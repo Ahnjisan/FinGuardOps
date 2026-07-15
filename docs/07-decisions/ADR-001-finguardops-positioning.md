@@ -7,6 +7,7 @@
   - `README.md`
   - `docs/00-overview/fds-service-scope.md`
   - `docs/01-requirements/fds-user-scenarios.md`
+  - `docs/07-decisions/ADR-002-rename-repository-to-finguardops.md`
 
 ## Context
 
@@ -30,6 +31,12 @@
 - Kafka와 Kubernetes는 핵심 거래·탐지·사건 기능이 안정화된 이후 단계적으로 도입한다.
 
 이 결정은 제품과 아키텍처의 목표 및 단계적 계획을 정하는 것이다. 아래 강화 범위와 개발 우선순위에 포함된 항목을 현재 모두 구현된 기능으로 간주하지 않는다.
+
+## 후속 변경
+
+2026-07-15에 제품명과 저장소명을 통일하기 위해 GitHub 저장소명과 로컬 폴더명을 `FinGuardOps`로 변경했다. 자세한 결정은 [ADR-002](./ADR-002-rename-repository-to-finguardops.md)를 따른다.
+
+이 변경은 제품 범위나 아키텍처를 변경하지 않으며, 기존 Git 이력, Issue, PR과 구현 구조는 유지한다.
 
 ## 유지 범위
 

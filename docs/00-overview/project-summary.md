@@ -2,7 +2,7 @@
 
 ## 프로젝트명
 
-AI Fraud Detection Platform
+FinGuardOps
 
 ## 한 줄 설명
 
