@@ -2,9 +2,6 @@
 
 > Cloud Native 금융 AI 이상거래 탐지·사건 처리·운영 플랫폼
 
-* **Repository:** `AI-FINANCIAL-FDS-PLATFORM`
-* **Product:** `FinGuardOps`
-
 FinGuardOps는 금융거래와 사용자 행동을 기반으로 이상거래를 탐지하고, 위험 대응과 사건 처리를 지원하며, AI 서비스의 장애·성능·비용을 통합 관리하는 Cloud Native 금융 AI FraudOps 플랫폼입니다.
 
 단순히 이상거래 위험 점수를 계산하는 데서 끝나지 않고 다음 흐름을 하나의 시스템으로 구현하는 것을 목표로 합니다.

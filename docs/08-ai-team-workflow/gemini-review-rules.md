@@ -2,7 +2,7 @@
 
 ## 문서 목적
 
-이 문서는 AI-FINANCIAL-FDS-PLATFORM 프로젝트에서 Gemini를 Review / QA AI로 활용할 때의 역할, 검토 기준, 리뷰 결과 형식, 금지 사항을 정의한다.
+이 문서는 FinGuardOps 프로젝트에서 Gemini를 Review / QA AI로 활용할 때의 역할, 검토 기준, 리뷰 결과 형식, 금지 사항을 정의한다.
 
 Gemini는 구현 담당 AI가 아니라 검토 담당 AI이며, 최종 승인자는 사용자가 담당한다.
 

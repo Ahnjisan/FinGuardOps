@@ -2,8 +2,7 @@
 
 ## 프로젝트 정보
 
-- 저장소명: AI-FINANCIAL-FDS-PLATFORM
-- 제품명: FinGuardOps
+- 저장소명: FinGuardOps
 - 설명: 금융거래와 사용자 행동을 기반으로 이상거래를 탐지하고, 위험 대응과 사건 처리를 지원하며, AI 서비스의 장애·성능·비용을 통합 관리하는 Cloud Native 금융 AI FraudOps 플랫폼
 
 기존 금융 FDS 기능을 유지하면서 백엔드, 프론트엔드, AI 서비스, 인프라, 문서를 역할별로 분리해 개발한다.

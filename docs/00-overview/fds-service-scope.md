@@ -4,8 +4,7 @@
 
 ## 프로젝트 구분
 
-- 저장소명: `AI-FINANCIAL-FDS-PLATFORM`
-- 제품명: `FinGuardOps`
+- 저장소명: `FinGuardOps`
 
 FinGuardOps는 기존 금융 이상거래 탐지 프로젝트의 금융거래·사용자 행동 분석 범위를 유지하면서 사건 처리, AI 운영, Cloud Native 운영 관점을 강화한 제품이다. 기존 프로젝트를 폐기하고 별도로 시작하는 프로젝트가 아니다.
 
@@ -97,7 +96,7 @@ Docker, Kafka, Kubernetes, AWS, Observability는 로드맵에 따라 단계적�
 
 ### 저장소명
 
-`AI-FINANCIAL-FDS-PLATFORM`
+`FinGuardOps`
 
 ### 한 줄 설명
 
