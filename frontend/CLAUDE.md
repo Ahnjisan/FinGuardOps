@@ -37,6 +37,54 @@ Claude Code는 `frontend/` 디렉터리에서 Frontend AI로 작업한다.
 - API client는 컴포넌트 외부에 분리하고, 호출 함수 이름은 도메인 동작을 드러내도록 작성한다.
 - 인증 토큰, 사용자 식별자, 민감 정보는 안전하게 처리한다.
 
+- 화면에 필요하다는 이유로 백엔드 필드를 임의로 생성하지 않는다.
+- API가 아직 정의되지 않은 기능은 `planned` 또는 `mock` 상태로 구분한다.
+- 구현되지 않은 Kafka, Kubernetes와 AWS 상태를 실제 데이터처럼 표시하지 않는다.
+
+## FinGuardOps 사용자와 화면 범위
+
+### FDS 분석 담당자 화면
+
+- FDS 대시보드와 거래 모니터링
+- 사건 대기열과 사건 상세
+- Rule·ML 탐지 근거와 행동 타임라인
+- AI 사건 리포트와 조사 메모
+- 사건 상태와 최종 판정
+- 감사 이력
+
+### 플랫폼·클라우드 운영자 화면
+
+- 서비스 Health와 배포 버전
+- API 응답시간·오류율·처리량
+- Rule 실행시간과 ML 추론시간
+- DB Connection Pool과 Kafka Consumer Lag
+- AI 호출량, 입력·출력 토큰과 모델별 비용
+- 캐시 적중률과 fallback 비율
+- 장애와 배포 이력
+
+Kafka와 Kubernetes는 향후 도입 범위이며, 관련 API와 화면이 구현되기 전에는 `planned` 또는 `mock` 상태로만 표현한다.
+
+## React 관리자 화면과 Grafana의 경계
+
+### React 관리자 화면
+
+- 거래와 사건 등 업무 상태
+- 조사와 최종 판정
+- 운영 정책과 Rule 정보
+- AI 비용 요약
+- fallback과 장애 이력
+- 배포 이력과 서비스 상태 요약
+
+### Grafana
+
+- 시계열 기술 메트릭
+- 서비스별 지연시간, 오류율과 처리량
+- 인프라 상태
+- DB Connection Pool과 Kafka Consumer Lag
+- 상세 Observability 지표
+
+React 관리자 화면에서 Grafana와 동일한 기술 대시보드를 전부 다시 구현하지 않는다.
+
 ## 테스트 및 검증 원칙
 
 - 핵심 컴포넌트는 렌더링과 사용자 상호작용을 검증한다.
