@@ -300,28 +300,38 @@ Kafka
 * 8개 핵심 이상거래 시나리오 정의
 * Rule·ML·생성형 AI 역할 구분
 * 사건 관리·장애 대응·FinOps 방향 정의
-* FinGuardOps 제품 포지셔닝 결정
+* FinGuardOps 제품 포지셔닝·README·ADR 정비
+* 플랫폼 운영 요구사항 정의
+* FDS 분석·플랫폼 운영 화면 와이어프레임 작성
+* 거래·사건·AI 리포트 상태 전이 정의
+* 시스템 아키텍처 명세 작성
+* 핵심 도메인 ERD 작성
+* API 공통 규칙 정의
+* 거래·행동·탐지 API 계약 작성
+* 사건·조사 메모·감사 API 계약 작성
 
 ### In Progress
 
-* FinGuardOps README·서비스 범위·ADR 정비
-* 플랫폼 운영 요구사항 정의 준비
+* 다음 작업 착수 전
 
 ### Planned
 
-* 거래·행동 이벤트 모델링
-* 거래·사건 상태 전이
-* 시스템 아키텍처 명세
-* ERD와 REST API 명세
+* AI 리포트·AI 사용량·비용 API 계약
+* 이벤트·메트릭 명세
+* 거래·행동 이벤트 도메인 구현
+* JPA Entity·Repository 구현
+* PostgreSQL 연동과 데이터베이스 마이그레이션
+* 멱등성·중복 이벤트 처리
 * Rule 관리와 실행
-* 위험 점수 산출
+* 위험 점수·위험 등급 산출
 * 사건 생성·조회·상태 변경
-* 감사 로그
+* 조사 메모·감사 로그
 * FastAPI 연동
 * ML 추론
 * AI 사건 리포트
 * AI 사용량·토큰·비용 기록
-* PostgreSQL·Redis 연동
+* External Risk Mock
+* Redis 연동
 * Docker Compose
 * Kafka 비동기 처리
 * React 관리자 화면
