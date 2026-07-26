@@ -66,7 +66,7 @@ Codex는 `ai-service/` 디렉터리에서 AI Service 구현 전용 AI로 작업�
 - LLM 실패 시 Rule·ML 결과 기반 템플릿으로 fallback한다.
 - 모델, 입력·출력 토큰, 지연시간, 추정 또는 실제 비용과 fallback 여부를 Spring Boot가 저장할 수 있도록 반환한다.
 - LLM Timeout, LLM Provider 오류, 출력 형식 오류, 템플릿 fallback 여부와 모델 라우팅 결과를 기록하고 반환할 수 있어야 한다.
-- 아직 API 계약이 확정되지 않았으므로 구체적인 필드명이나 응답 구조를 임의로 확정하지 않는다.
+- AI 리포트·사용량 API 계약은 `docs/03-api/ai-report-usage-api.md`를 기준으로 하며 `aiRequestId`, `executionId`, `executionShared`, `ProviderCallAttempt`의 책임과 응답 구조를 임의로 변경하지 않는다.
 
 ## 생성형 AI 제한과 캐시 원칙
 

@@ -82,6 +82,7 @@
 - `docs/03-api/ai-report-usage-api.md`
 - `docs/07-decisions/ADR-001-finguardops-positioning.md`
 - `docs/07-decisions/ADR-002-rename-repository-to-finguardops.md`
+- `docs/07-decisions/ADR-003-transaction-processing-boundary.md`
 
 전용 상태 전이 문서를 상태 모델의 우선 기준으로 사용한다. 따라서 거래에는 처리 상태, 위험 등급과 위험 대응 결과를 별도 속성으로 두고, 사건에는 `caseStatus`와 `finalDisposition`을 별도 속성으로 둔다. AI 리포트 상태도 거래·사건 상태와 독립적으로 관리한다.
 
@@ -103,16 +104,16 @@ Redis
 
 FastAPI나 LLM Provider가 반환한 값은 그 자체로 업무 원본이 아니다. Spring Boot가 요청과 버전을 검증하고 PostgreSQL에 연결해 저장한 결과가 감사 가능한 FinGuardOps 기록이 된다.
 
-### 3.1 확인된 문서 표현 차이
+### 3.1 최신 문서 정합성
 
-다음 차이는 이 문서에서 기존 문서를 수정하지 않고 후속 정비 대상으로 기록한다.
+구현 전 문서 정비에서 다음 기준을 상태 전이·API 계약과 통일했다.
 
-- `docs/00-overview/fds-service-scope.md`와 `docs/01-requirements/fds-user-scenarios.md`에는 `LOAN_DISBURSED`가 행동 이벤트처럼 표현된 부분이 있다. 현재 기준에서는 행동 이벤트로 확정하지 않고, 대출 실행을 나타내는 금융거래 또는 Mock 이벤트 후보로 둔다.
-- 초기 `docs/01-requirements/functional-requirements.md`의 `정상·주의·위험` 분류는 현재 위험 등급 기준으로 사용하지 않는다. 전용 거래 상태 전이 문서의 `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`을 사용한다.
-- 초기 서비스 범위 문서에는 사건 진행 상태와 최종 판정이 하나의 목록에 섞여 있는 예시가 있으나, 같은 문서의 후속 설명과 전용 사건 상태 전이 문서에 따라 두 개념을 분리한다.
-- README의 일부 로드맵·현재 상태 표현은 상태 전이와 아키텍처 문서가 이미 존재하는 현재 저장소 상태를 완전히 반영하지 않는다. 이 문서에서 README를 수정하지 않고 후속 문서 정비 항목으로 남긴다.
-- `docs/03-api/ai-report-usage-api.md`는 `parentAiRequestId`와 요청 아래 `attempts`로 진행 실행 공유와 Provider 호출을 표현한다. 요청·실행 분리 ERD에서는 같은 `executionRef`와 실행 소유 attempts가 원본 관계이므로 후속 API 계약 수정 필요 사항에 차이를 기록한다.
-- `docs/01-requirements/ai-report-state-transition.md`는 캐시 적중 요청 이력과 현재 리포트 유지·노출 방식을 `TBD`로 남기지만, 후속 `docs/03-api/ai-report-usage-api.md`는 새 요청 이력 생성, 기존 결과 참조와 이전 유효 리포트 유지 정책을 확정했다. 이 문서는 최신 API 계약을 반영하되 상태 전이 문서를 수정하지 않고 후속 문서 정비 대상으로 기록한다.
+- `LOAN_DISBURSED`는 행동 이벤트가 아니라 대출 실행 사실을 나타내는 Mock 금융거래 유형이다.
+- 위험 등급은 `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`을 사용한다.
+- 사건 진행 상태인 `caseStatus`와 최종 판정인 `finalDisposition`을 분리한다.
+- AI 외부 요청은 `aiRequestId`, 실제 논리 실행은 `executionId`로 식별하고 진행 중 실행 공유는 `executionShared`로 표현한다.
+- 완료된 정확 일치 캐시 요청은 새 `AiReportRequest` 이력을 만들되 새 실행·Provider 호출·가상 사용량을 만들지 않는다.
+- AI 자동 재시도는 Timeout과 연결 실패에만 최대 1회 적용하고 출력 검증 실패와 비일시적 Provider 오류는 템플릿 fallback으로 전환한다.
 - 공식 DB 설계 경로인 `docs/04-database/`는 현재 저장소에 없으며, 이번 작업은 기존 논리 모델인 이 문서만 보완한다.
 
 ## 4. 데이터 모델링 원칙
@@ -233,6 +234,17 @@ PostgreSQL에 저장하는 거래·탐지·사건·감사·AI 사용량은 업�
 | `createdAt`, `updatedAt` | 생성·마지막 변경 시각 |
 | `concurrencyVersion` 후보 | 상태 변경 경합을 탐지하기 위한 버전 값 |
 
+초기 `transactionType` 값은 거래 API 계약과 같은 다음 네 가지를 사용한다.
+
+```text
+ACCOUNT_TRANSFER
+OPEN_BANKING_TRANSFER
+ATM_WITHDRAWAL
+LOAN_DISBURSED
+```
+
+`LOAN_DISBURSED`는 실제 대출 원장·상품·심사·실행 기능이 아니라 대출 실행 사실을 입력하는 Mock 금융거래 유형이다.
+
 `currentDetectionResultVersion`만 저장하는 방식보다 `adoptedDetectionResultId`로 채택 결과를 직접 가리키는 방안을 우선 검토한다. 버전 번호는 같은 거래 안에서만 유일하기 때문에 식별자 참조가 채택된 결과를 더 명확하게 표현한다.
 
 다음 정합성 원칙이 필요하다.
@@ -293,7 +305,7 @@ TRANSFER_REQUESTED
 ATM_WITHDRAWAL_REQUESTED
 ```
 
-`LOAN_DISBURSED`는 이 목록에 포함하지 않는다. 대출 실행을 나타내는 금융거래 또는 별도 Mock 이벤트로 표현할 필요가 있는지는 사용자 결정 사항이다.
+`LOAN_DISBURSED`는 이 목록에 포함하지 않는다. 대출 실행 사실은 `Transaction.transactionType = LOAN_DISBURSED`인 Mock 금융거래로 표현한다.
 
 | 속성 후보 | 의미와 설계 이유 |
 | --- | --- |
@@ -495,7 +507,7 @@ caseStatus
 ≠ finalDisposition
 ```
 
-조사 중에는 `finalDisposition = null`일 수 있다. `CLOSED`일 때 최종 판정을 필수로 할지, 행정 종료 같은 예외를 허용할지는 사용자 결정 사항이다.
+초기 사건 API 계약에서는 `OPEN`, `IN_REVIEW`, `ADDITIONAL_INFORMATION_REQUIRED` 동안 `finalDisposition = null`을 유지한다. `IN_REVIEW` 사건을 종료할 때 `NORMAL`, `FALSE_POSITIVE`, `CONFIRMED_FRAUD` 중 하나의 최종 판정을 필수로 설정하고 `caseStatus = CLOSED`, `closedAt`과 AuditLog를 같은 업무 트랜잭션에서 반영한다. `IN_REVIEW`에는 담당자가 필요하다.
 
 대표 위험 등급은 연결 거래 중 최고 등급, 대표 거래 등급 또는 사건 분석 결과 중 무엇을 사용할지 확정되지 않았다. 계산 규칙과 갱신 시점을 후속 설계에서 결정해야 한다.
 
@@ -644,7 +656,7 @@ targetType + targetId
 - `COMPLETED` 또는 `FALLBACK_COMPLETED` 요청은 `resolvedReportRef`가 필요하고 `FAILED` 요청은 결과를 참조하지 않는다.
 - 요청 상태는 실행 상태를 외부 요청 관점으로 투영한다. 공유 실행이 종료될 때 연결된 요청을 같은 정합성 경계에서 종결하거나 조회 시 실행 결과로 일관되게 계산해야 한다.
 
-`sourceAiRequestId`와 `parentAiRequestId`는 영속 필드나 요청 self 관계로 사용하지 않는다. 진행 중 실행 공유는 여러 요청이 같은 `executionRef`를 참조하는 것으로 표현한다. 후속 API 계약에서는 `parentAiRequestId`를 제거하고 `executionId`와 `executionShared`로 교체하는 방향을 권장한다. `sourceAiRequestId`는 캐시 원본 요청 식별자로 유지하되 저장된 FK가 아니라 아래 결과 계보를 조회한 파생 응답값이다.
+`parentAiRequestId`는 영속 필드나 요청 self 관계로 사용하지 않는다. 진행 중 실행 공유는 여러 요청이 같은 `executionRef`를 참조하는 원본 관계와 API 응답의 `executionId`, `executionShared`, `initiatingAiRequestId`로 표현한다. `sourceAiRequestId`는 캐시 원본 요청 식별자로 유지하되 저장된 FK가 아니라 아래 결과 계보를 조회한 파생 응답값이다.
 
 ### 7.12 AiReportExecution
 
@@ -755,9 +767,10 @@ API에서 캐시 요청의 토큰 합계를 0으로 보여줄 수는 있지만 �
 
 초기 구현에서는 `FraudCase.currentAiReportRef`를 추가하지 않고 현재 유효한 리포트를 조회 시 결정한다. `COMPLETED` 또는 `FALLBACK_COMPLETED` 결과만 후보로 삼아 다음 순서로 내림차순 정렬하고 하나를 선택한다.
 
-1. `AiReport.generatedAt DESC`
-2. 실행 최초 요청의 `requestedAt DESC`
-3. 실행 최초 요청의 `aiRequestId DESC`
+1. 실행 최초 요청의 `requestedAt DESC`
+2. 실행 최초 요청의 `aiRequestId DESC`
+
+`generatedAt`은 결과가 실제 사용 가능해진 시각으로 보존하지만 현재 리포트의 첫 번째 우선순위로 사용하지 않는다. 캐시 요청은 기존 결과의 순서를 올리지 않으며 오래된 최초 요청의 실행이 늦게 완료되어도 더 최근 최초 요청이 만든 성공 결과를 덮어쓰지 않는다.
 
 새 요청이나 실행이 `PENDING`, `GENERATING` 또는 `FAILED`여도 기존 유효 리포트는 유지한다. `FraudCase.currentAiReportRef`는 조회 성능 문제가 실제로 확인될 경우 도입할 후속 최적화 후보이며, 어느 경우에도 과거 결과를 덮어쓰지 않는다.
 
@@ -1052,11 +1065,12 @@ finalDisposition
 
 최소 정합성 후보는 다음과 같다.
 
-- `OPEN`, `IN_REVIEW`, `ADDITIONAL_INFORMATION_REQUIRED`에서는 `finalDisposition`이 null일 수 있다.
-- `CLOSED`이면 `closedAt`이 필요하다는 후보를 검토한다.
-- `CLOSED`에서 최종 판정을 필수로 할지는 확정하지 않는다.
+- `OPEN`, `IN_REVIEW`, `ADDITIONAL_INFORMATION_REQUIRED`에서는 `finalDisposition`이 null이다.
+- `IN_REVIEW`에는 `assigneeRef`가 필요하다.
+- `CLOSED`이면 `closedAt`과 `finalDisposition`이 필요하다.
+- `finalDisposition` 설정, `caseStatus = CLOSED`, 종료 시각, 동시성 버전과 AuditLog를 하나의 업무 트랜잭션에서 반영한다.
 - 최종 판정을 변경할 때 기존 값을 AuditLog 없이 덮어쓰지 않는다.
-- `CLOSED` 재개와 판정 정정은 별도 사용자 승인 정책이 필요하다.
+- `CLOSED` 재개와 판정 정정은 초기 범위에서 제외하며 후속 도입에는 별도 사용자 승인이 필요하다.
 
 ### 10.3 AI 요청·실행·결과 상태 모델
 
@@ -1157,7 +1171,7 @@ caseId
 - 거래 금액은 일반적으로 0보다 커야 하지만, 0원 검증·정정 거래나 취소 표현이 필요한지 확인한 뒤 확정한다.
 - `recipientAccountRef`는 거래 유형에 따라 선택값일 수 있다.
 - 완료된 DetectionResult에는 위험 점수·등급과 완료 시각이 필요하다는 후보를 검토한다.
-- `CLOSED` 사건의 `closedAt` 필수 여부와 `finalDisposition` 필수 여부를 분리해 결정한다.
+- `CLOSED` 사건에는 `closedAt`과 `finalDisposition`이 모두 필요하며 하나의 종료 업무 트랜잭션에서 확정한다.
 - 과거 Rule 버전과 이를 참조하는 DetectionEvidence는 물리 삭제하지 않는다.
 - `AiReport.reportStatus = COMPLETED`이면 `reportSource = LLM`이어야 한다.
 - `AiReport.reportStatus = FALLBACK_COMPLETED`이면 `reportSource = TEMPLATE_FALLBACK`이고 fallback 원인 `failureCode`가 필요하다는 후보를 검토한다.
@@ -1209,9 +1223,9 @@ HIGH·CRITICAL 거래 처리의 재시도와 중복 이벤트가 새 사건을 �
 1. Spring Boot가 사건, 대표 탐지 결과 버전, 요청자와 `Idempotency-Key`를 검증하고 정규화 요청 지문을 계산한다.
 2. 같은 키의 기존 기록을 원자적으로 확인한다. 지문이 같으면 기존 요청이 `FAILED`여도 기존 `AiReportRequest`와 `aiRequestId`를 반환하고, 다르면 `IDEMPOTENCY_KEY_CONFLICT`로 거부한다.
 3. 새 키이면 외부 요청마다 `executionRef`가 null인 새 `AiReportRequest`와 `aiRequestId`를 먼저 생성한다.
-4. 정확 일치 네 요소로 진행 중 실행과 완료 결과를 확인한다.
-5. `PENDING` 또는 `GENERATING` 실행이 있으면 새 요청의 `executionRef`를 그 실행에 연결하고 새 실행을 만들지 않는다.
-6. 완료된 정확 일치 `AiReport`가 있으면 요청을 `cacheHit = true`로 기록하고 `resolvedReportRef`를 연결한다. 이 경로에는 `AiReportExecution`과 `ProviderCallAttempt`를 만들지 않으며 `sourceAiRequestId`는 결과 계보에서 파생한다.
+4. 정확 일치 네 요소로 완료된 재사용 가능 `AiReport`를 먼저 확인한다.
+5. 완료된 정확 일치 `AiReport`가 있으면 요청을 `cacheHit = true`, `executionRef = null`로 기록하고 `resolvedReportRef`를 연결한다. API에서는 `executionId = null`, `executionShared = false`로 반환한다. 이 경로에는 `AiReportExecution`과 `ProviderCallAttempt`를 만들지 않으며 `sourceAiRequestId`는 결과 계보에서 파생한다.
+6. 완료 결과가 없으면 같은 정확 일치 조건의 `PENDING` 또는 `GENERATING` 실행을 확인한다. 활성 실행이 있으면 새 요청의 `executionRef`를 그 실행에 연결하고 `executionShared = true`로 표현하며 새 실행을 만들지 않는다.
 7. 진행 실행과 완료 결과가 모두 없으면 새 요청을 `initiatingRequestRef`로 참조하는 `AiReportExecution`을 생성하고, 최초 요청의 `executionRef`를 생성된 실행으로 갱신한다. 요청 생성, 실행 생성과 역참조 갱신은 하나의 업무 트랜잭션에서 처리한다.
 8. 실행이 Provider를 실제 호출할 때마다 `ProviderCallAttempt`를 먼저 식별하고 호출 결과, 실제 토큰, 지연시간과 추정 비용을 기록한다. 일시적 오류의 자동 재시도는 새 attempt로 추가한다.
 9. LLM 출력 검증이 성공하면 `reportSource = LLM`인 `AiReport`를 생성한다. 출력 검증 실패나 비일시적 오류 후 템플릿이 성공하면 추가 Provider attempt 없이 `reportSource = TEMPLATE_FALLBACK`인 결과를 생성한다.
@@ -1435,7 +1449,7 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 | ProviderCallAttempt | `outcome + requestedAt`, `failureCode + requestedAt` | 실패·재시도 운영 조회 |
 | AiReport | `executionRef` Unique | 실행당 최대 한 결과 |
 | AiReport | 정확 일치 네 요소 Unique | 완료 결과 캐시 재사용과 중복 결과 방지 |
-| AiReport | `caseRef + generatedAt DESC` | 현재 유효 결과 후보와 과거 결과 조회. 동률은 실행 최초 요청의 `requestedAt`, `aiRequestId`를 조인해 결정 |
+| AiReport | `caseRef + generatedAt DESC` | 실제 생성 시각 기준 과거 결과 조회. 현재 유효 결과 우선순위는 실행 최초 요청의 `requestedAt DESC`, `aiRequestId DESC`를 조인해 결정 |
 | AiReport | `reportSource + generatedAt` | LLM·fallback 결과 집계 |
 
 실제 컬럼 순서와 부분 인덱스 문법은 쿼리 계획과 데이터 분포를 확인해 마이그레이션 설계에서 확정한다. Provider 필터는 요청의 마지막 Provider 중복 컬럼이 아니라 `ProviderCallAttempt` 존재 조건으로 평가한다. 사건당 호출량·토큰·비용·지연시간은 FraudCase → AiReportExecution → ProviderCallAttempt 관계의 distinct attempt만 집계하고, `executionCount`는 distinct 실행, `requestCount`와 `cacheHitCount`는 요청을 기준으로 별도 집계한다. 공유 요청 상세에 같은 attempts가 반복 노출되어도 요청별로 다시 합산하지 않으며 캐시·공유 요청을 위한 attempt나 비용 행을 만들지 않는다.
@@ -1485,7 +1499,6 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 - 거래 상태별 필수 시각과 실패 사유 구조
 - `adoptedDetectionResultId`의 같은 Transaction 소속을 외래 키·DB 제약·애플리케이션 검증 중 어디까지 보장할지
 - 최종 상태에서 재분석·정정 시 현재 거래 상태를 변경할지 새 이력으로 남길지
-- `LOAN_DISBURSED`를 금융거래, 별도 Mock 이벤트 또는 다른 개념으로 분류할지
 - BehaviorEvent 공통 속성과 유형별 상세의 최종 모델
 - 기기·IP·지역 데이터의 최소 저장 범위
 
@@ -1501,10 +1514,8 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 
 ### 사건
 
-- `CLOSED`일 때 `finalDisposition` 필수 여부
-- `OPEN`·`ADDITIONAL_INFORMATION_REQUIRED`에서 직접 종료 허용 여부
-- `CLOSED` 사건 재개와 최종 판정 정정 정책
-- 담당자 없는 `IN_REVIEW` 허용 여부와 담당자 배정 방식
+- 초기 범위 밖인 `CLOSED` 사건 재개와 최종 판정 정정을 향후 도입할지
+- 초기 수동 배정 외에 담당자 자동 배정을 도입할지와 사용자·담당자 디렉터리 연동 방식
 - 대표 거래와 대표 위험 등급 선정 규칙
 - 동일 거래의 여러 과거 사건 연결 허용 범위
 - 동일 거래의 중복 활성 사건을 Spring Boot 트랜잭션 검증, CaseTransaction 중복 상태와 보조 인덱스, 별도 활성 관계 또는 DB Trigger·제약 중 어떤 방식으로 방지할지
@@ -1513,7 +1524,7 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 
 ### AI 리포트·비용
 
-이 논리 ERD에서 요청·실행 분리, 실행의 `initiatingRequestRef`, `sourceAiRequestId` 파생 관계, `parentAiRequestId` 비영속화, 활성 실행 부분 Unique와 완료 결과 Unique, 조회 시 현재 리포트 선택, `FAILED` 실행 이후 새 키 요청 허용 정책은 확정 설계이다. 구현 완료를 의미하지 않으며 실제 DDL·API 반영은 후속 작업이다. AI 리포트 영역에서 남은 사용자 결정은 다음과 같다.
+이 논리 ERD에서 요청·실행 분리, 실행의 `initiatingRequestRef`, `sourceAiRequestId` 파생 관계, `parentAiRequestId` 비영속화, 활성 실행 부분 Unique와 완료 결과 Unique, 조회 시 현재 리포트 선택, `FAILED` 실행 이후 새 키 요청 허용 정책은 확정 설계이며 최신 AI API에도 반영되어 있다. 구현 완료를 의미하지 않으며 실제 DDL 반영은 후속 작업이다. AI 리포트 영역에서 남은 사용자 결정은 다음과 같다.
 
 | 결정 항목 | 후속 결정 내용 | 영향 |
 | --- | --- | --- |
@@ -1538,8 +1549,6 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 
 - 외부 참조값만 사용할지 최소 Customer·Account 참조 엔티티가 필요한지
 - 연결용 참조값과 마스킹 표시값의 생성·갱신 주체
-- `LOAN_DISBURSED`, 레거시 위험 분류와 사건 상태 혼합 예시를 기존 문서에서 언제 정비할지
-- README 로드맵·현재 상태를 실제 문서 진행 상황에 맞춰 언제 갱신할지
 
 ## 20. 후속 JPA·API·마이그레이션 설계 항목
 
@@ -1566,21 +1575,18 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 - 공통 `transactionId`, `caseId`, `eventId`, `aiRequestId`, `traceId` 생성·전파
 - 외부 참조값과 마스킹 데이터 노출 범위
 
-#### 후속 API 계약 수정 필요 사항
+#### 최신 AI API 계약 반영
 
-현재 `docs/03-api/ai-report-usage-api.md`를 이번 작업에서 수정하지 않는다. 이 ERD의 확정 논리 설계와 맞추려면 다음 계약을 후속 검토해야 한다.
+`docs/03-api/ai-report-usage-api.md`는 이 ERD의 요청·실행·시도·결과 관계를 다음과 같이 반영한다.
 
-- `parentAiRequestId`를 제거하고 `executionId`와 `executionShared`로 교체하는 방향을 권장한다. 같은 실행을 참조하는 요청 수 또는 최초 요청 여부에서 `executionShared`를 일관되게 계산하는 계약이 필요하다.
-- 실행 최초 요청을 노출할 필요가 있으면 `initiatingAiRequestId`를 후보로 검토한다. 값은 `AiReportExecution.initiatingRequestRef → AiReportRequest.aiRequestId`에서 파생한다.
-- `sourceAiRequestId`는 캐시 원본 요청 식별자로 유지하되 저장 필드가 아니라 `resolvedReportRef → AiReport.executionRef → AiReportExecution.initiatingRequestRef → AiReportRequest.aiRequestId` 관계 조회 결과로 정의한다.
-- 요청 중심 상세 조회가 연결 실행의 attempts를 보여주는지와 캐시 요청에는 빈 attempts를 반환하는지를 명시해야 한다. 실행을 공유하는 여러 요청에서 동일 attempts를 보여줄 수 있지만 이는 요청별 호출이 아니라 같은 실행의 호출 이력을 투영한 것이다.
-- 비용 집계는 요청 행이나 요청별 상세 응답의 attempts 합계가 아니라 distinct `AiReportExecution`의 실제 distinct `ProviderCallAttempt`를 기준으로 해야 한다. `providerCallCount`, 토큰, 비용, 지연시간과 `executionCount`의 집계 기준을 요청 수·캐시 적중 수와 분리한다.
-- 결과 업무 식별자 `reportId`, 결과를 만든 실행의 `executionId`, 실행 최초 요청의 `initiatingAiRequestId`, 최신 외부 요청의 `latestRequest.aiRequestId` 의미를 구분한다.
-- 요청의 `reportStatus`와 실행의 `executionStatus`가 같은 값 집합을 사용하더라도 소유자와 전이 주체가 다르다는 응답 의미를 명시해야 한다. 캐시 요청에는 실행 상태가 없고 결과 상태가 요청의 종료 상태로 투영된다.
-- attempts의 단일 `calledAt`은 호출 시작·완료 구간을 충분히 표현하지 못하므로 `requestedAt`과 `completedAt` 후보를 검토한다. `latencyMs`는 실제 측정값으로 유지한다.
-- 캐시 요청 응답의 토큰 0은 빈 attempt 집합의 계산 결과이며 0 토큰 사용량 행을 저장한 것이 아니라는 점을 명시해야 한다.
-- 같은 키 재전송은 `FAILED` 요청을 포함해 기존 `AiReportRequest`와 `aiRequestId`를 반환해야 한다. 새 키 요청은 이전 실행이 `FAILED`이고 정확 일치 결과와 활성 실행이 없을 때 새 실행을 만들 수 있으며, 새 실행에도 자동 재시도 최대 1회를 적용한다.
-- 정확 일치 `AiReport`가 있으면 캐시 재사용하고, 동일 정확 일치 결과의 강제 재생성은 허용하지 않는 경계를 명시해야 한다.
+- 요청 간 부모·자식 필드인 `parentAiRequestId`를 사용하지 않고, 새 실행·진행 실행 공유·완료 결과 캐시를 `executionId`, `executionShared`, `initiatingAiRequestId`로 구분한다.
+- `sourceAiRequestId`는 캐시 원본 요청을 `resolvedReportRef → AiReport.executionRef → AiReportExecution.initiatingRequestRef → AiReportRequest.aiRequestId` 관계로 조회한 파생값이다.
+- 요청 중심 운영 상세의 attempts는 연결 실행의 실제 `ProviderCallAttempt`를 투영하며, 캐시 요청에는 빈 attempts를 반환한다.
+- 비용·토큰·지연 집계는 요청별 attempts 합계가 아니라 distinct 실행의 distinct `ProviderCallAttempt`를 기준으로 한다.
+- `reportId`, `executionId`, `initiatingAiRequestId`와 최신 외부 요청의 `aiRequestId` 의미를 구분한다.
+- 캐시 요청은 `executionId = null`, `executionShared = false`, `cacheHit = true`이며 새 실행·attempt·가상 사용량을 만들지 않는다.
+- 자동 재시도는 Timeout과 연결 실패에만 같은 `executionId` 아래 최대 1회 적용한다.
+- 정확 일치 `AiReport`가 있으면 캐시로 재사용하며 동일 정확 일치 결과의 강제 재생성을 허용하지 않는다.
 
 구체적인 경로, DTO와 상태 코드는 API 기준 문서에서 사용자 승인 후 확정한다. `FinancialTransaction`과 `financial_transaction`도 이름 후보일 뿐 이번 문서에서 Java 클래스나 물리 테이블 이름으로 확정하지 않는다.
 
@@ -1658,7 +1664,7 @@ Redis Key 구현 형식과 Kafka 이벤트 스키마는 이 문서에서 확정�
 - [ ] 비용 집계가 요청별 attempts 합계가 아니라 distinct 실행의 distinct ProviderCallAttempt를 기준으로 하는가
 - [ ] FAILED 요청의 같은 키 재전송과 새 키의 새 실행 허용 조건을 구분하는가
 - [ ] 새 요청이 실패하거나 처리 중이어도 이전 유효 리포트를 유지하는가
-- [ ] 현재 유효 리포트를 성공 결과의 generatedAt, 최초 요청 requestedAt, 최초 요청 aiRequestId 내림차순으로 조회하는가
+- [ ] 현재 유효 리포트를 성공 결과의 실행 최초 요청 `requestedAt DESC`, `aiRequestId DESC`로 조회하고 `generatedAt`을 첫 번째 우선순위로 사용하지 않는가
 - [ ] 늦은 Provider 응답이 종료된 실행·결과를 이력 없이 덮어쓰지 않는가
 - [ ] Prompt 원문, Provider 응답 원문과 고객 개인정보를 엔티티·예시·감사 로그에 저장하지 않는가
 - [ ] AuditLog가 AI 요청·실행·attempt 이력의 원본을 대신하지 않는가

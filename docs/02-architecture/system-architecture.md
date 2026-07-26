@@ -14,7 +14,7 @@
 - 어떤 기술을 현재 사용하고 어떤 조건에서 나중에 도입하는가
 - 후속 ERD·API·이벤트·메트릭 설계에서 무엇을 결정해야 하는가
 
-이 문서는 시스템 수준의 책임과 경계를 정의한다. Entity, DB 테이블·컬럼·관계, REST API 경로·DTO·상태 코드, Kafka Topic·Partition·Consumer Group, Kubernetes 리소스, AWS 상세 구성, Prometheus 메트릭 이름과 Timeout·Retry·Circuit Breaker 수치는 확정하지 않는다.
+이 문서는 시스템 수준의 책임과 경계를 정의한다. Entity, DB 테이블·컬럼·관계, REST API 경로·DTO·상태 코드, Kafka Topic·Partition·Consumer Group, Kubernetes 리소스, AWS 상세 구성, Prometheus 물리 메트릭 이름과 대부분의 Timeout·Retry·Circuit Breaker 수치는 확정하지 않는다. 단, AI 리포트 자동 재시도는 최신 API 계약에 따라 Timeout·연결 실패에 최대 1회로 제한한다.
 
 ## 2. 현재 프로젝트 상태
 
@@ -642,9 +642,9 @@ React는 서비스 상태, 배포 버전, 업무 영향, AI 비용과 장애·�
 | --- | --- | --- | --- |
 | FastAPI Timeout | Rule·ML 분석과 후속 위험 대응 지연 또는 실패 | Spring Boot가 거래 접수와 마지막 확정 상태를 보존하고 임의 점수를 만들지 않음 | 거래 처리·재시도 정책 `TBD` |
 | External Risk Timeout | 외부 위험계좌·IP·기기 근거 사용 불가 가능 | 실패를 위험정보 없음으로 해석하지 않고 유효 캐시 또는 조회 불가 상태를 기록하며 내부 분석을 계속함 | 최종 위험 대응 정책 `TBD` |
-| LLM Timeout | AI 사건 리포트 지연·실패 | Rule·ML 결과와 거래·사건 처리 결과를 변경하지 않고 템플릿 fallback | 재시도 순서·횟수 `TBD` |
-| LLM Provider 오류 | AI 리포트 생성 실패 | 템플릿 fallback과 오류·사용량 기록 | 다른 모델 전환 조건 `TBD` |
-| LLM 출력 형식 오류 | 리포트 품질 검증 실패 | 오류 출력을 정상 리포트로 표시하지 않고 재시도 후보 또는 fallback | 품질 검증·재시도 정책 `TBD` |
+| LLM Timeout·연결 실패 | AI 사건 리포트 지연·실패 | 같은 `executionId`에서 최대 한 번 자동 재시도한 뒤 Rule·ML 결과 기반 템플릿 fallback. 거래·사건 처리 결과는 변경하지 않음 | 재시도 간격·Timeout 값 `TBD` |
+| 비일시적 LLM Provider 오류 | AI 리포트 생성 실패 | 자동 재시도 없이 템플릿 fallback과 오류·사용량 기록 | 다른 모델 전환 조건은 별도 승인 |
+| LLM 출력 형식 오류 | 리포트 품질 검증 실패 | 오류 출력을 정상 리포트로 표시하거나 자동 재시도하지 않고 템플릿 fallback | 품질 검증 기준 `TBD` |
 | Redis 장애 | 캐시 미사용, 원본 호출과 비용 증가 가능 | 업무 원본은 PostgreSQL에 유지하고 정확 일치 조건을 우회하지 않음 | 캐시 우회·복구 정책 `TBD` |
 | PostgreSQL 장애 | 거래·탐지·사건·감사·AI 비용 저장 및 조회 장애 | 저장 성공이 불명확한 요청을 성공으로 처리하지 않음 | 복구 목표와 운영 절차 `TBD` |
 | Kafka Consumer 중단 | 도입 이후 AI 리포트·사건 이벤트·통계 등 비동기 적체 | 핵심 거래 결과를 유지하고 재처리 시 멱등성 보장 | 재개·DLQ·재처리 정책 `TBD` |
@@ -659,7 +659,9 @@ React는 서비스 상태, 배포 버전, 업무 영향, AI 비용과 장애·�
 | `transactionId` | 거래 접수, 행동·외부 조회·탐지 결과·위험 대응·사건 연결과 오류를 추적한다. |
 | `caseId` | 사건, 연관 거래, 조사·판정·감사와 AI 리포트를 연결한다. |
 | `eventId` | Kafka 도입 이후 이벤트 발행·소비·중복·재처리 결과를 연결한다. |
-| `aiRequestId` | 모델 라우팅, LLM 호출, 토큰·비용·지연·오류·fallback과 리포트 상태를 연결한다. |
+| `aiRequestId` | 외부 AI 리포트 요청, 요청자, 멱등 처리와 요청 상태를 연결한다. |
+| `executionId` | 실제 AI 논리 실행, 모델 라우팅 결과, 재시도, fallback과 Provider 호출들을 연결한다. |
+| `attemptId` | 개별 실제 Provider 호출의 토큰·비용·지연·오류를 식별한다. |
 | `traceId` | React 진입 이후 Spring Boot, External Risk Mock, FastAPI와 LLM Provider의 호출 흐름을 연결한다. |
 
 식별자는 로그, 메트릭, 트레이스와 업무 감사 이력을 서로 탐색하는 연결점이다. 모든 요청에 모든 식별자가 항상 존재하는 것은 아니다. 예를 들어 사건 생성 전에는 `caseId`가 없을 수 있고 Kafka 도입 전에는 `eventId`가 없을 수 있다.
@@ -852,7 +854,7 @@ Docker Compose와 필요 시 Kubernetes 환경에서 기능·장애·관측 기�
 | 논리 모듈별 분리 기준 충족 여부 | `TBD` | 독립 배포·확장·장애·데이터·팀 경계 |
 | 향후 MSA 전환 판단 | `TBD` | 분산 트랜잭션과 운영 비용을 감수할 실제 근거 |
 
-상태 전이 문서에 남아 있는 추가 인증 후 거래 전이, 사건 종료·재개·판정 변경, AI 리포트 재시도·재생성과 정확 일치 캐시 처리 방식도 후속 설계 전에 함께 결정해야 한다.
+상태 전이 문서에 남아 있는 추가 인증 후 거래 전이, 종료 사건 재개·판정 정정, AI 리포트 재생성 한도·품질 검증과 캐시 복구 방식은 후속 구현 전에 함께 결정해야 한다. AI 리포트의 무실행 캐시와 Timeout·연결 실패 최대 1회 재시도 정책은 이미 확정되어 있다.
 
 ## 22. 후속 설계 문서
 
@@ -900,7 +902,7 @@ Kafka Topic, Partition과 Consumer Group은 이벤트 요구가 확정된 뒤 �
 ### 22.5 장애·배포 설계
 
 - FastAPI와 External Risk 실패 시 확정 정책
-- LLM 재시도·모델 전환·fallback 순서
+- AI 리포트 재시도 간격·Timeout 값, 별도 모델 전환 조건과 품질 검증 기준
 - PostgreSQL·Redis·Kafka·Observability 복구 절차
 - Docker Compose 통합 검증 기준
 - Health·Readiness와 배포 성공·복구 기준

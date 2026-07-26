@@ -252,7 +252,6 @@ PASSWORD_CHANGED
 OTP_REISSUED
 BENEFICIARY_REGISTERED
 TRANSFER_LIMIT_CHANGED
-LOAN_DISBURSED
 TRANSFER_REQUESTED
 ATM_WITHDRAWAL_REQUESTED
 ```
@@ -316,7 +315,7 @@ ATM_WITHDRAWAL_REQUESTED
 → 대출금 대부분 송금
 ```
 
-실제 대출 상품과 심사 기능은 구현하지 않고 `LOAN_DISBURSED` 이벤트만 제공한다.
+실제 대출 상품과 심사 기능은 구현하지 않고 대출 실행 사실을 나타내는 `LOAN_DISBURSED` Mock 금융거래만 제공한다. `LOAN_DISBURSED`는 행동 이벤트가 아니다.
 
 ### 6.8 오픈뱅킹 자금 집중
 
@@ -431,14 +430,16 @@ Rule Score
 
 ```text
 RECEIVED
+VALIDATION_FAILED
 ANALYZING
+ANALYZED
 APPROVED
-MONITORING
 ADDITIONAL_AUTH_REQUIRED
 HELD
-BLOCKED
 FAILED
 ```
+
+MEDIUM의 모니터링은 거래 처리 상태가 아니라 `APPROVED` 상태와 별도의 승인 후 모니터링 대응 결과로 표현한다. 실제 거래 차단은 범위 밖이므로 `BLOCKED`를 거래 처리 상태로 사용하지 않는다.
 
 허용되지 않은 상태 변경은 Spring Boot Service 계층에서 차단한다.
 
@@ -576,8 +577,11 @@ CRITICAL
 연관 거래가 많고 복잡한 사건
 → 고성능 모델
 
-경량 모델 응답 품질 검증 실패
-→ 고성능 모델로 한 번만 재시도
+Timeout 또는 연결 실패
+→ 같은 실행에서 최대 한 번만 자동 재시도
+
+출력 형식·품질 검증 실패
+→ 자동 재시도 없이 템플릿 fallback
 ```
 
 라우팅 기준은 다음과 같다.
@@ -598,8 +602,11 @@ HIGH + 탐지 Rule 2개 이하
 CRITICAL + 연관 거래 5개 이상
 → 고성능 모델
 
+Timeout 또는 연결 실패
+→ 같은 executionId에서 최대 한 번만 자동 재시도
+
 응답 JSON 형식 검증 실패
-→ 상위 모델로 한 번만 재시도
+→ 템플릿 fallback
 ```
 
 ### 11.4 동일 사건의 정확 일치 리포트 캐시
@@ -804,20 +811,18 @@ Baseline과 Optimized 구조를 비교한다.
 
 고객의 거래 처리 결과와 관련된 흐름은 동기로 처리한다.
 
-### 14.2 비동기 처리
+### 14.2 비동기 후속 처리
 
-다음 흐름은 Kafka 도입 이후 적용할 비동기 처리 목표이다.
+최종 `POST /api/v1/transactions`는 거래 접수부터 분석, 위험 대응과 사건 생성 또는 기존 사건 연결까지 동기 계약을 유지한다. Kafka 도입 이후에는 이 업무 원본이 확정된 뒤 알림·AI 리포트 실행·통계 같은 후속 처리를 비동기로 분리할 수 있다.
 
 ```text
-TRANSACTION_ANALYZED 이벤트
-→ 사건 생성
-→ 담당자 알림
-→ AI 리포트 생성
+FraudCaseCreated 또는 AiReportRequestAccepted
+→ 담당자 알림 또는 AI 리포트 실행
 → 통계 반영
 → 비용 사용량 집계
 ```
 
-LLM 리포트 생성은 거래 승인 여부를 결정하는 필수 경로에서 분리한다. Kafka 도입 이후 메시지가 중복 소비되더라도 사건, 리포트와 사용량 데이터가 중복 생성되지 않도록 멱등성을 구현한다.
+LLM 리포트 생성은 거래 승인 여부를 결정하는 필수 경로에서 분리한다. Kafka 도입 이후 메시지가 중복 소비되더라도 사건 연결, 리포트와 사용량 데이터가 중복 생성되지 않도록 멱등성을 구현한다. 자세한 거래 처리 경계와 단계적 구현 순서는 `docs/07-decisions/ADR-003-transaction-processing-boundary.md`를 따른다.
 
 ## 15. 핵심 데이터 모델
 
@@ -834,9 +839,10 @@ CaseTransaction
 ExternalRiskInformation
 AuditLog
 RuleDefinition
-ModelExecution
-AIReport
-AIUsageLog
+AiReportRequest
+AiReportExecution
+ProviderCallAttempt
+AiReport
 CostPolicy
 ```
 
@@ -846,8 +852,10 @@ CostPolicy
 ACCOUNT_TRANSFER
 OPEN_BANKING_TRANSFER
 ATM_WITHDRAWAL
-LOAN_DISBURSEMENT
+LOAN_DISBURSED
 ```
+
+`LOAN_DISBURSED`는 실제 대출 원장·상품·심사·실행 기능을 소유하지 않고 대출 실행 사실만 표현하는 Mock 금융거래 유형이다.
 
 ### 15.2 행동 이벤트 유형
 

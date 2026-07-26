@@ -309,6 +309,9 @@ Kafka
 * API 공통 규칙 정의
 * 거래·행동·탐지 API 계약 작성
 * 사건·조사 메모·감사 API 계약 작성
+* AI 리포트·AI 사용량·비용 API 계약 작성
+* 도메인 이벤트 계약 작성
+* 관측성·운영 메트릭 명세 작성
 
 ### In Progress
 
@@ -316,8 +319,6 @@ Kafka
 
 ### Planned
 
-* AI 리포트·AI 사용량·비용 API 계약
-* 이벤트·메트릭 명세
 * 거래·행동 이벤트 도메인 구현
 * JPA Entity·Repository 구현
 * PostgreSQL 연동과 데이터베이스 마이그레이션
