@@ -74,6 +74,7 @@ FastAPI와 생성형 AI는 거래 상태, 위험 등급, 위험 대응, 사건 �
 - `docs/01-requirements/case-state-transition.md`
 - `docs/01-requirements/ai-report-state-transition.md`
 - `docs/01-requirements/platform-operation-requirements.md`
+- `docs/07-decisions/ADR-003-transaction-processing-boundary.md`
 
 주요 엔티티 관계는 다음과 같다.
 
@@ -598,7 +599,7 @@ sequenceDiagram
 - 토큰과 비용을 0으로 기록하는 가상 attempt를 생성하지 않음
 - 운영 응답의 토큰 0은 빈 attempt 집합의 계산 결과일 뿐 저장된 사용량 행이 아님
 
-정상 데이터에서는 같은 정확 일치 네 요소에 재사용 가능한 완료 결과와 활성 실행이 동시에 존재하지 않아야 한다. 두 상태가 함께 조회되면 어느 쪽을 임의로 선택하지 않고 정합성 오류로 격리·관측한 뒤 승인된 복구 절차를 적용한다. 정상 조회 순서 자체는 ERD와 AI API 사이의 충돌 사항으로 14절에 남긴다.
+정상 데이터에서는 같은 정확 일치 네 요소에 재사용 가능한 완료 결과와 활성 실행이 동시에 존재하지 않아야 한다. 정상 경로에서는 완료 결과를 먼저 확인하고 없을 때 활성 실행을 확인한다. 두 상태가 함께 조회되면 어느 쪽을 임의로 선택하지 않고 정합성 오류로 격리·관측한 뒤 승인된 복구 절차를 적용한다.
 
 ### 8.6 최종 실패 이후 새 요청
 
@@ -865,20 +866,15 @@ Spring Boot는 유효한 추적 문맥이 없으면 새 `traceId`를 만들고 F
 - 요청별 화면에 공유 실행의 같은 attempts가 보이더라도 실행을 공유한 `AiReportRequest`별로 토큰과 비용을 다시 합산하지 않는다.
 - 캐시 요청에는 `ProviderCallAttempt`가 없으므로 새 토큰 사용량이나 비용이 발생하지 않는다.
 
-## 14. 기존 문서와 발견된 충돌
+## 14. 정합성 정비 후 남은 문서 차이
 
-이 절은 충돌을 기록하며 기존 문서를 수정하거나 어느 한쪽을 임의로 폐기하지 않는다.
+구현 전 정합성 정비에서 AI 완료 결과 조회 순서, 현재 유효 리포트 선택, 자동 재시도, 무실행 캐시와 요청·실행 식별자 표현을 API·ERD·상태 전이·아키텍처·운영 요구사항과 통일했다. 다음은 아직 사용자 결정이 필요한 문서 차이이다.
 
 | 항목 | 문서별 표현 | 이 문서의 처리 |
 | --- | --- | --- |
 | `eventId` 의미 | `api-conventions.md`는 행동 이벤트 식별자로 정의. `system-architecture.md`와 `platform-operation-requirements.md`는 향후 Kafka 이벤트 발행·소비 식별자로 표현 | Envelope `eventId`와 BehaviorEvent 업무 식별자의 이름 충돌로 기록. 논리 Envelope에서는 이벤트 자체 ID, 행동 엔티티 ID는 `aggregateId`로 표현. 물리 필드 매핑은 후속 결정 |
-| AI 완료 결과·활성 실행 조회 순서 | `domain-erd.md` 13.5 흐름은 활성 실행 확인 후 완료 결과 확인. `ai-report-usage-api.md`는 완료 결과 → 활성 실행 → 새 실행 | 두 원문 순서 차이를 유지해 기록. 현재 AI API 흐름 설명에서는 승인된 API 계약의 완료 결과 우선 흐름을 인용했지만 ERD 자체를 변경하지 않음 |
-| 현재 유효 리포트 선택 순서 | `domain-erd.md` 일부 절은 `generatedAt DESC`를 우선. `ai-report-usage-api.md`는 initiating request의 `requestedAt DESC`, `aiRequestId DESC`를 우선 | 이벤트 계약은 현재 리포트 선택 알고리즘을 새로 확정하지 않음. 후속 문서 정합화 필요 |
 | External Risk 캐시 부재 | 거래 상태 전이·플랫폼 운영 요구사항은 조회 불가를 기록하고 내부 Rule·ML 분석 지속. 거래 API는 초기 권장 정책으로 Transaction `FAILED`와 사건 미생성 | 위험 대응 이벤트의 선행 장애 정책 충돌로 기록. 이 문서는 새 장애 정책을 선택하지 않음 |
 | `VALIDATION_FAILED` 영속 범위 | 거래 상태 전이 문서는 Transaction 종료 상태로 설명. 거래 API는 JSON·기본 형식 실패 시 Transaction을 생성하지 않고 영속 범위를 사용자 결정으로 둠 | 기본 검증 전 실패에는 `TransactionReceived`를 만들지 않는 API 경계를 사용하되 `VALIDATION_FAILED` 영속 정책은 미확정으로 유지 |
-| AI 자동 재시도 | `ai-report-state-transition.md`와 플랫폼 운영 요구사항은 횟수·간격을 `TBD`로 둠. 후속 `ai-report-usage-api.md`는 Timeout·연결 실패에 최대 1회로 정의 | 이 문서의 AI 흐름은 사용자가 지시한 현재 AI API 계약을 기술하고, 이전 요구사항 문서의 `TBD`와 표현 차이를 기록 |
-| AI 캐시 요청 이력 | `ai-report-state-transition.md`는 기존 결과 반환 또는 새 요청 이력을 `TBD`로 둠. ERD와 AI API는 새 요청 이력·무실행 캐시를 확정 | 후속 ERD·API 정책을 AI 흐름에 반영하되 상태 전이 문서의 미정 표현은 충돌·정비 대상으로 유지 |
-| AI 사용량 연결 식별자 | `system-architecture.md`와 플랫폼 운영 요구사항은 `aiRequestId`가 모델 호출·토큰·비용을 연결한다고 표현. ERD와 AI API는 실제 소유자를 `executionId`·`ProviderCallAttempt`로 분리 | 운영 조회에서 `aiRequestId`로 간접 탐색할 수 있으나 비용 원본 소유자는 실행과 attempt라는 구분을 유지 |
 | FastAPI Timeout 거래 처리 | 거래 상태 전이·플랫폼 요구사항은 기본 분석·중단 정책을 `TBD`로 둠. 거래 API는 초기 권장 정책으로 Transaction `FAILED`와 `503`을 제시 | 이 문서는 탐지 완료 이벤트를 만들 수 없는 조건만 명시하고 최종 장애 정책은 새로 확정하지 않음 |
 
 ## 15. 사용자 결정 필요 사항
@@ -897,8 +893,7 @@ Spring Boot는 유효한 추적 문맥이 없으면 새 `traceId`를 만들고 F
 | 중복 처리 기록 보존 기간 | A. 업무 데이터와 동일 / B. 전달 재시도 기간 기준 / C. 계층별 차등 | C | HTTP·내부 이벤트·향후 Kafka의 재전달 기간이 다를 수 있음 | 재처리 안전 기간과 저장 비용에 영향 | 후속 결정 |
 | DetectionResult 식별자 생성 시점 | A. 분석 요청 전에 발급 / B. 완료 저장 시 발급 / C. 별도 analysisRequestId 도입 | C 검토 | 실패 시도와 완료 결과 식별자를 혼합하지 않기 쉬움 | 탐지 API·ERD·이벤트 Aggregate 선택에 영향 | 탐지 요청 물리 Schema 전 결정 |
 | 동일 거래의 중복 활성 사건 기준 | A. Service 트랜잭션 검증 / B. 별도 활성 관계 / C. 중복 상태+DB 제약 / D. Trigger | A 우선 | 현재 모델 변경을 최소화하면서 업무 규칙을 Service에 명시 가능 | 사건 생성 Handler, 격리·잠금·동시성 테스트에 영향 | 사건 구현 전 결정 |
-| AI 완료 결과·활성 실행 정상 조회 순서 | A. 완료 결과 우선 / B. 활성 실행 우선 / C. 상태별 단일 조회와 공존 시 오류 | C, 정상 경로는 A 검토 | 공존 자체를 정합성 위반으로 다루고 AI API의 캐시 우선 흐름을 유지할 수 있음 | 조회 쿼리, 고유 제약, 복구·관측과 동시성 테스트에 영향 | AI 실행 구현 전 결정 |
-| 현재 유효 AI 리포트 선택 순서 | A. `generatedAt` 우선 / B. initiating request의 `requestedAt`, `aiRequestId` 우선 | B | 오래된 요청의 늦은 완료와 캐시 요청이 더 최근 성공 결과의 우선순위를 바꾸는 것을 막기 쉬움 | 현재 리포트 조회 쿼리와 ERD·API 문서 정합화에 영향 | 조회 구현 전 결정 |
+| AI 완료 결과·활성 실행 동시 존재 시 복구 | A. 완료 결과 유지 후 활성 실행 격리 / B. 전체 오류 격리 후 수동 복구 / C. 상태별 자동 복구 | B 검토 | 정상 조회는 완료 결과 → 활성 실행 순서로 확정되어 있으나 두 상태의 공존은 정합성 위반이므로 업무 결과를 임의 선택하지 않는 복구 절차가 필요 | 복구 작업, 관측·알림과 동시성 테스트에 영향 | AI 실행 구현 전 결정 |
 | 기본 검증과 `VALIDATION_FAILED` 영속 경계 | A. 모든 검증 실패 미저장 / B. 모든 검증 실패 Transaction 저장 / C. JSON·헤더·형식 실패는 미저장, 접수 후 업무 검증 실패만 영속 | C | 유효하지 않은 임의 Transaction 생성을 막으면서 접수 이후 업무 실패 이력을 보존 가능 | Transaction 생성 시점, 상태 전이, AuditLog와 오류 `resource`에 영향 | 거래 구현 전 결정 |
 | External Risk 캐시 부재 시 처리 | A. 내부 Rule·ML 계속 후 제한된 결과 확정 / B. 분석은 계속하되 거래 대응 확정 보류·실패 / C. 즉시 Transaction `FAILED` | B | 조회 실패를 안전으로 해석하지 않으면서 내부 분석 근거와 장애 상태를 보존 가능 | 거래 상태, DetectionResult, 위험 대응 이벤트와 `503` 응답에 영향 | 거래 위험 대응 구현 전 결정 |
 | 거래 분석 FastAPI Timeout 정책 | A. Transaction `FAILED` / B. 마지막 상태 유지 후 수동·자동 재개 / C. 승인된 로컬 baseline | A 우선 | 현재 거래 API의 초기 정책과 일치하고 임의 위험 점수 생성을 막음 | 상태 전이, 재처리 API, 감사와 장애 복구에 영향 | 거래 분석 구현 전 결정 |
@@ -927,4 +922,4 @@ Spring Boot는 유효한 추적 문맥이 없으면 새 `traceId`를 만들고 F
 - [ ] FDS 분석 담당자에게 Provider attempt·토큰·비용 상세를 노출하지 않는가
 - [ ] Prompt 원문, Provider 응답 원문, 인증정보와 개인정보를 payload·로그에 넣지 않는가
 - [ ] 미확정 Kafka Topic·Partition·Consumer·DLQ·Outbox가 구현 완료처럼 표현되지 않는가
-- [ ] 기존 문서 충돌을 임의로 해소한 것으로 표현하지 않는가
+- [ ] 남은 문서 차이와 사용자 결정 사항을 확정된 정책처럼 표현하지 않는가

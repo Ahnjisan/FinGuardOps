@@ -26,6 +26,7 @@
 - `docs/01-requirements/transaction-state-transition.md`
 - `docs/01-requirements/case-state-transition.md`
 - `docs/01-requirements/ai-report-state-transition.md`
+- `docs/07-decisions/ADR-003-transaction-processing-boundary.md`
 
 API 요청·응답과 상태 코드는 `docs/03-api/`, 시스템 책임은 `docs/02-architecture/`, 상태 의미는 전용 상태 전이 문서를 기준으로 한다. 문서 사이에 표현 차이가 있으면 이 명세에서 임의로 업무 정책을 확정하지 않고 16절에 기록한다.
 
@@ -429,23 +430,16 @@ React 관리자 화면은 업무 영향과 조치 요약에 집중하고 Grafana
 
 알림은 위험 점수, 위험 등급, 거래 대응, 사건 상태와 최종 판정을 자동 변경하지 않는다. 비용 알림도 금융 위험 신호로 해석하지 않는다.
 
-## 16. 기존 문서 충돌과 표현 차이
+## 16. 정합성 정비 후 남은 문서 차이
 
-다음은 기존 문서에 이미 존재하는 차이이며 이 명세에서 해결하거나 기존 문서를 수정하지 않는다.
+구현 전 정합성 정비에서 AI 조회 순서, 요청·실행 식별자, 자동 재시도, 무실행 캐시와 사건 담당자·종료 조건을 API·ERD·상태 전이·이벤트·아키텍처 문서와 통일했다. 다음은 아직 사용자 결정이 필요한 문서 차이이다.
 
 | 항목 | 문서별 표현 | 메트릭 명세의 처리 |
 | --- | --- | --- |
 | 도메인 `eventId` 명명 | API 공통 규칙은 행동 이벤트 식별자로, 시스템·운영 문서는 향후 Kafka 이벤트 식별자로 사용 | 어떤 `eventId`도 메트릭 라벨에 사용하지 않는다. 로그·이벤트 물리 명명은 후속 결정 |
-| AI 완료 결과와 활성 실행 조회 순서 | ERD 13.5는 활성 실행 후 완료 결과, AI API는 완료 결과 후 활성 실행 | 캐시·공유·신규 실행이 최종 확정된 결과만 각각 계수. 조회 순서를 새로 확정하지 않음 |
-| 현재 유효 AI 리포트 선택 | ERD는 `generatedAt` 우선, AI API는 initiating request의 `requestedAt`, `aiRequestId` 우선 | 결과 생성 Counter는 distinct report 기준이며 현재 리포트 선택 알고리즘을 확정하지 않음 |
-| ERD의 AI API 정비 설명 | ERD 3.1·20.2는 AI API에 `parentAiRequestId`가 남아 있다고 설명하지만 현재 AI API는 이미 제거하고 `executionId`, `executionShared`를 사용 | 현재 AI API의 요청·실행·attempt 구분을 메트릭 집계에 적용하고 ERD의 오래된 설명은 정비 대상으로 보고 |
 | External Risk 캐시 부재 | 거래 상태 전이·운영 요구사항은 내부 Rule·ML 지속, 거래 API는 초기 권장으로 Transaction `FAILED`와 `503` | External Risk 장애 지표는 후속 정책과 분리. 거래 결과 Counter는 실제 확정된 상태만 계수 |
 | `VALIDATION_FAILED` 영속 범위 | 거래 상태 전이는 종료 상태로 설명하고 거래 API는 기본 형식 실패 시 Transaction 미생성, 영속 범위는 사용자 결정 | 최초 Transaction이 생성된 경우에만 거래 접수·결과 업무 Counter를 계수 |
 | FastAPI Timeout 거래 처리 | 상태 전이·운영 요구사항은 정책 `TBD`, 거래 API는 초기 권장으로 Transaction `FAILED`와 `503` | 실제 Spring Boot가 확정한 결과만 거래 결과로 계수. Timeout 자체는 client 실패 Counter로 별도 계수 |
-| AI 자동 재시도 | AI 상태 전이·운영 요구사항은 횟수·간격 `TBD`, 후속 AI API는 Timeout·연결 실패에 최대 1회 | distinct 실제 ProviderCallAttempt를 모두 계수하되 이 명세가 재시도 정책을 새로 확정하지 않음 |
-| AI 캐시 요청 이력 | AI 상태 전이 문서는 기존 결과 반환 또는 새 요청 이력을 `TBD`, ERD·AI API는 새 요청 이력과 무실행 캐시를 확정 | 후속 ERD·AI API 기준으로 새 AiReportRequest와 캐시 적중을 계수하고 새 실행·attempt·비용은 계수하지 않음 |
-| AI 사용량 연결 식별자 | 시스템·운영 요구사항은 `aiRequestId`가 모델 호출·토큰·비용을 연결한다고 표현하고 ERD·AI API는 실제 소유자를 execution·attempt로 분리 | 로그에서 aiRequestId로 탐색할 수 있으나 비용 집계는 distinct ProviderCallAttempt 기준 |
-| 사건 종료와 담당자 조건 | 사건 상태 전이는 최종 판정 필수와 담당자 없는 `IN_REVIEW`를 `TBD`로 두고 사건 API는 최종 판정·담당자를 필수로 계약 | 상태 변경 메트릭은 실제 API 결과를 계수하며 요구사항 문서의 정비 여부를 결정하지 않음 |
 
 ## 17. 사용자 결정 필요 사항
 
@@ -493,7 +487,7 @@ React 관리자 화면은 업무 영향과 조치 요약에 집중하고 Grafana
 - [ ] 현재 최소 범위, 핵심 기능 구현 시와 향후 도입 시를 구분했는가
 - [ ] Redis, Kafka, Kubernetes와 AWS를 현재 구현·수집 중인 것으로 표현하지 않았는가
 - [ ] 알림 임계값을 기준선·부하 테스트·비용 예산 근거 없이 확정하지 않았는가
-- [ ] 기존 문서 충돌을 임의로 해결하거나 기존 문서를 수정하지 않았는가
+- [ ] 이미 통일한 계약을 다시 충돌로 기록하지 않고, 남은 문서 차이와 사용자 결정 사항만 미확정으로 유지하는가
 
 ## 19. 제외 범위
 
