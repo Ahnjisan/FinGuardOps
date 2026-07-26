@@ -128,7 +128,7 @@ AiReport 1 ── N AiReportRequest
   "correlationId": "corr_demo_0001",
   "causationId": "cmd_demo_0001",
   "aggregateType": "Transaction",
-  "aggregateId": "tx_demo_20260726_0001",
+  "aggregateId": "7b8d9e10-4f2a-4c61-8b3d-5e6f70819002",
   "payload": {}
 }
 ```
@@ -220,7 +220,7 @@ payload에는 비식별 참조값, 승인된 Reason Code, 버전, 안전한 실�
 | 원거래 판단 영향 | 이 이벤트만으로 위험 등급이나 대응을 정하지 않음 |
 | 처리 범위 | 현재 내부 동기 흐름 가능. 향후 비동기 전달 가능하나 접수 영속화가 선행 |
 
-JSON 파싱, 필수 헤더 또는 기본 형식 검증에 실패해 Transaction이 생성되지 않았다면 이 이벤트를 발생시키지 않는다. `VALIDATION_FAILED`를 영속 Transaction 상태로 사용할 범위는 문서 충돌 사항이다.
+JSON 파싱, 필수 헤더, 기본 필드 형식 또는 거래 유형별 도메인 Validation에 실패하면 Transaction과 IdempotencyRecord를 생성하지 않고 이 이벤트도 발생시키지 않는다. `VALIDATION_FAILED`는 현재 거래 접수의 영속 상태가 아니다.
 
 ### 6.2 `BehaviorEventReceived`
 
@@ -874,7 +874,6 @@ Spring Boot는 유효한 추적 문맥이 없으면 새 `traceId`를 만들고 F
 | --- | --- | --- |
 | `eventId` 의미 | `api-conventions.md`는 행동 이벤트 식별자로 정의. `system-architecture.md`와 `platform-operation-requirements.md`는 향후 Kafka 이벤트 발행·소비 식별자로 표현 | Envelope `eventId`와 BehaviorEvent 업무 식별자의 이름 충돌로 기록. 논리 Envelope에서는 이벤트 자체 ID, 행동 엔티티 ID는 `aggregateId`로 표현. 물리 필드 매핑은 후속 결정 |
 | External Risk 캐시 부재 | 거래 상태 전이·플랫폼 운영 요구사항은 조회 불가를 기록하고 내부 Rule·ML 분석 지속. 거래 API는 초기 권장 정책으로 Transaction `FAILED`와 사건 미생성 | 위험 대응 이벤트의 선행 장애 정책 충돌로 기록. 이 문서는 새 장애 정책을 선택하지 않음 |
-| `VALIDATION_FAILED` 영속 범위 | 거래 상태 전이 문서는 Transaction 종료 상태로 설명. 거래 API는 JSON·기본 형식 실패 시 Transaction을 생성하지 않고 영속 범위를 사용자 결정으로 둠 | 기본 검증 전 실패에는 `TransactionReceived`를 만들지 않는 API 경계를 사용하되 `VALIDATION_FAILED` 영속 정책은 미확정으로 유지 |
 | FastAPI Timeout 거래 처리 | 거래 상태 전이·플랫폼 요구사항은 기본 분석·중단 정책을 `TBD`로 둠. 거래 API는 초기 권장 정책으로 Transaction `FAILED`와 `503`을 제시 | 이 문서는 탐지 완료 이벤트를 만들 수 없는 조건만 명시하고 최종 장애 정책은 새로 확정하지 않음 |
 
 ## 15. 사용자 결정 필요 사항
@@ -894,7 +893,6 @@ Spring Boot는 유효한 추적 문맥이 없으면 새 `traceId`를 만들고 F
 | DetectionResult 식별자 생성 시점 | A. 분석 요청 전에 발급 / B. 완료 저장 시 발급 / C. 별도 analysisRequestId 도입 | C 검토 | 실패 시도와 완료 결과 식별자를 혼합하지 않기 쉬움 | 탐지 API·ERD·이벤트 Aggregate 선택에 영향 | 탐지 요청 물리 Schema 전 결정 |
 | 동일 거래의 중복 활성 사건 기준 | A. Service 트랜잭션 검증 / B. 별도 활성 관계 / C. 중복 상태+DB 제약 / D. Trigger | A 우선 | 현재 모델 변경을 최소화하면서 업무 규칙을 Service에 명시 가능 | 사건 생성 Handler, 격리·잠금·동시성 테스트에 영향 | 사건 구현 전 결정 |
 | AI 완료 결과·활성 실행 동시 존재 시 복구 | A. 완료 결과 유지 후 활성 실행 격리 / B. 전체 오류 격리 후 수동 복구 / C. 상태별 자동 복구 | B 검토 | 정상 조회는 완료 결과 → 활성 실행 순서로 확정되어 있으나 두 상태의 공존은 정합성 위반이므로 업무 결과를 임의 선택하지 않는 복구 절차가 필요 | 복구 작업, 관측·알림과 동시성 테스트에 영향 | AI 실행 구현 전 결정 |
-| 기본 검증과 `VALIDATION_FAILED` 영속 경계 | A. 모든 검증 실패 미저장 / B. 모든 검증 실패 Transaction 저장 / C. JSON·헤더·형식 실패는 미저장, 접수 후 업무 검증 실패만 영속 | C | 유효하지 않은 임의 Transaction 생성을 막으면서 접수 이후 업무 실패 이력을 보존 가능 | Transaction 생성 시점, 상태 전이, AuditLog와 오류 `resource`에 영향 | 거래 구현 전 결정 |
 | External Risk 캐시 부재 시 처리 | A. 내부 Rule·ML 계속 후 제한된 결과 확정 / B. 분석은 계속하되 거래 대응 확정 보류·실패 / C. 즉시 Transaction `FAILED` | B | 조회 실패를 안전으로 해석하지 않으면서 내부 분석 근거와 장애 상태를 보존 가능 | 거래 상태, DetectionResult, 위험 대응 이벤트와 `503` 응답에 영향 | 거래 위험 대응 구현 전 결정 |
 | 거래 분석 FastAPI Timeout 정책 | A. Transaction `FAILED` / B. 마지막 상태 유지 후 수동·자동 재개 / C. 승인된 로컬 baseline | A 우선 | 현재 거래 API의 초기 정책과 일치하고 임의 위험 점수 생성을 막음 | 상태 전이, 재처리 API, 감사와 장애 복구에 영향 | 거래 분석 구현 전 결정 |
 | AI 리포트 생성 가능 `caseStatus` | A. 모든 상태 / B. 활성 조사 상태 / C. `IN_REVIEW`만 | B | 조사 지원 목적과 `CLOSED` 읽기 전용 원칙을 함께 유지하기 쉬움 | 생성 Validation과 테스트에 영향 | AI 생성 구현 전 결정 |

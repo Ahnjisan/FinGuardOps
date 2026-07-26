@@ -11,6 +11,7 @@
   - `docs/02-architecture/domain-erd.md`
   - `docs/03-api/transaction-detection-api.md`
   - `docs/03-api/domain-event-contracts.md`
+  - `docs/04-database/transaction-intake-schema.md`
 
 ## Context
 
@@ -48,7 +49,7 @@
 초기 구현은 다음 순서를 따른다.
 
 1. 거래 식별자, 요청 지문과 멱등성 선점 규칙을 정의하고 거래 접수 영속화를 구현한다.
-2. 거래 기본 검증과 `RECEIVED`, `VALIDATION_FAILED`의 영속 경계를 확정·검증한다.
+2. 요청 형식·도메인 Validation을 거래 저장 전에 수행하고, 검증을 통과한 거래의 `RECEIVED` 영속 경계를 검증한다. Validation 실패는 거래로 저장하지 않는다.
 3. External Risk와 FastAPI 분석 호출 경계, DetectionResult 저장·채택을 구현한다.
 4. 위험 대응 결과, 거래 최종 상태와 HIGH·CRITICAL 사건 생성 또는 기존 사건 연결을 구현한다.
 5. 전체 성공·실패·멱등·동시성 흐름이 준비되면 최종 동기 Controller를 공개한다.

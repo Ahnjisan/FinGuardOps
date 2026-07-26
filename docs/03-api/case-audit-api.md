@@ -168,7 +168,7 @@ POST /api/v1/cases/{caseId}/notes
 
 - 최초 요청은 각 API의 정상 처리 규칙에 따라 처리한다.
 - 같은 키와 같은 정규화 요청의 처리가 완료되었으면 새 상태 변경이나 CaseNote를 만들지 않고 `200 OK`로 기존 결과를 반환한다.
-- 같은 키와 같은 정규화 요청이 처리 중이면 새 처리를 시작하지 않고 [`api-conventions.md`](./api-conventions.md)의 `202 Accepted` 계약에 따라 현재 처리 상태를 반환한다.
+- 같은 키와 같은 정규화 요청이 처리 중이면 새 처리를 시작하지 않고 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다.
 - 같은 키에 다른 요청 내용이 오면 변경을 적용하지 않고 `409 Conflict`와 `IDEMPOTENCY_KEY_CONFLICT`를 반환한다.
 - 응답 유실 후 같은 요청을 재전송해도 사건 종료, `concurrencyVersion` 변경, CaseNote와 AuditLog가 중복 생성되지 않아야 한다.
 - 멱등성 확인은 완료된 동일 요청의 기존 결과를 식별할 수 있어야 하며, 단순한 현재 사건 상태 검사만으로 대체하지 않는다.
@@ -354,9 +354,9 @@ Content-Type: application/json
     "concurrencyVersion": 4
   },
   "representativeTransaction": {
-    "transactionId": "tx_demo_20260724_0001",
+    "transactionId": "91a2b3c4-d5e6-47f8-9a0b-1c2d3e4f5003",
     "transactionType": "ACCOUNT_TRANSFER",
-    "amount": "1250000.00",
+    "amount": "1250000",
     "currencyCode": "KRW",
     "occurredAt": "2026-07-24T01:15:30Z",
     "processingStatus": "ADDITIONAL_AUTH_REQUIRED",
@@ -433,9 +433,9 @@ Content-Type: application/json
   "caseId": "case_demo_20260724_0031",
   "content": [
     {
-      "transactionId": "tx_demo_20260724_0001",
+      "transactionId": "91a2b3c4-d5e6-47f8-9a0b-1c2d3e4f5003",
       "transactionType": "ACCOUNT_TRANSFER",
-      "amount": "1250000.00",
+      "amount": "1250000",
       "currencyCode": "KRW",
       "occurredAt": "2026-07-24T01:15:30Z",
       "processingStatus": "ADDITIONAL_AUTH_REQUIRED",
@@ -675,7 +675,7 @@ Idempotency-Key: <required>
 - 최초 요청은 현재 `caseStatus = IN_REVIEW`인 사건만 종료할 수 있다.
 - 같은 키와 같은 정규화 요청의 완료된 재전송은 현재 사건이 이미 `CLOSED`이고 요청의 `expectedVersion`이 과거 값이더라도 최초 종료 결과를 식별해 `200 OK`로 반환한다. 새 종료, `concurrencyVersion` 증가와 AuditLog를 만들지 않는다.
 - 완료된 동일 멱등 요청의 판별은 일반적인 현재 상태·동시성 검증보다 먼저 수행해 단순 `CASE_ALREADY_CLOSED` 또는 `CONCURRENT_MODIFICATION`으로 처리하지 않는다.
-- 같은 키와 같은 요청이 처리 중이면 새 종료를 시작하지 않고 공통 `202 Accepted` 계약을 따른다.
+- 같은 키와 같은 요청이 처리 중이면 새 종료를 시작하지 않고 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다.
 - 같은 키에 다른 요청이 오면 `409 Conflict`와 `IDEMPOTENCY_KEY_CONFLICT`를 반환한다.
 - 새로운 키의 요청이나 기존 완료 결과와 일치하지 않는 요청은 현재 상태와 `expectedVersion`을 정상 검증한다.
 - `finalDisposition`은 필수이며 사건 상태 값과 혼합하지 않는다.
@@ -736,10 +736,9 @@ Content-Type: application/json
 | 상태 코드 | 사용 기준 |
 | --- | --- |
 | `200 OK` | 최초 종료 성공 또는 완료된 동일 멱등 요청에 기존 결과 반환 |
-| `202 Accepted` | 처리 중인 동일 멱등 요청에 현재 처리 상태 반환 |
 | `400 Bad Request` | JSON, 필수 `Idempotency-Key`, 식별자, Enum 또는 버전 형식 오류 |
 | `404 Not Found` | 해당 사건이 없음 |
-| `409 Conflict` | 멱등성 키 충돌, 종료할 수 없는 현재 상태, 이미 종료된 사건 또는 동시성 충돌 |
+| `409 Conflict` | 멱등성 키 지문 충돌, 동일 멱등 요청 처리 중, 종료할 수 없는 현재 상태, 이미 종료된 사건 또는 동시성 충돌 |
 | `422 Unprocessable Entity` | 최종 판정 또는 종료 사유 등 업무 종료 조건을 충족하지 못함 |
 | `500 Internal Server Error` | 공개할 수 없는 예기치 않은 서버 오류 |
 
@@ -773,7 +772,7 @@ Idempotency-Key: <required>
 - CaseNote는 append-only로 관리한다.
 - 최초 요청은 새 CaseNote를 생성하고 `201 Created`로 결과를 반환한다.
 - 같은 키와 같은 정규화 요청의 완료된 재전송은 새 메모를 만들지 않고 `200 OK`로 최초 생성된 CaseNote 결과를 반환한다.
-- 같은 키와 같은 요청이 처리 중이면 새 메모를 만들지 않고 공통 `202 Accepted` 계약을 따른다.
+- 같은 키와 같은 요청이 처리 중이면 새 메모를 만들지 않고 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다.
 - 같은 키에 다른 요청이 오면 `409 Conflict`와 `IDEMPOTENCY_KEY_CONFLICT`를 반환한다.
 - 응답 유실 후 재전송되더라도 동일 메모, 정정 메모와 AuditLog를 중복 생성하지 않는다.
 - 기존 메모를 직접 수정하거나 물리 삭제하지 않는다.
@@ -815,10 +814,9 @@ Content-Type: application/json
 | --- | --- |
 | `201 Created` | 일반 메모 또는 정정 메모 최초 생성 성공 |
 | `200 OK` | 완료된 동일 멱등 요청에 최초 생성된 메모 결과 반환 |
-| `202 Accepted` | 처리 중인 동일 멱등 요청에 현재 처리 상태 반환 |
 | `400 Bad Request` | JSON, 필수 `Idempotency-Key`, 식별자 또는 필드 형식 오류 |
 | `404 Not Found` | 해당 사건이 없음 |
-| `409 Conflict` | 멱등성 키 충돌 또는 종료 사건 등 메모를 추가할 수 없는 현재 사건 상태 |
+| `409 Conflict` | 멱등성 키 지문 충돌, 동일 멱등 요청 처리 중 또는 종료 사건 등 메모를 추가할 수 없는 현재 사건 상태 |
 | `422 Unprocessable Entity` | 빈 내용, 잘못된 정정 참조 등 메모 업무 규칙 위반 |
 | `500 Internal Server Error` | 공개할 수 없는 예기치 않은 서버 오류 |
 
@@ -1229,7 +1227,7 @@ Content-Type: application/json
 
 - `Idempotency-Key`의 형식, 작업별 범위와 보존 기간
 - 정규화 요청 지문과 완료 응답의 저장 범위
-- 처리 중 `202 Accepted` 응답의 작업별 결과 조회 문맥
+- 처리 중 `409 IDEMPOTENCY_REQUEST_IN_PROGRESS` 응답의 작업별 오류 문맥
 - 충돌 응답에 현재 `concurrencyVersion` 또는 최신 사건 조회 경로를 포함할지
 - 충돌 후 사용자 입력 보존·재입력·병합 UX
 - `fieldErrors.code`의 최종 목록과 버전 관리 방식

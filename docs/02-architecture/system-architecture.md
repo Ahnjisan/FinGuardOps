@@ -535,8 +535,8 @@ sequenceDiagram
     participant AI as FastAPI
 
     Client->>Spring: 거래 요청
-    Spring->>DB: 멱등성·현재 처리 결과 확인
-    Spring->>Spring: 입력 검증 및 거래·행동 데이터 준비
+    Spring->>Spring: 요청 형식·도메인 Validation
+    Spring->>DB: 멱등성 선점·현재 처리 결과 확인 및 거래 저장
     Spring->>Risk: 외부 위험정보 조회
     Risk-->>Spring: 위험정보 또는 조회 상태
     Spring->>AI: 거래·행동·외부 조회 상태 분석 요청
@@ -546,7 +546,7 @@ sequenceDiagram
     Spring-->>Client: Mock 거래 처리 결과
 ```
 
-거래 상태는 기존 상태 전이 문서의 `RECEIVED`, `VALIDATION_FAILED`, `ANALYZING`, `ANALYZED`와 최종 처리 상태를 따른다. MEDIUM의 모니터링은 별도 위험 대응 결과로 표현하고 AI 리포트 실패로 거래를 `FAILED` 처리하지 않는다.
+거래 상태는 기존 상태 전이 문서의 `RECEIVED`, `ANALYZING`, `ANALYZED`와 최종 처리 상태를 따른다. 요청 형식과 도메인 Validation 실패는 거래로 저장하지 않으며 오류 응답, `traceId`, 로그와 운영 메트릭으로 관측한다. MEDIUM의 모니터링은 별도 위험 대응 결과로 표현하고 AI 리포트 실패로 거래를 `FAILED` 처리하지 않는다.
 
 ### 13.2 사건 조사
 

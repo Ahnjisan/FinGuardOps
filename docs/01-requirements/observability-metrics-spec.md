@@ -438,8 +438,9 @@ React 관리자 화면은 업무 영향과 조치 요약에 집중하고 Grafana
 | --- | --- | --- |
 | 도메인 `eventId` 명명 | API 공통 규칙은 행동 이벤트 식별자로, 시스템·운영 문서는 향후 Kafka 이벤트 식별자로 사용 | 어떤 `eventId`도 메트릭 라벨에 사용하지 않는다. 로그·이벤트 물리 명명은 후속 결정 |
 | External Risk 캐시 부재 | 거래 상태 전이·운영 요구사항은 내부 Rule·ML 지속, 거래 API는 초기 권장으로 Transaction `FAILED`와 `503` | External Risk 장애 지표는 후속 정책과 분리. 거래 결과 Counter는 실제 확정된 상태만 계수 |
-| `VALIDATION_FAILED` 영속 범위 | 거래 상태 전이는 종료 상태로 설명하고 거래 API는 기본 형식 실패 시 Transaction 미생성, 영속 범위는 사용자 결정 | 최초 Transaction이 생성된 경우에만 거래 접수·결과 업무 Counter를 계수 |
 | FastAPI Timeout 거래 처리 | 상태 전이·운영 요구사항은 정책 `TBD`, 거래 API는 초기 권장으로 Transaction `FAILED`와 `503` | 실제 Spring Boot가 확정한 결과만 거래 결과로 계수. Timeout 자체는 client 실패 Counter로 별도 계수 |
+
+Validation 거절은 Transaction과 IdempotencyRecord를 생성하지 않는다. 거래 접수·상태 결과 Counter에 포함하지 않고 HTTP 오류, Validation 오류 코드, `traceId`, 로그와 승인된 저카디널리티 오류 메트릭으로 관측한다.
 
 ## 17. 사용자 결정 필요 사항
 
