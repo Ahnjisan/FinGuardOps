@@ -40,6 +40,7 @@ GET  /api/v1/behavior-events
 - 저장과 서비스 간 전달은 UTC를 원칙으로 한다.
 - UTC 시각은 `Z` 접미사를 포함해 표현한다.
 - 발생 시각과 저장 시각을 구분한다.
+- 거래 생성 요청의 `occurredAt`은 Validation 시점의 서버 시각보다 최대 5분 미래까지 허용한다.
 
 예:
 
@@ -50,7 +51,7 @@ GET  /api/v1/behavior-events
 }
 ```
 
-클라이언트의 로컬 시간대 표시는 화면 책임이며 API의 원본 시각을 덮어쓰지 않는다. 소수 초 정밀도와 허용할 시각 범위는 후속 Validation 설계에서 확정한다.
+클라이언트의 로컬 시간대 표시는 화면 책임이며 API의 원본 시각을 덮어쓰지 않는다. 거래 발생 시각의 5분 미래 허용 범위는 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따르며, 그 밖의 API가 허용할 시각 범위는 각 API 계약에서 정한다.
 
 ### 3.3 내부 식별자와 업무 식별자
 
@@ -67,7 +68,7 @@ DB 관계와 저장에 사용하는 내부 식별자와 API·로그·업무 조�
 
 각 식별자는 서로 대체할 수 없다. 특히 `traceId`는 거래나 탐지 결과의 업무 식별자가 아니며, `eventId`는 이 문서 범위에서 행동 이벤트 식별자를 뜻한다.
 
-식별자의 구체적인 형식, 길이, 생성 주체와 보존 기간은 후속 구현 설계에서 확정한다. 식별자 자체에 실제 고객번호, 계좌번호, 인증정보와 같은 민감정보를 포함하지 않는다.
+`transactionId`는 거래 생성 요청에서 클라이언트가 전달하는 UUID v4이며 PostgreSQL 내부 Identity PK와 구분한다. 그 밖의 식별자의 구체적인 형식, 길이, 생성 주체와 보존 기간은 후속 구현 설계에서 확정한다. 식별자 자체에 실제 고객번호, 계좌번호, 인증정보와 같은 민감정보를 포함하지 않는다.
 
 ### 3.4 민감정보
 
@@ -86,31 +87,29 @@ DB 관계와 저장에 사용하는 내부 식별자와 API·로그·업무 조�
 
 ```json
 {
-  "amount": "1250000.00",
+  "amount": "1250000",
   "currencyCode": "KRW"
 }
 ```
 
 금액 표현 후보는 다음 두 가지이다.
 
-| 비교 기준 | JSON number | 소수점 문자열 |
+| 비교 기준 | JSON number | 10진 문자열 |
 | --- | --- | --- |
-| 예 | `1250000.00` | `"1250000.00"` |
+| 예 | `1250000` | `"1250000"` |
 | Java `BigDecimal` | JSON 숫자 토큰을 `BigDecimal`로 직접 역직렬화하면 정밀도를 유지할 수 있다. 중간에 `double`을 거치면 정밀도 손실 가능성이 있다. | 문자열을 승인된 형식으로 검증한 뒤 `BigDecimal`로 변환해 10진수 값을 명시적으로 보존할 수 있다. |
 | JavaScript | 일반 `number`는 IEEE 754 배정밀도를 사용하므로 큰 정수와 일부 소수에서 정확한 금융 금액 표현을 보장하지 못한다. | 문자열 상태로 정밀도를 보존할 수 있다. 계산 시 decimal 라이브러리 또는 별도 변환 정책이 필요하다. |
 | API 사용 편의성 | 숫자 필드이므로 단순 클라이언트에서 계산·정렬하기 편리하다. | 형식 검증과 변환이 필요해 사용 편의성이 낮아질 수 있다. |
 | 계약 명확성 | 클라이언트 언어와 JSON 파서에 따라 정밀도 처리 차이가 생길 수 있다. | 허용 자릿수와 소수점 형식을 계약으로 고정하기 쉽다. |
 
-이번 API 계약에서 거래 금액은 **소수점 문자열**로 표현한다. JavaScript 클라이언트 경계에서 금융 금액 정밀도를 잃지 않고 Java `BigDecimal`로 명시적으로 변환하기 위한 기준이다.
+이번 API 계약에서 거래 금액은 **10진 정수 문자열**로 표현한다. JavaScript 클라이언트 경계에서 금융 금액 정밀도를 잃지 않고 Java `BigDecimal`로 명시적으로 변환하기 위한 기준이다.
 
-다음 세부 사항은 후속 사용자 승인이 필요하다.
+- 값은 0보다 큰 정수여야 한다.
+- 지수 표기, 소수부, 반올림과 자동 절삭을 허용하지 않는다.
+- 초기 지원 통화는 `KRW` 하나이다.
+- PostgreSQL 저장 타입과 최대값은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)의 `NUMERIC(19,4)` 계약을 따른다.
 
-- 통화별 허용 소수 자릿수
-- 최대 정수부·소수부 자릿수
-- 반올림 허용 여부와 반올림 방식
-- 0원·음수 거래 허용 여부
-
-모든 거래 요청·응답 예시는 확정된 계약인 소수점 문자열을 사용한다.
+모든 거래 요청·응답 예시는 정수 문자열을 사용한다.
 
 ## 5. 페이지네이션
 
@@ -181,7 +180,15 @@ Cursor는 클라이언트가 내부 정렬키를 조작하지 않도록 불투�
 Idempotency-Key: <key>
 ```
 
-`Idempotency-Key`는 필수 헤더이다. 누락하거나 형식이 올바르지 않으면 Transaction을 생성하지 않고 `400 Bad Request`와 `VALIDATION_ERROR`를 반환한다.
+`Idempotency-Key`는 필수 헤더이다. 누락하거나 형식이 올바르지 않으면 Transaction과 멱등 기록을 생성하지 않고 `400 Bad Request`와 `VALIDATION_ERROR`를 반환한다.
+
+- 길이는 8~128자이다.
+- 허용 문자는 영문 대문자·소문자, 숫자, 마침표(`.`), 밑줄(`_`), 콜론(`:`), 하이픈(`-`)이다.
+- 정규식은 `^[A-Za-z0-9._:-]{8,128}$`이다.
+- 서버는 키를 trim하거나 대소문자 변환하지 않는다.
+- 거래 생성의 작업 범위는 `POST:/api/v1/transactions`이다.
+- `(operationScope, Idempotency-Key)` 조합을 Unique로 관리한다.
+- 멱등 기록은 최초 선점 시각부터 24시간 보존한다.
 
 ### 6.2 처리 규칙
 
@@ -190,53 +197,66 @@ Spring Boot가 멱등성 확인과 업무 결과의 최종 소유자이다.
 | 상황 | 처리 규칙 |
 | --- | --- |
 | 같은 키 + 같은 요청, 최초 처리 완료 | 새 거래·탐지·사건을 만들지 않고 `200 OK`로 기존 완료 결과를 반환한다. |
-| 같은 키 + 같은 요청, 최초 처리 중 | 새 처리를 시작하지 않고 `202 Accepted`로 현재 처리 상태를 반환한다. |
+| 같은 키 + 같은 요청, 최초 처리 중 | 새 처리를 시작하지 않고 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다. |
 | 같은 키 + 다른 요청 | 키 재사용 충돌로 거부하고 `409 Conflict`와 `IDEMPOTENCY_KEY_CONFLICT`를 반환한다. |
 | 다른 키 + 같은 `transactionId` | 새 거래로 처리하지 않고 `409 Conflict`와 `DUPLICATE_TRANSACTION`을 반환한다. |
 | 같은 `transactionId` + 다른 요청 내용 | 기존 거래를 덮어쓰거나 재분석으로 해석하지 않고 `409 Conflict`와 `DUPLICATE_TRANSACTION`을 반환한다. |
-| 같은 요청의 동시 도착 | 하나의 요청만 최초 처리를 획득한다. 나머지 요청은 새 업무 결과를 만들지 않고 기존 처리 상태나 완료 결과를 참조한다. |
+| 같은 요청의 동시 도착 | 하나의 요청만 최초 처리를 획득한다. 나머지 요청은 새 업무 결과를 만들지 않고 기존 완료 결과를 반환하거나 처리 중 충돌을 반환한다. |
 
-처리 중인 동일 요청의 응답에는 최소한 다음 정보를 포함한다.
+요청 형식과 거래 유형별 도메인 Validation은 멱등 선점 전에 수행한다. Validation에 실패한 요청은 Transaction과 멱등 기록을 생성하지 않고 오류 응답, `traceId`, 로그와 운영 메트릭으로만 관측한다.
 
-- `transactionId`
-- 현재 `processingStatus`
-- 결과 조회 경로 후보
-- `traceId`
+처리 중인 동일 요청의 오류 응답은 다음 공통 구조를 사용한다.
 
 응답 예:
 
 ```http
-HTTP/1.1 202 Accepted
+HTTP/1.1 409 Conflict
 Content-Type: application/json
 ```
 
 ```json
 {
-  "transactionId": "tx_demo_20260723_0001",
-  "processingStatus": "ANALYZING",
-  "resultLocation": "/api/v1/transactions/tx_demo_20260723_0001",
-  "traceId": "trace_demo_processing_01"
+  "code": "IDEMPOTENCY_REQUEST_IN_PROGRESS",
+  "message": "같은 멱등 요청이 처리 중입니다.",
+  "traceId": "trace_demo_processing_01",
+  "fieldErrors": []
 }
 ```
 
-`resultLocation`의 최종 필드명과 HTTP `Location` 헤더 병행 여부는 사용자 결정 사항이다.
+### 6.3 요청 지문
 
-### 6.3 멱등성 상태 코드
+정규화 요청 지문은 다음 열 개 필드를 정확히 포함한다.
+
+```text
+transactionId
+transactionType
+amount
+currencyCode
+occurredAt
+externalCustomerRef
+senderAccountRef
+recipientAccountRef
+channel
+deviceRef
+```
+
+`traceId`, `Idempotency-Key`, 내부 Identity PK, 생성·수정 시각, version, 처리 상태와 그 밖의 서버 생성 필드는 제외한다. 정규화 JSON의 UTF-8 byte sequence를 SHA-256으로 계산하고 소문자 16진수 64자로 저장한다. 필드 순서, UUID·금액·시각 정규화와 null 처리의 정확한 기준은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따른다.
+
+### 6.4 멱등성 상태 코드
 
 - 최초 생성 완료 응답은 `201 Created`를 사용한다.
 - 완료된 동일 멱등 요청의 재전송은 `200 OK`로 기존 결과를 반환한다.
-- 처리 중인 동일 멱등 요청의 재전송은 `202 Accepted`로 현재 상태를 반환한다.
+- 처리 중인 동일 멱등 요청의 재전송은 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다.
 - 어떤 응답이든 새 거래·탐지·사건을 중복 생성하지 않는다.
 
-### 6.4 후속 구현 항목
+### 6.5 저장 계약과 후속 항목
 
-다음은 API 계약에 필요한 후속 구현 항목이며 이번 문서에서 저장 구조를 확정하지 않는다.
+거래 접수의 요청 지문, 처리 상태, 완료 응답 snapshot, Unique 범위와 만료 저장 구조는 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따른다.
 
-- 정규화된 요청 내용의 요청 지문 저장
-- 처리 중·완료·실패를 구분하는 멱등 처리 상태
-- 완료 결과 식별자 또는 완료 응답 저장
-- 동시에 도착한 요청의 최초 처리 선점
-- 멱등성 기록 보존·만료 정책
+다음 항목은 후속 구현 전에 추가 결정한다.
+
+- `FAILED`인 같은 키·같은 지문의 재시도 또는 기존 실패 반환 정책
+- 만료 기록 정리 주기와 경합 처리
 - 재시도와 늦은 FastAPI 응답의 경합 처리
 
 ## 7. 오류 응답
@@ -296,6 +316,7 @@ Content-Type: application/json
 | `DUPLICATE_TRANSACTION` | 이미 존재하는 `transactionId`로 새 거래 생성을 시도함 | `409 Conflict` |
 | `DUPLICATE_EVENT` | 같은 `eventId`에 다른 내용이 도착하거나 중복 정책과 충돌함 | `409 Conflict` |
 | `IDEMPOTENCY_KEY_CONFLICT` | 같은 멱등성 키가 다른 요청 내용에 재사용됨 | `409 Conflict` |
+| `IDEMPOTENCY_REQUEST_IN_PROGRESS` | 같은 멱등성 키와 같은 요청의 최초 처리가 아직 진행 중임 | `409 Conflict` |
 | `STATE_TRANSITION_NOT_ALLOWED` | 현재 상태에서 요청한 상태나 처리를 허용할 수 없음 | `409 Conflict` |
 | `CONCURRENT_MODIFICATION` | 더 최신 변경과 충돌해 요청을 적용할 수 없음 | `409 Conflict` |
 | `DEPENDENCY_TIMEOUT` | 필수 의존 서비스가 제한 시간 안에 결과를 반환하지 않음 | `503 Service Unavailable` |
@@ -309,7 +330,7 @@ JSON·필수 헤더·필드 형식 오류와 도메인 규칙 위반을 구분�
 | --- | --- |
 | `200 OK` | 조회 성공, 기존 결과 반환 또는 승인된 중복 수집 응답 |
 | `201 Created` | 거래 또는 행동 이벤트가 처음 생성됨 |
-| `202 Accepted` | 처리 중인 동일 멱등 거래 요청에 현재 처리 상태를 반환함 |
+| `202 Accepted` | 명시적으로 비동기 접수 계약을 가진 API가 요청 또는 진행 중 리소스 상태를 반환함. 거래 생성의 동일 멱등 요청 처리 중 응답에는 사용하지 않음 |
 | `400 Bad Request` | 잘못된 JSON, 필수 헤더 누락, 필드·쿼리 형식 오류 등 요청을 해석·기본 검증할 수 없음 |
 | `404 Not Found` | 식별자로 요청한 리소스가 없음 |
 | `409 Conflict` | 멱등성 키, 업무 식별자, 상태 또는 동시성 충돌 |
@@ -343,11 +364,8 @@ Client
 
 ## 9. 사용자 결정 필요 항목
 
-- 통화별 금액 자릿수, 최대값, 0·음수와 반올림 정책
 - 페이지 번호 시작값, 기본·최대 `size`와 허용 정렬 필드
-- `Idempotency-Key` 형식, 범위와 보존 기간
-- 처리 중 응답의 `resultLocation` 최종 필드명과 `Location` 헤더 병행 여부
-- 요청 지문과 완료 응답의 저장 범위
+- `FAILED` 멱등 요청의 같은 키 재전송 정책과 만료 기록 정리 방식
 - Validation 오류의 최상위 오류 코드를 더 세분화할지
 - `fieldErrors.code`의 코드 목록과 버전 관리 방식
 - 오류 응답의 `resource` 최종 이름과 범용 구조

@@ -32,24 +32,24 @@
 
 `ExternalRiskSnapshot`은 외부 위험계좌·IP·기기 근거의 재현과 장애·fallback 실험을 위해 초기 핵심 엔티티에 포함하는 방향을 권장한다. 다만 구체적인 속성, 보존 기간과 보호 방식은 후속 설계에서 확정한다.
 
-다음 엔티티는 필요성과 대안을 비교하는 후보이며 필수 구현 대상으로 확정하지 않는다.
+다음 엔티티는 필요성과 적용 범위를 구분해 관리한다.
 
-- API 요청 처리 상태와 완료 응답 재사용을 관리하는 `IdempotencyRecord`
+- API 요청 처리 상태와 완료 응답 재사용을 관리하는 `IdempotencyRecord`. 거래 접수에는 채택되었고 다른 API의 공통 적용 범위는 후보
 - 테스트·Mock 시나리오를 위한 최소 `Customer`·`Account` 참조 엔티티
 
 ### 2.2 제외 범위
 
-이 문서에서는 다음 사항을 확정하지 않는다.
+거래 접수 물리 계약에서 확정한 범위를 제외하고, 이 문서에서는 다음 사항을 확정하지 않는다.
 
 - JPA Entity, 연관관계 매핑과 Java Enum
 - Java·Python·프론트엔드 구현 코드
-- PostgreSQL DDL, 구체적인 DB 타입과 제약조건 문법
-- Flyway·Liquibase 마이그레이션
+- 거래 접수 외 PostgreSQL DDL, 구체적인 DB 타입과 제약조건 문법
+- 실제 Flyway·Liquibase 마이그레이션 파일
 - REST API 경로, 요청·응답 DTO와 상태 코드
 - Kafka 이벤트 스키마, Topic, Partition과 Consumer 구조
 - Redis Key의 구현 형식과 TTL
 - Worker와 Scheduler 구현
-- 낙관적 락 또는 비관적 락의 선택
+- 거래 접수 외 동시성 제어의 낙관적 락 또는 비관적 락 선택
 - 암호화·해시 알고리즘, 키 관리 방식과 보존 기간
 - 고객 원장·계좌 원장, 실제 잔액과 실제 소유권 관리
 - 실제 거래 승인·추가 인증·보류·차단과 고객 제재
@@ -114,7 +114,7 @@ FastAPI나 LLM Provider가 반환한 값은 그 자체로 업무 원본이 아�
 - AI 외부 요청은 `aiRequestId`, 실제 논리 실행은 `executionId`로 식별하고 진행 중 실행 공유는 `executionShared`로 표현한다.
 - 완료된 정확 일치 캐시 요청은 새 `AiReportRequest` 이력을 만들되 새 실행·Provider 호출·가상 사용량을 만들지 않는다.
 - AI 자동 재시도는 Timeout과 연결 실패에만 최대 1회 적용하고 출력 검증 실패와 비일시적 Provider 오류는 템플릿 fallback으로 전환한다.
-- 공식 DB 설계 경로인 `docs/04-database/`는 현재 저장소에 없으며, 이번 작업은 기존 논리 모델인 이 문서만 보완한다.
+- 거래 접수의 공식 물리 DB 계약은 `docs/04-database/transaction-intake-schema.md`이며, 이 논리 모델의 거래·멱등 후보 중 해당 범위를 구체화한다.
 
 ## 4. 데이터 모델링 원칙
 
@@ -202,7 +202,7 @@ PostgreSQL에 저장하는 거래·탐지·사건·감사·AI 사용량은 업�
 | `ProviderCallAttempt` | 실행 중 발생한 실제 Provider 호출별 토큰·지연·비용·결과 기록 | 핵심 후보 |
 | `AiReport` | 검증된 LLM 또는 템플릿 fallback 결과 본문과 최초 생성 출처 보존 | 핵심 후보 |
 | `ExternalRiskSnapshot` | 탐지 당시 외부 위험정보와 조회·캐시·fallback 상태의 최소 스냅샷 | 초기 핵심 권장 |
-| `IdempotencyRecord` | 요청의 처리 중·완료·실패와 완료 응답 재사용 정보 | 후보 |
+| `IdempotencyRecord` | 요청의 처리 중·완료·실패와 완료 응답 재사용 정보 | 거래 접수 확정, 다른 API 후보 |
 | 최소 `Customer`·`Account` 참조 엔티티 | 테스트·Mock 관계의 외래 키 정합성 보조 | 후보 |
 
 기존 `AiUsageRecord` 후보의 책임은 실제 Provider 호출 단위인 `ProviderCallAttempt`로 명확히 재정의한다. `ModelExecution`, `CostPolicy`, `ServiceIncident`, `DeploymentRecord`, 알림, 배포와 사용자 인증 전체 모델은 이번 핵심 ERD에 추가하지 않는다.
@@ -217,22 +217,24 @@ PostgreSQL에 저장하는 거래·탐지·사건·감사·AI 사용량은 업�
 
 | 속성 후보 | 의미와 설계 이유 |
 | --- | --- |
-| 내부 식별자 | 외래 키 연결을 위한 내부 식별자 후보 |
-| `transactionId` | 외부 요청, 로그, 추적과 사용자 조회에 사용하는 업무 식별자 |
+| 내부 식별자 | 외래 키 연결을 위한 `BIGINT Identity` 내부 식별자 |
+| `transactionId` | 외부 요청, 로그, 추적과 사용자 조회에 사용하는 UUID v4 업무 식별자 |
 | `transactionType` | 계좌이체, 오픈뱅킹 이체, ATM 인출 등 거래 유형 |
-| `amount` | 거래 금액. 0 또는 음수 허용 여부는 후속 정책 필요 |
-| `currencyCode` | 다중 통화 가능성을 구분하는 후보. 초기 단일 통화라도 금액 의미를 고정하는 데 유용 |
+| `amount` | 0보다 큰 정수 거래 금액. PostgreSQL은 `NUMERIC(19,4)` 사용 |
+| `currencyCode` | 초기에는 `KRW`만 허용 |
 | `occurredAt` | 실제 거래 요청 또는 발생 시각 |
 | `externalCustomerRef` | 고객 원문 대신 사용하는 외부 연결 참조값 |
-| `senderAccountRef` | 발신 계좌 원문 대신 사용하는 외부 연결 참조값 |
-| `recipientAccountRef` | 수신 계좌 원문 대신 사용하는 외부 연결 참조값. ATM 인출 등에는 없을 수 있음 |
+| `senderAccountRef` | 네 거래 유형의 기준 계좌 원문 대신 사용하는 외부 연결 참조값 |
+| `recipientAccountRef` | 계좌·오픈뱅킹 이체에는 필수이고 ATM 인출·대출 실행에는 금지되는 외부 수취 계좌 참조값 |
+| `channel` | 거래가 FinGuardOps에 유입된 거래 유형별 접수 경로 |
+| `deviceRef` | 기기 원문 대신 사용하는 선택 참조값 |
 | 발신·수신 마스킹 표시값 후보 | 화면 표시가 필요할 때 연결용 참조값과 분리해 보관하는 후보 |
 | `processingStatus` | 거래 처리 단계 |
 | `riskLevel` | 현재 채택된 탐지 결과의 위험 등급 |
 | `riskResponseOutcome` | 승인, 승인 후 모니터링, 추가 인증 요구, 보류 등 Mock 대응 결과 |
 | `adoptedDetectionResultId` 후보 | 현재 위험 등급과 대응의 기준으로 채택한 DetectionResult를 직접 식별하는 논리 참조 후보 |
 | `createdAt`, `updatedAt` | 생성·마지막 변경 시각 |
-| `concurrencyVersion` 후보 | 상태 변경 경합을 탐지하기 위한 버전 값 |
+| `version` | 상태 변경 경합을 탐지하기 위한 낙관적 잠금 값 |
 
 초기 `transactionType` 값은 거래 API 계약과 같은 다음 네 가지를 사용한다.
 
@@ -244,6 +246,17 @@ LOAN_DISBURSED
 ```
 
 `LOAN_DISBURSED`는 실제 대출 원장·상품·심사·실행 기능이 아니라 대출 실행 사실을 입력하는 Mock 금융거래 유형이다.
+
+거래 유형별 `recipientAccountRef`와 `channel`은 다음 계약을 사용한다.
+
+| `transactionType` | `recipientAccountRef` | `channel` |
+| --- | --- | --- |
+| `ACCOUNT_TRANSFER` | 필수 | `MOBILE_BANKING` |
+| `OPEN_BANKING_TRANSFER` | 필수 | `OPEN_BANKING` |
+| `ATM_WITHDRAWAL` | 금지 | `ATM` |
+| `LOAN_DISBURSED` | 금지 | `CORE_BANKING` |
+
+거래 접수의 타입, 제약과 인덱스는 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따른다.
 
 `currentDetectionResultVersion`만 저장하는 방식보다 `adoptedDetectionResultId`로 채택 결과를 직접 가리키는 방안을 우선 검토한다. 버전 번호는 같은 거래 안에서만 유일하기 때문에 식별자 참조가 채택된 결과를 더 명확하게 표현한다.
 
@@ -259,7 +272,6 @@ LOAN_DISBURSED
 
 ```text
 RECEIVED
-VALIDATION_FAILED
 ANALYZING
 ANALYZED
 APPROVED
@@ -776,7 +788,7 @@ API에서 캐시 요청의 토큰 합계를 0으로 보여줄 수는 있지만 �
 
 복수 거래 사건을 위한 `caseAnalysisSnapshotVersion`은 향후 확장 후보이며 이번 정확 일치 네 요소를 교체하지 않는다. Reason Code가 같다는 이유로 다른 사건의 결과를 재사용하지 않는다.
 
-### 7.15 IdempotencyRecord 후보
+### 7.15 IdempotencyRecord
 
 #### 방안 A: Transaction에 멱등성 키 직접 저장
 
@@ -794,9 +806,9 @@ API에서 캐시 요청의 토큰 합계를 0으로 보여줄 수는 있지만 �
 | 만료 정책 | 거래 보존과 결합됨 | 멱등성 기록 보존을 별도로 결정 가능 |
 | 초기 구현 복잡도 | 낮음 | 엔티티와 원자적 선점 로직 필요 |
 
-권장 후보는 방안 B이다. 거래 접수 외 상태 변경과 AI 리포트 요청에도 같은 원칙을 재사용하고, 동시에 도착한 요청 중 하나만 최초 처리를 획득하도록 표현하기 쉽기 때문이다. 초기에는 적용 대상 작업을 제한해 복잡도를 통제할 수 있다.
+거래 접수에는 방안 B를 채택한다. 동시에 도착한 요청 중 하나만 최초 처리를 획득하고 처리 중·완료·실패 및 완료 응답 snapshot을 거래 상태와 분리하기 위해서다. 다른 API에 같은 테이블을 적용할지는 각 API 물리 계약에서 결정한다.
 
-멱등성 키가 시스템 전체에서 전역 Unique인지, 요청 작업·클라이언트 범위와 조합해 Unique인지, 요청 본문이 다른 동일 키를 어떻게 거부할지와 보존·만료 정책은 사용자 결정 사항이다.
+거래 생성 작업은 `operationScope + idempotencyKey`를 Unique로 관리하고 정규화 요청의 SHA-256 지문, `IN_PROGRESS`·`COMPLETED`·`FAILED` 상태, 결과 거래 참조, 완료 응답 snapshot과 최초 선점부터 24시간인 만료 시각을 저장한다. 정확한 계약은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따른다.
 
 ### 7.16 최소 Customer·Account 참조 엔티티 후보
 
@@ -841,7 +853,7 @@ API에서 캐시 요청의 토큰 합계를 0으로 보여줄 수는 있지만 �
 | AiReport–AiReportRequest | 결과 1 : 요청 1..N, 요청의 결과 참조는 0..1 | 최초·공유 요청과 이후 캐시 요청이 같은 결과를 참조 가능 |
 | DetectionResult–AiReportExecution | 대표 결과 사용 시 1 : 0..N 후보 | 다중 결과 집합 모델은 미확정 |
 | Transaction/FraudCase–AuditLog | 각 대상 1 : 0..N 조회 문맥 | 범용 대상 참조와 자주 쓰는 식별자를 병행하는 후보 |
-| IdempotencyRecord–Transaction | 요청 1 : 결과 0..1 후보 | 처리 중에는 거래 결과가 없을 수 있음 |
+| IdempotencyRecord–Transaction | 요청 1 : 결과 0..1 | 처리 중에는 거래 결과가 없을 수 있고 완료된 거래 접수는 하나의 결과를 참조 |
 | IdempotencyRecord–AiReportRequest | 멱등 기록 1 : 요청 0..1 후보 | 공통 멱등 엔티티를 채택하면 같은 키·지문 확인과 완료 aiRequestId 재사용을 연결 |
 
 `FraudCase–CaseTransaction`을 1..N으로 표현하는 것은 사건이 거래 조사 단위라는 업무 의미를 반영한다. 사건 생성과 첫 거래 연결을 같은 정합성 경계에서 보장할지, 일시적으로 거래가 없는 사건을 허용할지는 후속 트랜잭션 설계에서 확정한다.
@@ -850,18 +862,18 @@ Transaction–CaseTransaction의 1:N 관계는 과거 사건 연결을 포함한
 
 ## 9. Mermaid ERD
 
-다음 그림은 핵심 식별자와 관계 중심의 논리 ERD이다. 구체적인 PostgreSQL 타입이나 JPA 매핑을 의미하지 않는다. `ExternalRiskSnapshot`은 초기 핵심 권장 방향이며 `IdempotencyRecord`는 후보이다. Transaction과 채택 DetectionResult의 관계는 논리 후보이고, `AiReportExecution`과 `DetectionResult`의 관계는 대표 탐지 결과를 사용하는 초기 대안만 표시한다. 캐시 요청은 `AI_REPORT_REQUEST.resolvedReportRef`로 기존 결과를 참조하며 새 실행·attempt·리포트를 만들지 않고, 캐시 원본 요청은 결과의 실행과 `initiatingRequestRef`를 따라 조회한다.
+다음 그림은 핵심 식별자와 관계 중심의 논리 ERD이다. 거래 접수의 PostgreSQL 타입과 제약은 전용 물리 계약을 우선하며, 나머지 엔티티는 구체적인 PostgreSQL 타입이나 JPA 매핑을 의미하지 않는다. `ExternalRiskSnapshot`은 초기 핵심 권장 방향이고 `IdempotencyRecord`는 거래 접수에 확정되었으며 다른 API 적용은 후보이다. Transaction과 채택 DetectionResult의 관계는 논리 후보이고, `AiReportExecution`과 `DetectionResult`의 관계는 대표 탐지 결과를 사용하는 초기 대안만 표시한다. 캐시 요청은 `AI_REPORT_REQUEST.resolvedReportRef`로 기존 결과를 참조하며 새 실행·attempt·리포트를 만들지 않고, 캐시 원본 요청은 결과의 실행과 `initiatingRequestRef`를 따라 조회한다.
 
 ```mermaid
 erDiagram
     TRANSACTION {
-        string internalId PK
-        string transactionId UK
+        bigint internalId PK
+        uuid transactionId UK
         string adoptedDetectionResultId FK
         string processingStatus
         string riskLevel
         string riskResponseOutcome
-        number concurrencyVersion
+        number version
     }
 
     BEHAVIOR_EVENT {
@@ -999,10 +1011,12 @@ erDiagram
     }
 
     IDEMPOTENCY_RECORD {
-        string idempotencyRecordId PK
-        string idempotencyKey UK
+        bigint idempotencyRecordId PK
+        string idempotencyKey
         string operationScope
+        string requestFingerprint
         string processingState
+        datetime expiresAt
     }
 
     TRANSACTION o|--o{ BEHAVIOR_EVENT : "선택적으로 연결"
@@ -1139,10 +1153,10 @@ caseId
 
 ### 11.4 동시성 버전
 
-업무 내용 버전과 동시성 충돌 탐지용 `concurrencyVersion`은 목적이 다르다.
+업무 내용 버전과 동시성 충돌 탐지용 Transaction `version` 또는 다른 엔티티의 `concurrencyVersion`은 목적이 다르다.
 
 - `detectionResultVersion`, Rule `version`, `promptVersion`, `modelVersion`: 어떤 계산·생성 조건을 사용했는지 설명
-- `concurrencyVersion`: 사용자가 읽은 이후 다른 쓰기가 발생했는지 탐지
+- Transaction `version`, 다른 엔티티의 `concurrencyVersion`: 읽은 이후 다른 쓰기가 발생했는지 탐지
 
 두 종류를 하나의 속성으로 합치지 않는다.
 
@@ -1164,12 +1178,13 @@ caseId
 | AiReport | `executionRef` | 한 실행에서 결과 두 건 생성 |
 | AiReport 정확 일치 결과 | `caseId + detectionResultVersion + promptVersion + modelVersion` | 완료된 재사용 가능 결과 중복 생성 |
 | ProviderCallAttempt | `attemptId`와 `executionId + attemptNumber` | 같은 실제 Provider 호출의 토큰·비용 중복 |
-| IdempotencyRecord | `idempotencyKey` 또는 `operationScope + idempotencyKey` | 동일 요청의 중복 처리 |
+| IdempotencyRecord | `operationScope + idempotencyKey` | 동일 작업 범위 요청의 중복 처리 |
 
 추가 정합성 후보는 다음과 같다.
 
-- 거래 금액은 일반적으로 0보다 커야 하지만, 0원 검증·정정 거래나 취소 표현이 필요한지 확인한 뒤 확정한다.
-- `recipientAccountRef`는 거래 유형에 따라 선택값일 수 있다.
+- 거래 금액은 0보다 큰 정수이고 초기 통화는 `KRW`이다.
+- `ACCOUNT_TRANSFER`, `OPEN_BANKING_TRANSFER`의 `recipientAccountRef`는 필수이고 `ATM_WITHDRAWAL`, `LOAN_DISBURSED`에는 금지한다.
+- 거래 유형별 `channel`은 각각 `MOBILE_BANKING`, `OPEN_BANKING`, `ATM`, `CORE_BANKING`만 허용한다.
 - 완료된 DetectionResult에는 위험 점수·등급과 완료 시각이 필요하다는 후보를 검토한다.
 - `CLOSED` 사건에는 `closedAt`과 `finalDisposition`이 모두 필요하며 하나의 종료 업무 트랜잭션에서 확정한다.
 - 과거 Rule 버전과 이를 참조하는 DetectionEvidence는 물리 삭제하지 않는다.
@@ -1191,12 +1206,15 @@ caseId
 
 ### 13.1 거래 접수
 
-1. 요청의 멱등성 키와 `transactionId`를 확인한다.
-2. 동일 키의 처리 중 요청이 있으면 두 번째 실행이 새 거래를 만들지 않도록 한다.
-3. 완료된 동일 요청이면 승인된 기존 결과를 반환하는 방안을 검토한다.
-4. 동일 키에 요청 내용이 다르면 재사용으로 처리하지 않고 거부 정책을 적용해야 한다.
+1. JSON·헤더 형식과 거래 유형별 도메인 Validation을 수행한다. 실패하면 Transaction과 IdempotencyRecord를 만들지 않는다.
+2. 검증된 열 개 요청 DTO 필드를 정규화하고 SHA-256 요청 지문을 계산한다.
+3. `POST:/api/v1/transactions + Idempotency-Key` Unique로 최초 처리를 선점한다.
+4. 동일 키의 지문이 다르면 `IDEMPOTENCY_KEY_CONFLICT`로 거부한다.
+5. 동일 키·동일 지문의 처리가 진행 중이면 `IDEMPOTENCY_REQUEST_IN_PROGRESS`로 거부한다.
+6. 동일 키·동일 지문의 처리가 완료되었으면 `200 OK`로 기존 결과를 반환한다.
+7. 새 요청만 Transaction을 저장하고 최초 성공에는 `201 Created`를 반환한다.
 
-요청 내용 비교를 위한 지문을 저장할지, 응답 전체가 아닌 결과 식별자·응답 요약만 저장할지는 후속 보안·API 설계에서 결정한다.
+요청 지문, 완료 응답 snapshot과 24시간 보존은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)의 물리 계약을 따른다.
 
 ### 13.2 행동 이벤트
 
@@ -1268,11 +1286,11 @@ HIGH·CRITICAL 거래 처리의 재시도와 중복 이벤트가 새 사건을 �
 
 ## 14. 동시성 고려사항
 
-이 문서는 락 방식을 선택하지 않고 충돌 탐지에 필요한 데이터 후보만 정의한다.
+거래 접수에는 `financial_transaction.version` 낙관적 잠금을 선택했다. 다른 엔티티는 락 방식을 선택하지 않고 충돌 탐지에 필요한 데이터 후보만 정의한다.
 
 ### 14.1 Transaction
 
-동일 거래의 분석 완료, Timeout 처리와 위험 대응 적용이 동시에 실행될 수 있다. `concurrencyVersion` 또는 현재 상태 검증에 필요한 값이 있어야 하며, 이전 상태를 읽은 실행이 더 최신 결과를 역행시켜서는 안 된다. `adoptedDetectionResultId` 변경, 위험 등급·대응 현재값 반영과 AuditLog 기록은 일부만 성공하지 않도록 같은 업무 정합성 경계에서 처리해야 한다.
+동일 거래의 분석 완료, Timeout 처리와 위험 대응 적용이 동시에 실행될 수 있다. 거래 접수 물리 스키마는 `financial_transaction.version`을 사용하는 낙관적 잠금을 적용하며, 이전 상태를 읽은 실행이 더 최신 결과를 역행시켜서는 안 된다. `adoptedDetectionResultId` 변경, 위험 등급·대응 현재값 반영과 AuditLog 기록은 일부만 성공하지 않도록 같은 업무 정합성 경계에서 처리해야 한다.
 
 ### 14.2 FraudCase
 
@@ -1485,7 +1503,7 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 | AiReportExecution | 장애·재시도·결과 재현 기간과 연결 요청·결과 참조를 고려해 보존 |
 | ProviderCallAttempt | 비용 검증과 운영 분석 기간에 맞춰 실제 호출 이력 보존 |
 | AiReport | 현재 결과만 남기지 않고 과거 정상·fallback 결과와 원본 생성 계보 보존. 본문 개인정보 가능성 함께 검토 |
-| IdempotencyRecord | 업무 원본보다 짧을 수 있으나 재전송 가능 기간과 응답 재사용 정책에 맞춰 결정 |
+| IdempotencyRecord | 거래 생성 작업은 최초 선점부터 24시간 보존. 다른 작업 범위는 각 API 계약에서 결정 |
 
 법적·규제 보존 기간을 이 개인 프로젝트 문서에서 임의로 확정하지 않는다. 만료 후 물리 삭제, 비식별화 또는 집계만 보존할지와 사건·감사 참조가 있는 데이터의 삭제 제한을 후속 보안·운영 설계에서 결정한다.
 
@@ -1495,7 +1513,6 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 
 ### 거래·행동
 
-- 거래 유형별 금액 0·음수 허용 여부와 통화 지원 범위
 - 거래 상태별 필수 시각과 실패 사유 구조
 - `adoptedDetectionResultId`의 같은 Transaction 소속을 외래 키·DB 제약·애플리케이션 검증 중 어디까지 보장할지
 - 최종 상태에서 재분석·정정 시 현재 거래 상태를 변경할지 새 이력으로 남길지
@@ -1537,10 +1554,10 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 
 ### 멱등성·동시성·감사
 
-- 별도 IdempotencyRecord 도입 여부와 우선 적용 API
-- 멱등성 키의 전역 또는 작업 범위 Unique 정책
-- 처리 상태, 요청 지문, 완료 응답 저장 범위와 만료 정책
-- Transaction, FraudCase, AiReportExecution과 Rule의 충돌 탐지 방식
+- 거래 외 API에 공통 IdempotencyRecord를 적용할 범위
+- 거래 멱등 기록이 `FAILED`일 때 같은 키 재전송과 재시도 정책
+- 거래 멱등 만료 기록의 정리 주기·batch·경합 처리
+- FraudCase, AiReportExecution과 Rule의 충돌 탐지 방식
 - 충돌 후 자동 재시도, 사용자 재입력 또는 병합 정책
 - AuditLog의 범용 대상 참조와 명시적 외래 키 적용 범위
 - 감사 로그 접근 권한, 정정 절차와 보존 기간
@@ -1556,11 +1573,11 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 
 - 논리 도메인명 `Transaction`에 대응하는 Java Entity 이름으로 `FinancialTransaction` 후보 검토
 - 엔티티와 Aggregate 경계
-- 내부 식별자와 업무 식별자의 타입·생성 전략
+- 거래 외 엔티티의 내부 식별자와 업무 식별자 타입·생성 전략
 - 연관관계 방향, 지연 로딩과 조회 전용 Projection
 - 상태·버전 속성의 Enum 및 null 정책
 - 생성·수정 시각과 작성 주체 관리
-- 동시성 버전 적용 대상
+- 거래 외 엔티티의 동시성 버전 적용 대상
 - 불변 Rule·DetectionResult·감사 이력의 수정 통제
 
 ### 20.2 API 계약
@@ -1588,18 +1605,18 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 - 자동 재시도는 Timeout과 연결 실패에만 같은 `executionId` 아래 최대 1회 적용한다.
 - 정확 일치 `AiReport`가 있으면 캐시로 재사용하며 동일 정확 일치 결과의 강제 재생성을 허용하지 않는다.
 
-구체적인 경로, DTO와 상태 코드는 API 기준 문서에서 사용자 승인 후 확정한다. `FinancialTransaction`과 `financial_transaction`도 이름 후보일 뿐 이번 문서에서 Java 클래스나 물리 테이블 이름으로 확정하지 않는다.
+구체적인 경로, DTO와 상태 코드는 API 기준 문서에서 사용자 승인 후 확정한다. 거래 접수의 물리 테이블 이름 `financial_transaction`은 확정되었고 Java 클래스는 후속 구현 범위이다.
 
 ### 20.3 마이그레이션·DB 제약 설계
 
-- 논리 도메인명 `Transaction`에 대응하는 PostgreSQL 테이블 이름으로 `financial_transaction` 후보 검토
+- 거래 접수의 `financial_transaction`, `idempotency_record` 실제 Flyway Migration 작성
 - 이 문서의 Unique 후보를 실제 제약으로 적용할 범위
 - `adoptedDetectionResultId`가 같은 Transaction의 DetectionResult만 참조하도록 보장하는 방식
 - 교차 테이블 상태 조건의 한계를 고려한 활성 사건 검증, 중복 상태·별도 활성 관계·DB Trigger와 보조 제약 비교
 - 외래 키와 삭제 제한
 - 상태별 필수값을 애플리케이션과 DB 중 어디까지 검증할지
 - Rule 버전과 탐지 근거의 불변성 보조
-- AiReportRequest의 멱등 키·요청 지문과 IdempotencyRecord 역할 중복 정리
+- AiReportRequest의 멱등 키·요청 지문과 공통 IdempotencyRecord 적용 여부 정리
 - AiReportExecution의 NOT NULL `initiatingRequestRef`와 최초 요청의 `executionRef` 상호 계보 검증
 - AiReportExecution 활성 정확 일치 부분 Unique와 충돌 시 기존 실행 재조회
 - ProviderCallAttempt의 실행별 attemptNumber Unique, 토큰·비용 null·Check 제약
@@ -1608,7 +1625,7 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 - 시간 범위·목록·집계 조회를 위한 인덱스 순서
 - 데이터 보존·비식별화·파티셔닝 필요 여부
 
-DDL과 마이그레이션 파일은 별도 승인 작업에서 작성한다.
+DDL 실행 파일과 마이그레이션 파일은 별도 승인 작업에서 작성한다. 거래 접수의 DDL 기준은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)에 확정되어 있다.
 
 ### 20.4 트랜잭션·동시성 설계
 
@@ -1620,7 +1637,7 @@ DDL과 마이그레이션 파일은 별도 승인 작업에서 작성한다.
 - ProviderCallAttempt 저장, AiReport 결과 생성과 실행·공유 요청 종결의 부분 실패 처리
 - 늦은 응답, 재시도와 fallback 경합 처리
 
-락 방식과 격리 수준은 실제 충돌·부하 테스트 근거로 결정한다.
+거래 상태 변경은 `financial_transaction.version` 낙관적 잠금을 사용한다. 다른 엔티티의 락 방식과 트랜잭션 격리 수준은 실제 충돌·부하 테스트 근거로 결정한다.
 
 ### 20.5 캐시·이벤트 후속 설계
 

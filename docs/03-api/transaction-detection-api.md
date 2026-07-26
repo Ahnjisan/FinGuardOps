@@ -64,7 +64,7 @@ FastAPI는 다음 작업을 수행하지 않는다.
 
 | 식별자 | 이 문서에서의 의미 |
 | --- | --- |
-| `transactionId` | 거래 업무 식별자 |
+| `transactionId` | 클라이언트가 거래 생성 요청으로 전달하는 UUID v4 거래 업무 식별자 |
 | `eventId` | 행동 이벤트 업무 식별자 |
 | `detectionResultId` | 개별 탐지 결과 업무 식별자 |
 | `caseId` | 생성되었거나 연결된 사건 업무 식별자 |
@@ -93,7 +93,6 @@ LOAN_DISBURSED
 
 ```text
 RECEIVED
-VALIDATION_FAILED
 ANALYZING
 ANALYZED
 APPROVED
@@ -177,32 +176,43 @@ Content-Type: application/json
 Idempotency-Key: <required>
 ```
 
-`Idempotency-Key`는 필수이다. 누락하거나 형식이 올바르지 않으면 Transaction을 생성하지 않고 `400 Bad Request`와 `VALIDATION_ERROR`를 반환한다. 키 형식, 길이와 보존 기간은 사용자 승인이 필요하다.
+`Idempotency-Key`는 필수이다. 길이는 8~128자이고 영문, 숫자, 마침표(`.`), 밑줄(`_`), 콜론(`:`), 하이픈(`-`)만 허용한다. 누락하거나 형식이 올바르지 않으면 Transaction과 멱등 기록을 생성하지 않고 `400 Bad Request`와 `VALIDATION_ERROR`를 반환한다. 작업 범위는 `POST:/api/v1/transactions`이고 멱등 기록은 최초 선점부터 24시간 보존한다.
 
-### 5.2 요청 필드 후보
+### 5.2 요청 필드
 
-| 필드 | 타입 후보 | 필수 후보 | 설명 |
+| 필드 | 타입 | 필수 | 설명 |
 | --- | --- | --- | --- |
-| `transactionId` | string | 필수 | 거래 업무 식별자 |
+| `transactionId` | string | 필수 | UUID v4 거래 업무 식별자 |
 | `transactionType` | string | 필수 | 지원 거래 유형 |
-| `amount` | decimal string | 필수 | 소수점 문자열로 표현하는 거래 금액 |
-| `currencyCode` | string | 필수 | 통화 코드 후보 |
+| `amount` | string | 필수 | 0보다 큰 10진 정수 문자열 |
+| `currencyCode` | string | 필수 | 초기에는 `KRW`만 허용 |
 | `occurredAt` | string | 필수 | 거래 발생 시각, UTC ISO-8601 |
 | `externalCustomerRef` | string | 필수 | 실제 고객번호가 아닌 외부 고객 참조값 |
-| `senderAccountRef` | string | 거래 유형별 필수 | 실제 계좌번호가 아닌 발신 계좌 참조값 |
-| `recipientAccountRef` | string 또는 null | 거래 유형별 선택 | 실제 계좌번호가 아닌 수신 계좌 참조값 |
-| `channel` | string | 필수 후보 | 거래 발생 채널 |
+| `senderAccountRef` | string | 필수 | 실제 계좌번호가 아닌 거래 기준 계좌 참조값 |
+| `recipientAccountRef` | string 또는 null | 거래 유형별 조건부 | 실제 계좌번호가 아닌 외부 수취 계좌 참조값 |
+| `channel` | string | 필수 | 거래가 FinGuardOps에 유입된 접수 경로 |
 | `deviceRef` | string 또는 null | 선택 | 실제 기기 식별자 원문 대신 사용하는 참조값 |
 
-`recipientAccountRef`는 ATM 인출이나 대출 실행 Mock 거래 등 거래 유형에 따라 없을 수 있다. 거래 유형별 필수값, 허용 채널, 통화와 금액 범위는 후속 Validation 계약에서 확정한다.
+`senderAccountRef`는 네 거래 유형 모두에서 FinGuardOps가 추적하는 기준 계좌를 나타낸다. `LOAN_DISBURSED`에서는 대출금 입금 대상 계좌를 이 필드로 표현하며 별도 `accountRef` 필드를 추가하지 않는다.
+
+거래 유형별 수취 계좌와 채널 계약은 다음과 같다.
+
+| `transactionType` | `recipientAccountRef` | 허용 `channel` | 채널 의미 |
+| --- | --- | --- | --- |
+| `ACCOUNT_TRANSFER` | 필수 | `MOBILE_BANKING` | 모바일뱅킹을 통한 계좌이체 |
+| `OPEN_BANKING_TRANSFER` | 필수 | `OPEN_BANKING` | 오픈뱅킹 연계 거래 |
+| `ATM_WITHDRAWAL` | 금지, 반드시 null | `ATM` | ATM 인출 |
+| `LOAN_DISBURSED` | 금지, 반드시 null | `CORE_BANKING` | 코어뱅킹 Mock에서 전달된 대출 실행 이벤트 |
+
+`ACCOUNT_TRANSFER`의 인터넷뱅킹과 창구 등 추가 채널은 MVP 범위에서 제외하며 후속 계약 변경으로만 확장한다.
 
 ### 5.3 요청 예시
 
 ```json
 {
-  "transactionId": "tx_demo_20260723_0001",
+  "transactionId": "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
   "transactionType": "ACCOUNT_TRANSFER",
-  "amount": "1250000.00",
+  "amount": "1250000",
   "currencyCode": "KRW",
   "occurredAt": "2026-07-23T01:15:30Z",
   "externalCustomerRef": "cust_ref_demo_a7f2",
@@ -213,28 +223,28 @@ Idempotency-Key: <required>
 }
 ```
 
-### 5.4 요청 검증 후보
+### 5.4 요청 검증
 
-- `transactionId`는 비어 있지 않아야 하며 기존 거래와 중복되지 않아야 한다.
+- `transactionId`는 UUID v4여야 하며 기존 거래와 중복되지 않아야 한다.
 - `transactionType`은 지원 목록에 있어야 한다.
-- `amount`는 승인된 금액 형식과 범위를 만족해야 한다.
-- `currencyCode`는 승인된 통화 코드여야 한다.
-- `occurredAt`은 UTC ISO-8601 형식이어야 한다.
-- 거래 유형별 계좌 참조값 필수 조건을 검증한다.
+- `amount`는 지수 표기나 소수부가 없는 0보다 큰 10진 정수 문자열이어야 한다.
+- `currencyCode`는 `KRW`여야 한다.
+- `occurredAt`은 UTC ISO-8601 `Z` 형식이고 Validation 시점의 서버 시각보다 최대 5분 미래까지 허용한다.
+- `senderAccountRef`는 모든 거래 유형에서 필수이다.
+- 거래 유형별 `recipientAccountRef` 필수·금지와 `channel` 조합을 검증한다.
 - 참조값에 실제 고객번호·계좌번호 원문을 사용하지 않는다.
 - 알 수 없는 상세 필드를 업무 데이터나 FastAPI 입력으로 자동 전달하지 않는다.
 
-금액 0·음수, 미래 시각, 통화 목록과 참조값 형식은 사용자 결정 사항이다.
+참조값의 길이와 공백, PostgreSQL 타입 및 DB `CHECK`는 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따른다.
 
 #### 5.4.1 API 검증 실패와 Transaction 상태 경계
 
-- JSON 파싱, 필수 `Idempotency-Key`와 기본 필드 형식 검증에 실패한 요청은 Transaction을 생성하지 않는다.
+- JSON 파싱, 필수 `Idempotency-Key`, 기본 필드 형식 또는 거래 유형별 도메인 검증에 실패한 요청은 Transaction과 멱등 기록을 생성하지 않는다.
 - 잘못된 요청을 저장하기 위해 임의의 `transactionId`나 Transaction을 생성하지 않는다.
 - 형식은 올바르지만 거래 유형별 도메인 규칙을 위반한 요청은 `422 Unprocessable Entity`로 처리한다.
-- 거래 상태 전이 문서의 `VALIDATION_FAILED`를 영속 Transaction 상태로 유지할지, Transaction 생성 전 API 검증 오류만으로 처리할지는 별도 사용자 결정이 필요하다.
-- 이번 API 구현 전에 `VALIDATION_FAILED`의 영속화 대상, 생성 시점과 감사 범위를 기존 거래 상태 전이 문서와 함께 확정해야 한다.
-
-기존 거래 상태 전이 문서의 상태 목록은 변경하지 않는다. 이 API 문서는 검증 실패 요청을 저장하기 위한 임의 Transaction 생성을 허용하지 않는다.
+- Validation 거절은 오류 응답, `traceId`, 민감정보를 제외한 로그와 운영 메트릭으로만 관측한다.
+- `VALIDATION_FAILED`는 현재 거래 접수의 영속 `processingStatus`에서 제외한다.
+- 모든 Validation을 통과해 최초 저장되는 Transaction의 초기 상태는 `RECEIVED`이다.
 
 ### 5.5 성공 응답 필드 후보
 
@@ -256,12 +266,12 @@ Idempotency-Key: <required>
 ```http
 HTTP/1.1 201 Created
 Content-Type: application/json
-Location: /api/v1/transactions/tx_demo_20260723_0001
+Location: /api/v1/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001
 ```
 
 ```json
 {
-  "transactionId": "tx_demo_20260723_0001",
+  "transactionId": "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
   "processingStatus": "ADDITIONAL_AUTH_REQUIRED",
   "riskLevel": "HIGH",
   "riskResponseOutcome": "ADDITIONAL_AUTH_REQUIRED",
@@ -279,30 +289,31 @@ Location: /api/v1/transactions/tx_demo_20260723_0001
 ### 5.7 멱등성과 중복
 
 - 같은 `Idempotency-Key`와 같은 요청의 최초 처리가 완료되었으면 새 거래·탐지·사건을 생성하지 않고 `200 OK`로 기존 결과를 반환한다.
-- 같은 `Idempotency-Key`와 같은 요청의 최초 처리가 진행 중이면 새 처리를 시작하지 않고 `202 Accepted`로 현재 처리 상태를 반환한다.
+- 같은 `Idempotency-Key`와 같은 요청의 최초 처리가 진행 중이면 새 처리를 시작하지 않고 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다.
 - 같은 키에 다른 요청 내용이 오면 `409 Conflict`와 `IDEMPOTENCY_KEY_CONFLICT`를 반환한다.
 - 다른 키로 같은 `transactionId`가 오면 `409 Conflict`와 `DUPLICATE_TRANSACTION`을 반환한다.
 - 같은 `transactionId`에 다른 요청 내용이 오면 기존 거래를 덮어쓰거나 재분석으로 해석하지 않는다.
-- 요청 지문, 처리 상태와 완료 응답 저장은 후속 구현 항목이다.
+- 요청 지문은 정규화한 `transactionId`, `transactionType`, `amount`, `currencyCode`, `occurredAt`, `externalCustomerRef`, `senderAccountRef`, `recipientAccountRef`, `channel`, `deviceRef`를 고정 순서 JSON으로 직렬화한 뒤 SHA-256으로 계산한다.
+- `traceId`, `Idempotency-Key`, 내부 PK, 생성·수정 시각, version, 처리 상태와 그 밖의 서버 생성 필드는 지문에서 제외한다.
+- 요청 지문, `IN_PROGRESS`·`COMPLETED`·`FAILED` 상태, 완료 응답 snapshot과 24시간 만료의 물리 저장 기준은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따른다.
 
 처리 중인 동일 요청의 응답 예시는 다음과 같다.
 
 ```http
-HTTP/1.1 202 Accepted
+HTTP/1.1 409 Conflict
 Content-Type: application/json
-Location: /api/v1/transactions/tx_demo_20260723_0001
 ```
 
 ```json
 {
-  "transactionId": "tx_demo_20260723_0001",
-  "processingStatus": "ANALYZING",
-  "resultLocation": "/api/v1/transactions/tx_demo_20260723_0001",
-  "traceId": "trace_demo_processing_01"
+  "code": "IDEMPOTENCY_REQUEST_IN_PROGRESS",
+  "message": "같은 멱등 요청이 처리 중입니다.",
+  "traceId": "trace_demo_processing_01",
+  "fieldErrors": []
 }
 ```
 
-`resultLocation`의 최종 이름과 `Location` 헤더 병행 여부는 사용자 결정 사항이다.
+`FAILED`인 같은 키·같은 요청의 재시도 또는 기존 실패 반환 정책은 후속 장애·재시도 계약에서 결정한다.
 
 ### 5.8 의존 서비스 Timeout
 
@@ -335,7 +346,7 @@ Content-Type: application/json
   "traceId": "trace_demo_timeout_01",
   "fieldErrors": [],
   "resource": {
-    "transactionId": "tx_demo_20260723_0001",
+    "transactionId": "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
     "processingStatus": "FAILED"
   }
 }
@@ -349,9 +360,8 @@ Content-Type: application/json
 | --- | --- |
 | `201 Created` | 거래가 처음 생성되고 승인된 동기 처리 결과를 반환함 |
 | `200 OK` | 완료된 동일 멱등 요청에 기존 결과 반환 |
-| `202 Accepted` | 처리 중인 동일 멱등 요청에 현재 상태와 결과 조회 경로 반환 |
 | `400 Bad Request` | 잘못된 JSON, 필수 헤더 누락 또는 필드 형식 오류 |
-| `409 Conflict` | 멱등성 키 충돌 또는 `transactionId` 중복 |
+| `409 Conflict` | 멱등성 키 지문 충돌, 동일 멱등 요청 처리 중, `transactionId` 중복 또는 동시성 충돌 |
 | `422 Unprocessable Entity` | 형식은 맞지만 거래 유형별 업무 규칙을 만족하지 못함 |
 | `503 Service Unavailable` | 유효 캐시 없는 External Risk Timeout 또는 FastAPI Timeout의 초기 정책 |
 
@@ -399,9 +409,9 @@ Content-Type: application/json
 {
   "content": [
     {
-      "transactionId": "tx_demo_20260723_0001",
+      "transactionId": "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
       "transactionType": "ACCOUNT_TRANSFER",
-      "amount": "1250000.00",
+      "amount": "1250000",
       "currencyCode": "KRW",
       "occurredAt": "2026-07-23T01:15:30Z",
       "externalCustomerRef": "cust_ref_demo_a7f2",
@@ -452,7 +462,7 @@ GET /api/v1/transactions/{transactionId}
 요청 예:
 
 ```http
-GET /api/v1/transactions/tx_demo_20260723_0001
+GET /api/v1/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001
 ```
 
 ### 7.2 응답 범위
@@ -475,9 +485,9 @@ GET /api/v1/transactions/tx_demo_20260723_0001
 ```json
 {
   "transaction": {
-    "transactionId": "tx_demo_20260723_0001",
+    "transactionId": "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
     "transactionType": "ACCOUNT_TRANSFER",
-    "amount": "1250000.00",
+    "amount": "1250000",
     "currencyCode": "KRW",
     "occurredAt": "2026-07-23T01:15:30Z",
     "externalCustomerRef": "cust_ref_demo_a7f2",
@@ -580,7 +590,7 @@ Content-Type: application/json
 {
   "eventId": "evt_demo_20260723_0042",
   "externalCustomerRef": "cust_ref_demo_a7f2",
-  "transactionId": "tx_demo_20260723_0001",
+  "transactionId": "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
   "eventType": "DEVICE_REGISTERED",
   "occurredAt": "2026-07-23T01:10:00Z",
   "deviceRef": "device_ref_demo_18b3",
@@ -614,7 +624,7 @@ Content-Type: application/json
 {
   "eventId": "evt_demo_20260723_0042",
   "eventType": "DEVICE_REGISTERED",
-  "transactionId": "tx_demo_20260723_0001",
+  "transactionId": "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
   "occurredAt": "2026-07-23T01:10:00Z",
   "createdAt": "2026-07-23T01:10:01Z",
   "traceId": "trace_demo_event_0042"
@@ -682,7 +692,7 @@ GET /api/v1/behavior-events?externalCustomerRef=cust_ref_demo_a7f2&occurredAtFro
     {
       "eventId": "evt_demo_20260723_0042",
       "externalCustomerRef": "cust_ref_demo_a7f2",
-      "transactionId": "tx_demo_20260723_0001",
+      "transactionId": "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
       "eventType": "DEVICE_REGISTERED",
       "occurredAt": "2026-07-23T01:10:00Z",
       "deviceRef": "device_ref_demo_18b3",
@@ -730,7 +740,7 @@ GET /api/v1/transactions/{transactionId}/detection-results
 요청 예:
 
 ```http
-GET /api/v1/transactions/tx_demo_20260723_0001/detection-results?page=0&size=20&sort=detectionResultVersion,desc
+GET /api/v1/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001/detection-results?page=0&size=20&sort=detectionResultVersion,desc
 ```
 
 한 거래에 여러 재분석 버전이 존재할 수 있으므로 페이지네이션을 적용하는 방향을 권장한다.
@@ -754,7 +764,7 @@ GET /api/v1/transactions/tx_demo_20260723_0001/detection-results?page=0&size=20&
 
 ```json
 {
-  "transactionId": "tx_demo_20260723_0001",
+  "transactionId": "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
   "content": [
     {
       "detectionResultId": "det_demo_20260723_0101",
@@ -836,7 +846,7 @@ GET /api/v1/detection-results/det_demo_20260723_0101
 {
   "detectionResult": {
     "detectionResultId": "det_demo_20260723_0101",
-    "transactionId": "tx_demo_20260723_0001",
+    "transactionId": "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
     "detectionResultVersion": 1,
     "riskScore": 72.5,
     "riskLevel": "HIGH",
@@ -916,15 +926,15 @@ GET /api/v1/detection-results/det_demo_20260723_0101
 
 ## 12. HTTP 상태 코드 요약
 
-| API | `200` | `201` | `202` | `400` | `404` | `409` | `422` | `503` |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `POST /transactions` | 완료된 동일 멱등 요청의 기존 결과 | 최초 생성 | 처리 중인 동일 멱등 요청의 현재 상태 | JSON·필수 헤더·필드 형식 오류 | 사용하지 않음 | 멱등성·거래·상태·동시성 충돌 | 거래 유형별 도메인 규칙 위반 | 유효 캐시 없는 External Risk Timeout 또는 FastAPI Timeout 초기 정책 |
-| `GET /transactions` | 조회 성공 | 사용하지 않음 | 사용하지 않음 | 필터·페이지 형식 오류 | 사용하지 않음 | 사용하지 않음 | 의미상 잘못된 필터 | 조회 의존성 장애 |
-| `GET /transactions/{transactionId}` | 조회 성공 | 사용하지 않음 | 사용하지 않음 | 식별자 형식 오류 | 거래 없음 | 사용하지 않음 | 사용하지 않음 | 조회 의존성 장애 |
-| `POST /behavior-events` | 동일 이벤트 기존 결과 | 최초 생성 | 사용하지 않음 | JSON·알 수 없는 필드·필드 형식 오류 | 관련 거래 없음 후보 | 다른 내용의 `eventId` 중복 | 이벤트 유형별 도메인 규칙 위반 | 저장 의존성 장애 |
-| `GET /behavior-events` | 조회 성공 | 사용하지 않음 | 사용하지 않음 | 필터·페이지 형식 오류 | 사용하지 않음 | 사용하지 않음 | 의미상 잘못된 필터 | 조회 의존성 장애 |
-| `GET /transactions/{transactionId}/detection-results` | 조회 성공 | 사용하지 않음 | 사용하지 않음 | 식별자·페이지 형식 오류 | 거래 없음 | 사용하지 않음 | 의미상 잘못된 조건 | 조회 의존성 장애 |
-| `GET /detection-results/{detectionResultId}` | 조회 성공 | 사용하지 않음 | 사용하지 않음 | 식별자 형식 오류 | 탐지 결과 없음 | 사용하지 않음 | 사용하지 않음 | 조회 의존성 장애 |
+| API | `200` | `201` | `400` | `404` | `409` | `422` | `503` |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `POST /transactions` | 완료된 동일 멱등 요청의 기존 결과 | 최초 생성 | JSON·필수 헤더·필드 형식 오류 | 사용하지 않음 | 멱등 키 지문 충돌·처리 중 동일 요청·거래·상태·동시성 충돌 | 거래 유형별 도메인 규칙 위반 | 유효 캐시 없는 External Risk Timeout 또는 FastAPI Timeout 초기 정책 |
+| `GET /transactions` | 조회 성공 | 사용하지 않음 | 필터·페이지 형식 오류 | 사용하지 않음 | 사용하지 않음 | 의미상 잘못된 필터 | 조회 의존성 장애 |
+| `GET /transactions/{transactionId}` | 조회 성공 | 사용하지 않음 | 식별자 형식 오류 | 거래 없음 | 사용하지 않음 | 사용하지 않음 | 조회 의존성 장애 |
+| `POST /behavior-events` | 동일 이벤트 기존 결과 | 최초 생성 | JSON·알 수 없는 필드·필드 형식 오류 | 관련 거래 없음 후보 | 다른 내용의 `eventId` 중복 | 이벤트 유형별 도메인 규칙 위반 | 저장 의존성 장애 |
+| `GET /behavior-events` | 조회 성공 | 사용하지 않음 | 필터·페이지 형식 오류 | 사용하지 않음 | 사용하지 않음 | 의미상 잘못된 필터 | 조회 의존성 장애 |
+| `GET /transactions/{transactionId}/detection-results` | 조회 성공 | 사용하지 않음 | 식별자·페이지 형식 오류 | 거래 없음 | 사용하지 않음 | 의미상 잘못된 조건 | 조회 의존성 장애 |
+| `GET /detection-results/{detectionResultId}` | 조회 성공 | 사용하지 않음 | 식별자 형식 오류 | 탐지 결과 없음 | 사용하지 않음 | 사용하지 않음 | 조회 의존성 장애 |
 
 행동 이벤트의 존재하지 않는 관련 거래 처리와 오류 `resource`의 범용 적용 범위는 사용자 결정 사항이다.
 
@@ -946,7 +956,23 @@ Content-Type: application/json
 }
 ```
 
-### 13.2 행동 이벤트 중복 충돌
+### 13.2 동일 멱등 요청 처리 중
+
+```http
+HTTP/1.1 409 Conflict
+Content-Type: application/json
+```
+
+```json
+{
+  "code": "IDEMPOTENCY_REQUEST_IN_PROGRESS",
+  "message": "같은 멱등 요청이 처리 중입니다.",
+  "traceId": "trace_demo_idempotency_in_progress_01",
+  "fieldErrors": []
+}
+```
+
+### 13.3 행동 이벤트 중복 충돌
 
 ```http
 HTTP/1.1 409 Conflict
@@ -968,7 +994,7 @@ Content-Type: application/json
 }
 ```
 
-### 13.3 리소스 없음
+### 13.4 리소스 없음
 
 ```http
 HTTP/1.1 404 Not Found
@@ -1011,11 +1037,8 @@ Content-Type: application/json
 
 ### 16.2 거래
 
-- `Idempotency-Key` 형식, 범위와 보존 기간
-- `201 Created`의 `Location` 헤더 최종 적용 여부와 처리 중 응답의 `resultLocation` 최종 이름·`Location` 헤더 병행 여부
-- 요청 지문과 완료 응답 저장 범위
-- 거래 유형별 필수 계좌 참조값, 채널, 통화와 금액 검증
-- `VALIDATION_FAILED`를 영속 Transaction 상태로 유지할지와 생성 시점·감사 범위
+- `201 Created`의 `Location` 헤더 최종 적용 여부
+- `FAILED` 멱등 요청의 같은 키 재전송 정책과 만료 기록 정리 방식
 - `riskResponseOutcome` Enum 이름
 - 채택 결과가 없는 처리 단계의 null 응답 규칙
 - FastAPI·External Risk Timeout 이후 재시도·복구 정책

@@ -430,7 +430,6 @@ Rule Score
 
 ```text
 RECEIVED
-VALIDATION_FAILED
 ANALYZING
 ANALYZED
 APPROVED
@@ -438,6 +437,8 @@ ADDITIONAL_AUTH_REQUIRED
 HELD
 FAILED
 ```
+
+요청 형식 또는 거래 유형별 도메인 Validation에 실패한 요청은 거래로 저장하지 않는다. `VALIDATION_FAILED`는 현재 거래 접수의 영속 상태가 아니며 거절은 오류 응답, `traceId`, 로그와 운영 메트릭으로 관측한다.
 
 MEDIUM의 모니터링은 거래 처리 상태가 아니라 `APPROVED` 상태와 별도의 승인 후 모니터링 대응 결과로 표현한다. 실제 거래 차단은 범위 밖이므로 `BLOCKED`를 거래 처리 상태로 사용하지 않는다.
 
