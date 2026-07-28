@@ -37,6 +37,60 @@ class IdempotencyRecordTest {
     }
 
     @Test
+    void linksTransactionOnlyWhileInProgressWithoutChangingTerminalFields() {
+        IdempotencyRecord record = inProgress();
+        FinancialTransaction transaction = transaction();
+
+        record.linkTransaction(transaction);
+        record.linkTransaction(transaction(transaction.getTransactionId()));
+
+        assertThat(record.getProcessingStatus())
+                .isEqualTo(IdempotencyProcessingStatus.IN_PROGRESS);
+        assertThat(record.getFinancialTransaction()).isSameAs(transaction);
+        assertThat(record.getResponseSnapshot()).isNull();
+        assertThat(record.getFailureCode()).isNull();
+        assertThat(record.getFinishedAt()).isNull();
+    }
+
+    @Test
+    void rejectsNullOrDifferentTransactionLinkWithoutChangingExistingLink() {
+        IdempotencyRecord record = inProgress();
+        FinancialTransaction linked = transaction();
+        record.linkTransaction(linked);
+
+        assertThatThrownBy(() -> record.linkTransaction(null))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> record.linkTransaction(transaction(UUID.randomUUID())))
+                .isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> record.linkTransaction(transaction(null)))
+                .isInstanceOf(NullPointerException.class);
+
+        assertThat(record.getFinancialTransaction()).isSameAs(linked);
+        assertThat(record.getProcessingStatus())
+                .isEqualTo(IdempotencyProcessingStatus.IN_PROGRESS);
+        assertThat(record.getResponseSnapshot()).isNull();
+        assertThat(record.getFailureCode()).isNull();
+        assertThat(record.getFinishedAt()).isNull();
+    }
+
+    @Test
+    void rejectsTransactionLinkAfterTerminalTransition() {
+        IdempotencyRecord completed = inProgress();
+        completed.complete(
+                transaction(),
+                objectMapper.createObjectNode(),
+                FINISHED_AT
+        );
+        IdempotencyRecord failed = inProgress();
+        failed.fail("DEPENDENCY_TIMEOUT", FINISHED_AT);
+
+        assertThatThrownBy(() -> completed.linkTransaction(transaction()))
+                .isInstanceOf(IdempotencyStateTransitionNotAllowedException.class);
+        assertThatThrownBy(() -> failed.linkTransaction(transaction()))
+                .isInstanceOf(IdempotencyStateTransitionNotAllowedException.class);
+    }
+
+    @Test
     void completesFromInProgressAndDefensivelyCopiesSnapshot() {
         IdempotencyRecord record = inProgress();
         FinancialTransaction transaction = transaction();
@@ -55,6 +109,43 @@ class IdempotencyRecordTest {
         assertThat(record.getResponseSnapshot().has("mutatedThroughGetter")).isFalse();
         assertThat(record.getFailureCode()).isNull();
         assertThat(record.getFinishedAt()).isEqualTo(FINISHED_AT);
+    }
+
+    @Test
+    void completesWithSameLinkedTransactionAndRejectsDifferentTransactionWithoutMutation() {
+        IdempotencyRecord sameTransactionRecord = inProgress();
+        FinancialTransaction linked = transaction();
+        sameTransactionRecord.linkTransaction(linked);
+
+        sameTransactionRecord.complete(
+                transaction(linked.getTransactionId()),
+                objectMapper.createObjectNode().put("result", "completed"),
+                FINISHED_AT
+        );
+
+        assertThat(sameTransactionRecord.getProcessingStatus())
+                .isEqualTo(IdempotencyProcessingStatus.COMPLETED);
+        assertThat(sameTransactionRecord.getFinancialTransaction()
+                .getTransactionId()).isEqualTo(linked.getTransactionId());
+
+        IdempotencyRecord differentTransactionRecord = inProgress();
+        FinancialTransaction original = transaction();
+        differentTransactionRecord.linkTransaction(original);
+        ObjectNode snapshot = objectMapper.createObjectNode().put("result", "rejected");
+
+        assertThatThrownBy(() -> differentTransactionRecord.complete(
+                transaction(UUID.randomUUID()),
+                snapshot,
+                FINISHED_AT
+        )).isInstanceOf(IllegalStateException.class);
+
+        assertThat(differentTransactionRecord.getProcessingStatus())
+                .isEqualTo(IdempotencyProcessingStatus.IN_PROGRESS);
+        assertThat(differentTransactionRecord.getFinancialTransaction())
+                .isSameAs(original);
+        assertThat(differentTransactionRecord.getResponseSnapshot()).isNull();
+        assertThat(differentTransactionRecord.getFailureCode()).isNull();
+        assertThat(differentTransactionRecord.getFinishedAt()).isNull();
     }
 
     @Test
@@ -163,8 +254,12 @@ class IdempotencyRecordTest {
     }
 
     private FinancialTransaction transaction() {
+        return transaction(UUID.randomUUID());
+    }
+
+    private FinancialTransaction transaction(UUID transactionId) {
         return new FinancialTransaction(
-                UUID.randomUUID(),
+                transactionId,
                 TransactionType.ACCOUNT_TRANSFER,
                 new BigDecimal("1250000"),
                 "KRW",

@@ -118,6 +118,69 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
     }
 
     @Test
+    void completesWhenSameTransactionWasAlreadyLinked() {
+        String key = key("linked-completed");
+        TransactionFingerprintInput input = fingerprintInput();
+        FinancialTransaction transaction = financialTransactionRepository.saveAndFlush(
+                transaction(input.transactionId())
+        );
+        long recordId = acquiredRecordId(idempotencyService.claim(key, input));
+        IdempotencyRecord record =
+                idempotencyRecordRepository.findById(recordId).orElseThrow();
+        record.linkTransaction(transaction);
+        idempotencyRecordRepository.saveAndFlush(record);
+
+        IdempotencyClaimResult.Completed completed = idempotencyService.complete(
+                recordId,
+                transaction.getTransactionId(),
+                objectMapper.createObjectNode().put("result", "completed")
+        );
+
+        assertThat(completed.responseSnapshotJson()).contains("completed");
+        IdempotencyRecord stored =
+                idempotencyRecordRepository.findById(recordId).orElseThrow();
+        assertThat(stored.getProcessingStatus())
+                .isEqualTo(IdempotencyProcessingStatus.COMPLETED);
+        assertThat(stored.getFinancialTransaction().getId())
+                .isEqualTo(transaction.getId());
+    }
+
+    @Test
+    void rejectsCompletionWithDifferentTransactionWithoutChangingRecord() {
+        String key = key("linked-mismatch");
+        TransactionFingerprintInput input = fingerprintInput();
+        FinancialTransaction linked = financialTransactionRepository.saveAndFlush(
+                transaction(input.transactionId())
+        );
+        FinancialTransaction different = financialTransactionRepository.saveAndFlush(
+                transaction(UUID.randomUUID())
+        );
+        long recordId = acquiredRecordId(idempotencyService.claim(key, input));
+        IdempotencyRecord record =
+                idempotencyRecordRepository.findById(recordId).orElseThrow();
+        record.linkTransaction(linked);
+        idempotencyRecordRepository.saveAndFlush(record);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> idempotencyService.complete(
+                        recordId,
+                        different.getTransactionId(),
+                        objectMapper.createObjectNode().put("result", "rejected")
+                )
+        ).isInstanceOf(IllegalStateException.class);
+
+        IdempotencyRecord stored =
+                idempotencyRecordRepository.findById(recordId).orElseThrow();
+        assertThat(stored.getProcessingStatus())
+                .isEqualTo(IdempotencyProcessingStatus.IN_PROGRESS);
+        assertThat(stored.getFinancialTransaction().getId())
+                .isEqualTo(linked.getId());
+        assertThat(stored.getResponseSnapshot()).isNull();
+        assertThat(stored.getFailureCode()).isNull();
+        assertThat(stored.getFinishedAt()).isNull();
+    }
+
+    @Test
     void persistsFailedTransitionAndReturnsExistingFailure() {
         String key = key("failed");
         TransactionFingerprintInput input = fingerprintInput();
