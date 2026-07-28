@@ -15,16 +15,13 @@ import org.flywaydb.core.api.MigrationState;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.math.BigDecimal;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.HashMap;
@@ -37,9 +34,8 @@ import java.util.stream.Collectors;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-@Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
-class TransactionPersistenceIntegrationTest {
+class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSupport {
 
     private static final String INSERT_ATM_TRANSACTION = """
             INSERT INTO financial_transaction (
@@ -55,11 +51,6 @@ class TransactionPersistenceIntegrationTest {
                 device_ref
             ) VALUES (?, 'ATM_WITHDRAWAL', ?, 'KRW', CURRENT_TIMESTAMP, ?, ?, NULL, 'ATM', NULL)
             """;
-
-    @Container
-    @ServiceConnection
-    static final PostgreSQLContainer<?> POSTGRESQL =
-            new PostgreSQLContainer<>("postgres:17-alpine");
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -273,6 +264,409 @@ class TransactionPersistenceIntegrationTest {
     }
 
     @Test
+    void rejectsNonVersionFourAndInvalidVariantUuids() {
+        Instant createdAt = Instant.now();
+        Set<UUID> invalidTransactionIds = Set.of(
+                UUID.fromString("6ba7b810-9dad-11d1-80b4-00c04fd430c8"),
+                UUID.fromString("6fa459ea-ee8a-3ca4-894e-db77e160355e"),
+                UUID.fromString("886313e1-3b8a-5372-9b90-0c9aee199e5d"),
+                UUID.fromString("2f4c0a4e-8a9d-4c2f-7a1b-7d6e5f430001")
+        );
+
+        for (UUID transactionId : invalidTransactionIds) {
+            assertConstraintViolation(
+                    () -> insertTransaction(
+                            transactionId,
+                            "ATM_WITHDRAWAL",
+                            new BigDecimal("1000"),
+                            "KRW",
+                            createdAt.minusSeconds(1),
+                            "cust_ref_uuid",
+                            "acct_ref_uuid",
+                            null,
+                            "ATM",
+                            null,
+                            "RECEIVED",
+                            createdAt
+                    ),
+                    "23514",
+                    "ck_financial_transaction_uuid_v4"
+            );
+        }
+    }
+
+    @Test
+    void acceptsAllApprovedTransactionTypeRecipientAndChannelCombinations() {
+        Instant createdAt = Instant.now();
+
+        insertTransaction(
+                UUID.randomUUID(), "ACCOUNT_TRANSFER", new BigDecimal("1000"), "KRW",
+                createdAt.minusSeconds(1), "cust_ref_account", "acct_ref_account_sender",
+                "acct_ref_account_recipient", "MOBILE_BANKING", null, "RECEIVED", createdAt
+        );
+        insertTransaction(
+                UUID.randomUUID(), "OPEN_BANKING_TRANSFER", new BigDecimal("2000"), "KRW",
+                createdAt.minusSeconds(1), "cust_ref_open", "acct_ref_open_sender",
+                "acct_ref_open_recipient", "OPEN_BANKING", null, "RECEIVED", createdAt
+        );
+        insertTransaction(
+                UUID.randomUUID(), "ATM_WITHDRAWAL", new BigDecimal("3000"), "KRW",
+                createdAt.minusSeconds(1), "cust_ref_atm", "acct_ref_atm_sender",
+                null, "ATM", null, "RECEIVED", createdAt
+        );
+        insertTransaction(
+                UUID.randomUUID(), "LOAN_DISBURSED", new BigDecimal("4000"), "KRW",
+                createdAt.minusSeconds(1), "cust_ref_loan", "acct_ref_loan_sender",
+                null, "CORE_BANKING", null, "RECEIVED", createdAt
+        );
+
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM financial_transaction",
+                Integer.class
+        )).isEqualTo(4);
+    }
+
+    @Test
+    void rejectsInvalidTransactionTypeRecipientAndChannelCombinations() {
+        Instant createdAt = Instant.now();
+
+        assertConstraintViolation(
+                () -> insertTransaction(
+                        UUID.randomUUID(), "ACCOUNT_TRANSFER", new BigDecimal("1000"), "KRW",
+                        createdAt.minusSeconds(1), "cust_ref_missing", "acct_ref_missing",
+                        null, "MOBILE_BANKING", null, "RECEIVED", createdAt
+                ),
+                "23514",
+                "ck_financial_transaction_type_contract"
+        );
+        assertConstraintViolation(
+                () -> insertTransaction(
+                        UUID.randomUUID(), "ATM_WITHDRAWAL", new BigDecimal("1000"), "KRW",
+                        createdAt.minusSeconds(1), "cust_ref_forbidden", "acct_ref_forbidden",
+                        "acct_ref_not_allowed", "ATM", null, "RECEIVED", createdAt
+                ),
+                "23514",
+                "ck_financial_transaction_type_contract"
+        );
+        assertConstraintViolation(
+                () -> insertTransaction(
+                        UUID.randomUUID(), "OPEN_BANKING_TRANSFER", new BigDecimal("1000"), "KRW",
+                        createdAt.minusSeconds(1), "cust_ref_channel", "acct_ref_channel",
+                        "acct_ref_recipient", "MOBILE_BANKING", null, "RECEIVED", createdAt
+                ),
+                "23514",
+                "ck_financial_transaction_type_contract"
+        );
+    }
+
+    @Test
+    void rejectsNegativeAndFractionalAmountsAndStoresPositiveIntegerExactly() {
+        Instant createdAt = Instant.now();
+
+        assertConstraintViolation(
+                () -> insertTransaction(
+                        UUID.randomUUID(), "ATM_WITHDRAWAL", new BigDecimal("-1"), "KRW",
+                        createdAt.minusSeconds(1), "cust_ref_negative", "acct_ref_negative",
+                        null, "ATM", null, "RECEIVED", createdAt
+                ),
+                "23514",
+                "ck_financial_transaction_amount"
+        );
+        assertConstraintViolation(
+                () -> insertTransaction(
+                        UUID.randomUUID(), "ATM_WITHDRAWAL", new BigDecimal("1000.5"), "KRW",
+                        createdAt.minusSeconds(1), "cust_ref_fraction", "acct_ref_fraction",
+                        null, "ATM", null, "RECEIVED", createdAt
+                ),
+                "23514",
+                "ck_financial_transaction_amount"
+        );
+
+        long transactionPk = insertTransaction(
+                UUID.randomUUID(), "ATM_WITHDRAWAL", new BigDecimal("999999999999999"), "KRW",
+                createdAt.minusSeconds(1), "cust_ref_exact", "acct_ref_exact",
+                null, "ATM", null, "RECEIVED", createdAt
+        );
+        BigDecimal storedAmount = jdbcTemplate.queryForObject(
+                "SELECT amount FROM financial_transaction WHERE id = ?",
+                BigDecimal.class,
+                transactionPk
+        );
+
+        assertThat(storedAmount).isEqualByComparingTo("999999999999999.0000");
+    }
+
+    @Test
+    void rejectsCurrencyOtherThanKrw() {
+        Instant createdAt = Instant.now();
+
+        assertConstraintViolation(
+                () -> insertTransaction(
+                        UUID.randomUUID(), "ATM_WITHDRAWAL", new BigDecimal("1000"), "USD",
+                        createdAt.minusSeconds(1), "cust_ref_currency", "acct_ref_currency",
+                        null, "ATM", null, "RECEIVED", createdAt
+                ),
+                "23514",
+                "ck_financial_transaction_currency"
+        );
+    }
+
+    @Test
+    void enforcesOccurredAtAgainstCreatedAtFiveMinuteBoundary() {
+        Instant createdAt = Instant.now().minus(10, ChronoUnit.MINUTES);
+
+        long acceptedTransactionPk = insertTransaction(
+                UUID.randomUUID(), "ATM_WITHDRAWAL", new BigDecimal("1000"), "KRW",
+                createdAt.plus(4, ChronoUnit.MINUTES), "cust_ref_four_minutes",
+                "acct_ref_four_minutes", null, "ATM", null, "RECEIVED", createdAt
+        );
+
+        assertThat(acceptedTransactionPk).isPositive();
+        assertConstraintViolation(
+                () -> insertTransaction(
+                        UUID.randomUUID(), "ATM_WITHDRAWAL", new BigDecimal("1000"), "KRW",
+                        createdAt.plus(6, ChronoUnit.MINUTES), "cust_ref_six_minutes",
+                        "acct_ref_six_minutes", null, "ATM", null, "RECEIVED", createdAt
+                ),
+                "23514",
+                "ck_financial_transaction_occurred_at"
+        );
+    }
+
+    @Test
+    void rejectsBlankAndPaddedReferenceValues() {
+        Instant createdAt = Instant.now();
+
+        assertReferenceViolation(createdAt, "", "acct_ref_sender", "acct_ref_recipient", null,
+                "ck_financial_transaction_refs");
+        assertReferenceViolation(createdAt, " cust_ref", "acct_ref_sender", "acct_ref_recipient", null,
+                "ck_financial_transaction_refs");
+        assertReferenceViolation(createdAt, "cust_ref", "", "acct_ref_recipient", null,
+                "ck_financial_transaction_refs");
+        assertReferenceViolation(createdAt, "cust_ref", "acct_ref_sender ", "acct_ref_recipient", null,
+                "ck_financial_transaction_refs");
+        assertReferenceViolation(createdAt, "cust_ref", "acct_ref_sender", "", null,
+                "ck_financial_transaction_type_contract");
+        assertReferenceViolation(createdAt, "cust_ref", "acct_ref_sender", "acct_ref_recipient ", null,
+                "ck_financial_transaction_type_contract");
+        assertReferenceViolation(createdAt, "cust_ref", "acct_ref_sender", "acct_ref_recipient", "",
+                "ck_financial_transaction_device_ref");
+        assertReferenceViolation(createdAt, "cust_ref", "acct_ref_sender", "acct_ref_recipient", " device_ref",
+                "ck_financial_transaction_device_ref");
+    }
+
+    @Test
+    void rejectsValidationFailedAsPersistentTransactionStatus() {
+        Instant createdAt = Instant.now();
+
+        assertConstraintViolation(
+                () -> insertTransaction(
+                        UUID.randomUUID(), "ATM_WITHDRAWAL", new BigDecimal("1000"), "KRW",
+                        createdAt.minusSeconds(1), "cust_ref_status", "acct_ref_status",
+                        null, "ATM", null, "VALIDATION_FAILED", createdAt
+                ),
+                "23514",
+                "ck_financial_transaction_processing_status"
+        );
+    }
+
+    @Test
+    void enforcesIdempotencyKeyLengthBoundaries() {
+        insertInProgressIdempotencyRecord("a".repeat(8));
+        insertInProgressIdempotencyRecord("b".repeat(128));
+
+        assertConstraintViolation(
+                () -> insertInProgressIdempotencyRecord("c".repeat(7)),
+                "23514",
+                "ck_idempotency_record_key_length"
+        );
+        assertSqlStateViolation(
+                () -> insertInProgressIdempotencyRecord("d".repeat(129)),
+                "22001"
+        );
+    }
+
+    @Test
+    void enforcesIdempotencyKeyAllowedCharacters() {
+        insertInProgressIdempotencyRecord("Az09._:-");
+
+        for (String invalidKey : Set.of("bad key1", "가나다라마바사아", "bad/key1", "bad\\key1")) {
+            assertConstraintViolation(
+                    () -> insertInProgressIdempotencyRecord(invalidKey),
+                    "23514",
+                    "ck_idempotency_record_key_characters"
+            );
+        }
+    }
+
+    @Test
+    void enforcesSha256RequestFingerprintFormat() {
+        insertInProgressIdempotencyRecord(
+                "POST:/api/v1/transactions",
+                "valid-fingerprint-key",
+                "0123456789abcdef".repeat(4),
+                null
+        );
+
+        for (String invalidFingerprint : Set.of(
+                "A".repeat(64),
+                "g".repeat(64),
+                "a".repeat(63)
+        )) {
+            assertConstraintViolation(
+                    () -> insertInProgressIdempotencyRecord(
+                            "POST:/api/v1/transactions",
+                            "invalid-fingerprint-" + UUID.randomUUID(),
+                            invalidFingerprint,
+                            null
+                    ),
+                    "23514",
+                    "ck_idempotency_record_fingerprint"
+            );
+        }
+    }
+
+    @Test
+    void rejectsLinkingSameTransactionToMultipleIdempotencyRecords() {
+        Instant createdAt = Instant.now();
+        long transactionPk = insertTransaction(
+                UUID.randomUUID(), "ATM_WITHDRAWAL", new BigDecimal("1000"), "KRW",
+                createdAt.minusSeconds(1), "cust_ref_link", "acct_ref_link",
+                null, "ATM", null, "RECEIVED", createdAt
+        );
+        insertInProgressIdempotencyRecord(
+                "POST:/api/v1/transactions",
+                "first-link-key",
+                "e".repeat(64),
+                transactionPk
+        );
+
+        assertConstraintViolation(
+                () -> insertInProgressIdempotencyRecord(
+                        "POST:/api/v1/transactions",
+                        "second-link-key",
+                        "f".repeat(64),
+                        transactionPk
+                ),
+                "23505",
+                "uq_idempotency_record_transaction"
+        );
+    }
+
+    @Test
+    void acceptsValidStateFieldCombinationsAndExactTwentyFourHourExpiration() {
+        Instant createdAt = Instant.now();
+        long transactionPk = insertTransaction(
+                UUID.randomUUID(), "ATM_WITHDRAWAL", new BigDecimal("1000"), "KRW",
+                createdAt.minusSeconds(1), "cust_ref_states", "acct_ref_states",
+                null, "ATM", null, "RECEIVED", createdAt
+        );
+        insertInProgressIdempotencyRecord("in-progress-state-key");
+        jdbcTemplate.update("""
+                        INSERT INTO idempotency_record (
+                            operation_scope,
+                            idempotency_key,
+                            request_fingerprint,
+                            processing_status,
+                            financial_transaction_id,
+                            response_snapshot,
+                            finished_at
+                        ) VALUES (?, ?, ?, 'COMPLETED', ?, '{}'::jsonb, CURRENT_TIMESTAMP)
+                        """,
+                "POST:/api/v1/transactions",
+                "completed-state-key",
+                "1".repeat(64),
+                transactionPk
+        );
+        jdbcTemplate.update("""
+                        INSERT INTO idempotency_record (
+                            operation_scope,
+                            idempotency_key,
+                            request_fingerprint,
+                            processing_status,
+                            failure_code,
+                            finished_at
+                        ) VALUES (?, ?, ?, 'FAILED', ?, CURRENT_TIMESTAMP)
+                        """,
+                "POST:/api/v1/transactions",
+                "failed-state-key",
+                "2".repeat(64),
+                "DEPENDENCY_TIMEOUT"
+        );
+
+        assertThat(jdbcTemplate.queryForObject("""
+                SELECT COUNT(*)
+                FROM idempotency_record
+                WHERE expires_at = created_at + INTERVAL '24 hours'
+                """, Integer.class)).isEqualTo(3);
+    }
+
+    @Test
+    void rejectsInvalidStateFieldCombinations() {
+        Instant createdAt = Instant.now();
+        long transactionPk = insertTransaction(
+                UUID.randomUUID(), "ATM_WITHDRAWAL", new BigDecimal("1000"), "KRW",
+                createdAt.minusSeconds(1), "cust_ref_invalid_states", "acct_ref_invalid_states",
+                null, "ATM", null, "RECEIVED", createdAt
+        );
+
+        assertConstraintViolation(
+                () -> jdbcTemplate.update("""
+                                INSERT INTO idempotency_record (
+                                    operation_scope,
+                                    idempotency_key,
+                                    request_fingerprint,
+                                    processing_status,
+                                    response_snapshot
+                                ) VALUES (?, ?, ?, 'IN_PROGRESS', '{}'::jsonb)
+                                """,
+                        "POST:/api/v1/transactions",
+                        "invalid-in-progress-state",
+                        "3".repeat(64)
+                ),
+                "23514",
+                "ck_idempotency_record_state_fields"
+        );
+        assertConstraintViolation(
+                () -> jdbcTemplate.update("""
+                                INSERT INTO idempotency_record (
+                                    operation_scope,
+                                    idempotency_key,
+                                    request_fingerprint,
+                                    processing_status,
+                                    finished_at
+                                ) VALUES (?, ?, ?, 'FAILED', CURRENT_TIMESTAMP)
+                                """,
+                        "POST:/api/v1/transactions",
+                        "invalid-failed-state",
+                        "4".repeat(64)
+                ),
+                "23514",
+                "ck_idempotency_record_state_fields"
+        );
+        assertConstraintViolation(
+                () -> jdbcTemplate.update("""
+                                INSERT INTO idempotency_record (
+                                    operation_scope,
+                                    idempotency_key,
+                                    request_fingerprint,
+                                    processing_status,
+                                    financial_transaction_id,
+                                    response_snapshot,
+                                    finished_at
+                                ) VALUES (?, ?, ?, 'COMPLETED', ?, '[]'::jsonb, CURRENT_TIMESTAMP)
+                                """,
+                        "POST:/api/v1/transactions",
+                        "invalid-completed-snapshot",
+                        "5".repeat(64),
+                        transactionPk
+                ),
+                "23514",
+                "ck_idempotency_record_state_fields"
+        );
+    }
+
+    @Test
     @Transactional
     void persistsAndLoadsEntitiesThroughEntityManager() {
         UUID transactionId = UUID.randomUUID();
@@ -430,18 +824,113 @@ class TransactionPersistenceIntegrationTest {
         );
     }
 
+    private long insertTransaction(
+            UUID transactionId,
+            String transactionType,
+            BigDecimal amount,
+            String currencyCode,
+            Instant occurredAt,
+            String externalCustomerRef,
+            String senderAccountRef,
+            String recipientAccountRef,
+            String channel,
+            String deviceRef,
+            String processingStatus,
+            Instant createdAt
+    ) {
+        Long id = jdbcTemplate.queryForObject("""
+                        INSERT INTO financial_transaction (
+                            transaction_id,
+                            transaction_type,
+                            amount,
+                            currency_code,
+                            occurred_at,
+                            external_customer_ref,
+                            sender_account_ref,
+                            recipient_account_ref,
+                            channel,
+                            device_ref,
+                            processing_status,
+                            created_at,
+                            updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        RETURNING id
+                        """,
+                Long.class,
+                transactionId,
+                transactionType,
+                amount,
+                currencyCode,
+                Timestamp.from(occurredAt),
+                externalCustomerRef,
+                senderAccountRef,
+                recipientAccountRef,
+                channel,
+                deviceRef,
+                processingStatus,
+                Timestamp.from(createdAt),
+                Timestamp.from(createdAt)
+        );
+
+        return id;
+    }
+
+    private void assertReferenceViolation(
+            Instant createdAt,
+            String externalCustomerRef,
+            String senderAccountRef,
+            String recipientAccountRef,
+            String deviceRef,
+            String expectedConstraint
+    ) {
+        assertConstraintViolation(
+                () -> insertTransaction(
+                        UUID.randomUUID(),
+                        "ACCOUNT_TRANSFER",
+                        new BigDecimal("1000"),
+                        "KRW",
+                        createdAt.minusSeconds(1),
+                        externalCustomerRef,
+                        senderAccountRef,
+                        recipientAccountRef,
+                        "MOBILE_BANKING",
+                        deviceRef,
+                        "RECEIVED",
+                        createdAt
+                ),
+                "23514",
+                expectedConstraint
+        );
+    }
+
     private void insertInProgressIdempotencyRecord(String idempotencyKey) {
+        insertInProgressIdempotencyRecord(
+                "POST:/api/v1/transactions",
+                idempotencyKey,
+                "d".repeat(64),
+                null
+        );
+    }
+
+    private void insertInProgressIdempotencyRecord(
+            String operationScope,
+            String idempotencyKey,
+            String requestFingerprint,
+            Long financialTransactionId
+    ) {
         jdbcTemplate.update("""
                         INSERT INTO idempotency_record (
                             operation_scope,
                             idempotency_key,
                             request_fingerprint,
-                            processing_status
-                        ) VALUES (?, ?, ?, 'IN_PROGRESS')
+                            processing_status,
+                            financial_transaction_id
+                        ) VALUES (?, ?, ?, 'IN_PROGRESS', ?)
                         """,
-                "POST:/api/v1/transactions",
+                operationScope,
                 idempotencyKey,
-                "d".repeat(64)
+                requestFingerprint,
+                financialTransactionId
         );
     }
 
@@ -459,6 +948,18 @@ class TransactionPersistenceIntegrationTest {
                     SQLException sqlException = (SQLException) rootCause;
                     assertThat(sqlException.getSQLState()).isEqualTo(expectedSqlState);
                     assertThat(sqlException.getMessage()).contains(expectedConstraint);
+                });
+    }
+
+    private void assertSqlStateViolation(Runnable operation, String expectedSqlState) {
+        assertThatThrownBy(operation::run)
+                .isInstanceOf(DataAccessException.class)
+                .satisfies(exception -> {
+                    Throwable rootCause = mostSpecificCause(exception);
+
+                    assertThat(rootCause).isInstanceOf(SQLException.class);
+                    SQLException sqlException = (SQLException) rootCause;
+                    assertThat(sqlException.getSQLState()).isEqualTo(expectedSqlState);
                 });
     }
 
