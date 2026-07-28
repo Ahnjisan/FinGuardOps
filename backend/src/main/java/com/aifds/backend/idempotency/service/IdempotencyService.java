@@ -11,6 +11,7 @@ import com.aifds.backend.transaction.repository.FinancialTransactionRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.SQLException;
@@ -111,7 +112,7 @@ public class IdempotencyService {
         );
     }
 
-    @Transactional
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public IdempotencyClaimResult.Failed fail(long recordId, String failureCode) {
         IdempotencyRecord record = idempotencyRecordRepository
                 .findByIdForUpdate(recordId)

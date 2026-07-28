@@ -24,6 +24,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.regex.Pattern;
 
 @Entity
@@ -119,7 +120,7 @@ public class IdempotencyRecord {
             Instant finishedAt
     ) {
         requireInProgress(IdempotencyProcessingStatus.COMPLETED);
-        Objects.requireNonNull(financialTransaction, "financialTransaction must not be null");
+        requireCompatibleTransaction(financialTransaction);
         Objects.requireNonNull(finishedAt, "finishedAt must not be null");
         if (responseSnapshot == null || !responseSnapshot.isObject()) {
             throw new IllegalArgumentException("responseSnapshot must be a JSON object");
@@ -129,10 +130,20 @@ public class IdempotencyRecord {
         }
 
         this.processingStatus = IdempotencyProcessingStatus.COMPLETED;
-        this.financialTransaction = financialTransaction;
+        if (this.financialTransaction == null) {
+            this.financialTransaction = financialTransaction;
+        }
         this.responseSnapshot = responseSnapshot.deepCopy();
         this.failureCode = null;
         this.finishedAt = finishedAt;
+    }
+
+    public void linkTransaction(FinancialTransaction financialTransaction) {
+        requireInProgress(IdempotencyProcessingStatus.IN_PROGRESS);
+        requireCompatibleTransaction(financialTransaction);
+        if (this.financialTransaction == null) {
+            this.financialTransaction = financialTransaction;
+        }
     }
 
     public void fail(String failureCode, Instant finishedAt) {
@@ -168,6 +179,30 @@ public class IdempotencyRecord {
             throw new IdempotencyStateTransitionNotAllowedException(
                     processingStatus,
                     targetStatus
+            );
+        }
+    }
+
+    private void requireCompatibleTransaction(
+            FinancialTransaction candidateTransaction
+    ) {
+        Objects.requireNonNull(
+                candidateTransaction,
+                "financialTransaction must not be null"
+        );
+        UUID candidateTransactionId = Objects.requireNonNull(
+                candidateTransaction.getTransactionId(),
+                "financialTransaction.transactionId must not be null"
+        );
+        if (financialTransaction == null) {
+            return;
+        }
+
+        UUID linkedTransactionId = financialTransaction.getTransactionId();
+        if (linkedTransactionId == null
+                || !linkedTransactionId.equals(candidateTransactionId)) {
+            throw new IllegalStateException(
+                    "Idempotency record is already linked to a different transaction"
             );
         }
     }
