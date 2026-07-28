@@ -73,8 +73,7 @@ class RepositoryPersistenceIntegrationTest extends PostgresqlIntegrationTestSupp
                 IdempotencyRecord.inProgress(
                         TRANSACTION_OPERATION_SCOPE,
                         idempotencyKey,
-                        "a".repeat(64),
-                        null
+                        "a".repeat(64)
                 )
         );
         entityManager.clear();
@@ -103,16 +102,14 @@ class RepositoryPersistenceIntegrationTest extends PostgresqlIntegrationTestSupp
                 IdempotencyRecord.inProgress(
                         TRANSACTION_OPERATION_SCOPE,
                         idempotencyKey,
-                        "b".repeat(64),
-                        null
+                        "b".repeat(64)
                 )
         );
         idempotencyRecordRepository.saveAndFlush(
                 IdempotencyRecord.inProgress(
                         otherOperationScope,
                         idempotencyKey,
-                        "c".repeat(64),
-                        null
+                        "c".repeat(64)
                 )
         );
 
@@ -145,8 +142,7 @@ class RepositoryPersistenceIntegrationTest extends PostgresqlIntegrationTestSupp
                 IdempotencyRecord.inProgress(
                         TRANSACTION_OPERATION_SCOPE,
                         idempotencyKey,
-                        "d".repeat(64),
-                        null
+                        "d".repeat(64)
                 )
         );
 
@@ -155,8 +151,7 @@ class RepositoryPersistenceIntegrationTest extends PostgresqlIntegrationTestSupp
                         IdempotencyRecord.inProgress(
                                 TRANSACTION_OPERATION_SCOPE,
                                 idempotencyKey,
-                                "e".repeat(64),
-                                null
+                                "e".repeat(64)
                         )
                 ),
                 "23505",
@@ -173,15 +168,19 @@ class RepositoryPersistenceIntegrationTest extends PostgresqlIntegrationTestSupp
         );
         String idempotencyKey = "relationship-key-" + UUID.randomUUID();
         IdempotencyRecord saved = idempotencyRecordRepository.saveAndFlush(
-                IdempotencyRecord.completed(
+                IdempotencyRecord.inProgress(
                         TRANSACTION_OPERATION_SCOPE,
                         idempotencyKey,
-                        "f".repeat(64),
-                        transaction,
-                        objectMapper.createObjectNode()
-                                .put("transactionId", transactionId.toString())
+                        "f".repeat(64)
                 )
         );
+        saved.complete(
+                transaction,
+                objectMapper.createObjectNode()
+                        .put("transactionId", transactionId.toString()),
+                Instant.now()
+        );
+        idempotencyRecordRepository.saveAndFlush(saved);
         Long transactionPk = transaction.getId();
         entityManager.clear();
 

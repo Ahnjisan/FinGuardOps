@@ -1,5 +1,6 @@
 package com.aifds.backend.idempotency.entity;
 
+import com.aifds.backend.idempotency.exception.IdempotencyStateTransitionNotAllowedException;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.persistence.Column;
@@ -21,10 +22,16 @@ import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.Map;
+import java.util.Objects;
+import java.util.regex.Pattern;
 
 @Entity
 @Table(name = "idempotency_record")
 public class IdempotencyRecord {
+
+    private static final Pattern FAILURE_CODE_PATTERN =
+            Pattern.compile("^[A-Z][A-Z0-9_]{0,63}$");
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -77,63 +84,75 @@ public class IdempotencyRecord {
     private IdempotencyRecord(
             String operationScope,
             String idempotencyKey,
-            String requestFingerprint,
-            IdempotencyProcessingStatus processingStatus,
-            FinancialTransaction financialTransaction,
-            JsonNode responseSnapshot,
-            String failureCode,
-            Instant finishedAt
+            String requestFingerprint
     ) {
-        this.operationScope = operationScope;
-        this.idempotencyKey = idempotencyKey;
-        this.requestFingerprint = requestFingerprint;
-        this.processingStatus = processingStatus;
-        this.financialTransaction = financialTransaction;
-        this.responseSnapshot = responseSnapshot;
-        this.failureCode = failureCode;
-        this.finishedAt = finishedAt;
+        this.operationScope = Objects.requireNonNull(
+                operationScope,
+                "operationScope must not be null"
+        );
+        this.idempotencyKey = Objects.requireNonNull(
+                idempotencyKey,
+                "idempotencyKey must not be null"
+        );
+        this.requestFingerprint = Objects.requireNonNull(
+                requestFingerprint,
+                "requestFingerprint must not be null"
+        );
+        this.processingStatus = IdempotencyProcessingStatus.IN_PROGRESS;
     }
 
     public static IdempotencyRecord inProgress(
             String operationScope,
             String idempotencyKey,
-            String requestFingerprint,
-            FinancialTransaction financialTransaction
+            String requestFingerprint
     ) {
         return new IdempotencyRecord(
                 operationScope,
                 idempotencyKey,
-                requestFingerprint,
-                IdempotencyProcessingStatus.IN_PROGRESS,
-                financialTransaction,
-                null,
-                null,
-                null
+                requestFingerprint
         );
     }
 
-    public static IdempotencyRecord completed(
-            String operationScope,
-            String idempotencyKey,
-            String requestFingerprint,
+    public void complete(
             FinancialTransaction financialTransaction,
-            JsonNode responseSnapshot
+            JsonNode responseSnapshot,
+            Instant finishedAt
     ) {
-        return new IdempotencyRecord(
-                operationScope,
-                idempotencyKey,
-                requestFingerprint,
-                IdempotencyProcessingStatus.COMPLETED,
-                financialTransaction,
-                responseSnapshot,
-                null,
-                Instant.now()
-        );
+        requireInProgress(IdempotencyProcessingStatus.COMPLETED);
+        Objects.requireNonNull(financialTransaction, "financialTransaction must not be null");
+        Objects.requireNonNull(finishedAt, "finishedAt must not be null");
+        if (responseSnapshot == null || !responseSnapshot.isObject()) {
+            throw new IllegalArgumentException("responseSnapshot must be a JSON object");
+        }
+        if (containsTraceId(responseSnapshot)) {
+            throw new IllegalArgumentException("responseSnapshot must not contain traceId");
+        }
+
+        this.processingStatus = IdempotencyProcessingStatus.COMPLETED;
+        this.financialTransaction = financialTransaction;
+        this.responseSnapshot = responseSnapshot.deepCopy();
+        this.failureCode = null;
+        this.finishedAt = finishedAt;
+    }
+
+    public void fail(String failureCode, Instant finishedAt) {
+        requireInProgress(IdempotencyProcessingStatus.FAILED);
+        Objects.requireNonNull(finishedAt, "finishedAt must not be null");
+        if (failureCode == null || !FAILURE_CODE_PATTERN.matcher(failureCode).matches()) {
+            throw new IllegalArgumentException(
+                    "failureCode must match ^[A-Z][A-Z0-9_]{0,63}$"
+            );
+        }
+
+        this.processingStatus = IdempotencyProcessingStatus.FAILED;
+        this.responseSnapshot = null;
+        this.failureCode = failureCode;
+        this.finishedAt = finishedAt;
     }
 
     @PrePersist
     private void initializeTimestamps() {
-        Instant now = finishedAt == null ? Instant.now() : finishedAt;
+        Instant now = Instant.now();
         this.createdAt = now;
         this.updatedAt = now;
         this.expiresAt = now.plus(24, ChronoUnit.HOURS);
@@ -141,7 +160,35 @@ public class IdempotencyRecord {
 
     @PreUpdate
     private void updateTimestamp() {
-        this.updatedAt = Instant.now();
+        this.updatedAt = finishedAt == null ? Instant.now() : finishedAt;
+    }
+
+    private void requireInProgress(IdempotencyProcessingStatus targetStatus) {
+        if (processingStatus != IdempotencyProcessingStatus.IN_PROGRESS) {
+            throw new IdempotencyStateTransitionNotAllowedException(
+                    processingStatus,
+                    targetStatus
+            );
+        }
+    }
+
+    private boolean containsTraceId(JsonNode node) {
+        if (node.isObject()) {
+            for (Map.Entry<String, JsonNode> field : node.properties()) {
+                if ("traceId".equals(field.getKey()) || containsTraceId(field.getValue())) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (node.isArray()) {
+            for (JsonNode element : node) {
+                if (containsTraceId(element)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     public Long getId() {
@@ -169,7 +216,7 @@ public class IdempotencyRecord {
     }
 
     public JsonNode getResponseSnapshot() {
-        return responseSnapshot;
+        return responseSnapshot == null ? null : responseSnapshot.deepCopy();
     }
 
     public String getFailureCode() {

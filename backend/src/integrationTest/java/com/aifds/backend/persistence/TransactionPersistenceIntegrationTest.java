@@ -687,14 +687,14 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
         ObjectNode responseSnapshot = objectMapper.createObjectNode()
                 .put("transactionId", transactionId.toString())
                 .put("processingStatus", "RECEIVED");
-        IdempotencyRecord idempotencyRecord = IdempotencyRecord.completed(
+        IdempotencyRecord idempotencyRecord = IdempotencyRecord.inProgress(
                 "POST:/api/v1/transactions",
                 "entity-test-" + UUID.randomUUID(),
-                "c".repeat(64),
-                transaction,
-                responseSnapshot
+                "c".repeat(64)
         );
         entityManager.persist(idempotencyRecord);
+        entityManager.flush();
+        idempotencyRecord.complete(transaction, responseSnapshot, Instant.now());
         entityManager.flush();
 
         Long transactionPk = transaction.getId();
@@ -724,7 +724,8 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
                 .isEqualTo(transactionId.toString());
         assertThat(loadedIdempotency.getExpiresAt())
                 .isEqualTo(loadedIdempotency.getCreatedAt().plus(24, ChronoUnit.HOURS));
-        assertThat(loadedIdempotency.getFinishedAt()).isEqualTo(loadedIdempotency.getCreatedAt());
+        assertThat(loadedIdempotency.getFinishedAt())
+                .isAfterOrEqualTo(loadedIdempotency.getCreatedAt());
     }
 
     private Set<String> tableNames() {
