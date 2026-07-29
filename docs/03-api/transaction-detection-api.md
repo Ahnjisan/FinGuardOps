@@ -383,30 +383,38 @@ Content-Type: application/json
 GET /api/v1/transactions
 ```
 
-### 6.2 필터와 페이지네이션 후보
+### 6.2 필터와 페이지네이션
 
-| 쿼리 파라미터 | 설명 |
-| --- | --- |
-| `occurredAtFrom` | 발생 시각 시작, UTC ISO-8601 |
-| `occurredAtTo` | 발생 시각 종료, UTC ISO-8601 |
-| `transactionType` | 거래 유형 |
-| `processingStatus` | 거래 처리 상태 |
-| `riskLevel` | 위험 등급 |
-| `externalCustomerRef` | 외부 고객 참조값 |
-| `accountRef` | 발신 또는 수신 계좌 외부 참조값 |
-| `activeCaseLinked` | 현재 활성 사건 연결 여부 |
-| `hasCaseHistory` | 현재 또는 과거 사건 연결 이력 존재 여부 |
-| `page` | 페이지 번호 |
-| `size` | 페이지 크기 |
-| `sort` | 정렬 조건 |
+| 쿼리 파라미터 | 필수 | 기본값 | 설명 |
+| --- | --- | --- | --- |
+| `occurredAtFrom` | 선택 | 없음 | 발생 시각 시작, UTC ISO-8601 `Z`, 포함 경계 |
+| `occurredAtTo` | 선택 | 없음 | 발생 시각 종료, UTC ISO-8601 `Z`, 미포함 경계 |
+| `transactionType` | 선택 | 없음 | 정확한 대문자 거래 유형 단일 값 |
+| `processingStatus` | 선택 | 없음 | 정확한 대문자 거래 처리 상태 단일 값 |
+| `externalCustomerRef` | 선택 | 없음 | 외부 고객 참조값 exact, case-sensitive 검색 |
+| `accountRef` | 선택 | 없음 | 발신 또는 수신 계좌 외부 참조값 exact, case-sensitive 검색 |
+| `page` | 선택 | `0` | 0부터 시작하는 페이지 번호 |
+| `size` | 선택 | `20` | 1~100의 페이지 크기 |
+| `sort` | 선택 | `occurredAt,desc` | 단일 발생 시각 정렬 |
 
 요청 예:
 
 ```http
-GET /api/v1/transactions?occurredAtFrom=2026-07-23T00:00:00Z&occurredAtTo=2026-07-24T00:00:00Z&riskLevel=HIGH&page=0&size=20&sort=occurredAt,desc
+GET /api/v1/transactions?occurredAtFrom=2026-07-23T00:00:00Z&occurredAtTo=2026-07-24T00:00:00Z&transactionType=ACCOUNT_TRANSFER&page=0&size=20&sort=occurredAt,desc
 ```
 
-시각 범위의 끝값 포함 여부, 복수 Enum 필터, `accountRef`의 발신·수신 구분과 허용 정렬 필드는 사용자 승인 사항이다.
+- 시각 범위는 `[occurredAtFrom, occurredAtTo)`이다. 시작값은 포함하고 종료값은 포함하지 않는다.
+- 시작값이나 종료값 중 하나만 전달할 수 있다.
+- 시작값이 종료값보다 늦으면 `422 Unprocessable Entity`를 반환한다. 두 값이 같으면 정상적인 빈 범위이다.
+- 시각 값은 `Z` 접미사가 있는 UTC ISO-8601이어야 하며 서버가 로컬 시간대나 UTC로 보정하지 않는다.
+- Enum 필터는 단일 값만 허용한다. 쉼표 구분 값이나 반복된 값은 허용하지 않는다.
+- `externalCustomerRef`와 `accountRef`는 값을 trim하거나 대소문자를 변경하지 않는다. 빈 문자열이나 공백만 있는 값은 허용하지 않는다.
+- `accountRef`는 `senderAccountRef = accountRef OR recipientAccountRef = accountRef` 조건이다.
+- 부분 일치, 대소문자 무시와 wildcard 검색은 지원하지 않는다.
+- `sort`는 `occurredAt,asc` 또는 `occurredAt,desc`만 허용한다. 반복된 `sort`, 다중 정렬, 다른 필드와 다른 방향 표기는 허용하지 않는다.
+- 같은 `occurredAt`을 가진 거래는 내부 `id`를 같은 방향의 보조 정렬키로 사용한다. 내부 `id`는 요청 정렬 필드나 응답 필드로 노출하지 않는다.
+
+현재 `financial_transaction` 저장 구조에 조회 원천이 없는 `riskLevel`, `activeCaseLinked`, `hasCaseHistory`는 요청 파라미터가 아니다. 관련 저장 구조와 후속 API 계약이 승인되기 전까지 지원하지 않는다.
 
 ### 6.3 성공 응답 예시
 
@@ -428,11 +436,6 @@ Content-Type: application/json
       "senderAccountRef": "acct_ref_demo_s91c",
       "recipientAccountRef": "acct_ref_demo_r44d",
       "processingStatus": "ADDITIONAL_AUTH_REQUIRED",
-      "riskLevel": "HIGH",
-      "riskResponseOutcome": "ADDITIONAL_AUTH_REQUIRED",
-      "adoptedDetectionResultId": "det_demo_20260723_0101",
-      "activeCaseLinked": true,
-      "hasCaseHistory": true,
       "createdAt": "2026-07-23T01:15:31Z"
     }
   ],
@@ -448,18 +451,38 @@ Content-Type: application/json
 }
 ```
 
-목록 응답은 조사에 필요한 요약만 제공한다. 전체 DetectionEvidence, 감사 로그와 AI 리포트를 포함하지 않는다.
+최상위 응답은 `content`, `page`, `traceId`만 포함한다. 각 `content` 항목은 예시에 표시된 거래 기본 정보 10개 필드만 포함한다. `recipientAccountRef`가 없으면 필드를 생략하지 않고 명시적인 null을 반환한다. 금액은 후행 0을 제거하되 실제 소수 자릿수는 보존한 10진 문자열로 반환하고 지수 표기를 사용하지 않는다.
 
-활성 사건은 `OPEN`, `IN_REVIEW`, `ADDITIONAL_INFORMATION_REQUIRED` 상태의 사건을 뜻한다. `hasCaseHistory`는 활성 사건 또는 과거 `CLOSED` 사건 연결이 하나 이상 있음을 나타낸다.
+위험 등급, 위험 대응, 채택 탐지 결과, 사건 연결·이력과 행동 이벤트 정보는 null, false 또는 0 placeholder로 반환하지 않고 필드 자체를 제외한다. `TransactionIntakeSnapshot`은 거래 접수 멱등 재전송용이며 조회 원천으로 사용하지 않는다.
+
+조회 결과가 없으면 다음처럼 정상 응답한다.
+
+```json
+{
+  "content": [],
+  "page": {
+    "number": 0,
+    "size": 20,
+    "totalElements": 0,
+    "totalPages": 0,
+    "first": true,
+    "last": true
+  },
+  "traceId": "trace_demo_tx_empty_01"
+}
+```
 
 ### 6.4 상태 코드
 
 | 상태 코드 | 사용 기준 |
 | --- | --- |
 | `200 OK` | 조회 성공. 결과가 없으면 빈 `content` 반환 |
-| `400 Bad Request` | 시각 범위, Enum, 페이지 또는 정렬 형식 오류 |
-| `422 Unprocessable Entity` | 시작 시각이 종료 시각보다 늦는 등 의미상 처리할 수 없는 필터 |
-| `503 Service Unavailable` | 필수 저장소 등 조회 의존성이 일시적으로 사용 불가 |
+| `400 Bad Request` | 시각·Enum·페이지·크기·정렬 형식 또는 참조값 오류 |
+| `422 Unprocessable Entity` | 시작 시각이 종료 시각보다 늦거나 페이지·크기가 허용 범위를 벗어남 |
+| `503 Service Unavailable` | 조회 Timeout은 `DEPENDENCY_TIMEOUT`, 명확한 저장소 가용성 장애는 `DEPENDENCY_UNAVAILABLE` |
+| `500 Internal Server Error` | 그 밖의 DataAccess 오류 또는 예상하지 못한 서버 오류 |
+
+`400`과 `422`는 모두 `VALIDATION_ERROR`를 사용한다. 공개 오류 메시지에는 쿼리 파라미터 원문이나 거래 참조값을 포함하지 않는다.
 
 ## 7. 거래 상세 조회
 
@@ -475,20 +498,11 @@ GET /api/v1/transactions/{transactionId}
 GET /api/v1/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001
 ```
 
+`transactionId`는 거래 접수와 같은 canonical UUID v4 및 RFC 4122 variant 규칙을 사용한다.
+
 ### 7.2 응답 범위
 
-응답 후보는 다음을 포함한다.
-
-- 거래 기본 정보
-- `processingStatus`
-- `riskLevel`
-- `riskResponseOutcome`
-- 채택된 DetectionResult 요약
-- 활성 사건 연결 요약과 전체 사건 이력 건수
-- 행동 이벤트 요약
-- `traceId`
-
-전체 감사 로그, 사건 조사 메모와 AI 리포트는 포함하지 않는다.
+최상위 응답은 `transaction`, `traceId`만 포함한다. `transaction`은 거래 기본 정보, 채널, 기기 참조, 처리 상태와 생성·변경 시각만 포함한다. 내부 DB `id`, 낙관적 잠금 `version`과 멱등 처리 정보는 포함하지 않는다.
 
 ### 7.3 성공 응답 예시
 
@@ -506,38 +520,14 @@ GET /api/v1/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001
     "channel": "MOBILE_BANKING",
     "deviceRef": "device_ref_demo_18b3",
     "processingStatus": "ADDITIONAL_AUTH_REQUIRED",
-    "riskLevel": "HIGH",
-    "riskResponseOutcome": "ADDITIONAL_AUTH_REQUIRED",
     "createdAt": "2026-07-23T01:15:31Z",
     "updatedAt": "2026-07-23T01:15:32Z"
-  },
-  "adoptedDetectionResult": {
-    "detectionResultId": "det_demo_20260723_0101",
-    "detectionResultVersion": 1,
-    "riskScore": 72.5,
-    "riskLevel": "HIGH",
-    "analysisStatus": "COMPLETED",
-    "analysisCompletedAt": "2026-07-23T01:15:32Z"
-  },
-  "activeCaseSummary": {
-    "caseId": "case_demo_20260723_0031",
-    "caseStatus": "IN_REVIEW"
-  },
-  "caseHistoryCount": 2,
-  "behaviorEventSummary": {
-    "eventCount": 3,
-    "recentEventTypes": [
-      "DEVICE_REGISTERED",
-      "BENEFICIARY_REGISTERED",
-      "TRANSFER_REQUESTED"
-    ],
-    "latestOccurredAt": "2026-07-23T01:15:29Z"
   },
   "traceId": "trace_demo_tx_detail_01"
 }
 ```
 
-활성 사건이 없으면 `activeCaseSummary`는 null일 수 있다. `caseHistoryCount`는 활성·종료 사건을 포함해 거래에 연결된 사건 이력 수를 나타낸다. 채택된 탐지 결과나 행동 이벤트가 연결되지 않은 처리 단계의 나머지 null 또는 빈 값 규칙은 후속 DTO 설계에서 확정한다.
+`recipientAccountRef`와 `deviceRef`가 없으면 필드를 생략하지 않고 명시적인 null을 반환한다. 금액 문자열 규칙은 목록 응답과 같다. 탐지·위험 대응·사건·행동 이벤트 정보는 placeholder 없이 필드 자체를 제외한다.
 
 ### 7.4 상태 코드
 
@@ -546,7 +536,10 @@ GET /api/v1/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001
 | `200 OK` | 거래 상세 조회 성공 |
 | `400 Bad Request` | `transactionId` 형식 오류 |
 | `404 Not Found` | 해당 `transactionId`의 거래가 없음 |
-| `503 Service Unavailable` | 필수 저장소 등 조회 의존성이 일시적으로 사용 불가 |
+| `503 Service Unavailable` | 조회 Timeout은 `DEPENDENCY_TIMEOUT`, 명확한 저장소 가용성 장애는 `DEPENDENCY_UNAVAILABLE` |
+| `500 Internal Server Error` | 그 밖의 DataAccess 오류 또는 예상하지 못한 서버 오류 |
+
+`400`은 `VALIDATION_ERROR`, `404`는 `RESOURCE_NOT_FOUND`를 사용한다. DB 예외 메시지, SQL, 테이블명, 컬럼명, 거래 식별자와 참조값은 공개 오류 메시지에 포함하지 않는다.
 
 ## 8. 행동 이벤트 생성
 
@@ -936,15 +929,15 @@ GET /api/v1/detection-results/det_demo_20260723_0101
 
 ## 12. HTTP 상태 코드 요약
 
-| API | `200` | `201` | `400` | `404` | `409` | `422` | `503` |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `POST /transactions` | 완료된 동일 멱등 요청의 기존 결과 | 최초 생성 | JSON·필수 헤더·필드 형식 오류 | 사용하지 않음 | 멱등 키 지문 충돌·처리 중 동일 요청·거래·상태·동시성 충돌 | 거래 유형별 도메인 규칙 위반 | 유효 캐시 없는 External Risk Timeout 또는 FastAPI Timeout 초기 정책 |
-| `GET /transactions` | 조회 성공 | 사용하지 않음 | 필터·페이지 형식 오류 | 사용하지 않음 | 사용하지 않음 | 의미상 잘못된 필터 | 조회 의존성 장애 |
-| `GET /transactions/{transactionId}` | 조회 성공 | 사용하지 않음 | 식별자 형식 오류 | 거래 없음 | 사용하지 않음 | 사용하지 않음 | 조회 의존성 장애 |
-| `POST /behavior-events` | 동일 이벤트 기존 결과 | 최초 생성 | JSON·알 수 없는 필드·필드 형식 오류 | 관련 거래 없음 후보 | 다른 내용의 `eventId` 중복 | 이벤트 유형별 도메인 규칙 위반 | 저장 의존성 장애 |
-| `GET /behavior-events` | 조회 성공 | 사용하지 않음 | 필터·페이지 형식 오류 | 사용하지 않음 | 사용하지 않음 | 의미상 잘못된 필터 | 조회 의존성 장애 |
-| `GET /transactions/{transactionId}/detection-results` | 조회 성공 | 사용하지 않음 | 식별자·페이지 형식 오류 | 거래 없음 | 사용하지 않음 | 의미상 잘못된 조건 | 조회 의존성 장애 |
-| `GET /detection-results/{detectionResultId}` | 조회 성공 | 사용하지 않음 | 식별자 형식 오류 | 탐지 결과 없음 | 사용하지 않음 | 사용하지 않음 | 조회 의존성 장애 |
+| API | `200` | `201` | `400` | `404` | `409` | `422` | `503` | `500` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `POST /transactions` | 완료된 동일 멱등 요청의 기존 결과 | 최초 생성 | JSON·필수 헤더·필드 형식 오류 | 사용하지 않음 | 멱등 키 지문 충돌·처리 중 동일 요청·거래·상태·동시성 충돌 | 거래 유형별 도메인 규칙 위반 | 유효 캐시 없는 External Risk Timeout 또는 FastAPI Timeout 초기 정책 | 예기치 않은 서버 오류 |
+| `GET /transactions` | 조회 성공 | 사용하지 않음 | 필터·페이지 형식 오류 | 사용하지 않음 | 사용하지 않음 | 의미상 잘못된 필터·페이지 범위 | 조회 Timeout 또는 명확한 저장소 가용성 장애 | 그 밖의 DataAccess 오류·예기치 않은 서버 오류 |
+| `GET /transactions/{transactionId}` | 조회 성공 | 사용하지 않음 | 식별자 형식 오류 | 거래 없음 | 사용하지 않음 | 사용하지 않음 | 조회 Timeout 또는 명확한 저장소 가용성 장애 | 그 밖의 DataAccess 오류·예기치 않은 서버 오류 |
+| `POST /behavior-events` | 동일 이벤트 기존 결과 | 최초 생성 | JSON·알 수 없는 필드·필드 형식 오류 | 관련 거래 없음 후보 | 다른 내용의 `eventId` 중복 | 이벤트 유형별 도메인 규칙 위반 | 저장 의존성 장애 | 예기치 않은 서버 오류 |
+| `GET /behavior-events` | 조회 성공 | 사용하지 않음 | 필터·페이지 형식 오류 | 사용하지 않음 | 사용하지 않음 | 의미상 잘못된 필터 | 조회 의존성 장애 | 예기치 않은 서버 오류 |
+| `GET /transactions/{transactionId}/detection-results` | 조회 성공 | 사용하지 않음 | 식별자·페이지 형식 오류 | 거래 없음 | 사용하지 않음 | 의미상 잘못된 조건 | 조회 의존성 장애 | 예기치 않은 서버 오류 |
+| `GET /detection-results/{detectionResultId}` | 조회 성공 | 사용하지 않음 | 식별자 형식 오류 | 탐지 결과 없음 | 사용하지 않음 | 사용하지 않음 | 조회 의존성 장애 | 예기치 않은 서버 오류 |
 
 행동 이벤트의 존재하지 않는 관련 거래 처리와 오류 `resource`의 범용 적용 범위는 사용자 결정 사항이다.
 
@@ -1042,7 +1035,6 @@ Content-Type: application/json
 
 ### 16.1 공통 계약
 
-- 페이지 번호, 기본·최대 크기와 허용 정렬 필드
 - `fieldErrors.code`의 코드 목록과 버전 관리 방식
 
 ### 16.2 거래

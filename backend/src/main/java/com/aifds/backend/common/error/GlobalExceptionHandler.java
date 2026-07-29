@@ -5,7 +5,10 @@ import com.aifds.backend.idempotency.exception.IdempotencyCompletionTransactionN
 import com.aifds.backend.idempotency.exception.IdempotencyRecordNotFoundException;
 import com.aifds.backend.idempotency.exception.IdempotencyStateTransitionNotAllowedException;
 import com.aifds.backend.transaction.exception.InvalidTransactionIntakeSnapshotException;
+import com.aifds.backend.transaction.exception.TransactionNotFoundException;
 import com.aifds.backend.transaction.exception.TransactionIntakeRejectedException;
+import com.aifds.backend.transaction.exception.TransactionQueryTimeoutException;
+import com.aifds.backend.transaction.exception.TransactionQueryUnavailableException;
 import com.aifds.backend.transaction.validation.IdempotencyKeyValidator;
 import com.aifds.backend.transaction.validation.TransactionRequestValidator;
 import com.aifds.backend.transaction.validation.TransactionValidationException;
@@ -40,6 +43,8 @@ public class GlobalExceptionHandler {
     static final String DUPLICATE_TRANSACTION =
             "DUPLICATE_TRANSACTION";
     static final String DEPENDENCY_TIMEOUT = "DEPENDENCY_TIMEOUT";
+    static final String DEPENDENCY_UNAVAILABLE = "DEPENDENCY_UNAVAILABLE";
+    static final String RESOURCE_NOT_FOUND = "RESOURCE_NOT_FOUND";
     static final String INTERNAL_ERROR = "INTERNAL_ERROR";
 
     static final String VALIDATION_MESSAGE = "요청 필드를 확인해 주세요.";
@@ -53,6 +58,12 @@ public class GlobalExceptionHandler {
             "이미 존재하는 transactionId입니다.";
     static final String DEPENDENCY_TIMEOUT_MESSAGE =
             "탐지 서비스를 사용할 수 없습니다.";
+    static final String QUERY_DEPENDENCY_TIMEOUT_MESSAGE =
+            "조회 요청이 제한 시간 안에 완료되지 않았습니다.";
+    static final String DEPENDENCY_UNAVAILABLE_MESSAGE =
+            "조회 저장소를 일시적으로 사용할 수 없습니다.";
+    static final String RESOURCE_NOT_FOUND_MESSAGE =
+            "요청한 거래를 찾을 수 없습니다.";
     static final String INTERNAL_ERROR_MESSAGE =
             "요청을 처리하는 중 오류가 발생했습니다.";
 
@@ -201,6 +212,48 @@ public class GlobalExceptionHandler {
             HttpServletRequest request
     ) {
         return internalErrorResponse(request);
+    }
+
+    @ExceptionHandler(TransactionNotFoundException.class)
+    ResponseEntity<ApiErrorResponse> handleTransactionNotFound(
+            TransactionNotFoundException exception,
+            HttpServletRequest request
+    ) {
+        return response(
+                HttpStatus.NOT_FOUND,
+                RESOURCE_NOT_FOUND,
+                RESOURCE_NOT_FOUND_MESSAGE,
+                List.of(),
+                request
+        );
+    }
+
+    @ExceptionHandler(TransactionQueryTimeoutException.class)
+    ResponseEntity<ApiErrorResponse> handleTransactionQueryTimeout(
+            TransactionQueryTimeoutException exception,
+            HttpServletRequest request
+    ) {
+        return response(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                DEPENDENCY_TIMEOUT,
+                QUERY_DEPENDENCY_TIMEOUT_MESSAGE,
+                List.of(),
+                request
+        );
+    }
+
+    @ExceptionHandler(TransactionQueryUnavailableException.class)
+    ResponseEntity<ApiErrorResponse> handleTransactionQueryUnavailable(
+            TransactionQueryUnavailableException exception,
+            HttpServletRequest request
+    ) {
+        return response(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                DEPENDENCY_UNAVAILABLE,
+                DEPENDENCY_UNAVAILABLE_MESSAGE,
+                List.of(),
+                request
+        );
     }
 
     @ExceptionHandler(Exception.class)
