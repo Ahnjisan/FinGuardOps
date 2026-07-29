@@ -13,6 +13,7 @@
   - `docs/03-api/transaction-detection-api.md`
   - `docs/03-api/domain-event-contracts.md`
   - `docs/04-database/transaction-intake-schema.md`
+  - `docs/07-decisions/ADR-004-idempotency-response-snapshot-transition.md`
 
 ## Context
 
@@ -51,7 +52,7 @@
 
 이 단계적 응답은 현재 구현 사실을 기록한 것이며, `POST /api/v1/transactions`를 비동기 접수 API로 바꾸거나 최종 동기 분석 결정을 뒤집는 새로운 결정이 아니다. 현행 단계 Controller는 이 ADR이 정한 중간 외부 노출 제한과 아직 정합화되지 않은 구현 차이로 기록한다. 후속 구현에서는 이 ADR의 최종 경계로 전환하거나, 결정 변경이 필요하면 별도 사용자 승인과 ADR 검토를 거쳐야 한다.
 
-현재 멱등 완료 응답 snapshot은 `RECEIVED`/null 구조를 저장·재생한다. 최종 동기 응답으로 전환하기 전에 기존 snapshot의 스키마·재생 의미·codec 호환·만료 전 데이터 처리 방식을 사용자가 결정해야 한다. 이 호환 문제는 아직 해결되지 않았다.
+현재 멱등 완료 응답 snapshot은 `RECEIVED`/null 구조를 저장·재생한다. [`ADR-004`](./ADR-004-idempotency-response-snapshot-transition.md)는 이 legacy Snapshot을 엄격하게 그대로 재생하고 소급 갱신하지 않으며, 최종 동기 응답 전환 이후 신규 요청부터 version envelope와 최초 확정 HTTP 상태를 저장하도록 결정한다. 이는 ADR-003의 최종 동기 처리 결정을 유지한 호환 정책이다. envelope·codec·Migration과 만료 처리는 아직 구현되지 않았다.
 
 ## 구현 순서
 

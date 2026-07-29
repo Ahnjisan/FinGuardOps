@@ -191,7 +191,9 @@ Idempotency-Key: <key>
 - 서버는 키를 trim하거나 대소문자 변환하지 않는다.
 - 거래 생성의 작업 범위는 `POST:/api/v1/transactions`이다.
 - `(operationScope, Idempotency-Key)` 조합을 Unique로 관리한다.
-- 멱등 기록은 최초 선점 시각부터 24시간 보존한다.
+- 현재 DB는 `expiresAt`에 최초 선점 시각의 24시간 후를 저장한다. 그러나 Service의 만료 판정과 정리 작업은 구현되지 않았으므로 이를 시행 중인 멱등 유효기간으로 해석하지 않는다.
+
+멱등 응답의 현재 구현, 신규 version envelope, legacy 재생과 최종 동기 응답 전환 정책은 [`../07-decisions/ADR-004-idempotency-response-snapshot-transition.md`](../07-decisions/ADR-004-idempotency-response-snapshot-transition.md)를 따른다.
 
 ### 6.2 처리 규칙
 
@@ -199,7 +201,8 @@ Spring Boot가 멱등성 확인과 업무 결과의 최종 소유자이다.
 
 | 상황 | 처리 규칙 |
 | --- | --- |
-| 같은 키 + 같은 요청, 최초 처리 완료 | 새 거래·탐지·사건을 만들지 않고 `200 OK`로 기존 완료 결과를 반환한다. |
+| 같은 키 + 같은 요청, legacy/current 처리 완료 | 새 거래·탐지·사건을 만들지 않고 현재 구현대로 `200 OK`로 기존 완료 결과를 반환한다. |
+| 같은 키 + 같은 요청, 신규 envelope 처리 완료 | 새 거래·탐지·사건을 만들지 않고 저장된 최초 확정 업무 결과와 HTTP 상태를 재생한다. `traceId`는 현재 재요청 값을 사용한다. 후속 구현이 필요하다. |
 | 같은 키 + 같은 요청, 최초 처리 중 | 새 처리를 시작하지 않고 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다. |
 | 같은 키 + 다른 요청 | 키 재사용 충돌로 거부하고 `409 Conflict`와 `IDEMPOTENCY_KEY_CONFLICT`를 반환한다. |
 | 다른 키 + 같은 `transactionId` | 새 거래로 처리하지 않고 `409 Conflict`와 `DUPLICATE_TRANSACTION`을 반환한다. |
@@ -248,13 +251,18 @@ deviceRef
 ### 6.4 멱등성 상태 코드
 
 - 최초 생성 완료 응답은 `201 Created`를 사용한다.
-- 완료된 동일 멱등 요청의 재전송은 `200 OK`로 기존 결과를 반환한다.
+- 현재 무버전 legacy Snapshot의 완료 재전송은 `200 OK`로 기존 업무 결과를 반환한다.
+- 신규 envelope 전환 이후 완료 재전송은 envelope에 기록된 최초 확정 HTTP 상태를 사용한다. 이는 ADR 결정이며 아직 구현되지 않았다.
 - 처리 중인 동일 멱등 요청의 재전송은 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다.
 - 어떤 응답이든 새 거래·탐지·사건을 중복 생성하지 않는다.
+
+완료 재전송에서 거래·탐지·위험 대응·사건 연결 업무 값은 최초 확정 값을 유지한다. `traceId`와 추적 헤더는 Snapshot 재생 대상에서 제외하고 현재 재전송 요청 값을 사용하므로, 멱등 재생은 HTTP 응답 전체의 바이트 단위 복제를 의미하지 않는다.
 
 ### 6.5 저장 계약과 후속 항목
 
 거래 접수의 요청 지문, 처리 상태, 완료 응답 snapshot, Unique 범위와 만료 저장 구조는 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따른다.
+
+현재 완료 Snapshot은 `RECEIVED`와 탐지 관련 null 값을 가진 무버전 일곱 필드 JSON이다. 신규 Snapshot은 업무 응답, 최초 확정 HTTP 상태, `responseSchemaVersion`, `codecVersion`과 확정 시각을 식별하는 envelope를 사용한다. 기존 Snapshot은 strict legacy codec으로만 복원하고 신규 envelope나 최종 탐지 응답으로 소급 갱신하지 않는다. 알 수 없는 구조·버전과 역직렬화 실패는 최신 상태 조회나 신규 거래 처리로 우회하지 않는다. 이 envelope와 version dispatch는 ADR 결정이며 후속 구현이 필요하다.
 
 거래 접수에서 `FAILED`인 같은 키·같은 지문의 요청은 자동 재실행하지 않는다. 저장된 `failureCode`는 외부 code, message 또는 HTTP 상태로 동적으로 사용하지 않고 다음 공개 whitelist만 고정 매핑한다.
 
@@ -267,8 +275,10 @@ null, 빈 값, 알 수 없는 값과 `TRANSACTION_INTAKE_FAILED` 같은 내부 �
 
 다음 항목은 후속 구현 전에 추가 결정한다.
 
-- 만료 기록 정리 주기와 경합 처리
+- 실제 멱등 보존 기간과 만료 후 같은 키 재사용 허용 여부
+- 만료 기록 정리 방식·주기와 정리 전후 경합 처리
 - 재시도와 늦은 FastAPI 응답의 경합 처리
+- 실제 `responseSchemaVersion`·`codecVersion` 식별자와 필요한 Flyway Migration
 
 ### 6.6 행동 이벤트 생성의 자연 멱등성
 

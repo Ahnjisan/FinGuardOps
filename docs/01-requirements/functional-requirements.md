@@ -5,6 +5,9 @@
 - 사용자는 거래 데이터를 등록할 수 있다.
 - 사용자는 거래 목록을 조회할 수 있다.
 - 사용자는 특정 거래의 상세 정보를 조회할 수 있다.
+- 시스템은 같은 거래 생성 멱등 키와 같은 정규화 요청의 재전송에서 새 거래·탐지·사건을 만들지 않고 최초 확정 업무 결과를 재생해야 한다.
+- 시스템은 같은 거래 생성 멱등 키에 다른 정규화 요청이 오면 `IDEMPOTENCY_KEY_CONFLICT`로 거부해야 한다.
+- 멱등 응답 재생은 최초 명령 결과를 재현하고, 최신 거래·탐지·사건 상태는 별도 조회 기능이 제공해야 한다.
 - 신뢰된 금융·인증 시스템 또는 승인된 수집 어댑터는 지원되는 사용자 행동 이벤트를 등록할 수 있다.
 - 시스템은 행동 이벤트의 `eventId`와 정규화 요청 지문을 기준으로 동일 이벤트 재전송과 충돌을 구분해야 한다.
 - 시스템은 행동 이벤트가 거래를 참조할 때 고객·계좌·거래 유형의 업무 정합성을 검증해야 한다.
@@ -16,6 +19,7 @@
 - 시스템은 탐지 사유를 생성한다.
 - 초기 Rule 기반 탐지의 입력, R001~R004 조건, 점수와 위험 등급 경계는 [`rule-v1-detection-contract.md`](./rule-v1-detection-contract.md)를 단일 기준으로 사용한다.
 - Rule v1은 문서로 확정되었지만 Rule 실행, DetectionResult 저장과 FastAPI 연동은 아직 구현되지 않았다.
+- 현재 거래 생성은 `RECEIVED`/null legacy Snapshot을 저장한다. 최종 동기 탐지 응답 전환, Snapshot 불변성과 version 재생 정책은 [`../07-decisions/ADR-004-idempotency-response-snapshot-transition.md`](../07-decisions/ADR-004-idempotency-response-snapshot-transition.md)를 따르며 후속 구현이 필요하다.
 
 ## 3. AI 분석 리포트
 

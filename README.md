@@ -319,7 +319,7 @@ Kafka
 * 금융거래·멱등성·행동 이벤트 PostgreSQL 애플리케이션 연동과 Flyway 스키마 구현
 * Rule v1 탐지 계약과 평가 정책 문서화
 
-현재 PostgreSQL 연동은 애플리케이션 코드와 Testcontainers 검증 범위입니다. 운영 PostgreSQL, Docker Compose, Kubernetes와 AWS 배포 환경이 구현되었다는 의미는 아닙니다. 거래 접수 성공 응답도 현재는 단계적 구현 상태인 `RECEIVED`와 탐지 관련 null 값을 반환하며, 최종 동기 분석 목표는 ADR-003을 유지합니다.
+현재 PostgreSQL 연동은 애플리케이션 코드와 Testcontainers 검증 범위입니다. 운영 PostgreSQL, Docker Compose, Kubernetes와 AWS 배포 환경이 구현되었다는 의미는 아닙니다. 거래 접수 성공 응답도 현재는 단계적 구현 상태인 `RECEIVED`와 탐지 관련 null 값을 반환하며, 최종 동기 분석 목표는 [`ADR-003`](docs/07-decisions/ADR-003-transaction-processing-boundary.md)을 유지합니다.
 
 ### In Progress
 
@@ -330,6 +330,7 @@ Kafka
 * 행동 이벤트 조회와 후속 도메인 구현
 * 탐지·사건·감사 도메인의 JPA Entity·Repository 구현
 * 후속 도메인의 PostgreSQL 마이그레이션
+* ADR-004 기반 멱등 Snapshot envelope·legacy codec·저장 HTTP 상태 재생 구현
 * Rule 관리와 실행
 * 위험 점수·위험 등급 산출
 * 사건 생성·조회·상태 변경
@@ -348,7 +349,7 @@ Kafka
 * Observability
 * 장애·비용 실험
 
-최종 동기 분석 구현 전에는 현재 `RECEIVED`/null 완료 응답을 저장한 멱등 response snapshot과 향후 최종 응답 사이의 스키마·재생 호환 및 전환 정책을 결정해야 합니다. 이 과제는 아직 해결되지 않았습니다.
+현재 `RECEIVED`/null 멱등 response snapshot은 최초 저장 결과를 그대로 재생하고 신규 최종 동기 응답으로 소급 갱신하지 않습니다. 전환 이후 신규 요청부터 version envelope와 최초 확정 HTTP 상태를 저장하는 정책은 [`ADR-004`](docs/07-decisions/ADR-004-idempotency-response-snapshot-transition.md)로 결정했지만 코드·Migration에는 아직 구현되지 않았습니다. 현재 DB의 24시간 `expires_at` 저장값도 Service 만료 판정과 정리 작업이 없어 실질적인 만료 정책은 아닙니다.
 
 ---
 
