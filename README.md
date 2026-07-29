@@ -140,7 +140,7 @@ CRITICAL
 → 거래 보류 + 긴급 사건 생성 + 알림
 ```
 
-Rule 가중치와 위험 등급 임계값은 테스트 데이터를 기반으로 검증한 뒤 결정합니다.
+Rule v1의 R001~R004, 가중치와 위험 등급 경계는 초기 실험값으로 문서화했으며 운영 정책으로 사용하기 전에 테스트 데이터와 담당자 검토로 재검증해야 합니다. 단일 기준은 [`docs/01-requirements/rule-v1-detection-contract.md`](docs/01-requirements/rule-v1-detection-contract.md)입니다.
 
 ---
 
@@ -185,6 +185,8 @@ CONFIRMED_FRAUD
 
 처음부터 전체 시스템을 마이크로서비스로 분리하지 않습니다.
 
+아래 구성은 목표 아키텍처를 포함합니다. 현재는 Spring Boot의 거래·행동 이벤트 접수와 PostgreSQL 애플리케이션 연동까지 구현되었고, FastAPI·Rule 실행·DetectionResult·운영 배포 환경은 아직 구현되지 않았습니다.
+
 ```text
 React·TypeScript
         │
@@ -228,7 +230,7 @@ Kafka
 
 ### Data
 
-* PostgreSQL: 거래, 행동 이벤트, 탐지 결과, 사건, 감사 로그, Rule, AI 사용량·비용
+* PostgreSQL: 현재 거래·멱등·행동 이벤트 애플리케이션 연동 구현, 탐지 결과·사건·감사 로그·Rule·AI 사용량·비용은 목표 범위
 * Redis: 정확 일치 리포트 캐시, 외부 위험정보 캐시, 집계 데이터
 * Kafka: 사건·리포트·통계 비동기 처리
 
@@ -314,7 +316,10 @@ Kafka
 * 관측성·운영 메트릭 명세 작성
 * 거래 접수·목록·상세 조회와 거래 멱등성 구현
 * 9개 유형 행동 이벤트 접수와 `eventId` 자연 멱등성 구현
-* 금융거래·멱등성·행동 이벤트 PostgreSQL Flyway 스키마 구현
+* 금융거래·멱등성·행동 이벤트 PostgreSQL 애플리케이션 연동과 Flyway 스키마 구현
+* Rule v1 탐지 계약과 평가 정책 문서화
+
+현재 PostgreSQL 연동은 애플리케이션 코드와 Testcontainers 검증 범위입니다. 운영 PostgreSQL, Docker Compose, Kubernetes와 AWS 배포 환경이 구현되었다는 의미는 아닙니다. 거래 접수 성공 응답도 현재는 단계적 구현 상태인 `RECEIVED`와 탐지 관련 null 값을 반환하며, 최종 동기 분석 목표는 ADR-003을 유지합니다.
 
 ### In Progress
 
@@ -342,6 +347,8 @@ Kafka
 * Kubernetes·AWS 배포
 * Observability
 * 장애·비용 실험
+
+최종 동기 분석 구현 전에는 현재 `RECEIVED`/null 완료 응답을 저장한 멱등 response snapshot과 향후 최종 응답 사이의 스키마·재생 호환 및 전환 정책을 결정해야 합니다. 이 과제는 아직 해결되지 않았습니다.
 
 ---
 

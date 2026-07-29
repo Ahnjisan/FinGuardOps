@@ -17,7 +17,7 @@
 - 고객·계좌·기기·IP 등 민감 정보 저장을 어떻게 최소화하는가
 - 후속 JPA, API와 마이그레이션 설계에서 무엇을 결정해야 하는가
 
-이 문서는 구현 완료 내역이 아니다. 현재 백엔드는 Health Check 범위만 구현되어 있으며, 아래 엔티티와 관계는 후속 구현을 위한 논리 설계 및 후보이다.
+이 문서는 구현 완료 내역이 아니다. 현재 백엔드는 Health Check, 거래 접수·조회, 거래 멱등성과 행동 이벤트 접수를 구현했으며 거래·멱등·행동 이벤트는 PostgreSQL 애플리케이션 연동과 Flyway 스키마가 구현되어 있다. 운영 PostgreSQL 배포 환경과 아래의 탐지·Rule·사건·감사·AI 운영 엔티티는 아직 구현되지 않았다.
 
 ## 2. 설계 범위와 제외 범위
 
@@ -53,7 +53,7 @@
 - 암호화·해시 알고리즘, 키 관리 방식과 보존 기간
 - 고객 원장·계좌 원장, 실제 잔액과 실제 소유권 관리
 - 실제 거래 승인·추가 인증·보류·차단과 고객 제재
-- Rule 점수·가중치, 위험 등급 임계값과 ML 모델 성능 기준
+- Rule v1 이외의 점수·가중치·위험 등급 통합 정책과 ML 모델 성능 기준. Rule v1은 [`../01-requirements/rule-v1-detection-contract.md`](../01-requirements/rule-v1-detection-contract.md)를 따른다.
 - AI 비용 계산 공식, Provider 가격표 반영과 통화 환산 방식
 - 실제 Provider·모델 선정, Prompt 전문과 Provider 요청·응답 원문 저장
 - 인증·인가 구현
@@ -69,6 +69,7 @@
 - `docs/00-overview/project-summary.md`
 - `docs/00-overview/fds-service-scope.md`
 - `docs/01-requirements/fds-user-scenarios.md`
+- `docs/01-requirements/rule-v1-detection-contract.md`
 - `docs/01-requirements/platform-operation-requirements.md`
 - `docs/01-requirements/fds-screen-wireframes.md`
 - `docs/01-requirements/platform-screen-wireframes.md`
@@ -444,6 +445,8 @@ ruleCode + version
 초기 권장안은 8~10개 Rule을 대상으로 방안 A를 우선 검토하는 것이다. 단, 각 버전 행을 불변으로 유지하고 `DetectionEvidence`가 사용한 특정 행을 참조해야 한다. Rule이 증가하거나 정의 수준의 메타데이터와 승인 이력이 필요해지면 방안 B로 분리할 수 있다. 최종 모델은 사용자 승인 사항이다.
 
 어느 방식을 선택해도 과거 탐지 근거가 참조한 Rule 버전을 물리 삭제하거나 현재 버전으로 치환해서는 안 된다.
+
+Rule v1은 물리 모델 선택과 무관하게 `ruleCode`별 활성 버전을 하나만 허용하고, 평가 시작 시 활성 Rule 집합을 고정하며, 조건·가중치 변경 시 새 불변 버전을 생성한다. 세부 계약은 [Rule v1 탐지 계약](../01-requirements/rule-v1-detection-contract.md)을 따른다. Rule 관리와 실행은 아직 구현되지 않았다.
 
 ### 7.6 ExternalRiskSnapshot
 
@@ -1128,7 +1131,7 @@ PENDING
 
 초기 권장 후보인 행 단위 모델에서는 `ruleCode + version`을 논리 버전으로 사용한다. 사용된 행의 조건·가중치·적용 정보를 덮어쓰지 않고 새 버전을 추가한다.
 
-활성 상태 변경 자체의 감사가 필요한지, 같은 `ruleCode`에 동시에 하나의 활성 버전만 허용할지, 적용 기간이 겹칠 수 있는지는 후속 설계에서 결정한다.
+Rule v1은 같은 `ruleCode`에 활성 버전을 하나만 허용한다. 활성 상태 변경 감사 방식, 적용 기간 표현과 활성 전환의 물리 제약은 후속 설계에서 결정한다.
 
 ### 11.3 AI 실행·결과 버전 조건
 
@@ -1207,6 +1210,8 @@ caseId
 7. 새 요청만 Transaction을 저장하고 최초 성공에는 `201 Created`를 반환한다.
 
 요청 지문, 완료 응답 snapshot과 24시간 보존은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)의 물리 계약을 따른다.
+
+현재 완료 응답 snapshot은 단계적 `RECEIVED`/null 응답을 재생한다. 최종 동기 분석 응답을 도입하기 전에 기존 snapshot의 스키마·재생 호환·만료 데이터 처리 방식을 결정해야 하며, 이 문제는 아직 해결되지 않았다.
 
 ### 13.2 행동 이벤트
 
@@ -1524,9 +1529,9 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 
 - DetectionResult 버전 생성 규칙과 실패 시도 표현
 - Feature 요약 보존 범위와 Feature 버전 관리 방식
-- Rule 행 단위 버전 모델 또는 RuleDefinition·RuleVersion 분리 모델
-- 동시에 허용할 활성 Rule 버전 수와 적용 기간 중복 정책
-- 과거 Rule 버전 비활성화·삭제 정책
+- Rule 행 단위 버전 모델 또는 RuleDefinition·RuleVersion 분리 물리 모델
+- `ruleCode`별 활성 버전 하나를 보장할 애플리케이션·DB 제약과 적용 기간 표현
+- 과거 Rule 버전의 비활성화·물리 삭제 방지와 감사 방식
 - ExternalRiskSnapshot의 구체 속성, 보존 기간, 참조 범위와 암호화 방식
 - 외부 위험정보 정정 후 기존 탐지·사건 근거 갱신 방식
 
@@ -1572,8 +1577,7 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 
 ### 20.1 JPA 상세 설계
 
-- 논리 도메인명 `Transaction`에 대응하는 Java Entity 이름으로 `FinancialTransaction` 후보 검토
-- 엔티티와 Aggregate 경계
+- 구현된 거래 Entity `FinancialTransaction`과 후속 탐지·사건 Entity의 Aggregate 경계
 - 거래 외 엔티티의 내부 식별자와 업무 식별자 타입·생성 전략
 - 연관관계 방향, 지연 로딩과 조회 전용 Projection
 - 상태·버전 속성의 Enum 및 null 정책
@@ -1606,11 +1610,11 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 - 자동 재시도는 Timeout과 연결 실패에만 같은 `executionId` 아래 최대 1회 적용한다.
 - 정확 일치 `AiReport`가 있으면 캐시로 재사용하며 동일 정확 일치 결과의 강제 재생성을 허용하지 않는다.
 
-구체적인 경로, DTO와 상태 코드는 API 기준 문서에서 사용자 승인 후 확정한다. 거래 접수의 물리 테이블 이름 `financial_transaction`은 확정되었고 Java 클래스는 후속 구현 범위이다.
+구체적인 경로, DTO와 상태 코드는 API 기준 문서에서 사용자 승인 후 확정한다. 거래 접수의 `financial_transaction`과 Java `FinancialTransaction`은 구현되었으며, 탐지·Rule·사건·AI 운영 클래스는 후속 구현 범위이다.
 
 ### 20.3 마이그레이션·DB 제약 설계
 
-- 거래 접수의 `financial_transaction`, `idempotency_record` 실제 Flyway Migration 작성
+- 구현된 `financial_transaction`, `idempotency_record`, `behavior_event` 이후의 탐지·Rule·사건·AI 운영 Flyway Migration 설계
 - 이 문서의 Unique 후보를 실제 제약으로 적용할 범위
 - `adoptedDetectionResultId`가 같은 Transaction의 DetectionResult만 참조하도록 보장하는 방식
 - 교차 테이블 상태 조건의 한계를 고려한 활성 사건 검증, 중복 상태·별도 활성 관계·DB Trigger와 보조 제약 비교
@@ -1626,7 +1630,7 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 - 시간 범위·목록·집계 조회를 위한 인덱스 순서
 - 데이터 보존·비식별화·파티셔닝 필요 여부
 
-DDL 실행 파일과 마이그레이션 파일은 별도 승인 작업에서 작성한다. 거래 접수의 DDL 기준은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)에 확정되어 있다.
+거래·멱등·행동 이벤트 Flyway Migration은 구현되어 있다. 탐지·Rule·사건·AI 운영 DDL과 마이그레이션 파일은 별도 승인 작업에서 작성하며, 거래 접수의 DDL 기준은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)이다.
 
 ### 20.4 트랜잭션·동시성 설계
 
