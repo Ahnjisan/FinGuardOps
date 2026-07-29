@@ -231,14 +231,14 @@ JSON 파싱, 필수 헤더, 기본 필드 형식 또는 거래 유형별 도메�
 | 처리 주체·예상 소비자 | 행동 타임라인, Feature·탐지 준비, 감사·관측 모듈 |
 | Aggregate | `BehaviorEvent` / 기존 API의 `BehaviorEvent.eventId` |
 | 필수 식별자 | Envelope `eventId`, Aggregate 식별자인 행동 이벤트 `eventId`, 선택적 `transactionId` |
-| 최소 payload | `behaviorEventType`, `behaviorOccurredAt`, `externalCustomerRef`, 선택적 `transactionId`, 승인된 `observedSignals` 요약 |
+| 최소 payload | `behaviorEventType`, `behaviorOccurredAt`, `externalCustomerRef`, 선택적 `accountRef`, `deviceRef`, `transactionId`, `beneficiaryRef` |
 | 중복 처리 | 같은 행동 이벤트 `eventId`+같은 정규화 요청은 기존 결과 반환, 다른 내용이면 `DUPLICATE_EVENT` |
 | 원거래 판단 영향 | 관측 신호이며 위험 등급·대응을 직접 확정하지 않음 |
 | 처리 범위 | 현재 저장과 내부 전달. 향후 메시지 전달 가능 |
 
-Envelope `eventId`와 행동 엔티티의 기존 `eventId`가 같은 이름을 사용하므로 직렬화 시 두 의미를 혼합하지 않는다. 이 문서에서는 행동 엔티티 식별자를 `aggregateId`로 전달한다.
+Envelope `eventId`와 REST 행동 엔티티의 `eventId`가 같은 이름을 사용하므로 직렬화 시 두 의미를 혼합하지 않는다. Envelope `eventId`는 논리 도메인 이벤트의 전달·재처리를 식별하고 REST `BehaviorEvent.eventId`는 호출자가 생성한 UUID v4 행동 Aggregate 식별자이다. 이 문서에서는 행동 엔티티 식별자를 `aggregateId`로 전달한다.
 
-Envelope `eventType=BehaviorEventReceived`는 발생한 도메인 이벤트의 종류이고, payload의 `behaviorEventType`은 로그인·인증·기기 변경 등 사용자 행동의 업무 유형이다. 기존 행동 이벤트 REST API가 `eventType`을 사용하더라도 논리적 이벤트 payload로 매핑할 때는 `behaviorEventType`으로 구분하며, REST API 필드명을 변경하는 의미가 아니다.
+Envelope `eventType=BehaviorEventReceived`는 발생한 도메인 이벤트의 종류이고, payload의 `behaviorEventType`은 로그인·인증·기기 변경 등 사용자 행동의 업무 유형이다. 기존 행동 이벤트 REST API가 `eventType`을 사용하더라도 논리적 이벤트 payload로 매핑할 때는 `behaviorEventType`으로 구분하며, REST API 필드명을 변경하는 의미가 아니다. 현재 REST 접수 범위는 저장까지이며 도메인 이벤트 발행·Kafka 구현을 포함하지 않는다.
 
 ### 6.3 `DetectionAnalysisRequested`
 

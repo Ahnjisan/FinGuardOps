@@ -550,71 +550,89 @@ POST /api/v1/behavior-events
 Content-Type: application/json
 ```
 
-행동 이벤트는 `eventId`를 자연 멱등 식별자로 사용한다. 이 API에 별도 `Idempotency-Key`를 적용할지는 후속 공통 멱등성 범위에서 결정한다.
+별도 `Idempotency-Key`는 사용하지 않는다. 호출자가 생성한 canonical UUID v4 `eventId`와 정규화 요청 fingerprint를 자연 멱등 기준으로 사용한다.
 
 #### 8.1.1 호출 주체와 신뢰 경계
 
 - 이 엔드포인트는 일반 사용자가 임의의 위험 판단을 제출하는 API가 아니다.
 - 신뢰된 Mock 금융·인증 시스템 또는 승인된 수집 어댑터가 관측 이벤트를 전달하는 수집 API이다.
-- `riskSignals`는 최종 위험 판단이 아닌 승인된 관측 신호 코드이며, 의미를 더 명확히 하기 위해 `observedSignals`를 필드명 후보로 사용한다.
-- `locationRiskSummary`는 원문 IP가 아니라 신뢰된 어댑터가 생성한 제한된 위치 문맥이다.
-- Spring Boot는 호출 경계에서 신호 코드, 위치 문맥과 이벤트 상세 구조를 검증한다.
-- 클라이언트가 전달한 신호는 `riskLevel`, `riskResponseOutcome`이나 사건 생성을 직접 확정하지 않는다. Spring Boot가 검증한 입력과 FastAPI 분석 결과에 승인된 정책을 적용해 최종 업무 결과를 결정한다.
+- 이번 접수 범위는 행동 이벤트 영속화와 선택적 거래 연결까지이다.
+- `locationRiskSummary`, `observedSignals`, 자유 형식 `eventDetails`, Rule·ML·위험·탐지·사건 필드는 받거나 반환하지 않는다.
 
-### 8.2 요청 필드 후보
+### 8.2 요청 필드
 
-| 필드 | 타입 후보 | 필수 후보 | 설명 |
+| 필드 | 타입 | 필수 | 설명 |
 | --- | --- | --- | --- |
-| `eventId` | string | 필수 | 행동 이벤트 업무 식별자 |
-| `externalCustomerRef` | string | 필수 | 외부 고객 참조값 |
-| `transactionId` | string 또는 null | 선택 | 관련 거래가 있을 때만 사용 |
-| `eventType` | string | 필수 | 지원 행동 이벤트 유형 |
-| `occurredAt` | string | 필수 | 이벤트 발생 시각, UTC ISO-8601 |
-| `deviceRef` | string 또는 null | 선택 | 기기 외부 참조값 |
-| `locationRiskSummary` | object 또는 null | 선택 | 신뢰된 어댑터가 생성한 국가·지역·해외 여부 등 제한된 위치 문맥 |
-| `observedSignals` | string array | 선택 | 최종 위험 판단이 아닌 승인된 관측 신호 코드 목록. `riskSignals`의 대체 이름 후보 |
-| `eventDetails` | object 또는 null | 이벤트 유형별 선택 | 허용 목록으로 제한된 이벤트 상세 |
+| `eventId` | string | 공통 필수 | 호출자 생성 canonical UUID v4 행동 이벤트 업무 식별자 |
+| `eventType` | string | 공통 필수 | 지원하는 9개 행동 이벤트 유형 |
+| `occurredAt` | string | 공통 필수 | `Z` 접미사의 UTC ISO-8601 발생 시각 |
+| `externalCustomerRef` | string | 공통 필수 | 외부 고객 참조값 |
+| `accountRef` | string 또는 null | 조건부 | 행동의 기준이 되는 고객 측 계좌 참조값 |
+| `deviceRef` | string 또는 null | 조건부 | 기기 외부 참조값 |
+| `transactionId` | string 또는 null | 조건부 | 관련 거래의 UUID v4 업무 식별자 |
+| `beneficiaryRef` | string 또는 null | 조건부 | 새로 등록된 수취인 참조값 |
 
-`eventDetails`는 무제한 JSON 저장소가 아니다. `eventType`별 허용 필드 집합을 명시적으로 정의해야 하며, 허용되지 않은 필드는 저장하거나 FastAPI에 전달하기 전에 거부한다. 알 수 없는 JSON 필드를 조용히 무시하지 않고 `400 Bad Request`와 `VALIDATION_ERROR`로 처리한다.
+요청 JSON은 위 8개 필드만 허용한다. 알 수 없는 필드, 중복 JSON 키, string 또는 null 외 타입과 스칼라 강제 변환은 `400 Bad Request`와 `VALIDATION_ERROR`로 거부한다.
 
-이벤트별 허용 필드 후보는 다음과 같다.
+`externalCustomerRef`, `accountRef`, `deviceRef`, `beneficiaryRef`는 제공될 때 1~128자이며 빈 값, 공백만 있는 값과 앞뒤 공백을 허용하지 않는다. 서버는 trim하거나 대소문자를 바꾸지 않고 exact·case-sensitive 값으로 취급한다. 선택 필드의 누락과 명시적 null은 동일하게 정규화한다.
 
-| `eventType` | `eventDetails` 허용 필드 후보 |
-| --- | --- |
-| `DEVICE_REGISTERED` | `registrationMethod`, `trusted` |
-| `TRANSFER_LIMIT_CHANGED` | `previousLimitBand`, `changedLimitBand` |
-| `BENEFICIARY_REGISTERED` | `beneficiaryRef`, `firstRegistration` |
+`accountRef`는 행동의 기준이 되는 고객 측 계좌이다. `BENEFICIARY_REGISTERED`에서는 수취인을 등록한 고객 측 출금 계좌이고, `beneficiaryRef`는 새로 등록된 수취인이다. 두 필드의 의미를 혼합하지 않는다.
 
-비밀번호, OTP 값, 인증 토큰, 실제 계좌번호, 원문 IP와 자유 형식 Provider 응답은 모든 이벤트 상세에서 금지한다. 실제 이벤트별 DTO 스키마는 후속 Validation·OpenAPI 설계에서 확정한다.
+### 8.3 이벤트별 필드 조건
 
-### 8.3 요청 예시
+| `eventType` | `accountRef` | `deviceRef` | `transactionId` | `beneficiaryRef` |
+| --- | --- | --- | --- | --- |
+| `LOGIN` | 선택 | 필수 | 선택 | 금지 |
+| `LOGIN_FAILED` | 선택 | 선택 | 선택 | 금지 |
+| `DEVICE_REGISTERED` | 선택 | 필수 | 선택 | 금지 |
+| `PASSWORD_CHANGED` | 선택 | 선택 | 선택 | 금지 |
+| `OTP_REISSUED` | 선택 | 선택 | 선택 | 금지 |
+| `BENEFICIARY_REGISTERED` | 필수 | 선택 | 선택 | 필수 |
+| `TRANSFER_LIMIT_CHANGED` | 필수 | 선택 | 선택 | 금지 |
+| `TRANSFER_REQUESTED` | 필수 | 선택 | 필수 | 금지 |
+| `ATM_WITHDRAWAL_REQUESTED` | 필수 | 선택 | 필수 | 금지 |
+
+조건부 필수값 누락과 금지된 `beneficiaryRef`는 형식상 파싱 가능한 요청의 업무 규칙 위반이므로 `422 Unprocessable Entity`와 `VALIDATION_ERROR`로 처리한다.
+
+### 8.4 UUID와 발생 시각
+
+- `eventId`와 제공된 `transactionId`는 canonical UUID 문자열, version 4와 RFC 4122 variant를 검증한다.
+- `eventId`는 REST BehaviorEvent Aggregate 식별자이며 내부 DB Identity PK를 받거나 반환하지 않는다.
+- 향후 도메인 이벤트 Envelope의 `eventId`는 논리 이벤트 전달 식별자이고 REST `BehaviorEvent.eventId`와 서로 다른 경계이다.
+- `occurredAt`은 `Z` 접미사를 가진 UTC ISO-8601만 허용한다.
+- 같은 순간을 표현하는 offset 시각도 거부한다.
+- 정확히 서버 시각보다 5분 미래는 허용하고 이를 초과하면 `422 Unprocessable Entity`와 `VALIDATION_ERROR`를 반환한다.
+- 서버 시각 검증은 테스트 가능한 주입식 `Clock`을 사용한다.
+
+### 8.5 관련 거래 검증
+
+`transactionId`가 제공되면 Spring Boot가 `financial_transaction`을 조회한다.
+
+- 거래가 없으면 `404 Not Found`와 `RESOURCE_NOT_FOUND`를 반환한다.
+- `externalCustomerRef`는 거래의 고객 참조와 정확히 일치해야 한다.
+- `accountRef`가 제공된 일반 이벤트는 거래의 `senderAccountRef` 또는 nullable `recipientAccountRef` 중 하나와 일치해야 한다.
+- `TRANSFER_REQUESTED`는 `ACCOUNT_TRANSFER` 또는 `OPEN_BANKING_TRANSFER` 거래만 참조하고 `accountRef`가 `senderAccountRef`와 일치해야 한다.
+- `ATM_WITHDRAWAL_REQUESTED`는 `ATM_WITHDRAWAL` 거래만 참조하고 `accountRef`가 출금 계좌인 `senderAccountRef`와 일치해야 한다.
+- 거래가 존재하지만 고객·계좌·유형 정합성이 맞지 않으면 `422 Unprocessable Entity`와 `VALIDATION_ERROR`를 반환한다.
+
+오류 응답에는 실제 참조값, 내부 PK, SQL과 DB 상세를 포함하지 않는다.
+
+### 8.6 요청 예시
 
 ```json
 {
-  "eventId": "evt_demo_20260723_0042",
+  "eventId": "e54cbf7e-d857-4ca0-bff3-8d4321b7722a",
+  "eventType": "BENEFICIARY_REGISTERED",
+  "occurredAt": "2026-07-29T04:10:00Z",
   "externalCustomerRef": "cust_ref_demo_a7f2",
-  "transactionId": "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
-  "eventType": "DEVICE_REGISTERED",
-  "occurredAt": "2026-07-23T01:10:00Z",
+  "accountRef": "acct_ref_demo_s91c",
   "deviceRef": "device_ref_demo_18b3",
-  "locationRiskSummary": {
-    "countryCode": "KR",
-    "regionCode": "SEOUL",
-    "foreignAccess": false
-  },
-  "observedSignals": [
-    "NEW_DEVICE"
-  ],
-  "eventDetails": {
-    "registrationMethod": "MOCK_VERIFICATION",
-    "trusted": false
-  }
+  "transactionId": null,
+  "beneficiaryRef": "acct_ref_demo_r82a"
 }
 ```
 
-지역 코드 체계, 관측 신호 코드, `observedSignals` 최종 필드명과 이벤트 유형별 `eventDetails` DTO 스키마는 후속 Validation·OpenAPI 계약에서 승인한다.
-
-### 8.4 성공 응답 예시
+### 8.7 성공 응답
 
 최초 저장:
 
@@ -625,41 +643,61 @@ Content-Type: application/json
 
 ```json
 {
-  "eventId": "evt_demo_20260723_0042",
-  "eventType": "DEVICE_REGISTERED",
-  "transactionId": "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
-  "occurredAt": "2026-07-23T01:10:00Z",
-  "createdAt": "2026-07-23T01:10:01Z",
-  "traceId": "trace_demo_event_0042"
+  "eventId": "e54cbf7e-d857-4ca0-bff3-8d4321b7722a",
+  "eventType": "BENEFICIARY_REGISTERED",
+  "transactionId": null,
+  "occurredAt": "2026-07-29T04:10:00Z",
+  "createdAt": "2026-07-29T04:10:01Z",
+  "traceId": "6cb3a9e2-7f91-4b99-98df-bcad0f8bf21b"
 }
 ```
 
-### 8.5 `eventId` 중복 처리
+응답은 위 6개 필드를 정확히 반환하고 nullable `transactionId`도 생략하지 않는다. 내부 PK·FK, fingerprint, 고객·계좌·기기·수취인 참조, Entity 상태와 Rule·ML·위험·탐지·사건 placeholder는 반환하지 않는다.
+
+### 8.8 `eventId` 자연 멱등성과 fingerprint
+
+정규화 fingerprint는 다음 필드를 고정 순서로 포함한다.
+
+```text
+eventId
+eventType
+occurredAt
+externalCustomerRef
+accountRef
+deviceRef
+transactionId
+beneficiaryRef
+```
+
+검증된 UUID와 시각은 canonical 문자열로 직렬화하고 nullable 필드는 명시적 JSON null로 표현한다. 고정 순서·고정 필드의 공백 없는 UTF-8 JSON object를 SHA-256으로 계산해 소문자 16진수 64자로 저장한다. 이 표현은 필드 경계와 null을 모호하지 않게 구분한다. `traceId`, 내부 PK·FK와 `createdAt`은 제외한다.
 
 | 상황 | 처리 규칙 |
 | --- | --- |
-| 같은 `eventId` + 같은 정규화 요청 | 새 이벤트를 저장하지 않고 기존 결과를 반환한다. `200 OK`를 우선 권장한다. |
+| 같은 `eventId` + 같은 정규화 요청 | 새 이벤트를 저장하지 않고 기존 결과를 `200 OK`로 반환한다. |
 | 같은 `eventId` + 다른 요청 내용 | 기존 이벤트를 덮어쓰지 않고 `409 Conflict`와 `DUPLICATE_EVENT`를 반환한다. |
 | 같은 유형·비슷한 시각 + 다른 `eventId` | 식별자가 다르다는 이유만으로 자동 중복 처리하지 않는다. 별도 이상 패턴으로 분석할 수 있다. |
 | 같은 `eventId`의 동시 도착 | 하나만 최초 저장하고 나머지는 기존 결과를 참조한다. |
 
-동일 이벤트 재전송과 수정 이벤트를 구분해야 한다. 저장된 행동 이벤트를 같은 `eventId` 요청으로 수정하지 않는다.
+저장 시도에서 Unique 위반이 발생한 트랜잭션은 rollback한 뒤 분리된 트랜잭션에서 기존 행을 재조회한다. 패자는 fingerprint가 같으면 `200`, 다르면 `409`를 반환한다. 별도 response snapshot은 만들지 않으며 기존 불변 행에서 결과를 재구성하고 현재 HTTP 요청의 `traceId`를 결합한다.
 
-### 8.6 상태 코드
+### 8.9 상태 코드
 
 | 상태 코드 | 사용 기준 |
 | --- | --- |
 | `201 Created` | 행동 이벤트가 처음 저장됨 |
 | `200 OK` | 같은 `eventId`와 같은 요청의 기존 결과 반환 |
-| `400 Bad Request` | 잘못된 JSON 또는 필수 필드·시각 형식 오류 |
-| `404 Not Found` | 관련 `transactionId`가 필수인 이벤트에서 거래가 없고, 해당 정책이 승인된 경우 |
+| `400 Bad Request` | malformed JSON, 공통 필수 필드·UUID·Enum·시각·참조 형식, 알 수 없는 필드, 중복 키와 타입 오류 |
+| `404 Not Found` | 제공되었거나 필수인 `transactionId`의 거래가 없음 |
 | `409 Conflict` | 같은 `eventId`에 다른 요청 내용이 도착함 |
-| `422 Unprocessable Entity` | 이벤트 유형별 허용 상세나 업무 의미를 만족하지 못함 |
-| `503 Service Unavailable` | 필수 저장소가 일시적으로 사용 불가 |
+| `422 Unprocessable Entity` | 조건부 필드, 미래 5분 초과 또는 거래 고객·계좌·유형 정합성 위반 |
+| `503 Service Unavailable` | 명확한 PostgreSQL timeout 또는 일시적 저장소 가용성 장애 |
+| `500 Internal Server Error` | 그 밖의 DataAccess 오류, 모순된 내부 데이터 또는 예상하지 못한 오류 |
 
-관련 거래가 아직 없을 때 이벤트를 거부할지 `transactionId` 연결 없이 저장할지는 이벤트 유형별 사용자 결정 사항이다.
+`DEPENDENCY_TIMEOUT`은 명확한 statement/query timeout에만, `DEPENDENCY_UNAVAILABLE`은 연결 실패 또는 명확한 일시적 가용성 장애에만 사용한다. 그 밖의 `DataAccessException`을 일괄적으로 `503`으로 변환하지 않고 `500 INTERNAL_ERROR`로 축약한다. 모든 오류는 공통 오류 구조와 현재 요청의 `traceId`를 사용하고 SQL·DB·드라이버·제약 이름·스택 트레이스·참조값·내부 PK·fingerprint를 노출하지 않는다.
 
 ## 9. 행동 이벤트 목록 조회
+
+이 절은 후속 조회 API 후보이며 Issue #68 구현 범위에 포함하지 않는다. 현재 구현되는 행동 이벤트 API는 8장의 생성 API뿐이다.
 
 ### 9.1 요청
 
@@ -693,20 +731,14 @@ GET /api/v1/behavior-events?externalCustomerRef=cust_ref_demo_a7f2&occurredAtFro
 {
   "content": [
     {
-      "eventId": "evt_demo_20260723_0042",
+      "eventId": "e54cbf7e-d857-4ca0-bff3-8d4321b7722a",
       "externalCustomerRef": "cust_ref_demo_a7f2",
       "transactionId": "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
       "eventType": "DEVICE_REGISTERED",
       "occurredAt": "2026-07-23T01:10:00Z",
       "deviceRef": "device_ref_demo_18b3",
-      "locationRiskSummary": {
-        "countryCode": "KR",
-        "regionCode": "SEOUL",
-        "foreignAccess": false
-      },
-      "observedSignals": [
-        "NEW_DEVICE"
-      ]
+      "accountRef": null,
+      "beneficiaryRef": null
     }
   ],
   "page": {
@@ -934,12 +966,10 @@ GET /api/v1/detection-results/det_demo_20260723_0101
 | `POST /transactions` | 완료된 동일 멱등 요청의 기존 결과 | 최초 생성 | JSON·필수 헤더·필드 형식 오류 | 사용하지 않음 | 멱등 키 지문 충돌·처리 중 동일 요청·거래·상태·동시성 충돌 | 거래 유형별 도메인 규칙 위반 | 유효 캐시 없는 External Risk Timeout 또는 FastAPI Timeout 초기 정책 | 예기치 않은 서버 오류 |
 | `GET /transactions` | 조회 성공 | 사용하지 않음 | 필터·페이지 형식 오류 | 사용하지 않음 | 사용하지 않음 | 의미상 잘못된 필터·페이지 범위 | 조회 Timeout 또는 명확한 저장소 가용성 장애 | 그 밖의 DataAccess 오류·예기치 않은 서버 오류 |
 | `GET /transactions/{transactionId}` | 조회 성공 | 사용하지 않음 | 식별자 형식 오류 | 거래 없음 | 사용하지 않음 | 사용하지 않음 | 조회 Timeout 또는 명확한 저장소 가용성 장애 | 그 밖의 DataAccess 오류·예기치 않은 서버 오류 |
-| `POST /behavior-events` | 동일 이벤트 기존 결과 | 최초 생성 | JSON·알 수 없는 필드·필드 형식 오류 | 관련 거래 없음 후보 | 다른 내용의 `eventId` 중복 | 이벤트 유형별 도메인 규칙 위반 | 저장 의존성 장애 | 예기치 않은 서버 오류 |
+| `POST /behavior-events` | 동일 이벤트 기존 결과 | 최초 생성 | JSON·알 수 없는 필드·필드 형식 오류 | 관련 거래 없음 | 다른 내용의 `eventId` 중복 | 이벤트 유형별 도메인 규칙·거래 정합성 위반 | 명확한 DB Timeout 또는 저장소 가용성 장애 | 그 밖의 DataAccess 오류·예기치 않은 서버 오류 |
 | `GET /behavior-events` | 조회 성공 | 사용하지 않음 | 필터·페이지 형식 오류 | 사용하지 않음 | 사용하지 않음 | 의미상 잘못된 필터 | 조회 의존성 장애 | 예기치 않은 서버 오류 |
 | `GET /transactions/{transactionId}/detection-results` | 조회 성공 | 사용하지 않음 | 식별자·페이지 형식 오류 | 거래 없음 | 사용하지 않음 | 의미상 잘못된 조건 | 조회 의존성 장애 | 예기치 않은 서버 오류 |
 | `GET /detection-results/{detectionResultId}` | 조회 성공 | 사용하지 않음 | 식별자 형식 오류 | 탐지 결과 없음 | 사용하지 않음 | 사용하지 않음 | 조회 의존성 장애 | 예기치 않은 서버 오류 |
-
-행동 이벤트의 존재하지 않는 관련 거래 처리와 오류 `resource`의 범용 적용 범위는 사용자 결정 사항이다.
 
 ## 13. 공통 오류 예시
 
@@ -1045,11 +1075,8 @@ Content-Type: application/json
 
 ### 16.3 행동 이벤트
 
-- 이벤트 유형별 `eventDetails` 허용 필드
-- 지역 코드, 관측 신호 코드와 `observedSignals` 최종 필드명
-- 존재하지 않는 `transactionId`를 가진 이벤트의 저장·거부 정책
-- 행동 이벤트 생성에 별도 `Idempotency-Key`를 적용할지
-- 같은 `eventId`와 같은 요청에 `200 OK` 또는 최초 상태를 재사용할지
+- 후속 행동 이벤트 조회 API의 필터·응답·인덱스 계약
+- 후속 Rule 입력에서 필요한 위치·관측 신호·유형별 상세의 제한된 필드 계약
 
 ### 16.4 탐지 결과
 

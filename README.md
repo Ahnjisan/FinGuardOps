@@ -312,6 +312,9 @@ Kafka
 * AI 리포트·AI 사용량·비용 API 계약 작성
 * 도메인 이벤트 계약 작성
 * 관측성·운영 메트릭 명세 작성
+* 거래 접수·목록·상세 조회와 거래 멱등성 구현
+* 9개 유형 행동 이벤트 접수와 `eventId` 자연 멱등성 구현
+* 금융거래·멱등성·행동 이벤트 PostgreSQL Flyway 스키마 구현
 
 ### In Progress
 
@@ -319,10 +322,9 @@ Kafka
 
 ### Planned
 
-* 거래·행동 이벤트 도메인 구현
-* JPA Entity·Repository 구현
-* PostgreSQL 연동과 데이터베이스 마이그레이션
-* 멱등성·중복 이벤트 처리
+* 행동 이벤트 조회와 후속 도메인 구현
+* 탐지·사건·감사 도메인의 JPA Entity·Repository 구현
+* 후속 도메인의 PostgreSQL 마이그레이션
 * Rule 관리와 실행
 * 위험 점수·위험 등급 산출
 * 사건 생성·조회·상태 변경

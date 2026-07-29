@@ -868,9 +868,13 @@ DEVICE_REGISTERED
 OTP_REISSUED
 BENEFICIARY_REGISTERED
 TRANSFER_LIMIT_CHANGED
+TRANSFER_REQUESTED
+ATM_WITHDRAWAL_REQUESTED
 ```
 
-이 목록은 개념 수준의 핵심 데이터 모델이며 이번 문서 작업에서 ERD, Entity 또는 DB 설계를 확정하지 않는다.
+행동 이벤트 접수의 구체적인 요청·응답과 영속 계약은
+`docs/03-api/transaction-detection-api.md`와
+`docs/04-database/behavior-event-intake-schema.md`를 따른다.
 
 ## 16. 주요 화면
 

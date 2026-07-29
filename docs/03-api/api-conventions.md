@@ -41,6 +41,7 @@ GET  /api/v1/behavior-events
 - UTC 시각은 `Z` 접미사를 포함해 표현한다.
 - 발생 시각과 저장 시각을 구분한다.
 - 거래 생성 요청의 `occurredAt`은 Validation 시점의 서버 시각보다 최대 5분 미래까지 허용한다.
+- 행동 이벤트 생성 요청의 `occurredAt`도 Validation 시점의 서버 시각보다 최대 5분 미래까지 허용한다. 정확히 5분은 허용하고 이를 초과하면 `422 Unprocessable Entity`와 `VALIDATION_ERROR`를 반환한다.
 
 예:
 
@@ -51,7 +52,7 @@ GET  /api/v1/behavior-events
 }
 ```
 
-클라이언트의 로컬 시간대 표시는 화면 책임이며 API의 원본 시각을 덮어쓰지 않는다. 거래 발생 시각의 5분 미래 허용 범위는 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따르며, 그 밖의 API가 허용할 시각 범위는 각 API 계약에서 정한다.
+클라이언트의 로컬 시간대 표시는 화면 책임이며 API의 원본 시각을 덮어쓰지 않는다. 거래 발생 시각의 5분 미래 허용 범위는 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를, 행동 이벤트 발생 시각은 [`../04-database/behavior-event-intake-schema.md`](../04-database/behavior-event-intake-schema.md)를 따른다. offset 표기가 같은 순간을 나타내더라도 `Z` 접미사가 아니면 거부한다.
 
 ### 3.3 내부 식별자와 업무 식별자
 
@@ -61,14 +62,14 @@ DB 관계와 저장에 사용하는 내부 식별자와 API·로그·업무 조�
 | --- | --- |
 | 내부 DB 식별자 | Entity 관계와 DB 연결에 사용하는 내부 값. 기본적으로 API에 노출하지 않는다. |
 | `transactionId` | 거래 접수·조회와 관련 탐지·사건 연결에 사용하는 거래 업무 식별자 |
-| `eventId` | 행동 이벤트의 중복 수신과 조회에 사용하는 행동 이벤트 업무 식별자 |
+| `eventId` | REST 행동 이벤트의 중복 수신과 조회에 사용하는 호출자 생성 UUID v4 업무 식별자 |
 | `detectionResultId` | 저장·검증된 개별 탐지 결과를 외부 계약에서 식별하는 업무 식별자 |
 | `caseId` | 생성되었거나 연결된 사건을 식별하는 업무 식별자 |
 | `traceId` | Spring Boot와 의존 서비스 호출 흐름을 연결하는 추적 식별자 |
 
 각 식별자는 서로 대체할 수 없다. 특히 `traceId`는 거래나 탐지 결과의 업무 식별자가 아니며, `eventId`는 이 문서 범위에서 행동 이벤트 식별자를 뜻한다.
 
-`transactionId`는 거래 생성 요청에서 클라이언트가 전달하는 UUID v4이며 PostgreSQL 내부 Identity PK와 구분한다. 그 밖의 식별자의 구체적인 형식, 길이, 생성 주체와 보존 기간은 후속 구현 설계에서 확정한다. 식별자 자체에 실제 고객번호, 계좌번호, 인증정보와 같은 민감정보를 포함하지 않는다.
+`transactionId`는 거래 생성 요청에서 클라이언트가 전달하는 UUID v4이며 PostgreSQL 내부 Identity PK와 구분한다. REST `BehaviorEvent.eventId`도 호출자가 생성한 canonical UUID v4이고 내부 Identity PK와 구분한다. 두 UUID는 version 4와 RFC 4122 variant를 검증한다. 향후 도메인 이벤트 Envelope도 `eventId`라는 이름을 사용할 수 있지만, Envelope 식별자는 전달·재처리되는 논리 도메인 이벤트를 식별하고 REST `BehaviorEvent.eventId`는 수집된 사용자 행동 Aggregate를 식별하므로 서로 다른 경계의 식별자이다. 식별자 자체에 실제 고객번호, 계좌번호, 인증정보와 같은 민감정보를 포함하지 않는다.
 
 ### 3.4 민감정보
 
@@ -268,6 +269,19 @@ null, 빈 값, 알 수 없는 값과 `TRANSACTION_INTAKE_FAILED` 같은 내부 �
 
 - 만료 기록 정리 주기와 경합 처리
 - 재시도와 늦은 FastAPI 응답의 경합 처리
+
+### 6.6 행동 이벤트 생성의 자연 멱등성
+
+`POST /api/v1/behavior-events`는 별도 `Idempotency-Key`를 사용하지 않는다. 호출자가 생성한 REST 행동 이벤트의 `eventId`와 승인된 8개 요청 필드의 정규화 SHA-256 fingerprint를 사용한다.
+
+- 같은 `eventId`와 같은 fingerprint는 새 행을 만들지 않고 `200 OK`로 기존 저장 결과를 반환한다.
+- 같은 `eventId`와 다른 fingerprint는 `409 Conflict`와 `DUPLICATE_EVENT`를 반환한다.
+- 최초 저장은 `201 Created`를 반환한다.
+- `traceId`, 내부 PK와 `createdAt`은 fingerprint에 포함하지 않는다.
+- 완료 응답 snapshot은 만들지 않고 불변 행동 이벤트 행에서 응답을 재구성한다.
+- 재전송 응답에는 저장 당시 값이 아니라 현재 HTTP 요청의 `traceId`를 사용한다.
+
+구체적인 필드 순서, null 직렬화와 DB 제약은 [`../04-database/behavior-event-intake-schema.md`](../04-database/behavior-event-intake-schema.md)를 따른다.
 
 ## 7. 오류 응답
 
