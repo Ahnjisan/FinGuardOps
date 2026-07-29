@@ -238,13 +238,28 @@ FAILED
 | 같은 키 + 같은 지문 + `COMPLETED` | `200 OK` | 새 처리를 시작하지 않고 기존 완료 결과 반환 |
 | 같은 키 + 다른 지문 | `409 Conflict`, `IDEMPOTENCY_KEY_CONFLICT` | 기존 기록과 거래를 변경하지 않음 |
 | 같은 키 + 같은 지문 + `IN_PROGRESS` | `409 Conflict`, `IDEMPOTENCY_REQUEST_IN_PROGRESS` | 새 처리·거래·탐지·사건을 시작하지 않음 |
+| 같은 키 + 같은 지문 + `FAILED` | 고정 whitelist 또는 `500 INTERNAL_ERROR` | 같은 키의 업무 처리를 자동 재실행하지 않음 |
 | 다른 키 + 같은 `transactionId` | `409 Conflict`, `DUPLICATE_TRANSACTION` | 기존 거래를 덮어쓰지 않음 |
 
 충돌 판별은 기존 레코드의 상태를 해석하기 전에 지문 일치 여부를 먼저 확인한다. 따라서 같은 키의 지문이 다르면 기존 처리가 진행 중이어도 `IDEMPOTENCY_KEY_CONFLICT`이다.
 
-최초 성공의 업무 응답은 `response_snapshot`에 `traceId`를 제외한 JSON object로 보존한다. 완료된 동일 요청 재전송은 저장된 업무 결과에 현재 재전송 요청의 새 `traceId`를 결합하고 HTTP 상태만 `200 OK`로 반환한다. 최초 성공의 `201`을 재전송 응답에 그대로 반복하지 않는다.
+최초 성공의 업무 응답은 `response_snapshot`에 다음 일곱 필드를 정확히 가진 JSON object로 보존한다.
 
-`FAILED`인 같은 키·같은 지문의 재시도 또는 기존 실패 결과 반환 정책은 후속 장애·재시도 계약에서 결정한다. 이 미확정 정책이 `IN_PROGRESS`와 `COMPLETED`의 위 동작을 변경하지 않는다.
+```json
+{
+  "transactionId": "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
+  "processingStatus": "RECEIVED",
+  "riskLevel": null,
+  "riskResponseOutcome": null,
+  "adoptedDetectionResultId": null,
+  "caseId": null,
+  "createdAt": "2026-07-23T01:15:31Z"
+}
+```
+
+`traceId`, `idempotencyRecordId`, 요청 지문, 내부 PK, 요청 본문, 고객·계좌 참조값은 snapshot에 저장하지 않는다. 네 nullable 업무 필드는 JSON에서 생략하지 않고 명시적 null로 저장한다. 완료된 동일 요청 재전송은 검증된 typed snapshot을 복원하고 현재 재전송 요청의 새 `traceId`를 결합해 `200 OK`로 반환한다. 최초 성공의 `201`이나 저장 당시 `traceId`를 반복하지 않는다. 손상되었거나 위 계약과 다른 snapshot은 보정하지 않고 `500 INTERNAL_ERROR`로 처리하며 snapshot 원문을 로그나 오류 응답에 노출하지 않는다.
+
+`FAILED`인 같은 키·같은 지문의 요청은 자동 재실행하지 않는다. `DUPLICATE_TRANSACTION`은 `409`, `DEPENDENCY_TIMEOUT`은 `503`으로만 고정 재현한다. null, 빈 값, 알 수 없는 값과 내부 전용 `TRANSACTION_INTAKE_FAILED`는 원문을 노출하지 않고 `500 INTERNAL_ERROR`로 축약한다.
 
 ### 6.4 24시간 보존
 
@@ -322,8 +337,8 @@ FAILED
 | `request_fingerprint` | `VARCHAR(64)` | NOT NULL | 없음 | SHA-256 소문자 16진수 |
 | `processing_status` | `VARCHAR(16)` | NOT NULL | 없음 | `IN_PROGRESS`, `COMPLETED`, `FAILED` |
 | `financial_transaction_id` | `BIGINT` | nullable | 없음 | 처리 중에는 null 가능, 거래 결과 FK |
-| `response_snapshot` | `JSONB` | nullable | 없음 | 완료 업무 응답, `traceId` 제외 |
-| `failure_code` | `VARCHAR(64)` | nullable | 없음 | `FAILED`의 안전한 실패 분류 |
+| `response_snapshot` | `JSONB` | nullable | 없음 | 위 일곱 필드의 완료 업무 응답 JSON object, `traceId`와 내부·요청 정보 제외 |
+| `failure_code` | `VARCHAR(64)` | nullable | 없음 | `FAILED`의 안전한 내부 실패 분류. 공개 응답은 whitelist로만 고정 매핑 |
 | `expires_at` | `TIMESTAMPTZ` | NOT NULL | `CURRENT_TIMESTAMP + INTERVAL '24 hours'` | 멱등 만료 시각 |
 | `created_at` | `TIMESTAMPTZ` | NOT NULL | `CURRENT_TIMESTAMP` | 최초 선점 시각 |
 | `updated_at` | `TIMESTAMPTZ` | NOT NULL | `CURRENT_TIMESTAMP` | 마지막 상태 변경 시각 |
@@ -605,7 +620,7 @@ CREATE INDEX ix_idempotency_record_status_updated_at
 - Unique 충돌이 발생하면 기존 행을 조회해 지문, 만료 시각과 처리 상태를 판별한다.
 - 상태 확정은 현재 `processing_status = 'IN_PROGRESS'`를 `UPDATE` 조건에 포함해 하나의 실행만 `COMPLETED` 또는 `FAILED`로 변경하게 한다.
 - `IN_PROGRESS` 선점 DB 트랜잭션을 External Risk나 FastAPI 네트워크 호출 동안 열어 두지 않는다.
-- `financial_transaction` 생성과 해당 멱등 기록의 `financial_transaction_id` 연결은 일부만 성공한 것처럼 관측되지 않도록 승인된 짧은 업무 트랜잭션 경계에서 처리한다.
+- `financial_transaction` 생성, 해당 멱등 기록의 `financial_transaction_id` 연결, typed snapshot 저장과 `COMPLETED` 전이는 하나의 짧은 업무 트랜잭션 경계에서 처리한다. 어느 단계든 실패하면 거래 저장과 `COMPLETED` 전이를 함께 롤백한 뒤 별도 짧은 트랜잭션으로 선점 기록을 `FAILED`로 확정한다.
 - 후속 분석과 최종 완료 응답 확정은 ADR-003의 단계적 구현 순서를 따르며, 전체 흐름 준비 전 불완전한 외부 Controller를 공개하지 않는다.
 
 ## 12. JPA 매핑 기준
@@ -688,7 +703,6 @@ CREATE INDEX ix_idempotency_record_status_updated_at
 
 이번 물리 계약 이후에도 다음 항목은 별도 승인과 구현 설계가 필요하다.
 
-- `idempotency_record.processing_status = FAILED`인 같은 키·같은 지문의 재시도 또는 기존 실패 반환 정책
 - 멱등 만료 레코드 정리 주기, batch 크기, 잠금과 장애 재시도 방식
 - 탐지 물리 스키마와 `adoptedDetectionResultId`, 위험 등급·위험 대응 컬럼 및 FK
 - 상태 변경 충돌 후 자동 재시도 여부

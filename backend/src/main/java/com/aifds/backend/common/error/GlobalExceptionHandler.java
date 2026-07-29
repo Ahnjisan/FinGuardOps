@@ -4,6 +4,8 @@ import com.aifds.backend.common.trace.TraceIdFilter;
 import com.aifds.backend.idempotency.exception.IdempotencyCompletionTransactionNotFoundException;
 import com.aifds.backend.idempotency.exception.IdempotencyRecordNotFoundException;
 import com.aifds.backend.idempotency.exception.IdempotencyStateTransitionNotAllowedException;
+import com.aifds.backend.transaction.exception.InvalidTransactionIntakeSnapshotException;
+import com.aifds.backend.transaction.exception.TransactionIntakeRejectedException;
 import com.aifds.backend.transaction.validation.IdempotencyKeyValidator;
 import com.aifds.backend.transaction.validation.TransactionRequestValidator;
 import com.aifds.backend.transaction.validation.TransactionValidationException;
@@ -31,11 +33,26 @@ public class GlobalExceptionHandler {
     static final String VALIDATION_ERROR = "VALIDATION_ERROR";
     static final String STATE_TRANSITION_NOT_ALLOWED =
             "STATE_TRANSITION_NOT_ALLOWED";
+    static final String IDEMPOTENCY_KEY_CONFLICT =
+            "IDEMPOTENCY_KEY_CONFLICT";
+    static final String IDEMPOTENCY_REQUEST_IN_PROGRESS =
+            "IDEMPOTENCY_REQUEST_IN_PROGRESS";
+    static final String DUPLICATE_TRANSACTION =
+            "DUPLICATE_TRANSACTION";
+    static final String DEPENDENCY_TIMEOUT = "DEPENDENCY_TIMEOUT";
     static final String INTERNAL_ERROR = "INTERNAL_ERROR";
 
     static final String VALIDATION_MESSAGE = "요청 필드를 확인해 주세요.";
     static final String STATE_TRANSITION_MESSAGE =
             "현재 상태에서는 요청한 처리를 수행할 수 없습니다.";
+    static final String IDEMPOTENCY_KEY_CONFLICT_MESSAGE =
+            "같은 멱등성 키가 다른 거래 요청에 사용되었습니다.";
+    static final String IDEMPOTENCY_REQUEST_IN_PROGRESS_MESSAGE =
+            "같은 멱등 요청이 처리 중입니다.";
+    static final String DUPLICATE_TRANSACTION_MESSAGE =
+            "이미 존재하는 transactionId입니다.";
+    static final String DEPENDENCY_TIMEOUT_MESSAGE =
+            "탐지 서비스를 사용할 수 없습니다.";
     static final String INTERNAL_ERROR_MESSAGE =
             "요청을 처리하는 중 오류가 발생했습니다.";
 
@@ -136,9 +153,48 @@ public class GlobalExceptionHandler {
         );
     }
 
+    @ExceptionHandler(TransactionIntakeRejectedException.class)
+    ResponseEntity<ApiErrorResponse> handleTransactionIntakeRejected(
+            TransactionIntakeRejectedException exception,
+            HttpServletRequest request
+    ) {
+        return switch (exception.reason()) {
+            case IDEMPOTENCY_KEY_CONFLICT -> response(
+                    HttpStatus.CONFLICT,
+                    IDEMPOTENCY_KEY_CONFLICT,
+                    IDEMPOTENCY_KEY_CONFLICT_MESSAGE,
+                    List.of(),
+                    request
+            );
+            case IDEMPOTENCY_REQUEST_IN_PROGRESS -> response(
+                    HttpStatus.CONFLICT,
+                    IDEMPOTENCY_REQUEST_IN_PROGRESS,
+                    IDEMPOTENCY_REQUEST_IN_PROGRESS_MESSAGE,
+                    List.of(),
+                    request
+            );
+            case DUPLICATE_TRANSACTION -> response(
+                    HttpStatus.CONFLICT,
+                    DUPLICATE_TRANSACTION,
+                    DUPLICATE_TRANSACTION_MESSAGE,
+                    List.of(),
+                    request
+            );
+            case DEPENDENCY_TIMEOUT -> response(
+                    HttpStatus.SERVICE_UNAVAILABLE,
+                    DEPENDENCY_TIMEOUT,
+                    DEPENDENCY_TIMEOUT_MESSAGE,
+                    List.of(),
+                    request
+            );
+            case INTERNAL_FAILURE -> internalErrorResponse(request);
+        };
+    }
+
     @ExceptionHandler({
             IdempotencyRecordNotFoundException.class,
-            IdempotencyCompletionTransactionNotFoundException.class
+            IdempotencyCompletionTransactionNotFoundException.class,
+            InvalidTransactionIntakeSnapshotException.class
     })
     ResponseEntity<ApiErrorResponse> handleInternalIdempotencyException(
             RuntimeException exception,

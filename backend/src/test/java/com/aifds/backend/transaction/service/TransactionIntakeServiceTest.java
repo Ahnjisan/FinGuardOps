@@ -47,7 +47,9 @@ class TransactionIntakeServiceTest {
     @Mock
     private IdempotencyService idempotencyService;
     @Mock
-    private TransactionIntakeWriter transactionIntakeWriter;
+    private TransactionIntakeCompletionService completionService;
+    @Mock
+    private TransactionIntakeSnapshotCodec snapshotCodec;
 
     private TransactionIntakeService transactionIntakeService;
 
@@ -57,7 +59,8 @@ class TransactionIntakeServiceTest {
                 idempotencyKeyValidator,
                 transactionRequestValidator,
                 idempotencyService,
-                transactionIntakeWriter
+                completionService,
+                snapshotCodec
         );
     }
 
@@ -75,7 +78,8 @@ class TransactionIntakeServiceTest {
         verifyNoInteractions(
                 transactionRequestValidator,
                 idempotencyService,
-                transactionIntakeWriter
+                completionService,
+                snapshotCodec
         );
     }
 
@@ -91,7 +95,11 @@ class TransactionIntakeServiceTest {
             assertThatThrownBy(() -> transactionIntakeService.receive(KEY, request))
                     .isSameAs(failure);
 
-            verifyNoInteractions(idempotencyService, transactionIntakeWriter);
+            verifyNoInteractions(
+                    idempotencyService,
+                    completionService,
+                    snapshotCodec
+            );
         }
     }
 
@@ -99,32 +107,32 @@ class TransactionIntakeServiceTest {
     void validatesThenClaimsAndPersistsOnlyAnAcquiredRequest() {
         TransactionCreateRequest request = request();
         ValidatedTransactionCommand command = command();
+        TransactionIntakeSnapshot snapshot = snapshot();
         TransactionIntakeResult.Received received =
-                new TransactionIntakeResult.Received(
-                        command.transactionId(),
-                        RECORD_ID
-                );
+                new TransactionIntakeResult.Received(snapshot);
         when(idempotencyKeyValidator.validate(KEY)).thenReturn(KEY);
         when(transactionRequestValidator.validate(request)).thenReturn(command);
         when(idempotencyService.claim(KEY, command.toFingerprintInput()))
                 .thenReturn(new IdempotencyClaimResult.Acquired(RECORD_ID));
-        when(transactionIntakeWriter.saveAndLink(RECORD_ID, command))
+        when(completionService.complete(RECORD_ID, command))
                 .thenReturn(received);
 
         TransactionIntakeResult result =
                 transactionIntakeService.receive(KEY, request);
 
         assertThat(result).isSameAs(received);
-        assertThat(received.transactionId()).isEqualTo(command.transactionId());
-        assertThat(received.processingStatus())
+        assertThat(received.snapshot().transactionId())
+                .isEqualTo(command.transactionId());
+        assertThat(received.snapshot().processingStatus())
                 .isEqualTo(TransactionProcessingStatus.RECEIVED);
-        assertThat(received.idempotencyRecordId()).isEqualTo(RECORD_ID);
+        assertThat(received.snapshot().createdAt())
+                .isEqualTo(snapshot.createdAt());
 
         InOrder order = inOrder(
                 idempotencyKeyValidator,
                 transactionRequestValidator,
                 idempotencyService,
-                transactionIntakeWriter
+                completionService
         );
         order.verify(idempotencyKeyValidator).validate(KEY);
         order.verify(transactionRequestValidator).validate(request);
@@ -132,7 +140,7 @@ class TransactionIntakeServiceTest {
                 KEY,
                 command.toFingerprintInput()
         );
-        order.verify(transactionIntakeWriter).saveAndLink(RECORD_ID, command);
+        order.verify(completionService).complete(RECORD_ID, command);
     }
 
     @Test
@@ -146,12 +154,15 @@ class TransactionIntakeServiceTest {
                 TransactionIntakeResult.InProgress.class
         );
 
+        String storedJson = "{\"result\":\"stored\"}";
+        TransactionIntakeSnapshot snapshot = snapshot();
+        when(snapshotCodec.decode(storedJson)).thenReturn(snapshot);
         TransactionIntakeResult completed = receiveWithClaim(
-                new IdempotencyClaimResult.Completed("{\"result\":\"stored\"}")
+                new IdempotencyClaimResult.Completed(storedJson)
         );
         assertThat(completed)
                 .isEqualTo(new TransactionIntakeResult.CompletedReplay(
-                        "{\"result\":\"stored\"}"
+                        snapshot
                 ));
 
         TransactionIntakeResult failed = receiveWithClaim(
@@ -162,8 +173,7 @@ class TransactionIntakeServiceTest {
                         "DEPENDENCY_TIMEOUT"
                 ));
 
-        verify(transactionIntakeWriter, never())
-                .saveAndLink(RECORD_ID, command());
+        verify(completionService, never()).complete(RECORD_ID, command());
     }
 
     @Test
@@ -173,8 +183,8 @@ class TransactionIntakeServiceTest {
                 "23505",
                 "uq_financial_transaction_transaction_id"
         );
-        doThrow(writerFailure).when(transactionIntakeWriter)
-                .saveAndLink(RECORD_ID, command);
+        doThrow(writerFailure).when(completionService)
+                .complete(RECORD_ID, command);
         when(idempotencyService.fail(
                 RECORD_ID,
                 TransactionIntakeService.DUPLICATE_TRANSACTION
@@ -216,8 +226,8 @@ class TransactionIntakeServiceTest {
         ValidatedTransactionCommand command = stubAcquired();
         RuntimeException writerFailure =
                 new IllegalStateException("transaction link failed");
-        doThrow(writerFailure).when(transactionIntakeWriter)
-                .saveAndLink(RECORD_ID, command);
+        doThrow(writerFailure).when(completionService)
+                .complete(RECORD_ID, command);
         when(idempotencyService.fail(
                 RECORD_ID,
                 TransactionIntakeService.TRANSACTION_INTAKE_FAILED
@@ -238,8 +248,8 @@ class TransactionIntakeServiceTest {
         );
         RuntimeException transitionFailure =
                 new IllegalStateException("failed transition unavailable");
-        doThrow(writerFailure).when(transactionIntakeWriter)
-                .saveAndLink(RECORD_ID, command);
+        doThrow(writerFailure).when(completionService)
+                .complete(RECORD_ID, command);
         when(idempotencyService.fail(
                 RECORD_ID,
                 TransactionIntakeService.DUPLICATE_TRANSACTION
@@ -285,8 +295,8 @@ class TransactionIntakeServiceTest {
             DataIntegrityViolationException writerFailure
     ) {
         ValidatedTransactionCommand command = stubAcquired();
-        doThrow(writerFailure).when(transactionIntakeWriter)
-                .saveAndLink(RECORD_ID, command);
+        doThrow(writerFailure).when(completionService)
+                .complete(RECORD_ID, command);
         when(idempotencyService.fail(
                 RECORD_ID,
                 TransactionIntakeService.TRANSACTION_INTAKE_FAILED
@@ -342,6 +352,18 @@ class TransactionIntakeServiceTest {
                 command.recipientAccountRef(),
                 command.channel().name(),
                 command.deviceRef()
+        );
+    }
+
+    private TransactionIntakeSnapshot snapshot() {
+        return new TransactionIntakeSnapshot(
+                command().transactionId(),
+                TransactionProcessingStatus.RECEIVED,
+                null,
+                null,
+                null,
+                null,
+                Instant.parse("2026-07-23T01:15:31Z")
         );
     }
 

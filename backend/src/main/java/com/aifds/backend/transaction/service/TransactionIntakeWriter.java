@@ -8,8 +8,8 @@ import com.aifds.backend.idempotency.repository.IdempotencyRecordRepository;
 import com.aifds.backend.transaction.command.ValidatedTransactionCommand;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.aifds.backend.transaction.repository.FinancialTransactionRepository;
+import jakarta.persistence.EntityManager;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
@@ -17,17 +17,20 @@ public class TransactionIntakeWriter {
 
     private final FinancialTransactionRepository financialTransactionRepository;
     private final IdempotencyRecordRepository idempotencyRecordRepository;
+    private final EntityManager entityManager;
 
     public TransactionIntakeWriter(
             FinancialTransactionRepository financialTransactionRepository,
-            IdempotencyRecordRepository idempotencyRecordRepository
+            IdempotencyRecordRepository idempotencyRecordRepository,
+            EntityManager entityManager
     ) {
         this.financialTransactionRepository = financialTransactionRepository;
         this.idempotencyRecordRepository = idempotencyRecordRepository;
+        this.entityManager = entityManager;
     }
 
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public TransactionIntakeResult.Received saveAndLink(
+    @Transactional
+    public PersistedTransactionIntake saveAndLink(
             long idempotencyRecordId,
             ValidatedTransactionCommand command
     ) {
@@ -60,13 +63,15 @@ public class TransactionIntakeWriter {
         );
         FinancialTransaction saved =
                 financialTransactionRepository.saveAndFlush(transaction);
+        entityManager.refresh(saved);
 
         record.linkTransaction(saved);
         idempotencyRecordRepository.saveAndFlush(record);
 
-        return new TransactionIntakeResult.Received(
+        return new PersistedTransactionIntake(
                 saved.getTransactionId(),
-                idempotencyRecordId
+                saved.getProcessingStatus(),
+                saved.getCreatedAt()
         );
     }
 }

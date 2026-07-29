@@ -1,28 +1,15 @@
 package com.aifds.backend.transaction.service;
 
-import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
-
 import java.util.Objects;
 import java.util.UUID;
 
 public sealed interface TransactionIntakeResult {
 
-    record Received(
-            UUID transactionId,
-            long idempotencyRecordId
-    ) implements TransactionIntakeResult {
+    record Received(TransactionIntakeSnapshot snapshot)
+            implements TransactionIntakeResult {
 
         public Received {
-            Objects.requireNonNull(transactionId, "transactionId must not be null");
-            if (idempotencyRecordId <= 0) {
-                throw new IllegalArgumentException(
-                        "idempotencyRecordId must be positive"
-                );
-            }
-        }
-
-        public TransactionProcessingStatus processingStatus() {
-            return TransactionProcessingStatus.RECEIVED;
+            Objects.requireNonNull(snapshot, "snapshot must not be null");
         }
     }
 
@@ -32,25 +19,17 @@ public sealed interface TransactionIntakeResult {
     record InProgress() implements TransactionIntakeResult {
     }
 
-    record CompletedReplay(
-            String responseSnapshotJson
-    ) implements TransactionIntakeResult {
+    record CompletedReplay(TransactionIntakeSnapshot snapshot)
+            implements TransactionIntakeResult {
 
         public CompletedReplay {
-            Objects.requireNonNull(
-                    responseSnapshotJson,
-                    "responseSnapshotJson must not be null"
-            );
+            Objects.requireNonNull(snapshot, "snapshot must not be null");
         }
     }
 
     record PreviousFailure(
             String failureCode
     ) implements TransactionIntakeResult {
-
-        public PreviousFailure {
-            Objects.requireNonNull(failureCode, "failureCode must not be null");
-        }
     }
 
     record DuplicateTransaction(

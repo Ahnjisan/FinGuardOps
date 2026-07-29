@@ -253,9 +253,17 @@ deviceRef
 
 거래 접수의 요청 지문, 처리 상태, 완료 응답 snapshot, Unique 범위와 만료 저장 구조는 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따른다.
 
+거래 접수에서 `FAILED`인 같은 키·같은 지문의 요청은 자동 재실행하지 않는다. 저장된 `failureCode`는 외부 code, message 또는 HTTP 상태로 동적으로 사용하지 않고 다음 공개 whitelist만 고정 매핑한다.
+
+| 저장된 `failureCode` | HTTP 상태 | 공개 code | 공개 message |
+| --- | --- | --- | --- |
+| `DUPLICATE_TRANSACTION` | `409 Conflict` | `DUPLICATE_TRANSACTION` | `이미 존재하는 transactionId입니다.` |
+| `DEPENDENCY_TIMEOUT` | `503 Service Unavailable` | `DEPENDENCY_TIMEOUT` | `탐지 서비스를 사용할 수 없습니다.` |
+
+null, 빈 값, 알 수 없는 값과 `TRANSACTION_INTAKE_FAILED` 같은 내부 전용 값은 `500 Internal Server Error`, `INTERNAL_ERROR`, `요청을 처리하는 중 오류가 발생했습니다.`로 축약한다. 내부 `failureCode`는 오류 응답이나 로그에 노출하지 않는다.
+
 다음 항목은 후속 구현 전에 추가 결정한다.
 
-- `FAILED`인 같은 키·같은 지문의 재시도 또는 기존 실패 반환 정책
 - 만료 기록 정리 주기와 경합 처리
 - 재시도와 늦은 FastAPI 응답의 경합 처리
 

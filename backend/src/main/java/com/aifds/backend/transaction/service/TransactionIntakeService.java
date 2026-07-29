@@ -27,18 +27,21 @@ public class TransactionIntakeService {
     private final IdempotencyKeyValidator idempotencyKeyValidator;
     private final TransactionRequestValidator transactionRequestValidator;
     private final IdempotencyService idempotencyService;
-    private final TransactionIntakeWriter transactionIntakeWriter;
+    private final TransactionIntakeCompletionService completionService;
+    private final TransactionIntakeSnapshotCodec snapshotCodec;
 
     public TransactionIntakeService(
             IdempotencyKeyValidator idempotencyKeyValidator,
             TransactionRequestValidator transactionRequestValidator,
             IdempotencyService idempotencyService,
-            TransactionIntakeWriter transactionIntakeWriter
+            TransactionIntakeCompletionService completionService,
+            TransactionIntakeSnapshotCodec snapshotCodec
     ) {
         this.idempotencyKeyValidator = idempotencyKeyValidator;
         this.transactionRequestValidator = transactionRequestValidator;
         this.idempotencyService = idempotencyService;
-        this.transactionIntakeWriter = transactionIntakeWriter;
+        this.completionService = completionService;
+        this.snapshotCodec = snapshotCodec;
     }
 
     public TransactionIntakeResult receive(
@@ -65,7 +68,7 @@ public class TransactionIntakeService {
         }
         if (claimResult instanceof IdempotencyClaimResult.Completed completed) {
             return new TransactionIntakeResult.CompletedReplay(
-                    completed.responseSnapshotJson()
+                    snapshotCodec.decode(completed.responseSnapshotJson())
             );
         }
         if (claimResult instanceof IdempotencyClaimResult.Failed failed) {
@@ -84,7 +87,7 @@ public class TransactionIntakeService {
             ValidatedTransactionCommand command
     ) {
         try {
-            return transactionIntakeWriter.saveAndLink(
+            return completionService.complete(
                     idempotencyRecordId,
                     command
             );
