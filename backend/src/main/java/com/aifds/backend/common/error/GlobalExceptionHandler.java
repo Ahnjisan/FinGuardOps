@@ -1,5 +1,6 @@
 package com.aifds.backend.common.error;
 
+import com.aifds.backend.common.trace.TraceIdFilter;
 import com.aifds.backend.idempotency.exception.IdempotencyCompletionTransactionNotFoundException;
 import com.aifds.backend.idempotency.exception.IdempotencyRecordNotFoundException;
 import com.aifds.backend.idempotency.exception.IdempotencyStateTransitionNotAllowedException;
@@ -7,6 +8,7 @@ import com.aifds.backend.transaction.validation.IdempotencyKeyValidator;
 import com.aifds.backend.transaction.validation.TransactionRequestValidator;
 import com.aifds.backend.transaction.validation.TransactionValidationException;
 import com.aifds.backend.transaction.validation.TransactionValidationType;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.FieldError;
@@ -43,7 +45,8 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(HttpMessageNotReadableException.class)
     ResponseEntity<ApiErrorResponse> handleHttpMessageNotReadable(
-            HttpMessageNotReadableException exception
+            HttpMessageNotReadableException exception,
+            HttpServletRequest request
     ) {
         Optional<TransactionValidationException> validationException =
                 findCause(exception, TransactionValidationException.class);
@@ -51,15 +54,17 @@ public class GlobalExceptionHandler {
         if (validationException.isPresent()) {
             return validationResponse(
                     HttpStatus.BAD_REQUEST,
-                    List.of(toFieldError(validationException.get()))
+                    List.of(toFieldError(validationException.get())),
+                    request
             );
         }
-        return validationResponse(HttpStatus.BAD_REQUEST, List.of());
+        return validationResponse(HttpStatus.BAD_REQUEST, List.of(), request);
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
     ResponseEntity<ApiErrorResponse> handleMethodArgumentNotValid(
-            MethodArgumentNotValidException exception
+            MethodArgumentNotValidException exception,
+            HttpServletRequest request
     ) {
         List<FieldErrorResponse> fieldErrors = new ArrayList<>();
         for (FieldError fieldError : exception.getBindingResult().getFieldErrors()) {
@@ -74,12 +79,17 @@ public class GlobalExceptionHandler {
                 ));
             }
         }
-        return validationResponse(HttpStatus.BAD_REQUEST, fieldErrors);
+        return validationResponse(
+                HttpStatus.BAD_REQUEST,
+                fieldErrors,
+                request
+        );
     }
 
     @ExceptionHandler(MissingRequestHeaderException.class)
     ResponseEntity<ApiErrorResponse> handleMissingRequestHeader(
-            MissingRequestHeaderException exception
+            MissingRequestHeaderException exception,
+            HttpServletRequest request
     ) {
         if (IDEMPOTENCY_KEY_HEADER.equalsIgnoreCase(
                 exception.getHeaderName()
@@ -90,34 +100,39 @@ public class GlobalExceptionHandler {
                             IDEMPOTENCY_KEY_HEADER,
                             IdempotencyKeyValidator.IDEMPOTENCY_KEY_REQUIRED,
                             IDEMPOTENCY_KEY_REQUIRED_REASON
-                    ))
+                    )),
+                    request
             );
         }
-        return validationResponse(HttpStatus.BAD_REQUEST, List.of());
+        return validationResponse(HttpStatus.BAD_REQUEST, List.of(), request);
     }
 
     @ExceptionHandler(TransactionValidationException.class)
     ResponseEntity<ApiErrorResponse> handleTransactionValidation(
-            TransactionValidationException exception
+            TransactionValidationException exception,
+            HttpServletRequest request
     ) {
         HttpStatus status = exception.getType() == TransactionValidationType.DOMAIN
                 ? HttpStatus.UNPROCESSABLE_ENTITY
                 : HttpStatus.BAD_REQUEST;
         return validationResponse(
                 status,
-                List.of(toFieldError(exception))
+                List.of(toFieldError(exception)),
+                request
         );
     }
 
     @ExceptionHandler(IdempotencyStateTransitionNotAllowedException.class)
     ResponseEntity<ApiErrorResponse> handleStateTransitionNotAllowed(
-            IdempotencyStateTransitionNotAllowedException exception
+            IdempotencyStateTransitionNotAllowedException exception,
+            HttpServletRequest request
     ) {
         return response(
                 HttpStatus.CONFLICT,
                 STATE_TRANSITION_NOT_ALLOWED,
                 STATE_TRANSITION_MESSAGE,
-                List.of()
+                List.of(),
+                request
         );
     }
 
@@ -126,36 +141,43 @@ public class GlobalExceptionHandler {
             IdempotencyCompletionTransactionNotFoundException.class
     })
     ResponseEntity<ApiErrorResponse> handleInternalIdempotencyException(
-            RuntimeException exception
+            RuntimeException exception,
+            HttpServletRequest request
     ) {
-        return internalErrorResponse();
+        return internalErrorResponse(request);
     }
 
     @ExceptionHandler(Exception.class)
     ResponseEntity<ApiErrorResponse> handleUnexpectedException(
-            Exception exception
+            Exception exception,
+            HttpServletRequest request
     ) {
-        return internalErrorResponse();
+        return internalErrorResponse(request);
     }
 
     private ResponseEntity<ApiErrorResponse> validationResponse(
             HttpStatus status,
-            List<FieldErrorResponse> fieldErrors
+            List<FieldErrorResponse> fieldErrors,
+            HttpServletRequest request
     ) {
         return response(
                 status,
                 VALIDATION_ERROR,
                 VALIDATION_MESSAGE,
-                fieldErrors
+                fieldErrors,
+                request
         );
     }
 
-    private ResponseEntity<ApiErrorResponse> internalErrorResponse() {
+    private ResponseEntity<ApiErrorResponse> internalErrorResponse(
+            HttpServletRequest request
+    ) {
         return response(
                 HttpStatus.INTERNAL_SERVER_ERROR,
                 INTERNAL_ERROR,
                 INTERNAL_ERROR_MESSAGE,
-                List.of()
+                List.of(),
+                request
         );
     }
 
@@ -163,15 +185,26 @@ public class GlobalExceptionHandler {
             HttpStatus status,
             String code,
             String message,
-            List<FieldErrorResponse> fieldErrors
+            List<FieldErrorResponse> fieldErrors,
+            HttpServletRequest request
     ) {
         ApiErrorResponse response = new ApiErrorResponse(
                 code,
                 message,
-                null,
+                currentTraceId(request),
                 fieldErrors
         );
         return ResponseEntity.status(status).body(response);
+    }
+
+    private String currentTraceId(HttpServletRequest request) {
+        if (request == null) {
+            return null;
+        }
+        Object traceId = request.getAttribute(
+                TraceIdFilter.TRACE_ID_REQUEST_ATTRIBUTE
+        );
+        return traceId instanceof String value ? value : null;
     }
 
     private FieldErrorResponse toFieldError(
