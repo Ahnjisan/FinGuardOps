@@ -113,7 +113,7 @@ DB 관계와 저장에 사용하는 내부 식별자와 API·로그·업무 조�
 
 ## 5. 페이지네이션
 
-### 5.1 초기 권장 방식
+### 5.1 기본 방식
 
 초기 목록 API는 다음 쿼리 파라미터를 우선 사용한다.
 
@@ -129,19 +129,21 @@ sort
 GET /api/v1/transactions?page=0&size=20&sort=occurredAt,desc
 ```
 
-권장 계약 후보:
+공통 계약:
 
-- `page`: 0부터 시작하는 페이지 번호
-- `size`: 한 페이지 항목 수
+- `page`: 0부터 시작하는 페이지 번호이며 기본값은 `0`이다.
+- `size`: 한 페이지 항목 수이며 기본값은 `20`, 최댓값은 `100`이다.
 - `sort`: `field,direction` 형식
-- 여러 정렬 조건이 필요하면 `sort`를 반복한다.
 - 정렬 방향은 `asc` 또는 `desc`를 사용한다.
-- 정렬 필드는 API가 허용 목록으로 제한한다.
+- 정렬 필드, 기본 정렬과 단일·복수 정렬 허용 여부는 각 API 계약의 허용 목록으로 제한한다.
+- API 계약이 복수 정렬을 명시하지 않으면 반복된 `sort` 또는 다중 정렬을 허용하지 않는다.
 - 같은 정렬값을 가진 항목의 순서를 안정적으로 유지하기 위해 업무 식별자 등의 보조 정렬키를 적용한다.
 
-`page` 시작값, 기본 `size`, 최대 `size`와 API별 허용 정렬 필드는 구현 전에 사용자 승인이 필요하다.
+- `page`가 정수가 아니거나 `size`의 숫자 형식이 잘못되면 `400 Bad Request`와 `VALIDATION_ERROR`를 반환한다.
+- `page`가 음수이거나 `size`가 1보다 작거나 100보다 크면 `422 Unprocessable Entity`와 `VALIDATION_ERROR`를 반환한다.
+- 클라이언트가 요청할 수 있는 정렬 필드는 전 API 공통 JPA 필드가 아니며 각 API의 외부 계약 이름으로 정의한다.
 
-페이지 응답의 공통 후보는 다음과 같다.
+페이지 응답의 공통 구조는 다음과 같다.
 
 ```json
 {
@@ -315,9 +317,9 @@ null, 빈 값, 알 수 없는 값과 `TRANSACTION_INTAKE_FAILED` 같은 내부 �
 }
 ```
 
-### 7.2 오류 코드 후보
+### 7.2 오류 코드
 
-| 오류 코드 | 의미 | HTTP 상태 후보 |
+| 오류 코드 | 의미 | HTTP 상태 |
 | --- | --- | --- |
 | `VALIDATION_ERROR` | JSON 파싱, 필수 헤더, 필드 형식 또는 도메인 입력 검증 실패 | 형식 오류는 `400 Bad Request`, 형식이 맞는 도메인 규칙 위반은 `422 Unprocessable Entity` |
 | `RESOURCE_NOT_FOUND` | 요청한 거래 또는 탐지 결과가 없음 | `404 Not Found` |
@@ -328,9 +330,12 @@ null, 빈 값, 알 수 없는 값과 `TRANSACTION_INTAKE_FAILED` 같은 내부 �
 | `STATE_TRANSITION_NOT_ALLOWED` | 현재 상태에서 요청한 상태나 처리를 허용할 수 없음 | `409 Conflict` |
 | `CONCURRENT_MODIFICATION` | 더 최신 변경과 충돌해 요청을 적용할 수 없음 | `409 Conflict` |
 | `DEPENDENCY_TIMEOUT` | 필수 의존 서비스가 제한 시간 안에 결과를 반환하지 않음 | `503 Service Unavailable` |
+| `DEPENDENCY_UNAVAILABLE` | 필수 의존 서비스나 저장소의 연결 실패 또는 명확한 일시적 가용성 장애 | `503 Service Unavailable` |
 | `INTERNAL_ERROR` | 공개할 수 없는 예기치 않은 서버 오류 | `500 Internal Server Error` |
 
 JSON·필수 헤더·필드 형식 오류와 도메인 규칙 위반을 구분하되 모두 `VALIDATION_ERROR`를 사용할 수 있다. 더 세분화된 최상위 오류 코드가 필요한지는 후속 Validation·OpenAPI 설계에서 결정한다.
+
+`DEPENDENCY_TIMEOUT`은 제한 시간 초과로 명확히 분류된 실패에만 사용한다. `DEPENDENCY_UNAVAILABLE`은 DB 연결 실패처럼 연결 또는 일시적 가용성 장애로 명확히 분류된 실패에 사용한다. 그 밖의 원인을 확정할 수 없는 `DataAccessException`과 예상하지 못한 서버 오류는 `500 Internal Server Error`와 `INTERNAL_ERROR`로 축약한다. 내부 예외 메시지, SQL, 테이블명, 컬럼명과 요청 원문은 공개 오류 응답에 포함하지 않는다.
 
 ### 7.3 HTTP 상태 코드 기준
 
@@ -405,7 +410,6 @@ OpenTelemetry, W3C Trace Context의 `traceparent`, 외부 HTTP 호출, Kafka와 
 
 ## 9. 사용자 결정 필요 항목
 
-- 페이지 번호 시작값, 기본·최대 `size`와 허용 정렬 필드
 - `FAILED` 멱등 요청의 같은 키 재전송 정책과 만료 기록 정리 방식
 - Validation 오류의 최상위 오류 코드를 더 세분화할지
 - `fieldErrors.code`의 코드 목록과 버전 관리 방식
