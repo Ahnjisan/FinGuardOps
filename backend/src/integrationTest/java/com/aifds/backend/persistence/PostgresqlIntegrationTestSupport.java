@@ -28,6 +28,7 @@ abstract class PostgresqlIntegrationTestSupport {
 
     @AfterEach
     void cleanDatabase() {
+        cleanupJdbcTemplate.update("DELETE FROM behavior_event");
         cleanupJdbcTemplate.update("DELETE FROM idempotency_record");
         cleanupJdbcTemplate.update("DELETE FROM financial_transaction");
     }

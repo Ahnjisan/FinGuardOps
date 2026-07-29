@@ -1,5 +1,12 @@
 package com.aifds.backend.common.error;
 
+import com.aifds.backend.behavior.exception.BehaviorEventConcurrentResultNotFoundException;
+import com.aifds.backend.behavior.exception.BehaviorEventDependencyTimeoutException;
+import com.aifds.backend.behavior.exception.BehaviorEventDependencyUnavailableException;
+import com.aifds.backend.behavior.exception.BehaviorEventTransactionNotFoundException;
+import com.aifds.backend.behavior.exception.DuplicateBehaviorEventException;
+import com.aifds.backend.behavior.validation.BehaviorEventValidationException;
+import com.aifds.backend.behavior.validation.BehaviorEventValidationType;
 import com.aifds.backend.common.trace.TraceIdFilter;
 import com.aifds.backend.idempotency.exception.IdempotencyCompletionTransactionNotFoundException;
 import com.aifds.backend.idempotency.exception.IdempotencyRecordNotFoundException;
@@ -42,6 +49,7 @@ public class GlobalExceptionHandler {
             "IDEMPOTENCY_REQUEST_IN_PROGRESS";
     static final String DUPLICATE_TRANSACTION =
             "DUPLICATE_TRANSACTION";
+    static final String DUPLICATE_EVENT = "DUPLICATE_EVENT";
     static final String DEPENDENCY_TIMEOUT = "DEPENDENCY_TIMEOUT";
     static final String DEPENDENCY_UNAVAILABLE = "DEPENDENCY_UNAVAILABLE";
     static final String RESOURCE_NOT_FOUND = "RESOURCE_NOT_FOUND";
@@ -56,12 +64,18 @@ public class GlobalExceptionHandler {
             "같은 멱등 요청이 처리 중입니다.";
     static final String DUPLICATE_TRANSACTION_MESSAGE =
             "이미 존재하는 transactionId입니다.";
+    static final String DUPLICATE_EVENT_MESSAGE =
+            "같은 eventId에 다른 이벤트 내용이 요청되었습니다.";
     static final String DEPENDENCY_TIMEOUT_MESSAGE =
             "탐지 서비스를 사용할 수 없습니다.";
     static final String QUERY_DEPENDENCY_TIMEOUT_MESSAGE =
             "조회 요청이 제한 시간 안에 완료되지 않았습니다.";
     static final String DEPENDENCY_UNAVAILABLE_MESSAGE =
             "조회 저장소를 일시적으로 사용할 수 없습니다.";
+    static final String BEHAVIOR_DEPENDENCY_TIMEOUT_MESSAGE =
+            "행동 이벤트 저장소 요청이 제한 시간 안에 완료되지 않았습니다.";
+    static final String BEHAVIOR_DEPENDENCY_UNAVAILABLE_MESSAGE =
+            "행동 이벤트 저장소를 일시적으로 사용할 수 없습니다.";
     static final String RESOURCE_NOT_FOUND_MESSAGE =
             "요청한 거래를 찾을 수 없습니다.";
     static final String INTERNAL_ERROR_MESSAGE =
@@ -83,6 +97,15 @@ public class GlobalExceptionHandler {
             return validationResponse(
                     HttpStatus.BAD_REQUEST,
                     List.of(toFieldError(validationException.get())),
+                    request
+            );
+        }
+        Optional<BehaviorEventValidationException> behaviorValidation =
+                findCause(exception, BehaviorEventValidationException.class);
+        if (behaviorValidation.isPresent()) {
+            return validationResponse(
+                    HttpStatus.BAD_REQUEST,
+                    List.of(toFieldError(behaviorValidation.get())),
                     request
             );
         }
@@ -143,6 +166,22 @@ public class GlobalExceptionHandler {
         HttpStatus status = exception.getType() == TransactionValidationType.DOMAIN
                 ? HttpStatus.UNPROCESSABLE_ENTITY
                 : HttpStatus.BAD_REQUEST;
+        return validationResponse(
+                status,
+                List.of(toFieldError(exception)),
+                request
+        );
+    }
+
+    @ExceptionHandler(BehaviorEventValidationException.class)
+    ResponseEntity<ApiErrorResponse> handleBehaviorEventValidation(
+            BehaviorEventValidationException exception,
+            HttpServletRequest request
+    ) {
+        HttpStatus status =
+                exception.getType() == BehaviorEventValidationType.DOMAIN
+                        ? HttpStatus.UNPROCESSABLE_ENTITY
+                        : HttpStatus.BAD_REQUEST;
         return validationResponse(
                 status,
                 List.of(toFieldError(exception)),
@@ -226,6 +265,74 @@ public class GlobalExceptionHandler {
                 List.of(),
                 request
         );
+    }
+
+    @ExceptionHandler(BehaviorEventTransactionNotFoundException.class)
+    ResponseEntity<ApiErrorResponse> handleBehaviorEventTransactionNotFound(
+            BehaviorEventTransactionNotFoundException exception,
+            HttpServletRequest request
+    ) {
+        return response(
+                HttpStatus.NOT_FOUND,
+                RESOURCE_NOT_FOUND,
+                RESOURCE_NOT_FOUND_MESSAGE,
+                List.of(),
+                request
+        );
+    }
+
+    @ExceptionHandler(DuplicateBehaviorEventException.class)
+    ResponseEntity<ApiErrorResponse> handleDuplicateBehaviorEvent(
+            DuplicateBehaviorEventException exception,
+            HttpServletRequest request
+    ) {
+        return response(
+                HttpStatus.CONFLICT,
+                DUPLICATE_EVENT,
+                DUPLICATE_EVENT_MESSAGE,
+                List.of(new FieldErrorResponse(
+                        "eventId",
+                        "EVENT_ID_ALREADY_USED",
+                        "이미 다른 내용으로 저장된 이벤트 식별자입니다."
+                )),
+                request
+        );
+    }
+
+    @ExceptionHandler(BehaviorEventDependencyTimeoutException.class)
+    ResponseEntity<ApiErrorResponse> handleBehaviorEventDependencyTimeout(
+            BehaviorEventDependencyTimeoutException exception,
+            HttpServletRequest request
+    ) {
+        return response(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                DEPENDENCY_TIMEOUT,
+                BEHAVIOR_DEPENDENCY_TIMEOUT_MESSAGE,
+                List.of(),
+                request
+        );
+    }
+
+    @ExceptionHandler(BehaviorEventDependencyUnavailableException.class)
+    ResponseEntity<ApiErrorResponse> handleBehaviorEventDependencyUnavailable(
+            BehaviorEventDependencyUnavailableException exception,
+            HttpServletRequest request
+    ) {
+        return response(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                DEPENDENCY_UNAVAILABLE,
+                BEHAVIOR_DEPENDENCY_UNAVAILABLE_MESSAGE,
+                List.of(),
+                request
+        );
+    }
+
+    @ExceptionHandler(BehaviorEventConcurrentResultNotFoundException.class)
+    ResponseEntity<ApiErrorResponse> handleBehaviorEventInternalInconsistency(
+            BehaviorEventConcurrentResultNotFoundException exception,
+            HttpServletRequest request
+    ) {
+        return internalErrorResponse(request);
     }
 
     @ExceptionHandler(TransactionQueryTimeoutException.class)
@@ -318,6 +425,16 @@ public class GlobalExceptionHandler {
 
     private FieldErrorResponse toFieldError(
             TransactionValidationException exception
+    ) {
+        return new FieldErrorResponse(
+                exception.getField(),
+                exception.getCode(),
+                exception.getReason()
+        );
+    }
+
+    private FieldErrorResponse toFieldError(
+            BehaviorEventValidationException exception
     ) {
         return new FieldErrorResponse(
                 exception.getField(),

@@ -65,14 +65,20 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
     private ObjectMapper objectMapper;
 
     @Test
-    void appliesV1MigrationToEmptyPostgresql() {
+    void appliesAllMigrationsToEmptyPostgresql() {
         MigrationInfo[] appliedMigrations = flyway.info().applied();
 
         assertThat(jdbcTemplate.queryForObject("SELECT 1", Integer.class)).isEqualTo(1);
-        assertThat(appliedMigrations).hasSize(1);
+        assertThat(appliedMigrations).hasSize(2);
         assertThat(appliedMigrations[0].getVersion().getVersion()).isEqualTo("1");
         assertThat(appliedMigrations[0].getState()).isEqualTo(MigrationState.SUCCESS);
-        assertThat(tableNames()).contains("financial_transaction", "idempotency_record");
+        assertThat(appliedMigrations[1].getVersion().getVersion()).isEqualTo("2");
+        assertThat(appliedMigrations[1].getState()).isEqualTo(MigrationState.SUCCESS);
+        assertThat(tableNames()).contains(
+                "financial_transaction",
+                "idempotency_record",
+                "behavior_event"
+        );
     }
 
     @Test

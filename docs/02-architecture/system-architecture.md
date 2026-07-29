@@ -30,9 +30,13 @@
 - 백엔드 Health Check Controller·Service·DTO
 - Health Controller 통합 테스트와 Health Service 단위 테스트
 - Health Check API 문서
+- 거래 접수·목록·상세 조회 API와 거래 멱등성 처리
+- Flyway 기반 금융거래·거래 멱등성·행동 이벤트 PostgreSQL 스키마
+- 9개 유형의 행동 이벤트 접수, 거래 정합성 검증과 `eventId` 자연 멱등성
+- 공통 오류 응답과 `TraceIdFilter`
 - Issue 및 Pull Request 템플릿
 
-현재 백엔드는 Health Check 범위만 구현되어 있다. 거래, 행동 이벤트, 탐지, 사건, Rule, 감사, AI 운영 도메인은 아직 구현되지 않았다.
+현재 백엔드는 Health Check, 거래 접수·조회와 행동 이벤트 접수를 구현한다. 행동 이벤트 조회, 탐지, 사건, Rule, 감사와 AI 운영 도메인은 아직 구현되지 않았다.
 
 ### 2.2 문서로 정의됨
 

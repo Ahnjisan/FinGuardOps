@@ -1,0 +1,13 @@
+package com.aifds.backend.behavior.entity;
+
+public enum BehaviorEventType {
+    LOGIN,
+    LOGIN_FAILED,
+    DEVICE_REGISTERED,
+    PASSWORD_CHANGED,
+    OTP_REISSUED,
+    BENEFICIARY_REGISTERED,
+    TRANSFER_LIMIT_CHANGED,
+    TRANSFER_REQUESTED,
+    ATM_WITHDRAWAL_REQUESTED
+}

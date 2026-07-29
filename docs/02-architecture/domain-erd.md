@@ -324,24 +324,16 @@ ATM_WITHDRAWAL_REQUESTED
 | 내부 식별자 | 관계 연결을 위한 내부 식별자 후보 |
 | `eventId` | 중복 수신과 재처리를 구분하는 업무 식별자 |
 | `externalCustomerRef` | 외부 고객 연결 참조값 |
+| `accountRef` | 행동의 기준이 되는 고객 측 계좌 참조값. 수취인 참조와 구분 |
 | 관련 거래 내부 식별자 또는 `transactionId` | 거래와 연결되는 이벤트에만 사용하는 선택 참조 |
 | `eventType` | 지원 행동 이벤트 유형 |
 | `occurredAt` | 행동이 실제 발생한 시각 |
 | `deviceRef` | 기기 원문 대신 사용하는 참조값 후보 |
-| IP·지역 요약 후보 | 원문 IP가 아닌 국가·지역, 해외 여부, 위험 여부 등 최소 신호 후보 |
-| 공통 결과·채널 후보 | 성공 여부, 발생 채널 등 여러 이벤트에 공통인 제한된 속성 |
-| 유형별 상세 후보 | 한도 변경 전후 값, 수취인 등록 참조 등 이벤트별 상세 |
+| `beneficiaryRef` | `BENEFICIARY_REGISTERED`에서 새로 등록된 수취인 참조값 |
+| `requestFingerprint` | 승인된 8개 REST 요청 필드의 결정적 정규화 SHA-256 |
 | `createdAt` | 수집·저장 시각 |
 
-이벤트 상세 모델은 다음 대안을 비교해야 한다.
-
-| 방식 | 장점 | 단점 |
-| --- | --- | --- |
-| 모든 상세를 하나의 JSON 후보에 저장 | 이벤트 유형 추가가 쉽고 초기 구현이 단순함 | 필수값 검증, 검색, 인덱싱과 민감정보 통제가 어려움 |
-| 유형별 전용 상세 구조 | 타입별 정합성과 조회가 명확함 | 엔티티·테이블 수와 구현 복잡도가 증가함 |
-| 공통 속성 + 제한된 확장 상세 | 공통 검색을 유지하면서 일부 변화에 대응 가능 | 공통/확장 경계를 정하고 허용 필드를 통제해야 함 |
-
-초기 권장안은 고객 참조, 유형, 발생 시각, 기기 참조 등 공통 조회 속성을 명시적으로 두고, 실제 Rule에 필요한 제한된 유형별 상세만 추가하는 방식이다. 무제한 JSON 저장은 권장하지 않으며 구체 구조는 후속 설계에서 승인한다.
+초기 행동 이벤트 접수는 위 명시적 속성만 저장한다. `locationRiskSummary`, `observedSignals`와 자유 형식 `eventDetails`는 포함하지 않는다. `accountRef`는 고객 측 기준 계좌이고 `beneficiaryRef`는 새로 등록된 수취인이므로 의미를 혼합하지 않는다. 유형별 null 조건, 거래 연결 검증과 물리 컬럼은 [`../04-database/behavior-event-intake-schema.md`](../04-database/behavior-event-intake-schema.md)를 따른다.
 
 ### 7.3 DetectionResult
 
@@ -1218,7 +1210,17 @@ caseId
 
 ### 13.2 행동 이벤트
 
-`eventId`를 기준으로 동일 이벤트의 중복 저장을 막는다. 같은 유형과 시각이 비슷하다는 이유만으로 다른 행동을 중복으로 간주하지 않는다.
+REST 행동 이벤트는 호출자 생성 UUID v4 `eventId`를 기준으로 동일 이벤트의 중복 저장을 막는다. 별도 `Idempotency-Key`는 사용하지 않는다.
+
+1. JSON·형식과 이벤트 유형별 Validation을 수행한다.
+2. 관련 `transactionId`가 있으면 거래 존재와 고객·계좌·거래 유형 정합성을 확인한다.
+3. 고정 순서의 8개 요청 필드를 정규화해 SHA-256 fingerprint를 계산한다.
+4. 같은 `eventId`와 같은 fingerprint는 기존 결과를 `200 OK`로 반환한다.
+5. 같은 `eventId`와 다른 fingerprint는 `DUPLICATE_EVENT`로 거부한다.
+6. 다른 `eventId`의 비슷한 유형·시각은 별도 행동으로 저장한다.
+7. 동시 Insert의 패자는 실패한 저장 트랜잭션과 분리된 트랜잭션에서 기존 행을 재조회한다.
+
+REST `BehaviorEvent.eventId`와 향후 도메인 이벤트 Envelope `eventId`는 이름은 같을 수 있지만 각각 행동 Aggregate와 논리 전달 이벤트를 식별하는 서로 다른 경계의 식별자이다.
 
 ### 13.3 탐지 결과
 
@@ -1516,8 +1518,7 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 - 거래 상태별 필수 시각과 실패 사유 구조
 - `adoptedDetectionResultId`의 같은 Transaction 소속을 외래 키·DB 제약·애플리케이션 검증 중 어디까지 보장할지
 - 최종 상태에서 재분석·정정 시 현재 거래 상태를 변경할지 새 이력으로 남길지
-- BehaviorEvent 공통 속성과 유형별 상세의 최종 모델
-- 기기·IP·지역 데이터의 최소 저장 범위
+- 후속 Rule·조회 API에서 추가할 행동 상세와 기기·IP·지역 데이터의 최소 저장 범위
 
 ### 탐지·Rule·외부 위험정보
 
