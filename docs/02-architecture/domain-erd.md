@@ -84,6 +84,7 @@
 - `docs/07-decisions/ADR-001-finguardops-positioning.md`
 - `docs/07-decisions/ADR-002-rename-repository-to-finguardops.md`
 - `docs/07-decisions/ADR-003-transaction-processing-boundary.md`
+- `docs/07-decisions/ADR-004-idempotency-response-snapshot-transition.md`
 
 전용 상태 전이 문서를 상태 모델의 우선 기준으로 사용한다. 따라서 거래에는 처리 상태, 위험 등급과 위험 대응 결과를 별도 속성으로 두고, 사건에는 `caseStatus`와 `finalDisposition`을 별도 속성으로 둔다. AI 리포트 상태도 거래·사건 상태와 독립적으로 관리한다.
 
@@ -116,6 +117,7 @@ FastAPI나 LLM Provider가 반환한 값은 그 자체로 업무 원본이 아�
 - 완료된 정확 일치 캐시 요청은 새 `AiReportRequest` 이력을 만들되 새 실행·Provider 호출·가상 사용량을 만들지 않는다.
 - AI 자동 재시도는 Timeout과 연결 실패에만 최대 1회 적용하고 출력 검증 실패와 비일시적 Provider 오류는 템플릿 fallback으로 전환한다.
 - 거래 접수의 공식 물리 DB 계약은 `docs/04-database/transaction-intake-schema.md`이며, 이 논리 모델의 거래·멱등 후보 중 해당 범위를 구체화한다.
+- 멱등 Snapshot은 최초 명령의 업무 결과를 재현하고 최신 거래·탐지 상태는 별도 조회 API가 제공한다. legacy와 최종 동기 응답 전환은 ADR-004를 따른다.
 
 ## 4. 데이터 모델링 원칙
 
@@ -803,7 +805,7 @@ API에서 캐시 요청의 토큰 합계를 0으로 보여줄 수는 있지만 �
 
 거래 접수에는 방안 B를 채택한다. 동시에 도착한 요청 중 하나만 최초 처리를 획득하고 처리 중·완료·실패 및 완료 응답 snapshot을 거래 상태와 분리하기 위해서다. 다른 API에 같은 테이블을 적용할지는 각 API 물리 계약에서 결정한다.
 
-거래 생성 작업은 `operationScope + idempotencyKey`를 Unique로 관리하고 정규화 요청의 SHA-256 지문, `IN_PROGRESS`·`COMPLETED`·`FAILED` 상태, 결과 거래 참조, 완료 응답 snapshot과 최초 선점부터 24시간인 만료 시각을 저장한다. 정확한 계약은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따른다.
+거래 생성 작업은 `operationScope + idempotencyKey`를 Unique로 관리하고 정규화 요청의 SHA-256 지문, `IN_PROGRESS`·`COMPLETED`·`FAILED` 상태, 결과 거래 참조, 완료 응답 snapshot과 `expiresAt`을 저장한다. 현재 `expiresAt` 값은 최초 선점의 24시간 후이지만 Service 판정과 정리 작업이 없어 실질적인 만료 정책은 시행되지 않는다. Snapshot 전환은 [`ADR-004`](../07-decisions/ADR-004-idempotency-response-snapshot-transition.md), 현재 물리 구조는 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따른다.
 
 ### 7.16 최소 Customer·Account 참조 엔티티 후보
 
@@ -1007,11 +1009,17 @@ erDiagram
 
     IDEMPOTENCY_RECORD {
         bigint idempotencyRecordId PK
-        string idempotencyKey
         string operationScope
+        string idempotencyKey
         string requestFingerprint
-        string processingState
+        string processingStatus
+        bigint financialTransactionRef FK,UK
+        json responseSnapshot
+        string failureCode
         datetime expiresAt
+        datetime createdAt
+        datetime updatedAt
+        datetime finishedAt
     }
 
     TRANSACTION o|--o{ BEHAVIOR_EVENT : "선택적으로 연결"
@@ -1206,12 +1214,12 @@ caseId
 3. `POST:/api/v1/transactions + Idempotency-Key` Unique로 최초 처리를 선점한다.
 4. 동일 키의 지문이 다르면 `IDEMPOTENCY_KEY_CONFLICT`로 거부한다.
 5. 동일 키·동일 지문의 처리가 진행 중이면 `IDEMPOTENCY_REQUEST_IN_PROGRESS`로 거부한다.
-6. 동일 키·동일 지문의 처리가 완료되었으면 `200 OK`로 기존 결과를 반환한다.
+6. 동일 키·동일 지문의 처리가 완료되었으면 현재 legacy Snapshot은 `200 OK`, 신규 envelope는 저장된 최초 확정 HTTP 상태로 기존 업무 결과를 반환한다. 신규 envelope 재생은 후속 구현이 필요하다.
 7. 새 요청만 Transaction을 저장하고 최초 성공에는 `201 Created`를 반환한다.
 
-요청 지문, 완료 응답 snapshot과 24시간 보존은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)의 물리 계약을 따른다.
+요청 지문과 현재 완료 응답 snapshot은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)의 물리 계약을 따른다. DB는 최초 선점 24시간 후를 `expires_at`에 저장하지만 현재 Service는 만료를 판정하지 않고 정리 작업도 없다.
 
-현재 완료 응답 snapshot은 단계적 `RECEIVED`/null 응답을 재생한다. 최종 동기 분석 응답을 도입하기 전에 기존 snapshot의 스키마·재생 호환·만료 데이터 처리 방식을 결정해야 하며, 이 문제는 아직 해결되지 않았다.
+현재 완료 응답 snapshot은 단계적 `RECEIVED`/null 응답을 재생한다. ADR-004는 기존 무버전 Snapshot을 strict legacy codec과 현재 `200 OK`로 그대로 재생하고 소급 갱신하지 않으며, 전환 이후 신규 요청부터 업무 응답·최초 확정 HTTP 상태·응답 스키마 버전·codec 버전·확정 시각을 식별하는 envelope를 저장하도록 결정했다. envelope와 version dispatch는 아직 구현되지 않았다.
 
 ### 13.2 행동 이벤트
 
@@ -1510,7 +1518,7 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 | AiReportExecution | 장애·재시도·결과 재현 기간과 연결 요청·결과 참조를 고려해 보존 |
 | ProviderCallAttempt | 비용 검증과 운영 분석 기간에 맞춰 실제 호출 이력 보존 |
 | AiReport | 현재 결과만 남기지 않고 과거 정상·fallback 결과와 원본 생성 계보 보존. 본문 개인정보 가능성 함께 검토 |
-| IdempotencyRecord | 거래 생성 작업은 최초 선점부터 24시간 보존. 다른 작업 범위는 각 API 계약에서 결정 |
+| IdempotencyRecord | 현재 거래 생성 레코드는 최초 선점 24시간 후를 `expiresAt`에 저장하지만 만료 판정·정리·키 재사용은 미구현. 실제 보존 기간과 다른 작업 범위는 후속 결정 |
 
 법적·규제 보존 기간을 이 개인 프로젝트 문서에서 임의로 확정하지 않는다. 만료 후 물리 삭제, 비식별화 또는 집계만 보존할지와 사건·감사 참조가 있는 데이터의 삭제 제한을 후속 보안·운영 설계에서 결정한다.
 
@@ -1561,8 +1569,8 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 ### 멱등성·동시성·감사
 
 - 거래 외 API에 공통 IdempotencyRecord를 적용할 범위
-- 거래 멱등 기록이 `FAILED`일 때 같은 키 재전송과 재시도 정책
-- 거래 멱등 만료 기록의 정리 주기·batch·경합 처리
+- 거래 멱등 실패 재생에 추가할 공개 오류 whitelist와 실패 응답 Snapshot 필요 여부
+- 거래 멱등의 실제 보존 기간, 만료 후 키 재사용, 정리 주기·batch·경합 처리
 - FraudCase, AiReportExecution과 Rule의 충돌 탐지 방식
 - 충돌 후 자동 재시도, 사용자 재입력 또는 병합 정책
 - AuditLog의 범용 대상 참조와 명시적 외래 키 적용 범위
@@ -1615,6 +1623,7 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 ### 20.3 마이그레이션·DB 제약 설계
 
 - 구현된 `financial_transaction`, `idempotency_record`, `behavior_event` 이후의 탐지·Rule·사건·AI 운영 Flyway Migration 설계
+- ADR-004 신규 Snapshot metadata를 JSONB 내부에 둘지 별도 컬럼으로 둘지와 새 Migration 필요 여부
 - 이 문서의 Unique 후보를 실제 제약으로 적용할 범위
 - `adoptedDetectionResultId`가 같은 Transaction의 DetectionResult만 참조하도록 보장하는 방식
 - 교차 테이블 상태 조건의 한계를 고려한 활성 사건 검증, 중복 상태·별도 활성 관계·DB Trigger와 보조 제약 비교
@@ -1630,7 +1639,7 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 - 시간 범위·목록·집계 조회를 위한 인덱스 순서
 - 데이터 보존·비식별화·파티셔닝 필요 여부
 
-거래·멱등·행동 이벤트 Flyway Migration은 구현되어 있다. 탐지·Rule·사건·AI 운영 DDL과 마이그레이션 파일은 별도 승인 작업에서 작성하며, 거래 접수의 DDL 기준은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)이다.
+거래·멱등·행동 이벤트 Flyway Migration은 구현되어 있다. 위 Mermaid `IDEMPOTENCY_RECORD`는 실제 V1 Migration의 `financial_transaction_id`, `response_snapshot`, `failure_code`, 세 시각 필드와 `processing_status` 명칭을 반영했다. 신규 Snapshot envelope, 별도 버전 metadata 컬럼과 legacy backfill Migration이 구현되었다는 뜻은 아니다. 탐지·Rule·사건·AI 운영 DDL과 마이그레이션 파일은 별도 승인 작업에서 작성하며, 거래 접수의 DDL 기준은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)이다.
 
 ### 20.4 트랜잭션·동시성 설계
 
