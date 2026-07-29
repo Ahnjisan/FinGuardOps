@@ -24,9 +24,5 @@ public sealed interface IdempotencyClaimResult {
     }
 
     record Failed(String failureCode) implements IdempotencyClaimResult {
-
-        public Failed {
-            Objects.requireNonNull(failureCode, "failureCode must not be null");
-        }
     }
 }

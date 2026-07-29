@@ -21,7 +21,7 @@ public class TraceIdFilter extends OncePerRequestFilter {
 
     public static final String TRACE_ID_HEADER = "X-Trace-Id";
     public static final String TRACE_ID_REQUEST_ATTRIBUTE =
-            TraceIdFilter.class.getName() + ".traceId";
+            "com.aifds.backend.common.trace.TraceIdFilter.traceId";
     public static final String TRACE_ID_MDC_KEY = "traceId";
 
     private static final int MIN_TRACE_ID_LENGTH = 8;

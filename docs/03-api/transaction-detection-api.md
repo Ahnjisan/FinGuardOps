@@ -246,18 +246,22 @@ Idempotency-Key: <required>
 - `VALIDATION_FAILED`는 현재 거래 접수의 영속 `processingStatus`에서 제외한다.
 - 모든 Validation을 통과해 최초 저장되는 Transaction의 초기 상태는 `RECEIVED`이다.
 
-### 5.5 성공 응답 필드 후보
+### 5.5 성공 응답 필드
 
-| 필드 | 설명 |
-| --- | --- |
-| `transactionId` | 처리한 거래 업무 식별자 |
-| `processingStatus` | 거래 처리 단계 |
-| `riskLevel` | 채택된 탐지 결과의 위험 등급. 채택 전에는 null 가능 후보 |
-| `riskResponseOutcome` | Spring Boot가 적용한 Mock 위험 대응. 대응 전에는 null 가능 후보 |
-| `adoptedDetectionResultId` | Spring Boot가 채택한 탐지 결과 업무 식별자 |
-| `caseId` | 이번 요청으로 새로 생성되거나 연결된 활성 사건 식별자. 활성 사건이 없으면 null |
-| `createdAt` | 거래 저장 시각 |
-| `traceId` | 요청 처리 흐름 추적 식별자 |
+거래 접수 성공 응답은 다음 여덟 필드를 정확히 포함한다.
+
+| 필드 | 타입 | 현재 거래 접수 값 |
+| --- | --- | --- |
+| `transactionId` | string | 저장된 거래의 UUID v4 업무 식별자 |
+| `processingStatus` | string | `RECEIVED` |
+| `riskLevel` | string 또는 null | 탐지 미구현이므로 명시적 null |
+| `riskResponseOutcome` | string 또는 null | 위험 대응 미구현이므로 명시적 null |
+| `adoptedDetectionResultId` | string 또는 null | 채택 탐지 결과 미구현이므로 명시적 null |
+| `caseId` | string 또는 null | 사건 처리 미구현이므로 명시적 null |
+| `createdAt` | string | DB/JPA 저장 결과의 실제 생성 시각, UTC ISO-8601 |
+| `traceId` | string | 현재 HTTP 요청의 추적 식별자 |
+
+현재 접수 단계에서는 네 nullable 필드를 JSON에서 생략하지 않는다. `riskLevel`과 `riskResponseOutcome`의 비-null Enum은 후속 위험 탐지·대응 계약에서 확정하며, 이번 접수 응답에서는 nullable string으로 취급한다.
 
 ### 5.6 성공 응답 예시
 
@@ -266,29 +270,27 @@ Idempotency-Key: <required>
 ```http
 HTTP/1.1 201 Created
 Content-Type: application/json
-Location: /api/v1/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001
+X-Trace-Id: trace_demo_tx_0001
 ```
 
 ```json
 {
   "transactionId": "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
-  "processingStatus": "ADDITIONAL_AUTH_REQUIRED",
-  "riskLevel": "HIGH",
-  "riskResponseOutcome": "ADDITIONAL_AUTH_REQUIRED",
-  "adoptedDetectionResultId": "det_demo_20260723_0101",
-  "caseId": "case_demo_20260723_0031",
+  "processingStatus": "RECEIVED",
+  "riskLevel": null,
+  "riskResponseOutcome": null,
+  "adoptedDetectionResultId": null,
+  "caseId": null,
   "createdAt": "2026-07-23T01:15:31Z",
   "traceId": "trace_demo_tx_0001"
 }
 ```
 
-이 응답은 Spring Boot가 FastAPI 결과를 그대로 반환한 값이 아니다. Spring Boot가 DetectionResult의 연결·완전성·버전을 검증하고 저장·채택한 뒤 승인된 정책을 적용한 업무 결과이다.
-
-`Location`은 생성된 거래 상세 조회 경로를 제공하는 응답 헤더 후보이다. 응답의 `caseId`는 이번 거래 생성 처리에서 생성되거나 연결된 활성 사건을 뜻하며, 거래의 전체 사건 이력을 단일 사건으로 제한하지 않는다.
+이번 거래 접수 API의 `201 Created` 응답에는 `Location` 헤더를 적용하지 않는다. `X-Trace-Id`는 공통 Trace Filter가 설정하며 응답 body의 `traceId`와 같다.
 
 ### 5.7 멱등성과 중복
 
-- 같은 `Idempotency-Key`와 같은 요청의 최초 처리가 완료되었으면 새 거래·탐지·사건을 생성하지 않고 `200 OK`로 기존 결과를 반환한다.
+- 같은 `Idempotency-Key`와 같은 요청의 최초 처리가 완료되었으면 새 거래·탐지·사건을 생성하지 않고 `200 OK`로 기존 업무 결과를 반환한다. `transactionId`, `processingStatus`, 네 nullable 필드와 `createdAt`은 최초 응답과 같고, `traceId`만 현재 재전송 요청의 값이다.
 - 같은 `Idempotency-Key`와 같은 요청의 최초 처리가 진행 중이면 새 처리를 시작하지 않고 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다.
 - 같은 키에 다른 요청 내용이 오면 `409 Conflict`와 `IDEMPOTENCY_KEY_CONFLICT`를 반환한다.
 - 다른 키로 같은 `transactionId`가 오면 `409 Conflict`와 `DUPLICATE_TRANSACTION`을 반환한다.
@@ -296,6 +298,7 @@ Location: /api/v1/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001
 - 요청 지문은 정규화한 `transactionId`, `transactionType`, `amount`, `currencyCode`, `occurredAt`, `externalCustomerRef`, `senderAccountRef`, `recipientAccountRef`, `channel`, `deviceRef`를 고정 순서 JSON으로 직렬화한 뒤 SHA-256으로 계산한다.
 - `traceId`, `Idempotency-Key`, 내부 PK, 생성·수정 시각, version, 처리 상태와 그 밖의 서버 생성 필드는 지문에서 제외한다.
 - 요청 지문, `IN_PROGRESS`·`COMPLETED`·`FAILED` 상태, 완료 응답 snapshot과 24시간 만료의 물리 저장 기준은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따른다.
+- `eventId` 중복과 `DUPLICATE_EVENT`는 행동 이벤트 API의 책임이며 이 거래 접수 API 범위에 포함하지 않는다.
 
 처리 중인 동일 요청의 응답 예시는 다음과 같다.
 
@@ -313,7 +316,14 @@ Content-Type: application/json
 }
 ```
 
-`FAILED`인 같은 키·같은 요청의 재시도 또는 기존 실패 반환 정책은 후속 장애·재시도 계약에서 결정한다.
+`FAILED`인 같은 키·같은 요청은 자동 재실행하지 않는다. 거래 접수 API가 기존 실패를 공개 응답으로 재현하는 whitelist는 다음과 같다.
+
+| 저장된 `failureCode` | HTTP 상태 | 공개 오류 코드 | 고정 message |
+| --- | --- | --- | --- |
+| `DUPLICATE_TRANSACTION` | `409 Conflict` | `DUPLICATE_TRANSACTION` | `이미 존재하는 transactionId입니다.` |
+| `DEPENDENCY_TIMEOUT` | `503 Service Unavailable` | `DEPENDENCY_TIMEOUT` | `탐지 서비스를 사용할 수 없습니다.` |
+
+저장된 `failureCode`가 null, 빈 값, 알 수 없는 값 또는 내부 전용 값이면 `500 Internal Server Error`, `INTERNAL_ERROR`, `요청을 처리하는 중 오류가 발생했습니다.`로 축약한다. 원래 `failureCode` 문자열을 공개 code나 message로 전달하지 않는다. 현재 거래 저장 또는 멱등 완료의 예기치 않은 실패를 기록하는 내부 코드 `TRANSACTION_INTAKE_FAILED`도 공개 whitelist가 아니므로 `INTERNAL_ERROR`로 처리한다.
 
 ### 5.8 의존 서비스 Timeout
 
@@ -1037,10 +1047,7 @@ Content-Type: application/json
 
 ### 16.2 거래
 
-- `201 Created`의 `Location` 헤더 최종 적용 여부
-- `FAILED` 멱등 요청의 같은 키 재전송 정책과 만료 기록 정리 방식
 - `riskResponseOutcome` Enum 이름
-- 채택 결과가 없는 처리 단계의 null 응답 규칙
 - FastAPI·External Risk Timeout 이후 재시도·복구 정책
 - 오류 응답의 `resource` 최종 이름과 범용 구조
 

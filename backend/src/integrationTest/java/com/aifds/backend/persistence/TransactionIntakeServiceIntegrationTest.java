@@ -17,8 +17,6 @@ import com.aifds.backend.transaction.service.TransactionIntakeResult;
 import com.aifds.backend.transaction.service.TransactionIntakeService;
 import com.aifds.backend.transaction.service.TransactionIntakeWriter;
 import com.aifds.backend.transaction.validation.TransactionValidationException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -60,9 +58,6 @@ class TransactionIntakeServiceIntegrationTest
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
-    @Autowired
-    private ObjectMapper objectMapper;
-
     @Test
     void validationFailuresDoNotClaimOrPersistRows() {
         TransactionCreateRequest valid = request(UUID.randomUUID());
@@ -101,7 +96,7 @@ class TransactionIntakeServiceIntegrationTest
     }
 
     @Test
-    void storesReceivedTransactionAndLinksInProgressRecordWithoutTerminalFields() {
+    void storesReceivedTransactionAndCompletesTypedSnapshot() {
         String key = key("received");
         TransactionCreateRequest request = request(UUID.randomUUID());
 
@@ -111,13 +106,13 @@ class TransactionIntakeServiceIntegrationTest
         assertThat(result).isInstanceOf(TransactionIntakeResult.Received.class);
         TransactionIntakeResult.Received received =
                 (TransactionIntakeResult.Received) result;
-        assertThat(received.transactionId())
+        assertThat(received.snapshot().transactionId())
                 .isEqualTo(UUID.fromString(request.transactionId()));
-        assertThat(received.processingStatus())
+        assertThat(received.snapshot().processingStatus())
                 .isEqualTo(TransactionProcessingStatus.RECEIVED);
 
         FinancialTransaction stored = financialTransactionRepository
-                .findByTransactionId(received.transactionId())
+                .findByTransactionId(received.snapshot().transactionId())
                 .orElseThrow();
         assertThat(stored.getTransactionType())
                 .isEqualTo(TransactionType.ACCOUNT_TRANSFER);
@@ -136,15 +131,37 @@ class TransactionIntakeServiceIntegrationTest
         assertThat(stored.getDeviceRef()).isEqualTo(request.deviceRef());
         assertThat(stored.getProcessingStatus())
                 .isEqualTo(TransactionProcessingStatus.RECEIVED);
+        assertThat(received.snapshot().createdAt())
+                .isEqualTo(stored.getCreatedAt());
 
-        IdempotencyRecord record = idempotencyRecordRepository
-                .findById(received.idempotencyRecordId())
-                .orElseThrow();
+        IdempotencyRecord record = recordByKey(key);
         assertThat(record.getProcessingStatus())
-                .isEqualTo(IdempotencyProcessingStatus.IN_PROGRESS);
-        assertThat(record.getResponseSnapshot()).isNull();
+                .isEqualTo(IdempotencyProcessingStatus.COMPLETED);
+        assertThat(record.getResponseSnapshot().fieldNames())
+                .toIterable()
+                .containsExactlyInAnyOrder(
+                        "transactionId",
+                        "processingStatus",
+                        "riskLevel",
+                        "riskResponseOutcome",
+                        "adoptedDetectionResultId",
+                        "caseId",
+                        "createdAt"
+                );
+        assertThat(record.getResponseSnapshot().get("riskLevel").isNull())
+                .isTrue();
+        assertThat(record.getResponseSnapshot()
+                .get("riskResponseOutcome").isNull()).isTrue();
+        assertThat(record.getResponseSnapshot()
+                .get("adoptedDetectionResultId").isNull()).isTrue();
+        assertThat(record.getResponseSnapshot().get("caseId").isNull())
+                .isTrue();
+        assertThat(record.getResponseSnapshot().has("traceId")).isFalse();
+        assertThat(record.getResponseSnapshot().has("idempotencyRecordId"))
+                .isFalse();
+        assertThat(record.getResponseSnapshot().has("fingerprint")).isFalse();
         assertThat(record.getFailureCode()).isNull();
-        assertThat(record.getFinishedAt()).isNull();
+        assertThat(record.getFinishedAt()).isNotNull();
         assertThat(linkedTransactionId(record.getId())).isEqualTo(stored.getId());
     }
 
@@ -169,7 +186,11 @@ class TransactionIntakeServiceIntegrationTest
 
         assertThat(first).isInstanceOf(TransactionIntakeResult.Received.class);
         assertThat(sameRequest)
-                .isInstanceOf(TransactionIntakeResult.InProgress.class);
+                .isInstanceOf(TransactionIntakeResult.CompletedReplay.class);
+        assertThat(((TransactionIntakeResult.CompletedReplay) sameRequest)
+                .snapshot()).isEqualTo(
+                ((TransactionIntakeResult.Received) first).snapshot()
+        );
         assertThat(conflict)
                 .isInstanceOf(TransactionIntakeResult.KeyConflict.class);
         assertThat(countRows("financial_transaction")).isEqualTo(1);
@@ -185,19 +206,6 @@ class TransactionIntakeServiceIntegrationTest
                         completedKey,
                         completedRequest
                 );
-        ObjectNode snapshot = objectMapper.createObjectNode()
-                .put("transactionId", completedRequest.transactionId())
-                .put("result", "completed");
-        idempotencyService.complete(
-                completedReceived.idempotencyRecordId(),
-                completedReceived.transactionId(),
-                snapshot
-        );
-        IdempotencyClaimResult.Completed storedCompleted =
-                (IdempotencyClaimResult.Completed) idempotencyService.claim(
-                        completedKey,
-                        fingerprintInput(completedRequest)
-                );
 
         TransactionIntakeResult completedReplay =
                 transactionIntakeService.receive(
@@ -207,20 +215,16 @@ class TransactionIntakeServiceIntegrationTest
 
         assertThat(completedReplay)
                 .isEqualTo(new TransactionIntakeResult.CompletedReplay(
-                        storedCompleted.responseSnapshotJson()
+                        completedReceived.snapshot()
                 ));
 
         String failedKey = key("failed");
         TransactionCreateRequest failedRequest = request(UUID.randomUUID());
-        TransactionIntakeResult.Received failedReceived =
-                (TransactionIntakeResult.Received) transactionIntakeService.receive(
+        long failedRecordId = acquiredRecordId(idempotencyService.claim(
                         failedKey,
-                        failedRequest
-                );
-        idempotencyService.fail(
-                failedReceived.idempotencyRecordId(),
-                "DEPENDENCY_TIMEOUT"
-        );
+                        fingerprintInput(failedRequest)
+                ));
+        idempotencyService.fail(failedRecordId, "DEPENDENCY_TIMEOUT");
 
         TransactionIntakeResult previousFailure =
                 transactionIntakeService.receive(failedKey, failedRequest);
@@ -229,8 +233,37 @@ class TransactionIntakeServiceIntegrationTest
                 .isEqualTo(new TransactionIntakeResult.PreviousFailure(
                         "DEPENDENCY_TIMEOUT"
                 ));
-        assertThat(countRows("financial_transaction")).isEqualTo(2);
+        assertThat(countRows("financial_transaction")).isEqualTo(1);
         assertThat(countRows("idempotency_record")).isEqualTo(2);
+    }
+
+    @Test
+    void rollsBackTransactionWhenCompletedTransitionFailsThenFailsClaim() {
+        installCompletionFailureTrigger();
+        String key = key("completion-failure");
+        TransactionCreateRequest request = request(UUID.randomUUID());
+
+        try {
+            assertThatThrownBy(() -> transactionIntakeService.receive(key, request))
+                    .isInstanceOf(JpaSystemException.class)
+                    .satisfies(exception -> {
+                        SQLException sqlException = findSqlException(exception);
+                        assertThatObject(sqlException).isNotNull();
+                        assertThat(sqlException.getSQLState()).isEqualTo("P0001");
+                    });
+        } finally {
+            removeCompletionFailureTrigger();
+        }
+
+        assertThat(countRows("financial_transaction")).isZero();
+        assertThat(countRows("idempotency_record")).isEqualTo(1);
+        IdempotencyRecord record = recordByKey(key);
+        assertThat(record.getProcessingStatus())
+                .isEqualTo(IdempotencyProcessingStatus.FAILED);
+        assertThat(record.getFailureCode())
+                .isEqualTo("TRANSACTION_INTAKE_FAILED");
+        assertThat(record.getResponseSnapshot()).isNull();
+        assertThat(linkedTransactionId(record.getId())).isNull();
     }
 
     @Test
@@ -394,6 +427,39 @@ class TransactionIntakeServiceIntegrationTest
                 """);
         jdbcTemplate.execute(
                 "DROP FUNCTION IF EXISTS fail_transaction_intake_test()"
+        );
+    }
+
+    private void installCompletionFailureTrigger() {
+        jdbcTemplate.execute("""
+                CREATE OR REPLACE FUNCTION fail_intake_completion_test()
+                RETURNS trigger
+                LANGUAGE plpgsql
+                AS $$
+                BEGIN
+                    IF NEW.processing_status = 'COMPLETED' THEN
+                        RAISE EXCEPTION 'forced intake completion failure'
+                            USING ERRCODE = 'P0001';
+                    END IF;
+                    RETURN NEW;
+                END
+                $$
+                """);
+        jdbcTemplate.execute("""
+                CREATE TRIGGER tg_fail_intake_completion_test
+                BEFORE UPDATE ON idempotency_record
+                FOR EACH ROW
+                EXECUTE FUNCTION fail_intake_completion_test()
+                """);
+    }
+
+    private void removeCompletionFailureTrigger() {
+        jdbcTemplate.execute("""
+                DROP TRIGGER IF EXISTS tg_fail_intake_completion_test
+                ON idempotency_record
+                """);
+        jdbcTemplate.execute(
+                "DROP FUNCTION IF EXISTS fail_intake_completion_test()"
         );
     }
 
