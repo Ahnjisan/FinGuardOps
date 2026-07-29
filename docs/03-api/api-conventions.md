@@ -350,17 +350,50 @@ Client
 → FastAPI
 ```
 
-원칙은 다음과 같다.
+### 8.1 HTTP 헤더
 
-- Spring Boot는 유효한 추적 문맥이 없으면 새 `traceId`를 생성한다.
-- 승인된 외부 입력 추적 문맥을 수용할 경우에도 형식과 신뢰 경계를 검증한다.
-- Spring Boot는 External Risk Mock과 FastAPI 요청에 같은 추적 흐름을 연결할 수 있는 값을 전달한다.
-- FastAPI와 External Risk Mock은 로그와 응답에서 해당 흐름을 연결할 수 있어야 한다.
-- Spring Boot는 성공·오류 응답 본문에 클라이언트가 확인할 수 있는 `traceId`를 반환한다.
+Spring Boot가 처리하는 모든 HTTP 요청은 다음 요청·응답 헤더를 사용한다. 기존 Health Check API인 `/api/health`에도 같은 응답 헤더를 적용하되 기존 JSON 본문 구조는 변경하지 않는다.
+
+```http
+X-Trace-Id: <traceId>
+```
+
+- 요청의 `X-Trace-Id`는 선택 사항이다.
+- 응답의 `X-Trace-Id`는 항상 현재 HTTP 요청의 `traceId`이다.
+- 오류 응답의 `X-Trace-Id`와 본문 `traceId`는 반드시 같은 값이다.
+- 거래·행동·탐지 등 업무 API의 성공·오류 응답 본문은 각 API 계약에 정의된 `traceId`를 반환한다.
+- `/api/health` 성공 응답 본문은 기존 `status`, `service` 필드만 유지하고 `traceId` 필드를 추가하지 않는다.
+
+### 8.2 외부 `traceId` 수용 규칙
+
+Spring Boot는 `X-Trace-Id`가 정확히 하나의 헤더 값으로 전달되고 다음 정규식 전체와 일치할 때만 원문 그대로 수용한다.
+
+```text
+^[A-Za-z0-9][A-Za-z0-9._:-]{7,63}$
+```
+
+- 전체 길이는 8~64자이다.
+- 첫 문자는 영문 대문자·소문자 또는 숫자이다.
+- 이후 문자는 영문 대문자·소문자, 숫자, 마침표(`.`), 밑줄(`_`), 콜론(`:`), 하이픈(`-`)만 허용한다.
+- 서버는 값을 trim하거나 대소문자를 변환하거나 일부를 잘라내지 않는다.
+- `X-Trace-Id` 헤더가 여러 줄로 전달되면 유효하지 않다.
+- 하나의 헤더 값에 쉼표가 포함되어 여러 값이 결합된 경우에도 유효하지 않다.
+- 빈 값, 길이 위반, 공백·비ASCII·제어 문자·그 밖의 허용되지 않은 문자를 포함한 값은 유효하지 않다.
+- 외부 `traceId`는 요청 추적용 불투명 값일 뿐 신뢰된 사용자 식별자, 인증·인가 정보 또는 보안 증명으로 사용하지 않는다.
+- 유효하지 않은 외부 원문을 로그, 오류 메시지, 응답 헤더 또는 응답 본문에 포함하지 않는다.
+
+### 8.3 서버 생성과 요청 범위
+
+- `X-Trace-Id`가 없거나 8.2의 검증을 통과하지 못하면 요청을 거절하지 않고 Spring Boot가 새 `traceId`를 생성한다.
+- 서버 생성값은 `UUID.randomUUID().toString()`으로 만든 canonical lowercase UUID v4 문자열이며 길이는 36자이다.
+- 하나의 HTTP 요청에서는 `traceId`를 한 번만 결정하고 정상·오류 처리와 로그에서 같은 값을 사용한다.
+- 오류 처리 과정에서 다른 `traceId`를 생성하지 않는다.
+- 요청 처리가 끝나면 실행 스레드의 MDC에서 `traceId`를 제거한다.
 - `traceId`는 `transactionId`, `eventId`, `detectionResultId`를 대체하지 않는다.
-- 로그·메트릭·트레이스에 고객·계좌·IP 원문을 `traceId`와 함께 기록하지 않는다.
+- `traceId`는 거래 요청 fingerprint와 멱등 완료 응답 snapshot에서 제외한다. 완료된 동일 요청의 재전송에는 저장된 업무 결과와 현재 HTTP 요청의 `traceId`를 결합한다.
+- 로그·메트릭·트레이스에 고객·계좌·IP 원문을 `traceId`와 함께 기록하지 않으며 `traceId`를 메트릭 레이블로 추가하지 않는다.
 
-구체적인 OpenTelemetry Header, W3C Trace Context 적용 방식, 응답 헤더명, 샘플링과 보존 기간은 이 문서에서 확정하지 않는다.
+OpenTelemetry, W3C Trace Context의 `traceparent`, 외부 HTTP 호출, Kafka와 비동기 작업으로의 전파, 샘플링과 보존 기간은 이 문서의 현재 구현 범위에서 제외한다.
 
 ## 9. 사용자 결정 필요 항목
 
@@ -369,7 +402,7 @@ Client
 - Validation 오류의 최상위 오류 코드를 더 세분화할지
 - `fieldErrors.code`의 코드 목록과 버전 관리 방식
 - 오류 응답의 `resource` 최종 이름과 범용 구조
-- OpenTelemetry 추적 헤더와 외부 추적 문맥 수용 정책
+- OpenTelemetry 추적 헤더와 외부 서비스·Kafka·비동기 경계의 추적 문맥 전파 정책
 
 ## 10. 제외 범위
 

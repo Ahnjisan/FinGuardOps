@@ -1,5 +1,6 @@
 package com.aifds.backend.common.error;
 
+import com.aifds.backend.common.trace.TraceIdFilter;
 import com.aifds.backend.idempotency.entity.IdempotencyProcessingStatus;
 import com.aifds.backend.idempotency.exception.IdempotencyCompletionTransactionNotFoundException;
 import com.aifds.backend.idempotency.exception.IdempotencyRecordNotFoundException;
@@ -11,11 +12,17 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -29,15 +36,23 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @WebMvcTest(GlobalExceptionHandlerMockMvcTest.TestController.class)
 @Import({
         GlobalExceptionHandler.class,
+        TraceIdFilter.class,
         GlobalExceptionHandlerMockMvcTest.TestController.class
 })
 class GlobalExceptionHandlerMockMvcTest {
+
+    private static final String MALFORMED_TRACE_ID = "trace_malformed_01";
+    private static final String BEAN_VALIDATION_TRACE_ID =
+            "trace_bean_validation_01";
+    private static final String DOMAIN_TRACE_ID = "trace_domain_01";
+    private static final String INTERNAL_TRACE_ID = "trace_internal_01";
 
     @Autowired
     private MockMvc mockMvc;
@@ -45,6 +60,10 @@ class GlobalExceptionHandlerMockMvcTest {
     @Test
     void malformedJsonReturnsValidationErrorWithoutFieldErrors() throws Exception {
         mockMvc.perform(post("/test/errors/json")
+                        .header(
+                                TraceIdFilter.TRACE_ID_HEADER,
+                                MALFORMED_TRACE_ID
+                        )
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{"))
                 .andExpect(status().isBadRequest())
@@ -54,7 +73,11 @@ class GlobalExceptionHandlerMockMvcTest {
                 .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
                 .andExpect(jsonPath("$.message")
                         .value(GlobalExceptionHandler.VALIDATION_MESSAGE))
-                .andExpect(jsonPath("$.traceId").value((Object) null))
+                .andExpect(header().string(
+                        TraceIdFilter.TRACE_ID_HEADER,
+                        MALFORMED_TRACE_ID
+                ))
+                .andExpect(jsonPath("$.traceId").value(MALFORMED_TRACE_ID))
                 .andExpect(jsonPath("$.fieldErrors").isArray())
                 .andExpect(jsonPath("$.fieldErrors").isEmpty());
     }
@@ -92,6 +115,7 @@ class GlobalExceptionHandlerMockMvcTest {
                         .value("amount format is invalid"));
 
         mockMvc.perform(get("/test/errors/domain"))
+                .andExpect(header().exists(TraceIdFilter.TRACE_ID_HEADER))
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
                 .andExpect(jsonPath("$.fieldErrors[0].code")
@@ -104,9 +128,19 @@ class GlobalExceptionHandlerMockMvcTest {
     void beanValidationMapsOnlyNotNullAndSortsAndDeduplicatesErrors()
             throws Exception {
         mockMvc.perform(post("/test/errors/bean-validation")
+                        .header(
+                                TraceIdFilter.TRACE_ID_HEADER,
+                                BEAN_VALIDATION_TRACE_ID
+                        )
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{}"))
                 .andExpect(status().isBadRequest())
+                .andExpect(header().string(
+                        TraceIdFilter.TRACE_ID_HEADER,
+                        BEAN_VALIDATION_TRACE_ID
+                ))
+                .andExpect(jsonPath("$.traceId")
+                        .value(BEAN_VALIDATION_TRACE_ID))
                 .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
                 .andExpect(jsonPath("$.fieldErrors.length()").value(2))
                 .andExpect(jsonPath("$.fieldErrors[0].field").value("alpha"))
@@ -167,12 +201,19 @@ class GlobalExceptionHandlerMockMvcTest {
     @Test
     void stateTransitionReturnsSafeConflictWithoutInternalStateDetails()
             throws Exception {
-        String response = mockMvc.perform(get("/test/errors/state-transition"))
+        String traceId = "trace_state_transition_01";
+        String response = mockMvc.perform(get("/test/errors/state-transition")
+                        .header(TraceIdFilter.TRACE_ID_HEADER, traceId))
                 .andExpect(status().isConflict())
+                .andExpect(header().string(
+                        TraceIdFilter.TRACE_ID_HEADER,
+                        traceId
+                ))
                 .andExpect(jsonPath("$.code")
                         .value("STATE_TRANSITION_NOT_ALLOWED"))
                 .andExpect(jsonPath("$.message")
                         .value(GlobalExceptionHandler.STATE_TRANSITION_MESSAGE))
+                .andExpect(jsonPath("$.traceId").value(traceId))
                 .andExpect(jsonPath("$.fieldErrors").isEmpty())
                 .andReturn()
                 .getResponse()
@@ -192,12 +233,20 @@ class GlobalExceptionHandlerMockMvcTest {
     @Test
     void responseContainsNoUnapprovedContractFieldsOrRejectedValues()
             throws Exception {
-        String response = mockMvc.perform(get("/test/errors/unexpected"))
+        String response = mockMvc.perform(get("/test/errors/unexpected")
+                        .header(
+                                TraceIdFilter.TRACE_ID_HEADER,
+                                INTERNAL_TRACE_ID
+                        ))
                 .andExpect(status().isInternalServerError())
+                .andExpect(header().string(
+                        TraceIdFilter.TRACE_ID_HEADER,
+                        INTERNAL_TRACE_ID
+                ))
                 .andExpect(jsonPath("$.code").value("INTERNAL_ERROR"))
                 .andExpect(jsonPath("$.message")
                         .value(GlobalExceptionHandler.INTERNAL_ERROR_MESSAGE))
-                .andExpect(jsonPath("$.traceId").value((Object) null))
+                .andExpect(jsonPath("$.traceId").value(INTERNAL_TRACE_ID))
                 .andExpect(jsonPath("$.fieldErrors").isArray())
                 .andExpect(jsonPath("$.fieldErrors").isEmpty())
                 .andExpect(jsonPath("$.timestamp").doesNotExist())
@@ -218,13 +267,92 @@ class GlobalExceptionHandlerMockMvcTest {
         );
     }
 
+    @Test
+    void domainValidationUsesTheSameTraceIdInHeaderAndBody()
+            throws Exception {
+        mockMvc.perform(get("/test/errors/domain")
+                        .header(
+                                TraceIdFilter.TRACE_ID_HEADER,
+                                DOMAIN_TRACE_ID
+                        ))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(header().string(
+                        TraceIdFilter.TRACE_ID_HEADER,
+                        DOMAIN_TRACE_ID
+                ))
+                .andExpect(jsonPath("$.traceId").value(DOMAIN_TRACE_ID))
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.message")
+                        .value(GlobalExceptionHandler.VALIDATION_MESSAGE))
+                .andExpect(jsonPath("$.fieldErrors[0].code")
+                        .value("RECIPIENT_ACCOUNT_REQUIRED"));
+    }
+
+    @Test
+    void requestCompletionRemovesTraceIdFromTheTestThread() throws Exception {
+        mockMvc.perform(get("/test/errors/unexpected")
+                        .header(
+                                TraceIdFilter.TRACE_ID_HEADER,
+                                INTERNAL_TRACE_ID
+                        ))
+                .andExpect(status().isInternalServerError());
+
+        assertThat(org.slf4j.MDC.get(TraceIdFilter.TRACE_ID_MDC_KEY))
+                .isNull();
+    }
+
+    @Test
+    @ExtendWith(OutputCaptureExtension.class)
+    void logsValidatedTraceIdWithoutExposingInvalidExternalValue(
+            CapturedOutput output
+    ) throws Exception {
+        String validTraceId = "trace_log_valid_01";
+        String invalidTraceId = "invalid trace value";
+
+        mockMvc.perform(get("/test/errors/log")
+                        .header(
+                                TraceIdFilter.TRACE_ID_HEADER,
+                                validTraceId
+                        ))
+                .andExpect(status().isOk())
+                .andExpect(header().string(
+                        TraceIdFilter.TRACE_ID_HEADER,
+                        validTraceId
+                ));
+
+        MvcResult invalidResult = mockMvc.perform(get("/test/errors/log")
+                        .header(
+                                TraceIdFilter.TRACE_ID_HEADER,
+                                invalidTraceId
+                        ))
+                .andExpect(status().isOk())
+                .andExpect(header().exists(TraceIdFilter.TRACE_ID_HEADER))
+                .andReturn();
+        String generatedTraceId = invalidResult.getResponse().getHeader(
+                TraceIdFilter.TRACE_ID_HEADER
+        );
+
+        assertThat(output)
+                .contains("[traceId=" + validTraceId + "]")
+                .contains("[traceId=" + generatedTraceId + "]")
+                .doesNotContain(invalidTraceId);
+    }
+
     private void assertSafeInternalError(String path) throws Exception {
-        String response = mockMvc.perform(get(path))
+        String response = mockMvc.perform(get(path)
+                        .header(
+                                TraceIdFilter.TRACE_ID_HEADER,
+                                INTERNAL_TRACE_ID
+                        ))
                 .andExpect(status().isInternalServerError())
+                .andExpect(header().string(
+                        TraceIdFilter.TRACE_ID_HEADER,
+                        INTERNAL_TRACE_ID
+                ))
                 .andExpect(jsonPath("$.code").value("INTERNAL_ERROR"))
                 .andExpect(jsonPath("$.message")
                         .value(GlobalExceptionHandler.INTERNAL_ERROR_MESSAGE))
-                .andExpect(jsonPath("$.traceId").value((Object) null))
+                .andExpect(jsonPath("$.traceId").value(INTERNAL_TRACE_ID))
                 .andExpect(jsonPath("$.fieldErrors").isEmpty())
                 .andReturn()
                 .getResponse()
@@ -243,6 +371,9 @@ class GlobalExceptionHandlerMockMvcTest {
     @RestController
     @RequestMapping("/test/errors")
     public static class TestController {
+
+        private static final Logger LOGGER =
+                LoggerFactory.getLogger(TestController.class);
 
         @PostMapping("/json")
         void json(@RequestBody TransactionCreateRequest request) {
@@ -313,6 +444,11 @@ class GlobalExceptionHandlerMockMvcTest {
             throw new SensitiveFailureClass(
                     "SELECT secret FROM account WHERE ref = acct_rejected_value"
             );
+        }
+
+        @GetMapping("/log")
+        void log() {
+            LOGGER.info("trace logging probe");
         }
     }
 
