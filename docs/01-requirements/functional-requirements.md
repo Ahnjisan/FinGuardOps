@@ -14,6 +14,8 @@
 - 시스템은 거래 데이터를 기반으로 위험 점수를 계산한다.
 - 시스템은 위험 점수에 따라 `LOW`, `MEDIUM`, `HIGH`, `CRITICAL` 위험 등급을 분류한다.
 - 시스템은 탐지 사유를 생성한다.
+- 초기 Rule 기반 탐지의 입력, R001~R004 조건, 점수와 위험 등급 경계는 [`rule-v1-detection-contract.md`](./rule-v1-detection-contract.md)를 단일 기준으로 사용한다.
+- Rule v1은 문서로 확정되었지만 Rule 실행, DetectionResult 저장과 FastAPI 연동은 아직 구현되지 않았다.
 
 ## 3. AI 분석 리포트
 

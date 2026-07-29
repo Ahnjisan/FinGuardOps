@@ -7,6 +7,7 @@
   - [#44: 구현 전 문서 정합성 및 거래 처리 경계 정리](https://github.com/Ahnjisan/FinGuardOps/issues/44)
 - 관련 문서:
   - `docs/01-requirements/transaction-state-transition.md`
+  - `docs/01-requirements/rule-v1-detection-contract.md`
   - `docs/02-architecture/system-architecture.md`
   - `docs/02-architecture/domain-erd.md`
   - `docs/03-api/transaction-detection-api.md`
@@ -44,17 +45,25 @@
 
 논리적 도메인 이벤트를 내부 애플리케이션 흐름에서 사용할 수 있지만, 이것이 `POST /api/v1/transactions`를 비동기 접수 계약으로 변경하거나 Kafka를 선행 도입한다는 뜻은 아니다.
 
+### 현재 구현 상태
+
+현재 저장소에는 거래·멱등·행동 이벤트의 PostgreSQL 애플리케이션 연동과 거래 접수 Controller가 구현되어 있다. 거래 접수 성공 응답은 `processingStatus = RECEIVED`이며 `riskLevel`, `riskResponseOutcome`, `adoptedDetectionResultId`, `caseId`는 null이다. External Risk, FastAPI Rule 실행, DetectionResult 저장·채택, 위험 대응과 사건 연결은 아직 수행하지 않는다.
+
+이 단계적 응답은 현재 구현 사실을 기록한 것이며, `POST /api/v1/transactions`를 비동기 접수 API로 바꾸거나 최종 동기 분석 결정을 뒤집는 새로운 결정이 아니다. 현행 단계 Controller는 이 ADR이 정한 중간 외부 노출 제한과 아직 정합화되지 않은 구현 차이로 기록한다. 후속 구현에서는 이 ADR의 최종 경계로 전환하거나, 결정 변경이 필요하면 별도 사용자 승인과 ADR 검토를 거쳐야 한다.
+
+현재 멱등 완료 응답 snapshot은 `RECEIVED`/null 구조를 저장·재생한다. 최종 동기 응답으로 전환하기 전에 기존 snapshot의 스키마·재생 의미·codec 호환·만료 전 데이터 처리 방식을 사용자가 결정해야 한다. 이 호환 문제는 아직 해결되지 않았다.
+
 ## 구현 순서
 
 초기 구현은 다음 순서를 따른다.
 
 1. 거래 식별자, 요청 지문과 멱등성 선점 규칙을 정의하고 거래 접수 영속화를 구현한다.
 2. 요청 형식·도메인 Validation을 거래 저장 전에 수행하고, 검증을 통과한 거래의 `RECEIVED` 영속 경계를 검증한다. Validation 실패는 거래로 저장하지 않는다.
-3. External Risk와 FastAPI 분석 호출 경계, DetectionResult 저장·채택을 구현한다.
+3. [Rule v1 탐지 계약](../01-requirements/rule-v1-detection-contract.md)에 따라 평가 Snapshot, 활성 Rule 집합, FastAPI 분석 호출 경계와 DetectionResult 저장·채택을 구현한다.
 4. 위험 대응 결과, 거래 최종 상태와 HIGH·CRITICAL 사건 생성 또는 기존 사건 연결을 구현한다.
-5. 전체 성공·실패·멱등·동시성 흐름이 준비되면 최종 동기 Controller를 공개한다.
+5. 전체 성공·실패·멱등·동시성 흐름이 준비되면 현재 단계 응답을 최종 동기 Controller 계약으로 전환한다.
 
-각 단계는 내부 단위·통합 테스트로 검증한다. 최종 Controller 공개 전에는 내부 구현 완료 범위와 외부 API 제공 상태를 구분해 보고한다.
+각 단계는 내부 단위·통합 테스트로 검증한다. 최종 동기 응답 전환 전에는 내부 구현 완료 범위와 외부 API 제공 상태를 구분해 보고한다.
 
 ## 유지되는 계약
 
@@ -77,7 +86,7 @@
 
 ### Trade-off
 
-- 전체 흐름이 완성되기 전에는 외부 거래 생성 API를 시연할 수 없다.
+- 현재 단계적 거래 접수 API로 영속화·멱등성은 시연할 수 있지만 탐지·위험 대응·사건 연결이 포함된 최종 동기 처리로 시연해서는 안 된다.
 - 내부 구성요소 테스트와 최종 Controller 통합 테스트를 구분해 관리해야 한다.
 - 거래 상태 변경, 탐지 결과 채택과 사건 연결의 최종 트랜잭션·복구 경계는 구현 전에 남은 사용자 결정 사항을 추가로 확정해야 한다.
 

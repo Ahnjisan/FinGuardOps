@@ -10,6 +10,8 @@
 
 ### 2.1 처리 흐름
 
+다음은 ADR-003이 유지하는 최종 동기 분석 목표이다.
+
 ```text
 Client
 → Spring Boot 거래 접수
@@ -22,7 +24,11 @@ Client
 → Client 응답
 ```
 
+현재 구현은 입력 검증·멱등성 확인·거래 PostgreSQL 저장 후 `RECEIVED`와 탐지 관련 null 값을 반환하는 단계까지이다. External Risk, FastAPI, DetectionResult 저장·채택, 위험 대응과 사건 연결은 아직 구현되지 않았다. 현재 단계 응답은 최종 동기 분석 목표를 변경하지 않는다.
+
 ### 2.2 Spring Boot 책임
+
+다음 항목은 최종 책임 범위이며, 현재 구현된 거래·행동 이벤트 접수 범위와 미구현 탐지 범위를 구분해야 한다.
 
 - 거래와 행동 이벤트 요청을 검증한다.
 - 거래 생성 요청의 멱등성과 `transactionId` 중복을 관리한다.
@@ -38,6 +44,8 @@ Client
 - 업무 결과와 감사·추적 식별자의 정합성을 관리한다.
 
 ### 2.3 FastAPI 책임
+
+다음 항목은 목표 책임 범위이다. 현재 `ai-service/`에는 FastAPI와 Rule 실행 구현이 없다.
 
 - Feature를 계산한다.
 - 승인된 Rule을 실행한다.
@@ -161,10 +169,10 @@ ATM_WITHDRAWAL_REQUESTED
 
 - API는 승인된 통합 정책이 산출한 최종 `riskScore`를 반환한다.
 - 각 DetectionEvidence는 해당 근거의 `scoreContribution`을 반환할 수 있다.
-- 통합 정책이 확정되기 전까지 `ruleScore`와 `mlScore`를 필수 API 계약으로 확정하지 않는다.
-- Rule·ML·External Risk·행동 근거의 점수 통합 공식은 후속 탐지 정책 설계에서 결정한다.
-- `riskScore`가 개별 `scoreContribution`의 단순 합이라고 가정하지 않는다.
-- `riskScore` 범위, 정밀도, 상한과 정규화 방식은 사용자 결정 사항이다.
+- Rule v1은 amount·security 그룹 상한을 적용해 `0`~`100` 범위의 정수 점수를 계산하며, 상세 공식과 등급 경계는 [`../01-requirements/rule-v1-detection-contract.md`](../01-requirements/rule-v1-detection-contract.md)를 따른다.
+- Rule v1의 `scoreContribution`은 그룹 상한 적용 전 개별 Rule 가중치이므로 Evidence 기여도의 단순 합이 최종 `riskScore`와 다를 수 있다.
+- Rule v1 이후 ML·External Risk·자금흐름 점수 통합과 점수 정밀도는 후속 계약에서 결정한다.
+- `ruleScore`와 `mlScore`는 현재 필수 외부 API 필드로 확정하지 않는다.
 
 ## 5. 거래 생성
 
@@ -263,6 +271,8 @@ Idempotency-Key: <required>
 
 현재 접수 단계에서는 네 nullable 필드를 JSON에서 생략하지 않는다. `riskLevel`과 `riskResponseOutcome`의 비-null Enum은 후속 위험 탐지·대응 계약에서 확정하며, 이번 접수 응답에서는 nullable string으로 취급한다.
 
+이 응답은 거래 영속화 단계의 현재 구현 계약이다. 최종 동기 분석 흐름에서는 채택된 DetectionResult와 위험 대응·사건 연결 결과를 반영해야 하며, 전환 시점과 호환 방식은 별도 승인 후 변경한다.
+
 ### 5.6 성공 응답 예시
 
 최초 생성:
@@ -299,6 +309,8 @@ X-Trace-Id: trace_demo_tx_0001
 - `traceId`, `Idempotency-Key`, 내부 PK, 생성·수정 시각, version, 처리 상태와 그 밖의 서버 생성 필드는 지문에서 제외한다.
 - 요청 지문, `IN_PROGRESS`·`COMPLETED`·`FAILED` 상태, 완료 응답 snapshot과 24시간 만료의 물리 저장 기준은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따른다.
 - `eventId` 중복과 `DUPLICATE_EVENT`는 행동 이벤트 API의 책임이며 이 거래 접수 API 범위에 포함하지 않는다.
+
+현재 완료 응답 snapshot은 `RECEIVED`와 네 탐지 관련 null 값을 포함한 단계적 응답을 저장·재생한다. 최종 동기 분석 응답을 도입하기 전에 기존 snapshot의 스키마, 재생 의미, 만료 전 데이터와 codec 호환, 전환 방식을 결정해야 한다. 이 호환 문제는 아직 해결되지 않았다.
 
 처리 중인 동일 요청의 응답 예시는 다음과 같다.
 
@@ -368,7 +380,7 @@ Content-Type: application/json
 
 | 상태 코드 | 사용 기준 |
 | --- | --- |
-| `201 Created` | 거래가 처음 생성되고 승인된 동기 처리 결과를 반환함 |
+| `201 Created` | 현재는 거래가 처음 영속화되어 단계적 `RECEIVED` 응답을 반환함. 최종 목표는 승인된 동기 분석 결과 반환 |
 | `200 OK` | 완료된 동일 멱등 요청에 기존 결과 반환 |
 | `400 Bad Request` | 잘못된 JSON, 필수 헤더 누락 또는 필드 형식 오류 |
 | `409 Conflict` | 멱등성 키 지문 충돌, 동일 멱등 요청 처리 중, `transactionId` 중복 또는 동시성 충돌 |
@@ -766,6 +778,8 @@ GET /api/v1/behavior-events?externalCustomerRef=cust_ref_demo_a7f2&occurredAtFro
 
 ## 10. 거래별 탐지 결과 조회
 
+이 절은 후속 API 후보이다. DetectionResult 저장과 조회는 아직 구현되지 않았다.
+
 ### 10.1 요청
 
 ```http
@@ -804,12 +818,12 @@ GET /api/v1/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001/detection-results?
     {
       "detectionResultId": "det_demo_20260723_0101",
       "detectionResultVersion": 1,
-      "riskScore": 72.5,
+      "riskScore": 55,
       "riskLevel": "HIGH",
       "analysisStatus": "COMPLETED",
       "adopted": true,
-      "modelVersion": "fraud-baseline-1.0",
-      "featureVersion": "feature-set-1.0",
+      "modelVersion": null,
+      "featureVersion": "rule-v1",
       "analysisStartedAt": "2026-07-23T01:15:30Z",
       "analysisCompletedAt": "2026-07-23T01:15:32Z"
     }
@@ -839,6 +853,8 @@ GET /api/v1/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001/detection-results?
 | `503 Service Unavailable` | 필수 저장소 등 조회 의존성이 일시적으로 사용 불가 |
 
 ## 11. 탐지 결과 상세 조회
+
+이 절은 후속 API 후보이다. DetectionResult·DetectionEvidence 영속화와 조회는 아직 구현되지 않았다.
 
 ### 11.1 요청
 
@@ -883,12 +899,12 @@ GET /api/v1/detection-results/det_demo_20260723_0101
     "detectionResultId": "det_demo_20260723_0101",
     "transactionId": "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
     "detectionResultVersion": 1,
-    "riskScore": 72.5,
+    "riskScore": 55,
     "riskLevel": "HIGH",
     "analysisStatus": "COMPLETED",
     "adopted": true,
-    "modelVersion": "fraud-baseline-1.0",
-    "featureVersion": "feature-set-1.0",
+    "modelVersion": null,
+    "featureVersion": "rule-v1",
     "analysisStartedAt": "2026-07-23T01:15:30Z",
     "analysisCompletedAt": "2026-07-23T01:15:32Z"
   },
@@ -896,59 +912,44 @@ GET /api/v1/detection-results/det_demo_20260723_0101
     {
       "evidenceId": "evidence_demo_rule_01",
       "evidenceType": "RULE",
-      "reasonCode": "NEW_DEVICE_HIGH_AMOUNT",
-      "displayDescription": "신규 기기 등록 후 고객 기준선보다 큰 금액의 이체가 요청되었습니다.",
-      "scoreContribution": 30.0,
+      "reasonCode": "TRANSFER_ABSOLUTE_HIGH_AMOUNT",
+      "displayDescription": "KRW 이체 금액이 Rule v1 절대 고액 기준 이상입니다.",
+      "scoreContribution": 15,
       "rule": {
-        "ruleCode": "NEW_DEVICE_HIGH_AMOUNT",
-        "ruleVersion": "1.0"
+        "ruleCode": "TRANSFER_ABSOLUTE_HIGH_AMOUNT",
+        "ruleVersion": "1"
       },
       "observationSummary": {
-        "newDevice": true,
-        "amountRatioBand": "TEN_OR_MORE"
+        "currencyCode": "KRW",
+        "amount": "10000000",
+        "amountThreshold": "10000000"
       },
       "evidenceOccurredAt": "2026-07-23T01:15:30Z"
     },
     {
-      "evidenceId": "evidence_demo_external_01",
-      "evidenceType": "EXTERNAL_RISK",
-      "reasonCode": "EXTERNAL_RISK_MATCH",
-      "displayDescription": "비식별 대상 참조값에 외부 위험 신호가 확인되었습니다.",
-      "scoreContribution": 17.5,
-      "externalRiskSnapshot": {
-        "targetType": "RECIPIENT_ACCOUNT_REFERENCE",
-        "matched": true,
-        "riskType": "SUSPECTED_ACCOUNT",
-        "providerAsOf": "2026-07-23T01:14:00Z",
-        "lookupStatus": "SUCCESS",
-        "cacheUsed": false,
-        "fallbackUsed": false
+      "evidenceId": "evidence_demo_rule_02",
+      "evidenceType": "RULE",
+      "reasonCode": "RECENT_SECURITY_CHANGE_HIGH_AMOUNT",
+      "displayDescription": "최근 24시간 안에 비밀번호 변경과 출금 계좌의 이체 한도 변경 이벤트가 순서대로 확인되었습니다.",
+      "scoreContribution": 40,
+      "rule": {
+        "ruleCode": "RECENT_SECURITY_CHANGE_HIGH_AMOUNT",
+        "ruleVersion": "1"
       },
-      "evidenceOccurredAt": "2026-07-23T01:15:31Z"
-    },
-    {
-      "evidenceId": "evidence_demo_behavior_01",
-      "evidenceType": "BEHAVIOR_PATTERN",
-      "reasonCode": "RECENT_SECURITY_SEQUENCE",
-      "displayDescription": "거래 직전에 기기 등록과 신규 수취인 등록이 연속으로 발생했습니다.",
-      "scoreContribution": 10.0,
-      "behaviorPatternSummary": {
-        "eventTypes": [
-          "DEVICE_REGISTERED",
-          "BENEFICIARY_REGISTERED",
-          "TRANSFER_REQUESTED"
-        ],
-        "eventCount": 3,
-        "windowSeconds": 330
+      "observationSummary": {
+        "passwordChangedEventId": "8f68e7f1-2f95-4e8c-9c40-7b6e08bde101",
+        "passwordChangedAt": "2026-07-23T00:30:00Z",
+        "transferLimitChangedEventId": "1a7d52c3-6b84-4f10-8d29-3e5c70a94102",
+        "transferLimitChangedAt": "2026-07-23T00:45:00Z"
       },
-      "evidenceOccurredAt": "2026-07-23T01:15:30Z"
+      "evidenceOccurredAt": "2026-07-23T00:45:00Z"
     }
   ],
   "traceId": "trace_demo_detection_detail_01"
 }
 ```
 
-`observationSummary`, `externalRiskSnapshot`과 `behaviorPatternSummary`는 설명과 감사에 필요한 최소 요약이다. 자유 형식 원문 저장·반환을 허용하지 않고 유형별 허용 필드를 후속 DTO 계약에서 확정한다.
+위 예시는 미구현 Rule v1 조회 응답의 후보이며 구현 완료를 의미하지 않는다. Rule 조건과 Evidence 의미는 [Rule v1 탐지 계약](../01-requirements/rule-v1-detection-contract.md)을 따르고, `observationSummary`의 구체적인 허용 필드는 후속 DTO 계약에서 확정한다. 자유 형식 원문 저장·반환은 허용하지 않는다.
 
 ### 11.4 상태 코드
 
@@ -1072,6 +1073,7 @@ Content-Type: application/json
 - `riskResponseOutcome` Enum 이름
 - FastAPI·External Risk Timeout 이후 재시도·복구 정책
 - 오류 응답의 `resource` 최종 이름과 범용 구조
+- 현재 `RECEIVED`/null 멱등 응답 snapshot과 최종 동기 분석 응답의 스키마·재생·전환 호환 정책
 
 ### 16.3 행동 이벤트
 
@@ -1082,8 +1084,7 @@ Content-Type: application/json
 
 - `analysisStatus` 전체 값과 실패한 분석 시도 표현
 - DetectionResult 버전 생성 규칙
-- `riskScore` 범위·정밀도·상한·정규화 방식과 null 규칙
-- Rule·ML·External Risk·행동 근거의 점수 통합 정책
+- Rule v1 이후 ML·External Risk·자금흐름 점수 통합과 점수 정밀도
 - Rule·External Risk·행동 패턴 요약의 유형별 허용 필드
 - 분석 당시 `traceId`와 조회 요청 `traceId`의 응답 구분
 

@@ -36,7 +36,7 @@
 - 공통 오류 응답과 `TraceIdFilter`
 - Issue 및 Pull Request 템플릿
 
-현재 백엔드는 Health Check, 거래 접수·조회와 행동 이벤트 접수를 구현한다. 행동 이벤트 조회, 탐지, 사건, Rule, 감사와 AI 운영 도메인은 아직 구현되지 않았다.
+현재 백엔드는 Health Check, 거래 접수·조회와 행동 이벤트 접수를 구현한다. 거래·멱등·행동 이벤트의 PostgreSQL 애플리케이션 연동도 구현되어 있지만 운영 배포 환경은 없다. 현재 거래 접수는 단계적 구현 응답인 `RECEIVED`와 탐지 관련 null 값을 반환한다. 행동 이벤트 조회, 탐지, 사건, Rule, 감사와 AI 운영 도메인은 아직 구현되지 않았다.
 
 ### 2.2 문서로 정의됨
 
@@ -47,6 +47,7 @@
 - 거래 상태 전이
 - 사건 상태와 최종 판정의 분리 및 상태 전이
 - AI 리포트 상태 전이와 정확 일치 캐시 원칙
+- Rule v1 탐지 계약과 초기 평가 정책
 - 저장소명을 FinGuardOps로 변경한 후속 결정
 
 문서에 등장하는 구성요소와 기술은 목표 또는 계획 범위를 포함한다. 문서에 정의되었다는 이유로 구현 완료로 간주하지 않는다.
@@ -57,7 +58,7 @@
 - `frontend/`: 역할 규칙과 자리표시자만 있으며 React 구현 없음
 - `infra/`: 자리표시자만 있으며 Docker Compose 등 인프라 구현 없음
 - `.github/`: Issue·PR 템플릿만 있으며 GitHub Actions Workflow 없음
-- PostgreSQL, Redis, Kafka 연동
+- 운영 PostgreSQL 배포 환경, Redis와 Kafka 연동
 - External Risk Mock과 LLM Provider 연동
 - Prometheus, Grafana, Loki와 분산 추적 구성
 - Kubernetes와 AWS 배포 구성
@@ -444,6 +445,8 @@ Spring Boot는 반환된 결과의 요청 연결, 완전성, 버전과 처리 �
 
 FastAPI Timeout 시 Spring Boot가 임의의 위험 점수를 생성하거나 무위험으로 간주하지 않는다. 이때 허용할 거래 상태와 재시도·수동 확인 정책은 `TBD`이다.
 
+Rule v1에서 Spring Boot는 거래·행동 이벤트 조회와 Snapshot 구성, Rule 정의·버전·활성 상태, 호출 오케스트레이션과 결과 영속화를 맡고 FastAPI는 Feature, R001~R004, 점수·등급·Reason Code·Evidence 계산을 맡는다. 상세 계약은 [`../01-requirements/rule-v1-detection-contract.md`](../01-requirements/rule-v1-detection-contract.md)를 따른다. 이 책임 경계는 목표이며 FastAPI 연동과 탐지 결과 영속화는 아직 구현되지 않았다.
+
 ## 10. Rule 관리·실행 책임
 
 권장 기본안은 다음과 같다.
@@ -465,6 +468,8 @@ FastAPI가 실행한 결과에는 어떤 Rule과 버전을 사용했는지 추�
 
 Rule을 요청마다 전달할지, 버전별 스냅샷을 동기화할지, 별도의 배포 산출물로 제공할지와 불일치 시 처리 방식은 후속 API·배포 설계에서 확정한다.
 
+Rule v1은 `ruleCode`별 활성 버전을 하나만 허용하고 평가 시작 시 활성 Rule 집합을 고정하며, 조건·가중치 변경 시 새 불변 버전을 생성한다. R001~R004의 단일 기준은 [Rule v1 탐지 계약](../01-requirements/rule-v1-detection-contract.md)이다.
+
 ## 11. 데이터 소유권
 
 | 구성요소 | 소유하는 책임 | 소유하지 않는 책임 |
@@ -483,7 +488,7 @@ FastAPI의 계산 결과와 LLM Provider의 생성 결과는 업무 원본이 �
 
 ### 12.1 초기 동기 경계
 
-초기 거래 처리에서 다음 흐름은 결과를 반환하기 전에 일관된 위험 대응을 결정해야 하므로 동기 호출 후보이다.
+최종 거래 처리 목표에서 다음 흐름은 결과를 반환하기 전에 일관된 위험 대응을 결정해야 하므로 동기 호출 경계이다.
 
 - React에서 Spring Boot로 거래·사건 업무 요청
 - Spring Boot에서 External Risk Mock으로 위험정보 조회
@@ -491,6 +496,8 @@ FastAPI의 계산 결과와 LLM Provider의 생성 결과는 업무 원본이 �
 - Spring Boot에서 PostgreSQL로 핵심 업무 결과 저장
 
 서비스 간 계약에는 전체 업무 Entity가 아니라 목적에 필요한 입력, 결과, 버전과 추적 정보를 전달해야 한다. 구체적인 API 경로와 DTO는 후속 API 설계에서 확정한다.
+
+현재 구현은 이 최종 경계에 도달하지 않았다. 거래 접수는 PostgreSQL에 저장한 뒤 `RECEIVED`와 탐지 관련 null 값을 반환하며 External Risk, FastAPI, DetectionResult, 위험 대응과 사건 연결은 수행하지 않는다. 이 단계적 구현 상태는 ADR-003의 최종 동기 처리 결정을 변경하지 않는다.
 
 ### 12.2 논리적 비동기 경계
 
@@ -515,6 +522,8 @@ Kafka는 다음 조건이 확인된 뒤 이 논리적 비동기 경계를 구현
 ## 13. 주요 업무 흐름
 
 ### 13.1 거래 접수·탐지
+
+다음 흐름은 ADR-003이 유지하는 최종 동기 분석 목표이다. 현재 구현은 입력 검증·멱등성 확인·거래 저장과 `RECEIVED` 응답까지이며, 이후 탐지·위험 대응·사건 단계는 미구현이다.
 
 ```text
 Client
@@ -551,6 +560,8 @@ sequenceDiagram
 ```
 
 거래 상태는 기존 상태 전이 문서의 `RECEIVED`, `ANALYZING`, `ANALYZED`와 최종 처리 상태를 따른다. 요청 형식과 도메인 Validation 실패는 거래로 저장하지 않으며 오류 응답, `traceId`, 로그와 운영 메트릭으로 관측한다. MEDIUM의 모니터링은 별도 위험 대응 결과로 표현하고 AI 리포트 실패로 거래를 `FAILED` 처리하지 않는다.
+
+현재 `RECEIVED`/null 완료 응답을 저장하는 멱등 `response_snapshot`은 최종 동기 응답과 구조·의미가 달라질 수 있다. 최종 흐름 구현 전에 기존 snapshot의 재생 호환과 전환 방식을 결정해야 하며 아직 해결된 상태가 아니다.
 
 ### 13.2 사건 조사
 
@@ -734,6 +745,10 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 - Health Controller 통합 테스트
 - Health Service 단위 테스트
 - Health Check API 문서
+- 거래 접수·목록·상세 조회와 거래 멱등성
+- 9개 행동 이벤트 접수와 `eventId` 자연 멱등성
+- 거래·멱등·행동 이벤트의 PostgreSQL 애플리케이션 연동과 Flyway 스키마
+- 단계적 거래 접수 `RECEIVED`/null 응답
 - 저장소 역할 규칙과 GitHub Issue·PR 템플릿
 
 ### 18.2 문서로 정의됨
@@ -744,11 +759,12 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 - 거래·사건·AI 리포트 상태 전이
 - 제품 포지셔닝과 저장소명 변경 ADR
 - 본 시스템 아키텍처
+- Rule v1 탐지 계약과 초기 평가 정책
 
 ### 18.3 다음 구현 예정
 
-- Spring Boot 핵심 거래·행동·탐지·위험 대응·사건·감사 도메인
-- PostgreSQL 영속화
+- 행동 이벤트 조회와 Spring Boot 탐지·위험 대응·사건·감사 도메인
+- 탐지·Rule·사건·감사 도메인의 PostgreSQL 영속화
 - FastAPI Rule 기반 Baseline과 분석 연동
 - External Risk Mock
 - Docker 및 Docker Compose 통합 환경
@@ -850,6 +866,7 @@ Docker Compose와 필요 시 Kubernetes 환경에서 기능·장애·관측 기�
 | External Risk 조회 실패 시 위험 대응 정책 | `TBD` | 캐시 유효성, 내부 Rule·ML 결과, 거래 상태와 시나리오별 업무 위험 |
 | FastAPI Timeout 시 거래 처리 정책 | `TBD` | 마지막 확정 상태, 재시도 안전성, 사용자 응답과 미탐·오탐 위험 |
 | Rule 정의를 FastAPI에 전달하는 방식 | `TBD` | 버전 일치, 배포 주기, 실행 성능과 감사 요구 |
+| 현재 멱등 응답 snapshot의 최종 동기 응답 호환 | `TBD` | 기존 `RECEIVED`/null snapshot의 스키마·재생 의미·만료 데이터와 전환 방식 |
 | 초기 AI 리포트 비동기 실행 방식 | `TBD` | 실패·재시도·멱등성 검증 가능성, 개인 프로젝트 운영 복잡도 |
 | Redis 최초 도입 시점 | `TBD` | 정확 일치 중복 호출, External Risk 조회 부하와 집계 성능 측정 |
 | Kafka 최초 도입 조건 충족 여부 | `TBD` | 비동기 적체, 다중 Consumer, 재처리와 독립 확장 요구 |
