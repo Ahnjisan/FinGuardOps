@@ -15,11 +15,14 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.math.BigDecimal;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -33,6 +36,8 @@ class TransactionIntakeCompletionServiceTest {
     private TransactionIntakeSnapshotCodec snapshotCodec;
     @Mock
     private IdempotencyService idempotencyService;
+    @Mock
+    private Clock clock;
 
     @Test
     void persistsBuildsSnapshotCompletesAndReturnsTheSameTypedResult() {
@@ -47,14 +52,21 @@ class TransactionIntakeCompletionServiceTest {
                 TransactionIntakeSnapshot.received(persisted);
         JsonNode encoded = new ObjectMapper().createObjectNode()
                 .put("transactionId", command.transactionId().toString());
+        Instant clockInstant =
+                Instant.parse("2026-07-23T01:15:33.654321987Z");
+        Instant finalizedAt =
+                Instant.parse("2026-07-23T01:15:33.654321Z");
 
         when(transactionIntakeWriter.saveAndLink(RECORD_ID, command))
                 .thenReturn(persisted);
-        when(snapshotCodec.encode(expected)).thenReturn(encoded);
+        when(clock.instant()).thenReturn(clockInstant);
+        when(snapshotCodec.encode(expected, 201, finalizedAt))
+                .thenReturn(encoded);
         when(idempotencyService.complete(
                 RECORD_ID,
                 command.transactionId(),
-                encoded
+                encoded,
+                finalizedAt
         )).thenReturn(new IdempotencyClaimResult.Completed(
                 encoded.toString()
         ));
@@ -63,23 +75,30 @@ class TransactionIntakeCompletionServiceTest {
                 new TransactionIntakeCompletionService(
                         transactionIntakeWriter,
                         snapshotCodec,
-                        idempotencyService
+                        idempotencyService,
+                        clock
                 ).complete(RECORD_ID, command);
 
         assertThat(result.snapshot()).isEqualTo(expected);
+        assertThat(result.httpStatus()).isEqualTo(201);
         InOrder order = inOrder(
                 transactionIntakeWriter,
+                clock,
                 snapshotCodec,
                 idempotencyService
         );
         order.verify(transactionIntakeWriter)
                 .saveAndLink(RECORD_ID, command);
-        order.verify(snapshotCodec).encode(expected);
+        order.verify(clock).instant();
+        order.verify(snapshotCodec).encode(expected, 201, finalizedAt);
         order.verify(idempotencyService).complete(
                 RECORD_ID,
                 command.transactionId(),
-                encoded
+                encoded,
+                finalizedAt
         );
+        verify(clock).instant();
+        verifyNoMoreInteractions(clock);
     }
 
     private ValidatedTransactionCommand command() {

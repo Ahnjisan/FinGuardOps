@@ -16,6 +16,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.SQLException;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.UUID;
 
 @Service
@@ -92,7 +93,8 @@ public class IdempotencyService {
     public IdempotencyClaimResult.Completed complete(
             long recordId,
             UUID transactionId,
-            JsonNode responseSnapshot
+            JsonNode responseSnapshot,
+            Instant finishedAt
     ) {
         FinancialTransaction financialTransaction = financialTransactionRepository
                 .findByTransactionId(transactionId)
@@ -105,7 +107,7 @@ public class IdempotencyService {
                 .findByIdForUpdate(recordId)
                 .orElseThrow(() -> new IdempotencyRecordNotFoundException(recordId));
 
-        record.complete(financialTransaction, responseSnapshot, clock.instant());
+        record.complete(financialTransaction, responseSnapshot, finishedAt);
 
         return new IdempotencyClaimResult.Completed(
                 record.getResponseSnapshot().toString()

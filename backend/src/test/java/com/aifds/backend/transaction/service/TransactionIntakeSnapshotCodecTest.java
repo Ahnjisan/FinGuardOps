@@ -4,14 +4,20 @@ import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
 import com.aifds.backend.transaction.exception.InvalidTransactionIntakeSnapshotException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 
 class TransactionIntakeSnapshotCodecTest {
 
@@ -20,16 +26,47 @@ class TransactionIntakeSnapshotCodecTest {
     );
     private static final Instant CREATED_AT =
             Instant.parse("2026-07-23T01:15:31.123456Z");
+    private static final Instant FINALIZED_AT =
+            Instant.parse("2026-07-23T01:15:33.654321Z");
 
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final TransactionIntakeSnapshotBodyCodec bodyCodec =
+            new TransactionIntakeSnapshotBodyCodec(objectMapper);
+    private final TransactionIntakeLegacySnapshotCodec legacyCodec =
+            new TransactionIntakeLegacySnapshotCodec(bodyCodec);
+    private final TransactionIntakeSnapshotEnvelopeCodec envelopeCodec =
+            new TransactionIntakeSnapshotEnvelopeCodec(
+                    objectMapper,
+                    bodyCodec
+            );
     private final TransactionIntakeSnapshotCodec codec =
-            new TransactionIntakeSnapshotCodec(objectMapper);
+            new TransactionIntakeSnapshotCodec(
+                    objectMapper,
+                    legacyCodec,
+                    envelopeCodec
+            );
 
     @Test
-    void encodesExactlySevenBusinessFieldsWithExplicitNulls() {
-        JsonNode encoded = codec.encode(snapshot());
+    void encodesVersionedEnvelopeWithExactMetadataAndBusinessBody() {
+        JsonNode encoded = codec.encode(snapshot(), 201, FINALIZED_AT);
 
-        assertThat(toFieldSet(encoded)).containsExactlyInAnyOrder(
+        assertThat(fieldNames(encoded)).containsExactlyInAnyOrder(
+                "responseBody",
+                "httpStatus",
+                "responseSchemaVersion",
+                "codecVersion",
+                "finalizedAt"
+        );
+        assertThat(encoded.get("httpStatus").intValue()).isEqualTo(201);
+        assertThat(encoded.get("responseSchemaVersion").textValue())
+                .isEqualTo("transaction-create-response-v1");
+        assertThat(encoded.get("codecVersion").textValue())
+                .isEqualTo("transaction-intake-snapshot-envelope-v1");
+        assertThat(encoded.get("finalizedAt").textValue())
+                .isEqualTo("2026-07-23T01:15:33.654321Z");
+
+        JsonNode responseBody = encoded.get("responseBody");
+        assertThat(fieldNames(responseBody)).containsExactlyInAnyOrder(
                 "transactionId",
                 "processingStatus",
                 "riskLevel",
@@ -38,106 +75,208 @@ class TransactionIntakeSnapshotCodecTest {
                 "caseId",
                 "createdAt"
         );
-        assertThat(encoded.get("transactionId").textValue())
+        assertThat(responseBody.get("transactionId").textValue())
                 .isEqualTo(TRANSACTION_ID.toString());
-        assertThat(encoded.get("processingStatus").textValue())
+        assertThat(responseBody.get("processingStatus").textValue())
                 .isEqualTo("RECEIVED");
-        assertThat(encoded.get("riskLevel").isNull()).isTrue();
-        assertThat(encoded.get("riskResponseOutcome").isNull()).isTrue();
-        assertThat(encoded.get("adoptedDetectionResultId").isNull()).isTrue();
-        assertThat(encoded.get("caseId").isNull()).isTrue();
-        assertThat(encoded.get("createdAt").textValue())
+        assertThat(responseBody.get("riskLevel").isNull()).isTrue();
+        assertThat(responseBody.get("riskResponseOutcome").isNull()).isTrue();
+        assertThat(responseBody.get("adoptedDetectionResultId").isNull())
+                .isTrue();
+        assertThat(responseBody.get("caseId").isNull()).isTrue();
+        assertThat(responseBody.get("createdAt").textValue())
                 .isEqualTo("2026-07-23T01:15:31.123456Z");
-        assertThat(encoded.has("traceId")).isFalse();
-        assertThat(encoded.has("idempotencyRecordId")).isFalse();
-        assertThat(encoded.has("fingerprint")).isFalse();
+        assertThat(containsFieldRecursively(encoded, "traceId")).isFalse();
     }
 
     @Test
-    void roundTripsAValidatedTypedSnapshot() throws Exception {
+    void roundTripsEnvelopeWithStored201Status() throws Exception {
         String encoded = objectMapper.writeValueAsString(
-                codec.encode(snapshot())
+                codec.encode(snapshot(), 201, FINALIZED_AT)
         );
 
-        assertThat(codec.decode(encoded)).isEqualTo(snapshot());
+        assertThat(codec.decode(encoded))
+                .isEqualTo(new TransactionIntakeSnapshotReplay(
+                        snapshot(),
+                        201
+                ));
     }
 
     @Test
-    void decodesNullableStringFieldsWhenTheyArePresent() {
-        String encoded = """
-                {
-                  "transactionId":"2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
-                  "processingStatus":"RECEIVED",
-                  "riskLevel":"HIGH",
-                  "riskResponseOutcome":"HELD",
-                  "adoptedDetectionResultId":"det_ref_1",
-                  "caseId":"case_ref_1",
-                  "createdAt":"2026-07-23T01:15:31Z"
-                }
-                """;
+    void decodesOnlyExactStrictLegacyShapeWith200Status() throws Exception {
+        ObjectNode legacy = legacySnapshot();
 
-        TransactionIntakeSnapshot decoded = codec.decode(encoded);
+        TransactionIntakeSnapshotReplay replay =
+                codec.decode(objectMapper.writeValueAsString(legacy));
 
-        assertThat(decoded.riskLevel()).isEqualTo("HIGH");
-        assertThat(decoded.riskResponseOutcome()).isEqualTo("HELD");
-        assertThat(decoded.adoptedDetectionResultId())
-                .isEqualTo("det_ref_1");
-        assertThat(decoded.caseId()).isEqualTo("case_ref_1");
+        assertThat(replay.snapshot()).isEqualTo(snapshot());
+        assertThat(replay.httpStatus()).isEqualTo(200);
     }
 
     @Test
-    void rejectsMalformedMissingExtraOrWrongTypedSnapshotsWithoutRawContent() {
+    void rejectsLegacyAdditionalFieldsAndNonNullDetectionFields() {
+        assertInvalid(legacySnapshot().put("additionalField", "rejected"));
+        assertInvalid(legacySnapshot().put("riskLevel", "HIGH"));
+        assertInvalid(legacySnapshot().put("riskResponseOutcome", "HELD"));
+        assertInvalid(legacySnapshot().put(
+                "adoptedDetectionResultId",
+                "det_ref"
+        ));
+        assertInvalid(legacySnapshot().put("caseId", "case_ref"));
+    }
+
+    @Test
+    void rejectsLegacyMissingWrongTypedAndInvalidValueFields() {
+        assertInvalid(legacySnapshot().remove("createdAt"));
+        assertInvalid(legacySnapshot().put("transactionId", 1));
+        assertInvalid(legacySnapshot().put(
+                "transactionId",
+                "not-a-canonical-uuid-v4"
+        ));
+        assertInvalid(legacySnapshot().put("processingStatus", "ANALYZED"));
+        assertInvalid(legacySnapshot().put("createdAt", "not-an-instant"));
+        assertInvalid(legacySnapshot().put(
+                "createdAt",
+                "2026-07-23T10:15:31.123456+09:00"
+        ));
+    }
+
+    @Test
+    void rejectsEnvelopeAndResponseBodyAdditionalFields() {
+        ObjectNode envelope = envelope();
+        envelope.put("additionalEnvelopeField", "rejected");
+        assertInvalid(envelope);
+
+        ObjectNode bodyWithExtra = envelope();
+        ((ObjectNode) bodyWithExtra.get("responseBody"))
+                .put("additionalBodyField", "rejected");
+        assertInvalid(bodyWithExtra);
+    }
+
+    @Test
+    void rejectsUnknownSchemaAndCodecVersions() {
+        assertInvalid(envelope().put(
+                "responseSchemaVersion",
+                "transaction-create-response-v999"
+        ));
+        assertInvalid(envelope().put(
+                "codecVersion",
+                "transaction-intake-snapshot-envelope-v999"
+        ));
+    }
+
+    @Test
+    void rejectsEnvelopeMissingFieldsAndWrongJsonTypes() {
+        assertEnvelopeMissing("responseBody");
+        assertEnvelopeMissing("httpStatus");
+        assertEnvelopeMissing("responseSchemaVersion");
+        assertEnvelopeMissing("codecVersion");
+        assertEnvelopeMissing("finalizedAt");
+        assertInvalid(envelope().put("responseBody", "not-an-object"));
+        assertInvalid(envelope().put("httpStatus", "201"));
+        assertInvalid(envelope().put("responseSchemaVersion", 1));
+        assertInvalid(envelope().put("codecVersion", 1));
+    }
+
+    @Test
+    void rejectsEnvelopeHttpStatusOtherThan201() {
+        assertInvalid(envelope().put("httpStatus", 200));
+        assertInvalid(envelope().put("httpStatus", 202));
+        assertInvalid(envelope().put("httpStatus", 500));
+    }
+
+    @Test
+    void rejectsFinalizedAtWrongTypeInvalidInstantAndNonUtcForm() {
+        assertInvalid(envelope().put("finalizedAt", 1));
+        assertInvalid(envelope().put("finalizedAt", "not-an-instant"));
+        assertInvalid(envelope().put(
+                "finalizedAt",
+                "2026-07-23T10:15:33.654321+09:00"
+        ));
+    }
+
+    @Test
+    void rejectsTraceIdAtEveryEnvelopeDepth() {
+        assertInvalid(envelope().put("traceId", "top-level-trace"));
+
+        ObjectNode responseBodyTrace = envelope();
+        ((ObjectNode) responseBodyTrace.get("responseBody"))
+                .put("traceId", "response-body-trace");
+        assertInvalid(responseBodyTrace);
+
+        ObjectNode nestedTrace = envelope();
+        ((ObjectNode) nestedTrace.get("responseBody")).set(
+                "riskLevel",
+                objectMapper.createObjectNode()
+                        .put("traceId", "nested-object-trace")
+        );
+        assertInvalid(nestedTrace);
+    }
+
+    @Test
+    void doesNotFallbackToLegacyAfterEnvelopeCandidateDecodeFailure()
+            throws Exception {
+        TransactionIntakeLegacySnapshotCodec legacySpy = spy(legacyCodec);
+        TransactionIntakeSnapshotCodec dispatchingCodec =
+                new TransactionIntakeSnapshotCodec(
+                        objectMapper,
+                        legacySpy,
+                        envelopeCodec
+                );
+        ObjectNode envelopeCandidate = legacySnapshot();
+        envelopeCandidate.put(
+                "codecVersion",
+                "transaction-intake-snapshot-envelope-v1"
+        );
+
+        assertThatThrownBy(() -> dispatchingCodec.decode(
+                objectMapper.writeValueAsString(envelopeCandidate)
+        )).isInstanceOf(InvalidTransactionIntakeSnapshotException.class);
+
+        verify(legacySpy, never()).decode(any());
+    }
+
+    @Test
+    void rejectsMalformedAndUnknownShapesWithoutRawContent() {
         String sensitiveRaw =
                 "{\"traceId\":\"secret_trace\",\"account\":\"secret_account\"}";
-        assertInvalid(sensitiveRaw);
-        assertInvalid("[]");
-        assertInvalid("""
-                {
-                  "transactionId":"2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
-                  "processingStatus":"RECEIVED",
-                  "riskLevel":null,
-                  "riskResponseOutcome":null,
-                  "adoptedDetectionResultId":null,
-                  "caseId":null
-                }
-                """);
-        assertInvalid("""
-                {
-                  "transactionId":"2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
-                  "processingStatus":"RECEIVED",
-                  "riskLevel":null,
-                  "riskResponseOutcome":null,
-                  "adoptedDetectionResultId":null,
-                  "caseId":null,
-                  "createdAt":"2026-07-23T01:15:31Z",
-                  "traceId":"must-not-be-stored"
-                }
-                """);
-        assertInvalid("""
-                {
-                  "transactionId":"not-a-uuid",
-                  "processingStatus":"RECEIVED",
-                  "riskLevel":null,
-                  "riskResponseOutcome":null,
-                  "adoptedDetectionResultId":null,
-                  "caseId":null,
-                  "createdAt":"2026-07-23T01:15:31Z"
-                }
-                """);
-        assertInvalid("""
-                {
-                  "transactionId":"2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
-                  "processingStatus":"ANALYZED",
-                  "riskLevel":null,
-                  "riskResponseOutcome":null,
-                  "adoptedDetectionResultId":null,
-                  "caseId":null,
-                  "createdAt":"not-an-instant"
-                }
-                """);
+        assertInvalidRaw(sensitiveRaw);
+        assertInvalidRaw("{");
+        assertInvalidRaw("{} {}");
+        assertInvalidRaw("[]");
+        assertInvalidRaw("{\"unknown\":\"shape\"}");
     }
 
-    private void assertInvalid(String rawSnapshot) {
+    private ObjectNode envelope() {
+        return (ObjectNode) codec.encode(snapshot(), 201, FINALIZED_AT);
+    }
+
+    private ObjectNode legacySnapshot() {
+        ObjectNode legacy = objectMapper.createObjectNode();
+        legacy.put("transactionId", TRANSACTION_ID.toString());
+        legacy.put("processingStatus", "RECEIVED");
+        legacy.putNull("riskLevel");
+        legacy.putNull("riskResponseOutcome");
+        legacy.putNull("adoptedDetectionResultId");
+        legacy.putNull("caseId");
+        legacy.put(
+                "createdAt",
+                "2026-07-23T01:15:31.123456Z"
+        );
+        return legacy;
+    }
+
+    private void assertInvalid(JsonNode rawSnapshot) {
+        assertInvalidRaw(rawSnapshot.toString());
+    }
+
+    private void assertEnvelopeMissing(String field) {
+        ObjectNode envelope = envelope();
+        envelope.remove(field);
+        assertInvalid(envelope);
+    }
+
+    private void assertInvalidRaw(String rawSnapshot) {
         assertThatThrownBy(() -> codec.decode(rawSnapshot))
                 .isInstanceOf(InvalidTransactionIntakeSnapshotException.class)
                 .hasMessage("Stored transaction intake snapshot is invalid")
@@ -157,9 +296,29 @@ class TransactionIntakeSnapshotCodecTest {
         );
     }
 
-    private Set<String> toFieldSet(JsonNode node) {
-        Set<String> fields = new java.util.HashSet<>();
+    private Set<String> fieldNames(JsonNode node) {
+        Set<String> fields = new HashSet<>();
         node.fieldNames().forEachRemaining(fields::add);
         return fields;
+    }
+
+    private boolean containsFieldRecursively(JsonNode node, String fieldName) {
+        if (node.isObject()) {
+            if (node.has(fieldName)) {
+                return true;
+            }
+            for (JsonNode value : node) {
+                if (containsFieldRecursively(value, fieldName)) {
+                    return true;
+                }
+            }
+        } else if (node.isArray()) {
+            for (JsonNode value : node) {
+                if (containsFieldRecursively(value, fieldName)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 }

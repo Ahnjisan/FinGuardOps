@@ -1214,12 +1214,12 @@ caseId
 3. `POST:/api/v1/transactions + Idempotency-Key` Unique로 최초 처리를 선점한다.
 4. 동일 키의 지문이 다르면 `IDEMPOTENCY_KEY_CONFLICT`로 거부한다.
 5. 동일 키·동일 지문의 처리가 진행 중이면 `IDEMPOTENCY_REQUEST_IN_PROGRESS`로 거부한다.
-6. 동일 키·동일 지문의 처리가 완료되었으면 현재 legacy Snapshot은 `200 OK`, 신규 envelope는 저장된 최초 확정 HTTP 상태로 기존 업무 결과를 반환한다. 신규 envelope 재생은 후속 구현이 필요하다.
+6. 동일 키·동일 지문의 처리가 완료되었으면 strict legacy Snapshot은 `200 OK`, 신규 envelope는 v1 codec이 검증한 저장 `201 Created`로 기존 업무 결과를 반환한다.
 7. 새 요청만 Transaction을 저장하고 최초 성공에는 `201 Created`를 반환한다.
 
 요청 지문과 현재 완료 응답 snapshot은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)의 물리 계약을 따른다. DB는 최초 선점 24시간 후를 `expires_at`에 저장하지만 현재 Service는 만료를 판정하지 않고 정리 작업도 없다.
 
-현재 완료 응답 snapshot은 단계적 `RECEIVED`/null 응답을 재생한다. ADR-004는 기존 무버전 Snapshot을 strict legacy codec과 현재 `200 OK`로 그대로 재생하고 소급 갱신하지 않으며, 전환 이후 신규 요청부터 업무 응답·최초 확정 HTTP 상태·응답 스키마 버전·codec 버전·확정 시각을 식별하는 envelope를 저장하도록 결정했다. envelope와 version dispatch는 아직 구현되지 않았다.
+현재 완료 응답 snapshot의 업무 본문은 단계적 `RECEIVED`/null 응답이다. 기존 무버전 Snapshot은 strict legacy codec과 `200 OK`로 그대로 재생하고 소급 갱신하지 않는다. 전환 이후 신규 요청은 `responseBody`, `httpStatus=201`, `responseSchemaVersion=transaction-create-response-v1`, `codecVersion=transaction-intake-snapshot-envelope-v1`, `finalizedAt`을 식별하는 envelope로 저장하며 version dispatch가 구현되어 있다. 이는 최종 탐지·위험 대응·사건 연결이 구현되었다는 뜻이 아니다.
 
 ### 13.2 행동 이벤트
 
@@ -1623,7 +1623,7 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 ### 20.3 마이그레이션·DB 제약 설계
 
 - 구현된 `financial_transaction`, `idempotency_record`, `behavior_event` 이후의 탐지·Rule·사건·AI 운영 Flyway Migration 설계
-- ADR-004 신규 Snapshot metadata를 JSONB 내부에 둘지 별도 컬럼으로 둘지와 새 Migration 필요 여부
+- 향후 Snapshot metadata 조회·인덱스 또는 DB 수준 version 제약이 필요할 때의 새 Migration 여부
 - 이 문서의 Unique 후보를 실제 제약으로 적용할 범위
 - `adoptedDetectionResultId`가 같은 Transaction의 DetectionResult만 참조하도록 보장하는 방식
 - 교차 테이블 상태 조건의 한계를 고려한 활성 사건 검증, 중복 상태·별도 활성 관계·DB Trigger와 보조 제약 비교
@@ -1639,7 +1639,7 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 - 시간 범위·목록·집계 조회를 위한 인덱스 순서
 - 데이터 보존·비식별화·파티셔닝 필요 여부
 
-거래·멱등·행동 이벤트 Flyway Migration은 구현되어 있다. 위 Mermaid `IDEMPOTENCY_RECORD`는 실제 V1 Migration의 `financial_transaction_id`, `response_snapshot`, `failure_code`, 세 시각 필드와 `processing_status` 명칭을 반영했다. 신규 Snapshot envelope, 별도 버전 metadata 컬럼과 legacy backfill Migration이 구현되었다는 뜻은 아니다. 탐지·Rule·사건·AI 운영 DDL과 마이그레이션 파일은 별도 승인 작업에서 작성하며, 거래 접수의 DDL 기준은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)이다.
+거래·멱등·행동 이벤트 Flyway Migration은 구현되어 있다. 위 Mermaid `IDEMPOTENCY_RECORD`는 실제 V1 Migration의 `financial_transaction_id`, `response_snapshot`, `failure_code`, 세 시각 필드와 `processing_status` 명칭을 반영했다. 신규 Snapshot envelope는 기존 `response_snapshot JSONB` 내부에 구현되어 별도 버전 metadata 컬럼, 새 Flyway Migration 또는 legacy backfill이 없다. 탐지·Rule·사건·AI 운영 DDL과 마이그레이션 파일은 별도 승인 작업에서 작성하며, 거래 접수의 DDL 기준은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)이다.
 
 ### 20.4 트랜잭션·동시성 설계
 

@@ -67,8 +67,11 @@ public class TransactionIntakeService {
             return new TransactionIntakeResult.InProgress();
         }
         if (claimResult instanceof IdempotencyClaimResult.Completed completed) {
+            TransactionIntakeSnapshotReplay replay =
+                    snapshotCodec.decode(completed.responseSnapshotJson());
             return new TransactionIntakeResult.CompletedReplay(
-                    snapshotCodec.decode(completed.responseSnapshotJson())
+                    replay.snapshot(),
+                    replay.httpStatus()
             );
         }
         if (claimResult instanceof IdempotencyClaimResult.Failed failed) {

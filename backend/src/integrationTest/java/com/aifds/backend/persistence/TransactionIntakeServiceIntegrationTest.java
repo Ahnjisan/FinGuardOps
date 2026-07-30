@@ -17,6 +17,7 @@ import com.aifds.backend.transaction.service.TransactionIntakeResult;
 import com.aifds.backend.transaction.service.TransactionIntakeService;
 import com.aifds.backend.transaction.service.TransactionIntakeWriter;
 import com.aifds.backend.transaction.validation.TransactionValidationException;
+import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -137,29 +138,37 @@ class TransactionIntakeServiceIntegrationTest
         IdempotencyRecord record = recordByKey(key);
         assertThat(record.getProcessingStatus())
                 .isEqualTo(IdempotencyProcessingStatus.COMPLETED);
-        assertThat(record.getResponseSnapshot().fieldNames())
+        JsonNode envelope = record.getResponseSnapshot();
+        assertThat(envelope.fieldNames())
                 .toIterable()
                 .containsExactlyInAnyOrder(
-                        "transactionId",
-                        "processingStatus",
-                        "riskLevel",
-                        "riskResponseOutcome",
-                        "adoptedDetectionResultId",
-                        "caseId",
-                        "createdAt"
+                        "responseBody",
+                        "httpStatus",
+                        "responseSchemaVersion",
+                        "codecVersion",
+                        "finalizedAt"
                 );
-        assertThat(record.getResponseSnapshot().get("riskLevel").isNull())
+        assertThat(envelope.get("httpStatus").intValue()).isEqualTo(201);
+        assertThat(envelope.get("responseSchemaVersion").textValue())
+                .isEqualTo("transaction-create-response-v1");
+        assertThat(envelope.get("codecVersion").textValue())
+                .isEqualTo("transaction-intake-snapshot-envelope-v1");
+        assertThat(Instant.parse(envelope.get("finalizedAt").textValue()))
+                .isEqualTo(record.getFinishedAt());
+        JsonNode responseBody = envelope.get("responseBody");
+        assertThat(responseBody.get("riskLevel").isNull())
                 .isTrue();
-        assertThat(record.getResponseSnapshot()
-                .get("riskResponseOutcome").isNull()).isTrue();
-        assertThat(record.getResponseSnapshot()
-                .get("adoptedDetectionResultId").isNull()).isTrue();
-        assertThat(record.getResponseSnapshot().get("caseId").isNull())
+        assertThat(responseBody.get("riskResponseOutcome").isNull())
                 .isTrue();
-        assertThat(record.getResponseSnapshot().has("traceId")).isFalse();
-        assertThat(record.getResponseSnapshot().has("idempotencyRecordId"))
+        assertThat(responseBody.get("adoptedDetectionResultId").isNull())
+                .isTrue();
+        assertThat(responseBody.get("caseId").isNull())
+                .isTrue();
+        assertThat(envelope.has("traceId")).isFalse();
+        assertThat(responseBody.has("traceId")).isFalse();
+        assertThat(envelope.has("idempotencyRecordId"))
                 .isFalse();
-        assertThat(record.getResponseSnapshot().has("fingerprint")).isFalse();
+        assertThat(envelope.has("fingerprint")).isFalse();
         assertThat(record.getFailureCode()).isNull();
         assertThat(record.getFinishedAt()).isNotNull();
         assertThat(linkedTransactionId(record.getId())).isEqualTo(stored.getId());
@@ -215,7 +224,8 @@ class TransactionIntakeServiceIntegrationTest
 
         assertThat(completedReplay)
                 .isEqualTo(new TransactionIntakeResult.CompletedReplay(
-                        completedReceived.snapshot()
+                        completedReceived.snapshot(),
+                        201
                 ));
 
         String failedKey = key("failed");

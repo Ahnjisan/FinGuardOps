@@ -201,8 +201,8 @@ Spring Boot가 멱등성 확인과 업무 결과의 최종 소유자이다.
 
 | 상황 | 처리 규칙 |
 | --- | --- |
-| 같은 키 + 같은 요청, legacy/current 처리 완료 | 새 거래·탐지·사건을 만들지 않고 현재 구현대로 `200 OK`로 기존 완료 결과를 반환한다. |
-| 같은 키 + 같은 요청, 신규 envelope 처리 완료 | 새 거래·탐지·사건을 만들지 않고 저장된 최초 확정 업무 결과와 HTTP 상태를 재생한다. `traceId`는 현재 재요청 값을 사용한다. 후속 구현이 필요하다. |
+| 같은 키 + 같은 요청, legacy 처리 완료 | 새 거래·탐지·사건을 만들지 않고 `200 OK`로 기존 완료 결과를 반환한다. |
+| 같은 키 + 같은 요청, 신규 envelope 처리 완료 | 새 거래·탐지·사건을 만들지 않고 저장된 최초 확정 업무 결과와 검증된 `201 Created`를 재생한다. `traceId`는 현재 재요청 값을 사용한다. |
 | 같은 키 + 같은 요청, 최초 처리 중 | 새 처리를 시작하지 않고 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다. |
 | 같은 키 + 다른 요청 | 키 재사용 충돌로 거부하고 `409 Conflict`와 `IDEMPOTENCY_KEY_CONFLICT`를 반환한다. |
 | 다른 키 + 같은 `transactionId` | 새 거래로 처리하지 않고 `409 Conflict`와 `DUPLICATE_TRANSACTION`을 반환한다. |
@@ -252,7 +252,7 @@ deviceRef
 
 - 최초 생성 완료 응답은 `201 Created`를 사용한다.
 - 현재 무버전 legacy Snapshot의 완료 재전송은 `200 OK`로 기존 업무 결과를 반환한다.
-- 신규 envelope 전환 이후 완료 재전송은 envelope에 기록된 최초 확정 HTTP 상태를 사용한다. 이는 ADR 결정이며 아직 구현되지 않았다.
+- 신규 envelope 완료 재전송은 envelope에 기록되고 v1 codec이 검증한 `201 Created`를 사용한다.
 - 처리 중인 동일 멱등 요청의 재전송은 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다.
 - 어떤 응답이든 새 거래·탐지·사건을 중복 생성하지 않는다.
 
@@ -262,7 +262,7 @@ deviceRef
 
 거래 접수의 요청 지문, 처리 상태, 완료 응답 snapshot, Unique 범위와 만료 저장 구조는 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따른다.
 
-현재 완료 Snapshot은 `RECEIVED`와 탐지 관련 null 값을 가진 무버전 일곱 필드 JSON이다. 신규 Snapshot은 업무 응답, 최초 확정 HTTP 상태, `responseSchemaVersion`, `codecVersion`과 확정 시각을 식별하는 envelope를 사용한다. 기존 Snapshot은 strict legacy codec으로만 복원하고 신규 envelope나 최종 탐지 응답으로 소급 갱신하지 않는다. 알 수 없는 구조·버전과 역직렬화 실패는 최신 상태 조회나 신규 거래 처리로 우회하지 않는다. 이 envelope와 version dispatch는 ADR 결정이며 후속 구현이 필요하다.
+전환 이후 신규 완료 Snapshot은 `responseBody`, 최초 확정 `httpStatus=201`, `responseSchemaVersion=transaction-create-response-v1`, `codecVersion=transaction-intake-snapshot-envelope-v1`, `finalizedAt`을 정확히 가진 envelope로 저장한다. 현재 `responseBody`는 실제 구현된 `RECEIVED`와 네 탐지 관련 JSON null을 가진 일곱 업무 필드이다. 기존 무버전 Snapshot은 이 정확한 일곱 필드와 값 계약을 만족할 때만 strict legacy codec으로 복원하고 신규 envelope로 소급 갱신하지 않는다. 알 수 없는 구조·버전과 역직렬화 실패는 `500 INTERNAL_ERROR`로 fail-closed 처리하며 최신 상태 조회나 신규 거래 처리로 우회하지 않는다.
 
 거래 접수에서 `FAILED`인 같은 키·같은 지문의 요청은 자동 재실행하지 않는다. 저장된 `failureCode`는 외부 code, message 또는 HTTP 상태로 동적으로 사용하지 않고 다음 공개 whitelist만 고정 매핑한다.
 
@@ -278,7 +278,7 @@ null, 빈 값, 알 수 없는 값과 `TRANSACTION_INTAKE_FAILED` 같은 내부 �
 - 실제 멱등 보존 기간과 만료 후 같은 키 재사용 허용 여부
 - 만료 기록 정리 방식·주기와 정리 전후 경합 처리
 - 재시도와 늦은 FastAPI 응답의 경합 처리
-- 실제 `responseSchemaVersion`·`codecVersion` 식별자와 필요한 Flyway Migration
+- 향후 응답 계약 또는 envelope 규칙 변경 시 새 version 식별자와 필요한 Flyway Migration
 
 ### 6.6 행동 이벤트 생성의 자연 멱등성
 

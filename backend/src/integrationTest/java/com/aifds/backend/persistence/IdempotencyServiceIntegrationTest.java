@@ -102,7 +102,8 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
         IdempotencyClaimResult.Completed completed = idempotencyService.complete(
                 recordId,
                 transaction.getTransactionId(),
-                snapshot
+                snapshot,
+                Instant.now().truncatedTo(ChronoUnit.MICROS)
         );
         IdempotencyRecord stored = idempotencyRecordRepository.findById(recordId).orElseThrow();
         IdempotencyClaimResult replay = idempotencyService.claim(key, input);
@@ -133,7 +134,8 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
         IdempotencyClaimResult.Completed completed = idempotencyService.complete(
                 recordId,
                 transaction.getTransactionId(),
-                objectMapper.createObjectNode().put("result", "completed")
+                objectMapper.createObjectNode().put("result", "completed"),
+                Instant.now().truncatedTo(ChronoUnit.MICROS)
         );
 
         assertThat(completed.responseSnapshotJson()).contains("completed");
@@ -165,7 +167,8 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
                 () -> idempotencyService.complete(
                         recordId,
                         different.getTransactionId(),
-                        objectMapper.createObjectNode().put("result", "rejected")
+                        objectMapper.createObjectNode().put("result", "rejected"),
+                        Instant.now().truncatedTo(ChronoUnit.MICROS)
                 )
         ).isInstanceOf(IllegalStateException.class);
 
@@ -288,7 +291,8 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
                     transitionTask(barrier, () -> idempotencyService.complete(
                             recordId,
                             transaction.getTransactionId(),
-                            objectMapper.createObjectNode().put("result", "completed")
+                            objectMapper.createObjectNode().put("result", "completed"),
+                            Instant.now().truncatedTo(ChronoUnit.MICROS)
                     ))
             );
             Future<TransitionAttempt> failFuture = executor.submit(
