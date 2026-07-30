@@ -139,6 +139,8 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
         assertColumn(idempotencyColumns, "response_snapshot", "jsonb", "jsonb", true);
         assertColumn(idempotencyColumns, "expires_at", "timestamp with time zone", "timestamptz", false);
         assertColumn(idempotencyColumns, "finished_at", "timestamp with time zone", "timestamptz", true);
+        assertThat(((Number) idempotencyColumns.get("finished_at")
+                .get("datetime_precision")).intValue()).isEqualTo(6);
     }
 
     @Test
@@ -751,7 +753,8 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
                             is_nullable,
                             is_identity,
                             numeric_precision,
-                            numeric_scale
+                            numeric_scale,
+                            datetime_precision
                         FROM information_schema.columns
                         WHERE table_schema = current_schema()
                           AND table_name = ?

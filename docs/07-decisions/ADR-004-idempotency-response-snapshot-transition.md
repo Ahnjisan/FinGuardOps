@@ -2,6 +2,7 @@
 
 - 상태: Accepted
 - 결정일: 2026-07-29
+- 구현 반영일: 2026-07-30
 - 결정자: Project Owner
 - 작업 목적: `[Docs] 멱등 응답 Snapshot과 동기 탐지 응답 전환 정책 결정`
 - 관련 문서:
@@ -15,13 +16,13 @@
 
 ADR-003은 최종 `POST /api/v1/transactions`가 거래 접수부터 External Risk 조회, FastAPI Rule·ML 분석, 탐지 결과 저장·채택, 위험 대응과 사건 연결까지 하나의 동기 요청에서 완료되는 경계를 유지한다고 결정했다.
 
-현재 구현은 그중 입력 검증, 멱등 선점과 거래 영속화까지만 수행한다. 최초 성공 시 `processingStatus = RECEIVED`이고 `riskLevel`, `riskResponseOutcome`, `adoptedDetectionResultId`, `caseId`가 null인 응답을 반환하며, 이 일곱 개 업무 필드를 `idempotency_record.response_snapshot`에 저장한다. 따라서 최종 동기 탐지 응답으로 전환할 때 기존 Snapshot을 새 탐지 완료 결과로 바꿀지, 서로 다른 구조를 어떻게 식별·복원할지, 재요청에 어떤 HTTP 상태와 `traceId`를 사용할지 결정해야 한다.
+ADR 작성 당시 구현은 그중 입력 검증, 멱등 선점과 거래 영속화까지만 수행했다. 최초 성공 시 `processingStatus = RECEIVED`이고 `riskLevel`, `riskResponseOutcome`, `adoptedDetectionResultId`, `caseId`가 null인 응답을 반환하며, 이 일곱 개 업무 필드를 무버전 `idempotency_record.response_snapshot`에 저장했다. 따라서 최종 동기 탐지 응답으로 전환할 때 기존 Snapshot을 새 탐지 완료 결과로 바꿀지, 서로 다른 구조를 어떻게 식별·복원할지, 재요청에 어떤 HTTP 상태와 `traceId`를 사용할지 결정해야 했다.
 
 이 ADR은 다음 세 범위를 구분한다.
 
 - **현재 구현**: 저장소의 Java 코드와 V1 Flyway Migration이 지금 수행하는 동작
 - **목표 계약**: 최종 동기 탐지 응답 전환 시 지켜야 할 멱등 재생 의미
-- **후속 구현 필요**: 이 ADR을 실제 코드·DB·운영 흐름에 반영하기 위해 별도 승인과 구현이 필요한 항목
+- **후속 구현 필요**: 최종 동기 탐지·위험 대응·사건 연결처럼 이번 Snapshot codec 전환에 포함되지 않은 항목
 
 ## 현재 단계적 구현
 
@@ -65,7 +66,7 @@ UUID는 canonical 문자열, 금액은 10진 정수 문자열, 시각은 UTC ISO
 
 ### Snapshot 저장 형식과 저장 시점
 
-현재 codec은 다음 일곱 필드만 허용하는 무버전 JSON object를 저장한다.
+전환 전 codec은 다음 일곱 필드의 무버전 JSON object를 저장했다. 전환 후 구현은 이 정확한 구조를 legacy로만 읽고, 신규 완료 요청은 아래에서 결정한 version envelope로 저장한다.
 
 ```json
 {
@@ -88,10 +89,10 @@ UUID는 canonical 문자열, 금액은 10진 정수 문자열, 시각은 UTC ISO
 | 기존 레코드 | 같은 지문 | 다른 지문 |
 | --- | --- | --- |
 | `IN_PROGRESS` | `409 Conflict`, `IDEMPOTENCY_REQUEST_IN_PROGRESS` | `409 Conflict`, `IDEMPOTENCY_KEY_CONFLICT` |
-| `COMPLETED` | strict codec으로 Snapshot을 복원해 `200 OK` 반환 | `409 Conflict`, `IDEMPOTENCY_KEY_CONFLICT` |
+| `COMPLETED` | 정확한 legacy는 `200 OK`, 지원하는 신규 envelope는 저장된 `201`로 복원 | `409 Conflict`, `IDEMPOTENCY_KEY_CONFLICT` |
 | `FAILED` | 자동 재처리하지 않고 저장된 실패 분류를 공개 whitelist로 매핑 | `409 Conflict`, `IDEMPOTENCY_KEY_CONFLICT` |
 
-최초 성공은 현재 `201 Created`, 완료 재요청은 `200 OK`이다. 업무 필드는 저장된 Snapshot 값이며 `traceId`만 재요청의 현재 값을 결합한다. Snapshot이 손상되었거나 정확한 일곱 필드·타입·`RECEIVED` 상태를 만족하지 않으면 `500 Internal Server Error`와 `INTERNAL_ERROR`로 처리하고 신규 거래 처리로 우회하지 않는다.
+최초 성공은 `201 Created`이다. legacy 완료 재요청은 `200 OK`, 신규 envelope 완료 재요청은 저장된 `201`을 사용한다. 업무 필드는 저장된 Snapshot 값이며 `traceId`만 재요청의 현재 값을 결합한다. Snapshot이 손상되었거나 strict legacy 또는 지원하는 envelope 계약을 만족하지 않으면 `500 Internal Server Error`와 `INTERNAL_ERROR`로 처리하고 신규 거래 처리로 우회하지 않는다.
 
 현재 `FAILED` 재요청의 공개 whitelist는 다음과 같다.
 
@@ -136,7 +137,7 @@ Migration 없이 구현하기 쉽지만 필드 추가·삭제가 codec 변경인
 - 멱등 응답 재생은 최초 명령 결과를 재현하는 기능이며 최신 거래·탐지·사건 상태 조회 기능이 아니다.
 - 확정된 Snapshot은 후속 탐지 결과, 재분석, 거래 상태 또는 사건 상태가 바뀌어도 수정하지 않는다.
 - 기존 무버전 `RECEIVED`/null Snapshot은 신규 최종 응답으로 소급 교체하지 않는다.
-- 전환 이후 새로 선점된 요청부터 최종 동기 탐지 응답을 신규 envelope로 저장한다.
+- Snapshot codec 전환 이후 새로 선점된 요청부터 그 요청에서 실제 확정한 업무 응답을 신규 envelope로 저장한다. 현재는 단계적 `RECEIVED` 응답이며, 최종 동기 탐지 응답은 해당 기능이 구현된 뒤 승인된 응답 schema version으로 저장한다.
 
 ## 요청 동일성 기준
 
@@ -208,7 +209,7 @@ Snapshot이 terminal 성공으로 확정되면 다음 값을 같은 멱등 레�
 - decoder는 `codecVersion`으로 envelope를 해석한 뒤 `responseSchemaVersion`에 대응하는 typed 응답을 복원한다.
 - 지원 중인 구버전 decoder는 해당 Snapshot 보존·재생 범위 동안 제거하지 않는다.
 - 버전이 달라도 기존 Snapshot을 새 버전으로 제자리 갱신하지 않는다.
-- 실제 최초 버전 식별자 값과 지원 버전 registry 구성은 후속 구현에서 확정한다.
+- 최초 구현의 `responseSchemaVersion`은 `transaction-create-response-v1`, `codecVersion`은 `transaction-intake-snapshot-envelope-v1`이다. 현재 registry는 이 한 조합만 지원하며 다른 값은 추측하지 않고 거부한다.
 
 ## 기존 `RECEIVED`/null Snapshot 전환 정책
 
@@ -282,28 +283,25 @@ legacy Snapshot은 엄격한 legacy codec으로만 복원하고 신규 envelope�
 
 ## 구현 영향
 
-다음은 **후속 구현 필요**이며 현재 구현된 것으로 간주하지 않는다.
+다음 항목은 2026-07-30 Snapshot codec 전환에서 구현되었다.
 
-- 신규 envelope DTO와 encoder·decoder
-- legacy strict decoder와 신규 version dispatch
-- 신규 envelope 재요청에서 저장된 HTTP 상태를 사용하는 Controller 매핑
-- 최종 동기 탐지 결과가 모두 확정된 뒤 Snapshot을 완료하는 트랜잭션 경계
-- Snapshot 불변성 단위·통합 테스트
-- unknown version, 역직렬화 실패와 fail-closed 재생 테스트
-- legacy `200`과 신규 기록 상태 재생의 호환 테스트
-- `traceId`가 Snapshot에 저장되지 않고 현재 요청 값으로 결합되는 테스트
+- 신규 envelope encoder·decoder와 명시적 version dispatch
+- 정확한 일곱 필드, `RECEIVED`, 네 탐지 관련 JSON null만 허용하는 strict legacy decoder
+- 신규 envelope 재요청에서 검증된 저장 HTTP `201`을 사용하는 Controller 매핑
+- legacy `200`, 신규 envelope `201`, 현재 요청 `traceId` 결합
+- unknown version, 손상 데이터와 역직렬화 실패의 fail-closed 처리
+- envelope 확정 시 `Clock`을 한 번 읽고 PostgreSQL `TIMESTAMPTZ` 기본 마이크로초 정밀도로 정규화한 동일 값을 `finalizedAt`과 `finished_at`에 사용
 
-Java·Python·테스트·설정은 이 ADR 문서 작업에서 변경하지 않는다.
+최종 동기 탐지 결과, External Risk, FastAPI, DetectionResult 저장·채택, 위험 대응과 사건 연결은 구현되지 않았다. 현재 `responseBody`는 실제 단계적 거래 접수 결과인 `RECEIVED`와 네 탐지 관련 null 값을 보존한다.
 
 ## Migration 영향
 
-현재 V1 Migration의 `response_snapshot JSONB`와 JSON object 제약은 legacy Snapshot을 저장하며, 신규 envelope에 필요한 별도 metadata 컬럼이나 DB 수준 버전 제약은 없다. 논리 envelope를 같은 JSONB에 저장할 수 있는지는 가능하지만, DB 제약·조회·운영 요구까지 포함한 최종 물리 설계를 의미하지 않는다.
+현재 V1 Migration의 `response_snapshot JSONB`와 JSON object 제약은 legacy Snapshot과 신규 envelope를 모두 저장할 수 있다. 이번 구현은 metadata를 JSONB 내부에 저장하며 별도 컬럼, 인덱스 또는 DB 수준 version 제약이 필요하지 않다.
 
 - 기존 V1 Migration을 수정하지 않는다.
 - 기존 Snapshot을 신규 envelope로 backfill하지 않는다.
-- metadata를 JSONB 내부에만 둘지 별도 컬럼으로 둘지, 추가 Check Constraint나 인덱스가 필요한지는 후속 구현 설계에서 결정한다.
-- 스키마 변경이 필요하면 새 Flyway Migration으로만 수행한다.
-- 필요한 Migration 버전과 정확한 DDL은 이 ADR에서 확정하지 않는다.
+- 이번 구현에서는 새 Flyway Migration을 추가하지 않는다.
+- 향후 metadata 조회·인덱스나 DB 수준 version 제약이 실제로 필요해지면 기존 Migration을 수정하지 않고 새 Flyway Migration으로 승인한다.
 
 ## 운영 및 관측 고려사항
 
@@ -333,10 +331,8 @@ Java·Python·테스트·설정은 이 ADR 문서 작업에서 변경하지 않�
 
 ## 후속 작업
 
-1. 최종 동기 거래 응답의 승인된 필드·Enum과 최초 HTTP 상태를 확정한다.
-2. `responseSchemaVersion`과 `codecVersion`의 실제 최초 식별자 및 지원 registry를 결정한다.
-3. legacy/new codec과 저장된 HTTP 상태 재생을 구현하고 호환 테스트를 추가한다.
-4. 최종 동기 탐지·위험 대응·사건 연결 완료 트랜잭션과 실패 경계를 구현한다.
-5. metadata의 JSONB 내부 저장 또는 별도 컬럼 여부와 필요한 새 Flyway Migration을 결정한다.
-6. 만료 후 키 재사용, 실제 보존 기간, 정리 작업과 동시성 정책을 별도 승인한다.
-7. 추가 공개 오류 code 또는 실패 whitelist가 필요하면 API 공통 규칙 변경으로 승인한다.
+1. 최종 동기 거래 응답의 승인된 필드·Enum과 탐지 완료 트랜잭션 경계를 확정한다.
+2. 최종 동기 탐지·위험 대응·사건 연결 완료 트랜잭션과 실패 경계를 구현한다.
+3. 응답 계약 또는 envelope 규칙 변경이 필요하면 기존 식별자를 재사용하지 않고 새 version을 승인한다.
+4. 만료 후 키 재사용, 실제 보존 기간, 정리 작업과 동시성 정책을 별도 승인한다.
+5. 추가 공개 오류 code 또는 실패 whitelist가 필요하면 API 공통 규칙 변경으로 승인한다.

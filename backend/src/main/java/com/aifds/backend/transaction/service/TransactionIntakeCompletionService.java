@@ -7,21 +7,28 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Clock;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+
 @Service
 public class TransactionIntakeCompletionService {
 
     private final TransactionIntakeWriter transactionIntakeWriter;
     private final TransactionIntakeSnapshotCodec snapshotCodec;
     private final IdempotencyService idempotencyService;
+    private final Clock clock;
 
     public TransactionIntakeCompletionService(
             TransactionIntakeWriter transactionIntakeWriter,
             TransactionIntakeSnapshotCodec snapshotCodec,
-            IdempotencyService idempotencyService
+            IdempotencyService idempotencyService,
+            Clock clock
     ) {
         this.transactionIntakeWriter = transactionIntakeWriter;
         this.snapshotCodec = snapshotCodec;
         this.idempotencyService = idempotencyService;
+        this.clock = clock;
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -36,12 +43,20 @@ public class TransactionIntakeCompletionService {
                 );
         TransactionIntakeSnapshot snapshot =
                 TransactionIntakeSnapshot.received(persisted);
-        JsonNode encodedSnapshot = snapshotCodec.encode(snapshot);
+        Instant finalizedAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
+        int httpStatus =
+                TransactionIntakeSnapshotEnvelopeCodec.SUPPORTED_HTTP_STATUS;
+        JsonNode encodedSnapshot = snapshotCodec.encode(
+                snapshot,
+                httpStatus,
+                finalizedAt
+        );
         idempotencyService.complete(
                 idempotencyRecordId,
                 snapshot.transactionId(),
-                encodedSnapshot
+                encodedSnapshot,
+                finalizedAt
         );
-        return new TransactionIntakeResult.Received(snapshot);
+        return new TransactionIntakeResult.Received(snapshot, httpStatus);
     }
 }

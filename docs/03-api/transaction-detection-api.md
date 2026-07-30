@@ -271,7 +271,7 @@ Idempotency-Key: <required>
 
 현재 접수 단계에서는 네 nullable 필드를 JSON에서 생략하지 않는다. `riskLevel`과 `riskResponseOutcome`의 비-null Enum은 후속 위험 탐지·대응 계약에서 확정하며, 이번 접수 응답에서는 nullable string으로 취급한다.
 
-이 응답은 거래 영속화 단계의 **현재 구현** 계약이며 최종 계약이 아니다. **목표 계약**은 채택된 DetectionResult와 위험 대응·사건 연결 결과를 동기 처리로 확정한 뒤 응답하고, 전환 이후 신규 요청부터 그 최초 확정 업무 결과를 version envelope에 저장하는 것이다. 목표 계약의 Java·DB 반영은 **후속 구현 필요**이다.
+이 응답은 거래 영속화 단계의 **현재 구현** 계약이며 최종 계약이 아니다. 현재 신규 요청은 이 단계적 업무 결과를 version envelope에 저장한다. 채택된 DetectionResult와 위험 대응·사건 연결 결과를 동기 처리로 확정하는 **목표 계약**의 Java·DB 반영은 여전히 후속 구현이다.
 
 ### 5.6 성공 응답 예시
 
@@ -300,7 +300,7 @@ X-Trace-Id: trace_demo_tx_0001
 
 ### 5.7 멱등성과 중복
 
-- 같은 `Idempotency-Key`와 같은 요청의 최초 처리가 완료되었으면 새 거래·탐지·사건을 생성하지 않고 기존 업무 결과를 반환한다. 현재 무버전 legacy Snapshot은 `200 OK`를 사용한다. 신규 envelope 전환 이후 요청은 기록된 최초 확정 HTTP 상태를 사용하며, 이 동작은 후속 구현이 필요하다.
+- 같은 `Idempotency-Key`와 같은 요청의 최초 처리가 완료되었으면 새 거래·탐지·사건을 생성하지 않고 기존 업무 결과를 반환한다. 무버전 legacy Snapshot은 `200 OK`, 신규 envelope는 기록되고 v1 codec이 검증한 `201 Created`를 사용한다.
 - 두 Snapshot 형식 모두 거래·탐지·위험 대응·사건 연결 업무 값은 최초 확정 값을 유지하고 `traceId`만 현재 재전송 요청의 값을 사용한다. 따라서 동일 응답 재생은 업무 결과와 정책상 HTTP 상태의 재생이며 응답 전체의 바이트 단위 복제를 뜻하지 않는다.
 - 같은 `Idempotency-Key`와 같은 요청의 최초 처리가 진행 중이면 새 처리를 시작하지 않고 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다.
 - 같은 키에 다른 요청 내용이 오면 `409 Conflict`와 `IDEMPOTENCY_KEY_CONFLICT`를 반환한다.
@@ -311,7 +311,7 @@ X-Trace-Id: trace_demo_tx_0001
 - 요청 지문, `IN_PROGRESS`·`COMPLETED`·`FAILED` 상태와 현재 완료 응답 snapshot의 물리 저장 기준은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따른다. `expires_at`의 24시간 값은 현재 저장 제약이며 만료 판정·키 재사용·정리 정책은 구현되지 않았다.
 - `eventId` 중복과 `DUPLICATE_EVENT`는 행동 이벤트 API의 책임이며 이 거래 접수 API 범위에 포함하지 않는다.
 
-**현재 구현**은 `RECEIVED`와 네 탐지 관련 null 값을 포함한 무버전 일곱 필드 Snapshot을 저장·재생한다. **ADR 결정**에 따라 이 legacy Snapshot은 strict legacy codec으로만 복원하고 신규 envelope나 탐지 완료 결과로 소급 갱신하지 않으며 재요청은 현재의 `200 OK`를 유지한다. **목표 계약**의 신규 envelope는 `responseBody`, 최초 확정 `httpStatus`, `responseSchemaVersion`, `codecVersion`, `finalizedAt`을 식별하고 기록된 HTTP 상태를 재생한다. 실제 version 값, codec 구현과 필요한 Migration은 후속 작업이다.
+**현재 구현**은 신규 완료 요청을 `responseBody`, `httpStatus=201`, `responseSchemaVersion=transaction-create-response-v1`, `codecVersion=transaction-intake-snapshot-envelope-v1`, `finalizedAt`의 정확한 envelope로 저장한다. `responseBody`는 현재 단계적 `RECEIVED`와 네 탐지 관련 JSON null을 가진 일곱 업무 필드이다. 기존 무버전 Snapshot은 정확한 일곱 필드, `RECEIVED`, 네 JSON null일 때만 strict legacy codec으로 복원하고 신규 envelope나 탐지 완료 결과로 소급 갱신하지 않으며 재요청은 `200 OK`를 유지한다. 별도 metadata 컬럼이나 Flyway Migration은 추가하지 않았다.
 
 알 수 없는 구조·버전 또는 역직렬화 실패를 최신 거래 상태로 보정하거나 신규 거래·탐지 처리로 우회하지 않는다. 멱등 재생은 최초 명령 결과의 책임이고 최신 거래·탐지 상태는 별도 조회 API의 책임이다.
 
@@ -383,8 +383,8 @@ Content-Type: application/json
 
 | 상태 코드 | 사용 기준 |
 | --- | --- |
-| `201 Created` | 현재 최초 거래 영속화의 단계적 `RECEIVED` 응답. 최종 목표는 승인된 동기 분석 결과이며 신규 envelope 재요청도 최초 확정 상태가 `201`이면 기록된 상태를 사용 |
-| `200 OK` | 현재 무버전 legacy Snapshot의 완료된 동일 멱등 요청에 기존 결과 반환 |
+| `201 Created` | 현재 최초 거래 영속화의 단계적 `RECEIVED` 응답과 신규 envelope 완료 재요청. 최종 동기 분석 결과는 미구현 |
+| `200 OK` | 무버전 strict legacy Snapshot의 완료된 동일 멱등 요청에 기존 결과 반환 |
 | `400 Bad Request` | 잘못된 JSON, 필수 헤더 누락 또는 필드 형식 오류 |
 | `409 Conflict` | 멱등성 키 지문 충돌, 동일 멱등 요청 처리 중, `transactionId` 중복 또는 동시성 충돌 |
 | `422 Unprocessable Entity` | 형식은 맞지만 거래 유형별 업무 규칙을 만족하지 못함 |
@@ -967,7 +967,7 @@ GET /api/v1/detection-results/det_demo_20260723_0101
 
 | API | `200` | `201` | `400` | `404` | `409` | `422` | `503` | `500` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `POST /transactions` | 현재 legacy 완료 재요청의 기존 결과. 신규 envelope는 기록된 상태가 `200`일 때 | 최초 생성과 신규 envelope에 기록된 상태가 `201`인 재요청 | JSON·필수 헤더·필드 형식 오류 | 사용하지 않음 | 멱등 키 지문 충돌·처리 중 동일 요청·거래·상태·동시성 충돌 | 거래 유형별 도메인 규칙 위반 | 유효 캐시 없는 External Risk Timeout 또는 FastAPI Timeout 초기 정책 | 예기치 않은 서버 오류 |
+| `POST /transactions` | strict legacy 완료 재요청의 기존 결과 | 최초 생성과 신규 envelope 완료 재요청 | JSON·필수 헤더·필드 형식 오류 | 사용하지 않음 | 멱등 키 지문 충돌·처리 중 동일 요청·거래·상태·동시성 충돌 | 거래 유형별 도메인 규칙 위반 | 유효 캐시 없는 External Risk Timeout 또는 FastAPI Timeout 초기 정책 | 예기치 않은 서버 오류 |
 | `GET /transactions` | 조회 성공 | 사용하지 않음 | 필터·페이지 형식 오류 | 사용하지 않음 | 사용하지 않음 | 의미상 잘못된 필터·페이지 범위 | 조회 Timeout 또는 명확한 저장소 가용성 장애 | 그 밖의 DataAccess 오류·예기치 않은 서버 오류 |
 | `GET /transactions/{transactionId}` | 조회 성공 | 사용하지 않음 | 식별자 형식 오류 | 거래 없음 | 사용하지 않음 | 사용하지 않음 | 조회 Timeout 또는 명확한 저장소 가용성 장애 | 그 밖의 DataAccess 오류·예기치 않은 서버 오류 |
 | `POST /behavior-events` | 동일 이벤트 기존 결과 | 최초 생성 | JSON·알 수 없는 필드·필드 형식 오류 | 관련 거래 없음 | 다른 내용의 `eventId` 중복 | 이벤트 유형별 도메인 규칙·거래 정합성 위반 | 명확한 DB Timeout 또는 저장소 가용성 장애 | 그 밖의 DataAccess 오류·예기치 않은 서버 오류 |
@@ -1076,7 +1076,7 @@ Content-Type: application/json
 - `riskResponseOutcome` Enum 이름
 - FastAPI·External Risk Timeout 이후 재시도·복구 정책
 - 오류 응답의 `resource` 최종 이름과 범용 구조
-- ADR-004를 구현할 실제 `responseSchemaVersion`·`codecVersion` 식별자와 지원 registry
+- 향후 응답 계약 또는 envelope codec 변경 시 새 version 식별자와 지원 registry
 - Snapshot metadata의 JSONB 내부 저장 또는 별도 컬럼 여부와 필요한 Flyway Migration
 - 만료 후 같은 키 재사용, 실제 보존 기간, 정리 방식과 정리 전후 동시성 정책
 

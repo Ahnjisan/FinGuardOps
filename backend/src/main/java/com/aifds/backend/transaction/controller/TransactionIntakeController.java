@@ -7,7 +7,6 @@ import com.aifds.backend.transaction.exception.TransactionIntakeRejectedExceptio
 import com.aifds.backend.transaction.service.TransactionIntakeResult;
 import com.aifds.backend.transaction.service.TransactionIntakeService;
 import jakarta.validation.Valid;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestAttribute;
@@ -41,7 +40,7 @@ public class TransactionIntakeController {
                 transactionIntakeService.receive(idempotencyKey, request);
 
         if (result instanceof TransactionIntakeResult.Received received) {
-            return ResponseEntity.status(HttpStatus.CREATED).body(
+            return ResponseEntity.status(received.httpStatus()).body(
                     TransactionCreateResponse.from(
                             received.snapshot(),
                             traceId
@@ -49,7 +48,7 @@ public class TransactionIntakeController {
             );
         }
         if (result instanceof TransactionIntakeResult.CompletedReplay replay) {
-            return ResponseEntity.ok(
+            return ResponseEntity.status(replay.httpStatus()).body(
                     TransactionCreateResponse.from(replay.snapshot(), traceId)
             );
         }

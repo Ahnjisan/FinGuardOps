@@ -156,7 +156,8 @@ class IdempotencyServiceTest {
         assertThatThrownBy(() -> idempotencyService.complete(
                 10L,
                 missingTransactionId,
-                objectMapper.createObjectNode()
+                objectMapper.createObjectNode(),
+                NOW
         )).isInstanceOf(IdempotencyCompletionTransactionNotFoundException.class)
                 .hasMessageContaining(missingTransactionId.toString());
         verify(idempotencyRecordRepository, never()).findByIdForUpdate(10L);

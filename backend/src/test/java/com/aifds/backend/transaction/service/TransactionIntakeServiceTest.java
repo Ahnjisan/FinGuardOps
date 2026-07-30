@@ -109,7 +109,7 @@ class TransactionIntakeServiceTest {
         ValidatedTransactionCommand command = command();
         TransactionIntakeSnapshot snapshot = snapshot();
         TransactionIntakeResult.Received received =
-                new TransactionIntakeResult.Received(snapshot);
+                new TransactionIntakeResult.Received(snapshot, 201);
         when(idempotencyKeyValidator.validate(KEY)).thenReturn(KEY);
         when(transactionRequestValidator.validate(request)).thenReturn(command);
         when(idempotencyService.claim(KEY, command.toFingerprintInput()))
@@ -156,13 +156,16 @@ class TransactionIntakeServiceTest {
 
         String storedJson = "{\"result\":\"stored\"}";
         TransactionIntakeSnapshot snapshot = snapshot();
-        when(snapshotCodec.decode(storedJson)).thenReturn(snapshot);
+        when(snapshotCodec.decode(storedJson)).thenReturn(
+                new TransactionIntakeSnapshotReplay(snapshot, 201)
+        );
         TransactionIntakeResult completed = receiveWithClaim(
                 new IdempotencyClaimResult.Completed(storedJson)
         );
         assertThat(completed)
                 .isEqualTo(new TransactionIntakeResult.CompletedReplay(
-                        snapshot
+                        snapshot,
+                        201
                 ));
 
         TransactionIntakeResult failed = receiveWithClaim(

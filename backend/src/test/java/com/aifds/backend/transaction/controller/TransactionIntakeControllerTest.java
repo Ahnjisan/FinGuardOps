@@ -69,7 +69,10 @@ class TransactionIntakeControllerTest {
     void newIntakeReturns201AndExactlyEightContractFields() throws Exception {
         String traceId = "trace_new_intake_01";
         when(transactionIntakeService.receive(anyString(), any()))
-                .thenReturn(new TransactionIntakeResult.Received(snapshot()));
+                .thenReturn(new TransactionIntakeResult.Received(
+                        snapshot(),
+                        201
+                ));
 
         MvcResult result = performValid(KEY, traceId)
                 .andExpect(status().isCreated())
@@ -110,16 +113,17 @@ class TransactionIntakeControllerTest {
     }
 
     @Test
-    void completedReplayReturns200WithStoredBusinessDataAndCurrentTraceId()
+    void envelopeCompletedReplayReturnsStored201WithCurrentTraceId()
             throws Exception {
         String replayTraceId = "trace_replay_current_01";
         when(transactionIntakeService.receive(anyString(), any()))
                 .thenReturn(new TransactionIntakeResult.CompletedReplay(
-                        snapshot()
+                        snapshot(),
+                        201
                 ));
 
         performValid(KEY, replayTraceId)
-                .andExpect(status().isOk())
+                .andExpect(status().isCreated())
                 .andExpect(header().string(
                         TraceIdFilter.TRACE_ID_HEADER,
                         replayTraceId
@@ -135,6 +139,27 @@ class TransactionIntakeControllerTest {
                 .andExpect(jsonPath("$.adoptedDetectionResultId")
                         .value(nullValue()))
                 .andExpect(jsonPath("$.caseId").value(nullValue()));
+    }
+
+    @Test
+    void legacyCompletedReplayReturns200WithCurrentTraceId()
+            throws Exception {
+        String replayTraceId = "trace_legacy_replay_01";
+        when(transactionIntakeService.receive(anyString(), any()))
+                .thenReturn(new TransactionIntakeResult.CompletedReplay(
+                        snapshot(),
+                        200
+                ));
+
+        performValid(KEY, replayTraceId)
+                .andExpect(status().isOk())
+                .andExpect(header().string(
+                        TraceIdFilter.TRACE_ID_HEADER,
+                        replayTraceId
+                ))
+                .andExpect(jsonPath("$.transactionId")
+                        .value(TRANSACTION_ID.toString()))
+                .andExpect(jsonPath("$.traceId").value(replayTraceId));
     }
 
     @Test

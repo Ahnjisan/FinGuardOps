@@ -13,6 +13,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
@@ -50,8 +51,11 @@ class TransactionIntakeControllerIntegrationTest
     @Autowired
     private IdempotencyRecordRepository idempotencyRecordRepository;
 
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
     @Test
-    void firstHttpRequestCompletesOnceAndReplayUsesCurrentTrace()
+    void firstHttpRequestStoresEnvelopeAndReplayUsesStored201AndCurrentTrace()
             throws Exception {
         UUID transactionId = UUID.randomUUID();
         String key = key("http-replay");
@@ -101,6 +105,23 @@ class TransactionIntakeControllerIntegrationTest
         JsonNode storedSnapshot = record.getResponseSnapshot();
         assertThat(storedSnapshot.isObject()).isTrue();
         assertThat(fieldNames(storedSnapshot)).containsExactlyInAnyOrder(
+                "responseBody",
+                "httpStatus",
+                "responseSchemaVersion",
+                "codecVersion",
+                "finalizedAt"
+        );
+        assertThat(storedSnapshot.get("httpStatus").intValue())
+                .isEqualTo(201);
+        assertThat(storedSnapshot.get("responseSchemaVersion").textValue())
+                .isEqualTo("transaction-create-response-v1");
+        assertThat(storedSnapshot.get("codecVersion").textValue())
+                .isEqualTo("transaction-intake-snapshot-envelope-v1");
+        assertThat(Instant.parse(
+                storedSnapshot.get("finalizedAt").textValue()
+        )).isEqualTo(record.getFinishedAt());
+        JsonNode storedBody = storedSnapshot.get("responseBody");
+        assertThat(fieldNames(storedBody)).containsExactlyInAnyOrder(
                 "transactionId",
                 "processingStatus",
                 "riskLevel",
@@ -109,19 +130,33 @@ class TransactionIntakeControllerIntegrationTest
                 "caseId",
                 "createdAt"
         );
-        assertThat(storedSnapshot.has("traceId")).isFalse();
-        assertThat(storedSnapshot.has("idempotencyRecordId")).isFalse();
-        assertThat(storedSnapshot.has("fingerprint")).isFalse();
-        assertThat(storedSnapshot.has("externalCustomerRef")).isFalse();
-        assertThat(storedSnapshot.has("senderAccountRef")).isFalse();
-        assertThat(storedSnapshot.has("recipientAccountRef")).isFalse();
+        assertThat(containsFieldRecursively(storedSnapshot, "traceId"))
+                .isFalse();
+        assertThat(containsFieldRecursively(
+                storedSnapshot,
+                "idempotencyRecordId"
+        )).isFalse();
+        assertThat(containsFieldRecursively(storedSnapshot, "fingerprint"))
+                .isFalse();
+        assertThat(containsFieldRecursively(
+                storedSnapshot,
+                "externalCustomerRef"
+        )).isFalse();
+        assertThat(containsFieldRecursively(
+                storedSnapshot,
+                "senderAccountRef"
+        )).isFalse();
+        assertThat(containsFieldRecursively(
+                storedSnapshot,
+                "recipientAccountRef"
+        )).isFalse();
 
         MvcResult replay = mockMvc.perform(post(PATH)
                         .header("Idempotency-Key", key)
                         .header(TraceIdFilter.TRACE_ID_HEADER, replayTrace)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(requestBody))
-                .andExpect(status().isOk())
+                .andExpect(status().isCreated())
                 .andExpect(header().string(
                         TraceIdFilter.TRACE_ID_HEADER,
                         replayTrace
@@ -148,6 +183,105 @@ class TransactionIntakeControllerIntegrationTest
                 .isEqualTo(replayTrace);
         assertThat(financialTransactionRepository.count()).isEqualTo(1);
         assertThat(idempotencyRecordRepository.count()).isEqualTo(1);
+    }
+
+    @Test
+    void legacyCompletedReplayKeeps200AndDoesNotRewriteSnapshot()
+            throws Exception {
+        UUID transactionId = UUID.randomUUID();
+        String key = key("http-legacy-replay");
+        String requestBody = requestJson(transactionId, "1250000");
+        postCreated(key, "trace_legacy_seed_01", requestBody);
+
+        IdempotencyRecord seeded = idempotencyRecordRepository
+                .findByOperationScopeAndIdempotencyKey(OPERATION_SCOPE, key)
+                .orElseThrow();
+        JsonNode legacySnapshot =
+                seeded.getResponseSnapshot().get("responseBody").deepCopy();
+        jdbcTemplate.update(
+                """
+                UPDATE idempotency_record
+                SET response_snapshot = CAST(? AS jsonb)
+                WHERE id = ?
+                """,
+                legacySnapshot.toString(),
+                seeded.getId()
+        );
+
+        String replayTrace = "trace_legacy_replay_02";
+        mockMvc.perform(post(PATH)
+                        .header("Idempotency-Key", key)
+                        .header(TraceIdFilter.TRACE_ID_HEADER, replayTrace)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(requestBody))
+                .andExpect(status().isOk())
+                .andExpect(header().string(
+                        TraceIdFilter.TRACE_ID_HEADER,
+                        replayTrace
+                ))
+                .andExpect(jsonPath("$.transactionId")
+                        .value(transactionId.toString()))
+                .andExpect(jsonPath("$.processingStatus")
+                        .value("RECEIVED"))
+                .andExpect(jsonPath("$.traceId").value(replayTrace));
+
+        IdempotencyRecord replayed = idempotencyRecordRepository
+                .findByOperationScopeAndIdempotencyKey(OPERATION_SCOPE, key)
+                .orElseThrow();
+        assertThat(replayed.getResponseSnapshot()).isEqualTo(legacySnapshot);
+        assertThat(financialTransactionRepository.count()).isEqualTo(1);
+        assertThat(idempotencyRecordRepository.count()).isEqualTo(1);
+    }
+
+    @Test
+    void corruptedCompletedEnvelopeReturnsInternalErrorWithoutNewTransaction()
+            throws Exception {
+        UUID transactionId = UUID.randomUUID();
+        String key = key("http-corrupt-envelope");
+        String requestBody = requestJson(transactionId, "1250000");
+        postCreated(key, "trace_corrupt_seed_01", requestBody);
+
+        IdempotencyRecord seeded = idempotencyRecordRepository
+                .findByOperationScopeAndIdempotencyKey(OPERATION_SCOPE, key)
+                .orElseThrow();
+        ObjectNode corrupted =
+                (ObjectNode) seeded.getResponseSnapshot();
+        corrupted.put(
+                "codecVersion",
+                "transaction-intake-snapshot-envelope-v999"
+        );
+        jdbcTemplate.update(
+                """
+                UPDATE idempotency_record
+                SET response_snapshot = CAST(? AS jsonb)
+                WHERE id = ?
+                """,
+                corrupted.toString(),
+                seeded.getId()
+        );
+
+        String replayTrace = "trace_corrupt_replay_02";
+        mockMvc.perform(post(PATH)
+                        .header("Idempotency-Key", key)
+                        .header(TraceIdFilter.TRACE_ID_HEADER, replayTrace)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(requestBody))
+                .andExpect(status().isInternalServerError())
+                .andExpect(header().string(
+                        TraceIdFilter.TRACE_ID_HEADER,
+                        replayTrace
+                ))
+                .andExpect(jsonPath("$.code").value("INTERNAL_ERROR"))
+                .andExpect(jsonPath("$.traceId").value(replayTrace));
+
+        assertThat(financialTransactionRepository.count()).isEqualTo(1);
+        assertThat(idempotencyRecordRepository.count()).isEqualTo(1);
+        IdempotencyRecord afterFailure = idempotencyRecordRepository
+                .findByOperationScopeAndIdempotencyKey(OPERATION_SCOPE, key)
+                .orElseThrow();
+        assertThat(afterFailure.getResponseSnapshot()).isEqualTo(corrupted);
+        assertThat(afterFailure.getProcessingStatus())
+                .isEqualTo(IdempotencyProcessingStatus.COMPLETED);
     }
 
     @Test
@@ -244,6 +378,26 @@ class TransactionIntakeControllerIntegrationTest
         Set<String> fields = new HashSet<>();
         node.fieldNames().forEachRemaining(fields::add);
         return fields;
+    }
+
+    private boolean containsFieldRecursively(JsonNode node, String fieldName) {
+        if (node.isObject()) {
+            if (node.has(fieldName)) {
+                return true;
+            }
+            for (JsonNode value : node) {
+                if (containsFieldRecursively(value, fieldName)) {
+                    return true;
+                }
+            }
+        } else if (node.isArray()) {
+            for (JsonNode value : node) {
+                if (containsFieldRecursively(value, fieldName)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private String requestJson(UUID transactionId, String amount)

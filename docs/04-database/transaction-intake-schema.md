@@ -29,7 +29,7 @@
 - 거래 금액, 통화와 발생 시각 검증
 - 거래 상태 변경을 위한 낙관적 잠금
 - 거래 생성 요청의 멱등 선점, 충돌 판별과 완료 결과 재사용
-- 멱등 기록의 24시간 보존
+- 멱등 기록의 24시간 후 `expires_at` 시각 저장
 - Flyway와 실제 PostgreSQL 기반 검증 원칙
 
 ### 2.2 이번 계약의 제외 범위
@@ -235,7 +235,7 @@ FAILED
 | 상황 | HTTP·오류 | 처리 |
 | --- | --- | --- |
 | 새 키의 최초 성공 | `201 Created` | 거래와 완료 결과를 한 번만 생성 |
-| 같은 키 + 같은 지문 + `COMPLETED` | `200 OK` | 새 처리를 시작하지 않고 기존 완료 결과 반환 |
+| 같은 키 + 같은 지문 + `COMPLETED` | legacy `200 OK`, 신규 envelope의 저장된 `201 Created` | 새 처리를 시작하지 않고 기존 완료 결과 반환 |
 | 같은 키 + 다른 지문 | `409 Conflict`, `IDEMPOTENCY_KEY_CONFLICT` | 기존 기록과 거래를 변경하지 않음 |
 | 같은 키 + 같은 지문 + `IN_PROGRESS` | `409 Conflict`, `IDEMPOTENCY_REQUEST_IN_PROGRESS` | 새 처리·거래·탐지·사건을 시작하지 않음 |
 | 같은 키 + 같은 지문 + `FAILED` | 고정 whitelist 또는 `500 INTERNAL_ERROR` | 같은 키의 업무 처리를 자동 재실행하지 않음 |
@@ -243,32 +243,41 @@ FAILED
 
 충돌 판별은 기존 레코드의 상태를 해석하기 전에 지문 일치 여부를 먼저 확인한다. 따라서 같은 키의 지문이 다르면 기존 처리가 진행 중이어도 `IDEMPOTENCY_KEY_CONFLICT`이다.
 
-최초 성공의 업무 응답은 `response_snapshot`에 다음 일곱 필드를 정확히 가진 JSON object로 보존한다.
+전환 이후 신규 최초 성공은 `response_snapshot`에 다음 envelope를 보존한다.
 
 ```json
 {
-  "transactionId": "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
-  "processingStatus": "RECEIVED",
-  "riskLevel": null,
-  "riskResponseOutcome": null,
-  "adoptedDetectionResultId": null,
-  "caseId": null,
-  "createdAt": "2026-07-23T01:15:31Z"
+  "responseBody": {
+    "transactionId": "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
+    "processingStatus": "RECEIVED",
+    "riskLevel": null,
+    "riskResponseOutcome": null,
+    "adoptedDetectionResultId": null,
+    "caseId": null,
+    "createdAt": "2026-07-23T01:15:31Z"
+  },
+  "httpStatus": 201,
+  "responseSchemaVersion": "transaction-create-response-v1",
+  "codecVersion": "transaction-intake-snapshot-envelope-v1",
+  "finalizedAt": "2026-07-23T01:15:33Z"
 }
 ```
 
-`traceId`, `idempotencyRecordId`, 요청 지문, 내부 PK, 요청 본문, 고객·계좌 참조값은 snapshot에 저장하지 않는다. 네 nullable 업무 필드는 JSON에서 생략하지 않고 명시적 null로 저장한다. 완료된 동일 요청 재전송은 검증된 typed snapshot을 복원하고 현재 재전송 요청의 새 `traceId`를 결합해 `200 OK`로 반환한다. 최초 성공의 `201`이나 저장 당시 `traceId`를 반복하지 않는다. 손상되었거나 위 계약과 다른 snapshot은 보정하지 않고 `500 INTERNAL_ERROR`로 처리하며 snapshot 원문을 로그나 오류 응답에 노출하지 않는다.
+`traceId`, `idempotencyRecordId`, 요청 지문, 내부 PK, 요청 본문, 고객·계좌 참조값은 snapshot에 저장하지 않는다. 네 nullable 업무 필드는 JSON에서 생략하지 않고 명시적 null로 저장한다. 신규 envelope 완료 재전송은 검증된 `responseBody`와 저장된 `201`을 복원하고 현재 재전송 요청의 새 `traceId`를 결합한다.
+
+기존 무버전 Snapshot은 `responseBody`에 표시한 일곱 필드만 최상위에 정확히 가지며 `processingStatus=RECEIVED`, 네 탐지 관련 필드가 모두 JSON null일 때만 strict legacy로 복원한다. legacy 재전송은 `200 OK`를 유지하며 신규 envelope로 갱신하지 않는다. 손상되었거나 두 계약과 다른 snapshot, 알 수 없는 version은 보정하지 않고 `500 INTERNAL_ERROR`로 처리하며 snapshot 원문을 로그나 오류 응답에 노출하지 않는다.
+
+`finalizedAt`과 `finished_at`은 완료 경로에서 `Clock`을 한 번 읽은 같은 확정 시각이다. V1의 무정밀도 지정 `TIMESTAMPTZ`가 PostgreSQL 기본 마이크로초 정밀도를 사용하므로 애플리케이션은 이 값을 마이크로초로 정규화한 뒤 두 위치에 동일하게 저장한다.
 
 `FAILED`인 같은 키·같은 지문의 요청은 자동 재실행하지 않는다. `DUPLICATE_TRANSACTION`은 `409`, `DEPENDENCY_TIMEOUT`은 `503`으로만 고정 재현한다. null, 빈 값, 알 수 없는 값과 내부 전용 `TRANSACTION_INTAKE_FAILED`는 원문을 노출하지 않고 `500 INTERNAL_ERROR`로 축약한다.
 
-### 6.4 24시간 보존
+### 6.4 24시간 시각 저장과 미구현 만료 정책
 
-- 각 멱등 기록의 유효 기간은 최초 선점 `created_at`부터 정확히 24시간이다.
 - `expires_at = created_at + INTERVAL '24 hours'`로 저장한다.
-- 24시간 동안 동일 `(operation_scope, idempotency_key)` 기록을 보존한다.
-- PostgreSQL에는 TTL이 없으므로 만료 레코드를 `expires_at` 인덱스로 조회해 승인된 정리 작업으로 물리 삭제한다.
-- 만료 시각이 지난 행도 삭제되기 전에는 Unique 제약에 남아 있다. 요청 경로에서 만료 행을 발견하면 같은 DB 트랜잭션 안에서 해당 행을 잠그고 삭제한 뒤 새 선점을 시도하거나, 정리 완료 전까지 재사용을 거부해야 한다.
-- 정리 주기, batch 크기와 실패 재시도는 운영 구현 전에 결정한다.
+- Service는 `expires_at`을 판정하지 않으며 만료 레코드 정리 작업도 구현하지 않았다.
+- 따라서 24시간은 현재 DB에 저장되는 시각과 Check Constraint일 뿐, 만료 후 키 재사용을 허용하는 시행 중인 유효기간이 아니다.
+- 만료 시각이 지난 행도 Unique 제약에 남고 현재 요청은 기존 상태에 따라 처리된다.
+- 실제 보존 기간, 키 재사용, 정리 주기·batch와 경합 정책은 후속 승인 사항이다.
 - `financial_transaction`은 멱등 기록과 함께 삭제하지 않는다.
 
 ## 7. `financial_transaction` 테이블
@@ -337,7 +346,7 @@ FAILED
 | `request_fingerprint` | `VARCHAR(64)` | NOT NULL | 없음 | SHA-256 소문자 16진수 |
 | `processing_status` | `VARCHAR(16)` | NOT NULL | 없음 | `IN_PROGRESS`, `COMPLETED`, `FAILED` |
 | `financial_transaction_id` | `BIGINT` | nullable | 없음 | 처리 중에는 null 가능, 거래 결과 FK |
-| `response_snapshot` | `JSONB` | nullable | 없음 | 위 일곱 필드의 완료 업무 응답 JSON object, `traceId`와 내부·요청 정보 제외 |
+| `response_snapshot` | `JSONB` | nullable | 없음 | strict legacy 일곱 필드 또는 신규 version envelope JSON object, `traceId`와 내부·요청 정보 제외 |
 | `failure_code` | `VARCHAR(64)` | nullable | 없음 | `FAILED`의 안전한 내부 실패 분류. 공개 응답은 whitelist로만 고정 매핑 |
 | `expires_at` | `TIMESTAMPTZ` | NOT NULL | `CURRENT_TIMESTAMP + INTERVAL '24 hours'` | 멱등 만료 시각 |
 | `created_at` | `TIMESTAMPTZ` | NOT NULL | `CURRENT_TIMESTAMP` | 최초 선점 시각 |
@@ -711,4 +720,4 @@ CREATE INDEX ix_idempotency_record_status_updated_at
 - 참조값 생성 주체, 추가 문자 제한, 암호화·마스킹과 보존 기간
 - 실제 Flyway 의존성, Migration 버전과 Testcontainers 의존성 도입 승인
 
-이번 계약에서 확정한 UUID v4, 거래 유형별 recipient/channel, 양의 정수 금액, KRW, 미래 5분, Validation 미저장, 낙관적 잠금, 멱등 키 형식·지문·상태 코드와 24시간 보존은 위 TBD에 포함하지 않는다.
+이번 계약에서 확정한 UUID v4, 거래 유형별 recipient/channel, 양의 정수 금액, KRW, 미래 5분, Validation 미저장, 낙관적 잠금, 멱등 키 형식·지문·상태 코드와 `expires_at = created_at + 24 hours` 저장 제약은 위 TBD에 포함하지 않는다. 실제 만료 시행과 보존 기간은 여전히 후속 결정이다.
