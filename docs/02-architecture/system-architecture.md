@@ -445,7 +445,14 @@ Spring Boot는 반환된 결과의 요청 연결, 완전성, 버전과 처리 �
 
 FastAPI Timeout 시 Spring Boot가 임의의 위험 점수를 생성하거나 무위험으로 간주하지 않는다. 이때 허용할 거래 상태와 재시도·수동 확인 정책은 `TBD`이다.
 
-Rule v1에서 Spring Boot는 거래·행동 이벤트 조회와 Snapshot 구성, Rule 정의·버전·활성 상태, 호출 오케스트레이션과 결과 영속화를 맡고 FastAPI는 Feature, R001~R004, 점수·등급·Reason Code·Evidence 계산을 맡는다. 상세 계약은 [`../01-requirements/rule-v1-detection-contract.md`](../01-requirements/rule-v1-detection-contract.md)를 따른다. 이 책임 경계는 목표이며 FastAPI 연동과 탐지 결과 영속화는 아직 구현되지 않았다.
+Rule v1에서 Spring Boot는 거래·행동 이벤트 조회와 Snapshot 구성, Rule
+정의·버전·활성 상태, 호출 오케스트레이션과 결과 영속화를 맡고
+FastAPI는 Feature, R001~R004, 점수·등급·Reason Code·Evidence 계산을
+맡는다. 상세 계약은
+[`../01-requirements/rule-v1-detection-contract.md`](../01-requirements/rule-v1-detection-contract.md)를
+따른다. DetectionResult·DetectionEvidence 물리 영속 모델은
+구현되었지만 FastAPI 연동과 실행 결과 생성·검증·채택 흐름은 아직
+구현되지 않았다.
 
 ## 10. Rule 관리·실행 책임
 

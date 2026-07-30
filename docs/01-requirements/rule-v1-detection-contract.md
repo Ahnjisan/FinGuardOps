@@ -15,7 +15,7 @@
 - Rule 정의·버전·활성 상태 관리
 - 평가용 행동 이벤트 조회와 Snapshot 구성
 - FastAPI Rule 실행과 Spring Boot 연동
-- DetectionResult·DetectionEvidence 저장·채택
+- 탐지 실행에 따른 DetectionResult·DetectionEvidence 생성·검증·채택
 - 위험 점수·위험 등급 산출과 위험 대응
 - 사건 생성·연결
 
@@ -324,7 +324,10 @@ FastAPI Timeout·응답 부재·검증 실패 시 Spring Boot는 임의 점수, 
 - 생성형 AI 리포트 구현
 - 운영 PostgreSQL·Redis·Kafka, Docker Compose, Kubernetes와 AWS 배포 환경
 
-현재 PostgreSQL 애플리케이션 연동과 Flyway 기반 거래·멱등·행동 이벤트 스키마는 구현되어 있다. 이는 운영 배포 환경과 탐지·Rule 스키마가 구현되었다는 의미가 아니다.
+현재 PostgreSQL 애플리케이션 연동과 Flyway 기반 거래·멱등·행동
+이벤트 및 DetectionResult·DetectionEvidence 물리 스키마는 구현되어
+있다. Rule 물리 모델, Rule 실행, FastAPI 연동과 운영 배포 환경은
+구현되지 않았다.
 
 ## 14. 후속 구현 순서
 

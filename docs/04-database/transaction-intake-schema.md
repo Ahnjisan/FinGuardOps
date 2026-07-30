@@ -36,14 +36,16 @@
 
 - 실제 Flyway SQL 파일 작성
 - JPA Entity, Repository, Service와 Controller 구현
-- DetectionResult, 사건, 감사 로그의 물리 테이블
-- `adoptedDetectionResultId`와 탐지 결과 FK
+- 사건과 감사 로그의 물리 테이블
 - 사건 연결 FK
 - Redis 기반 멱등성
 - Kafka, Outbox, Worker와 Scheduler 구현
 - 인증·인가와 CORS
 
-탐지 결과와 사건 관계는 각각의 물리 스키마가 승인된 뒤 별도 Flyway Migration으로 추가한다. 아직 참조 대상 테이블이 없는 FK나 임시 문자열 참조를 이번 테이블에 선행 추가하지 않는다.
+탐지 결과와 채택 관계는 후속 승인된
+[`detection-result-schema.md`](./detection-result-schema.md)와 V3
+Migration에서 추가되었다. 사건 관계는 사건 물리 스키마 승인 후 별도
+Migration으로 추가한다.
 
 ## 3. 확정된 거래 접수 경계
 
@@ -314,7 +316,11 @@ HELD
 FAILED
 ```
 
-`VALIDATION_FAILED`는 포함하지 않는다. 위험 등급, 위험 대응 결과와 채택 탐지 결과 참조는 탐지 물리 스키마와 함께 후속 Flyway Migration에서 추가한다.
+`VALIDATION_FAILED`는 포함하지 않는다. V3는 nullable
+`adopted_detection_result_id`, `risk_level`, `risk_response_outcome`을
+추가했지만 현재 거래 접수는 이 값을 설정하지 않고 기존
+`RECEIVED`/null 응답을 유지한다. 구체적인 제약은
+[`detection-result-schema.md`](./detection-result-schema.md)를 따른다.
 
 ### 7.2 제약조건
 
@@ -713,7 +719,7 @@ CREATE INDEX ix_idempotency_record_status_updated_at
 이번 물리 계약 이후에도 다음 항목은 별도 승인과 구현 설계가 필요하다.
 
 - 멱등 만료 레코드 정리 주기, batch 크기, 잠금과 장애 재시도 방식
-- 탐지 물리 스키마와 `adoptedDetectionResultId`, 위험 등급·위험 대응 컬럼 및 FK
+- 탐지 실행·결과 검증·채택·위험 대응을 기존 거래 접수 흐름에 통합하는 방식
 - 상태 변경 충돌 후 자동 재시도 여부
 - 최종 상태 거래의 재분석·정정 이력 모델
 - External Risk와 FastAPI Timeout 이후 재개·복구 정책

@@ -28,8 +28,14 @@ abstract class PostgresqlIntegrationTestSupport {
 
     @AfterEach
     void cleanDatabase() {
-        cleanupJdbcTemplate.update("DELETE FROM behavior_event");
-        cleanupJdbcTemplate.update("DELETE FROM idempotency_record");
-        cleanupJdbcTemplate.update("DELETE FROM financial_transaction");
+        cleanupJdbcTemplate.execute("""
+                TRUNCATE TABLE
+                    detection_evidence,
+                    detection_result,
+                    behavior_event,
+                    idempotency_record,
+                    financial_transaction
+                RESTART IDENTITY CASCADE
+                """);
     }
 }

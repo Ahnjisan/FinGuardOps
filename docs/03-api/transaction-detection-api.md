@@ -24,7 +24,12 @@ Client
 → Client 응답
 ```
 
-현재 구현은 입력 검증·멱등성 확인·거래 PostgreSQL 저장 후 `RECEIVED`와 탐지 관련 null 값을 반환하는 단계까지이다. External Risk, FastAPI, DetectionResult 저장·채택, 위험 대응과 사건 연결은 아직 구현되지 않았다. 현재 단계 응답은 최종 동기 분석 목표를 변경하지 않는다.
+현재 외부 거래 흐름은 입력 검증·멱등성 확인·거래 PostgreSQL 저장 후
+`RECEIVED`와 탐지 관련 null 값을 반환하는 단계까지이다.
+DetectionResult·DetectionEvidence의 물리 영속 모델은 구현되었지만
+External Risk, FastAPI, 탐지 실행 결과 생성·검증·채택, 위험 대응과
+사건 연결은 아직 구현되지 않았다. 현재 단계 응답은 최종 동기 분석
+목표를 변경하지 않는다.
 
 ### 2.2 Spring Boot 책임
 
@@ -74,7 +79,7 @@ FastAPI는 다음 작업을 수행하지 않는다.
 | --- | --- |
 | `transactionId` | 클라이언트가 거래 생성 요청으로 전달하는 UUID v4 거래 업무 식별자 |
 | `eventId` | 행동 이벤트 업무 식별자 |
-| `detectionResultId` | 개별 탐지 결과 업무 식별자 |
+| `detectionResultId` | Spring Boot가 생성하는 UUID v4 탐지 결과 업무 식별자 |
 | `caseId` | 생성되었거나 연결된 사건 업무 식별자 |
 | `traceId` | Spring Boot, External Risk Mock과 FastAPI 호출 흐름 추적 식별자 |
 
@@ -163,7 +168,9 @@ ATM_WITHDRAWAL_REQUESTED
 
 ### 4.6 탐지 분석 상태
 
-`analysisStatus`는 탐지 분석 요청·진행·완료·실패를 구분한다. 예시에서는 `COMPLETED`를 사용한다. 전체 값과 실패한 분석 시도의 버전 처리 방식은 후속 Spring Boot·FastAPI 계약에서 확정한다.
+`analysisStatus`는 `PENDING`, `IN_PROGRESS`, `COMPLETED`, `FAILED`를
+사용한다. 실패한 분석과 동일 분석의 재시도도 새
+`detectionResultVersion`을 소비하며 기존 결과를 수정하지 않는다.
 
 ### 4.7 위험 점수 의미
 
@@ -781,7 +788,9 @@ GET /api/v1/behavior-events?externalCustomerRef=cust_ref_demo_a7f2&occurredAtFro
 
 ## 10. 거래별 탐지 결과 조회
 
-이 절은 후속 API 후보이다. DetectionResult 저장과 조회는 아직 구현되지 않았다.
+이 절은 후속 API 후보이다. DetectionResult·Evidence 물리 영속 모델은
+구현되었지만 탐지 실행에 의한 결과 생성과 조회 API는 아직 구현되지
+않았다.
 
 ### 10.1 요청
 
@@ -809,6 +818,8 @@ GET /api/v1/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001/detection-results?
 | `adopted` | Spring Boot가 Transaction 현재값의 기준으로 채택했는지 여부 |
 | `modelVersion` | 사용 모델 버전 |
 | `featureVersion` | Feature 정의·계산 버전 |
+| `ruleSetVersion` | 평가에 사용한 전체 Rule 집합 버전 |
+| `scoringPolicyVersion` | 점수 합산·등급 정책 버전 |
 | `analysisStartedAt` | 분석 시작 시각 |
 | `analysisCompletedAt` | 분석 완료 시각. 미완료 시 null 가능 |
 
@@ -819,7 +830,7 @@ GET /api/v1/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001/detection-results?
   "transactionId": "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
   "content": [
     {
-      "detectionResultId": "det_demo_20260723_0101",
+      "detectionResultId": "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430101",
       "detectionResultVersion": 1,
       "riskScore": 55,
       "riskLevel": "HIGH",
@@ -827,6 +838,8 @@ GET /api/v1/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001/detection-results?
       "adopted": true,
       "modelVersion": null,
       "featureVersion": "rule-v1",
+      "ruleSetVersion": "rule-set-v1",
+      "scoringPolicyVersion": "scoring-policy-v1",
       "analysisStartedAt": "2026-07-23T01:15:30Z",
       "analysisCompletedAt": "2026-07-23T01:15:32Z"
     }
@@ -857,7 +870,8 @@ GET /api/v1/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001/detection-results?
 
 ## 11. 탐지 결과 상세 조회
 
-이 절은 후속 API 후보이다. DetectionResult·DetectionEvidence 영속화와 조회는 아직 구현되지 않았다.
+이 절은 후속 API 후보이다. DetectionResult·DetectionEvidence 물리
+영속 모델은 구현되었지만 상세 조회 API는 아직 구현되지 않았다.
 
 ### 11.1 요청
 
@@ -868,7 +882,7 @@ GET /api/v1/detection-results/{detectionResultId}
 요청 예:
 
 ```http
-GET /api/v1/detection-results/det_demo_20260723_0101
+GET /api/v1/detection-results/7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430101
 ```
 
 ### 11.2 응답 범위
@@ -899,7 +913,7 @@ GET /api/v1/detection-results/det_demo_20260723_0101
 ```json
 {
   "detectionResult": {
-    "detectionResultId": "det_demo_20260723_0101",
+    "detectionResultId": "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430101",
     "transactionId": "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
     "detectionResultVersion": 1,
     "riskScore": 55,
@@ -908,12 +922,14 @@ GET /api/v1/detection-results/det_demo_20260723_0101
     "adopted": true,
     "modelVersion": null,
     "featureVersion": "rule-v1",
+    "ruleSetVersion": "rule-set-v1",
+    "scoringPolicyVersion": "scoring-policy-v1",
     "analysisStartedAt": "2026-07-23T01:15:30Z",
     "analysisCompletedAt": "2026-07-23T01:15:32Z"
   },
   "evidence": [
     {
-      "evidenceId": "evidence_demo_rule_01",
+      "evidenceId": "6a4c0a4e-8a9d-4c2f-9a1b-7d6e5f430201",
       "evidenceType": "RULE",
       "reasonCode": "TRANSFER_ABSOLUTE_HIGH_AMOUNT",
       "displayDescription": "KRW 이체 금액이 Rule v1 절대 고액 기준 이상입니다.",
@@ -923,14 +939,13 @@ GET /api/v1/detection-results/det_demo_20260723_0101
         "ruleVersion": "1"
       },
       "observationSummary": {
-        "currencyCode": "KRW",
-        "amount": "10000000",
+        "observedAmount": "10000000",
         "amountThreshold": "10000000"
       },
       "evidenceOccurredAt": "2026-07-23T01:15:30Z"
     },
     {
-      "evidenceId": "evidence_demo_rule_02",
+      "evidenceId": "6a4c0a4e-8a9d-4c2f-9a1b-7d6e5f430202",
       "evidenceType": "RULE",
       "reasonCode": "RECENT_SECURITY_CHANGE_HIGH_AMOUNT",
       "displayDescription": "최근 24시간 안에 비밀번호 변경과 출금 계좌의 이체 한도 변경 이벤트가 순서대로 확인되었습니다.",
@@ -940,10 +955,12 @@ GET /api/v1/detection-results/det_demo_20260723_0101
         "ruleVersion": "1"
       },
       "observationSummary": {
-        "passwordChangedEventId": "8f68e7f1-2f95-4e8c-9c40-7b6e08bde101",
-        "passwordChangedAt": "2026-07-23T00:30:00Z",
-        "transferLimitChangedEventId": "1a7d52c3-6b84-4f10-8d29-3e5c70a94102",
-        "transferLimitChangedAt": "2026-07-23T00:45:00Z"
+        "observedAmount": "10000000",
+        "amountThreshold": "10000000",
+        "securityEventType": "TRANSFER_LIMIT_CHANGED",
+        "securityChangedAt": "2026-07-23T00:45:00Z",
+        "elapsedSeconds": 1830,
+        "windowSeconds": 86400
       },
       "evidenceOccurredAt": "2026-07-23T00:45:00Z"
     }
@@ -952,7 +969,13 @@ GET /api/v1/detection-results/det_demo_20260723_0101
 }
 ```
 
-위 예시는 미구현 Rule v1 조회 응답의 후보이며 구현 완료를 의미하지 않는다. Rule 조건과 Evidence 의미는 [Rule v1 탐지 계약](../01-requirements/rule-v1-detection-contract.md)을 따르고, `observationSummary`의 구체적인 허용 필드는 후속 DTO 계약에서 확정한다. 자유 형식 원문 저장·반환은 허용하지 않는다.
+위 예시는 미구현 Rule v1 조회 응답의 후보이며 조회 API 구현 완료를
+의미하지 않는다. Rule 조건과 Evidence 의미는
+[Rule v1 탐지 계약](../01-requirements/rule-v1-detection-contract.md)을
+따른다. `observationSummary`의 Reason Code별 정확한 allowlist와 물리
+제약은
+[`../04-database/detection-result-schema.md`](../04-database/detection-result-schema.md)를
+따르며 자유 형식 원문 저장·반환은 허용하지 않는다.
 
 ### 11.4 상태 코드
 
@@ -1087,8 +1110,6 @@ Content-Type: application/json
 
 ### 16.4 탐지 결과
 
-- `analysisStatus` 전체 값과 실패한 분석 시도 표현
-- DetectionResult 버전 생성 규칙
 - Rule v1 이후 ML·External Risk·자금흐름 점수 통합과 점수 정밀도
 - Rule·External Risk·행동 패턴 요약의 유형별 허용 필드
 - 분석 당시 `traceId`와 조회 요청 `traceId`의 응답 구분

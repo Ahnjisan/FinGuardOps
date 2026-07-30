@@ -362,7 +362,7 @@ Content-Type: application/json
     "processingStatus": "ADDITIONAL_AUTH_REQUIRED",
     "riskLevel": "HIGH",
     "riskResponseOutcome": "ADDITIONAL_AUTH_REQUIRED",
-    "adoptedDetectionResultId": "det_demo_20260724_0101"
+    "adoptedDetectionResultId": "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430101"
   },
   "relatedTransactionCount": 3,
   "noteCount": 2,
@@ -441,7 +441,7 @@ Content-Type: application/json
       "processingStatus": "ADDITIONAL_AUTH_REQUIRED",
       "riskLevel": "HIGH",
       "riskResponseOutcome": "ADDITIONAL_AUTH_REQUIRED",
-      "adoptedDetectionResultId": "det_demo_20260724_0101",
+      "adoptedDetectionResultId": "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430101",
       "representative": true,
       "linkReason": "NEW_DEVICE_HIGH_AMOUNT",
       "linkedAt": "2026-07-24T01:15:33Z"

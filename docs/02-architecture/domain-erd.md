@@ -235,7 +235,7 @@ PostgreSQL에 저장하는 거래·탐지·사건·감사·AI 사용량은 업�
 | `processingStatus` | 거래 처리 단계 |
 | `riskLevel` | 현재 채택된 탐지 결과의 위험 등급 |
 | `riskResponseOutcome` | 승인, 승인 후 모니터링, 추가 인증 요구, 보류 등 Mock 대응 결과 |
-| `adoptedDetectionResultId` 후보 | 현재 위험 등급과 대응의 기준으로 채택한 DetectionResult를 직접 식별하는 논리 참조 후보 |
+| `adoptedDetectionResultId` | 현재 위험 등급과 대응의 기준으로 채택한 DetectionResult의 직접 참조 |
 | `createdAt`, `updatedAt` | 생성·마지막 변경 시각 |
 | `version` | 상태 변경 경합을 탐지하기 위한 낙관적 잠금 값 |
 
@@ -261,7 +261,10 @@ LOAN_DISBURSED
 
 거래 접수의 타입, 제약과 인덱스는 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따른다.
 
-`currentDetectionResultVersion`만 저장하는 방식보다 `adoptedDetectionResultId`로 채택 결과를 직접 가리키는 방안을 우선 검토한다. 버전 번호는 같은 거래 안에서만 유일하기 때문에 식별자 참조가 채택된 결과를 더 명확하게 표현한다.
+V3 물리 모델은 `currentDetectionResultVersion` 대신
+`adoptedDetectionResultId`로 채택 결과를 직접 가리킨다. 버전 번호는
+같은 거래 안에서만 유일하므로 결과 식별자 참조가 채택된 결과를 더
+명확하게 표현한다.
 
 다음 정합성 원칙이 필요하다.
 
@@ -269,7 +272,9 @@ LOAN_DISBURSED
 - `Transaction.riskLevel`은 채택된 DetectionResult의 위험 등급을 현재값으로 반영한 조회용 업무 스냅샷이다.
 - `Transaction.riskResponseOutcome`은 채택된 분석 결과에 Spring Boot가 승인된 정책을 적용한 업무 대응이다.
 - 탐지 결과 채택, Transaction의 `riskLevel`·`riskResponseOutcome` 현재값 변경과 AuditLog 기록은 하나의 업무 정합성 경계에서 처리해야 한다.
-- 구체적인 외래 키, 트랜잭션 코드와 DB 제약은 후속 설계에서 확정한다.
+- 같은 거래 소속과 위험 등급 일치는 복합 FK, COMPLETED 여부는
+  PostgreSQL Trigger로 검증한다. 물리 기준은
+  [`../04-database/detection-result-schema.md`](../04-database/detection-result-schema.md)이다.
 
 거래 처리 상태는 다음 전용 상태 전이 기준을 따른다.
 
@@ -354,11 +359,11 @@ Transaction 1
 | `detectionResultVersion` | 같은 거래의 재분석 결과 순서 또는 버전 |
 | `riskScore` | 승인된 점수 통합 정책의 결과 |
 | `riskLevel` | 해당 분석 버전에서 계산된 위험 등급 |
-| `ruleScore` | Rule 결과의 기여 점수 |
-| `mlScore` | ML 결과의 기여 점수. ML 미사용 시 null 가능 후보 |
-| `modelVersion` | 사용한 ML 모델 또는 분석 모델 버전 후보 |
-| `featureVersion` | Feature 정의·계산 방식 버전 후보 |
-| `analysisStatus` | 요청·진행·완료·실패를 구분하기 위한 분석 상태 후보 |
+| `ruleSetVersion` | 평가에 사용한 전체 Rule 집합 버전 |
+| `scoringPolicyVersion` | 점수 합산과 등급 경계 정책 버전 |
+| `modelVersion` | ML 사용 시 모델 버전. 미사용 시 null |
+| `featureVersion` | Feature 정의·계산 방식 버전 |
+| `analysisStatus` | `PENDING`, `IN_PROGRESS`, `COMPLETED`, `FAILED` |
 | `analysisStartedAt`, `analysisCompletedAt` | 분석 수행 구간 |
 | `traceId` 후보 | 서비스 간 분석 호출 추적 |
 | `createdAt` | 결과 저장 시각 |
@@ -370,7 +375,10 @@ transactionId + detectionResultVersion
 → Unique 후보
 ```
 
-동일 버전의 재전송은 새 결과를 추가하지 않아야 한다. 입력이나 분석 조건이 달라진 정당한 재분석은 새 버전을 사용한다. 버전 생성 주체, 연속 번호인지 불변 식별자인지, 실패한 시도가 버전을 소비하는지는 후속 설계에서 결정한다.
+Spring Boot는 거래 행을 잠근 뒤 PENDING 생성 시 1부터 버전을
+할당한다. 버전은 단조 증가하고 간격을 허용한다. 실패한 분석과 동일
+분석 재시도도 새 버전을 소비한다. 동일 버전의 늦은 응답과 중복 저장은
+기존 결과를 변경하지 않고 Unique 위반으로 거부한다.
 
 ### 7.4 DetectionEvidence
 
@@ -833,7 +841,7 @@ API에서 캐시 요청의 토큰 합계를 0으로 보여줄 수는 있지만 �
 | --- | --- | --- |
 | Transaction–BehaviorEvent | Transaction 1 : BehaviorEvent 0..N, 이벤트의 거래 참조는 0..1 | 행동은 거래 없이 발생할 수 있고 하나의 거래 전후에 여러 행동이 연결될 수 있음 |
 | Transaction–DetectionResult | 1 : 0..N | 한 거래를 여러 버전으로 재분석할 수 있음 |
-| Transaction–채택 DetectionResult | Transaction 1 : DetectionResult 0..1 후보 | `adoptedDetectionResultId`가 같은 거래에 속한 현재 채택 결과를 가리키는 부분 관계 |
+| Transaction–채택 DetectionResult | Transaction 1 : DetectionResult 0..1 | `adoptedDetectionResultId`가 같은 거래의 COMPLETED 결과를 가리키는 부분 관계 |
 | DetectionResult–DetectionEvidence | 1 : 0..N | 하나의 결과에 여러 설명 근거가 존재 |
 | FraudRule/RuleVersion–DetectionEvidence | Rule 버전 1 : Evidence 0..N, Evidence 참조는 0..1 | RULE 유형 근거만 특정 Rule 버전을 참조 |
 | DetectionResult–ExternalRiskSnapshot | 1 : 0..N | 분석 당시 여러 계좌·IP·기기 조회 결과의 최소 스냅샷을 사용할 수 있음 |
@@ -859,7 +867,11 @@ Transaction–CaseTransaction의 1:N 관계는 과거 사건 연결을 포함한
 
 ## 9. Mermaid ERD
 
-다음 그림은 핵심 식별자와 관계 중심의 논리 ERD이다. 거래 접수의 PostgreSQL 타입과 제약은 전용 물리 계약을 우선하며, 나머지 엔티티는 구체적인 PostgreSQL 타입이나 JPA 매핑을 의미하지 않는다. `ExternalRiskSnapshot`은 초기 핵심 권장 방향이고 `IdempotencyRecord`는 거래 접수에 확정되었으며 다른 API 적용은 후보이다. Transaction과 채택 DetectionResult의 관계는 논리 후보이고, `AiReportExecution`과 `DetectionResult`의 관계는 대표 탐지 결과를 사용하는 초기 대안만 표시한다. 캐시 요청은 `AI_REPORT_REQUEST.resolvedReportRef`로 기존 결과를 참조하며 새 실행·attempt·리포트를 만들지 않고, 캐시 원본 요청은 결과의 실행과 `initiatingRequestRef`를 따라 조회한다.
+다음 그림은 핵심 식별자와 관계 중심의 논리 ERD이다. 거래·멱등·행동과
+DetectionResult·DetectionEvidence의 PostgreSQL 타입과 제약은 각각의
+전용 물리 계약을 우선한다. `ExternalRiskSnapshot`은 초기 핵심 권장
+방향이고 `AiReportExecution`과 `DetectionResult`의 관계는 대표 탐지
+결과를 사용하는 초기 대안만 표시한다.
 
 ```mermaid
 erDiagram
@@ -882,15 +894,20 @@ erDiagram
     }
 
     DETECTION_RESULT {
-        string detectionResultId PK
+        uuid detectionResultId UK
         string transactionRef FK
         number detectionResultVersion
         number riskScore
         string riskLevel
+        string analysisStatus
+        string ruleSetVersion
+        string scoringPolicyVersion
+        string featureVersion
+        string modelVersion
     }
 
     DETECTION_EVIDENCE {
-        string evidenceId PK
+        uuid evidenceId UK
         string detectionResultRef FK
         string evidenceType
         string reasonCode
@@ -1058,7 +1075,12 @@ erDiagram
 | 탐지된 위험 수준은 무엇인가 | `riskLevel` | `LOW`, `MEDIUM`, `HIGH`, `CRITICAL` |
 | 어떤 Mock 대응을 적용했는가 | `riskResponseOutcome` | 승인, 승인 후 모니터링, 추가 인증 요구, 보류 |
 
-`riskLevel`과 `riskResponseOutcome` 현재값은 `adoptedDetectionResultId`로 식별한 채택 결과 및 Spring Boot의 정책 적용 결과와 일치해야 한다. 채택 결과가 없는 처리 단계에서는 이 값들의 null 허용 여부를 후속 상태별 제약으로 결정한다.
+`adoptedDetectionResultId`와 `riskLevel`은 함께 null이거나 함께 존재하며
+같은 거래의 COMPLETED 결과와 그 등급을 가리킨다.
+`riskResponseOutcome`은 대응 전에는 null일 수 있고, 존재하면
+LOW→APPROVED, MEDIUM→APPROVED_WITH_MONITORING,
+HIGH→ADDITIONAL_AUTH_REQUIRED, CRITICAL→HELD를 따른다. FAILED
+Transaction도 이전에 정상 채택한 값은 유지할 수 있다.
 
 상태별 시각 후보는 다음과 같다.
 
@@ -1124,7 +1146,10 @@ PENDING
 
 ### 11.1 DetectionResult 버전
 
-같은 거래의 재분석은 `detectionResultVersion`으로 구분한다. 동일 요청 재시도는 같은 버전을 중복 저장하지 않고, 분석 입력이나 승인된 분석 조건이 변경된 경우에만 새 버전을 발급한다.
+같은 거래의 재분석은 `detectionResultVersion`으로 구분한다. 실패한
+분석과 동일 분석의 재시도도 새 버전을 발급하며 기존 결과는 수정하지
+않는다. 거래 행 잠금으로 버전을 할당하고 거래·버전 Unique가 동시
+중복을 최종 차단한다.
 
 각 버전은 다음 조건을 재현할 수 있어야 한다.
 
@@ -1188,7 +1213,8 @@ caseId
 - 거래 금액은 0보다 큰 정수이고 초기 통화는 `KRW`이다.
 - `ACCOUNT_TRANSFER`, `OPEN_BANKING_TRANSFER`의 `recipientAccountRef`는 필수이고 `ATM_WITHDRAWAL`, `LOAN_DISBURSED`에는 금지한다.
 - 거래 유형별 `channel`은 각각 `MOBILE_BANKING`, `OPEN_BANKING`, `ATM`, `CORE_BANKING`만 허용한다.
-- 완료된 DetectionResult에는 위험 점수·등급과 완료 시각이 필요하다는 후보를 검토한다.
+- 완료된 DetectionResult에는 위험 점수·등급과 시작·완료 시각이
+  필요하며, 실패 결과에는 실패 코드와 완료 시각이 필요하다.
 - `CLOSED` 사건에는 `closedAt`과 `finalDisposition`이 모두 필요하며 하나의 종료 업무 트랜잭션에서 확정한다.
 - 과거 Rule 버전과 이를 참조하는 DetectionEvidence는 물리 삭제하지 않는다.
 - `AiReport.reportStatus = COMPLETED`이면 `reportSource = LLM`이어야 한다.
@@ -1529,13 +1555,11 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 ### 거래·행동
 
 - 거래 상태별 필수 시각과 실패 사유 구조
-- `adoptedDetectionResultId`의 같은 Transaction 소속을 외래 키·DB 제약·애플리케이션 검증 중 어디까지 보장할지
 - 최종 상태에서 재분석·정정 시 현재 거래 상태를 변경할지 새 이력으로 남길지
 - 후속 Rule·조회 API에서 추가할 행동 상세와 기기·IP·지역 데이터의 최소 저장 범위
 
 ### 탐지·Rule·외부 위험정보
 
-- DetectionResult 버전 생성 규칙과 실패 시도 표현
 - Feature 요약 보존 범위와 Feature 버전 관리 방식
 - Rule 행 단위 버전 모델 또는 RuleDefinition·RuleVersion 분리 물리 모델
 - `ruleCode`별 활성 버전 하나를 보장할 애플리케이션·DB 제약과 적용 기간 표현

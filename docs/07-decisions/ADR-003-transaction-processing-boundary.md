@@ -48,7 +48,13 @@
 
 ### 현재 구현 상태
 
-현재 저장소에는 거래·멱등·행동 이벤트의 PostgreSQL 애플리케이션 연동과 거래 접수 Controller가 구현되어 있다. 거래 접수 성공 응답은 `processingStatus = RECEIVED`이며 `riskLevel`, `riskResponseOutcome`, `adoptedDetectionResultId`, `caseId`는 null이다. External Risk, FastAPI Rule 실행, DetectionResult 저장·채택, 위험 대응과 사건 연결은 아직 수행하지 않는다.
+현재 저장소에는 거래·멱등·행동 이벤트와
+DetectionResult·DetectionEvidence의 PostgreSQL 물리 영속 모델 및 거래
+접수 Controller가 구현되어 있다. 거래 접수 성공 응답은
+`processingStatus = RECEIVED`이며 `riskLevel`,
+`riskResponseOutcome`, `adoptedDetectionResultId`, `caseId`는 null이다.
+External Risk, FastAPI Rule 실행, 탐지 실행 결과 생성·검증·채택, 위험
+대응과 사건 연결은 아직 수행하지 않는다.
 
 이 단계적 응답은 현재 구현 사실을 기록한 것이며, `POST /api/v1/transactions`를 비동기 접수 API로 바꾸거나 최종 동기 분석 결정을 뒤집는 새로운 결정이 아니다. 현행 단계 Controller는 이 ADR이 정한 중간 외부 노출 제한과 아직 정합화되지 않은 구현 차이로 기록한다. 후속 구현에서는 이 ADR의 최종 경계로 전환하거나, 결정 변경이 필요하면 별도 사용자 승인과 ADR 검토를 거쳐야 한다.
 
