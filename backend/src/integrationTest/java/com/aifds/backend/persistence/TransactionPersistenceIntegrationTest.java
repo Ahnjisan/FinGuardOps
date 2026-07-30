@@ -69,13 +69,15 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
         MigrationInfo[] appliedMigrations = flyway.info().applied();
 
         assertThat(jdbcTemplate.queryForObject("SELECT 1", Integer.class)).isEqualTo(1);
-        assertThat(appliedMigrations).hasSize(3);
+        assertThat(appliedMigrations).hasSize(4);
         assertThat(appliedMigrations[0].getVersion().getVersion()).isEqualTo("1");
         assertThat(appliedMigrations[0].getState()).isEqualTo(MigrationState.SUCCESS);
         assertThat(appliedMigrations[1].getVersion().getVersion()).isEqualTo("2");
         assertThat(appliedMigrations[1].getState()).isEqualTo(MigrationState.SUCCESS);
         assertThat(appliedMigrations[2].getVersion().getVersion()).isEqualTo("3");
         assertThat(appliedMigrations[2].getState()).isEqualTo(MigrationState.SUCCESS);
+        assertThat(appliedMigrations[3].getVersion().getVersion()).isEqualTo("4");
+        assertThat(appliedMigrations[3].getState()).isEqualTo(MigrationState.SUCCESS);
         assertThat(tableNames()).contains(
                 "financial_transaction",
                 "idempotency_record",

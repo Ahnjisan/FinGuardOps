@@ -53,12 +53,21 @@ DetectionResult·DetectionEvidence의 PostgreSQL 물리 영속 모델 및 거래
 접수 Controller가 구현되어 있다. 거래 접수 성공 응답은
 `processingStatus = RECEIVED`이며 `riskLevel`,
 `riskResponseOutcome`, `adoptedDetectionResultId`, `caseId`는 null이다.
+행동 이벤트는 내부 Rule 평가용 제한 조회와 행동 기반
+`DetectionEvidence.observationSummary`의 외부 Event ID 검증까지 구현되어
+있다. 공개 행동 이벤트 조회 API와 Rule 실행은 구현되지 않았다.
 External Risk, FastAPI Rule 실행, 탐지 실행 결과 생성·검증·채택, 위험
 대응과 사건 연결은 아직 수행하지 않는다.
 
 이 단계적 응답은 현재 구현 사실을 기록한 것이며, `POST /api/v1/transactions`를 비동기 접수 API로 바꾸거나 최종 동기 분석 결정을 뒤집는 새로운 결정이 아니다. 현행 단계 Controller는 이 ADR이 정한 중간 외부 노출 제한과 아직 정합화되지 않은 구현 차이로 기록한다. 후속 구현에서는 이 ADR의 최종 경계로 전환하거나, 결정 변경이 필요하면 별도 사용자 승인과 ADR 검토를 거쳐야 한다.
 
-현재 멱등 완료 응답 snapshot은 `RECEIVED`/null 구조를 저장·재생한다. [`ADR-004`](./ADR-004-idempotency-response-snapshot-transition.md)는 이 legacy Snapshot을 엄격하게 그대로 재생하고 소급 갱신하지 않으며, 최종 동기 응답 전환 이후 신규 요청부터 version envelope와 최초 확정 HTTP 상태를 저장하도록 결정한다. 이는 ADR-003의 최종 동기 처리 결정을 유지한 호환 정책이다. envelope·codec·Migration과 만료 처리는 아직 구현되지 않았다.
+현재 멱등 완료 응답 snapshot은 `RECEIVED`/null 구조를 저장·재생한다. [`ADR-004`](./ADR-004-idempotency-response-snapshot-transition.md)는 이 legacy Snapshot을 엄격하게 그대로 재생하고 소급 갱신하지 않으며, 최종 동기 응답 전환 이후 신규 요청부터 version envelope와 최초 확정 HTTP 상태를 저장하도록 결정한다. 이는 ADR-003의 최종 동기 처리 결정을 유지한 호환 정책이다. ADR-004 결정 당시에는 envelope·codec, 관련 Migration과 만료 처리가 아직 구현되지 않은 상태였다.
+
+후속 구현 상태(2026-07-30): 신규 요청의 version envelope encoder·decoder와
+version dispatch는 구현되었다. 기존 `response_snapshot JSONB` 안에 저장하므로
+별도 Migration과 legacy backfill은 필요하지 않았고, 만료 판정·정리 작업은
+여전히 구현되지 않았다. 이 후속 상태는 ADR-003의 결정 자체를 변경하지
+않는다.
 
 ## 구현 순서
 

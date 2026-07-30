@@ -71,7 +71,7 @@ class DetectionPersistenceIntegrationTest
 
     @Test
     void migrationCreatesExactColumnsConstraintsIndexesAndTriggers() {
-        assertThat(flyway.info().applied()).hasSize(3);
+        assertThat(flyway.info().applied()).hasSize(4);
         assertThat(columns("detection_result")).containsExactlyInAnyOrder(
                 "id",
                 "detection_result_id",
@@ -684,6 +684,10 @@ class DetectionPersistenceIntegrationTest
                 "1",
                 objectMapper.createObjectNode()
                         .put("observedAmount", "10000000")
+                        .put(
+                                "eventId",
+                                "11111111-1111-4111-8111-111111111111"
+                        )
                         .put(
                                 "beneficiaryRegisteredAt",
                                 "2026-07-30T01:00:00Z"

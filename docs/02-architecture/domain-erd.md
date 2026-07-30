@@ -17,7 +17,7 @@
 - 고객·계좌·기기·IP 등 민감 정보 저장을 어떻게 최소화하는가
 - 후속 JPA, API와 마이그레이션 설계에서 무엇을 결정해야 하는가
 
-이 문서는 구현 완료 내역이 아니다. 현재 백엔드는 Health Check, 거래 접수·조회, 거래 멱등성과 행동 이벤트 접수를 구현했으며 거래·멱등·행동 이벤트는 PostgreSQL 애플리케이션 연동과 Flyway 스키마가 구현되어 있다. 운영 PostgreSQL 배포 환경과 아래의 탐지·Rule·사건·감사·AI 운영 엔티티는 아직 구현되지 않았다.
+이 문서는 전체 구현 완료 내역이 아니다. 현재 백엔드는 Health Check, 거래 접수·조회, 거래 멱등성, 행동 이벤트 접수와 내부 Rule 평가용 제한 조회를 구현했다. 거래·멱등·행동 이벤트와 `DetectionResult`·`DetectionEvidence`는 PostgreSQL 애플리케이션 연동과 Flyway 스키마가 구현되어 있다. Rule 실행·Rule 물리 모델, 공개 행동 이벤트 조회 API, 사건·감사·AI 운영 엔티티와 운영 PostgreSQL 배포 환경은 아직 구현되지 않았다.
 
 ## 2. 설계 범위와 제외 범위
 
@@ -343,6 +343,14 @@ ATM_WITHDRAWAL_REQUESTED
 
 초기 행동 이벤트 접수는 위 명시적 속성만 저장한다. `locationRiskSummary`, `observedSignals`와 자유 형식 `eventDetails`는 포함하지 않는다. `accountRef`는 고객 측 기준 계좌이고 `beneficiaryRef`는 새로 등록된 수취인이므로 의미를 혼합하지 않는다. 유형별 null 조건, 거래 연결 검증과 물리 컬럼은 [`../04-database/behavior-event-intake-schema.md`](../04-database/behavior-event-intake-schema.md)를 따른다.
 
+Rule 평가용 내부 Repository 조회는 `externalCustomerRef`, 비어 있지 않은
+`eventTypes`, 양 끝을 포함하는 `occurredAt` 구간으로 필터링한다. 정렬은
+`occurredAt DESC, eventId ASC`로 고정하며 호출자가
+`PageRequest.of(0, limit, Sort.unsorted())`의 1 이상 유한한 `limit`을 전달한다.
+반환형은 `List<BehaviorEvent>`이므로 count query를 실행하지 않으며, 선택적
+`FinancialTransaction` LAZY 관계를 fetch하지 않는다. 공개 행동 이벤트 조회
+API는 제공하지 않는다.
+
 ### 7.3 DetectionResult
 
 `DetectionResult`는 특정 거래에 대한 분석 결과의 버전별 기록이다.
@@ -414,6 +422,15 @@ BEHAVIOR_PATTERN
 | `createdAt` | 근거 저장 시각 |
 
 Feature 전체 벡터, 원문 행동 로그, 실제 계좌번호, 원문 IP와 LLM 입력 전체를 근거에 무제한 저장하지 않는다. 재현에 필요한 Feature 버전과 제한된 요약을 저장하고, 상세 Feature 보존이 필요하면 별도 보안·보존 설계를 거쳐야 한다.
+
+Rule v1의 행동 기반 근거는 선택된 `BehaviorEvent`의 내부 `BIGINT` PK가 아니라
+canonical lowercase UUID v4 업무 ID를 `observationSummary`에 기록한다. R002와
+R004는 `eventId`, R003은 `passwordChangedEventId`와
+`transferLimitChangedEventId`를 사용한다. R001에는 행동 Event ID를 허용하지
+않으며, Reason Code별 allowlist 밖의 필드와 행동 이벤트 원문 전체 복제를
+거부한다. R003은 두 이벤트 ID와 발생 시각을 모두 요구하고
+`passwordChangedAt <= transferLimitChangedAt <= evaluationCutoffAt` 순서를
+검증한다.
 
 ### 7.5 FraudRule과 Rule 버전
 
@@ -1478,6 +1495,14 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 
 고객별 시간순 행동 타임라인과 특정 시간 창의 이벤트 유형 조회가 중심이다.
 
+현재 구현된 내부 Rule 조회는 `externalCustomerRef`, `eventType IN (...)`,
+`occurredAt >= fromInclusive`, `occurredAt <= toInclusive` 조건과
+`occurredAt DESC, eventId ASC` 정렬을 사용한다. V4의 최소 복합 인덱스
+`(external_customer_ref, event_type, occurred_at DESC, event_id ASC)`가 이
+필터와 유형별 시간 탐색을 지원한다. 여러 Event Type을 한 번에 조회하면
+인덱스만으로 최종 전역 정렬을 모두 충족하지 못해 추가 정렬이 발생할 수
+있으며, 최종 업무 순서는 JPQL `ORDER BY`가 보장한다.
+
 ### 17.4 탐지와 Rule
 
 주요 조건은 다음과 같다.
@@ -1642,11 +1667,11 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 - 자동 재시도는 Timeout과 연결 실패에만 같은 `executionId` 아래 최대 1회 적용한다.
 - 정확 일치 `AiReport`가 있으면 캐시로 재사용하며 동일 정확 일치 결과의 강제 재생성을 허용하지 않는다.
 
-구체적인 경로, DTO와 상태 코드는 API 기준 문서에서 사용자 승인 후 확정한다. 거래 접수의 `financial_transaction`과 Java `FinancialTransaction`은 구현되었으며, 탐지·Rule·사건·AI 운영 클래스는 후속 구현 범위이다.
+구체적인 경로, DTO와 상태 코드는 API 기준 문서에서 사용자 승인 후 확정한다. 거래 접수의 `FinancialTransaction`, 행동 이벤트의 `BehaviorEvent`, 탐지 영속 모델의 `DetectionResult`·`DetectionEvidence`는 구현되었다. Rule 실행·Rule 물리 모델, 사건·AI 운영 클래스는 후속 구현 범위이다.
 
 ### 20.3 마이그레이션·DB 제약 설계
 
-- 구현된 `financial_transaction`, `idempotency_record`, `behavior_event` 이후의 탐지·Rule·사건·AI 운영 Flyway Migration 설계
+- 구현된 `financial_transaction`, `idempotency_record`, `behavior_event`, `detection_result`, `detection_evidence` 이후의 Rule·사건·AI 운영 Flyway Migration 설계
 - 향후 Snapshot metadata 조회·인덱스 또는 DB 수준 version 제약이 필요할 때의 새 Migration 여부
 - 이 문서의 Unique 후보를 실제 제약으로 적용할 범위
 - `adoptedDetectionResultId`가 같은 Transaction의 DetectionResult만 참조하도록 보장하는 방식
@@ -1663,7 +1688,7 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 - 시간 범위·목록·집계 조회를 위한 인덱스 순서
 - 데이터 보존·비식별화·파티셔닝 필요 여부
 
-거래·멱등·행동 이벤트 Flyway Migration은 구현되어 있다. 위 Mermaid `IDEMPOTENCY_RECORD`는 실제 V1 Migration의 `financial_transaction_id`, `response_snapshot`, `failure_code`, 세 시각 필드와 `processing_status` 명칭을 반영했다. 신규 Snapshot envelope는 기존 `response_snapshot JSONB` 내부에 구현되어 별도 버전 metadata 컬럼, 새 Flyway Migration 또는 legacy backfill이 없다. 탐지·Rule·사건·AI 운영 DDL과 마이그레이션 파일은 별도 승인 작업에서 작성하며, 거래 접수의 DDL 기준은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)이다.
+거래·멱등·행동 이벤트와 탐지 결과·근거의 Flyway Migration은 V1~V3에 구현되어 있다. V4는 기존 `behavior_event`를 변경하지 않고 내부 Rule 조회용 `ix_behavior_event_customer_type_occurred_event` 인덱스만 추가한다. 위 Mermaid `IDEMPOTENCY_RECORD`는 실제 V1 Migration의 `financial_transaction_id`, `response_snapshot`, `failure_code`, 세 시각 필드와 `processing_status` 명칭을 반영했다. 신규 Snapshot envelope는 기존 `response_snapshot JSONB` 내부에 구현되어 별도 버전 metadata 컬럼, 새 Flyway Migration 또는 legacy backfill이 없다. Rule·사건·AI 운영 DDL과 마이그레이션 파일은 별도 승인 작업에서 작성하며, 거래 접수의 DDL 기준은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)이다.
 
 ### 20.4 트랜잭션·동시성 설계
 

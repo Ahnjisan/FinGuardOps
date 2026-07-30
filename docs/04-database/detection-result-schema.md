@@ -136,15 +136,28 @@ Snapshot으로 보존한다.
 | Reason Code | 정확한 허용 필드 |
 | --- | --- |
 | `TRANSFER_ABSOLUTE_HIGH_AMOUNT` | `observedAmount`, `amountThreshold` |
-| `RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT` | `observedAmount`, `amountThreshold`, `deviceRegisteredAt`, `elapsedSeconds`, `windowSeconds` |
-| `RECENT_SECURITY_CHANGE_HIGH_AMOUNT` | `observedAmount`, `amountThreshold`, `securityEventType`, `securityChangedAt`, `elapsedSeconds`, `windowSeconds` |
-| `RECENT_BENEFICIARY_TRANSFER` | `observedAmount`, `beneficiaryRegisteredAt`, `elapsedSeconds`, `windowSeconds` |
+| `RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT` | `observedAmount`, `amountThreshold`, `eventId`, `deviceRegisteredAt`, `elapsedSeconds`, `windowSeconds` |
+| `RECENT_SECURITY_CHANGE_HIGH_AMOUNT` | `observedAmount`, `amountThreshold`, `passwordChangedEventId`, `passwordChangedAt`, `transferLimitChangedEventId`, `transferLimitChangedAt`, `elapsedSeconds`, `windowSeconds` |
+| `RECENT_BENEFICIARY_TRANSFER` | `observedAmount`, `eventId`, `beneficiaryRegisteredAt`, `elapsedSeconds`, `windowSeconds` |
 
-`securityEventType`은 Rule v1에서 사용하는 `PASSWORD_CHANGED` 또는
-`TRANSFER_LIMIT_CHANGED`만 허용한다.
+R002와 R004의 `eventId`, R003의 `passwordChangedEventId`와
+`transferLimitChangedEventId`는 선택된 BehaviorEvent의 내부 BIGINT PK가
+아니라 canonical lowercase UUID v4 업무 ID이다. RFC 4122 variant를
+검증한다. R001은 행동 이벤트를 사용하지 않으므로 행동 Event ID 필드를
+허용하지 않는다.
+
+R003은 `PASSWORD_CHANGED`와 `TRANSFER_LIMIT_CHANGED` 두 이벤트를 모두
+사용한다. `passwordChangedAt <= transferLimitChangedAt <=
+DetectionResult.evaluationCutoffAt`을 검증하고 두 이벤트 모두
+`windowSeconds` 안에 있어야 한다. `elapsedSeconds`는
+`evaluationCutoffAt - transferLimitChangedAt`의 경과 초와 같아야 한다.
+기존 단일 `securityEventType`, `securityChangedAt` 필드는 두 이벤트를
+재현할 수 없어 허용 목록에서 제거한다.
 
 DB는 JSON object와 비어 있지 않음을 검증하고, Reason Code별 정확한
-allowlist와 scalar 타입은 Java 도메인 값 객체가 검증한다.
+allowlist, scalar 타입, 행동 Event ID, R003 순서·cutoff·경과 시간은
+Java 도메인 값 객체가 검증한다. 원문 행동 이벤트 전체, 고객·계좌·기기
+원문과 내부 PK를 JSONB에 복제하지 않는다.
 
 ## 6. Transaction 채택 결과
 
