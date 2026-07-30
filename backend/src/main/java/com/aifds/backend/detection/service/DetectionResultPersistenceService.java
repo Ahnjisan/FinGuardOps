@@ -5,6 +5,8 @@ import com.aifds.backend.detection.entity.DetectionResult;
 import com.aifds.backend.detection.entity.RiskLevel;
 import com.aifds.backend.detection.repository.DetectionEvidenceRepository;
 import com.aifds.backend.detection.repository.DetectionResultRepository;
+import com.aifds.backend.rule.entity.RuleVersion;
+import com.aifds.backend.rule.repository.RuleVersionRepository;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.aifds.backend.transaction.exception.TransactionNotFoundException;
 import com.aifds.backend.transaction.repository.FinancialTransactionRepository;
@@ -21,15 +23,18 @@ public class DetectionResultPersistenceService {
     private final FinancialTransactionRepository transactionRepository;
     private final DetectionResultRepository detectionResultRepository;
     private final DetectionEvidenceRepository evidenceRepository;
+    private final RuleVersionRepository ruleVersionRepository;
 
     public DetectionResultPersistenceService(
             FinancialTransactionRepository transactionRepository,
             DetectionResultRepository detectionResultRepository,
-            DetectionEvidenceRepository evidenceRepository
+            DetectionEvidenceRepository evidenceRepository,
+            RuleVersionRepository ruleVersionRepository
     ) {
         this.transactionRepository = transactionRepository;
         this.detectionResultRepository = detectionResultRepository;
         this.evidenceRepository = evidenceRepository;
+        this.ruleVersionRepository = ruleVersionRepository;
     }
 
     @Transactional
@@ -83,11 +88,8 @@ public class DetectionResultPersistenceService {
         List<DetectionEvidence> evidence = evidenceDrafts.stream()
                 .map(draft -> DetectionEvidence.rule(
                         result,
-                        draft.reasonCode(),
                         draft.displayDescription(),
-                        draft.scoreContribution(),
-                        draft.ruleCode(),
-                        draft.ruleVersion(),
+                        findRuleVersion(draft.ruleVersionId()),
                         draft.observationSummary(),
                         draft.evidenceOccurredAt(),
                         draft.sortOrder()
@@ -117,5 +119,14 @@ public class DetectionResultPersistenceService {
                         "Detection result does not exist"
                 )
         );
+    }
+
+    private RuleVersion findRuleVersion(UUID ruleVersionId) {
+        return ruleVersionRepository.findByRuleVersionId(ruleVersionId)
+                .orElseThrow(
+                        () -> new IllegalArgumentException(
+                                "Rule version does not exist"
+                        )
+                );
     }
 }

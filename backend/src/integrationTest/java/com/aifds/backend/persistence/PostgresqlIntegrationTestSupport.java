@@ -2,7 +2,9 @@ package com.aifds.backend.persistence;
 
 import org.junit.jupiter.api.AfterEach;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -32,10 +34,16 @@ abstract class PostgresqlIntegrationTestSupport {
                 TRUNCATE TABLE
                     detection_evidence,
                     detection_result,
+                    rule_version,
+                    fraud_rule,
                     behavior_event,
                     idempotency_record,
                     financial_transaction
                 RESTART IDENTITY CASCADE
                 """);
+        ResourceDatabasePopulator populator = new ResourceDatabasePopulator(
+                new ClassPathResource("sql/rule-v1-draft-seed.sql")
+        );
+        populator.execute(cleanupJdbcTemplate.getDataSource());
     }
 }

@@ -292,8 +292,9 @@ legacy Snapshot은 엄격한 legacy codec으로만 복원하고 신규 envelope�
 - unknown version, 손상 데이터와 역직렬화 실패의 fail-closed 처리
 - envelope 확정 시 `Clock`을 한 번 읽고 PostgreSQL `TIMESTAMPTZ` 기본 마이크로초 정밀도로 정규화한 동일 값을 `finalizedAt`과 `finished_at`에 사용
 
-DetectionResult·DetectionEvidence 물리 영속 모델은 구현되었지만 최종
-동기 탐지 결과, External Risk, FastAPI, 탐지 실행 결과
+DetectionResult·DetectionEvidence와 ADR-005의 FraudRule·RuleVersion
+물리 영속 모델은 구현되었지만 최종 동기 탐지 결과, External Risk,
+FastAPI, 탐지 실행 결과
 생성·검증·채택, 위험 대응과 사건 연결은 구현되지 않았다. 현재
 `responseBody`는 실제 단계적 거래 접수 결과인 `RECEIVED`와 네 탐지
 관련 null 값을 보존한다.

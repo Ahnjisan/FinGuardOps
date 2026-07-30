@@ -48,14 +48,16 @@
 
 ### 현재 구현 상태
 
-현재 저장소에는 거래·멱등·행동 이벤트와
-DetectionResult·DetectionEvidence의 PostgreSQL 물리 영속 모델 및 거래
-접수 Controller가 구현되어 있다. 거래 접수 성공 응답은
+현재 저장소에는 거래·멱등·행동 이벤트,
+DetectionResult·DetectionEvidence와 ADR-005의
+FraudRule·RuleVersion PostgreSQL 물리 영속 모델 및 거래 접수 Controller가
+구현되어 있다. 거래 접수 성공 응답은
 `processingStatus = RECEIVED`이며 `riskLevel`,
 `riskResponseOutcome`, `adoptedDetectionResultId`, `caseId`는 null이다.
 행동 이벤트는 내부 Rule 평가용 제한 조회와 행동 기반
 `DetectionEvidence.observationSummary`의 외부 Event ID 검증까지 구현되어
-있다. 공개 행동 이벤트 조회 API와 Rule 실행은 구현되지 않았다.
+있다. RuleVersion 적용 기간·불변성·Evidence FK 정합성은 구현되었지만
+공개 행동 이벤트 조회 API와 Rule 실행은 구현되지 않았다.
 External Risk, FastAPI Rule 실행, 탐지 실행 결과 생성·검증·채택, 위험
 대응과 사건 연결은 아직 수행하지 않는다.
 
