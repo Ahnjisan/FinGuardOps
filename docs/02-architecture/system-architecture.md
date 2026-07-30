@@ -36,7 +36,13 @@
 - 공통 오류 응답과 `TraceIdFilter`
 - Issue 및 Pull Request 템플릿
 
-현재 백엔드는 Health Check, 거래 접수·조회와 행동 이벤트 접수를 구현한다. 거래·멱등·행동 이벤트의 PostgreSQL 애플리케이션 연동도 구현되어 있지만 운영 배포 환경은 없다. 현재 거래 접수는 단계적 구현 응답인 `RECEIVED`와 탐지 관련 null 값을 반환한다. 행동 이벤트 조회, 탐지, 사건, Rule, 감사와 AI 운영 도메인은 아직 구현되지 않았다.
+현재 백엔드는 Health Check, 거래 접수·조회, 행동 이벤트 접수와 내부 Rule
+평가용 조회를 구현한다. 거래·멱등·행동 이벤트,
+DetectionResult·DetectionEvidence와 FraudRule·RuleVersion의 PostgreSQL
+애플리케이션 연동도 구현되어 있지만 운영 배포 환경은 없다. 현재 거래
+접수는 단계적 구현 응답인 `RECEIVED`와 탐지 관련 null 값을 반환한다.
+Rule 실행, 탐지 결과 자동 생성·채택, 사건, 감사와 AI 운영 도메인은 아직
+구현되지 않았다.
 
 ### 2.2 문서로 정의됨
 

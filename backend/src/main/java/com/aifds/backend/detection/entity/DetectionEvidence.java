@@ -1,5 +1,7 @@
 package com.aifds.backend.detection.entity;
 
+import com.aifds.backend.rule.entity.RuleVersion;
+import com.aifds.backend.rule.entity.RuleVersionStatus;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -83,6 +85,16 @@ public class DetectionEvidence {
     @Column(name = "rule_version", length = 32, updatable = false)
     private String ruleVersion;
 
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(
+            name = "rule_version_id",
+            updatable = false,
+            foreignKey = @ForeignKey(
+                    name = "fk_detection_evidence_rule_version"
+            )
+    )
+    private RuleVersion ruleVersionRef;
+
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(
             name = "observation_summary",
@@ -110,11 +122,8 @@ public class DetectionEvidence {
 
     private DetectionEvidence(
             DetectionResult detectionResult,
-            String reasonCode,
             String displayDescription,
-            int scoreContribution,
-            String ruleCode,
-            String ruleVersion,
+            RuleVersion ruleVersionRef,
             RuleEvidenceObservationSummary observationSummary,
             Instant evidenceOccurredAt,
             int sortOrder
@@ -125,16 +134,20 @@ public class DetectionEvidence {
                 "detectionResult must not be null"
         );
         this.evidenceType = DetectionEvidenceType.RULE;
-        this.reasonCode = requireCode(reasonCode, "reasonCode");
+        this.ruleVersionRef = requirePublishedRuleVersion(ruleVersionRef);
+        this.reasonCode = requireCode(
+                ruleVersionRef.getReasonCode(),
+                "reasonCode"
+        );
         this.displayDescription = requireDescription(displayDescription);
-        if (scoreContribution < 0 || scoreContribution > 100) {
-            throw new IllegalArgumentException(
-                    "scoreContribution must be between 0 and 100"
-            );
-        }
-        this.scoreContribution = scoreContribution;
-        this.ruleCode = requireCode(ruleCode, "ruleCode");
-        this.ruleVersion = requireRuleVersion(ruleVersion);
+        this.scoreContribution = ruleVersionRef.getWeight();
+        this.ruleCode = requireCode(
+                ruleVersionRef.getFraudRule().getRuleCode(),
+                "ruleCode"
+        );
+        this.ruleVersion = Integer.toString(
+                ruleVersionRef.getVersionNumber()
+        );
         this.observationSummary = Objects.requireNonNull(
                 observationSummary,
                 "observationSummary must not be null"
@@ -153,24 +166,18 @@ public class DetectionEvidence {
 
     public static DetectionEvidence rule(
             DetectionResult detectionResult,
-            String reasonCode,
             String displayDescription,
-            int scoreContribution,
-            String ruleCode,
-            String ruleVersion,
+            RuleVersion ruleVersion,
             JsonNode observationSummary,
             Instant evidenceOccurredAt,
             int sortOrder
     ) {
         return new DetectionEvidence(
                 detectionResult,
-                reasonCode,
                 displayDescription,
-                scoreContribution,
-                ruleCode,
                 ruleVersion,
                 RuleEvidenceObservationSummary.from(
-                        reasonCode,
+                        ruleVersion.getReasonCode(),
                         observationSummary,
                         detectionResult.getEvaluationCutoffAt()
                 ),
@@ -205,13 +212,11 @@ public class DetectionEvidence {
         return value;
     }
 
-    private String requireRuleVersion(String value) {
-        if (value == null
-                || value.isBlank()
-                || value.length() > 32
-                || !value.equals(value.trim())) {
+    private RuleVersion requirePublishedRuleVersion(RuleVersion value) {
+        Objects.requireNonNull(value, "ruleVersion must not be null");
+        if (value.getStatus() != RuleVersionStatus.PUBLISHED) {
             throw new IllegalArgumentException(
-                    "ruleVersion must be 1 to 32 trimmed characters"
+                    "Rule evidence requires a published rule version"
             );
         }
         return value;
@@ -251,6 +256,10 @@ public class DetectionEvidence {
 
     public String getRuleVersion() {
         return ruleVersion;
+    }
+
+    public RuleVersion getRuleVersionRef() {
+        return ruleVersionRef;
     }
 
     public JsonNode getObservationSummary() {

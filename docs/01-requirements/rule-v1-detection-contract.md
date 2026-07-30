@@ -6,14 +6,16 @@
 
 - 작업 목적: `[Docs] Rule v1 탐지 계약 및 평가 정책 정의`
 - 문서 상태: Rule v1 계약 확정
-- 구현 상태: 미구현
+- 구현 상태: 물리 Rule 모델과 탐지 영속 모델 구현, Rule 실행 미구현
 
-현재 구현된 범위는 Spring Boot의 거래 접수·목록·상세 조회, 거래 멱등성, 행동 이벤트 접수와 PostgreSQL 애플리케이션 연동이다. 현재 거래 접수 성공 응답은 단계적 구현 상태인 `RECEIVED`와 탐지 관련 null 값을 반환한다.
+현재 구현된 범위는 Spring Boot의 거래 접수·목록·상세 조회, 거래 멱등성,
+행동 이벤트 접수·Rule 평가용 내부 조회, DetectionResult·DetectionEvidence,
+FraudRule·RuleVersion PostgreSQL 영속 모델이다. 현재 거래 접수 성공 응답은
+단계적 구현 상태인 `RECEIVED`와 탐지 관련 null 값을 반환한다.
 
 다음 항목은 아직 구현되지 않았다.
 
-- Rule 정의·버전·활성 상태 관리
-- 평가용 행동 이벤트 조회와 Snapshot 구성
+- 평가 입력과 활성 Rule 집합 Snapshot 구성
 - FastAPI Rule 실행과 Spring Boot 연동
 - 탐지 실행에 따른 DetectionResult·DetectionEvidence 생성·검증·채택
 - 위험 점수·위험 등급 산출과 위험 대응
@@ -209,6 +211,11 @@ R004는 수취인이 고객에게 최초인지 또는 과거 거래 관계가 �
 
 Rule v1에서는 적중한 Rule마다 하나의 `RULE` Evidence를 반환한다. 초기 `reasonCode`는 해당 `ruleCode`와 같은 값을 사용한다.
 
+`ruleCode`는 FraudRule의 안정적인 논리 식별자이고 `reasonCode`는
+Evidence 설명과 typed `observationSummary` 계약을 선택하는
+RuleVersion 속성이다. 초기 문자열은 같지만 서로 다른 개념이며 DB와
+Java에서 값의 동일성을 강제하지 않는다.
+
 | Rule ID | `reasonCode` |
 | --- | --- |
 | R001 | `TRANSFER_ABSOLUTE_HIGH_AMOUNT` |
@@ -219,6 +226,7 @@ Rule v1에서는 적중한 Rule마다 하나의 `RULE` Evidence를 반환한다.
 각 Evidence는 최소한 다음 내용을 포함해야 한다.
 
 - `evidenceType = RULE`
+- 불변 `ruleVersionId` 참조. 기존 호환 행은 null 가능
 - `ruleCode`
 - 불변 `ruleVersion`
 - `reasonCode`
@@ -227,6 +235,12 @@ Rule v1에서는 적중한 Rule마다 하나의 `RULE` Evidence를 반환한다.
 - 조건을 설명하는 민감정보 없는 관측값 요약
 - 행동 이벤트를 사용한 경우 선택된 `eventId`와 `occurredAt`
 - R003의 경우 선택된 비밀번호 변경·한도 변경 이벤트 식별자와 각 발생 시각
+
+신규 애플리케이션 생성 경로는 PUBLISHED RuleVersion을 요구한다.
+`ruleCode`, canonical decimal `ruleVersion`, `reasonCode`와
+`scoreContribution`은 참조 RuleVersion에서 파생한다. DetectionEvidence는
+FK와 위 snapshot을 함께 보존하며 FK가 있는 행은 DB에서도 네 값의
+일치를 검증한다.
 
 Reason Code별 `observationSummary`의 정확한 행동 ID 필드는 다음과 같다.
 
@@ -279,14 +293,30 @@ R001~R004만 적용할 때 가능한 최고 점수는 `15 + 60 = 75`점이다. �
 ## 9. Rule 코드·버전·활성 상태 정책
 
 - `ruleCode`는 논리 Rule의 안정적인 식별자이며 기존 의미를 다른 조건으로 재사용하지 않는다.
-- 각 `ruleCode`에는 한 시점에 활성 버전을 하나만 허용한다.
+- FraudRule은 논리 정체성, RuleVersion은 특정 실행 설정과 Evidence
+  출력 계약을 소유한다.
+- R001~R004는 문서 별칭이며 별도 영속 컬럼이 아니다.
+- RuleVersion의 `versionNumber`는 Rule별 1부터 증가하고
+  `(fraudRuleId, versionNumber)`를 유일하게 유지한다.
+- DRAFT는 실행 정의와 예정 기간을 수정할 수 있고 PUBLISHED 또는
+  WITHDRAWN으로만 전이한다. WITHDRAWN은 terminal이다.
+- PUBLISHED의 조건·가중치·Reason Code·적용 시작과 게시 시각은
+  수정하지 않는다. 적용 종료는 null에서 유효한 시각으로 한 번만
+  설정할 수 있다.
 - 조건, 가중치, 시간창, 적용 대상 또는 Evidence 의미가 변경되면 기존 버전을 수정하지 않고 새 불변 버전을 생성한다.
 - 과거 DetectionEvidence가 참조한 Rule 버전은 비활성화 후에도 물리 삭제하거나 현재 버전으로 치환하지 않는다.
+- PUBLISHED 적용 기간은 `[effectiveFrom, effectiveTo)`이고 null 종료는
+  무기한이다. `btree_gist` exclusion constraint로 같은 FraudRule의
+  PUBLISHED 기간 중복을 차단한다.
+- 위 반개방 적용 기간은 BehaviorEvent 조회의 `[T-window, T]` 양끝
+  포함 계약과 별개다.
 - Spring Boot와 PostgreSQL이 Rule 정의·버전·활성 상태의 업무 원본을 소유한다.
 - 평가 시작 시 Spring Boot가 활성 Rule 집합을 고정한다.
 - FastAPI는 전달받거나 승인된 방식으로 동기화한 고정 Rule 집합만 실행하며 버전·조건·가중치·활성 상태를 임의로 변경하지 않는다.
 
-버전 문자열 형식, 활성 전환 승인 이력, Rule 전달·동기화 방식과 불일치 시 거부 응답은 후속 구현 전에 확정한다.
+Evidence `ruleVersion` 문자열은 양의 `versionNumber`의 canonical decimal
+문자열을 사용한다. 활성 전환 승인 이력, Rule 전달·동기화 방식과 불일치
+시 거부 응답은 후속 구현 전에 확정한다.
 
 ## 10. Spring Boot와 FastAPI 책임 경계
 
@@ -358,17 +388,19 @@ FastAPI Timeout·응답 부재·검증 실패 시 Spring Boot는 임의 점수, 
 - 생성형 AI 리포트 구현
 - 운영 PostgreSQL·Redis·Kafka, Docker Compose, Kubernetes와 AWS 배포 환경
 
-현재 PostgreSQL 애플리케이션 연동과 Flyway 기반 거래·멱등·행동
-이벤트 및 DetectionResult·DetectionEvidence 물리 스키마, Rule 평가용
-BehaviorEvent 내부 시간창 조회와 행동 Evidence typed summary 검증은
-구현되어 있다. 공개 행동 조회 API, Rule 물리 모델, Rule 실행, FastAPI
-연동과 운영 배포 환경은 구현되지 않았다.
+현재 PostgreSQL 애플리케이션 연동과 Flyway V1~V5 기반 거래·멱등·행동
+이벤트, DetectionResult·DetectionEvidence와 FraudRule·RuleVersion 물리
+스키마가 구현되어 있다. Rule 평가용 BehaviorEvent 내부 시간창 조회,
+Rule·Evidence typed JSON 검증, RuleVersion 기간 중복 방지와
+DetectionEvidence FK·snapshot 정합성도 구현되어 있다. 공개 행동 조회
+API, Rule 실행, FastAPI 연동과 운영 배포 환경은 구현되지 않았다.
 
 ## 14. 후속 구현 순서
 
 1. 현재 `RECEIVED`/null 거래 접수 응답과 최종 동기 응답 사이의 전환 정책을 정하고, 기존 멱등 `response_snapshot`의 스키마·재생 호환·만료 데이터 처리 방식을 확정한다.
 2. Spring Boot가 평가 cutoff, 입력 Snapshot과 활성 Rule 집합을 고정하는 내부 계약을 정의한다.
-3. 구현된 DetectionResult·DetectionEvidence 영속 계약에 연결할 Rule 정의·버전·활성 상태의 JPA·DB 설계를 별도 승인 작업으로 확정한다.
+3. 구현된 FraudRule·RuleVersion에서 평가 시각에 실행 가능한 PUBLISHED
+   Rule 집합을 결정하고 불변 Snapshot으로 고정하는 내부 계약을 구현한다.
 4. 구현된 고객·이벤트 유형·시간창 조회를 사용해 기기·계좌·수취인 조건을 적용하고 평가 입력 Snapshot 상한을 확정한다.
 5. FastAPI에 R001~R004, 그룹 상한, 위험 등급과 Evidence 반환을 구현한다.
 6. Spring Boot의 FastAPI 호출, 결과 검증·영속화·채택과 장애 처리를 구현한다.

@@ -9,6 +9,10 @@ import com.aifds.backend.detection.repository.DetectionEvidenceRepository;
 import com.aifds.backend.detection.repository.DetectionResultRepository;
 import com.aifds.backend.detection.service.DetectionResultPersistenceService;
 import com.aifds.backend.detection.service.RuleEvidenceDraft;
+import com.aifds.backend.rule.entity.RuleVersion;
+import com.aifds.backend.rule.entity.RuleVersionStatus;
+import com.aifds.backend.rule.repository.RuleVersionRepository;
+import com.aifds.backend.rule.service.RuleVersionLifecycleService;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.aifds.backend.transaction.entity.TransactionChannel;
 import com.aifds.backend.transaction.entity.TransactionType;
@@ -64,6 +68,12 @@ class DetectionPersistenceIntegrationTest
     private DetectionResultPersistenceService persistenceService;
 
     @Autowired
+    private RuleVersionRepository ruleVersionRepository;
+
+    @Autowired
+    private RuleVersionLifecycleService ruleVersionLifecycleService;
+
+    @Autowired
     private EntityManager entityManager;
 
     @Autowired
@@ -71,7 +81,7 @@ class DetectionPersistenceIntegrationTest
 
     @Test
     void migrationCreatesExactColumnsConstraintsIndexesAndTriggers() {
-        assertThat(flyway.info().applied()).hasSize(4);
+        assertThat(flyway.info().applied()).hasSize(5);
         assertThat(columns("detection_result")).containsExactlyInAnyOrder(
                 "id",
                 "detection_result_id",
@@ -102,6 +112,7 @@ class DetectionPersistenceIntegrationTest
                 "score_contribution",
                 "rule_code",
                 "rule_version",
+                "rule_version_id",
                 "observation_summary",
                 "evidence_occurred_at",
                 "sort_order",
@@ -130,6 +141,7 @@ class DetectionPersistenceIntegrationTest
                         "uq_detection_evidence_business_id",
                         "uq_detection_evidence_result_sort",
                         "fk_detection_evidence_result",
+                        "fk_detection_evidence_rule_version",
                         "ck_detection_evidence_uuid_v4",
                         "ck_detection_evidence_type",
                         "ck_detection_evidence_reason_code",
@@ -137,10 +149,12 @@ class DetectionPersistenceIntegrationTest
                         "ck_detection_evidence_score",
                         "ck_detection_evidence_rule_fields",
                         "ck_detection_evidence_observation_summary",
-                        "ck_detection_evidence_sort_order"
+                        "ck_detection_evidence_sort_order",
+                        "ck_detection_evidence_rule_version_type"
                 );
         assertThat(indexes("detection_evidence")).contains(
-                "uq_detection_evidence_result_rule_code"
+                "uq_detection_evidence_result_rule_code",
+                "ix_detection_evidence_rule_version_id"
         );
         assertThat(triggers()).containsExactlyInAnyOrder(
                 "tg_detection_result_history_guard",
@@ -574,6 +588,10 @@ class DetectionPersistenceIntegrationTest
                 evidence.get(0),
                 "detectionResult"
         )).isFalse();
+        assertThat(persistenceUnitUtil.isLoaded(
+                evidence.get(0),
+                "ruleVersionRef"
+        )).isFalse();
     }
 
     @Test
@@ -676,12 +694,12 @@ class DetectionPersistenceIntegrationTest
     }
 
     private RuleEvidenceDraft beneficiaryDraft(int sortOrder) {
+        RuleVersion version = publishSeedRuleVersion(
+                RuleEvidenceObservationSummary.RECENT_BENEFICIARY_TRANSFER
+        );
         return new RuleEvidenceDraft(
-                RuleEvidenceObservationSummary.RECENT_BENEFICIARY_TRANSFER,
+                version.getRuleVersionId(),
                 "최근 등록된 수취인 이체입니다.",
-                10,
-                RuleEvidenceObservationSummary.RECENT_BENEFICIARY_TRANSFER,
-                "1",
                 objectMapper.createObjectNode()
                         .put("observedAmount", "10000000")
                         .put(
@@ -700,18 +718,40 @@ class DetectionPersistenceIntegrationTest
     }
 
     private RuleEvidenceDraft ruleDraft(int sortOrder) {
+        RuleVersion version = publishSeedRuleVersion(
+                RuleEvidenceObservationSummary.TRANSFER_ABSOLUTE_HIGH_AMOUNT
+        );
         return new RuleEvidenceDraft(
-                RuleEvidenceObservationSummary
-                        .TRANSFER_ABSOLUTE_HIGH_AMOUNT,
+                version.getRuleVersionId(),
                 "KRW 이체 금액이 기준 이상입니다.",
-                15,
-                RuleEvidenceObservationSummary
-                        .TRANSFER_ABSOLUTE_HIGH_AMOUNT,
-                "1",
                 amountSummary(),
                 Instant.now(),
                 sortOrder
         );
+    }
+
+    private RuleVersion publishSeedRuleVersion(String ruleCode) {
+        RuleVersion version = ruleVersionRepository
+                .findByFraudRule_RuleCodeAndVersionNumber(ruleCode, 1)
+                .orElseThrow();
+        if (version.getStatus() == RuleVersionStatus.PUBLISHED) {
+            return version;
+        }
+        ruleVersionLifecycleService.updateDraft(
+                version.getRuleVersionId(),
+                version.getReasonCode(),
+                version.getWeight(),
+                version.getConditionDefinition(),
+                Instant.parse("2026-01-01T00:00:00Z"),
+                null
+        );
+        ruleVersionLifecycleService.publish(
+                version.getRuleVersionId(),
+                Instant.now().truncatedTo(ChronoUnit.MICROS)
+        );
+        return ruleVersionRepository.findByRuleVersionId(
+                version.getRuleVersionId()
+        ).orElseThrow();
     }
 
     private ObjectNode amountSummary() {

@@ -17,7 +17,13 @@
 - 고객·계좌·기기·IP 등 민감 정보 저장을 어떻게 최소화하는가
 - 후속 JPA, API와 마이그레이션 설계에서 무엇을 결정해야 하는가
 
-이 문서는 전체 구현 완료 내역이 아니다. 현재 백엔드는 Health Check, 거래 접수·조회, 거래 멱등성, 행동 이벤트 접수와 내부 Rule 평가용 제한 조회를 구현했다. 거래·멱등·행동 이벤트와 `DetectionResult`·`DetectionEvidence`는 PostgreSQL 애플리케이션 연동과 Flyway 스키마가 구현되어 있다. Rule 실행·Rule 물리 모델, 공개 행동 이벤트 조회 API, 사건·감사·AI 운영 엔티티와 운영 PostgreSQL 배포 환경은 아직 구현되지 않았다.
+이 문서는 전체 구현 완료 내역이 아니다. 현재 백엔드는 Health Check, 거래
+접수·조회, 거래 멱등성, 행동 이벤트 접수와 내부 Rule 평가용 제한 조회를
+구현했다. 거래·멱등·행동 이벤트, `DetectionResult`·`DetectionEvidence`와
+분리된 `FraudRule`·`RuleVersion`은 PostgreSQL 애플리케이션 연동과 Flyway
+스키마가 구현되어 있다. Rule 실행, 공개 행동 이벤트 조회 API,
+사건·감사·AI 운영 엔티티와 운영 PostgreSQL 배포 환경은 아직 구현되지
+않았다.
 
 ## 2. 설계 범위와 제외 범위
 
@@ -26,7 +32,7 @@
 핵심 설계 범위는 다음과 같다.
 
 - 거래·행동: `Transaction`, `BehaviorEvent`
-- 탐지: `DetectionResult`, `DetectionEvidence`, `FraudRule` 또는 `RuleVersion`, `ExternalRiskSnapshot`
+- 탐지: `DetectionResult`, `DetectionEvidence`, `FraudRule`, `RuleVersion`, `ExternalRiskSnapshot`
 - 사건: `FraudCase`, `CaseTransaction`, `CaseNote`, `AuditLog`
 - AI 운영: `AiReportRequest`, `AiReportExecution`, `ProviderCallAttempt`, `AiReport`
 
@@ -434,46 +440,35 @@ R004는 `eventId`, R003은 `passwordChangedEventId`와
 
 ### 7.5 FraudRule과 Rule 버전
 
-Rule은 다음 정보를 표현할 수 있어야 한다.
-
-- Rule ID 또는 `ruleCode`
-- 이름과 설명
-- 조건
-- 가중치
-- 버전
-- 활성 상태
-- 적용 시작일
-- 필요 시 적용 종료일 후보
-
-#### 방안 A: 행 단위 버전 관리
-
-`FraudRule` 한 엔티티에서 버전별 행을 저장한다.
+ADR-005는 논리 Rule과 실행 버전을 다음처럼 분리한다.
 
 ```text
-ruleCode + version
-→ Unique 후보
+FraudRule 1
+→ RuleVersion N
 ```
 
-각 행은 한 번 사용된 뒤 조건·가중치를 덮어쓰지 않는 불변 버전으로 취급한다. 새 Rule 변경은 새 버전 행으로 추가한다.
+`FraudRule`은 UUID v4 업무 ID, 불변 `ruleCode`, 이름·설명과
+`ACTIVE → RETIRED` lifecycle을 소유한다. `RuleVersion`은 UUID v4 업무
+ID, Rule별 양의 `versionNumber`, 상태, `reasonCode`, 1~100 가중치,
+typed JSONB 조건, 적용 기간과 게시 시각을 소유한다.
 
-#### 방안 B: RuleDefinition과 RuleVersion 분리
+Rule Code는 논리 식별자이고 Reason Code는 Evidence 설명과 typed
+observation 계약을 선택한다. 초기 문자열이 같아도 동일성 제약을 두지
+않는다.
 
-`RuleDefinition`은 `ruleCode`, 이름 등 논리 Rule의 정체성을 소유하고, `RuleVersion`은 조건·가중치·적용 기간과 버전을 소유한다.
+DRAFT는 수정 후 PUBLISHED 또는 WITHDRAWN으로 전이한다. PUBLISHED 실행
+정의는 불변이고 종료 시각만 null에서 한 번 설정할 수 있다. 적용 기간은
+`[effectiveFrom, effectiveTo)`이며 PostgreSQL `btree_gist` exclusion
+constraint가 같은 FraudRule의 PUBLISHED 기간 중복을 막는다.
 
-| 비교 기준 | 방안 A: 단일 엔티티 버전 행 | 방안 B: 정의·버전 분리 |
-| --- | --- | --- |
-| 구현 복잡도 | 낮음 | 엔티티와 관계가 하나 늘어남 |
-| 과거 버전 추적 | 불변 행 원칙을 지키면 가능 | 정의와 버전 관계가 더 명시적 |
-| 활성 버전 조회 | 활성 플래그·적용 기간 조건 필요 | 정의별 활성 버전 관계를 명확히 만들 수 있음 |
-| Rule 변경 이력 | 이름·설명 중복 가능 | 공통 정의와 버전 변경을 구분하기 쉬움 |
-| 탐지 근거 연결 | `ruleCode + version` 행 또는 내부 ID 참조 | 특정 RuleVersion FK가 명확함 |
-| 초기 개인 프로젝트 범위 | 단순하고 적합 | 장기 확장에는 유리하지만 초기 복잡도 증가 |
+DetectionEvidence는 nullable RuleVersion FK와 불변 코드·버전·Reason
+Code·가중치 snapshot을 함께 저장한다. 신규 생성은 PUBLISHED 버전을
+요구하고 snapshot을 참조 엔티티에서 파생한다. 과거 버전은 물리 삭제하지
+않는다.
 
-초기 권장안은 8~10개 Rule을 대상으로 방안 A를 우선 검토하는 것이다. 단, 각 버전 행을 불변으로 유지하고 `DetectionEvidence`가 사용한 특정 행을 참조해야 한다. Rule이 증가하거나 정의 수준의 메타데이터와 승인 이력이 필요해지면 방안 B로 분리할 수 있다. 최종 모델은 사용자 승인 사항이다.
-
-어느 방식을 선택해도 과거 탐지 근거가 참조한 Rule 버전을 물리 삭제하거나 현재 버전으로 치환해서는 안 된다.
-
-Rule v1은 물리 모델 선택과 무관하게 `ruleCode`별 활성 버전을 하나만 허용하고, 평가 시작 시 활성 Rule 집합을 고정하며, 조건·가중치 변경 시 새 불변 버전을 생성한다. 세부 계약은 [Rule v1 탐지 계약](../01-requirements/rule-v1-detection-contract.md)을 따른다. Rule 관리와 실행은 아직 구현되지 않았다.
+R001~R004의 DRAFT seed와 상세 물리 계약은
+[FraudRule·RuleVersion DB 계약](../04-database/fraud-rule-version-schema.md)을
+따른다. Rule 실행과 공개 관리 API는 아직 구현되지 않았다.
 
 ### 7.6 ExternalRiskSnapshot
 
@@ -1214,7 +1209,8 @@ caseId
 | Transaction | `transactionId` | 동일 업무 거래 중복 저장 |
 | BehaviorEvent | `eventId` | 동일 행동 이벤트 중복 수신·재처리 |
 | DetectionResult | `transactionId + detectionResultVersion` | 같은 거래·버전의 탐지 결과 중복 |
-| FraudRule | `ruleCode + ruleVersion` | 같은 Rule 버전 중복 |
+| FraudRule | `fraudRuleId`, `ruleCode` | 논리 Rule 업무 ID·코드 중복 |
+| RuleVersion | `ruleVersionId`, `fraudRuleId + versionNumber` | 업무 ID와 같은 Rule 버전 중복 |
 | FraudCase | `caseId` | 사건 업무 식별자 중복 |
 | CaseTransaction | `caseId + transactionId` | 같은 사건에 같은 거래 중복 연결 |
 | AiReportRequest | `aiRequestId` | 외부 요청 업무 식별자 중복 |
@@ -1372,9 +1368,11 @@ HIGH·CRITICAL 거래 처리의 재시도와 중복 이벤트가 새 사건을 �
 
 ### 14.4 FraudRule
 
-행 단위 불변 버전 모델을 선택하면 사용된 버전 내용은 수정하지 않는다. 다만 활성 버전 변경이나 새 버전 등록이 동시에 발생할 수 있으므로 활성 상태와 적용 기간을 변경할 때 충돌 검증 정보가 필요할 수 있다.
-
-낙관적 락과 비관적 락 중 어느 방식을 사용할지, 충돌 시 자동 재시도 여부와 트랜잭션 격리 수준은 후속 설계에서 확정한다.
+FraudRule과 RuleVersion은 `concurrencyVersion` 낙관적 잠금을 사용한다.
+게시 Service는 FraudRule을 비관적으로 잠근 뒤 기간 중복을 사전 검사한다.
+PostgreSQL exclusion constraint가 경쟁 게시의 최종 방어선이며 중복을
+조회 limit으로 숨기지 않는다. DB Trigger는 게시 후 실행 정의 변경,
+허용되지 않은 상태 전이와 물리 삭제를 거부한다.
 
 ## 15. 감사 로그
 
@@ -1586,9 +1584,8 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 ### 탐지·Rule·외부 위험정보
 
 - Feature 요약 보존 범위와 Feature 버전 관리 방식
-- Rule 행 단위 버전 모델 또는 RuleDefinition·RuleVersion 분리 물리 모델
-- `ruleCode`별 활성 버전 하나를 보장할 애플리케이션·DB 제약과 적용 기간 표현
-- 과거 Rule 버전의 비활성화·물리 삭제 방지와 감사 방식
+- Rule 변경 승인 주체와 별도 AuditLog 연결 방식
+- PUBLISHED 적용 종료·신규 버전 게시를 외부 관리 기능에서 노출할 방식
 - ExternalRiskSnapshot의 구체 속성, 보존 기간, 참조 범위와 암호화 방식
 - 외부 위험정보 정정 후 기존 탐지·사건 근거 갱신 방식
 
@@ -1667,11 +1664,15 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 - 자동 재시도는 Timeout과 연결 실패에만 같은 `executionId` 아래 최대 1회 적용한다.
 - 정확 일치 `AiReport`가 있으면 캐시로 재사용하며 동일 정확 일치 결과의 강제 재생성을 허용하지 않는다.
 
-구체적인 경로, DTO와 상태 코드는 API 기준 문서에서 사용자 승인 후 확정한다. 거래 접수의 `FinancialTransaction`, 행동 이벤트의 `BehaviorEvent`, 탐지 영속 모델의 `DetectionResult`·`DetectionEvidence`는 구현되었다. Rule 실행·Rule 물리 모델, 사건·AI 운영 클래스는 후속 구현 범위이다.
+구체적인 경로, DTO와 상태 코드는 API 기준 문서에서 사용자 승인 후
+확정한다. 거래 접수의 `FinancialTransaction`, 행동 이벤트의
+`BehaviorEvent`, 탐지 영속 모델의 `DetectionResult`·`DetectionEvidence`,
+Rule 물리 모델의 `FraudRule`·`RuleVersion`은 구현되었다. Rule 실행,
+사건·AI 운영 클래스는 후속 구현 범위이다.
 
 ### 20.3 마이그레이션·DB 제약 설계
 
-- 구현된 `financial_transaction`, `idempotency_record`, `behavior_event`, `detection_result`, `detection_evidence` 이후의 Rule·사건·AI 운영 Flyway Migration 설계
+- 구현된 거래·행동·탐지·Rule V1~V5 이후 사건·AI 운영 Flyway Migration 설계
 - 향후 Snapshot metadata 조회·인덱스 또는 DB 수준 version 제약이 필요할 때의 새 Migration 여부
 - 이 문서의 Unique 후보를 실제 제약으로 적용할 범위
 - `adoptedDetectionResultId`가 같은 Transaction의 DetectionResult만 참조하도록 보장하는 방식
@@ -1688,7 +1689,12 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 - 시간 범위·목록·집계 조회를 위한 인덱스 순서
 - 데이터 보존·비식별화·파티셔닝 필요 여부
 
-거래·멱등·행동 이벤트와 탐지 결과·근거의 Flyway Migration은 V1~V3에 구현되어 있다. V4는 기존 `behavior_event`를 변경하지 않고 내부 Rule 조회용 `ix_behavior_event_customer_type_occurred_event` 인덱스만 추가한다. 위 Mermaid `IDEMPOTENCY_RECORD`는 실제 V1 Migration의 `financial_transaction_id`, `response_snapshot`, `failure_code`, 세 시각 필드와 `processing_status` 명칭을 반영했다. 신규 Snapshot envelope는 기존 `response_snapshot JSONB` 내부에 구현되어 별도 버전 metadata 컬럼, 새 Flyway Migration 또는 legacy backfill이 없다. Rule·사건·AI 운영 DDL과 마이그레이션 파일은 별도 승인 작업에서 작성하며, 거래 접수의 DDL 기준은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)이다.
+거래·멱등·행동 이벤트와 탐지 결과·근거의 Flyway Migration은 V1~V3에
+구현되어 있다. V4는 기존 `behavior_event`에 내부 Rule 조회 인덱스를
+추가한다. V5는 `btree_gist`, FraudRule·RuleVersion, R001~R004 DRAFT
+seed와 DetectionEvidence nullable RuleVersion FK를 additive하게 추가하며
+V1~V4를 수정하거나 기존 Evidence를 backfill하지 않는다. Rule 실행,
+사건·AI 운영 DDL은 별도 승인 작업이다.
 
 ### 20.4 트랜잭션·동시성 설계
 

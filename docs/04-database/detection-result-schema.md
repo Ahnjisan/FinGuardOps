@@ -4,13 +4,14 @@
 
 이 문서는 FinGuardOps의 `detection_result`,
 `detection_evidence`와 Transaction 채택 결과의 PostgreSQL 물리 계약을
-정의한다. 구현은 Flyway
-`V3__create_detection_result_and_evidence_tables.sql`, JPA Entity,
-Repository와 내부 persistence service까지이다.
+정의한다. 기본 구현은 Flyway
+`V3__create_detection_result_and_evidence_tables.sql`이며 V5가
+FraudRule·RuleVersion과 nullable Evidence FK를 additive하게 연결한다.
+JPA Entity, Repository와 내부 persistence service가 구현되어 있다.
 
 다음 기능은 구현하지 않는다.
 
-- Rule 실행과 Rule 물리 테이블
+- Rule 실행
 - FastAPI Client와 ML 추론
 - 외부 탐지 실행 API와 탐지 결과 조회 API
 - 거래 생성의 최종 동기 탐지 응답
@@ -102,6 +103,7 @@ Evidence에는 실제 고객·계좌·기기·수취인 식별자, 원문 IP, �
 | `score_contribution` | `INTEGER` | nullable | 0~100 개별 기여도 |
 | `rule_code` | `VARCHAR(64)` | nullable | RULE의 불변 Rule 코드 |
 | `rule_version` | `VARCHAR(32)` | nullable | RULE의 불변 Rule 버전 |
+| `rule_version_id` | `BIGINT` | nullable | V5의 정확한 RuleVersion FK. 기존 행은 null 가능 |
 | `observation_summary` | `JSONB` | NOT NULL | 제한된 typed 관측 요약 |
 | `evidence_occurred_at` | `TIMESTAMPTZ` | NOT NULL | 근거 관측 시각 |
 | `sort_order` | `INTEGER` | NOT NULL | 결과 안의 안정적 정렬 순서 |
@@ -111,20 +113,29 @@ Evidence에는 실제 고객·계좌·기기·수취인 식별자, 원문 IP, �
 현재 Java 생성 경로는 Rule v1 `RULE` Evidence를 우선 구현한다.
 
 RULE은 `rule_code`, `rule_version`, `score_contribution`이 필수이다.
-비-RULE은 Rule 두 필드를 null로 유지한다. Rule 물리 테이블이 없으므로
-이번 Migration은 Rule FK를 만들지 않고 정확한 코드·버전을 불변
-Snapshot으로 보존한다.
+비-RULE은 Rule 필드와 RuleVersion FK를 null로 유지한다. V3는 Rule
+물리 테이블이 없어서 코드·버전 snapshot만 보존했고 V5는 기존 snapshot을
+유지하면서 nullable `rule_version_id`를 추가한다. 기존 행은 backfill하지
+않는다.
+
+신규 Java 생성 경로는 PUBLISHED RuleVersion을 요구하고 ruleCode,
+canonical decimal versionNumber, reasonCode와 weight를 참조 엔티티에서
+파생한다. FK가 존재하는 Evidence는 insert Trigger가 네 snapshot 값의
+일치를 검증한다. Rule Code와 Reason Code 자체의 동일성은 강제하지
+않는다.
 
 ### 4.2 제약과 인덱스
 
 - 결과·Evidence 업무 ID UUID v4 Check와 Unique
 - 결과 FK `ON DELETE RESTRICT`
+- RuleVersion FK `ON DELETE RESTRICT`, 기존 호환을 위해 nullable
 - `(detection_result_id, sort_order)` Unique
 - RULE 필드 조합과 점수 범위 Check
 - JSON object이며 빈 object가 아닌지 Check
 - `uq_detection_evidence_result_rule_code` partial unique index로 한
   DetectionResult에 같은 Rule 코드 Evidence를 한 건만 허용
 - JSONB GIN 인덱스 없음
+- null이 아닌 `rule_version_id` 조회용 partial index
 
 ## 5. Rule v1 `observation_summary`
 
@@ -215,6 +226,7 @@ Evidence는 완료 트랜잭션에서 먼저 저장한 뒤 결과를 COMPLETED�
 
 - DetectionResult → FinancialTransaction: LAZY, cascade 없음
 - DetectionEvidence → DetectionResult: LAZY, cascade 없음
+- DetectionEvidence → RuleVersion: nullable LAZY, cascade 없음
 - FinancialTransaction → 채택 DetectionResult: nullable LAZY, cascade 없음
 - 양방향 컬렉션, `orphanRemoval` 없음
 - Evidence는 전용 Repository로 조회
@@ -224,9 +236,11 @@ Evidence는 완료 트랜잭션에서 먼저 저장한 뒤 결과를 COMPLETED�
 ## 10. Migration과 검증
 
 V3는 V1·V2를 수정하지 않고 두 테이블과 거래의 nullable 컬럼을
-추가한다. 기존 거래는 세 값이 모두 null이므로 backfill하지 않는다.
+추가한다. V5는 V1~V4를 수정하지 않고 RuleVersion nullable FK와
+snapshot 검증을 추가한다. 기존 거래와 Evidence는 backfill하지 않는다.
 
 PostgreSQL 17 Testcontainers에서 Migration 순서, Hibernate validation,
-제약·Trigger, 동시 버전 할당, LAZY 관계, rollback과 기존 거래
+제약·Trigger, 동시 버전 할당, RuleVersion snapshot 정합성, LAZY 관계,
+rollback과 기존 거래
 접수·멱등·Snapshot 회귀를 검증한다. H2 호환 결과를 근거로 사용하지
 않는다.

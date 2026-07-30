@@ -4,6 +4,8 @@ import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.aifds.backend.transaction.entity.RiskResponseOutcome;
 import com.aifds.backend.transaction.entity.TransactionChannel;
 import com.aifds.backend.transaction.entity.TransactionType;
+import com.aifds.backend.rule.entity.FraudRule;
+import com.aifds.backend.rule.entity.RuleVersion;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
@@ -79,14 +81,12 @@ class DetectionDomainTest {
     void createsImmutableRuleEvidenceWithUuidV4AndDefensiveJson() {
         DetectionResult result = pending(transaction(UUID.randomUUID()), 1);
         ObjectNode summary = amountSummary();
+        RuleVersion version = publishedAmountRuleVersion();
 
         DetectionEvidence evidence = DetectionEvidence.rule(
                 result,
-                RuleEvidenceObservationSummary.TRANSFER_ABSOLUTE_HIGH_AMOUNT,
                 "고액 이체 기준 이상입니다.",
-                15,
-                RuleEvidenceObservationSummary.TRANSFER_ABSOLUTE_HIGH_AMOUNT,
-                "1",
+                version,
                 summary,
                 CUTOFF,
                 0
@@ -99,6 +99,39 @@ class DetectionDomainTest {
                 .isEqualTo(DetectionEvidenceType.RULE);
         assertThat(evidence.getObservationSummary()
                 .get("observedAmount").textValue()).isEqualTo("10000000");
+        assertThat(evidence.getRuleCode())
+                .isEqualTo(version.getFraudRule().getRuleCode());
+        assertThat(evidence.getReasonCode()).isEqualTo(version.getReasonCode());
+        assertThat(evidence.getRuleVersion()).isEqualTo("1");
+        assertThat(evidence.getScoreContribution()).isEqualTo(15);
+    }
+
+    @Test
+    void rejectsRuleEvidenceForDraftVersion() {
+        DetectionResult result = pending(transaction(UUID.randomUUID()), 1);
+        FraudRule rule = FraudRule.create(
+                RuleEvidenceObservationSummary.TRANSFER_ABSOLUTE_HIGH_AMOUNT,
+                "절대 고액 이체",
+                "현재 거래의 절대 금액을 평가한다."
+        );
+        RuleVersion draft = RuleVersion.draft(
+                rule,
+                1,
+                RuleEvidenceObservationSummary.TRANSFER_ABSOLUTE_HIGH_AMOUNT,
+                15,
+                amountCondition(),
+                CUTOFF,
+                null
+        );
+
+        assertThatThrownBy(() -> DetectionEvidence.rule(
+                result,
+                "고액 이체 기준 이상입니다.",
+                draft,
+                amountSummary(),
+                CUTOFF,
+                0
+        )).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
@@ -173,6 +206,34 @@ class DetectionDomainTest {
     private ObjectNode amountSummary() {
         return objectMapper.createObjectNode()
                 .put("observedAmount", "10000000")
+                .put("amountThreshold", "10000000");
+    }
+
+    private RuleVersion publishedAmountRuleVersion() {
+        FraudRule rule = FraudRule.create(
+                RuleEvidenceObservationSummary.TRANSFER_ABSOLUTE_HIGH_AMOUNT,
+                "절대 고액 이체",
+                "현재 거래의 절대 금액을 평가한다."
+        );
+        RuleVersion version = RuleVersion.draft(
+                rule,
+                1,
+                RuleEvidenceObservationSummary.TRANSFER_ABSOLUTE_HIGH_AMOUNT,
+                15,
+                amountCondition(),
+                CUTOFF.minusSeconds(60),
+                null
+        );
+        version.publish(CUTOFF.minusSeconds(120));
+        return version;
+    }
+
+    private ObjectNode amountCondition() {
+        ObjectNode condition = objectMapper.createObjectNode();
+        condition.putArray("transactionTypes")
+                .add("ACCOUNT_TRANSFER")
+                .add("OPEN_BANKING_TRANSFER");
+        return condition.put("currencyCode", "KRW")
                 .put("amountThreshold", "10000000");
     }
 }

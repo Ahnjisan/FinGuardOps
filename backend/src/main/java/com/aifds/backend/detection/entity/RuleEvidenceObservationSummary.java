@@ -135,6 +135,10 @@ public final class RuleEvidenceObservationSummary {
         return value.deepCopy();
     }
 
+    public static boolean supportsReasonCode(String reasonCode) {
+        return ALLOWED_FIELDS.containsKey(reasonCode);
+    }
+
     private static void requireKrwInteger(JsonNode root, String field) {
         JsonNode value = root.get(field);
         if (value == null
