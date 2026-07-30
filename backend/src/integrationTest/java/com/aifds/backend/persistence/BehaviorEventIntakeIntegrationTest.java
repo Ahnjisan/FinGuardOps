@@ -111,7 +111,8 @@ class BehaviorEventIntakeIntegrationTest
         assertThat(indexes).containsExactlyInAnyOrder(
                 "pk_behavior_event",
                 "uq_behavior_event_event_id",
-                "ix_behavior_event_transaction"
+                "ix_behavior_event_transaction",
+                "ix_behavior_event_customer_type_occurred_event"
         );
         assertThat(jdbcTemplate.queryForObject("""
                 SELECT indexdef
@@ -119,6 +120,15 @@ class BehaviorEventIntakeIntegrationTest
                 WHERE indexname = 'ix_behavior_event_transaction'
                 """, String.class)).contains(
                 "WHERE (financial_transaction_id IS NOT NULL)"
+        );
+        assertThat(jdbcTemplate.queryForObject("""
+                SELECT indexdef
+                FROM pg_indexes
+                WHERE indexname =
+                    'ix_behavior_event_customer_type_occurred_event'
+                """, String.class)).contains(
+                "(external_customer_ref, event_type, "
+                        + "occurred_at DESC, event_id)"
         );
         assertThat(jdbcTemplate.queryForObject("""
                 SELECT confdeltype::text

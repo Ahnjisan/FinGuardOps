@@ -957,8 +957,10 @@ GET /api/v1/detection-results/7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430101
       "observationSummary": {
         "observedAmount": "10000000",
         "amountThreshold": "10000000",
-        "securityEventType": "TRANSFER_LIMIT_CHANGED",
-        "securityChangedAt": "2026-07-23T00:45:00Z",
+        "passwordChangedEventId": "8be68132-507c-42c9-926e-aeb63c471d23",
+        "passwordChangedAt": "2026-07-23T00:15:00Z",
+        "transferLimitChangedEventId": "cc7ec17c-064f-4c90-841d-b7e75c6e82f8",
+        "transferLimitChangedAt": "2026-07-23T00:45:00Z",
         "elapsedSeconds": 1830,
         "windowSeconds": 86400
       },

@@ -99,6 +99,21 @@ T - 24시간 <= event.occurredAt <= T
 
 같은 평가 실행 중 새 행동 이벤트나 Rule 활성 상태 변경이 발생해도 고정된 입력과 Rule 집합을 바꾸지 않는다.
 
+### 4.1 내부 BehaviorEvent 조회 계약
+
+현재 구현된 내부 Repository 조회는 다음 조건을 모두 사용한다.
+
+```text
+event.externalCustomerRef = transaction.externalCustomerRef
+event.eventType IN requestedEventTypes
+fromInclusive <= event.occurredAt <= toInclusive
+ORDER BY event.occurredAt DESC, event.eventId ASC
+```
+
+`requestedEventTypes`는 비어 있지 않아야 한다. 호출자는 `PageRequest.of(0, limit, Sort.unsorted())`를 사용하며 `limit`은 1 이상의 유한한 값이어야 한다. Repository가 업무 최대값을 임의로 정하지 않으며 Rule Snapshot 상한은 Rule 실행 구현 전에 별도 확정한다. 반환형은 `List<BehaviorEvent>`이고 count query를 실행하지 않는다. 거래 관계는 fetch join하지 않아 `financialTransaction` LAZY 관계를 초기화하지 않는다.
+
+이 조회는 Rule 실행을 위한 내부 계약이며 공개 행동 이벤트 조회 API를 추가하지 않는다. 다중 Event Type에서 PostgreSQL이 추가 정렬을 수행할 수 있지만 최종 업무 순서는 JPQL의 `occurredAt DESC`, `eventId ASC`가 보장한다.
+
 ## 5. R001~R004 상세 계약
 
 ### 5.1 R001: 절대 고액 이체
@@ -160,7 +175,18 @@ T - 24시간 <= limitEvent.occurredAt <= T
 
 조건을 만족하는 조합이 여러 개이면 `TRANSFER_LIMIT_CHANGED.occurredAt`이 가장 늦은 조합을 선택한다. 같은 시각이면 해당 이벤트의 `eventId` 오름차순으로 결정한다. 선택한 한도 변경 이벤트 이전 또는 같은 시각의 적격 `PASSWORD_CHANGED` 중 가장 늦은 이벤트를 사용하고, 같은 시각이면 `eventId` 오름차순으로 결정한다. 점수는 한 번만 부여한다.
 
-R003은 `TRANSFER_LIMIT_CHANGED`의 발생 사실만 사용한다. 현재 입력에는 변경 전·후 한도와 변경 방향이 없으므로 실제 한도 상향 여부, 상향 폭 또는 거래 금액이 과거 한도를 초과했는지는 판단하지 못한다.
+R003 Evidence는 선택한 두 행동을 `passwordChangedEventId`, `passwordChangedAt`, `transferLimitChangedEventId`, `transferLimitChangedAt`으로 각각 식별한다. 두 ID는 BehaviorEvent의 내부 BIGINT PK가 아니라 canonical lowercase UUID v4 업무 ID이고 RFC 4122 variant를 만족해야 한다.
+
+`elapsedSeconds`는 평가 cutoff `T`에서 두 선행 이벤트 중 더 최근인 `transferLimitChangedAt`을 뺀 경과 초이다.
+
+```text
+passwordChangedAt <= transferLimitChangedAt <= T
+elapsedSeconds = seconds(T - transferLimitChangedAt)
+```
+
+두 이벤트 모두 `T - windowSeconds` 이상이어야 한다. 순서 역전, cutoff 이후 시각, 시간창 밖 이벤트 또는 계산과 다른 `elapsedSeconds`는 typed observation summary 검증에서 거부한다.
+
+R003은 `TRANSFER_LIMIT_CHANGED`에 대해서 변경 발생 사실만 사용한다. 현재 입력에는 변경 전·후 한도와 변경 방향이 없으므로 실제 한도 상향 여부, 상향 폭 또는 거래 금액이 과거 한도를 초과했는지는 판단하지 못한다.
 
 ### 5.4 R004: 최근 등록 수취인 이체
 
@@ -201,6 +227,14 @@ Rule v1에서는 적중한 Rule마다 하나의 `RULE` Evidence를 반환한다.
 - 조건을 설명하는 민감정보 없는 관측값 요약
 - 행동 이벤트를 사용한 경우 선택된 `eventId`와 `occurredAt`
 - R003의 경우 선택된 비밀번호 변경·한도 변경 이벤트 식별자와 각 발생 시각
+
+Reason Code별 `observationSummary`의 정확한 행동 ID 필드는 다음과 같다.
+
+- R001은 행동 이벤트를 사용하지 않으므로 행동 Event ID 필드를 금지한다.
+- R002와 R004는 선택된 단일 BehaviorEvent의 외부 업무 ID를 `eventId`로 기록한다.
+- R003은 `passwordChangedEventId`와 `transferLimitChangedEventId`를 모두 기록한다.
+- 행동 Event ID는 canonical lowercase UUID v4와 RFC 4122 variant를 검증한다.
+- 내부 BIGINT PK, 고객·계좌·기기 원문과 행동 이벤트 전체를 복제하지 않는다.
 
 적중하지 않은 Rule에는 점수와 `RULE` Evidence를 만들지 않는다. 같은 Rule의 적격 이벤트가 여러 개여도 Evidence나 점수를 중복 생성하지 않는다.
 
@@ -325,16 +359,17 @@ FastAPI Timeout·응답 부재·검증 실패 시 Spring Boot는 임의 점수, 
 - 운영 PostgreSQL·Redis·Kafka, Docker Compose, Kubernetes와 AWS 배포 환경
 
 현재 PostgreSQL 애플리케이션 연동과 Flyway 기반 거래·멱등·행동
-이벤트 및 DetectionResult·DetectionEvidence 물리 스키마는 구현되어
-있다. Rule 물리 모델, Rule 실행, FastAPI 연동과 운영 배포 환경은
-구현되지 않았다.
+이벤트 및 DetectionResult·DetectionEvidence 물리 스키마, Rule 평가용
+BehaviorEvent 내부 시간창 조회와 행동 Evidence typed summary 검증은
+구현되어 있다. 공개 행동 조회 API, Rule 물리 모델, Rule 실행, FastAPI
+연동과 운영 배포 환경은 구현되지 않았다.
 
 ## 14. 후속 구현 순서
 
 1. 현재 `RECEIVED`/null 거래 접수 응답과 최종 동기 응답 사이의 전환 정책을 정하고, 기존 멱등 `response_snapshot`의 스키마·재생 호환·만료 데이터 처리 방식을 확정한다.
 2. Spring Boot가 평가 cutoff, 입력 Snapshot과 활성 Rule 집합을 고정하는 내부 계약을 정의한다.
-3. Rule 정의·버전·활성 상태와 DetectionResult·DetectionEvidence의 JPA·DB 설계를 별도 승인 작업으로 확정한다.
-4. 시간창 경계와 고객·기기·계좌·수취인 조건을 만족하는 행동 이벤트 조회를 구현한다.
+3. 구현된 DetectionResult·DetectionEvidence 영속 계약에 연결할 Rule 정의·버전·활성 상태의 JPA·DB 설계를 별도 승인 작업으로 확정한다.
+4. 구현된 고객·이벤트 유형·시간창 조회를 사용해 기기·계좌·수취인 조건을 적용하고 평가 입력 Snapshot 상한을 확정한다.
 5. FastAPI에 R001~R004, 그룹 상한, 위험 등급과 Evidence 반환을 구현한다.
 6. Spring Boot의 FastAPI 호출, 결과 검증·영속화·채택과 장애 처리를 구현한다.
 7. ADR-003의 최종 동기 거래 처리 흐름에 위험 대응과 사건 연결을 통합하고 멱등·동시성·실패 복구를 검증한다.

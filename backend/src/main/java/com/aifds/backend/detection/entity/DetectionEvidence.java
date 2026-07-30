@@ -171,7 +171,8 @@ public class DetectionEvidence {
                 ruleVersion,
                 RuleEvidenceObservationSummary.from(
                         reasonCode,
-                        observationSummary
+                        observationSummary,
+                        detectionResult.getEvaluationCutoffAt()
                 ),
                 evidenceOccurredAt,
                 sortOrder

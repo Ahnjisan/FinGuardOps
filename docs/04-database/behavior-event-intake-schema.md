@@ -2,9 +2,9 @@
 
 ## 1. 문서 목적
 
-이 문서는 `POST /api/v1/behavior-events`가 사용하는 `behavior_event` 테이블, Validation, 거래 연결, 자연 멱등성, 동시성, Flyway와 PostgreSQL 통합 테스트 계약을 정의한다.
+이 문서는 `POST /api/v1/behavior-events`가 사용하는 `behavior_event` 테이블, Validation, 거래 연결, 자연 멱등성, 동시성, Rule 평가용 내부 조회, Flyway와 PostgreSQL 통합 테스트 계약을 정의한다.
 
-행동 이벤트 접수만 범위에 포함한다. 행동 이벤트 조회, Rule·ML, 탐지 결과, 위험 대응, 사건, AI 리포트, FastAPI, External Risk, Redis와 Kafka는 포함하지 않는다.
+행동 이벤트 접수와 Rule 평가용 내부 Repository 조회만 범위에 포함한다. 공개 행동 이벤트 조회 API, Rule 실행, ML, 위험 대응, 사건, AI 리포트, FastAPI, External Risk, Redis와 Kafka는 포함하지 않는다.
 
 ## 2. 처리 경계
 
@@ -187,14 +187,27 @@ beneficiaryRef
 
 - `uq_behavior_event_event_id`가 `event_id` Unique 인덱스를 제공한다.
 - nullable FK 조회를 위해 `ix_behavior_event_transaction`을 `financial_transaction_id`에 부분 인덱스로 추가한다.
-- 고객·계좌·기기·이벤트 유형과 시각의 추측성 복합 인덱스는 추가하지 않는다. 후속 Rule·조회 API의 실제 쿼리와 실행 계획을 근거로 결정한다.
+- V4는 Rule 평가용 고객·유형·발생 시각 조회를 위해 `ix_behavior_event_customer_type_occurred_event`를 다음 순서로 추가한다.
+
+```text
+external_customer_ref
+event_type
+occurred_at DESC
+event_id ASC
+```
+
+내부 Repository는 같은 고객, 비어 있지 않은 이벤트 유형 집합과 양 끝을 포함하는 `occurred_at` 구간을 조회한다. 결과는 `occurred_at DESC`, 동일 발생 시각에는 `event_id ASC`로 정렬한다. 호출자는 `PageRequest.of(0, limit, Sort.unsorted())` 형식으로 1 이상의 유한한 `limit`을 전달해야 하며 `Pageable.unpaged()`를 사용하지 않는다. 반환형은 `List<BehaviorEvent>`이므로 count query를 실행하지 않는다.
+
+선두 인덱스 컬럼에 `event_type`이 있으므로 여러 유형을 한 번에 조회할 때 PostgreSQL이 결과 정렬을 추가로 수행할 수 있다. 인덱스는 필터와 시간 범위 축소를 지원하며 최종 업무 정렬은 JPQL `ORDER BY`가 보장한다. 계좌·기기·수취인별 추가 인덱스는 실제 Rule 실행 쿼리와 실행 계획 없이 선제 추가하지 않는다.
 
 ## 10. Flyway와 JPA
 
 - 기존 `V1__create_transaction_persistence_tables.sql`은 수정하지 않는다.
 - `V2__create_behavior_event_table.sql`에서 `behavior_event`를 추가한다.
-- Hibernate `ddl-auto=validate`가 Entity와 V1→V2 결과의 타입·길이·nullability를 검증해야 한다.
+- V3은 DetectionResult와 DetectionEvidence를 추가하고 V4는 기존 `behavior_event`에 Rule 조회용 복합 인덱스만 추가한다.
+- Hibernate `ddl-auto=validate`가 Entity와 V1→V2→V3→V4 결과의 타입·길이·nullability를 검증해야 한다.
 - `BehaviorEvent`는 거래를 nullable `ManyToOne`으로 참조하되 API에는 내부 관계를 노출하지 않는다.
+- Rule 조회는 거래를 fetch join하지 않으며 `financialTransaction` LAZY 관계를 초기화하지 않는다.
 - Entity를 Controller 응답으로 직접 반환하지 않고 전용 Response DTO와 Mapper를 사용한다.
 
 ## 11. 오류와 보안
@@ -207,17 +220,18 @@ beneficiaryRef
 
 ## 12. 통합 테스트 계약
 
-- 빈 PostgreSQL에 V1→V2가 순서대로 적용된다.
+- 빈 PostgreSQL 17에 V1→V2→V3→V4가 순서대로 적용된다.
 - Hibernate 자동 DDL 없이 애플리케이션이 시작된다.
 - 컬럼 타입·길이·nullability, named constraint와 최소 인덱스를 검증한다.
 - UUID v4·variant, 9개 Enum, 참조값, 유형별 null, 미래 5분, fingerprint Check를 검증한다.
 - 거래 FK와 `ON DELETE RESTRICT`, `event_id` Unique를 검증한다.
 - 최초 접수, 동일 재전송, 다른 fingerprint 충돌, 다른 eventId, 거래 연결과 실제 동시 요청을 검증한다.
 - Unique 위반 저장 트랜잭션과 중복 재조회 트랜잭션이 분리되어 rollback-only 상태를 재사용하지 않는지 검증한다.
+- 내부 Rule 조회의 양 끝 포함, 범위 밖·다른 고객·요청하지 않은 유형 제외, 복수 유형, 고정 정렬, 개수 제한과 거래 LAZY 관계 미초기화를 검증한다.
 
 ## 13. 제외 범위
 
-- 행동 이벤트 조회 API와 이를 위한 복합 인덱스
+- 공개 행동 이벤트 조회 Controller·Service·API
 - Rule·ML·탐지·위험 대응·사건·AI 리포트
 - FastAPI·External Risk·Redis·Kafka
 - 인증·인가·CORS·OpenTelemetry
