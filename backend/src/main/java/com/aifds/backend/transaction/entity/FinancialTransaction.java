@@ -1,12 +1,19 @@
 package com.aifds.backend.transaction.entity;
 
+import com.aifds.backend.detection.entity.DetectionAnalysisStatus;
+import com.aifds.backend.detection.entity.DetectionResult;
+import com.aifds.backend.detection.entity.RiskLevel;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
+import jakarta.persistence.FetchType;
+import jakarta.persistence.ForeignKey;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
@@ -14,6 +21,7 @@ import jakarta.persistence.Version;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.Objects;
 import java.util.UUID;
 
 @Entity
@@ -60,6 +68,24 @@ public class FinancialTransaction {
     @Enumerated(EnumType.STRING)
     @Column(name = "processing_status", nullable = false, length = 32)
     private TransactionProcessingStatus processingStatus;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(
+            name = "adopted_detection_result_id",
+            foreignKey = @ForeignKey(
+                    name =
+                            "fk_financial_transaction_adopted_detection_result"
+            )
+    )
+    private DetectionResult adoptedDetectionResult;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "risk_level", length = 16)
+    private RiskLevel riskLevel;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "risk_response_outcome", length = 32)
+    private RiskResponseOutcome riskResponseOutcome;
 
     @Version
     @Column(name = "version", nullable = false)
@@ -111,6 +137,43 @@ public class FinancialTransaction {
         this.updatedAt = Instant.now();
     }
 
+    public void adoptDetectionResult(DetectionResult detectionResult) {
+        Objects.requireNonNull(
+                detectionResult,
+                "detectionResult must not be null"
+        );
+        if (!detectionResult.belongsTo(this)) {
+            throw new IllegalArgumentException(
+                    "Detection result must belong to this transaction"
+            );
+        }
+        if (detectionResult.getAnalysisStatus()
+                != DetectionAnalysisStatus.COMPLETED) {
+            throw new IllegalArgumentException(
+                    "Only completed detection results can be adopted"
+            );
+        }
+
+        this.adoptedDetectionResult = detectionResult;
+        this.riskLevel = detectionResult.getRiskLevel();
+        this.riskResponseOutcome = null;
+    }
+
+    public void applyRiskResponseOutcome(RiskResponseOutcome outcome) {
+        Objects.requireNonNull(outcome, "outcome must not be null");
+        if (adoptedDetectionResult == null || riskLevel == null) {
+            throw new IllegalStateException(
+                    "A completed detection result must be adopted first"
+            );
+        }
+        if (!outcome.supports(riskLevel)) {
+            throw new IllegalArgumentException(
+                    "Risk response outcome does not match risk level"
+            );
+        }
+        this.riskResponseOutcome = outcome;
+    }
+
     public Long getId() {
         return id;
     }
@@ -157,6 +220,18 @@ public class FinancialTransaction {
 
     public TransactionProcessingStatus getProcessingStatus() {
         return processingStatus;
+    }
+
+    public DetectionResult getAdoptedDetectionResult() {
+        return adoptedDetectionResult;
+    }
+
+    public RiskLevel getRiskLevel() {
+        return riskLevel;
+    }
+
+    public RiskResponseOutcome getRiskResponseOutcome() {
+        return riskResponseOutcome;
     }
 
     public long getVersion() {

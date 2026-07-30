@@ -69,15 +69,19 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
         MigrationInfo[] appliedMigrations = flyway.info().applied();
 
         assertThat(jdbcTemplate.queryForObject("SELECT 1", Integer.class)).isEqualTo(1);
-        assertThat(appliedMigrations).hasSize(2);
+        assertThat(appliedMigrations).hasSize(3);
         assertThat(appliedMigrations[0].getVersion().getVersion()).isEqualTo("1");
         assertThat(appliedMigrations[0].getState()).isEqualTo(MigrationState.SUCCESS);
         assertThat(appliedMigrations[1].getVersion().getVersion()).isEqualTo("2");
         assertThat(appliedMigrations[1].getState()).isEqualTo(MigrationState.SUCCESS);
+        assertThat(appliedMigrations[2].getVersion().getVersion()).isEqualTo("3");
+        assertThat(appliedMigrations[2].getState()).isEqualTo(MigrationState.SUCCESS);
         assertThat(tableNames()).contains(
                 "financial_transaction",
                 "idempotency_record",
-                "behavior_event"
+                "behavior_event",
+                "detection_result",
+                "detection_evidence"
         );
     }
 
@@ -99,6 +103,9 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
                 "channel",
                 "device_ref",
                 "processing_status",
+                "adopted_detection_result_id",
+                "risk_level",
+                "risk_response_outcome",
                 "version",
                 "created_at",
                 "updated_at"
@@ -113,6 +120,9 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
         assertColumn(financialColumns, "occurred_at", "timestamp with time zone", "timestamptz", false);
         assertColumn(financialColumns, "recipient_account_ref", "character varying", "varchar", true);
         assertColumn(financialColumns, "device_ref", "character varying", "varchar", true);
+        assertColumn(financialColumns, "adopted_detection_result_id", "bigint", "int8", true);
+        assertColumn(financialColumns, "risk_level", "character varying", "varchar", true);
+        assertColumn(financialColumns, "risk_response_outcome", "character varying", "varchar", true);
         assertColumn(financialColumns, "version", "bigint", "int8", false);
         assertColumn(financialColumns, "created_at", "timestamp with time zone", "timestamptz", false);
         assertColumn(financialColumns, "updated_at", "timestamp with time zone", "timestamptz", false);
@@ -158,6 +168,11 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
                         Map.entry("ck_financial_transaction_type_contract", "c"),
                         Map.entry("ck_financial_transaction_device_ref", "c"),
                         Map.entry("ck_financial_transaction_processing_status", "c"),
+                        Map.entry("ck_financial_transaction_risk_level", "c"),
+                        Map.entry("ck_financial_transaction_risk_response_outcome", "c"),
+                        Map.entry("ck_financial_transaction_adopted_risk", "c"),
+                        Map.entry("ck_financial_transaction_risk_response_mapping", "c"),
+                        Map.entry("fk_financial_transaction_adopted_detection_result", "f"),
                         Map.entry("ck_financial_transaction_version", "c"),
                         Map.entry("ck_financial_transaction_timestamps", "c")
                 )
@@ -198,6 +213,7 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
                 "ix_financial_transaction_customer_occurred_at",
                 "ix_financial_transaction_sender_occurred_at",
                 "ix_financial_transaction_recipient_occurred_at",
+                "ix_financial_transaction_risk_occurred_at",
                 "pk_idempotency_record",
                 "uq_idempotency_record_scope_key",
                 "uq_idempotency_record_transaction",
