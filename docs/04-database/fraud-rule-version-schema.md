@@ -42,6 +42,33 @@ Trigger가 거부한다.
 uppercase snake case 코드, trim·길이, 상태, 음수가 아닌
 concurrencyVersion과 시각 순서를 CHECK로 검증한다.
 
+### 2.1 Audit timestamp clock과 정밀도
+
+`fraud_rule`과 `rule_version`의 audit timestamp는 PostgreSQL을
+authoritative clock으로 사용한다. JPA 저장 경로도 Hibernate의 DB-source
+timestamp generation을 명시해 애플리케이션 JVM clock을 사용하지 않는다.
+직접 SQL 저장 경로는 컬럼의 `CURRENT_TIMESTAMP` default를 사용한다.
+
+timestamp별 생성 주체는 다음과 같다.
+
+| Entity timestamp | 생성·갱신 주체 |
+| --- | --- |
+| `FraudRule.createdAt` | 최초 INSERT의 PostgreSQL transaction timestamp |
+| `FraudRule.updatedAt` | INSERT와 이후 UPDATE의 PostgreSQL transaction timestamp |
+| `RuleVersion.createdAt` | 최초 INSERT의 PostgreSQL transaction timestamp |
+| `RuleVersion.publishedAt` | 게시 도메인 동작에 전달된 게시 시각 |
+| `RuleVersion.effectiveFrom` | 버전 생성·DRAFT 수정 도메인 동작에 전달된 적용 시작 시각 |
+| `RuleVersion.effectiveTo` | 버전 생성·DRAFT 수정 또는 게시 기간 종료 도메인 동작에 전달된 적용 종료 시각 |
+
+PostgreSQL의 `CURRENT_TIMESTAMP`는 같은 트랜잭션에서 동일한 transaction
+timestamp를 반환한다. 따라서 `FraudRule` 최초 저장 시 `created_at`과
+`updated_at`은 같고, 이후 수정 트랜잭션에서는 `created_at`을 유지하면서
+`updated_at`만 해당 수정 트랜잭션의 DB timestamp로 갱신한다.
+
+V5의 무정밀도 지정 `TIMESTAMPTZ`는 PostgreSQL 기본 마이크로초 정밀도
+(`datetime_precision = 6`)를 사용한다. JPA의 `Instant`도 DB에서 저장하고
+다시 읽은 값은 이 마이크로초 정밀도 계약을 따른다.
+
 ## 3. `rule_version`
 
 | 컬럼 | 타입 | Null | 의미 |

@@ -7,13 +7,13 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
-import jakarta.persistence.PrePersist;
-import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
+import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.SourceType;
+import org.hibernate.annotations.UpdateTimestamp;
 
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -54,9 +54,11 @@ public class FraudRule {
     @Column(name = "concurrency_version", nullable = false)
     private long concurrencyVersion;
 
+    @CreationTimestamp(source = SourceType.DB)
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
+    @UpdateTimestamp(source = SourceType.DB)
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
 
@@ -95,18 +97,6 @@ public class FraudRule {
             );
         }
         this.lifecycleStatus = FraudRuleLifecycleStatus.RETIRED;
-    }
-
-    @PrePersist
-    private void initializeTimestamps() {
-        Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
-        this.createdAt = now;
-        this.updatedAt = now;
-    }
-
-    @PreUpdate
-    private void updateTimestamp() {
-        this.updatedAt = Instant.now().truncatedTo(ChronoUnit.MICROS);
     }
 
     private static String requireCode(String value) {
