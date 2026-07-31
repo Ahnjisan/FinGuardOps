@@ -33,6 +33,8 @@ class DetectionDomainTest {
         assertThat(result.getDetectionResultId().variant()).isEqualTo(2);
         assertThat(result.getAnalysisStatus())
                 .isEqualTo(DetectionAnalysisStatus.PENDING);
+        assertThat(result.getEvaluationCutoffAt())
+                .isEqualTo(transaction.getOccurredAt());
 
         result.start(CUTOFF.plusSeconds(1));
         result.complete(55, RiskLevel.HIGH, CUTOFF.plusSeconds(2));
@@ -178,6 +180,36 @@ class DetectionDomainTest {
         pending.complete(10, RiskLevel.LOW, CUTOFF.plusSeconds(2));
         assertThatThrownBy(() -> other.adoptDetectionResult(pending))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void rejectsPendingCutoffBeforeOrAfterTransactionOccurredAt() {
+        FinancialTransaction transaction = transaction(UUID.randomUUID());
+
+        assertThatThrownBy(() -> DetectionResult.pending(
+                transaction,
+                1,
+                "rule-v1",
+                "score-v1",
+                "feature-v1",
+                null,
+                CUTOFF.plusNanos(1),
+                "trace_cutoff_future"
+        ))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("exactly match");
+        assertThatThrownBy(() -> DetectionResult.pending(
+                transaction,
+                1,
+                "rule-v1",
+                "score-v1",
+                "feature-v1",
+                null,
+                CUTOFF.minusNanos(1),
+                "trace_cutoff_past"
+        ))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("exactly match");
     }
 
     private DetectionResult pending(

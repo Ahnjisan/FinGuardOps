@@ -28,7 +28,9 @@ import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -95,6 +97,76 @@ class DetectionResultPersistenceServiceTest {
                 .isEqualTo(DetectionAnalysisStatus.COMPLETED);
     }
 
+    @Test
+    void createsPendingWhenCutoffExactlyMatchesTransactionOccurredAt() {
+        FinancialTransaction transaction = stubStoredTransaction();
+        when(resultRepository.findMaximumVersionByTransactionPk(1L))
+                .thenReturn(0);
+        when(resultRepository.saveAndFlush(any(DetectionResult.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        DetectionResult result = service.createPending(
+                transaction.getTransactionId(),
+                "rule-v1",
+                "score-v1",
+                "feature-v1",
+                null,
+                CUTOFF,
+                "trace_cutoff_exact"
+        );
+
+        assertThat(result.getEvaluationCutoffAt()).isEqualTo(CUTOFF);
+        verify(resultRepository).saveAndFlush(result);
+    }
+
+    @Test
+    void rejectsPendingWhenCutoffIsAfterTransactionOccurredAt() {
+        FinancialTransaction transaction = stubStoredTransaction();
+        when(resultRepository.findMaximumVersionByTransactionPk(1L))
+                .thenReturn(0);
+
+        assertThatThrownBy(() -> service.createPending(
+                transaction.getTransactionId(),
+                "rule-v1",
+                "score-v1",
+                "feature-v1",
+                null,
+                CUTOFF.plusNanos(1),
+                "trace_cutoff_future"
+        ))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage(
+                        "evaluationCutoffAt must exactly match transaction "
+                                + "occurredAt"
+                );
+
+        verify(resultRepository, never()).saveAndFlush(any());
+    }
+
+    @Test
+    void rejectsPendingWhenCutoffIsBeforeTransactionOccurredAt() {
+        FinancialTransaction transaction = stubStoredTransaction();
+        when(resultRepository.findMaximumVersionByTransactionPk(1L))
+                .thenReturn(0);
+
+        assertThatThrownBy(() -> service.createPending(
+                transaction.getTransactionId(),
+                "rule-v1",
+                "score-v1",
+                "feature-v1",
+                null,
+                CUTOFF.minusNanos(1),
+                "trace_cutoff_past"
+        ))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage(
+                        "evaluationCutoffAt must exactly match transaction "
+                                + "occurredAt"
+                );
+
+        verify(resultRepository, never()).saveAndFlush(any());
+    }
+
     private DetectionResult startedResult() {
         FinancialTransaction transaction = new FinancialTransaction(
                 UUID.randomUUID(),
@@ -120,6 +192,19 @@ class DetectionResultPersistenceServiceTest {
         );
         result.start(CUTOFF.plusSeconds(1));
         return result;
+    }
+
+    private FinancialTransaction stubStoredTransaction() {
+        UUID transactionId = UUID.randomUUID();
+        FinancialTransaction transaction = org.mockito.Mockito.mock(
+                FinancialTransaction.class
+        );
+        when(transaction.getId()).thenReturn(1L);
+        when(transaction.getTransactionId()).thenReturn(transactionId);
+        when(transaction.getOccurredAt()).thenReturn(CUTOFF);
+        when(transactionRepository.findByTransactionIdForUpdate(transactionId))
+                .thenReturn(Optional.of(transaction));
+        return transaction;
     }
 
     private RuleVersion publishedAmountVersion() {

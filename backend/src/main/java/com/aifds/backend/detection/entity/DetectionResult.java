@@ -165,10 +165,19 @@ public class DetectionResult {
         this.modelVersion = modelVersion == null
                 ? null
                 : requireVersion(modelVersion, "modelVersion");
-        this.evaluationCutoffAt = Objects.requireNonNull(
+        Instant requestedEvaluationCutoffAt = Objects.requireNonNull(
                 evaluationCutoffAt,
                 "evaluationCutoffAt must not be null"
         );
+        Instant transactionOccurredAt = this.financialTransaction
+                .getOccurredAt();
+        if (!transactionOccurredAt.equals(requestedEvaluationCutoffAt)) {
+            throw new IllegalArgumentException(
+                    "evaluationCutoffAt must exactly match transaction "
+                            + "occurredAt"
+            );
+        }
+        this.evaluationCutoffAt = transactionOccurredAt;
         this.analysisTraceId = requireTraceId(analysisTraceId);
         this.analysisStatus = DetectionAnalysisStatus.PENDING;
     }
@@ -210,6 +219,7 @@ public class DetectionResult {
             RiskLevel completedRiskLevel,
             Instant completedAt
     ) {
+        validateEvaluationCutoffConsistency();
         requireStatus(DetectionAnalysisStatus.IN_PROGRESS);
         if (completedRiskScore < 0 || completedRiskScore > 100) {
             throw new IllegalArgumentException(
@@ -236,6 +246,17 @@ public class DetectionResult {
         this.failureCode = null;
         this.analysisStatus = DetectionAnalysisStatus.COMPLETED;
         this.updatedAt = validatedCompletedAt;
+    }
+
+    public void validateEvaluationCutoffConsistency() {
+        if (!financialTransaction.getOccurredAt().equals(
+                evaluationCutoffAt
+        )) {
+            throw new IllegalStateException(
+                    "evaluationCutoffAt must exactly match transaction "
+                            + "occurredAt"
+            );
+        }
     }
 
     public void fail(String failedCode, Instant failedAt) {
