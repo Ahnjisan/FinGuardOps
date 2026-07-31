@@ -14,14 +14,16 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.OneToOne;
-import jakarta.persistence.PrePersist;
-import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
+import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.Generated;
 import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.annotations.SourceType;
+import org.hibernate.annotations.UpdateTimestamp;
+import org.hibernate.generator.EventType;
 import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
@@ -67,12 +69,20 @@ public class IdempotencyRecord {
     @Column(name = "failure_code", length = 64)
     private String failureCode;
 
-    @Column(name = "expires_at", nullable = false, updatable = false)
+    @Generated(event = EventType.INSERT)
+    @Column(
+            name = "expires_at",
+            nullable = false,
+            insertable = false,
+            updatable = false
+    )
     private Instant expiresAt;
 
+    @CreationTimestamp(source = SourceType.DB)
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
+    @UpdateTimestamp(source = SourceType.DB)
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
 
@@ -159,19 +169,6 @@ public class IdempotencyRecord {
         this.responseSnapshot = null;
         this.failureCode = failureCode;
         this.finishedAt = finishedAt;
-    }
-
-    @PrePersist
-    private void initializeTimestamps() {
-        Instant now = Instant.now();
-        this.createdAt = now;
-        this.updatedAt = now;
-        this.expiresAt = now.plus(24, ChronoUnit.HOURS);
-    }
-
-    @PreUpdate
-    private void updateTimestamp() {
-        this.updatedAt = finishedAt == null ? Instant.now() : finishedAt;
     }
 
     private void requireInProgress(IdempotencyProcessingStatus targetStatus) {

@@ -17,8 +17,10 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 import java.math.BigDecimal;
+import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -32,6 +34,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.when;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport {
@@ -52,6 +55,9 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
 
     @Autowired
     private ObjectMapper objectMapper;
+
+    @MockitoBean
+    private Clock clock;
 
     @Test
     void acquiresNewRequestAsCommittedInProgressRecord() {
@@ -98,12 +104,13 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
         ObjectNode snapshot = objectMapper.createObjectNode()
                 .put("transactionId", transaction.getTransactionId().toString())
                 .put("processingStatus", "RECEIVED");
+        Instant finishedAt = finishedAtFor(recordId);
 
         IdempotencyClaimResult.Completed completed = idempotencyService.complete(
                 recordId,
                 transaction.getTransactionId(),
                 snapshot,
-                Instant.now().truncatedTo(ChronoUnit.MICROS)
+                finishedAt
         );
         IdempotencyRecord stored = idempotencyRecordRepository.findById(recordId).orElseThrow();
         IdempotencyClaimResult replay = idempotencyService.claim(key, input);
@@ -114,7 +121,7 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
         assertThat(stored.getFinancialTransaction().getId()).isEqualTo(transaction.getId());
         assertThat(stored.getResponseSnapshot()).isEqualTo(snapshot);
         assertThat(stored.getFailureCode()).isNull();
-        assertThat(stored.getFinishedAt()).isNotNull();
+        assertThat(stored.getFinishedAt()).isEqualTo(finishedAt);
         assertThat(replay).isEqualTo(completed);
     }
 
@@ -130,12 +137,13 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
                 idempotencyRecordRepository.findById(recordId).orElseThrow();
         record.linkTransaction(transaction);
         idempotencyRecordRepository.saveAndFlush(record);
+        Instant finishedAt = finishedAtFor(recordId);
 
         IdempotencyClaimResult.Completed completed = idempotencyService.complete(
                 recordId,
                 transaction.getTransactionId(),
                 objectMapper.createObjectNode().put("result", "completed"),
-                Instant.now().truncatedTo(ChronoUnit.MICROS)
+                finishedAt
         );
 
         assertThat(completed.responseSnapshotJson()).contains("completed");
@@ -145,6 +153,7 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
                 .isEqualTo(IdempotencyProcessingStatus.COMPLETED);
         assertThat(stored.getFinancialTransaction().getId())
                 .isEqualTo(transaction.getId());
+        assertThat(stored.getFinishedAt()).isEqualTo(finishedAt);
     }
 
     @Test
@@ -162,13 +171,14 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
                 idempotencyRecordRepository.findById(recordId).orElseThrow();
         record.linkTransaction(linked);
         idempotencyRecordRepository.saveAndFlush(record);
+        Instant finishedAt = finishedAtFor(recordId);
 
         org.assertj.core.api.Assertions.assertThatThrownBy(
                 () -> idempotencyService.complete(
                         recordId,
                         different.getTransactionId(),
                         objectMapper.createObjectNode().put("result", "rejected"),
-                        Instant.now().truncatedTo(ChronoUnit.MICROS)
+                        finishedAt
                 )
         ).isInstanceOf(IllegalStateException.class);
 
@@ -188,6 +198,8 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
         String key = key("failed");
         TransactionFingerprintInput input = fingerprintInput();
         long recordId = acquiredRecordId(idempotencyService.claim(key, input));
+        Instant failedAt = finishedAtFor(recordId);
+        when(clock.instant()).thenReturn(failedAt);
 
         IdempotencyClaimResult.Failed failed = idempotencyService.fail(
                 recordId,
@@ -201,7 +213,7 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
         assertThat(stored.getFinancialTransaction()).isNull();
         assertThat(stored.getResponseSnapshot()).isNull();
         assertThat(stored.getFailureCode()).isEqualTo("DEPENDENCY_TIMEOUT");
-        assertThat(stored.getFinishedAt()).isNotNull();
+        assertThat(stored.getFinishedAt()).isEqualTo(failedAt);
         assertThat(replay).isEqualTo(failed);
     }
 
@@ -283,6 +295,8 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
                 transaction(input.transactionId())
         );
         long recordId = acquiredRecordId(idempotencyService.claim(key, input));
+        Instant finishedAt = finishedAtFor(recordId);
+        when(clock.instant()).thenReturn(finishedAt);
         CyclicBarrier barrier = new CyclicBarrier(2);
         ExecutorService executor = Executors.newFixedThreadPool(2);
 
@@ -292,7 +306,7 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
                             recordId,
                             transaction.getTransactionId(),
                             objectMapper.createObjectNode().put("result", "completed"),
-                            Instant.now().truncatedTo(ChronoUnit.MICROS)
+                            finishedAt
                     ))
             );
             Future<TransitionAttempt> failFuture = executor.submit(
@@ -321,7 +335,7 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
                     IdempotencyProcessingStatus.COMPLETED,
                     IdempotencyProcessingStatus.FAILED
             );
-            assertThat(stored.getFinishedAt()).isNotNull();
+            assertThat(stored.getFinishedAt()).isEqualTo(finishedAt);
             assertThat(countByKey(key)).isEqualTo(1);
         } finally {
             shutdown(executor);
@@ -388,6 +402,14 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
                 FROM idempotency_record
                 WHERE operation_scope = ? AND idempotency_key = ?
                 """, Integer.class, OPERATION_SCOPE, key);
+    }
+
+    private Instant finishedAtFor(long recordId) {
+        return idempotencyRecordRepository.findById(recordId)
+                .orElseThrow()
+                .getCreatedAt()
+                .plus(1, ChronoUnit.HOURS)
+                .truncatedTo(ChronoUnit.MICROS);
     }
 
     private String key(String prefix) {
