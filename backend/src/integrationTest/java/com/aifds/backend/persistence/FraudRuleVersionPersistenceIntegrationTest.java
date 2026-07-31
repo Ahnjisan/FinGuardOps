@@ -743,7 +743,8 @@ class FraudRuleVersionPersistenceIntegrationTest
                         TransactionType.ACCOUNT_TRANSFER,
                         new BigDecimal("10000000"),
                         "KRW",
-                        Instant.now().minusSeconds(60),
+                        Instant.now().minusSeconds(60)
+                                .truncatedTo(ChronoUnit.MICROS),
                         "cust_ref_rule_version_evidence",
                         "acct_ref_rule_version_sender",
                         "acct_ref_rule_version_recipient",

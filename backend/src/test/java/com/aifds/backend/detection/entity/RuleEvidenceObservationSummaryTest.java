@@ -145,6 +145,59 @@ class RuleEvidenceObservationSummaryTest {
     }
 
     @Test
+    void acceptsR003ZeroAndInclusiveWindowBoundaries() {
+        assertAccepted(
+                RuleEvidenceObservationSummary
+                        .RECENT_SECURITY_CHANGE_HIGH_AMOUNT,
+                securitySummary()
+                        .put(
+                                "passwordChangedAt",
+                                EVALUATION_CUTOFF.toString()
+                        )
+                        .put(
+                                "transferLimitChangedAt",
+                                EVALUATION_CUTOFF.toString()
+                        )
+                        .put("elapsedSeconds", 0)
+                        .put("windowSeconds", 60)
+        );
+        assertAccepted(
+                RuleEvidenceObservationSummary
+                        .RECENT_SECURITY_CHANGE_HIGH_AMOUNT,
+                securitySummary()
+                        .put(
+                                "passwordChangedAt",
+                                EVALUATION_CUTOFF.minusSeconds(60).toString()
+                        )
+                        .put(
+                                "transferLimitChangedAt",
+                                EVALUATION_CUTOFF.minusSeconds(60).toString()
+                        )
+                        .put("elapsedSeconds", 60)
+                        .put("windowSeconds", 60)
+        );
+    }
+
+    @Test
+    void rejectsR003OneSecondBeyondWindow() {
+        assertInvalid(
+                RuleEvidenceObservationSummary
+                        .RECENT_SECURITY_CHANGE_HIGH_AMOUNT,
+                securitySummary()
+                        .put(
+                                "passwordChangedAt",
+                                EVALUATION_CUTOFF.minusSeconds(61).toString()
+                        )
+                        .put(
+                                "transferLimitChangedAt",
+                                EVALUATION_CUTOFF.minusSeconds(61).toString()
+                        )
+                        .put("elapsedSeconds", 61)
+                        .put("windowSeconds", 60)
+        );
+    }
+
+    @Test
     void rejectsElapsedMismatchAndOneSecondBeyondWindow() {
         assertInvalid(
                 RuleEvidenceObservationSummary

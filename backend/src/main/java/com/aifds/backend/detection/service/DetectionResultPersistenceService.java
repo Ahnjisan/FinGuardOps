@@ -85,6 +85,7 @@ public class DetectionResultPersistenceService {
             List<RuleEvidenceDraft> evidenceDrafts
     ) {
         DetectionResult result = resultForUpdate(detectionResultId);
+        result.validateEvaluationCutoffConsistency();
         List<DetectionEvidence> evidence = evidenceDrafts.stream()
                 .map(draft -> RuleEvidenceAssembler.assemble(
                         result,

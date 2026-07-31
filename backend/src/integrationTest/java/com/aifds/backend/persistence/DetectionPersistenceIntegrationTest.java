@@ -30,6 +30,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.math.BigDecimal;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
@@ -500,6 +501,7 @@ class DetectionPersistenceIntegrationTest
             Future<Integer> first = executor.submit(
                     () -> createVersionConcurrently(
                             transaction.getTransactionId(),
+                            transaction.getOccurredAt(),
                             "trace_concurrent_01",
                             ready,
                             start
@@ -508,6 +510,7 @@ class DetectionPersistenceIntegrationTest
             Future<Integer> second = executor.submit(
                     () -> createVersionConcurrently(
                             transaction.getTransactionId(),
+                            transaction.getOccurredAt(),
                             "trace_concurrent_02",
                             ready,
                             start
@@ -715,8 +718,51 @@ class DetectionPersistenceIntegrationTest
         assertThat(stored.getAnalysisCompletedAt()).isNull();
     }
 
+    @Test
+    void rejectsInvalidStoredCutoffBeforeEvidenceOrPartialCompletion() {
+        FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
+        Instant invalidCutoff = transaction.getOccurredAt().plusSeconds(3600);
+        UUID detectionResultId = UUID.randomUUID();
+        insertPendingResultWithCutoff(
+                transaction.getId(),
+                detectionResultId,
+                1,
+                invalidCutoff
+        );
+        Instant startedAt = Instant.now().plusSeconds(1);
+        persistenceService.start(detectionResultId, startedAt);
+
+        assertThatThrownBy(() -> persistenceService.complete(
+                detectionResultId,
+                25,
+                RiskLevel.MEDIUM,
+                startedAt.plusSeconds(1),
+                List.of(deviceDraft(invalidCutoff, 0))
+        ))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage(
+                        "evaluationCutoffAt must exactly match transaction "
+                                + "occurredAt"
+                );
+
+        entityManager.clear();
+        assertThat(evidenceRepository
+                .findAllByDetectionResult_DetectionResultIdOrderBySortOrderAscIdAsc(
+                        detectionResultId
+                )).isEmpty();
+        DetectionResult stored = resultRepository.findByDetectionResultId(
+                detectionResultId
+        ).orElseThrow();
+        assertThat(stored.getAnalysisStatus())
+                .isEqualTo(DetectionAnalysisStatus.IN_PROGRESS);
+        assertThat(stored.getRiskScore()).isNull();
+        assertThat(stored.getRiskLevel()).isNull();
+        assertThat(stored.getAnalysisCompletedAt()).isNull();
+    }
+
     private int createVersionConcurrently(
             UUID transactionId,
+            Instant evaluationCutoffAt,
             String traceId,
             CountDownLatch ready,
             CountDownLatch start
@@ -729,7 +775,7 @@ class DetectionPersistenceIntegrationTest
                 "score-v1",
                 "feature-v1",
                 null,
-                Instant.now(),
+                evaluationCutoffAt,
                 traceId
         ).getDetectionResultVersion();
     }
@@ -963,6 +1009,38 @@ class DetectionPersistenceIntegrationTest
                 )
                 RETURNING id
                 """, Long.class, resultId, transactionPk, version);
+    }
+
+    private long insertPendingResultWithCutoff(
+            long transactionPk,
+            UUID resultId,
+            int version,
+            Instant evaluationCutoffAt
+    ) {
+        return jdbcTemplate.queryForObject("""
+                INSERT INTO detection_result (
+                    detection_result_id,
+                    financial_transaction_id,
+                    detection_result_version,
+                    analysis_status,
+                    rule_set_version,
+                    scoring_policy_version,
+                    feature_version,
+                    evaluation_cutoff_at,
+                    analysis_trace_id
+                ) VALUES (
+                    ?, ?, ?, 'PENDING',
+                    'rule-v1', 'score-v1', 'feature-v1',
+                    ?, 'trace_invalid_cutoff'
+                )
+                RETURNING id
+                """,
+                Long.class,
+                resultId,
+                transactionPk,
+                version,
+                Timestamp.from(evaluationCutoffAt)
+        );
     }
 
     private void insertRuleEvidence(

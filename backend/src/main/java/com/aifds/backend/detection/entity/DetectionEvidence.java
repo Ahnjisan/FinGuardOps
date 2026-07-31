@@ -133,6 +133,7 @@ public class DetectionEvidence {
                 detectionResult,
                 "detectionResult must not be null"
         );
+        this.detectionResult.validateEvaluationCutoffConsistency();
         this.evidenceType = DetectionEvidenceType.RULE;
         this.ruleVersionRef = requirePublishedRuleVersion(ruleVersionRef);
         this.reasonCode = requireCode(
