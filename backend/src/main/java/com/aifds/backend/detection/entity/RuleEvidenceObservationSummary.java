@@ -1,5 +1,6 @@
 package com.aifds.backend.detection.entity;
 
+import com.aifds.backend.rule.contract.RuleV1ContractRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.time.Duration;
@@ -8,19 +9,21 @@ import java.time.format.DateTimeParseException;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.regex.Pattern;
 
 public final class RuleEvidenceObservationSummary {
 
     public static final String TRANSFER_ABSOLUTE_HIGH_AMOUNT =
-            "TRANSFER_ABSOLUTE_HIGH_AMOUNT";
+            RuleV1ContractRegistry.TRANSFER_ABSOLUTE_HIGH_AMOUNT;
     public static final String RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT =
-            "RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT";
+            RuleV1ContractRegistry.RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT;
     public static final String RECENT_SECURITY_CHANGE_HIGH_AMOUNT =
-            "RECENT_SECURITY_CHANGE_HIGH_AMOUNT";
+            RuleV1ContractRegistry.RECENT_SECURITY_CHANGE_HIGH_AMOUNT;
     public static final String RECENT_BENEFICIARY_TRANSFER =
-            "RECENT_BENEFICIARY_TRANSFER";
+            RuleV1ContractRegistry.RECENT_BENEFICIARY_TRANSFER;
 
     private static final Pattern KRW_INTEGER_PATTERN =
             Pattern.compile("^(0|[1-9][0-9]{0,18})$");
@@ -57,9 +60,14 @@ public final class RuleEvidenceObservationSummary {
             )
     );
 
+    private final String reasonCode;
     private final JsonNode value;
 
-    private RuleEvidenceObservationSummary(JsonNode value) {
+    private RuleEvidenceObservationSummary(
+            String reasonCode,
+            JsonNode value
+    ) {
+        this.reasonCode = reasonCode;
         this.value = value.deepCopy();
     }
 
@@ -123,20 +131,42 @@ public final class RuleEvidenceObservationSummary {
             requireNonNegativeInteger(value, "elapsedSeconds");
         }
         if (value.has("windowSeconds")) {
-            requireNonNegativeInteger(value, "windowSeconds");
+            requirePositiveInteger(value, "windowSeconds");
         }
         rejectNestedValues(value);
         validateBehaviorTiming(reasonCode, value, evaluationCutoffAt);
 
-        return new RuleEvidenceObservationSummary(value);
+        return new RuleEvidenceObservationSummary(reasonCode, value);
     }
 
     public JsonNode toJson() {
         return value.deepCopy();
     }
 
-    public static boolean supportsReasonCode(String reasonCode) {
-        return ALLOWED_FIELDS.containsKey(reasonCode);
+    public Optional<Instant> referenceOccurredAt() {
+        return switch (reasonCode) {
+            case RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT ->
+                    Optional.of(requireUtcInstant(value, "deviceRegisteredAt"));
+            case RECENT_SECURITY_CHANGE_HIGH_AMOUNT ->
+                    Optional.of(requireUtcInstant(
+                            value,
+                            "transferLimitChangedAt"
+                    ));
+            case RECENT_BENEFICIARY_TRANSFER ->
+                    Optional.of(requireUtcInstant(
+                            value,
+                            "beneficiaryRegisteredAt"
+                    ));
+            default -> Optional.empty();
+        };
+    }
+
+    public OptionalLong windowSeconds() {
+        JsonNode windowSeconds = value.get("windowSeconds");
+        if (windowSeconds == null) {
+            return OptionalLong.empty();
+        }
+        return OptionalLong.of(windowSeconds.longValue());
     }
 
     private static void requireKrwInteger(JsonNode root, String field) {
@@ -201,17 +231,21 @@ public final class RuleEvidenceObservationSummary {
             Instant evaluationCutoffAt
     ) {
         if (RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT.equals(reasonCode)) {
-            requireNotAfterCutoff(
+            validateElapsedAndWindow(
                     requireUtcInstant(value, "deviceRegisteredAt"),
                     evaluationCutoffAt,
+                    value.get("elapsedSeconds").longValue(),
+                    value.get("windowSeconds").longValue(),
                     "deviceRegisteredAt"
             );
             return;
         }
         if (RECENT_BENEFICIARY_TRANSFER.equals(reasonCode)) {
-            requireNotAfterCutoff(
+            validateElapsedAndWindow(
                     requireUtcInstant(value, "beneficiaryRegisteredAt"),
                     evaluationCutoffAt,
+                    value.get("elapsedSeconds").longValue(),
+                    value.get("windowSeconds").longValue(),
                     "beneficiaryRegisteredAt"
             );
             return;
@@ -233,29 +267,49 @@ public final class RuleEvidenceObservationSummary {
                     "passwordChangedAt must not be after transferLimitChangedAt"
             );
         }
-        requireNotAfterCutoff(
+        long elapsedSeconds = value.get("elapsedSeconds").longValue();
+        long windowSeconds = value.get("windowSeconds").longValue();
+        validateElapsedAndWindow(
                 transferLimitChangedAt,
                 evaluationCutoffAt,
+                elapsedSeconds,
+                windowSeconds,
                 "transferLimitChangedAt"
         );
 
-        long elapsedSeconds = value.get("elapsedSeconds").longValue();
-        long expectedElapsedSeconds = Duration.between(
-                transferLimitChangedAt,
-                evaluationCutoffAt
-        ).getSeconds();
-        if (elapsedSeconds != expectedElapsedSeconds) {
-            throw new IllegalArgumentException(
-                    "elapsedSeconds must equal evaluation cutoff minus "
-                            + "transferLimitChangedAt"
-            );
-        }
-
-        long windowSeconds = value.get("windowSeconds").longValue();
         if (Duration.between(passwordChangedAt, evaluationCutoffAt).getSeconds()
                 > windowSeconds) {
             throw new IllegalArgumentException(
                     "security change events must be within windowSeconds"
+            );
+        }
+    }
+
+    private static void validateElapsedAndWindow(
+            Instant eventOccurredAt,
+            Instant evaluationCutoffAt,
+            long elapsedSeconds,
+            long windowSeconds,
+            String eventField
+    ) {
+        requireNotAfterCutoff(
+                eventOccurredAt,
+                evaluationCutoffAt,
+                eventField
+        );
+        long expectedElapsedSeconds = Duration.between(
+                eventOccurredAt,
+                evaluationCutoffAt
+        ).getSeconds();
+        if (elapsedSeconds != expectedElapsedSeconds) {
+            throw new IllegalArgumentException(
+                    "elapsedSeconds must equal Duration between " + eventField
+                            + " and evaluationCutoffAt"
+            );
+        }
+        if (elapsedSeconds > windowSeconds) {
+            throw new IllegalArgumentException(
+                    eventField + " must be within windowSeconds"
             );
         }
     }
@@ -283,6 +337,21 @@ public final class RuleEvidenceObservationSummary {
                 || value.longValue() < 0) {
             throw new IllegalArgumentException(
                     field + " must be a non-negative integer"
+            );
+        }
+    }
+
+    private static void requirePositiveInteger(
+            JsonNode root,
+            String field
+    ) {
+        JsonNode value = root.get(field);
+        if (value == null
+                || !value.isIntegralNumber()
+                || !value.canConvertToLong()
+                || value.longValue() < 1) {
+            throw new IllegalArgumentException(
+                    field + " must be a positive integer"
             );
         }
     }

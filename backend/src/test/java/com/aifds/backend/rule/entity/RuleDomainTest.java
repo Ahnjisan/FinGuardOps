@@ -45,17 +45,9 @@ class RuleDomainTest {
     }
 
     @Test
-    void keepsRuleCodeAndReasonCodeAsIndependentConcepts() {
+    void validatesRuleCodeAndReasonCodeThroughExplicitCompatibilityContract() {
         FraudRule rule = amountRule();
-        RuleVersion version = RuleVersion.draft(
-                rule,
-                1,
-                RuleEvidenceObservationSummary.RECENT_BENEFICIARY_TRANSFER,
-                15,
-                amountCondition(),
-                EFFECTIVE_FROM,
-                null
-        );
+        RuleVersion version = draft(rule, 15);
 
         assertThat(version.getFraudRule().getRuleCode())
                 .isEqualTo(
@@ -64,6 +56,21 @@ class RuleDomainTest {
                 );
         assertThat(version.getReasonCode())
                 .isEqualTo(
+                        RuleEvidenceObservationSummary
+                                .TRANSFER_ABSOLUTE_HIGH_AMOUNT
+                );
+        assertThatThrownBy(() -> RuleVersion.draft(
+                rule,
+                2,
+                RuleEvidenceObservationSummary.RECENT_BENEFICIARY_TRANSFER,
+                15,
+                amountCondition(),
+                EFFECTIVE_FROM,
+                null
+        ))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(rule.getRuleCode())
+                .hasMessageContaining(
                         RuleEvidenceObservationSummary
                                 .RECENT_BENEFICIARY_TRANSFER
                 );

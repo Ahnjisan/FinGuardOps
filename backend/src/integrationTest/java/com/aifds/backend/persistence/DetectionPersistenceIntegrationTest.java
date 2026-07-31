@@ -570,7 +570,13 @@ class DetectionPersistenceIntegrationTest
                 20,
                 RiskLevel.MEDIUM,
                 Instant.now().plusSeconds(1),
-                List.of(beneficiaryDraft(1), ruleDraft(0))
+                List.of(
+                        beneficiaryDraft(
+                                result.getEvaluationCutoffAt(),
+                                1
+                        ),
+                        ruleDraft(result.getEvaluationCutoffAt(), 0)
+                )
         );
         entityManager.clear();
 
@@ -605,7 +611,7 @@ class DetectionPersistenceIntegrationTest
                 101,
                 RiskLevel.HIGH,
                 Instant.now().plusSeconds(1),
-                List.of(ruleDraft(0))
+                List.of(ruleDraft(result.getEvaluationCutoffAt(), 0))
         )).isInstanceOf(IllegalArgumentException.class);
 
         assertThat(evidenceRepository
@@ -617,6 +623,96 @@ class DetectionPersistenceIntegrationTest
         ).orElseThrow();
         assertThat(stored.getAnalysisStatus())
                 .isEqualTo(DetectionAnalysisStatus.IN_PROGRESS);
+    }
+
+    @Test
+    void persistsValidR001ThroughR004EvidenceAtStorageBoundary() {
+        DetectionResult result = startedResult(
+                saveTransaction(UUID.randomUUID())
+        );
+        Instant cutoff = result.getEvaluationCutoffAt();
+
+        persistenceService.complete(
+                result.getDetectionResultId(),
+                75,
+                RiskLevel.HIGH,
+                Instant.now().plusSeconds(1),
+                List.of(
+                        ruleDraft(cutoff, 0),
+                        deviceDraft(cutoff, 1),
+                        securityDraft(cutoff, 2),
+                        beneficiaryDraft(cutoff, 3)
+                )
+        );
+        entityManager.clear();
+
+        List<DetectionEvidence> storedEvidence = evidenceRepository
+                .findAllByDetectionResult_DetectionResultIdOrderBySortOrderAscIdAsc(
+                        result.getDetectionResultId()
+                );
+        DetectionResult storedResult = resultRepository
+                .findByDetectionResultId(result.getDetectionResultId())
+                .orElseThrow();
+
+        assertThat(storedEvidence)
+                .extracting(DetectionEvidence::getRuleCode)
+                .containsExactly(
+                        RuleEvidenceObservationSummary
+                                .TRANSFER_ABSOLUTE_HIGH_AMOUNT,
+                        RuleEvidenceObservationSummary
+                                .RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT,
+                        RuleEvidenceObservationSummary
+                                .RECENT_SECURITY_CHANGE_HIGH_AMOUNT,
+                        RuleEvidenceObservationSummary
+                                .RECENT_BENEFICIARY_TRANSFER
+                );
+        assertThat(storedResult.getAnalysisStatus())
+                .isEqualTo(DetectionAnalysisStatus.COMPLETED);
+    }
+
+    @Test
+    void rejectsInvalidEvidenceWithoutPartialDatabaseState() {
+        DetectionResult result = startedResult(
+                saveTransaction(UUID.randomUUID())
+        );
+        Instant cutoff = result.getEvaluationCutoffAt();
+        RuleEvidenceDraft validDraft = ruleDraft(cutoff, 0);
+        RuleEvidenceDraft validBeneficiary = beneficiaryDraft(cutoff, 1);
+        RuleEvidenceDraft invalidBeneficiary = new RuleEvidenceDraft(
+                validBeneficiary.ruleVersionId(),
+                validBeneficiary.displayDescription(),
+                validBeneficiary.observationSummary(),
+                validBeneficiary.evidenceOccurredAt().plusSeconds(1),
+                validBeneficiary.sortOrder()
+        );
+
+        assertThatThrownBy(() -> persistenceService.complete(
+                result.getDetectionResultId(),
+                25,
+                RiskLevel.MEDIUM,
+                Instant.now().plusSeconds(1),
+                List.of(validDraft, invalidBeneficiary)
+        ))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("evidenceOccurredAt")
+                .hasMessageContaining(
+                        RuleEvidenceObservationSummary
+                                .RECENT_BENEFICIARY_TRANSFER
+                );
+
+        entityManager.clear();
+        assertThat(evidenceRepository
+                .findAllByDetectionResult_DetectionResultIdOrderBySortOrderAscIdAsc(
+                        result.getDetectionResultId()
+                )).isEmpty();
+        DetectionResult stored = resultRepository.findByDetectionResultId(
+                result.getDetectionResultId()
+        ).orElseThrow();
+        assertThat(stored.getAnalysisStatus())
+                .isEqualTo(DetectionAnalysisStatus.IN_PROGRESS);
+        assertThat(stored.getRiskScore()).isNull();
+        assertThat(stored.getRiskLevel()).isNull();
+        assertThat(stored.getAnalysisCompletedAt()).isNull();
     }
 
     private int createVersionConcurrently(
@@ -655,7 +751,7 @@ class DetectionPersistenceIntegrationTest
                 riskScore,
                 riskLevel,
                 Instant.now().plusSeconds(1),
-                List.of(ruleDraft(0))
+                List.of(ruleDraft(result.getEvaluationCutoffAt(), 0))
         );
         return resultRepository.findByDetectionResultId(
                 result.getDetectionResultId()
@@ -693,10 +789,14 @@ class DetectionPersistenceIntegrationTest
         );
     }
 
-    private RuleEvidenceDraft beneficiaryDraft(int sortOrder) {
+    private RuleEvidenceDraft beneficiaryDraft(
+            Instant cutoff,
+            int sortOrder
+    ) {
         RuleVersion version = publishSeedRuleVersion(
                 RuleEvidenceObservationSummary.RECENT_BENEFICIARY_TRANSFER
         );
+        Instant beneficiaryRegisteredAt = cutoff.minusSeconds(60);
         return new RuleEvidenceDraft(
                 version.getRuleVersionId(),
                 "최근 등록된 수취인 이체입니다.",
@@ -708,16 +808,79 @@ class DetectionPersistenceIntegrationTest
                         )
                         .put(
                                 "beneficiaryRegisteredAt",
-                                "2026-07-30T01:00:00Z"
+                                beneficiaryRegisteredAt.toString()
                         )
                         .put("elapsedSeconds", 60)
                         .put("windowSeconds", 86400),
-                Instant.now(),
+                beneficiaryRegisteredAt,
                 sortOrder
         );
     }
 
-    private RuleEvidenceDraft ruleDraft(int sortOrder) {
+    private RuleEvidenceDraft deviceDraft(Instant cutoff, int sortOrder) {
+        RuleVersion version = publishSeedRuleVersion(
+                RuleEvidenceObservationSummary
+                        .RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT
+        );
+        Instant deviceRegisteredAt = cutoff.minusSeconds(60);
+        return new RuleEvidenceDraft(
+                version.getRuleVersionId(),
+                "최근 등록된 기기의 고액 이체입니다.",
+                objectMapper.createObjectNode()
+                        .put("observedAmount", "10000000")
+                        .put("amountThreshold", "10000000")
+                        .put(
+                                "eventId",
+                                "11111111-1111-4111-8111-111111111111"
+                        )
+                        .put(
+                                "deviceRegisteredAt",
+                                deviceRegisteredAt.toString()
+                        )
+                        .put("elapsedSeconds", 60)
+                        .put("windowSeconds", 86400),
+                deviceRegisteredAt,
+                sortOrder
+        );
+    }
+
+    private RuleEvidenceDraft securityDraft(Instant cutoff, int sortOrder) {
+        RuleVersion version = publishSeedRuleVersion(
+                RuleEvidenceObservationSummary
+                        .RECENT_SECURITY_CHANGE_HIGH_AMOUNT
+        );
+        Instant passwordChangedAt = cutoff.minusSeconds(120);
+        Instant transferLimitChangedAt = cutoff.minusSeconds(60);
+        return new RuleEvidenceDraft(
+                version.getRuleVersionId(),
+                "최근 보안정보 변경 후 고액 이체입니다.",
+                objectMapper.createObjectNode()
+                        .put("observedAmount", "10000000")
+                        .put("amountThreshold", "10000000")
+                        .put(
+                                "passwordChangedEventId",
+                                "11111111-1111-4111-8111-111111111111"
+                        )
+                        .put(
+                                "passwordChangedAt",
+                                passwordChangedAt.toString()
+                        )
+                        .put(
+                                "transferLimitChangedEventId",
+                                "22222222-2222-4222-8222-222222222222"
+                        )
+                        .put(
+                                "transferLimitChangedAt",
+                                transferLimitChangedAt.toString()
+                        )
+                        .put("elapsedSeconds", 60)
+                        .put("windowSeconds", 86400),
+                transferLimitChangedAt,
+                sortOrder
+        );
+    }
+
+    private RuleEvidenceDraft ruleDraft(Instant cutoff, int sortOrder) {
         RuleVersion version = publishSeedRuleVersion(
                 RuleEvidenceObservationSummary.TRANSFER_ABSOLUTE_HIGH_AMOUNT
         );
@@ -725,7 +888,7 @@ class DetectionPersistenceIntegrationTest
                 version.getRuleVersionId(),
                 "KRW 이체 금액이 기준 이상입니다.",
                 amountSummary(),
-                Instant.now(),
+                cutoff,
                 sortOrder
         );
     }

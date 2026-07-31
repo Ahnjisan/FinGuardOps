@@ -1,23 +1,25 @@
 package com.aifds.backend.rule.entity;
 
+import com.aifds.backend.rule.contract.RuleV1ContractRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.math.BigInteger;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.regex.Pattern;
 
 public final class RuleConditionDefinition {
 
     public static final String TRANSFER_ABSOLUTE_HIGH_AMOUNT =
-            "TRANSFER_ABSOLUTE_HIGH_AMOUNT";
+            RuleV1ContractRegistry.TRANSFER_ABSOLUTE_HIGH_AMOUNT;
     public static final String RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT =
-            "RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT";
+            RuleV1ContractRegistry.RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT;
     public static final String RECENT_SECURITY_CHANGE_HIGH_AMOUNT =
-            "RECENT_SECURITY_CHANGE_HIGH_AMOUNT";
+            RuleV1ContractRegistry.RECENT_SECURITY_CHANGE_HIGH_AMOUNT;
     public static final String RECENT_BENEFICIARY_TRANSFER =
-            "RECENT_BENEFICIARY_TRANSFER";
+            RuleV1ContractRegistry.RECENT_BENEFICIARY_TRANSFER;
 
     private static final String HIGH_AMOUNT_PREREQUISITE =
             TRANSFER_ABSOLUTE_HIGH_AMOUNT;
@@ -110,6 +112,14 @@ public final class RuleConditionDefinition {
 
     public JsonNode toJson() {
         return value.deepCopy();
+    }
+
+    public OptionalLong windowSeconds() {
+        JsonNode windowSeconds = value.get("windowSeconds");
+        if (windowSeconds == null) {
+            return OptionalLong.empty();
+        }
+        return OptionalLong.of(windowSeconds.longValue());
     }
 
     private static void validateR001(JsonNode root) {
