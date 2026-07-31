@@ -27,10 +27,14 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataAccessException;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
@@ -84,6 +88,9 @@ class FraudRuleVersionPersistenceIntegrationTest
     @Autowired
     private ObjectMapper objectMapper;
 
+    @Autowired
+    private PlatformTransactionManager transactionManager;
+
     @Test
     void migrationCreatesExtensionTablesConstraintsIndexesAndTriggers() {
         assertThat(flyway.info().applied()).hasSize(5);
@@ -121,6 +128,12 @@ class FraudRuleVersionPersistenceIntegrationTest
                 "published_at",
                 "concurrency_version"
         );
+        assertThat(timestampPrecision("fraud_rule", "created_at"))
+                .isEqualTo(6);
+        assertThat(timestampPrecision("fraud_rule", "updated_at"))
+                .isEqualTo(6);
+        assertThat(timestampPrecision("rule_version", "created_at"))
+                .isEqualTo(6);
         assertThat(constraints("fraud_rule")).containsExactlyInAnyOrder(
                 "pk_fraud_rule",
                 "uq_fraud_rule_business_id",
@@ -578,18 +591,128 @@ class FraudRuleVersionPersistenceIntegrationTest
     }
 
     @Test
+    void usesDatabaseTransactionTimestampForFraudRuleAuditTimestamps() {
+        TransactionTemplate transactions =
+                new TransactionTemplate(transactionManager);
+
+        FraudRuleTimestampSnapshot created = transactions.execute(status -> {
+            Instant transactionTimestamp = databaseTransactionTimestamp();
+            FraudRule saved = fraudRuleRepository.saveAndFlush(
+                    FraudRule.create(
+                            "TIMESTAMP_CLOCK_TEST",
+                            "Timestamp clock test",
+                            "Verifies database-sourced audit timestamps"
+                    )
+            );
+            UUID fraudRuleId = saved.getFraudRuleId();
+
+            entityManager.clear();
+            FraudRule reloaded = fraudRuleRepository
+                    .findByFraudRuleId(fraudRuleId)
+                    .orElseThrow();
+
+            assertThat(saved.getCreatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(saved.getUpdatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(reloaded.getCreatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(reloaded.getUpdatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(reloaded.getUpdatedAt())
+                    .isAfterOrEqualTo(reloaded.getCreatedAt());
+
+            return new FraudRuleTimestampSnapshot(
+                    fraudRuleId,
+                    reloaded.getCreatedAt()
+            );
+        });
+
+        assertThat(created).isNotNull();
+        transactions.execute(status -> {
+            Instant transactionTimestamp = databaseTransactionTimestamp();
+            FraudRule rule = fraudRuleRepository
+                    .findByFraudRuleId(created.fraudRuleId())
+                    .orElseThrow();
+            rule.updateDetails(
+                    "Updated timestamp clock test",
+                    "Verifies the database update transaction timestamp"
+            );
+            FraudRule saved = fraudRuleRepository.saveAndFlush(rule);
+
+            entityManager.clear();
+            FraudRule reloaded = fraudRuleRepository
+                    .findByFraudRuleId(created.fraudRuleId())
+                    .orElseThrow();
+
+            assertThat(saved.getCreatedAt()).isEqualTo(created.createdAt());
+            assertThat(saved.getUpdatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(reloaded.getCreatedAt())
+                    .isEqualTo(created.createdAt());
+            assertThat(reloaded.getUpdatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(reloaded.getUpdatedAt())
+                    .isAfterOrEqualTo(reloaded.getCreatedAt());
+            return null;
+        });
+    }
+
+    @Test
+    void usesDatabaseTransactionTimestampForSubsequentRuleVersionCreation() {
+        TransactionTemplate transactions =
+                new TransactionTemplate(transactionManager);
+
+        transactions.execute(status -> {
+            Instant transactionTimestamp = databaseTransactionTimestamp();
+            RuleVersion saved = ruleVersionRepository.saveAndFlush(
+                    newDraft(
+                            seedRule(AMOUNT_RULE),
+                            2,
+                            null,
+                            null
+                    )
+            );
+            UUID ruleVersionId = saved.getRuleVersionId();
+
+            entityManager.clear();
+            RuleVersion reloaded = ruleVersionRepository
+                    .findByRuleVersionId(ruleVersionId)
+                    .orElseThrow();
+
+            assertThat(saved.getCreatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(reloaded.getCreatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(reloaded.getVersionNumber()).isEqualTo(2);
+            return null;
+        });
+    }
+
+    @Test
     void detectsOptimisticLockConflicts() {
         FraudRule first = fraudRuleRepository.findByRuleCode(AMOUNT_RULE)
                 .orElseThrow();
         FraudRule stale = fraudRuleRepository.findByRuleCode(AMOUNT_RULE)
                 .orElseThrow();
+        Instant createdAt = first.getCreatedAt();
 
         first.updateDetails("첫 번째 수정", "첫 번째 설명");
         fraudRuleRepository.saveAndFlush(first);
         stale.updateDetails("늦은 수정", "늦은 설명");
 
         assertThatThrownBy(() -> fraudRuleRepository.saveAndFlush(stale))
-                .isInstanceOf(DataAccessException.class);
+                .isInstanceOf(
+                        ObjectOptimisticLockingFailureException.class
+                );
+
+        FraudRule persisted = fraudRuleRepository.findByRuleCode(AMOUNT_RULE)
+                .orElseThrow();
+        assertThat(persisted.getName()).isEqualTo("첫 번째 수정");
+        assertThat(persisted.getConcurrencyVersion()).isEqualTo(1);
+        assertThat(persisted.getCreatedAt()).isEqualTo(createdAt);
+        assertThat(persisted.getUpdatedAt())
+                .isAfterOrEqualTo(persisted.getCreatedAt());
     }
 
     @Test
@@ -854,6 +977,31 @@ class FraudRuleVersionPersistenceIntegrationTest
                 """, String.class, tableName));
     }
 
+    private int timestampPrecision(String tableName, String columnName) {
+        Integer precision = jdbcTemplate.queryForObject("""
+                SELECT datetime_precision
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = ?
+                  AND column_name = ?
+                """, Integer.class, tableName, columnName);
+        if (precision == null) {
+            throw new AssertionError("Timestamp precision was not found");
+        }
+        return precision;
+    }
+
+    private Instant databaseTransactionTimestamp() {
+        Timestamp timestamp = jdbcTemplate.queryForObject(
+                "SELECT CURRENT_TIMESTAMP",
+                Timestamp.class
+        );
+        if (timestamp == null) {
+            throw new AssertionError("Database timestamp was not returned");
+        }
+        return timestamp.toInstant();
+    }
+
     private Set<String> constraints(String tableName) {
         return Set.copyOf(jdbcTemplate.queryForList("""
                 SELECT conname
@@ -913,5 +1061,11 @@ class FraudRuleVersionPersistenceIntegrationTest
             current = current.getCause();
         }
         throw new AssertionError("SQLException was not found", throwable);
+    }
+
+    private record FraudRuleTimestampSnapshot(
+            UUID fraudRuleId,
+            Instant createdAt
+    ) {
     }
 }
