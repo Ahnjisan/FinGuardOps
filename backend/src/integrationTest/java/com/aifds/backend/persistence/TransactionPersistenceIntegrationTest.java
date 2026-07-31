@@ -4,6 +4,7 @@ import com.aifds.backend.detection.entity.DetectionResult;
 import com.aifds.backend.detection.entity.RiskLevel;
 import com.aifds.backend.idempotency.entity.IdempotencyProcessingStatus;
 import com.aifds.backend.idempotency.entity.IdempotencyRecord;
+import com.aifds.backend.idempotency.repository.IdempotencyRecordRepository;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.aifds.backend.transaction.entity.RiskResponseOutcome;
 import com.aifds.backend.transaction.entity.TransactionChannel;
@@ -70,6 +71,9 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
 
     @Autowired
     private FinancialTransactionRepository financialTransactionRepository;
+
+    @Autowired
+    private IdempotencyRecordRepository idempotencyRecordRepository;
 
     @Autowired
     private ObjectMapper objectMapper;
@@ -171,6 +175,14 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
         assertColumn(idempotencyColumns, "financial_transaction_id", "bigint", "int8", true);
         assertColumn(idempotencyColumns, "response_snapshot", "jsonb", "jsonb", true);
         assertColumn(idempotencyColumns, "expires_at", "timestamp with time zone", "timestamptz", false);
+        assertThat(((Number) idempotencyColumns.get("expires_at")
+                .get("datetime_precision")).intValue()).isEqualTo(6);
+        assertColumn(idempotencyColumns, "created_at", "timestamp with time zone", "timestamptz", false);
+        assertThat(((Number) idempotencyColumns.get("created_at")
+                .get("datetime_precision")).intValue()).isEqualTo(6);
+        assertColumn(idempotencyColumns, "updated_at", "timestamp with time zone", "timestamptz", false);
+        assertThat(((Number) idempotencyColumns.get("updated_at")
+                .get("datetime_precision")).intValue()).isEqualTo(6);
         assertColumn(idempotencyColumns, "finished_at", "timestamp with time zone", "timestamptz", true);
         assertThat(((Number) idempotencyColumns.get("finished_at")
                 .get("datetime_precision")).intValue()).isEqualTo(6);
@@ -796,6 +808,203 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
     }
 
     @Test
+    void usesDatabaseTransactionTimestampsForIdempotencyAuditsAndPreservesBusinessTimes() {
+        TransactionTemplate transactions =
+                new TransactionTemplate(transactionManager);
+
+        IdempotencyAuditSnapshot created = transactions.execute(status -> {
+            Instant transactionTimestamp = databaseTransactionTimestamp();
+            FinancialTransaction transaction = financialTransactionRepository
+                    .saveAndFlush(transaction(
+                            transactionTimestamp.minusSeconds(60),
+                            "idempotency_clock"
+                    ));
+            IdempotencyRecord completionRecord =
+                    idempotencyRecordRepository.saveAndFlush(
+                            IdempotencyRecord.inProgress(
+                                    "POST:/api/v1/transactions",
+                                    "audit-complete-" + UUID.randomUUID(),
+                                    "8".repeat(64)
+                            )
+                    );
+            IdempotencyRecord failureRecord =
+                    idempotencyRecordRepository.saveAndFlush(
+                            IdempotencyRecord.inProgress(
+                                    "POST:/api/v1/transactions",
+                                    "audit-fail-" + UUID.randomUUID(),
+                                    "9".repeat(64)
+                            )
+                    );
+
+            assertThat(completionRecord.getCreatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(completionRecord.getUpdatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(completionRecord.getUpdatedAt())
+                    .isEqualTo(completionRecord.getCreatedAt());
+            assertThat(completionRecord.getExpiresAt())
+                    .isEqualTo(transactionTimestamp.plus(24, ChronoUnit.HOURS));
+            assertThat(failureRecord.getCreatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(failureRecord.getUpdatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(failureRecord.getExpiresAt())
+                    .isEqualTo(transactionTimestamp.plus(24, ChronoUnit.HOURS));
+
+            long completionRecordId = completionRecord.getId();
+            long failureRecordId = failureRecord.getId();
+            UUID transactionId = transaction.getTransactionId();
+            Instant expiresAt = completionRecord.getExpiresAt();
+            entityManager.flush();
+            entityManager.clear();
+
+            IdempotencyRecord reloadedCompletion =
+                    idempotencyRecordRepository.findById(completionRecordId)
+                            .orElseThrow();
+            IdempotencyRecord reloadedFailure =
+                    idempotencyRecordRepository.findById(failureRecordId)
+                            .orElseThrow();
+
+            assertThat(reloadedCompletion.getCreatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(reloadedCompletion.getUpdatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(reloadedCompletion.getExpiresAt())
+                    .isEqualTo(expiresAt);
+            assertThat(reloadedFailure.getCreatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(reloadedFailure.getUpdatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(reloadedFailure.getExpiresAt())
+                    .isEqualTo(transactionTimestamp.plus(
+                            24,
+                            ChronoUnit.HOURS
+                    ));
+
+            return new IdempotencyAuditSnapshot(
+                    completionRecordId,
+                    failureRecordId,
+                    transactionId,
+                    transactionTimestamp,
+                    expiresAt
+            );
+        });
+
+        assertThat(created).isNotNull();
+        transactions.execute(status -> {
+            Instant transactionTimestamp = databaseTransactionTimestamp();
+            IdempotencyRecord record = idempotencyRecordRepository
+                    .findById(created.completionRecordId())
+                    .orElseThrow();
+            FinancialTransaction transaction = financialTransactionRepository
+                    .findByTransactionId(created.transactionId())
+                    .orElseThrow();
+
+            record.linkTransaction(transaction);
+            idempotencyRecordRepository.saveAndFlush(record);
+
+            assertThat(record.getCreatedAt()).isEqualTo(created.createdAt());
+            assertThat(record.getExpiresAt()).isEqualTo(created.expiresAt());
+            assertThat(record.getUpdatedAt()).isEqualTo(transactionTimestamp);
+            assertThat(record.getUpdatedAt())
+                    .isAfterOrEqualTo(record.getCreatedAt());
+            assertThat(record.getFinishedAt()).isNull();
+
+            entityManager.clear();
+            IdempotencyRecord reloaded = idempotencyRecordRepository
+                    .findById(created.completionRecordId())
+                    .orElseThrow();
+
+            assertThat(reloaded.getCreatedAt()).isEqualTo(created.createdAt());
+            assertThat(reloaded.getExpiresAt()).isEqualTo(created.expiresAt());
+            assertThat(reloaded.getUpdatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(reloaded.getFinancialTransaction().getTransactionId())
+                    .isEqualTo(created.transactionId());
+            assertThat(reloaded.getFinishedAt()).isNull();
+            return null;
+        });
+
+        Instant completedAt = created.createdAt()
+                .plus(1, ChronoUnit.HOURS)
+                .truncatedTo(ChronoUnit.MICROS);
+        transactions.execute(status -> {
+            Instant transactionTimestamp = databaseTransactionTimestamp();
+            IdempotencyRecord record = idempotencyRecordRepository
+                    .findById(created.completionRecordId())
+                    .orElseThrow();
+            FinancialTransaction transaction = financialTransactionRepository
+                    .findByTransactionId(created.transactionId())
+                    .orElseThrow();
+            ObjectNode responseSnapshot = objectMapper.createObjectNode()
+                    .put("transactionId", created.transactionId().toString())
+                    .put("processingStatus", "RECEIVED");
+
+            record.complete(transaction, responseSnapshot, completedAt);
+            idempotencyRecordRepository.saveAndFlush(record);
+
+            assertThat(record.getCreatedAt()).isEqualTo(created.createdAt());
+            assertThat(record.getExpiresAt()).isEqualTo(created.expiresAt());
+            assertThat(record.getUpdatedAt()).isEqualTo(transactionTimestamp);
+            assertThat(record.getUpdatedAt())
+                    .isAfterOrEqualTo(record.getCreatedAt());
+            assertThat(record.getFinishedAt()).isEqualTo(completedAt);
+
+            entityManager.clear();
+            IdempotencyRecord reloaded = idempotencyRecordRepository
+                    .findById(created.completionRecordId())
+                    .orElseThrow();
+
+            assertThat(reloaded.getCreatedAt()).isEqualTo(created.createdAt());
+            assertThat(reloaded.getExpiresAt()).isEqualTo(created.expiresAt());
+            assertThat(reloaded.getUpdatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(reloaded.getFinishedAt()).isEqualTo(completedAt);
+            assertThat(reloaded.getProcessingStatus())
+                    .isEqualTo(IdempotencyProcessingStatus.COMPLETED);
+            assertThat(reloaded.getResponseSnapshot())
+                    .isEqualTo(responseSnapshot);
+            return null;
+        });
+
+        Instant failedAt = created.createdAt()
+                .plus(2, ChronoUnit.HOURS)
+                .truncatedTo(ChronoUnit.MICROS);
+        transactions.execute(status -> {
+            Instant transactionTimestamp = databaseTransactionTimestamp();
+            IdempotencyRecord record = idempotencyRecordRepository
+                    .findById(created.failureRecordId())
+                    .orElseThrow();
+
+            record.fail("DEPENDENCY_TIMEOUT", failedAt);
+            idempotencyRecordRepository.saveAndFlush(record);
+
+            assertThat(record.getCreatedAt()).isEqualTo(created.createdAt());
+            assertThat(record.getExpiresAt()).isEqualTo(created.expiresAt());
+            assertThat(record.getUpdatedAt()).isEqualTo(transactionTimestamp);
+            assertThat(record.getUpdatedAt())
+                    .isAfterOrEqualTo(record.getCreatedAt());
+            assertThat(record.getFinishedAt()).isEqualTo(failedAt);
+
+            entityManager.clear();
+            IdempotencyRecord reloaded = idempotencyRecordRepository
+                    .findById(created.failureRecordId())
+                    .orElseThrow();
+
+            assertThat(reloaded.getCreatedAt()).isEqualTo(created.createdAt());
+            assertThat(reloaded.getExpiresAt()).isEqualTo(created.expiresAt());
+            assertThat(reloaded.getUpdatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(reloaded.getFinishedAt()).isEqualTo(failedAt);
+            assertThat(reloaded.getProcessingStatus())
+                    .isEqualTo(IdempotencyProcessingStatus.FAILED);
+            assertThat(reloaded.getFailureCode())
+                    .isEqualTo("DEPENDENCY_TIMEOUT");
+            return null;
+        });
+    }
+
+    @Test
     void keepsDatabaseDefaultTimestampOrderWhenJpaUpdatesDirectSqlRow() {
         TransactionTemplate transactions =
                 new TransactionTemplate(transactionManager);
@@ -1292,6 +1501,15 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
     private record FinancialTransactionTimestampSnapshot(
             UUID transactionId,
             Instant createdAt
+    ) {
+    }
+
+    private record IdempotencyAuditSnapshot(
+            long completionRecordId,
+            long failureRecordId,
+            UUID transactionId,
+            Instant createdAt,
+            Instant expiresAt
     ) {
     }
 }

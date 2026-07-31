@@ -33,6 +33,9 @@ class IdempotencyRecordTest {
         assertThat(record.getFinancialTransaction()).isNull();
         assertThat(record.getResponseSnapshot()).isNull();
         assertThat(record.getFailureCode()).isNull();
+        assertThat(record.getExpiresAt()).isNull();
+        assertThat(record.getCreatedAt()).isNull();
+        assertThat(record.getUpdatedAt()).isNull();
         assertThat(record.getFinishedAt()).isNull();
     }
 
@@ -108,6 +111,7 @@ class IdempotencyRecordTest {
         assertThat(record.getResponseSnapshot().has("mutatedAfterTransition")).isFalse();
         assertThat(record.getResponseSnapshot().has("mutatedThroughGetter")).isFalse();
         assertThat(record.getFailureCode()).isNull();
+        assertThat(record.getUpdatedAt()).isNull();
         assertThat(record.getFinishedAt()).isEqualTo(FINISHED_AT);
     }
 
@@ -158,6 +162,7 @@ class IdempotencyRecordTest {
                 .isEqualTo(IdempotencyProcessingStatus.FAILED);
         assertThat(record.getResponseSnapshot()).isNull();
         assertThat(record.getFailureCode()).isEqualTo("DEPENDENCY_TIMEOUT");
+        assertThat(record.getUpdatedAt()).isNull();
         assertThat(record.getFinishedAt()).isEqualTo(FINISHED_AT);
     }
 

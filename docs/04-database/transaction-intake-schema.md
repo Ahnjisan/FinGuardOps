@@ -275,7 +275,8 @@ FAILED
 
 ### 6.4 24시간 시각 저장과 미구현 만료 정책
 
-- `expires_at = created_at + INTERVAL '24 hours'`로 저장한다.
+- `expires_at`은 감사 시각이 아니라 최초 선점 기준 24시간 후를 나타내는 업무 시각이다.
+- PostgreSQL INSERT transaction timestamp를 사용하는 기존 `DEFAULT (CURRENT_TIMESTAMP + INTERVAL '24 hours')`로 생성하며 `expires_at = created_at + INTERVAL '24 hours'`로 저장한다.
 - Service는 `expires_at`을 판정하지 않으며 만료 레코드 정리 작업도 구현하지 않았다.
 - 따라서 24시간은 현재 DB에 저장되는 시각과 Check Constraint일 뿐, 만료 후 키 재사용을 허용하는 시행 중인 유효기간이 아니다.
 - 만료 시각이 지난 행도 Unique 제약에 남고 현재 요청은 기존 상태에 따라 처리된다.
@@ -382,12 +383,42 @@ V1의 무정밀도 지정 `TIMESTAMPTZ`는 PostgreSQL 기본 마이크로초 정
 | `financial_transaction_id` | `BIGINT` | nullable | 없음 | 처리 중에는 null 가능, 거래 결과 FK |
 | `response_snapshot` | `JSONB` | nullable | 없음 | strict legacy 일곱 필드 또는 신규 version envelope JSON object, `traceId`와 내부·요청 정보 제외 |
 | `failure_code` | `VARCHAR(64)` | nullable | 없음 | `FAILED`의 안전한 내부 실패 분류. 공개 응답은 whitelist로만 고정 매핑 |
-| `expires_at` | `TIMESTAMPTZ` | NOT NULL | `CURRENT_TIMESTAMP + INTERVAL '24 hours'` | 멱등 만료 시각 |
-| `created_at` | `TIMESTAMPTZ` | NOT NULL | `CURRENT_TIMESTAMP` | 최초 선점 시각 |
-| `updated_at` | `TIMESTAMPTZ` | NOT NULL | `CURRENT_TIMESTAMP` | 마지막 상태 변경 시각 |
-| `finished_at` | `TIMESTAMPTZ` | nullable | 없음 | 완료 또는 실패 확정 시각 |
+| `expires_at` | `TIMESTAMPTZ` | NOT NULL | `CURRENT_TIMESTAMP + INTERVAL '24 hours'` | 최초 선점 기준 24시간 후의 업무 만료 기준 시각 |
+| `created_at` | `TIMESTAMPTZ` | NOT NULL | `CURRENT_TIMESTAMP` | 최초 INSERT 감사 시각 |
+| `updated_at` | `TIMESTAMPTZ` | NOT NULL | `CURRENT_TIMESTAMP` | 마지막 JPA 변경 감사 시각 |
+| `finished_at` | `TIMESTAMPTZ` | nullable | 없음 | 완료 또는 실패가 확정된 업무 시각 |
 
-### 8.2 제약조건
+### 8.2 감사 시각과 업무 시각
+
+`idempotency_record`의 authoritative audit clock은 PostgreSQL이다. JPA
+경로의 `created_at`과 `updated_at`은 Hibernate DB-source timestamp
+generation을 사용하며 애플리케이션 JVM clock으로 생성하거나
+`finished_at`에서 복사하지 않는다.
+
+| timestamp | 분류 | 생성·갱신 정책 |
+| --- | --- | --- |
+| `created_at` | 감사 시각 | 최초 INSERT 트랜잭션의 PostgreSQL transaction timestamp, 이후 불변 |
+| `updated_at` | 감사 시각 | INSERT 및 실제 JPA UPDATE 트랜잭션의 PostgreSQL transaction timestamp |
+| `expires_at` | 업무 시각 | 기존 DB default가 INSERT transaction timestamp에 24시간을 더해 생성, 이후 불변 |
+| `finished_at` | 업무 시각 | 완료·실패 호출자가 전달한 확정 시각을 그대로 저장 |
+
+PostgreSQL의 `CURRENT_TIMESTAMP`는 트랜잭션 시작 시각을 반환하므로 같은
+INSERT 트랜잭션의 `created_at`과 `updated_at`은 정확히 같고
+`expires_at`은 그 시각의 정확히 24시간 후이다. Hibernate는
+`expires_at`을 INSERT generated 값으로 매핑해 flush 후 관리 중인
+엔티티에 DB default 결과를 회수한다.
+
+네 컬럼은 모두 V1의 무정밀도 지정 `TIMESTAMPTZ`가 제공하는 PostgreSQL
+기본 마이크로초 정밀도(`datetime_precision = 6`)를 사용한다.
+`updated_at`은 영속 레코드 변경 이력을, `finished_at`은 업무 완료·실패
+확정 시각을 각각 나타내며 두 값이 같아야 한다는 계약은 없다.
+
+직접 SQL INSERT는 기존 column default를 사용한다. 반면 trigger가 없으므로
+직접 SQL UPDATE는 `updated_at = CURRENT_TIMESTAMP`를 명시하지 않으면 감사
+시각의 자동 갱신이 보장되지 않는다. Hibernate DB-source
+`@UpdateTimestamp`는 JPA가 실행하는 실제 UPDATE에만 적용된다.
+
+### 8.3 제약조건
 
 | 제약 이름 | 종류 | 조건 |
 | --- | --- | --- |
@@ -660,8 +691,9 @@ CREATE INDEX ix_idempotency_record_status_updated_at
 
 - `idempotency_record`에는 낙관적 잠금용 version을 두지 않는다.
 - 최초 선점은 `(operation_scope, idempotency_key)` Unique Insert로 원자화한다.
-- Unique 충돌이 발생하면 기존 행을 조회해 지문, 만료 시각과 처리 상태를 판별한다.
-- 상태 확정은 현재 `processing_status = 'IN_PROGRESS'`를 `UPDATE` 조건에 포함해 하나의 실행만 `COMPLETED` 또는 `FAILED`로 변경하게 한다.
+- Unique 충돌이 발생하면 기존 행을 조회해 지문과 현재 처리 상태를 판별한다. `expires_at`을 이용한 만료 판정이나 키 재사용은 아직 구현하지 않았다.
+- 거래 연결과 완료·실패 상태 확정은 Repository의 `findByIdForUpdate`가 JPA `PESSIMISTIC_WRITE`로 대상 PK 행을 먼저 잠근 뒤 엔티티 상태 전이와 dirty checking UPDATE를 수행한다.
+- 현재 구현은 `processing_status = 'IN_PROGRESS'`를 SQL UPDATE 조건에 직접 포함하지 않는다. 경합 실행은 같은 행의 비관적 잠금 획득 순서로 직렬화되고, 뒤에 잠금을 얻은 실행은 이미 terminal 상태인 엔티티의 상태 전이 검증에서 거부되어 단일 승자를 유지한다.
 - `IN_PROGRESS` 선점 DB 트랜잭션을 External Risk나 FastAPI 네트워크 호출 동안 열어 두지 않는다.
 - `financial_transaction` 생성, 해당 멱등 기록의 `financial_transaction_id` 연결, typed snapshot 저장과 `COMPLETED` 전이는 하나의 짧은 업무 트랜잭션 경계에서 처리한다. 어느 단계든 실패하면 거래 저장과 `COMPLETED` 전이를 함께 롤백한 뒤 별도 짧은 트랜잭션으로 선점 기록을 `FAILED`로 확정한다.
 - 후속 분석과 최종 완료 응답 확정은 ADR-003의 단계적 구현 순서를 따르며, 전체 흐름 준비 전 불완전한 외부 Controller를 공개하지 않는다.
@@ -732,7 +764,11 @@ Java 매핑 변경은 이 물리 DB 계약과 함께 검증한다.
 - 존재하지 않는 `financial_transaction_id`는 FK 위반이다.
 - 한 거래를 두 멱등 완료 기록에 연결하면 Unique 위반이다.
 - 상태별 FK, 응답 snapshot, 실패 코드와 종료 시각 조합이 Check로 검증된다.
+- `created_at`, `updated_at`, `expires_at`, `finished_at`의 `datetime_precision`은 모두 6이다.
+- 명시적 INSERT 트랜잭션에서 `created_at`과 `updated_at`은 해당 PostgreSQL `CURRENT_TIMESTAMP`와 정확히 일치하고 서로 같다.
 - `expires_at`은 `created_at`의 정확히 24시간 후여야 한다.
+- 별도 명시적 UPDATE 트랜잭션에서 실제 거래 연결·완료·실패 변경 후 `created_at`과 `expires_at`은 불변이고 `updated_at`은 해당 트랜잭션의 `CURRENT_TIMESTAMP`와 정확히 일치한다.
+- 완료·실패의 `finished_at`은 호출자가 전달한 마이크로초 정밀도 업무 시각을 그대로 보존한다.
 - `expires_at` 인덱스로 만료 정리 대상 조회가 가능하다.
 
 테스트는 예외 타입만 확인하지 않고 위반한 PostgreSQL constraint 이름 또는 SQLState를 함께 확인해 의도한 제약이 실제로 동작했는지 검증한다.
