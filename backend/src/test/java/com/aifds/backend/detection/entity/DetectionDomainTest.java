@@ -87,7 +87,11 @@ class DetectionDomainTest {
                 result,
                 "고액 이체 기준 이상입니다.",
                 version,
-                summary,
+                RuleEvidenceObservationSummary.from(
+                        version.getReasonCode(),
+                        summary,
+                        result.getEvaluationCutoffAt()
+                ),
                 CUTOFF,
                 0
         );
@@ -128,7 +132,11 @@ class DetectionDomainTest {
                 result,
                 "고액 이체 기준 이상입니다.",
                 draft,
-                amountSummary(),
+                RuleEvidenceObservationSummary.from(
+                        draft.getReasonCode(),
+                        amountSummary(),
+                        result.getEvaluationCutoffAt()
+                ),
                 CUTOFF,
                 0
         )).isInstanceOf(IllegalArgumentException.class);

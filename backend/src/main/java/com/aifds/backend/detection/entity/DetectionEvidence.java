@@ -168,7 +168,7 @@ public class DetectionEvidence {
             DetectionResult detectionResult,
             String displayDescription,
             RuleVersion ruleVersion,
-            JsonNode observationSummary,
+            RuleEvidenceObservationSummary observationSummary,
             Instant evidenceOccurredAt,
             int sortOrder
     ) {
@@ -176,11 +176,7 @@ public class DetectionEvidence {
                 detectionResult,
                 displayDescription,
                 ruleVersion,
-                RuleEvidenceObservationSummary.from(
-                        ruleVersion.getReasonCode(),
-                        observationSummary,
-                        detectionResult.getEvaluationCutoffAt()
-                ),
+                observationSummary,
                 evidenceOccurredAt,
                 sortOrder
         );

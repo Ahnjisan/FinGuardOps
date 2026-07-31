@@ -1,6 +1,6 @@
 package com.aifds.backend.rule.entity;
 
-import com.aifds.backend.detection.entity.RuleEvidenceObservationSummary;
+import com.aifds.backend.rule.contract.RuleV1ContractRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -211,7 +211,12 @@ public class RuleVersion {
             Instant newEffectiveFrom,
             Instant newEffectiveTo
     ) {
-        this.reasonCode = requireReasonCode(newReasonCode);
+        String validatedReasonCode = requireReasonCode(newReasonCode);
+        RuleV1ContractRegistry.requireCompatible(
+                fraudRule.getRuleCode(),
+                validatedReasonCode
+        );
+        this.reasonCode = validatedReasonCode;
         this.weight = requireWeight(newWeight);
         this.conditionDefinition = RuleConditionDefinition.from(
                 fraudRule.getRuleCode(),
@@ -228,7 +233,7 @@ public class RuleVersion {
                     "reasonCode must be an uppercase snake case code"
             );
         }
-        if (!RuleEvidenceObservationSummary.supportsReasonCode(value)) {
+        if (!RuleV1ContractRegistry.supportsReasonCode(value)) {
             throw new IllegalArgumentException(
                     "reasonCode is not supported by Rule v1 evidence"
             );

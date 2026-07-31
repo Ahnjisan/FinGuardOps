@@ -6,18 +6,21 @@
 
 - 작업 목적: `[Docs] Rule v1 탐지 계약 및 평가 정책 정의`
 - 문서 상태: Rule v1 계약 확정
-- 구현 상태: 물리 Rule 모델과 탐지 영속 모델 구현, Rule 실행 미구현
+- 구현 상태: 물리 Rule 모델, 탐지 영속 모델과 Rule v1 Evidence 최종
+  방어 검증 구현, Rule 실행 미구현
 
 현재 구현된 범위는 Spring Boot의 거래 접수·목록·상세 조회, 거래 멱등성,
 행동 이벤트 접수·Rule 평가용 내부 조회, DetectionResult·DetectionEvidence,
-FraudRule·RuleVersion PostgreSQL 영속 모델이다. 현재 거래 접수 성공 응답은
-단계적 구현 상태인 `RECEIVED`와 탐지 관련 null 값을 반환한다.
+FraudRule·RuleVersion PostgreSQL 영속 모델과 Rule v1 Evidence 저장 전
+시간·코드 교차검증이다. 이 교차검증은 PR #78·#81에서 도입한 Evidence와
+행동 이벤트 계약의 누락을 보완하는 후속 구현이다. 현재 거래 접수 성공
+응답은 단계적 구현 상태인 `RECEIVED`와 탐지 관련 null 값을 반환한다.
 
 다음 항목은 아직 구현되지 않았다.
 
 - 평가 입력과 활성 Rule 집합 Snapshot 구성
 - FastAPI Rule 실행과 Spring Boot 연동
-- 탐지 실행에 따른 DetectionResult·DetectionEvidence 생성·검증·채택
+- 탐지 실행에 따른 DetectionResult·DetectionEvidence 자동 생성·채택
 - 위험 점수·위험 등급 산출과 위험 대응
 - 사건 생성·연결
 
@@ -84,7 +87,10 @@ Rule v1에서 사용하는 행동 이벤트 유형은 다음 네 가지이다.
 
 ## 4. 평가 기준 시각과 시간 범위
 
-평가는 거래 접수 흐름에서 수행하며, 현재 거래의 `occurredAt`을 평가 cutoff `T`로 사용한다.
+평가는 거래 접수 흐름에서 수행하며, 현재 거래의 `occurredAt`을 평가 cutoff
+`T`로 사용한다. DetectionResult의 `evaluationCutoffAt`은 이 실행에서 고정한
+`T`이며 Evidence 시간 검증은 시스템 현재 시각을 조회하지 않고 이 값만
+사용한다.
 
 모든 최근 24시간 시간창은 양 끝을 포함한다.
 
@@ -93,6 +99,19 @@ T - 24시간 <= event.occurredAt <= T
 ```
 
 따라서 정확히 `T - 24시간` 또는 `T`에 발생한 이벤트는 포함한다. `T - 24시간`보다 이르거나 `T`보다 늦은 이벤트는 제외한다. 서버 접수 시각, DB `createdAt`, FastAPI 호출 시각과 평가 완료 시각을 cutoff로 대체하지 않는다.
+
+행동 Rule의 경과 초는 기존 API·DB 타임스탬프 정밀도를 유지한
+`Duration.between(eventOccurredAt, evaluationCutoffAt).getSeconds()` 값이다.
+임의의 오차 범위를 두지 않는다.
+
+```text
+elapsedSeconds = Duration.between(eventOccurredAt, T).getSeconds()
+0 <= elapsedSeconds <= windowSeconds
+```
+
+`elapsedSeconds = 0`과 `elapsedSeconds = windowSeconds`는 허용한다.
+계산값과 다른 경과 초, 음수 경과 초, `windowSeconds + 1` 이상인 경과 초와
+0 이하 시간창은 거부한다.
 
 평가 시작 시 Spring Boot가 다음 두 입력을 고정한다.
 
@@ -211,17 +230,19 @@ R004는 수취인이 고객에게 최초인지 또는 과거 거래 관계가 �
 
 Rule v1에서는 적중한 Rule마다 하나의 `RULE` Evidence를 반환한다. 초기 `reasonCode`는 해당 `ruleCode`와 같은 값을 사용한다.
 
-`ruleCode`는 FraudRule의 안정적인 논리 식별자이고 `reasonCode`는
-Evidence 설명과 typed `observationSummary` 계약을 선택하는
-RuleVersion 속성이다. 초기 문자열은 같지만 서로 다른 개념이며 DB와
-Java에서 값의 동일성을 강제하지 않는다.
+`ruleCode`는 FraudRule의 안정적인 논리 식별자이자 evaluator 선택자이고,
+`reasonCode`는 Evidence 설명과 typed `observationSummary` 표현 형식
+선택자이다. 초기 문자열은 같지만 서로 다른 개념이다. Spring Boot는 단순
+문자열 equality 대신 `ruleCode → 허용 reasonCode 집합` Registry로 다음
+Rule v1 조합만 허용한다. 이 구조는 향후 하나의 `ruleCode`에 여러
+`reasonCode`를 등록할 수 있다.
 
-| Rule ID | `reasonCode` |
-| --- | --- |
-| R001 | `TRANSFER_ABSOLUTE_HIGH_AMOUNT` |
-| R002 | `RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT` |
-| R003 | `RECENT_SECURITY_CHANGE_HIGH_AMOUNT` |
-| R004 | `RECENT_BENEFICIARY_TRANSFER` |
+| Rule ID | `ruleCode` | 허용 `reasonCode` |
+| --- | --- | --- |
+| R001 | `TRANSFER_ABSOLUTE_HIGH_AMOUNT` | `TRANSFER_ABSOLUTE_HIGH_AMOUNT` |
+| R002 | `RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT` | `RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT` |
+| R003 | `RECENT_SECURITY_CHANGE_HIGH_AMOUNT` | `RECENT_SECURITY_CHANGE_HIGH_AMOUNT` |
+| R004 | `RECENT_BENEFICIARY_TRANSFER` | `RECENT_BENEFICIARY_TRANSFER` |
 
 각 Evidence는 최소한 다음 내용을 포함해야 한다.
 
@@ -249,6 +270,21 @@ Reason Code별 `observationSummary`의 정확한 행동 ID 필드는 다음과 �
 - R003은 `passwordChangedEventId`와 `transferLimitChangedEventId`를 모두 기록한다.
 - 행동 Event ID는 canonical lowercase UUID v4와 RFC 4122 variant를 검증한다.
 - 내부 BIGINT PK, 고객·계좌·기기 원문과 행동 이벤트 전체를 복제하지 않는다.
+
+Rule별 `evidenceOccurredAt` 기준은 다음과 같다.
+
+| Rule ID | `evidenceOccurredAt` |
+| --- | --- |
+| R001 | `FinancialTransaction.occurredAt` |
+| R002 | `deviceRegisteredAt` |
+| R003 | `transferLimitChangedAt` |
+| R004 | `beneficiaryRegisteredAt` |
+
+행동 Rule Evidence의 `windowSeconds`는 양수여야 하며 참조
+RuleVersion의 `conditionDefinition.windowSeconds`와 정확히 같아야 한다.
+R001에는 `windowSeconds`를 추가하지 않는다. Spring Boot는 Evidence가
+전달한 시간창과 근거 시각을 신뢰하지 않고 저장 직전에 RuleVersion,
+DetectionResult의 `evaluationCutoffAt`, 거래 시각과 교차검증한다.
 
 적중하지 않은 Rule에는 점수와 `RULE` Evidence를 만들지 않는다. 같은 Rule의 적격 이벤트가 여러 개여도 Evidence나 점수를 중복 생성하지 않는다.
 
@@ -327,6 +363,8 @@ Evidence `ruleVersion` 문자열은 양의 `versionNumber`의 canonical decimal
 - Rule 정의·버전·활성 상태 관리와 평가 Rule 집합 고정
 - FastAPI 호출 오케스트레이션
 - FastAPI 결과의 요청 연결, Rule 버전, 점수, 위험 등급, Evidence와 완전성 검증
+- Rule v1 Evidence의 코드 조합, 경과 초, 시간창과 근거 시각을 저장 전에
+  최종 방어 검증하고 위반 시 DetectionResult와 Evidence를 함께 rollback
 - DetectionResult·DetectionEvidence 영속화와 채택
 - 거래·위험 대응·사건 상태의 업무 정합성 관리
 
@@ -391,9 +429,10 @@ FastAPI Timeout·응답 부재·검증 실패 시 Spring Boot는 임의 점수, 
 현재 PostgreSQL 애플리케이션 연동과 Flyway V1~V5 기반 거래·멱등·행동
 이벤트, DetectionResult·DetectionEvidence와 FraudRule·RuleVersion 물리
 스키마가 구현되어 있다. Rule 평가용 BehaviorEvent 내부 시간창 조회,
-Rule·Evidence typed JSON 검증, RuleVersion 기간 중복 방지와
-DetectionEvidence FK·snapshot 정합성도 구현되어 있다. 공개 행동 조회
-API, Rule 실행, FastAPI 연동과 운영 배포 환경은 구현되지 않았다.
+Rule·Evidence typed JSON 검증, RuleVersion 기간 중복 방지,
+DetectionEvidence FK·snapshot 정합성과 Evidence 시간·코드 저장 경계
+검증도 구현되어 있다. 공개 행동 조회 API, Rule 실행, FastAPI 연동과 운영
+배포 환경은 구현되지 않았다.
 
 ## 14. 후속 구현 순서
 

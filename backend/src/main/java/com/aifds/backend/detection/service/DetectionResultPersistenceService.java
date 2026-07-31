@@ -86,13 +86,10 @@ public class DetectionResultPersistenceService {
     ) {
         DetectionResult result = resultForUpdate(detectionResultId);
         List<DetectionEvidence> evidence = evidenceDrafts.stream()
-                .map(draft -> DetectionEvidence.rule(
+                .map(draft -> RuleEvidenceAssembler.assemble(
                         result,
-                        draft.displayDescription(),
                         findRuleVersion(draft.ruleVersionId()),
-                        draft.observationSummary(),
-                        draft.evidenceOccurredAt(),
-                        draft.sortOrder()
+                        draft
                 ))
                 .toList();
         evidenceRepository.saveAllAndFlush(evidence);

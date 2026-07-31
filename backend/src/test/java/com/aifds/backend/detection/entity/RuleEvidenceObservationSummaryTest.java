@@ -120,6 +120,69 @@ class RuleEvidenceObservationSummaryTest {
     }
 
     @Test
+    void acceptsZeroAndInclusiveWindowBoundaries() {
+        assertAccepted(
+                RuleEvidenceObservationSummary
+                        .RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT,
+                deviceSummary()
+                        .put(
+                                "deviceRegisteredAt",
+                                EVALUATION_CUTOFF.toString()
+                        )
+                        .put("elapsedSeconds", 0)
+                        .put("windowSeconds", 60)
+        );
+        assertAccepted(
+                RuleEvidenceObservationSummary.RECENT_BENEFICIARY_TRANSFER,
+                beneficiarySummary()
+                        .put(
+                                "beneficiaryRegisteredAt",
+                                EVALUATION_CUTOFF.minusSeconds(60).toString()
+                        )
+                        .put("elapsedSeconds", 60)
+                        .put("windowSeconds", 60)
+        );
+    }
+
+    @Test
+    void rejectsElapsedMismatchAndOneSecondBeyondWindow() {
+        assertInvalid(
+                RuleEvidenceObservationSummary
+                        .RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT,
+                deviceSummary().put("elapsedSeconds", 59)
+        );
+        assertInvalid(
+                RuleEvidenceObservationSummary.RECENT_BENEFICIARY_TRANSFER,
+                beneficiarySummary().put("elapsedSeconds", 61)
+        );
+        assertInvalid(
+                RuleEvidenceObservationSummary.RECENT_BENEFICIARY_TRANSFER,
+                beneficiarySummary()
+                        .put(
+                                "beneficiaryRegisteredAt",
+                                EVALUATION_CUTOFF.minusSeconds(61).toString()
+                        )
+                        .put("elapsedSeconds", 61)
+                        .put("windowSeconds", 60)
+        );
+    }
+
+    @Test
+    void rejectsNonPositiveBehaviorWindow() {
+        assertInvalid(
+                RuleEvidenceObservationSummary
+                        .RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT,
+                deviceSummary()
+                        .put(
+                                "deviceRegisteredAt",
+                                EVALUATION_CUTOFF.toString()
+                        )
+                        .put("elapsedSeconds", 0)
+                        .put("windowSeconds", 0)
+        );
+    }
+
+    @Test
     void rejectsBehaviorTimesAfterEvaluationCutoff() {
         assertInvalid(
                 RuleEvidenceObservationSummary
@@ -197,7 +260,11 @@ class RuleEvidenceObservationSummaryTest {
                                 "deviceRegisteredAt",
                                 "2026-07-30T10:00:00+09:00"
                         )
-                        .put("elapsedSeconds", -1)
+        );
+        assertInvalid(
+                RuleEvidenceObservationSummary
+                        .RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT,
+                deviceSummary().put("elapsedSeconds", -1)
         );
     }
 
