@@ -12,11 +12,12 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
-import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
+import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.SourceType;
+import org.hibernate.annotations.UpdateTimestamp;
 
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -120,9 +121,11 @@ public class DetectionResult {
     )
     private String analysisTraceId;
 
+    @CreationTimestamp(source = SourceType.DB)
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
+    @UpdateTimestamp(source = SourceType.DB)
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
 
@@ -211,7 +214,6 @@ public class DetectionResult {
                 "startedAt must not be null"
         );
         this.analysisStatus = DetectionAnalysisStatus.IN_PROGRESS;
-        this.updatedAt = startedAt;
     }
 
     public void complete(
@@ -245,7 +247,6 @@ public class DetectionResult {
         this.analysisCompletedAt = validatedCompletedAt;
         this.failureCode = null;
         this.analysisStatus = DetectionAnalysisStatus.COMPLETED;
-        this.updatedAt = validatedCompletedAt;
     }
 
     public void validateEvaluationCutoffConsistency() {
@@ -288,7 +289,6 @@ public class DetectionResult {
         this.analysisCompletedAt = validatedFailedAt;
         this.failureCode = failedCode;
         this.analysisStatus = DetectionAnalysisStatus.FAILED;
-        this.updatedAt = validatedFailedAt;
     }
 
     public boolean belongsTo(FinancialTransaction transaction) {
@@ -302,13 +302,6 @@ public class DetectionResult {
                 && financialTransaction.getTransactionId().equals(
                 transaction.getTransactionId()
         );
-    }
-
-    @PrePersist
-    private void initializeTimestamps() {
-        Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
-        this.createdAt = now;
-        this.updatedAt = now;
     }
 
     private void requireStatus(DetectionAnalysisStatus expected) {

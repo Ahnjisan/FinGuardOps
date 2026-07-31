@@ -52,11 +52,22 @@ Evidence에는 실제 고객·계좌·기기·수취인 식별자, 원문 IP, �
 | `analysis_completed_at` | `TIMESTAMPTZ` | nullable | 완료·실패 확정 시각 |
 | `failure_code` | `VARCHAR(64)` | nullable | 안전한 내부 실패 분류 |
 | `analysis_trace_id` | `VARCHAR(64)` | NOT NULL | 분석 당시 운영 추적값 |
-| `created_at` | `TIMESTAMPTZ` | NOT NULL | PENDING 생성 시각 |
-| `updated_at` | `TIMESTAMPTZ` | NOT NULL | 마지막 비terminal 전이 시각 |
+| `created_at` | `TIMESTAMPTZ` | NOT NULL | PENDING INSERT의 PostgreSQL transaction timestamp |
+| `updated_at` | `TIMESTAMPTZ` | NOT NULL | INSERT와 이후 UPDATE의 PostgreSQL transaction timestamp |
 
 `analysis_trace_id`는 기본 업무 응답에 노출하거나 메트릭 레이블로
 사용하지 않는다.
+
+`created_at`과 `updated_at`은 감사 시각이다. JPA는 각각
+`@CreationTimestamp(source = SourceType.DB)`와
+`@UpdateTimestamp(source = SourceType.DB)`로 PostgreSQL clock을 사용한다.
+두 컬럼은 `datetime_precision = 6`이며 신규 결과에서는 같은 INSERT
+transaction timestamp를 가진다. 이후 상태 전이에서는 `created_at`을
+유지하고 `updated_at`만 해당 UPDATE transaction timestamp로 갱신한다.
+
+`evaluation_cutoff_at`, `analysis_started_at`, `analysis_completed_at`은
+감사 시각이 아니라 평가와 분석 과정에서 입력되거나 결정되는 업무
+시각이다. DB 감사 clock으로 생성하거나 감사 시각으로 덮어쓰지 않는다.
 
 ### 3.2 상태별 필드
 
@@ -107,10 +118,15 @@ Evidence에는 실제 고객·계좌·기기·수취인 식별자, 원문 IP, �
 | `observation_summary` | `JSONB` | NOT NULL | 제한된 typed 관측 요약 |
 | `evidence_occurred_at` | `TIMESTAMPTZ` | NOT NULL | 근거 관측 시각 |
 | `sort_order` | `INTEGER` | NOT NULL | 결과 안의 안정적 정렬 순서 |
-| `created_at` | `TIMESTAMPTZ` | NOT NULL | 저장 시각 |
+| `created_at` | `TIMESTAMPTZ` | NOT NULL | INSERT의 PostgreSQL transaction timestamp |
 
 근거 유형은 `RULE`, `ML`, `EXTERNAL_RISK`, `BEHAVIOR_PATTERN`이다.
 현재 Java 생성 경로는 Rule v1 `RULE` Evidence를 우선 구현한다.
+
+`created_at`은 `@CreationTimestamp(source = SourceType.DB)`로 생성하는
+감사 시각이며 `datetime_precision = 6`이다. `evidence_occurred_at`은
+근거가 관측되거나 확정된 업무 시각이므로 입력값을 그대로 저장하고 DB
+감사 clock으로 대체하지 않는다.
 
 RULE은 `rule_code`, `rule_version`, `score_contribution`이 필수이다.
 비-RULE은 Rule 필드와 RuleVersion FK를 null로 유지한다. V3는 Rule
@@ -231,6 +247,7 @@ Evidence는 완료 트랜잭션에서 먼저 저장한 뒤 결과를 COMPLETED�
 - 양방향 컬렉션, `orphanRemoval` 없음
 - Evidence는 전용 Repository로 조회
 - 불변 컬럼 `updatable=false`
+- 감사 시각은 Hibernate DB-source timestamp annotation 사용
 - JSONB는 `JsonNode`와 `@JdbcTypeCode(SqlTypes.JSON)`
 
 ## 10. Migration과 검증
@@ -240,7 +257,7 @@ V3는 V1·V2를 수정하지 않고 두 테이블과 거래의 nullable 컬럼�
 snapshot 검증을 추가한다. 기존 거래와 Evidence는 backfill하지 않는다.
 
 PostgreSQL 17 Testcontainers에서 Migration 순서, Hibernate validation,
+감사·업무 시각의 마이크로초 정밀도와 DB transaction timestamp,
 제약·Trigger, 동시 버전 할당, RuleVersion snapshot 정합성, LAZY 관계,
-rollback과 기존 거래
-접수·멱등·Snapshot 회귀를 검증한다. H2 호환 결과를 근거로 사용하지
-않는다.
+rollback과 기존 거래 접수·멱등·Snapshot 회귀를 검증한다. H2 호환
+결과를 근거로 사용하지 않는다.

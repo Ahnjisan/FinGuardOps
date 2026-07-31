@@ -27,6 +27,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.sql.SQLException;
@@ -80,6 +82,9 @@ class DetectionPersistenceIntegrationTest
     @Autowired
     private ObjectMapper objectMapper;
 
+    @Autowired
+    private PlatformTransactionManager transactionManager;
+
     @Test
     void migrationCreatesExactColumnsConstraintsIndexesAndTriggers() {
         assertThat(flyway.info().applied()).hasSize(5);
@@ -119,6 +124,28 @@ class DetectionPersistenceIntegrationTest
                 "sort_order",
                 "created_at"
         );
+        assertThat(timestampPrecision(
+                "detection_result",
+                "evaluation_cutoff_at"
+        )).isEqualTo(6);
+        assertThat(timestampPrecision(
+                "detection_result",
+                "analysis_started_at"
+        )).isEqualTo(6);
+        assertThat(timestampPrecision(
+                "detection_result",
+                "analysis_completed_at"
+        )).isEqualTo(6);
+        assertThat(timestampPrecision("detection_result", "created_at"))
+                .isEqualTo(6);
+        assertThat(timestampPrecision("detection_result", "updated_at"))
+                .isEqualTo(6);
+        assertThat(timestampPrecision(
+                "detection_evidence",
+                "evidence_occurred_at"
+        )).isEqualTo(6);
+        assertThat(timestampPrecision("detection_evidence", "created_at"))
+                .isEqualTo(6);
         assertThat(constraints("detection_result")).containsExactlyInAnyOrder(
                 "pk_detection_result",
                 "uq_detection_result_business_id",
@@ -162,6 +189,131 @@ class DetectionPersistenceIntegrationTest
                 "tg_detection_evidence_history_guard",
                 "tg_financial_transaction_adoption_guard"
         );
+    }
+
+    @Test
+    void usesDatabaseTransactionTimestampsForDetectionAuditsAndPreservesBusinessTimes() {
+        FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
+        Instant evaluationCutoffAt = transaction.getOccurredAt();
+        Instant analysisStartedAt = evaluationCutoffAt.plusSeconds(10);
+        Instant analysisCompletedAt = evaluationCutoffAt.plusSeconds(20);
+        RuleEvidenceDraft evidenceDraft = ruleDraft(evaluationCutoffAt, 0);
+        TransactionTemplate transactions =
+                new TransactionTemplate(transactionManager);
+
+        DetectionAuditSnapshot created = transactions.execute(status -> {
+            Instant transactionTimestamp = databaseTransactionTimestamp();
+            DetectionResult saved = persistenceService.createPending(
+                    transaction.getTransactionId(),
+                    "rule-v1",
+                    "score-v1",
+                    "feature-v1",
+                    null,
+                    evaluationCutoffAt,
+                    "trace_detection_timestamp_create"
+            );
+            UUID detectionResultId = saved.getDetectionResultId();
+
+            entityManager.flush();
+            entityManager.clear();
+            DetectionResult reloaded = resultRepository
+                    .findByDetectionResultId(detectionResultId)
+                    .orElseThrow();
+
+            assertThat(saved.getCreatedAt()).isEqualTo(transactionTimestamp);
+            assertThat(saved.getUpdatedAt()).isEqualTo(transactionTimestamp);
+            assertThat(saved.getCreatedAt()).isEqualTo(saved.getUpdatedAt());
+            assertThat(reloaded.getCreatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(reloaded.getUpdatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(reloaded.getEvaluationCutoffAt())
+                    .isEqualTo(evaluationCutoffAt);
+            assertThat(reloaded.getAnalysisStartedAt()).isNull();
+            assertThat(reloaded.getAnalysisCompletedAt()).isNull();
+
+            return new DetectionAuditSnapshot(
+                    detectionResultId,
+                    reloaded.getCreatedAt()
+            );
+        });
+
+        assertThat(created).isNotNull();
+        transactions.execute(status -> {
+            Instant transactionTimestamp = databaseTransactionTimestamp();
+            persistenceService.start(
+                    created.detectionResultId(),
+                    analysisStartedAt
+            );
+
+            entityManager.flush();
+            entityManager.clear();
+            DetectionResult reloaded = resultRepository
+                    .findByDetectionResultId(created.detectionResultId())
+                    .orElseThrow();
+
+            assertThat(reloaded.getCreatedAt()).isEqualTo(created.createdAt());
+            assertThat(reloaded.getUpdatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(reloaded.getUpdatedAt())
+                    .isAfterOrEqualTo(reloaded.getCreatedAt());
+            assertThat(reloaded.getEvaluationCutoffAt())
+                    .isEqualTo(evaluationCutoffAt);
+            assertThat(reloaded.getAnalysisStartedAt())
+                    .isEqualTo(analysisStartedAt);
+            assertThat(reloaded.getAnalysisCompletedAt()).isNull();
+            return null;
+        });
+
+        transactions.execute(status -> {
+            Instant transactionTimestamp = databaseTransactionTimestamp();
+            persistenceService.complete(
+                    created.detectionResultId(),
+                    15,
+                    RiskLevel.MEDIUM,
+                    analysisCompletedAt,
+                    List.of(evidenceDraft)
+            );
+
+            entityManager.flush();
+            entityManager.clear();
+            DetectionResult reloaded = resultRepository
+                    .findByDetectionResultId(created.detectionResultId())
+                    .orElseThrow();
+            List<DetectionEvidence> evidence = evidenceRepository
+                    .findAllByDetectionResult_DetectionResultIdOrderBySortOrderAscIdAsc(
+                            created.detectionResultId()
+                    );
+
+            assertThat(reloaded.getCreatedAt()).isEqualTo(created.createdAt());
+            assertThat(reloaded.getUpdatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(reloaded.getUpdatedAt())
+                    .isAfterOrEqualTo(reloaded.getCreatedAt());
+            assertThat(reloaded.getEvaluationCutoffAt())
+                    .isEqualTo(evaluationCutoffAt);
+            assertThat(reloaded.getAnalysisStartedAt())
+                    .isEqualTo(analysisStartedAt);
+            assertThat(reloaded.getAnalysisCompletedAt())
+                    .isEqualTo(analysisCompletedAt);
+            assertThat(reloaded.getAnalysisStatus())
+                    .isEqualTo(DetectionAnalysisStatus.COMPLETED);
+            assertThat(reloaded.getRiskScore()).isEqualTo(15);
+            assertThat(reloaded.getRiskLevel()).isEqualTo(RiskLevel.MEDIUM);
+            assertThat(evidence).singleElement().satisfies(stored -> {
+                assertThat(stored.getCreatedAt())
+                        .isEqualTo(transactionTimestamp);
+                assertThat(stored.getEvidenceOccurredAt())
+                        .isEqualTo(evaluationCutoffAt);
+                assertThat(stored.getDetectionResult().getDetectionResultId())
+                        .isEqualTo(created.detectionResultId());
+                assertThat(stored.getRuleCode()).isEqualTo(
+                        RuleEvidenceObservationSummary
+                                .TRANSFER_ABSOLUTE_HIGH_AMOUNT
+                );
+            });
+            return null;
+        });
     }
 
     @Test
@@ -1080,6 +1232,31 @@ class DetectionPersistenceIntegrationTest
                 """, String.class, tableName));
     }
 
+    private int timestampPrecision(String tableName, String columnName) {
+        Integer precision = jdbcTemplate.queryForObject("""
+                SELECT datetime_precision
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = ?
+                  AND column_name = ?
+                """, Integer.class, tableName, columnName);
+        if (precision == null) {
+            throw new AssertionError("Timestamp precision was not found");
+        }
+        return precision;
+    }
+
+    private Instant databaseTransactionTimestamp() {
+        Timestamp timestamp = jdbcTemplate.queryForObject(
+                "SELECT CURRENT_TIMESTAMP",
+                Timestamp.class
+        );
+        if (timestamp == null) {
+            throw new AssertionError("Database timestamp was not returned");
+        }
+        return timestamp.toInstant();
+    }
+
     private Set<String> constraints(String tableName) {
         return Set.copyOf(jdbcTemplate.queryForList("""
                 SELECT constraint_record.conname
@@ -1141,5 +1318,11 @@ class DetectionPersistenceIntegrationTest
             current = current.getCause();
         }
         return null;
+    }
+
+    private record DetectionAuditSnapshot(
+            UUID detectionResultId,
+            Instant createdAt
+    ) {
     }
 }
