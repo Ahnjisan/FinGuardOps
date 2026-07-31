@@ -132,7 +132,7 @@ JSON·헤더 형식 검증
 - 미래 시각은 Validation 시점의 서버 시각보다 최대 5분까지 허용한다.
 - 애플리케이션 Validation은 주입 가능한 서버 Clock을 기준으로 수행한다.
 - PostgreSQL은 시간에 따라 결과가 달라지는 `CURRENT_TIMESTAMP`를 `CHECK`에 직접 사용하지 않고 `occurred_at <= created_at + INTERVAL '5 minutes'`로 방어적 검증한다.
-- `created_at`은 서버가 설정하는 최초 저장 시각이며 클라이언트 입력으로 받지 않는다.
+- `created_at`은 PostgreSQL DB clock이 설정하는 최초 저장 시각이며 클라이언트 입력으로 받지 않는다.
 - Testcontainers에서는 애플리케이션 Clock의 5분 경계와 DB `created_at` 기준의 방어 제약을 각각 검증한다.
 
 ## 5. 요청 지문 계약
@@ -322,7 +322,35 @@ FAILED
 `RECEIVED`/null 응답을 유지한다. 구체적인 제약은
 [`detection-result-schema.md`](./detection-result-schema.md)를 따른다.
 
-### 7.2 제약조건
+### 7.2 감사 시각 clock과 정밀도
+
+`financial_transaction.created_at`과 `updated_at`의 authoritative clock은
+PostgreSQL이다. JPA 저장 경로는 Hibernate의 DB-source timestamp
+generation을 사용하고, 직접 SQL INSERT는 컬럼의 `CURRENT_TIMESTAMP`
+default를 사용한다. 애플리케이션 JVM clock은 두 감사 시각을 생성하거나
+갱신하지 않는다.
+
+timestamp별 생성 정책은 다음과 같다.
+
+| 감사 timestamp | 생성·갱신 정책 |
+| --- | --- |
+| `created_at` | 최초 INSERT 트랜잭션의 PostgreSQL transaction timestamp, 이후 불변 |
+| `updated_at` | INSERT와 이후 UPDATE 트랜잭션의 PostgreSQL transaction timestamp |
+
+PostgreSQL의 `CURRENT_TIMESTAMP`는 같은 트랜잭션에서 동일한 transaction
+timestamp를 반환한다. 따라서 신규 거래의 `created_at`과 `updated_at`은
+같고, 이후 수정 트랜잭션에서는 `created_at`을 유지하면서 `updated_at`만
+해당 수정 트랜잭션의 DB timestamp로 갱신한다.
+
+V1의 무정밀도 지정 `TIMESTAMPTZ`는 PostgreSQL 기본 마이크로초 정밀도
+(`datetime_precision = 6`)를 사용한다. JPA의 `Instant`도 DB에서 생성해
+다시 읽은 이 정밀도 값을 사용한다.
+
+`occurred_at`은 외부에서 전달된 거래 발생 업무 시각이므로 감사 시각 생성
+정책의 대상이 아니다. 애플리케이션 Clock 기준 미래 5분 Validation과
+`occurred_at <= created_at + INTERVAL '5 minutes'` DB 방어 제약도 유지한다.
+
+### 7.3 제약조건
 
 | 제약 이름 | 종류 | 조건 |
 | --- | --- | --- |
@@ -626,7 +654,7 @@ CREATE INDEX ix_idempotency_record_status_updated_at
 - 상태 또는 그 밖의 가변 업무값을 갱신할 때 이전 version 일치를 `UPDATE` 조건으로 확인하고 성공한 변경에서 version을 증가시킨다.
 - version 불일치는 기존 값을 덮어쓰지 않고 `409 Conflict`와 `CONCURRENT_MODIFICATION`으로 매핑한다.
 - `version`은 탐지 결과 버전이나 업무 이력 버전이 아니다.
-- `created_at`은 변경하지 않고 모든 성공 갱신에서 `updated_at`을 서버 시각으로 갱신한다.
+- `created_at`은 변경하지 않고 모든 성공 갱신에서 `updated_at`을 PostgreSQL 수정 트랜잭션 시각으로 갱신한다.
 
 ### 11.2 멱등 요청 선점
 
@@ -640,7 +668,7 @@ CREATE INDEX ix_idempotency_record_status_updated_at
 
 ## 12. JPA 매핑 기준
 
-후속 Java 구현은 다음 매핑을 기준으로 한다.
+현재 Java 구현은 다음 매핑을 기준으로 한다.
 
 | PostgreSQL | Java/JPA 후보 | 주의사항 |
 | --- | --- | --- |
@@ -652,7 +680,7 @@ CREATE INDEX ix_idempotency_record_status_updated_at
 | `version BIGINT` | `Long` 또는 `long` + `@Version` | 최초 0, 업무 버전과 분리 |
 | `JSONB` | 승인된 구조화 응답 snapshot | 자유 형식 업무 입력 저장소로 사용하지 않음 |
 
-이 표는 Java 코드 변경 승인이 아니며 이번 작업에서는 Java 파일을 수정하지 않는다.
+Java 매핑 변경은 이 물리 DB 계약과 함께 검증한다.
 
 ## 13. Flyway 변경 원칙
 
@@ -685,6 +713,10 @@ CREATE INDEX ix_idempotency_record_status_updated_at
 - `KRW`는 저장되고 다른 통화는 거부된다.
 - 애플리케이션 Clock 기준 4분 미래는 허용되고 6분 미래는 Validation에서 거부된다.
 - DB에서는 `created_at`보다 4분 뒤인 `occurred_at`은 허용되고 6분 뒤인 값은 Check 위반이다.
+- `created_at`, `updated_at`의 `datetime_precision`은 6이다.
+- JPA 신규 저장의 두 감사 시각은 같은 트랜잭션의 PostgreSQL `CURRENT_TIMESTAMP`와 정확히 일치한다.
+- 별도 JPA 수정 트랜잭션에서 `created_at`은 불변이고 `updated_at`은 해당 트랜잭션의 PostgreSQL `CURRENT_TIMESTAMP`와 정확히 일치한다.
+- DB default로 직접 생성한 행을 JPA로 수정해도 `updated_at >= created_at`을 유지한다.
 - 빈 값과 앞뒤 공백이 있는 필수 참조값은 거부된다.
 - `VALIDATION_FAILED` 저장은 거부된다.
 - `version` 기본값은 0이고 음수는 거부된다.
