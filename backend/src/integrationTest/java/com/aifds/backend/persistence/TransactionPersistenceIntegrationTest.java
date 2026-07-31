@@ -1,11 +1,15 @@
 package com.aifds.backend.persistence;
 
+import com.aifds.backend.detection.entity.DetectionResult;
+import com.aifds.backend.detection.entity.RiskLevel;
 import com.aifds.backend.idempotency.entity.IdempotencyProcessingStatus;
 import com.aifds.backend.idempotency.entity.IdempotencyRecord;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
+import com.aifds.backend.transaction.entity.RiskResponseOutcome;
 import com.aifds.backend.transaction.entity.TransactionChannel;
 import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
 import com.aifds.backend.transaction.entity.TransactionType;
+import com.aifds.backend.transaction.repository.FinancialTransactionRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.EntityManager;
@@ -17,7 +21,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.sql.SQLException;
@@ -62,7 +69,13 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
     private EntityManager entityManager;
 
     @Autowired
+    private FinancialTransactionRepository financialTransactionRepository;
+
+    @Autowired
     private ObjectMapper objectMapper;
+
+    @Autowired
+    private PlatformTransactionManager transactionManager;
 
     @Test
     void appliesAllMigrationsToEmptyPostgresql() {
@@ -131,7 +144,11 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
         assertColumn(financialColumns, "risk_response_outcome", "character varying", "varchar", true);
         assertColumn(financialColumns, "version", "bigint", "int8", false);
         assertColumn(financialColumns, "created_at", "timestamp with time zone", "timestamptz", false);
+        assertThat(((Number) financialColumns.get("created_at")
+                .get("datetime_precision")).intValue()).isEqualTo(6);
         assertColumn(financialColumns, "updated_at", "timestamp with time zone", "timestamptz", false);
+        assertThat(((Number) financialColumns.get("updated_at")
+                .get("datetime_precision")).intValue()).isEqualTo(6);
 
         assertThat(idempotencyColumns.keySet()).containsExactlyInAnyOrder(
                 "id",
@@ -697,6 +714,221 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
     }
 
     @Test
+    void usesDatabaseTransactionTimestampForFinancialTransactionAuditTimestamps() {
+        TransactionTemplate transactions =
+                new TransactionTemplate(transactionManager);
+
+        FinancialTransactionTimestampSnapshot created =
+                transactions.execute(status -> {
+                    Instant transactionTimestamp =
+                            databaseTransactionTimestamp();
+                    FinancialTransaction saved =
+                            financialTransactionRepository.saveAndFlush(
+                                    transaction(
+                                            transactionTimestamp.minusSeconds(60),
+                                            "jpa_clock"
+                                    )
+                            );
+                    entityManager.refresh(saved);
+                    UUID transactionId = saved.getTransactionId();
+
+                    assertThat(saved.getCreatedAt())
+                            .isEqualTo(transactionTimestamp);
+                    assertThat(saved.getUpdatedAt())
+                            .isEqualTo(transactionTimestamp);
+                    assertThat(saved.getUpdatedAt())
+                            .isEqualTo(saved.getCreatedAt());
+
+                    entityManager.flush();
+                    entityManager.clear();
+                    FinancialTransaction reloaded =
+                            financialTransactionRepository
+                                    .findByTransactionId(transactionId)
+                                    .orElseThrow();
+
+                    assertThat(reloaded.getCreatedAt())
+                            .isEqualTo(transactionTimestamp);
+                    assertThat(reloaded.getUpdatedAt())
+                            .isEqualTo(transactionTimestamp);
+
+                    return new FinancialTransactionTimestampSnapshot(
+                            transactionId,
+                            reloaded.getCreatedAt()
+                    );
+                });
+
+        assertThat(created).isNotNull();
+        transactions.execute(status -> {
+            Instant transactionTimestamp = databaseTransactionTimestamp();
+            FinancialTransaction transaction =
+                    financialTransactionRepository
+                            .findByTransactionId(created.transactionId())
+                            .orElseThrow();
+            DetectionResult detectionResult =
+                    persistCompletedDetectionResult(transaction);
+            transaction.adoptDetectionResult(detectionResult);
+            FinancialTransaction saved =
+                    financialTransactionRepository.saveAndFlush(transaction);
+            entityManager.refresh(saved);
+
+            assertThat(saved.getCreatedAt())
+                    .isEqualTo(created.createdAt());
+            assertThat(saved.getUpdatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(saved.getUpdatedAt())
+                    .isAfterOrEqualTo(saved.getCreatedAt());
+
+            entityManager.flush();
+            entityManager.clear();
+            FinancialTransaction reloaded =
+                    financialTransactionRepository
+                            .findByTransactionId(created.transactionId())
+                            .orElseThrow();
+
+            assertThat(reloaded.getCreatedAt())
+                    .isEqualTo(created.createdAt());
+            assertThat(reloaded.getUpdatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(reloaded.getUpdatedAt())
+                    .isAfterOrEqualTo(reloaded.getCreatedAt());
+            return null;
+        });
+    }
+
+    @Test
+    void keepsDatabaseDefaultTimestampOrderWhenJpaUpdatesDirectSqlRow() {
+        TransactionTemplate transactions =
+                new TransactionTemplate(transactionManager);
+
+        FinancialTransactionTimestampSnapshot inserted =
+                transactions.execute(status -> {
+                    Instant transactionTimestamp =
+                            databaseTransactionTimestamp();
+                    UUID transactionId = UUID.randomUUID();
+                    insertAtmTransaction(
+                            transactionId,
+                            new BigDecimal("1000")
+                    );
+
+                    entityManager.clear();
+                    FinancialTransaction reloaded =
+                            financialTransactionRepository
+                                    .findByTransactionId(transactionId)
+                                    .orElseThrow();
+
+                    assertThat(reloaded.getCreatedAt())
+                            .isEqualTo(transactionTimestamp);
+                    assertThat(reloaded.getUpdatedAt())
+                            .isEqualTo(transactionTimestamp);
+
+                    return new FinancialTransactionTimestampSnapshot(
+                            transactionId,
+                            reloaded.getCreatedAt()
+                    );
+                });
+
+        assertThat(inserted).isNotNull();
+        transactions.execute(status -> {
+            Instant transactionTimestamp = databaseTransactionTimestamp();
+            FinancialTransaction transaction =
+                    financialTransactionRepository
+                            .findByTransactionId(inserted.transactionId())
+                            .orElseThrow();
+            DetectionResult detectionResult =
+                    persistCompletedDetectionResult(transaction);
+            transaction.adoptDetectionResult(detectionResult);
+            financialTransactionRepository.saveAndFlush(transaction);
+
+            entityManager.clear();
+            FinancialTransaction reloaded =
+                    financialTransactionRepository
+                            .findByTransactionId(inserted.transactionId())
+                            .orElseThrow();
+
+            assertThat(reloaded.getCreatedAt())
+                    .isEqualTo(inserted.createdAt());
+            assertThat(reloaded.getUpdatedAt())
+                    .isEqualTo(transactionTimestamp);
+            assertThat(reloaded.getUpdatedAt())
+                    .isAfterOrEqualTo(reloaded.getCreatedAt());
+            return null;
+        });
+    }
+
+    @Test
+    void rejectsActualStaleFinancialTransactionVersionUpdate() {
+        TransactionTemplate transactions =
+                new TransactionTemplate(transactionManager);
+
+        UUID transactionId = transactions.execute(status -> {
+            Instant transactionTimestamp = databaseTransactionTimestamp();
+            FinancialTransaction transaction =
+                    financialTransactionRepository.saveAndFlush(
+                            transaction(
+                                    transactionTimestamp.minusSeconds(60),
+                                    "optimistic_lock"
+                            )
+                    );
+            DetectionResult detectionResult =
+                    persistCompletedDetectionResult(transaction);
+            transaction.adoptDetectionResult(detectionResult);
+            financialTransactionRepository.saveAndFlush(transaction);
+            return transaction.getTransactionId();
+        });
+
+        assertThat(transactionId).isNotNull();
+        FinancialTransaction first = transactions.execute(status ->
+                financialTransactionRepository
+                        .findByTransactionId(transactionId)
+                        .orElseThrow()
+        );
+        FinancialTransaction stale = transactions.execute(status ->
+                financialTransactionRepository
+                        .findByTransactionId(transactionId)
+                        .orElseThrow()
+        );
+
+        assertThat(first).isNotNull();
+        assertThat(stale).isNotNull();
+        assertThat(first).isNotSameAs(stale);
+        assertThat(first.getVersion()).isEqualTo(stale.getVersion());
+        long originalVersion = first.getVersion();
+        Instant createdAt = first.getCreatedAt();
+
+        first.applyRiskResponseOutcome(
+                RiskResponseOutcome.APPROVED_WITH_MONITORING
+        );
+        stale.applyRiskResponseOutcome(
+                RiskResponseOutcome.APPROVED_WITH_MONITORING
+        );
+        transactions.execute(status -> {
+            financialTransactionRepository.saveAndFlush(first);
+            return null;
+        });
+
+        assertThatThrownBy(() -> transactions.execute(status -> {
+            financialTransactionRepository.saveAndFlush(stale);
+            return null;
+        })).isInstanceOf(
+                ObjectOptimisticLockingFailureException.class
+        );
+
+        FinancialTransaction persisted = transactions.execute(status ->
+                financialTransactionRepository
+                        .findByTransactionId(transactionId)
+                        .orElseThrow()
+        );
+
+        assertThat(persisted).isNotNull();
+        assertThat(persisted.getRiskResponseOutcome())
+                .isEqualTo(RiskResponseOutcome.APPROVED_WITH_MONITORING);
+        assertThat(persisted.getVersion()).isEqualTo(originalVersion + 1);
+        assertThat(persisted.getCreatedAt()).isEqualTo(createdAt);
+        assertThat(persisted.getUpdatedAt())
+                .isAfterOrEqualTo(persisted.getCreatedAt());
+    }
+
+    @Test
     @Transactional
     void persistsAndLoadsEntitiesThroughEntityManager() {
         UUID transactionId = UUID.randomUUID();
@@ -756,6 +988,60 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
                 .isEqualTo(loadedIdempotency.getCreatedAt().plus(24, ChronoUnit.HOURS));
         assertThat(loadedIdempotency.getFinishedAt())
                 .isAfterOrEqualTo(loadedIdempotency.getCreatedAt());
+    }
+
+    private FinancialTransaction transaction(
+            Instant occurredAt,
+            String referenceSuffix
+    ) {
+        return new FinancialTransaction(
+                UUID.randomUUID(),
+                TransactionType.ACCOUNT_TRANSFER,
+                new BigDecimal("1250000"),
+                "KRW",
+                occurredAt,
+                "cust_ref_" + referenceSuffix,
+                "acct_ref_sender_" + referenceSuffix,
+                "acct_ref_recipient_" + referenceSuffix,
+                TransactionChannel.MOBILE_BANKING,
+                "device_ref_" + referenceSuffix
+        );
+    }
+
+    private DetectionResult persistCompletedDetectionResult(
+            FinancialTransaction transaction
+    ) {
+        Instant startedAt = transaction.getOccurredAt().plusSeconds(1);
+        DetectionResult result = DetectionResult.pending(
+                transaction,
+                1,
+                "rule-v1",
+                "score-v1",
+                "feature-v1",
+                null,
+                transaction.getOccurredAt(),
+                "trace_financial_transaction_" + UUID.randomUUID()
+        );
+        result.start(startedAt);
+        result.complete(
+                50,
+                RiskLevel.MEDIUM,
+                startedAt.plusSeconds(1)
+        );
+        entityManager.persist(result);
+        entityManager.flush();
+        return result;
+    }
+
+    private Instant databaseTransactionTimestamp() {
+        Timestamp timestamp = jdbcTemplate.queryForObject(
+                "SELECT CURRENT_TIMESTAMP",
+                Timestamp.class
+        );
+        if (timestamp == null) {
+            throw new AssertionError("Database timestamp was not returned");
+        }
+        return timestamp.toInstant();
     }
 
     private Set<String> tableNames() {
@@ -1001,5 +1287,11 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
             current = current.getCause();
         }
         return current;
+    }
+
+    private record FinancialTransactionTimestampSnapshot(
+            UUID transactionId,
+            Instant createdAt
+    ) {
     }
 }

@@ -14,10 +14,11 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
-import jakarta.persistence.PrePersist;
-import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
+import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.SourceType;
+import org.hibernate.annotations.UpdateTimestamp;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -91,9 +92,11 @@ public class FinancialTransaction {
     @Column(name = "version", nullable = false)
     private long version;
 
+    @CreationTimestamp(source = SourceType.DB)
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
+    @UpdateTimestamp(source = SourceType.DB)
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
 
@@ -123,18 +126,6 @@ public class FinancialTransaction {
         this.channel = channel;
         this.deviceRef = deviceRef;
         this.processingStatus = TransactionProcessingStatus.RECEIVED;
-    }
-
-    @PrePersist
-    private void initializeTimestamps() {
-        Instant now = Instant.now();
-        this.createdAt = now;
-        this.updatedAt = now;
-    }
-
-    @PreUpdate
-    private void updateTimestamp() {
-        this.updatedAt = Instant.now();
     }
 
     public void adoptDetectionResult(DetectionResult detectionResult) {
