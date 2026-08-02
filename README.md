@@ -185,7 +185,7 @@ CONFIRMED_FRAUD
 
 처음부터 전체 시스템을 마이크로서비스로 분리하지 않습니다.
 
-아래 구성은 목표 아키텍처를 포함합니다. 현재는 Spring Boot의 거래·행동 이벤트 접수와 PostgreSQL 애플리케이션 연동까지 구현되었고, FastAPI·Rule 실행·DetectionResult·운영 배포 환경은 아직 구현되지 않았습니다.
+아래 구성은 목표 아키텍처를 포함합니다. 현재는 Spring Boot의 거래·행동 이벤트 접수와 PostgreSQL 애플리케이션 연동, FastAPI AI Service의 초기 실행·Health 기반까지 구현되었습니다. Rule 실행·Spring Boot와 FastAPI 분석 연동·DetectionResult 생성·운영 배포 환경은 아직 구현되지 않았습니다.
 
 ```text
 React·TypeScript
@@ -254,11 +254,10 @@ Kafka
 
 ### AI Service
 
-* Python
-* FastAPI
-* Rule Engine
-* Machine Learning
-* Generative AI API
+* Python 3.12
+* FastAPI·Pydantic v2
+* uv·pytest·Ruff
+* Rule Engine, Machine Learning, Generative AI API는 후속 구현
 
 ### Data
 
@@ -318,6 +317,8 @@ Kafka
 * 9개 유형 행동 이벤트 접수와 `eventId` 자연 멱등성 구현
 * 금융거래·멱등성·행동 이벤트 PostgreSQL 애플리케이션 연동과 Flyway 스키마 구현
 * Rule v1 탐지 계약과 평가 정책 문서화
+* FastAPI AI Service 초기 실행·설정·Health API와 테스트 기반 구성
+* Backend와 AI Service 전용 GitHub Actions CI 구성
 
 현재 PostgreSQL 연동은 애플리케이션 코드와 Testcontainers 검증 범위입니다. 운영 PostgreSQL, Docker Compose, Kubernetes와 AWS 배포 환경이 구현되었다는 의미는 아닙니다. 거래 접수 성공 응답도 현재는 단계적 구현 상태인 `RECEIVED`와 탐지 관련 null 값을 반환하며, 최종 동기 분석 목표는 [`ADR-003`](docs/07-decisions/ADR-003-transaction-processing-boundary.md)을 유지합니다.
 
@@ -344,7 +345,7 @@ Kafka
 * Docker Compose
 * Kafka 비동기 처리
 * React 관리자 화면
-* GitHub Actions CI/CD
+* 이미지 빌드·배포를 포함한 GitHub Actions CI/CD 확장
 * Kubernetes·AWS 배포
 * Observability
 * 장애·비용 실험

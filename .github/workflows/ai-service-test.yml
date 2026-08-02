@@ -1,0 +1,42 @@
+name: AI Service Tests
+
+on:
+  push:
+    paths:
+      - "ai-service/**"
+      - ".github/workflows/ai-service-test.yml"
+  pull_request:
+    paths:
+      - "ai-service/**"
+      - ".github/workflows/ai-service-test.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint, format, and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: ai-service
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@v8
+        with:
+          version: "0.12.1"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "ai-service/uv.lock"
+      - name: Install locked dependencies
+        run: uv sync --locked
+      - name: Run Ruff lint
+        run: uv run --locked ruff check .
+      - name: Check Ruff formatting
+        run: uv run --locked ruff format --check .
+      - name: Run tests
+        run: uv run --locked pytest
