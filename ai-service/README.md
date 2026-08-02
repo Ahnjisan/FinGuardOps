@@ -1,6 +1,6 @@
 # FinGuardOps AI Service
 
-FinGuardOps의 Feature·Rule·ML 및 AI 리포트 계산 책임을 담당할 FastAPI 서비스의 초기 개발 기반이다. 현재 구현 범위는 애플리케이션 설정과 Health API까지이며, Rule 실행·점수 계산·Spring Boot 연동·외부 시스템 연결은 포함하지 않는다.
+FinGuardOps의 Feature·Rule·ML 및 AI 리포트 계산 책임을 담당할 FastAPI 서비스이다. 현재 구현 범위는 애플리케이션 설정, Health API와 R001~R004 Rule v1 개별 순수 evaluator이다. Rule Registry·전체 실행 오케스트레이션·점수 계산·Spring Boot 연동·외부 시스템 연결은 포함하지 않는다.
 
 ## 개발 환경
 
@@ -61,3 +61,15 @@ uv run --locked pytest --cov=finguardops_ai --cov-report=term-missing
 환경 설정은 `finguardops_ai.core.config`에서 관리하며 환경 변수 접두사는 `FINGUARDOPS_AI_`이다. 현재 외부 시스템 접속 설정은 없으며 애플리케이션 import 시 네트워크나 저장소에 연결하지 않는다.
 
 시각을 추가하는 후속 구현은 timezone-aware UTC를 사용한다. API Key, Token, Password, DB 접속 정보, 개인정보 및 금융 식별자 원문은 코드·문서·로그에 기록하지 않는다.
+
+## Rule v1 evaluator
+
+`finguardops_ai.rules.v1`은 공식 Rule v1 계약의 R001~R004를 외부 시스템과 애플리케이션 전역 상태에 의존하지 않는 개별 evaluator로 제공한다.
+
+- 금액은 `Decimal`을 사용한다.
+- 거래와 행동 시각은 timezone-aware UTC만 허용한다.
+- 행동 시간창은 거래 `occurredAt` 기준 `[T-86400초, T]` 양끝을 포함한다.
+- 입력 모델과 행동 이벤트 모음은 불변이다.
+- 결과에는 Rule ID, 적중 여부와 판정에 사용한 최소 내부 사실만 포함한다.
+
+Registry, 외부 API Evidence 표현, Reason Code 응답, 점수 합산과 위험 등급 계산은 후속 범위이다.
