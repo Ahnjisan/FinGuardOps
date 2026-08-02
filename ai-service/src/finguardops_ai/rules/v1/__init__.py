@@ -17,19 +17,33 @@ from finguardops_ai.rules.v1.r001 import evaluate_r001
 from finguardops_ai.rules.v1.r002 import evaluate_r002
 from finguardops_ai.rules.v1.r003 import evaluate_r003
 from finguardops_ai.rules.v1.r004 import evaluate_r004
+from finguardops_ai.rules.v1.registry import (
+    DuplicateRuleIdError,
+    RuleEvaluator,
+    RuleEvaluatorRegistry,
+    RuleEvaluatorResult,
+    UnsupportedRuleIdError,
+    create_default_rule_evaluator_registry,
+)
 
 __all__ = [
     "BehaviorEventSnapshot",
     "BehaviorEventType",
+    "DuplicateRuleIdError",
     "R001Facts",
     "R002Facts",
     "R003Facts",
     "R004Facts",
     "RuleEvaluationInput",
     "RuleEvaluationResult",
+    "RuleEvaluator",
+    "RuleEvaluatorRegistry",
+    "RuleEvaluatorResult",
     "RuleId",
     "TransactionSnapshot",
     "TransactionType",
+    "UnsupportedRuleIdError",
+    "create_default_rule_evaluator_registry",
     "evaluate_r001",
     "evaluate_r002",
     "evaluate_r003",
