@@ -74,4 +74,15 @@ RuleEvaluatorRegistry의 RuleId는 AI Service가 구현한 evaluator capability�
 - 입력 모델과 행동 이벤트 모음은 불변이다.
 - 결과에는 Rule ID, 적중 여부와 판정에 사용한 최소 내부 사실만 포함한다.
 
-외부 API Evidence 표현, Reason Code 응답, 전체 Rule 실행, 점수 합산과 위험 등급 계산은 후속 범위이다.
+내부 Rule 실행 오케스트레이션의 책임, 입력·출력, validation, 순차 실행과
+fail-fast 정책은
+[Rule 실행 오케스트레이션 내부 계약](../docs/01-requirements/rule-execution-orchestration-contract.md)에
+문서로 정의되어 있다.
+
+- Rule 실행 오케스트레이션 계약: 문서 정의 완료
+- `RuleExecutionOrchestrator` Python 구현: 미구현
+- 점수 합산·위험 등급·Evidence 변환: 후속 범위
+
+외부 API Evidence 표현, Reason Code 응답, 전체 Rule 실행 구현과 Spring Boot
+연동도 후속 범위이다. 계약 문서가 존재한다는 사실을 구현 완료로 간주하지
+않는다.
