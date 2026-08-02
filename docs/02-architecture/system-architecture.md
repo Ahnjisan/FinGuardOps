@@ -35,6 +35,8 @@
 - 9개 유형의 행동 이벤트 접수, 거래 정합성 검증과 `eventId` 자연 멱등성
 - 공통 오류 응답과 `TraceIdFilter`
 - Issue 및 Pull Request 템플릿
+- FastAPI AI Service의 Python 3.12·uv 프로젝트, 애플리케이션 진입점과 Health API
+- Backend와 AI Service 전용 GitHub Actions 테스트 Workflow
 
 현재 백엔드는 Health Check, 거래 접수·조회, 행동 이벤트 접수와 내부 Rule
 평가용 조회를 구현한다. 거래·멱등·행동 이벤트,
@@ -60,10 +62,10 @@ Rule 실행, 탐지 결과 자동 생성·채택, 사건, 감사와 AI 운영 �
 
 ### 2.3 구현되지 않음
 
-- `ai-service/`: 역할 규칙과 자리표시자만 있으며 FastAPI 구현 없음
+- `ai-service/`: 초기 실행·설정·Health API 기반만 구현되었으며 Rule·ML·AI 리포트와 Spring Boot 연동 없음
 - `frontend/`: 역할 규칙과 자리표시자만 있으며 React 구현 없음
 - `infra/`: 자리표시자만 있으며 Docker Compose 등 인프라 구현 없음
-- `.github/`: Issue·PR 템플릿만 있으며 GitHub Actions Workflow 없음
+- `.github/`: Issue·PR 템플릿과 Backend·AI Service 테스트 Workflow가 있으며 이미지 빌드·배포 자동화 없음
 - 운영 PostgreSQL 배포 환경, Redis와 Kafka 연동
 - External Risk Mock과 LLM Provider 연동
 - Prometheus, Grafana, Loki와 분산 추적 구성
@@ -401,7 +403,7 @@ LLM Provider는 외부 생성 서비스이며 FinGuardOps 업무 데이터 저�
 
 GitHub Actions는 반복 가능한 빌드·테스트·이미지 생성과 배포 이력 연결을 위한 후보이다. Kubernetes는 복구, Rolling Update, 리소스 제한, Config·Secret 분리와 서비스별 확장이 필요할 때 도입한다. AWS는 로컬·컨테이너 환경에서 검증된 구성을 클라우드에서 운영하기 위한 후속 배포 대상이다.
 
-현재 `.github`에는 Issue·PR 템플릿만 있으며 GitHub Actions, Kubernetes와 AWS 구성은 구현되지 않았다.
+현재 `.github`에는 Issue·PR 템플릿과 Backend·AI Service 테스트 Workflow가 있다. 이미지 빌드·배포 자동화, Kubernetes와 AWS 구성은 구현되지 않았다.
 
 ## 8. Spring Boot 논리 모듈
 
@@ -763,6 +765,8 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 - 거래·멱등·행동 이벤트의 PostgreSQL 애플리케이션 연동과 Flyway 스키마
 - 단계적 거래 접수 `RECEIVED`/null 응답
 - 저장소 역할 규칙과 GitHub Issue·PR 템플릿
+- FastAPI AI Service 초기 실행·설정·Health API와 테스트 기반
+- Backend와 AI Service 전용 GitHub Actions 테스트 Workflow
 
 ### 18.2 문서로 정의됨
 
@@ -789,7 +793,7 @@ Redis의 최초 적용 시점은 실제 캐시 필요와 원본 호출 부하를
 - Redis 캐시와 재생성 가능한 집계
 - Kafka 비동기 처리
 - React 전체 업무·운영 화면
-- GitHub Actions CI/CD
+- 이미지 빌드·배포를 포함한 GitHub Actions CI/CD 확장
 - Kubernetes
 - AWS
 - Prometheus·Grafana·Loki·Tracing
