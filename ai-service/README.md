@@ -1,6 +1,6 @@
 # FinGuardOps AI Service
 
-FinGuardOps의 Feature·Rule·ML 및 AI 리포트 계산 책임을 담당할 FastAPI 서비스이다. 현재 구현 범위는 애플리케이션 설정, Health API, R001~R004 Rule v1 개별 순수 evaluator와 불변 RuleEvaluatorRegistry이다. 전체 실행 오케스트레이션·점수 계산·Spring Boot 연동·외부 시스템 연결은 포함하지 않는다.
+FinGuardOps의 Feature·Rule·ML 및 AI 리포트 계산 책임을 담당할 FastAPI 서비스이다. 현재 구현 범위는 애플리케이션 설정, Health API, R001~R004 Rule v1 개별 순수 evaluator, 불변 RuleEvaluatorRegistry와 ordered raw evaluator 실행을 담당하는 RuleExecutionOrchestrator이다. RuleVersion 연결·점수 계산·Spring Boot 연동·외부 시스템 연결은 포함하지 않는다.
 
 ## 개발 환경
 
@@ -80,9 +80,9 @@ fail-fast 정책은
 문서로 정의되어 있다.
 
 - Rule 실행 오케스트레이션 계약: 문서 정의 완료
-- `RuleExecutionOrchestrator` Python 구현: 미구현
+- `RuleExecutionOrchestrator`: 구현 완료
 - 점수 합산·위험 등급·Evidence 변환: 후속 범위
 
-외부 API Evidence 표현, Reason Code 응답, 전체 Rule 실행 구현과 Spring Boot
-연동도 후속 범위이다. 계약 문서가 존재한다는 사실을 구현 완료로 간주하지
-않는다.
+raw evaluator orchestration은 구현되었지만 RuleVersion 연결, 점수 산정, 위험
+등급, Evidence·Reason Code 변환, 외부 API와 Spring Boot 연동은 후속 범위이다.
+계약 문서가 존재한다는 사실만으로 후속 기능까지 구현된 것으로 간주하지 않는다.

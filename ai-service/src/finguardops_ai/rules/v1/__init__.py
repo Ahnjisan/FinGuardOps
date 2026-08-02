@@ -13,6 +13,11 @@ from finguardops_ai.rules.v1.models import (
     TransactionSnapshot,
     TransactionType,
 )
+from finguardops_ai.rules.v1.orchestrator import (
+    InvalidRuleExecutionPlanError,
+    RuleEvaluatorResultMismatchError,
+    RuleExecutionOrchestrator,
+)
 from finguardops_ai.rules.v1.r001 import evaluate_r001
 from finguardops_ai.rules.v1.r002 import evaluate_r002
 from finguardops_ai.rules.v1.r003 import evaluate_r003
@@ -30,6 +35,7 @@ __all__ = [
     "BehaviorEventSnapshot",
     "BehaviorEventType",
     "DuplicateRuleIdError",
+    "InvalidRuleExecutionPlanError",
     "R001Facts",
     "R002Facts",
     "R003Facts",
@@ -38,7 +44,9 @@ __all__ = [
     "RuleEvaluationResult",
     "RuleEvaluator",
     "RuleEvaluatorRegistry",
+    "RuleEvaluatorResultMismatchError",
     "RuleEvaluatorResult",
+    "RuleExecutionOrchestrator",
     "RuleId",
     "TransactionSnapshot",
     "TransactionType",
