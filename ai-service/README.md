@@ -1,6 +1,6 @@
 # FinGuardOps AI Service
 
-FinGuardOps의 Feature·Rule·ML 및 AI 리포트 계산 책임을 담당할 FastAPI 서비스이다. 현재 구현 범위는 애플리케이션 설정, Health API, R001~R004 Rule v1 개별 순수 evaluator, 불변 RuleEvaluatorRegistry와 ordered raw evaluator 실행을 담당하는 RuleExecutionOrchestrator이다. RuleVersion 연결·점수 계산·Spring Boot 연동·외부 시스템 연결은 포함하지 않는다.
+FinGuardOps의 Feature·Rule·ML 및 AI 리포트 계산 책임을 담당할 FastAPI 서비스이다. 현재 구현 범위는 애플리케이션 설정, Health API, R001~R004 Rule v1 개별 순수 evaluator, 불변 RuleEvaluatorRegistry와 ordered raw evaluator 실행을 담당하는 RuleExecutionOrchestrator이다. RuleVersion 기반 실행 계획은 계약만 정의되어 있으며 설정 전달·점수 계산·Spring Boot 연동·외부 시스템 연결은 구현되지 않았다.
 
 ## 개발 환경
 
@@ -81,8 +81,13 @@ fail-fast 정책은
 
 - Rule 실행 오케스트레이션 계약: 문서 정의 완료
 - `RuleExecutionOrchestrator`: 구현 완료
-- 점수 합산·위험 등급·Evidence 변환: 후속 범위
+- [RuleVersion 기반 Rule 실행 계획 계약](../docs/01-requirements/rule-execution-plan-contract.md):
+  문서 정의 완료, 실행 계획 생성 구현은 후속 범위
+- RuleVersion 설정 전달, 점수 합산·위험 등급·Evidence·DetectionResult:
+  후속 범위
 
-raw evaluator orchestration은 구현되었지만 RuleVersion 연결, 점수 산정, 위험
-등급, Evidence·Reason Code 변환, 외부 API와 Spring Boot 연동은 후속 범위이다.
-계약 문서가 존재한다는 사실만으로 후속 기능까지 구현된 것으로 간주하지 않는다.
+개별 evaluator·Registry와 raw evaluator orchestration은 구현되었지만
+RuleVersion snapshot 수신과 plan 생성, typed 설정 전달, 점수 산정, 위험
+등급, Evidence·Reason Code 변환, DetectionResult, 외부 API와 Spring Boot
+연동은 후속 범위이다. 계약 문서가 존재한다는 사실만으로 후속 기능까지
+구현된 것으로 간주하지 않는다.
