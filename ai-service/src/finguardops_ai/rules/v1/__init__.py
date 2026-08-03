@@ -47,6 +47,12 @@ from finguardops_ai.rules.v1.registry import (
     UnsupportedRuleIdError,
     create_default_rule_evaluator_registry,
 )
+from finguardops_ai.rules.v1.runner import (
+    PlannedRuleResult,
+    RuleExecutionPlanRunner,
+    RuleExecutionPlanRunnerError,
+    RuleExecutionPlanRunnerErrorCategory,
+)
 
 __all__ = [
     "BehaviorEventSnapshot",
@@ -54,6 +60,7 @@ __all__ = [
     "DuplicateRuleIdError",
     "FraudRuleLifecycleStatus",
     "InvalidRuleExecutionPlanError",
+    "PlannedRuleResult",
     "R001ConditionDefinition",
     "R001Facts",
     "R002ConditionDefinition",
@@ -74,6 +81,9 @@ __all__ = [
     "RuleExecutionPlanError",
     "RuleExecutionPlanErrorCategory",
     "RuleExecutionPlanItem",
+    "RuleExecutionPlanRunner",
+    "RuleExecutionPlanRunnerError",
+    "RuleExecutionPlanRunnerErrorCategory",
     "RuleExecutionOrchestrator",
     "RuleId",
     "RuleVersionSnapshot",
