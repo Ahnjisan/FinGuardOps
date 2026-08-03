@@ -4,16 +4,23 @@
 
 이 문서는 [GitHub Issue #108](https://github.com/Ahnjisan/FinGuardOps/issues/108)에
 따라 Spring Boot가 고정한 활성 RuleVersion 업무 snapshot을 FastAPI 내부의
-결정적인 ordered `RuleExecutionPlan`으로 변환하는 계약을 정의한다.
+결정적인 ordered `RuleExecutionPlan`으로 변환하는 계약을 정의하고,
+[GitHub Issue #112](https://github.com/Ahnjisan/FinGuardOps/issues/112)에 따라
+검증된 plan을 실행하고 raw evaluator 결과와 결합하는 내부 계약을 함께
+정의한다.
 
 이 문서는 다음 연결 경계를 다룬다.
 
 ```text
 Spring Boot의 활성 RuleVersion 업무 snapshot
-→ FastAPI 실행 계획 생성 계층의 mapping·dependency·설정·capability 검증
+→ RuleExecutionPlanBuilder의 mapping·dependency·설정·capability 검증
 → 불변 ordered RuleExecutionPlan
-→ 기존 RuleExecutionOrchestrator
-→ ordered raw RuleEvaluationResult tuple
+→ RuleExecutionPlanRunner의 plan·입력 실행 정합성 검증
+→ 기존 RuleExecutionOrchestrator의 evaluator resolve·순차 실행
+→ ordered raw RuleEvaluatorResult tuple
+→ RuleExecutionPlanRunner의 strict index 결합
+→ ordered PlannedRuleResult tuple
+→ 후속 scoring·Evidence 계층
 ```
 
 현재 구현 상태는 다음과 같다.
@@ -23,14 +30,18 @@ Spring Boot의 활성 RuleVersion 업무 snapshot
 - 불변 `RuleEvaluatorRegistry`: 구현됨
 - `RuleExecutionOrchestrator`: 구현됨
 - 이 문서의 RuleVersion 기반 실행 계획 계약: 문서 정의 완료
+- `RuleExecutionPlan`, `RuleExecutionPlanItem`과 순수
+  `RuleExecutionPlanBuilder`: 구현됨
+- `RuleExecutionPlanRunner` 실행·결합 계약: 문서 정의 완료, Python 미구현
+- `PlannedRuleResult` 계약: 문서 정의 완료, Python 미구현
 - 활성 RuleVersion 전체 조회·업무 snapshot 생성: 미구현
-- `RuleExecutionPlan`과 `RuleExecutionPlanItem` Python 클래스: 미구현
 - RuleVersion 설정 전달과 typed evaluator settings: 미구현
 - Spring Boot·FastAPI 실제 연동: 미구현
 - 점수·위험 등급·Evidence·DetectionResult 처리: 미구현 후속 범위
 
-계약 문서가 존재한다는 사실은 실행 계획 생성이나 서비스 연동이 구현되었다는
-뜻이 아니다.
+현재 순수 Builder 구현은 전달받은 RuleVersion snapshot을 plan으로 변환할
+뿐이다. Runner 계약이 존재한다는 사실은 plan 실행·결합, 서비스 연동이나
+후속 scoring이 구현되었다는 뜻이 아니다.
 
 공식 Rule 조건과 평가 의미는
 [Rule v1 탐지 계약](./rule-v1-detection-contract.md)을 따르고, ordered Rule ID
@@ -78,8 +89,10 @@ plan에 영향을 주지 않는다.
 ### 2.4 raw result와 planned result
 
 raw result는 기존 `RuleExecutionOrchestrator`가 반환하는
-`RuleEvaluationResult`다. `PlannedRuleResult`는 하나의 plan item과 같은
-index의 raw result를 묶는 후속 구현용 개념 계약이다. 이 문서는 해당 Python
+`RuleEvaluatorResult`다. 이는 Registry가 공개하는 union type alias이며 실제
+인스턴스의 generic 클래스는 `RuleEvaluationResult`다. `PlannedRuleResult`는
+하나의 plan item과 같은 index의 raw result를 묶는 불변 중첩 구조다. 이
+문서는 두 타입의 Python 구현을 변경하거나 `PlannedRuleResult` Python
 클래스를 구현하지 않는다.
 
 ## 3. 책임 경계
@@ -98,10 +111,10 @@ Spring Boot는 다음 책임을 가진다.
 Spring Boot는 Python 내부 `RuleId` mapping이나
 `RuleEvaluatorRegistry`를 소유하지 않는다.
 
-### 3.2 FastAPI 실행 계획 생성 계층
+### 3.2 RuleExecutionPlanBuilder
 
-FastAPI의 실행 계획 생성 계층은 기존 Orchestrator보다 앞에서 다음 책임을
-가진다.
+`RuleExecutionPlanBuilder`는 기존 Orchestrator와 Runner보다 앞에서 다음
+책임을 가진다.
 
 - 전달받은 업무 snapshot 구조와 선택 조건 재검증
 - exact `ruleCode → RuleId` mapping
@@ -112,13 +125,28 @@ FastAPI의 실행 계획 생성 계층은 기존 Orchestrator보다 앞에서 �
 - `ruleSetVersion` 생성
 - 모든 `RuleId`의 Registry capability 사전 검증
 - 불변 `RuleExecutionPlan` 생성
-- 기존 `RuleExecutionOrchestrator.execute()` 호출
-- plan item과 ordered raw result의 strict index 결합
 
-FastAPI는 Spring Boot의 업무 DB를 직접 조회하지 않고 RuleVersion lifecycle,
-status, 기간과 weight를 임의로 변경하지 않는다.
+Builder는 Orchestrator를 호출하거나 evaluator를 실행하지 않고 plan과
+`RuleEvaluationInput`의 cutoff 정합성을 검증하지 않는다.
 
-### 3.3 기존 RuleExecutionOrchestrator
+### 3.3 RuleExecutionPlanRunner
+
+`RuleExecutionPlanRunner`는 Builder가 생성한 plan과 평가 입력 사이의 실행
+경계를 담당한다.
+
+- plan과 `RuleEvaluationInput`의 지원 타입 검증
+- 실행 순서에 직접 영향을 주는 plan 구조의 방어 검증
+- plan의 `evaluationCutoffAt`과 거래 `occurredAt` 일치 검증
+- `plan.items`의 물리적 순서에서 ordered Rule ID tuple 생성
+- 기존 `RuleExecutionOrchestrator.execute()` 정확히 1회 호출
+- ordered raw result의 타입·개수·RuleId 후조건 검증
+- plan item과 같은 index의 raw result를 `PlannedRuleResult`로 불변 결합
+- 오류 시 planned 부분 결과, retry와 fallback 금지
+
+Runner는 Builder의 업무·설정 validation을 다시 수행하거나 Registry를 직접
+조회하지 않는다. Runner Python 구현은 아직 없다.
+
+### 3.4 기존 RuleExecutionOrchestrator
 
 기존 `RuleExecutionOrchestrator`는 다음 책임을 유지한다.
 
@@ -139,6 +167,17 @@ status, 기간과 weight를 임의로 변경하지 않는다.
 - `ruleSetVersion` 생성
 - weight 적용, 점수 합산과 위험 등급 계산
 - Evidence·Reason Code 변환과 DetectionResult 영속화
+
+### 3.5 후속 scoring 계층
+
+후속 scoring 계층은 정상 결합된 `PlannedRuleResult`를 입력으로 적중 Rule의
+weight 적용, 그룹 상한, 점수 합산과 위험 등급을 계산한다. 이후 Evidence
+계층은 plan metadata와 raw facts를 사용해 Evidence를 구성한다. scoring과
+Evidence·DetectionResult 처리는 Builder, Runner와 Orchestrator의 책임이
+아니다.
+
+FastAPI의 모든 내부 계층은 Spring Boot의 업무 DB를 직접 조회하지 않고
+RuleVersion lifecycle, status, 기간과 weight를 임의로 변경하지 않는다.
 
 ## 4. 평가 기준 시각과 활성 RuleVersion 선택
 
@@ -480,12 +519,12 @@ FastAPI 실행 계획 생성 계층은 첫 evaluator 호출 전에 최소한 다
 11. deep copy와 typed 불변 값만 사용하는 plan snapshot을 확정하고
     `ruleSetVersion`을 생성한다.
 12. 모든 `RuleId`의 Registry capability resolution 가능성을 검증한다.
-13. 위 검증이 모두 성공한 뒤 기존 `RuleExecutionOrchestrator.execute()`를
-    호출한다.
+13. 검증된 불변 `RuleExecutionPlan`을 반환한다.
 
 앞 단계 실패는 뒤 단계보다 우선한다. 실행 계획 생성 계층은 오류를 모두
 수집하기 위해 validation을 계속 진행하지 않아도 된다. 다만 어느 단계에서
-실패하더라도 evaluator 호출 횟수는 0회여야 한다.
+실패하더라도 evaluator 호출 횟수는 0회여야 한다. Builder는 정상 완료한
+경우에도 Orchestrator나 evaluator를 호출하지 않는다.
 
 ## 14. 오류 범주와 실패 정책
 
@@ -518,16 +557,97 @@ FastAPI 실행 계획 생성 계층은 첫 evaluator 호출 전에 최소한 다
 오류를 `LOW`, 빈 plan, 빈 raw result, 미적중 결과 또는 부분 성공으로
 변환하지 않는다. 설정 오류가 난 Rule만 제외하고 나머지를 실행하지 않는다.
 
-## 15. Orchestrator 호출과 evaluator 0회 보장
+## 15. RuleExecutionPlanRunner 입력과 실행 전 검증
 
-plan 생성과 Registry capability 사전 검증이 모두 성공한 뒤 기존
-Orchestrator에는 다음 ordered Rule ID tuple만 전달한다.
+### 15.1 공개 실행 계약과 구현 상태
+
+`RuleExecutionPlanRunner`의 계약상 공개 메서드는 다음 구조다.
 
 ```python
-tuple(item.ruleId for item in plan.items)
+execute(
+    plan: RuleExecutionPlan,
+    rule_input: RuleEvaluationInput,
+) -> tuple[PlannedRuleResult, ...]
 ```
 
-기존 공개 계약은 변경하지 않는다.
+Runner는 이 문서에서 계약만 정의하며 Python 구현은 아직 없다. 기존
+`RuleExecutionPlanBuilder`, `RuleExecutionOrchestrator`, evaluator, Registry와
+`RuleEvaluationInput`의 공개 계약은 변경하지 않는다. 실행 단위
+`executionId`, 상태, 시작·종료 시각이나 실패 상세를 담는 별도 wrapper도
+정의하지 않는다.
+
+### 15.2 지원 입력과 cutoff 정합성
+
+Runner는 Orchestrator를 호출하기 전에 다음 두 입력 타입을 확인한다.
+
+- `plan`은 `RuleExecutionPlan`이어야 한다.
+- `rule_input`은 `RuleEvaluationInput`이어야 한다.
+
+두 타입 중 하나라도 다르면 `INVALID_PLAN_RUNNER_INPUT`으로 실패하고
+Orchestrator를 호출하지 않는다. 지원 입력의 cutoff는 다음 Python 필드끼리
+비교한다.
+
+```python
+plan.evaluation_cutoff_at == rule_input.transaction.occurred_at
+```
+
+업무 문서의 `evaluationCutoffAt`과 `transaction.occurredAt`은 각각 위
+snake_case Python 필드에 대응한다. 두 값은 기존 Builder와 입력 모델 계약에
+따라 timezone-aware UTC여야 하며 microsecond까지 정확한 `datetime` equality를
+적용한다. 서버 현재 시각, 별도 Clock, 허용 오차, 초 단위 절삭과 timezone
+변환을 사용하지 않는다. 값이 다르면 `EVALUATION_CUTOFF_MISMATCH`로
+Orchestrator 호출 전에 실패한다.
+
+현재 `RuleExecutionPlan`에는 `transactionId` 또는 `transaction_id`가 없다.
+따라서 Runner는 cutoff 일치 외에 plan과 입력이 같은 transaction snapshot에서
+생성되었는지까지 검증할 수 없다. 이 상관관계는 plan 생성·전달을 조합하는
+상위 계층이 보장해야 한다.
+
+### 15.3 실행 순서에 영향을 주는 plan 방어 검증
+
+Runner는 공식 `RuleExecutionPlanBuilder`가 생성한 plan을 지원 입력으로
+삼는다. 다만 공개 dataclass 생성자를 통해 구조가 손상된 plan이 전달될 수
+있으므로 실행 순서에 직접 영향을 주는 다음 항목만 방어적으로 검증한다.
+
+1. `plan.items`가 비어 있지 않은 tuple인지 확인한다.
+2. 모든 원소가 `RuleExecutionPlanItem`인지 확인한다.
+3. 각 index에서 `item.execution_order == index + 1`인지 확인한다.
+4. 모든 `item.rule_id`가 중복되지 않는지 확인한다.
+5. item의 물리적 RuleId 순서가 `R001 → R002 → R003 → R004`의 canonical
+   subsequence인지 확인한다.
+
+`R004` 단독 plan과 `R001 → R003 → R004` plan은 유효하다. 비연속 또는 중복
+`execution_order`, 중복 RuleId와 canonical 역순은
+`INVALID_RULE_EXECUTION_PLAN`으로 Orchestrator 호출 전에 거부한다. Runner는
+손상된 plan을 정렬하거나 execution order를 다시 부여해 복구하지 않는다.
+canonical subsequence 검증만으로 Builder의 전체 유효성이 다시 증명되는 것은
+아니다. 예를 들어 공식 Builder가 dependency 오류로 거부할 수동 구성 plan을
+Runner가 dependency까지 재검증하지 않으며, 그런 plan은 지원 입력이 아니다.
+
+Runner는 다음 Builder 책임을 중복 검증하지 않는다.
+
+- FraudRule lifecycle과 RuleVersion status
+- effective period
+- exact `ruleCode → RuleId` mapping
+- R001·R002·R003 plan 구성 dependency
+- `conditionDefinition` typed parsing과 evaluator 설정 호환성
+- `reasonCode`와 weight validation
+- `ruleSetVersion` canonical hash 재계산
+- Registry capability 사전 조회
+
+## 16. 실행 순서, Orchestrator 호출과 Registry 구성 전제
+
+### 16.1 plan 물리 순서의 전달
+
+Runner는 `execution_order`나 RuleId로 `plan.items`를 다시 정렬하지 않는다.
+15절 검증을 통과한 item의 물리적 순서에서 다음 tuple을 그대로 생성한다.
+
+```python
+tuple(item.rule_id for item in plan.items)
+```
+
+Runner는 이 tuple과 같은 `rule_input`을 기존 Orchestrator 공개 메서드에
+전달한다.
 
 ```python
 execute(
@@ -536,208 +656,347 @@ execute(
 ) -> tuple[RuleEvaluatorResult, ...]
 ```
 
-실행 계획 생성 계층의 사전 Registry 검증은 현재 Registry가 immutable이라는
-계약을 전제로 한다. Orchestrator도 전달받은 전체 ID를 다시 resolve한 뒤
-첫 evaluator를 실행한다.
+Orchestrator는 전달받은 전체 RuleId를 Registry에서 먼저 resolve하고 모든
+resolution이 성공한 뒤 입력 순서대로 evaluator를 순차 실행한다. 따라서
+Registry 등록 순서는 실제 호출 순서와 결과 순서에 영향을 주지 않는다.
 
-따라서 다음 오류에서는 evaluator 호출 횟수가 0회다.
+### 16.2 호출 횟수와 evaluator 중복 실행 방지
 
-- snapshot·기간·중복·mapping·dependency 오류
-- 설정 구조와 호환성 오류
-- Registry 미지원 capability
-- Orchestrator의 빈 plan·중복 ID·미지원 ID validation 오류
+계약상 호출 횟수는 다음과 같다.
 
-evaluator 실행 중 예외가 발생한 경우에는 기존 Orchestrator 계약대로 이전
-evaluator가 이미 실행되었을 수 있다. 이 경우에도 부분 raw result를 정상
-반환하지 않고 이후 evaluator 실행을 중단한다.
+| 상황 | Runner의 Orchestrator 호출 | Runner의 Registry 직접 조회 | Runner의 evaluator 직접 실행 | retry·fallback |
+| --- | ---: | ---: | ---: | ---: |
+| 잘못된 입력·plan 또는 cutoff 불일치 | 0회 | 0회 | 0회 | 0회 |
+| 유효한 실행 | 정확히 1회 | 0회 | 0회 | 0회 |
 
-## 16. plan item과 raw result의 strict 결합
+Runner는 Orchestrator를 우회하거나 evaluator를 개별 호출하지 않는다. 실행 전
+RuleId 중복 검증, Orchestrator 정확히 1회 호출과 기존 Orchestrator의 단일
+순차 loop를 함께 적용하므로 각 plan item의 evaluator는 최대 1회 실행된다.
+R002와 R003 evaluator가 고액 조건을 자체 재평가하는 것은 R001 evaluator를
+다시 호출하는 동작이 아니다.
 
-Orchestrator가 정상 완료하면 plan과 raw result는 index 기반으로만 결합한다.
+### 16.3 Registry 구성 전제와 capability 실패
 
-```text
-plan.items[i] ↔ rawResults[i]
+애플리케이션 composition은 Builder와 Orchestrator에 동일한 Rule v1
+capability 구성을 제공해야 한다. 두 계층이 반드시 동일한
+`RuleEvaluatorRegistry` Python 객체 인스턴스를 공유할 필요는 없으며 Runner는
+Registry 객체 identity를 비교하지 않는다.
+
+Runner는 Registry를 직접 조회하지 않는다. Builder가 plan을 만든 이후
+Orchestrator의 capability 구성이 누락되거나 달라졌다면 Orchestrator가 전체
+RuleId resolution 중 `UnsupportedRuleIdError`로 fail-fast해야 한다. 이때
+Runner는 이미 Orchestrator를 1회 호출했지만 evaluator 호출 횟수는 0회다.
+
+## 17. raw 결과 후조건과 PlannedRuleResult 결합
+
+### 17.1 PlannedRuleResult 구조
+
+계약상 per-rule 결합 결과는 metadata를 평탄화하지 않는 다음 불변 중첩
+구조다.
+
+```python
+@dataclass(frozen=True, slots=True)
+class PlannedRuleResult:
+    plan_item: RuleExecutionPlanItem
+    evaluation_result: RuleEvaluatorResult
 ```
 
-필수 불변식은 다음과 같다.
-
-- `len(plan.items) == len(rawResults)`
-- 모든 index에서 `plan.items[i].ruleId == rawResults[i].rule_id`
-- 누락되거나 초과한 result가 없음
-- `RuleId`를 기준으로 raw result를 다시 정렬하지 않음
-- dictionary에 넣고 RuleId로 다시 조회해 결합하지 않음
-- 모든 불변식 검증이 성공한 뒤에만 불변
-  `PlannedRuleResult(planItem, rawResult)` 개념 pair로 결합
-- 하나라도 위반하면 정상 planned result나 부분 pair를 반환하지 않음
-
-`PlannedRuleResult`는 후속 scoring·Evidence 연결을 위한 개념이며 이번
-Issue에서 Python 클래스로 구현하지 않는다. 기존 Orchestrator의 반환 타입도
+`RuleEvaluatorResult`는 현재 Registry가 공개하고 Orchestrator 반환 annotation에
+사용하는 union type alias다. union의 각 값은 `models.py`에 정의된 generic
+`RuleEvaluationResult` 클래스의 인스턴스다. 이 문서는 기존 raw result 타입을
 변경하지 않는다.
 
-## 17. 정상·실패 흐름 예시
+다음 업무 metadata는 `plan_item`을 통해 원래 타입과 값 그대로 보존한다.
 
-### 17.1 R001·R003·R004 정상 실행
+- `ruleVersionId` / Python `rule_version_id`
+- `ruleCode` / Python `rule_code`
+- `ruleId` / Python `rule_id`
+- `versionNumber` / Python `version_number`
+- `reasonCode` / Python `reason_code`
+- `weight`
+- `conditionDefinition` / Python `condition_definition`
+- `effectiveFrom` / Python `effective_from`
+- `effectiveTo` / Python `effective_to`
+- `executionOrder` / Python `execution_order`
 
-```text
-evaluationCutoffAt 고정
-→ R001·R003·R004 실행 가능 snapshot
-→ exact mapping 성공
-→ R003 dependency인 R001 존재 확인
-→ 설정 호환성 성공
-→ canonical order R001, R003, R004
-→ executionOrder 1, 2, 3
-→ Registry capability 사전 검증 성공
-→ Orchestrator.execute(("R001", "R003", "R004"), ruleInput)
-→ 같은 index의 plan item과 raw result 결합
-```
+`evaluationCutoffAt` / Python `evaluation_cutoff_at`과 `ruleSetVersion` / Python
+`rule_set_version`은 plan 전체의 값으로만 유지한다. 각
+`PlannedRuleResult`에 복제하지 않는다. Runner는 metadata를 수정하거나
+평탄화한 중복 필드를 만들지 않는다.
 
-### 17.2 R004만 활성인 정상 실행
+### 17.2 raw 결과 후조건
 
-```text
-R004 실행 가능 snapshot
-→ R004는 독립 Rule이므로 dependency 성공
-→ executionOrder 1
-→ Orchestrator.execute(("R004",), ruleInput)
-```
+Orchestrator 호출이 정상 반환한 뒤 Runner는 `PlannedRuleResult`를 만들기
+전에 다음 후조건을 모두 검증한다.
 
-### 17.3 활성 RuleVersion 0개
+1. raw 결과 collection이 tuple인지 확인한다.
+2. 모든 원소가 공식 raw evaluator 결과 클래스인
+   `RuleEvaluationResult`인지 확인한다.
+3. `len(plan.items) == len(raw_results)`인지 확인한다.
+4. 모든 index에서
+   `plan.items[i].rule_id == raw_results[i].rule_id`인지 확인한다.
+5. 결과가 plan과 같은 순서를 유지하는지 확인한다.
 
-```text
-실행 가능 snapshot이 비어 있음
-→ NO_EXECUTABLE_RULE_VERSION
-→ evaluator 호출 0회
-→ 빈 성공·0점·LOW 생성 금지
-```
+결과 부족과 초과는 모두 `RULE_EXECUTION_RESULT_COUNT_MISMATCH`다. collection
+또는 원소 타입이 잘못됐거나 그 밖의 raw 결과 구조가 손상되면
+`INVALID_RULE_EXECUTION_RESULT`다. 같은 index의 RuleId가 다르면
+`RULE_EVALUATOR_RESULT_MISMATCH`다. 잘못된 결과를 정상 미적중
+`RuleEvaluationResult(matched=False, facts=None)`로 바꾸지 않는다.
 
-### 17.4 동일 Rule 복수 활성 버전
+현재 Orchestrator는 요청한 RuleId마다 결과 하나를 수집하고 반환 직후
+`rule_id`를 검증하므로 정상 구현에서는 개수와 RuleId 후조건을 만족한다.
+Runner의 검증은 대체 구현, 잘못된 test double 또는 런타임 계약 손상에 대한
+최종 방어선이며 Orchestrator 공개 계약을 대체하지 않는다.
 
-```text
-같은 fraudRuleId에 cutoff 기준 실행 가능 RuleVersion 2건
-→ MULTIPLE_EXECUTABLE_RULE_VERSIONS
-→ 최신 version·첫 행 선택 금지
-→ evaluator 호출 0회
-```
+### 17.3 strict index 결합
 
-### 17.5 알 수 없는 ruleCode
-
-```text
-ruleCode = UNKNOWN_RULE
-→ exact bridge 실패
-→ UNKNOWN_RULE_CODE
-→ trim·uppercase·alias fallback 금지
-→ evaluator 호출 0회
-```
-
-### 17.6 R001 없이 R002 활성
+허용되는 결합 관계는 다음 하나뿐이다.
 
 ```text
-활성 Rule = R002
-→ exact mapping 성공
-→ R001 dependency 누락
-→ MISSING_RULE_DEPENDENCY
-→ evaluator 호출 0회
+plan.items[i] ↔ raw_results[i]
 ```
 
-### 17.7 지원하지 않는 amountThreshold 또는 windowSeconds
+모든 후조건 검증이 성공한 뒤에만 다음 의미로 완전한 tuple을 생성한다.
+
+```python
+tuple(
+    PlannedRuleResult(
+        plan_item=plan_item,
+        evaluation_result=raw_result,
+    )
+    for plan_item, raw_result in zip(
+        plan.items,
+        raw_results,
+        strict=True,
+    )
+)
+```
+
+RuleId dictionary 변환, RuleId 기준 재정렬, completion order 사용, 누락 결과
+보충, 초과 결과 무시와 검증 전 부분 `PlannedRuleResult` 생성을 금지한다.
+evaluator가 모두 미적중이어도 각 plan item에는 대응하는 raw
+`RuleEvaluationResult`가 있으므로 같은 개수의 `PlannedRuleResult`를 유지한다.
+
+## 18. Runner 오류 범주와 fail-fast 정책
+
+### 18.1 semantic 오류 범주
+
+다음 오류 범주는 구현 독립적인 Runner 계약이다. 구체적인 Python 예외 클래스
+계층, FastAPI HTTP 상태와 외부 오류 응답 매핑은 확정하지 않는다.
+
+| 오류 범주 | 발생 조건 | Orchestrator 호출 시점 | 부분 결과 | retry·fallback |
+| --- | --- | --- | --- | --- |
+| `INVALID_PLAN_RUNNER_INPUT` | `plan` 또는 `rule_input`이 지원 타입이 아님 | 호출 전 실패 | 반환 금지 | 금지 |
+| `EVALUATION_CUTOFF_MISMATCH` | plan cutoff와 거래 `occurred_at`이 정확히 다름 | 호출 전 실패 | 반환 금지 | 금지 |
+| `INVALID_RULE_EXECUTION_PLAN` | 빈/non-tuple items, 잘못된 item 타입, 비연속·중복 order, 중복 RuleId 또는 non-canonical 순서 | 호출 전 실패 | 반환 금지 | 금지 |
+| `UNSUPPORTED_RULE_CAPABILITY` | Orchestrator의 Registry가 plan의 RuleId를 resolve할 수 없음 | Runner가 Orchestrator를 호출한 뒤, evaluator 실행 전 실패 | 반환 금지 | 금지 |
+| `RULE_EVALUATOR_EXECUTION_FAILED` | evaluator가 실행 중 예외를 발생시킴 | Orchestrator 호출 후 실패 | 반환 금지 | 금지 |
+| `RULE_EVALUATOR_RESULT_MISMATCH` | evaluator 또는 반환 tuple의 `rule_id`가 같은 index의 계획 RuleId와 다름 | Orchestrator 호출 후 실패 | 반환 금지 | 금지 |
+| `RULE_EXECUTION_RESULT_COUNT_MISMATCH` | raw result가 plan item보다 부족하거나 초과함 | Orchestrator 반환 후 실패 | 반환 금지 | 금지 |
+| `INVALID_RULE_EXECUTION_RESULT` | raw collection이 tuple이 아니거나 원소가 공식 `RuleEvaluationResult`가 아닌 등 결과 구조가 손상됨 | Orchestrator 반환 후 실패 | 반환 금지 | 금지 |
+
+같은 입력에 여러 문제가 있더라도 Runner는 현재 단계에서 확인한 첫 오류에
+fail-fast할 수 있으며 오류를 모두 수집할 의무는 없다. 어떤 오류도 빈 tuple,
+`LOW`, 미적중 또는 planned 부분 성공으로 변환하지 않는다.
+
+### 18.2 기존 내부 오류와의 관계
+
+Registry의 `UnsupportedRuleIdError`, Orchestrator의
+`InvalidRuleExecutionPlanError`, `RuleEvaluatorResultMismatchError`와 evaluator
+원래 예외를 정상 결과로 변환하지 않는다. 후속 Runner 구현은 원인을
+보존하면서 내부 오류를 위 semantic category로 한 번 해석할 수 있다. 동일한
+오류를 Registry, Orchestrator와 Runner에서 반복 wrapping하거나 원래 원인을
+잃어서는 안 된다.
+
+`UnsupportedRuleIdError`는 Runner가 Registry를 직접 조회해서 만드는 오류가
+아니다. Orchestrator가 모든 capability를 evaluator 실행 전에 resolve하는
+과정에서 발생하며 Runner 관점의 semantic category는
+`UNSUPPORTED_RULE_CAPABILITY`다.
+
+### 18.3 evaluator 실패와 부분 결과 금지
+
+evaluator 실행 중 예외가 발생하면 기존 Orchestrator 정책에 따라 이후
+evaluator 실행을 즉시 중단한다. 실패 evaluator보다 앞선 evaluator가 이미
+실행되어 raw result가 메모리에 계산됐을 수 있지만 Orchestrator는 부분 tuple을
+반환하지 않고 Runner 호출 전체가 실패한다.
+
+Runner는 앞서 계산된 raw result를 `PlannedRuleResult` 부분 성공으로 반환하지
+않고 빈 성공 tuple도 반환하지 않는다. evaluator 예외를 미적중으로 변환하지
+않으며 자동 retry와 fallback을 수행하지 않는다. Orchestrator가 반환한 뒤
+결과 후조건이 실패한 경우에도 `PlannedRuleResult`를 하나도 외부로 반환하지
+않는다.
+
+## 19. Runner 정상·오류 흐름 예시
+
+### 19.1 R001·R003·R004 정상 실행
 
 ```text
-R001 amountThreshold = "20000000"
-또는 R002 windowSeconds = 3600
-→ typed parsing은 가능
-→ 현재 evaluator 지원값과 불일치
-→ UNSUPPORTED_RULE_CONFIGURATION
-→ evaluator 호출 0회
+Builder가 canonical plan.items = (R001, R003, R004) 생성
+→ Runner가 plan·input 타입과 cutoff equality 검증
+→ executionOrder 1, 2, 3과 canonical subsequence 검증
+→ Orchestrator.execute((R001, R003, R004), rule_input) 정확히 1회
+→ Orchestrator가 세 evaluator를 plan 순서대로 각각 최대 1회 실행
+→ ordered raw result tuple 반환
+→ Runner가 타입·개수·index RuleId 후조건 검증
+→ ordered PlannedRuleResult tuple 반환
 ```
 
-### 17.8 Registry에서 지원하지 않는 RuleId
+Registry 등록 순서가 `R004, R003, R001`이어도 Runner가 전달한
+`R001, R003, R004` 순서가 실행과 결과 순서를 지배한다. behavior event 등
+입력 snapshot 내부 순서도 evaluator 선택 순서를 바꾸지 않는다.
+
+### 19.2 R004 단독 정상 실행
 
 ```text
-공식 bridge와 dependency·설정 검증 성공
-→ Registry에서 mapping된 RuleId capability 해결 실패
-→ UNSUPPORTED_RULE_CAPABILITY
-→ Orchestrator 호출 전 evaluator 호출 0회
+plan.items = (R004 executionOrder=1,)
+→ canonical subsequence 검증 성공
+→ Orchestrator.execute((R004,), rule_input) 정확히 1회
+→ R004 evaluator 최대 1회 실행
+→ PlannedRuleResult 1개인 tuple 반환
 ```
 
-### 17.9 plan과 raw result 불일치
+### 19.3 전체 evaluator 미적중과 metadata 보존
 
-```text
-plan item 3개, raw result 2개
-또는 같은 index의 ruleId와 returned rule_id 불일치
-→ strict 결합 실패
-→ 정상 PlannedRuleResult·부분 pair 반환 금지
-```
+모든 evaluator가 `matched=False`, `facts=None`을 반환해도 실행 성공이면 각
+plan item별 `PlannedRuleResult`를 유지한다. R001·R003·R004 plan이면 결과도
+같은 순서의 3개 tuple이다. 각 결과의 `plan_item`은 `weight`, `reason_code`,
+RuleVersion ID·코드·버전, typed `condition_definition`, effective period와
+`execution_order`를 그대로 보존한다.
 
-Orchestrator의 반환 `rule_id` 불일치는 기존 구현이 evaluator 반환 직후
-계약 위반으로 거부한다.
+Runner는 적중 여부와 관계없이 weight를 적용하거나 점수를 계산하지 않는다.
+Reason Code도 Evidence로 변환하지 않는다.
 
-### 17.10 snapshot 이후 원본 설정 변경
+### 19.4 실행 전 오류 예시
 
-```text
-Spring Boot가 RuleVersion 값을 deep copy한 snapshot 생성
-→ FastAPI가 typed 불변 plan 확정
-→ 원본 Entity·JsonNode·입력 collection 변경
-→ 현재 plan과 ruleSetVersion은 변경되지 않음
-→ 현재 실행은 고정 plan만 사용
-```
+| 사례 | 오류 범주 | Orchestrator 호출 | 결과 |
+| --- | --- | ---: | --- |
+| `plan`이 `RuleExecutionPlan`이 아님 | `INVALID_PLAN_RUNNER_INPUT` | 0회 | 실패 |
+| `rule_input`이 `RuleEvaluationInput`이 아님 | `INVALID_PLAN_RUNNER_INPUT` | 0회 | 실패 |
+| plan cutoff와 거래 `occurred_at`의 microsecond가 다름 | `EVALUATION_CUTOFF_MISMATCH` | 0회 | 실패 |
+| `plan.items == ()` | `INVALID_RULE_EXECUTION_PLAN` | 0회 | 실패 |
+| `plan.items`가 list 등 tuple이 아님 | `INVALID_RULE_EXECUTION_PLAN` | 0회 | 실패 |
+| item 중 하나가 `RuleExecutionPlanItem`이 아님 | `INVALID_RULE_EXECUTION_PLAN` | 0회 | 실패 |
+| executionOrder가 `1, 3`처럼 비연속 | `INVALID_RULE_EXECUTION_PLAN` | 0회 | 실패 |
+| executionOrder가 `1, 1`처럼 중복 | `INVALID_RULE_EXECUTION_PLAN` | 0회 | 실패 |
+| RuleId가 `R001, R001`처럼 중복 | `INVALID_RULE_EXECUTION_PLAN` | 0회 | 실패 |
+| RuleId가 `R004, R001`처럼 canonical 역순 | `INVALID_RULE_EXECUTION_PLAN` | 0회 | 실패 |
 
-새 평가 실행은 자신의 `evaluationCutoffAt`과 새 snapshot을 사용한다.
+Runner는 위 plan을 정렬·보충·정규화해 실행하지 않는다.
 
-## 18. 후속 scoring 계약으로 전달할 경계
+### 19.5 Orchestrator·evaluator·결과 오류 예시
 
-정상 결합된 후속 계층은 다음 값을 사용할 수 있다.
+| 사례 | 오류 범주 | Orchestrator 호출 | evaluator 실행 | planned 결과 |
+| --- | --- | ---: | --- | --- |
+| Orchestrator Registry에 후순위 RuleId capability 누락 | `UNSUPPORTED_RULE_CAPABILITY` | 1회 | 0회 | 없음 |
+| 두 번째 evaluator가 예외 발생 | `RULE_EVALUATOR_EXECUTION_FAILED` | 1회 | 앞 evaluator와 실패 evaluator는 실행됐을 수 있음 | 없음 |
+| raw collection이 list임 | `INVALID_RULE_EXECUTION_RESULT` | 1회 | 완료됐을 수 있음 | 없음 |
+| raw 원소가 `RuleEvaluationResult`가 아님 | `INVALID_RULE_EXECUTION_RESULT` | 1회 | 완료됐을 수 있음 | 없음 |
+| 반환 `rule_id`가 같은 index의 계획 RuleId와 다름 | `RULE_EVALUATOR_RESULT_MISMATCH` | 1회 | 불일치 지점까지 실행됐을 수 있음 | 없음 |
+| plan item 3개에 raw result 2개 | `RULE_EXECUTION_RESULT_COUNT_MISMATCH` | 1회 | 완료됐을 수 있음 | 없음 |
+| plan item 3개에 raw result 4개 | `RULE_EXECUTION_RESULT_COUNT_MISMATCH` | 1회 | 완료됐을 수 있음 | 없음 |
 
-- plan의 `evaluationCutoffAt`과 `ruleSetVersion`
-- plan item의 RuleVersion 업무 ID·코드·버전·Reason Code·weight·순서
-- raw result의 `rule_id`, 적중 여부와 facts
+현재 공식 Orchestrator는 결과 타입을 제외한 RuleId·개수 불변식을 자체적으로
+보장한다. 위 raw collection·개수 사례는 계약을 위반한 대체 구현이나 test
+double까지 Runner가 방어해야 한다는 의미다. 어떤 실패에서도 부분
+`PlannedRuleResult`를 반환하지 않는다.
+
+## 20. 후속 계층 경계와 제외 범위
+
+### 20.1 scoring·Evidence·DetectionResult 경계
+
+Runner는 raw result의 `matched`와 `facts`를 plan metadata에 결정적으로 결합할
+뿐이다. 정상 결합된 후속 계층은 plan의 `evaluationCutoffAt`과
+`ruleSetVersion`, plan item metadata와 raw result를 사용할 수 있다.
+
+Runner는 다음 작업을 수행하지 않는다.
+
+- weight 적용과 그룹 상한 계산
+- risk score와 risk level 산정
+- Reason Code의 Evidence 변환
+- `observationSummary` 생성
+- DetectionResult 생성·완전성 검증·저장·채택
 
 후속 scoring 계약은 적중 Rule의 weight 적용, 그룹 상한, 점수 합산과
-`scoringPolicyVersion`을 정의해야 한다. Evidence 계약은 `reasonCode`,
-`conditionDefinition`과 facts를 사용해 typed Evidence를 구성하고 Spring
-Boot 저장 전 검증 경계를 정의해야 한다.
+`scoringPolicyVersion`을 정의해야 한다. Evidence 계약은 `reasonCode`, typed
+`conditionDefinition`과 raw facts를 사용한 Evidence 구성 및 Spring Boot 저장
+전 검증 경계를 별도로 정의해야 한다.
 
-이 문서는 weight를 보존하지만 적용하지 않으며 점수·위험 등급·Evidence와
-DetectionResult를 생성하지 않는다.
+### 20.2 Spring Boot·DB·API 경계
 
-## 19. 제외 범위
+Runner는 다음 작업을 수행하지 않는다.
 
-다음 항목은 이 계약 문서와 Issue #108의 구현 범위에 포함하지 않는다.
+- 거래 상태와 사건 상태 변경
+- Spring Boot 업무 DB와 PostgreSQL 직접 조회
+- 실제 활성 RuleVersion 선택과 snapshot 생성
+- RuleVersion 재조회 또는 plan 교체
+- FastAPI endpoint와 서비스 간 API DTO 정의
+- Spring Boot 통신과 DetectionResult 영속화
 
-- Python·Java 구현
-- DB Migration과 `execution_order` 컬럼
-- Repository·Service 구현
-- 서비스 간 API DTO, FastAPI endpoint와 통신 방식
+Spring Boot는 거래·RuleVersion·DetectionResult 업무 정합성의 최종 소유자다.
+서비스 간 통신 방식, API 오류 매핑, 거래 실패 상태와 복구 정책은 후속 승인
+범위다.
+
+### 20.3 Issue #112 제외 범위
+
+다음 항목은 이번 문서 작업과 Runner 계약의 구현 범위에 포함하지 않는다.
+
+- `RuleExecutionPlanRunner`와 `PlannedRuleResult` Python 구현
+- 기존 evaluator, Registry, Orchestrator와 모델 수정
 - evaluator signature와 `RuleEvaluationInput` 변경
 - typed evaluator settings 구현과 주입
-- `RuleExecutionPlan`·`RuleExecutionPlanItem` Python 클래스
-- `PlannedRuleResult` Python 클래스
-- weight 적용, 점수 합산과 그룹별 상한
-- 위험 등급
-- Evidence와 Reason Code 변환
-- DetectionResult 생성·저장·채택
-- 오류의 HTTP·Python·Spring 표현
-- 재시도와 fallback
-- Spring Boot·FastAPI 실제 연동
+- 실행 단위 wrapper, `executionId`, 상태와 실행 시각
+- Python·Java Service, Repository와 DB Migration 구현
+- `execution_order` DB 컬럼
+- weight 적용, 점수 합산, 위험 등급, Evidence와 DetectionResult 구현
+- FastAPI endpoint, API DTO와 Spring Boot 실제 연동
+- Python 예외 계층과 HTTP 오류 응답 확정
+- retry와 fallback
+- 로그와 메트릭
 - Redis, Kafka, ML과 LLM
-- 전체 시스템 아키텍처와 ERD 문서 정합화
+- 전체 시스템 아키텍처와 ERD 정합화
 
-## 20. 후속 구현 검증 조건
+## 21. 구현 검증 조건
 
-후속 구현은 최소한 다음 조건을 자동화된 테스트로 검증해야 한다.
+### 21.1 현재 Builder·Orchestrator 구현
 
-- `transaction.occurredAt`만 활성 선택 cutoff로 사용
+현재 자동화 테스트는 Builder의 canonical order·hash·불변성·설정 검증과
+Orchestrator의 입력 순서 보존, 전체 capability 사전 resolution, 순차 실행,
+반환 RuleId 검증과 fail-fast를 검증한다. 다음 Builder 조건도 계속 유지해야
+한다.
+
+- 전달받은 timezone-aware UTC `evaluation_cutoff_at`을 plan에 그대로 보존
 - 적용 기간 시작 포함·종료 제외
 - 활성 0개와 동일 Rule 복수 활성 버전 거부
 - exact mapping과 정규화·alias 금지
-- DB 반환 순서와 무관한 canonical order
+- DB·Registry 입력 순서와 무관한 canonical order
 - 일부 Rule filtering 후 1부터 연속 `executionOrder` 부여
 - R002·R003의 R001 dependency와 R004 독립 실행
-- Rule별 typed `conditionDefinition` 필드·타입·정확한 지원값 검증
-- JSON key 순서와 공백이 의미 비교에 영향 없음
-- 공통 고액 기준·시간창 불일치 거부
+- Rule별 typed `conditionDefinition` 구조·타입·지원값 검증
 - 같은 ordered snapshot의 `ruleSetVersion` 결정성
-- DB·Registry·JSON 객체 순서가 hash에 영향 없음
-- plan 확정 뒤 원본 Entity·JSON·collection 변경 격리
-- 모든 구성·capability 오류에서 evaluator 호출 0회
-- 기존 Orchestrator 공개 계약 유지
-- plan item과 raw result의 strict index 결합
-- 개수·RuleId 불일치 시 부분 planned result 금지
+- plan 확정 뒤 원본 JSON·collection 변경 격리
+- Builder의 evaluator 호출 0회
+
+### 21.2 후속 Runner 구현
+
+Runner 구현 시 최소한 다음 조건을 자동화된 테스트로 검증해야 한다.
+
+- 지원 plan·input 타입과 잘못된 타입
+- cutoff의 UTC·microsecond exact equality와 불일치 시 Orchestrator 0회
+- non-empty tuple items와 item 타입
+- `execution_order == index + 1`, 중복 order와 비연속 order 거부
+- 중복 RuleId와 non-canonical 순서 거부
+- R004 단독과 R001·R003·R004 canonical subsequence 허용
+- plan item의 물리 순서를 재정렬하지 않고 Orchestrator에 전달
+- 유효 실행에서 Orchestrator 정확히 1회, Runner의 Registry·evaluator 직접 호출 0회
+- Registry 등록 순서와 무관한 evaluator 실행 순서
+- 각 evaluator 최대 1회 실행과 retry·fallback 0회
+- raw collection tuple과 `RuleEvaluationResult` 원소 타입 검증
+- plan item과 raw result의 개수·index RuleId 일치
+- raw 결과 부족·초과·손상과 RuleId 불일치 거부
+- 모든 raw 후조건 성공 후에만 strict index 결합
+- 전체 미적중에도 plan item별 `PlannedRuleResult` 보존
+- evaluator·결과 오류 시 planned 부분 결과와 빈 성공 tuple 미반환
+- plan metadata 보존과 weight·Reason Code 미사용
+
+현재 Runner와 해당 테스트는 구현되지 않았으며, 이 문서의 검증 조건을 구현
+완료로 표현하지 않는다.

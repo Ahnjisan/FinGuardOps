@@ -308,9 +308,11 @@ Registry가 특정 요청 ID에 callable을 연결했다는 사실만으로 반�
 `ruleCode → RuleId` 연결, 활성 RuleVersion snapshot, dependency, 설정
 호환성과 결정적 실행 순서는
 [RuleVersion 기반 Rule 실행 계획 내부 계약](./rule-execution-plan-contract.md)에
-정의되어 있다. 해당 계약은 아직 Python·Java 또는 서비스 연동으로 구현되지
-않았다. 실행 계획의 weight는 snapshot 정보로만 보존하며 이
-오케스트레이터는 weight를 적용하거나 scoring하지 않는다. 관련 후속 구현은
+정의되어 있다. 현재 Python에는 불변 `RuleExecutionPlan`,
+`RuleExecutionPlanItem`과 순수 `RuleExecutionPlanBuilder`가 구현되어 있지만,
+plan 실행·결합을 담당하는 `RuleExecutionPlanRunner`, Java 구현과 서비스
+연동은 아직 구현되지 않았다. 실행 계획의 weight는 snapshot 정보로만
+보존하며 이 오케스트레이터는 weight를 적용하거나 scoring하지 않는다. 관련 후속 구현은
 [ADR-005](../07-decisions/ADR-005-fraud-rule-version-model.md)의 RuleVersion
 불변성과 Spring Boot·PostgreSQL 데이터 소유권을 유지해야 한다.
 
