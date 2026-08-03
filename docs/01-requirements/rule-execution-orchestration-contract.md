@@ -13,7 +13,7 @@
 - Rule 실행 오케스트레이션 계약: 문서 정의 완료
 - R001~R004 순수 evaluator: 구현됨
 - 불변 `RuleEvaluatorRegistry`: 구현됨
-- `RuleExecutionOrchestrator` Python 구현: 미구현
+- `RuleExecutionOrchestrator` Python 구현: 구현됨
 - 점수 합산·위험 등급·Evidence 변환: 미구현 후속 범위
 - FastAPI 외부 분석 API와 Spring Boot 연동: 미구현 후속 범위
 
@@ -68,6 +68,10 @@ Rule 실행 오케스트레이터
 ```
 
 선행 계층과 후속 계층의 구체 구현은 이 문서의 범위가 아니다.
+활성 RuleVersion 업무 snapshot을 exact `ruleCode → RuleId` mapping과
+결정적인 순서로 변환하는 선행 계층 계약은
+[RuleVersion 기반 Rule 실행 계획 내부 계약](./rule-execution-plan-contract.md)에서
+정의한다. 실행 계획 생성은 이 오케스트레이터의 책임이 아니다.
 
 ## 3. Registry와 오케스트레이터의 책임 분리
 
@@ -104,8 +108,7 @@ ordered RuleId plan
 
 ## 4. 입력 계약
 
-개념적인 공개 계약은 다음과 같다. 실제 Python 클래스와 메서드는 아직
-구현하지 않았다.
+구현된 공개 계약은 다음과 같다.
 
 ```python
 execute(
@@ -202,10 +205,9 @@ evaluator capability로 해결되어야 한다는 뜻이다. 어느 단계에서
 - `"R001"`, `" R001"`은 중복이 아니다. 두 번째 값은 정규화하지 않으며
   Registry resolution에서 미지원 ID로 거부한다.
 
-Registry 생성 시 중복 등록을 나타내는 기존 `DuplicateRuleIdError`와 실행
-요청의 중복은 책임과 의미가 다르다. 후속 Python 구현에서는 실행 계획 전용
-validation 오류를 별도로 정의해야 한다. 이 문서는 Python 예외 클래스를
-구현하거나 정확한 클래스명을 확정하지 않는다.
+Registry 생성 시 중복 등록을 나타내는 `DuplicateRuleIdError`와 실행 요청의
+중복은 책임과 의미가 다르다. 현재 구현은 실행 요청의 중복을
+`InvalidRuleExecutionPlanError`로 구분한다.
 
 ### 6.3 미지원 Rule ID
 
@@ -264,9 +266,8 @@ Registry가 특정 요청 ID에 callable을 연결했다는 사실만으로 반�
 - 이전에 계산한 결과를 포함한 부분 tuple 미반환
 - 자동 수정, ID 덮어쓰기, retry와 fallback 금지
 
-후속 Python 구현은 이 상황을 정상적인 미적중이나 미지원 ID와 구분할 수 있는
-실행 계약 오류로 표현해야 한다. 정확한 예외 클래스는 구현 작업에서 현재
-오류 구조와 함께 확정한다.
+현재 Python 구현은 이 상황을 정상적인 미적중이나 미지원 ID와 구분되는
+`RuleEvaluatorResultMismatchError`로 표현한다.
 
 ## 10. 점수·위험 등급·Evidence 계층과의 경계
 
@@ -287,7 +288,7 @@ Registry가 특정 요청 ID에 callable을 연결했다는 사실만으로 반�
 추가하지 않는다. downstream 계층도 raw 결과의 순서나 `rule_id`를 근거 없이
 변경해서는 안 된다.
 
-## 11. RuleVersion 계약과 아직 해결되지 않은 연결 경계
+## 11. RuleVersion 실행 계획 계약과 연결 경계
 
 현재 내부 계약과 공식 시스템 계약 사이에는 다음 연결 경계가 남아 있다.
 
@@ -304,9 +305,13 @@ Registry가 특정 요청 ID에 callable을 연결했다는 사실만으로 반�
 - 내부 fail-fast·무재시도 정책은 상위 시스템의 거래 복구 및 재호출 정책을
   결정하지 않는다.
 
-`ruleCode → RuleId` 연결, 활성 RuleVersion snapshot 구성, 실행 조건·weight
-전달과 결과에 사용 버전을 결합하는 방식은 별도의 후속 계약이다. 관련 후속
-설계는 [ADR-005](../07-decisions/ADR-005-fraud-rule-version-model.md)의 RuleVersion
+`ruleCode → RuleId` 연결, 활성 RuleVersion snapshot, dependency, 설정
+호환성과 결정적 실행 순서는
+[RuleVersion 기반 Rule 실행 계획 내부 계약](./rule-execution-plan-contract.md)에
+정의되어 있다. 해당 계약은 아직 Python·Java 또는 서비스 연동으로 구현되지
+않았다. 실행 계획의 weight는 snapshot 정보로만 보존하며 이
+오케스트레이터는 weight를 적용하거나 scoring하지 않는다. 관련 후속 구현은
+[ADR-005](../07-decisions/ADR-005-fraud-rule-version-model.md)의 RuleVersion
 불변성과 Spring Boot·PostgreSQL 데이터 소유권을 유지해야 한다.
 
 이번 문서에서는 공식 Rule v1 문서의 `ruleCode = evaluator 선택자` 표현과
@@ -316,7 +321,7 @@ DB·ADR 계약을 변경하지 않는다.
 
 다음 항목은 이 문서 계약과 현재 작업의 범위에 포함하지 않는다.
 
-- `RuleExecutionOrchestrator` Python 구현
+- RuleVersion 기반 실행 계획 생성 구현
 - `evaluate_all()` 구현
 - Registry 기능 확장 또는 수정
 - 기존 evaluator와 models 수정
@@ -335,9 +340,9 @@ DB·ADR 계약을 변경하지 않는다.
 - 신규 외부 의존성
 - 공식 Rule v1, DB와 ADR 계약 변경
 
-## 13. 후속 Python 구현의 테스트 조건
+## 13. Python 구현의 테스트 조건
 
-후속 구현은 최소한 다음 조건을 자동화된 테스트로 검증해야 한다.
+현재 구현은 최소한 다음 조건을 자동화된 테스트로 검증한다.
 
 - 호출자가 전달한 실행 순서를 유지한다.
 - 결과 tuple이 요청과 동일한 순서를 가진다.
