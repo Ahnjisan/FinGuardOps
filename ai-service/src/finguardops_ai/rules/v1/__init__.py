@@ -53,6 +53,16 @@ from finguardops_ai.rules.v1.runner import (
     RuleExecutionPlanRunnerError,
     RuleExecutionPlanRunnerErrorCategory,
 )
+from finguardops_ai.rules.v1.scoring import (
+    RiskLevel,
+    RuleScoreContribution,
+    RuleScoreGroupSummary,
+    RuleScoringCalculator,
+    RuleScoringError,
+    RuleScoringErrorCategory,
+    RuleScoringResult,
+    ScoringGroupId,
+)
 
 __all__ = [
     "BehaviorEventSnapshot",
@@ -69,6 +79,7 @@ __all__ = [
     "R003Facts",
     "R004ConditionDefinition",
     "R004Facts",
+    "RiskLevel",
     "RuleConditionDefinition",
     "RuleEvaluationInput",
     "RuleEvaluationResult",
@@ -86,8 +97,15 @@ __all__ = [
     "RuleExecutionPlanRunnerErrorCategory",
     "RuleExecutionOrchestrator",
     "RuleId",
+    "RuleScoreContribution",
+    "RuleScoreGroupSummary",
+    "RuleScoringCalculator",
+    "RuleScoringError",
+    "RuleScoringErrorCategory",
+    "RuleScoringResult",
     "RuleVersionSnapshot",
     "RuleVersionStatus",
+    "ScoringGroupId",
     "TransactionSnapshot",
     "TransactionType",
     "UnsupportedRuleIdError",
