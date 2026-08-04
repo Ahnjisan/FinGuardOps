@@ -1,6 +1,6 @@
 # FinGuardOps AI Service
 
-FinGuardOps의 Feature·Rule·ML 및 AI 리포트 계산 책임을 담당할 FastAPI 서비스이다. 현재 구현 범위는 애플리케이션 설정, Health API, R001~R004 Rule v1 개별 순수 evaluator, 불변 RuleEvaluatorRegistry, ordered raw evaluator 실행을 담당하는 RuleExecutionOrchestrator와 RuleVersion snapshot을 immutable RuleExecutionPlan으로 변환하는 순수 builder이다. 실제 RuleVersion 조회, Spring Boot 연동, Orchestrator 호출과 plan·raw result 결합, 설정 주입·점수 계산·외부 시스템 연결은 구현되지 않았다.
+FinGuardOps의 Feature·Rule·ML 및 AI 리포트 계산 책임을 담당할 FastAPI 서비스이다. 현재 구현 범위는 애플리케이션 설정, Health API, R001~R004 Rule v1 개별 순수 evaluator, 불변 RuleEvaluatorRegistry, ordered raw evaluator 실행을 담당하는 RuleExecutionOrchestrator, RuleVersion snapshot을 immutable RuleExecutionPlan으로 변환하는 순수 builder와 plan·raw result를 결합하는 RuleExecutionPlanRunner·PlannedRuleResult이다. 실제 RuleVersion 조회, Spring Boot 연동, scoring, Evidence 변환, DetectionResult 생성과 외부 시스템 연결은 구현되지 않았다.
 
 ## 개발 환경
 
@@ -82,15 +82,17 @@ fail-fast 정책은
 - Rule 실행 오케스트레이션 계약: 문서 정의 완료
 - `RuleExecutionOrchestrator`: 구현 완료
 - [RuleVersion 기반 Rule 실행 계획 계약](../docs/01-requirements/rule-execution-plan-contract.md):
-  문서 정의 완료, 순수 `RuleExecutionPlan` builder 구현 완료
-- 실제 RuleVersion 조회와 Spring Boot 연동, Orchestrator 호출과 plan·raw result 결합:
-  후속 범위
-- evaluator settings 주입, 점수 합산·위험 등급·Evidence·DetectionResult:
+  문서 정의 완료, 순수 `RuleExecutionPlan` builder와
+  `RuleExecutionPlanRunner`·`PlannedRuleResult` 구현 완료
+- 실제 RuleVersion 조회와 Spring Boot 연동: 후속 범위
+- evaluator settings 주입, `scoring-policy-v1` 점수 합산·위험 등급,
+  Evidence 변환·DetectionResult 생성:
   후속 범위
 
-개별 evaluator·Registry와 raw evaluator orchestration은 구현되었지만
-RuleVersion snapshot의 실제 수신·조회, plan을 사용한 Orchestrator 호출,
-typed settings 주입, 점수 산정, 위험 등급, Evidence·Reason Code 변환,
-DetectionResult, 외부 API와 Spring Boot 연동은 후속 범위이다. 순수 builder는
-전달받은 `evaluationCutoffAt`의 UTC 표현과 RuleVersion 적용 기간만 검증하며,
-해당 시각이 거래 `occurredAt`과 같은지는 후속 호출 계층이 검증한다.
+개별 evaluator·Registry, raw evaluator orchestration과 plan 기반 실행·결합은
+구현되었지만 RuleVersion snapshot의 실제 수신·조회, typed settings 주입,
+점수 산정, 위험 등급, Evidence·Reason Code 변환, DetectionResult, 외부 API와
+Spring Boot 연동은 후속 범위이다. 순수 builder는 전달받은
+`evaluationCutoffAt`의 UTC 표현과 RuleVersion 적용 기간을 검증하고, 구현된
+Runner는 plan의 cutoff와 거래 `occurredAt`의 정확한 일치 및 ordered raw result
+후조건을 검증한다. Runner는 weight를 적용하거나 scoring하지 않는다.

@@ -6,22 +6,27 @@
 
 - 작업 목적: `[Docs] Rule v1 탐지 계약 및 평가 정책 정의`
 - 문서 상태: Rule v1 계약 확정
-- 구현 상태: 물리 Rule 모델, 탐지 영속 모델과 Rule v1 Evidence 최종
-  방어 검증 구현, Rule 실행 미구현
+- 구현 상태: 물리 Rule·탐지 영속 모델, R001~R004 evaluator부터
+  `PlannedRuleResult`까지의 Rule 실행 경로와 Rule v1 Evidence 저장 전 방어
+  검증 구현, scoring 이후 계층 미구현
 
 현재 구현된 범위는 Spring Boot의 거래 접수·목록·상세 조회, 거래 멱등성,
 행동 이벤트 접수·Rule 평가용 내부 조회, DetectionResult·DetectionEvidence,
 FraudRule·RuleVersion PostgreSQL 영속 모델과 Rule v1 Evidence 저장 전
-시간·코드 교차검증이다. 이 교차검증은 PR #78·#81에서 도입한 Evidence와
-행동 이벤트 계약의 누락을 보완하는 후속 구현이다. 현재 거래 접수 성공
-응답은 단계적 구현 상태인 `RECEIVED`와 탐지 관련 null 값을 반환한다.
+시간·코드 교차검증이다. AI Service에는 R001~R004 순수 evaluator,
+`RuleEvaluatorRegistry`, `RuleExecutionOrchestrator`, `RuleExecutionPlan`,
+`RuleExecutionPlanBuilder`, `RuleExecutionPlanRunner`와 `PlannedRuleResult`가
+구현되어 있다. 현재 거래 접수 성공 응답은 단계적 구현 상태인 `RECEIVED`와
+탐지 관련 null 값을 반환한다.
 
 다음 항목은 아직 구현되지 않았다.
 
-- 평가 입력과 활성 Rule 집합 Snapshot 구성
-- FastAPI Rule 실행과 Spring Boot 연동
+- Spring Boot의 평가 입력과 활성 Rule 집합 Snapshot 구성 및 실제 전달
+- scoring 계층과 위험 점수·위험 등급 산출
+- Evidence 변환
 - 탐지 실행에 따른 DetectionResult·DetectionEvidence 자동 생성·채택
-- 위험 점수·위험 등급 산출과 위험 대응
+- FastAPI 탐지 endpoint와 Spring Boot 실제 연동
+- 위험 대응
 - 사건 생성·연결
 
 ADR-003에서 결정한 최종 동기 분석 목표는 유지한다. 현재 단계 응답을 최종 계약으로 간주하지 않으며, 문서 확정을 구현 완료로 표현하지 않는다.
@@ -296,20 +301,175 @@ Evidence에는 실제 고객번호·계좌번호·기기 원문, 비밀번호 �
 
 다음 값은 측정 완료된 운영 정책이 아니라 Rule v1 구현과 검증을 위한 초기 실험값이다.
 
+### 7.1 scoring 계층 책임과 공개 계약
+
+scoring 계층은 `RuleExecutionPlanRunner`가 정상적으로 결합한 결과만 입력으로
+받고 다음 순수 계산만 수행한다.
+
+- 각 실행 Rule의 적중 여부와 상한 적용 전 원래 기여도 계산
+- 그룹별 `rawScore`, `cap`, `appliedScore`, `reduction` 계산
+- 최종 `riskScore`와 `riskLevel` 계산
+- 적용한 `scoringPolicyVersion` 기록
+
+`RuleScoringCalculator`는 `scoring-policy-v1` 정책에 따라 Runner의 정상 결과를
+점수로 계산하는 공개 scoring 소유 타입이다. 공개 계산 진입점은 다음
+`RuleScoringCalculator.calculate(...)` 하나로 확정한다.
+
+```python
+RuleScoringCalculator.calculate(
+    plan: RuleExecutionPlan,
+    planned_results: tuple[PlannedRuleResult, ...],
+) -> RuleScoringResult
+```
+
+`RuleScoringResult`와 그 중첩 값의 계약상 필드는 다음과 같다. Python 필드는
+snake_case를 사용하고 업무·API 표현은 대응하는 camelCase를 사용한다.
+
+```text
+RuleScoringResult
+├─ scoringPolicyVersion / scoring_policy_version: str
+├─ riskScore / risk_score: int
+├─ riskLevel / risk_level: RiskLevel
+├─ ruleContributions / rule_contributions: tuple<RuleScoreContribution>
+└─ groupSummaries / group_summaries: tuple<RuleScoreGroupSummary>
+
+RuleScoreContribution
+├─ ruleId / rule_id: RuleId
+├─ executionOrder / execution_order: int
+├─ matched: bool
+└─ originalContribution / original_contribution: int
+
+RuleScoreGroupSummary
+├─ groupId / group_id: ScoringGroupId
+├─ rawScore / raw_score: int
+├─ cap: int
+├─ appliedScore / applied_score: int
+└─ reduction: int
+```
+
+`ScoringGroupId`의 canonical 값은 소문자 `amount`, `security` 두 개다.
+`RiskLevel`의 canonical 값은 `LOW`, `MEDIUM`, `HIGH`, `CRITICAL` 네 개다.
+`ruleContributions`는 `planned_results`와 같은 plan 순서를 유지하고,
+`groupSummaries`는 항상 `amount`, `security` 순서의 두 항목을 반환한다. 일부
+Rule만 실행된 plan에서도 두 그룹 summary를 모두 반환하며 실행하지 않은 Rule의
+기여도를 새 항목으로 보충하지 않는다.
+
+`ruleSetVersion`과 `evaluationCutoffAt`은 이미 `RuleExecutionPlan`이 소유하는
+실행 metadata이므로 `RuleScoringResult`에 복제하지 않는다. 후속 조합 계층은
+plan과 scoring 결과를 함께 유지해 DetectionResult에 필요한 실행 metadata와
+점수 metadata를 각각 가져와야 한다. scoring 결과에는 scoring에 고유한
+`scoringPolicyVersion`만 포함한다.
+
+scoring 계층은 raw result의 `matched`만 사용한다. Rule 조건이나 `facts`를 다시
+평가하거나 보충하지 않고, plan item의 metadata와 evaluator facts를 수정하지
+않는다. Evidence, `observationSummary`, DetectionResult, FastAPI DTO 생성은
+scoring 책임이 아니다.
+
+### 7.2 scoringPolicyVersion
+
+Rule v1의 canonical `scoringPolicyVersion`은 다음 값으로 확정한다.
+
+```text
+scoring-policy-v1
+```
+
+이 값은 기존 DetectionResult·DB·API의 1~64자 trim 문자열 계약과 lowercase
+kebab-case `*-v1` naming convention을 만족한다. 의미는 다음 네 정책 요소의
+정확한 조합이다.
+
+- RuleId와 `amount`·`security` 그룹의 매핑
+- 그룹별 상한
+- 최종 점수 상한 100
+- 위험 등급 경계
+
+`ruleSetVersion`은 어떤 RuleVersion 집합을 어떤 순서로 실행했는지 식별하는
+plan의 64자 SHA-256 값이다. RuleVersion의 weight 변경은 새 불변 RuleVersion과
+새 `ruleSetVersion`으로 식별한다. 반면 `scoringPolicyVersion`은 weight 자체가
+아니라 위 그룹 매핑·상한·등급 정책을 식별한다.
+
+위 네 정책 요소 중 하나라도 바뀌면 기존 `scoring-policy-v1`의 의미를 수정하지
+않고 새 `scoringPolicyVersion`을 사용한다. 과거 DetectionResult가 참조한
+정책 버전을 현재 정책 값으로 치환하지 않는다.
+
+### 7.3 Rule별 원래 기여도
+
+각 `PlannedRuleResult`의 기여도는 같은 index의 plan item weight에서만
+계산한다.
+
+```text
+matched = true  → originalContribution = planItem.weight
+matched = false → originalContribution = 0
+```
+
+Rule별 weight를 scoring 구현에 다시 하드코딩하지 않는다. 적중하지 않은
+Rule도 실행 결과와 순서 보존을 위해 `RuleScoreContribution` 항목을 유지하되
+`originalContribution`은 0이다. 적중 Rule의 원래 contribution은 그룹 상한이
+적용되어도 줄이거나 다른 Rule에 재배분하지 않는다. 이 값은 후속 Evidence의
+상한 적용 전 `scoreContribution`과 연결할 수 있다.
+
+### 7.4 그룹별 raw·cap·applied·reduction
+
 | 시나리오군 | 포함 Rule | 합산 방식 | 상한 |
 | --- | --- | --- | --- |
 | amount | R001 | R001 적중 점수 합산 | 15 |
 | security | R002 + R003 + R004 | 적중 Rule 점수 합산 후 상한 적용 | 60 |
 
 ```text
-amountGroupScore = min(15, R001 점수)
-securityGroupScore = min(60, R002 점수 + R003 점수 + R004 점수)
-riskScore = min(100, amountGroupScore + securityGroupScore)
+amountRawScore = R001 originalContribution 합계
+amountAppliedScore = min(15, amountRawScore)
+amountReduction = amountRawScore - amountAppliedScore
+
+securityRawScore = R002 + R003 + R004 originalContribution 합계
+securityAppliedScore = min(60, securityRawScore)
+securityReduction = securityRawScore - securityAppliedScore
+
+riskScore = min(100, amountAppliedScore + securityAppliedScore)
 ```
 
-R002·R003·R004의 원래 가중치 합은 70점이지만 security 그룹 상한은 60점이다. 세 Rule이 모두 적중하면 security 그룹에는 60점만 반영한다.
+`rawScore`는 해당 그룹에 속하고 실제 실행된 Rule의 원래 contribution 합계다.
+`appliedScore`는 그룹 상한 적용 결과이고 `reduction = rawScore -
+appliedScore`다. 그룹 차감량은 summary에만 기록하고 특정 Rule에 배분하지
+않는다. 따라서 개별 contribution 합계와 최종 `riskScore`는 다를 수 있다.
+
+공식 R001~R004 weight가 모두 적중하면 결과는 다음과 같다.
+
+```text
+Rule 원래 contribution 합계 = 15 + 20 + 40 + 10 = 85
+amount raw/applied/reduction = 15/15/0
+security raw/applied/reduction = 70/60/10
+riskScore = min(100, 15 + 60) = 75
+riskLevel = HIGH
+```
 
 Rule v1에는 음수 점수, Rule 간 상쇄, 통화 환산, ML 점수, 외부 위험 점수와 생성형 AI 점수를 포함하지 않는다.
+
+### 7.5 순수 계산과 오류 정책
+
+scoring은 입력 collection과 그 원소를 변경하지 않고 새로운 불변 tuple 결과를
+반환한다. DB, 네트워크, 현재 시각, 환경에 따라 변하는 값과 mutable 전역 상태를
+사용하지 않는다. 같은 유효 plan, 같은 ordered planned result와 같은
+`scoring-policy-v1`에는 같은 결과와 순서를 반환한다.
+
+구현 독립적인 semantic 오류 범주는 다음 최소 집합으로 정의한다. 구체적인
+Python 예외 클래스와 HTTP 상태는 후속 구현·API 계약에서 정한다.
+
+| 오류 범주 | 의미 |
+| --- | --- |
+| `INVALID_SCORING_INPUT` | plan 타입이 잘못됐거나 result collection이 non-tuple·빈 tuple이거나 원소가 `PlannedRuleResult`가 아님 |
+| `SCORING_PLAN_RESULT_MISMATCH` | plan/result 개수, 같은 index의 plan item, RuleId 또는 execution order가 일치하지 않음 |
+| `UNSUPPORTED_SCORING_RULE` | `scoring-policy-v1` 그룹 매핑에 없는 RuleId가 있음 |
+| `INVALID_RULE_WEIGHT` | plan item weight가 bool이 아닌 정수 1~100 계약을 위반함 |
+| `INVALID_SCORING_POLICY` | `RuleScoringCalculator`에 적용되는 scoring policy 구성 또는 policy binding이 유효하지 않거나, 정책 버전·그룹 매핑·상한·최종 상한·등급 경계가 `scoring-policy-v1` 정의와 일치하지 않음 |
+
+scoring 계층은 plan item과 result를 같은 index에서만 연결한다. plan item을
+RuleId로 재정렬하거나 결과를 보충·제거하지 않고, 잘못된 execution order를
+다시 부여하지 않는다. 같은 index의 `PlannedRuleResult.plan_item`은
+`plan.items[i]`와 정확히 같아야 하며 evaluation result의 RuleId도 해당 plan
+item의 RuleId와 같아야 한다.
+
+위 오류는 확인된 첫 위반에서 fail-fast할 수 있다. 오류를 `LOW`, 0점, 빈 결과,
+부분 점수 또는 일부 그룹 성공으로 변환하지 않는다. retry와 fallback도
+수행하지 않는다.
 
 ## 8. 위험 등급 경계
 
@@ -325,6 +485,39 @@ Rule v1에는 음수 점수, Rule 간 상쇄, 통화 환산, ML 점수, 외부 �
 R001~R004만 적용할 때 가능한 최고 점수는 `15 + 60 = 75`점이다. 따라서 현재 최소 범위에서는 `CRITICAL`이 발생하지 않는다. `CRITICAL` 경계는 후속 외부 위험 및 자금흐름 Rule 추가를 고려해 유지한다.
 
 위험 등급은 FastAPI가 이 점수 경계로 계산해 반환하되, Spring Boot가 결과의 범위·버전·완전성을 검증하고 채택한 뒤에만 업무 기록으로 사용한다. 위험 등급은 최종 이상거래 판정이나 거래 대응 결과와 동일하지 않다.
+
+### 8.1 후속 scoring 구현의 자동 검증 조건
+
+후속 Python scoring 구현은 최소한 다음 사례를 자동화된 테스트로 검증해야
+한다.
+
+| 적중 Rule | 원래 contribution 합계 | 최종 `riskScore` | `riskLevel` |
+| --- | ---: | ---: | --- |
+| 없음 | 0 | 0 | `LOW` |
+| R004 | 10 | 10 | `LOW` |
+| R001 | 15 | 15 | `LOW` |
+| R001 + R002 | 35 | 35 | `MEDIUM` |
+| R001 + R003 | 55 | 55 | `HIGH` |
+| R001 + R004 | 25 | 25 | `MEDIUM` |
+| R001 + R002 + R003 + R004 | 85 | 75 | `HIGH` |
+
+전체 적중 사례에서는 security `rawScore = 70`, `cap = 60`,
+`appliedScore = 60`, `reduction = 10`과 amount `15/15/0`을 함께 검증한다.
+그룹 상한 적용 뒤에도 R001~R004의 개별 `originalContribution`이 각각
+15·20·40·10으로 유지되고 security 차감 10이 특정 Rule에 배분되지 않는지
+검증한다.
+
+정상·오류 사례에 공통으로 다음 조건도 검증한다.
+
+- `ruleContributions`가 plan 순서이고 `groupSummaries`가 `amount → security`
+  순서인지
+- 입력 plan, planned result tuple과 중첩 원소를 변경하지 않는지
+- 잘못된 plan 타입, non-tuple·빈 결과, 잘못된 결과 원소 타입을 fail-fast하는지
+- plan/result 개수, 같은 index의 plan item, RuleId와 execution order 불일치를
+  재정렬·보충 없이 fail-fast하는지
+- 지원하지 않는 RuleId, 잘못된 weight와 잘못된 scoring policy를 거부하는지
+- 오류를 0점, `LOW`, 부분 점수, retry 또는 fallback으로 바꾸지 않는지
+- DB·네트워크·현재 시각·mutable 전역 상태를 사용하지 않는지
 
 ## 9. Rule 코드·버전·활성 상태 정책
 
@@ -431,17 +624,22 @@ FastAPI Timeout·응답 부재·검증 실패 시 Spring Boot는 임의 점수, 
 스키마가 구현되어 있다. Rule 평가용 BehaviorEvent 내부 시간창 조회,
 Rule·Evidence typed JSON 검증, RuleVersion 기간 중복 방지,
 DetectionEvidence FK·snapshot 정합성과 Evidence 시간·코드 저장 경계
-검증도 구현되어 있다. 공개 행동 조회 API, Rule 실행, FastAPI 연동과 운영
-배포 환경은 구현되지 않았다.
+검증도 구현되어 있다. AI Service의 R001~R004 evaluator, Registry,
+Orchestrator, 실행 plan·builder와 Runner·planned result까지 구현되어 있다.
+scoring, Evidence 변환, DetectionResult 생성, 공개 탐지 API, Spring Boot 실제
+연동과 운영 배포 환경은 구현되지 않았다.
 
 ## 14. 후속 구현 순서
 
 1. 현재 `RECEIVED`/null 거래 접수 응답과 최종 동기 응답 사이의 전환 정책을 정하고, 기존 멱등 `response_snapshot`의 스키마·재생 호환·만료 데이터 처리 방식을 확정한다.
-2. Spring Boot가 평가 cutoff, 입력 Snapshot과 활성 Rule 집합을 고정하는 내부 계약을 정의한다.
-3. 구현된 FraudRule·RuleVersion에서 평가 시각에 실행 가능한 PUBLISHED
-   Rule 집합을 결정하고 불변 Snapshot으로 고정하는 내부 계약을 구현한다.
-4. 구현된 고객·이벤트 유형·시간창 조회를 사용해 기기·계좌·수취인 조건을 적용하고 평가 입력 Snapshot 상한을 확정한다.
-5. FastAPI에 R001~R004, 그룹 상한, 위험 등급과 Evidence 반환을 구현한다.
+2. Spring Boot가 평가 cutoff, 입력 Snapshot과 활성 Rule 집합을 고정하고 실제
+   서비스 입력으로 전달하는 경계를 구현한다.
+3. 구현된 Runner의 정상 `PlannedRuleResult`를 입력으로 이 문서의
+   `scoring-policy-v1` scoring 계층을 구현한다.
+4. plan metadata와 raw facts를 사용한 Evidence·`observationSummary` 변환을
+   별도 계층으로 구현한다.
+5. FastAPI 탐지 endpoint와 DTO를 확정하고 DetectionResult 생성에 필요한
+   결과의 완전성을 검증한다.
 6. Spring Boot의 FastAPI 호출, 결과 검증·영속화·채택과 장애 처리를 구현한다.
 7. ADR-003의 최종 동기 거래 처리 흐름에 위험 대응과 사건 연결을 통합하고 멱등·동시성·실패 복구를 검증한다.
 8. 경계값·복합 적중·늦은 이벤트·Timeout·성능·관측 지표 테스트와 실험을 수행한 뒤 운영 정책 후보를 재승인한다.
