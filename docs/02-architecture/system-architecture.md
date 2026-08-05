@@ -43,8 +43,11 @@
 DetectionResult·DetectionEvidence와 FraudRule·RuleVersion의 PostgreSQL
 애플리케이션 연동도 구현되어 있지만 운영 배포 환경은 없다. 현재 거래
 접수는 단계적 구현 응답인 `RECEIVED`와 탐지 관련 null 값을 반환한다.
-Rule 실행, 탐지 결과 자동 생성·채택, 사건, 감사와 AI 운영 도메인은 아직
-구현되지 않았다.
+AI Service에는 RuleVersion snapshot 입력 모델, ExecutionPlan Builder,
+Orchestrator, Runner, R001~R004 evaluator와 Scoring Calculator의 순수 내부
+경로가 구현되어 있다. Rule Evidence 변환과 Rule 분석 결과 조합은 계약만
+정의되어 있고, FastAPI 탐지 endpoint, Spring Boot Client, 탐지 결과 자동
+생성·채택, 사건, 감사와 AI 운영 도메인은 아직 구현되지 않았다.
 
 ### 2.2 문서로 정의됨
 
@@ -62,7 +65,8 @@ Rule 실행, 탐지 결과 자동 생성·채택, 사건, 감사와 AI 운영 �
 
 ### 2.3 구현되지 않음
 
-- `ai-service/`: 초기 실행·설정·Health API 기반만 구현되었으며 Rule·ML·AI 리포트와 Spring Boot 연동 없음
+- `ai-service/`: Rule v1 실행·scoring 순수 내부 경로까지 구현되었으며 Evidence
+  Transformer, 탐지 endpoint, ML·AI 리포트와 Spring Boot 연동 없음
 - `frontend/`: 역할 규칙과 자리표시자만 있으며 React 구현 없음
 - `infra/`: 자리표시자만 있으며 Docker Compose 등 인프라 구현 없음
 - `.github/`: Issue·PR 템플릿과 Backend·AI Service 테스트 Workflow가 있으며 이미지 빌드·배포 자동화 없음
@@ -462,6 +466,19 @@ FastAPI는 Feature, R001~R004, 점수·등급·Reason Code·Evidence 계산을
 구현되었지만 FastAPI 연동과 실행 결과 생성·검증·채택 흐름은 아직
 구현되지 않았다.
 
+현재 FastAPI 내부에서는 RuleVersion snapshot을 받는 Python 입력 모델부터
+ExecutionPlan Builder → Orchestrator → Runner → R001~R004 evaluator → Scoring
+Calculator까지 구현되어 있다. `RuleEvidenceTransformer`와
+`RuleAnalysisResult`는 계약 정의 상태이며 구현되지 않았다. 이 내부 구현은
+공개 FastAPI endpoint나 Spring Boot Client가 구현되었다는 뜻이 아니다.
+
+후속 Rule Evidence 경계에서 FastAPI는 RuleVersion metadata, Reason Code,
+원래 contribution, typed observation, Evidence 시각과 plan 기반 출력 순서를
+계산한다. Spring Boot는 DetectionResult·Evidence 업무 ID, 분석 상태·시각·trace,
+표시 설명과 0-based 연속 영속 순서를 생성하고 결과를 검증·채택·저장한다.
+Spring Boot는 방어 검증을 위해 evaluator 조건, 행동 이벤트 선택, scoring
+그룹 상한과 위험 등급 알고리즘을 재구현하지 않는다.
+
 ## 10. Rule 관리·실행 책임
 
 권장 기본안은 다음과 같다.
@@ -766,6 +783,8 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 - 단계적 거래 접수 `RECEIVED`/null 응답
 - 저장소 역할 규칙과 GitHub Issue·PR 템플릿
 - FastAPI AI Service 초기 실행·설정·Health API와 테스트 기반
+- RuleVersion snapshot 입력 모델, ExecutionPlan Builder, Orchestrator, Runner,
+  R001~R004 evaluator와 Scoring Calculator
 - Backend와 AI Service 전용 GitHub Actions 테스트 Workflow
 
 ### 18.2 문서로 정의됨
@@ -777,12 +796,13 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 - 제품 포지셔닝과 저장소명 변경 ADR
 - 본 시스템 아키텍처
 - Rule v1 탐지 계약과 초기 평가 정책
+- Rule Evidence 변환과 Rule 분석 결과 조합 계약
 
 ### 18.3 다음 구현 예정
 
-- 행동 이벤트 조회와 Spring Boot 탐지·위험 대응·사건·감사 도메인
-- 탐지·Rule·사건·감사 도메인의 PostgreSQL 영속화
-- FastAPI Rule 기반 Baseline과 분석 연동
+- R004 `observed_amount` facts 보강과 Rule Evidence Transformer·분석 결과 조합
+- FastAPI 탐지 endpoint와 Spring Boot Client·분석 연동
+- DetectionResult 자동 영속화·채택과 위험 대응·사건·감사 도메인
 - External Risk Mock
 - Docker 및 Docker Compose 통합 환경
 

@@ -14,7 +14,8 @@
 - R001~R004 순수 evaluator: 구현됨
 - 불변 `RuleEvaluatorRegistry`: 구현됨
 - `RuleExecutionOrchestrator` Python 구현: 구현됨
-- 점수 합산·위험 등급·Evidence 변환: 미구현 후속 범위
+- `RuleExecutionPlanRunner` 이후 `RuleScoringCalculator`: 구현됨
+- Evidence 변환과 Rule 분석 결과 조합: 미구현 후속 범위
 - FastAPI 외부 분석 API와 Spring Boot 연동: 미구현 후속 범위
 
 현재 구현된 evaluator와 Registry의 기준은
@@ -272,11 +273,12 @@ Registry가 특정 요청 ID에 callable을 연결했다는 사실만으로 반�
 ## 10. 점수·위험 등급·Evidence 계층과의 경계
 
 오케스트레이터 출력은 점수와 외부 Evidence가 결합되지 않은 raw
-`RuleEvaluationResult` tuple이다. 다음 기능은 후속 계층의 책임이다.
+`RuleEvaluationResult` tuple이다. 다음 기능은 오케스트레이터가 아닌 downstream
+계층의 책임이다.
 
-- RuleVersion과 weight 적용
-- 그룹 상한과 점수 합산
-- 위험 점수와 위험 등급 산정
+- Runner의 RuleVersion metadata 결합
+- 구현된 `RuleScoringCalculator`의 canonical weight 검증, 그룹 상한과 점수 합산
+- 구현된 `RuleScoringCalculator`의 위험 점수와 위험 등급 산정
 - facts의 Evidence 및 `observationSummary` 변환
 - `reasonCode`, `ruleCode`, RuleVersion 결합
 - DetectionResult 완전성 검증
@@ -310,10 +312,11 @@ Registry가 특정 요청 ID에 callable을 연결했다는 사실만으로 반�
 [RuleVersion 기반 Rule 실행 계획 내부 계약](./rule-execution-plan-contract.md)에
 정의되어 있다. 현재 Python에는 불변 `RuleExecutionPlan`,
 `RuleExecutionPlanItem`, 순수 `RuleExecutionPlanBuilder`, plan 실행·결합을
-담당하는 `RuleExecutionPlanRunner`와 `PlannedRuleResult`가 구현되어 있지만,
-Java 구현과 서비스 연동은 아직 구현되지 않았다. 실행 계획의 weight는
-snapshot 정보로만 보존하며 이 오케스트레이터는 weight를 적용하거나
-scoring하지 않는다. 관련 후속 구현은
+담당하는 `RuleExecutionPlanRunner`, `PlannedRuleResult`와 별도 downstream
+`RuleScoringCalculator`가 구현되어 있지만, Evidence Transformer, Java 구현과
+서비스 연동은 아직 구현되지 않았다. 실행 계획의 weight는 오케스트레이터에서
+snapshot 정보로만 보존하며 이 오케스트레이터 자체는 weight를 적용하거나
+scoring하지 않는다. downstream 구현은
 [ADR-005](../07-decisions/ADR-005-fraud-rule-version-model.md)의 RuleVersion
 불변성과 Spring Boot·PostgreSQL 데이터 소유권을 유지해야 한다.
 
