@@ -40,11 +40,25 @@ def test_r004_matches_recent_same_customer_account_and_beneficiary(
     assert result.rule_id is RuleId.R004
     assert result.matched is True
     assert result.facts == R004Facts(
+        observed_amount=Decimal("10000000"),
         event_id=event.event_id,
         beneficiary_registered_at=event.occurred_at,
         elapsed_seconds=1800,
         window_seconds=86400,
     )
+
+
+def test_r004_facts_preserve_observed_amount(transaction_factory, event_factory) -> None:
+    rule_input = RuleEvaluationInput(
+        transaction=transaction_factory(amount=Decimal("123456")),
+        behavior_events=(_beneficiary_event(event_factory),),
+    )
+
+    result = evaluate_r004(rule_input)
+
+    assert result.matched is True
+    assert result.facts is not None
+    assert result.facts.observed_amount == Decimal("123456")
 
 
 def test_r004_does_not_match_different_customer_account_or_beneficiary(

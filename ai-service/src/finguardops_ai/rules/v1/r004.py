@@ -36,6 +36,7 @@ def evaluate_r004(rule_input: RuleEvaluationInput) -> RuleEvaluationResult[R004F
         rule_id=RuleId.R004,
         matched=True,
         facts=R004Facts(
+            observed_amount=transaction.amount,
             event_id=selected_event.event_id,
             beneficiary_registered_at=selected_event.occurred_at,
             elapsed_seconds=elapsed_seconds(selected_event.occurred_at, transaction.occurred_at),

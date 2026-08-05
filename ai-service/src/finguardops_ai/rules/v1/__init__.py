@@ -7,6 +7,14 @@ from finguardops_ai.rules.v1.condition_definitions import (
     R004ConditionDefinition,
     RuleConditionDefinition,
 )
+from finguardops_ai.rules.v1.evidence import (
+    RuleAnalysisResult,
+    RuleEvidenceError,
+    RuleEvidenceErrorCategory,
+    RuleEvidenceObservation,
+    RuleEvidenceOutput,
+    RuleEvidenceTransformer,
+)
 from finguardops_ai.rules.v1.execution_plan import (
     FraudRuleLifecycleStatus,
     RuleExecutionPlan,
@@ -80,7 +88,13 @@ __all__ = [
     "R004ConditionDefinition",
     "R004Facts",
     "RiskLevel",
+    "RuleAnalysisResult",
     "RuleConditionDefinition",
+    "RuleEvidenceError",
+    "RuleEvidenceErrorCategory",
+    "RuleEvidenceObservation",
+    "RuleEvidenceOutput",
+    "RuleEvidenceTransformer",
     "RuleEvaluationInput",
     "RuleEvaluationResult",
     "RuleEvaluator",
