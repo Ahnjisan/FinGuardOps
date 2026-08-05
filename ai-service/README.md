@@ -1,6 +1,14 @@
 # FinGuardOps AI Service
 
-FinGuardOps의 Feature·Rule·ML 및 AI 리포트 계산 책임을 담당할 FastAPI 서비스이다. 현재 구현 범위는 애플리케이션 설정, Health API, R001~R004 Rule v1 개별 순수 evaluator, 불변 RuleEvaluatorRegistry, ordered raw evaluator 실행을 담당하는 RuleExecutionOrchestrator, RuleVersion snapshot을 immutable RuleExecutionPlan으로 변환하는 순수 builder와 plan·raw result를 결합하는 RuleExecutionPlanRunner·PlannedRuleResult이다. 실제 RuleVersion 조회, Spring Boot 연동, scoring, Evidence 변환, DetectionResult 생성과 외부 시스템 연결은 구현되지 않았다.
+FinGuardOps의 Feature·Rule·ML 및 AI 리포트 계산 책임을 담당할 FastAPI
+서비스이다. 현재 구현 범위는 애플리케이션 설정, Health API, R001~R004 Rule v1
+개별 순수 evaluator, 불변 RuleEvaluatorRegistry, ordered raw evaluator 실행을
+담당하는 RuleExecutionOrchestrator, RuleVersion snapshot을 immutable
+RuleExecutionPlan으로 변환하는 순수 builder, plan·raw result를 결합하는
+RuleExecutionPlanRunner·PlannedRuleResult와 `scoring-policy-v1`의
+RuleScoringCalculator이다. 실제 RuleVersion 조회·수신, Spring Boot 연동,
+Evidence 변환, Rule 분석 결과 조합, DetectionResult 생성과 외부 시스템 연결은
+구현되지 않았다.
 
 ## 개발 환경
 
@@ -62,7 +70,7 @@ uv run --locked pytest --cov=finguardops_ai --cov-report=term-missing
 
 시각을 추가하는 후속 구현은 timezone-aware UTC를 사용한다. API Key, Token, Password, DB 접속 정보, 개인정보 및 금융 식별자 원문은 코드·문서·로그에 기록하지 않는다.
 
-## Rule v1 evaluator
+## Rule v1 execution and scoring
 
 `finguardops_ai.rules.v1`은 공식 Rule v1 계약의 R001~R004를 외부 시스템과 애플리케이션 전역 상태에 의존하지 않는 개별 evaluator로 제공한다.
 
@@ -84,15 +92,36 @@ fail-fast 정책은
 - [RuleVersion 기반 Rule 실행 계획 계약](../docs/01-requirements/rule-execution-plan-contract.md):
   문서 정의 완료, 순수 `RuleExecutionPlan` builder와
   `RuleExecutionPlanRunner`·`PlannedRuleResult` 구현 완료
+- `RuleScoringCalculator.calculate(plan, planned_results) -> RuleScoringResult`:
+  `scoring-policy-v1` 구현과 테스트 완료
+- [Rule v1 Evidence 변환·분석 결과 조합 계약](../docs/01-requirements/rule-v1-detection-contract.md#6-reason-code와-evidence):
+  공개 타입·진입점 계약 정의 완료, Python 구현은 후속 범위
 - 실제 RuleVersion 조회와 Spring Boot 연동: 후속 범위
-- evaluator settings 주입, `scoring-policy-v1` 점수 합산·위험 등급,
-  Evidence 변환·DetectionResult 생성:
+- evaluator settings 주입, R004 `observed_amount` facts 보강,
+  Evidence 변환·Rule 분석 결과 조합·DetectionResult 생성:
   후속 범위
 
 개별 evaluator·Registry, raw evaluator orchestration과 plan 기반 실행·결합은
 구현되었지만 RuleVersion snapshot의 실제 수신·조회, typed settings 주입,
-점수 산정, 위험 등급, Evidence·Reason Code 변환, DetectionResult, 외부 API와
+Evidence·Reason Code 변환, Rule 분석 결과 조합, DetectionResult, 외부 API와
 Spring Boot 연동은 후속 범위이다. 순수 builder는 전달받은
 `evaluationCutoffAt`의 UTC 표현과 RuleVersion 적용 기간을 검증하고, 구현된
 Runner는 plan의 cutoff와 거래 `occurredAt`의 정확한 일치 및 ordered raw result
-후조건을 검증한다. Runner는 weight를 적용하거나 scoring하지 않는다.
+후조건을 검증한다. Runner 자체는 weight를 적용하거나 scoring하지 않으며,
+별도의 구현된 `RuleScoringCalculator`가 canonical Rule ID·group·weight binding,
+그룹 상한과 위험 등급을 검증·계산한다.
+
+후속 Evidence 공개 구조는 다음으로 계약만 확정되어 있다.
+
+```python
+RuleEvidenceTransformer.transform(
+    plan: RuleExecutionPlan,
+    planned_results: tuple[PlannedRuleResult, ...],
+    scoring_result: RuleScoringResult,
+) -> RuleAnalysisResult
+```
+
+확정한 공개 타입명은 `RuleEvidenceTransformer`, `RuleEvidenceOutput`,
+`RuleEvidenceObservation`, `RuleAnalysisResult`, `RuleEvidenceError`,
+`RuleEvidenceErrorCategory`다. 이 타입들은 아직 현재 패키지에 구현되거나
+export되지 않았다. FastAPI 탐지 endpoint와 Pydantic 요청·응답 DTO도 아직 없다.

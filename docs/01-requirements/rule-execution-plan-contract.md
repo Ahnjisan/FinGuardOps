@@ -37,12 +37,15 @@ Spring Boot의 활성 RuleVersion 업무 snapshot
 - 활성 RuleVersion 전체 조회·업무 snapshot 생성: 미구현
 - RuleVersion 설정 전달과 typed evaluator settings: 미구현
 - Spring Boot·FastAPI 실제 연동: 미구현
-- 점수·위험 등급·Evidence·DetectionResult 처리: 미구현 후속 범위
+- `RuleScoringCalculator`와 점수·위험 등급 계산: 구현됨
+- Evidence Transformer·`RuleAnalysisResult`·DetectionResult 처리: 미구현 후속 범위
 
 현재 순수 Builder 구현은 전달받은 RuleVersion snapshot을 plan으로 변환하고,
 Runner는 plan을 기존 Orchestrator로 실행해 ordered raw result와 strict index로
-결합한다. 이 실행 경로가 구현되었다는 사실은 실제 서비스 연동이나 후속
-scoring이 구현되었다는 뜻이 아니다.
+결합한다. 구현된 `RuleScoringCalculator`는 정상 결합 결과를
+`scoring-policy-v1`에 따라 점수로 계산한다. 이 순수 실행·scoring 경로가
+구현되었다는 사실은 실제 서비스 연동이나 후속 Evidence 변환이 구현되었다는
+뜻이 아니다.
 
 공식 Rule 조건과 평가 의미는
 [Rule v1 탐지 계약](./rule-v1-detection-contract.md)을 따르고, ordered Rule ID
@@ -171,11 +174,11 @@ Runner는 Builder의 업무·설정 validation을 다시 수행하거나 Registr
 
 ### 3.5 scoring 계층
 
-미구현 scoring 계층은 정상 결합된 `PlannedRuleResult`를 입력으로 적중 Rule의
-weight 적용, 그룹 상한, 점수 합산과 위험 등급을 계산한다. 이후 Evidence
-계층은 plan metadata와 raw facts를 사용해 Evidence를 구성한다. scoring과
-Evidence·DetectionResult 처리는 Builder, Runner와 Orchestrator의 책임이
-아니다.
+구현된 scoring 계층은 정상 결합된 `PlannedRuleResult`를 입력으로 적중 Rule의
+weight 적용, 그룹 상한, 점수 합산과 위험 등급을 계산한다. 후속 Evidence
+계층은 plan metadata, raw facts와 scoring 결과를 사용해 Evidence와 Rule 분석
+결과를 구성한다. scoring과 Evidence·DetectionResult 처리는 Builder, Runner와
+Orchestrator의 책임이 아니다.
 
 FastAPI의 모든 내부 계층은 Spring Boot의 업무 DB를 직접 조회하지 않고
 RuleVersion lifecycle, status, 기간과 weight를 임의로 변경하지 않는다.
@@ -918,8 +921,8 @@ Runner는 다음 작업을 수행하지 않는다.
 - DetectionResult 생성·완전성 검증·저장·채택
 
 `RuleScoringCalculator`는 `scoring-policy-v1` 정책에 따라 Runner의 정상 결과를
-점수로 계산하는 공개 scoring 소유 타입이다. Issue #116의 공개 계산 진입점은
-다음 `RuleScoringCalculator.calculate(...)` 하나로 확정한다.
+점수로 계산하는 구현된 공개 scoring 소유 타입이다. 공개 계산 진입점은 다음
+`RuleScoringCalculator.calculate(...)` 하나다.
 
 ```python
 RuleScoringCalculator.calculate(
@@ -932,7 +935,10 @@ RuleScoringCalculator.calculate(
 `RuleScoreGroupSummary`, `ScoringGroupId`, `RiskLevel`의 필드와
 `scoring-policy-v1` 의미는 [Rule v1 탐지 계약 7절](./rule-v1-detection-contract.md#7-점수-합산과-시나리오군-상한)을
 따른다. scoring 계층은 정상 Runner 결과의 `matched`와 같은 index plan item의
-`weight`만 사용하며 Rule 조건과 facts를 다시 평가하지 않는다.
+`weight`만 contribution 계산에 사용하며 Rule 조건과 facts를 다시 평가하지
+않는다. `scoring-policy-v1`은 R001·R002·R003·R004의 canonical group·weight
+binding 15·20·40·10을 소유하고 plan item이 이 binding과 일치하는지 검증한
+뒤 실제 contribution에 검증된 `plan_item.weight`를 사용한다.
 
 `evaluationCutoffAt`과 `ruleSetVersion`은 plan 전체의 metadata로만 유지하고
 `RuleScoringResult`에 복제하지 않는다. scoring 결과에는 적용한
@@ -953,8 +959,8 @@ scoring은 계산 전에 최소한 다음 정합성을 fail-fast로 검증한다
    검증한다.
 8. 모든 RuleId가 `scoring-policy-v1`의 R001~R004 그룹 mapping에 포함되는지
    검증한다.
-9. 각 weight가 bool이 아닌 정수이고 기존 plan 계약의 1~100 범위인지
-   검증한다.
+9. 각 weight가 bool이 아닌 정수이고 기존 plan 계약의 1~100 범위이며
+   R001·R002·R003·R004의 canonical weight 15·20·40·10과 같은지 검증한다.
 10. 선택된 scoring policy의 버전·그룹 mapping·그룹 상한·최종 상한·등급
     경계가 `scoring-policy-v1`과 정확히 같은지 검증한다.
 
@@ -969,8 +975,33 @@ Python 예외 클래스와 HTTP 상태는 확정하지 않는다.
 scoring 계층은 결과를 RuleId 기준으로 재정렬하거나 누락 결과를 보충하지
 않고 plan과 같은 index에서만 결합한다. 잘못된 입력과 mismatch를 0점,
 `LOW`, 부분 점수, 빈 성공 결과로 바꾸지 않으며 retry와 fallback을 수행하지
-않는다. Evidence 계약은 `reasonCode`, typed `conditionDefinition`과 raw facts를
-사용한 Evidence 구성 및 Spring Boot 저장 전 검증 경계를 별도로 정의해야 한다.
+않는다.
+
+후속 Evidence 변환 계층의 공개 handoff는 다음 세 입력으로 확정한다.
+
+```python
+RuleEvidenceTransformer.transform(
+    plan: RuleExecutionPlan,
+    planned_results: tuple[PlannedRuleResult, ...],
+    scoring_result: RuleScoringResult,
+) -> RuleAnalysisResult
+```
+
+`evaluationCutoffAt`과 `ruleSetVersion`은 plan에서, RuleVersion metadata와
+`executionOrder`는 같은 index plan item에서, `matched`와 typed facts는
+planned result에서, contribution·그룹 summary·점수·등급·정책 버전은 scoring
+result에서 가져온다. `RuleAnalysisResult`는 plan의 두 global metadata,
+중첩 `RuleScoringResult`와 ordered immutable Evidence tuple을 소유하고 scoring
+필드를 다시 평탄화하지 않는다.
+
+Transformer는 공식 Builder → Runner → Calculator 경로의 index·identity·순서,
+matched·contribution과 metadata 정합성을 방어적으로 검증하되 evaluator Rule
+조건이나 행동 이벤트 선택을 다시 실행하지 않는다. scoring policy 상수와
+계산 알고리즘도 Evidence 모듈에 복제하지 않고 기존 calculator 또는 scoring
+모듈의 단일 검증 경로를 재사용해야 한다. Rule별 Evidence와 observation의
+정확한 필드·시각·순서·semantic 오류 계약은
+[Rule v1 탐지 계약 6절](./rule-v1-detection-contract.md#6-reason-code와-evidence)을
+따른다. Transformer와 해당 공개 결과·오류 타입은 아직 구현되지 않았다.
 
 ### 20.2 Spring Boot·DB·API 경계
 
@@ -989,20 +1020,18 @@ Spring Boot는 거래·RuleVersion·DetectionResult 업무 정합성의 최종 �
 
 ### 20.3 현재 제외 범위
 
-다음 항목은 Issue #116 문서 작업과 scoring 계약의 구현 범위에 포함하지
-않는다.
+Builder·Runner·Scoring Calculator는 현재 구현되어 있다. 다음 항목은 아직
+구현되지 않은 후속 범위다.
 
-- Python scoring 구현과 Python 테스트 추가·수정
-- 기존 evaluator, Registry, Orchestrator와 모델 수정
-- evaluator signature와 `RuleEvaluationInput` 변경
-- typed evaluator settings 구현과 주입
+- R004 `observed_amount` facts 보강
+- `RuleEvidenceTransformer`, `RuleEvidenceOutput`, `RuleAnalysisResult`와
+  Evidence 오류 타입
 - 실행 단위 wrapper, `executionId`, 상태와 실행 시각
 - Python·Java Service, Repository와 DB Migration 구현
 - `execution_order` DB 컬럼
-- Evidence와 `observationSummary` 변환
 - DetectionResult 생성·검증·저장·채택
 - FastAPI endpoint, API DTO와 Spring Boot 실제 연동
-- Python 예외 계층과 HTTP 오류 응답 확정
+- HTTP 오류 응답 확정
 - retry와 fallback
 - 로그와 메트릭
 - Redis, Kafka, ML과 LLM
@@ -1051,12 +1080,12 @@ Orchestrator의 입력 순서 보존, 전체 capability 사전 resolution, 순�
 - evaluator·결과 오류 시 planned 부분 결과와 빈 성공 tuple 미반환
 - plan metadata 보존과 weight·Reason Code 미사용
 
-Runner와 위 테스트는 구현되어 있다. 이는 scoring, Evidence 변환,
-DetectionResult 생성 또는 실제 서비스 연동이 구현되었다는 뜻이 아니다.
+Runner와 위 테스트는 구현되어 있다. 이 사실만으로 후속 Evidence 변환,
+DetectionResult 생성 또는 실제 서비스 연동이 구현되었다는 뜻은 아니다.
 
-### 21.3 후속 scoring 구현
+### 21.3 현재 scoring 구현
 
-scoring 구현 시 다음 점수·등급 사례를 자동화된 테스트로 검증해야 한다.
+현재 scoring 구현과 자동화된 테스트는 다음 점수·등급 사례를 검증한다.
 
 - 전체 미적중: 0, `LOW`
 - R004만 적중: 10, `LOW`
@@ -1077,10 +1106,11 @@ scoring 구현 시 다음 점수·등급 사례를 자동화된 테스트로 검
 - 잘못된 `PlannedRuleResult` 원소 타입 거부
 - plan/result 개수와 같은 index plan item 불일치 fail-fast
 - RuleId·execution order mismatch를 재정렬·보충 없이 fail-fast
-- 지원하지 않는 RuleId와 bool·범위 밖 weight 거부
+- 지원하지 않는 RuleId와 bool·범위 밖·canonical binding 불일치 weight 거부
 - `scoring-policy-v1`과 다른 버전 또는 정의 거부
 - 오류 시 0점·`LOW`·부분 결과·retry·fallback 미사용
 - DB·네트워크·현재 시각·mutable 전역 상태 미사용
 
-현재 scoring 구현과 해당 테스트는 아직 없으며 이 문서 계약을 구현 완료로
-표현하지 않는다.
+현재 `RuleScoringCalculator`, 결과 타입, 오류 범주와 해당 테스트는 구현되어
+있다. `RuleEvidenceTransformer`, Evidence 결과·오류 타입, FastAPI endpoint와
+Spring Boot 연동은 아직 구현되지 않았다.
