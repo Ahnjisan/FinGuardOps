@@ -182,6 +182,7 @@ class R003Facts:
 
 @dataclass(frozen=True, slots=True)
 class R004Facts:
+    observed_amount: Decimal
     event_id: UUID
     beneficiary_registered_at: datetime
     elapsed_seconds: int
