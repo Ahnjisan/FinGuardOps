@@ -11,6 +11,10 @@ FastAPI Rule 분석 endpoint, Pydantic 요청·응답 DTO, RuleVersion 조회를
 Spring Boot Client, DetectionResult·DetectionEvidence 자동 영속화와 결과 채택은
 구현되지 않았다.
 
+Spring Boot → FastAPI 내부 Rule v1 분석 요청·응답, 추적, 직렬화와 오류 계약은
+[Rule v1 내부 분석 API](../docs/03-api/rule-v1-analysis-api.md)에 정의되어 있다.
+계약 문서는 확정되었지만 Endpoint와 DTO 구현이 완료되었다는 뜻은 아니다.
+
 ## 개발 환경
 
 - CPython 3.12
@@ -97,6 +101,8 @@ fail-fast 정책은
   `scoring-policy-v1` 구현과 테스트 완료
 - [Rule v1 Evidence 변환·분석 결과 조합 계약](../docs/01-requirements/rule-v1-detection-contract.md#6-reason-code와-evidence):
   공개 타입·진입점 계약과 Python 구현·테스트 완료
+- [Rule v1 내부 분석 API 계약](../docs/03-api/rule-v1-analysis-api.md):
+  문서 정의 완료, FastAPI Endpoint·Pydantic DTO와 Spring Boot Client 미구현
 - 실제 RuleVersion 조회와 Spring Boot Client: 후속 범위
 - R004 `observed_amount` facts 보강과 Evidence 변환·Rule 분석 결과 조합:
   구현 완료

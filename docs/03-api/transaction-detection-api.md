@@ -50,7 +50,10 @@ External Risk, FastAPI, 탐지 실행 결과 생성·검증·채택, 위험 대�
 
 ### 2.3 FastAPI 책임
 
-다음 항목은 목표 책임 범위이다. 현재 `ai-service/`에는 FastAPI와 Rule 실행 구현이 없다.
+다음 항목은 목표 책임 범위이다. 현재 `ai-service/`에는 R001~R004 실행,
+scoring, Evidence 변환과 Rule 분석 결과 조합의 순수 내부 경로가 구현되어
+있다. [Rule v1 내부 분석 API](./rule-v1-analysis-api.md)는 문서로 정의되었지만
+FastAPI Endpoint·Pydantic DTO, Spring Boot Client와 ML은 아직 구현되지 않았다.
 
 - Feature를 계산한다.
 - 승인된 Rule을 실행한다.
@@ -838,7 +841,7 @@ GET /api/v1/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001/detection-results?
       "adopted": true,
       "modelVersion": null,
       "featureVersion": "rule-v1",
-      "ruleSetVersion": "rule-set-v1",
+      "ruleSetVersion": "085edb92debd4e80d8472f77fab507d846810c668268ee34d8ee97ec2c917b26",
       "scoringPolicyVersion": "scoring-policy-v1",
       "analysisStartedAt": "2026-07-23T01:15:30Z",
       "analysisCompletedAt": "2026-07-23T01:15:32Z"
@@ -922,7 +925,7 @@ GET /api/v1/detection-results/7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430101
     "adopted": true,
     "modelVersion": null,
     "featureVersion": "rule-v1",
-    "ruleSetVersion": "rule-set-v1",
+    "ruleSetVersion": "085edb92debd4e80d8472f77fab507d846810c668268ee34d8ee97ec2c917b26",
     "scoringPolicyVersion": "scoring-policy-v1",
     "analysisStartedAt": "2026-07-23T01:15:30Z",
     "analysisCompletedAt": "2026-07-23T01:15:32Z"

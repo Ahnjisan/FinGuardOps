@@ -44,9 +44,9 @@ DetectionResult·DetectionEvidence와 FraudRule·RuleVersion의 PostgreSQL
 애플리케이션 연동도 구현되어 있지만 운영 배포 환경은 없다. 현재 거래
 접수는 단계적 구현 응답인 `RECEIVED`와 탐지 관련 null 값을 반환한다.
 AI Service에는 RuleVersion snapshot 입력 모델, ExecutionPlan Builder,
-Orchestrator, Runner, R001~R004 evaluator와 Scoring Calculator의 순수 내부
-경로가 구현되어 있다. Rule Evidence 변환과 Rule 분석 결과 조합은 계약만
-정의되어 있고, FastAPI 탐지 endpoint, Spring Boot Client, 탐지 결과 자동
+Orchestrator, Runner, R001~R004 evaluator, Scoring Calculator, Rule Evidence
+Transformer와 Rule 분석 결과 조합의 순수 내부 경로가 구현되어 있다.
+FastAPI 분석 Endpoint·Pydantic DTO, Spring Boot Client, 탐지 결과 자동
 생성·채택, 사건, 감사와 AI 운영 도메인은 아직 구현되지 않았다.
 
 ### 2.2 문서로 정의됨
@@ -65,8 +65,9 @@ Orchestrator, Runner, R001~R004 evaluator와 Scoring Calculator의 순수 내부
 
 ### 2.3 구현되지 않음
 
-- `ai-service/`: Rule v1 실행·scoring 순수 내부 경로까지 구현되었으며 Evidence
-  Transformer, 탐지 endpoint, ML·AI 리포트와 Spring Boot 연동 없음
+- `ai-service/`: Rule v1 실행·scoring·Evidence 변환과 분석 결과 조합의 순수
+  내부 경로까지 구현되었으며 분석 Endpoint·Pydantic DTO, ML·AI 리포트와
+  Spring Boot 연동 없음
 - `frontend/`: 역할 규칙과 자리표시자만 있으며 React 구현 없음
 - `infra/`: 자리표시자만 있으며 Docker Compose 등 인프라 구현 없음
 - `.github/`: Issue·PR 템플릿과 Backend·AI Service 테스트 Workflow가 있으며 이미지 빌드·배포 자동화 없음
@@ -468,9 +469,10 @@ FastAPI는 Feature, R001~R004, 점수·등급·Reason Code·Evidence 계산을
 
 현재 FastAPI 내부에서는 RuleVersion snapshot을 받는 Python 입력 모델부터
 ExecutionPlan Builder → Orchestrator → Runner → R001~R004 evaluator → Scoring
-Calculator까지 구현되어 있다. `RuleEvidenceTransformer`와
-`RuleAnalysisResult`는 계약 정의 상태이며 구현되지 않았다. 이 내부 구현은
-공개 FastAPI endpoint나 Spring Boot Client가 구현되었다는 뜻이 아니다.
+Calculator → RuleEvidenceTransformer → RuleAnalysisResult까지 구현되어 있다.
+이 내부 구현은 문서로 정의된 FastAPI 분석 Endpoint·Pydantic DTO나 Spring Boot
+Client가 구현되었다는 뜻이 아니다. 내부 HTTP 계약은
+[`../03-api/rule-v1-analysis-api.md`](../03-api/rule-v1-analysis-api.md)를 따른다.
 
 후속 Rule Evidence 경계에서 FastAPI는 RuleVersion metadata, Reason Code,
 원래 contribution, typed observation, Evidence 시각과 plan 기반 출력 순서를
@@ -494,11 +496,17 @@ Rule 실행
 → Spring Boot
 ```
 
-Spring Boot는 승인된 Rule 정의와 변경 이력의 업무 원본을 관리한다. FastAPI는 전달받거나 동기화된 Rule을 실행하지만 가중치, 버전과 활성 상태를 임의로 변경하지 않는다.
+Spring Boot는 승인된 Rule 정의와 변경 이력의 업무 원본을 관리한다. Rule v1
+분석에서는 평가마다 전체 RuleVersion Snapshot을 FastAPI 요청으로 전달한다.
+FastAPI는 전달받은 Rule을 재검증해 실행하지만 가중치, 버전과 활성 상태를
+임의로 변경하지 않는다.
 
 FastAPI가 실행한 결과에는 어떤 Rule과 버전을 사용했는지 추적할 수 있는 정보가 필요하다. Spring Boot는 해당 결과를 거래와 탐지 결과에 연결해 저장한다.
 
-Rule을 요청마다 전달할지, 버전별 스냅샷을 동기화할지, 별도의 배포 산출물로 제공할지와 불일치 시 처리 방식은 후속 API·배포 설계에서 확정한다.
+Rule v1에서는 별도 동기화나 배포 산출물 방식을 도입하지 않는다. 요청·응답과
+배포 불일치 처리 방식은
+[Rule v1 내부 분석 API](../03-api/rule-v1-analysis-api.md)를 따른다. 후속 Rule
+계약이 다른 전달 방식을 요구하면 별도 승인한다.
 
 Rule v1은 `ruleCode`별 활성 버전을 하나만 허용하고 평가 시작 시 활성 Rule 집합을 고정하며, 조건·가중치 변경 시 새 불변 버전을 생성한다. R001~R004의 단일 기준은 [Rule v1 탐지 계약](../01-requirements/rule-v1-detection-contract.md)이다.
 
@@ -784,7 +792,8 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 - 저장소 역할 규칙과 GitHub Issue·PR 템플릿
 - FastAPI AI Service 초기 실행·설정·Health API와 테스트 기반
 - RuleVersion snapshot 입력 모델, ExecutionPlan Builder, Orchestrator, Runner,
-  R001~R004 evaluator와 Scoring Calculator
+  R001~R004 evaluator, Scoring Calculator, Rule Evidence Transformer와
+  RuleAnalysisResult
 - Backend와 AI Service 전용 GitHub Actions 테스트 Workflow
 
 ### 18.2 문서로 정의됨
@@ -797,11 +806,11 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 - 본 시스템 아키텍처
 - Rule v1 탐지 계약과 초기 평가 정책
 - Rule Evidence 변환과 Rule 분석 결과 조합 계약
+- Spring Boot → FastAPI Rule v1 내부 분석 HTTP API 계약
 
 ### 18.3 다음 구현 예정
 
-- R004 `observed_amount` facts 보강과 Rule Evidence Transformer·분석 결과 조합
-- FastAPI 탐지 endpoint와 Spring Boot Client·분석 연동
+- 문서로 정의된 FastAPI 분석 Endpoint·Pydantic DTO와 Spring Boot Client·분석 연동
 - DetectionResult 자동 영속화·채택과 위험 대응·사건·감사 도메인
 - External Risk Mock
 - Docker 및 Docker Compose 통합 환경
@@ -902,7 +911,6 @@ Docker Compose와 필요 시 Kubernetes 환경에서 기능·장애·관측 기�
 | --- | --- | --- |
 | External Risk 조회 실패 시 위험 대응 정책 | `TBD` | 캐시 유효성, 내부 Rule·ML 결과, 거래 상태와 시나리오별 업무 위험 |
 | FastAPI Timeout 시 거래 처리 정책 | `TBD` | 마지막 확정 상태, 재시도 안전성, 사용자 응답과 미탐·오탐 위험 |
-| Rule 정의를 FastAPI에 전달하는 방식 | `TBD` | 버전 일치, 배포 주기, 실행 성능과 감사 요구 |
 | 현재 멱등 응답 snapshot의 최종 동기 응답 호환 | `TBD` | 기존 `RECEIVED`/null snapshot의 스키마·재생 의미·만료 데이터와 전환 방식 |
 | 초기 AI 리포트 비동기 실행 방식 | `TBD` | 실패·재시도·멱등성 검증 가능성, 개인 프로젝트 운영 복잡도 |
 | Redis 최초 도입 시점 | `TBD` | 정확 일치 중복 호출, External Risk 조회 부하와 집계 성능 측정 |
