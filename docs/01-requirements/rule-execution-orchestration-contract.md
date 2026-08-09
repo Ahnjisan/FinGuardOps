@@ -15,8 +15,8 @@
 - 불변 `RuleEvaluatorRegistry`: 구현됨
 - `RuleExecutionOrchestrator` Python 구현: 구현됨
 - `RuleExecutionPlanRunner` 이후 `RuleScoringCalculator`: 구현됨
-- Evidence 변환과 Rule 분석 결과 조합: 미구현 후속 범위
-- FastAPI 외부 분석 API와 Spring Boot 연동: 미구현 후속 범위
+- Evidence 변환과 Rule 분석 결과 조합: 구현됨
+- FastAPI 내부 분석 API 계약: 문서 정의 완료, Endpoint·Spring Boot 연동 미구현
 
 현재 구현된 evaluator와 Registry의 기준은
 [`ai-service/src/finguardops_ai/rules/v1/`](../../ai-service/src/finguardops_ai/rules/v1/)에
@@ -313,10 +313,10 @@ Registry가 특정 요청 ID에 callable을 연결했다는 사실만으로 반�
 정의되어 있다. 현재 Python에는 불변 `RuleExecutionPlan`,
 `RuleExecutionPlanItem`, 순수 `RuleExecutionPlanBuilder`, plan 실행·결합을
 담당하는 `RuleExecutionPlanRunner`, `PlannedRuleResult`와 별도 downstream
-`RuleScoringCalculator`가 구현되어 있지만, Evidence Transformer, Java 구현과
-서비스 연동은 아직 구현되지 않았다. 실행 계획의 weight는 오케스트레이터에서
-snapshot 정보로만 보존하며 이 오케스트레이터 자체는 weight를 적용하거나
-scoring하지 않는다. downstream 구현은
+`RuleScoringCalculator`, `RuleEvidenceTransformer`와 `RuleAnalysisResult`가
+구현되어 있지만, FastAPI Endpoint, Java Client와 서비스 연동은 아직 구현되지
+않았다. 실행 계획의 weight는 오케스트레이터에서 snapshot 정보로만 보존하며
+이 오케스트레이터 자체는 weight를 적용하거나 scoring하지 않는다. downstream 구현은
 [ADR-005](../07-decisions/ADR-005-fraud-rule-version-model.md)의 RuleVersion
 불변성과 Spring Boot·PostgreSQL 데이터 소유권을 유지해야 한다.
 
@@ -325,7 +325,8 @@ DB·ADR 계약을 변경하지 않는다.
 
 ## 12. 제외 범위
 
-다음 항목은 이 문서 계약과 현재 작업의 범위에 포함하지 않는다.
+다음 항목은 이 오케스트레이터의 책임 범위에 포함하지 않는다. 다른 계층에
+이미 구현된 항목도 오케스트레이터가 직접 수행하지 않는다는 의미다.
 
 - RuleVersion 기반 실행 계획 생성 구현
 - `evaluate_all()` 구현
@@ -339,7 +340,7 @@ DB·ADR 계약을 변경하지 않는다.
 - 점수 합산과 위험 등급 산정
 - Evidence, `observationSummary`와 reasonCode 변환
 - DetectionResult 검증·저장·채택 구현
-- FastAPI 외부 API와 Spring Boot 연동
+- FastAPI 내부 HTTP Endpoint와 Spring Boot 연동
 - retry, fallback과 병렬 실행
 - 로그·메트릭 저장
 - Redis, Kafka, ML과 LLM 연동

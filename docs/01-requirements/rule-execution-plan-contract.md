@@ -38,14 +38,16 @@ Spring Boot의 활성 RuleVersion 업무 snapshot
 - RuleVersion 설정 전달과 typed evaluator settings: 미구현
 - Spring Boot·FastAPI 실제 연동: 미구현
 - `RuleScoringCalculator`와 점수·위험 등급 계산: 구현됨
-- Evidence Transformer·`RuleAnalysisResult`·DetectionResult 처리: 미구현 후속 범위
+- Evidence Transformer와 `RuleAnalysisResult`: 구현됨
+- DetectionResult 처리: 미구현 후속 범위
 
 현재 순수 Builder 구현은 전달받은 RuleVersion snapshot을 plan으로 변환하고,
 Runner는 plan을 기존 Orchestrator로 실행해 ordered raw result와 strict index로
 결합한다. 구현된 `RuleScoringCalculator`는 정상 결합 결과를
 `scoring-policy-v1`에 따라 점수로 계산한다. 이 순수 실행·scoring 경로가
-구현되었다는 사실은 실제 서비스 연동이나 후속 Evidence 변환이 구현되었다는
-뜻이 아니다.
+구현되었고 후속 Evidence 변환과 Rule 분석 결과 조합도 구현되어 있다. 이 순수
+내부 경로가 구현되었다는 사실은 FastAPI Endpoint나 Spring Boot 실제 연동이
+구현되었다는 뜻이 아니다.
 
 공식 Rule 조건과 평가 의미는
 [Rule v1 탐지 계약](./rule-v1-detection-contract.md)을 따르고, ordered Rule ID
@@ -64,8 +66,9 @@ Runner는 plan을 기존 Orchestrator로 실행해 ordered raw result와 strict 
 RuleVersion 집합이다.
 
 snapshot은 원본 JPA Entity나 영속성 context를 FastAPI에 노출하는 객체가
-아니다. 서비스 간 실제 DTO와 통신 방식은 이 문서에서 정의하지 않지만,
-개념적으로 다음 검증에 필요한 업무 값을 포함해야 한다.
+아니다. 서비스 간 실제 DTO와 통신 방식은
+[Rule v1 내부 분석 API](../03-api/rule-v1-analysis-api.md)를 따르며 다음 검증에
+필요한 업무 값을 포함해야 한다.
 
 - FraudRule 업무 UUID `fraudRuleId`
 - `ruleCode`와 `lifecycleStatus`
@@ -175,7 +178,7 @@ Runner는 Builder의 업무·설정 validation을 다시 수행하거나 Registr
 ### 3.5 scoring 계층
 
 구현된 scoring 계층은 정상 결합된 `PlannedRuleResult`를 입력으로 적중 Rule의
-weight 적용, 그룹 상한, 점수 합산과 위험 등급을 계산한다. 후속 Evidence
+weight 적용, 그룹 상한, 점수 합산과 위험 등급을 계산한다. 구현된 Evidence
 계층은 plan metadata, raw facts와 scoring 결과를 사용해 Evidence와 Rule 분석
 결과를 구성한다. scoring과 Evidence·DetectionResult 처리는 Builder, Runner와
 Orchestrator의 책임이 아니다.
@@ -359,7 +362,7 @@ RuleExecutionPlan
 DB 내부 BIGINT `id`는 item에 포함하지 않는다. 모호한 문자열 `version` 대신
 양의 정수 `versionNumber`를 사용한다.
 
-`reasonCode`와 `weight`는 후속 Evidence·scoring 연결을 위한 snapshot이다.
+`reasonCode`와 `weight`는 downstream Evidence·scoring 연결을 위한 snapshot이다.
 이 문서는 Reason Code를 Evidence로 변환하거나 weight를 점수에 적용하지
 않는다.
 
@@ -550,10 +553,11 @@ FastAPI 실행 계획 생성 계층은 첫 evaluator 호출 전에 최소한 다
 동일 FraudRule 복수 활성 버전과 단순 중복 `ruleCode`가 함께 성립하면 업무
 의미가 더 구체적인 `MULTIPLE_EXECUTABLE_RULE_VERSIONS`를 사용한다.
 
-이 문서는 다음을 확정하지 않는다.
+Python 예외 클래스와 semantic category는 현재 구현되어 있다. HTTP 상태와
+서비스 간 오류 응답 매핑은
+[Rule v1 내부 분석 API](../03-api/rule-v1-analysis-api.md)를 따른다. 다음 항목은
+이 문서에서 확정하지 않는다.
 
-- Python 예외 클래스명
-- HTTP 상태와 외부 오류 응답 코드
 - Spring Boot 내부 예외와 실패 코드
 - DetectionResult 생성·`FAILED` 전이 여부
 - 거래 상태, 재시도와 수동 복구 정책
@@ -785,8 +789,9 @@ evaluator가 모두 미적중이어도 각 plan item에는 대응하는 raw
 
 ### 18.1 semantic 오류 범주
 
-다음 오류 범주는 구현 독립적인 Runner 계약이다. 구체적인 Python 예외 클래스
-계층, FastAPI HTTP 상태와 외부 오류 응답 매핑은 확정하지 않는다.
+다음 오류 범주는 구현된 Runner의 semantic 계약이다. FastAPI HTTP 상태와
+서비스 간 오류 응답 매핑은
+[Rule v1 내부 분석 API](../03-api/rule-v1-analysis-api.md)를 따른다.
 
 | 오류 범주 | 발생 조건 | Orchestrator 호출 시점 | 부분 결과 | retry·fallback |
 | --- | --- | --- | --- | --- |
@@ -977,7 +982,7 @@ scoring 계층은 결과를 RuleId 기준으로 재정렬하거나 누락 결과
 `LOW`, 부분 점수, 빈 성공 결과로 바꾸지 않으며 retry와 fallback을 수행하지
 않는다.
 
-후속 Evidence 변환 계층의 공개 handoff는 다음 세 입력으로 확정한다.
+구현된 Evidence 변환 계층의 공개 handoff는 다음 세 입력으로 확정한다.
 
 ```python
 RuleEvidenceTransformer.transform(
@@ -1001,7 +1006,8 @@ matched·contribution과 metadata 정합성을 방어적으로 검증하되 eval
 모듈의 단일 검증 경로를 재사용해야 한다. Rule별 Evidence와 observation의
 정확한 필드·시각·순서·semantic 오류 계약은
 [Rule v1 탐지 계약 6절](./rule-v1-detection-contract.md#6-reason-code와-evidence)을
-따른다. Transformer와 해당 공개 결과·오류 타입은 아직 구현되지 않았다.
+따른다. Transformer와 해당 공개 결과·오류 타입은 현재 Python으로 구현되어
+있다.
 
 ### 20.2 Spring Boot·DB·API 경계
 
@@ -1015,23 +1021,21 @@ Runner는 다음 작업을 수행하지 않는다.
 - Spring Boot 통신과 DetectionResult 영속화
 
 Spring Boot는 거래·RuleVersion·DetectionResult 업무 정합성의 최종 소유자다.
-서비스 간 통신 방식, API 오류 매핑, 거래 실패 상태와 복구 정책은 후속 승인
-범위다.
+서비스 간 분석 요청·응답과 API 오류 매핑은
+[Rule v1 내부 분석 API](../03-api/rule-v1-analysis-api.md)에 정의되어 있으며
+Endpoint·Spring Boot Client 구현, 거래 실패 상태와 복구 정책은 후속 범위다.
 
 ### 20.3 현재 제외 범위
 
-Builder·Runner·Scoring Calculator는 현재 구현되어 있다. 다음 항목은 아직
-구현되지 않은 후속 범위다.
+Builder·Runner·Scoring Calculator와 Evidence Transformer는 현재 구현되어
+있다. 다음 항목은 아직 구현되지 않은 후속 범위다.
 
-- R004 `observed_amount` facts 보강
-- `RuleEvidenceTransformer`, `RuleEvidenceOutput`, `RuleAnalysisResult`와
-  Evidence 오류 타입
 - 실행 단위 wrapper, `executionId`, 상태와 실행 시각
 - Python·Java Service, Repository와 DB Migration 구현
 - `execution_order` DB 컬럼
 - DetectionResult 생성·검증·저장·채택
-- FastAPI endpoint, API DTO와 Spring Boot 실제 연동
-- HTTP 오류 응답 확정
+- 문서로 정의된 FastAPI Endpoint·Pydantic DTO·HTTP 오류 처리와 Spring Boot
+  실제 연동
 - retry와 fallback
 - 로그와 메트릭
 - Redis, Kafka, ML과 LLM
@@ -1080,8 +1084,9 @@ Orchestrator의 입력 순서 보존, 전체 capability 사전 resolution, 순�
 - evaluator·결과 오류 시 planned 부분 결과와 빈 성공 tuple 미반환
 - plan metadata 보존과 weight·Reason Code 미사용
 
-Runner와 위 테스트는 구현되어 있다. 이 사실만으로 후속 Evidence 변환,
-DetectionResult 생성 또는 실제 서비스 연동이 구현되었다는 뜻은 아니다.
+Runner와 위 테스트는 구현되어 있다. Evidence 변환도 별도 계층으로 구현되어
+있지만, 이 사실만으로 DetectionResult 생성 또는 실제 서비스 연동이
+구현되었다는 뜻은 아니다.
 
 ### 21.3 현재 scoring 구현
 
@@ -1112,5 +1117,5 @@ DetectionResult 생성 또는 실제 서비스 연동이 구현되었다는 뜻�
 - DB·네트워크·현재 시각·mutable 전역 상태 미사용
 
 현재 `RuleScoringCalculator`, 결과 타입, 오류 범주와 해당 테스트는 구현되어
-있다. `RuleEvidenceTransformer`, Evidence 결과·오류 타입, FastAPI endpoint와
-Spring Boot 연동은 아직 구현되지 않았다.
+있다. `RuleEvidenceTransformer`와 Evidence 결과·오류 타입도 구현되어 있다.
+FastAPI Endpoint·Pydantic DTO와 Spring Boot 연동은 아직 구현되지 않았다.

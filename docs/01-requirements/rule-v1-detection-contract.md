@@ -7,8 +7,9 @@
 - 작업 목적: `[Docs] Rule v1 탐지 계약 및 평가 정책 정의`
 - 문서 상태: Rule v1 계약 확정
 - 구현 상태: 물리 Rule·탐지 영속 모델, R001~R004 evaluator부터
-  `PlannedRuleResult`까지의 Rule 실행 경로, `RuleScoringCalculator`와 Rule v1
-  Evidence 저장 전 방어 검증 구현, Evidence 변환 이후 계층 미구현
+  `PlannedRuleResult`까지의 Rule 실행 경로, `RuleScoringCalculator`,
+  `RuleEvidenceTransformer`와 `RuleAnalysisResult` 구현, FastAPI 분석 Endpoint와
+  Spring Boot 연동 이후 계층 미구현
 
 현재 구현된 범위는 Spring Boot의 거래 접수·목록·상세 조회, 거래 멱등성,
 행동 이벤트 접수·Rule 평가용 내부 조회, DetectionResult·DetectionEvidence,
@@ -16,15 +17,16 @@ FraudRule·RuleVersion PostgreSQL 영속 모델과 Rule v1 Evidence 저장 전
 시간·코드 교차검증이다. AI Service에는 R001~R004 순수 evaluator,
 `RuleEvaluatorRegistry`, `RuleExecutionOrchestrator`, `RuleExecutionPlan`,
 `RuleExecutionPlanBuilder`, `RuleExecutionPlanRunner`, `PlannedRuleResult`와
-`RuleScoringCalculator`가 구현되어 있다. 현재 거래 접수 성공 응답은 단계적
-구현 상태인 `RECEIVED`와 탐지 관련 null 값을 반환한다.
+`RuleScoringCalculator`, `RuleEvidenceTransformer`와 `RuleAnalysisResult`가
+구현되어 있다. 현재 거래 접수 성공 응답은 단계적 구현 상태인 `RECEIVED`와
+탐지 관련 null 값을 반환한다.
 
 다음 항목은 아직 구현되지 않았다.
 
 - Spring Boot의 평가 입력과 활성 Rule 집합 Snapshot 구성 및 실제 전달
-- Evidence 변환
 - 탐지 실행에 따른 DetectionResult·DetectionEvidence 자동 생성·채택
-- FastAPI 탐지 endpoint와 Spring Boot 실제 연동
+- 문서로 정의된 FastAPI Rule v1 분석 Endpoint·Pydantic DTO 구현과 Spring Boot
+  실제 연동
 - 위험 대응
 - 사건 생성·연결
 
@@ -135,7 +137,7 @@ fromInclusive <= event.occurredAt <= toInclusive
 ORDER BY event.occurredAt DESC, event.eventId ASC
 ```
 
-`requestedEventTypes`는 비어 있지 않아야 한다. 호출자는 `PageRequest.of(0, limit, Sort.unsorted())`를 사용하며 `limit`은 1 이상의 유한한 값이어야 한다. Repository가 업무 최대값을 임의로 정하지 않으며 Rule Snapshot 상한은 Rule 실행 구현 전에 별도 확정한다. 반환형은 `List<BehaviorEvent>`이고 count query를 실행하지 않는다. 거래 관계는 fetch join하지 않아 `financialTransaction` LAZY 관계를 초기화하지 않는다.
+`requestedEventTypes`는 비어 있지 않아야 한다. 호출자는 `PageRequest.of(0, limit, Sort.unsorted())`를 사용하며 `limit`은 1 이상의 유한한 값이어야 한다. Repository가 업무 최대값을 임의로 정하지 않으며 FastAPI 요청의 `behaviorEvents` Snapshot 상한은 [Rule v1 내부 분석 API](../03-api/rule-v1-analysis-api.md)에 따라 1,000개다. 반환형은 `List<BehaviorEvent>`이고 count query를 실행하지 않는다. 거래 관계는 fetch join하지 않아 `financialTransaction` LAZY 관계를 초기화하지 않는다.
 
 이 조회는 Rule 실행을 위한 내부 계약이며 공개 행동 이벤트 조회 API를 추가하지 않는다. 다중 Event Type에서 PostgreSQL이 추가 정렬을 수행할 수 있지만 최종 업무 순서는 JPQL의 `occurredAt DESC`, `eventId ASC`가 보장한다.
 
@@ -294,14 +296,14 @@ DetectionResult의 `evaluationCutoffAt`, 거래 시각과 교차검증한다.
 Evidence를 만들지 않는다. 같은 Rule의 적격 이벤트가 여러 개여도 Evidence나
 contribution을 중복 생성하지 않는다.
 
-`scoreContribution`은 그룹 상한 적용 전 Rule의 원래 가중치를 나타낸다. 그룹 상한으로 차감된 점수는 `RuleScoringResult.group_summaries`에서 별도로 식별하며, 개별 Evidence 값을 임의로 변경해 합계를 맞추지 않는다. 구체적인 FastAPI 응답 DTO와 DetectionResult 저장 구조는 후속 구현 계약에서 확정한다.
+`scoreContribution`은 그룹 상한 적용 전 Rule의 원래 가중치를 나타낸다. 그룹 상한으로 차감된 점수는 `RuleScoringResult.group_summaries`에서 별도로 식별하며, 개별 Evidence 값을 임의로 변경해 합계를 맞추지 않는다. 구체적인 FastAPI 응답 DTO는 [Rule v1 내부 분석 API](../03-api/rule-v1-analysis-api.md)를 따르며 DetectionResult 저장 구조는 기존 DB 계약을 따른다.
 
 Evidence에는 실제 고객번호·계좌번호·기기 원문, 비밀번호 값, 전체 행동 로그 또는 설명에 필요하지 않은 원문 데이터를 포함하지 않는다.
 
-### 6.1 후속 Evidence 변환 공개 계약
+### 6.1 Evidence 변환 공개 계약
 
-Evidence 변환과 Rule 분석 결과 조합은 아직 Python으로 구현되지 않았다. 후속
-구현의 공개 소유 타입과 유일한 변환 진입점은 다음으로 확정한다.
+Evidence 변환과 Rule 분석 결과 조합은 Python으로 구현되어 있다. 공개 소유
+타입과 유일한 변환 진입점은 다음과 같다.
 
 ```python
 RuleEvidenceTransformer.transform(
@@ -366,8 +368,8 @@ evidence_occurred_at: datetime
 
 `RuleEvidenceOutput`과 `RuleEvidenceObservation`은 불변 값이다. 하나의
 `RuleEvidenceObservation`은 해당 Rule 행의 정확한 필드만 소유하며 다른 Rule의
-필드나 optional 공용 필드를 섞지 않는다. 구체적인 비공개 concrete class 구성은
-후속 Python 구현에서 정하되 아래 필드·타입 계약을 바꾸지 않는다.
+필드나 optional 공용 필드를 섞지 않는다. 구체적인 Rule별 concrete class는
+비공개 구현으로 유지하며 아래 필드·타입 계약을 바꾸지 않는다.
 
 공통 metadata mapping은 다음과 같다.
 
@@ -387,8 +389,8 @@ Python 타입 자체가 Rule Evidence임을 나타낸다. `evidence_type`, `evid
 
 Python 내부 typed facts와 Evidence 필드는 snake_case를 사용한다. 아래 표의
 camelCase는 기존 DB `observationSummary`의 정확한 allowlist다. HTTP JSON
-직렬화, Pydantic alias와 `Decimal` 직렬화 형식은 후속 FastAPI 요청·응답
-계약에서 확정하며 이 내부 계약에서 wire format을 추가하지 않는다.
+직렬화, Pydantic alias와 `Decimal` 직렬화 형식은
+[Rule v1 내부 분석 API](../03-api/rule-v1-analysis-api.md)를 따른다.
 
 | Rule ID | Python typed observation | DB `observationSummary` 정확한 allowlist | `evidenceOccurredAt` |
 | --- | --- | --- | --- |
@@ -397,11 +399,9 @@ camelCase는 기존 DB `observationSummary`의 정확한 allowlist다. HTTP JSON
 | R003 | `observed_amount: Decimal`, `amount_threshold: Decimal`, `password_changed_event_id: UUID`, `password_changed_at: datetime`, `transfer_limit_changed_event_id: UUID`, `transfer_limit_changed_at: datetime`, `elapsed_seconds: int`, `window_seconds: int` | `observedAmount`, `amountThreshold`, `passwordChangedEventId`, `passwordChangedAt`, `transferLimitChangedEventId`, `transferLimitChangedAt`, `elapsedSeconds`, `windowSeconds` | `transfer_limit_changed_at` |
 | R004 | `observed_amount: Decimal`, `event_id: UUID`, `beneficiary_registered_at: datetime`, `elapsed_seconds: int`, `window_seconds: int` | `observedAmount`, `eventId`, `beneficiaryRegisteredAt`, `elapsedSeconds`, `windowSeconds` | `beneficiary_registered_at` |
 
-현재 `R004Facts`에는 `observed_amount`가 없다. 기존 DB allowlist의
-`observedAmount`는 유지하므로 Evidence Transformer를 구현하기 전에
-`R004Facts.observed_amount: Decimal`을 추가해야 한다. 이 facts 보강과
-Transformer 구현은 이 문서 작업의 구현 완료 범위가 아니다. R004는 금액을
-적중 조건으로 사용하지 않으며 `amountThreshold`를 포함하지 않는다.
+현재 `R004Facts`에는 Evidence의 `observedAmount`를 생성하기 위한
+`observed_amount: Decimal`이 구현되어 있다. R004는 금액을 적중 조건으로
+사용하지 않으며 `amountThreshold`를 포함하지 않는다.
 
 모든 observation 필드는 필수다. Rule별 allowlist에 없는 필드, null, 중첩
 객체·배열을 허용하지 않는다. 고객·계좌·기기·수취인 원문, 내부 BIGINT PK,
@@ -751,11 +751,14 @@ R001~R004만 적용할 때 가능한 최고 점수는 `15 + 60 = 75`점이다. �
   포함 계약과 별개다.
 - Spring Boot와 PostgreSQL이 Rule 정의·버전·활성 상태의 업무 원본을 소유한다.
 - 평가 시작 시 Spring Boot가 활성 Rule 집합을 고정한다.
-- FastAPI는 전달받거나 승인된 방식으로 동기화한 고정 Rule 집합만 실행하며 버전·조건·가중치·활성 상태를 임의로 변경하지 않는다.
+- Spring Boot는 평가마다 전체 RuleVersion Snapshot을 FastAPI 요청에 포함한다.
+- FastAPI는 전달받은 고정 Rule 집합만 실행하며 버전·조건·가중치·활성 상태를
+  임의로 변경하지 않는다.
 
 Evidence `ruleVersion` 문자열은 양의 `versionNumber`의 canonical decimal
-문자열을 사용한다. 활성 전환 승인 이력, Rule 전달·동기화 방식과 불일치
-시 거부 응답은 후속 구현 전에 확정한다.
+문자열을 사용한다. Rule 전달 방식과 불일치 시 오류 응답은
+[Rule v1 내부 분석 API](../03-api/rule-v1-analysis-api.md)를 따른다. 별도 Rule
+동기화 방식은 현재 범위에서 도입하지 않는다.
 
 ## 10. Spring Boot와 FastAPI 책임 경계
 
@@ -858,22 +861,20 @@ Rule·Evidence typed JSON 검증, RuleVersion 기간 중복 방지,
 DetectionEvidence FK·snapshot 정합성과 Evidence 시간·코드 저장 경계
 검증도 구현되어 있다. AI Service의 R001~R004 evaluator, Registry,
 Orchestrator, 실행 plan·builder, Runner·planned result와 scoring calculator가
-구현되어 있다. Evidence Transformer와 `RuleAnalysisResult`, DetectionResult
-생성, 공개 탐지 API, Spring Boot 실제 연동과 운영 배포 환경은 구현되지 않았다.
+구현되어 있다. Evidence Transformer와 `RuleAnalysisResult`도 구현되어 있다.
+DetectionResult 생성, 문서로 정의된 FastAPI 분석 Endpoint·Pydantic DTO,
+Spring Boot 실제 연동과 운영 배포 환경은 구현되지 않았다.
 
 ## 14. 후속 구현 순서
 
 1. 현재 `RECEIVED`/null 거래 접수 응답과 최종 동기 응답 사이의 전환 정책을 정하고, 기존 멱등 `response_snapshot`의 스키마·재생 호환·만료 데이터 처리 방식을 확정한다.
 2. Spring Boot가 평가 cutoff, 입력 Snapshot과 활성 Rule 집합을 고정하고 실제
    서비스 입력으로 전달하는 경계를 구현한다.
-3. R004 facts에 `observed_amount`를 보강하고, 구현된 Runner·scoring 결과와
-   plan metadata를 사용하는 Evidence Transformer·`RuleAnalysisResult`를
-   별도 계층으로 구현한다.
-4. FastAPI 탐지 endpoint와 DTO를 확정하고 DetectionResult 생성에 필요한
-   결과의 완전성을 검증한다.
-5. Spring Boot의 FastAPI 호출, 결과 검증·영속화·채택과 장애 처리를 구현한다.
-6. ADR-003의 최종 동기 거래 처리 흐름에 위험 대응과 사건 연결을 통합하고 멱등·동시성·실패 복구를 검증한다.
-7. 경계값·복합 적중·늦은 이벤트·Timeout·성능·관측 지표 테스트와 실험을 수행한 뒤 운영 정책 후보를 재승인한다.
+3. [Rule v1 내부 분석 API](../03-api/rule-v1-analysis-api.md)에 따른 FastAPI
+   Endpoint, Pydantic DTO와 오류 처리를 구현하고 결과 완전성을 검증한다.
+4. Spring Boot의 FastAPI 호출, 결과 검증·영속화·채택과 장애 처리를 구현한다.
+5. ADR-003의 최종 동기 거래 처리 흐름에 위험 대응과 사건 연결을 통합하고 멱등·동시성·실패 복구를 검증한다.
+6. 경계값·복합 적중·늦은 이벤트·Timeout·성능·관측 지표 테스트와 실험을 수행한 뒤 운영 정책 후보를 재승인한다.
 
 1번의 멱등 응답 snapshot 호환 문제는 이 문서에서 해결된 것으로 간주하지 않는다. 후속 구현 전에 사용자가 결정해야 하는 과제이다.
 
