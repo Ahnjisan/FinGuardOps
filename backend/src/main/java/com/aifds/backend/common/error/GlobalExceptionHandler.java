@@ -21,6 +21,8 @@ import com.aifds.backend.transaction.validation.TransactionRequestValidator;
 import com.aifds.backend.transaction.validation.TransactionValidationException;
 import com.aifds.backend.transaction.validation.TransactionValidationType;
 import jakarta.servlet.http.HttpServletRequest;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.FieldError;
@@ -39,6 +41,9 @@ import java.util.Set;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    private static final Logger LOGGER =
+            LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
     static final String VALIDATION_ERROR = "VALIDATION_ERROR";
     static final String STATE_TRANSITION_NOT_ALLOWED =
@@ -237,7 +242,7 @@ public class GlobalExceptionHandler {
                     List.of(),
                     request
             );
-            case INTERNAL_FAILURE -> internalErrorResponse(request);
+            case INTERNAL_FAILURE -> internalErrorResponse(exception, request);
         };
     }
 
@@ -250,7 +255,7 @@ public class GlobalExceptionHandler {
             RuntimeException exception,
             HttpServletRequest request
     ) {
-        return internalErrorResponse(request);
+        return internalErrorResponse(exception, request);
     }
 
     @ExceptionHandler(TransactionNotFoundException.class)
@@ -332,7 +337,7 @@ public class GlobalExceptionHandler {
             BehaviorEventConcurrentResultNotFoundException exception,
             HttpServletRequest request
     ) {
-        return internalErrorResponse(request);
+        return internalErrorResponse(exception, request);
     }
 
     @ExceptionHandler(TransactionQueryTimeoutException.class)
@@ -368,7 +373,7 @@ public class GlobalExceptionHandler {
             Exception exception,
             HttpServletRequest request
     ) {
-        return internalErrorResponse(request);
+        return internalErrorResponse(exception, request);
     }
 
     private ResponseEntity<ApiErrorResponse> validationResponse(
@@ -386,8 +391,16 @@ public class GlobalExceptionHandler {
     }
 
     private ResponseEntity<ApiErrorResponse> internalErrorResponse(
+            Exception exception,
             HttpServletRequest request
     ) {
+        LOGGER.error(
+                "Internal server error [traceId={}, method={}, path={}]",
+                currentTraceId(request),
+                currentMethod(request),
+                currentRequestPath(request),
+                exception
+        );
         return response(
                 HttpStatus.INTERNAL_SERVER_ERROR,
                 INTERNAL_ERROR,
@@ -421,6 +434,14 @@ public class GlobalExceptionHandler {
                 TraceIdFilter.TRACE_ID_REQUEST_ATTRIBUTE
         );
         return traceId instanceof String value ? value : null;
+    }
+
+    private String currentMethod(HttpServletRequest request) {
+        return request == null ? null : request.getMethod();
+    }
+
+    private String currentRequestPath(HttpServletRequest request) {
+        return request == null ? null : request.getRequestURI();
     }
 
     private FieldErrorResponse toFieldError(
