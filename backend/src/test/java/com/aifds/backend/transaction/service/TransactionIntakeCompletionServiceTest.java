@@ -1,5 +1,6 @@
 package com.aifds.backend.transaction.service;
 
+import com.aifds.backend.common.time.DatabaseTransactionTimestampProvider;
 import com.aifds.backend.idempotency.service.IdempotencyClaimResult;
 import com.aifds.backend.idempotency.service.IdempotencyService;
 import com.aifds.backend.transaction.command.ValidatedTransactionCommand;
@@ -17,6 +18,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -37,10 +39,10 @@ class TransactionIntakeCompletionServiceTest {
     @Mock
     private IdempotencyService idempotencyService;
     @Mock
-    private Clock clock;
+    private DatabaseTransactionTimestampProvider timestampProvider;
 
     @Test
-    void persistsBuildsSnapshotCompletesAndReturnsTheSameTypedResult() {
+    void usesOneDatabaseTimestampForSnapshotAndCompletionWhenApplicationClockLags() {
         ValidatedTransactionCommand command = command();
         PersistedTransactionIntake persisted =
                 new PersistedTransactionIntake(
@@ -52,21 +54,26 @@ class TransactionIntakeCompletionServiceTest {
                 TransactionIntakeSnapshot.received(persisted);
         JsonNode encoded = new ObjectMapper().createObjectNode()
                 .put("transactionId", command.transactionId().toString());
-        Instant clockInstant =
-                Instant.parse("2026-07-23T01:15:33.654321987Z");
-        Instant finalizedAt =
+        Clock laggingApplicationClock = Clock.fixed(
+                Instant.parse("2026-07-23T01:15:33.600000Z"),
+                ZoneOffset.UTC
+        );
+        Instant databaseTimestamp =
                 Instant.parse("2026-07-23T01:15:33.654321Z");
+        assertThat(laggingApplicationClock.instant())
+                .isBefore(databaseTimestamp);
 
         when(transactionIntakeWriter.saveAndLink(RECORD_ID, command))
                 .thenReturn(persisted);
-        when(clock.instant()).thenReturn(clockInstant);
-        when(snapshotCodec.encode(expected, 201, finalizedAt))
+        when(timestampProvider.currentTransactionTimestamp())
+                .thenReturn(databaseTimestamp);
+        when(snapshotCodec.encode(expected, 201, databaseTimestamp))
                 .thenReturn(encoded);
         when(idempotencyService.complete(
                 RECORD_ID,
                 command.transactionId(),
                 encoded,
-                finalizedAt
+                databaseTimestamp
         )).thenReturn(new IdempotencyClaimResult.Completed(
                 encoded.toString()
         ));
@@ -76,29 +83,29 @@ class TransactionIntakeCompletionServiceTest {
                         transactionIntakeWriter,
                         snapshotCodec,
                         idempotencyService,
-                        clock
+                        timestampProvider
                 ).complete(RECORD_ID, command);
 
         assertThat(result.snapshot()).isEqualTo(expected);
         assertThat(result.httpStatus()).isEqualTo(201);
         InOrder order = inOrder(
                 transactionIntakeWriter,
-                clock,
+                timestampProvider,
                 snapshotCodec,
                 idempotencyService
         );
         order.verify(transactionIntakeWriter)
                 .saveAndLink(RECORD_ID, command);
-        order.verify(clock).instant();
-        order.verify(snapshotCodec).encode(expected, 201, finalizedAt);
+        order.verify(timestampProvider).currentTransactionTimestamp();
+        order.verify(snapshotCodec).encode(expected, 201, databaseTimestamp);
         order.verify(idempotencyService).complete(
                 RECORD_ID,
                 command.transactionId(),
                 encoded,
-                finalizedAt
+                databaseTimestamp
         );
-        verify(clock).instant();
-        verifyNoMoreInteractions(clock);
+        verify(timestampProvider).currentTransactionTimestamp();
+        verifyNoMoreInteractions(timestampProvider);
     }
 
     private ValidatedTransactionCommand command() {

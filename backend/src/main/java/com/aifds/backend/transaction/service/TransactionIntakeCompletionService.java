@@ -1,5 +1,6 @@
 package com.aifds.backend.transaction.service;
 
+import com.aifds.backend.common.time.DatabaseTransactionTimestampProvider;
 import com.aifds.backend.idempotency.service.IdempotencyService;
 import com.aifds.backend.transaction.command.ValidatedTransactionCommand;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -7,9 +8,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.Clock;
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 
 @Service
 public class TransactionIntakeCompletionService {
@@ -17,18 +16,18 @@ public class TransactionIntakeCompletionService {
     private final TransactionIntakeWriter transactionIntakeWriter;
     private final TransactionIntakeSnapshotCodec snapshotCodec;
     private final IdempotencyService idempotencyService;
-    private final Clock clock;
+    private final DatabaseTransactionTimestampProvider timestampProvider;
 
     public TransactionIntakeCompletionService(
             TransactionIntakeWriter transactionIntakeWriter,
             TransactionIntakeSnapshotCodec snapshotCodec,
             IdempotencyService idempotencyService,
-            Clock clock
+            DatabaseTransactionTimestampProvider timestampProvider
     ) {
         this.transactionIntakeWriter = transactionIntakeWriter;
         this.snapshotCodec = snapshotCodec;
         this.idempotencyService = idempotencyService;
-        this.clock = clock;
+        this.timestampProvider = timestampProvider;
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -43,7 +42,7 @@ public class TransactionIntakeCompletionService {
                 );
         TransactionIntakeSnapshot snapshot =
                 TransactionIntakeSnapshot.received(persisted);
-        Instant finalizedAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
+        Instant finalizedAt = timestampProvider.currentTransactionTimestamp();
         int httpStatus =
                 TransactionIntakeSnapshotEnvelopeCodec.SUPPORTED_HTTP_STATUS;
         JsonNode encodedSnapshot = snapshotCodec.encode(

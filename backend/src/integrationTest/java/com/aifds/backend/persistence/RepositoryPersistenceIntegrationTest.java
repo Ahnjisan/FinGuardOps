@@ -178,7 +178,7 @@ class RepositoryPersistenceIntegrationTest extends PostgresqlIntegrationTestSupp
                 transaction,
                 objectMapper.createObjectNode()
                         .put("transactionId", transactionId.toString()),
-                Instant.now()
+                saved.getCreatedAt()
         );
         idempotencyRecordRepository.saveAndFlush(saved);
         Long transactionPk = transaction.getId();
