@@ -1,5 +1,6 @@
 package com.aifds.backend.idempotency.service;
 
+import com.aifds.backend.common.time.DatabaseTransactionTimestampProvider;
 import com.aifds.backend.idempotency.entity.IdempotencyRecord;
 import com.aifds.backend.idempotency.exception.IdempotencyCompletionTransactionNotFoundException;
 import com.aifds.backend.idempotency.fingerprint.TransactionFingerprintInput;
@@ -19,9 +20,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 
 import java.math.BigDecimal;
 import java.sql.SQLException;
-import java.time.Clock;
 import java.time.Instant;
-import java.time.ZoneOffset;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -46,6 +45,8 @@ class IdempotencyServiceTest {
     private FinancialTransactionRepository financialTransactionRepository;
     @Mock
     private TransactionRequestFingerprint transactionRequestFingerprint;
+    @Mock
+    private DatabaseTransactionTimestampProvider timestampProvider;
 
     private IdempotencyService idempotencyService;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -57,7 +58,7 @@ class IdempotencyServiceTest {
                 idempotencyRecordRepository,
                 financialTransactionRepository,
                 transactionRequestFingerprint,
-                Clock.fixed(NOW, ZoneOffset.UTC)
+                timestampProvider
         );
     }
 
@@ -161,6 +162,34 @@ class IdempotencyServiceTest {
         )).isInstanceOf(IdempotencyCompletionTransactionNotFoundException.class)
                 .hasMessageContaining(missingTransactionId.toString());
         verify(idempotencyRecordRepository, never()).findByIdForUpdate(10L);
+    }
+
+    @Test
+    void failureUsesDatabaseTimestampWhenApplicationClockLags() {
+        long recordId = 11L;
+        Instant laggingApplicationTime =
+                Instant.parse("2026-08-09T06:05:08.307362Z");
+        Instant databaseTimestamp =
+                Instant.parse("2026-08-09T06:05:08.352971Z");
+        IdempotencyRecord record = IdempotencyRecord.inProgress(
+                IdempotencyService.TRANSACTION_CREATE_OPERATION_SCOPE,
+                KEY,
+                REQUEST_FINGERPRINT
+        );
+        assertThat(laggingApplicationTime).isBefore(databaseTimestamp);
+        when(idempotencyRecordRepository.findByIdForUpdate(recordId))
+                .thenReturn(Optional.of(record));
+        when(timestampProvider.currentTransactionTimestamp())
+                .thenReturn(databaseTimestamp);
+
+        IdempotencyClaimResult.Failed result = idempotencyService.fail(
+                recordId,
+                "DEPENDENCY_TIMEOUT"
+        );
+
+        assertThat(result.failureCode()).isEqualTo("DEPENDENCY_TIMEOUT");
+        assertThat(record.getFinishedAt()).isEqualTo(databaseTimestamp);
+        verify(timestampProvider).currentTransactionTimestamp();
     }
 
     private void stubScopeKeyUniqueViolation(

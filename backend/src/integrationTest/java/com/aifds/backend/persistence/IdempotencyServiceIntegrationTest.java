@@ -1,5 +1,6 @@
 package com.aifds.backend.persistence;
 
+import com.aifds.backend.common.time.DatabaseTransactionTimestampProvider;
 import com.aifds.backend.idempotency.entity.IdempotencyProcessingStatus;
 import com.aifds.backend.idempotency.entity.IdempotencyRecord;
 import com.aifds.backend.idempotency.exception.IdempotencyStateTransitionNotAllowedException;
@@ -20,7 +21,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 import java.math.BigDecimal;
-import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -57,7 +57,7 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
     private ObjectMapper objectMapper;
 
     @MockitoBean
-    private Clock clock;
+    private DatabaseTransactionTimestampProvider timestampProvider;
 
     @Test
     void acquiresNewRequestAsCommittedInProgressRecord() {
@@ -199,7 +199,8 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
         TransactionFingerprintInput input = fingerprintInput();
         long recordId = acquiredRecordId(idempotencyService.claim(key, input));
         Instant failedAt = finishedAtFor(recordId);
-        when(clock.instant()).thenReturn(failedAt);
+        when(timestampProvider.currentTransactionTimestamp())
+                .thenReturn(failedAt);
 
         IdempotencyClaimResult.Failed failed = idempotencyService.fail(
                 recordId,
@@ -296,7 +297,8 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
         );
         long recordId = acquiredRecordId(idempotencyService.claim(key, input));
         Instant finishedAt = finishedAtFor(recordId);
-        when(clock.instant()).thenReturn(finishedAt);
+        when(timestampProvider.currentTransactionTimestamp())
+                .thenReturn(finishedAt);
         CyclicBarrier barrier = new CyclicBarrier(2);
         ExecutorService executor = Executors.newFixedThreadPool(2);
 

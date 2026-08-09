@@ -1165,7 +1165,11 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
         );
         entityManager.persist(idempotencyRecord);
         entityManager.flush();
-        idempotencyRecord.complete(transaction, responseSnapshot, Instant.now());
+        idempotencyRecord.complete(
+                transaction,
+                responseSnapshot,
+                idempotencyRecord.getCreatedAt()
+        );
         entityManager.flush();
 
         Long transactionPk = transaction.getId();

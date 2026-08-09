@@ -1,5 +1,6 @@
 package com.aifds.backend.idempotency.service;
 
+import com.aifds.backend.common.time.DatabaseTransactionTimestampProvider;
 import com.aifds.backend.idempotency.entity.IdempotencyRecord;
 import com.aifds.backend.idempotency.exception.IdempotencyCompletionTransactionNotFoundException;
 import com.aifds.backend.idempotency.exception.IdempotencyRecordNotFoundException;
@@ -15,7 +16,6 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.SQLException;
-import java.time.Clock;
 import java.time.Instant;
 import java.util.UUID;
 
@@ -32,20 +32,20 @@ public class IdempotencyService {
     private final IdempotencyRecordRepository idempotencyRecordRepository;
     private final FinancialTransactionRepository financialTransactionRepository;
     private final TransactionRequestFingerprint transactionRequestFingerprint;
-    private final Clock clock;
+    private final DatabaseTransactionTimestampProvider timestampProvider;
 
     public IdempotencyService(
             IdempotencyClaimWriter idempotencyClaimWriter,
             IdempotencyRecordRepository idempotencyRecordRepository,
             FinancialTransactionRepository financialTransactionRepository,
             TransactionRequestFingerprint transactionRequestFingerprint,
-            Clock clock
+            DatabaseTransactionTimestampProvider timestampProvider
     ) {
         this.idempotencyClaimWriter = idempotencyClaimWriter;
         this.idempotencyRecordRepository = idempotencyRecordRepository;
         this.financialTransactionRepository = financialTransactionRepository;
         this.transactionRequestFingerprint = transactionRequestFingerprint;
-        this.clock = clock;
+        this.timestampProvider = timestampProvider;
     }
 
     public IdempotencyClaimResult claim(
@@ -120,7 +120,10 @@ public class IdempotencyService {
                 .findByIdForUpdate(recordId)
                 .orElseThrow(() -> new IdempotencyRecordNotFoundException(recordId));
 
-        record.fail(failureCode, clock.instant());
+        record.fail(
+                failureCode,
+                timestampProvider.currentTransactionTimestamp()
+        );
 
         return new IdempotencyClaimResult.Failed(record.getFailureCode());
     }
