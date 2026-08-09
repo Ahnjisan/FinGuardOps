@@ -6,6 +6,7 @@ import com.aifds.backend.idempotency.exception.IdempotencyCompletionTransactionN
 import com.aifds.backend.idempotency.exception.IdempotencyRecordNotFoundException;
 import com.aifds.backend.idempotency.exception.IdempotencyStateTransitionNotAllowedException;
 import com.aifds.backend.transaction.dto.TransactionCreateRequest;
+import com.aifds.backend.transaction.exception.TransactionQueryUnavailableException;
 import com.aifds.backend.transaction.validation.TransactionValidationException;
 import com.aifds.backend.transaction.validation.TransactionValidationType;
 import jakarta.validation.Valid;
@@ -231,9 +232,13 @@ class GlobalExceptionHandlerMockMvcTest {
     }
 
     @Test
-    void responseContainsNoUnapprovedContractFieldsOrRejectedValues()
-            throws Exception {
+    @ExtendWith(OutputCaptureExtension.class)
+    void responseContainsNoUnapprovedContractFieldsOrRejectedValues(
+            CapturedOutput output
+    ) throws Exception {
+        String querySecret = "query_secret_must_not_be_logged";
         String response = mockMvc.perform(get("/test/errors/unexpected")
+                        .queryParam("debug", querySecret)
                         .header(
                                 TraceIdFilter.TRACE_ID_HEADER,
                                 INTERNAL_TRACE_ID
@@ -265,6 +270,57 @@ class GlobalExceptionHandlerMockMvcTest {
                 "42",
                 "2f4c0a4e"
         );
+        assertThat(output)
+                .contains("ERROR")
+                .contains("Internal server error [traceId="
+                        + INTERNAL_TRACE_ID
+                        + ", method=GET, path=/test/errors/unexpected]")
+                .contains("SensitiveFailureClass: SELECT secret FROM account")
+                .contains("at " + TestController.class.getName()
+                        + ".unexpected")
+                .doesNotContain(querySecret);
+        assertThat(output.toString())
+                .containsOnlyOnce("Internal server error [traceId=");
+    }
+
+    @Test
+    @ExtendWith(OutputCaptureExtension.class)
+    void existingInternalHandlerUsesTheSameCommonLoggingPath(
+            CapturedOutput output
+    ) throws Exception {
+        mockMvc.perform(get("/test/errors/missing-idempotency-record")
+                        .header(
+                                TraceIdFilter.TRACE_ID_HEADER,
+                                INTERNAL_TRACE_ID
+                        ))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.code").value("INTERNAL_ERROR"));
+
+        assertThat(output)
+                .contains("Internal server error [traceId="
+                        + INTERNAL_TRACE_ID
+                        + ", method=GET, path=/test/errors/missing-idempotency-record]")
+                .contains(IdempotencyRecordNotFoundException.class.getName());
+        assertThat(output.toString())
+                .containsOnlyOnce("Internal server error [traceId=");
+    }
+
+    @Test
+    @ExtendWith(OutputCaptureExtension.class)
+    void clientAndDependencyErrorsDoNotWriteInternalErrorLogs(
+            CapturedOutput output
+    ) throws Exception {
+        mockMvc.perform(get("/test/errors/domain"))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"));
+
+        mockMvc.perform(get("/test/errors/dependency-unavailable"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.code")
+                        .value("DEPENDENCY_UNAVAILABLE"));
+
+        assertThat(output)
+                .doesNotContain("Internal server error [traceId=");
     }
 
     @Test
@@ -443,6 +499,13 @@ class GlobalExceptionHandlerMockMvcTest {
         void unexpected() {
             throw new SensitiveFailureClass(
                     "SELECT secret FROM account WHERE ref = acct_rejected_value"
+            );
+        }
+
+        @GetMapping("/dependency-unavailable")
+        void dependencyUnavailable() {
+            throw new TransactionQueryUnavailableException(
+                    new IllegalStateException("repository unavailable")
             );
         }
 
