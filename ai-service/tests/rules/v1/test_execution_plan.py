@@ -111,8 +111,12 @@ def _recording_registry(
 def _assert_category(
     exc_info: pytest.ExceptionInfo[RuleExecutionPlanError],
     expected: RuleExecutionPlanErrorCategory,
+    origin: execution_plan_module.RuleExecutionPlanErrorOrigin = (
+        execution_plan_module.RuleExecutionPlanErrorOrigin.REQUEST_CONTRACT
+    ),
 ) -> None:
     assert exc_info.value.category is expected
+    assert exc_info.value.origin is origin
 
 
 def test_builder_creates_r001_r003_r004_plan_in_canonical_order() -> None:
@@ -270,7 +274,11 @@ def test_official_bridge_defensively_rejects_duplicate_rule_id_mapping() -> None
     with pytest.raises(RuleExecutionPlanError) as exc_info:
         execution_plan_module._validate_rule_code_bridge(invalid_bridge)
 
-    _assert_category(exc_info, RuleExecutionPlanErrorCategory.DUPLICATE_RULE_ID)
+    _assert_category(
+        exc_info,
+        RuleExecutionPlanErrorCategory.DUPLICATE_RULE_ID,
+        execution_plan_module.RuleExecutionPlanErrorOrigin.SERVER_CONFIGURATION,
+    )
 
 
 @pytest.mark.parametrize(
@@ -320,7 +328,11 @@ def test_builder_translates_registry_lookup_failure_without_running_evaluators()
             [_snapshot(RuleId.R001), _snapshot(RuleId.R004)],
         )
 
-    _assert_category(exc_info, RuleExecutionPlanErrorCategory.UNSUPPORTED_RULE_CAPABILITY)
+    _assert_category(
+        exc_info,
+        RuleExecutionPlanErrorCategory.UNSUPPORTED_RULE_CAPABILITY,
+        execution_plan_module.RuleExecutionPlanErrorOrigin.DEPLOYED_CAPABILITY,
+    )
     assert calls == []
 
 

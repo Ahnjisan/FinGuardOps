@@ -17,9 +17,11 @@ Spring Boot
 현재 AI Service에는 RuleVersion Snapshot, ExecutionPlan Builder,
 Orchestrator, Runner, R001~R004 evaluator, `RuleScoringCalculator`,
 `RuleEvidenceTransformer`와 `RuleAnalysisResult`까지의 순수 내부 경로가
-구현되어 있다. 이 문서에서 정의하는 FastAPI Endpoint, Pydantic 요청·응답
-DTO, 공통 예외 Handler와 Spring Boot Client는 아직 구현되지 않았다. 문서
-확정은 서비스 연동 구현 완료를 의미하지 않는다.
+구현되어 있다. Pydantic 요청·응답 DTO와 명시적 매퍼에 이어 이 문서에서
+정의하는 FastAPI Endpoint, Service, Trace·본문 크기 Middleware와 공통 예외
+Handler도 구현되어 있다. Spring Boot Client와 DetectionResult 영속·채택은
+아직 구현되지 않았다. FastAPI HTTP 경계 구현 완료를 전체 서비스 연동
+완료로 해석하지 않는다.
 
 이 API는 외부 사용자 API가 아니라 Private Network 안에서 사용하는
 Spring Boot → FastAPI 내부 서비스 API다. 인증·인가는 아직 구현되지 않았으며
@@ -38,8 +40,8 @@ X-Trace-Id: <traceId>
 - FastAPI는 분석 결과를 영속화하지 않는다.
 - `GET /api/health`의 기존 경로와 응답 계약은 변경하지 않는다.
 - 요청과 응답 본문은 UTF-8 JSON을 사용한다.
-- 요청 본문 최대 크기는 1 MiB, 즉 1,048,576 bytes다. 후속 FastAPI Middleware가
-  이 제한을 반드시 적용하며 Endpoint와 Middleware는 아직 구현되지 않았다.
+- 요청 본문 최대 크기는 1 MiB, 즉 1,048,576 bytes다. 구현된 FastAPI
+  Middleware가 실제 수신 byte를 기준으로 이 제한을 적용한다.
 
 ## 3. 추적 계약
 
@@ -228,10 +230,11 @@ Registry가 제공하지 못하는 배포 불일치만 `500 UNSUPPORTED_RULE_CAP
 현재 `RuleExecutionPlanBuilder`는 `reasonCode`를 비어 있지 않은 문자열로,
 `weight`를 1~100 범위로 검증하고 exact bridge·dependency·conditionDefinition과
 Registry capability를 검증한다. canonical weight는 downstream scoring이,
-허용 `reasonCode`는 Evidence 변환이 다시 검증한다. 따라서 후속 HTTP 계층은 위
-사전 검증을 추가해야 하며 아직 구현되지 않았다. 사전 검증을 통과한 뒤
-scoring 또는 Evidence에서 canonical 불일치가 다시 발생하면 입력 오류로
-재분류하지 않고 `500 INTERNAL_ERROR`인 서버 내부 불변식 위반으로 처리한다.
+허용 `reasonCode`는 Evidence 변환이 다시 검증한다. 구현된 HTTP DTO→도메인
+매퍼는 위 canonical metadata와 요청 업무 계약을 plan 생성 전에 사전
+검증한다. 사전 검증을 통과한 뒤 scoring 또는 Evidence에서 canonical
+불일치가 다시 발생하면 입력 오류로 재분류하지 않고 `500 INTERNAL_ERROR`인
+서버 내부 불변식 위반으로 처리한다.
 
 ## 6. conditionDefinition exact 계약
 
@@ -581,10 +584,10 @@ JSON scalar 타입과 UUID·UTC·Decimal·Enum wire 형식 오류는 별도 Exce
 Handler가 위 공통 오류 envelope의 `400 INVALID_REQUEST`로 변환해야 한다.
 DTO 변환 이후의 Rule 업무 계약 위반은 별도 Rule 계약 예외로 발생시켜
 `422 RULE_CONTRACT_ERROR`로 반환한다. FastAPI 기본 `422`와 업무 계약 `422`를
-혼합하지 않는다. 이 Exception Handler는 아직 구현되지 않은 후속 구현
-대상이다.
+혼합하지 않는다. 구현된 Exception Handler가 Pydantic wire 오류와 Rule 업무
+계약 오류를 위 기준으로 구분한다.
 
-다음 실행 계획 semantic category는 `UNSUPPORTED_RULE_CAPABILITY`를 제외하고
+다음 실행 계획 semantic category는 오류 origin이 `REQUEST_CONTRACT`인 경우에만
 `422 RULE_CONTRACT_ERROR`의 세부 `fieldErrors.code`로 사용할 수 있다.
 
 - `NO_EXECUTABLE_RULE_VERSION`
@@ -596,6 +599,12 @@ DTO 변환 이후의 Rule 업무 계약 위반은 별도 Rule 계약 예외로 �
 - `MISSING_RULE_DEPENDENCY`
 - `UNSUPPORTED_RULE_CONFIGURATION`
 - `INVALID_RULE_EXECUTION_PLAN`
+
+서버 소유 Rule Code Bridge, dependency 또는 configuration의 중복·누락·손상은
+같은 category 이름을 사용하더라도 `500 INTERNAL_ERROR`로 처리한다. 배포된
+evaluator 또는 Registry capability 누락은 `500 UNSUPPORTED_RULE_CAPABILITY`로
+처리한다. origin과 category가 모순되는 조합은 fail-closed 방식으로
+`500 INTERNAL_ERROR`로 처리한다.
 
 `UNSUPPORTED_RULE_CAPABILITY`는 요청을 일부 실행하거나 지원하지 않는 Rule을
 제외하지 않고 배포 불일치 `500`으로 반환한다. Runner, scoring과 Evidence의
@@ -621,16 +630,16 @@ FastAPI는 실패를 `LOW`, 0점, 빈 Evidence 또는 일부 Rule 성공으로 �
 
 | 제한 | 계약값 | 현재 적용 상태 |
 | --- | ---: | --- |
-| `behaviorEvents` | 최대 1,000개 | Pydantic DTO 후속 구현 대상 |
-| `ruleVersions` | 1~32개 | Pydantic DTO 후속 구현 대상 |
-| HTTP 요청 본문 | 최대 1 MiB = 1,048,576 bytes | FastAPI Middleware 후속 구현 필수 |
+| `behaviorEvents` | 최대 1,000개 | DTO→도메인 매퍼에서 적용 |
+| `ruleVersions` | 1~32개 | DTO→도메인 매퍼에서 적용 |
+| HTTP 요청 본문 | 최대 1 MiB = 1,048,576 bytes | FastAPI Middleware에서 실제 수신 byte 기준 적용 |
 
 FastAPI Middleware는 `Content-Length`만 신뢰하지 않고 실제 수신 byte 상한을
 적용하며, 제한 초과 요청을 Rule 분석과 DTO 역직렬화 전에
 `413 PAYLOAD_TOO_LARGE`로 거부해야 한다. Gateway가 도입되면 동일하거나 더 작은
 제한으로 조기 차단할 수 있지만 이는 추가 방어이며 FastAPI Middleware 제한을
-대체하지 않는다. Endpoint, Middleware와 Exception Handler는 아직 구현되지
-않았다.
+대체하지 않는다. Endpoint, Middleware와 Exception Handler는 현재 구현되어
+있다.
 
 처리 순서는 `X-Trace-Id` 검증과 요청 범위 `traceId` 확정, 본문 크기 검사, DTO
 역직렬화 순이다. 유효한 요청 Trace가 있는 413 응답은 그 값을 응답 헤더·본문과
@@ -650,14 +659,13 @@ FastAPI Middleware는 `Content-Length`만 신뢰하지 않고 실제 수신 byte
 - Private Network 전제만으로 호출자 신뢰와 인증이 구현되었다고 표현하지
   않는다.
 
-## 13. 제외 범위
+## 13. 현재 구현 이후 제외 범위
 
-- FastAPI Router, Service, Pydantic DTO와 Exception Handler 구현
 - Spring Boot HTTP Client와 Timeout·재호출 구현
 - DetectionResult·DetectionEvidence 생성·채택·영속화
 - 거래 상태, 위험 대응과 사건 상태 변경
 - RuleVersion 별도 동기화·캐시·배포 산출물
 - 인증·인가, CORS와 네트워크 보안 구현
-- 요청 본문 1 MiB 차단 FastAPI Middleware와 선택적 Gateway 조기 차단 구현
+- 선택적 Gateway 요청 본문 조기 차단 구현
 - External Risk, ML과 생성형 AI 연동
 - DB 스키마와 Migration 변경
