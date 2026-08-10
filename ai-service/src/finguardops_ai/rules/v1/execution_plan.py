@@ -39,11 +39,24 @@ class RuleExecutionPlanErrorCategory(StrEnum):
     INVALID_RULE_EXECUTION_PLAN = "INVALID_RULE_EXECUTION_PLAN"
 
 
+class RuleExecutionPlanErrorOrigin(StrEnum):
+    REQUEST_CONTRACT = "REQUEST_CONTRACT"
+    SERVER_CONFIGURATION = "SERVER_CONFIGURATION"
+    DEPLOYED_CAPABILITY = "DEPLOYED_CAPABILITY"
+
+
 class RuleExecutionPlanError(ValueError):
     """A categorized failure to build an immutable Rule execution plan."""
 
-    def __init__(self, category: RuleExecutionPlanErrorCategory, message: str) -> None:
+    def __init__(
+        self,
+        category: RuleExecutionPlanErrorCategory,
+        message: str,
+        *,
+        origin: RuleExecutionPlanErrorOrigin = RuleExecutionPlanErrorOrigin.REQUEST_CONTRACT,
+    ) -> None:
         self.category = category
+        self.origin = origin
         super().__init__(message)
 
 
@@ -85,7 +98,7 @@ class RuleExecutionPlan:
     items: tuple[RuleExecutionPlanItem, ...]
 
 
-_RULE_CODE_TO_RULE_ID: Mapping[str, RuleId] = MappingProxyType(
+_CANONICAL_RULE_CODE_TO_RULE_ID: Mapping[str, RuleId] = MappingProxyType(
     {
         "TRANSFER_ABSOLUTE_HIGH_AMOUNT": RuleId.R001,
         "RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT": RuleId.R002,
@@ -93,6 +106,7 @@ _RULE_CODE_TO_RULE_ID: Mapping[str, RuleId] = MappingProxyType(
         "RECENT_BENEFICIARY_TRANSFER": RuleId.R004,
     }
 )
+_RULE_CODE_TO_RULE_ID = _CANONICAL_RULE_CODE_TO_RULE_ID
 _CANONICAL_RULE_ORDER = (RuleId.R001, RuleId.R002, RuleId.R003, RuleId.R004)
 _CANONICAL_RULE_INDEX = MappingProxyType(
     {rule_id: index for index, rule_id in enumerate(_CANONICAL_RULE_ORDER)}
@@ -139,8 +153,8 @@ class RuleExecutionPlanBuilder:
         _validate_executable_rule_versions(rule_versions_snapshot, evaluation_cutoff_at)
         _validate_unique_rule_version_ids(rule_versions_snapshot)
         _validate_rule_identity_uniqueness(rule_versions_snapshot)
-        mapped_rule_versions = _map_rule_ids(rule_versions_snapshot)
         _validate_rule_code_bridge(_RULE_CODE_TO_RULE_ID)
+        mapped_rule_versions = _map_rule_ids(rule_versions_snapshot)
         _validate_unique_mapped_rule_ids(mapped_rule_versions)
         _validate_dependencies(mapped_rule_versions)
         parsed_rule_versions = _parse_condition_definitions(mapped_rule_versions)
@@ -270,13 +284,22 @@ def _validate_rule_code_bridge(bridge: Mapping[str, RuleId]) -> None:
     seen_rule_ids: set[RuleId] = set()
     for rule_code, rule_id in bridge.items():
         if not isinstance(rule_code, str) or not isinstance(rule_id, RuleId):
-            _invalid_plan("Rule code bridge contains an invalid entry")
+            _invalid_plan(
+                "Rule code bridge contains an invalid entry",
+                origin=RuleExecutionPlanErrorOrigin.SERVER_CONFIGURATION,
+            )
         if rule_id in seen_rule_ids:
             _raise_plan_error(
                 RuleExecutionPlanErrorCategory.DUPLICATE_RULE_ID,
                 f"Rule code bridge maps multiple rule codes to {rule_id}",
+                origin=RuleExecutionPlanErrorOrigin.SERVER_CONFIGURATION,
             )
         seen_rule_ids.add(rule_id)
+    if bridge != _CANONICAL_RULE_CODE_TO_RULE_ID:
+        _invalid_plan(
+            "Rule code bridge does not match the canonical Rule v1 mapping",
+            origin=RuleExecutionPlanErrorOrigin.SERVER_CONFIGURATION,
+        )
 
 
 def _validate_unique_mapped_rule_ids(
@@ -288,6 +311,7 @@ def _validate_unique_mapped_rule_ids(
             _raise_plan_error(
                 RuleExecutionPlanErrorCategory.DUPLICATE_RULE_ID,
                 f"Duplicate mapped Rule ID: {mapped.rule_id}",
+                origin=RuleExecutionPlanErrorOrigin.SERVER_CONFIGURATION,
             )
         seen.add(mapped.rule_id)
 
@@ -379,6 +403,7 @@ def _validate_registry_capabilities(
             raise RuleExecutionPlanError(
                 RuleExecutionPlanErrorCategory.UNSUPPORTED_RULE_CAPABILITY,
                 f"Registry does not support Rule ID {item.rule_id}",
+                origin=RuleExecutionPlanErrorOrigin.DEPLOYED_CAPABILITY,
             ) from exc
 
 
@@ -408,9 +433,22 @@ def _require_bounded_integer(value: object, field_name: str, minimum: int, maxim
         _invalid_plan(f"{field_name} must be an integer from {minimum} to {maximum}")
 
 
-def _invalid_plan(message: str) -> None:
-    _raise_plan_error(RuleExecutionPlanErrorCategory.INVALID_RULE_EXECUTION_PLAN, message)
+def _invalid_plan(
+    message: str,
+    *,
+    origin: RuleExecutionPlanErrorOrigin = RuleExecutionPlanErrorOrigin.REQUEST_CONTRACT,
+) -> None:
+    _raise_plan_error(
+        RuleExecutionPlanErrorCategory.INVALID_RULE_EXECUTION_PLAN,
+        message,
+        origin=origin,
+    )
 
 
-def _raise_plan_error(category: RuleExecutionPlanErrorCategory, message: str) -> None:
-    raise RuleExecutionPlanError(category, message)
+def _raise_plan_error(
+    category: RuleExecutionPlanErrorCategory,
+    message: str,
+    *,
+    origin: RuleExecutionPlanErrorOrigin = RuleExecutionPlanErrorOrigin.REQUEST_CONTRACT,
+) -> None:
+    raise RuleExecutionPlanError(category, message, origin=origin)

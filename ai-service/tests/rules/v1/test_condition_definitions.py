@@ -22,6 +22,7 @@ from finguardops_ai.rules.v1 import (
     TransactionType,
     create_default_rule_evaluator_registry,
 )
+from finguardops_ai.rules.v1.execution_plan import RuleExecutionPlanErrorOrigin
 
 CUTOFF_AT = datetime(2026, 7, 23, 12, 0, tzinfo=UTC)
 RULE_CODES = {
@@ -103,6 +104,7 @@ def _assert_unsupported(
     exc_info: pytest.ExceptionInfo[RuleExecutionPlanError],
 ) -> None:
     assert exc_info.value.category is RuleExecutionPlanErrorCategory.UNSUPPORTED_RULE_CONFIGURATION
+    assert exc_info.value.origin is RuleExecutionPlanErrorOrigin.REQUEST_CONTRACT
 
 
 def test_all_rule_condition_definitions_are_parsed_to_typed_immutable_values() -> None:
