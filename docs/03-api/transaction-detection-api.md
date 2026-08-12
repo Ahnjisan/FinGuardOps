@@ -26,10 +26,11 @@ Client
 
 현재 외부 거래 흐름은 입력 검증·멱등성 확인·거래 PostgreSQL 저장 후
 `RECEIVED`와 탐지 관련 null 값을 반환하는 단계까지이다.
-DetectionResult·DetectionEvidence의 물리 영속 모델은 구현되었지만
-External Risk, FastAPI, 탐지 실행 결과 생성·검증·채택, 위험 대응과
-사건 연결은 아직 구현되지 않았다. 현재 단계 응답은 최종 동기 분석
-목표를 변경하지 않는다.
+DetectionResult·DetectionEvidence의 물리 영속 모델과 FastAPI
+`POST /api/v1/rule-analysis` HTTP 경계는 구현되었지만 External Risk,
+Spring Boot Client와 호출 오케스트레이션, 탐지 실행 결과 생성·검증·채택,
+위험 대응과 사건 연결은 아직 구현되지 않았다. 현재 단계 응답은 최종 동기
+분석 목표를 변경하지 않는다.
 
 ### 2.2 Spring Boot 책임
 
@@ -51,9 +52,12 @@ External Risk, FastAPI, 탐지 실행 결과 생성·검증·채택, 위험 대�
 ### 2.3 FastAPI 책임
 
 다음 항목은 목표 책임 범위이다. 현재 `ai-service/`에는 R001~R004 실행,
-scoring, Evidence 변환과 Rule 분석 결과 조합의 순수 내부 경로가 구현되어
-있다. [Rule v1 내부 분석 API](./rule-v1-analysis-api.md)는 문서로 정의되었지만
-FastAPI Endpoint·Pydantic DTO, Spring Boot Client와 ML은 아직 구현되지 않았다.
+scoring, Evidence 변환과 Rule 분석 결과 조합의 내부 경로에 더해 Pydantic
+요청·응답 DTO와 FastAPI `POST /api/v1/rule-analysis` HTTP 경계가 구현되어
+있다. Spring Boot Client, 자동 DetectionResult 채택·영속화와 ML은 아직
+구현되지 않았다. 상세 Client 계약은
+[Rule v1 내부 분석 API](./rule-v1-analysis-api.md#13-spring-boot-client-연동-계약)를
+따른다.
 
 - Feature를 계산한다.
 - 승인된 Rule을 실행한다.
@@ -364,8 +368,17 @@ Content-Type: application/json
 
 - Spring Boot는 임의 위험 점수나 `LOW` 결과를 생성하지 않는다.
 - 완료·검증된 DetectionResult가 없으므로 `adoptedDetectionResultId`를 설정하지 않는다.
-- 초기 권장 정책은 Transaction을 `FAILED`로 기록하고 사건을 생성하지 않는 것이다.
-- 클라이언트에는 `503 Service Unavailable`과 `DEPENDENCY_TIMEOUT`을 반환한다.
+- Rule v1 Spring Boot Client의 자동 retry는 `0회`이며 timeout 응답을 반복
+  호출하거나 fallback 결과로 바꾸지 않는다.
+- Transaction을 `FAILED`로 기록하고 사건을 생성하지 않는 방식은 기존 초기
+  권장안이며, 실제 거래 실패 상태, 수동 재개와 재처리 정책은 계속 `TBD`이다.
+- 기존 초기 권장 외부 응답은 `503 Service Unavailable`과
+  `DEPENDENCY_TIMEOUT`이다.
+
+connect·response timeout의 상세 분류와 설정은
+[Rule v1 내부 분석 API](./rule-v1-analysis-api.md#13-spring-boot-client-연동-계약)를
+따른다. Client 내부 오류 category를 외부 거래 API code로 직접 노출하지 않으며
+외부 오류와 거래 상태의 최종 매핑은 후속 오케스트레이션 계약에서 결정한다.
 
 실패 Transaction 저장과 오류 응답은 일부만 성공한 것처럼 보이지 않도록 정합성 경계를 가져야 한다. 오류 응답에서 이미 저장된 실패 Transaction을 식별할 수 있도록 다음 공통 오류 문맥을 사용한다.
 
@@ -1102,7 +1115,8 @@ Content-Type: application/json
 ### 16.2 거래
 
 - `riskResponseOutcome` Enum 이름
-- FastAPI·External Risk Timeout 이후 재시도·복구 정책
+- FastAPI·External Risk Timeout 이후 거래 실패 상태, 수동 재개와 재처리 정책.
+  Rule v1 Client 자체의 자동 retry는 `0회`로 확정됨
 - 오류 응답의 `resource` 최종 이름과 범용 구조
 - 향후 응답 계약 또는 envelope codec 변경 시 새 version 식별자와 지원 registry
 - Snapshot metadata의 JSONB 내부 저장 또는 별도 컬럼 여부와 필요한 Flyway Migration

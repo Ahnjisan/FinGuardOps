@@ -14,7 +14,7 @@
 - 어떤 기술을 현재 사용하고 어떤 조건에서 나중에 도입하는가
 - 후속 ERD·API·이벤트·메트릭 설계에서 무엇을 결정해야 하는가
 
-이 문서는 시스템 수준의 책임과 경계를 정의한다. Entity, DB 테이블·컬럼·관계, REST API 경로·DTO·상태 코드, Kafka Topic·Partition·Consumer Group, Kubernetes 리소스, AWS 상세 구성, Prometheus 물리 메트릭 이름과 대부분의 Timeout·Retry·Circuit Breaker 수치는 확정하지 않는다. 단, AI 리포트 자동 재시도는 최신 API 계약에 따라 Timeout·연결 실패에 최대 1회로 제한한다.
+이 문서는 시스템 수준의 책임과 경계를 정의한다. Entity, DB 테이블·컬럼·관계, REST API 경로·DTO·상태 코드, Kafka Topic·Partition·Consumer Group, Kubernetes 리소스, AWS 상세 구성, Prometheus 물리 메트릭 이름과 대부분의 Timeout·Retry·Circuit Breaker 수치는 확정하지 않는다. 예외로 Rule v1 Spring Boot Client의 connect timeout `1s`, response timeout `3s`, 자동 retry `0회`와 AI 리포트의 Timeout·연결 실패 최대 1회 자동 재시도는 최신 API 계약에 따라 확정되어 있다.
 
 ## 2. 현재 프로젝트 상태
 
@@ -45,9 +45,10 @@ DetectionResult·DetectionEvidence와 FraudRule·RuleVersion의 PostgreSQL
 접수는 단계적 구현 응답인 `RECEIVED`와 탐지 관련 null 값을 반환한다.
 AI Service에는 RuleVersion snapshot 입력 모델, ExecutionPlan Builder,
 Orchestrator, Runner, R001~R004 evaluator, Scoring Calculator, Rule Evidence
-Transformer와 Rule 분석 결과 조합의 순수 내부 경로가 구현되어 있다.
-FastAPI 분석 Endpoint·Pydantic DTO, Spring Boot Client, 탐지 결과 자동
-생성·채택, 사건, 감사와 AI 운영 도메인은 아직 구현되지 않았다.
+Transformer와 Rule 분석 결과 조합의 내부 경로에 더해 Pydantic 요청·응답
+DTO와 FastAPI `POST /api/v1/rule-analysis` HTTP 경계가 구현되어 있다.
+Spring Boot Client, 탐지 결과 자동 생성·검증·채택·영속화, 전체 서비스 연동,
+사건, 감사와 AI 운영 도메인은 아직 구현되지 않았다.
 
 ### 2.2 문서로 정의됨
 
@@ -65,9 +66,9 @@ FastAPI 분석 Endpoint·Pydantic DTO, Spring Boot Client, 탐지 결과 자동
 
 ### 2.3 구현되지 않음
 
-- `ai-service/`: Rule v1 실행·scoring·Evidence 변환과 분석 결과 조합의 순수
-  내부 경로까지 구현되었으며 분석 Endpoint·Pydantic DTO, ML·AI 리포트와
-  Spring Boot 연동 없음
+- `ai-service/`: Rule v1 실행·scoring·Evidence 변환과 분석 결과 조합,
+  Pydantic 요청·응답 DTO와 분석 HTTP 경계까지 구현되었으며 ML·AI 리포트와
+  Spring Boot Client 연동 없음
 - `frontend/`: 역할 규칙과 자리표시자만 있으며 React 구현 없음
 - `infra/`: 자리표시자만 있으며 Docker Compose 등 인프라 구현 없음
 - `.github/`: Issue·PR 템플릿과 Backend·AI Service 테스트 Workflow가 있으며 이미지 빌드·배포 자동화 없음
@@ -456,7 +457,9 @@ Spring Boot는 거래·행동 및 사용할 수 있는 외부 위험정보 상�
 
 Spring Boot는 반환된 결과의 요청 연결, 완전성, 버전과 처리 가능 여부를 검증한다. 그 뒤 승인된 위험 대응 정책에 따라 거래 처리 상태와 사건 생성 또는 기존 사건 연결 여부를 결정하고 PostgreSQL에 저장한다.
 
-FastAPI Timeout 시 Spring Boot가 임의의 위험 점수를 생성하거나 무위험으로 간주하지 않는다. 이때 허용할 거래 상태와 재시도·수동 확인 정책은 `TBD`이다.
+FastAPI Timeout 시 Spring Boot가 임의의 위험 점수를 생성하거나 무위험으로
+간주하지 않는다. Rule v1 Client 자체의 자동 retry는 `0회`로 확정하며, 이때
+허용할 거래 상태, 수동 재개와 재처리 정책은 `TBD`이다.
 
 Rule v1에서 Spring Boot는 거래·행동 이벤트 조회와 Snapshot 구성, Rule
 정의·버전·활성 상태, 호출 오케스트레이션과 결과 영속화를 맡고
@@ -464,15 +467,23 @@ FastAPI는 Feature, R001~R004, 점수·등급·Reason Code·Evidence 계산을
 맡는다. 상세 계약은
 [`../01-requirements/rule-v1-detection-contract.md`](../01-requirements/rule-v1-detection-contract.md)를
 따른다. DetectionResult·DetectionEvidence 물리 영속 모델은
-구현되었지만 FastAPI 연동과 실행 결과 생성·검증·채택 흐름은 아직
-구현되지 않았다.
+구현되었지만 Spring Boot Client와 실행 결과 자동 생성·검증·채택·영속화
+흐름은 아직 구현되지 않았다.
 
-현재 FastAPI 내부에서는 RuleVersion snapshot을 받는 Python 입력 모델부터
+현재 FastAPI에는 RuleVersion snapshot을 받는 Python 입력 모델부터
 ExecutionPlan Builder → Orchestrator → Runner → R001~R004 evaluator → Scoring
-Calculator → RuleEvidenceTransformer → RuleAnalysisResult까지 구현되어 있다.
-이 내부 구현은 문서로 정의된 FastAPI 분석 Endpoint·Pydantic DTO나 Spring Boot
-Client가 구현되었다는 뜻이 아니다. 내부 HTTP 계약은
-[`../03-api/rule-v1-analysis-api.md`](../03-api/rule-v1-analysis-api.md)를 따른다.
+Calculator → RuleEvidenceTransformer → RuleAnalysisResult까지의 실행 경로와
+Pydantic 요청·응답 DTO, `POST /api/v1/rule-analysis` HTTP 경계가 구현되어 있다.
+이는 Spring Boot Client나 전체 서비스 연동, 결과 자동 채택·영속화가
+구현되었다는 뜻이 아니다. 내부 HTTP와 Spring Boot Client의 상세 계약은
+[`../03-api/rule-v1-analysis-api.md`](../03-api/rule-v1-analysis-api.md#13-spring-boot-client-연동-계약)를
+따른다.
+
+Rule v1 호출에서는 읽기 트랜잭션으로 거래·행동 이벤트·활성 RuleVersion
+Snapshot을 고정하고 요청 DTO를 구성한 뒤 해당 트랜잭션을 종료한다. DB 쓰기
+트랜잭션을 유지하지 않은 상태에서 FastAPI를 호출하고 응답을 검증한 다음,
+후속 별도 쓰기 트랜잭션에서 결과를 채택·영속화한다. 마지막 채택·영속화
+단계는 아직 구현되지 않았다.
 
 후속 Rule Evidence 경계에서 FastAPI는 RuleVersion metadata, Reason Code,
 원래 contribution, typed observation, Evidence 시각과 plan 기반 출력 순서를
@@ -695,7 +706,7 @@ React는 서비스 상태, 배포 버전, 업무 영향, AI 비용과 장애·�
 
 | 장애 | 직접 영향 | 유지해야 할 원칙 | 미확정 사항 |
 | --- | --- | --- | --- |
-| FastAPI Timeout | Rule·ML 분석과 후속 위험 대응 지연 또는 실패 | Spring Boot가 거래 접수와 마지막 확정 상태를 보존하고 임의 점수를 만들지 않음 | 거래 처리·재시도 정책 `TBD` |
+| FastAPI Timeout | Rule·ML 분석과 후속 위험 대응 지연 또는 실패 | Spring Boot가 거래 접수와 마지막 확정 상태를 보존하고 임의 점수를 만들지 않음. Rule v1 Client 자동 retry는 0회 | 거래 실패 상태, 수동 재개·재처리 정책 `TBD` |
 | External Risk Timeout | 외부 위험계좌·IP·기기 근거 사용 불가 가능 | 실패를 위험정보 없음으로 해석하지 않고 유효 캐시 또는 조회 불가 상태를 기록하며 내부 분석을 계속함 | 최종 위험 대응 정책 `TBD` |
 | LLM Timeout·연결 실패 | AI 사건 리포트 지연·실패 | 같은 `executionId`에서 최대 한 번 자동 재시도한 뒤 Rule·ML 결과 기반 템플릿 fallback. 거래·사건 처리 결과는 변경하지 않음 | 재시도 간격·Timeout 값 `TBD` |
 | 비일시적 LLM Provider 오류 | AI 리포트 생성 실패 | 자동 재시도 없이 템플릿 fallback과 오류·사용량 기록 | 다른 모델 전환 조건은 별도 승인 |
@@ -794,6 +805,8 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 - RuleVersion snapshot 입력 모델, ExecutionPlan Builder, Orchestrator, Runner,
   R001~R004 evaluator, Scoring Calculator, Rule Evidence Transformer와
   RuleAnalysisResult
+- Rule v1 Pydantic 요청·응답 DTO와 FastAPI `POST /api/v1/rule-analysis` HTTP
+  경계
 - Backend와 AI Service 전용 GitHub Actions 테스트 Workflow
 
 ### 18.2 문서로 정의됨
@@ -810,7 +823,7 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 
 ### 18.3 다음 구현 예정
 
-- 문서로 정의된 FastAPI 분석 Endpoint·Pydantic DTO와 Spring Boot Client·분석 연동
+- 문서로 정의된 Spring Boot Rule v1 Client와 전체 분석 연동
 - DetectionResult 자동 영속화·채택과 위험 대응·사건·감사 도메인
 - External Risk Mock
 - Docker 및 Docker Compose 통합 환경
@@ -895,7 +908,8 @@ Docker Compose와 필요 시 Kubernetes 환경에서 기능·장애·관측 기�
 - Kafka Topic·Partition·Consumer Group 확정
 - Kubernetes 리소스와 AWS 상세 구성 확정
 - Prometheus 메트릭 이름과 경보 임계값 확정
-- Timeout·Retry·Circuit Breaker 수치 확정
+- Rule v1 Client와 AI 리포트의 위 명시적 예외를 제외한 Timeout·Retry·Circuit
+  Breaker 수치 확정
 - 시맨틱 캐시와 범용 FDS 챗봇
 - Investigation Copilot
 - Reason Code만을 기준으로 한 다른 사건의 AI 리포트 재사용
@@ -910,7 +924,7 @@ Docker Compose와 필요 시 Kubernetes 환경에서 기능·장애·관측 기�
 | 결정 항목 | 현재 상태 | 결정에 필요한 근거 |
 | --- | --- | --- |
 | External Risk 조회 실패 시 위험 대응 정책 | `TBD` | 캐시 유효성, 내부 Rule·ML 결과, 거래 상태와 시나리오별 업무 위험 |
-| FastAPI Timeout 시 거래 처리 정책 | `TBD` | 마지막 확정 상태, 재시도 안전성, 사용자 응답과 미탐·오탐 위험 |
+| FastAPI Timeout 시 거래 처리 정책 | `TBD` | Rule v1 Client 자동 retry 0회 이후의 거래 실패 상태, 수동 재개·재처리, 사용자 응답과 미탐·오탐 위험 |
 | 현재 멱등 응답 snapshot의 최종 동기 응답 호환 | `TBD` | 기존 `RECEIVED`/null snapshot의 스키마·재생 의미·만료 데이터와 전환 방식 |
 | 초기 AI 리포트 비동기 실행 방식 | `TBD` | 실패·재시도·멱등성 검증 가능성, 개인 프로젝트 운영 복잡도 |
 | Redis 최초 도입 시점 | `TBD` | 정확 일치 중복 호출, External Risk 조회 부하와 집계 성능 측정 |
