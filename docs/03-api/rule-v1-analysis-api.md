@@ -659,7 +659,209 @@ FastAPI Middleware는 `Content-Length`만 신뢰하지 않고 실제 수신 byte
 - Private Network 전제만으로 호출자 신뢰와 인증이 구현되었다고 표현하지
   않는다.
 
-## 13. 현재 구현 이후 제외 범위
+## 13. Spring Boot Client 연동 계약
+
+이 절은 Spring Boot가 이 문서의 wire 계약을 호출하는 Client의 단일 상세
+기준이다. 기존 요청·응답 DTO, HTTP 상태와 FastAPI 오류 envelope는 변경하지
+않는다. 현재 FastAPI HTTP 경계는 구현되어 있지만 이 절의 Spring Boot Client와
+결과 채택·영속화는 아직 구현되지 않았다.
+
+### 13.1 계층과 책임
+
+Spring Boot Controller는 FastAPI를 직접 호출하지 않는다. 애플리케이션
+오케스트레이션은 평가 Snapshot 준비와 Client 호출 시점을 조정하고, 별도 HTTP
+adapter인 Client는 다음 책임만 가진다.
+
+- 이 문서의 요청 DTO 직렬화
+- 현재 요청의 `traceId`를 `X-Trace-Id`로 전달
+- FastAPI 동기 HTTP 호출
+- 성공·오류 응답 역직렬화와 오류 해석
+- Trace와 성공 응답의 계약·무결성 검증
+- transport 실패를 13.6의 Spring Boot 내부 category로 분류
+
+Client는 Rule 적중 여부, scoring 또는 Evidence를 Java에서 다시 계산하거나
+응답값을 보정하지 않는다. DetectionResult·DetectionEvidence 생성·채택·영속화,
+거래 상태 변경, 위험 대응과 사건 생성도 Client 책임이 아니다.
+
+### 13.2 HTTP Client 선택과 호출 경로
+
+- Spring Framework의 동기 `RestClient`를 사용한다.
+- 현재 `spring-boot-starter-web` 의존성 안에서 구현하고 WebClient, Reactor,
+  Apache HttpClient, Resilience4j 등 신규 의존성을 추가하지 않는다.
+- Endpoint path는 base URL과 분리된 고정값 `/api/v1/rule-analysis`를 사용한다.
+- 하나의 Client 호출은 하나의 HTTP 요청만 수행한다.
+
+### 13.3 설정 계약
+
+| Spring property | 필수·기본값 | 의미 |
+| --- | --- | --- |
+| `finguardops.ai-service.base-url` | 필수, 기본값 없음 | 환경별 AI Service base URL. 코드에 하드코딩하지 않는다. |
+| `finguardops.ai-service.connect-timeout` | 기본값 `1s` | AI Service와 연결을 수립할 수 있는 최대 시간 |
+| `finguardops.ai-service.response-timeout` | 기본값 `3s` | 연결 후 FastAPI 응답을 기다리고 응답 본문을 읽는 transport 제한 |
+
+Spring Boot relaxed binding에 대응하는 환경 변수 이름은 다음과 같다.
+
+```text
+FINGUARDOPS_AI_SERVICE_BASE_URL
+FINGUARDOPS_AI_SERVICE_CONNECT_TIMEOUT
+FINGUARDOPS_AI_SERVICE_RESPONSE_TIMEOUT
+```
+
+`base-url`은 환경별로 반드시 주입하며 로컬 주소를 포함한 기본값을 두지 않는다.
+테스트에서도 같은 property를 override하고 별도 테스트 전용 설정 키를 만들지
+않는다. `response-timeout`은 FastAPI 응답 대기·읽기 구간의 제한이며 거래 전체
+처리 시간, 거래 실패 확정 기한이나 수동 복구 기한을 뜻하지 않는다. 이 Issue는
+설정 계약만 정의하며 `application.yml`과 `.env.example`에는 값을 추가하지
+않는다.
+
+### 13.4 Retry와 fallback
+
+- 초기 Client의 자동 retry는 `0회`이다.
+- circuit breaker를 적용하지 않는다.
+- timeout, 오류 또는 무결성 실패를 `LOW`, 0점이나 빈 Evidence로 변환하지
+  않는다.
+- 일부 Rule 또는 일부 응답만 정상 결과로 채택하지 않는다.
+- AI 리포트의 템플릿·LLM fallback을 Rule 분석 흐름에 적용하지 않는다.
+
+거래 실패 상태, 수동 재개와 재처리 정책은 계속 `TBD`이다. 이 정책은 Client의
+자동 retry 0회와 별도이며 후속 거래 오케스트레이션 계약에서 결정한다.
+
+### 13.5 Trace와 성공 응답 검증
+
+Client는 현재 Spring Boot 요청에서 확정한 유효한 `traceId` 하나를 요청
+`X-Trace-Id`로 전달한다. 정상 응답을 채택하기 전에 다음 세 값이 원문 기준으로
+모두 같은지 검증한다.
+
+```text
+요청 X-Trace-Id
+= 응답 X-Trace-Id
+= 응답 body.traceId
+```
+
+응답 `X-Trace-Id`가 누락되거나 복수 값이거나 body 값과 불일치하면 정상 결과로
+채택하지 않는다. 오류 응답도 요청 Trace, 응답 헤더와 body `traceId`의 일치를
+검증한 뒤 오류 code를 해석한다. 잘못된 upstream Trace 원문은 외부 응답이나
+로그에 노출하지 않는다.
+
+`200 OK`는 곧바로 신뢰하지 않고 strict DTO 역직렬화 후 최소 다음 항목을
+검증한다.
+
+- 응답 `transactionId`가 요청 거래의 `transactionId`와 일치한다.
+- 응답 `analysis.evaluationCutoffAt`이 요청 `evaluationCutoffAt`과 정확히
+  일치한다.
+- `ruleSetVersion`이 64자 lowercase SHA-256 형식이다.
+- `scoringPolicyVersion`이 Spring Boot가 지원하는 정책 버전과 일치한다.
+- `riskScore`, `riskLevel`, Rule contribution과 group summary가 이 문서와
+  승인된 scoring 계약의 타입·범위·허용값·상호 관계를 만족한다.
+- contribution의 `ruleId`와 `executionOrder`는 지원하는 실행 계획 안에서
+  중복 없이 일관된 순서를 이룬다.
+- Evidence의 `ruleId`, `ruleVersionId`, `ruleCode`, `ruleVersion`,
+  `reasonCode`, `executionOrder`와 `scoreContribution`이 요청 RuleVersion
+  Snapshot 및 대응 contribution과 일치한다.
+- 적중 contribution마다 정확히 하나의 Evidence가 있고, 미적중 contribution에
+  Evidence가 없으며, Evidence만 존재하는 Rule이 없다.
+- Rule별 `observationSummary`가 9.2절의 exact allowlist와 타입 계약을
+  만족하고 지원하지 않는 Rule이 없다.
+- 최상위와 모든 중첩 DTO에 알 수 없는 필드, 필수 필드 누락과 null 불일치가
+  없다.
+
+지원하지 않는 Rule이나 알 수 없는 필드, malformed·잘린 JSON, 불완전 응답,
+DTO 역직렬화 실패와 상호 모순되는 응답은 13.6의
+`AI_SERVICE_INVALID_RESPONSE`로 fail-closed 처리한다. Client는 이를 보정하거나
+Rule 조건, evaluator 선택, scoring과 Evidence를 Java에서 재계산하지 않는다.
+
+### 13.6 Spring Boot 내부 오류 category
+
+다음 category는 Spring Boot 내부 Client 분류이며 외부 거래 API의 공개 오류
+code가 아니다. HTTP 오류 매핑은 HTTP 상태, 공통 오류 envelope, `code`와 Trace
+계약이 모두 일치할 때만 적용한다.
+
+| 내부 category | FastAPI 응답 또는 실패 조건 |
+| --- | --- |
+| `AI_SERVICE_REQUEST_CONTRACT_ERROR` | `400` + `INVALID_REQUEST` |
+| `AI_SERVICE_PAYLOAD_TOO_LARGE` | `413` + `PAYLOAD_TOO_LARGE` |
+| `AI_SERVICE_RULE_CONTRACT_ERROR` | `422` + `RULE_CONTRACT_ERROR` |
+| `AI_SERVICE_CAPABILITY_MISMATCH` | `500` + `UNSUPPORTED_RULE_CAPABILITY` |
+| `AI_SERVICE_INTERNAL_ERROR` | `500` + `INTERNAL_ERROR` |
+| `AI_SERVICE_CONNECT_TIMEOUT` | 연결 수립 timeout |
+| `AI_SERVICE_RESPONSE_TIMEOUT` | 응답 대기 또는 응답 본문 읽기 timeout |
+| `AI_SERVICE_UNAVAILABLE` | DNS 실패, 연결 거부와 timeout이 아닌 그 밖의 transport I/O 실패 |
+| `AI_SERVICE_INVALID_RESPONSE` | 신뢰할 수 없는 HTTP 또는 응답 계약 |
+
+`AI_SERVICE_INVALID_RESPONSE`에는 다음이 포함된다.
+
+- 지원하지 않는 HTTP 상태
+- `application/json`과 호환되지 않는 응답 `Content-Type`
+- malformed 또는 잘린 JSON
+- DTO 역직렬화 실패
+- HTTP 상태와 오류 `code`의 모순
+- 필수 필드가 누락되거나 알 수 없는 필드가 있는 오류 envelope
+- 오류 응답의 Trace 불일치
+- 13.5의 성공 응답 무결성 위반
+
+FastAPI 원본 오류 메시지, 응답 원문과 내부 예외를 외부 거래 API에 그대로
+전달하지 않는다. 위 내부 category와 외부 API 오류 및 거래 상태의 최종 매핑은
+후속 거래 오케스트레이션 계약에서 결정한다.
+
+### 13.7 DB와 외부 HTTP 트랜잭션 경계
+
+다음 순서를 지킨다.
+
+1. 읽기 트랜잭션에서 거래·행동 이벤트·활성 RuleVersion Snapshot을 고정한다.
+2. 요청 DTO를 구성하고 읽기 트랜잭션을 종료한다.
+3. DB 쓰기 트랜잭션을 유지하지 않은 상태에서 FastAPI를 호출한다.
+4. 응답 wire 계약과 무결성을 검증한다.
+5. 후속 별도 쓰기 트랜잭션에서 결과 채택과 영속화를 수행한다.
+
+네트워크 응답을 기다리는 동안 DB 쓰기 트랜잭션과 잠금을 장시간 유지하지
+않는다. 이번 Issue는 5단계를 구현하지 않으며 결과 채택·영속화가 완료된
+것으로 표현하지 않는다.
+
+### 13.8 로그와 정보 보호
+
+Client 로그는 다음 최소 항목만 기록할 수 있다.
+
+- `traceId`
+- 대상 서비스 식별자
+- Endpoint 식별자
+- HTTP 상태 분류
+- 13.6의 내부 오류 category
+- 호출 소요 시간
+
+다음 값은 로그에 기록하지 않는다.
+
+- 요청·응답 JSON 원문
+- 고객·계좌·기기·수취인 참조값
+- `conditionDefinition` 원문
+- Evidence 원문
+- FastAPI 원본 오류 메시지
+- 인증정보
+
+stack trace와 내부 예외 상세는 외부 응답에 노출하지 않는다. 내부 진단 로그가
+필요해도 위 민감정보와 HTTP 원문을 포함하지 않는다.
+
+### 13.9 후속 Java 구현 테스트 계약
+
+후속 Java 구현은 최소 다음 항목을 검증한다.
+
+- 정상 `200 OK` 요청·응답과 요청 DTO 직렬화
+- 전 Rule 정상 미적중인 0점·`LOW`·빈 Evidence 응답
+- 요청·응답 헤더·body Trace 일치와 누락·복수·불일치 거부
+- `transactionId`, cutoff, RuleSet, scoring, contribution, group summary와
+  Evidence 무결성
+- FastAPI `400`, `413`, `422`, `500`의 상태·code별 내부 category 변환
+- capability 불일치와 FastAPI 내부 오류의 구분
+- connect timeout과 response timeout의 구분
+- DNS 실패, 연결 거부와 그 밖의 transport 연결 실패
+- 지원하지 않는 상태·Content-Type, malformed·잘린·불완전 응답과 DTO
+  역직렬화 실패
+- 알 수 없는 필드, 지원하지 않는 Rule과 상호 모순되는 성공·오류 응답
+- 모든 실패에서 정상 분석 결과, DetectionResult와 Evidence가 생성되지 않음
+- 한 Client 호출에서 HTTP 요청이 한 번만 수행되어 자동 retry가 없음
+- 로그와 외부 오류 응답에 요청·응답 원문, 참조값, Evidence, upstream 오류
+  메시지와 인증정보가 노출되지 않음
+
+## 14. 현재 구현 이후 제외 범위
 
 - Spring Boot HTTP Client와 Timeout·재호출 구현
 - DetectionResult·DetectionEvidence 생성·채택·영속화

@@ -39,6 +39,9 @@ Spring Boot의 활성 RuleVersion 업무 snapshot
 - Spring Boot·FastAPI 실제 연동: 미구현
 - `RuleScoringCalculator`와 점수·위험 등급 계산: 구현됨
 - Evidence Transformer와 `RuleAnalysisResult`: 구현됨
+- Pydantic 요청·응답 DTO와 도메인 매퍼, FastAPI
+  `POST /api/v1/rule-analysis`, Trace·1 MiB 요청 제한·공통 오류 경계와 실행 경로
+  연결: 구현됨
 - DetectionResult 처리: 미구현 후속 범위
 
 현재 순수 Builder 구현은 전달받은 RuleVersion snapshot을 plan으로 변환하고,
@@ -46,8 +49,11 @@ Runner는 plan을 기존 Orchestrator로 실행해 ordered raw result와 strict 
 결합한다. 구현된 `RuleScoringCalculator`는 정상 결합 결과를
 `scoring-policy-v1`에 따라 점수로 계산한다. 이 순수 실행·scoring 경로가
 구현되었고 후속 Evidence 변환과 Rule 분석 결과 조합도 구현되어 있다. 이 순수
-내부 경로가 구현되었다는 사실은 FastAPI Endpoint나 Spring Boot 실제 연동이
-구현되었다는 뜻이 아니다.
+내부 경로와 FastAPI HTTP 경계가 구현되었다는 사실은 Spring Boot Client,
+평가 Snapshot의 실제 전달, 응답 교차 검증과 전체 서비스 연동이 구현되었다는
+뜻이 아니다. 상세 Client 계약은
+[Rule v1 내부 분석 API](../03-api/rule-v1-analysis-api.md#13-spring-boot-client-연동-계약)를
+따른다.
 
 공식 Rule 조건과 평가 의미는
 [Rule v1 탐지 계약](./rule-v1-detection-contract.md)을 따르고, ordered Rule ID
@@ -1023,19 +1029,22 @@ Runner는 다음 작업을 수행하지 않는다.
 Spring Boot는 거래·RuleVersion·DetectionResult 업무 정합성의 최종 소유자다.
 서비스 간 분석 요청·응답과 API 오류 매핑은
 [Rule v1 내부 분석 API](../03-api/rule-v1-analysis-api.md)에 정의되어 있으며
-Endpoint·Spring Boot Client 구현, 거래 실패 상태와 복구 정책은 후속 범위다.
+FastAPI Endpoint와 HTTP 경계는 구현되어 있다. Spring Boot Client, 실제 호출과
+응답 교차 검증, 거래 실패 상태와 복구·재처리 정책은 후속 범위다.
 
 ### 20.3 현재 제외 범위
 
 Builder·Runner·Scoring Calculator와 Evidence Transformer는 현재 구현되어
-있다. 다음 항목은 아직 구현되지 않은 후속 범위다.
+있다. Pydantic 요청·응답 DTO와 도메인 매퍼, FastAPI
+`POST /api/v1/rule-analysis`, Trace·1 MiB 요청 제한·공통 오류 경계와 실행 경로
+연결도 구현되어 있다. 다음 항목은 아직 구현되지 않은 후속 범위다.
 
 - 실행 단위 wrapper, `executionId`, 상태와 실행 시각
 - Python·Java Service, Repository와 DB Migration 구현
 - `execution_order` DB 컬럼
 - DetectionResult 생성·검증·저장·채택
-- 문서로 정의된 FastAPI Endpoint·Pydantic DTO·HTTP 오류 처리와 Spring Boot
-  실제 연동
+- Spring Boot Rule v1 HTTP Client, 평가 Snapshot 구성과 실제 FastAPI 호출
+- FastAPI 응답의 Spring Boot 교차 검증과 전체 서비스 연동
 - retry와 fallback
 - 로그와 메트릭
 - Redis, Kafka, ML과 LLM
@@ -1118,4 +1127,6 @@ Runner와 위 테스트는 구현되어 있다. Evidence 변환도 별도 계층
 
 현재 `RuleScoringCalculator`, 결과 타입, 오류 범주와 해당 테스트는 구현되어
 있다. `RuleEvidenceTransformer`와 Evidence 결과·오류 타입도 구현되어 있다.
-FastAPI Endpoint·Pydantic DTO와 Spring Boot 연동은 아직 구현되지 않았다.
+FastAPI Endpoint·Pydantic DTO와 HTTP 오류·Trace 경계는 구현되어 있지만
+Spring Boot Client와 DetectionResult 자동 생성·채택·영속화 및 전체 서비스
+연동은 아직 구현되지 않았다.
