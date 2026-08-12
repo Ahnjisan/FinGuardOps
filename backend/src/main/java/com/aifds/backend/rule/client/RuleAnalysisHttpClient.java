@@ -15,8 +15,10 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.LongSupplier;
 import java.util.regex.Pattern;
 
 public final class RuleAnalysisHttpClient {
@@ -33,11 +35,31 @@ public final class RuleAnalysisHttpClient {
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
     private final RuleAnalysisResponseValidator validator;
+    private final Duration responseTimeout;
+    private final long responseTimeoutNanos;
+    private final LongSupplier ticker;
 
     public RuleAnalysisHttpClient(
             RestClient restClient,
             ObjectMapper objectMapper,
-            RuleAnalysisResponseValidator validator
+            RuleAnalysisResponseValidator validator,
+            Duration responseTimeout
+    ) {
+        this(
+                restClient,
+                objectMapper,
+                validator,
+                responseTimeout,
+                System::nanoTime
+        );
+    }
+
+    RuleAnalysisHttpClient(
+            RestClient restClient,
+            ObjectMapper objectMapper,
+            RuleAnalysisResponseValidator validator,
+            Duration responseTimeout,
+            LongSupplier ticker
     ) {
         this.restClient = Objects.requireNonNull(restClient, "restClient must not be null");
         this.objectMapper = Objects.requireNonNull(
@@ -45,6 +67,9 @@ public final class RuleAnalysisHttpClient {
                 "objectMapper must not be null"
         );
         this.validator = Objects.requireNonNull(validator, "validator must not be null");
+        this.responseTimeout = requirePositiveTimeout(responseTimeout);
+        this.responseTimeoutNanos = toNanosSaturated(responseTimeout);
+        this.ticker = Objects.requireNonNull(ticker, "ticker must not be null");
     }
 
     public RuleAnalysisResponse analyze(
@@ -53,7 +78,7 @@ public final class RuleAnalysisHttpClient {
     ) {
         Objects.requireNonNull(request, "request must not be null");
         requireValidTraceId(traceId);
-        long startedAt = System.nanoTime();
+        long startedAt = ticker.getAsLong();
         try {
             RuleAnalysisResponse response = restClient.post()
                     .uri(ENDPOINT)
@@ -64,7 +89,8 @@ public final class RuleAnalysisHttpClient {
                     .exchange((httpRequest, httpResponse) -> handleResponse(
                             request,
                             traceId,
-                            httpResponse
+                            httpResponse,
+                            startedAt
                     ));
             logSuccess(traceId, elapsedMillis(startedAt));
             return response;
@@ -88,7 +114,8 @@ public final class RuleAnalysisHttpClient {
     private RuleAnalysisResponse handleResponse(
             RuleAnalysisRequest request,
             String requestTraceId,
-            ClientHttpResponse response
+            ClientHttpResponse response,
+            long startedAt
     ) {
         int status;
         try {
@@ -107,7 +134,8 @@ public final class RuleAnalysisHttpClient {
             RuleAnalysisResponse success = readBody(
                     response,
                     RuleAnalysisResponse.class,
-                    status
+                    status,
+                    startedAt
             );
             requireMatchingBodyTrace(requestTraceId, success.traceId(), status);
             try {
@@ -126,7 +154,8 @@ public final class RuleAnalysisHttpClient {
         RuleAnalysisErrorResponse error = readBody(
                 response,
                 RuleAnalysisErrorResponse.class,
-                status
+                status,
+                startedAt
         );
         requireMatchingBodyTrace(requestTraceId, error.traceId(), status);
         throw new RuleAnalysisClientException(
@@ -138,7 +167,8 @@ public final class RuleAnalysisHttpClient {
     private <T> T readBody(
             ClientHttpResponse response,
             Class<T> bodyType,
-            int status
+            int status,
+            long startedAt
     ) {
         try {
             T body = objectMapper.readValue(response.getBody(), bodyType);
@@ -149,8 +179,23 @@ public final class RuleAnalysisHttpClient {
         } catch (RuleAnalysisClientException exception) {
             throw exception;
         } catch (IOException | RuntimeException exception) {
+            var transportCategory = RuleAnalysisTransportErrorClassifier
+                    .classifyBodyReadFailure(
+                            exception,
+                            () -> responseTimeoutExpired(startedAt)
+                    );
+            if (transportCategory.isPresent()) {
+                throw new RuleAnalysisClientException(
+                        transportCategory.get(),
+                        null
+                );
+            }
             throw invalidResponse(status);
         }
+    }
+
+    Duration responseTimeout() {
+        return responseTimeout;
     }
 
     private void requireJsonContentType(HttpHeaders headers, int status) {
@@ -261,6 +306,26 @@ public final class RuleAnalysisHttpClient {
     }
 
     private long elapsedMillis(long startedAt) {
-        return (System.nanoTime() - startedAt) / 1_000_000;
+        return Math.max(0L, ticker.getAsLong() - startedAt) / 1_000_000;
+    }
+
+    private boolean responseTimeoutExpired(long startedAt) {
+        return ticker.getAsLong() - startedAt >= responseTimeoutNanos;
+    }
+
+    private static Duration requirePositiveTimeout(Duration timeout) {
+        Objects.requireNonNull(timeout, "responseTimeout must not be null");
+        if (timeout.isZero() || timeout.isNegative()) {
+            throw new IllegalArgumentException("responseTimeout must be positive");
+        }
+        return timeout;
+    }
+
+    private static long toNanosSaturated(Duration timeout) {
+        try {
+            return timeout.toNanos();
+        } catch (ArithmeticException exception) {
+            return Long.MAX_VALUE;
+        }
     }
 }

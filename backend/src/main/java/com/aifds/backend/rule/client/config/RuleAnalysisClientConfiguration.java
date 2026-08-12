@@ -119,9 +119,15 @@ public class RuleAnalysisClientConfiguration {
     public RuleAnalysisHttpClient ruleAnalysisHttpClient(
             @Qualifier(REST_CLIENT_BEAN) RestClient restClient,
             @Qualifier(OBJECT_MAPPER_BEAN) ObjectMapper objectMapper,
-            RuleAnalysisResponseValidator validator
+            RuleAnalysisResponseValidator validator,
+            AiServiceProperties properties
     ) {
-        return new RuleAnalysisHttpClient(restClient, objectMapper, validator);
+        return new RuleAnalysisHttpClient(
+                restClient,
+                objectMapper,
+                validator,
+                properties.responseTimeout()
+        );
     }
 
     private static final class CanonicalUuidV4Deserializer

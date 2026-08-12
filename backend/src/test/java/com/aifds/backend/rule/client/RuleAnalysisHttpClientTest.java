@@ -7,7 +7,9 @@ import com.aifds.backend.rule.client.config.AiServiceProperties;
 import com.aifds.backend.rule.client.config.RuleAnalysisClientConfiguration;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequest;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResponse;
+import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -25,19 +27,29 @@ import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
+import java.net.Socket;
 import java.net.URI;
 import java.net.http.HttpConnectTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.LongSupplier;
 import java.util.stream.Stream;
 
 import static com.aifds.backend.rule.client.RuleAnalysisClientTestFixtures.TRACE_ID;
@@ -47,6 +59,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class RuleAnalysisHttpClientTest {
 
     private HttpServer server;
+    private ExecutorService serverExecutor;
     private URI baseUrl;
     private ObjectMapper mapper;
     private RuleAnalysisRequest request;
@@ -57,6 +70,7 @@ class RuleAnalysisHttpClientTest {
     private final AtomicReference<String> requestMethod = new AtomicReference<>();
     private final AtomicReference<String> requestPath = new AtomicReference<>();
     private final AtomicInteger requestCount = new AtomicInteger();
+    private final AtomicBoolean responseBodyPrefixFlushed = new AtomicBoolean();
 
     @BeforeEach
     void setUp() throws IOException {
@@ -69,7 +83,8 @@ class RuleAnalysisHttpClientTest {
 
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext(RuleAnalysisHttpClient.ENDPOINT, this::handle);
-        server.setExecutor(Executors.newCachedThreadPool());
+        serverExecutor = Executors.newCachedThreadPool();
+        server.setExecutor(serverExecutor);
         server.start();
         baseUrl = URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/");
     }
@@ -77,6 +92,7 @@ class RuleAnalysisHttpClientTest {
     @AfterEach
     void tearDown() {
         server.stop(0);
+        serverExecutor.shutdownNow();
     }
 
     @Test
@@ -351,7 +367,7 @@ class RuleAnalysisHttpClientTest {
     }
 
     @Test
-    void mapsActualResponseTimeoutAndNeverReturnsANormalResult() {
+    void mapsResponseHeaderWaitTimeoutAndNeverReturnsANormalResult() {
         response.set(new ResponseSpec(
                 200,
                 "application/json",
@@ -370,6 +386,181 @@ class RuleAnalysisHttpClientTest {
                         )
                 );
         assertThat(requestCount).hasValue(1);
+    }
+
+    @Test
+    void mapsResponseBodyReadTimeoutWithoutRetryOrInformationExposure()
+            throws Exception {
+        String rawResponse = mapper.writeValueAsString(
+                RuleAnalysisClientTestFixtures.matchedResponse(mapper)
+        );
+        response.set(partialJsonResponse(
+                rawResponse,
+                Duration.ofSeconds(2)
+        ));
+
+        assertThatThrownBy(() -> client(Duration.ofSeconds(1))
+                .analyze(request, TRACE_ID))
+                .isInstanceOfSatisfying(
+                        RuleAnalysisClientException.class,
+                        exception -> {
+                            assertThat(exception.category()).isEqualTo(
+                                    RuleAnalysisClientErrorCategory
+                                            .AI_SERVICE_RESPONSE_TIMEOUT
+                            );
+                            assertThat(exception.httpStatus()).isEmpty();
+                            assertSafeException(
+                                    exception,
+                                    baseUrl.toString(),
+                                    rawResponse,
+                                    RuleAnalysisClientTestFixtures.RULE_SET_VERSION
+                            );
+                        }
+                );
+
+        assertThat(requestCount).hasValue(1);
+        assertThat(responseBodyPrefixFlushed).isTrue();
+    }
+
+    @Test
+    void mapsBodyTransportTerminationBeforeTimeoutAsUnavailable()
+            throws Exception {
+        String rawResponse = mapper.writeValueAsString(
+                RuleAnalysisClientTestFixtures.matchedResponse(mapper)
+        );
+        byte[] responseBytes = rawResponse.getBytes(StandardCharsets.UTF_8);
+        AtomicInteger abruptRequestCount = new AtomicInteger();
+        AtomicBoolean abruptPrefixFlushed = new AtomicBoolean();
+        AtomicReference<Throwable> serverFailure = new AtomicReference<>();
+
+        try (ServerSocket abruptServer = new ServerSocket(
+                0,
+                1,
+                InetAddress.getByName("127.0.0.1")
+        )) {
+            Future<?> serverTask = serverExecutor.submit(() -> {
+                try (Socket socket = abruptServer.accept()) {
+                    readRequestHeaders(socket.getInputStream());
+                    abruptRequestCount.incrementAndGet();
+                    socket.setSoLinger(true, 0);
+                    OutputStream output = socket.getOutputStream();
+                    String headers = "HTTP/1.1 200 OK\r\n"
+                            + "Content-Type: application/json\r\n"
+                            + "X-Trace-Id: " + TRACE_ID + "\r\n"
+                            + "Content-Length: " + responseBytes.length + "\r\n"
+                            + "Connection: close\r\n\r\n";
+                    output.write(headers.getBytes(StandardCharsets.US_ASCII));
+                    output.write(responseBytes, 0, responseBytes.length / 2);
+                    output.flush();
+                    abruptPrefixFlushed.set(true);
+                } catch (Throwable exception) {
+                    serverFailure.set(exception);
+                }
+            });
+            URI abruptBaseUrl = URI.create(
+                    "http://127.0.0.1:" + abruptServer.getLocalPort()
+            );
+
+            assertThatThrownBy(() -> client(
+                    abruptBaseUrl,
+                    Duration.ofSeconds(5)
+            ).analyze(request, TRACE_ID))
+                    .isInstanceOfSatisfying(
+                            RuleAnalysisClientException.class,
+                            exception -> {
+                                assertThat(exception.category()).isEqualTo(
+                                        RuleAnalysisClientErrorCategory
+                                                .AI_SERVICE_UNAVAILABLE
+                                );
+                                assertThat(exception.httpStatus()).isEmpty();
+                                assertSafeException(
+                                        exception,
+                                        abruptBaseUrl.toString(),
+                                        rawResponse,
+                                        RuleAnalysisClientTestFixtures
+                                                .RULE_SET_VERSION
+                                );
+                            }
+                    );
+
+            serverTask.get(2, TimeUnit.SECONDS);
+        }
+
+        assertThat(serverFailure).hasNullValue();
+        assertThat(abruptRequestCount).hasValue(1);
+        assertThat(abruptPrefixFlushed).isTrue();
+    }
+
+    @Test
+    void keepsPureJacksonFailureInvalidAfterTheTimeoutBudgetHasElapsed() {
+        response.set(jsonResponse(200, "{\"transactionId\":"));
+        AtomicInteger tickerCalls = new AtomicInteger();
+        LongSupplier elapsedTicker = () -> tickerCalls.getAndIncrement() == 0
+                ? 0L
+                : Duration.ofSeconds(2).toNanos();
+
+        assertThatThrownBy(() -> client(
+                baseUrl,
+                Duration.ofSeconds(1),
+                mapper,
+                elapsedTicker
+        ).analyze(request, TRACE_ID))
+                .isInstanceOfSatisfying(
+                        RuleAnalysisClientException.class,
+                        exception -> {
+                            assertThat(exception.category()).isEqualTo(
+                                    RuleAnalysisClientErrorCategory
+                                            .AI_SERVICE_INVALID_RESPONSE
+                            );
+                            assertThat(exception.httpStatus()).hasValue(200);
+                        }
+                );
+
+        assertThat(requestCount).hasValue(1);
+    }
+
+    @Test
+    void removesOriginalBodyTransportCauseFromTheExternalException()
+            throws Exception {
+        String marker = "body_transport_exception_marker_137";
+        String rawResponse = mapper.writeValueAsString(
+                RuleAnalysisClientTestFixtures.matchedResponse(mapper)
+        );
+        response.set(jsonResponse(200, rawResponse));
+        ObjectMapper transportFailureMapper = new ObjectMapper() {
+            @Override
+            public <T> T readValue(InputStream source, Class<T> valueType)
+                    throws IOException {
+                throw JsonMappingException.from(
+                        (JsonParser) null,
+                        "safe Jackson wrapper",
+                        new IOException(marker)
+                );
+            }
+        };
+
+        assertThatThrownBy(() -> client(
+                baseUrl,
+                Duration.ofSeconds(1),
+                transportFailureMapper,
+                () -> 0L
+        ).analyze(request, TRACE_ID))
+                .isInstanceOfSatisfying(
+                        RuleAnalysisClientException.class,
+                        exception -> {
+                            assertThat(exception.category()).isEqualTo(
+                                    RuleAnalysisClientErrorCategory
+                                            .AI_SERVICE_UNAVAILABLE
+                            );
+                            assertThat(exception.httpStatus()).isEmpty();
+                            assertSafeException(
+                                    exception,
+                                    marker,
+                                    baseUrl.toString(),
+                                    rawResponse
+                            );
+                        }
+                );
     }
 
     @Test
@@ -409,7 +600,8 @@ class RuleAnalysisHttpClientTest {
         RuleAnalysisHttpClient failingClient = new RuleAnalysisHttpClient(
                 failingRestClient,
                 mapper,
-                new RuleAnalysisResponseValidator()
+                new RuleAnalysisResponseValidator(),
+                Duration.ofSeconds(1)
         );
 
         assertThatThrownBy(() -> failingClient.analyze(request, TRACE_ID))
@@ -451,6 +643,25 @@ class RuleAnalysisHttpClientTest {
                             assertSafeException(exception, marker, rawResponse);
                         }
                 );
+    }
+
+    @Test
+    void productionConfigurationPassesDefaultAndOverrideResponseTimeoutToClient() {
+        AiServiceProperties defaults = new AiServiceProperties(
+                baseUrl,
+                null,
+                null
+        );
+        AiServiceProperties override = new AiServiceProperties(
+                baseUrl,
+                Duration.ofMillis(200),
+                Duration.ofMillis(750)
+        );
+
+        assertThat(productionClient(defaults).responseTimeout())
+                .isEqualTo(AiServiceProperties.DEFAULT_RESPONSE_TIMEOUT);
+        assertThat(productionClient(override).responseTimeout())
+                .isEqualTo(Duration.ofMillis(750));
     }
 
     @Test
@@ -557,14 +768,55 @@ class RuleAnalysisHttpClientTest {
                 Duration.ofMillis(200),
                 responseTimeout
         );
+        return productionClient(configuration, properties);
+    }
+
+    private RuleAnalysisHttpClient productionClient(
+            AiServiceProperties properties
+    ) {
+        return productionClient(new RuleAnalysisClientConfiguration(), properties);
+    }
+
+    private RuleAnalysisHttpClient productionClient(
+            RuleAnalysisClientConfiguration configuration,
+            AiServiceProperties properties
+    ) {
+        RestClient restClient = configuration.ruleAnalysisRestClient(
+                properties,
+                configuration.ruleAnalysisJdkHttpClient(properties),
+                mapper
+        );
+        return configuration.ruleAnalysisHttpClient(
+                restClient,
+                mapper,
+                new RuleAnalysisResponseValidator(),
+                properties
+        );
+    }
+
+    private RuleAnalysisHttpClient client(
+            URI url,
+            Duration responseTimeout,
+            ObjectMapper responseMapper,
+            LongSupplier ticker
+    ) {
+        RuleAnalysisClientConfiguration configuration =
+                new RuleAnalysisClientConfiguration();
+        AiServiceProperties properties = new AiServiceProperties(
+                url,
+                Duration.ofMillis(200),
+                responseTimeout
+        );
         return new RuleAnalysisHttpClient(
                 configuration.ruleAnalysisRestClient(
                         properties,
                         configuration.ruleAnalysisJdkHttpClient(properties),
                         mapper
                 ),
-                mapper,
-                new RuleAnalysisResponseValidator()
+                responseMapper,
+                new RuleAnalysisResponseValidator(),
+                responseTimeout,
+                ticker
         );
     }
 
@@ -594,6 +846,22 @@ class RuleAnalysisHttpClientTest {
         );
     }
 
+    private ResponseSpec partialJsonResponse(
+            String body,
+            Duration bodyDelay
+    ) {
+        int bodyLength = body.getBytes(StandardCharsets.UTF_8).length;
+        return new ResponseSpec(
+                200,
+                "application/json; charset=UTF-8",
+                List.of(TRACE_ID),
+                body,
+                Duration.ZERO,
+                Math.max(1, bodyLength / 2),
+                bodyDelay
+        );
+    }
+
     private String errorJson(String code, String traceId) {
         return """
                 {
@@ -612,13 +880,7 @@ class RuleAnalysisHttpClientTest {
         requestTraceHeaders.set(exchange.getRequestHeaders().get("X-Trace-Id"));
         requestBody.set(exchange.getRequestBody().readAllBytes());
         ResponseSpec spec = response.get();
-        if (!spec.delay().isZero()) {
-            try {
-                Thread.sleep(spec.delay().toMillis());
-            } catch (InterruptedException exception) {
-                Thread.currentThread().interrupt();
-            }
-        }
+        delay(spec.headerDelay());
         if (spec.contentType() != null) {
             exchange.getResponseHeaders().set("Content-Type", spec.contentType());
         }
@@ -628,10 +890,59 @@ class RuleAnalysisHttpClientTest {
         byte[] body = spec.body().getBytes(StandardCharsets.UTF_8);
         try {
             exchange.sendResponseHeaders(spec.status(), body.length);
-            exchange.getResponseBody().write(body);
+            try (OutputStream output = exchange.getResponseBody()) {
+                if (spec.initialBodyBytes() < 0) {
+                    output.write(body);
+                } else {
+                    int prefixLength = Math.min(
+                            spec.initialBodyBytes(),
+                            body.length
+                    );
+                    output.write(body, 0, prefixLength);
+                    output.flush();
+                    responseBodyPrefixFlushed.set(true);
+                    delay(spec.bodyDelay());
+                    output.write(
+                            body,
+                            prefixLength,
+                            body.length - prefixLength
+                    );
+                }
+            }
+        } catch (IOException exception) {
+            // The client can close the response stream after its timeout expires.
         } finally {
             exchange.close();
         }
+    }
+
+    private void delay(Duration duration) {
+        if (duration.isZero()) {
+            return;
+        }
+        try {
+            Thread.sleep(duration.toMillis());
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void readRequestHeaders(InputStream input) throws IOException {
+        ByteArrayOutputStream headers = new ByteArrayOutputStream();
+        int current;
+        while ((current = input.read()) != -1) {
+            headers.write(current);
+            byte[] bytes = headers.toByteArray();
+            int length = bytes.length;
+            if (length >= 4
+                    && bytes[length - 4] == '\r'
+                    && bytes[length - 3] == '\n'
+                    && bytes[length - 2] == '\r'
+                    && bytes[length - 1] == '\n') {
+                return;
+            }
+        }
+        throw new IOException("request headers ended prematurely");
     }
 
     private record ResponseSpec(
@@ -639,7 +950,26 @@ class RuleAnalysisHttpClientTest {
             String contentType,
             List<String> traceHeaders,
             String body,
-            Duration delay
+            Duration headerDelay,
+            int initialBodyBytes,
+            Duration bodyDelay
     ) {
+        private ResponseSpec(
+                int status,
+                String contentType,
+                List<String> traceHeaders,
+                String body,
+                Duration headerDelay
+        ) {
+            this(
+                    status,
+                    contentType,
+                    traceHeaders,
+                    body,
+                    headerDelay,
+                    -1,
+                    Duration.ZERO
+            );
+        }
     }
 }
