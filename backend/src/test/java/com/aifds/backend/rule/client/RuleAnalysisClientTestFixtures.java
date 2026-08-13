@@ -41,7 +41,7 @@ final class RuleAnalysisClientTestFixtures {
             "30000000-0000-4000-8000-000000000004"
     );
     static final String RULE_SET_VERSION =
-            "085edb92debd4e80d8472f77fab507d846810c668268ee34d8ee97ec2c917b26";
+            "659019c2294c4cfaa3d68f8cb312418e71c2cad5071aec360331422a259a4e63";
 
     private RuleAnalysisClientTestFixtures() {
     }

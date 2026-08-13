@@ -115,6 +115,8 @@ FastAPI 내부에서 immutable execution plan을 만들고 evaluator를 순차 �
 - 거래 Snapshot은 저장된 거래의 현재 분석 입력 필드를 복사해 구성한다.
 - 행동 이벤트는 현재 Rule v1 계약의 고객·이벤트 종류·포함 구간과 최대
   1,000건 제한을 사용한다.
+- 계약 정렬인 `occurredAt DESC, eventId ASC`에서 최신 1,000건을 현재 실행의
+  Snapshot으로 고정하고, 그보다 오래된 적격 이벤트는 현재 실행에 포함하지 않는다.
 - 행동 이벤트 구간의 상한은 `evaluationCutoffAt`을 포함한다. 고정 뒤 발생한
   이벤트는 다음 분석 계약이 정해지기 전까지 현재 실행에 섞지 않는다.
 - 요청 객체는 외부 호출 전에 독립된 immutable 값으로 구성한다. 외부 호출
@@ -146,7 +148,9 @@ FastAPI 응답의 `analysis.ruleSetVersion`은 이 예상 값과 정확히 같�
 
 ## 7. 분석 시작 쓰기 트랜잭션
 
-분석 시작은 하나의 짧은 DB 쓰기 트랜잭션으로 처리한다.
+분석 시작은 `REQUIRES_NEW`, `REPEATABLE_READ`인 하나의 짧은 DB 쓰기
+트랜잭션으로 처리한다. 거래 잠금 뒤 같은 transaction snapshot에서 조회한 Rule과
+행동 이벤트만 사용하므로 조회 사이에 commit된 변경을 현재 실행에 섞지 않는다.
 
 1. `FinancialTransaction`을 pessimistic write lock으로 조회한다.
 2. 거래가 `RECEIVED`인지, 채택 결과가 없는지 확인한다. 이미
@@ -335,15 +339,17 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
 - DetectionResult와 거래를 함께 `FAILED`로 만드는 실패 persistence boundary
 - 동일 거래 동시 시작과 terminal 상태 이후 늦은 성공·실패 요청 방지 검증
 - 행동 이벤트 Rule 평가 조회와 Rule 코드별 실행 가능 `RuleVersion` 조회
+- 전체 실행 가능 RuleVersion 일괄 조회와 거래·행동 이벤트·RuleVersion immutable
+  요청 Snapshot 조합
+- Java canonical Registry의 RuleId mapping·실행 순서·dependency·현재 evaluator
+  capability 검증과 FastAPI golden vector 기반 `ruleSetVersion` 선계산
+- `REQUIRES_NEW`, `REPEATABLE_READ` 시작 경계와 최신 행동 이벤트 1,000건 고정
+- 요청 Rule Snapshot으로 계산한 예상 `ruleSetVersion`과 응답 값의 exact 비교
 - Flyway V1~V5의 거래·멱등·행동 이벤트·탐지 결과·RuleVersion 제약과 index
 
 ### 15.2 구현되지 않음
 
 - 이 문서의 Spring Boot 거래 분석 오케스트레이션 전체
-- 거래·행동 이벤트·전체 활성 `RuleVersion`을 한 실행 Snapshot으로 조합하는
-  Service
-- 전체 실행 가능 RuleVersion을 한 번에 조회하는 경로
-- Spring Boot의 예상 `ruleSetVersion` 선계산과 응답 exact 비교
 - Snapshot 조합, Client 호출과 persistence boundary를 연결하는 상위 실행 경로
 - 검증된 FastAPI 응답을 `RuleEvidenceDraft`로 자동 변환하는 경로
 - Client 오류 category를 거래 API 공통 오류로 매핑하는 경로
@@ -359,12 +365,9 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
   원자적 경계는 구현되었지만 아직 거래 접수나 `RuleAnalysisHttpClient`에서 호출하지 않는다.
 - 기존 `DetectionResultPersistenceService`의 저수준 primitive는 호환성을 위해 유지하며,
   향후 상위 분석 실행 경로는 복합 persistence boundary만 사용해야 한다.
-- `DetectionResult`는 FastAPI 호출 전 PENDING 생성 시 `ruleSetVersion`을
-  요구하지만 Spring Boot의 canonical hash 선계산 경로는 없다. 현재 Client
-  validator도 응답 해시의 형식은 확인하지만 DB에 선확정한 예상 해시와의 exact
-  비교는 하지 않는다.
-- 현재 RuleVersion Repository는 Rule 코드 하나의 실행 가능 버전을 조회할 수
-  있지만 전체 활성 Rule Snapshot 조합 경로는 없다.
+- Snapshot 조합과 canonical hash 선계산은 분석 시작 persistence boundary에
+  포함되지만, commit된 immutable 요청을 `RuleAnalysisHttpClient`로 전달하는 상위
+  실행 경로는 아직 없다.
 - V5 초기 RuleVersion은 모두 `DRAFT`이므로 그대로는 실행 가능한 Rule 집합이
   없다.
 
