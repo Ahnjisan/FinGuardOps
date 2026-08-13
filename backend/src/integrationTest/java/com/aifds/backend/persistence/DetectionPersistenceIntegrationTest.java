@@ -8,13 +8,16 @@ import com.aifds.backend.detection.entity.RuleEvidenceObservationSummary;
 import com.aifds.backend.detection.repository.DetectionEvidenceRepository;
 import com.aifds.backend.detection.repository.DetectionResultRepository;
 import com.aifds.backend.detection.service.DetectionResultPersistenceService;
+import com.aifds.backend.detection.service.RuleAnalysisPersistenceService;
 import com.aifds.backend.detection.service.RuleEvidenceDraft;
+import com.aifds.backend.detection.service.StartedRuleAnalysis;
 import com.aifds.backend.rule.entity.RuleVersion;
 import com.aifds.backend.rule.entity.RuleVersionStatus;
 import com.aifds.backend.rule.repository.RuleVersionRepository;
 import com.aifds.backend.rule.service.RuleVersionLifecycleService;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.aifds.backend.transaction.entity.TransactionChannel;
+import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
 import com.aifds.backend.transaction.entity.TransactionType;
 import com.aifds.backend.transaction.repository.FinancialTransactionRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -43,6 +46,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatObject;
@@ -69,6 +73,9 @@ class DetectionPersistenceIntegrationTest
 
     @Autowired
     private DetectionResultPersistenceService persistenceService;
+
+    @Autowired
+    private RuleAnalysisPersistenceService ruleAnalysisPersistenceService;
 
     @Autowired
     private RuleVersionRepository ruleVersionRepository;
@@ -643,6 +650,321 @@ class DetectionPersistenceIntegrationTest
     }
 
     @Test
+    void startsRuleAnalysisWithTransactionAndResultInOneCommit() {
+        FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
+
+        StartedRuleAnalysis started = startRuleAnalysis(
+                transaction,
+                "trace_boundary_start_commit"
+        );
+
+        entityManager.clear();
+        FinancialTransaction storedTransaction = transactionRepository
+                .findByTransactionId(transaction.getTransactionId())
+                .orElseThrow();
+        DetectionResult storedResult = resultRepository
+                .findByDetectionResultId(started.detectionResultId())
+                .orElseThrow();
+        assertThat(storedTransaction.getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.ANALYZING);
+        assertThat(storedTransaction.getAdoptedDetectionResult()).isNull();
+        assertThat(storedResult.getAnalysisStatus())
+                .isEqualTo(DetectionAnalysisStatus.IN_PROGRESS);
+        assertThat(storedResult.getDetectionResultVersion()).isEqualTo(1);
+        assertThat(storedResult.getAnalysisStartedAt()).isNotNull();
+        assertThat(started.transactionId())
+                .isEqualTo(transaction.getTransactionId());
+    }
+
+    @Test
+    void rollsBackPendingInsertWhenStartTransitionFails() {
+        FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
+
+        assertThatThrownBy(() -> ruleAnalysisPersistenceService.startAnalysis(
+                transaction.getTransactionId(),
+                "rule-v1",
+                "score-v1",
+                "feature-v1",
+                null,
+                transaction.getOccurredAt(),
+                "trace_boundary_start_rollback",
+                null
+        )).isInstanceOf(NullPointerException.class);
+
+        entityManager.clear();
+        FinancialTransaction storedTransaction = transactionRepository
+                .findByTransactionId(transaction.getTransactionId())
+                .orElseThrow();
+        assertThat(storedTransaction.getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.RECEIVED);
+        assertThat(resultRepository
+                .findAllByFinancialTransaction_TransactionIdOrderByDetectionResultVersionDesc(
+                        transaction.getTransactionId()
+                )).isEmpty();
+    }
+
+    @Test
+    void allowsOnlyOneConcurrentCompositeAnalysisStart() throws Exception {
+        FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        try {
+            Future<Object> first = executor.submit(() ->
+                    startRuleAnalysisConcurrently(
+                            transaction,
+                            "trace_boundary_concurrent_01",
+                            ready,
+                            start
+                    )
+            );
+            Future<Object> second = executor.submit(() ->
+                    startRuleAnalysisConcurrently(
+                            transaction,
+                            "trace_boundary_concurrent_02",
+                            ready,
+                            start
+                    )
+            );
+
+            assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+            List<Object> attempts = List.of(
+                    first.get(10, TimeUnit.SECONDS),
+                    second.get(10, TimeUnit.SECONDS)
+            );
+
+            assertThat(attempts.stream()
+                    .filter(StartedRuleAnalysis.class::isInstance))
+                    .hasSize(1);
+            assertThat(attempts.stream()
+                    .filter(IllegalStateException.class::isInstance))
+                    .hasSize(1);
+        } finally {
+            executor.shutdownNow();
+            assertThat(executor.awaitTermination(5, TimeUnit.SECONDS))
+                    .isTrue();
+        }
+
+        entityManager.clear();
+        FinancialTransaction storedTransaction = transactionRepository
+                .findByTransactionId(transaction.getTransactionId())
+                .orElseThrow();
+        List<DetectionResult> results = resultRepository
+                .findAllByFinancialTransaction_TransactionIdOrderByDetectionResultVersionDesc(
+                        transaction.getTransactionId()
+                );
+        assertThat(storedTransaction.getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.ANALYZING);
+        assertThat(results).singleElement().satisfies(result -> {
+            assertThat(result.getDetectionResultVersion()).isEqualTo(1);
+            assertThat(result.getAnalysisStatus())
+                    .isEqualTo(DetectionAnalysisStatus.IN_PROGRESS);
+        });
+    }
+
+    @Test
+    void completesEvidenceResultAndAdoptionAtomically() {
+        FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
+        RuleEvidenceDraft draft = ruleDraft(transaction.getOccurredAt(), 0);
+        StartedRuleAnalysis started = startRuleAnalysis(
+                transaction,
+                "trace_boundary_complete"
+        );
+
+        ruleAnalysisPersistenceService.completeAndAdopt(
+                started,
+                55,
+                RiskLevel.HIGH,
+                Instant.now(),
+                List.of(draft)
+        );
+
+        entityManager.clear();
+        FinancialTransaction storedTransaction = transactionRepository
+                .findByTransactionId(transaction.getTransactionId())
+                .orElseThrow();
+        DetectionResult storedResult = resultRepository
+                .findByDetectionResultId(started.detectionResultId())
+                .orElseThrow();
+        assertThat(storedTransaction.getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.ANALYZED);
+        assertThat(storedTransaction.getRiskLevel())
+                .isEqualTo(RiskLevel.HIGH);
+        assertThat(storedResult.getAnalysisStatus())
+                .isEqualTo(DetectionAnalysisStatus.COMPLETED);
+        assertThat(storedResult.getRiskScore()).isEqualTo(55);
+        assertThat(evidenceRepository
+                .findAllByDetectionResult_DetectionResultIdOrderBySortOrderAscIdAsc(
+                        started.detectionResultId()
+                )).hasSize(1);
+        Long adoptedResultPk = jdbcTemplate.queryForObject(
+                """
+                        SELECT adopted_detection_result_id
+                        FROM financial_transaction
+                        WHERE transaction_id = ?
+                        """,
+                Long.class,
+                transaction.getTransactionId()
+        );
+        assertThat(adoptedResultPk).isEqualTo(storedResult.getId());
+    }
+
+    @Test
+    void rollsBackCompositeCompletionWhenEvidenceContractFails() {
+        FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
+        RuleEvidenceDraft valid = ruleDraft(transaction.getOccurredAt(), 0);
+        RuleEvidenceDraft invalid = new RuleEvidenceDraft(
+                valid.ruleVersionId(),
+                valid.displayDescription(),
+                valid.observationSummary(),
+                valid.evidenceOccurredAt().plusSeconds(1),
+                valid.sortOrder()
+        );
+        StartedRuleAnalysis started = startRuleAnalysis(
+                transaction,
+                "trace_boundary_evidence_rollback"
+        );
+
+        assertThatThrownBy(() ->
+                ruleAnalysisPersistenceService.completeAndAdopt(
+                        started,
+                        55,
+                        RiskLevel.HIGH,
+                        Instant.now(),
+                        List.of(invalid)
+                )
+        ).isInstanceOf(IllegalStateException.class);
+
+        assertInProgressWithoutEvidenceOrAdoption(started);
+    }
+
+    @Test
+    void rollsBackFlushedEvidenceWhenCompositeCompletionIsInvalid() {
+        FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
+        RuleEvidenceDraft draft = ruleDraft(transaction.getOccurredAt(), 0);
+        StartedRuleAnalysis started = startRuleAnalysis(
+                transaction,
+                "trace_boundary_score_rollback"
+        );
+
+        assertThatThrownBy(() ->
+                ruleAnalysisPersistenceService.completeAndAdopt(
+                        started,
+                        101,
+                        RiskLevel.HIGH,
+                        Instant.now(),
+                        List.of(draft)
+                )
+        ).isInstanceOf(IllegalArgumentException.class);
+
+        assertInProgressWithoutEvidenceOrAdoption(started);
+    }
+
+    @Test
+    void failsResultAndTransactionAtomically() {
+        FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
+        StartedRuleAnalysis started = startRuleAnalysis(
+                transaction,
+                "trace_boundary_failure"
+        );
+
+        ruleAnalysisPersistenceService.failAnalysis(
+                started,
+                "DEPENDENCY_TIMEOUT",
+                Instant.now()
+        );
+
+        entityManager.clear();
+        FinancialTransaction storedTransaction = transactionRepository
+                .findByTransactionId(transaction.getTransactionId())
+                .orElseThrow();
+        DetectionResult storedResult = resultRepository
+                .findByDetectionResultId(started.detectionResultId())
+                .orElseThrow();
+        assertThat(storedTransaction.getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.FAILED);
+        assertThat(storedTransaction.getAdoptedDetectionResult()).isNull();
+        assertThat(storedTransaction.getRiskLevel()).isNull();
+        assertThat(storedResult.getAnalysisStatus())
+                .isEqualTo(DetectionAnalysisStatus.FAILED);
+        assertThat(storedResult.getFailureCode())
+                .isEqualTo("DEPENDENCY_TIMEOUT");
+    }
+
+    @Test
+    void rejectsLateSuccessAfterFailureWithoutChangingTerminalState() {
+        FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
+        StartedRuleAnalysis started = startRuleAnalysis(
+                transaction,
+                "trace_boundary_late_success"
+        );
+        ruleAnalysisPersistenceService.failAnalysis(
+                started,
+                "DEPENDENCY_TIMEOUT",
+                Instant.now()
+        );
+
+        assertThatThrownBy(() ->
+                ruleAnalysisPersistenceService.completeAndAdopt(
+                        started,
+                        0,
+                        RiskLevel.LOW,
+                        Instant.now(),
+                        List.of()
+                )
+        ).isInstanceOf(IllegalStateException.class);
+
+        assertTerminalState(
+                started,
+                TransactionProcessingStatus.FAILED,
+                DetectionAnalysisStatus.FAILED
+        );
+    }
+
+    @Test
+    void rejectsLateFailureAndDuplicateSuccessAfterAdoption() {
+        FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
+        StartedRuleAnalysis started = startRuleAnalysis(
+                transaction,
+                "trace_boundary_late_failure"
+        );
+        ruleAnalysisPersistenceService.completeAndAdopt(
+                started,
+                0,
+                RiskLevel.LOW,
+                Instant.now(),
+                List.of()
+        );
+
+        assertThatThrownBy(() -> ruleAnalysisPersistenceService.failAnalysis(
+                started,
+                "LATE_FAILURE",
+                Instant.now()
+        )).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() ->
+                ruleAnalysisPersistenceService.completeAndAdopt(
+                        started,
+                        0,
+                        RiskLevel.LOW,
+                        Instant.now(),
+                        List.of()
+                )
+        ).isInstanceOf(IllegalStateException.class);
+
+        assertTerminalState(
+                started,
+                TransactionProcessingStatus.ANALYZED,
+                DetectionAnalysisStatus.COMPLETED
+        );
+        assertThat(evidenceRepository
+                .findAllByDetectionResult_DetectionResultIdOrderBySortOrderAscIdAsc(
+                        started.detectionResultId()
+                )).isEmpty();
+    }
+
+    @Test
     void allocatesMonotonicVersionsUnderConcurrentRequests() throws Exception {
         FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
         CountDownLatch ready = new CountDownLatch(2);
@@ -930,6 +1252,80 @@ class DetectionPersistenceIntegrationTest
                 evaluationCutoffAt,
                 traceId
         ).getDetectionResultVersion();
+    }
+
+    private Object startRuleAnalysisConcurrently(
+            FinancialTransaction transaction,
+            String traceId,
+            CountDownLatch ready,
+            CountDownLatch start
+    ) throws InterruptedException {
+        ready.countDown();
+        if (!start.await(10, TimeUnit.SECONDS)) {
+            throw new AssertionError("Concurrent analysis start was not released");
+        }
+        try {
+            return startRuleAnalysis(transaction, traceId);
+        } catch (IllegalStateException exception) {
+            return exception;
+        }
+    }
+
+    private StartedRuleAnalysis startRuleAnalysis(
+            FinancialTransaction transaction,
+            String traceId
+    ) {
+        return ruleAnalysisPersistenceService.startAnalysis(
+                transaction.getTransactionId(),
+                "rule-v1",
+                "score-v1",
+                "feature-v1",
+                null,
+                transaction.getOccurredAt(),
+                traceId,
+                Instant.now()
+        );
+    }
+
+    private void assertInProgressWithoutEvidenceOrAdoption(
+            StartedRuleAnalysis started
+    ) {
+        entityManager.clear();
+        FinancialTransaction transaction = transactionRepository
+                .findByTransactionId(started.transactionId())
+                .orElseThrow();
+        DetectionResult result = resultRepository
+                .findByDetectionResultId(started.detectionResultId())
+                .orElseThrow();
+        assertThat(transaction.getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.ANALYZING);
+        assertThat(transaction.getAdoptedDetectionResult()).isNull();
+        assertThat(transaction.getRiskLevel()).isNull();
+        assertThat(result.getAnalysisStatus())
+                .isEqualTo(DetectionAnalysisStatus.IN_PROGRESS);
+        assertThat(result.getRiskScore()).isNull();
+        assertThat(result.getRiskLevel()).isNull();
+        assertThat(evidenceRepository
+                .findAllByDetectionResult_DetectionResultIdOrderBySortOrderAscIdAsc(
+                        started.detectionResultId()
+                )).isEmpty();
+    }
+
+    private void assertTerminalState(
+            StartedRuleAnalysis started,
+            TransactionProcessingStatus transactionStatus,
+            DetectionAnalysisStatus resultStatus
+    ) {
+        entityManager.clear();
+        FinancialTransaction transaction = transactionRepository
+                .findByTransactionId(started.transactionId())
+                .orElseThrow();
+        DetectionResult result = resultRepository
+                .findByDetectionResultId(started.detectionResultId())
+                .orElseThrow();
+        assertThat(transaction.getProcessingStatus())
+                .isEqualTo(transactionStatus);
+        assertThat(result.getAnalysisStatus()).isEqualTo(resultStatus);
     }
 
     private DetectionResult completedResult(

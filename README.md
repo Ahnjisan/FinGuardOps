@@ -328,19 +328,22 @@ Kafka
 * Spring Boot `RuleAnalysisHttpClient`, Timeout·Trace 전달, 성공·오류 응답 검증과 오류 분류 구현
 * Rule v1 Client 자동 retry 0회 구현·검증
 * Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약 문서화
+* 거래 분석 시작과 DetectionResult 시작, 성공 Evidence·결과 채택·`ANALYZED`,
+  실패 결과·거래 `FAILED`를 각각 원자적으로 저장하는 persistence boundary 구현
+* 거래 우선 잠금으로 동일 거래 동시 분석 시작과 terminal 결과의 늦은 완료 방지 검증
 * Backend와 AI Service 전용 GitHub Actions CI 구성
 
 현재 PostgreSQL 연동은 애플리케이션 코드와 Testcontainers 검증 범위입니다. 운영 PostgreSQL, Docker Compose, Kubernetes와 AWS 배포 환경이 구현되었다는 의미는 아닙니다. 거래 접수 성공 응답도 현재는 단계적 구현 상태인 `RECEIVED`와 탐지 관련 null 값을 반환하며, 최종 동기 분석 목표는 [`ADR-003`](docs/07-decisions/ADR-003-transaction-processing-boundary.md)을 유지합니다.
 
 ### In Progress
 
-* Spring Boot Rule v1 거래 분석 오케스트레이션 구현 준비
+* Spring Boot Rule v1 Snapshot 조합·HTTP 호출 상위 오케스트레이션 구현 준비
 
 ### Planned
 
 * 거래·행동 이벤트·전체 활성 RuleVersion Snapshot 조합 Service
-* 거래 `RECEIVED → ANALYZING → ANALYZED|FAILED` 실행 경로
-* FastAPI 응답의 DetectionResult·Evidence 자동 변환·저장과 결과 채택
+* Snapshot과 `RuleAnalysisHttpClient`를 persistence boundary에 연결하는 상위 실행 경로
+* FastAPI 응답의 `RuleEvidenceDraft` 자동 변환과 성공·실패 boundary 호출
 * 결과 채택 commit 이후 최종 동기 응답과 멱등 Snapshot 확정
 * 실패 후 재분석·수동 복구 계약
 * 사건 생성·조회·상태 변경

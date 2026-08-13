@@ -3,6 +3,7 @@ package com.aifds.backend.detection.entity;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.aifds.backend.transaction.entity.RiskResponseOutcome;
 import com.aifds.backend.transaction.entity.TransactionChannel;
+import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
 import com.aifds.backend.transaction.entity.TransactionType;
 import com.aifds.backend.rule.entity.FraudRule;
 import com.aifds.backend.rule.entity.RuleVersion;
@@ -151,6 +152,7 @@ class DetectionDomainTest {
         result.start(CUTOFF.plusSeconds(1));
         result.complete(55, RiskLevel.HIGH, CUTOFF.plusSeconds(2));
 
+        transaction.startAnalysis();
         transaction.adoptDetectionResult(result);
         transaction.applyRiskResponseOutcome(
                 RiskResponseOutcome.ADDITIONAL_AUTH_REQUIRED
@@ -158,6 +160,8 @@ class DetectionDomainTest {
 
         assertThat(transaction.getAdoptedDetectionResult()).isSameAs(result);
         assertThat(transaction.getRiskLevel()).isEqualTo(RiskLevel.HIGH);
+        assertThat(transaction.getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.ANALYZED);
         assertThat(transaction.getRiskResponseOutcome())
                 .isEqualTo(RiskResponseOutcome.ADDITIONAL_AUTH_REQUIRED);
         assertThatThrownBy(
@@ -173,13 +177,119 @@ class DetectionDomainTest {
         FinancialTransaction other = transaction(UUID.randomUUID());
         DetectionResult pending = pending(transaction, 1);
 
+        transaction.startAnalysis();
         assertThatThrownBy(() -> transaction.adoptDetectionResult(pending))
                 .isInstanceOf(IllegalArgumentException.class);
 
         pending.start(CUTOFF.plusSeconds(1));
         pending.complete(10, RiskLevel.LOW, CUTOFF.plusSeconds(2));
+        other.startAnalysis();
         assertThatThrownBy(() -> other.adoptDetectionResult(pending))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void startsAnalysisOnlyFromReceivedWithoutAnOutcome() {
+        FinancialTransaction transaction = transaction(UUID.randomUUID());
+
+        transaction.startAnalysis();
+
+        assertThat(transaction.getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.ANALYZING);
+        assertThat(transaction.getAdoptedDetectionResult()).isNull();
+        assertThat(transaction.getRiskLevel()).isNull();
+        assertThat(transaction.getRiskResponseOutcome()).isNull();
+        assertThatThrownBy(transaction::startAnalysis)
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void adoptsCompletedResultAndRejectsRepeatedAdoption() {
+        FinancialTransaction transaction = transaction(UUID.randomUUID());
+        DetectionResult completed = completed(transaction, 1, RiskLevel.HIGH);
+        DetectionResult otherCompleted = completed(
+                transaction,
+                2,
+                RiskLevel.MEDIUM
+        );
+        transaction.startAnalysis();
+
+        transaction.adoptDetectionResult(completed);
+
+        assertThat(transaction.getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.ANALYZED);
+        assertThat(transaction.getAdoptedDetectionResult())
+                .isSameAs(completed);
+        assertThat(transaction.getRiskLevel()).isEqualTo(RiskLevel.HIGH);
+        assertThat(transaction.getRiskResponseOutcome()).isNull();
+        assertThatThrownBy(
+                () -> transaction.adoptDetectionResult(otherCompleted)
+        ).isInstanceOf(IllegalStateException.class);
+        assertThat(transaction.getAdoptedDetectionResult())
+                .isSameAs(completed);
+    }
+
+    @Test
+    void rejectsNonCompletedResultsDuringAnalysis() {
+        FinancialTransaction pendingTransaction = transaction(
+                UUID.randomUUID()
+        );
+        DetectionResult pending = pending(pendingTransaction, 1);
+        pendingTransaction.startAnalysis();
+        assertThatThrownBy(
+                () -> pendingTransaction.adoptDetectionResult(pending)
+        ).isInstanceOf(IllegalArgumentException.class);
+
+        FinancialTransaction inProgressTransaction = transaction(
+                UUID.randomUUID()
+        );
+        DetectionResult inProgress = pending(inProgressTransaction, 1);
+        inProgress.start(CUTOFF.plusSeconds(1));
+        inProgressTransaction.startAnalysis();
+        assertThatThrownBy(
+                () -> inProgressTransaction.adoptDetectionResult(inProgress)
+        ).isInstanceOf(IllegalArgumentException.class);
+
+        FinancialTransaction failedTransaction = transaction(
+                UUID.randomUUID()
+        );
+        DetectionResult failed = pending(failedTransaction, 1);
+        failed.start(CUTOFF.plusSeconds(1));
+        failed.fail("DEPENDENCY_TIMEOUT", CUTOFF.plusSeconds(2));
+        failedTransaction.startAnalysis();
+        assertThatThrownBy(
+                () -> failedTransaction.adoptDetectionResult(failed)
+        ).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void failsAnalysisOnlyFromAnalyzingWithoutAnOutcome() {
+        FinancialTransaction received = transaction(UUID.randomUUID());
+        assertThatThrownBy(received::failAnalysis)
+                .isInstanceOf(IllegalStateException.class);
+
+        FinancialTransaction failed = transaction(UUID.randomUUID());
+        failed.startAnalysis();
+        failed.failAnalysis();
+        assertThat(failed.getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.FAILED);
+        assertThatThrownBy(failed::failAnalysis)
+                .isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(failed::startAnalysis)
+                .isInstanceOf(IllegalStateException.class);
+
+        FinancialTransaction analyzed = transaction(UUID.randomUUID());
+        DetectionResult completed = completed(
+                analyzed,
+                1,
+                RiskLevel.MEDIUM
+        );
+        analyzed.startAnalysis();
+        analyzed.adoptDetectionResult(completed);
+        assertThatThrownBy(analyzed::failAnalysis)
+                .isInstanceOf(IllegalStateException.class);
+        assertThat(analyzed.getAdoptedDetectionResult()).isSameAs(completed);
+        assertThat(analyzed.getRiskLevel()).isEqualTo(RiskLevel.MEDIUM);
     }
 
     @Test
@@ -226,6 +336,17 @@ class DetectionDomainTest {
                 CUTOFF,
                 "trace_detection_01"
         );
+    }
+
+    private DetectionResult completed(
+            FinancialTransaction transaction,
+            int version,
+            RiskLevel riskLevel
+    ) {
+        DetectionResult result = pending(transaction, version);
+        result.start(CUTOFF.plusSeconds(1));
+        result.complete(55, riskLevel, CUTOFF.plusSeconds(2));
+        return result;
     }
 
     private FinancialTransaction transaction(UUID transactionId) {
