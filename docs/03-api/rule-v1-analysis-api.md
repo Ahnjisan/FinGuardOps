@@ -19,9 +19,10 @@ Orchestrator, Runner, R001~R004 evaluator, `RuleScoringCalculator`,
 `RuleEvidenceTransformer`와 `RuleAnalysisResult`까지의 순수 내부 경로가
 구현되어 있다. Pydantic 요청·응답 DTO와 명시적 매퍼에 이어 이 문서에서
 정의하는 FastAPI Endpoint, Service, Trace·본문 크기 Middleware와 공통 예외
-Handler도 구현되어 있다. Spring Boot Client와 DetectionResult 영속·채택은
-아직 구현되지 않았다. FastAPI HTTP 경계 구현 완료를 전체 서비스 연동
-완료로 해석하지 않는다.
+Handler도 구현되어 있다. Spring Boot `RuleAnalysisHttpClient`, Timeout·Trace
+전달, 성공·오류 응답 검증과 transport·응답 오류 분류도 구현되어 있다.
+DetectionResult 자동 영속·채택과 거래 분석 오케스트레이션은 아직 구현되지
+않았다. HTTP 양쪽 경계 구현 완료를 전체 서비스 연동 완료로 해석하지 않는다.
 
 이 API는 외부 사용자 API가 아니라 Private Network 안에서 사용하는
 Spring Boot → FastAPI 내부 서비스 API다. 인증·인가는 아직 구현되지 않았으며
@@ -80,7 +81,7 @@ Spring Boot는 요청마다 `X-Trace-Id`를 정확히 하나 전달해야 한다
 
 - 거래 접수와 요청 멱등성 관리
 - 현재 거래의 `occurredAt`을 `evaluationCutoffAt`으로 확정
-- 하나의 일관된 읽기 경계에서 거래·행동 이벤트 Snapshot 고정
+- 한 실행에서 거래·행동 이벤트 Snapshot 고정
 - 평가에 사용할 전체 활성 RuleVersion Snapshot 고정
 - FastAPI 동기 호출과 Timeout 처리
 - 응답의 transaction·cutoff·RuleVersion·점수·Evidence 완전성 검증
@@ -663,8 +664,8 @@ FastAPI Middleware는 `Content-Length`만 신뢰하지 않고 실제 수신 byte
 
 이 절은 Spring Boot가 이 문서의 wire 계약을 호출하는 Client의 단일 상세
 기준이다. 기존 요청·응답 DTO, HTTP 상태와 FastAPI 오류 envelope는 변경하지
-않는다. 현재 FastAPI HTTP 경계는 구현되어 있지만 이 절의 Spring Boot Client와
-결과 채택·영속화는 아직 구현되지 않았다.
+않는다. FastAPI HTTP 경계와 이 절의 Spring Boot Client는 구현되어 있지만
+결과 채택·영속화 오케스트레이션은 아직 구현되지 않았다.
 
 ### 13.1 계층과 책임
 
@@ -723,8 +724,9 @@ FINGUARDOPS_AI_SERVICE_RESPONSE_TIMEOUT
 - 일부 Rule 또는 일부 응답만 정상 결과로 채택하지 않는다.
 - AI 리포트의 템플릿·LLM fallback을 Rule 분석 흐름에 적용하지 않는다.
 
-거래 실패 상태, 수동 재개와 재처리 정책은 계속 `TBD`이다. 이 정책은 Client의
-자동 retry 0회와 별도이며 후속 거래 오케스트레이션 계약에서 결정한다.
+Client 실패 시 대상 DetectionResult와 거래는 `FAILED`로 기록하고 결과를
+채택하지 않는다. 수동 재개와 재분석은 Client의 자동 retry 0회와 별도인 후속
+계약에서 결정한다.
 
 ### 13.5 Trace와 성공 응답 검증
 
@@ -770,6 +772,11 @@ DTO 역직렬화 실패와 상호 모순되는 응답은 13.6의
 `AI_SERVICE_INVALID_RESPONSE`로 fail-closed 처리한다. Client는 이를 보정하거나
 Rule 조건, evaluator 선택, scoring과 Evidence를 Java에서 재계산하지 않는다.
 
+Client의 현재 validator는 `ruleSetVersion` 형식과 응답 내부 정합성을 검증한다.
+Spring Boot 오케스트레이션은 PENDING 결과를 만들기 전에 canonical Rule
+Snapshot으로 예상 해시를 고정하고, 응답 해시가 그 값과 exact 일치하는지
+추가로 검증해야 한다. 이 연결 검증은 아직 구현되지 않았다.
+
 ### 13.6 Spring Boot 내부 오류 category
 
 다음 category는 Spring Boot 내부 Client 분류이며 외부 거래 API의 공개 오류
@@ -800,22 +807,38 @@ code가 아니다. HTTP 오류 매핑은 HTTP 상태, 공통 오류 envelope, `c
 - 13.5의 성공 응답 무결성 위반
 
 FastAPI 원본 오류 메시지, 응답 원문과 내부 예외를 외부 거래 API에 그대로
-전달하지 않는다. 위 내부 category와 외부 API 오류 및 거래 상태의 최종 매핑은
-후속 거래 오케스트레이션 계약에서 결정한다.
+전달하지 않는다. 외부 거래 API에는 다음처럼 기존 공통 오류만 사용한다.
+
+| 내부 category | 외부 HTTP·공통 code |
+| --- | --- |
+| `AI_SERVICE_CONNECT_TIMEOUT`, `AI_SERVICE_RESPONSE_TIMEOUT` | `503 DEPENDENCY_TIMEOUT` |
+| `AI_SERVICE_UNAVAILABLE` | `503 DEPENDENCY_UNAVAILABLE` |
+| 나머지 Client category | `500 INTERNAL_ERROR` |
+
+Spring Boot가 만든 요청·Rule·배포 capability나 upstream 응답 계약의 결함은 외부
+거래 API 호출자의 `400`·`413`·`422`로 전가하지 않는다. 거래 상태·결과 채택과
+함께 적용하는 상세 경계는
+[Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../01-requirements/spring-rule-analysis-orchestration-contract.md)을
+따른다.
 
 ### 13.7 DB와 외부 HTTP 트랜잭션 경계
 
 다음 순서를 지킨다.
 
-1. 읽기 트랜잭션에서 거래·행동 이벤트·활성 RuleVersion Snapshot을 고정한다.
-2. 요청 DTO를 구성하고 읽기 트랜잭션을 종료한다.
-3. DB 쓰기 트랜잭션을 유지하지 않은 상태에서 FastAPI를 호출한다.
-4. 응답 wire 계약과 무결성을 검증한다.
-5. 후속 별도 쓰기 트랜잭션에서 결과 채택과 영속화를 수행한다.
+1. 짧은 분석 시작 쓰기 트랜잭션에서 거래를 잠그고 거래·행동 이벤트·활성
+   RuleVersion Snapshot과 다음 DetectionResult 버전을 고정한다.
+2. 같은 트랜잭션에서 DetectionResult `PENDING → IN_PROGRESS`와 거래
+   `RECEIVED → ANALYZING`을 commit한다.
+3. DB 트랜잭션과 잠금을 유지하지 않은 상태에서 FastAPI를 호출한다.
+4. 응답 wire 계약, 무결성과 선확정 Snapshot 대응을 검증한다.
+5. 후속 별도 쓰기 트랜잭션에서 Evidence, DetectionResult `COMPLETED`, 결과
+   채택과 거래 `ANALYZING → ANALYZED`를 원자적으로 수행한다.
+6. 결과 채택 commit 이후에만 최종 성공 멱등 Snapshot을 확정한다.
 
 네트워크 응답을 기다리는 동안 DB 쓰기 트랜잭션과 잠금을 장시간 유지하지
-않는다. 이번 Issue는 5단계를 구현하지 않으며 결과 채택·영속화가 완료된
-것으로 표현하지 않는다.
+않는다. 현재 Client 호출과 검증은 구현되어 있으나 1~2단계의 통합 시작 경계,
+5~6단계는 구현되지 않았으므로 결과 채택·영속화가 완료된 것으로 표현하지
+않는다.
 
 ### 13.8 로그와 정보 보호
 
@@ -840,9 +863,12 @@ Client 로그는 다음 최소 항목만 기록할 수 있다.
 stack trace와 내부 예외 상세는 외부 응답에 노출하지 않는다. 내부 진단 로그가
 필요해도 위 민감정보와 HTTP 원문을 포함하지 않는다.
 
-### 13.9 후속 Java 구현 테스트 계약
+### 13.9 Java Client 테스트 상태와 후속 오케스트레이션 검증
 
-후속 Java 구현은 최소 다음 항목을 검증한다.
+현재 Java Client 단위·통합 테스트는 정상 요청, all-unmatched 성공, 엄격한
+Trace·wire·업무 응답 검증, Client category 분류, connect·response timeout과
+자동 retry 0회를 검증한다. 후속 오케스트레이션 구현은 기존 검증에 더해 최소
+다음 항목을 검증해야 한다.
 
 - 정상 `200 OK` 요청·응답과 요청 DTO 직렬화
 - 전 Rule 정상 미적중인 0점·`LOW`·빈 Evidence 응답
@@ -856,16 +882,17 @@ stack trace와 내부 예외 상세는 외부 응답에 노출하지 않는다. 
 - 지원하지 않는 상태·Content-Type, malformed·잘린·불완전 응답과 DTO
   역직렬화 실패
 - 알 수 없는 필드, 지원하지 않는 Rule과 상호 모순되는 성공·오류 응답
-- 모든 실패에서 정상 분석 결과, DetectionResult와 Evidence가 생성되지 않음
+- Client 단계의 모든 실패에서 정상 분석 응답을 반환하지 않음
 - 한 Client 호출에서 HTTP 요청이 한 번만 수행되어 자동 retry가 없음
 - 로그와 외부 오류 응답에 요청·응답 원문, 참조값, Evidence, upstream 오류
   메시지와 인증정보가 노출되지 않음
 
 ## 14. 현재 구현 이후 제외 범위
 
-- Spring Boot HTTP Client와 Timeout·재호출 구현
-- DetectionResult·DetectionEvidence 생성·채택·영속화
-- 거래 상태, 위험 대응과 사건 상태 변경
+- 거래·행동 이벤트·전체 활성 RuleVersion Snapshot 조합
+- DetectionResult·DetectionEvidence 자동 생성·채택·영속화 오케스트레이션
+- 최종 동기 분석 응답과 결과 채택 이후 멱등 Snapshot 확정
+- 분석 이후 위험 대응과 사건 상태 변경
 - RuleVersion 별도 동기화·캐시·배포 산출물
 - 인증·인가, CORS와 네트워크 보안 구현
 - 선택적 Gateway 요청 본문 조기 차단 구현

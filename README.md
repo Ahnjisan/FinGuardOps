@@ -185,7 +185,11 @@ CONFIRMED_FRAUD
 
 처음부터 전체 시스템을 마이크로서비스로 분리하지 않습니다.
 
-아래 구성은 목표 아키텍처를 포함합니다. 현재는 Spring Boot의 거래·행동 이벤트 접수와 PostgreSQL 애플리케이션 연동, FastAPI AI Service의 초기 실행·Health 기반까지 구현되었습니다. Rule 실행·Spring Boot와 FastAPI 분석 연동·DetectionResult 생성·운영 배포 환경은 아직 구현되지 않았습니다.
+아래 구성은 목표 아키텍처를 포함합니다. 현재는 Spring Boot의 거래·행동 이벤트
+접수와 PostgreSQL 연동, 탐지 결과·RuleVersion 영속 모델, FastAPI Rule v1 실행
+Endpoint와 Spring Boot `RuleAnalysisHttpClient`까지 구현되었습니다. 거래 분석
+Snapshot 조합·상태 전이·결과 채택 오케스트레이션과 운영 배포 환경은 아직
+구현되지 않았습니다.
 
 ```text
 React·TypeScript
@@ -230,7 +234,7 @@ Kafka
 
 ### Data
 
-* PostgreSQL: 현재 거래·멱등·행동 이벤트 애플리케이션 연동 구현, 탐지 결과·사건·감사 로그·Rule·AI 사용량·비용은 목표 범위
+* PostgreSQL: 현재 거래·멱등·행동 이벤트·탐지 결과·RuleVersion 애플리케이션 연동 구현, 사건·감사 로그·AI 사용량·비용은 목표 범위
 * Redis: 정확 일치 리포트 캐시, 외부 위험정보 캐시, 집계 데이터
 * Kafka: 사건·리포트·통계 비동기 처리
 
@@ -257,7 +261,7 @@ Kafka
 * Python 3.12
 * FastAPI·Pydantic v2
 * uv·pytest·Ruff
-* Rule Engine, Machine Learning, Generative AI API는 후속 구현
+* Rule v1 Engine 구현, Machine Learning과 Generative AI API는 후속 구현
 
 ### Data
 
@@ -318,25 +322,29 @@ Kafka
 * 금융거래·멱등성·행동 이벤트 PostgreSQL 애플리케이션 연동과 Flyway 스키마 구현
 * Rule v1 탐지 계약과 평가 정책 문서화
 * FastAPI AI Service 초기 실행·설정·Health API와 테스트 기반 구성
+* FastAPI Rule v1 실행 계획·R001~R004·scoring·Evidence 계산과 `POST /api/v1/rule-analysis` 구현
+* DetectionResult·DetectionEvidence와 FraudRule·RuleVersion Entity, Repository, Flyway V3~V5 구현
+* 행동 이벤트 Rule 평가 조회와 DetectionResult 상태 전이·Evidence 저장 persistence primitive 구현
+* Spring Boot `RuleAnalysisHttpClient`, Timeout·Trace 전달, 성공·오류 응답 검증과 오류 분류 구현
+* Rule v1 Client 자동 retry 0회 구현·검증
+* Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약 문서화
 * Backend와 AI Service 전용 GitHub Actions CI 구성
 
 현재 PostgreSQL 연동은 애플리케이션 코드와 Testcontainers 검증 범위입니다. 운영 PostgreSQL, Docker Compose, Kubernetes와 AWS 배포 환경이 구현되었다는 의미는 아닙니다. 거래 접수 성공 응답도 현재는 단계적 구현 상태인 `RECEIVED`와 탐지 관련 null 값을 반환하며, 최종 동기 분석 목표는 [`ADR-003`](docs/07-decisions/ADR-003-transaction-processing-boundary.md)을 유지합니다.
 
 ### In Progress
 
-* 다음 작업 착수 전
+* Spring Boot Rule v1 거래 분석 오케스트레이션 구현 준비
 
 ### Planned
 
-* 행동 이벤트 조회와 후속 도메인 구현
-* 탐지·사건·감사 도메인의 JPA Entity·Repository 구현
-* 후속 도메인의 PostgreSQL 마이그레이션
-* ADR-004 기반 멱등 Snapshot envelope·legacy codec·저장 HTTP 상태 재생 구현
-* Rule 관리와 실행
-* 위험 점수·위험 등급 산출
+* 거래·행동 이벤트·전체 활성 RuleVersion Snapshot 조합 Service
+* 거래 `RECEIVED → ANALYZING → ANALYZED|FAILED` 실행 경로
+* FastAPI 응답의 DetectionResult·Evidence 자동 변환·저장과 결과 채택
+* 결과 채택 commit 이후 최종 동기 응답과 멱등 Snapshot 확정
+* 실패 후 재분석·수동 복구 계약
 * 사건 생성·조회·상태 변경
 * 조사 메모·감사 로그
-* FastAPI 연동
 * ML 추론
 * AI 사건 리포트
 * AI 사용량·토큰·비용 기록
@@ -350,7 +358,14 @@ Kafka
 * Observability
 * 장애·비용 실험
 
-현재 `RECEIVED`/null 멱등 response snapshot은 최초 저장 결과를 그대로 재생하고 신규 최종 동기 응답으로 소급 갱신하지 않습니다. 전환 이후 신규 요청부터 version envelope와 최초 확정 HTTP 상태를 저장하는 정책은 [`ADR-004`](docs/07-decisions/ADR-004-idempotency-response-snapshot-transition.md)로 결정했지만 코드·Migration에는 아직 구현되지 않았습니다. 현재 DB의 24시간 `expires_at` 저장값도 Service 만료 판정과 정리 작업이 없어 실질적인 만료 정책은 아닙니다.
+현재 `RECEIVED`/null 멱등 response snapshot은 거래 접수 commit에서 확정되어 그대로
+재생됩니다. 이는 목표 분석 계약의 "결과 채택 commit 이후 최종 성공 Snapshot
+확정"과 다르며 아직 전환되지 않았습니다. version envelope, legacy codec와 저장
+HTTP 상태 재생은 구현되어 있지만 최종 분석 응답 연결은 미구현입니다. 상세
+목표 경계는
+[`spring-rule-analysis-orchestration-contract.md`](docs/01-requirements/spring-rule-analysis-orchestration-contract.md)를
+따릅니다. DB의 24시간 `expires_at` 저장값도 Service 만료 판정과 정리 작업이
+없어 실질적인 만료 정책은 아닙니다.
 
 ---
 

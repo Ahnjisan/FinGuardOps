@@ -47,8 +47,10 @@ AI Service에는 RuleVersion snapshot 입력 모델, ExecutionPlan Builder,
 Orchestrator, Runner, R001~R004 evaluator, Scoring Calculator, Rule Evidence
 Transformer와 Rule 분석 결과 조합의 내부 경로에 더해 Pydantic 요청·응답
 DTO와 FastAPI `POST /api/v1/rule-analysis` HTTP 경계가 구현되어 있다.
-Spring Boot Client, 탐지 결과 자동 생성·검증·채택·영속화, 전체 서비스 연동,
-사건, 감사와 AI 운영 도메인은 아직 구현되지 않았다.
+Spring Boot `RuleAnalysisHttpClient`, Timeout·Trace 전달, 성공·오류 응답 검증과
+오류 분류도 구현되어 있다. 거래 분석 Snapshot 조합·상태 전이, 탐지 결과 자동
+생성·채택·영속화의 통합 경로, 사건, 감사와 AI 운영 도메인은 아직 구현되지
+않았다.
 
 ### 2.2 문서로 정의됨
 
@@ -67,8 +69,9 @@ Spring Boot Client, 탐지 결과 자동 생성·검증·채택·영속화, 전�
 ### 2.3 구현되지 않음
 
 - `ai-service/`: Rule v1 실행·scoring·Evidence 변환과 분석 결과 조합,
-  Pydantic 요청·응답 DTO와 분석 HTTP 경계까지 구현되었으며 ML·AI 리포트와
-  Spring Boot Client 연동 없음
+  Pydantic 요청·응답 DTO와 분석 HTTP 경계까지 구현되었으며 ML·AI 리포트 없음
+- Spring Boot Rule v1 Client는 구현되었으나 거래 분석 오케스트레이션과 결과
+  채택 실행 경로 없음
 - `frontend/`: 역할 규칙과 자리표시자만 있으며 React 구현 없음
 - `infra/`: 자리표시자만 있으며 Docker Compose 등 인프라 구현 없음
 - `.github/`: Issue·PR 템플릿과 Backend·AI Service 테스트 Workflow가 있으며 이미지 빌드·배포 자동화 없음
@@ -458,8 +461,9 @@ Spring Boot는 거래·행동 및 사용할 수 있는 외부 위험정보 상�
 Spring Boot는 반환된 결과의 요청 연결, 완전성, 버전과 처리 가능 여부를 검증한다. 그 뒤 승인된 위험 대응 정책에 따라 거래 처리 상태와 사건 생성 또는 기존 사건 연결 여부를 결정하고 PostgreSQL에 저장한다.
 
 FastAPI Timeout 시 Spring Boot가 임의의 위험 점수를 생성하거나 무위험으로
-간주하지 않는다. Rule v1 Client 자체의 자동 retry는 `0회`로 확정하며, 이때
-허용할 거래 상태, 수동 재개와 재처리 정책은 `TBD`이다.
+간주하지 않는다. Rule v1 Client 자체의 자동 retry는 `0회`이며 분석 시도를
+`FAILED`로 끝내고 결과를 채택하지 않는다. 실패 후 재분석·수동 복구는 후속
+계약으로 분리한다.
 
 Rule v1에서 Spring Boot는 거래·행동 이벤트 조회와 Snapshot 구성, Rule
 정의·버전·활성 상태, 호출 오케스트레이션과 결과 영속화를 맡고
@@ -467,23 +471,27 @@ FastAPI는 Feature, R001~R004, 점수·등급·Reason Code·Evidence 계산을
 맡는다. 상세 계약은
 [`../01-requirements/rule-v1-detection-contract.md`](../01-requirements/rule-v1-detection-contract.md)를
 따른다. DetectionResult·DetectionEvidence 물리 영속 모델은
-구현되었지만 Spring Boot Client와 실행 결과 자동 생성·검증·채택·영속화
-흐름은 아직 구현되지 않았다.
+구현되었고 Spring Boot Client도 구현되었지만 실행 Snapshot 조합과 결과 자동
+생성·채택·영속화 흐름은 아직 구현되지 않았다.
 
 현재 FastAPI에는 RuleVersion snapshot을 받는 Python 입력 모델부터
 ExecutionPlan Builder → Orchestrator → Runner → R001~R004 evaluator → Scoring
 Calculator → RuleEvidenceTransformer → RuleAnalysisResult까지의 실행 경로와
 Pydantic 요청·응답 DTO, `POST /api/v1/rule-analysis` HTTP 경계가 구현되어 있다.
-이는 Spring Boot Client나 전체 서비스 연동, 결과 자동 채택·영속화가
-구현되었다는 뜻이 아니다. 내부 HTTP와 Spring Boot Client의 상세 계약은
+Spring Boot Client도 구현되어 있지만 전체 서비스 연동과 결과 자동
+채택·영속화가 구현되었다는 뜻은 아니다. 내부 HTTP와 Spring Boot Client의 상세 계약은
 [`../03-api/rule-v1-analysis-api.md`](../03-api/rule-v1-analysis-api.md#13-spring-boot-client-연동-계약)를
+따르고, 전체 처리 순서와 결과 채택은
+[Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../01-requirements/spring-rule-analysis-orchestration-contract.md)을
 따른다.
 
-Rule v1 호출에서는 읽기 트랜잭션으로 거래·행동 이벤트·활성 RuleVersion
-Snapshot을 고정하고 요청 DTO를 구성한 뒤 해당 트랜잭션을 종료한다. DB 쓰기
-트랜잭션을 유지하지 않은 상태에서 FastAPI를 호출하고 응답을 검증한 다음,
-후속 별도 쓰기 트랜잭션에서 결과를 채택·영속화한다. 마지막 채택·영속화
-단계는 아직 구현되지 않았다.
+Rule v1 호출에서는 짧은 분석 시작 쓰기 트랜잭션에서 거래를 잠그고
+거래·행동 이벤트·활성 RuleVersion Snapshot과 다음 DetectionResult 버전을
+고정한다. `PENDING → IN_PROGRESS`와 `RECEIVED → ANALYZING`을 함께 commit한
+뒤 DB 트랜잭션과 잠금 없이 FastAPI를 호출한다. 검증 성공 뒤 새 쓰기
+트랜잭션에서 Evidence, `DetectionResult COMPLETED`, 결과 채택과
+`ANALYZING → ANALYZED`를 원자적으로 반영한다. 이 오케스트레이션은 아직
+구현되지 않았다.
 
 후속 Rule Evidence 경계에서 FastAPI는 RuleVersion metadata, Reason Code,
 원래 contribution, typed observation, Evidence 시각과 plan 기반 출력 순서를
@@ -565,7 +573,8 @@ Kafka는 다음 조건이 확인된 뒤 이 논리적 비동기 경계를 구현
 
 ### 12.3 결과 일관성
 
-- 동기 Timeout과 실제 처리 완료가 경합할 수 있으므로 재시도 전에 기존 결과를 확인한다.
+- Rule v1 동기 Timeout과 늦은 성공 응답은 같은 거래·DetectionResult 잠금과
+  terminal 상태 검증으로 하나만 확정한다. Client는 자동 재시도하지 않는다.
 - 비동기 중복 실행이 사건, 리포트, 사용량과 비용을 중복 생성하지 않아야 한다.
 - 늦은 LLM 응답이 이미 확정된 fallback 결과를 이력 없이 덮어쓰지 않아야 한다.
 - 이벤트 기반으로 전환하더라도 Spring Boot의 업무 소유권은 유지한다.
@@ -612,7 +621,10 @@ sequenceDiagram
 
 거래 상태는 기존 상태 전이 문서의 `RECEIVED`, `ANALYZING`, `ANALYZED`와 최종 처리 상태를 따른다. 요청 형식과 도메인 Validation 실패는 거래로 저장하지 않으며 오류 응답, `traceId`, 로그와 운영 메트릭으로 관측한다. MEDIUM의 모니터링은 별도 위험 대응 결과로 표현하고 AI 리포트 실패로 거래를 `FAILED` 처리하지 않는다.
 
-현재 `RECEIVED`/null 완료 응답을 저장하는 멱등 `response_snapshot`은 최종 동기 응답과 구조·의미가 달라질 수 있다. 최종 흐름 구현 전에 기존 snapshot의 재생 호환과 전환 방식을 결정해야 하며 아직 해결된 상태가 아니다.
+현재 구현은 `RECEIVED`/null 완료 응답을 멱등 `response_snapshot`으로 거래 접수
+commit에서 확정한다. 목표 계약에서는 결과 채택 commit 이후에만 최종 동기
+성공 Snapshot을 확정한다. 기존 Snapshot의 전환과 채택 commit·멱등 완료 사이
+장애 복구 구현은 아직 남아 있다.
 
 ### 13.2 사건 조사
 
@@ -706,7 +718,7 @@ React는 서비스 상태, 배포 버전, 업무 영향, AI 비용과 장애·�
 
 | 장애 | 직접 영향 | 유지해야 할 원칙 | 미확정 사항 |
 | --- | --- | --- | --- |
-| FastAPI Timeout | Rule·ML 분석과 후속 위험 대응 지연 또는 실패 | Spring Boot가 거래 접수와 마지막 확정 상태를 보존하고 임의 점수를 만들지 않음. Rule v1 Client 자동 retry는 0회 | 거래 실패 상태, 수동 재개·재처리 정책 `TBD` |
+| FastAPI Timeout | Rule·ML 분석과 후속 위험 대응 실패 | 대상 DetectionResult와 거래를 `FAILED`로 기록하고 결과를 채택하지 않음. Rule v1 Client 자동 retry는 0회 | 실패 후 재분석·수동 복구 계약 |
 | External Risk Timeout | 외부 위험계좌·IP·기기 근거 사용 불가 가능 | 실패를 위험정보 없음으로 해석하지 않고 유효 캐시 또는 조회 불가 상태를 기록하며 내부 분석을 계속함 | 최종 위험 대응 정책 `TBD` |
 | LLM Timeout·연결 실패 | AI 사건 리포트 지연·실패 | 같은 `executionId`에서 최대 한 번 자동 재시도한 뒤 Rule·ML 결과 기반 템플릿 fallback. 거래·사건 처리 결과는 변경하지 않음 | 재시도 간격·Timeout 값 `TBD` |
 | 비일시적 LLM Provider 오류 | AI 리포트 생성 실패 | 자동 재시도 없이 템플릿 fallback과 오류·사용량 기록 | 다른 모델 전환 조건은 별도 승인 |
@@ -807,6 +819,12 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
   RuleAnalysisResult
 - Rule v1 Pydantic 요청·응답 DTO와 FastAPI `POST /api/v1/rule-analysis` HTTP
   경계
+- DetectionResult·DetectionEvidence와 FraudRule·RuleVersion Entity, Repository,
+  Flyway V3~V5 및 persistence primitive
+- 행동 이벤트 Rule 평가 조회
+- Spring Boot `RuleAnalysisHttpClient`, Timeout·Trace 전달, 엄격한 성공·오류
+  응답 검증과 transport·응답 오류 분류
+- Rule v1 Client 자동 retry 0회
 - Backend와 AI Service 전용 GitHub Actions 테스트 Workflow
 
 ### 18.2 문서로 정의됨
@@ -820,11 +838,15 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 - Rule v1 탐지 계약과 초기 평가 정책
 - Rule Evidence 변환과 Rule 분석 결과 조합 계약
 - Spring Boot → FastAPI Rule v1 내부 분석 HTTP API 계약
+- Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약
 
 ### 18.3 다음 구현 예정
 
-- 문서로 정의된 Spring Boot Rule v1 Client와 전체 분석 연동
-- DetectionResult 자동 영속화·채택과 위험 대응·사건·감사 도메인
+- 거래·행동 이벤트·전체 활성 RuleVersion Snapshot 조합과 거래 분석
+  오케스트레이션
+- FastAPI 응답의 DetectionResult·Evidence 자동 영속화, 결과 채택과 최종 멱등
+  Snapshot 확정
+- 위험 대응·사건·감사 도메인
 - External Risk Mock
 - Docker 및 Docker Compose 통합 환경
 
@@ -924,8 +946,8 @@ Docker Compose와 필요 시 Kubernetes 환경에서 기능·장애·관측 기�
 | 결정 항목 | 현재 상태 | 결정에 필요한 근거 |
 | --- | --- | --- |
 | External Risk 조회 실패 시 위험 대응 정책 | `TBD` | 캐시 유효성, 내부 Rule·ML 결과, 거래 상태와 시나리오별 업무 위험 |
-| FastAPI Timeout 시 거래 처리 정책 | `TBD` | Rule v1 Client 자동 retry 0회 이후의 거래 실패 상태, 수동 재개·재처리, 사용자 응답과 미탐·오탐 위험 |
-| 현재 멱등 응답 snapshot의 최종 동기 응답 호환 | `TBD` | 기존 `RECEIVED`/null snapshot의 스키마·재생 의미·만료 데이터와 전환 방식 |
+| FastAPI Timeout 시 Rule v1 거래 처리 | 분석 시도 `FAILED`, 결과 미채택 | 수동 재개·재처리는 후속 계약에서 결정 |
+| 최종 성공 멱등 Snapshot 확정 시점 | 결과 채택 commit 이후 | 기존 `RECEIVED`/null Snapshot의 전환 구현과 운영 복구 방식은 후속 검증 필요 |
 | 초기 AI 리포트 비동기 실행 방식 | `TBD` | 실패·재시도·멱등성 검증 가능성, 개인 프로젝트 운영 복잡도 |
 | Redis 최초 도입 시점 | `TBD` | 정확 일치 중복 호출, External Risk 조회 부하와 집계 성능 측정 |
 | Kafka 최초 도입 조건 충족 여부 | `TBD` | 비동기 적체, 다중 Consumer, 재처리와 독립 확장 요구 |

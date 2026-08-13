@@ -11,11 +11,19 @@ JPA Entity, Repository와 내부 persistence service가 구현되어 있다.
 
 다음 기능은 구현하지 않는다.
 
-- Rule 실행
-- FastAPI Client와 ML 추론
+- Spring Boot가 시작하는 Rule 분석 실행 경로
+- ML 추론
 - 외부 탐지 실행 API와 탐지 결과 조회 API
 - 거래 생성의 최종 동기 탐지 응답
+- 거래·행동 이벤트·전체 활성 RuleVersion Snapshot 조합과 Spring Boot 분석
+  오케스트레이션
+- FastAPI 응답의 자동 Evidence 변환·결과 채택과 거래 상태 전이
 - 사건, 감사 로그와 AI 리포트
+
+FastAPI Rule v1 Endpoint와 Spring Boot `RuleAnalysisHttpClient`는 구현되어
+있지만 이 영속 모델을 자동으로 생성·완료·채택하는 실행 경로는 아직 없다.
+그 경로의 기준은
+[Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../01-requirements/spring-rule-analysis-orchestration-contract.md)이다.
 
 현재 `POST /api/v1/transactions`는 기존 계약대로 Transaction을
 `RECEIVED`로 저장하고 탐지 관련 null을 반환한다.
@@ -69,6 +77,10 @@ transaction timestamp를 가진다. 이후 상태 전이에서는 `created_at`�
 감사 시각이 아니라 평가와 분석 과정에서 입력되거나 결정되는 업무
 시각이다. DB 감사 clock으로 생성하거나 감사 시각으로 덮어쓰지 않는다.
 
+Rule v1 한 실행의 `evaluation_cutoff_at`은 거래 `occurred_at`으로 한 번만
+확정한다. Snapshot 고정 뒤 추가된 행동 이벤트나 변경된 RuleVersion은 해당
+결과 버전에 포함하지 않는다.
+
 ### 3.2 상태별 필드
 
 | 상태 | 필수 | 금지 |
@@ -81,6 +93,11 @@ transaction timestamp를 가진다. 이후 상태 전이에서는 `created_at`�
 `FAILED`는 시작 전에도 확정될 수 있으므로 `analysis_started_at`이 null일
 수 있다. 점수와 등급의 임계값 관계는 `scoring_policy_version`별
 애플리케이션 검증 책임이며 DB에는 고정하지 않는다.
+
+`rule_set_version`은 PENDING부터 NOT NULL이고 Trigger가 변경을 금지한다.
+따라서 Rule v1 오케스트레이션은 FastAPI 호출 전에 고정한 Rule Snapshot의
+canonical 해시를 계산해 저장하고, 성공 응답 해시와 exact 비교해야 한다.
+현재 Spring Boot에는 이 선계산·비교 경로가 구현되어 있지 않다.
 
 ### 3.3 제약과 인덱스
 
@@ -211,15 +228,23 @@ Java 도메인 값 객체가 검증한다. 원문 행동 이벤트 전체, 고�
 Transaction이 `FAILED`로 전이되어도 이전에 정상 채택한 결과·등급·대응을
 유지할 수 있다. DetectionResult에는 `adopted` 컬럼을 두지 않는다.
 
+Rule v1 분석 성공에서는 Evidence 저장, DetectionResult `COMPLETED`, 거래의
+결과 채택과 `ANALYZING → ANALYZED`를 하나의 쓰기 트랜잭션으로 수행한다.
+분석 실패에서는 대상 DetectionResult와 거래를 `FAILED`로 기록하고 결과를
+채택하지 않는다. 현재 `DetectionResultPersistenceService.complete`는 Evidence와
+결과 `COMPLETED`만 한 트랜잭션으로 처리하며 거래 채택·상태 전이는 포함하지
+않는다.
+
 ## 7. 버전과 동시성
 
 Spring Boot는 PENDING 생성 트랜잭션에서 대상 거래 행을
 `PESSIMISTIC_WRITE`로 잠그고 현재 최대 결과 버전에 1을 더한다. 버전은
 1부터 단조 증가하나 롤백·실패에 따른 간격을 허용한다.
 
-실패 결과와 동일 분석의 재시도도 새 버전을 소비한다. 거래별
-Unique가 경쟁 쓰기의 최종 방어선이다. 동일 버전의 늦은 응답이나
-중복 저장은 기존 결과를 수정하지 않고 거부한다.
+실패 결과도 버전을 소비한다. 후속 계약이 재분석을 허용하면 새 버전을
+사용해야 하며 terminal 결과를 재사용하지 않는다. 거래별 Unique가 경쟁
+쓰기의 최종 방어선이다. 동일 버전의 늦은 응답이나 중복 저장은 기존 결과를
+수정하지 않고 거부한다.
 
 ## 8. 불변성과 Trigger
 
@@ -236,7 +261,9 @@ Unique가 경쟁 쓰기의 최종 방어선이다. 동일 버전의 늦은 응�
   - `COMPLETED` 결과만 채택
 
 Evidence는 완료 트랜잭션에서 먼저 저장한 뒤 결과를 COMPLETED로
-전환한다. 중간 단계가 실패하면 같은 트랜잭션 전체가 rollback된다.
+전환한다. 현재 persistence service는 이 두 변경을 함께 rollback한다. 목표
+오케스트레이션은 같은 트랜잭션에 거래 결과 채택과
+`ANALYZING → ANALYZED`도 포함해야 한다.
 
 ## 9. JPA
 
