@@ -19,13 +19,18 @@
 - Pydantic 요청·응답 DTO와 도메인 매퍼, FastAPI
   `POST /api/v1/rule-analysis`, Trace·1 MiB 요청 제한·공통 오류 경계와 기존 실행
   경로 연결: 구현됨
-- Spring Boot Rule v1 HTTP Client와 전체 서비스 연동: 미구현
+- Spring Boot Rule v1 HTTP Client: 구현됨
+- Spring Boot 거래 분석 오케스트레이션과 전체 서비스 연동: 미구현
 
 현재 구현된 evaluator와 Registry의 기준은
 [`ai-service/src/finguardops_ai/rules/v1/`](../../ai-service/src/finguardops_ai/rules/v1/)에
 있다. 공식 Rule 조건과 시스템 책임 경계는
 [Rule v1 탐지 계약](./rule-v1-detection-contract.md)을 따른다. 이 문서는 해당
 공식 계약을 변경하거나 Rule 실행 구현 완료를 의미하지 않는다.
+
+Spring Boot의 거래 접수, Snapshot 고정, 외부 호출, 결과 영속·채택 경계는
+[Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](./spring-rule-analysis-orchestration-contract.md)이
+소유한다. 이 문서는 FastAPI 내부 evaluator 실행 계약으로만 유지한다.
 
 ## 2. 주요 용어와 책임 계층
 
@@ -317,11 +322,13 @@ Registry가 특정 요청 ID에 callable을 연결했다는 사실만으로 반�
 `RuleExecutionPlanItem`, 순수 `RuleExecutionPlanBuilder`, plan 실행·결합을
 담당하는 `RuleExecutionPlanRunner`, `PlannedRuleResult`와 별도 downstream
 `RuleScoringCalculator`, `RuleEvidenceTransformer`와 `RuleAnalysisResult`가
-구현되어 있다. Pydantic 요청·응답 DTO와 도메인 매퍼, FastAPI 분석 Endpoint와
-HTTP 오류·Trace 경계도 구현되어 있지만 Spring Boot Client, 평가 Snapshot의
-실제 전달, 호출 오케스트레이션, 응답 교차 검증과 전체 서비스 연동은 아직
-구현되지 않았다. 상세 Client 계약은
+구현되어 있다. Pydantic 요청·응답 DTO와 도메인 매퍼, FastAPI 분석 Endpoint,
+HTTP 오류·Trace 경계와 Spring Boot Client도 구현되어 있다. 평가 Snapshot의
+실제 조합·전달, 거래 상태 전이, 결과 영속·채택 오케스트레이션과 전체 서비스
+연동은 아직 구현되지 않았다. 상세 Client 계약은
 [Rule v1 내부 분석 API](../03-api/rule-v1-analysis-api.md#13-spring-boot-client-연동-계약)를
+따르고, Spring Boot 처리 경계는
+[Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](./spring-rule-analysis-orchestration-contract.md)을
 따른다. 실행 계획의 weight는 오케스트레이터에서 snapshot 정보로만 보존하며
 이 오케스트레이터 자체는 weight를 적용하거나 scoring하지 않는다. downstream 구현은
 [ADR-005](../07-decisions/ADR-005-fraud-rule-version-model.md)의 RuleVersion

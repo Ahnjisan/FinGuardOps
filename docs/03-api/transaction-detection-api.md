@@ -27,10 +27,12 @@ Client
 현재 외부 거래 흐름은 입력 검증·멱등성 확인·거래 PostgreSQL 저장 후
 `RECEIVED`와 탐지 관련 null 값을 반환하는 단계까지이다.
 DetectionResult·DetectionEvidence의 물리 영속 모델과 FastAPI
-`POST /api/v1/rule-analysis` HTTP 경계는 구현되었지만 External Risk,
-Spring Boot Client와 호출 오케스트레이션, 탐지 실행 결과 생성·검증·채택,
+`POST /api/v1/rule-analysis` HTTP 경계, Spring Boot `RuleAnalysisHttpClient`,
+Timeout·Trace 전달과 응답 검증·오류 분류는 구현되었다. External Risk, 거래
+분석 Snapshot 조합·호출 오케스트레이션, 탐지 실행 결과 자동 생성·채택,
 위험 대응과 사건 연결은 아직 구현되지 않았다. 현재 단계 응답은 최종 동기
-분석 목표를 변경하지 않는다.
+분석 목표를 변경하지 않는다. Spring Boot 분석 처리의 기준은
+[Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../01-requirements/spring-rule-analysis-orchestration-contract.md)이다.
 
 ### 2.2 Spring Boot 책임
 
@@ -54,8 +56,8 @@ Spring Boot Client와 호출 오케스트레이션, 탐지 실행 결과 생성�
 다음 항목은 목표 책임 범위이다. 현재 `ai-service/`에는 R001~R004 실행,
 scoring, Evidence 변환과 Rule 분석 결과 조합의 내부 경로에 더해 Pydantic
 요청·응답 DTO와 FastAPI `POST /api/v1/rule-analysis` HTTP 경계가 구현되어
-있다. Spring Boot Client, 자동 DetectionResult 채택·영속화와 ML은 아직
-구현되지 않았다. 상세 Client 계약은
+있다. Spring Boot Client도 구현되어 있으나 자동 DetectionResult 채택·영속화와
+ML은 아직 구현되지 않았다. 상세 Client 계약은
 [Rule v1 내부 분석 API](./rule-v1-analysis-api.md#13-spring-boot-client-연동-계약)를
 따른다.
 
@@ -285,7 +287,10 @@ Idempotency-Key: <required>
 
 현재 접수 단계에서는 네 nullable 필드를 JSON에서 생략하지 않는다. `riskLevel`과 `riskResponseOutcome`의 비-null Enum은 후속 위험 탐지·대응 계약에서 확정하며, 이번 접수 응답에서는 nullable string으로 취급한다.
 
-이 응답은 거래 영속화 단계의 **현재 구현** 계약이며 최종 계약이 아니다. 현재 신규 요청은 이 단계적 업무 결과를 version envelope에 저장한다. 채택된 DetectionResult와 위험 대응·사건 연결 결과를 동기 처리로 확정하는 **목표 계약**의 Java·DB 반영은 여전히 후속 구현이다.
+이 응답은 거래 영속화 단계의 **현재 구현** 계약이며 최종 계약이 아니다. 현재
+신규 요청은 이 단계적 업무 결과를 version envelope에 저장한다. 목표 Rule v1
+계약은 DetectionResult 채택 commit 이후에만 최종 성공 Snapshot을 확정한다.
+이 연결과 위험 대응·사건 결과의 Java·DB 반영은 여전히 후속 구현이다.
 
 ### 5.6 성공 응답 예시
 
@@ -354,6 +359,11 @@ Content-Type: application/json
 
 저장된 `failureCode`가 null, 빈 값, 알 수 없는 값 또는 내부 전용 값이면 `500 Internal Server Error`, `INTERNAL_ERROR`, `요청을 처리하는 중 오류가 발생했습니다.`로 축약한다. 원래 `failureCode` 문자열을 공개 code나 message로 전달하지 않는다. 현재 거래 저장 또는 멱등 완료의 예기치 않은 실패를 기록하는 내부 코드 `TRANSACTION_INTAKE_FAILED`도 공개 whitelist가 아니므로 `INTERNAL_ERROR`로 처리한다.
 
+따라서 목표 오케스트레이션의 `DEPENDENCY_UNAVAILABLE` 최초 응답 매핑과 현재
+FAILED 멱등 재생 whitelist는 아직 일치하지 않는다. 후속 구현은 같은 실패의
+최초 응답과 재생 응답이 달라지지 않도록 기존 공통 code를 안전하게 연결해야
+하며, 구현 전에는 완료된 것으로 표현하지 않는다.
+
 ### 5.8 의존 서비스 Timeout
 
 #### 5.8.1 External Risk Timeout
@@ -370,15 +380,25 @@ Content-Type: application/json
 - 완료·검증된 DetectionResult가 없으므로 `adoptedDetectionResultId`를 설정하지 않는다.
 - Rule v1 Spring Boot Client의 자동 retry는 `0회`이며 timeout 응답을 반복
   호출하거나 fallback 결과로 바꾸지 않는다.
-- Transaction을 `FAILED`로 기록하고 사건을 생성하지 않는 방식은 기존 초기
-  권장안이며, 실제 거래 실패 상태, 수동 재개와 재처리 정책은 계속 `TBD`이다.
-- 기존 초기 권장 외부 응답은 `503 Service Unavailable`과
-  `DEPENDENCY_TIMEOUT`이다.
+- 대상 DetectionResult와 Transaction을 `FAILED`로 기록하고 결과를 채택하거나
+  사건을 생성하지 않는다.
+- connect·response timeout은 `503 Service Unavailable`과
+  `DEPENDENCY_TIMEOUT`으로 반환한다.
+- 실패 후 재분석과 수동 복구는 후속 계약으로 분리한다.
 
 connect·response timeout의 상세 분류와 설정은
 [Rule v1 내부 분석 API](./rule-v1-analysis-api.md#13-spring-boot-client-연동-계약)를
 따른다. Client 내부 오류 category를 외부 거래 API code로 직접 노출하지 않으며
-외부 오류와 거래 상태의 최종 매핑은 후속 오케스트레이션 계약에서 결정한다.
+다음 목표 매핑을 적용한다.
+
+| Client 내부 category | 외부 HTTP·공통 code |
+| --- | --- |
+| `AI_SERVICE_CONNECT_TIMEOUT`, `AI_SERVICE_RESPONSE_TIMEOUT` | `503 DEPENDENCY_TIMEOUT` |
+| `AI_SERVICE_UNAVAILABLE` | `503 DEPENDENCY_UNAVAILABLE` |
+| 요청·payload·Rule 계약, capability, FastAPI 내부 오류, invalid response category | `500 INTERNAL_ERROR` |
+
+FastAPI 원문 오류와 Client 내부 category는 외부 응답에 포함하지 않는다. 이
+매핑과 실패 상태의 원자적 기록은 아직 오케스트레이션으로 구현되지 않았다.
 
 실패 Transaction 저장과 오류 응답은 일부만 성공한 것처럼 보이지 않도록 정합성 경계를 가져야 한다. 오류 응답에서 이미 저장된 실패 Transaction을 식별할 수 있도록 다음 공통 오류 문맥을 사용한다.
 
@@ -411,7 +431,8 @@ Content-Type: application/json
 | `400 Bad Request` | 잘못된 JSON, 필수 헤더 누락 또는 필드 형식 오류 |
 | `409 Conflict` | 멱등성 키 지문 충돌, 동일 멱등 요청 처리 중, `transactionId` 중복 또는 동시성 충돌 |
 | `422 Unprocessable Entity` | 형식은 맞지만 거래 유형별 업무 규칙을 만족하지 못함 |
-| `503 Service Unavailable` | 유효 캐시 없는 External Risk Timeout 또는 FastAPI Timeout의 초기 정책 |
+| `503 Service Unavailable` | 유효 캐시 없는 External Risk Timeout, FastAPI connect·response timeout 또는 가용성 장애 |
+| `500 Internal Server Error` | Spring이 만든 AI 요청·Rule·배포 capability 문제, FastAPI 내부 오류, 신뢰할 수 없는 응답 또는 그 밖의 서버 오류 |
 
 ## 6. 거래 목록 조회
 
@@ -872,7 +893,11 @@ GET /api/v1/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001/detection-results?
 }
 ```
 
-동일 `transactionId + detectionResultVersion`은 하나의 결과만 유지한다. Timeout 후 늦은 응답과 재시도 응답이 같은 버전을 각각 확정하지 않으며, 실제 새 분석은 새 버전을 사용한다.
+동일 `transactionId + detectionResultVersion`은 하나의 결과만 유지한다. 거래
+잠금 아래 다음 버전을 할당하고 DB unique 제약을 최종 방어선으로 사용한다.
+Timeout 실패와 늦은 성공 응답은 같은 거래·DetectionResult 잠금 및 terminal
+상태 검증으로 하나만 확정한다. Client 자동 retry는 없으며 실제 새 분석은
+후속 재분석 계약에 따라 새 버전을 사용해야 한다.
 
 ### 10.4 상태 코드
 
@@ -1115,8 +1140,9 @@ Content-Type: application/json
 ### 16.2 거래
 
 - `riskResponseOutcome` Enum 이름
-- FastAPI·External Risk Timeout 이후 거래 실패 상태, 수동 재개와 재처리 정책.
-  Rule v1 Client 자체의 자동 retry는 `0회`로 확정됨
+- External Risk Timeout 이후 거래 실패 상태와 복구 정책
+- Rule v1 분석 실패 후 재분석·수동 복구 정책. 최초 시도는 DetectionResult와
+  거래를 `FAILED`로 기록하고 Client 자동 retry는 `0회`
 - 오류 응답의 `resource` 최종 이름과 범용 구조
 - 향후 응답 계약 또는 envelope codec 변경 시 새 version 식별자와 지원 registry
 - Snapshot metadata의 JSONB 내부 저장 또는 별도 컬럼 여부와 필요한 Flyway Migration

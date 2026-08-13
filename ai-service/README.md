@@ -9,13 +9,16 @@ RuleExecutionPlanRunner·PlannedRuleResult와 `scoring-policy-v1`의
 RuleScoringCalculator, RuleEvidenceTransformer와 RuleAnalysisResult 조합이다.
 Pydantic 요청·응답 DTO와 명시적 매퍼, `POST /api/v1/rule-analysis`, Trace·실제
 수신 byte 기반 본문 제한 Middleware와 공통 오류 Handler도 구현되어 있다.
-RuleVersion 조회를 포함한 Spring Boot Client, DetectionResult·DetectionEvidence
+Spring Boot `RuleAnalysisHttpClient`도 구현되어 있다. 다만 실제 RuleVersion 전체
+조회·Snapshot 조합, 거래 분석 오케스트레이션, DetectionResult·DetectionEvidence
 자동 영속화와 결과 채택은 구현되지 않았다.
 
 Spring Boot → FastAPI 내부 Rule v1 분석 요청·응답, 추적, 직렬화와 오류 계약은
 [Rule v1 내부 분석 API](../docs/03-api/rule-v1-analysis-api.md)에 정의되어 있다.
-FastAPI HTTP 경계는 구현되었지만 Spring Boot 실제 연동이 완료되었다는 뜻은
-아니다.
+FastAPI HTTP 경계와 Spring Boot Client는 구현되었지만 거래 분석 실행 경로
+전체가 연결되었다는 뜻은 아니다. Spring Boot의 처리 순서와 결과 채택 경계는
+[Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../docs/01-requirements/spring-rule-analysis-orchestration-contract.md)에
+정의한다.
 
 ## 개발 환경
 
@@ -105,8 +108,10 @@ fail-fast 정책은
   공개 타입·진입점 계약과 Python 구현·테스트 완료
 - [Rule v1 내부 분석 API 계약](../docs/03-api/rule-v1-analysis-api.md):
   문서 정의 및 FastAPI Endpoint·Pydantic DTO·Trace·본문 제한·오류 처리 구현 완료,
-  Spring Boot Client 미구현
-- 실제 RuleVersion 조회와 Spring Boot Client: 후속 범위
+  Spring Boot Client·Timeout·Trace 전달·응답 검증·오류 분류 구현 완료
+- 실제 전체 활성 RuleVersion 조회와 거래·행동 이벤트 Snapshot 조합: 후속 범위
+- [Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../docs/01-requirements/spring-rule-analysis-orchestration-contract.md):
+  문서 정의 완료, 실행 경로 미구현
 - R004 `observed_amount` facts 보강과 Evidence 변환·Rule 분석 결과 조합:
   구현 완료
 - DetectionResult·DetectionEvidence 자동 영속화와 결과 채택: 후속 범위
@@ -115,8 +120,9 @@ fail-fast 정책은
 구현되었고 Evidence·Reason Code 변환과 Rule 분석 결과 조합까지 순수 내부
 경로로 구현되어 있다. RuleVersion snapshot을 HTTP DTO로 수신해 기존 내부
 경로를 실행하고 응답 DTO로 반환하는 FastAPI Rule 분석 endpoint도 구현되어
-있다. RuleVersion 조회를 포함한 Spring Boot Client와
-DetectionResult·DetectionEvidence 자동 영속화·결과 채택은 후속 범위이다.
+있다. Spring Boot HTTP Client도 구현되어 있으나 실제 전체 활성 RuleVersion
+조회·Snapshot 조합과 DetectionResult·DetectionEvidence 자동 영속화·결과
+채택을 연결하는 오케스트레이션은 후속 범위이다.
 순수 builder는 전달받은
 `evaluationCutoffAt`의 UTC 표현과 RuleVersion 적용 기간을 검증하고, 구현된
 Runner는 plan의 cutoff와 거래 `occurredAt`의 정확한 일치 및 ordered raw result
@@ -137,5 +143,5 @@ RuleEvidenceTransformer.transform(
 확정한 공개 타입명은 `RuleEvidenceTransformer`, `RuleEvidenceOutput`,
 `RuleEvidenceObservation`, `RuleAnalysisResult`, `RuleEvidenceError`,
 `RuleEvidenceErrorCategory`이며 현재 패키지에서 export한다. FastAPI Rule 분석
-endpoint와 Pydantic 요청·응답 DTO는 구현되어 있으며 Spring Boot Client,
-자동 영속화와 결과 채택은 아직 없다.
+endpoint와 Pydantic 요청·응답 DTO 및 Spring Boot Client는 구현되어 있으며,
+자동 영속화와 결과 채택을 수행하는 통합 실행 경로는 아직 없다.
