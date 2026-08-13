@@ -1,5 +1,7 @@
 package com.aifds.backend.persistence;
 
+import com.aifds.backend.behavior.entity.BehaviorEventType;
+import com.aifds.backend.behavior.repository.BehaviorEventRepository;
 import com.aifds.backend.detection.entity.DetectionAnalysisStatus;
 import com.aifds.backend.detection.entity.DetectionEvidence;
 import com.aifds.backend.detection.entity.DetectionResult;
@@ -11,6 +13,7 @@ import com.aifds.backend.detection.service.DetectionResultPersistenceService;
 import com.aifds.backend.detection.service.RuleAnalysisPersistenceService;
 import com.aifds.backend.detection.service.RuleEvidenceDraft;
 import com.aifds.backend.detection.service.StartedRuleAnalysis;
+import com.aifds.backend.detection.service.StartedRuleAnalysisExecution;
 import com.aifds.backend.rule.entity.RuleVersion;
 import com.aifds.backend.rule.entity.RuleVersionStatus;
 import com.aifds.backend.rule.repository.RuleVersionRepository;
@@ -28,10 +31,13 @@ import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.data.domain.PageRequest;
 
 import java.math.BigDecimal;
 import java.sql.SQLException;
@@ -91,6 +97,9 @@ class DetectionPersistenceIntegrationTest
 
     @Autowired
     private PlatformTransactionManager transactionManager;
+
+    @Autowired
+    private BehaviorEventRepository behaviorEventRepository;
 
     @Test
     void migrationCreatesExactColumnsConstraintsIndexesAndTriggers() {
@@ -650,13 +659,15 @@ class DetectionPersistenceIntegrationTest
     }
 
     @Test
-    void startsRuleAnalysisWithTransactionAndResultInOneCommit() {
+    void startsRuleAnalysisWithTransactionAndResultInOneCommit()
+            throws Exception {
         FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
 
-        StartedRuleAnalysis started = startRuleAnalysis(
+        StartedRuleAnalysisExecution execution = startRuleAnalysisExecution(
                 transaction,
                 "trace_boundary_start_commit"
         );
+        StartedRuleAnalysis started = execution.startedAnalysis();
 
         entityManager.clear();
         FinancialTransaction storedTransaction = transactionRepository
@@ -674,19 +685,27 @@ class DetectionPersistenceIntegrationTest
         assertThat(storedResult.getAnalysisStartedAt()).isNotNull();
         assertThat(started.transactionId())
                 .isEqualTo(transaction.getTransactionId());
+        assertThat(storedResult.getEvaluationCutoffAt())
+                .isEqualTo(execution.request().evaluationCutoffAt());
+        assertThat(storedResult.getRuleSetVersion())
+                .isEqualTo(started.ruleSetVersion());
+        assertThat(objectMapper.writeValueAsString(execution.request()))
+                .contains(transaction.getTransactionId().toString())
+                .contains(started.evaluationCutoffAt().toString());
     }
 
     @Test
     void rollsBackPendingInsertWhenStartTransitionFails() {
         FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
+        publishSeedRuleVersion(
+                RuleEvidenceObservationSummary.TRANSFER_ABSOLUTE_HIGH_AMOUNT
+        );
 
         assertThatThrownBy(() -> ruleAnalysisPersistenceService.startAnalysis(
                 transaction.getTransactionId(),
-                "rule-v1",
                 "score-v1",
                 "feature-v1",
                 null,
-                transaction.getOccurredAt(),
                 "trace_boundary_start_rollback",
                 null
         )).isInstanceOf(NullPointerException.class);
@@ -706,6 +725,9 @@ class DetectionPersistenceIntegrationTest
     @Test
     void allowsOnlyOneConcurrentCompositeAnalysisStart() throws Exception {
         FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
+        publishSeedRuleVersion(
+                RuleEvidenceObservationSummary.TRANSFER_ABSOLUTE_HIGH_AMOUNT
+        );
         CountDownLatch ready = new CountDownLatch(2);
         CountDownLatch start = new CountDownLatch(1);
         ExecutorService executor = Executors.newFixedThreadPool(2);
@@ -738,9 +760,26 @@ class DetectionPersistenceIntegrationTest
             assertThat(attempts.stream()
                     .filter(StartedRuleAnalysis.class::isInstance))
                     .hasSize(1);
-            assertThat(attempts.stream()
-                    .filter(IllegalStateException.class::isInstance))
-                    .hasSize(1);
+            List<Object> failedAttempts = attempts.stream()
+                    .filter(attempt -> !(attempt instanceof StartedRuleAnalysis))
+                    .toList();
+            assertThat(failedAttempts).singleElement().satisfies(failure -> {
+                // The loser can either observe ANALYZING in a fresh snapshot or
+                // receive PostgreSQL 40001 after waiting on the concurrent update.
+                assertThat(failure).isInstanceOfAny(
+                        IllegalStateException.class,
+                        CannotAcquireLockException.class
+                );
+                if (failure instanceof IllegalStateException stateFailure) {
+                    assertThat(stateFailure).hasMessageContaining(
+                            "processing status must be RECEIVED"
+                    );
+                } else if (failure instanceof CannotAcquireLockException lockFailure) {
+                    SQLException sqlException = findSqlException(lockFailure);
+                    assertThatObject(sqlException).isNotNull();
+                    assertThat(sqlException.getSQLState()).isEqualTo("40001");
+                }
+            });
         } finally {
             executor.shutdownNow();
             assertThat(executor.awaitTermination(5, TimeUnit.SECONDS))
@@ -1266,7 +1305,7 @@ class DetectionPersistenceIntegrationTest
         }
         try {
             return startRuleAnalysis(transaction, traceId);
-        } catch (IllegalStateException exception) {
+        } catch (IllegalStateException | CannotAcquireLockException exception) {
             return exception;
         }
     }
@@ -1275,13 +1314,135 @@ class DetectionPersistenceIntegrationTest
             FinancialTransaction transaction,
             String traceId
     ) {
-        return ruleAnalysisPersistenceService.startAnalysis(
+        return startRuleAnalysisExecution(transaction, traceId)
+                .startedAnalysis();
+    }
+
+    @Test
+    void snapshotFailureLeavesTransactionReceivedWithoutDetectionResult() {
+        FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
+
+        assertThatThrownBy(() -> ruleAnalysisPersistenceService.startAnalysis(
                 transaction.getTransactionId(),
-                "rule-v1",
                 "score-v1",
                 "feature-v1",
                 null,
-                transaction.getOccurredAt(),
+                "trace_boundary_snapshot_rollback",
+                Instant.now()
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must not be empty");
+
+        entityManager.clear();
+        assertThat(transactionRepository.findByTransactionId(
+                transaction.getTransactionId()
+        ).orElseThrow().getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.RECEIVED);
+        assertThat(resultRepository
+                .findAllByFinancialTransaction_TransactionIdOrderByDetectionResultVersionDesc(
+                        transaction.getTransactionId()
+                )).isEmpty();
+    }
+
+    @Test
+    void repeatableReadExcludesBehaviorCommittedAfterRuleSnapshot()
+            throws Exception {
+        FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
+        publishSeedRuleVersion(
+                RuleEvidenceObservationSummary.TRANSFER_ABSOLUTE_HIGH_AMOUNT
+        );
+        publishSeedRuleVersion(
+                RuleEvidenceObservationSummary
+                        .RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT
+        );
+        CountDownLatch behaviorQueryReached = new CountDownLatch(1);
+        CountDownLatch behaviorInsertCommitted = new CountDownLatch(1);
+        TransactionTemplate repeatableRead = new TransactionTemplate(
+                transactionManager
+        );
+        repeatableRead.setIsolationLevel(
+                TransactionDefinition.ISOLATION_REPEATABLE_READ
+        );
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+
+        try {
+            Future<List<com.aifds.backend.behavior.entity.BehaviorEvent>>
+                    behaviorSnapshot = executor.submit(() ->
+                    repeatableRead.execute(status -> {
+                        transactionRepository.findByTransactionIdForUpdate(
+                                transaction.getTransactionId()
+                        ).orElseThrow();
+                        ruleVersionRepository.findAllExecutableVersions(
+                                transaction.getOccurredAt()
+                        );
+                        behaviorQueryReached.countDown();
+                        try {
+                            if (!behaviorInsertCommitted.await(
+                                    10,
+                                    TimeUnit.SECONDS
+                            )) {
+                                throw new AssertionError(
+                                        "Behavior insert was not committed"
+                                );
+                            }
+                        } catch (InterruptedException exception) {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException(exception);
+                        }
+                        return behaviorEventRepository.findForRuleEvaluation(
+                                transaction.getExternalCustomerRef(),
+                                Set.of(BehaviorEventType.DEVICE_REGISTERED),
+                                transaction.getOccurredAt().minusSeconds(86_400),
+                                transaction.getOccurredAt(),
+                                PageRequest.of(0, 1_000)
+                        );
+                    })
+            );
+            assertThat(behaviorQueryReached.await(10, TimeUnit.SECONDS))
+                    .isTrue();
+            jdbcTemplate.update("""
+                    INSERT INTO behavior_event (
+                        event_id,
+                        event_type,
+                        occurred_at,
+                        external_customer_ref,
+                        device_ref,
+                        request_fingerprint
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    UUID.randomUUID(),
+                    BehaviorEventType.DEVICE_REGISTERED.name(),
+                    Timestamp.from(transaction.getOccurredAt()),
+                    transaction.getExternalCustomerRef(),
+                    transaction.getDeviceRef(),
+                    "c".repeat(64)
+            );
+            behaviorInsertCommitted.countDown();
+
+            assertThat(behaviorSnapshot.get(10, TimeUnit.SECONDS)).isEmpty();
+            assertThat(jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM behavior_event",
+                    Integer.class
+            )).isEqualTo(1);
+        } finally {
+            behaviorInsertCommitted.countDown();
+            executor.shutdownNow();
+            assertThat(executor.awaitTermination(5, TimeUnit.SECONDS))
+                    .isTrue();
+        }
+    }
+
+    private StartedRuleAnalysisExecution startRuleAnalysisExecution(
+            FinancialTransaction transaction,
+            String traceId
+    ) {
+        publishSeedRuleVersion(
+                RuleEvidenceObservationSummary.TRANSFER_ABSOLUTE_HIGH_AMOUNT
+        );
+        return ruleAnalysisPersistenceService.startAnalysis(
+                transaction.getTransactionId(),
+                "score-v1",
+                "feature-v1",
+                null,
                 traceId,
                 Instant.now()
         );

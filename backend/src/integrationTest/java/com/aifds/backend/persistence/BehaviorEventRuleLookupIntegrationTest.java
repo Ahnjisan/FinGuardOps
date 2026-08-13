@@ -17,6 +17,7 @@ import org.springframework.data.domain.Sort;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -145,6 +146,44 @@ class BehaviorEventRuleLookupIntegrationTest
                 .isEqualTo(1);
         assertThatThrownBy(() -> PageRequest.of(0, 0, Sort.unsorted()))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void freezesTheLatestOneThousandEventsInContractOrder() {
+        List<BehaviorEvent> events = new ArrayList<>();
+        List<UUID> ids = new ArrayList<>();
+        for (int index = 0; index <= 1_000; index++) {
+            UUID eventId = UUID.randomUUID();
+            ids.add(eventId);
+            events.add(new BehaviorEvent(
+                    eventId,
+                    BehaviorEventType.DEVICE_REGISTERED,
+                    TO_INCLUSIVE.minusSeconds(index),
+                    CUSTOMER_REF,
+                    null,
+                    "device_ref_rule_lookup",
+                    null,
+                    null,
+                    FINGERPRINT
+            ));
+        }
+        behaviorEventRepository.saveAllAndFlush(events);
+        entityManager.clear();
+
+        List<BehaviorEvent> results = behaviorEventRepository
+                .findForRuleEvaluation(
+                        CUSTOMER_REF,
+                        Set.of(BehaviorEventType.DEVICE_REGISTERED),
+                        FROM_INCLUSIVE,
+                        TO_INCLUSIVE,
+                        PageRequest.of(0, 1_000, Sort.unsorted())
+                );
+
+        assertThat(results).hasSize(1_000);
+        assertThat(results.get(0).getEventId()).isEqualTo(ids.get(0));
+        assertThat(results.get(999).getEventId()).isEqualTo(ids.get(999));
+        assertThat(results).extracting(BehaviorEvent::getEventId)
+                .doesNotContain(ids.get(1_000));
     }
 
     private void save(

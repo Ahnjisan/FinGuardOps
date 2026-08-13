@@ -187,9 +187,9 @@ CONFIRMED_FRAUD
 
 아래 구성은 목표 아키텍처를 포함합니다. 현재는 Spring Boot의 거래·행동 이벤트
 접수와 PostgreSQL 연동, 탐지 결과·RuleVersion 영속 모델, FastAPI Rule v1 실행
-Endpoint와 Spring Boot `RuleAnalysisHttpClient`까지 구현되었습니다. 거래 분석
-Snapshot 조합·상태 전이·결과 채택 오케스트레이션과 운영 배포 환경은 아직
-구현되지 않았습니다.
+Endpoint, Spring Boot `RuleAnalysisHttpClient`, 거래 분석 Snapshot 조합과 분석
+시작·결과 채택 persistence boundary까지 구현되었습니다. HTTP Client를 연결하는
+상위 오케스트레이션과 운영 배포 환경은 아직 구현되지 않았습니다.
 
 ```text
 React·TypeScript
@@ -331,17 +331,18 @@ Kafka
 * 거래 분석 시작과 DetectionResult 시작, 성공 Evidence·결과 채택·`ANALYZED`,
   실패 결과·거래 `FAILED`를 각각 원자적으로 저장하는 persistence boundary 구현
 * 거래 우선 잠금으로 동일 거래 동시 분석 시작과 terminal 결과의 늦은 완료 방지 검증
+* 거래·최신 행동 이벤트 1,000건·전체 실행 가능 RuleVersion immutable Snapshot 조합
+* `REPEATABLE_READ` 분석 시작 경계와 canonical `ruleSetVersion` 선계산·응답 exact 검증
 * Backend와 AI Service 전용 GitHub Actions CI 구성
 
 현재 PostgreSQL 연동은 애플리케이션 코드와 Testcontainers 검증 범위입니다. 운영 PostgreSQL, Docker Compose, Kubernetes와 AWS 배포 환경이 구현되었다는 의미는 아닙니다. 거래 접수 성공 응답도 현재는 단계적 구현 상태인 `RECEIVED`와 탐지 관련 null 값을 반환하며, 최종 동기 분석 목표는 [`ADR-003`](docs/07-decisions/ADR-003-transaction-processing-boundary.md)을 유지합니다.
 
 ### In Progress
 
-* Spring Boot Rule v1 Snapshot 조합·HTTP 호출 상위 오케스트레이션 구현 준비
+* Spring Boot Rule v1 HTTP 호출 상위 오케스트레이션 구현 준비
 
 ### Planned
 
-* 거래·행동 이벤트·전체 활성 RuleVersion Snapshot 조합 Service
 * Snapshot과 `RuleAnalysisHttpClient`를 persistence boundary에 연결하는 상위 실행 경로
 * FastAPI 응답의 `RuleEvidenceDraft` 자동 변환과 성공·실패 boundary 호출
 * 결과 채택 commit 이후 최종 동기 응답과 멱등 Snapshot 확정

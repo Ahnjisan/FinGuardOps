@@ -56,6 +56,24 @@ public interface RuleVersionRepository
     );
 
     @Query("""
+            SELECT version
+            FROM RuleVersion version
+            JOIN FETCH version.fraudRule rule
+            WHERE rule.lifecycleStatus =
+                com.aifds.backend.rule.entity.FraudRuleLifecycleStatus.ACTIVE
+              AND version.status =
+                com.aifds.backend.rule.entity.RuleVersionStatus.PUBLISHED
+              AND version.effectiveFrom <= :asOf
+              AND (
+                  version.effectiveTo IS NULL
+                  OR :asOf < version.effectiveTo
+              )
+            """)
+    List<RuleVersion> findAllExecutableVersions(
+            @Param("asOf") Instant asOf
+    );
+
+    @Query("""
             SELECT COUNT(version)
             FROM RuleVersion version
             WHERE version.fraudRule.id = :fraudRulePk

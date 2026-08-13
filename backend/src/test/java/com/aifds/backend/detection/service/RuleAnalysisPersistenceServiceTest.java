@@ -6,6 +6,14 @@ import com.aifds.backend.detection.entity.RiskLevel;
 import com.aifds.backend.detection.repository.DetectionEvidenceRepository;
 import com.aifds.backend.detection.repository.DetectionResultRepository;
 import com.aifds.backend.rule.contract.RuleV1ContractRegistry;
+import com.aifds.backend.rule.client.dto.RuleAnalysisRequest;
+import com.aifds.backend.rule.client.dto.RuleLifecycleStatus;
+import com.aifds.backend.rule.client.dto.RuleTransactionSnapshotRequest;
+import com.aifds.backend.rule.client.dto.RuleTransactionType;
+import com.aifds.backend.rule.client.dto.RuleVersionSnapshotRequest;
+import com.aifds.backend.rule.client.dto.RuleVersionStatus;
+import com.aifds.backend.rule.contract.CanonicalRuleSetVersionCalculator;
+import com.aifds.backend.rule.contract.RuleV1ExecutionPlanRegistry;
 import com.aifds.backend.rule.entity.FraudRule;
 import com.aifds.backend.rule.entity.RuleVersion;
 import com.aifds.backend.rule.repository.RuleVersionRepository;
@@ -25,7 +33,12 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.CannotAcquireLockException;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
+import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
@@ -56,6 +69,8 @@ class RuleAnalysisPersistenceServiceTest {
     private DetectionEvidenceRepository evidenceRepository;
     @Mock
     private RuleVersionRepository ruleVersionRepository;
+    @Mock
+    private RuleAnalysisSnapshotAssembler snapshotAssembler;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private RuleAnalysisPersistenceService service;
@@ -66,7 +81,8 @@ class RuleAnalysisPersistenceServiceTest {
                 transactionRepository,
                 resultRepository,
                 evidenceRepository,
-                ruleVersionRepository
+                ruleVersionRepository,
+                snapshotAssembler
         );
     }
 
@@ -80,26 +96,30 @@ class RuleAnalysisPersistenceServiceTest {
                 .thenReturn(2);
         when(resultRepository.saveAndFlush(any(DetectionResult.class)))
                 .thenAnswer(invocation -> invocation.getArgument(0));
+        RuleAnalysisSnapshotAssembler.AssembledRuleAnalysisSnapshot snapshot =
+                snapshot(transactionId);
+        when(snapshotAssembler.assemble(transaction)).thenReturn(snapshot);
 
-        StartedRuleAnalysis started = service.startAnalysis(
+        StartedRuleAnalysisExecution execution = service.startAnalysis(
                 transactionId,
-                "rule-set-v1",
                 "score-v1",
                 "feature-v1",
                 null,
-                CUTOFF,
                 "trace_analysis_start_01",
                 STARTED_AT
         );
+        StartedRuleAnalysis started = execution.startedAnalysis();
 
         ArgumentCaptor<DetectionResult> resultCaptor =
                 ArgumentCaptor.forClass(DetectionResult.class);
         InOrder order = inOrder(
                 transactionRepository,
+                snapshotAssembler,
                 resultRepository
         );
         order.verify(transactionRepository)
                 .findByTransactionIdForUpdate(transactionId);
+        order.verify(snapshotAssembler).assemble(transaction);
         order.verify(resultRepository)
                 .findMaximumVersionByTransactionPk(41L);
         order.verify(resultRepository).saveAndFlush(resultCaptor.capture());
@@ -112,11 +132,14 @@ class RuleAnalysisPersistenceServiceTest {
         assertThat(started.detectionResultId())
                 .isEqualTo(result.getDetectionResultId());
         assertThat(started.detectionResultVersion()).isEqualTo(3);
-        assertThat(started.ruleSetVersion()).isEqualTo("rule-set-v1");
+        assertThat(started.ruleSetVersion()).isEqualTo(
+                snapshot.ruleSetVersion()
+        );
         assertThat(started.modelVersion()).isNull();
         assertThat(started.evaluationCutoffAt()).isEqualTo(CUTOFF);
         assertThat(started.analysisTraceId())
                 .isEqualTo("trace_analysis_start_01");
+        assertThat(execution.request()).isSameAs(snapshot.request());
         verify(transaction).startAnalysis();
     }
 
@@ -130,11 +153,9 @@ class RuleAnalysisPersistenceServiceTest {
 
         assertThatThrownBy(() -> service.startAnalysis(
                 transaction.getTransactionId(),
-                "rule-set-v1",
                 "score-v1",
                 "feature-v1",
                 null,
-                CUTOFF,
                 "trace_analysis_start_02",
                 STARTED_AT
         )).isInstanceOf(IllegalStateException.class);
@@ -142,6 +163,7 @@ class RuleAnalysisPersistenceServiceTest {
         verify(resultRepository, never())
                 .findMaximumVersionByTransactionPk(anyLong());
         verify(resultRepository, never()).saveAndFlush(any());
+        verify(snapshotAssembler, never()).assemble(any());
     }
 
     @Test
@@ -626,6 +648,102 @@ class RuleAnalysisPersistenceServiceTest {
                 .add("OPEN_BANKING_TRANSFER");
         return condition.put("currencyCode", "KRW")
                 .put("amountThreshold", "10000000");
+    }
+
+    @Test
+    void startUsesRequiresNewRepeatableReadAndPropagatesLockFailure()
+            throws Exception {
+        Method method = RuleAnalysisPersistenceService.class.getMethod(
+                "startAnalysis",
+                UUID.class,
+                String.class,
+                String.class,
+                String.class,
+                String.class,
+                Instant.class
+        );
+        Transactional transactional = method.getAnnotation(
+                Transactional.class
+        );
+        assertThat(transactional.propagation())
+                .isEqualTo(Propagation.REQUIRES_NEW);
+        assertThat(transactional.isolation())
+                .isEqualTo(Isolation.REPEATABLE_READ);
+
+        UUID transactionId = UUID.randomUUID();
+        CannotAcquireLockException failure =
+                new CannotAcquireLockException("serialization");
+        when(transactionRepository.findByTransactionIdForUpdate(transactionId))
+                .thenThrow(failure);
+        assertThatThrownBy(() -> service.startAnalysis(
+                transactionId,
+                "score-v1",
+                "feature-v1",
+                null,
+                "trace_analysis_concurrent",
+                STARTED_AT
+        )).isSameAs(failure);
+        verify(snapshotAssembler, never()).assemble(any());
+        verify(resultRepository, never())
+                .findMaximumVersionByTransactionPk(anyLong());
+        verify(resultRepository, never()).saveAndFlush(any());
+        verify(transactionRepository, never()).saveAndFlush(any());
+    }
+
+    private RuleAnalysisSnapshotAssembler.AssembledRuleAnalysisSnapshot
+    snapshot(UUID transactionId) {
+        RuleVersionSnapshotRequest rule = new RuleVersionSnapshotRequest(
+                UUID.fromString("10000000-0000-4000-8000-000000000004"),
+                RuleV1ContractRegistry.RECENT_BENEFICIARY_TRANSFER,
+                RuleLifecycleStatus.ACTIVE,
+                UUID.fromString("20000000-0000-4000-8000-000000000004"),
+                1,
+                RuleVersionStatus.PUBLISHED,
+                RuleV1ContractRegistry.RECENT_BENEFICIARY_TRANSFER,
+                10,
+                objectMapper.createObjectNode()
+                        .put("eventType", "BENEFICIARY_REGISTERED")
+                        .put("windowSeconds", 86_400)
+                        .put(
+                                "matchPolicy",
+                                "SAME_CUSTOMER_SENDER_ACCOUNT_AND_BENEFICIARY"
+                        )
+                        .put(
+                                "selectionPolicy",
+                                "LATEST_OCCURRED_AT_THEN_EVENT_ID_ASC"
+                        ),
+                CUTOFF.minusSeconds(120),
+                null
+        );
+        RuleAnalysisRequest request = new RuleAnalysisRequest(
+                CUTOFF,
+                new RuleTransactionSnapshotRequest(
+                        transactionId,
+                        RuleTransactionType.ACCOUNT_TRANSFER,
+                        "10000000",
+                        "KRW",
+                        CUTOFF,
+                        "customer_ref",
+                        "sender_ref",
+                        "recipient_ref",
+                        "device_ref"
+                ),
+                List.of(),
+                List.of(rule)
+        );
+        String ruleSetVersion = new CanonicalRuleSetVersionCalculator()
+                .calculate(List.of(
+                        new RuleV1ExecutionPlanRegistry.RuleVersionIdentity(
+                                rule.fraudRuleId(),
+                                rule.ruleVersionId(),
+                                rule.ruleCode(),
+                                rule.versionNumber()
+                        )
+                ));
+        return new RuleAnalysisSnapshotAssembler.AssembledRuleAnalysisSnapshot(
+                ruleSetVersion,
+                request
+        );
     }
 
     private enum AttemptMismatch {

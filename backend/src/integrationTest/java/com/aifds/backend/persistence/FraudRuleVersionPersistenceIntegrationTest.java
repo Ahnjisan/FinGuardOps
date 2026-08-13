@@ -464,6 +464,16 @@ class FraudRuleVersionPersistenceIntegrationTest
                 AMOUNT_RULE,
                 FIRST_START
         )).get().extracting(RuleVersion::getVersionNumber).isEqualTo(1);
+        List<RuleVersion> allAtStart = ruleVersionRepository
+                .findAllExecutableVersions(FIRST_START);
+        PersistenceUnitUtil persistenceUnitUtil = entityManager
+                .getEntityManagerFactory()
+                .getPersistenceUnitUtil();
+        assertThat(allAtStart).singleElement().satisfies(version -> {
+            assertThat(version.getVersionNumber()).isEqualTo(1);
+            assertThat(persistenceUnitUtil.isLoaded(version, "fraudRule"))
+                    .isTrue();
+        });
         assertThat(ruleVersionRepository.findExecutableVersion(
                 AMOUNT_RULE,
                 FIRST_START.plusSeconds(3600)
@@ -473,6 +483,10 @@ class FraudRuleVersionPersistenceIntegrationTest
                 AMOUNT_RULE,
                 FIRST_START.plusSeconds(3600)
         )).get().extracting(RuleVersion::getVersionNumber).isEqualTo(2);
+        assertThat(ruleVersionRepository.findAllExecutableVersions(
+                FIRST_START.plusSeconds(3600)
+        )).singleElement().extracting(RuleVersion::getVersionNumber)
+                .isEqualTo(2);
         assertThat(ruleVersionRepository
                 .findAllByFraudRule_RuleCodeOrderByVersionNumberDesc(
                         AMOUNT_RULE

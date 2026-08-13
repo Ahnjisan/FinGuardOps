@@ -7,6 +7,7 @@ import com.aifds.backend.rule.client.config.AiServiceProperties;
 import com.aifds.backend.rule.client.config.RuleAnalysisClientConfiguration;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequest;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResponse;
+import com.aifds.backend.rule.client.dto.RuleAnalysisResultResponse;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.JsonMappingException;
@@ -151,6 +152,28 @@ class RuleAnalysisHttpClientTest {
         assertThat(actual.analysis().scoringResult().riskLevel().name())
                 .isEqualTo("LOW");
         assertThat(actual.analysis().evidence()).isEmpty();
+    }
+
+    @Test
+    void rejectsWellFormedRuleSetVersionThatDoesNotMatchRequest()
+            throws Exception {
+        RuleAnalysisResponse valid =
+                RuleAnalysisClientTestFixtures.matchedResponse(mapper);
+        RuleAnalysisResponse mismatched = new RuleAnalysisResponse(
+                valid.transactionId(),
+                valid.traceId(),
+                new RuleAnalysisResultResponse(
+                        valid.analysis().evaluationCutoffAt(),
+                        "0".repeat(64),
+                        valid.analysis().scoringResult(),
+                        valid.analysis().evidence()
+                )
+        );
+        response.set(jsonResponse(200, mapper.writeValueAsString(mismatched)));
+
+        assertInvalidResponse(() -> client(Duration.ofSeconds(1))
+                .analyze(request, TRACE_ID));
+        assertThat(requestCount).hasValue(1);
     }
 
     @ParameterizedTest

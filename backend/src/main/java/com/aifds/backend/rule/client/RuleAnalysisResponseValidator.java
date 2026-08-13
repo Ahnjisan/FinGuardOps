@@ -12,13 +12,13 @@ import com.aifds.backend.rule.client.dto.RuleScoreGroupId;
 import com.aifds.backend.rule.client.dto.RuleScoreGroupSummaryResponse;
 import com.aifds.backend.rule.client.dto.RuleScoringResultResponse;
 import com.aifds.backend.rule.client.dto.RuleVersionSnapshotRequest;
-import com.aifds.backend.rule.contract.RuleV1ContractRegistry;
+import com.aifds.backend.rule.contract.CanonicalRuleSetVersionCalculator;
+import com.aifds.backend.rule.contract.RuleV1ExecutionPlanRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -41,37 +41,6 @@ public final class RuleAnalysisResponseValidator {
             Pattern.compile("^[1-9][0-9]*$");
     private static final Pattern UTC_Z_PATTERN = Pattern.compile(
             "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$"
-    );
-
-    private static final Map<String, RuleContract> CONTRACT_BY_RULE_CODE = Map.of(
-            RuleV1ContractRegistry.TRANSFER_ABSOLUTE_HIGH_AMOUNT,
-            new RuleContract(
-                    RuleId.R001,
-                    RuleV1ContractRegistry.TRANSFER_ABSOLUTE_HIGH_AMOUNT,
-                    15,
-                    RuleScoreGroupId.amount
-            ),
-            RuleV1ContractRegistry.RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT,
-            new RuleContract(
-                    RuleId.R002,
-                    RuleV1ContractRegistry.RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT,
-                    20,
-                    RuleScoreGroupId.security
-            ),
-            RuleV1ContractRegistry.RECENT_SECURITY_CHANGE_HIGH_AMOUNT,
-            new RuleContract(
-                    RuleId.R003,
-                    RuleV1ContractRegistry.RECENT_SECURITY_CHANGE_HIGH_AMOUNT,
-                    40,
-                    RuleScoreGroupId.security
-            ),
-            RuleV1ContractRegistry.RECENT_BENEFICIARY_TRANSFER,
-            new RuleContract(
-                    RuleId.R004,
-                    RuleV1ContractRegistry.RECENT_BENEFICIARY_TRANSFER,
-                    10,
-                    RuleScoreGroupId.security
-            )
     );
 
     private static final Map<RuleId, Set<String>> OBSERVATION_FIELDS = Map.of(
@@ -125,6 +94,16 @@ public final class RuleAnalysisResponseValidator {
                         response.analysis().ruleSetVersion()
                 ).matches(),
                 "ruleSetVersion is invalid"
+        );
+        String expectedRuleSetVersion =
+                new CanonicalRuleSetVersionCalculator().calculate(
+                        ruleVersionIdentities(request.ruleVersions())
+                );
+        require(
+                expectedRuleSetVersion.equals(
+                        response.analysis().ruleSetVersion()
+                ),
+                "ruleSetVersion does not match request"
         );
 
         List<ExpectedRule> expectedRules = expectedRules(request.ruleVersions());
@@ -542,30 +521,56 @@ public final class RuleAnalysisResponseValidator {
             List<RuleVersionSnapshotRequest> snapshots
     ) {
         require(!snapshots.isEmpty(), "request contains no RuleVersion snapshot");
-        List<ExpectedRule> expected = new ArrayList<>();
-        Set<RuleId> seen = new HashSet<>();
+        Map<UUID, RuleVersionSnapshotRequest> snapshotsById = new HashMap<>();
         for (RuleVersionSnapshotRequest snapshot : snapshots) {
-            RuleContract contract = CONTRACT_BY_RULE_CODE.get(snapshot.ruleCode());
-            require(contract != null, "request contains an unsupported Rule");
-            require(seen.add(contract.ruleId()), "request contains a duplicate Rule");
-            require(snapshot.reasonCode().equals(contract.reasonCode()),
-                    "request reasonCode is unsupported");
-            require(snapshot.weight() == contract.weight(), "request Rule weight is unsupported");
-            require(snapshot.versionNumber() > 0, "request Rule version is invalid");
-            expected.add(new ExpectedRule(snapshot, contract, 0));
+            require(
+                    snapshotsById.put(snapshot.ruleVersionId(), snapshot) == null,
+                    "request contains a duplicate RuleVersion"
+            );
+            RuleV1ExecutionPlanRegistry.requireExecutionCompatible(
+                    snapshot.ruleCode(),
+                    snapshot.reasonCode(),
+                    snapshot.weight(),
+                    snapshot.conditionDefinition()
+            );
         }
-        require(
-                (!seen.contains(RuleId.R002) && !seen.contains(RuleId.R003))
-                        || seen.contains(RuleId.R001),
-                "request Rule dependency is invalid"
+        return RuleV1ExecutionPlanRegistry.canonicalize(
+                        ruleVersionIdentities(snapshots)
+                ).stream()
+                .map(rule -> new ExpectedRule(
+                        snapshotsById.get(rule.identity().ruleVersionId()),
+                        toRuleContract(rule.capability()),
+                        rule.executionOrder()
+                ))
+                .toList();
+    }
+
+    private List<RuleV1ExecutionPlanRegistry.RuleVersionIdentity>
+    ruleVersionIdentities(List<RuleVersionSnapshotRequest> snapshots) {
+        return snapshots.stream()
+                .map(snapshot -> new RuleV1ExecutionPlanRegistry
+                        .RuleVersionIdentity(
+                        snapshot.fraudRuleId(),
+                        snapshot.ruleVersionId(),
+                        snapshot.ruleCode(),
+                        snapshot.versionNumber()
+                ))
+                .toList();
+    }
+
+    private RuleContract toRuleContract(
+            RuleV1ExecutionPlanRegistry.RuleCapability capability
+    ) {
+        RuleScoreGroupId groupId = switch (capability.scoreGroup()) {
+            case AMOUNT -> RuleScoreGroupId.amount;
+            case SECURITY -> RuleScoreGroupId.security;
+        };
+        return new RuleContract(
+                RuleId.valueOf(capability.ruleId().name()),
+                capability.reasonCode(),
+                capability.weight(),
+                groupId
         );
-        expected.sort(Comparator.comparingInt(value -> value.contract().ruleId().ordinal()));
-        List<ExpectedRule> ordered = new ArrayList<>(expected.size());
-        for (int index = 0; index < expected.size(); index++) {
-            ExpectedRule item = expected.get(index);
-            ordered.add(new ExpectedRule(item.snapshot(), item.contract(), index + 1));
-        }
-        return List.copyOf(ordered);
     }
 
     private Map<UUID, RuleBehaviorEventSnapshotRequest> behaviorEventsById(

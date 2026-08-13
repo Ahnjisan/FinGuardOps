@@ -13,6 +13,7 @@ import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
 import com.aifds.backend.transaction.exception.TransactionNotFoundException;
 import com.aifds.backend.transaction.repository.FinancialTransactionRepository;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -28,27 +29,31 @@ public class RuleAnalysisPersistenceService {
     private final DetectionResultRepository detectionResultRepository;
     private final DetectionEvidenceRepository evidenceRepository;
     private final RuleVersionRepository ruleVersionRepository;
+    private final RuleAnalysisSnapshotAssembler snapshotAssembler;
 
     public RuleAnalysisPersistenceService(
             FinancialTransactionRepository transactionRepository,
             DetectionResultRepository detectionResultRepository,
             DetectionEvidenceRepository evidenceRepository,
-            RuleVersionRepository ruleVersionRepository
+            RuleVersionRepository ruleVersionRepository,
+            RuleAnalysisSnapshotAssembler snapshotAssembler
     ) {
         this.transactionRepository = transactionRepository;
         this.detectionResultRepository = detectionResultRepository;
         this.evidenceRepository = evidenceRepository;
         this.ruleVersionRepository = ruleVersionRepository;
+        this.snapshotAssembler = snapshotAssembler;
     }
 
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public StartedRuleAnalysis startAnalysis(
+    @Transactional(
+            propagation = Propagation.REQUIRES_NEW,
+            isolation = Isolation.REPEATABLE_READ
+    )
+    public StartedRuleAnalysisExecution startAnalysis(
             UUID transactionId,
-            String ruleSetVersion,
             String scoringPolicyVersion,
             String featureVersion,
             String modelVersion,
-            Instant evaluationCutoffAt,
             String analysisTraceId,
             Instant startedAt
     ) {
@@ -57,12 +62,8 @@ public class RuleAnalysisPersistenceService {
                 .findByTransactionIdForUpdate(transactionId)
                 .orElseThrow(TransactionNotFoundException::new);
         validateCanStart(transaction);
-        if (!transaction.getOccurredAt().equals(evaluationCutoffAt)) {
-            throw new IllegalArgumentException(
-                    "evaluationCutoffAt must exactly match transaction "
-                            + "occurredAt"
-            );
-        }
+        RuleAnalysisSnapshotAssembler.AssembledRuleAnalysisSnapshot snapshot =
+                snapshotAssembler.assemble(transaction);
 
         int nextVersion = Math.addExact(
                 detectionResultRepository.findMaximumVersionByTransactionPk(
@@ -73,11 +74,11 @@ public class RuleAnalysisPersistenceService {
         DetectionResult pending = DetectionResult.pending(
                 transaction,
                 nextVersion,
-                ruleSetVersion,
+                snapshot.ruleSetVersion(),
                 scoringPolicyVersion,
                 featureVersion,
                 modelVersion,
-                evaluationCutoffAt,
+                snapshot.request().evaluationCutoffAt(),
                 analysisTraceId
         );
         DetectionResult saved = detectionResultRepository.saveAndFlush(
@@ -88,7 +89,7 @@ public class RuleAnalysisPersistenceService {
         transaction.startAnalysis();
         transactionRepository.saveAndFlush(transaction);
 
-        return new StartedRuleAnalysis(
+        StartedRuleAnalysis started = new StartedRuleAnalysis(
                 transaction.getTransactionId(),
                 saved.getDetectionResultId(),
                 saved.getDetectionResultVersion(),
@@ -99,6 +100,7 @@ public class RuleAnalysisPersistenceService {
                 saved.getEvaluationCutoffAt(),
                 saved.getAnalysisTraceId()
         );
+        return new StartedRuleAnalysisExecution(started, snapshot.request());
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
