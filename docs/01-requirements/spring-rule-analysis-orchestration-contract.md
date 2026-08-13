@@ -327,6 +327,13 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
 - 거래 잠금 아래 다음 DetectionResult 버전을 할당하는 persistence primitive
 - `DetectionResult`의 `PENDING → IN_PROGRESS → COMPLETED|FAILED` primitive
 - Evidence 저장과 `DetectionResult COMPLETED`를 묶는 persistence transaction
+- 거래와 DetectionResult 시작을 `RECEIVED/PENDING → ANALYZING/IN_PROGRESS`로
+  함께 commit하는 `REQUIRES_NEW` persistence boundary
+- 거래 우선 잠금과 분석 시도 불변값 exact 비교
+- Evidence 저장, DetectionResult `COMPLETED`, 결과 채택과 거래 `ANALYZED`를
+  함께 commit하는 성공 persistence boundary
+- DetectionResult와 거래를 함께 `FAILED`로 만드는 실패 persistence boundary
+- 동일 거래 동시 시작과 terminal 상태 이후 늦은 성공·실패 요청 방지 검증
 - 행동 이벤트 Rule 평가 조회와 Rule 코드별 실행 가능 `RuleVersion` 조회
 - Flyway V1~V5의 거래·멱등·행동 이벤트·탐지 결과·RuleVersion 제약과 index
 
@@ -337,11 +344,9 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
   Service
 - 전체 실행 가능 RuleVersion을 한 번에 조회하는 경로
 - Spring Boot의 예상 `ruleSetVersion` 선계산과 응답 exact 비교
-- 거래의 `RECEIVED → ANALYZING → ANALYZED` 및 실패 전이 실행 경로
-- 분석 시작 상태 변경을 한 트랜잭션으로 묶는 경로
-- FastAPI 응답을 Evidence로 자동 변환·저장하고 완료 결과를 채택하는 통합 경로
-- Evidence, 결과 완료, 채택과 거래 `ANALYZED`의 단일 쓰기 트랜잭션
-- 분석 실패 시 결과와 거래를 함께 `FAILED`로 만드는 경로
+- Snapshot 조합, Client 호출과 persistence boundary를 연결하는 상위 실행 경로
+- 검증된 FastAPI 응답을 `RuleEvidenceDraft`로 자동 변환하는 경로
+- Client 오류 category를 거래 API 공통 오류로 매핑하는 경로
 - 최종 동기 분석 응답과 결과 채택 이후 멱등 Snapshot 확정
 - 위험 대응과 사건 생성
 
@@ -350,11 +355,10 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
 - 현재 `TransactionIntakeCompletionService`는 거래를 `RECEIVED`로 저장한
   트랜잭션에서 `RECEIVED`/탐지 null 응답 Snapshot을 즉시 `COMPLETED`로
   확정한다. 13절의 최종 분석 결과 이후 확정과 다르다.
-- `FinancialTransaction`에는 완료 결과 채택 메서드는 있으나
-  `RECEIVED → ANALYZING → ANALYZED`와 분석 실패 전이 메서드가 없다.
-- 현재 `DetectionResultPersistenceService`는 PENDING 생성, 시작, 완료·Evidence,
-  실패를 각각 제공하지만 거래 상태 변경·결과 채택과 한 원자적 경계로 묶지
-  않는다.
+- `FinancialTransaction` 상태 전이와 `RuleAnalysisPersistenceService`의 시작·성공·실패
+  원자적 경계는 구현되었지만 아직 거래 접수나 `RuleAnalysisHttpClient`에서 호출하지 않는다.
+- 기존 `DetectionResultPersistenceService`의 저수준 primitive는 호환성을 위해 유지하며,
+  향후 상위 분석 실행 경로는 복합 persistence boundary만 사용해야 한다.
 - `DetectionResult`는 FastAPI 호출 전 PENDING 생성 시 `ruleSetVersion`을
   요구하지만 Spring Boot의 canonical hash 선계산 경로는 없다. 현재 Client
   validator도 응답 해시의 형식은 확인하지만 DB에 선확정한 예상 해시와의 exact

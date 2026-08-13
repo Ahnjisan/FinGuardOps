@@ -778,6 +778,7 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
                             .orElseThrow();
             DetectionResult detectionResult =
                     persistCompletedDetectionResult(transaction);
+            transaction.startAnalysis();
             transaction.adoptDetectionResult(detectionResult);
             FinancialTransaction saved =
                     financialTransactionRepository.saveAndFlush(transaction);
@@ -1045,6 +1046,7 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
                             .orElseThrow();
             DetectionResult detectionResult =
                     persistCompletedDetectionResult(transaction);
+            transaction.startAnalysis();
             transaction.adoptDetectionResult(detectionResult);
             financialTransactionRepository.saveAndFlush(transaction);
 
@@ -1080,6 +1082,7 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
                     );
             DetectionResult detectionResult =
                     persistCompletedDetectionResult(transaction);
+            transaction.startAnalysis();
             transaction.adoptDetectionResult(detectionResult);
             financialTransactionRepository.saveAndFlush(transaction);
             return transaction.getTransactionId();

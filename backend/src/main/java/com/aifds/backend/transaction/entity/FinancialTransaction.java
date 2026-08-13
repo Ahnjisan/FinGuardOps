@@ -128,11 +128,19 @@ public class FinancialTransaction {
         this.processingStatus = TransactionProcessingStatus.RECEIVED;
     }
 
+    public void startAnalysis() {
+        requireAnalysisState(TransactionProcessingStatus.RECEIVED);
+        requireNoAnalysisOutcome();
+        this.processingStatus = TransactionProcessingStatus.ANALYZING;
+    }
+
     public void adoptDetectionResult(DetectionResult detectionResult) {
         Objects.requireNonNull(
                 detectionResult,
                 "detectionResult must not be null"
         );
+        requireAnalysisState(TransactionProcessingStatus.ANALYZING);
+        requireNoAnalysisOutcome();
         if (!detectionResult.belongsTo(this)) {
             throw new IllegalArgumentException(
                     "Detection result must belong to this transaction"
@@ -148,6 +156,13 @@ public class FinancialTransaction {
         this.adoptedDetectionResult = detectionResult;
         this.riskLevel = detectionResult.getRiskLevel();
         this.riskResponseOutcome = null;
+        this.processingStatus = TransactionProcessingStatus.ANALYZED;
+    }
+
+    public void failAnalysis() {
+        requireAnalysisState(TransactionProcessingStatus.ANALYZING);
+        requireNoAnalysisOutcome();
+        this.processingStatus = TransactionProcessingStatus.FAILED;
     }
 
     public void applyRiskResponseOutcome(RiskResponseOutcome outcome) {
@@ -163,6 +178,27 @@ public class FinancialTransaction {
             );
         }
         this.riskResponseOutcome = outcome;
+    }
+
+    private void requireAnalysisState(
+            TransactionProcessingStatus requiredStatus
+    ) {
+        if (processingStatus != requiredStatus) {
+            throw new IllegalStateException(
+                    "Transaction processing status must be "
+                            + requiredStatus
+            );
+        }
+    }
+
+    private void requireNoAnalysisOutcome() {
+        if (adoptedDetectionResult != null
+                || riskLevel != null
+                || riskResponseOutcome != null) {
+            throw new IllegalStateException(
+                    "Transaction must not have an analysis outcome"
+            );
+        }
     }
 
     public Long getId() {
