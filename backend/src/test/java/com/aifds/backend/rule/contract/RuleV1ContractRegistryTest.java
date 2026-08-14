@@ -90,4 +90,36 @@ class RuleV1ContractRegistryTest {
                         RuleV1ContractRegistry.RECENT_BENEFICIARY_TRANSFER
                 );
     }
+
+    @Test
+    void ownsRuleAnalysisMetadataAndApprovedDisplayDescriptions() {
+        assertThat(RuleV1ContractRegistry.ruleAnalysisMetadata())
+                .satisfies(metadata -> {
+                    assertThat(metadata.scoringPolicyVersion())
+                            .isEqualTo("scoring-policy-v1");
+                    assertThat(metadata.featureVersion())
+                            .isEqualTo("rule-v1");
+                    assertThat(metadata.modelVersion()).isNull();
+                });
+        assertThat(RuleV1ContractRegistry.displayDescriptionFor(
+                RuleV1ContractRegistry.TRANSFER_ABSOLUTE_HIGH_AMOUNT
+        )).isEqualTo("절대 고액 이체");
+        assertThat(RuleV1ContractRegistry.displayDescriptionFor(
+                RuleV1ContractRegistry
+                        .RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT
+        )).isEqualTo("최근 기기 등록 이벤트가 있는 고액 이체");
+        assertThat(RuleV1ContractRegistry.displayDescriptionFor(
+                RuleV1ContractRegistry.RECENT_SECURITY_CHANGE_HIGH_AMOUNT
+        )).isEqualTo("최근 보안정보 변경 시퀀스가 있는 고액 이체");
+        assertThat(RuleV1ContractRegistry.displayDescriptionFor(
+                RuleV1ContractRegistry.RECENT_BENEFICIARY_TRANSFER
+        )).isEqualTo("최근 등록 수취인 이체");
+
+        assertThatThrownBy(() ->
+                RuleV1ContractRegistry.displayDescriptionFor(
+                        "UNSUPPORTED_REASON"
+                ))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("UNSUPPORTED_REASON");
+    }
 }

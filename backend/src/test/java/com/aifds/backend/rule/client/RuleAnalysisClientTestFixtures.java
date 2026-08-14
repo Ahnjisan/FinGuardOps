@@ -17,6 +17,7 @@ import com.aifds.backend.rule.client.dto.RuleTransactionSnapshotRequest;
 import com.aifds.backend.rule.client.dto.RuleTransactionType;
 import com.aifds.backend.rule.client.dto.RuleVersionSnapshotRequest;
 import com.aifds.backend.rule.client.dto.RuleVersionStatus;
+import com.aifds.backend.rule.contract.RuleV1ContractRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
@@ -79,7 +80,8 @@ final class RuleAnalysisClientTestFixtures {
 
     static RuleAnalysisResponse matchedResponse(ObjectMapper mapper) {
         RuleScoringResultResponse scoring = new RuleScoringResultResponse(
-                RuleAnalysisResponseValidator.SCORING_POLICY_VERSION,
+                RuleV1ContractRegistry.ruleAnalysisMetadata()
+                        .scoringPolicyVersion(),
                 25,
                 RuleRiskLevel.MEDIUM,
                 List.of(
@@ -111,7 +113,8 @@ final class RuleAnalysisClientTestFixtures {
 
     static RuleAnalysisResponse unmatchedResponse() {
         RuleScoringResultResponse scoring = new RuleScoringResultResponse(
-                RuleAnalysisResponseValidator.SCORING_POLICY_VERSION,
+                RuleV1ContractRegistry.ruleAnalysisMetadata()
+                        .scoringPolicyVersion(),
                 0,
                 RuleRiskLevel.LOW,
                 List.of(

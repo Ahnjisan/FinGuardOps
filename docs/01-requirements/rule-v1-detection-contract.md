@@ -9,7 +9,7 @@
 - 구현 상태: 물리 Rule·탐지 영속 모델, R001~R004 evaluator부터
   `PlannedRuleResult`까지의 Rule 실행 경로, `RuleScoringCalculator`,
   `RuleEvidenceTransformer`와 `RuleAnalysisResult`, FastAPI 분석 HTTP 경계 구현,
-  Spring Boot Client와 이후 연동 계층 미구현
+  Spring Boot Client·Snapshot·HTTP 오케스트레이션·결과 채택 구현
 
 현재 구현된 범위는 Spring Boot의 거래 접수·목록·상세 조회, 거래 멱등성,
 행동 이벤트 접수·Rule 평가용 내부 조회, DetectionResult·DetectionEvidence,
@@ -28,11 +28,9 @@ null 값을 반환한다.
 
 다음 항목은 아직 구현되지 않았다.
 
-- Spring Boot Rule v1 HTTP Client, 평가 입력·활성 Rule 집합 Snapshot 구성과
-  실제 FastAPI 호출 오케스트레이션
-- FastAPI 응답의 Spring Boot 교차 검증과 DetectionResult·DetectionEvidence
-  자동 생성·채택·영속화
-- 거래 상태 변경, 위험 대응과 장애 후 거래 복구·재처리 정책
+- 거래 접수 Service에서 Rule v1 분석 오케스트레이터를 호출하는 연결
+- 최종 동기 거래 응답과 멱등 Snapshot 확정
+- 위험 대응과 장애 후 거래 복구·재처리 정책
 - 사건 생성·연결
 
 ADR-003에서 결정한 최종 동기 분석 목표는 유지한다. 현재 단계 응답을 최종 계약으로 간주하지 않으며, 문서 확정을 구현 완료로 표현하지 않는다.
@@ -254,6 +252,17 @@ Rule v1 조합만 허용한다. 이 구조는 향후 하나의 `ruleCode`에 여
 | R002 | `RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT` | `RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT` |
 | R003 | `RECENT_SECURITY_CHANGE_HIGH_AMOUNT` | `RECENT_SECURITY_CHANGE_HIGH_AMOUNT` |
 | R004 | `RECENT_BENEFICIARY_TRANSFER` | `RECENT_BENEFICIARY_TRANSFER` |
+
+Spring Boot의 Java Rule v1 계약 Registry는 Reason Code별 다음 고정
+`displayDescription`을 단일 소유한다. 변경 가능한 DB Rule 설명이나 FastAPI
+응답에서 표시 문구를 가져오지 않는다.
+
+| Rule ID | 고정 `displayDescription` |
+| --- | --- |
+| R001 | `절대 고액 이체` |
+| R002 | `최근 기기 등록 이벤트가 있는 고액 이체` |
+| R003 | `최근 보안정보 변경 시퀀스가 있는 고액 이체` |
+| R004 | `최근 등록 수취인 이체` |
 
 Spring Boot가 영속하는 `DetectionEvidence`는 최소한 다음 내용을 포함해야 한다.
 
@@ -870,21 +879,22 @@ Orchestrator, 실행 plan·builder, Runner·planned result와 scoring calculator
 Pydantic 요청·응답 DTO와 도메인 매퍼, FastAPI
 `POST /api/v1/rule-analysis`, Trace·요청 크기·공통 오류 응답 경계와 실행
 경로 연결도 구현되어 있다. Spring Boot Rule v1 HTTP Client, 평가 Snapshot
-구성과 실제 호출, 응답 교차 검증, DetectionResult·DetectionEvidence 자동
-생성·채택·영속화, 거래 상태·위험 대응과 전체 서비스 연동 및 운영 배포 환경은
-구현되지 않았다. 장애 후 거래 복구·재처리 정책도 아직 확정되지 않았다.
+구성, 실제 호출, 응답 교차 검증, DetectionResult·DetectionEvidence 자동
+생성·채택·영속화와 실패 기록도 구현되어 있다. 거래 접수 연결, 최종 멱등
+응답, 위험 대응과 전체 서비스 연동 및 운영 배포 환경은 구현되지 않았다.
+장애 후 거래 복구·재처리 정책도 아직 확정되지 않았다.
 
 ## 14. 후속 구현 순서
 
 1. 현재 `RECEIVED`/null 거래 접수 응답과 최종 동기 응답 사이의 전환 정책을 정하고, 기존 멱등 `response_snapshot`의 스키마·재생 호환·만료 데이터 처리 방식을 확정한다.
-2. Spring Boot가 평가 cutoff, 입력 Snapshot과 활성 Rule 집합을 고정하고 실제
-   서비스 입력으로 전달하는 경계를 구현한다.
+2. 완료(PR #143): Spring Boot가 평가 cutoff, 입력 Snapshot과 활성 Rule 집합을
+   고정하고 canonical `ruleSetVersion`을 선계산한다.
 3. 완료(PR #133): [Rule v1 내부 분석 API](../03-api/rule-v1-analysis-api.md)에
    따른 FastAPI Endpoint, Pydantic DTO, Trace·요청 크기·오류 경계와 실행 경로
    연결을 구현한다.
-4. [상세 Client 계약](../03-api/rule-v1-analysis-api.md#13-spring-boot-client-연동-계약)에
-   따라 Spring Boot의 FastAPI 호출, 결과 검증·영속화·채택과 장애 처리를
-   구현한다.
+4. 완료(Issue #144): [상세 Client 계약](../03-api/rule-v1-analysis-api.md#13-spring-boot-client-연동-계약)에
+   따라 Spring Boot의 FastAPI 정확히 1회 호출, 결과 변환·영속화·채택과
+   장애 처리를 구현한다.
 5. ADR-003의 최종 동기 거래 처리 흐름에 위험 대응과 사건 연결을 통합하고 멱등·동시성·실패 복구를 검증한다.
 6. 경계값·복합 적중·늦은 이벤트·Timeout·성능·관측 지표 테스트와 실험을 수행한 뒤 운영 정책 후보를 재승인한다.
 
