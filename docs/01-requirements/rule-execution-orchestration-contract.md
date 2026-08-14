@@ -20,7 +20,8 @@
   `POST /api/v1/rule-analysis`, Trace·1 MiB 요청 제한·공통 오류 경계와 기존 실행
   경로 연결: 구현됨
 - Spring Boot Rule v1 HTTP Client: 구현됨
-- Spring Boot 거래 분석 오케스트레이션과 전체 서비스 연동: 미구현
+- Spring Boot 내부 Rule v1 분석 HTTP 오케스트레이션: 구현됨
+- Spring Boot 거래 접수와 최종 응답을 포함한 전체 서비스 연동: 미구현
 
 현재 구현된 evaluator와 Registry의 기준은
 [`ai-service/src/finguardops_ai/rules/v1/`](../../ai-service/src/finguardops_ai/rules/v1/)에

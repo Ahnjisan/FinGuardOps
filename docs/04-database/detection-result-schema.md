@@ -11,17 +11,15 @@ JPA Entity, Repository와 내부 persistence service가 구현되어 있다.
 
 다음 기능은 구현하지 않는다.
 
-- Spring Boot가 시작하는 Rule 분석 실행 경로
+- 거래 접수 Service에서 Spring Boot Rule 분석 실행 경로를 호출하는 연결
 - ML 추론
 - 외부 탐지 실행 API와 탐지 결과 조회 API
 - 거래 생성의 최종 동기 탐지 응답
-- 거래·행동 이벤트·전체 활성 RuleVersion Snapshot 조합과 Spring Boot 분석
-  오케스트레이션
-- FastAPI 응답의 자동 Evidence 변환·결과 채택과 거래 상태 전이
+- 결과 채택 이후 최종 동기 거래 응답과 멱등 Snapshot 확정
 - 사건, 감사 로그와 AI 리포트
 
-FastAPI Rule v1 Endpoint와 Spring Boot `RuleAnalysisHttpClient`는 구현되어
-있지만 이 영속 모델을 자동으로 생성·완료·채택하는 실행 경로는 아직 없다.
+FastAPI Rule v1 Endpoint, Spring Boot `RuleAnalysisHttpClient`와 이 영속 모델을
+자동으로 생성·완료·채택하거나 실패로 확정하는 실행 경로는 구현되어 있다.
 그 경로의 기준은
 [Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../01-requirements/spring-rule-analysis-orchestration-contract.md)이다.
 
@@ -97,7 +95,8 @@ Rule v1 한 실행의 `evaluation_cutoff_at`은 거래 `occurred_at`으로 한 �
 `rule_set_version`은 PENDING부터 NOT NULL이고 Trigger가 변경을 금지한다.
 따라서 Rule v1 오케스트레이션은 FastAPI 호출 전에 고정한 Rule Snapshot의
 canonical 해시를 계산해 저장하고, 성공 응답 해시와 exact 비교해야 한다.
-현재 Spring Boot에는 이 선계산·비교 경로가 구현되어 있지 않다.
+현재 Spring Boot 분석 시작 경계와 Client validator에 이 선계산·exact 비교
+경로가 구현되어 있다.
 
 ### 3.3 제약과 인덱스
 
@@ -261,9 +260,9 @@ Spring Boot는 PENDING 생성 트랜잭션에서 대상 거래 행을
   - `COMPLETED` 결과만 채택
 
 Evidence는 완료 트랜잭션에서 먼저 저장한 뒤 결과를 COMPLETED로
-전환한다. 현재 persistence service는 이 두 변경을 함께 rollback한다. 목표
-오케스트레이션은 같은 트랜잭션에 거래 결과 채택과
-`ANALYZING → ANALYZED`도 포함해야 한다.
+전환한다. 현재 Rule 분석 성공 persistence boundary는 Evidence, 결과 완료,
+거래 결과 채택과 `ANALYZING → ANALYZED`를 같은 트랜잭션에서 commit하거나
+함께 rollback하며 오케스트레이터가 이 경계를 호출한다.
 
 ## 9. JPA
 

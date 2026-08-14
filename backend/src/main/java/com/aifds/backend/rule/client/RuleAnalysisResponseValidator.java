@@ -13,6 +13,7 @@ import com.aifds.backend.rule.client.dto.RuleScoreGroupSummaryResponse;
 import com.aifds.backend.rule.client.dto.RuleScoringResultResponse;
 import com.aifds.backend.rule.client.dto.RuleVersionSnapshotRequest;
 import com.aifds.backend.rule.contract.CanonicalRuleSetVersionCalculator;
+import com.aifds.backend.rule.contract.RuleV1ContractRegistry;
 import com.aifds.backend.rule.contract.RuleV1ExecutionPlanRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 
@@ -29,8 +30,6 @@ import java.util.UUID;
 import java.util.regex.Pattern;
 
 public final class RuleAnalysisResponseValidator {
-
-    static final String SCORING_POLICY_VERSION = "scoring-policy-v1";
 
     private static final int WINDOW_SECONDS = 86_400;
     private static final Pattern RULE_SET_VERSION_PATTERN =
@@ -127,7 +126,9 @@ public final class RuleAnalysisResponseValidator {
             RuleScoringResultResponse scoring
     ) {
         require(
-                SCORING_POLICY_VERSION.equals(scoring.scoringPolicyVersion()),
+                RuleV1ContractRegistry.ruleAnalysisMetadata()
+                        .scoringPolicyVersion()
+                        .equals(scoring.scoringPolicyVersion()),
                 "scoringPolicyVersion is unsupported"
         );
         require(

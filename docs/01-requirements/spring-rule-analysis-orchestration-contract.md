@@ -345,13 +345,17 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
   capability 검증과 FastAPI golden vector 기반 `ruleSetVersion` 선계산
 - `REQUIRES_NEW`, `REPEATABLE_READ` 시작 경계와 최신 행동 이벤트 1,000건 고정
 - 요청 Rule Snapshot으로 계산한 예상 `ruleSetVersion`과 응답 값의 exact 비교
+- 비트랜잭션 `RuleAnalysisOrchestrationService`가 시작 commit 뒤 Client를 정확히
+  한 번 호출하고 응답 변환·완료 채택 또는 실패 기록을 연결하는 실행 경로
+- `RuleRiskLevel`의 persistence `RiskLevel` 명시 변환, Reason Code 고정 표시
+  Registry와 응답 배열 index 기반 0-based `RuleEvidenceDraft.sortOrder` 변환
+- Client category와 HTTP·응답 변환·채택·트랜잭션 경계 실패의 안전한
+  `failureCode` 기록 및 원래 예외 보존
 - Flyway V1~V5의 거래·멱등·행동 이벤트·탐지 결과·RuleVersion 제약과 index
 
 ### 15.2 구현되지 않음
 
-- 이 문서의 Spring Boot 거래 분석 오케스트레이션 전체
-- Snapshot 조합, Client 호출과 persistence boundary를 연결하는 상위 실행 경로
-- 검증된 FastAPI 응답을 `RuleEvidenceDraft`로 자동 변환하는 경로
+- 거래 접수 Service에서 분석 오케스트레이터를 호출하는 전체 연결
 - Client 오류 category를 거래 API 공통 오류로 매핑하는 경로
 - 최종 동기 분석 응답과 결과 채택 이후 멱등 Snapshot 확정
 - 위험 대응과 사건 생성
@@ -362,12 +366,12 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
   트랜잭션에서 `RECEIVED`/탐지 null 응답 Snapshot을 즉시 `COMPLETED`로
   확정한다. 13절의 최종 분석 결과 이후 확정과 다르다.
 - `FinancialTransaction` 상태 전이와 `RuleAnalysisPersistenceService`의 시작·성공·실패
-  원자적 경계는 구현되었지만 아직 거래 접수나 `RuleAnalysisHttpClient`에서 호출하지 않는다.
+  원자적 경계는 오케스트레이터에서 사용하지만 아직 거래 접수에서 호출하지 않는다.
 - 기존 `DetectionResultPersistenceService`의 저수준 primitive는 호환성을 위해 유지하며,
   향후 상위 분석 실행 경로는 복합 persistence boundary만 사용해야 한다.
-- Snapshot 조합과 canonical hash 선계산은 분석 시작 persistence boundary에
-  포함되지만, commit된 immutable 요청을 `RuleAnalysisHttpClient`로 전달하는 상위
-  실행 경로는 아직 없다.
+- Snapshot 조합과 canonical hash 선계산, commit된 immutable 요청의
+  `RuleAnalysisHttpClient` 전달과 결과 채택은 연결되었지만 최종 거래 접수·멱등
+  응답 경로에는 아직 연결되지 않았다.
 - V5 초기 RuleVersion은 모두 `DRAFT`이므로 그대로는 실행 가능한 Rule 집합이
   없다.
 

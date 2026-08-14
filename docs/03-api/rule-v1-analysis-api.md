@@ -21,8 +21,10 @@ Orchestrator, Runner, R001~R004 evaluator, `RuleScoringCalculator`,
 정의하는 FastAPI Endpoint, Service, Trace·본문 크기 Middleware와 공통 예외
 Handler도 구현되어 있다. Spring Boot `RuleAnalysisHttpClient`, Timeout·Trace
 전달, 성공·오류 응답 검증과 transport·응답 오류 분류도 구현되어 있다.
-DetectionResult 자동 영속·채택과 거래 분석 오케스트레이션은 아직 구현되지
-않았다. HTTP 양쪽 경계 구현 완료를 전체 서비스 연동 완료로 해석하지 않는다.
+거래·행동 이벤트·RuleVersion Snapshot, DetectionResult 시작 commit,
+FastAPI 정확히 1회 호출, 응답의 Evidence 변환, 결과 완료·채택과 실패 기록을
+연결하는 Spring Boot 오케스트레이션도 구현되어 있다. 거래 접수와 최종 멱등
+응답 연결은 아직 구현되지 않았으므로 전체 서비스 연동 완료로 해석하지 않는다.
 
 이 API는 외부 사용자 API가 아니라 Private Network 안에서 사용하는
 Spring Boot → FastAPI 내부 서비스 API다. 인증·인가는 아직 구현되지 않았으며
@@ -664,8 +666,8 @@ FastAPI Middleware는 `Content-Length`만 신뢰하지 않고 실제 수신 byte
 
 이 절은 Spring Boot가 이 문서의 wire 계약을 호출하는 Client의 단일 상세
 기준이다. 기존 요청·응답 DTO, HTTP 상태와 FastAPI 오류 envelope는 변경하지
-않는다. FastAPI HTTP 경계와 이 절의 Spring Boot Client는 구현되어 있지만
-결과 채택·영속화 오케스트레이션은 아직 구현되지 않았다.
+않는다. FastAPI HTTP 경계, Spring Boot Client와 결과 채택·영속화
+오케스트레이션이 구현되어 있다.
 
 ### 13.1 계층과 책임
 
@@ -774,8 +776,8 @@ Rule 조건, evaluator 선택, scoring과 Evidence를 Java에서 재계산하지
 
 Client의 현재 validator는 `ruleSetVersion` 형식과 응답 내부 정합성을 검증한다.
 Spring Boot 오케스트레이션은 PENDING 결과를 만들기 전에 canonical Rule
-Snapshot으로 예상 해시를 고정하고, 응답 해시가 그 값과 exact 일치하는지
-추가로 검증해야 한다. 이 연결 검증은 아직 구현되지 않았다.
+Snapshot으로 예상 해시를 고정하고, Client validator가 응답 해시를 요청
+Snapshot의 예상 값과 exact 비교한다. 이 연결 검증은 구현되어 있다.
 
 ### 13.6 Spring Boot 내부 오류 category
 
@@ -836,9 +838,9 @@ Spring Boot가 만든 요청·Rule·배포 capability나 upstream 응답 계약�
 6. 결과 채택 commit 이후에만 최종 성공 멱등 Snapshot을 확정한다.
 
 네트워크 응답을 기다리는 동안 DB 쓰기 트랜잭션과 잠금을 장시간 유지하지
-않는다. 현재 Client 호출과 검증은 구현되어 있으나 1~2단계의 통합 시작 경계,
-5~6단계는 구현되지 않았으므로 결과 채택·영속화가 완료된 것으로 표현하지
-않는다.
+않는다. 현재 1~5단계는 비트랜잭션 오케스트레이터와 기존 `REQUIRES_NEW`
+persistence boundary로 구현되어 있다. 6단계의 최종 성공 멱등 Snapshot과 거래
+접수 연결은 아직 구현되지 않았다.
 
 ### 13.8 로그와 정보 보호
 
@@ -865,10 +867,10 @@ stack trace와 내부 예외 상세는 외부 응답에 노출하지 않는다. 
 
 ### 13.9 Java Client 테스트 상태와 후속 오케스트레이션 검증
 
-현재 Java Client 단위·통합 테스트는 정상 요청, all-unmatched 성공, 엄격한
-Trace·wire·업무 응답 검증, Client category 분류, connect·response timeout과
-자동 retry 0회를 검증한다. 후속 오케스트레이션 구현은 기존 검증에 더해 최소
-다음 항목을 검증해야 한다.
+현재 Java Client와 오케스트레이션 단위·통합 테스트는 정상 요청,
+all-unmatched 성공, 엄격한 Trace·wire·업무 응답 검증, Client category 분류,
+connect·response timeout, 자동 retry 0회, 트랜잭션 밖 HTTP 호출과 결과
+완료·실패 경계를 검증한다. 유지해야 할 회귀 항목은 다음과 같다.
 
 - 정상 `200 OK` 요청·응답과 요청 DTO 직렬화
 - 전 Rule 정상 미적중인 0점·`LOW`·빈 Evidence 응답
@@ -889,8 +891,7 @@ Trace·wire·업무 응답 검증, Client category 분류, connect·response tim
 
 ## 14. 현재 구현 이후 제외 범위
 
-- 거래·행동 이벤트·전체 활성 RuleVersion Snapshot 조합
-- DetectionResult·DetectionEvidence 자동 생성·채택·영속화 오케스트레이션
+- 거래 접수 Service에서 Rule v1 오케스트레이터를 호출하는 연결
 - 최종 동기 분석 응답과 결과 채택 이후 멱등 Snapshot 확정
 - 분석 이후 위험 대응과 사건 상태 변경
 - RuleVersion 별도 동기화·캐시·배포 산출물

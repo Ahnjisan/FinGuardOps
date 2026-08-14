@@ -28,9 +28,10 @@ Client
 `RECEIVED`와 탐지 관련 null 값을 반환하는 단계까지이다.
 DetectionResult·DetectionEvidence의 물리 영속 모델과 FastAPI
 `POST /api/v1/rule-analysis` HTTP 경계, Spring Boot `RuleAnalysisHttpClient`,
-Timeout·Trace 전달과 응답 검증·오류 분류는 구현되었다. External Risk, 거래
-분석 Snapshot 조합·호출 오케스트레이션, 탐지 실행 결과 자동 생성·채택,
-위험 대응과 사건 연결은 아직 구현되지 않았다. 현재 단계 응답은 최종 동기
+Timeout·Trace 전달과 응답 검증·오류 분류, 거래 분석 Snapshot 조합·HTTP
+오케스트레이션과 탐지 실행 결과 자동 생성·채택은 구현되었다. External Risk,
+거래 접수 Service 연결, 최종 멱등 응답, 위험 대응과 사건 연결은 아직
+구현되지 않았다. 현재 단계 응답은 최종 동기
 분석 목표를 변경하지 않는다. Spring Boot 분석 처리의 기준은
 [Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../01-requirements/spring-rule-analysis-orchestration-contract.md)이다.
 
@@ -397,8 +398,10 @@ connect·response timeout의 상세 분류와 설정은
 | `AI_SERVICE_UNAVAILABLE` | `503 DEPENDENCY_UNAVAILABLE` |
 | 요청·payload·Rule 계약, capability, FastAPI 내부 오류, invalid response category | `500 INTERNAL_ERROR` |
 
-FastAPI 원문 오류와 Client 내부 category는 외부 응답에 포함하지 않는다. 이
-매핑과 실패 상태의 원자적 기록은 아직 오케스트레이션으로 구현되지 않았다.
+FastAPI 원문 오류와 Client 내부 category는 외부 응답에 포함하지 않는다.
+DetectionResult에는 Client category 이름과 승인된 오케스트레이션 로컬
+`failureCode`를 원자적으로 기록한다. 외부 거래 API 공통 오류 매핑은 거래
+접수 연결과 함께 구현할 후속 범위이다.
 
 실패 Transaction 저장과 오류 응답은 일부만 성공한 것처럼 보이지 않도록 정합성 경계를 가져야 한다. 오류 응답에서 이미 저장된 실패 Transaction을 식별할 수 있도록 다음 공통 오류 문맥을 사용한다.
 
@@ -973,7 +976,7 @@ GET /api/v1/detection-results/7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430101
       "evidenceId": "6a4c0a4e-8a9d-4c2f-9a1b-7d6e5f430201",
       "evidenceType": "RULE",
       "reasonCode": "TRANSFER_ABSOLUTE_HIGH_AMOUNT",
-      "displayDescription": "KRW 이체 금액이 Rule v1 절대 고액 기준 이상입니다.",
+      "displayDescription": "절대 고액 이체",
       "scoreContribution": 15,
       "rule": {
         "ruleCode": "TRANSFER_ABSOLUTE_HIGH_AMOUNT",
@@ -989,7 +992,7 @@ GET /api/v1/detection-results/7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430101
       "evidenceId": "6a4c0a4e-8a9d-4c2f-9a1b-7d6e5f430202",
       "evidenceType": "RULE",
       "reasonCode": "RECENT_SECURITY_CHANGE_HIGH_AMOUNT",
-      "displayDescription": "최근 24시간 안에 비밀번호 변경과 출금 계좌의 이체 한도 변경 이벤트가 순서대로 확인되었습니다.",
+      "displayDescription": "최근 보안정보 변경 시퀀스가 있는 고액 이체",
       "scoreContribution": 40,
       "rule": {
         "ruleCode": "RECENT_SECURITY_CHANGE_HIGH_AMOUNT",

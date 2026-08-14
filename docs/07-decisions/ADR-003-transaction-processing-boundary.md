@@ -57,9 +57,10 @@ FraudRule·RuleVersion PostgreSQL 물리 영속 모델 및 거래 접수 Control
 행동 이벤트는 내부 Rule 평가용 제한 조회와 행동 기반
 `DetectionEvidence.observationSummary`의 외부 Event ID 검증까지 구현되어
 있다. RuleVersion 적용 기간·불변성·Evidence FK 정합성은 구현되었지만
-공개 행동 이벤트 조회 API와 Rule 실행은 구현되지 않았다.
-External Risk, FastAPI Rule 실행, 탐지 실행 결과 생성·검증·채택, 위험
-대응과 사건 연결은 아직 수행하지 않는다.
+공개 행동 이벤트 조회 API는 구현되지 않았다. FastAPI Rule v1 실행과 Spring
+Boot의 Snapshot 고정·HTTP 호출·탐지 결과 생성·검증·채택 및 실패 기록은
+구현되었다. External Risk, 거래 접수에서 분석 오케스트레이터를 호출하는 연결,
+최종 멱등 응답, 위험 대응과 사건 연결은 아직 수행하지 않는다.
 
 이 단계적 응답은 현재 구현 사실을 기록한 것이며, `POST /api/v1/transactions`를 비동기 접수 API로 바꾸거나 최종 동기 분석 결정을 뒤집는 새로운 결정이 아니다. 현행 단계 Controller는 이 ADR이 정한 중간 외부 노출 제한과 아직 정합화되지 않은 구현 차이로 기록한다. 후속 구현에서는 이 ADR의 최종 경계로 전환하거나, 결정 변경이 필요하면 별도 사용자 승인과 ADR 검토를 거쳐야 한다.
 
@@ -70,6 +71,12 @@ version dispatch는 구현되었다. 기존 `response_snapshot JSONB` 안에 저
 별도 Migration과 legacy backfill은 필요하지 않았고, 만료 판정·정리 작업은
 여전히 구현되지 않았다. 이 후속 상태는 ADR-003의 결정 자체를 변경하지
 않는다.
+
+후속 구현 상태(2026-08-14): 거래·행동 이벤트·RuleVersion Snapshot과 분석
+시작 commit, DB 트랜잭션 밖 FastAPI 정확히 1회 호출, 응답 Evidence 변환,
+DetectionResult 완료·채택 또는 실패 기록을 연결하는 내부 Rule v1
+오케스트레이터가 구현되었다. 거래 접수와 최종 동기 응답 연결은 아직 수행하지
+않으며 ADR-003의 단계적 구현 결정은 유지한다.
 
 ## 구현 순서
 
