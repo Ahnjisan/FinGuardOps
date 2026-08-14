@@ -48,9 +48,11 @@ Orchestrator, Runner, R001~R004 evaluator, Scoring Calculator, Rule Evidence
 Transformer와 Rule 분석 결과 조합의 내부 경로에 더해 Pydantic 요청·응답
 DTO와 FastAPI `POST /api/v1/rule-analysis` HTTP 경계가 구현되어 있다.
 Spring Boot `RuleAnalysisHttpClient`, Timeout·Trace 전달, 성공·오류 응답 검증과
-오류 분류도 구현되어 있다. 거래 분석 Snapshot 조합·상태 전이, 탐지 결과 자동
-생성·채택·영속화의 통합 경로, 사건, 감사와 AI 운영 도메인은 아직 구현되지
-않았다.
+오류 분류도 구현되어 있다. 거래 분석 Snapshot 조합, 분석 시작·HTTP 호출,
+탐지 결과 자동 생성·완료·Evidence 영속화·채택과 거래 `ANALYZED` 전이까지의
+내부 오케스트레이션도 구현되어 있다. 거래 접수 Service 연결, External Risk,
+위험 대응·최종 거래 상태, 사건 연결, Snapshot v2와 완료 간극 복구, 감사와 AI
+운영 도메인은 아직 구현되지 않았다.
 
 ### 2.2 문서로 정의됨
 
@@ -70,8 +72,8 @@ Spring Boot `RuleAnalysisHttpClient`, Timeout·Trace 전달, 성공·오류 응�
 
 - `ai-service/`: Rule v1 실행·scoring·Evidence 변환과 분석 결과 조합,
   Pydantic 요청·응답 DTO와 분석 HTTP 경계까지 구현되었으며 ML·AI 리포트 없음
-- Spring Boot Rule v1 Client는 구현되었으나 거래 분석 오케스트레이션과 결과
-  채택 실행 경로 없음
+- Spring Boot Rule v1 Client와 내부 분석 오케스트레이션·결과 채택은
+  구현되었으나 거래 접수 Service와 최종 업무 흐름 연결은 없음
 - `frontend/`: 역할 규칙과 자리표시자만 있으며 React 구현 없음
 - `infra/`: 자리표시자만 있으며 Docker Compose 등 인프라 구현 없음
 - `.github/`: Issue·PR 템플릿과 Backend·AI Service 테스트 Workflow가 있으며 이미지 빌드·배포 자동화 없음
@@ -471,15 +473,16 @@ FastAPI는 Feature, R001~R004, 점수·등급·Reason Code·Evidence 계산을
 맡는다. 상세 계약은
 [`../01-requirements/rule-v1-detection-contract.md`](../01-requirements/rule-v1-detection-contract.md)를
 따른다. DetectionResult·DetectionEvidence 물리 영속 모델은
-구현되었고 Spring Boot Client도 구현되었지만 실행 Snapshot 조합과 결과 자동
-생성·채택·영속화 흐름은 아직 구현되지 않았다.
+구현되었고 Spring Boot Client와 실행 Snapshot 조합, 결과 자동
+생성·완료·Evidence 영속화·채택 흐름도 구현되어 있다.
 
 현재 FastAPI에는 RuleVersion snapshot을 받는 Python 입력 모델부터
 ExecutionPlan Builder → Orchestrator → Runner → R001~R004 evaluator → Scoring
 Calculator → RuleEvidenceTransformer → RuleAnalysisResult까지의 실행 경로와
 Pydantic 요청·응답 DTO, `POST /api/v1/rule-analysis` HTTP 경계가 구현되어 있다.
-Spring Boot Client도 구현되어 있지만 전체 서비스 연동과 결과 자동
-채택·영속화가 구현되었다는 뜻은 아니다. 내부 HTTP와 Spring Boot Client의 상세 계약은
+Spring Boot Client와 내부 결과 채택·영속화 오케스트레이션도 구현되어 있지만
+거래 접수와 위험 대응·사건·최종 Snapshot을 포함한 전체 서비스 연동이
+구현되었다는 뜻은 아니다. 내부 HTTP와 Spring Boot Client의 상세 계약은
 [`../03-api/rule-v1-analysis-api.md`](../03-api/rule-v1-analysis-api.md#13-spring-boot-client-연동-계약)를
 따르고, 전체 처리 순서와 결과 채택은
 [Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../01-requirements/spring-rule-analysis-orchestration-contract.md)을
@@ -490,8 +493,8 @@ Rule v1 호출에서는 짧은 분석 시작 쓰기 트랜잭션에서 거래를
 고정한다. `PENDING → IN_PROGRESS`와 `RECEIVED → ANALYZING`을 함께 commit한
 뒤 DB 트랜잭션과 잠금 없이 FastAPI를 호출한다. 검증 성공 뒤 새 쓰기
 트랜잭션에서 Evidence, `DetectionResult COMPLETED`, 결과 채택과
-`ANALYZING → ANALYZED`를 원자적으로 반영한다. 이 오케스트레이션은 아직
-구현되지 않았다.
+`ANALYZING → ANALYZED`를 원자적으로 반영한다. 이 내부 오케스트레이션은
+구현되어 있으며 거래 접수 Service가 호출하는 연결은 아직 구현되지 않았다.
 
 후속 Rule Evidence 경계에서 FastAPI는 RuleVersion metadata, Reason Code,
 원래 contribution, typed observation, Evidence 시각과 plan 기반 출력 순서를
@@ -556,7 +559,10 @@ FastAPI의 계산 결과와 LLM Provider의 생성 결과는 업무 원본이 �
 
 서비스 간 계약에는 전체 업무 Entity가 아니라 목적에 필요한 입력, 결과, 버전과 추적 정보를 전달해야 한다. 구체적인 API 경로와 DTO는 후속 API 설계에서 확정한다.
 
-현재 구현은 이 최종 경계에 도달하지 않았다. 거래 접수는 PostgreSQL에 저장한 뒤 `RECEIVED`와 탐지 관련 null 값을 반환하며 External Risk, FastAPI, DetectionResult, 위험 대응과 사건 연결은 수행하지 않는다. 이 단계적 구현 상태는 ADR-003의 최종 동기 처리 결정을 변경하지 않는다.
+현재 거래 접수 흐름은 이 최종 경계에 도달하지 않았다. 거래 접수는 PostgreSQL에
+저장한 뒤 `RECEIVED`와 탐지 관련 null 값을 반환하며 External Risk나 구현된
+내부 Rule 분석 오케스트레이터를 호출하지 않고 위험 대응과 사건 연결도 수행하지
+않는다. 이 단계적 구현 상태는 ADR-003의 최종 동기 처리 결정을 변경하지 않는다.
 
 ### 12.2 논리적 비동기 경계
 
@@ -583,7 +589,10 @@ Kafka는 다음 조건이 확인된 뒤 이 논리적 비동기 경계를 구현
 
 ### 13.1 거래 접수·탐지
 
-다음 흐름은 ADR-003이 유지하는 최종 동기 분석 목표이다. 현재 구현은 입력 검증·멱등성 확인·거래 저장과 `RECEIVED` 응답까지이며, 이후 탐지·위험 대응·사건 단계는 미구현이다.
+다음 흐름은 ADR-003이 유지하는 최종 동기 분석 목표이다. 현재 거래 접수 구현은
+입력 검증·멱등성 확인·거래 저장과 `RECEIVED` 응답까지이며, 구현된 내부 Rule
+분석 오케스트레이터를 접수에서 호출하는 연결과 이후 위험 대응·사건 단계는
+미구현이다.
 
 ```text
 Client
@@ -622,9 +631,15 @@ sequenceDiagram
 거래 상태는 기존 상태 전이 문서의 `RECEIVED`, `ANALYZING`, `ANALYZED`와 최종 처리 상태를 따른다. 요청 형식과 도메인 Validation 실패는 거래로 저장하지 않으며 오류 응답, `traceId`, 로그와 운영 메트릭으로 관측한다. MEDIUM의 모니터링은 별도 위험 대응 결과로 표현하고 AI 리포트 실패로 거래를 `FAILED` 처리하지 않는다.
 
 현재 구현은 `RECEIVED`/null 완료 응답을 멱등 `response_snapshot`으로 거래 접수
-commit에서 확정한다. 목표 계약에서는 결과 채택 commit 이후에만 최종 동기
-성공 Snapshot을 확정한다. 기존 Snapshot의 전환과 채택 commit·멱등 완료 사이
-장애 복구 구현은 아직 남아 있다.
+commit에서 v1으로 확정한다. 결과 채택과 거래 `ANALYZED`는 중간 단계이며,
+위험 대응, 최종 거래 상태 전이와 HIGH·CRITICAL의 사건 생성 또는 기존 사건
+연결이 commit된 뒤에만 ADR-006의 Snapshot v2를 확정한다. 최종 업무 commit 뒤
+Snapshot 완료가 실패하면 업무 결과는 유지하고 멱등 레코드는 `IN_PROGRESS`로
+남긴다. 운영 복구는 외부 호출이나 업무 실행 없이 확정된 상태를 검증해 동일한
+Snapshot v2만 확정한다. 위험 대응·사건 연결·Snapshot v2·복구 실행 경로는
+아직 구현되지 않았다. 자세한 계약은
+[`ADR-006`](../07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md)을
+따른다.
 
 ### 13.2 사건 조사
 
@@ -825,6 +840,9 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 - Spring Boot `RuleAnalysisHttpClient`, Timeout·Trace 전달, 엄격한 성공·오류
   응답 검증과 transport·응답 오류 분류
 - Rule v1 Client 자동 retry 0회
+- 거래 분석 Snapshot 고정, 분석 시작 commit, FastAPI 1회 호출, 응답 변환,
+  DetectionResult·Evidence 완료·채택과 거래 `ANALYZED` 전이의 내부
+  오케스트레이션
 - Backend와 AI Service 전용 GitHub Actions 테스트 Workflow
 
 ### 18.2 문서로 정의됨
@@ -842,11 +860,11 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 
 ### 18.3 다음 구현 예정
 
-- 거래·행동 이벤트·전체 활성 RuleVersion Snapshot 조합과 거래 분석
-  오케스트레이션
-- FastAPI 응답의 DetectionResult·Evidence 자동 영속화, 결과 채택과 최종 멱등
-  Snapshot 확정
-- 위험 대응·사건·감사 도메인
+- 거래 접수 Service와 내부 Rule 분석 오케스트레이터 연결
+- RuleVersion publish·운영 준비
+- 위험 대응·최종 거래 상태 전이와 사건 생성·연결
+- 최종 Snapshot v2 확정과 완료 간극 운영 복구
+- 감사 도메인
 - External Risk Mock
 - Docker 및 Docker Compose 통합 환경
 
@@ -947,7 +965,7 @@ Docker Compose와 필요 시 Kubernetes 환경에서 기능·장애·관측 기�
 | --- | --- | --- |
 | External Risk 조회 실패 시 위험 대응 정책 | `TBD` | 캐시 유효성, 내부 Rule·ML 결과, 거래 상태와 시나리오별 업무 위험 |
 | FastAPI Timeout 시 Rule v1 거래 처리 | 분석 시도 `FAILED`, 결과 미채택 | 수동 재개·재처리는 후속 계약에서 결정 |
-| 최종 성공 멱등 Snapshot 확정 시점 | 결과 채택 commit 이후 | 기존 `RECEIVED`/null Snapshot의 전환 구현과 운영 복구 방식은 후속 검증 필요 |
+| 최종 성공 멱등 Snapshot 확정 시점 | ADR-006에 따라 위험 대응·최종 거래 상태와 HIGH·CRITICAL 사건 연결의 업무 commit 이후 | v2 codec과 완료 간극 운영 복구는 구현 필요 |
 | 초기 AI 리포트 비동기 실행 방식 | `TBD` | 실패·재시도·멱등성 검증 가능성, 개인 프로젝트 운영 복잡도 |
 | Redis 최초 도입 시점 | `TBD` | 정확 일치 중복 호출, External Risk 조회 부하와 집계 성능 측정 |
 | Kafka 최초 도입 조건 충족 여부 | `TBD` | 비동기 적체, 다중 Consumer, 재처리와 독립 확장 요구 |

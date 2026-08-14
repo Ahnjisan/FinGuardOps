@@ -9,19 +9,32 @@
 FraudRule·RuleVersion과 nullable Evidence FK를 additive하게 연결한다.
 JPA Entity, Repository와 내부 persistence service가 구현되어 있다.
 
+Rule 분석 성공 경로에서 DetectionResult `COMPLETED`, Evidence 저장, 거래 결과
+채택과 `ANALYZING → ANALYZED`를 함께 commit하는 내부 오케스트레이션도
+구현되어 있다. `ANALYZED`는 위험 대응 전 중간 상태이며 최종 거래 성공 상태가
+아니다.
+
 다음 기능은 구현하지 않는다.
 
 - 거래 접수 Service에서 Spring Boot Rule 분석 실행 경로를 호출하는 연결
+- External Risk와 위험 대응·최종 거래 상태 전이
+- HIGH·CRITICAL 사건 생성 또는 기존 사건 연결
+- 최종 동기 응답과 Snapshot v2 확정
+- Snapshot 완료 간극 운영 복구
+- RuleVersion 운영 publish
 - ML 추론
 - 외부 탐지 실행 API와 탐지 결과 조회 API
-- 거래 생성의 최종 동기 탐지 응답
-- 결과 채택 이후 최종 동기 거래 응답과 멱등 Snapshot 확정
-- 사건, 감사 로그와 AI 리포트
+- 감사 로그와 AI 리포트
 
 FastAPI Rule v1 Endpoint, Spring Boot `RuleAnalysisHttpClient`와 이 영속 모델을
 자동으로 생성·완료·채택하거나 실패로 확정하는 실행 경로는 구현되어 있다.
 그 경로의 기준은
 [Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../01-requirements/spring-rule-analysis-orchestration-contract.md)이다.
+
+위험 대응·최종 거래 상태와 필요한 사건 연결의 업무 commit 이후에만
+[`ADR-006`](../07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md)의
+Snapshot v2를 확정한다. 이 DetectionResult DB 계약은 Snapshot 완료를 소유하지
+않으며 v2 codec이나 완료 간극 복구 실행 경로를 정의하지 않는다.
 
 현재 `POST /api/v1/transactions`는 기존 계약대로 Transaction을
 `RECEIVED`로 저장하고 탐지 관련 null을 반환한다.
@@ -230,9 +243,10 @@ Transaction이 `FAILED`로 전이되어도 이전에 정상 채택한 결과·�
 Rule v1 분석 성공에서는 Evidence 저장, DetectionResult `COMPLETED`, 거래의
 결과 채택과 `ANALYZING → ANALYZED`를 하나의 쓰기 트랜잭션으로 수행한다.
 분석 실패에서는 대상 DetectionResult와 거래를 `FAILED`로 기록하고 결과를
-채택하지 않는다. 현재 `DetectionResultPersistenceService.complete`는 Evidence와
-결과 `COMPLETED`만 한 트랜잭션으로 처리하며 거래 채택·상태 전이는 포함하지
-않는다.
+채택하지 않는다. 내부 Rule 분석 오케스트레이터는 실제
+`RuleAnalysisPersistenceService.completeAndAdopt` 경계를 사용한다. 기존 저수준
+`DetectionResultPersistenceService.complete`는 Evidence와 결과 `COMPLETED`만
+한 트랜잭션으로 처리하며 거래 채택·상태 전이는 포함하지 않는다.
 
 ## 7. 버전과 동시성
 

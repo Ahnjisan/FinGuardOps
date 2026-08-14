@@ -193,9 +193,10 @@ HTTP 오케스트레이터도 Snapshot과 분석 시작 commit, 분석 시도당
 1회 호출, 응답 변환, 결과 완료·Evidence 저장·거래 결과 채택 또는 실패 상태
 기록을 연결합니다.
 
-거래 접수 Service의 오케스트레이터 호출, 최종 동기 거래 응답 연결, 결과 채택
-이후 멱등 성공 Snapshot 확정, 운영 배포·복구·재분석, 위험 대응과 사건 생성은
-아직 구현되지 않았습니다.
+거래 접수 Service의 오케스트레이터 호출, External Risk, 위험 대응과 사건 연결,
+최종 동기 거래 응답과 Snapshot v2, Snapshot 완료 간극 복구, RuleVersion 운영
+publish, 운영 배포·재분석은 아직 구현되지 않았습니다. `ANALYZED`는 위험 대응
+전 중간 상태이므로 최종 성공으로 반환하거나 성공 Snapshot으로 확정하지 않습니다.
 
 ```text
 React·TypeScript
@@ -342,19 +343,27 @@ Kafka
 * 비트랜잭션 `RuleAnalysisOrchestrationService`의 분석 시작 commit, FastAPI 정확히
   1회 호출, 응답 변환, 결과 완료·채택과 실패 기록 연결
 * Rule v1 고정 metadata·Reason Code 표시 Registry와 `RuleEvidenceDraft` 변환 구현
+* 최종 거래 성공 경계, 멱등 Snapshot v2와 완료 간극 복구 계약을
+  [`ADR-006`](docs/07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md)으로 확정
 * Backend와 AI Service 전용 GitHub Actions CI 구성
 
 현재 PostgreSQL 연동은 애플리케이션 코드와 Testcontainers 검증 범위입니다. 운영 PostgreSQL, Docker Compose, Kubernetes와 AWS 배포 환경이 구현되었다는 의미는 아닙니다. 거래 접수 성공 응답도 현재는 단계적 구현 상태인 `RECEIVED`와 탐지 관련 null 값을 반환하며, 최종 동기 분석 목표는 [`ADR-003`](docs/07-decisions/ADR-003-transaction-processing-boundary.md)을 유지합니다.
 
-### In Progress
-
-* 거래 접수와 Rule v1 분석 오케스트레이터 연결 경계 검토
-
 ### Planned
 
-* 결과 채택 commit 이후 최종 동기 응답과 멱등 Snapshot 확정
-* 실패 후 재분석·수동 복구 계약
-* 사건 생성·조회·상태 변경
+최종 동기 거래 접수는 다음 선행 순서를 따른다.
+
+1. RuleVersion publish·운영 준비
+2. External Risk 정책과 Mock 구현
+3. 위험 대응 정책과 거래 최종 상태 전이 구현
+4. 사건 영속 모델과 HIGH·CRITICAL 사건 연결 구현
+5. 거래 접수–Rule 분석–위험 대응–사건–Snapshot v2 연결
+6. Snapshot 완료 간극 운영 복구 구현
+
+그 밖의 계획은 다음과 같습니다.
+
+* 실패 후 재분석 계약
+* 사건 조회·상태 변경
 * 조사 메모·감사 로그
 * ML 추론
 * AI 사건 리포트
@@ -370,11 +379,12 @@ Kafka
 * 장애·비용 실험
 
 현재 `RECEIVED`/null 멱등 response snapshot은 거래 접수 commit에서 확정되어 그대로
-재생됩니다. 이는 목표 분석 계약의 "결과 채택 commit 이후 최종 성공 Snapshot
-확정"과 다르며 아직 전환되지 않았습니다. version envelope, legacy codec와 저장
-HTTP 상태 재생은 구현되어 있지만 최종 분석 응답 연결은 미구현입니다. 상세
-목표 경계는
-[`spring-rule-analysis-orchestration-contract.md`](docs/01-requirements/spring-rule-analysis-orchestration-contract.md)를
+재생됩니다. strict legacy codec과 v1 envelope, 저장 HTTP 상태 재생은 구현되어
+있지만 최종 `transaction-create-response-v2`와
+`transaction-intake-snapshot-envelope-v2` codec은 미구현입니다. 최종 성공은
+Rule 결과 채택뿐 아니라 위험 대응, 최종 거래 상태와 HIGH·CRITICAL 사건 연결의
+모든 업무 commit 이후에만 확정합니다. 상세 경계와 완료 간극 복구 정책은
+[`ADR-006`](docs/07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md)을
 따릅니다. DB의 24시간 `expires_at` 저장값도 Service 만료 판정과 정리 작업이
 없어 실질적인 만료 정책은 아닙니다.
 

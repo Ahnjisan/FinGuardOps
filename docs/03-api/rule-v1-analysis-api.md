@@ -25,6 +25,9 @@ Handler도 구현되어 있다. Spring Boot `RuleAnalysisHttpClient`, Timeout·T
 FastAPI 정확히 1회 호출, 응답의 Evidence 변환, 결과 완료·채택과 실패 기록을
 연결하는 Spring Boot 오케스트레이션도 구현되어 있다. 거래 접수와 최종 멱등
 응답 연결은 아직 구현되지 않았으므로 전체 서비스 연동 완료로 해석하지 않는다.
+최종 거래 성공, Snapshot v2와 완료 간극 복구는
+[`ADR-006`](../07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md)을
+따르며 이 내부 Rule 분석 API의 책임이 아니다.
 
 이 API는 외부 사용자 API가 아니라 Private Network 안에서 사용하는
 Spring Boot → FastAPI 내부 서비스 API다. 인증·인가는 아직 구현되지 않았으며
@@ -827,20 +830,35 @@ Spring Boot가 만든 요청·Rule·배포 capability나 upstream 응답 계약�
 
 다음 순서를 지킨다.
 
-1. 짧은 분석 시작 쓰기 트랜잭션에서 거래를 잠그고 거래·행동 이벤트·활성
-   RuleVersion Snapshot과 다음 DetectionResult 버전을 고정한다.
-2. 같은 트랜잭션에서 DetectionResult `PENDING → IN_PROGRESS`와 거래
+1. 상위 거래 처리 흐름이 단일 `evaluationCutoffAt`을 확정한다.
+2. 같은 cutoff로 거래·행동 이벤트·실행 가능한 활성 RuleVersion 기준과 예상
+   `ruleSetVersion`을 고정한다.
+3. 상위 거래 처리 흐름이 DB 트랜잭션과 행 잠금 없이 External Risk를 조회하고
+   승인된 실패·캐시 정책을 적용한다.
+4. External Risk 결과와 조회 상태를 포함한 immutable 분석 입력을 확정해
+   `RuleAnalysisOrchestrationService`에 전달한다. 이 Service는 External Risk를
+   직접 조회하거나 정책을 결정하지 않는다.
+5. 짧은 분석 시작 쓰기 트랜잭션에서 거래를 잠그고 전달받은 Snapshot과 다음
+   DetectionResult 버전을 고정한다.
+6. 같은 트랜잭션에서 DetectionResult `PENDING → IN_PROGRESS`와 거래
    `RECEIVED → ANALYZING`을 commit한다.
-3. DB 트랜잭션과 잠금을 유지하지 않은 상태에서 FastAPI를 호출한다.
-4. 응답 wire 계약, 무결성과 선확정 Snapshot 대응을 검증한다.
-5. 후속 별도 쓰기 트랜잭션에서 Evidence, DetectionResult `COMPLETED`, 결과
+7. DB 트랜잭션과 잠금을 유지하지 않은 상태에서 FastAPI를 정확히 한 번 호출한다.
+8. 응답 wire 계약, 무결성과 선확정 Snapshot 대응을 검증·변환한다.
+9. 후속 별도 쓰기 트랜잭션에서 Evidence, DetectionResult `COMPLETED`, 결과
    채택과 거래 `ANALYZING → ANALYZED`를 원자적으로 수행한다.
-6. 결과 채택 commit 이후에만 최종 성공 멱등 Snapshot을 확정한다.
+10. 9단계 commit으로 Rule 분석 HTTP 오케스트레이터의 책임이 끝난다.
+    `ANALYZED`는 최종 성공이 아닌 중간 상태이며 External Risk를 새로 조회하거나
+    다시 반영하지 않는다.
+11. 이 계약 밖의 상위 거래 처리 흐름이 위험 대응, 최종 거래 상태 전이와
+    HIGH·CRITICAL의 사건 생성 또는 기존 사건 연결을 수행하고 commit한다.
+12. 모든 최종 업무 commit 이후에만 ADR-006의 Snapshot v2를 확정한다.
 
 네트워크 응답을 기다리는 동안 DB 쓰기 트랜잭션과 잠금을 장시간 유지하지
-않는다. 현재 1~5단계는 비트랜잭션 오케스트레이터와 기존 `REQUIRES_NEW`
-persistence boundary로 구현되어 있다. 6단계의 최종 성공 멱등 Snapshot과 거래
-접수 연결은 아직 구현되지 않았다.
+않는다. 현재 내부 구현은 External Risk가 없는 거래·행동·RuleVersion Snapshot을
+분석 시작 경계에서 조합한 뒤 5~10단계의 시작·HTTP·완료·채택 책임을 수행한다.
+상위 흐름이 1~4단계의 External Risk 포함 입력을 선행 구성해 전달하는 연결과
+11~12단계는 아직 구현되지 않았다. Rule 분석 HTTP 오케스트레이터는 External
+Risk 조회·정책, 위험 대응, 사건 또는 Snapshot v2를 소유하지 않는다.
 
 ### 13.8 로그와 정보 보호
 
@@ -892,10 +910,13 @@ connect·response timeout, 자동 retry 0회, 트랜잭션 밖 HTTP 호출과 �
 ## 14. 현재 구현 이후 제외 범위
 
 - 거래 접수 Service에서 Rule v1 오케스트레이터를 호출하는 연결
-- 최종 동기 분석 응답과 결과 채택 이후 멱등 Snapshot 확정
-- 분석 이후 위험 대응과 사건 상태 변경
-- RuleVersion 별도 동기화·캐시·배포 산출물
+- External Risk 정책과 연동
+- 분석 이후 위험 대응과 최종 거래 상태 전이
+- HIGH·CRITICAL 사건 생성 또는 기존 사건 연결
+- 최종 동기 응답과 Snapshot v2 확정
+- Snapshot 완료 간극 운영 복구
+- RuleVersion publish·운영 준비와 별도 동기화·캐시·배포 산출물
 - 인증·인가, CORS와 네트워크 보안 구현
 - 선택적 Gateway 요청 본문 조기 차단 구현
-- External Risk, ML과 생성형 AI 연동
+- ML과 생성형 AI 연동
 - DB 스키마와 Migration 변경
