@@ -16,6 +16,8 @@
 - [`../02-architecture/domain-erd.md`](../02-architecture/domain-erd.md)
 - [`../01-requirements/transaction-state-transition.md`](../01-requirements/transaction-state-transition.md)
 - [`../07-decisions/ADR-003-transaction-processing-boundary.md`](../07-decisions/ADR-003-transaction-processing-boundary.md)
+- [`../07-decisions/ADR-004-idempotency-response-snapshot-transition.md`](../07-decisions/ADR-004-idempotency-response-snapshot-transition.md)
+- [`../07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md`](../07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md)
 
 논리 모델보다 이 문서가 더 구체적으로 확정한 거래 접수의 PostgreSQL 컬럼, 제약조건, 인덱스와 멱등 정책은 후속 Flyway Migration, JPA 매핑과 Testcontainers 통합 테스트의 구현 기준이다.
 
@@ -237,7 +239,7 @@ FAILED
 | 상황 | HTTP·오류 | 처리 |
 | --- | --- | --- |
 | 새 키의 최초 성공 | `201 Created` | 거래와 완료 결과를 한 번만 생성 |
-| 같은 키 + 같은 지문 + `COMPLETED` | legacy `200 OK`, 신규 envelope의 저장된 `201 Created` | 새 처리를 시작하지 않고 기존 완료 결과 반환 |
+| 같은 키 + 같은 지문 + `COMPLETED` | legacy `200 OK`, v1·v2 envelope의 저장된 `201 Created` | 새 처리를 시작하지 않고 기존 완료 결과 반환 |
 | 같은 키 + 다른 지문 | `409 Conflict`, `IDEMPOTENCY_KEY_CONFLICT` | 기존 기록과 거래를 변경하지 않음 |
 | 같은 키 + 같은 지문 + `IN_PROGRESS` | `409 Conflict`, `IDEMPOTENCY_REQUEST_IN_PROGRESS` | 새 처리·거래·탐지·사건을 시작하지 않음 |
 | 같은 키 + 같은 지문 + `FAILED` | 고정 whitelist 또는 `500 INTERNAL_ERROR` | 같은 키의 업무 처리를 자동 재실행하지 않음 |
@@ -245,7 +247,8 @@ FAILED
 
 충돌 판별은 기존 레코드의 상태를 해석하기 전에 지문 일치 여부를 먼저 확인한다. 따라서 같은 키의 지문이 다르면 기존 처리가 진행 중이어도 `IDEMPOTENCY_KEY_CONFLICT`이다.
 
-전환 이후 신규 최초 성공은 `response_snapshot`에 다음 envelope를 보존한다.
+현재 단계적 구현의 신규 최초 성공은 `response_snapshot`에 다음 v1 envelope를
+보존한다.
 
 ```json
 {
@@ -265,13 +268,43 @@ FAILED
 }
 ```
 
-`traceId`, `idempotencyRecordId`, 요청 지문, 내부 PK, 요청 본문, 고객·계좌 참조값은 snapshot에 저장하지 않는다. 네 nullable 업무 필드는 JSON에서 생략하지 않고 명시적 null로 저장한다. 신규 envelope 완료 재전송은 검증된 `responseBody`와 저장된 `201`을 복원하고 현재 재전송 요청의 새 `traceId`를 결합한다.
+`traceId`, `idempotencyRecordId`, 요청 지문, 내부 PK, 요청 본문, 고객·계좌 참조값은 snapshot에 저장하지 않는다. 네 nullable 업무 필드는 JSON에서 생략하지 않고 명시적 null로 저장한다. v1 envelope 완료 재전송은 검증된 `responseBody`와 저장된 `201`을 복원하고 현재 재전송 요청의 새 `traceId`를 결합한다.
 
 기존 무버전 Snapshot은 `responseBody`에 표시한 일곱 필드만 최상위에 정확히 가지며 `processingStatus=RECEIVED`, 네 탐지 관련 필드가 모두 JSON null일 때만 strict legacy로 복원한다. legacy 재전송은 `200 OK`를 유지하며 신규 envelope로 갱신하지 않는다. 손상되었거나 두 계약과 다른 snapshot, 알 수 없는 version은 보정하지 않고 `500 INTERNAL_ERROR`로 처리하며 snapshot 원문을 로그나 오류 응답에 노출하지 않는다.
 
+최종 동기 처리의 신규 성공은 같은 일곱 업무 필드를
+`transaction-create-response-v2`와
+`transaction-intake-snapshot-envelope-v2`, `httpStatus=201`로 저장한다. v2는
+`APPROVED`, `ADDITIONAL_AUTH_REQUIRED`, `HELD`만 허용하고 위험 등급·대응·채택
+결과를 필수로 가진다. LOW·MEDIUM은 `caseId`가 null이고 HIGH·CRITICAL은
+`caseId`가 필수다. `RECEIVED`, `ANALYZING`, `ANALYZED`, `FAILED`는 v2에 저장할
+수 없다. v2 codec과 실행 경로는 아직 구현되지 않았다.
+
+legacy와 v1 Snapshot은 수정·backfill하지 않고 최신 DB 상태로 보정하지 않는다.
+기존 version의 의미를 확장하지 않으며 기존 Snapshot 재생에서 분석·위험 대응·사건
+처리를 시작하지 않는다. 기존 `response_snapshot JSONB`와 object Check는 v2
+envelope도 저장할 수 있으므로 이 계약 확정만으로 새 컬럼이나 Flyway Migration은
+필요하지 않다.
+
 `finalizedAt`과 `finished_at`은 완료 경로에서 `Clock`을 한 번 읽은 같은 확정 시각이다. V1의 무정밀도 지정 `TIMESTAMPTZ`가 PostgreSQL 기본 마이크로초 정밀도를 사용하므로 애플리케이션은 이 값을 마이크로초로 정규화한 뒤 두 위치에 동일하게 저장한다.
 
-`FAILED`인 같은 키·같은 지문의 요청은 자동 재실행하지 않는다. `DUPLICATE_TRANSACTION`은 `409`, `DEPENDENCY_TIMEOUT`은 `503`으로만 고정 재현한다. null, 빈 값, 알 수 없는 값과 내부 전용 `TRANSACTION_INTAKE_FAILED`는 원문을 노출하지 않고 `500 INTERNAL_ERROR`로 축약한다.
+`FAILED`인 같은 키·같은 지문의 요청은 자동 재실행하지 않는다.
+`DUPLICATE_TRANSACTION`은 `409`, `DEPENDENCY_TIMEOUT`과
+`DEPENDENCY_UNAVAILABLE`은 각각 같은 공개 code의 `503`, `INTERNAL_ERROR`는
+`500`으로 고정 재현한다. 두 의존성 오류의 공개 message는
+`탐지 서비스를 사용할 수 없습니다.`이다. null, 빈 값, 알 수 없는 값과 내부
+전용 값은 원문을 노출하지 않고 `500 INTERNAL_ERROR`로 축약한다.
+
+최종 업무 상태 commit 뒤 Snapshot 생성 또는 멱등 `COMPLETED` commit이 실패하면
+이미 확정된 업무 결과를 되돌리지 않고 멱등 레코드를 `IN_PROGRESS`로 유지한다.
+최초 요청은 `500 INTERNAL_ERROR`, 같은 요청은
+`409 IDEMPOTENCY_REQUEST_IN_PROGRESS`다. 운영 복구는 확정된 도메인 상태를
+검증해 동일 v2 Snapshot만 생성하고 기존 레코드를 `COMPLETED`로 전이한다.
+
+분석 실패와 거래·DetectionResult `FAILED` commit이 확인된 경우에만 멱등
+`FAILED`를 확정한다. 시작 전 실패로 거래 `RECEIVED`와 결과 미생성이 확인되면
+승인된 내부 코드로 실패를 확정할 수 있다. 거래가 `ANALYZING`이거나 결과 상태가
+불확실하면 `IN_PROGRESS`로 유지하고 자동 재실행하지 않는다.
 
 ### 6.4 24시간 시각 저장과 미구현 만료 정책
 
@@ -695,8 +728,15 @@ CREATE INDEX ix_idempotency_record_status_updated_at
 - 거래 연결과 완료·실패 상태 확정은 Repository의 `findByIdForUpdate`가 JPA `PESSIMISTIC_WRITE`로 대상 PK 행을 먼저 잠근 뒤 엔티티 상태 전이와 dirty checking UPDATE를 수행한다.
 - 현재 구현은 `processing_status = 'IN_PROGRESS'`를 SQL UPDATE 조건에 직접 포함하지 않는다. 경합 실행은 같은 행의 비관적 잠금 획득 순서로 직렬화되고, 뒤에 잠금을 얻은 실행은 이미 terminal 상태인 엔티티의 상태 전이 검증에서 거부되어 단일 승자를 유지한다.
 - `IN_PROGRESS` 선점 DB 트랜잭션을 External Risk나 FastAPI 네트워크 호출 동안 열어 두지 않는다.
-- `financial_transaction` 생성, 해당 멱등 기록의 `financial_transaction_id` 연결, typed snapshot 저장과 `COMPLETED` 전이는 하나의 짧은 업무 트랜잭션 경계에서 처리한다. 어느 단계든 실패하면 거래 저장과 `COMPLETED` 전이를 함께 롤백한 뒤 별도 짧은 트랜잭션으로 선점 기록을 `FAILED`로 확정한다.
-- 후속 분석과 최종 완료 응답 확정은 ADR-003의 단계적 구현 순서를 따르며, 전체 흐름 준비 전 불완전한 외부 Controller를 공개하지 않는다.
+- **현재 구현**은 `financial_transaction` 생성, 멱등 거래 연결, v1 typed Snapshot
+  저장과 `COMPLETED` 전이를 하나의 짧은 업무 트랜잭션으로 처리한다. 실패하면
+  거래 저장과 완료 전이를 rollback하고 별도 트랜잭션에서 선점 기록을
+  `FAILED`로 확정한다.
+- **최종 목표**는 거래 저장·연결 commit 뒤 External Risk와 Rule 분석을 DB
+  트랜잭션 밖에서 수행하고, 위험 대응·최종 상태·필요한 사건 연결의 모든 업무
+  commit 뒤 별도 짧은 트랜잭션에서 v2 Snapshot과 멱등 `COMPLETED`를 확정한다.
+- 최종 업무 commit 뒤 멱등 완료 실패는 업무 rollback이나 멱등 `FAILED`로
+  변환하지 않는다. `IN_PROGRESS` 상태에서 ADR-006의 운영 복구를 기다린다.
 
 ## 12. JPA 매핑 기준
 
@@ -787,10 +827,10 @@ Java 매핑 변경은 이 물리 DB 계약과 함께 검증한다.
 이번 물리 계약 이후에도 다음 항목은 별도 승인과 구현 설계가 필요하다.
 
 - 멱등 만료 레코드 정리 주기, batch 크기, 잠금과 장애 재시도 방식
-- 탐지 실행·결과 검증·채택·위험 대응을 기존 거래 접수 흐름에 통합하는 방식
+- ADR-006 순서에 따른 External Risk·탐지·위험 대응·사건·v2 Snapshot 구현
 - 상태 변경 충돌 후 자동 재시도 여부
 - 최종 상태 거래의 재분석·정정 이력 모델
-- External Risk와 FastAPI Timeout 이후 재개·복구 정책
+- External Risk와 FastAPI 실패 이후 새 업무 재실행 정책
 - 참조값 생성 주체, 추가 문자 제한, 암호화·마스킹과 보존 기간
 - 실제 Flyway 의존성, Migration 버전과 Testcontainers 의존성 도입 승인
 

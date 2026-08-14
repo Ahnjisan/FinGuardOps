@@ -23,7 +23,9 @@
 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md),
 Rule v1 분석의 실행 시점·트랜잭션·결과 채택은
 [Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](./spring-rule-analysis-orchestration-contract.md)에서
-구체화한다.
+구체화한다. 최종 거래 성공 상태와 멱등 Snapshot·완료 간극 복구는
+[`ADR-006`](../07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md)을
+따른다.
 
 FinGuardOps는 실제 금융기관 거래를 승인·인증·보류·차단하지 않는다. 이 문서의 승인, 추가 인증과 보류는 프로젝트 내부의 Mock 처리 결과를 뜻한다.
 
@@ -93,7 +95,7 @@ HIGH와 CRITICAL은 사건 생성 대상이지만, 재처리·연관 거래·사
 
 ### `ANALYZED`
 
-사용 가능한 탐지 결과가 저장되고 위험 등급이 결정되어 위험 대응을 적용할 준비가 된 상태이다. 위험 대응까지 완료되었다는 뜻은 아니다.
+사용 가능한 탐지 결과가 저장되고 위험 등급이 결정되어 위험 대응을 적용할 준비가 된 상태이다. 위험 대응까지 완료되었다는 뜻이 아니며 성공 HTTP 응답이나 성공 멱등 Snapshot을 확정할 수 없는 중간 상태이다.
 
 ### `APPROVED`
 
@@ -198,12 +200,19 @@ FastAPI 호출은 이 전이의 commit 이후 DB 트랜잭션과 거래 잠금�
 - 재시도 가능 여부: 가능 후보. 이미 반영된 승인 결과를 중복 생성하지 않는다.
 - 감사 로그 여부: 필요
 
+LOW는 `riskResponseOutcome = APPROVED`, MEDIUM은
+`riskResponseOutcome = APPROVED_WITH_MONITORING`을 사용한다. 두 경우 모두
+`caseId`는 null이다. 대응 결과와 `APPROVED` 전이가 commit된 뒤에만 최종 성공
+조건을 충족한다.
+
 ### `ANALYZED` → `ADDITIONAL_AUTH_REQUIRED`
 
 - 전이 조건: 위험 등급이 HIGH이고 추가 인증 및 사건 생성 정책을 적용한다.
 - 변경 주체: 시스템인 Spring Boot
 - 생성되는 결과: Mock 추가 인증 필요 결과와 사건 생성 또는 기존 사건 연결 결과
-- 사건 생성 여부: 필요. 동일 거래에 대한 중복 사건은 생성하지 않는다.
+- 사건 생성 여부: 필요. 동일 거래에 대한 중복 사건은 생성하지 않는다. 사건
+  생성 또는 기존 사건 연결과 `caseId`가 확정되지 않으면 성공 조건을 충족하지
+  않는다.
 - 실패 시 처리: 거래 상태 변경과 사건 생성의 일부만 성공한 경우 정합성 확인 및 복구가 필요하다. 구체적인 보상 방식은 후속 설계에서 확정한다.
 - 재시도 가능 여부: 가능 후보. 상태와 사건 생성 모두 멱등성을 보장해야 한다.
 - 감사 로그 여부: 필요
@@ -213,7 +222,8 @@ FastAPI 호출은 이 전이의 commit 이후 DB 트랜잭션과 거래 잠금�
 - 전이 조건: 위험 등급이 CRITICAL이고 거래 보류, 긴급 사건 및 알림 정책을 적용한다.
 - 변경 주체: 시스템인 Spring Boot
 - 생성되는 결과: Mock 보류 결과, 긴급 사건 생성 또는 기존 사건 연결, 담당자 알림 후보
-- 사건 생성 여부: 필요. 중복 긴급 사건 생성을 방지한다.
+- 사건 생성 여부: 필요. 중복 긴급 사건 생성을 방지한다. 사건 생성 또는 기존
+  사건 연결과 `caseId`가 확정되지 않으면 성공 조건을 충족하지 않는다.
 - 실패 시 처리: 보류·사건·알림의 각 결과를 구분해 기록한다. 알림 실패가 거래 위험 판단 결과를 변경하지 않는다.
 - 재시도 가능 여부: 가능 후보. 각 결과의 중복 생성을 방지해야 한다.
 - 감사 로그 여부: 필요
@@ -284,17 +294,25 @@ FastAPI는 Feature 계산, Rule 실행과 ML 추론 결과를 제공할 수 있�
 ### 동일 멱등성 키를 가진 거래 요청 재전송
 
 - 최초 요청의 처리 결과를 식별해 동일한 업무 결과를 유지해야 한다.
-- 같은 키와 같은 지문의 최초 처리가 완료되었으면 `200 OK`로 기존 결과를 반환한다.
+- 같은 키와 같은 지문의 최초 처리가 완료되었으면 저장 형식과 HTTP 상태를
+  재생한다. strict legacy는 `200 OK`, v1 envelope와 최종 v2 envelope는 저장된
+  `201 Created`를 반환한다.
 - 같은 키와 같은 지문의 최초 처리가 진행 중이면 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다.
 - 같은 키에 다른 지문이 도착하면 `409 Conflict`와 `IDEMPOTENCY_KEY_CONFLICT`로 거부한다.
 - `Idempotency-Key`는 8~128자의 승인된 ASCII 문자만 사용하며 `(operationScope, idempotencyKey)`를 Unique로 관리한다.
 - 정규화 요청 지문은 SHA-256으로 계산하고 멱등 기록은 최초 선점부터 24시간 보존한다.
 - 정확한 필드, 정규화, 저장과 만료 정책은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따른다.
 
-Rule v1 최종 동기 성공 응답의 멱등 Snapshot은 채택 결과와
-`ANALYZING → ANALYZED` commit 이후에만 확정한다. 현재 구현은 거래 접수
-commit에서 `RECEIVED`/탐지 null Snapshot을 먼저 완료하므로 이 목표 경로는
-아직 구현되지 않았다.
+Rule 결과 채택과 `ANALYZING → ANALYZED` commit만으로는 최종 동기 성공 응답을
+확정하지 않는다. 위험 대응 결과와 최종 거래 상태가 확정되고,
+HIGH·CRITICAL이면 사건 생성 또는 기존 사건 연결까지 commit된 뒤에만 v2 성공
+Snapshot을 확정한다. 현재 구현은 거래 접수 commit에서 `RECEIVED`/탐지 null
+v1 Snapshot을 먼저 완료하므로 이 목표 경로는 아직 구현되지 않았다.
+
+최종 업무 commit 뒤 Snapshot 완료가 실패하면 멱등 레코드는 `FAILED`로 전이하지
+않고 `IN_PROGRESS`로 유지한다. 최초 요청은 `500 INTERNAL_ERROR`, 같은 요청은
+`409 IDEMPOTENCY_REQUEST_IN_PROGRESS`이며 외부 호출과 업무 처리를 반복하지
+않는다. 운영 복구만 확정된 상태를 검증해 동일 v2 Snapshot을 완료할 수 있다.
 
 ### 같은 요청의 동시 도착
 
@@ -381,12 +399,11 @@ Validation 거절은 Transaction이나 AuditLog 행을 만들지 않는다. 오�
 
 - 추가 인증 성공·실패·만료 후 허용할 거래 상태 전이
 - 최종 상태에서 재분석·정정이 필요할 때 기존 상태 변경 또는 새 이력 생성 여부
-- `FAILED` 멱등 요청의 같은 키 재전송과 재시도 정책
-- FastAPI 장애 시 허용할 기본 분석 및 거래 처리 정책
+- `FAILED` 멱등 요청의 새 키 재처리와 재분석 정책
 - External Risk 조회 불가가 위험 대응에 미치는 정책
 - 탐지·상태 전이 재시도 가능 오류, 횟수와 간격
 - 동일 거래 또는 연관 거래의 사건 중복 방지와 병합·분리 기준
-- 상태 변경과 사건 생성 중 일부만 성공했을 때의 복구·보상 정책
+- 위험 대응과 사건 연결 중 일부만 성공했을 때의 복구·보상 구현 방식
 - 동시 상태 변경 충돌 후 재조회·자동 재시도·운영 확인 방식
 - 감사 로그 보존 기간과 접근 범위
 

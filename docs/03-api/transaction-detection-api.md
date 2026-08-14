@@ -4,7 +4,7 @@
 
 이 문서는 FinGuardOps의 거래 접수·조회, 행동 이벤트 수집·조회와 탐지 결과 조회 REST API 계약을 정의한다.
 
-이 계약은 이후 Spring Boot Controller, 요청·응답 DTO, Validation, Service, 테스트와 OpenAPI 구현의 기준이다. API 공통 표현, 금액, 페이지네이션, 멱등성, 오류 응답과 추적 원칙은 [`api-conventions.md`](./api-conventions.md)를 따른다. 멱등 Snapshot과 최종 동기 응답 전환은 [`ADR-004`](../07-decisions/ADR-004-idempotency-response-snapshot-transition.md)를 따른다.
+이 계약은 이후 Spring Boot Controller, 요청·응답 DTO, Validation, Service, 테스트와 OpenAPI 구현의 기준이다. API 공통 표현, 금액, 페이지네이션, 멱등성, 오류 응답과 추적 원칙은 [`api-conventions.md`](./api-conventions.md)를 따른다. 기존 멱등 Snapshot 전환은 [`ADR-004`](../07-decisions/ADR-004-idempotency-response-snapshot-transition.md), 최종 성공과 Snapshot v2·완료 간극 복구는 [`ADR-006`](../07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md)을 따른다.
 
 ## 2. 범위와 책임 경계
 
@@ -30,8 +30,8 @@ DetectionResult·DetectionEvidence의 물리 영속 모델과 FastAPI
 `POST /api/v1/rule-analysis` HTTP 경계, Spring Boot `RuleAnalysisHttpClient`,
 Timeout·Trace 전달과 응답 검증·오류 분류, 거래 분석 Snapshot 조합·HTTP
 오케스트레이션과 탐지 실행 결과 자동 생성·채택은 구현되었다. External Risk,
-거래 접수 Service 연결, 최종 멱등 응답, 위험 대응과 사건 연결은 아직
-구현되지 않았다. 현재 단계 응답은 최종 동기
+거래 접수 Service 연결, 최종 멱등 응답 v2, 위험 대응과 사건 연결, Snapshot
+완료 간극 복구와 RuleVersion 운영 publish는 아직 구현되지 않았다. 현재 단계 응답은 최종 동기
 분석 목표를 변경하지 않는다. Spring Boot 분석 처리의 기준은
 [Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../01-requirements/spring-rule-analysis-orchestration-contract.md)이다.
 
@@ -286,12 +286,32 @@ Idempotency-Key: <required>
 | `createdAt` | string | DB/JPA 저장 결과의 실제 생성 시각, UTC ISO-8601 |
 | `traceId` | string | 현재 HTTP 요청의 추적 식별자 |
 
-현재 접수 단계에서는 네 nullable 필드를 JSON에서 생략하지 않는다. `riskLevel`과 `riskResponseOutcome`의 비-null Enum은 후속 위험 탐지·대응 계약에서 확정하며, 이번 접수 응답에서는 nullable string으로 취급한다.
+현재 접수 단계에서는 네 nullable 필드를 JSON에서 생략하지 않으며 nullable
+string으로 취급한다. 최종 v2의 비-null `riskLevel`과
+`riskResponseOutcome` 조합은 바로 아래 계약과 ADR-006을 따른다.
 
 이 응답은 거래 영속화 단계의 **현재 구현** 계약이며 최종 계약이 아니다. 현재
-신규 요청은 이 단계적 업무 결과를 version envelope에 저장한다. 목표 Rule v1
-계약은 DetectionResult 채택 commit 이후에만 최종 성공 Snapshot을 확정한다.
-이 연결과 위험 대응·사건 결과의 Java·DB 반영은 여전히 후속 구현이다.
+신규 요청은 이 단계적 업무 결과를 v1 envelope에 저장한다. DetectionResult
+채택과 거래 `ANALYZED`는 위험 대응 전 중간 상태이므로 최종 성공 응답이나
+성공 Snapshot을 확정하지 않는다. 이 연결과 External Risk, 위험 대응·사건 결과,
+Snapshot v2의 Java·DB 반영은 여전히 후속 구현이다.
+
+#### 5.5.1 최종 동기 성공 응답
+
+최종 동기 성공은 Rule 결과·Evidence 저장과 채택, 위험 등급·대응, 최종 거래
+상태가 모두 확정되고 HIGH·CRITICAL이면 사건 생성 또는 기존 사건 연결까지
+commit된 뒤에만 허용한다.
+
+| `riskLevel` | `processingStatus` | `riskResponseOutcome` | `caseId` |
+| --- | --- | --- | --- |
+| `LOW` | `APPROVED` | `APPROVED` | null |
+| `MEDIUM` | `APPROVED` | `APPROVED_WITH_MONITORING` | null |
+| `HIGH` | `ADDITIONAL_AUTH_REQUIRED` | `ADDITIONAL_AUTH_REQUIRED` | 필수 |
+| `CRITICAL` | `HELD` | `HELD` | 필수 |
+
+최종 v2 response body도 현재와 같은 일곱 업무 필드를 사용하며 HTTP 응답에서만
+현재 요청의 `traceId`를 여덟 번째 필드로 결합한다. `RECEIVED`, `ANALYZING`,
+`ANALYZED`, `FAILED`는 v2 성공 body에 사용할 수 없다.
 
 ### 5.6 성공 응답 예시
 
@@ -320,8 +340,8 @@ X-Trace-Id: trace_demo_tx_0001
 
 ### 5.7 멱등성과 중복
 
-- 같은 `Idempotency-Key`와 같은 요청의 최초 처리가 완료되었으면 새 거래·탐지·사건을 생성하지 않고 기존 업무 결과를 반환한다. 무버전 legacy Snapshot은 `200 OK`, 신규 envelope는 기록되고 v1 codec이 검증한 `201 Created`를 사용한다.
-- 두 Snapshot 형식 모두 거래·탐지·위험 대응·사건 연결 업무 값은 최초 확정 값을 유지하고 `traceId`만 현재 재전송 요청의 값을 사용한다. 따라서 동일 응답 재생은 업무 결과와 정책상 HTTP 상태의 재생이며 응답 전체의 바이트 단위 복제를 뜻하지 않는다.
+- 같은 `Idempotency-Key`와 같은 요청의 최초 처리가 완료되었으면 새 거래·탐지·사건을 생성하지 않고 기존 업무 결과를 반환한다. 무버전 legacy Snapshot은 `200 OK`, v1과 v2 envelope는 저장되고 검증된 `201 Created`를 사용한다.
+- 모든 Snapshot 형식은 최초 확정 업무 값을 유지하고 `traceId`만 현재 재전송 요청의 값을 사용한다. 따라서 동일 응답 재생은 업무 결과와 정책상 HTTP 상태의 재생이며 응답 전체의 바이트 단위 복제를 뜻하지 않는다.
 - 같은 `Idempotency-Key`와 같은 요청의 최초 처리가 진행 중이면 새 처리를 시작하지 않고 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다.
 - 같은 키에 다른 요청 내용이 오면 `409 Conflict`와 `IDEMPOTENCY_KEY_CONFLICT`를 반환한다.
 - 다른 키로 같은 `transactionId`가 오면 `409 Conflict`와 `DUPLICATE_TRANSACTION`을 반환한다.
@@ -332,6 +352,13 @@ X-Trace-Id: trace_demo_tx_0001
 - `eventId` 중복과 `DUPLICATE_EVENT`는 행동 이벤트 API의 책임이며 이 거래 접수 API 범위에 포함하지 않는다.
 
 **현재 구현**은 신규 완료 요청을 `responseBody`, `httpStatus=201`, `responseSchemaVersion=transaction-create-response-v1`, `codecVersion=transaction-intake-snapshot-envelope-v1`, `finalizedAt`의 정확한 envelope로 저장한다. `responseBody`는 현재 단계적 `RECEIVED`와 네 탐지 관련 JSON null을 가진 일곱 업무 필드이다. 기존 무버전 Snapshot은 정확한 일곱 필드, `RECEIVED`, 네 JSON null일 때만 strict legacy codec으로 복원하고 신규 envelope나 탐지 완료 결과로 소급 갱신하지 않으며 재요청은 `200 OK`를 유지한다. 별도 metadata 컬럼이나 Flyway Migration은 추가하지 않았다.
+
+**최종 목표**는 신규 최종 성공 요청을
+`responseSchemaVersion=transaction-create-response-v2`,
+`codecVersion=transaction-intake-snapshot-envelope-v2`, `httpStatus=201`로
+저장한다. v2 codec과 거래 접수 연결은 아직 구현되지 않았다. legacy와 v1을
+수정·backfill하거나 최신 DB 상태로 보정하지 않으며 기존 version의 의미를
+확장하지 않는다.
 
 알 수 없는 구조·버전 또는 역직렬화 실패를 최신 거래 상태로 보정하거나 신규 거래·탐지 처리로 우회하지 않는다. 멱등 재생은 최초 명령 결과의 책임이고 최신 거래·탐지 상태는 별도 조회 API의 책임이다.
 
@@ -357,13 +384,20 @@ Content-Type: application/json
 | --- | --- | --- | --- |
 | `DUPLICATE_TRANSACTION` | `409 Conflict` | `DUPLICATE_TRANSACTION` | `이미 존재하는 transactionId입니다.` |
 | `DEPENDENCY_TIMEOUT` | `503 Service Unavailable` | `DEPENDENCY_TIMEOUT` | `탐지 서비스를 사용할 수 없습니다.` |
+| `DEPENDENCY_UNAVAILABLE` | `503 Service Unavailable` | `DEPENDENCY_UNAVAILABLE` | `탐지 서비스를 사용할 수 없습니다.` |
+| `INTERNAL_ERROR` | `500 Internal Server Error` | `INTERNAL_ERROR` | `요청을 처리하는 중 오류가 발생했습니다.` |
 
 저장된 `failureCode`가 null, 빈 값, 알 수 없는 값 또는 내부 전용 값이면 `500 Internal Server Error`, `INTERNAL_ERROR`, `요청을 처리하는 중 오류가 발생했습니다.`로 축약한다. 원래 `failureCode` 문자열을 공개 code나 message로 전달하지 않는다. 현재 거래 저장 또는 멱등 완료의 예기치 않은 실패를 기록하는 내부 코드 `TRANSACTION_INTAKE_FAILED`도 공개 whitelist가 아니므로 `INTERNAL_ERROR`로 처리한다.
 
-따라서 목표 오케스트레이션의 `DEPENDENCY_UNAVAILABLE` 최초 응답 매핑과 현재
-FAILED 멱등 재생 whitelist는 아직 일치하지 않는다. 후속 구현은 같은 실패의
-최초 응답과 재생 응답이 달라지지 않도록 기존 공통 code를 안전하게 연결해야
-하며, 구현 전에는 완료된 것으로 표현하지 않는다.
+위 whitelist의 `DEPENDENCY_UNAVAILABLE`과 `INTERNAL_ERROR` 거래 접수 연결은
+아직 구현되지 않았다. 최초 응답과 FAILED 재생은 같은 HTTP 상태·공개 code·고정
+message를 사용해야 하며 Client category 원문을 노출하지 않는다.
+
+최종 업무 상태 commit 뒤 v2 Snapshot 완료가 실패하면 멱등 레코드를 `FAILED`로
+바꾸지 않고 `IN_PROGRESS`로 유지한다. 최초 요청은 `500 INTERNAL_ERROR`, 같은
+키·같은 요청은 `409 IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다. 재요청은
+FastAPI, External Risk, 위험 대응과 사건 생성을 반복하지 않는다. 운영 복구만
+확정된 도메인 상태를 검증해 동일 v2 Snapshot을 완료할 수 있다.
 
 ### 5.8 의존 서비스 Timeout
 
@@ -381,11 +415,14 @@ FAILED 멱등 재생 whitelist는 아직 일치하지 않는다. 후속 구현�
 - 완료·검증된 DetectionResult가 없으므로 `adoptedDetectionResultId`를 설정하지 않는다.
 - Rule v1 Spring Boot Client의 자동 retry는 `0회`이며 timeout 응답을 반복
   호출하거나 fallback 결과로 바꾸지 않는다.
-- 대상 DetectionResult와 Transaction을 `FAILED`로 기록하고 결과를 채택하거나
-  사건을 생성하지 않는다.
+- 대상 DetectionResult와 Transaction을 `FAILED`로 기록하는 commit이 확인되면
+  결과를 채택하거나 사건을 생성하지 않고 멱등 실패를 확정한다. 거래가
+  `ANALYZING`이거나 결과 상태가 불확실하면 멱등 레코드는 `IN_PROGRESS`로
+  유지한다.
 - connect·response timeout은 `503 Service Unavailable`과
   `DEPENDENCY_TIMEOUT`으로 반환한다.
-- 실패 후 재분석과 수동 복구는 후속 계약으로 분리한다.
+- 실패 후 재분석 정책과 운영 복구 실행 경로는 후속 구현으로 분리한다. 불확실한
+  상태에서 자동 재실행하지 않는 복구 원칙은 ADR-006을 따른다.
 
 connect·response timeout의 상세 분류와 설정은
 [Rule v1 내부 분석 API](./rule-v1-analysis-api.md#13-spring-boot-client-연동-계약)를
@@ -403,7 +440,7 @@ DetectionResult에는 Client category 이름과 승인된 오케스트레이션 
 `failureCode`를 원자적으로 기록한다. 외부 거래 API 공통 오류 매핑은 거래
 접수 연결과 함께 구현할 후속 범위이다.
 
-실패 Transaction 저장과 오류 응답은 일부만 성공한 것처럼 보이지 않도록 정합성 경계를 가져야 한다. 오류 응답에서 이미 저장된 실패 Transaction을 식별할 수 있도록 다음 공통 오류 문맥을 사용한다.
+실패 Transaction 저장과 오류 응답은 일부만 성공한 것처럼 보이지 않도록 정합성 경계를 가져야 한다. 현재 오류 응답은 다음 공통 envelope를 사용한다.
 
 ```http
 HTTP/1.1 503 Service Unavailable
@@ -415,21 +452,18 @@ Content-Type: application/json
   "code": "DEPENDENCY_TIMEOUT",
   "message": "탐지 서비스를 사용할 수 없습니다.",
   "traceId": "trace_demo_timeout_01",
-  "fieldErrors": [],
-  "resource": {
-    "transactionId": "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
-    "processingStatus": "FAILED"
-  }
+  "fieldErrors": []
 }
 ```
 
-`resource`는 오류와 함께 영속 리소스 문맥을 반환하기 위한 후보이다. 최종 필드명, 범용 구조와 다른 오류에 적용할 범위는 사용자 결정 사항이다. JSON 파싱이나 기본 형식 검증처럼 Transaction을 생성하지 않은 오류에는 이 문맥을 반환하지 않는다.
+`resource`는 오류와 함께 영속 리소스 문맥을 반환하기 위한 후보일 뿐 현재 계약에
+포함하지 않는다. 별도 승인 전 오류 응답에 추가하지 않는다.
 
 ### 5.9 상태 코드
 
 | 상태 코드 | 사용 기준 |
 | --- | --- |
-| `201 Created` | 현재 최초 거래 영속화의 단계적 `RECEIVED` 응답과 신규 envelope 완료 재요청. 최종 동기 분석 결과는 미구현 |
+| `201 Created` | 현재 최초 거래 영속화의 단계적 `RECEIVED` 응답과 v1 완료 재요청. 향후 최종 v2 최초·완료 재요청 |
 | `200 OK` | 무버전 strict legacy Snapshot의 완료된 동일 멱등 요청에 기존 결과 반환 |
 | `400 Bad Request` | 잘못된 JSON, 필수 헤더 누락 또는 필드 형식 오류 |
 | `409 Conflict` | 멱등성 키 지문 충돌, 동일 멱등 요청 처리 중, `transactionId` 중복 또는 동시성 충돌 |
@@ -1036,7 +1070,7 @@ GET /api/v1/detection-results/7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430101
 
 | API | `200` | `201` | `400` | `404` | `409` | `422` | `503` | `500` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `POST /transactions` | strict legacy 완료 재요청의 기존 결과 | 최초 생성과 신규 envelope 완료 재요청 | JSON·필수 헤더·필드 형식 오류 | 사용하지 않음 | 멱등 키 지문 충돌·처리 중 동일 요청·거래·상태·동시성 충돌 | 거래 유형별 도메인 규칙 위반 | 유효 캐시 없는 External Risk Timeout 또는 FastAPI Timeout 초기 정책 | 예기치 않은 서버 오류 |
+| `POST /transactions` | strict legacy 완료 재요청의 기존 결과 | 현재 단계적 최초 생성·v1 완료 재요청과 향후 최종 v2 최초·완료 재요청 | JSON·필수 헤더·필드 형식 오류 | 사용하지 않음 | 멱등 키 지문 충돌·처리 중 동일 요청·거래·상태·동시성 충돌 | 거래 유형별 도메인 규칙 위반 | 유효 캐시 없는 External Risk Timeout, FastAPI Timeout 또는 가용성 장애 | 계약·응답·내부 오류와 Snapshot 완료 실패 |
 | `GET /transactions` | 조회 성공 | 사용하지 않음 | 필터·페이지 형식 오류 | 사용하지 않음 | 사용하지 않음 | 의미상 잘못된 필터·페이지 범위 | 조회 Timeout 또는 명확한 저장소 가용성 장애 | 그 밖의 DataAccess 오류·예기치 않은 서버 오류 |
 | `GET /transactions/{transactionId}` | 조회 성공 | 사용하지 않음 | 식별자 형식 오류 | 거래 없음 | 사용하지 않음 | 사용하지 않음 | 조회 Timeout 또는 명확한 저장소 가용성 장애 | 그 밖의 DataAccess 오류·예기치 않은 서버 오류 |
 | `POST /behavior-events` | 동일 이벤트 기존 결과 | 최초 생성 | JSON·알 수 없는 필드·필드 형식 오류 | 관련 거래 없음 | 다른 내용의 `eventId` 중복 | 이벤트 유형별 도메인 규칙·거래 정합성 위반 | 명확한 DB Timeout 또는 저장소 가용성 장애 | 그 밖의 DataAccess 오류·예기치 않은 서버 오류 |
@@ -1119,7 +1153,12 @@ Content-Type: application/json
 ## 14. `traceId` 전파
 
 - Spring Boot는 거래·행동·탐지 API의 성공과 오류 응답에 `traceId`를 반환한다.
-- 거래 생성 흐름의 `traceId`는 Spring Boot, External Risk Mock과 FastAPI 호출을 연결한다.
+- 최초 거래 생성 HTTP 요청의 `traceId`를 별도 생성 없이 분석
+  `analysisTraceId`로 그대로 전달해 Spring Boot, External Risk Mock과 FastAPI
+  호출을 연결한다.
+- Snapshot에는 `traceId`를 저장하지 않는다. 완료·실패 재생 응답은 현재
+  재요청의 `traceId`를 사용하며 최초 분석 trace를 재요청 trace로 재사용하지
+  않는다.
 - 조회 API의 `traceId`는 해당 조회 요청을 추적하며 저장된 과거 분석의 `traceId`와 같을 필요가 없다.
 - 탐지 결과에 저장된 분석 당시 추적값과 현재 조회 요청의 `traceId`를 함께 제공할 필요가 있으면 서로 다른 필드명과 의미로 구분한다.
 - OpenTelemetry 전파 헤더의 구체적인 이름과 구현은 이 문서에서 확정하지 않는다.
@@ -1142,13 +1181,11 @@ Content-Type: application/json
 
 ### 16.2 거래
 
-- `riskResponseOutcome` Enum 이름
 - External Risk Timeout 이후 거래 실패 상태와 복구 정책
 - Rule v1 분석 실패 후 재분석·수동 복구 정책. 최초 시도는 DetectionResult와
   거래를 `FAILED`로 기록하고 Client 자동 retry는 `0회`
 - 오류 응답의 `resource` 최종 이름과 범용 구조
-- 향후 응답 계약 또는 envelope codec 변경 시 새 version 식별자와 지원 registry
-- Snapshot metadata의 JSONB 내부 저장 또는 별도 컬럼 여부와 필요한 Flyway Migration
+- v2 이후 응답 계약 또는 envelope codec 변경 시 새 version 식별자와 지원 registry
 - 만료 후 같은 키 재사용, 실제 보존 기간, 정리 방식과 정리 전후 동시성 정책
 
 ### 16.3 행동 이벤트

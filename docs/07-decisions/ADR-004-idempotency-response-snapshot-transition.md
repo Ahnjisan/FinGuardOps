@@ -7,6 +7,7 @@
 - 작업 목적: `[Docs] 멱등 응답 Snapshot과 동기 탐지 응답 전환 정책 결정`
 - 관련 문서:
   - [`ADR-003-transaction-processing-boundary.md`](./ADR-003-transaction-processing-boundary.md)
+  - [`ADR-006-final-transaction-success-and-idempotency-recovery.md`](./ADR-006-final-transaction-success-and-idempotency-recovery.md)
   - [`../03-api/api-conventions.md`](../03-api/api-conventions.md)
   - [`../03-api/transaction-detection-api.md`](../03-api/transaction-detection-api.md)
   - [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)
@@ -102,11 +103,15 @@ UUID는 canonical 문자열, 금액은 10진 정수 문자열, 시각은 UTC ISO
 | `DEPENDENCY_TIMEOUT` | `503 Service Unavailable` | `DEPENDENCY_TIMEOUT` | `탐지 서비스를 사용할 수 없습니다.` |
 | null·빈 값·알 수 없는 값·내부 전용 값 | `500 Internal Server Error` | `INTERNAL_ERROR` | `요청을 처리하는 중 오류가 발생했습니다.` |
 
+ADR-006이 승인한 최종 연결 목표에서는 `DEPENDENCY_UNAVAILABLE`을 `503 Service Unavailable`, `DEPENDENCY_UNAVAILABLE`, `탐지 서비스를 사용할 수 없습니다.`로 재생하고, 계약·payload·capability·invalid response·내부 오류와 mapping·adoption·transaction boundary 오류를 `INTERNAL_ERROR`로 저장·재생한다. 이 확대된 whitelist와 실패 저장 경계는 아직 거래 접수 흐름에 구현되지 않았다.
+
 현재 DB와 Entity는 `expires_at = created_at + 24 hours`를 저장한다. 그러나 Service는 claim 시 `expires_at`을 판정하지 않고 만료 레코드 정리 작업도 구현하지 않았다. 따라서 24시간은 현재 저장된 시각과 DB 제약일 뿐, 만료 후 키 재사용까지 시행하는 실질적인 만료 정책이 아니다.
 
 ## 최종 동기 탐지 응답 목표
 
-최종 동기 흐름은 ADR-003을 유지한다. 최초 요청은 탐지 결과 검증·저장·채택, 위험 대응과 필요한 사건 연결이 업무적으로 확정된 뒤에만 성공 Snapshot을 확정한다. 최종 응답은 `RECEIVED` placeholder가 아니라 그 요청에서 확정된 거래·탐지·위험 대응·사건 연결 결과를 반영한다.
+최종 동기 흐름은 ADR-003과 ADR-006을 유지한다. `RECEIVED`, `ANALYZING`, `ANALYZED`는 중간 상태이므로 성공 응답과 성공 Snapshot을 확정하지 않는다. 최초 요청은 Rule 분석 결과·Evidence 저장, DetectionResult `COMPLETED`, 거래 결과 채택과 위험 등급, 위험 대응, 최종 거래 상태, HIGH·CRITICAL 사건 연결을 포함한 모든 필수 업무 commit이 끝난 뒤에만 성공 Snapshot을 확정한다.
+
+최종 값은 LOW가 `APPROVED`/`APPROVED`/case null, MEDIUM이 `APPROVED`/`APPROVED_WITH_MONITORING`/case null, HIGH가 `ADDITIONAL_AUTH_REQUIRED`/`ADDITIONAL_AUTH_REQUIRED`/case 필수, CRITICAL이 `HELD`/`HELD`/case 필수이다. 자세한 v2와 복구 계약은 ADR-006이 소유한다.
 
 생성형 AI 리포트는 이 동기 경로의 필수 결과가 아니며 위험 점수, 거래 대응과 사건 상태를 결정하지 않는다.
 
@@ -137,7 +142,7 @@ Migration 없이 구현하기 쉽지만 필드 추가·삭제가 codec 변경인
 - 멱등 응답 재생은 최초 명령 결과를 재현하는 기능이며 최신 거래·탐지·사건 상태 조회 기능이 아니다.
 - 확정된 Snapshot은 후속 탐지 결과, 재분석, 거래 상태 또는 사건 상태가 바뀌어도 수정하지 않는다.
 - 기존 무버전 `RECEIVED`/null Snapshot은 신규 최종 응답으로 소급 교체하지 않는다.
-- Snapshot codec 전환 이후 새로 선점된 요청부터 그 요청에서 실제 확정한 업무 응답을 신규 envelope로 저장한다. 현재는 단계적 `RECEIVED` 응답이며, 최종 동기 탐지 응답은 해당 기능이 구현된 뒤 승인된 응답 schema version으로 저장한다.
+- Snapshot codec 전환 이후 새로 선점된 요청부터 그 요청에서 실제 확정한 업무 응답을 버전 envelope로 저장한다. 현재 단계적 `RECEIVED` 응답은 v1이고, 최종 동기 성공 응답은 해당 기능이 구현된 뒤 ADR-006의 v2로 저장한다.
 
 ## 요청 동일성 기준
 
@@ -163,13 +168,13 @@ fingerprint 입력 필드, 정규화 또는 해시 알고리즘을 바꾸려면 
     "createdAt": "2026-07-29T01:15:31Z"
   },
   "httpStatus": 201,
-  "responseSchemaVersion": "<registered-response-schema-version>",
-  "codecVersion": "<registered-codec-version>",
+  "responseSchemaVersion": "transaction-create-response-v2",
+  "codecVersion": "transaction-intake-snapshot-envelope-v2",
   "finalizedAt": "2026-07-29T01:15:33Z"
 }
 ```
 
-예시의 업무 값과 버전 placeholder는 구조 설명용이며 실제 응답 값이나 버전 식별자를 확정하지 않는다.
+이 예시는 CRITICAL 최종 성공 Snapshot 구조이다. v2 업무 본문은 기존 일곱 필드를 유지하고 `processingStatus`는 `APPROVED`, `ADDITIONAL_AUTH_REQUIRED`, `HELD`만 허용한다. `riskLevel`, `riskResponseOutcome`, `adoptedDetectionResultId`는 필수이고 HIGH·CRITICAL은 `caseId`가 필수이며 LOW·MEDIUM은 null이어야 한다. `RECEIVED`, `ANALYZING`, `ANALYZED`, `FAILED`와 `traceId`는 v2 Snapshot에 저장하지 않는다.
 
 - `responseBody`: 최초 확정된 업무 응답. 요청별 관측 문맥인 `traceId`는 제외한다.
 - `httpStatus`: 최초 확정 응답에 실제 사용한 HTTP 상태.
@@ -177,7 +182,7 @@ fingerprint 입력 필드, 정규화 또는 해시 알고리즘을 바꾸려면 
 - `codecVersion`: envelope 직렬화·역직렬화 규칙 버전.
 - `finalizedAt`: Snapshot이 terminal 성공 결과로 확정된 시각.
 
-신규 envelope 재요청은 기록된 `httpStatus`를 사용한다. 따라서 현재의 “최초 `201`, 완료 재요청 `200`” 동작은 legacy/current 구현으로 한정되며, 신규 envelope 전환 뒤에는 저장된 최초 확정 상태를 재생하는 목표 계약으로 바뀐다. 최초 확정 HTTP 상태 자체는 전환 시점의 승인된 API 공통 규칙을 따르며 이 ADR이 새로운 상태 코드를 추가하지 않는다.
+신규 envelope 재요청은 기록된 `httpStatus`를 사용한다. 현재 v1과 최종 v2의 최초·재생 상태는 모두 `201 Created`이고, 무버전 legacy만 재생 시 `200 OK`를 유지한다.
 
 ### `traceId` 재생 범위
 
@@ -189,6 +194,8 @@ fingerprint 입력 필드, 정규화 또는 해시 알고리즘을 바꾸려면 
 - JSON 직렬화의 공백, 필드 출력 순서와 전송 헤더처럼 업무 계약 밖의 바이트 표현은 Snapshot 불변성 대상이 아니다.
 
 이 예외는 재요청 자체를 로그·트레이스에서 추적하면서 최초 업무 결과를 보존하기 위한 것이다. 저장된 과거 `traceId`나 최초 요청의 네트워크 문맥을 현재 요청의 추적값처럼 재사용하지 않는다.
+
+최초 HTTP 요청의 `traceId`는 별도 분석 trace를 생성하지 않고 Rule 분석 `analysisTraceId`로 그대로 전달한다. 재생 시에는 분석을 다시 실행하지 않으며 현재 재요청의 `traceId`만 응답에 결합한다.
 
 ## Snapshot 불변성
 
@@ -209,7 +216,8 @@ Snapshot이 terminal 성공으로 확정되면 다음 값을 같은 멱등 레�
 - decoder는 `codecVersion`으로 envelope를 해석한 뒤 `responseSchemaVersion`에 대응하는 typed 응답을 복원한다.
 - 지원 중인 구버전 decoder는 해당 Snapshot 보존·재생 범위 동안 제거하지 않는다.
 - 버전이 달라도 기존 Snapshot을 새 버전으로 제자리 갱신하지 않는다.
-- 최초 구현의 `responseSchemaVersion`은 `transaction-create-response-v1`, `codecVersion`은 `transaction-intake-snapshot-envelope-v1`이다. 현재 registry는 이 한 조합만 지원하며 다른 값은 추측하지 않고 거부한다.
+- 현재 구현의 `responseSchemaVersion`은 `transaction-create-response-v1`, `codecVersion`은 `transaction-intake-snapshot-envelope-v1`이다. 현재 registry는 이 한 조합만 지원하며 다른 값은 추측하지 않고 거부한다.
+- 최종 성공 계약은 `transaction-create-response-v2`와 `transaction-intake-snapshot-envelope-v2`를 사용한다. 이 v2 codec과 registry 등록은 아직 구현되지 않았다.
 
 ## 기존 `RECEIVED`/null Snapshot 전환 정책
 
@@ -239,9 +247,19 @@ legacy Snapshot은 엄격한 legacy codec으로만 복원하고 신규 envelope�
 
 `FAILED`인 같은 키·같은 fingerprint는 자동 재처리하지 않는다. 이는 실패 원인이 사라졌는지와 무관하게 같은 키로 새로운 거래·탐지 실행을 만들지 않는다는 결정이다.
 
-현재 공개 whitelist의 `DUPLICATE_TRANSACTION`, `DEPENDENCY_TIMEOUT`만 기존 HTTP 상태·공개 code·고정 message로 재현하고, null·빈 값·알 수 없는 값과 내부 전용 값은 `500 Internal Server Error`, `INTERNAL_ERROR`로 축약한다. 저장된 내부 실패 문자열을 그대로 공개하지 않는다.
+현재 구현은 `DUPLICATE_TRANSACTION`, `DEPENDENCY_TIMEOUT`만 기존 HTTP 상태·공개 code·고정 message로 재현한다. ADR-006의 최종 연결에서는 `DEPENDENCY_UNAVAILABLE`도 `503 Service Unavailable`, `DEPENDENCY_UNAVAILABLE`, `탐지 서비스를 사용할 수 없습니다.`로 재현하고, 계약·payload·capability·invalid response·내부 오류와 mapping·adoption·transaction boundary 오류는 `500 Internal Server Error`, `INTERNAL_ERROR`로 축약한다. 저장된 Client category, 원본 FastAPI 오류와 민감정보는 공개하지 않는다.
 
 실패 응답 전체를 성공 Snapshot envelope에 저장하거나 신규 오류 code를 추가하지 않는다. 향후 실패 응답 Snapshot이 필요하면 민감정보 제외, `traceId` 처리, 상태·스키마 버전과 기존 `failure_code` 관계를 별도 승인한다.
+
+### Snapshot 완료 간극
+
+최종 업무 상태가 commit된 뒤 멱등 Snapshot 완료가 실패하면 거래·탐지·위험 대응·사건 결과를 되돌리거나 멱등 레코드를 `FAILED`로 전이하지 않는다. 레코드는 `IN_PROGRESS`로 유지하고 최초 요청은 `500 Internal Server Error`, `INTERNAL_ERROR`, 같은 키 재요청은 `409 Conflict`, `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다. 재요청은 FastAPI, External Risk, 위험 대응 또는 사건 생성을 반복하지 않는다.
+
+운영 복구는 이미 확정된 도메인 상태를 검증한 뒤 동일한 v2 Snapshot만 생성하여 `COMPLETED`로 전이한다. 이는 새로운 업무 실행이 아니라 누락된 멱등 완료 복원이며 실행 경로는 아직 구현되지 않았다.
+
+### 실패 기록 불확실성
+
+분석 실패와 거래·DetectionResult `FAILED` commit이 확인된 경우에만 멱등 레코드를 `FAILED`로 확정한다. 분석 시작 전 실패로 거래가 `RECEIVED`이고 DetectionResult가 없으면 승인된 내부 코드로 `FAILED`를 확정할 수 있다. 거래가 `ANALYZING`이거나 결과 상태가 불확실하면 `IN_PROGRESS`를 유지하고 같은 요청을 자동 재실행하지 않는다. 운영 복구가 거래와 결과 상태를 확인해 후속 조치를 결정한다.
 
 ## 역직렬화 실패와 알 수 없는 버전 처리
 
@@ -292,16 +310,11 @@ legacy Snapshot은 엄격한 legacy codec으로만 복원하고 신규 envelope�
 - unknown version, 손상 데이터와 역직렬화 실패의 fail-closed 처리
 - envelope 확정 시 `Clock`을 한 번 읽고 PostgreSQL `TIMESTAMPTZ` 기본 마이크로초 정밀도로 정규화한 동일 값을 `finalizedAt`과 `finished_at`에 사용
 
-DetectionResult·DetectionEvidence와 ADR-005의 FraudRule·RuleVersion
-물리 영속 모델은 구현되었지만 최종 동기 탐지 결과, External Risk,
-FastAPI, 탐지 실행 결과
-생성·검증·채택, 위험 대응과 사건 연결은 구현되지 않았다. 현재
-`responseBody`는 실제 단계적 거래 접수 결과인 `RECEIVED`와 네 탐지
-관련 null 값을 보존한다.
+DetectionResult·DetectionEvidence와 ADR-005의 FraudRule·RuleVersion 물리 영속 모델, Rule 분석 내부 HTTP 오케스트레이터는 구현되었다. 거래 접수에서 오케스트레이터를 호출하는 연결, External Risk, 위험 대응, 사건 연결, 최종 v2 Snapshot codec과 완료 간극 복구 실행 경로는 구현되지 않았다. 현재 `responseBody`는 실제 단계적 거래 접수 결과인 `RECEIVED`와 네 탐지 관련 null 값을 v1으로 보존한다. V5의 DRAFT RuleVersion은 자동 실행하지 않으며 publish·운영 준비는 별도 선행 작업이다.
 
 ## Migration 영향
 
-현재 V1 Migration의 `response_snapshot JSONB`와 JSON object 제약은 legacy Snapshot과 신규 envelope를 모두 저장할 수 있다. 이번 구현은 metadata를 JSONB 내부에 저장하며 별도 컬럼, 인덱스 또는 DB 수준 version 제약이 필요하지 않다.
+현재 V1 Migration의 `response_snapshot JSONB`와 JSON object 제약은 legacy, v1과 최종 v2 envelope를 모두 저장할 수 있다. 승인된 v2도 metadata를 JSONB 내부에 저장하므로 계약 확정 자체에는 별도 컬럼, 인덱스 또는 DB 수준 version 제약이 필요하지 않다.
 
 - 기존 V1 Migration을 수정하지 않는다.
 - 기존 Snapshot을 신규 envelope로 backfill하지 않는다.
@@ -314,7 +327,9 @@ FastAPI, 탐지 실행 결과
 
 - 최초 완료
 - legacy 완료 재생
-- 신규 envelope 완료 재생
+- v1 완료 재생
+- v2 완료 재생
+- Snapshot 완료 간극과 운영 복구 결과
 - key conflict
 - request in progress
 - previous failure replay
@@ -332,12 +347,15 @@ FastAPI, 탐지 실행 결과
 - 정리 전후 claim·재생·삭제의 동시성 처리
 - 실제 보존 기간과 감사·규제·운영 요구
 
-외부 서비스 호출량과 AI 비용은 이 문서 변경으로 증가하지 않는다. 후속 구현에서도 완료 재생, 처리 중 거절, 충돌과 실패 재생은 새 External Risk·FastAPI·LLM 호출을 만들지 않아야 한다.
+외부 서비스 호출량과 AI 비용은 이 문서 변경으로 증가하지 않는다. 후속 구현에서도 완료 재생, 처리 중 거절, 충돌, 실패 재생과 Snapshot 완료 간극 복구는 새 External Risk·FastAPI·위험 대응·사건 생성·LLM 호출을 만들지 않아야 한다.
 
 ## 후속 작업
 
-1. 최종 동기 거래 응답의 승인된 필드·Enum과 탐지 완료 트랜잭션 경계를 확정한다.
-2. 최종 동기 탐지·위험 대응·사건 연결 완료 트랜잭션과 실패 경계를 구현한다.
-3. 응답 계약 또는 envelope 규칙 변경이 필요하면 기존 식별자를 재사용하지 않고 새 version을 승인한다.
-4. 만료 후 키 재사용, 실제 보존 기간, 정리 작업과 동시성 정책을 별도 승인한다.
-5. 추가 공개 오류 code 또는 실패 whitelist가 필요하면 API 공통 규칙 변경으로 승인한다.
+1. RuleVersion publish·운영 준비
+2. External Risk 정책과 Mock 구현
+3. 위험 대응 정책과 거래 최종 상태 전이 구현
+4. 사건 영속 모델과 HIGH·CRITICAL 사건 연결 구현
+5. 거래 접수–Rule 분석–위험 대응–사건–Snapshot v2 연결
+6. Snapshot 완료 간극 운영 복구 구현
+
+만료 후 키 재사용, 실제 보존 기간, 정리 작업과 동시성 정책은 위 순서와 별도로 승인한다.

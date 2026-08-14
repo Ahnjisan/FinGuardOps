@@ -14,6 +14,7 @@
   - `docs/03-api/domain-event-contracts.md`
   - `docs/04-database/transaction-intake-schema.md`
   - `docs/07-decisions/ADR-004-idempotency-response-snapshot-transition.md`
+  - `docs/07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md`
 
 ## Context
 
@@ -38,6 +39,8 @@
 ## Decision
 
 - 최종 `POST /api/v1/transactions`는 거래 접수부터 분석, 위험 대응, 사건 생성 또는 기존 사건 연결까지의 동기 계약을 유지한다.
+- `RECEIVED`, `ANALYZING`, `ANALYZED`는 최종 성공 상태가 아니며 이 상태에서
+  성공 응답이나 성공 멱등 Snapshot을 확정하지 않는다.
 - 구현은 거래 영속화와 멱등성부터 내부 구성요소 단위로 진행한다.
 - 전체 흐름이 준비되기 전에는 불완전한 외부 Controller를 공개하지 않는다.
 - 이번 결정은 API 처리 경계 변경이 아니라 구현 순서에 관한 결정이다.
@@ -60,7 +63,8 @@ FraudRule·RuleVersion PostgreSQL 물리 영속 모델 및 거래 접수 Control
 공개 행동 이벤트 조회 API는 구현되지 않았다. FastAPI Rule v1 실행과 Spring
 Boot의 Snapshot 고정·HTTP 호출·탐지 결과 생성·검증·채택 및 실패 기록은
 구현되었다. External Risk, 거래 접수에서 분석 오케스트레이터를 호출하는 연결,
-최종 멱등 응답, 위험 대응과 사건 연결은 아직 수행하지 않는다.
+최종 멱등 Snapshot v2, 위험 대응과 사건 연결, Snapshot 완료 간극 복구와
+RuleVersion 운영 publish는 아직 수행하지 않는다.
 
 이 단계적 응답은 현재 구현 사실을 기록한 것이며, `POST /api/v1/transactions`를 비동기 접수 API로 바꾸거나 최종 동기 분석 결정을 뒤집는 새로운 결정이 아니다. 현행 단계 Controller는 이 ADR이 정한 중간 외부 노출 제한과 아직 정합화되지 않은 구현 차이로 기록한다. 후속 구현에서는 이 ADR의 최종 경계로 전환하거나, 결정 변경이 필요하면 별도 사용자 승인과 ADR 검토를 거쳐야 한다.
 
@@ -77,6 +81,13 @@ version dispatch는 구현되었다. 기존 `response_snapshot JSONB` 안에 저
 DetectionResult 완료·채택 또는 실패 기록을 연결하는 내부 Rule v1
 오케스트레이터가 구현되었다. 거래 접수와 최종 동기 응답 연결은 아직 수행하지
 않으며 ADR-003의 단계적 구현 결정은 유지한다.
+
+후속 결정(2026-08-14): [`ADR-006`](./ADR-006-final-transaction-success-and-idempotency-recovery.md)은
+위험 대응, 최종 거래 상태와 HIGH·CRITICAL 사건 연결을 포함한 모든 업무 commit
+뒤에만 최종 성공을 허용한다. 신규 최종 성공은 Snapshot v2로 저장하고, 업무
+commit 뒤 멱등 완료 실패는 업무를 되돌리거나 멱등 `FAILED`로 바꾸지 않고
+`IN_PROGRESS`에서 운영 복구를 기다린다. 이 계약과 복구 실행 경로는 아직
+구현되지 않았다.
 
 ## 구현 순서
 
@@ -113,7 +124,8 @@ DetectionResult 완료·채택 또는 실패 기록을 연결하는 내부 Rule 
 
 - 현재 단계적 거래 접수 API로 영속화·멱등성은 시연할 수 있지만 탐지·위험 대응·사건 연결이 포함된 최종 동기 처리로 시연해서는 안 된다.
 - 내부 구성요소 테스트와 최종 Controller 통합 테스트를 구분해 관리해야 한다.
-- 거래 상태 변경, 탐지 결과 채택과 사건 연결의 최종 트랜잭션·복구 경계는 구현 전에 남은 사용자 결정 사항을 추가로 확정해야 한다.
+- 최종 성공과 멱등 완료 간극의 불변 원칙은 ADR-006으로 확정되었다. 사건·위험
+  대응의 구체 트랜잭션과 운영 복구 명령·권한은 후속 구현에서 구체화해야 한다.
 
 ## 제외 범위
 
