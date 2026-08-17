@@ -194,8 +194,10 @@ HTTP 오케스트레이터도 Snapshot과 분석 시작 commit, 분석 시도당
 기록을 연결합니다.
 
 거래 접수 Service의 오케스트레이터 호출, External Risk, 위험 대응과 사건 연결,
-최종 동기 거래 응답과 Snapshot v2, Snapshot 완료 간극 복구, RuleVersion 운영
-publish, 운영 배포·재분석은 아직 구현되지 않았습니다. `ANALYZED`는 위험 대응
+최종 동기 거래 응답과 Snapshot v2, Snapshot 완료 간극 복구, 운영 배포·재분석은
+아직 구현되지 않았습니다. Rule v1 기본 RuleVersion 집합의 제한된 local/dev/test
+one-shot 발행 경계만 구현되어 있으며 공개 관리 API나 정상 시작 자동 발행은 없습니다.
+`ANALYZED`는 위험 대응
 전 중간 상태이므로 최종 성공으로 반환하거나 성공 Snapshot으로 확정하지 않습니다.
 
 ```text
@@ -343,6 +345,8 @@ Kafka
 * 비트랜잭션 `RuleAnalysisOrchestrationService`의 분석 시작 commit, FastAPI 정확히
   1회 호출, 응답 변환, 결과 완료·채택과 실패 기록 연결
 * Rule v1 고정 metadata·Reason Code 표시 Registry와 `RuleEvidenceDraft` 변환 구현
+* V5 R001~R004 기본 RuleVersion의 원자적 발행 Service와 local/dev/test 전용
+  비활성 one-shot Runner 구현
 * 최종 거래 성공 경계, 멱등 Snapshot v2와 완료 간극 복구 계약을
   [`ADR-006`](docs/07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md)으로 확정
 * Backend와 AI Service 전용 GitHub Actions CI 구성
@@ -353,12 +357,11 @@ Kafka
 
 최종 동기 거래 접수는 다음 선행 순서를 따른다.
 
-1. RuleVersion publish·운영 준비
-2. External Risk 정책과 Mock 구현
-3. 위험 대응 정책과 거래 최종 상태 전이 구현
-4. 사건 영속 모델과 HIGH·CRITICAL 사건 연결 구현
-5. 거래 접수–Rule 분석–위험 대응–사건–Snapshot v2 연결
-6. Snapshot 완료 간극 운영 복구 구현
+1. External Risk 정책과 Mock 구현
+2. 위험 대응 정책과 거래 최종 상태 전이 구현
+3. 사건 영속 모델과 HIGH·CRITICAL 사건 연결 구현
+4. 거래 접수–Rule 분석–위험 대응–사건–Snapshot v2 연결
+5. Snapshot 완료 간극 운영 복구 구현
 
 그 밖의 계획은 다음과 같습니다.
 
@@ -377,6 +380,31 @@ Kafka
 * Kubernetes·AWS 배포
 * Observability
 * 장애·비용 실험
+
+## Rule v1 기본 RuleVersion one-shot 발행
+
+V5는 항상 R001~R004를 `DRAFT`로 seed한다. 발행은 정상 애플리케이션 시작과
+분리된 명시적 명령이며, 네 버전을 하나의 트랜잭션에서 같은 `effectiveFrom`과
+`publishedAt`으로 전환한다. 다음은 local 환경 예시다. `effective-from`은 실행
+시각보다 미래인 canonical UTC `Instant`로 교체해야 한다.
+
+```powershell
+cd backend
+.\gradlew.bat bootRun --args="--spring.profiles.active=local,rule-v1-default-publication --spring.main.web-application-type=none --finguardops.rule-v1-default-publication.enabled=true --finguardops.rule-v1-default-publication.confirmation=PUBLISH_RULE_V1_DEFAULT_V1 --finguardops.rule-v1-default-publication.effective-from=2099-01-01T00:00:00Z"
+```
+
+활성화는 의도적인 2단계 방어다. Bean 생성 gate는 전용
+`rule-v1-default-publication` profile과 `enabled=true`만 확인한다. Bean 생성 후
+runtime fail-fast gate가 `local`/`dev`/`test` 중 하나, non-web mode, exact
+confirmation, 명시적 미래 UTC 시각을 모두 요구하고 `production` 또는 `prod`
+profile이 하나라도 함께 활성화되면 실행을 거부한다. 따라서 전용 profile과
+`enabled=true`만 설정한 잘못된 one-shot 명령은 조용히 성공 종료하지 않고
+명시적으로 실패할 수 있다. 정확히 같은 네 PUBLISHED 버전과 `effectiveFrom`
+재호출만 멱등 성공한다. 조건 원문은 로그에 남기지 않는다.
+
+현재 임계값·가중치·시간창은 실험값이므로 production 발행은 승인되지 않았다.
+새 정책은 기존 PUBLISHED 버전을 되돌리거나 덮어쓰지 않고 새 `versionNumber`로
+설계해야 한다.
 
 현재 `RECEIVED`/null 멱등 response snapshot은 거래 접수 commit에서 확정되어 그대로
 재생됩니다. strict legacy codec과 v1 envelope, 저장 HTTP 상태 재생은 구현되어

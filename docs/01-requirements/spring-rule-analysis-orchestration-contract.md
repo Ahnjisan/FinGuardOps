@@ -395,6 +395,10 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
 - Client category와 HTTP·응답 변환·채택·트랜잭션 경계 실패의 안전한
   `failureCode` 기록 및 원래 예외 보존
 - Flyway V1~V5의 거래·멱등·행동 이벤트·탐지 결과·RuleVersion 제약과 index
+- V5 고정 R001~R004를 RuleVersion→FraudRule canonical 순서로 잠그고 exact
+  identity·metadata를 검증한 뒤 공통 적용·게시 시각으로 전환하는 원자적 발행 경계
+- 기본 비활성, local/dev/test와 전용 profile에서만 동작하고 production을 거부하는
+  non-web one-shot 발행 Runner
 
 ### 15.2 구현되지 않음
 
@@ -406,7 +410,7 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
 - 위험 대응, 최종 거래 상태 전이와 사건 생성·연결
 - 최종 동기 응답과 Snapshot v2 codec·멱등 완료 연결
 - Snapshot 완료 간극과 불확실 분석 상태의 운영 복구 실행 경로
-- RuleVersion 운영 publish 준비
+- 공개 RuleVersion 관리 API와 production 발행·일반 버전 배포 관리
 
 ### 15.3 현재 구현과 목표 계약의 차이
 
@@ -423,8 +427,9 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
 - 현재 내부 오케스트레이터는 External Risk가 없는 Rule v1 입력을 분석 시작
   경계에서 조합한다. 상위 흐름이 External Risk 포함 고정 입력을 선행 구성해
   전달하는 목표 연결은 아직 구현되지 않았다.
-- V5 초기 RuleVersion은 모두 `DRAFT`이므로 그대로는 실행 가능한 Rule 집합이
-  없다.
+- V5 초기 RuleVersion은 항상 모두 `DRAFT`다. 별도 one-shot 명령을 명시적으로
+  실행한 local/dev/test 환경에서만 기본 네 버전이 실행 가능해지며, 정상 앱 시작은
+  자동 발행하지 않는다.
 
 이 차이는 문서만으로 구현 완료된 것으로 간주하지 않는다.
 

@@ -1,3 +1,4 @@
+import hashlib
 from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime, timedelta, timezone
 from types import MappingProxyType
@@ -391,6 +392,36 @@ def test_canonical_input_uses_exact_tabs_lf_trailing_lf_and_utf8_without_bom() -
     assert canonical.endswith(b"\n")
     assert b"\r" not in canonical
     assert not canonical.startswith(b"\xef\xbb\xbf")
+
+
+def test_default_rule_set_matches_independently_verified_golden_vector() -> None:
+    registry, _ = _recording_registry()
+    plan = RuleExecutionPlanBuilder(registry).build(
+        CUTOFF_AT,
+        [
+            _snapshot(RuleId.R004),
+            _snapshot(RuleId.R002),
+            _snapshot(RuleId.R001),
+            _snapshot(RuleId.R003),
+        ],
+    )
+
+    canonical = execution_plan_module._canonical_rule_set_input(plan.items)
+
+    assert canonical == (
+        b"rule-plan-v1\n"
+        b"1\t20000000-0000-4000-8000-000000000001\t"
+        b"TRANSFER_ABSOLUTE_HIGH_AMOUNT\tR001\t1\n"
+        b"2\t20000000-0000-4000-8000-000000000002\t"
+        b"RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT\tR002\t1\n"
+        b"3\t20000000-0000-4000-8000-000000000003\t"
+        b"RECENT_SECURITY_CHANGE_HIGH_AMOUNT\tR003\t1\n"
+        b"4\t20000000-0000-4000-8000-000000000004\t"
+        b"RECENT_BENEFICIARY_TRANSFER\tR004\t1\n"
+    )
+    assert hashlib.sha256(canonical).hexdigest() == (
+        "31299ea02656c1a5c72f2ead74b5ca468d087b4080249e5915d8882164d8121e"
+    )
 
 
 def test_validation_priority_precedes_later_mapping_and_configuration_errors() -> None:

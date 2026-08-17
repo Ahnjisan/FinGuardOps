@@ -215,6 +215,27 @@ R001~R004는 문서 별칭이고 별도 컬럼이 아니다.
 구현 검증용 실험값이다. 측정 완료된 운영 정책이 아니며 DRAFT seed는
 거래 처리나 탐지 결과를 자동 변경하지 않는다.
 
+### 8.1 기본 집합 발행 경계
+
+애플리케이션의 `RuleV1DefaultRuleSetPublicationService`는 V5 고정 UUID 네 개를
+R001→R004 순서로 먼저 `PESSIMISTIC_WRITE` 잠근 뒤, 부모 FraudRule 네 개를 같은
+순서로 잠근다. 하나의 기본 트랜잭션(`READ_COMMITTED`) 안에서 UUID, FK, ruleCode,
+versionNumber, ACTIVE 상태와 reasonCode·weight·typed condition의 threshold,
+window, dependency를 exact 검증한다. 검증 뒤 네 버전에 같은 명시적 미래
+`effectiveFrom`과 하나의 `publishedAt`을 적용하고 한 번에 flush한다.
+
+모두 DRAFT인 경우만 신규 발행한다. 모두 PUBLISHED이며 identity·metadata와 요청
+`effectiveFrom`이 정확히 같고 하나의 `publishedAt`을 공유할 때만 멱등 성공한다.
+혼합 상태, WITHDRAWN, RETIRED, metadata 또는 시각 불일치는 거부하며 하나라도
+실패하면 전체 rollback한다. canonical bytes는 R001→R004 연속 실행 순서로 계산하고
+현재 기본 집합 SHA-256은
+`31299ea02656c1a5c72f2ead74b5ca468d087b4080249e5915d8882164d8121e`다.
+
+이 경계는 Flyway seed를 PUBLISHED로 바꾸지 않는다. 기본 비활성 one-shot Runner를
+명시적으로 실행한 local/dev/test 환경에서만 사용할 수 있고 production은 거부한다.
+정상 애플리케이션 시작 자동 발행, 공개 관리 API와 영속 감사 테이블은 없다.
+감사 단서는 `publishedAt`과 조건 원문을 제외한 구조화 성공 로그다.
+
 ## 9. Migration과 검증
 
 V5는 V1~V4를 수정하지 않는다. 기존 데이터의 backfill·삭제 없이 두
