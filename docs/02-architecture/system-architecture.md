@@ -50,7 +50,9 @@ DTO와 FastAPI `POST /api/v1/rule-analysis` HTTP 경계가 구현되어 있다.
 Spring Boot `RuleAnalysisHttpClient`, Timeout·Trace 전달, 성공·오류 응답 검증과
 오류 분류도 구현되어 있다. 거래 분석 Snapshot 조합, 분석 시작·HTTP 호출,
 탐지 결과 자동 생성·완료·Evidence 영속화·채택과 거래 `ANALYZED` 전이까지의
-내부 오케스트레이션도 구현되어 있다. 거래 접수 Service 연결, External Risk,
+내부 오케스트레이션도 구현되어 있다. 독립 External Risk Port·정책 Service,
+local/dev/test 결정적 Mock과 immutable 인메모리 성공 Snapshot도 구현되어 있다.
+거래 접수 Service 연결, External Risk의 Rule 입력 연결,
 위험 대응·최종 거래 상태, 사건 연결, Snapshot v2와 완료 간극 복구, 감사와 AI
 운영 도메인은 아직 구현되지 않았다.
 
@@ -78,7 +80,7 @@ Spring Boot `RuleAnalysisHttpClient`, Timeout·Trace 전달, 성공·오류 응�
 - `infra/`: 자리표시자만 있으며 Docker Compose 등 인프라 구현 없음
 - `.github/`: Issue·PR 템플릿과 Backend·AI Service 테스트 Workflow가 있으며 이미지 빌드·배포 자동화 없음
 - 운영 PostgreSQL 배포 환경, Redis와 Kafka 연동
-- External Risk Mock과 LLM Provider 연동
+- 실제 External Risk HTTP Provider·DB 영속화와 LLM Provider 연동
 - Prometheus, Grafana, Loki와 분산 추적 구성
 - Kubernetes와 AWS 배포 구성
 
@@ -109,7 +111,8 @@ FastAPI, External Risk Mock, Redis와 LLM Provider의 장애를 동일한 장애
 - AI 리포트 실패는 거래·탐지·사건 처리 실패와 구분한다.
 - Redis 장애는 캐시와 재생성 가능한 데이터의 이용 장애이지 업무 원본 데이터 유실이 아니다.
 - PostgreSQL 장애는 거래·사건·감사 데이터의 기록과 조회에 영향을 주는 핵심 업무 장애이다.
-- FastAPI와 External Risk 장애 시 거래 처리 정책은 각각 별도 `TBD`로 관리한다.
+- FastAPI와 External Risk 실패는 현재 분석을 계속하지 않고 typed failure로
+  전파한다. 거래·분석 `FAILED` 연결의 구현과 재분석·수동 복구는 후속 범위다.
 
 ### 4.3 변경 주기와 기술 특성
 
@@ -163,7 +166,7 @@ Kafka·Kubernetes·AWS를 핵심 거래·탐지·사건 기능보다 먼저 도�
 4. FastAPI는 Feature 계산, Rule 실행, ML 추론, AI 리포트와 템플릿 fallback을 담당한다.
 5. 생성형 AI는 위험 점수, 위험 등급, 최종 판정, 거래 승인·보류·차단, 고객 제재와 사건 상태를 결정하지 않는다.
 6. PostgreSQL은 영속 업무 데이터의 원본이다.
-7. Redis는 정확 일치 캐시, 외부 위험정보 단기 캐시와 재생성 가능한 집계의 후보이며 업무 정합성의 최종 저장소가 아니다.
+7. Redis는 정확 일치 AI 리포트 캐시와 재생성 가능한 집계의 후보이며 업무 정합성의 최종 저장소가 아니다. External Risk cache는 별도 Issue와 계약 승인 전에는 현재 계약이 아니다.
 8. Kafka는 핵심 기능 안정화 후 비동기 처리 필요가 확인될 때 도입한다.
 9. Docker Compose로 서비스 연결과 실행 환경을 먼저 검증한 뒤 Kubernetes를 도입한다.
 10. React는 업무 상태와 운영 조치 요약을, Grafana는 상세 기술 메트릭 시계열을 담당한다.
@@ -298,19 +301,24 @@ Spring Boot는 FastAPI 응답을 그대로 업무 상태로 적용하지 않는�
 #### 선정 이유
 
 - 실제 금융 위험정보 API와 데이터를 사용할 수 없는 제약을 보완한다.
-- 위험계좌, 위험 IP와 위험 기기 정보를 모의 제공한다.
-- 지연, 오류, 부분 응답과 Timeout을 재현한다.
+- 승인된 송신·수신 위험계좌와 위험 기기 결과를 결정적으로 모의 제공한다.
+- Timeout, unavailable과 invalid response를 재현한다.
 - 외부 의존성 장애 격리와 호출 추적을 검증한다.
 
-초기 기본안은 Spring Boot가 External Risk Mock 호출을 오케스트레이션하고 조회 결과와 조회 상태를 FastAPI 분석 입력에 포함하는 방식이다.
+현재 Spring Boot에는 독립 Port, 응답 검증·정책 계산 Service와 local/dev/test 전용
+Mock Adapter가 구현되어 있다. 성공 Snapshot은 immutable 인메모리 값이며 JPA
+Entity가 아니다. 거래 접수와 FastAPI 분석 입력 연결, 실제 HTTP Provider, DB
+영속화, IP·피싱 정책은 아직 구현되지 않았다.
 
 이 기본안은 다음 이유로 선택한다.
 
-- 외부 장애와 fallback 처리를 Spring Boot에서 중앙 통제한다.
+- 외부 장애 분류와 전파를 Spring Boot에서 중앙 통제한다.
 - 사용한 외부 정보, 기준 시각과 조회 상태를 거래·사건에 연결해 감사할 수 있다.
 - FastAPI가 외부 연동과 금융 업무 조정까지 맡아 책임이 과도하게 확대되는 것을 방지한다.
 
-조회 실패를 위험정보 없음으로 해석하지 않는다. 유효한 캐시가 있으면 기준 시각과 함께 사용할 수 있고, 캐시가 없으면 조회 불가 상태를 분석 입력과 감사 근거에 남긴다. 이 상태가 최종 위험 대응에 미치는 영향은 `TBD`이다.
+현재 경계는 조회 실패를 위험정보 없음으로 해석하지 않고 typed exception으로
+전파한다. 자동 retry, fallback과 cache는 없으며 실패가 최종 거래 처리에 미치는
+영향과 공개 HTTP 오류 매핑은 상위 오케스트레이션 Issue에서 확정한다.
 
 ### 7.5 PostgreSQL
 
@@ -342,7 +350,8 @@ Spring Boot는 FastAPI 응답을 그대로 업무 상태로 적용하지 않는�
 #### 선정 이유
 
 - 동일 사건·동일 분석 조건의 정확 일치 AI 리포트 캐시에 적합하다.
-- External Risk Mock 결과의 단기 캐시 후보로 사용할 수 있다.
+- External Risk cache는 현재 사용하지 않으며 별도 Issue와 계약 승인 후에만 후보로
+  검토할 수 있다.
 - 원본에서 다시 계산할 수 있는 집계 데이터를 빠르게 제공할 수 있다.
 
 AI 리포트 정확 일치 키의 논리 구성은 다음과 같다.
@@ -734,7 +743,7 @@ React는 서비스 상태, 배포 버전, 업무 영향, AI 비용과 장애·�
 | 장애 | 직접 영향 | 유지해야 할 원칙 | 미확정 사항 |
 | --- | --- | --- | --- |
 | FastAPI Timeout | Rule·ML 분석과 후속 위험 대응 실패 | 대상 DetectionResult와 거래를 `FAILED`로 기록하고 결과를 채택하지 않음. Rule v1 Client 자동 retry는 0회 | 실패 후 재분석·수동 복구 계약 |
-| External Risk Timeout | 외부 위험계좌·IP·기기 근거 사용 불가 가능 | 실패를 위험정보 없음으로 해석하지 않고 유효 캐시 또는 조회 불가 상태를 기록하며 내부 분석을 계속함 | 최종 위험 대응 정책 `TBD` |
+| External Risk Timeout·Unavailable·Invalid Response | 외부 위험계좌·기기 근거 사용 불가 | typed failure로 그대로 전파하며 현재 분석을 계속하지 않고 `UNMATCHED`·cache·fallback으로 변환하거나 자동 retry하지 않음 | 거래·분석 `FAILED` 연결과 기존 공개 HTTP 오류 매핑 구현 |
 | LLM Timeout·연결 실패 | AI 사건 리포트 지연·실패 | 같은 `executionId`에서 최대 한 번 자동 재시도한 뒤 Rule·ML 결과 기반 템플릿 fallback. 거래·사건 처리 결과는 변경하지 않음 | 재시도 간격·Timeout 값 `TBD` |
 | 비일시적 LLM Provider 오류 | AI 리포트 생성 실패 | 자동 재시도 없이 템플릿 fallback과 오류·사용량 기록 | 다른 모델 전환 조건은 별도 승인 |
 | LLM 출력 형식 오류 | 리포트 품질 검증 실패 | 오류 출력을 정상 리포트로 표시하거나 자동 재시도하지 않고 템플릿 fallback | 품질 검증 기준 `TBD` |
@@ -857,6 +866,7 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 - Rule Evidence 변환과 Rule 분석 결과 조합 계약
 - Spring Boot → FastAPI Rule v1 내부 분석 HTTP API 계약
 - Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약
+- 독립 External Risk Port·정책 Service·결정적 local/dev/test Mock 계약
 
 ### 18.3 다음 구현 예정
 
@@ -865,7 +875,7 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 - 위험 대응·최종 거래 상태 전이와 사건 생성·연결
 - 최종 Snapshot v2 확정과 완료 간극 운영 복구
 - 감사 도메인
-- External Risk Mock
+- 실제 External Risk HTTP Provider와 Snapshot DB 영속화
 - Docker 및 Docker Compose 통합 환경
 
 Redis의 최초 적용 시점은 실제 캐시 필요와 원본 호출 부하를 확인해 사용자가 결정한다.
@@ -909,7 +919,7 @@ Kubernetes 도입 후 검증할 목표는 Rolling Update, 복구, 리소스 제�
 다음 중 하나 이상의 필요가 측정될 때 도입한다.
 
 - 동일 정확 일치 AI 리포트의 불필요한 재호출이 발생한다.
-- External Risk Mock의 반복 조회와 지연을 단기 캐시로 줄일 근거가 있다.
+- 별도 승인된 External Risk cache의 필요성과 정합성 근거가 측정된다.
 - 재생성 가능한 집계 조회가 PostgreSQL 핵심 업무 부하와 경쟁한다.
 
 캐시 없이 먼저 정합한 원본 흐름을 검증하고, Redis 장애 시 동작과 비용 증가를 함께 시험한다.
@@ -963,11 +973,11 @@ Docker Compose와 필요 시 Kubernetes 환경에서 기능·장애·관측 기�
 
 | 결정 항목 | 현재 상태 | 결정에 필요한 근거 |
 | --- | --- | --- |
-| External Risk 조회 실패 시 위험 대응 정책 | `TBD` | 캐시 유효성, 내부 Rule·ML 결과, 거래 상태와 시나리오별 업무 위험 |
+| External Risk 실패 후 재분석·수동 복구 정책 | `TBD` | 별도 승인된 실행 경로, 멱등성과 거래 상태 정합성 |
 | FastAPI Timeout 시 Rule v1 거래 처리 | 분석 시도 `FAILED`, 결과 미채택 | 수동 재개·재처리는 후속 계약에서 결정 |
 | 최종 성공 멱등 Snapshot 확정 시점 | ADR-006에 따라 위험 대응·최종 거래 상태와 HIGH·CRITICAL 사건 연결의 업무 commit 이후 | v2 codec과 완료 간극 운영 복구는 구현 필요 |
 | 초기 AI 리포트 비동기 실행 방식 | `TBD` | 실패·재시도·멱등성 검증 가능성, 개인 프로젝트 운영 복잡도 |
-| Redis 최초 도입 시점 | `TBD` | 정확 일치 중복 호출, External Risk 조회 부하와 집계 성능 측정 |
+| Redis 최초 도입 시점 | `TBD` | 정확 일치 AI 리포트 중복 호출과 집계 성능 측정. External Risk 용도는 별도 승인 필요 |
 | Kafka 최초 도입 조건 충족 여부 | `TBD` | 비동기 적체, 다중 Consumer, 재처리와 독립 확장 요구 |
 | Observability 최초 적용 범위 | `TBD` | 핵심 사용자 흐름, 장애 실험, 보존·운영 비용과 민감정보 보호 |
 | AWS 배포 방식 | `TBD` | Docker·Kubernetes 검증 결과, 관리 복잡도, 비용과 포트폴리오 목표 |

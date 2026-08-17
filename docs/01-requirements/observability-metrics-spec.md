@@ -437,10 +437,15 @@ React 관리자 화면은 업무 영향과 조치 요약에 집중하고 Grafana
 | 항목 | 문서별 표현 | 메트릭 명세의 처리 |
 | --- | --- | --- |
 | 도메인 `eventId` 명명 | API 공통 규칙은 행동 이벤트 식별자로, 시스템·운영 문서는 향후 Kafka 이벤트 식별자로 사용 | 어떤 `eventId`도 메트릭 라벨에 사용하지 않는다. 로그·이벤트 물리 명명은 후속 결정 |
-| External Risk 캐시 부재 | 거래 상태 전이·운영 요구사항은 내부 Rule·ML 지속, 거래 API는 초기 권장으로 Transaction `FAILED`와 `503` | External Risk 장애 지표는 후속 정책과 분리. 거래 결과 Counter는 실제 확정된 상태만 계수 |
+| External Risk 실패 관측 | 성공은 match 기반 `MATCHED` 또는 `UNMATCHED`. timeout·unavailable·invalid response는 분석을 중단하고 typed failure로 전파 | 현재 구현된 신규 meter는 없다. 후속 계측은 성공 결과와 failure category를 구분하고 실제 확정된 거래 결과만 계수한다. cache hit·stale data·fallback meter는 현재 계약이 아님 |
 | FastAPI Timeout 거래 처리 | 상태 전이·운영 요구사항은 정책 `TBD`, 거래 API는 초기 권장으로 Transaction `FAILED`와 `503` | 실제 Spring Boot가 확정한 결과만 거래 결과로 계수. Timeout 자체는 client 실패 Counter로 별도 계수 |
 
 Validation 거절은 Transaction과 IdempotencyRecord를 생성하지 않는다. 거래 접수·상태 결과 Counter에 포함하지 않고 HTTP 오류, Validation 오류 코드, `traceId`, 로그와 승인된 저카디널리티 오류 메트릭으로 관측한다.
+
+External Risk의 현재 운영 경계에는 자동 retry, cache, stale data, fallback과 Circuit
+Breaker가 없다. 따라서 이를 현재 구현 metric이나 성공 결과로 계수하지 않는다.
+향후 도입하려면 별도 Issue·ADR에서 category, meter 이름, 라벨과 집계 시점을 먼저
+승인해야 한다. Issue #150은 신규 metric 코드를 추가하지 않는다.
 
 ## 17. 사용자 결정 필요 사항
 

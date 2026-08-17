@@ -873,7 +873,7 @@ Spring Boot는 유효한 추적 문맥이 없으면 새 `traceId`를 만들고 F
 | 항목 | 문서별 표현 | 이 문서의 처리 |
 | --- | --- | --- |
 | `eventId` 의미 | `api-conventions.md`는 행동 이벤트 식별자로 정의. `system-architecture.md`와 `platform-operation-requirements.md`는 향후 Kafka 이벤트 발행·소비 식별자로 표현 | Envelope `eventId`와 BehaviorEvent 업무 식별자의 이름 충돌로 기록. 논리 Envelope에서는 이벤트 자체 ID, 행동 엔티티 ID는 `aggregateId`로 표현. 물리 필드 매핑은 후속 결정 |
-| External Risk 캐시 부재 | 거래 상태 전이·플랫폼 운영 요구사항은 조회 불가를 기록하고 내부 Rule·ML 분석 지속. 거래 API는 초기 권장 정책으로 Transaction `FAILED`와 사건 미생성 | 위험 대응 이벤트의 선행 장애 정책 충돌로 기록. 이 문서는 새 장애 정책을 선택하지 않음 |
+| External Risk 실패 | 현재 timeout·unavailable·invalid response는 Rule 분석을 시작하지 않고 typed failure로 전파. 실패를 `UNMATCHED`나 정상 결과로 이벤트화하지 않음 | 후속 거래 연결에서 거래와 분석 결과를 `FAILED`로 확정하고 기존 외부 오류 매핑을 사용한다. 이번 Issue는 External Risk 도메인 이벤트를 추가·발행하지 않음 |
 | FastAPI Timeout 거래 처리 | 거래 상태 전이·플랫폼 요구사항은 기본 분석·중단 정책을 `TBD`로 둠. 거래 API는 초기 권장 정책으로 Transaction `FAILED`와 `503`을 제시 | 이 문서는 탐지 완료 이벤트를 만들 수 없는 조건만 명시하고 최종 장애 정책은 새로 확정하지 않음 |
 
 ## 15. 사용자 결정 필요 사항
@@ -893,7 +893,7 @@ Spring Boot는 유효한 추적 문맥이 없으면 새 `traceId`를 만들고 F
 | DetectionResult 식별자 생성 시점 | A. 분석 요청 전에 발급 / B. 완료 저장 시 발급 / C. 별도 analysisRequestId 도입 | C 검토 | 실패 시도와 완료 결과 식별자를 혼합하지 않기 쉬움 | 탐지 API·ERD·이벤트 Aggregate 선택에 영향 | 탐지 요청 물리 Schema 전 결정 |
 | 동일 거래의 중복 활성 사건 기준 | A. Service 트랜잭션 검증 / B. 별도 활성 관계 / C. 중복 상태+DB 제약 / D. Trigger | A 우선 | 현재 모델 변경을 최소화하면서 업무 규칙을 Service에 명시 가능 | 사건 생성 Handler, 격리·잠금·동시성 테스트에 영향 | 사건 구현 전 결정 |
 | AI 완료 결과·활성 실행 동시 존재 시 복구 | A. 완료 결과 유지 후 활성 실행 격리 / B. 전체 오류 격리 후 수동 복구 / C. 상태별 자동 복구 | B 검토 | 정상 조회는 완료 결과 → 활성 실행 순서로 확정되어 있으나 두 상태의 공존은 정합성 위반이므로 업무 결과를 임의 선택하지 않는 복구 절차가 필요 | 복구 작업, 관측·알림과 동시성 테스트에 영향 | AI 실행 구현 전 결정 |
-| External Risk 캐시 부재 시 처리 | A. 내부 Rule·ML 계속 후 제한된 결과 확정 / B. 분석은 계속하되 거래 대응 확정 보류·실패 / C. 즉시 Transaction `FAILED` | B | 조회 실패를 안전으로 해석하지 않으면서 내부 분석 근거와 장애 상태를 보존 가능 | 거래 상태, DetectionResult, 위험 대응 이벤트와 `503` 응답에 영향 | 거래 위험 대응 구현 전 결정 |
+| External Risk cache·fallback 이벤트 | 현재 도입하지 않음 / 향후 별도 계약으로 도입 | 현재 도입하지 않음 | 현재 경계는 no retry·no cache·no stale data·no fallback·no Circuit Breaker이며 실패 시 Rule 분석을 시작하지 않음 | 향후 도입 시 event type·payload·순서·중복·거래 상태 영향에 별도 승인 필요 | 현재 비차단, 별도 Issue·ADR 승인 필요 |
 | 거래 분석 FastAPI Timeout 정책 | A. Transaction `FAILED` / B. 마지막 상태 유지 후 수동·자동 재개 / C. 승인된 로컬 baseline | A 우선 | 현재 거래 API의 초기 정책과 일치하고 임의 위험 점수 생성을 막음 | 상태 전이, 재처리 API, 감사와 장애 복구에 영향 | 거래 분석 구현 전 결정 |
 | AI 리포트 생성 가능 `caseStatus` | A. 모든 상태 / B. 활성 조사 상태 / C. `IN_REVIEW`만 | B | 조사 지원 목적과 `CLOSED` 읽기 전용 원칙을 함께 유지하기 쉬움 | 생성 Validation과 테스트에 영향 | AI 생성 구현 전 결정 |
 | AI `failureCode`·attempt `outcome` 목록 | A. Provider 자유 문자열 / B. 공통 Enum / C. 외부 공통 Enum+보호된 내부 코드 | C | 외부 계약 안정성과 운영 진단을 분리 | DTO·DB·Provider 매핑과 관측 지표에 영향 | Provider 연동 전 결정 |
@@ -901,6 +901,10 @@ Spring Boot는 유효한 추적 문맥이 없으면 새 `traceId`를 만들고 F
 | 이벤트·감사·AI 이력 보존 기간 | A. 동일 / B. 엔티티별 차등 / C. 상세 단기+비식별 집계 장기 | C | 감사·비용 검증과 개인정보 최소 보존의 균형 | 조회 가능 기간, 삭제·비식별화와 참조 무결성에 영향 | 후속 결정 |
 
 ## 16. 구현·검증 체크리스트
+
+이 문서는 목표 event catalog를 포함하지만 Issue #150에서는 External Risk 이벤트
+DTO, Producer 또는 발행 경로를 구현하지 않았다. cache·fallback 관련 이벤트도
+향후 별도 계약 대상이며 현재 구현 상태로 해석하지 않는다.
 
 - [ ] 이벤트가 Kafka 전용 계약으로 구현되지 않는가
 - [ ] Envelope `eventId`와 BehaviorEvent 업무 식별자를 혼합하지 않는가

@@ -833,8 +833,10 @@ Spring Boot가 만든 요청·Rule·배포 capability나 upstream 응답 계약�
 1. 상위 거래 처리 흐름이 단일 `evaluationCutoffAt`을 확정한다.
 2. 같은 cutoff로 거래·행동 이벤트·실행 가능한 활성 RuleVersion 기준과 예상
    `ruleSetVersion`을 고정한다.
-3. 상위 거래 처리 흐름이 DB 트랜잭션과 행 잠금 없이 External Risk를 조회하고
-   승인된 실패·캐시 정책을 적용한다.
+3. 상위 거래 처리 흐름이 DB 트랜잭션과 행 잠금 없이 External Risk를 조회한다.
+   현재 승인된 실패 정책은 no retry·no cache·no stale data·no fallback·no
+   Circuit Breaker다. timeout·unavailable·invalid response는 typed failure로
+   전파하고 Rule 분석을 시작하지 않는다.
 4. External Risk 결과와 조회 상태를 포함한 immutable 분석 입력을 확정해
    `RuleAnalysisOrchestrationService`에 전달한다. 이 Service는 External Risk를
    직접 조회하거나 정책을 결정하지 않는다.
@@ -859,6 +861,11 @@ Spring Boot가 만든 요청·Rule·배포 capability나 upstream 응답 계약�
 상위 흐름이 1~4단계의 External Risk 포함 입력을 선행 구성해 전달하는 연결과
 11~12단계는 아직 구현되지 않았다. Rule 분석 HTTP 오케스트레이터는 External
 Risk 조회·정책, 위험 대응, 사건 또는 Snapshot v2를 소유하지 않는다.
+
+현재 FastAPI `RuleAnalysisRequest`에는 External Risk 입력이 없다. Issue #150은
+Spring Boot 내부의 독립 Port·Policy Service·local/dev/test Mock·인메모리 성공
+Snapshot만 구현했으며 FastAPI·Python·`RuleAnalysisRequest`를 변경하지 않았다.
+External Risk DTO와 FastAPI 호출 입력의 연결은 후속 Issue에서 별도로 승인한다.
 
 ### 13.8 로그와 정보 보호
 

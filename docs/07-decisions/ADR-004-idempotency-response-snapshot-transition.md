@@ -310,7 +310,15 @@ legacy Snapshot은 엄격한 legacy codec으로만 복원하고 신규 envelope�
 - unknown version, 손상 데이터와 역직렬화 실패의 fail-closed 처리
 - envelope 확정 시 `Clock`을 한 번 읽고 PostgreSQL `TIMESTAMPTZ` 기본 마이크로초 정밀도로 정규화한 동일 값을 `finalizedAt`과 `finished_at`에 사용
 
-DetectionResult·DetectionEvidence와 ADR-005의 FraudRule·RuleVersion 물리 영속 모델, Rule 분석 내부 HTTP 오케스트레이터는 구현되었다. 거래 접수에서 오케스트레이터를 호출하는 연결, External Risk, 위험 대응, 사건 연결, 최종 v2 Snapshot codec과 완료 간극 복구 실행 경로는 구현되지 않았다. 현재 `responseBody`는 실제 단계적 거래 접수 결과인 `RECEIVED`와 네 탐지 관련 null 값을 v1으로 보존한다. V5의 DRAFT RuleVersion은 자동 실행하지 않으며 publish·운영 준비는 별도 선행 작업이다.
+DetectionResult·DetectionEvidence와 ADR-005의 FraudRule·RuleVersion 물리 영속 모델,
+Rule 분석 내부 HTTP 오케스트레이터, 기본 RuleVersion 원자적 발행 경계, 독립
+External Risk Port·정책 Service·local/dev/test Mock·성공 인메모리 Snapshot은
+구현되었다. External Risk 실제 Provider·FastAPI 입력·거래 접수 연결, 위험 대응,
+사건 연결, 최종 v2 Snapshot codec과 완료 간극 복구 실행 경로는 구현되지 않았다.
+External Risk 실패는 현재 cache·stale data·fallback·`UNMATCHED`로 변환하지 않고
+typed failure로 전파한다. 후속 거래 접수 연결에서는 거래와 분석 결과를 `FAILED`로
+확정하고 기존 외부 오류 매핑을 사용한다. 현재 `responseBody`는 실제 단계적 거래
+접수 결과인 `RECEIVED`와 네 탐지 관련 null 값을 v1으로 보존한다.
 
 ## Migration 영향
 
@@ -351,11 +359,9 @@ DetectionResult·DetectionEvidence와 ADR-005의 FraudRule·RuleVersion 물리 �
 
 ## 후속 작업
 
-1. RuleVersion publish·운영 준비
-2. External Risk 정책과 Mock 구현
-3. 위험 대응 정책과 거래 최종 상태 전이 구현
-4. 사건 영속 모델과 HIGH·CRITICAL 사건 연결 구현
-5. 거래 접수–Rule 분석–위험 대응–사건–Snapshot v2 연결
-6. Snapshot 완료 간극 운영 복구 구현
+1. 위험 대응 정책과 거래 최종 상태 전이 구현
+2. 사건 영속 모델과 HIGH·CRITICAL 사건 연결 구현
+3. 거래 접수–External Risk–Rule 분석–위험 대응–사건–Snapshot v2 연결
+4. Snapshot 완료 간극 운영 복구 구현
 
 만료 후 키 재사용, 실제 보존 기간, 정리 작업과 동시성 정책은 위 순서와 별도로 승인한다.

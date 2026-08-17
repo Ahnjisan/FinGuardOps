@@ -62,9 +62,11 @@ FraudRule·RuleVersion PostgreSQL 물리 영속 모델 및 거래 접수 Control
 있다. RuleVersion 적용 기간·불변성·Evidence FK 정합성은 구현되었지만
 공개 행동 이벤트 조회 API는 구현되지 않았다. FastAPI Rule v1 실행과 Spring
 Boot의 Snapshot 고정·HTTP 호출·탐지 결과 생성·검증·채택 및 실패 기록은
-구현되었다. External Risk, 거래 접수에서 분석 오케스트레이터를 호출하는 연결,
+구현되었다. 독립 External Risk Port·정책 Service, local/dev/test 결정적 Mock과
+immutable 인메모리 성공 Snapshot도 구현되었다. 실제 Provider, 거래 접수와
+Rule 분석 입력 연결,
 최종 멱등 Snapshot v2, 위험 대응과 사건 연결, Snapshot 완료 간극 복구와
-RuleVersion 운영 publish는 아직 수행하지 않는다.
+일반 RuleVersion 운영 관리는 아직 수행하지 않는다.
 
 이 단계적 응답은 현재 구현 사실을 기록한 것이며, `POST /api/v1/transactions`를 비동기 접수 API로 바꾸거나 최종 동기 분석 결정을 뒤집는 새로운 결정이 아니다. 현행 단계 Controller는 이 ADR이 정한 중간 외부 노출 제한과 아직 정합화되지 않은 구현 차이로 기록한다. 후속 구현에서는 이 ADR의 최종 경계로 전환하거나, 결정 변경이 필요하면 별도 사용자 승인과 ADR 검토를 거쳐야 한다.
 

@@ -82,7 +82,8 @@ FastAPI 내부에서 immutable execution plan을 만들고 evaluator를 순차 �
 3. 상위 거래 처리 흐름이 같은 cutoff로 거래·행동 이벤트와 실행 가능한 활성
    `RuleVersion` 기준을 고정하고 예상 `ruleSetVersion`을 계산한다.
 4. 어떤 DB 트랜잭션이나 행 잠금도 유지하지 않은 상태에서 상위 거래 처리
-   흐름이 External Risk를 조회하고 승인된 실패·캐시 정책을 적용한다.
+   흐름이 External Risk를 조회한다. timeout·unavailable·invalid response는
+   cache·fallback·`UNMATCHED`로 바꾸지 않고 typed failure로 전파한다.
 5. External Risk 결과와 조회 상태를 3단계의 고정 값에 결합해 immutable 분석
    입력을 확정한다. 이후 External Risk를 다시 조회하거나 재반영하지 않는다.
 6. `RuleAnalysisOrchestrationService`는 이 고정 입력을 받아 분석 시작 쓰기
@@ -158,14 +159,17 @@ FastAPI 응답의 `analysis.ruleSetVersion`은 이 예상 값과 정확히 같�
 
 ### 6.5 External Risk 결합 경계
 
-- External Risk 조회와 실패·캐시 정책 적용은 `RuleAnalysisOrchestrationService`가
+- External Risk 조회와 실패 전파는 `RuleAnalysisOrchestrationService`가
   아니라 상위 거래 처리 흐름의 책임이다.
 - 상위 흐름은 거래·행동 이벤트·활성 `RuleVersion` 기준을 고정한 뒤, DB
   트랜잭션과 행 잠금 없이 External Risk를 조회한다.
 - 조회 결과와 조회 상태는 FastAPI 호출 전에 immutable 분석 입력에 포함한다.
 - Rule 분석 시작 뒤에는 External Risk를 다시 조회하거나 기존 입력을 바꾸지
   않는다. `ANALYZED` 이후에는 이미 고정된 근거로 위험 대응만 수행한다.
-- External Risk 조회 실패와 공개 오류 매핑은 기존 거래 API 계약을 유지한다.
+- External Risk 조회 실패 시 현재 분석을 계속하지 않는다. 후속 거래 연결에서는
+  거래와 분석 결과를 `FAILED`로 확정하고 기존 외부 오류 매핑을 사용한다. 이 연결과
+  공개 오류 매핑은 아직 구현되지 않았다.
+- cache·Circuit Breaker·fallback은 별도 Issue와 계약 승인이 필요하다.
 
 ## 7. 분석 시작 쓰기 트랜잭션
 
@@ -399,6 +403,8 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
   identity·metadata를 검증한 뒤 공통 적용·게시 시각으로 전환하는 원자적 발행 경계
 - 기본 비활성, local/dev/test와 전용 profile에서만 동작하고 production을 거부하는
   non-web one-shot 발행 Runner
+- 독립 External Risk Port, 응답 검증·match 기반 정책 Service, local/dev/test 전용
+  결정적 Mock과 성공 결과용 immutable 인메모리 Snapshot
 
 ### 15.2 구현되지 않음
 
@@ -406,7 +412,7 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
 - 상위 거래 흐름에서 거래·행동·RuleVersion 기준을 고정하고 External Risk
   결과·조회 상태를 결합한 입력을 오케스트레이터에 전달하는 연결
 - Client 오류 category를 거래 API 공통 오류로 매핑하는 경로
-- External Risk 정책과 Mock
+- 실제 External Risk HTTP Provider와 Snapshot DB 영속화
 - 위험 대응, 최종 거래 상태 전이와 사건 생성·연결
 - 최종 동기 응답과 Snapshot v2 codec·멱등 완료 연결
 - Snapshot 완료 간극과 불확실 분석 상태의 운영 복구 실행 경로
@@ -426,7 +432,8 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
   응답 경로에는 아직 연결되지 않았다.
 - 현재 내부 오케스트레이터는 External Risk가 없는 Rule v1 입력을 분석 시작
   경계에서 조합한다. 상위 흐름이 External Risk 포함 고정 입력을 선행 구성해
-  전달하는 목표 연결은 아직 구현되지 않았다.
+  전달하는 목표 연결은 아직 구현되지 않았다. 독립 조회 정책·Mock 경계의 구현은
+  이 `RuleAnalysisRequest` 연결을 완료했다는 의미가 아니다.
 - V5 초기 RuleVersion은 항상 모두 `DRAFT`다. 별도 one-shot 명령을 명시적으로
   실행한 local/dev/test 환경에서만 기본 네 버전이 실행 가능해지며, 정상 앱 시작은
   자동 발행하지 않는다.
