@@ -3,7 +3,8 @@
 ## 상태
 
 - 결정: 승인됨
-- 구현 상태: Spring Boot JPA, Flyway V5와 PostgreSQL 통합 테스트 구현
+- 구현 상태: Spring Boot JPA, Flyway V5, 기본 Rule v1 원자적 발행 경계와
+  PostgreSQL 통합 테스트 구현
 - 결정일: 2026-07-30
 
 ## 배경
@@ -128,6 +129,27 @@ effectiveTo, publishedAt은 null이다.
 완료된 운영 정책이 아니다. DRAFT seed는 실행 가능 Rule이 아니고 거래나
 탐지 결과를 자동 변경하지 않는다.
 
+### 기본 Rule v1 집합의 원자적 발행
+
+V5 고정 R001~R004 발행은 일반 단일 버전 lifecycle Service와 구분한 하나의
+트랜잭션 Service가 담당한다. 네 RuleVersion을 canonical 순서로 모두 잠근 뒤
+부모 FraudRule을 같은 순서로 잠그고, identity·ACTIVE lifecycle·실행 metadata와
+dependency를 exact 검증한다. 모두 DRAFT일 때 공통 `effectiveFrom`과
+`publishedAt`으로 전체 발행하며 중간 실패는 전체 rollback한다.
+
+모두 PUBLISHED이고 metadata와 요청 `effectiveFrom`이 정확히 일치하는 재호출만
+같은 canonical hash로 멱등 성공한다. 혼합·terminal·불일치는 거부하고 기존
+버전을 DRAFT로 되돌리거나 덮어쓰지 않는다. 향후 변경은 새 versionNumber다.
+
+운영 진입점은 기본 비활성 non-web one-shot Runner이며 활성화는 의도적인 2단계
+방어다. Bean 생성 gate는 전용 `rule-v1-default-publication` profile과
+`enabled=true`만 확인한다. 생성 후 runtime fail-fast gate는 local/dev/test 중
+하나, non-web mode, exact confirmation, 명시적 미래 UTC 시각을 모두 요구하며
+production 또는 prod profile이 하나라도 있으면 거부한다. 이 구조는 Bean 생성
+gate만 충족한 잘못된 명령을 무작업 성공으로 끝내지 않고 명시적으로 실패시킨다.
+정상 애플리케이션 시작 자동 발행과 공개 관리 API는 없고, 현 실험값의 production
+발행은 이 ADR로 승인하지 않는다.
+
 ## 대안
 
 ### 단일 FraudRule 버전행
@@ -165,5 +187,5 @@ allowlist로 임의 구조를 차단한다.
 - 과거 Evidence는 참조 버전과 자체 snapshot으로 재현할 수 있다.
 - 게시된 실행 정의의 덮어쓰기와 기간 중복을 애플리케이션·DB 양쪽에서
   차단한다.
-- Rule 실행 엔진, 공개 관리 API, 거래 오케스트레이션과 Scoring Policy는
-  이 결정의 구현 범위에 포함하지 않는다.
+- 공개 관리 API, 거래 오케스트레이션과 Scoring Policy는 이 결정의 구현 범위에
+  포함하지 않는다. 기본 Rule v1 one-shot 발행 경계만 구현 범위에 추가되었다.

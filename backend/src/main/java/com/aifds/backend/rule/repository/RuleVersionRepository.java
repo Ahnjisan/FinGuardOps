@@ -21,6 +21,17 @@ public interface RuleVersionRepository
     @Query("""
             SELECT version
             FROM RuleVersion version
+            WHERE version.ruleVersionId IN :ruleVersionIds
+            ORDER BY version.ruleVersionId ASC
+            """)
+    List<RuleVersion> findAllByRuleVersionIdInForUpdate(
+            @Param("ruleVersionIds") List<UUID> ruleVersionIds
+    );
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("""
+            SELECT version
+            FROM RuleVersion version
             WHERE version.ruleVersionId = :ruleVersionId
             """)
     Optional<RuleVersion> findByRuleVersionIdForUpdate(

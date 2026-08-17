@@ -24,6 +24,30 @@ class CanonicalRuleSetVersionCalculatorTest {
     }
 
     @Test
+    void matchesRuleV1DefaultSetGoldenVectorExactly() {
+        List<RuleV1ExecutionPlanRegistry.RuleVersionIdentity> identities =
+                List.of(identity(4), identity(2), identity(1), identity(3));
+
+        assertThat(calculator.calculate(identities)).isEqualTo(
+                "31299ea02656c1a5c72f2ead74b5ca468d087b4080249e5915d8882164d8121e"
+        );
+        assertThat(new String(
+                calculator.canonicalInput(identities),
+                StandardCharsets.UTF_8
+        )).isEqualTo(
+                "rule-plan-v1\n"
+                        + "1\t20000000-0000-4000-8000-000000000001\t"
+                        + "TRANSFER_ABSOLUTE_HIGH_AMOUNT\tR001\t1\n"
+                        + "2\t20000000-0000-4000-8000-000000000002\t"
+                        + "RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT\tR002\t1\n"
+                        + "3\t20000000-0000-4000-8000-000000000003\t"
+                        + "RECENT_SECURITY_CHANGE_HIGH_AMOUNT\tR003\t1\n"
+                        + "4\t20000000-0000-4000-8000-000000000004\t"
+                        + "RECENT_BENEFICIARY_TRANSFER\tR004\t1\n"
+        );
+    }
+
+    @Test
     void canonicalInputUsesTabsUtf8AndTrailingLineFeed() {
         byte[] input = calculator.canonicalInput(
                 List.of(identity(4), identity(1), identity(3))
@@ -63,6 +87,8 @@ class CanonicalRuleSetVersionCalculatorTest {
                 switch (ruleNumber) {
                     case 1 -> RuleV1ContractRegistry
                             .TRANSFER_ABSOLUTE_HIGH_AMOUNT;
+                    case 2 -> RuleV1ContractRegistry
+                            .RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT;
                     case 3 -> RuleV1ContractRegistry
                             .RECENT_SECURITY_CHANGE_HIGH_AMOUNT;
                     case 4 -> RuleV1ContractRegistry

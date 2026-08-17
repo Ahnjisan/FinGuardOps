@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -15,6 +16,17 @@ public interface FraudRuleRepository extends JpaRepository<FraudRule, Long> {
     Optional<FraudRule> findByFraudRuleId(UUID fraudRuleId);
 
     Optional<FraudRule> findByRuleCode(String ruleCode);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("""
+            SELECT rule
+            FROM FraudRule rule
+            WHERE rule.fraudRuleId IN :fraudRuleIds
+            ORDER BY rule.fraudRuleId ASC
+            """)
+    List<FraudRule> findAllByFraudRuleIdInForUpdate(
+            @Param("fraudRuleIds") List<UUID> fraudRuleIds
+    );
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("""
