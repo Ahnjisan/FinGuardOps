@@ -237,6 +237,9 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
   인메모리 성공 Snapshot
 - LOW·MEDIUM·HIGH·CRITICAL별 목표 거래 상태, `RiskResponseOutcome`과 사건 필수
   여부를 반환하는 순수 immutable 위험 대응 decision
+- `FraudCase`·`CaseTransaction` Entity, Flyway V6와 HIGH·CRITICAL
+  `ANALYZED` 거래의 새 `OPEN` 사건·첫 연결을 원자적으로 생성하거나 기존 활성
+  연결을 멱등 반환하는 내부 persistence boundary
 
 ### 구현되지 않음
 
@@ -245,7 +248,8 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
   Snapshot DB 영속화
 - 위험 대응 decision의 `FinancialTransaction` 적용, `RiskResponseOutcome`
   영속화와 최종 거래 상태 전이
-- HIGH·CRITICAL 사건 생성 또는 기존 사건 연결
+- 구현된 사건 persistence boundary를 위험 대응·최종 거래 상태·AuditLog와 같은
+  최종화 트랜잭션에 연결
 - 최종 v2 Snapshot codec과 거래 접수 완료 연결
 - Snapshot 완료 간극과 불확실 분석 상태의 운영 복구 실행 경로
 - RuleVersion 운영 publish 준비
@@ -253,7 +257,7 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
 ## 12. 후속 구현 순서
 
 1. 구현된 위험 대응 decision을 거래에 적용하고 최종 상태 전이 구현
-2. 사건 영속 모델과 HIGH·CRITICAL 사건 연결 구현
+2. AuditLog 계약과 물리 모델 구현
 3. 거래 접수–External Risk–Rule 분석–위험 대응–사건–Snapshot v2 연결
 4. Snapshot 완료 간극 운영 복구 구현
 

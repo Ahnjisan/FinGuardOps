@@ -6,7 +6,11 @@
 
 이 계약은 이후 Spring Boot Controller, 요청·응답 DTO, Validation, Service, 테스트와 OpenAPI 구현의 기준이다. API 공통 표현, 시간, 금액, 페이지네이션, 오류 응답과 추적 원칙은 [`api-conventions.md`](./api-conventions.md)를 따른다.
 
-이 문서는 API 계약이며 구현 완료 내역이 아니다. Java 코드, JPA 매핑, PostgreSQL 구조와 실제 인증·인가 방식은 정의하지 않는다.
+이 문서는 API 계약이며 공개 사건 API 구현 완료 내역이 아니다. Issue #154에서
+`FraudCase`·`CaseTransaction` JPA 영속 기반과 Flyway V6, 사건·첫 거래 연결 내부
+Service만 구현되었다. Controller·API DTO, 조사 상태 전이, AuditLog와 인증·인가는
+구현되지 않았다. 문서의 `case_demo_...` 값은 읽기 쉬운 예시이며 실제 영속
+`caseId`는 UUID v4를 사용한다.
 
 ## 2. 범위와 책임 경계
 
@@ -1236,11 +1240,11 @@ Content-Type: application/json
 
 - Spring Boot 코드
 - Controller, DTO, Validation과 Service 구현
-- JPA Entity
-- PostgreSQL DDL
-- Flyway·Liquibase
+- 공개 사건 API용 JPA 조회·변경 Service
+- Issue #154의 `fraud_case`·`case_transaction` 이외 사건·감사 PostgreSQL DDL
+- V6 이후 사건 조사·감사 Flyway Migration
 - OpenAPI YAML
-- 사건 자동 생성 내부 구현
+- 구현된 사건 자동 생성 내부 경계의 거래 최종화·AuditLog 연결
 - 사건 병합·분리 API
 - 종료 사건 재개 API
 - 조사 메모 수정·삭제 API
