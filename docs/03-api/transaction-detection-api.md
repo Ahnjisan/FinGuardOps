@@ -32,10 +32,12 @@ Timeout·Trace 전달과 응답 검증·오류 분류, 거래 분석 Snapshot �
 오케스트레이션과 탐지 실행 결과 자동 생성·채택은 구현되었다. 독립 External Risk
 Port·정책 Service·local/dev/test Mock·성공 인메모리 Snapshot도 구현되었지만
 FastAPI 입력과 거래 접수에는 연결되지 않았다. 거래 접수 Service 연결, 최종 멱등
-응답 v2, 위험 대응과 사건 연결, Snapshot
+응답 v2, 위험 대응의 거래 적용과 사건 연결, Snapshot
 완료 간극 복구와 RuleVersion 운영 publish는 아직 구현되지 않았다. 현재 단계 응답은 최종 동기
 분석 목표를 변경하지 않는다. Spring Boot 분석 처리의 기준은
 [Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../01-requirements/spring-rule-analysis-orchestration-contract.md)이다.
+위험 등급별 목표 거래 상태·`RiskResponseOutcome`·사건 필수 여부를 반환하는 순수
+decision 정책은 구현되었지만 거래 Entity와 API 응답에는 아직 적용되지 않았다.
 
 ### 2.2 Spring Boot 책임
 
@@ -139,7 +141,8 @@ CRITICAL
 
 ### 4.4 위험 대응 결과
 
-`riskResponseOutcome`은 위험 등급에 Spring Boot가 승인된 Mock 대응 정책을 적용한 결과이다. 값 후보는 다음과 같다.
+`riskResponseOutcome`은 위험 등급에 Spring Boot의 승인된 Mock 대응 정책을 적용한
+결과이다. 확정된 Enum 값은 다음과 같다.
 
 ```text
 APPROVED
@@ -148,7 +151,10 @@ ADDITIONAL_AUTH_REQUIRED
 HELD
 ```
 
-값 이름은 API Enum 후보이며 최종 승인이 필요하다. 거래 상태, 위험 등급과 위험 대응 결과는 다음처럼 분리한다.
+값 이름과 위험 등급별 매핑은 확정 계약이다. 현재 순수 decision 정책은 LOW를
+`APPROVED`, MEDIUM을 `APPROVED_WITH_MONITORING`, HIGH를
+`ADDITIONAL_AUTH_REQUIRED`, CRITICAL을 `HELD`로 결정한다. 거래 상태, 위험
+등급과 위험 대응 결과는 다음처럼 분리한다.
 
 ```json
 {
@@ -295,7 +301,8 @@ string으로 취급한다. 최종 v2의 비-null `riskLevel`과
 이 응답은 거래 영속화 단계의 **현재 구현** 계약이며 최종 계약이 아니다. 현재
 신규 요청은 이 단계적 업무 결과를 v1 envelope에 저장한다. DetectionResult
 채택과 거래 `ANALYZED`는 위험 대응 전 중간 상태이므로 최종 성공 응답이나
-성공 Snapshot을 확정하지 않는다. 이 연결과 External Risk, 위험 대응·사건 결과,
+성공 Snapshot을 확정하지 않는다. 순수 위험 대응 decision은 구현되었지만 이
+결정을 거래에 적용하는 상태 전이·영속화와 External Risk·사건 결과 연결,
 Snapshot v2의 Java·DB 반영은 여전히 후속 구현이다.
 
 #### 5.5.1 최종 동기 성공 응답

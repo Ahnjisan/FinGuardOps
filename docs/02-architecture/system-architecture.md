@@ -52,9 +52,12 @@ Spring Boot `RuleAnalysisHttpClient`, Timeout·Trace 전달, 성공·오류 응�
 탐지 결과 자동 생성·완료·Evidence 영속화·채택과 거래 `ANALYZED` 전이까지의
 내부 오케스트레이션도 구현되어 있다. 독립 External Risk Port·정책 Service,
 local/dev/test 결정적 Mock과 immutable 인메모리 성공 Snapshot도 구현되어 있다.
+네 위험 등급별 목표 거래 상태, `RiskResponseOutcome`과 사건 필수 여부를 반환하는
+Spring·DB 비의존 순수 decision 정책도 구현되어 있다.
 거래 접수 Service 연결, External Risk의 Rule 입력 연결,
-위험 대응·최종 거래 상태, 사건 연결, Snapshot v2와 완료 간극 복구, 감사와 AI
-운영 도메인은 아직 구현되지 않았다.
+위험 대응 정책의 `FinancialTransaction` 적용과 최종 거래 상태 전이,
+대응 결과 영속화, 사건 연결, Snapshot v2와 완료 간극 복구, 감사와 AI 운영
+도메인은 아직 구현되지 않았다.
 
 ### 2.2 문서로 정의됨
 

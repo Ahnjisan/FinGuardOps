@@ -65,8 +65,10 @@ Boot의 Snapshot 고정·HTTP 호출·탐지 결과 생성·검증·채택 및 �
 구현되었다. 독립 External Risk Port·정책 Service, local/dev/test 결정적 Mock과
 immutable 인메모리 성공 Snapshot도 구현되었다. 실제 Provider, 거래 접수와
 Rule 분석 입력 연결,
-최종 멱등 Snapshot v2, 위험 대응과 사건 연결, Snapshot 완료 간극 복구와
-일반 RuleVersion 운영 관리는 아직 수행하지 않는다.
+위험 등급별 목표 거래 상태·`RiskResponseOutcome`·사건 필수 여부를 반환하는
+순수 decision 정책도 구현되었다. 최종 멱등 Snapshot v2, 이 정책의 거래 적용과
+최종 상태 전이, 대응 결과 영속화, 사건 연결, Snapshot 완료 간극 복구와 일반
+RuleVersion 운영 관리는 아직 수행하지 않는다.
 
 이 단계적 응답은 현재 구현 사실을 기록한 것이며, `POST /api/v1/transactions`를 비동기 접수 API로 바꾸거나 최종 동기 분석 결정을 뒤집는 새로운 결정이 아니다. 현행 단계 Controller는 이 ADR이 정한 중간 외부 노출 제한과 아직 정합화되지 않은 구현 차이로 기록한다. 후속 구현에서는 이 ADR의 최종 경계로 전환하거나, 결정 변경이 필요하면 별도 사용자 승인과 ADR 검토를 거쳐야 한다.
 
@@ -98,7 +100,7 @@ commit 뒤 멱등 완료 실패는 업무를 되돌리거나 멱등 `FAILED`로 
 1. 거래 식별자, 요청 지문과 멱등성 선점 규칙을 정의하고 거래 접수 영속화를 구현한다.
 2. 요청 형식·도메인 Validation을 거래 저장 전에 수행하고, 검증을 통과한 거래의 `RECEIVED` 영속 경계를 검증한다. Validation 실패는 거래로 저장하지 않는다.
 3. [Rule v1 탐지 계약](../01-requirements/rule-v1-detection-contract.md)에 따라 평가 Snapshot, 활성 Rule 집합, FastAPI 분석 호출 경계와 DetectionResult 저장·채택을 구현한다.
-4. 위험 대응 결과, 거래 최종 상태와 HIGH·CRITICAL 사건 생성 또는 기존 사건 연결을 구현한다.
+4. 구현된 위험 대응 decision을 거래에 적용해 대응 결과와 최종 상태를 확정하고 HIGH·CRITICAL 사건 생성 또는 기존 사건 연결을 구현한다.
 5. 전체 성공·실패·멱등·동시성 흐름이 준비되면 현재 단계 응답을 최종 동기 Controller 계약으로 전환한다.
 
 각 단계는 내부 단위·통합 테스트로 검증한다. 최종 동기 응답 전환 전에는 내부 구현 완료 범위와 외부 API 제공 상태를 구분해 보고한다.
