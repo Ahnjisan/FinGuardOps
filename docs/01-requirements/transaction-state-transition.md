@@ -323,9 +323,10 @@ Rule 결과 채택과 `ANALYZING → ANALYZED` commit만으로는 최종 동기 
 HIGH·CRITICAL이면 사건 생성 또는 기존 사건 연결까지 commit된 뒤에만 v2 성공
 Snapshot을 확정한다. 현재 구현은 거래 접수 commit에서 `RECEIVED`/탐지 null
 v1 Snapshot을 먼저 완료한다. 위험 등급별 목표 상태·대응 결과·사건 필수 여부를
-반환하는 순수 정책은 구현되었지만, 이를 `FinancialTransaction`에 적용하는 전이,
-`RiskResponseOutcome` 영속화, 사건 연결과 최종 원자적 commit은 아직 구현되지
-않았다.
+반환하는 순수 정책과 HIGH·CRITICAL `ANALYZED` 거래의 사건·첫 연결 내부 영속
+경계는 구현되었다. 하지만 이를 `FinancialTransaction`에 적용하는 전이,
+`RiskResponseOutcome` 영속화, AuditLog와 사건 경계를 포함한 최종 원자적
+commit은 아직 구현되지 않았다.
 
 최종 업무 commit 뒤 Snapshot 완료가 실패하면 멱등 레코드는 `FAILED`로 전이하지
 않고 `IN_PROGRESS`로 유지한다. 최초 요청은 `500 INTERNAL_ERROR`, 같은 요청은
@@ -354,7 +355,11 @@ v1 Snapshot을 먼저 완료한다. 위험 등급별 목표 상태·대응 결�
 ### 동일 거래에 대한 중복 사건 생성 방지
 
 - HIGH·CRITICAL 처리의 재시도, 중복 이벤트와 동시 실행으로 새 사건이 중복 생성되지 않아야 한다.
-- 기존 사건 연결, 사건 병합·분리와 중복 방지 기준은 사용자 결정이 필요한 `TBD`이다.
+- Issue #154의 내부 사건 영속 경계는 거래 행을 먼저 비관적으로 잠그고 거래당
+  활성 사건을 최대 하나로 검증한다. 동일 거래 재호출은 기존 활성 연결을 멱등
+  반환하며 둘 이상이면 임의 선택하지 않고 정합성 오류로 거부한다.
+- 기존 사건에 다른 거래를 추가하는 선정 정책과 사건 병합·분리는 후속
+  사용자 결정이 필요한 `TBD`이다.
 
 ## 12. 동시성 고려사항
 

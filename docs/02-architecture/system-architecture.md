@@ -34,6 +34,7 @@
 - Flyway 기반 금융거래·거래 멱등성·행동 이벤트 PostgreSQL 스키마
 - 9개 유형의 행동 이벤트 접수, 거래 정합성 검증과 `eventId` 자연 멱등성
 - 공통 오류 응답과 `TraceIdFilter`
+- `FraudCase`·`CaseTransaction` Entity, Flyway V6와 HIGH·CRITICAL 거래의 사건·첫 연결 내부 영속 경계
 - Issue 및 Pull Request 템플릿
 - FastAPI AI Service의 Python 3.12·uv 프로젝트, 애플리케이션 진입점과 Health API
 - Backend와 AI Service 전용 GitHub Actions 테스트 Workflow
@@ -56,7 +57,8 @@ local/dev/test 결정적 Mock과 immutable 인메모리 성공 Snapshot도 구�
 Spring·DB 비의존 순수 decision 정책도 구현되어 있다.
 거래 접수 Service 연결, External Risk의 Rule 입력 연결,
 위험 대응 정책의 `FinancialTransaction` 적용과 최종 거래 상태 전이,
-대응 결과 영속화, 사건 연결, Snapshot v2와 완료 간극 복구, 감사와 AI 운영
+대응 결과 영속화, 사건 경계의 거래 최종화 연결, Snapshot v2와 완료 간극 복구,
+감사와 AI 운영
 도메인은 아직 구현되지 않았다.
 
 ### 2.2 문서로 정의됨
@@ -855,6 +857,9 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 - 거래 분석 Snapshot 고정, 분석 시작 commit, FastAPI 1회 호출, 응답 변환,
   DetectionResult·Evidence 완료·채택과 거래 `ANALYZED` 전이의 내부
   오케스트레이션
+- `FraudCase`·`CaseTransaction`과 Flyway V6, 거래 → 사건 → 연결 잠금 순서로
+  HIGH·CRITICAL 거래의 새 사건·첫 연결 또는 기존 활성 연결을 원자적으로
+  확정하는 내부 persistence boundary
 - Backend와 AI Service 전용 GitHub Actions 테스트 Workflow
 
 ### 18.2 문서로 정의됨
@@ -875,7 +880,7 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 
 - 거래 접수 Service와 내부 Rule 분석 오케스트레이터 연결
 - RuleVersion publish·운영 준비
-- 위험 대응·최종 거래 상태 전이와 사건 생성·연결
+- 위험 대응·최종 거래 상태 전이와 구현된 사건 영속 경계의 통합
 - 최종 Snapshot v2 확정과 완료 간극 운영 복구
 - 감사 도메인
 - 실제 External Risk HTTP Provider와 Snapshot DB 영속화

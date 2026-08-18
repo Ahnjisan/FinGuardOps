@@ -20,10 +20,10 @@
 이 문서는 전체 구현 완료 내역이 아니다. 현재 백엔드는 Health Check, 거래
 접수·조회, 거래 멱등성, 행동 이벤트 접수와 내부 Rule 평가용 제한 조회를
 구현했다. 거래·멱등·행동 이벤트, `DetectionResult`·`DetectionEvidence`와
-분리된 `FraudRule`·`RuleVersion`은 PostgreSQL 애플리케이션 연동과 Flyway
-스키마가 구현되어 있다. Rule 실행, 공개 행동 이벤트 조회 API,
-사건·감사·AI 운영 엔티티와 운영 PostgreSQL 배포 환경은 아직 구현되지
-않았다.
+분리된 `FraudRule`·`RuleVersion`, `FraudCase`·`CaseTransaction`은 PostgreSQL
+애플리케이션 연동과 Flyway 스키마가 구현되어 있다. Rule 실행, 공개 행동 이벤트
+조회 API, 사건 조사·감사·AI 운영 엔티티와 운영 PostgreSQL 배포 환경은 아직
+구현되지 않았다.
 
 ## 2. 설계 범위와 제외 범위
 
@@ -224,7 +224,7 @@ PostgreSQL에 저장하는 거래·탐지·사건·감사·AI 사용량은 업�
 
 `Transaction`은 FinGuardOps가 접수한 금융거래의 식별, 금액·시각과 현재 업무 처리 결과를 소유한다. Rule·ML 상세 근거는 `DetectionResult`와 `DetectionEvidence`에 분리하고, 사건 조사 상태는 `FraudCase`에 분리한다.
 
-| 속성 후보 | 의미와 설계 이유 |
+| 속성 | 의미와 구현 상태 |
 | --- | --- |
 | 내부 식별자 | 외래 키 연결을 위한 `BIGINT Identity` 내부 식별자 |
 | `transactionId` | 외부 요청, 로그, 추적과 사용자 조회에 사용하는 UUID v4 업무 식별자 |
@@ -513,14 +513,12 @@ DB 테이블이 구현되었다는 의미가 아니다. IP·피싱, cache·fallb
 | `caseId` | 화면·로그·추적에 사용하는 업무 식별자 |
 | `caseStatus` | 현재 조사 진행 단계 |
 | `finalDisposition` | 담당자의 최종 조사 결과. 조사 중 null 가능 |
-| `representativeRiskLevel` | 사건 대기열용 대표 위험 등급 후보 |
-| 대표 탐지 사유 후보 | 목록에서 표시할 대표 Reason Code 또는 요약 |
-| `assigneeRef` | 담당자 원문 프로필이 아닌 참조값 후보 |
+| `assigneeRef` | 담당자 원문 프로필이 아닌 참조값. 현재 생성 시 null |
 | `createdAt` | 사건 생성 시각 |
-| `reviewStartedAt` | 최초 검토 시작 시각 후보 |
+| `reviewStartedAt` | 최초 검토 시작 시각. 상태 전이 Service는 미구현 |
 | `closedAt` | 종료 시각 |
 | `lastChangedAt` | 목록 정렬과 충돌 안내에 사용하는 마지막 변경 시각 |
-| `concurrencyVersion` 후보 | 동시 수정 충돌 탐지 |
+| `concurrencyVersion` | JPA 낙관적 잠금 버전 |
 
 사건 상태는 다음 값이다.
 
@@ -546,7 +544,8 @@ caseStatus
 
 초기 사건 API 계약에서는 `OPEN`, `IN_REVIEW`, `ADDITIONAL_INFORMATION_REQUIRED` 동안 `finalDisposition = null`을 유지한다. `IN_REVIEW` 사건을 종료할 때 `NORMAL`, `FALSE_POSITIVE`, `CONFIRMED_FRAUD` 중 하나의 최종 판정을 필수로 설정하고 `caseStatus = CLOSED`, `closedAt`과 AuditLog를 같은 업무 트랜잭션에서 반영한다. `IN_REVIEW`에는 담당자가 필요하다.
 
-대표 위험 등급은 연결 거래 중 최고 등급, 대표 거래 등급 또는 사건 분석 결과 중 무엇을 사용할지 확정되지 않았다. 계산 규칙과 갱신 시점을 후속 설계에서 결정해야 한다.
+`representativeRiskLevel`, 대표 거래와 대표 Reason Code는 선정 정책이 없어 V6에
+포함하지 않았다. 필요하면 후속 Issue와 additive Migration으로 도입한다.
 
 ### 7.8 CaseTransaction
 
@@ -560,27 +559,26 @@ CaseTransaction
 Transaction N
 ```
 
-속성 후보는 다음과 같다.
+V6에서 구현된 속성은 다음과 같다.
 
 - 사건 식별자
 - 거래 식별자
-- 대표 거래 여부
-- 연결 사유 또는 Reason Code 후보
 - 연결 시각
-- 연결 주체 후보
 
-핵심 중복 방지 후보는 다음과 같다.
+동일 사건–거래 연결은 별도 내부 PK가 아니라 다음 V6 DB 제약으로 중복을
+방지한다.
 
 ```text
-caseId + transactionId
-→ Unique 후보
+UNIQUE(fraud_case_id, financial_transaction_id)
 ```
 
-대표 거래 여부는 사건 목록과 AI 리포트 근거 선택에 유용할 수 있다. 다만 사건당 대표 거래를 정확히 하나로 강제할지, 대표 거래 없이 복수 거래를 동등하게 다룰지는 사용자 결정 사항이다.
+대표 거래 여부, 연결 사유와 연결 주체는 선정 정책이 없어 V6에서 제외했다.
 
 한 거래가 여러 사건에 연결될 수 있는지는 병합·분리 정책과 관련된다. 현재 ERD는 다대다 가능성을 보존하지만, 같은 의심 흐름에서 중복 사건을 허용한다는 뜻은 아니다.
 
-하나의 Transaction이 과거 여러 `CLOSED` 사건과 연결될 가능성은 유지하되, 동일 Transaction은 `OPEN`, `IN_REVIEW`, `ADDITIONAL_INFORMATION_REQUIRED` 상태의 사건 중 최대 하나에만 동시에 연결될 수 있다는 업무 규칙을 권장한다.
+하나의 Transaction은 과거 여러 `CLOSED` 사건과 연결될 수 있다. 동일
+Transaction은 `OPEN`, `IN_REVIEW`, `ADDITIONAL_INFORMATION_REQUIRED` 상태의
+사건 중 최대 하나에만 동시에 연결할 수 있다는 업무 규칙을 적용한다.
 
 현재 `caseStatus`는 FraudCase에 있고 거래 연결은 CaseTransaction에 있으므로, CaseTransaction 한 테이블만 대상으로 하는 단순 Partial Unique Index는 다른 테이블의 상태 조건을 직접 평가하기 어렵다. 구현 후보는 다음과 같다.
 
@@ -591,7 +589,10 @@ caseId + transactionId
 | C | 별도 활성 사건 연결 관계 사용 | 현재 활성 연결을 명시적으로 분리하고 과거 연결과 구분 가능 | 새로운 관계와 수명주기 관리 복잡도 증가 |
 | D | DB Trigger 또는 별도 DB 제약 사용 | DB 수준에서 교차 테이블 규칙을 강제할 가능성 | DB 종속성, 테스트와 마이그레이션 복잡도 증가 |
 
-초기 권장안은 방안 A인 Spring Boot 업무 트랜잭션 검증과 동시성 제어이다. DB 보조 제약의 필요성과 구체 방식은 실제 경합 테스트를 근거로 후속 JPA·마이그레이션 설계에서 결정한다.
+Issue #154는 방안 A를 채택했다. `FinancialTransaction`을 먼저
+`PESSIMISTIC_WRITE`로 잠그고 활성 사건 조회·상태 재검증, 사건과 연결 순서의
+잠금을 수행한다. V6에는 cross-table trigger, 중복 활성 상태 또는 별도 활성
+관계를 추가하지 않았다.
 
 ### 7.9 CaseNote
 
@@ -881,9 +882,13 @@ API에서 캐시 요청의 토큰 합계를 0으로 보여줄 수는 있지만 �
 | IdempotencyRecord–Transaction | 요청 1 : 결과 0..1 | 처리 중에는 거래 결과가 없을 수 있고 완료된 거래 접수는 하나의 결과를 참조 |
 | IdempotencyRecord–AiReportRequest | 멱등 기록 1 : 요청 0..1 후보 | 공통 멱등 엔티티를 채택하면 같은 키·지문 확인과 완료 aiRequestId 재사용을 연결 |
 
-`FraudCase–CaseTransaction`을 1..N으로 표현하는 것은 사건이 거래 조사 단위라는 업무 의미를 반영한다. 사건 생성과 첫 거래 연결을 같은 정합성 경계에서 보장할지, 일시적으로 거래가 없는 사건을 허용할지는 후속 트랜잭션 설계에서 확정한다.
+`FraudCase–CaseTransaction`을 1..N으로 표현하는 것은 사건이 거래 조사 단위라는
+업무 의미를 반영한다. Issue #154의 내부 영속 경계는 사건 생성과 첫 거래 연결을
+같은 `REQUIRED` 트랜잭션에서 flush하며 연결 없는 사건을 정상 결과로 남기지 않는다.
 
-Transaction–CaseTransaction의 1:N 관계는 과거 사건 연결을 포함한다. 현재 활성 사건 연결은 Transaction당 최대 하나라는 별도 업무 규칙을 적용하며, 구현 방식은 후속 설계에서 결정한다.
+Transaction–CaseTransaction의 1:N 관계는 과거 `CLOSED` 사건 연결을 포함한다.
+활성 사건은 Transaction당 최대 하나이며 거래 행 비관적 잠금과 Service 재검증으로
+직렬화한다.
 
 ## 9. Mermaid ERD
 
@@ -957,9 +962,10 @@ erDiagram
     }
 
     CASE_TRANSACTION {
-        string caseRef PK,FK
-        string transactionRef PK,FK
-        boolean representative
+        bigint id PK
+        bigint fraud_case_id FK
+        bigint financial_transaction_id FK
+        datetime linked_at
     }
 
     CASE_NOTE {
@@ -1210,9 +1216,11 @@ caseId
 
 ## 12. 식별자와 Unique Constraint 후보
 
-다음은 논리 Unique 후보이며 실제 제약 문법과 이름은 후속 마이그레이션 설계에서 확정한다.
+다음은 논리 Unique 계약이다. 거래·행동·탐지·Rule과 사건 V6에서 이미 구현된
+항목은 각 전용 물리 스키마의 제약 문법과 이름을 우선한다. 나머지 후보는 후속
+마이그레이션 설계에서 확정한다.
 
-| 대상 | Unique 후보 | 방지하려는 중복 |
+| 대상 | 논리 Unique 키 | 방지하려는 중복 |
 | --- | --- | --- |
 | Transaction | `transactionId` | 동일 업무 거래 중복 저장 |
 | BehaviorEvent | `eventId` | 동일 행동 이벤트 중복 수신·재처리 |
@@ -1220,7 +1228,7 @@ caseId
 | FraudRule | `fraudRuleId`, `ruleCode` | 논리 Rule 업무 ID·코드 중복 |
 | RuleVersion | `ruleVersionId`, `fraudRuleId + versionNumber` | 업무 ID와 같은 Rule 버전 중복 |
 | FraudCase | `caseId` | 사건 업무 식별자 중복 |
-| CaseTransaction | `caseId + transactionId` | 같은 사건에 같은 거래 중복 연결 |
+| CaseTransaction | `fraud_case_id + financial_transaction_id` | 같은 사건에 같은 거래 중복 연결. V6 pair Unique로 구현 |
 | AiReportRequest | `aiRequestId` | 외부 요청 업무 식별자 중복 |
 | AiReportRequest 멱등성 | AI 리포트 생성 작업 범위의 `idempotencyKey` | 같은 키로 새 요청 이력 중복 생성 |
 | AiReportExecution 활성 실행 | `caseId + detectionResultVersion + promptVersion + modelVersion`, 단 `PENDING`·`GENERATING`만 | 정확 일치 조건의 동시 실행 중복 |
@@ -1250,7 +1258,11 @@ caseId
 
 사건 중복은 단일 Unique Constraint만으로 완전히 해결하기 어렵다. 한 사건에 여러 거래가 있고 같은 거래가 과거 여러 사건에 연결될 수 있기 때문이다. 사건 생성 기준, 의심 흐름 병합·분리 정책과 트랜잭션 경계를 함께 결정해야 한다.
 
-추가 업무 제약 후보로, 동일 Transaction은 `OPEN`, `IN_REVIEW`, `ADDITIONAL_INFORMATION_REQUIRED` 상태의 사건 중 최대 하나에만 연결할 수 있다. `CLOSED` 사건 연결은 과거 이력으로 유지할 수 있다. `caseStatus`와 거래 연결이 서로 다른 테이블에 있으므로 CaseTransaction에 대한 단순 Partial Unique Index만으로 이 조건을 직접 보장하기 어렵다. 초기에는 Spring Boot 업무 트랜잭션의 활성 사건 조회·검증과 동시성 제어를 권장하며, 중복 상태 저장, 별도 활성 관계 또는 DB Trigger·보조 제약은 후속 설계에서 비교한다.
+동일 Transaction은 `OPEN`, `IN_REVIEW`, `ADDITIONAL_INFORMATION_REQUIRED`
+상태의 사건 중 최대 하나에만 연결하고 `CLOSED` 사건 이력은 여러 개 유지할 수
+있다. 현재 구현은 거래 행 잠금과 Service 재검증,
+`UNIQUE(fraud_case_id, financial_transaction_id)`를 조합한다. 활성 사건이 둘
+이상이면 임의 선택하지 않고 정합성 오류로 거부한다.
 
 ## 13. 멱등성·중복 방지
 
@@ -1288,15 +1300,24 @@ REST `BehaviorEvent.eventId`와 향후 도메인 이벤트 Envelope `eventId`는
 
 ### 13.4 사건
 
-HIGH·CRITICAL 거래 처리의 재시도와 중복 이벤트가 새 사건을 중복 생성하지 않아야 한다. 최소한 다음을 함께 적용한다.
+HIGH·CRITICAL 거래 처리의 재시도와 중복 이벤트가 새 사건을 중복 생성하지 않도록
+현재 다음을 함께 적용한다.
 
-- 사건 생성 전에 해당 거래의 기존 `CaseTransaction` 연결을 확인
-- 사건 생성과 최초 거래 연결의 정합성 경계 검토
-- `caseId + transactionId` 중복 연결 방지
-- 동일 의심 흐름의 병합·분리 정책
-- 중복 생성 시도와 기존 사건 연결 결과의 감사 기록
+- 거래를 먼저 `PESSIMISTIC_WRITE`로 잠근 뒤 활성 사건 연결 확인
+- 사건 생성과 첫 거래 연결을 하나의 `REQUIRED` 트랜잭션으로 처리
+- `UNIQUE(fraud_case_id, financial_transaction_id)`로 동일 pair 중복 방지
+- 잠금 후 사건 상태와 거래 관계 재검증
 
-동일 거래의 과거 사건 연결 수를 하나로 제한하지 않는다. 대신 사건 생성·연결 시 해당 거래에 이미 활성 사건이 있는지 확인하고, 있으면 승인된 병합·분리 정책에 따라 기존 사건 연결 또는 새 사건 생성 거부를 결정해야 한다. 동시 실행에서도 둘 이상의 활성 사건이 확정되지 않아야 한다.
+기존 사건에 다른 거래를 추가하는 선정 정책, 사건 병합·분리와 AuditLog는 후속
+승인·구현 범위이다.
+
+동일 거래의 과거 `CLOSED` 사건 연결 수를 하나로 제한하지 않는다. 사건 생성·연결
+시 활성 사건이 없으면 새 `OPEN` 사건과 첫 거래 연결을 생성한다. 활성 사건이
+하나이면 기존 사건과 기존 `linkedAt`을 반환하는 멱등 성공으로 처리한다. 활성
+사건이 둘 이상이면 여러 사건 중 하나를 임의로 선택하지 않고 정합성 오류로
+거부한다. `CLOSED` 사건은 활성 사건으로 재사용하지 않으며 `CLOSED` 이력만 있으면
+새 `OPEN` 사건을 생성한다. 기존 사건에 다른 거래를 추가하는 기능과 사건
+병합·분리는 아직 구현되지 않았다.
 
 ### 13.5 AI 리포트 요청부터 결과 저장까지의 처리 흐름
 
@@ -1348,7 +1369,20 @@ HIGH·CRITICAL 거래 처리의 재시도와 중복 이벤트가 새 사건을 �
 
 ## 14. 동시성 고려사항
 
-거래 접수에는 `financial_transaction.version` 낙관적 잠금을 선택했다. 다른 엔티티는 락 방식을 선택하지 않고 충돌 탐지에 필요한 데이터 후보만 정의한다.
+사건 생성·첫 거래 연결 경계는 PostgreSQL 기본 `READ_COMMITTED`에서 다음 전역
+잠금 순서를 사용한다.
+
+1. `FinancialTransaction`을 `PESSIMISTIC_WRITE`로 잠근다.
+2. 활성 `FraudCase`를 `caseId` 오름차순으로 `PESSIMISTIC_WRITE` 잠금한다.
+3. `CaseTransaction`을 같은 사건 순서로 잠근다.
+
+거래 행 잠금으로 동일 거래의 사건 생성을 직렬화한다. 거래당 활성 사건 최대
+하나는 거래 잠금, Service 상태·관계 재검증과
+`UNIQUE(fraud_case_id, financial_transaction_id)`를 조합해 보장한다. 이는
+cross-table trigger나 별도 활성 상태 컬럼으로 보장하는 구조가 아니다. 후속 사건
+종료와 기존 사건 추가 연결 경로도 같은 전역 잠금 순서를 따라야 한다. 거래의
+일반 상태 변경에는 기존 `financial_transaction.version` 낙관적 잠금 계약도
+유지한다.
 
 ### 14.1 Transaction
 
@@ -1602,8 +1636,7 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 - 초기 범위 밖인 `CLOSED` 사건 재개와 최종 판정 정정을 향후 도입할지
 - 초기 수동 배정 외에 담당자 자동 배정을 도입할지와 사용자·담당자 디렉터리 연동 방식
 - 대표 거래와 대표 위험 등급 선정 규칙
-- 동일 거래의 여러 과거 사건 연결 허용 범위
-- 동일 거래의 중복 활성 사건을 Spring Boot 트랜잭션 검증, CaseTransaction 중복 상태와 보조 인덱스, 별도 활성 관계 또는 DB Trigger·제약 중 어떤 방식으로 방지할지
+- 여러 과거 `CLOSED` 사건 이력을 조회·표시할 후속 UI 정책
 - 사건 병합·분리 및 동일 의심 흐름의 중복 방지 기준
 - CaseNote append-only 초기 권장안을 최종 정책으로 채택할지와 향후 정정 관계·논리 삭제·이력 모델
 
@@ -1675,16 +1708,18 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 구체적인 경로, DTO와 상태 코드는 API 기준 문서에서 사용자 승인 후
 확정한다. 거래 접수의 `FinancialTransaction`, 행동 이벤트의
 `BehaviorEvent`, 탐지 영속 모델의 `DetectionResult`·`DetectionEvidence`,
-Rule 물리 모델의 `FraudRule`·`RuleVersion`은 구현되었다. Rule 실행,
-사건·AI 운영 클래스는 후속 구현 범위이다.
+Rule 물리 모델의 `FraudRule`·`RuleVersion`과 사건 영속 기반의
+`FraudCase`·`CaseTransaction`은 구현되었다. 공개 사건 조사·감사와 AI 운영
+클래스는 후속 구현 범위이다.
 
 ### 20.3 마이그레이션·DB 제약 설계
 
-- 구현된 거래·행동·탐지·Rule V1~V5 이후 사건·AI 운영 Flyway Migration 설계
+- 구현된 거래·행동·탐지·Rule V1~V5와 사건 V6 이후 감사·AI 운영 Flyway Migration 설계
 - 향후 Snapshot metadata 조회·인덱스 또는 DB 수준 version 제약이 필요할 때의 새 Migration 여부
 - 이 문서의 Unique 후보를 실제 제약으로 적용할 범위
 - `adoptedDetectionResultId`가 같은 Transaction의 DetectionResult만 참조하도록 보장하는 방식
-- 교차 테이블 상태 조건의 한계를 고려한 활성 사건 검증, 중복 상태·별도 활성 관계·DB Trigger와 보조 제약 비교
+- 현재 거래 잠금·Service 재검증 기반 활성 사건 보장의 운영 한계와, 향후 별도
+  승인이 있을 때만 검토할 중복 상태·별도 활성 관계·DB Trigger 보조 제약
 - 외래 키와 삭제 제한
 - 상태별 필수값을 애플리케이션과 DB 중 어디까지 검증할지
 - Rule 버전과 탐지 근거의 불변성 보조
@@ -1701,8 +1736,10 @@ Rule 물리 모델의 `FraudRule`·`RuleVersion`은 구현되었다. Rule 실행
 구현되어 있다. V4는 기존 `behavior_event`에 내부 Rule 조회 인덱스를
 추가한다. V5는 `btree_gist`, FraudRule·RuleVersion, R001~R004 DRAFT
 seed와 DetectionEvidence nullable RuleVersion FK를 additive하게 추가하며
-V1~V4를 수정하거나 기존 Evidence를 backfill하지 않는다. Rule 실행,
-사건·AI 운영 DDL은 별도 승인 작업이다.
+V1~V4를 수정하거나 기존 Evidence를 backfill하지 않는다.
+V6는 `fraud_case`·`case_transaction`과 승인된 FK·Unique·Check·Index를
+additive하게 구현한다. 사건 조사 메모·AuditLog와 AI 운영 DDL은 별도 승인
+작업이다.
 
 ### 20.4 트랜잭션·동시성 설계
 
@@ -1714,7 +1751,10 @@ V1~V4를 수정하거나 기존 Evidence를 backfill하지 않는다. Rule 실�
 - ProviderCallAttempt 저장, AiReport 결과 생성과 실행·공유 요청 종결의 부분 실패 처리
 - 늦은 응답, 재시도와 fallback 경합 처리
 
-거래 상태 변경은 `financial_transaction.version` 낙관적 잠금을 사용한다. 다른 엔티티의 락 방식과 트랜잭션 격리 수준은 실제 충돌·부하 테스트 근거로 결정한다.
+거래 상태 변경은 `financial_transaction.version` 낙관적 잠금을 사용한다. 사건
+생성·첫 연결 경계는 기본 `READ_COMMITTED`·`REQUIRED`에서
+`FinancialTransaction → FraudCase → CaseTransaction` 비관적 잠금 순서를
+사용한다. 조사 상태 변경의 세부 잠금 방식은 후속 범위이다.
 
 ### 20.5 캐시·이벤트 후속 설계
 

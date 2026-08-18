@@ -32,12 +32,15 @@ Timeout·Trace 전달과 응답 검증·오류 분류, 거래 분석 Snapshot �
 오케스트레이션과 탐지 실행 결과 자동 생성·채택은 구현되었다. 독립 External Risk
 Port·정책 Service·local/dev/test Mock·성공 인메모리 Snapshot도 구현되었지만
 FastAPI 입력과 거래 접수에는 연결되지 않았다. 거래 접수 Service 연결, 최종 멱등
-응답 v2, 위험 대응의 거래 적용과 사건 연결, Snapshot
+응답 v2, 위험 대응의 거래 적용과 구현된 사건·첫 거래 연결 영속 경계의 최종화 연결, Snapshot
 완료 간극 복구와 RuleVersion 운영 publish는 아직 구현되지 않았다. 현재 단계 응답은 최종 동기
 분석 목표를 변경하지 않는다. Spring Boot 분석 처리의 기준은
 [Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../01-requirements/spring-rule-analysis-orchestration-contract.md)이다.
 위험 등급별 목표 거래 상태·`RiskResponseOutcome`·사건 필수 여부를 반환하는 순수
 decision 정책은 구현되었지만 거래 Entity와 API 응답에는 아직 적용되지 않았다.
+`FraudCase`·`CaseTransaction`과 Flyway V6, HIGH·CRITICAL `ANALYZED` 거래의
+새 사건·첫 연결 또는 기존 활성 연결을 원자적으로 확정하는 내부 Service도
+구현되었지만 거래 접수와 최종 상태 전이에는 연결되지 않았다.
 
 ### 2.2 Spring Boot 책임
 

@@ -66,8 +66,10 @@ Boot의 Snapshot 고정·HTTP 호출·탐지 결과 생성·검증·채택 및 �
 immutable 인메모리 성공 Snapshot도 구현되었다. 실제 Provider, 거래 접수와
 Rule 분석 입력 연결,
 위험 등급별 목표 거래 상태·`RiskResponseOutcome`·사건 필수 여부를 반환하는
-순수 decision 정책도 구현되었다. 최종 멱등 Snapshot v2, 이 정책의 거래 적용과
-최종 상태 전이, 대응 결과 영속화, 사건 연결, Snapshot 완료 간극 복구와 일반
+순수 decision 정책도 구현되었다. `FraudCase`·`CaseTransaction`, Flyway V6와
+HIGH·CRITICAL `ANALYZED` 거래의 사건·첫 연결 생성 또는 활성 연결 멱등 반환
+경계도 구현되었다. 최종 멱등 Snapshot v2, decision의 거래 적용과 최종 상태
+전이, 대응 결과 영속화, 사건 경계의 최종화 연결, AuditLog, Snapshot 완료 간극 복구와 일반
 RuleVersion 운영 관리는 아직 수행하지 않는다.
 
 이 단계적 응답은 현재 구현 사실을 기록한 것이며, `POST /api/v1/transactions`를 비동기 접수 API로 바꾸거나 최종 동기 분석 결정을 뒤집는 새로운 결정이 아니다. 현행 단계 Controller는 이 ADR이 정한 중간 외부 노출 제한과 아직 정합화되지 않은 구현 차이로 기록한다. 후속 구현에서는 이 ADR의 최종 경계로 전환하거나, 결정 변경이 필요하면 별도 사용자 승인과 ADR 검토를 거쳐야 한다.
