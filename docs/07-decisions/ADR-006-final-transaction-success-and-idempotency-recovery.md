@@ -212,10 +212,16 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
 ## 10. External Risk와 RuleVersion 선행 조건
 
 - ADR-003의 External Risk 단계를 최종 동기 목표에서 제거하지 않는다.
-- External Risk 정책과 Mock 구현 전에는 최종 거래 접수 연결을 구현 완료로
-  표시하지 않는다.
+- 독립 External Risk 정책·Mock 경계는 구현되었지만 거래 접수·Rule 분석 입력과
+  연결되기 전에는 최종 거래 접수 연결을 구현 완료로 표시하지 않는다.
+- External Risk timeout·unavailable·invalid response는 현재 분석을 계속하지 않고
+  typed failure로 전파한다. cache, stale data, fallback과 `UNMATCHED` 변환은 없다.
+- 후속 거래 접수 연결에서는 거래와 분석 결과를 `FAILED`로 확정하고 기존 외부
+  오류 매핑을 사용한다. cache·Circuit Breaker·fallback은 별도 Issue와 계약
+  승인 없이는 도입하지 않는다.
 - V5의 `DRAFT` RuleVersion을 자동 실행하거나 암묵적으로 publish하지 않는다.
-- RuleVersion publish와 운영 준비는 별도 선행 Issue에서 수행한다.
+- 기본 RuleVersion의 원자적 발행 경계와 제한된 local/dev/test one-shot 명령은
+  구현되었지만 정상 시작 자동 발행과 production 실험값 발행은 없다.
 - 이 결정은 RuleVersion seed나 Flyway Migration을 변경하지 않는다.
 
 ## 11. 현재 구현 상태
@@ -225,11 +231,14 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
 - 신규 거래 접수의 단계적 `RECEIVED` v1 Snapshot 저장·재생
 - strict legacy `RECEIVED` Snapshot 재생
 - 내부 Rule v1 HTTP 오케스트레이터와 분석 결과 저장·채택·실패 기록
+- 독립 External Risk Port·정책 Service, local/dev/test 결정적 Mock과 immutable
+  인메모리 성공 Snapshot
 
 ### 구현되지 않음
 
 - 거래 접수 Service와 Rule 분석 오케스트레이터 연결
-- External Risk 정책과 Mock
+- 실제 External Risk HTTP Provider, FastAPI 입력·거래 접수 연결, 공개 오류 매핑과
+  Snapshot DB 영속화
 - 위험 대응과 최종 거래 상태 전이
 - HIGH·CRITICAL 사건 생성 또는 기존 사건 연결
 - 최종 v2 Snapshot codec과 거래 접수 완료 연결
@@ -238,14 +247,12 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
 
 ## 12. 후속 구현 순서
 
-1. RuleVersion publish·운영 준비
-2. External Risk 정책과 Mock 구현
-3. 위험 대응 정책과 거래 최종 상태 전이 구현
-4. 사건 영속 모델과 HIGH·CRITICAL 사건 연결 구현
-5. 거래 접수–Rule 분석–위험 대응–사건–Snapshot v2 연결
-6. Snapshot 완료 간극 운영 복구 구현
+1. 위험 대응 정책과 거래 최종 상태 전이 구현
+2. 사건 영속 모델과 HIGH·CRITICAL 사건 연결 구현
+3. 거래 접수–External Risk–Rule 분석–위험 대응–사건–Snapshot v2 연결
+4. Snapshot 완료 간극 운영 복구 구현
 
-각 단계는 이전 단계의 계약과 상태를 임시 기본값으로 대체하지 않는다. 5단계가
+각 단계는 이전 단계의 계약과 상태를 임시 기본값으로 대체하지 않는다. 4단계가
 완료되기 전까지 현행 `RECEIVED` v1 응답을 최종 동기 거래 처리로 표현하지 않는다.
 
 ## 13. 영향과 제외 범위

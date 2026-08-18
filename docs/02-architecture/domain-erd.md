@@ -36,7 +36,7 @@
 - 사건: `FraudCase`, `CaseTransaction`, `CaseNote`, `AuditLog`
 - AI 운영: `AiReportRequest`, `AiReportExecution`, `ProviderCallAttempt`, `AiReport`
 
-`ExternalRiskSnapshot`은 외부 위험계좌·IP·기기 근거의 재현과 장애·fallback 실험을 위해 초기 핵심 엔티티에 포함하는 방향을 권장한다. 다만 구체적인 속성, 보존 기간과 보호 방식은 후속 설계에서 확정한다.
+`ExternalRiskSnapshot`은 외부 위험계좌·기기 근거의 재현을 위해 초기 핵심 엔티티에 포함하는 방향을 권장한다. 현재 cache·fallback·IP 정책은 없으며 구체적인 영속 속성, 보존 기간과 보호 방식은 후속 설계에서 확정한다.
 
 다음 엔티티는 필요성과 적용 범위를 구분해 관리한다.
 
@@ -210,7 +210,7 @@ PostgreSQL에 저장하는 거래·탐지·사건·감사·AI 사용량은 업�
 | `AiReportExecution` | 정확 일치 조건에 대한 실제 논리 실행과 최종 실행 상태 관리 | 핵심 후보 |
 | `ProviderCallAttempt` | 실행 중 발생한 실제 Provider 호출별 토큰·지연·비용·결과 기록 | 핵심 후보 |
 | `AiReport` | 검증된 LLM 또는 템플릿 fallback 결과 본문과 최초 생성 출처 보존 | 핵심 후보 |
-| `ExternalRiskSnapshot` | 탐지 당시 외부 위험정보와 조회·캐시·fallback 상태의 최소 스냅샷 | 초기 핵심 권장 |
+| `ExternalRiskSnapshot` | 탐지 당시 외부 위험정보 성공 조회의 최소 스냅샷 | 초기 핵심 권장 |
 | `IdempotencyRecord` | 요청의 처리 중·완료·실패와 완료 응답 재사용 정보 | 거래 접수 확정, 다른 API 후보 |
 | 최소 `Customer`·`Account` 참조 엔티티 | 테스트·Mock 관계의 외래 키 정합성 보조 | 후보 |
 
@@ -472,13 +472,22 @@ R001~R004의 DRAFT seed와 상세 물리 계약은
 
 ### 7.6 ExternalRiskSnapshot
 
-`ExternalRiskSnapshot`은 위험계좌·IP·기기 조회의 원본 전체가 아니라 탐지 시점에 실제 사용한 최소 정보를 보존한다. 외부 위험 근거의 재현과 External Risk 장애·캐시·fallback 실험을 지원하므로 초기 핵심 엔티티로 포함하는 방향을 권장한다.
+`ExternalRiskSnapshot`은 위험계좌·기기 조회의 원본 전체가 아니라 탐지 시점에 실제 사용한 최소 정보를 보존한다. 외부 위험 근거의 재현을 지원하므로 초기 핵심 엔티티로 포함하는 방향을 권장한다. cache·fallback·IP 정책은 현재 계약이 아니며 도입하려면 별도 Issue와 계약 승인이 필요하다.
+
+현재 구현된 `ExternalRiskSnapshot`은 Issue #150의 성공 결과용 immutable 인메모리
+값 객체다. `transactionId`, `evaluationCutoffAt`, `lookedUpAt`, `providerCode`,
+`providerAsOf`, `SUCCEEDED` 조회 상태, match 기반 `MATCHED`/`UNMATCHED` 결과와
+제한된 match 목록만 가진다. `traceId`는 호출 경계까지만 전달하고 실제
+고객·계좌·기기 reference와 함께 업무 Snapshot 및 목표 영속 모델에 저장하지
+않는다. 이 절과 Mermaid의 Entity·관계는 목표 영속 모델이며 현재 JPA Entity나
+DB 테이블이 구현되었다는 의미가 아니다. IP·피싱, cache·fallback과 실패 Snapshot도
+현재 구현 범위가 아니다.
 
 저장 목적은 다음과 같다.
 
 - 탐지 시점의 외부 위험정보를 재현한다.
 - 외부 데이터가 변경·정정된 뒤에도 당시 판단 근거를 감사할 수 있다.
-- 조회 성공, 캐시 사용, 조회 불가와 fallback 결과를 구분한다.
+- 현재 성공 조회의 Provider 기준 시각과 match 근거를 구분한다.
 
 속성 후보는 다음과 같다.
 
@@ -489,11 +498,10 @@ R001~R004의 DRAFT seed와 상세 물리 계약은
 - 제공자 기준 시각과 유효 기준 후보
 - 조회 시각
 - 조회 결과 상태
-- 캐시 사용 여부와 캐시 기준 시각
-- fallback 또는 조회 불가 사유
-- 관련 `transactionId`, DetectionResult와 `traceId`
+- match 기반 정책 결과와 제한된 match 목록
+- 관련 `transactionId`와 DetectionResult
 
-외부 Provider 응답 원문 전체, 실제 계좌번호·IP·기기 식별자 원문과 불필요한 Provider 데이터는 저장하지 않는다. 조회 상태, 일치 결과, Reason Code, 기준 시각, 캐시·fallback 정보와 `traceId` 등 감사와 장애 재현에 필요한 최소 스냅샷만 저장한다. 구체적인 속성, 보존 기간과 암호화 방식은 후속 설계에서 사용자 승인으로 확정한다.
+외부 Provider 응답 원문 전체, 실제 계좌번호·IP·기기 식별자 원문과 불필요한 Provider 데이터는 저장하지 않는다. 목표 영속 모델의 구체 속성, 실패·cache 상태, 보존 기간과 암호화 방식은 후속 설계에서 사용자 승인으로 확정한다. `traceId`는 로그·추적에 전달하되 Snapshot에는 저장하지 않는다.
 
 ### 7.7 FraudCase
 
@@ -1388,7 +1396,7 @@ PostgreSQL exclusion constraint가 경쟁 게시의 최종 방어선이며 중�
 - Rule 버전 생성, 활성 상태와 적용 기간 변경
 - AI 리포트 요청, 상태 변경, 재시도, 재생성과 fallback
 - 캐시 적중·미적중과 중복 요청 처리 결과
-- 외부 위험정보 조회 상태, 캐시 사용과 복구 후 근거 변경
+- 외부 위험정보 성공 조회 상태·Provider 기준 시각 또는 실패 category
 - 동시성 충돌, 허용되지 않은 상태 전이와 멱등 처리 결과
 
 감사 기록의 기본 구조 후보는 다음과 같다.

@@ -200,15 +200,18 @@ Rule 기반 탐지
 
 ### 3.5 금융권 공동 FDS에서 가져올 요소
 
-의심 계좌, 위험 IP, 위험 기기, 피싱 의심 정보를 제공하는 가상의 외부 위험정보 서비스를 구현한다. 실제 외부기관 데이터는 사용하지 않지만 다음 기술 요소를 구현한다.
+장기 목표는 의심 계좌, 위험 IP, 위험 기기와 피싱 의심 정보를 제공하는 외부
+위험정보 경계를 단계적으로 검증하는 것이다. 현재 Issue #150에서는 독립
+External Risk Port·Policy Service, local/dev/test 결정적 Mock, immutable 인메모리
+성공 Snapshot과 내부 failure category만 구현했다. 현재 Mock은 송신·수신 계좌와
+기기 scenario만 지원하며 실제 외부 HTTP Provider, IP·피싱 조회와 거래·FastAPI
+연결은 구현하지 않았다.
 
-- 외부 API 연동
-- Timeout
-- Retry
-- Circuit Breaker
-- Fallback
-- Redis Cache
-- 장애 격리
+현재 실패 정책은 timeout·unavailable·invalid response에서 분석을 계속하지 않는
+fail-closed다. 실패는 typed exception으로 전파하며 자동 retry, cache, stale data,
+fallback, Circuit Breaker와 `UNMATCHED` 변환은 없다. cache·Circuit Breaker·fallback
+등의 운영 고도화는 실제 필요성과 정합성 근거를 확인한 뒤 별도 Issue와 ADR 승인을
+받아 도입할 수 있는 향후 후보일 뿐 현재 운영 경계에 적용되지 않는다.
 
 ## 4. 분석 대상
 
@@ -1041,10 +1044,9 @@ ATM_WITHDRAWAL_REQUESTED
 - 동시성 제어
 - 중복 사건 생성 방지
 - Kafka 도입 이후 중복 메시지 처리
-- 외부 API Timeout
-- Retry
-- Circuit Breaker
-- Fallback
+- 외부 API Timeout과 typed failure 분류
+- External Risk fail-closed와 무재시도 검증
+- retry·Circuit Breaker·fallback은 외부 연동별 별도 승인 후 검증할 향후 후보
 - 데이터 정합성
 - 감사 로그
 - API 계약 관리
@@ -1059,7 +1061,8 @@ ATM_WITHDRAWAL_REQUESTED
 - 두 담당자의 동시 수정을 제어하는가
 - 허용되지 않은 상태 전이를 차단하는가
 - Kafka 도입 이후 메시지 중복 소비에도 결과가 중복 저장되지 않는가
-- 외부 위험정보 서비스 장애 시 기본 분석이 동작하는가
+- External Risk 실패 시 Rule 분석을 시작하지 않고 typed failure와 후속 `FAILED`
+  경계를 유지하는가
 - LLM 장애 시 템플릿 리포트가 생성되는가
 - 동일 사건의 리포트가 불필요하게 재생성되지 않는가
 - 모델 라우팅 정책이 위험도에 맞게 적용되는가
@@ -1120,7 +1123,7 @@ ATM_WITHDRAWAL_REQUESTED
 
 ### 20.2 백엔드
 
-> Spring Boot에서 거래 멱등성, 트랜잭션과 상태 전이, 사건 생성, 감사 이력을 관리했습니다. FastAPI 분석 서비스와 외부 위험정보 서비스의 장애를 고려해 타임아웃, 재시도, Circuit Breaker와 Fallback을 설계했습니다.
+> Spring Boot의 거래 멱등성과 상태 전이 경계를 구현하고 있습니다. 현재 External Risk는 독립 Port·정책 Service와 local/dev/test Mock에서 timeout·unavailable·invalid response를 typed failure로 전파하는 fail-closed 경계를 구현했으며 자동 retry, cache, stale data, Circuit Breaker와 fallback은 적용하지 않았습니다. 실제 Provider와 거래·FastAPI 연결은 후속 범위입니다.
 
 ### 20.3 AI 활용
 
@@ -1222,13 +1225,12 @@ ATM_WITHDRAWAL_REQUESTED
 - 사건당 및 거래 1,000건당 AI 비용 측정
 - 비용·응답시간·리포트 품질 비교
 
-### 23.6 외부 연동과 비동기 처리
+### 23.6 외부 연동과 비동기 처리 목표
 
-- 외부 위험정보 Mock API
-- Redis
-- Timeout
-- Retry
-- Circuit Breaker
+- 현재 독립 External Risk Port·정책 Service와 local/dev/test 결정적 Mock
+- 실제 외부 위험정보 HTTP Provider와 거래·FastAPI 연결은 미구현
+- Timeout·Unavailable·Invalid Response의 현재 fail-closed 처리
+- Redis cache·retry·Circuit Breaker·fallback은 별도 Issue·ADR 승인 후의 향후 후보
 - Kafka
 - 중복 메시지 처리
 - DLQ

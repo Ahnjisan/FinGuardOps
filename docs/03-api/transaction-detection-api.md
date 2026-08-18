@@ -29,8 +29,10 @@ Client
 DetectionResult·DetectionEvidence의 물리 영속 모델과 FastAPI
 `POST /api/v1/rule-analysis` HTTP 경계, Spring Boot `RuleAnalysisHttpClient`,
 Timeout·Trace 전달과 응답 검증·오류 분류, 거래 분석 Snapshot 조합·HTTP
-오케스트레이션과 탐지 실행 결과 자동 생성·채택은 구현되었다. External Risk,
-거래 접수 Service 연결, 최종 멱등 응답 v2, 위험 대응과 사건 연결, Snapshot
+오케스트레이션과 탐지 실행 결과 자동 생성·채택은 구현되었다. 독립 External Risk
+Port·정책 Service·local/dev/test Mock·성공 인메모리 Snapshot도 구현되었지만
+FastAPI 입력과 거래 접수에는 연결되지 않았다. 거래 접수 Service 연결, 최종 멱등
+응답 v2, 위험 대응과 사건 연결, Snapshot
 완료 간극 복구와 RuleVersion 운영 publish는 아직 구현되지 않았다. 현재 단계 응답은 최종 동기
 분석 목표를 변경하지 않는다. Spring Boot 분석 처리의 기준은
 [Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../01-requirements/spring-rule-analysis-orchestration-contract.md)이다.
@@ -403,11 +405,17 @@ FastAPI, External Risk, 위험 대응과 사건 생성을 반복하지 않는다
 
 #### 5.8.1 External Risk Timeout
 
-- 사용할 수 있는 유효 캐시가 있으면 캐시의 기준 시각과 유효성을 검증한 뒤 분석을 계속할 수 있다.
-- 캐시 사용 여부, 캐시 기준 시각과 조회 Timeout은 ExternalRiskSnapshot에 기록한다.
-- 유효 캐시가 없으면 조회 실패를 위험정보 없음 또는 안전으로 해석하지 않는다.
-- 유효 캐시가 없는 초기 권장 정책은 Transaction을 `FAILED`로 기록하고 사건을 생성하지 않는 것이다.
-- 클라이언트에는 `503 Service Unavailable`과 `DEPENDENCY_TIMEOUT`을 반환한다.
+- timeout은 `TIMEOUT`, unavailable은 `UNAVAILABLE`, 비정상 응답은
+  `INVALID_RESPONSE` typed failure로 전파하고 현재 분석을 계속하지 않는다.
+- 실패를 cache, stale data, fallback, `UNMATCHED`, 위험정보 없음 또는 안전으로
+  변환하지 않는다. 현재 `ExternalRiskSnapshot`은 성공 결과만 표현한다.
+- 후속 거래 접수 연결에서는 Transaction과 분석 결과를 `FAILED`로 확정하고 사건을
+  생성하지 않으며 기존 외부 의존성 오류 매핑을 사용한다.
+- timeout은 `503 Service Unavailable`과 `DEPENDENCY_TIMEOUT`, unavailable은
+  `503 Service Unavailable`과 `DEPENDENCY_UNAVAILABLE`을 사용한다. 이 공개 매핑과
+  거래 연결은 아직 구현되지 않았다.
+- cache, Circuit Breaker 또는 fallback을 도입하려면 별도 Issue와 계약 승인이
+  필요하다.
 
 #### 5.8.2 FastAPI Timeout
 
@@ -468,7 +476,7 @@ Content-Type: application/json
 | `400 Bad Request` | 잘못된 JSON, 필수 헤더 누락 또는 필드 형식 오류 |
 | `409 Conflict` | 멱등성 키 지문 충돌, 동일 멱등 요청 처리 중, `transactionId` 중복 또는 동시성 충돌 |
 | `422 Unprocessable Entity` | 형식은 맞지만 거래 유형별 업무 규칙을 만족하지 못함 |
-| `503 Service Unavailable` | 유효 캐시 없는 External Risk Timeout, FastAPI connect·response timeout 또는 가용성 장애 |
+| `503 Service Unavailable` | External Risk Timeout·Unavailable, FastAPI connect·response timeout 또는 가용성 장애 |
 | `500 Internal Server Error` | Spring이 만든 AI 요청·Rule·배포 capability 문제, FastAPI 내부 오류, 신뢰할 수 없는 응답 또는 그 밖의 서버 오류 |
 
 ## 6. 거래 목록 조회
@@ -1070,7 +1078,7 @@ GET /api/v1/detection-results/7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430101
 
 | API | `200` | `201` | `400` | `404` | `409` | `422` | `503` | `500` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `POST /transactions` | strict legacy 완료 재요청의 기존 결과 | 현재 단계적 최초 생성·v1 완료 재요청과 향후 최종 v2 최초·완료 재요청 | JSON·필수 헤더·필드 형식 오류 | 사용하지 않음 | 멱등 키 지문 충돌·처리 중 동일 요청·거래·상태·동시성 충돌 | 거래 유형별 도메인 규칙 위반 | 유효 캐시 없는 External Risk Timeout, FastAPI Timeout 또는 가용성 장애 | 계약·응답·내부 오류와 Snapshot 완료 실패 |
+| `POST /transactions` | strict legacy 완료 재요청의 기존 결과 | 현재 단계적 최초 생성·v1 완료 재요청과 향후 최종 v2 최초·완료 재요청 | JSON·필수 헤더·필드 형식 오류 | 사용하지 않음 | 멱등 키 지문 충돌·처리 중 동일 요청·거래·상태·동시성 충돌 | 거래 유형별 도메인 규칙 위반 | External Risk Timeout·Unavailable, FastAPI Timeout 또는 가용성 장애 | 계약·응답·내부 오류와 Snapshot 완료 실패 |
 | `GET /transactions` | 조회 성공 | 사용하지 않음 | 필터·페이지 형식 오류 | 사용하지 않음 | 사용하지 않음 | 의미상 잘못된 필터·페이지 범위 | 조회 Timeout 또는 명확한 저장소 가용성 장애 | 그 밖의 DataAccess 오류·예기치 않은 서버 오류 |
 | `GET /transactions/{transactionId}` | 조회 성공 | 사용하지 않음 | 식별자 형식 오류 | 거래 없음 | 사용하지 않음 | 사용하지 않음 | 조회 Timeout 또는 명확한 저장소 가용성 장애 | 그 밖의 DataAccess 오류·예기치 않은 서버 오류 |
 | `POST /behavior-events` | 동일 이벤트 기존 결과 | 최초 생성 | JSON·알 수 없는 필드·필드 형식 오류 | 관련 거래 없음 | 다른 내용의 `eventId` 중복 | 이벤트 유형별 도메인 규칙·거래 정합성 위반 | 명확한 DB Timeout 또는 저장소 가용성 장애 | 그 밖의 DataAccess 오류·예기치 않은 서버 오류 |
@@ -1170,7 +1178,13 @@ Content-Type: application/json
 - 행동 이벤트는 국가·지역·해외 여부와 위험 신호 같은 최소 요약을 사용한다.
 - 거래 목록·상세에서 고객·계좌 원문을 반환하지 않는다.
 - 탐지 근거에는 Feature 전체 벡터와 원문 행동 로그를 반환하지 않는다.
-- ExternalRiskSnapshot에는 조회 상태, 일치 여부, Reason Code, 기준 시각, 캐시·fallback 여부만 최소 제공한다.
+- 현재 `ExternalRiskSnapshot`은 성공 조회 전용 immutable 인메모리 값으로
+  `transactionId`, `evaluationCutoffAt`, `lookedUpAt`, `providerCode`,
+  `providerAsOf`, `SUCCEEDED` 조회 상태, `MATCHED` 또는 `UNMATCHED` 정책 결과와
+  최대 3개의 제한된 match만 제공한다.
+- Snapshot에는 cache·fallback·stale data·retry·실패 상태·`traceId`, 실제
+  고객·계좌·기기 reference와 Provider 원문을 포함하지 않는다. External Risk
+  실패 시 Snapshot을 생성하지 않고 typed exception을 전파한다.
 - Provider 응답 원문, 인증정보와 내부 예외 원문을 응답에 포함하지 않는다.
 
 ## 16. 사용자 결정 필요 항목
@@ -1181,7 +1195,15 @@ Content-Type: application/json
 
 ### 16.2 거래
 
-- External Risk Timeout 이후 거래 실패 상태와 복구 정책
+후속 거래 오케스트레이션 연결에서는 External Risk timeout·unavailable·invalid
+response 발생 시 분석을 계속하지 않고 거래와 해당 분석 결과를 `FAILED`로 확정한다.
+결과를 채택하거나 성공 Snapshot으로 변환하지 않는다. timeout은
+`DEPENDENCY_TIMEOUT`, unavailable은 `DEPENDENCY_UNAVAILABLE`, 계약·검증·변환
+오류는 `INTERNAL_ERROR`로 매핑한다. 이 거래 상태 전이와 공개 오류 매핑은 Issue
+#150에서 아직 구현되지 않았다.
+
+- `FAILED` 거래의 재분석 허용 여부, 수동 복구 절차, 운영자 재처리 권한과 감사 방식
+- External Risk cache·Circuit Breaker·fallback 도입 여부. 별도 Issue와 계약 승인 필요
 - Rule v1 분석 실패 후 재분석·수동 복구 정책. 최초 시도는 DetectionResult와
   거래를 `FAILED`로 기록하고 Client 자동 retry는 `0회`
 - 오류 응답의 `resource` 최종 이름과 범용 구조
