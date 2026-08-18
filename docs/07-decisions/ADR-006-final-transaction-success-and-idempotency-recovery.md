@@ -18,9 +18,11 @@ Rule 분석, 위험 대응과 필요한 사건 연결까지 완료한 뒤 최초
 결과를 멱등 Snapshot으로 확정하도록 결정했다.
 
 현재 구현은 거래 접수의 단계적 `RECEIVED` Snapshot과 내부 Rule v1 분석
-오케스트레이터까지 제공한다. Rule 분석 성공은 DetectionResult와 Evidence를
-저장하고 결과를 채택해 거래를 `ANALYZED`로 만들지만, 위험 대응과 사건 연결을
-완료하지 않는다. 또한 최종 업무 commit 뒤 멱등 Snapshot 완료가 실패하는
+오케스트레이터, 위험 등급별 목표 거래 상태·`RiskResponseOutcome`·사건 필수
+여부를 반환하는 순수 decision 정책까지 제공한다. Rule 분석 성공은
+DetectionResult와 Evidence를 저장하고 결과를 채택해 거래를 `ANALYZED`로
+만들지만, decision을 거래에 적용하거나 사건 연결을 완료하지 않는다. 또한 최종
+업무 commit 뒤 멱등 Snapshot 완료가 실패하는
 간극과 분석 실패 상태가 불확실한 경우의 멱등 전이 기준이 확정되지 않았다.
 
 이 ADR은 기존 최종 동기 목표를 유지하면서 최종 성공 경계, Snapshot v2,
@@ -233,13 +235,16 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
 - 내부 Rule v1 HTTP 오케스트레이터와 분석 결과 저장·채택·실패 기록
 - 독립 External Risk Port·정책 Service, local/dev/test 결정적 Mock과 immutable
   인메모리 성공 Snapshot
+- LOW·MEDIUM·HIGH·CRITICAL별 목표 거래 상태, `RiskResponseOutcome`과 사건 필수
+  여부를 반환하는 순수 immutable 위험 대응 decision
 
 ### 구현되지 않음
 
 - 거래 접수 Service와 Rule 분석 오케스트레이터 연결
 - 실제 External Risk HTTP Provider, FastAPI 입력·거래 접수 연결, 공개 오류 매핑과
   Snapshot DB 영속화
-- 위험 대응과 최종 거래 상태 전이
+- 위험 대응 decision의 `FinancialTransaction` 적용, `RiskResponseOutcome`
+  영속화와 최종 거래 상태 전이
 - HIGH·CRITICAL 사건 생성 또는 기존 사건 연결
 - 최종 v2 Snapshot codec과 거래 접수 완료 연결
 - Snapshot 완료 간극과 불확실 분석 상태의 운영 복구 실행 경로
@@ -247,7 +252,7 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
 
 ## 12. 후속 구현 순서
 
-1. 위험 대응 정책과 거래 최종 상태 전이 구현
+1. 구현된 위험 대응 decision을 거래에 적용하고 최종 상태 전이 구현
 2. 사건 영속 모델과 HIGH·CRITICAL 사건 연결 구현
 3. 거래 접수–External Risk–Rule 분석–위험 대응–사건–Snapshot v2 연결
 4. Snapshot 완료 간극 운영 복구 구현

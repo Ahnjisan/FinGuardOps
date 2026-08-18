@@ -59,7 +59,22 @@ Rule·ML 탐지 결과를 승인된 점수 통합 정책으로 평가한 위험 
 - `HIGH`: 추가 인증 요청 및 사건 생성
 - `CRITICAL`: 거래 보류, 긴급 사건 생성 및 알림
 
-위험 대응 결과는 거래 처리 상태와 별도로 관리하는 것을 우선 제안한다. 예를 들어 MEDIUM 거래의 거래 처리 상태는 승인 완료이고, 위험 대응 결과는 승인 후 모니터링이다.
+위험 대응 결과는 거래 처리 상태와 별도로 관리한다. 예를 들어 MEDIUM 거래의
+목표 거래 처리 상태는 승인 완료이고, 위험 대응 결과는 승인 후 모니터링이다.
+
+현재 순수 위험 대응 결정 정책은 `RiskLevel` 하나를 입력받아 다음 네 값을
+immutable decision으로 반환한다.
+
+- 원본 `RiskLevel`
+- 목표 `TransactionProcessingStatus`
+- `RiskResponseOutcome`
+- 사건 필수 여부
+
+이 정책은 LOW를 `APPROVED`/`APPROVED`/사건 불필요, MEDIUM을
+`APPROVED`/`APPROVED_WITH_MONITORING`/사건 불필요, HIGH를
+`ADDITIONAL_AUTH_REQUIRED`/`ADDITIONAL_AUTH_REQUIRED`/사건 필수,
+CRITICAL을 `HELD`/`HELD`/사건 필수로 결정한다. 정책 실행만으로 거래 상태나
+영속 결과를 변경하거나 사건을 생성·연결하지 않는다.
 
 ### 3.4 사건 생성 여부
 
@@ -307,7 +322,10 @@ Rule 결과 채택과 `ANALYZING → ANALYZED` commit만으로는 최종 동기 
 확정하지 않는다. 위험 대응 결과와 최종 거래 상태가 확정되고,
 HIGH·CRITICAL이면 사건 생성 또는 기존 사건 연결까지 commit된 뒤에만 v2 성공
 Snapshot을 확정한다. 현재 구현은 거래 접수 commit에서 `RECEIVED`/탐지 null
-v1 Snapshot을 먼저 완료하므로 이 목표 경로는 아직 구현되지 않았다.
+v1 Snapshot을 먼저 완료한다. 위험 등급별 목표 상태·대응 결과·사건 필수 여부를
+반환하는 순수 정책은 구현되었지만, 이를 `FinancialTransaction`에 적용하는 전이,
+`RiskResponseOutcome` 영속화, 사건 연결과 최종 원자적 commit은 아직 구현되지
+않았다.
 
 최종 업무 commit 뒤 Snapshot 완료가 실패하면 멱등 레코드는 `FAILED`로 전이하지
 않고 `IN_PROGRESS`로 유지한다. 최초 요청은 `500 INTERNAL_ERROR`, 같은 요청은

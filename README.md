@@ -194,9 +194,12 @@ HTTP 오케스트레이터도 Snapshot과 분석 시작 commit, 분석 시도당
 기록을 연결합니다.
 
 거래 접수 Service의 오케스트레이터 호출, External Risk 결과의 Rule 입력 연결,
-위험 대응과 사건 연결,
+위험 대응의 거래 적용과 사건 연결,
 최종 동기 거래 응답과 Snapshot v2, Snapshot 완료 간극 복구, 운영 배포·재분석은
-아직 구현되지 않았습니다. 독립 External Risk Port·정책 Service와 local/dev/test
+아직 구현되지 않았습니다. 네 위험 등급에서 목표 거래 상태,
+`RiskResponseOutcome`, 사건 필수 여부를 결정하는 순수 immutable 정책은
+구현되었습니다. 이 정책은 거래 상태·영속 결과·사건을 변경하지 않습니다.
+독립 External Risk Port·정책 Service와 local/dev/test
 전용 결정적 Mock·immutable 인메모리 Snapshot은 구현되었습니다. Rule v1 기본 RuleVersion 집합의 제한된 local/dev/test
 one-shot 발행 경계만 구현되어 있으며 공개 관리 API나 정상 시작 자동 발행은 없습니다.
 `ANALYZED`는 위험 대응
@@ -353,6 +356,8 @@ Kafka
 * 독립 External Risk Port·응답 검증 정책 Service와 local/dev/test 전용 결정적
   Mock, 성공 결과용 immutable 인메모리 Snapshot 구현 및
   [`External Risk 조회 정책`](docs/01-requirements/external-risk-lookup-policy.md) 문서화
+* LOW·MEDIUM·HIGH·CRITICAL별 목표 거래 상태, `RiskResponseOutcome`과 사건 필수
+  여부를 반환하는 순수 위험 대응 결정 정책 구현
 * 최종 거래 성공 경계, 멱등 Snapshot v2와 완료 간극 복구 계약을
   [`ADR-006`](docs/07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md)으로 확정
 * Backend와 AI Service 전용 GitHub Actions CI 구성
@@ -363,7 +368,7 @@ Kafka
 
 최종 동기 거래 접수는 다음 선행 순서를 따른다.
 
-1. 위험 대응 정책과 거래 최종 상태 전이 구현
+1. 구현된 위험 대응 결정 정책을 거래에 적용하고 최종 상태 전이 구현
 2. 사건 영속 모델과 HIGH·CRITICAL 사건 연결 구현
 3. 거래 접수–External Risk–Rule 분석–위험 대응–사건–Snapshot v2 연결
 4. Snapshot 완료 간극 운영 복구 구현
