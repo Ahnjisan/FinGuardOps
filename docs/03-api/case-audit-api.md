@@ -8,9 +8,10 @@
 
 이 문서는 API 계약이며 공개 사건 API 구현 완료 내역이 아니다. Issue #154에서
 `FraudCase`·`CaseTransaction` JPA 영속 기반과 Flyway V6, 사건·첫 거래 연결 내부
-Service만 구현되었다. Controller·API DTO, 조사 상태 전이, AuditLog와 인증·인가는
-구현되지 않았다. 문서의 `case_demo_...` 값은 읽기 쉬운 예시이며 실제 영속
-`caseId`는 UUID v4를 사용한다.
+Service가 구현되었다. Issue #156에서는 append-only `AuditLog` JPA 영속 기반과
+Flyway V7만 구현되었다. Controller·API DTO, 조사 상태 전이, 실제 업무 변경과
+AuditLog의 연결, 인증·인가는 구현되지 않았다. 문서의 `case_demo_...` 값은 읽기
+쉬운 예시이며 실제 영속 `caseId`와 `auditId`는 UUID v4를 사용한다.
 
 ## 2. 범위와 책임 경계
 
@@ -371,11 +372,12 @@ Content-Type: application/json
   "relatedTransactionCount": 3,
   "noteCount": 2,
   "recentAuditSummary": {
-    "auditLogId": "audit_demo_20260724_0401",
-    "action": "CASE_STATUS_CHANGED",
-    "actorRef": "analyst_ref_demo_07",
+    "auditLogId": "8bf3c9a2-7d0e-4a51-9b36-1c2d3e4f5a60",
+    "action": "CASE_CREATED",
+    "actorType": "SYSTEM",
+    "actorId": "finguardops-backend",
     "changedAt": "2026-07-24T02:05:10Z",
-    "reason": "추가 자료 확인 후 검토를 재개했습니다."
+    "reasonCode": "CASE_REQUIRED_BY_RISK_POLICY"
   },
   "traceId": "trace_demo_case_detail_01"
 }
@@ -901,7 +903,8 @@ GET /api/v1/cases/{caseId}/audit-logs
 | 쿼리 파라미터 | 설명 |
 | --- | --- |
 | `action` | 변경 작업 |
-| `actorRef` | 변경 주체 참조값 |
+| `actorType` | 변경 주체 유형 |
+| `actorId` | `SYSTEM`은 `finguardops-backend`, `USER`는 내부 사용자 UUID v4 |
 | `changedAtFrom` | 변경 시각 범위 시작, UTC ISO-8601 |
 | `changedAtTo` | 변경 시각 범위 끝, UTC ISO-8601 |
 | `transactionId` | 관련 거래 업무 식별자 |
@@ -913,35 +916,35 @@ GET /api/v1/cases/{caseId}/audit-logs
 요청 예:
 
 ```http
-GET /api/v1/cases/case_demo_20260724_0031/audit-logs?action=CASE_STATUS_CHANGED&page=0&size=20&sort=changedAt,desc
+GET /api/v1/cases/case_demo_20260724_0031/audit-logs?action=CASE_CREATED&page=0&size=20&sort=changedAt,desc
 ```
 
-`action` 값 후보는 다음과 같다. 최종 Enum과 세분화 수준은 사용자 승인이 필요하다.
+V7 물리 모델의 승인된 `action` 값은 다음 네 가지로 제한한다.
 
 ```text
-CASE_STATUS_CHANGED
-CASE_ASSIGNEE_CHANGED
-CASE_RESOLVED
-CASE_NOTE_CREATED
-CASE_NOTE_CORRECTION_CREATED
-CASE_STATUS_CHANGE_REJECTED
-CASE_CONCURRENCY_CONFLICT
-CASE_CLOSED_CHANGE_REJECTED
+CASE_CREATED
+CASE_TRANSACTION_LINKED
+TRANSACTION_RISK_RESPONSE_APPLIED
+TRANSACTION_STATUS_CHANGED
 ```
+
+사건 상태·담당자·판정·메모 변경과 거부 감사 action은 이 API 초안의 후속 후보일
+뿐 V7 Enum에 포함되지 않는다. 도입하려면 별도 승인과 additive Migration이 필요하다.
 
 ### 13.3 응답 항목
 
 | 필드 | 설명 |
 | --- | --- |
 | `auditLogId` | 감사 로그 업무 식별자 |
-| `actorRef` | 변경 주체 참조값 |
+| `actorType` | `SYSTEM` 또는 `USER` |
+| `actorId` | `SYSTEM`이면 `finguardops-backend`, `USER`이면 canonical lowercase 내부 사용자 업무 UUID v4 |
 | `changedAt` | 변경 시각 |
 | `targetType` | 변경 대상 유형 |
 | `targetId` | 변경 대상 식별자 |
 | `action` | 변경 작업 |
 | `beforeValueSummary` | 변경 전 값의 제한된 요약 |
 | `afterValueSummary` | 변경 후 값의 제한된 요약 |
-| `reason` | 변경 또는 거부 사유 |
+| `reasonCode` | 승인된 구조화 사유 코드. 자유 텍스트 사유를 저장하지 않음 |
 | `transactionId` | 관련 거래 식별자. 없으면 null 가능 |
 | `caseId` | 관련 사건 식별자 |
 | `traceId` | 관련 처리 흐름 추적 식별자 |
@@ -957,27 +960,24 @@ Content-Type: application/json
 
 ```json
 {
-  "caseId": "case_demo_20260724_0031",
+  "caseId": "5c671624-8714-4bd7-871a-a9445e6f453e",
   "content": [
     {
-      "auditLogId": "audit_demo_20260724_0401",
-      "actorRef": "analyst_ref_demo_07",
+      "auditLogId": "8bf3c9a2-7d0e-4a51-9b36-1c2d3e4f5a60",
+      "actorType": "SYSTEM",
+      "actorId": "finguardops-backend",
       "changedAt": "2026-07-24T02:05:10Z",
       "targetType": "FRAUD_CASE",
-      "targetId": "case_demo_20260724_0031",
-      "action": "CASE_STATUS_CHANGED",
-      "beforeValueSummary": {
-        "caseStatus": "ADDITIONAL_INFORMATION_REQUIRED",
-        "concurrencyVersion": 3
-      },
+      "targetId": "5c671624-8714-4bd7-871a-a9445e6f453e",
+      "action": "CASE_CREATED",
+      "beforeValueSummary": null,
       "afterValueSummary": {
-        "caseStatus": "IN_REVIEW",
-        "concurrencyVersion": 4
+        "caseStatus": "OPEN"
       },
-      "reason": "추가 자료 확인 후 검토를 재개했습니다.",
-      "transactionId": null,
-      "caseId": "case_demo_20260724_0031",
-      "traceId": "trace_demo_case_status_00"
+      "reasonCode": "CASE_REQUIRED_BY_RISK_POLICY",
+      "transactionId": "91a2b3c4-d5e6-47f8-9a0b-1c2d3e4f5003",
+      "caseId": "5c671624-8714-4bd7-871a-a9445e6f453e",
+      "traceId": "trace_demo_case_created_00"
     }
   ],
   "page": {
@@ -1081,18 +1081,23 @@ Content-Type: application/json
 감사 기록에는 다음 정보를 포함하는 방향을 사용한다.
 
 ```text
-actorRef
+actorType
++ actorId
 + changedAt
 + targetType
 + targetId
 + action
 + beforeValueSummary
 + afterValueSummary
-+ reason
++ reasonCode
 + transactionId?
 + caseId
-+ traceId
++ traceId?
 ```
+
+V7은 성공한 네 action만 저장하며 자유 텍스트 사유와 거부 감사는 허용하지 않는다.
+각 action의 summary·metadata exact schema는
+[`audit-log-schema.md`](../04-database/audit-log-schema.md)를 따른다.
 
 ### 15.1 성공한 업무 변경의 트랜잭션 경계
 
@@ -1185,7 +1190,11 @@ Content-Type: application/json
 - 실제 고객번호와 실제 계좌번호 원문을 요청·응답·오류 예시에 사용하지 않는다.
 - 사건 목록과 상세에는 조사에 필요한 최소 요약만 반환한다.
 - 연관 거래 응답에는 고객·계좌 원문을 반환하지 않는다.
-- 담당자와 작성자는 제한된 `assigneeRef`, `authorRef`, `actorRef`로 표현한다.
+- 담당자와 작성자는 제한된 `assigneeRef`, `authorRef`로 표현하고, 감사 `USER`
+  `actorId`는 내부 사용자 업무 UUID v4로만 표현한다.
+- 외부 인증 Provider subject, 사용자명, 이메일, 사번, 전화번호 원문은
+  `actorId`로 저장하지 않는다. 향후 인증 계층이 외부 subject를 내부 UUID
+  v4로 매핑해 전달하며, 실제 `USER` 감사 연결은 현재 미구현이다.
 - 참조값 자체에 개인정보, 인증정보 또는 업무상 불필요한 의미를 포함하지 않는다.
 - 메모와 변경 사유에 불필요한 고객·계좌 원문이나 인증정보를 기록하지 않는다.
 - 감사 로그의 변경 전후 요약은 허용된 필드와 마스킹·축약 값만 사용한다.
@@ -1208,7 +1217,9 @@ Content-Type: application/json
 - Mock Actor 참조값의 허용 목록과 테스트 격리 방식
 - 실제 인증·인가 도입 시 서버 사용자 문맥으로 교체하는 경계
 
-작성자와 변경 주체는 테스트·로컬 환경의 서버 사용자 문맥으로 공급한다. 요청 본문의 `authorRef`나 `actorRef`는 신뢰하지 않는다. 구체적인 요청 헤더명, Mock Actor Provider 구현과 인증 코드는 이번 문서에서 확정하지 않는다.
+작성자와 변경 주체는 테스트·로컬 환경의 서버 사용자 문맥으로 공급한다. 요청 본문의
+`authorRef`, `actorType`, `actorId`는 신뢰하지 않는다. 구체적인 요청 헤더명, Mock
+Actor Provider 구현과 인증 코드는 이번 문서에서 확정하지 않는다.
 
 ### 18.3 조회와 표시
 
@@ -1241,8 +1252,8 @@ Content-Type: application/json
 - Spring Boot 코드
 - Controller, DTO, Validation과 Service 구현
 - 공개 사건 API용 JPA 조회·변경 Service
-- Issue #154의 `fraud_case`·`case_transaction` 이외 사건·감사 PostgreSQL DDL
-- V6 이후 사건 조사·감사 Flyway Migration
+- Issue #156 V7 이외의 사건 조사 PostgreSQL DDL
+- V8 이후 사건 조사·감사 Flyway Migration과 action 확장
 - OpenAPI YAML
 - 구현된 사건 자동 생성 내부 경계의 거래 최종화·AuditLog 연결
 - 사건 병합·분리 API

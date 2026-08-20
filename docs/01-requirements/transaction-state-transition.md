@@ -418,7 +418,9 @@ commit은 아직 구현되지 않았다.
 - `traceId` 후보
 - 재시도·중복 처리 식별 정보 후보
 
-민감 정보 원문은 감사 로그에 기록하지 않는다. 구체적인 AuditLog Entity, 저장 구조와 보존 기간은 확정하지 않는다.
+민감 정보 원문은 감사 로그에 기록하지 않는다. Issue #156에서 append-only
+AuditLog Entity, Flyway V7과 INSERT 전용 Persistence 경계는 구현되었다. 기존
+거래·사건 Service의 실제 AuditLog 통합과 보존 기간은 아직 확정하지 않았다.
 
 Validation 거절은 Transaction이나 AuditLog 행을 만들지 않는다. 오류 응답, `traceId`, 민감정보를 제외한 로그와 승인된 저카디널리티 운영 메트릭으로만 관측한다.
 

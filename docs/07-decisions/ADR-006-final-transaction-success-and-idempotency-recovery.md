@@ -240,6 +240,8 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
 - `FraudCase`·`CaseTransaction` Entity, Flyway V6와 HIGH·CRITICAL
   `ANALYZED` 거래의 새 `OPEN` 사건·첫 연결을 원자적으로 생성하거나 기존 활성
   연결을 멱등 반환하는 내부 persistence boundary
+- append-only `AuditLog` Entity, Flyway V7, typed INSERT 전용 Persistence 경계와
+  PostgreSQL UPDATE·DELETE 차단 trigger
 
 ### 구현되지 않음
 
@@ -257,7 +259,7 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
 ## 12. 후속 구현 순서
 
 1. 구현된 위험 대응 decision을 거래에 적용하고 최종 상태 전이 구현
-2. AuditLog 계약과 물리 모델 구현
+2. AuditLog 계약과 물리 모델 구현 — Issue #156에서 완료
 3. 거래 접수–External Risk–Rule 분석–위험 대응–사건–Snapshot v2 연결
 4. Snapshot 완료 간극 운영 복구 구현
 

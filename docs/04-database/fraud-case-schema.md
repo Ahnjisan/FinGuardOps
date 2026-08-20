@@ -8,8 +8,9 @@
 
 구현 범위는 사건 영속 모델, 거래 연결, 중복 연결 제약과 내부 persistence
 boundary이다. 사건 조사 상태 전이 Service, 기존 사건에 다른 거래 추가, 사건
-병합·분리, AuditLog, 공개 API, 최종 거래 상태 전이와 Snapshot v2는 포함하지
-않는다.
+병합·분리, AuditLog 실제 통합, 공개 API, 최종 거래 상태 전이와 Snapshot v2는
+포함하지 않는다. AuditLog 물리 기반은 Issue #156의 Flyway V7에서 별도로
+구현했으며 [`audit-log-schema.md`](audit-log-schema.md)를 따른다.
 
 ## 2. 관계와 식별자
 
@@ -78,7 +79,7 @@ PostgreSQL 마이크로초 정밀도로 정규화해 사용한다.
 
 ## 7. 미구현 경계
 
-- AuditLog Entity·테이블·action Enum
+- 구현된 AuditLog Persistence 경계와 사건 생성·첫 연결의 실제 통합
 - 위험 대응 결과와 최종 거래 상태 적용
 - 사건 조사 상태 전이와 종료
 - 기존 사건에 추가 거래 연결
@@ -86,4 +87,5 @@ PostgreSQL 마이크로초 정밀도로 정규화해 사용한다.
 - 공개 사건 Controller·DTO
 - 거래 접수 전체 오케스트레이션과 Snapshot v2
 
-AuditLog가 구현되기 전에는 이 영속 경계를 사건 업무 전체 완료로 간주하지 않는다.
+AuditLog 물리 기반은 구현되었지만 아직 이 Service와 연결되지 않았다. 따라서 이
+영속 경계를 사건 업무 전체 또는 최종 위험 대응 완료로 간주하지 않는다.

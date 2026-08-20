@@ -35,6 +35,8 @@
 - 9개 유형의 행동 이벤트 접수, 거래 정합성 검증과 `eventId` 자연 멱등성
 - 공통 오류 응답과 `TraceIdFilter`
 - `FraudCase`·`CaseTransaction` Entity, Flyway V6와 HIGH·CRITICAL 거래의 사건·첫 연결 내부 영속 경계
+- append-only `AuditLog` Entity, Flyway V7, INSERT 전용 Persistence 경계와
+  PostgreSQL UPDATE·DELETE 차단 trigger
 - Issue 및 Pull Request 템플릿
 - FastAPI AI Service의 Python 3.12·uv 프로젝트, 애플리케이션 진입점과 Health API
 - Backend와 AI Service 전용 GitHub Actions 테스트 Workflow
@@ -882,7 +884,7 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 - RuleVersion publish·운영 준비
 - 위험 대응·최종 거래 상태 전이와 구현된 사건 영속 경계의 통합
 - 최종 Snapshot v2 확정과 완료 간극 운영 복구
-- 감사 도메인
+- 감사 조회 API와 기존 업무 Service의 AuditLog 통합
 - 실제 External Risk HTTP Provider와 Snapshot DB 영속화
 - Docker 및 Docker Compose 통합 환경
 
