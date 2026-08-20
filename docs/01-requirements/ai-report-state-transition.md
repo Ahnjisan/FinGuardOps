@@ -362,7 +362,9 @@ Timeout 후 실제 Provider 처리가 완료되었을 가능성과 응답 유실
 - `executionId` 후보
 - `traceId` 후보
 
-민감한 프롬프트 원문, LLM 입력·출력과 인증정보를 무분별하게 기록하지 않는다. 구체적인 AuditLog Entity, AI 사용량 Entity, DB 구조와 보존 기간은 확정하지 않는다.
+민감한 프롬프트 원문, LLM 입력·출력과 인증정보를 AuditLog에 기록하지 않는다.
+AuditLog의 V7 물리 기반은 구현되었지만 AI action, 실제 AI 업무 통합, AI 사용량
+Entity와 보존 기간은 확정하지 않는다.
 
 ## 15. 사용자 결정 필요 항목
 

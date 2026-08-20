@@ -324,7 +324,9 @@ CLOSED → IN_REVIEW
 - 외부 정보 변경에 따른 근거 갱신
 - 승인된 운영자 조치
 
-감사 로그는 이전 값을 덮어쓰지 않고 변경 흐름을 추적할 수 있어야 하며 조회 화면에서 수정·삭제하지 않는다. 구체적인 AuditLog Entity, DB 구조, 보존 기간과 접근 범위는 확정하지 않는다.
+감사 로그는 이전 값을 덮어쓰지 않고 변경 흐름을 추적할 수 있어야 하며 조회 화면에서
+수정·삭제하지 않는다. V7 append-only AuditLog 물리 기반은 구현되었지만 사건 상태
+전이와의 실제 통합, 조회 API, 보존 기간과 접근 범위는 확정하지 않는다.
 
 ## 15. 사용자 결정 필요 항목
 
@@ -351,6 +353,7 @@ CLOSED → IN_REVIEW
 - 감사 로그와 `caseId`, `transactionId`, `traceId` 연결
 - 외부 정보 갱신과 사건 근거 버전 표현
 
-이 문서는 사건 상태와 최종 판정 계약의 기준이다. Issue #154에서 확정된
-Java Enum, 사건·첫 거래 연결 Entity와 V6 물리 스키마를 제외한 조사 상태 전이
-Service, 공개 API DTO·상태 코드와 AuditLog 물리 모델은 후속 승인 범위이다.
+이 문서는 사건 상태와 최종 판정 계약의 기준이다. Issue #154에서 Java Enum,
+사건·첫 거래 연결 Entity와 V6 물리 스키마를 구현했고, Issue #156에서 V7
+append-only AuditLog 물리 기반을 구현했다. 조사 상태 전이 Service, 공개 API
+DTO·상태 코드와 실제 AuditLog 통합은 후속 승인 범위이다.

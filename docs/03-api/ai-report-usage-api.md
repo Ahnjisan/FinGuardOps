@@ -135,7 +135,8 @@ AiReportRequest.resolvedReportRef
 
 ### 3.3 요청 사용자와 호출 주체
 
-- FDS 분석 담당자나 운영자의 식별은 요청 본문의 임의 `requestedBy`, `authorRef` 또는 `actorRef`를 신뢰하지 않고 서버 사용자 문맥에서 결정한다.
+- FDS 분석 담당자나 운영자의 식별은 요청 본문의 임의 `requestedBy`, `authorRef`,
+  `actorType` 또는 `actorId`를 신뢰하지 않고 서버 사용자 문맥에서 결정한다.
 - 인증·인가가 구현되지 않은 local/test 환경의 Mock Actor 공급 방식과 헤더명은 이 계약에서 확정하지 않는다.
 - 감사 기록에는 제한된 요청자 참조값, `aiRequestId`, `caseId`, 요청 시각과 `traceId`를 연결한다.
 

@@ -318,7 +318,7 @@ External Risk Port·정책 Service·local/dev/test Mock·성공 인메모리 Sna
 활성 사건을 멱등 반환하고, 거래 잠금으로 동시 중복 생성을 방지하며, 사건 생성과
 첫 연결을 함께 commit하거나 rollback한다.
 
-AuditLog, 위험 대응 결과 적용, `ANALYZED` 이후 최종 거래 상태 전이,
+AuditLog 실제 업무 통합, 위험 대응 결과 적용, `ANALYZED` 이후 최종 거래 상태 전이,
 `RiskResponseOutcome` 영속화, 기존 사건에 추가 거래 연결, 사건 병합·분리, 거래
 접수 전체 연결, 최종 v2 Snapshot과 완료 간극 복구, 공개 사건 API는 구현되지
 않았다. 따라서 내부 사건 persistence 경계의 구현을 거래 최종화 전체 완료로

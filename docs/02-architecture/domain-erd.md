@@ -20,10 +20,10 @@
 이 문서는 전체 구현 완료 내역이 아니다. 현재 백엔드는 Health Check, 거래
 접수·조회, 거래 멱등성, 행동 이벤트 접수와 내부 Rule 평가용 제한 조회를
 구현했다. 거래·멱등·행동 이벤트, `DetectionResult`·`DetectionEvidence`와
-분리된 `FraudRule`·`RuleVersion`, `FraudCase`·`CaseTransaction`은 PostgreSQL
-애플리케이션 연동과 Flyway 스키마가 구현되어 있다. Rule 실행, 공개 행동 이벤트
-조회 API, 사건 조사·감사·AI 운영 엔티티와 운영 PostgreSQL 배포 환경은 아직
-구현되지 않았다.
+분리된 `FraudRule`·`RuleVersion`, `FraudCase`·`CaseTransaction`, append-only
+`AuditLog`는 PostgreSQL 애플리케이션 연동과 Flyway 스키마가 구현되어 있다.
+Rule 실행, 공개 행동 이벤트 조회 API, 사건 조사·감사 조회 API, AI 운영
+엔티티와 운영 PostgreSQL 배포 환경은 아직 구현되지 않았다.
 
 ## 2. 설계 범위와 제외 범위
 
@@ -618,24 +618,36 @@ Issue #154는 방안 A를 채택했다. `FinancialTransaction`을 먼저
 
 ### 7.10 AuditLog
 
-`AuditLog`는 업무 원본의 현재값을 대신하지 않고 주요 변경과 거부·중복 처리 결과를 감사 가능하게 남긴다.
+`AuditLog`는 업무 원본의 현재값을 대신하지 않고 주요 변경을 감사 가능하게
+남기는 append-only 기록이다. Issue #156과 Flyway V7에서 물리 모델과 INSERT
+전용 Persistence 경계를 구현했으며 기존 사건·거래 Service와의 실제 통합,
+거부 감사, 조회 API는 아직 구현하지 않았다. 물리 계약은
+[`../04-database/audit-log-schema.md`](../04-database/audit-log-schema.md)를
+따른다.
 
 지원 정보는 다음과 같다.
 
-- 변경 주체
-- 변경 시각
-- 대상 유형
-- 대상 식별자
-- 변경 작업
-- 이전 값
-- 변경 후 값
-- 변경 사유
+- `auditId`
+- `actorType`, `actorId`
+- `changedAt`
+- `targetType`, `targetId`
+- typed `action`, `reasonCode`
+- 제한된 `beforeValueSummary`, `afterValueSummary`, `metadata`
 - 관련 `transactionId`
 - 관련 `caseId`
 - `traceId`
-- 필요 시 `eventId`, `aiRequestId`와 멱등 처리 식별 정보 후보
+- 후속 action에서 필요 시 `eventId`, `aiRequestId`와 멱등 처리 식별 정보 후보
 
-이전 값과 변경 후 값은 민감 원문 전체 복제를 피하고 감사에 필요한 변경 필드와 마스킹·축약 값을 저장해야 한다. 구체적인 구조화 형식은 후속 설계에서 결정한다.
+`SYSTEM actorId`는 `finguardops-backend`로 고정하고, `USER actorId`는 내부
+사용자 업무 UUID v4만 허용한다. 외부 인증 Provider subject와 표시용
+개인정보 원문은 저장하지 않으며, 실제 `USER` actor 연결은 아직
+구현하지 않았다.
+
+V7은 최초 네 action별 exact JSON key·scalar 타입·형식을 Java와 PostgreSQL에서
+검증한다. 자유 텍스트 reason과 임의 metadata를 허용하지 않으며 세 JSON의 UTF-8
+`jsonb::text` 표현 크기 합계를 8192 byte로 제한한다. Java도 제한된
+scalar JSON 계약에서 같은 크기를 계산하며, 첫 deep copy 전에 구조·크기를
+bounded traversal로 검증한다.
 
 #### 범용 대상 참조
 
@@ -656,9 +668,13 @@ targetType + targetId
 | 조회 편의성 | 대상별 해석 필요 | 주요 대상 조인이 명확 |
 | 구현 복잡도 | 쓰기는 단순, 검증 책임 증가 | 관계와 null 조합 관리 필요 |
 
-권장 후보는 `targetType + targetId`를 주 대상으로 사용하면서, 실제 화면과 장애 추적에서 자주 사용하는 `transactionId`, `caseId`, `traceId`를 조회 문맥으로 병행하는 방식이다. 이 병행 값에 명시적 외래 키를 적용할지 단순 참조값으로 둘지는 사용자 승인 사항이다.
+V7은 `targetType + targetId`를 주 대상으로 사용하면서 실제 화면과 장애 추적에서
+자주 사용하는 `transactionId`, `caseId`, `traceId`를 조회 문맥으로 병행한다.
+`transactionId`와 `caseId`에는 `ON DELETE RESTRICT` FK를 적용한다.
 
-감사 로그는 임의 수정·삭제를 전제로 하지 않는다. 정정이 필요하면 기존 행을 덮어쓰기보다 추가 정정 기록을 남기는 방향을 검토한다.
+Java Entity 불변성과 PostgreSQL trigger가 일반 UPDATE·DELETE를 거부한다. 현재
+동일 datasource owner가 DDL·TRUNCATE·trigger disable까지 수행하지 못하도록 하는
+runtime role 분리는 구현하지 않았다. 정정과 보존·파기는 후속 정책이다.
 
 ### 7.11 AiReportRequest
 
@@ -976,12 +992,21 @@ erDiagram
     }
 
     AUDIT_LOG {
-        string auditId PK
+        long id PK
+        uuid auditId UK
+        string actorType
+        string actorId
+        string action
+        string reasonCode
         string targetType
-        string targetId
-        string transactionId
-        string caseId
+        uuid targetId
+        uuid transactionId FK
+        uuid caseId FK
         string traceId
+        json beforeValueSummary
+        json afterValueSummary
+        json metadata
+        datetime changedAt
     }
 
     AI_REPORT_REQUEST {
@@ -1308,8 +1333,8 @@ HIGH·CRITICAL 거래 처리의 재시도와 중복 이벤트가 새 사건을 �
 - `UNIQUE(fraud_case_id, financial_transaction_id)`로 동일 pair 중복 방지
 - 잠금 후 사건 상태와 거래 관계 재검증
 
-기존 사건에 다른 거래를 추가하는 선정 정책, 사건 병합·분리와 AuditLog는 후속
-승인·구현 범위이다.
+기존 사건에 다른 거래를 추가하는 선정 정책, 사건 병합·분리와 실제 AuditLog
+기록 통합은 후속 승인·구현 범위이다. AuditLog 물리 기반은 V7에 구현되어 있다.
 
 동일 거래의 과거 `CLOSED` 사건 연결 수를 하나로 제한하지 않는다. 사건 생성·연결
 시 활성 사건이 없으면 새 `OPEN` 사건과 첫 거래 연결을 생성한다. 활성 사건이
@@ -1738,8 +1763,9 @@ Rule 물리 모델의 `FraudRule`·`RuleVersion`과 사건 영속 기반의
 seed와 DetectionEvidence nullable RuleVersion FK를 additive하게 추가하며
 V1~V4를 수정하거나 기존 Evidence를 backfill하지 않는다.
 V6는 `fraud_case`·`case_transaction`과 승인된 FK·Unique·Check·Index를
-additive하게 구현한다. 사건 조사 메모·AuditLog와 AI 운영 DDL은 별도 승인
-작업이다.
+additive하게 구현한다. V7은 승인된 네 action의 append-only AuditLog 물리 기반을
+additive하게 구현한다. 사건 조사 메모와 AI 운영 DDL, 실제 업무 Service와 AuditLog의
+통합은 별도 승인 작업이다.
 
 ### 20.4 트랜잭션·동시성 설계
 
