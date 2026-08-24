@@ -3,6 +3,7 @@ package com.aifds.backend.transaction.entity;
 import com.aifds.backend.detection.entity.DetectionAnalysisStatus;
 import com.aifds.backend.detection.entity.DetectionResult;
 import com.aifds.backend.detection.entity.RiskLevel;
+import com.aifds.backend.transaction.policy.RiskResponseDecision;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -165,19 +166,76 @@ public class FinancialTransaction {
         this.processingStatus = TransactionProcessingStatus.FAILED;
     }
 
-    public void applyRiskResponseOutcome(RiskResponseOutcome outcome) {
-        Objects.requireNonNull(outcome, "outcome must not be null");
-        if (adoptedDetectionResult == null || riskLevel == null) {
+    public void finalizeRiskResponse(RiskResponseDecision decision) {
+        RiskResponseDecision validatedDecision = Objects.requireNonNull(
+                decision,
+                "decision must not be null"
+        );
+        requireAnalysisState(TransactionProcessingStatus.ANALYZED);
+        if (adoptedDetectionResult == null) {
             throw new IllegalStateException(
                     "A completed detection result must be adopted first"
             );
         }
-        if (!outcome.supports(riskLevel)) {
-            throw new IllegalArgumentException(
-                    "Risk response outcome does not match risk level"
+        if (!adoptedDetectionResult.belongsTo(this)
+                || adoptedDetectionResult.getAnalysisStatus()
+                != DetectionAnalysisStatus.COMPLETED) {
+            throw new IllegalStateException(
+                    "Adopted detection result must be completed and belong "
+                            + "to this transaction"
             );
         }
-        this.riskResponseOutcome = outcome;
+        if (riskLevel == null
+                || adoptedDetectionResult.getRiskLevel() != riskLevel) {
+            throw new IllegalStateException(
+                    "Transaction risk level must match the adopted result"
+            );
+        }
+        if (riskResponseOutcome != null) {
+            throw new IllegalStateException(
+                    "Risk response outcome must not already be finalized"
+            );
+        }
+        if (validatedDecision.sourceRiskLevel() != riskLevel) {
+            throw new IllegalArgumentException(
+                    "Risk response decision does not match risk level"
+            );
+        }
+        if (!matchesApprovedFinalization(validatedDecision)) {
+            throw new IllegalArgumentException(
+                    "Risk response decision has an invalid final mapping"
+            );
+        }
+
+        this.riskResponseOutcome = validatedDecision.riskResponseOutcome();
+        this.processingStatus = validatedDecision.targetTransactionStatus();
+    }
+
+    private boolean matchesApprovedFinalization(
+            RiskResponseDecision decision
+    ) {
+        return switch (riskLevel) {
+            case LOW -> decision.targetTransactionStatus()
+                    == TransactionProcessingStatus.APPROVED
+                    && decision.riskResponseOutcome()
+                    == RiskResponseOutcome.APPROVED
+                    && !decision.caseRequired();
+            case MEDIUM -> decision.targetTransactionStatus()
+                    == TransactionProcessingStatus.APPROVED
+                    && decision.riskResponseOutcome()
+                    == RiskResponseOutcome.APPROVED_WITH_MONITORING
+                    && !decision.caseRequired();
+            case HIGH -> decision.targetTransactionStatus()
+                    == TransactionProcessingStatus.ADDITIONAL_AUTH_REQUIRED
+                    && decision.riskResponseOutcome()
+                    == RiskResponseOutcome.ADDITIONAL_AUTH_REQUIRED
+                    && decision.caseRequired();
+            case CRITICAL -> decision.targetTransactionStatus()
+                    == TransactionProcessingStatus.HELD
+                    && decision.riskResponseOutcome()
+                    == RiskResponseOutcome.HELD
+                    && decision.caseRequired();
+        };
     }
 
     private void requireAnalysisState(

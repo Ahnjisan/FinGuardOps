@@ -19,10 +19,11 @@ Rule 분석, 위험 대응과 필요한 사건 연결까지 완료한 뒤 최초
 
 현재 구현은 거래 접수의 단계적 `RECEIVED` Snapshot과 내부 Rule v1 분석
 오케스트레이터, 위험 등급별 목표 거래 상태·`RiskResponseOutcome`·사건 필수
-여부를 반환하는 순수 decision 정책까지 제공한다. Rule 분석 성공은
-DetectionResult와 Evidence를 저장하고 결과를 채택해 거래를 `ANALYZED`로
-만들지만, decision을 거래에 적용하거나 사건 연결을 완료하지 않는다. 또한 최종
-업무 commit 뒤 멱등 Snapshot 완료가 실패하는
+여부를 반환하는 순수 decision 정책을 제공한다. Rule 분석 성공은 DetectionResult와
+Evidence를 저장하고 결과를 채택해 거래를 `ANALYZED`로 만든다. 별도 내부
+최종화 경계는 decision 적용, 필요한 사건 생성 또는 재사용, 거래 최종 상태와
+AuditLog를 원자적으로 확정한다. 다만 거래 접수 전체 연결과 최종 업무 commit 뒤
+멱등 Snapshot 완료가 실패하는
 간극과 분석 실패 상태가 불확실한 경우의 멱등 전이 기준이 확정되지 않았다.
 
 이 ADR은 기존 최종 동기 목표를 유지하면서 최종 성공 경계, Snapshot v2,
@@ -242,24 +243,23 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
   연결을 멱등 반환하는 내부 persistence boundary
 - append-only `AuditLog` Entity, Flyway V7, typed INSERT 전용 Persistence 경계와
   PostgreSQL UPDATE·DELETE 차단 trigger
+- `ANALYZED` 거래를 잠그고 채택 결과를 검증한 뒤 decision, 필요한 사건,
+  최종 거래 상태·`RiskResponseOutcome`, AuditLog를 함께 commit하거나 rollback하는
+  내부 위험 대응 최종화 경계
 
 ### 구현되지 않음
 
 - 거래 접수 Service와 Rule 분석 오케스트레이터 연결
 - 실제 External Risk HTTP Provider, FastAPI 입력·거래 접수 연결, 공개 오류 매핑과
   Snapshot DB 영속화
-- 위험 대응 decision의 `FinancialTransaction` 적용, `RiskResponseOutcome`
-  영속화와 최종 거래 상태 전이
-- 구현된 사건 persistence boundary를 위험 대응·최종 거래 상태·AuditLog와 같은
-  최종화 트랜잭션에 연결
 - 최종 v2 Snapshot codec과 거래 접수 완료 연결
 - Snapshot 완료 간극과 불확실 분석 상태의 운영 복구 실행 경로
 - RuleVersion 운영 publish 준비
 
 ## 12. 후속 구현 순서
 
-1. 구현된 위험 대응 decision을 거래에 적용하고 최종 상태 전이 구현
-2. AuditLog 계약과 물리 모델 구현 — Issue #156에서 완료
+1. 구현된 위험 대응 decision을 거래에 적용하고 최종 상태 전이 구현 — 완료
+2. AuditLog 계약과 물리 모델 및 내부 최종화 통합 — 완료
 3. 거래 접수–External Risk–Rule 분석–위험 대응–사건–Snapshot v2 연결
 4. Snapshot 완료 간극 운영 복구 구현
 

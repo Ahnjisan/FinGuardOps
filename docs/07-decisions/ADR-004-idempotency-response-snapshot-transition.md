@@ -316,14 +316,14 @@ External Risk Port·정책 Service·local/dev/test Mock·성공 인메모리 Sna
 구현되었다. `FraudCase`·`CaseTransaction` 영속 모델과 사건·첫 거래 연결의
 `REQUIRED` 단일 트랜잭션 경계도 구현되었다. 이 경계는 동일 거래 재호출에서 기존
 활성 사건을 멱등 반환하고, 거래 잠금으로 동시 중복 생성을 방지하며, 사건 생성과
-첫 연결을 함께 commit하거나 rollback한다.
+첫 연결을 함께 commit하거나 rollback한다. `ANALYZED` 거래에 decision을 적용하고
+필요한 사건 경계, 최종 상태·`RiskResponseOutcome`, AuditLog를 함께 commit하거나
+rollback하는 내부 최종화 경계도 구현되었다.
 
-AuditLog 실제 업무 통합, 위험 대응 결과 적용, `ANALYZED` 이후 최종 거래 상태 전이,
-`RiskResponseOutcome` 영속화, 기존 사건에 추가 거래 연결, 사건 병합·분리, 거래
-접수 전체 연결, 최종 v2 Snapshot과 완료 간극 복구, 공개 사건 API는 구현되지
-않았다. 따라서 내부 사건 persistence 경계의 구현을 거래 최종화 전체 완료로
-간주하지 않는다. External Risk 실제 Provider·FastAPI 입력·거래 접수 연결도
-구현되지 않았다.
+기존 사건에 추가 거래 연결, 사건 병합·분리, 거래 접수 전체 연결, 최종 v2
+Snapshot과 완료 간극 복구, 공개 사건 API는 구현되지 않았다. 따라서 내부 최종화
+경계의 구현을 공개 거래 처리 전체 완료로 간주하지 않는다. External Risk 실제
+Provider·FastAPI 입력·거래 접수 연결도 구현되지 않았다.
 External Risk 실패는 현재 cache·stale data·fallback·`UNMATCHED`로 변환하지 않고
 typed failure로 전파한다. 후속 거래 접수 연결에서는 거래와 분석 결과를 `FAILED`로
 확정하고 기존 외부 오류 매핑을 사용한다. 현재 `responseBody`는 실제 단계적 거래
@@ -368,8 +368,8 @@ typed failure로 전파한다. 후속 거래 접수 연결에서는 거래와 �
 
 ## 후속 작업
 
-1. 위험 대응 정책과 거래 최종 상태 전이 구현
-2. 구현된 사건 영속 경계를 AuditLog와 함께 거래 최종화 트랜잭션에 연결
+1. 위험 대응 정책과 거래 최종 상태 전이 구현 — 완료
+2. 구현된 사건 영속 경계를 AuditLog와 함께 거래 최종화 트랜잭션에 연결 — 완료
 3. 거래 접수–External Risk–Rule 분석–위험 대응–사건–Snapshot v2 연결
 4. Snapshot 완료 간극 운영 복구 구현
 

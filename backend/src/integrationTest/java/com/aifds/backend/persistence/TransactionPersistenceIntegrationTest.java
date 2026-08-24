@@ -10,6 +10,7 @@ import com.aifds.backend.transaction.entity.RiskResponseOutcome;
 import com.aifds.backend.transaction.entity.TransactionChannel;
 import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
 import com.aifds.backend.transaction.entity.TransactionType;
+import com.aifds.backend.transaction.policy.RiskResponseDecisionPolicy;
 import com.aifds.backend.transaction.repository.FinancialTransactionRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -1096,16 +1097,20 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
         });
 
         assertThat(transactionId).isNotNull();
-        FinancialTransaction first = transactions.execute(status ->
-                financialTransactionRepository
+        FinancialTransaction first = transactions.execute(status -> {
+            FinancialTransaction loaded = financialTransactionRepository
                         .findByTransactionId(transactionId)
-                        .orElseThrow()
-        );
-        FinancialTransaction stale = transactions.execute(status ->
-                financialTransactionRepository
+                        .orElseThrow();
+            loaded.getAdoptedDetectionResult().getRiskLevel();
+            return loaded;
+        });
+        FinancialTransaction stale = transactions.execute(status -> {
+            FinancialTransaction loaded = financialTransactionRepository
                         .findByTransactionId(transactionId)
-                        .orElseThrow()
-        );
+                        .orElseThrow();
+            loaded.getAdoptedDetectionResult().getRiskLevel();
+            return loaded;
+        });
 
         assertThat(first).isNotNull();
         assertThat(stale).isNotNull();
@@ -1114,11 +1119,11 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
         long originalVersion = first.getVersion();
         Instant createdAt = first.getCreatedAt();
 
-        first.applyRiskResponseOutcome(
-                RiskResponseOutcome.APPROVED_WITH_MONITORING
+        first.finalizeRiskResponse(
+                new RiskResponseDecisionPolicy().decide(RiskLevel.MEDIUM)
         );
-        stale.applyRiskResponseOutcome(
-                RiskResponseOutcome.APPROVED_WITH_MONITORING
+        stale.finalizeRiskResponse(
+                new RiskResponseDecisionPolicy().decide(RiskLevel.MEDIUM)
         );
         transactions.execute(status -> {
             financialTransactionRepository.saveAndFlush(first);

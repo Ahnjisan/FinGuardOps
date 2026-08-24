@@ -73,8 +73,9 @@ immutable decision으로 반환한다.
 이 정책은 LOW를 `APPROVED`/`APPROVED`/사건 불필요, MEDIUM을
 `APPROVED`/`APPROVED_WITH_MONITORING`/사건 불필요, HIGH를
 `ADDITIONAL_AUTH_REQUIRED`/`ADDITIONAL_AUTH_REQUIRED`/사건 필수,
-CRITICAL을 `HELD`/`HELD`/사건 필수로 결정한다. 정책 실행만으로 거래 상태나
-영속 결과를 변경하거나 사건을 생성·연결하지 않는다.
+CRITICAL을 `HELD`/`HELD`/사건 필수로 결정한다. 정책 자체는 부수 효과가 없고,
+내부 `RiskResponseFinalizationService`가 이 decision을 검증해 거래 최종 상태와
+대응 결과를 함께 적용하며 필요한 사건·감사를 같은 트랜잭션에서 확정한다.
 
 ### 3.4 사건 생성 여부
 
@@ -126,7 +127,10 @@ CRITICAL 위험 대응으로 Mock 거래가 보류된 상태이다. 실제 금�
 
 ### `FAILED`
 
-검증 이후 내부 저장, 분석 조정 또는 위험 대응 반영 과정에서 시스템 처리에 실패해 정상적인 다음 상태로 진행하지 못한 상태이다. 실패 단계와 마지막으로 확정된 결과를 함께 식별할 수 있어야 한다.
+현재 구현에서 Rule 분석 또는 분석 오케스트레이션이 결과를 정상적으로 완료·채택하지
+못해 거래가 `ANALYZING`에서 실패로 확정된 상태이다. 실패 단계와 마지막으로 확정된
+결과를 함께 식별할 수 있어야 한다. `ANALYZED` 이후 내부 최종화 실패에는 이 상태를
+사용하지 않는다.
 
 AI 리포트 생성 실패는 `FAILED`의 사유가 아니다.
 
@@ -148,9 +152,13 @@ ANALYZED
 ├─ LOW 대응      → APPROVED
 ├─ MEDIUM 대응   → APPROVED
 ├─ HIGH 대응     → ADDITIONAL_AUTH_REQUIRED
-├─ CRITICAL 대응 → HELD
-└─ 대응 반영 실패 → FAILED
+└─ CRITICAL 대응 → HELD
 ```
+
+`ANALYZING → FAILED`는 Rule 분석 또는 분석 오케스트레이션이 실패해 분석 결과를
+정상적으로 완료·채택하지 못한 경우이다. `ANALYZED` 이후 내부 최종화 실패는 상태
+전이가 아니라 같은 REQUIRED 트랜잭션의 전체 rollback이며 거래는 `ANALYZED`를
+유지한다.
 
 MEDIUM의 `승인 후 모니터링`은 다음과 같이 표현한다.
 
@@ -228,7 +236,7 @@ LOW는 `riskResponseOutcome = APPROVED`, MEDIUM은
 - 사건 생성 여부: 필요. 동일 거래에 대한 중복 사건은 생성하지 않는다. 사건
   생성 또는 기존 사건 연결과 `caseId`가 확정되지 않으면 성공 조건을 충족하지
   않는다.
-- 실패 시 처리: 거래 상태 변경과 사건 생성의 일부만 성공한 경우 정합성 확인 및 복구가 필요하다. 구체적인 보상 방식은 후속 설계에서 확정한다.
+- 실패 시 처리: 아래 HIGH·CRITICAL 원자적 rollback 계약을 적용한다.
 - 재시도 가능 여부: 가능 후보. 상태와 사건 생성 모두 멱등성을 보장해야 한다.
 - 감사 로그 여부: 필요
 
@@ -239,25 +247,44 @@ LOW는 `riskResponseOutcome = APPROVED`, MEDIUM은
 - 생성되는 결과: Mock 보류 결과, 긴급 사건 생성 또는 기존 사건 연결, 담당자 알림 후보
 - 사건 생성 여부: 필요. 중복 긴급 사건 생성을 방지한다. 사건 생성 또는 기존
   사건 연결과 `caseId`가 확정되지 않으면 성공 조건을 충족하지 않는다.
-- 실패 시 처리: 보류·사건·알림의 각 결과를 구분해 기록한다. 알림 실패가 거래 위험 판단 결과를 변경하지 않는다.
+- 실패 시 처리: 아래 HIGH·CRITICAL 원자적 rollback 계약을 적용한다.
 - 재시도 가능 여부: 가능 후보. 각 결과의 중복 생성을 방지해야 한다.
 - 감사 로그 여부: 필요
 
-### `ANALYZING` 또는 `ANALYZED` → `FAILED`
+HIGH·CRITICAL 내부 최종화에서는 사건 생성, 사건–거래 연결, 거래
+`RiskResponseOutcome`, 거래 최종 상태와 관련 AuditLog를 하나의 REQUIRED
+트랜잭션으로 처리한다. 어느 단계에서든 실패하면 전체 트랜잭션을 rollback한다.
+거래는 `ANALYZED`, outcome은 null로 유지되고 신규 사건·연결과 AuditLog는 남지
+않는다. 별도 보상 트랜잭션을 실행하거나 부분 결과를 복구 대상으로 남기지 않는다.
 
-- 전이 조건: 거래 처리에 필요한 내부 단계가 실패했고 승인된 fallback 또는 재시도로 계속할 수 없다.
+최종 업무 commit 전 내부 최종화가 실패하면 전체 업무 트랜잭션을 rollback하고
+거래는 `ANALYZED`를 유지한다. 최종 업무 commit 후 Snapshot v2 저장이 실패하면
+이미 확정된 업무 결과는 유지하고 Snapshot만 전용 운영 복구 대상으로 다룬다.
+Snapshot v2 완료 간극의 운영 복구는 아직 구현되지 않은 별도 후속 경계이며, 위험
+대응·사건·감사 업무의 부분 성공을 복구하는 절차가 아니다.
+
+### `ANALYZING` → `FAILED`
+
+- 전이 조건: Rule 분석 또는 분석 오케스트레이션이 실패해 분석 결과를 정상적으로
+  완료·채택할 수 없다.
 - 변경 주체: 시스템인 Spring Boot
-- 생성되는 결과: 실패 단계, 원인 분류, 마지막 확정 상태와 재시도 가능 여부
-- 사건 생성 여부: 실패만을 이유로 자동 생성하지 않음. 이미 생성된 사건을 삭제하거나 중복 생성하지 않는다.
-- 실패 시 처리: 저장 성공 여부가 불명확하면 성공으로 간주하지 않고 정합성을 확인한다.
+- 생성되는 결과: 거래와 대상 DetectionResult의 실패 상태, 실패 단계, 원인 분류와
+  재시도 가능 여부
+- 사건 생성 여부: 생성하지 않음
+- 실패 시 처리: 거래와 DetectionResult 실패 확정을 같은 쓰기 트랜잭션으로
+  처리하고 결과를 채택하지 않는다.
 - 재시도 가능 여부: 오류 유형별 `TBD`
 - 감사 로그 여부: 필요
 
 Rule v1 분석 실패에서는 `DetectionResult PENDING|IN_PROGRESS → FAILED`와 거래
 `ANALYZING → FAILED`를 함께 기록하고 결과를 채택하지 않는다. Client 자동
 retry는 0회이며 실패를 0점·`LOW`·빈 Evidence 또는 fallback 성공으로 바꾸지
-않는다. `ANALYZED → FAILED`의 위험 대응 실패 의미는 이 분석 실패 경계와
-구분한다.
+않는다.
+
+향후 운영상 `ANALYZED` 거래를 별도의 terminal 실패 상태로 확정하는 정책은 현재
+구현되지 않았고 Issue #158 범위가 아니다. 별도 상태 전이, 재처리와 운영 복구
+계약 및 사용자 승인이 필요하며, 현재 내부 최종화 실패를 `FAILED`로 자동 변환해서는
+안 된다.
 
 ## 8. 금지 전이
 
@@ -278,8 +305,9 @@ retry는 0회이며 실패를 0점·`LOW`·빈 Evidence 또는 fallback 성공�
 - 상태 전이는 현재 상태, 요청된 다음 상태와 승인된 위험 대응 정책을 함께 검증해야 한다.
 - 위험 등급은 Rule·ML과 승인된 점수 통합 정책의 결과여야 하며 생성형 AI가 계산하지 않는다.
 - Rule v1의 Evidence 저장, `DetectionResult COMPLETED`, 결과 채택과
-  `ANALYZING → ANALYZED`는 하나의 쓰기 트랜잭션으로 처리한다. 다른 분석과
-  위험 대응의 구체 경계는 후속 설계에서 확정한다.
+  `ANALYZING → ANALYZED`는 하나의 쓰기 트랜잭션으로 처리한다. 이후 내부 위험
+  대응 최종화는 별도 REQUIRED 트랜잭션에서 잠근 `ANALYZED` 거래와 채택 결과를
+  검증하고 사건·최종 상태·AuditLog를 원자적으로 확정한다.
 - HIGH·CRITICAL의 새 사건 생성 전에 동일 거래 또는 동일 의심 흐름과 연결된 사건 존재 여부를 확인해야 한다.
 - 외부 연동 결과가 불명확하면 성공, 정상 또는 위험정보 없음으로 임의 해석하지 않는다.
 - 전이 요청에는 변경 원인과 관련 `transactionId`, 필요 시 `caseId` 및 `traceId` 후보를 연결할 수 있어야 한다.
@@ -323,10 +351,10 @@ Rule 결과 채택과 `ANALYZING → ANALYZED` commit만으로는 최종 동기 
 HIGH·CRITICAL이면 사건 생성 또는 기존 사건 연결까지 commit된 뒤에만 v2 성공
 Snapshot을 확정한다. 현재 구현은 거래 접수 commit에서 `RECEIVED`/탐지 null
 v1 Snapshot을 먼저 완료한다. 위험 등급별 목표 상태·대응 결과·사건 필수 여부를
-반환하는 순수 정책과 HIGH·CRITICAL `ANALYZED` 거래의 사건·첫 연결 내부 영속
-경계는 구현되었다. 하지만 이를 `FinancialTransaction`에 적용하는 전이,
-`RiskResponseOutcome` 영속화, AuditLog와 사건 경계를 포함한 최종 원자적
-commit은 아직 구현되지 않았다.
+반환하는 순수 정책과 `ANALYZED` 거래를 최종화하는 내부 경계는 구현되었다. 이
+경계는 LOW·MEDIUM의 최종 상태·대응 결과와 HIGH·CRITICAL의 신규 또는 기존 활성
+사건 연결, 거래 최종 상태·대응 결과, 필요한 AuditLog를 하나의 commit으로
+확정한다. 거래 접수 전체 연결과 최종 v2 Snapshot 확정은 아직 구현되지 않았다.
 
 최종 업무 commit 뒤 Snapshot 완료가 실패하면 멱등 레코드는 `FAILED`로 전이하지
 않고 `IN_PROGRESS`로 유지한다. 최초 요청은 `500 INTERNAL_ERROR`, 같은 요청은
@@ -419,8 +447,10 @@ commit은 아직 구현되지 않았다.
 - 재시도·중복 처리 식별 정보 후보
 
 민감 정보 원문은 감사 로그에 기록하지 않는다. Issue #156에서 append-only
-AuditLog Entity, Flyway V7과 INSERT 전용 Persistence 경계는 구현되었다. 기존
-거래·사건 Service의 실제 AuditLog 통합과 보존 기간은 아직 확정하지 않았다.
+AuditLog Entity, Flyway V7과 INSERT 전용 Persistence 경계를 구현했고, 내부 위험
+대응 최종화는 신규 사건이면 사건 감사 2건 뒤 거래 감사 2건, 기존 사건 재사용이나
+LOW·MEDIUM이면 거래 감사 2건을 같은 트랜잭션에 append한다. 사건 조사 상태 전이
+감사, 공개 조회, 보존 기간은 아직 확정하지 않았다.
 
 Validation 거절은 Transaction이나 AuditLog 행을 만들지 않는다. 오류 응답, `traceId`, 민감정보를 제외한 로그와 승인된 저카디널리티 운영 메트릭으로만 관측한다.
 
@@ -432,22 +462,35 @@ Validation 거절은 Transaction이나 AuditLog 행을 만들지 않는다. 오�
 - External Risk 실패 후 재분석·수동 복구 정책
 - 탐지·상태 전이 재시도 가능 오류, 횟수와 간격
 - 동일 거래 또는 연관 거래의 사건 중복 방지와 병합·분리 기준
-- 위험 대응과 사건 연결 중 일부만 성공했을 때의 복구·보상 구현 방식
+- 거래 접수 전체 연결 뒤 최종 업무 commit과 Snapshot v2 완료 사이 간극의 운영 복구 방식
 - 동시 상태 변경 충돌 후 재조회·자동 재시도·운영 확인 방식
 - 감사 로그 보존 기간과 접근 범위
 
-## 16. 후속 ERD·API 설계 항목
+## 16. 구현·미구현 범위
 
-후속 설계에서는 다음 항목을 사용자 승인으로 구체화해야 한다.
+현재 구현된 범위는 다음과 같다.
 
-- 거래 처리 상태, 위험 등급, 위험 대응 결과와 사건 연결의 분리 표현
-- 상태 및 탐지 결과의 변경 이력과 버전 표현
-- `FAILED` 멱등 기록의 재시도와 만료 정리 방식
-- 허용 전이를 보장할 데이터 정합성 제약과 트랜잭션 경계
-- 동시성 충돌 탐지와 응답 계약
-- 분석 요청·결과의 식별 및 재시도 계약
-- 사건 생성 또는 기존 사건 연결의 원자성·복구 경계
-- 감사 로그 조회에 필요한 연결 정보
-- FastAPI와 External Risk 장애를 표현할 오류·처리 결과 계약
+- 위험 대응 순수 결정 정책
+- `FinancialTransaction` 최종 상태·outcome 단일 도메인 전이
+- V3 DetectionResult·riskLevel·outcome 물리 제약
+- V6 FraudCase·CaseTransaction 물리 스키마
+- V7 append-only AuditLog 물리 스키마
+- 사건 생성·첫 거래 연결 Persistence 경계
+- 거래·사건·연결·감사 원자적 최종화 Persistence 경계
 
-거래 접수의 구체적인 DB 컬럼, 제약조건, 인덱스, 멱등 상태 코드와 낙관적 잠금은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)에서 확정한다. Java 구현, 탐지·사건 물리 스키마와 그 밖의 상태 코드는 후속 승인 범위이다.
+다음 범위는 아직 구현되지 않았으며 후속 사용자 승인이 필요하다.
+
+- 거래 접수 전체 흐름 연결
+- External Risk 결과를 포함한 분석 입력 연결
+- Snapshot v2 확정
+- Snapshot 완료 간극 운영 복구
+- 공개 최종화·사건·AuditLog API
+- 실제 USER 인증·인가 연결
+- 사건 조사 상태 전이
+- 사건 추가 거래 연결·병합·분리
+- AuditLog 조회·보존·파기와 runtime DB role 분리
+
+거래 접수의 현재 물리 계약은
+[`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를
+따른다. 위 미구현 범위를 현재 내부 최종화 또는 V3·V6·V7 물리 스키마의 미구현으로
+표현하지 않는다.
