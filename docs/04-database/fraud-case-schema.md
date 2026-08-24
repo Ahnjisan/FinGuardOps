@@ -7,10 +7,11 @@
 `case_transaction`을 추가한다.
 
 구현 범위는 사건 영속 모델, 거래 연결, 중복 연결 제약과 내부 persistence
-boundary이다. 사건 조사 상태 전이 Service, 기존 사건에 다른 거래 추가, 사건
-병합·분리, AuditLog 실제 통합, 공개 API, 최종 거래 상태 전이와 Snapshot v2는
-포함하지 않는다. AuditLog 물리 기반은 Issue #156의 Flyway V7에서 별도로
-구현했으며 [`audit-log-schema.md`](audit-log-schema.md)를 따른다.
+boundary이며, 위험 대응 최종화 경계가 이를 재사용해 신규 사건·첫 연결 또는 기존
+활성 사건을 거래 최종 상태·대응 결과·AuditLog와 같은 REQUIRED 트랜잭션에서
+확정한다. 사건 조사 상태 전이 Service, 기존 사건에 다른 거래 추가, 사건 병합·분리,
+공개 API, 거래 접수 전체 연결과 Snapshot v2는 포함하지 않는다. AuditLog 계약은
+[`audit-log-schema.md`](audit-log-schema.md)를 따른다.
 
 ## 2. 관계와 식별자
 
@@ -77,15 +78,18 @@ FraudCase 1 ─ N CaseTransaction N ─ 1 FinancialTransaction
 사건 생성 시각, 변경 시각과 첫 연결 시각은 기존 UTC `Clock`의 한 값을
 PostgreSQL 마이크로초 정밀도로 정규화해 사용한다.
 
+위험 대응 최종화는 이 Service에 참여하기 전에 거래를 먼저 잠근다. 이 Service의
+기존 동일 거래 재잠금은 같은 REQUIRED 트랜잭션에서 수행되며 잠금 순서를 바꾸지
+않는다. 사건 생성·연결, 거래 최종화, 감사 중 어느 단계라도 실패하면 모두
+rollback한다.
+
 ## 7. 미구현 경계
 
-- 구현된 AuditLog Persistence 경계와 사건 생성·첫 연결의 실제 통합
-- 위험 대응 결과와 최종 거래 상태 적용
 - 사건 조사 상태 전이와 종료
 - 기존 사건에 추가 거래 연결
 - 사건 병합·분리
 - 공개 사건 Controller·DTO
 - 거래 접수 전체 오케스트레이션과 Snapshot v2
 
-AuditLog 물리 기반은 구현되었지만 아직 이 Service와 연결되지 않았다. 따라서 이
-영속 경계를 사건 업무 전체 또는 최종 위험 대응 완료로 간주하지 않는다.
+내부 위험 대응·사건·감사 최종화는 구현되었지만, 이를 사건 업무 전체나 공개 거래
+처리 완료로 간주하지 않는다.

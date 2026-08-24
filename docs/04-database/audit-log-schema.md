@@ -6,9 +6,9 @@
 Persistence 경계를 정의한다. Flyway V7은 기존 V1~V6를 수정하지 않고
 `audit_log` 테이블, 제약, 조회 Index와 UPDATE·DELETE 차단 trigger를 추가한다.
 
-구현 범위는 typed 감사 기록의 안전한 INSERT 기반까지다. 기존
-`FraudCasePersistenceService`, 위험 대응, 거래 최종 상태 전이, 공개 조회 API와
-실제 인증 사용자 연결은 포함하지 않는다.
+구현 범위는 typed 감사 기록의 안전한 INSERT 기반과 내부 위험 대응 최종화의 실제
+통합까지다. 공개 조회 API, 실제 인증 사용자 연결과 사건 조사 상태 변경 감사는
+포함하지 않는다.
 
 관련 논리·API 계약은 다음 문서를 함께 따른다.
 
@@ -113,8 +113,20 @@ PersistedAuditLog append(AuditLogDraft draft)
 - Repository는 Spring Data `JpaRepository`를 노출하지 않고
   `EntityManager.persist()`와 `flush()`만 사용한다.
 
-기존 사건·거래 Service에는 아직 연결하지 않았다. 후속 최종 위험 대응 경계가
-업무 변경과 필요한 AuditLog를 같은 트랜잭션에서 호출해야 한다.
+`RiskResponseFinalizationService`는 거래 잠금·검증과 필요한 사건 생성 또는 재사용,
+거래 최종화·flush 뒤 이 경계를 같은 REQUIRED 트랜잭션에서 호출한다. AuditLog
+append 실패는 전파되어 사건·연결·거래 변경과 이전 감사 INSERT까지 모두
+rollback한다.
+
+감사 append 순서와 수는 다음과 같다.
+
+1. 신규 사건: `CASE_CREATED`, `CASE_TRANSACTION_LINKED`,
+   `TRANSACTION_RISK_RESPONSE_APPLIED`, `TRANSACTION_STATUS_CHANGED`
+2. 기존 활성 사건 재사용: 거래 감사 2건만 기록
+3. LOW·MEDIUM: 거래 감사 2건만 기록
+
+기존 활성 사건 재사용은 사건 또는 연결의 새 변경이 아니므로 사건 감사를 중복
+append하지 않는다.
 
 ## 7. append-only 보장과 한계
 
@@ -150,8 +162,6 @@ deduplication key와 action 단독 Index는 추가하지 않는다. 후속 호�
 
 ## 9. 미구현 경계
 
-- `FraudCasePersistenceService`와 실제 통합
-- 위험 대응 결과와 거래 최종 상태 적용
 - 거부 감사와 별도 commit 경계
 - 공개 AuditLog 조회 API
 - 인증·인가 기반 USER actor

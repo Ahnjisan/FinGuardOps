@@ -31,16 +31,17 @@ DetectionResult·DetectionEvidence의 물리 영속 모델과 FastAPI
 Timeout·Trace 전달과 응답 검증·오류 분류, 거래 분석 Snapshot 조합·HTTP
 오케스트레이션과 탐지 실행 결과 자동 생성·채택은 구현되었다. 독립 External Risk
 Port·정책 Service·local/dev/test Mock·성공 인메모리 Snapshot도 구현되었지만
-FastAPI 입력과 거래 접수에는 연결되지 않았다. 거래 접수 Service 연결, 최종 멱등
-응답 v2, 위험 대응의 거래 적용과 구현된 사건·첫 거래 연결 영속 경계의 최종화 연결, Snapshot
+FastAPI 입력과 거래 접수에는 연결되지 않았다. `ANALYZED` 거래를 잠그고 채택 결과를
+검증한 뒤 위험 대응·필요한 사건·거래 최종 상태·AuditLog를 원자적으로 확정하는
+내부 최종화 경계는 구현되었다. 거래 접수 Service 연결, 최종 멱등 응답 v2, Snapshot
 완료 간극 복구와 RuleVersion 운영 publish는 아직 구현되지 않았다. 현재 단계 응답은 최종 동기
 분석 목표를 변경하지 않는다. Spring Boot 분석 처리의 기준은
 [Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../01-requirements/spring-rule-analysis-orchestration-contract.md)이다.
 위험 등급별 목표 거래 상태·`RiskResponseOutcome`·사건 필수 여부를 반환하는 순수
-decision 정책은 구현되었지만 거래 Entity와 API 응답에는 아직 적용되지 않았다.
-`FraudCase`·`CaseTransaction`과 Flyway V6, HIGH·CRITICAL `ANALYZED` 거래의
-새 사건·첫 연결 또는 기존 활성 연결을 원자적으로 확정하는 내부 Service도
-구현되었지만 거래 접수와 최종 상태 전이에는 연결되지 않았다.
+decision 정책과 이를 거래 Entity에 적용하는 내부 경계가 구현되었다.
+`FraudCase`·`CaseTransaction`과 Flyway V6, append-only AuditLog V7을 재사용하며,
+HIGH·CRITICAL은 새 사건·첫 연결 또는 기존 활성 연결을 최종 상태와 함께 확정한다.
+이 내부 경계는 Controller나 공개 API를 추가하지 않으며 거래 접수에는 연결되지 않았다.
 
 ### 2.2 Spring Boot 책임
 
@@ -290,10 +291,10 @@ Idempotency-Key: <required>
 | --- | --- | --- |
 | `transactionId` | string | 저장된 거래의 UUID v4 업무 식별자 |
 | `processingStatus` | string | `RECEIVED` |
-| `riskLevel` | string 또는 null | 탐지 미구현이므로 명시적 null |
-| `riskResponseOutcome` | string 또는 null | 위험 대응 미구현이므로 명시적 null |
-| `adoptedDetectionResultId` | string 또는 null | 채택 탐지 결과 미구현이므로 명시적 null |
-| `caseId` | string 또는 null | 사건 처리 미구현이므로 명시적 null |
+| `riskLevel` | string 또는 null | 거래 접수 전체 연결 전이므로 명시적 null |
+| `riskResponseOutcome` | string 또는 null | 거래 접수 전체 연결 전이므로 명시적 null |
+| `adoptedDetectionResultId` | string 또는 null | 거래 접수 전체 연결 전이므로 명시적 null |
+| `caseId` | string 또는 null | 거래 접수 전체 연결 전이므로 명시적 null |
 | `createdAt` | string | DB/JPA 저장 결과의 실제 생성 시각, UTC ISO-8601 |
 | `traceId` | string | 현재 HTTP 요청의 추적 식별자 |
 
@@ -304,9 +305,9 @@ string으로 취급한다. 최종 v2의 비-null `riskLevel`과
 이 응답은 거래 영속화 단계의 **현재 구현** 계약이며 최종 계약이 아니다. 현재
 신규 요청은 이 단계적 업무 결과를 v1 envelope에 저장한다. DetectionResult
 채택과 거래 `ANALYZED`는 위험 대응 전 중간 상태이므로 최종 성공 응답이나
-성공 Snapshot을 확정하지 않는다. 순수 위험 대응 decision은 구현되었지만 이
-결정을 거래에 적용하는 상태 전이·영속화와 External Risk·사건 결과 연결,
-Snapshot v2의 Java·DB 반영은 여전히 후속 구현이다.
+성공 Snapshot을 확정하지 않는다. 내부 위험 대응·사건·AuditLog 원자적 최종화는
+구현되었지만 거래 접수·External Risk 입력과의 연결, Snapshot v2의 Java·DB 반영은
+여전히 후속 구현이다.
 
 #### 5.5.1 최종 동기 성공 응답
 

@@ -12,13 +12,13 @@ JPA Entity, Repository와 내부 persistence service가 구현되어 있다.
 Rule 분석 성공 경로에서 DetectionResult `COMPLETED`, Evidence 저장, 거래 결과
 채택과 `ANALYZING → ANALYZED`를 함께 commit하는 내부 오케스트레이션도
 구현되어 있다. `ANALYZED`는 위험 대응 전 중간 상태이며 최종 거래 성공 상태가
-아니다.
+아니다. 별도 내부 최종화 경계는 채택된 `COMPLETED` 결과의 소유 관계와 위험 등급을
+다시 검증하고, 필요한 사건·거래 최종 상태·AuditLog를 원자적으로 확정한다.
 
 다음 기능은 구현하지 않는다.
 
 - 거래 접수 Service에서 Spring Boot Rule 분석 실행 경로를 호출하는 연결
-- External Risk와 위험 대응·최종 거래 상태 전이
-- HIGH·CRITICAL 사건 생성 또는 기존 사건 연결
+- External Risk와 거래 접수 전체 실행 경로의 연결
 - 최종 동기 응답과 Snapshot v2 확정
 - Snapshot 완료 간극 운영 복구
 - RuleVersion 운영 publish

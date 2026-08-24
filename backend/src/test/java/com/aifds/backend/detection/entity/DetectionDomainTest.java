@@ -5,6 +5,8 @@ import com.aifds.backend.transaction.entity.RiskResponseOutcome;
 import com.aifds.backend.transaction.entity.TransactionChannel;
 import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
 import com.aifds.backend.transaction.entity.TransactionType;
+import com.aifds.backend.transaction.policy.RiskResponseDecision;
+import com.aifds.backend.transaction.policy.RiskResponseDecisionPolicy;
 import com.aifds.backend.rule.entity.FraudRule;
 import com.aifds.backend.rule.entity.RuleVersion;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -146,7 +148,7 @@ class DetectionDomainTest {
     }
 
     @Test
-    void adoptsOnlyCompletedResultFromSameTransactionAndMapsOutcome() {
+    void adoptsOnlyCompletedResultAndFinalizesRiskResponseAtomically() {
         FinancialTransaction transaction = transaction(UUID.randomUUID());
         DetectionResult result = pending(transaction, 1);
         result.start(CUTOFF.plusSeconds(1));
@@ -154,21 +156,72 @@ class DetectionDomainTest {
 
         transaction.startAnalysis();
         transaction.adoptDetectionResult(result);
-        transaction.applyRiskResponseOutcome(
-                RiskResponseOutcome.ADDITIONAL_AUTH_REQUIRED
+        transaction.finalizeRiskResponse(
+                new RiskResponseDecisionPolicy().decide(RiskLevel.HIGH)
         );
 
         assertThat(transaction.getAdoptedDetectionResult()).isSameAs(result);
         assertThat(transaction.getRiskLevel()).isEqualTo(RiskLevel.HIGH);
         assertThat(transaction.getProcessingStatus())
-                .isEqualTo(TransactionProcessingStatus.ANALYZED);
+                .isEqualTo(
+                        TransactionProcessingStatus.ADDITIONAL_AUTH_REQUIRED
+                );
         assertThat(transaction.getRiskResponseOutcome())
                 .isEqualTo(RiskResponseOutcome.ADDITIONAL_AUTH_REQUIRED);
         assertThatThrownBy(
-                () -> transaction.applyRiskResponseOutcome(
-                        RiskResponseOutcome.APPROVED
+                () -> transaction.finalizeRiskResponse(
+                        new RiskResponseDecisionPolicy().decide(RiskLevel.HIGH)
                 )
-        ).isInstanceOf(IllegalArgumentException.class);
+        ).isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void rejectsManipulatedRiskResponseDecisionWithoutPartialMutation() {
+        FinancialTransaction transaction = transaction(UUID.randomUUID());
+        DetectionResult result = completed(transaction, 1, RiskLevel.HIGH);
+        transaction.startAnalysis();
+        transaction.adoptDetectionResult(result);
+
+        assertThatThrownBy(() -> transaction.finalizeRiskResponse(
+                new RiskResponseDecision(
+                        RiskLevel.HIGH,
+                        TransactionProcessingStatus.HELD,
+                        RiskResponseOutcome.ADDITIONAL_AUTH_REQUIRED,
+                        true
+                )
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessage(
+                        "Risk response decision has an invalid final mapping"
+                );
+
+        assertThat(transaction.getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.ANALYZED);
+        assertThat(transaction.getRiskResponseOutcome()).isNull();
+
+        assertThatThrownBy(() -> transaction.finalizeRiskResponse(
+                new RiskResponseDecision(
+                        RiskLevel.HIGH,
+                        TransactionProcessingStatus.ADDITIONAL_AUTH_REQUIRED,
+                        RiskResponseOutcome.ADDITIONAL_AUTH_REQUIRED,
+                        false
+                )
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessage(
+                        "Risk response decision has an invalid final mapping"
+                );
+        assertThat(transaction.getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.ANALYZED);
+        assertThat(transaction.getRiskResponseOutcome()).isNull();
+
+        assertThatThrownBy(() -> transaction.finalizeRiskResponse(
+                new RiskResponseDecisionPolicy().decide(RiskLevel.LOW)
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessage(
+                        "Risk response decision does not match risk level"
+                );
+        assertThat(transaction.getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.ANALYZED);
+        assertThat(transaction.getRiskResponseOutcome()).isNull();
     }
 
     @Test
