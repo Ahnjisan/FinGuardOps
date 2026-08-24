@@ -12,6 +12,10 @@ from finguardops_ai.rules.v1 import (
     TransactionType,
 )
 from finguardops_ai.schemas.rule_analysis import (
+    ExternalRiskLookupStatus,
+    ExternalRiskMatchRequest,
+    ExternalRiskPolicyResult,
+    ExternalRiskSnapshotRequest,
     R001EvidenceResponse,
     R001ObservationResponse,
     R002EvidenceResponse,
@@ -21,6 +25,7 @@ from finguardops_ai.schemas.rule_analysis import (
     R004EvidenceResponse,
     R004ObservationResponse,
     RuleAnalysisRequest,
+    RuleAnalysisRequestV2,
     RuleAnalysisResponse,
     RuleAnalysisResultResponse,
     RuleBehaviorEventSnapshotRequest,
@@ -136,6 +141,31 @@ def _valid_request() -> dict[str, object]:
             ),
         ],
     }
+
+
+def _valid_external_risk(*, matched: bool = True) -> dict[str, object]:
+    return {
+        "providerCode": "EXTERNAL_RISK_MOCK_V1",
+        "lookupStatus": "SUCCEEDED",
+        "policyResult": "MATCHED" if matched else "UNMATCHED",
+        "providerAsOf": "2026-07-23T11:59:59.123456Z",
+        "lookedUpAt": "2026-07-23T12:00:00.654321Z",
+        "matches": [
+            {
+                "subjectType": "SENDER_ACCOUNT",
+                "externalRiskType": "SUSPICIOUS_ACCOUNT",
+                "reasonCode": "SUSPICIOUS_SENDER_ACCOUNT",
+            }
+        ]
+        if matched
+        else [],
+    }
+
+
+def _valid_v2_request(*, matched: bool = True) -> dict[str, object]:
+    payload = _valid_request()
+    payload["externalRisk"] = _valid_external_risk(matched=matched)
+    return payload
 
 
 def _rule_version(
@@ -741,3 +771,122 @@ def test_business_contract_shape_can_pass_dto_wire_validation() -> None:
 
     assert request.transaction.transaction_type is TransactionType.ATM_WITHDRAWAL
     assert request.rule_versions[0].weight == 14
+
+
+@pytest.mark.parametrize("matched", [True, False])
+def test_v2_matched_and_unmatched_requests_are_strict_immutable_dtos(matched: bool) -> None:
+    original = _valid_v2_request(matched=matched)
+
+    request = RuleAnalysisRequestV2.model_validate(original)
+    rendered = request.model_dump(mode="json", by_alias=True)
+
+    assert rendered == original
+    assert isinstance(request.external_risk, ExternalRiskSnapshotRequest)
+    assert request.external_risk.lookup_status is ExternalRiskLookupStatus.SUCCEEDED
+    expected_policy = (
+        ExternalRiskPolicyResult.MATCHED if matched else ExternalRiskPolicyResult.UNMATCHED
+    )
+    assert request.external_risk.policy_result is expected_policy
+    assert isinstance(request.external_risk.matches, tuple)
+    assert all(isinstance(item, ExternalRiskMatchRequest) for item in request.external_risk.matches)
+    with pytest.raises(ValidationError):
+        request.external_risk.provider_code = "CHANGED"
+
+
+def test_v1_continues_to_reject_external_risk_as_an_unknown_field() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        RuleAnalysisRequest.model_validate(_valid_v2_request())
+
+    assert any(
+        error["type"] == "extra_forbidden" and error["loc"] == ("externalRisk",)
+        for error in exc_info.value.errors()
+    )
+
+
+@pytest.mark.parametrize("mode", ["missing", "null"])
+def test_v2_rejects_missing_or_null_external_risk(mode: str) -> None:
+    payload = _valid_request()
+    if mode == "null":
+        payload["externalRisk"] = None
+
+    with pytest.raises(ValidationError):
+        RuleAnalysisRequestV2.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["providerCode", "lookupStatus", "policyResult", "providerAsOf", "lookedUpAt", "matches"],
+)
+@pytest.mark.parametrize("use_null", [False, True], ids=["missing", "null"])
+def test_v2_rejects_every_missing_or_null_external_risk_field(
+    field: str,
+    use_null: bool,
+) -> None:
+    payload = _valid_v2_request()
+    external_risk = payload["externalRisk"]
+    assert isinstance(external_risk, dict)
+    if use_null:
+        external_risk[field] = None
+    else:
+        external_risk.pop(field)
+
+    with pytest.raises(ValidationError):
+        RuleAnalysisRequestV2.model_validate(payload)
+
+
+@pytest.mark.parametrize("location", ["top", "snapshot", "match"])
+def test_v2_rejects_unknown_fields_at_every_new_object_level(location: str) -> None:
+    payload = _valid_v2_request()
+    external_risk = payload["externalRisk"]
+    assert isinstance(external_risk, dict)
+    if location == "top":
+        payload["unexpected"] = "value"
+    elif location == "snapshot":
+        external_risk["unexpected"] = "value"
+    else:
+        matches = external_risk["matches"]
+        assert isinstance(matches, list)
+        matches[0]["unexpected"] = "value"
+
+    with pytest.raises(ValidationError) as exc_info:
+        RuleAnalysisRequestV2.model_validate(payload)
+
+    assert any(error["type"] == "extra_forbidden" for error in exc_info.value.errors())
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("providerCode", " external-risk "),
+        ("lookupStatus", "FAILED"),
+        ("policyResult", "matched"),
+        ("providerAsOf", "2026-07-23T11:59:59.1234567Z"),
+        ("lookedUpAt", "2026-07-23T12:00:00+00:00"),
+        ("matches", "not-an-array"),
+    ],
+)
+def test_v2_rejects_invalid_external_risk_wire_values(field: str, value: object) -> None:
+    payload = _valid_v2_request()
+    external_risk = payload["externalRisk"]
+    assert isinstance(external_risk, dict)
+    external_risk[field] = value
+
+    with pytest.raises(ValidationError):
+        RuleAnalysisRequestV2.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("subjectType", "CUSTOMER"),
+        ("externalRiskType", "PHISHING_IP"),
+        ("reasonCode", "UNKNOWN_REASON"),
+    ],
+)
+def test_v2_rejects_unsupported_match_enums(field: str, value: str) -> None:
+    payload = _valid_v2_request()
+    match = payload["externalRisk"]["matches"][0]  # type: ignore[index]
+    match[field] = value
+
+    with pytest.raises(ValidationError):
+        RuleAnalysisRequestV2.model_validate(payload)

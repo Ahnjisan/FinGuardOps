@@ -40,6 +40,7 @@ from finguardops_ai.schemas.rule_analysis import (
     R004EvidenceResponse,
     R004ObservationResponse,
     RuleAnalysisRequest,
+    RuleAnalysisRequestV2,
     RuleAnalysisResponse,
 )
 
@@ -150,6 +151,41 @@ def _valid_request() -> dict[str, object]:
     }
 
 
+def _external_match(
+    subject_type: str,
+    external_risk_type: str,
+    reason_code: str,
+) -> dict[str, object]:
+    return {
+        "subjectType": subject_type,
+        "externalRiskType": external_risk_type,
+        "reasonCode": reason_code,
+    }
+
+
+def _valid_external_risk() -> dict[str, object]:
+    return {
+        "providerCode": "EXTERNAL_RISK_MOCK_V1",
+        "lookupStatus": "SUCCEEDED",
+        "policyResult": "MATCHED",
+        "providerAsOf": "2026-07-23T11:59:59.123456Z",
+        "lookedUpAt": "2026-07-23T12:00:00.654321Z",
+        "matches": [
+            _external_match(
+                "SENDER_ACCOUNT",
+                "SUSPICIOUS_ACCOUNT",
+                "SUSPICIOUS_SENDER_ACCOUNT",
+            )
+        ],
+    }
+
+
+def _valid_v2_request() -> dict[str, object]:
+    payload = _valid_request()
+    payload["externalRisk"] = _valid_external_risk()
+    return payload
+
+
 def _rule_version(
     number: int,
     rule_code: str,
@@ -180,6 +216,11 @@ def _replace(payload: dict[str, object], path: tuple[object, ...], value: object
 
 def _map(payload: dict[str, object]):
     dto = RuleAnalysisRequest.model_validate(payload)
+    return RuleAnalysisRequestMapper.to_domain(dto)
+
+
+def _map_v2(payload: dict[str, object]):
+    dto = RuleAnalysisRequestV2.model_validate(payload)
     return RuleAnalysisRequestMapper.to_domain(dto)
 
 
@@ -658,3 +699,121 @@ def test_response_mapper_requires_explicit_valid_transaction_and_trace_ids() -> 
             "short",
             analysis_result,
         )
+
+
+def test_v1_and_v2_map_to_the_exact_same_rule_execution_input() -> None:
+    v1_input = _map(_valid_request())
+    v2_input = _map_v2(_valid_v2_request())
+
+    assert v2_input == v1_input
+    assert not hasattr(v2_input.rule_input, "external_risk")
+
+
+@pytest.mark.parametrize(
+    "matches",
+    [
+        [],
+        [
+            _external_match(
+                "SENDER_ACCOUNT",
+                "SUSPICIOUS_ACCOUNT",
+                "SUSPICIOUS_SENDER_ACCOUNT",
+            )
+        ],
+        [
+            _external_match(
+                "SENDER_ACCOUNT",
+                "SUSPICIOUS_ACCOUNT",
+                "SUSPICIOUS_SENDER_ACCOUNT",
+            ),
+            _external_match(
+                "RECIPIENT_ACCOUNT",
+                "SUSPICIOUS_ACCOUNT",
+                "SUSPICIOUS_RECIPIENT_ACCOUNT",
+            ),
+            _external_match("DEVICE", "RISK_DEVICE", "RISK_DEVICE"),
+        ],
+    ],
+    ids=["unmatched", "one-match", "three-matches"],
+)
+def test_v2_accepts_only_supported_canonical_match_sets(
+    matches: list[dict[str, object]],
+) -> None:
+    payload = _valid_v2_request()
+    external_risk = payload["externalRisk"]
+    assert isinstance(external_risk, dict)
+    external_risk["matches"] = matches
+    external_risk["policyResult"] = "UNMATCHED" if not matches else "MATCHED"
+
+    mapped = _map_v2(payload)
+
+    assert mapped == _map(_valid_request())
+
+
+def _invalid_external_risk_cases() -> list[object]:
+    sender = _external_match(
+        "SENDER_ACCOUNT",
+        "SUSPICIOUS_ACCOUNT",
+        "SUSPICIOUS_SENDER_ACCOUNT",
+    )
+    recipient = _external_match(
+        "RECIPIENT_ACCOUNT",
+        "SUSPICIOUS_ACCOUNT",
+        "SUSPICIOUS_RECIPIENT_ACCOUNT",
+    )
+    device = _external_match("DEVICE", "RISK_DEVICE", "RISK_DEVICE")
+    return [
+        pytest.param("MATCHED", [], None, None, id="matched-empty"),
+        pytest.param("UNMATCHED", [sender], None, None, id="unmatched-nonempty"),
+        pytest.param("MATCHED", [sender, recipient, device, sender], None, None, id="four"),
+        pytest.param(
+            "MATCHED",
+            [_external_match("SENDER_ACCOUNT", "RISK_DEVICE", "RISK_DEVICE")],
+            None,
+            None,
+            id="unsupported-combination",
+        ),
+        pytest.param("MATCHED", [sender, sender], None, None, id="duplicate"),
+        pytest.param("MATCHED", [device, sender], None, None, id="noncanonical"),
+        pytest.param(
+            "MATCHED",
+            [sender],
+            "2026-07-23T12:00:00.000001Z",
+            None,
+            id="provider-after-cutoff",
+        ),
+        pytest.param(
+            "MATCHED",
+            [sender],
+            None,
+            "2026-07-23T11:59:59.999999Z",
+            id="lookup-before-cutoff",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("policy_result", "matches", "provider_as_of", "looked_up_at"),
+    _invalid_external_risk_cases(),
+)
+def test_v2_cross_field_contract_failures_use_dedicated_error(
+    policy_result: str,
+    matches: list[dict[str, object]],
+    provider_as_of: str | None,
+    looked_up_at: str | None,
+) -> None:
+    payload = _valid_v2_request()
+    external_risk = payload["externalRisk"]
+    assert isinstance(external_risk, dict)
+    external_risk["policyResult"] = policy_result
+    external_risk["matches"] = matches
+    if provider_as_of is not None:
+        external_risk["providerAsOf"] = provider_as_of
+    if looked_up_at is not None:
+        external_risk["lookedUpAt"] = looked_up_at
+    dto = RuleAnalysisRequestV2.model_validate(payload)
+
+    with pytest.raises(RuleAnalysisRequestError) as exc_info:
+        RuleAnalysisRequestMapper.to_domain(dto)
+
+    assert exc_info.value.category is RuleAnalysisRequestErrorCategory.RULE_CONTRACT_ERROR

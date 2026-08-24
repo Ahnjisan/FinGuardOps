@@ -23,7 +23,8 @@
 - Rule v1은 거래 접수 시 현재 거래의 `occurredAt`을 기준으로 평가하며, 행동 이벤트 접수만으로 자동 재평가하지 않는다.
 - Rule v1 계약, DetectionResult·Evidence 물리 모델, 현재
   `POST /api/v1/rule-analysis`와 내부 결과 생성·검증·채택은 구현되었다. 거래
-  접수 연결과 External Risk를 필수 입력으로 받는 목표 v2 wire는 미구현이다.
+  접수 연결과 Backend Java v2 Client는 미구현이지만 External Risk를 필수 입력으로
+  검증하는 FastAPI `POST /api/v2/rule-analysis` wire는 구현되었다.
 
 ### 외부 위험정보 서비스 장애 처리 정책
 
@@ -42,10 +43,10 @@
 현재 External Risk Mock은 송신 계좌, 수신 계좌와 기기 scenario만 지원한다.
 IP reference와 IP 조회는 현재 거래 모델에 없고 피싱 정책도 미구현이다. 아래의
 위험 IP·피싱·외부 위험 점수·등급·대응 표현은 최종 사용자 시나리오 또는 향후
-확장 후보이며 현재 구현 동작을 의미하지 않는다. 실제 외부 HTTP Provider,
-목표 FastAPI v2 `RuleAnalysisRequest`와 거래 접수 상위 오케스트레이션은 아직
-구현되지 않았다. `ExternalRiskSnapshot` 영속화는 이번 목표가 아니며 별도 승인
-대상이다.
+확장 후보이며 현재 구현 동작을 의미하지 않는다. FastAPI v2
+`RuleAnalysisRequestV2`와 검증 Endpoint는 구현됐지만 실제 외부 HTTP Provider,
+Backend Java v2 Client와 거래 접수 상위 오케스트레이션은 아직 구현되지 않았다.
+`ExternalRiskSnapshot` 영속화는 이번 목표가 아니며 별도 승인 대상이다.
 
 ### AI 리포트 생성 실패 처리 정책
 
@@ -370,7 +371,7 @@ v2는 이 결과를 분석 Snapshot에 포함하지만 R001~R004·점수·등급
 
 1. 고객이 계좌이체를 요청한다.
 2. 시스템이 수취 계좌의 외부 위험정보를 조회한다.
-3. 목표 v2가 일치·불일치 Snapshot을 검증하지만 현재 R001~R004는 이를 사용하지
+3. FastAPI v2가 일치·불일치 Snapshot을 검증하지만 현재 R001~R004는 이를 사용하지
    않고 기존 Rule 결과를 산출한다.
 4. 최종 위험등급에 따라 Mock 거래 대응을 수행한다.
 
@@ -432,7 +433,7 @@ v2는 이 결과를 분석 Snapshot에 포함하지만 R001~R004·점수·등급
 
 - 최종 위험등급이 HIGH이면 Mock 추가 인증을 요구하고 사건을 생성한다.
 - CRITICAL이면 Mock 거래 보류, 긴급 사건 생성과 담당자 알림을 수행한다.
-- 현재 목표 v2는 External Risk를 인메모리 요청에만 포함하고 Evidence·AuditLog·DB에
+- 현재 구현된 FastAPI v2는 External Risk를 인메모리 요청에만 포함하고 Evidence·AuditLog·DB에
   저장하지 않는다. 향후 감사·영속 요구는 별도 승인이 필요하다.
 
 ### 사건 생성 조건

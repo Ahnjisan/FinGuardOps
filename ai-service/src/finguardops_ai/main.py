@@ -14,7 +14,12 @@ def create_app() -> FastAPI:
     register_rule_analysis_exception_handlers(application)
     application.add_middleware(
         RuleAnalysisHttpMiddleware,
-        path=f"{settings.api_prefix}/v1/rule-analysis",
+        paths=frozenset(
+            {
+                f"{settings.api_prefix}/v1/rule-analysis",
+                f"{settings.api_prefix}/v2/rule-analysis",
+            }
+        ),
     )
     application.include_router(health_router, prefix=settings.api_prefix)
     application.include_router(rule_analysis_router, prefix=settings.api_prefix)

@@ -193,11 +193,13 @@ HTTP 오케스트레이터도 Snapshot과 분석 시작 commit, 분석 시도당
 1회 호출, 응답 변환, 결과 완료·Evidence 저장·거래 결과 채택 또는 실패 상태
 기록을 연결합니다.
 
-거래 접수 Service의 전체 오케스트레이션, External Risk 결과를 필수 입력으로 받는
-목표 `POST /api/v2/rule-analysis`, 최종 동기 거래 응답과 Snapshot v2, Snapshot
-완료 간극 복구, 운영 배포·재분석은 아직 구현되지 않았습니다. 기존
-`POST /api/v1/rule-analysis`는 External Risk가 없는 현재 구현이며 당장 제거하지
-않습니다. 네 위험 등급에서 목표 거래 상태,
+FastAPI에는 기존 `POST /api/v1/rule-analysis`와 함께 External Risk 결과를 필수
+입력으로 검증하는 `POST /api/v2/rule-analysis`가 구현되었습니다. 두 endpoint는
+같은 Rule v1 실행 경계를 사용하며 External Risk는 아직 점수·등급·Evidence에
+반영하지 않습니다. Backend Java v2 DTO·Mapper·Client, 거래 접수 Service의 전체
+오케스트레이션, 최종 동기 거래 응답과 Snapshot v2, Snapshot 완료 간극 복구,
+운영 배포·재분석은 아직 구현되지 않았습니다. 기존 v1은 당장 제거하지 않습니다.
+네 위험 등급에서 목표 거래 상태,
 `RiskResponseOutcome`, 사건 필수 여부를 결정하는 순수 immutable 정책은
 구현되었습니다. 이 정책은 거래 상태·영속 결과·사건을 변경하지 않습니다.
 `FraudCase`·`CaseTransaction` Entity와 Flyway V6, HIGH·CRITICAL `ANALYZED`
@@ -363,8 +365,9 @@ Kafka
 * 독립 External Risk Port·응답 검증 정책 Service와 local/dev/test 전용 결정적
   Mock, 성공 결과용 immutable 인메모리 Snapshot 구현 및
   [`External Risk 조회 정책`](docs/01-requirements/external-risk-lookup-policy.md) 문서화
-* External Risk 선행 조회와 목표 `POST /api/v2/rule-analysis` 입력 연결 계약을
-  [`External Risk·Rule 분석 입력 계약`](docs/01-requirements/external-risk-rule-analysis-input-contract.md)으로 확정
+* External Risk 선행 조회와 `POST /api/v2/rule-analysis` 입력 연결 계약을
+  [`External Risk·Rule 분석 입력 계약`](docs/01-requirements/external-risk-rule-analysis-input-contract.md)으로 확정하고,
+  FastAPI v2 strict DTO·wire 및 교차 필드 검증·Endpoint 구현
 * LOW·MEDIUM·HIGH·CRITICAL별 목표 거래 상태, `RiskResponseOutcome`과 사건 필수
   여부를 반환하는 순수 위험 대응 결정 정책 구현
 * `FraudCase`·`CaseTransaction` Entity와 Flyway V6, 거래 우선 비관적 잠금으로
@@ -382,7 +385,7 @@ Kafka
 
 최종 동기 거래 접수는 다음 선행 순서를 따른다.
 
-1. AI Service의 목표 `/api/v2/rule-analysis`와 Java·Python 필수 `externalRisk` DTO 구현
+1. Backend Java 필수 `externalRisk` DTO·Mapper·Client 구현과 FastAPI v2 전환
 2. 비트랜잭션 상위 Service에서 거래 접수–External Risk–Rule 분석–위험 대응–사건 연결
 3. 최종 Snapshot v2 확정과 Snapshot 완료 간극 운영 복구 구현
 

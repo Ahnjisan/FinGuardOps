@@ -24,6 +24,11 @@ from finguardops_ai.rules.v1.condition_definitions import (
     parse_condition_definition,
 )
 from finguardops_ai.schemas.rule_analysis import (
+    ExternalRiskMatchRequest,
+    ExternalRiskPolicyResult,
+    ExternalRiskReasonCode,
+    ExternalRiskSubjectType,
+    ExternalRiskType,
     R001EvidenceResponse,
     R001ObservationResponse,
     R002EvidenceResponse,
@@ -33,6 +38,7 @@ from finguardops_ai.schemas.rule_analysis import (
     R004EvidenceResponse,
     R004ObservationResponse,
     RuleAnalysisRequest,
+    RuleAnalysisRequestV2,
     RuleAnalysisResponse,
     RuleAnalysisResultResponse,
     RuleContributionResponse,
@@ -89,6 +95,45 @@ _RULE_METADATA = MappingProxyType(
             "RECENT_BENEFICIARY_TRANSFER",
             10,
         ),
+    }
+)
+_SUPPORTED_EXTERNAL_RISK_MATCHES = frozenset(
+    {
+        (
+            ExternalRiskSubjectType.SENDER_ACCOUNT,
+            ExternalRiskType.SUSPICIOUS_ACCOUNT,
+            ExternalRiskReasonCode.SUSPICIOUS_SENDER_ACCOUNT,
+        ),
+        (
+            ExternalRiskSubjectType.RECIPIENT_ACCOUNT,
+            ExternalRiskType.SUSPICIOUS_ACCOUNT,
+            ExternalRiskReasonCode.SUSPICIOUS_RECIPIENT_ACCOUNT,
+        ),
+        (
+            ExternalRiskSubjectType.DEVICE,
+            ExternalRiskType.RISK_DEVICE,
+            ExternalRiskReasonCode.RISK_DEVICE,
+        ),
+    }
+)
+_EXTERNAL_RISK_SUBJECT_RANK = MappingProxyType(
+    {
+        ExternalRiskSubjectType.SENDER_ACCOUNT: 0,
+        ExternalRiskSubjectType.RECIPIENT_ACCOUNT: 1,
+        ExternalRiskSubjectType.DEVICE: 2,
+    }
+)
+_EXTERNAL_RISK_TYPE_RANK = MappingProxyType(
+    {
+        ExternalRiskType.SUSPICIOUS_ACCOUNT: 0,
+        ExternalRiskType.RISK_DEVICE: 1,
+    }
+)
+_EXTERNAL_RISK_REASON_RANK = MappingProxyType(
+    {
+        ExternalRiskReasonCode.SUSPICIOUS_SENDER_ACCOUNT: 0,
+        ExternalRiskReasonCode.SUSPICIOUS_RECIPIENT_ACCOUNT: 1,
+        ExternalRiskReasonCode.RISK_DEVICE: 2,
     }
 )
 
@@ -185,6 +230,52 @@ def _validate_request_contract(request: RuleAnalysisRequest) -> None:
         _validate_behavior_references(event)
 
     _validate_rule_versions(request)
+    if isinstance(request, RuleAnalysisRequestV2):
+        _validate_external_risk_contract(request)
+
+
+def _validate_external_risk_contract(request: RuleAnalysisRequestV2) -> None:
+    external_risk = request.external_risk
+    matches = external_risk.matches
+    match_count = len(matches)
+
+    if match_count > 3:
+        _contract_error("externalRisk.matches must contain at most 3 items")
+    if external_risk.policy_result is ExternalRiskPolicyResult.MATCHED and match_count == 0:
+        _contract_error("MATCHED externalRisk must contain at least one match")
+    if external_risk.policy_result is ExternalRiskPolicyResult.UNMATCHED and match_count != 0:
+        _contract_error("UNMATCHED externalRisk must not contain matches")
+
+    seen_matches: set[tuple[ExternalRiskSubjectType, ExternalRiskType, ExternalRiskReasonCode]] = (
+        set()
+    )
+    for match in matches:
+        match_key = (match.subject_type, match.external_risk_type, match.reason_code)
+        if match_key not in _SUPPORTED_EXTERNAL_RISK_MATCHES:
+            _contract_error("externalRisk contains an unsupported match combination")
+        if match_key in seen_matches:
+            _contract_error("externalRisk must not contain duplicate matches")
+        seen_matches.add(match_key)
+
+    canonical_matches = tuple(sorted(matches, key=_external_risk_match_rank))
+    if matches != canonical_matches:
+        _contract_error("externalRisk.matches must use canonical order")
+
+    if (
+        external_risk.provider_as_of > request.evaluation_cutoff_at
+        or request.evaluation_cutoff_at > external_risk.looked_up_at
+    ):
+        _contract_error(
+            "externalRisk timestamps must satisfy providerAsOf <= evaluationCutoffAt <= lookedUpAt"
+        )
+
+
+def _external_risk_match_rank(match: ExternalRiskMatchRequest) -> tuple[int, int, int]:
+    return (
+        _EXTERNAL_RISK_SUBJECT_RANK[match.subject_type],
+        _EXTERNAL_RISK_TYPE_RANK[match.external_risk_type],
+        _EXTERNAL_RISK_REASON_RANK[match.reason_code],
+    )
 
 
 def _validate_behavior_references(event: object) -> None:
