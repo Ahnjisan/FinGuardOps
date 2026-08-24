@@ -21,6 +21,7 @@ FastAPI 내부에서 immutable execution plan을 만들고 evaluator를 순차 �
 ### 2.1 포함
 
 - 거래 접수와 멱등 처리의 분석 연결
+- 선행 성공 `ExternalRiskSnapshot`을 포함한 immutable 분석 입력 연결
 - 거래·행동 이벤트·활성 `RuleVersion` Snapshot 고정
 - `evaluationCutoffAt`과 `ruleSetVersion` 고정
 - 거래별 다음 `DetectionResult` 버전 할당
@@ -35,9 +36,9 @@ FastAPI 내부에서 immutable execution plan을 만들고 evaluator를 순차 �
 ### 2.2 제외
 
 - 실패 후 자동 재분석과 새 버전 생성 정책
-- External Risk, ML, LLM, 위험 대응과 사건 생성
+- External Risk Provider 직접 호출·정책 결정, ML, LLM, 위험 대응과 사건 생성
 - 최종 거래 성공 Snapshot v2 codec과 완료 간극 운영 복구 구현
-- 신규 Endpoint, DTO, 상태, 컬럼 또는 Migration
+- Java·Python 신규 Endpoint·DTO, 상태·컬럼·Migration 구현
 - Client 자동 retry와 fallback
 
 실패 후 재분석은 별도 후속 계약에서 정한다. 최종 Snapshot 완료 간극과
@@ -77,22 +78,26 @@ FastAPI 내부에서 immutable execution plan을 만들고 evaluator를 순차 �
 정상 경로의 순서는 다음과 같다.
 
 1. 거래 접수 요청의 멱등 레코드를 `IN_PROGRESS`로 선점한다.
-2. 거래를 저장하고 이번 실행의 `evaluationCutoffAt`을 거래의 `occurredAt`으로
-   한 번만 확정한다.
-3. 상위 거래 처리 흐름이 같은 cutoff로 거래·행동 이벤트와 실행 가능한 활성
-   `RuleVersion` 기준을 고정하고 예상 `ruleSetVersion`을 계산한다.
-4. 어떤 DB 트랜잭션이나 행 잠금도 유지하지 않은 상태에서 상위 거래 처리
-   흐름이 External Risk를 조회한다. timeout·unavailable·invalid response는
+2. 거래를 `RECEIVED`로 저장·commit하고 이번 실행의 `evaluationCutoffAt`을
+   거래의 `occurredAt`으로 한 번만 확정한다.
+3. 어떤 DB 트랜잭션이나 행 잠금도 유지하지 않은 상태에서 상위 거래 처리
+   흐름이 같은 cutoff로 External Risk를 조회한다. timeout·unavailable·invalid response는
    cache·fallback·`UNMATCHED`로 바꾸지 않고 typed failure로 전파한다.
-5. External Risk 결과와 조회 상태를 3단계의 고정 값에 결합해 immutable 분석
-   입력을 확정한다. 이후 External Risk를 다시 조회하거나 재반영하지 않는다.
-6. `RuleAnalysisOrchestrationService`는 이 고정 입력을 받아 분석 시작 쓰기
-   트랜잭션에서 거래 행을 잠근다.
+4. External Risk 성공 Snapshot을 immutable 값으로 고정한다. 이후 다시 조회하거나
+   재반영하지 않는다.
+5. Provider 호출이 끝난 뒤 Spring Boot 소유 Snapshot assembly 경계가 짧은 DB read
+   transaction에서 같은 cutoff의 거래·행동 이벤트와 실행 가능한 활성
+   `RuleVersion`을 읽고 External Risk와 조합해 완전한 immutable 목표 v2
+   `RuleAnalysisRequest`를 반환한다. DetectionResult나 상태는 만들거나 바꾸지 않는다.
+6. `RuleAnalysisOrchestrationService`는 완성된 요청을 분석 시작 쓰기 트랜잭션에
+   전달한다. 거래 행을 잠그고 요청 소유 관계·cutoff·시간 계약을 재검증하며 예상
+   `ruleSetVersion`을 계산한다.
 7. 거래 잠금 아래 다음 `detectionResultVersion`을 할당해 `PENDING`
    `DetectionResult`를 만들고 고정된 Snapshot·분석 버전 필드·trace를 저장한다.
 8. 같은 트랜잭션에서 `DetectionResult`를 `IN_PROGRESS`로, 거래를
    `RECEIVED → ANALYZING`으로 전이하고 commit한다.
-9. 어떤 DB 트랜잭션이나 행 잠금도 유지하지 않은 상태에서 FastAPI를 정확히
+9. 어떤 DB 트랜잭션이나 행 잠금도 유지하지 않은 상태에서 목표
+   `POST /api/v2/rule-analysis`를 정확히
    한 번 호출한다.
 10. 성공 응답의 wire, trace, 업무 의미와 요청 Snapshot 대응을 Client 계약에
     따라 검증한다.
@@ -101,7 +106,7 @@ FastAPI 내부에서 immutable execution plan을 만들고 evaluator를 순차 �
 12. 결과 채택 commit이 성공하면 거래는 `ANALYZED` 중간 상태가 된다. 이
     단계에서는 External Risk를 새로 조회·반영하거나 성공 HTTP 응답·성공 멱등
     Snapshot을 확정하지 않는다.
-13. 상위 거래 처리 흐름은 고정된 분석 결과와 External Risk 근거로 위험 대응,
+13. 상위 거래 처리 흐름은 고정된 분석 결과로 위험 대응,
     최종 거래 상태 전이와 HIGH·CRITICAL 사건 연결을 수행하고 commit한다.
 14. 모든 최종 업무 commit 뒤 ADR-006의 Snapshot v2를 확정한다.
 
@@ -161,29 +166,36 @@ FastAPI 응답의 `analysis.ruleSetVersion`은 이 예상 값과 정확히 같�
 
 - External Risk 조회와 실패 전파는 `RuleAnalysisOrchestrationService`가
   아니라 상위 거래 처리 흐름의 책임이다.
-- 상위 흐름은 거래·행동 이벤트·활성 `RuleVersion` 기준을 고정한 뒤, DB
-  트랜잭션과 행 잠금 없이 External Risk를 조회한다.
-- 조회 결과와 조회 상태는 FastAPI 호출 전에 immutable 분석 입력에 포함한다.
+- 상위 흐름은 `RECEIVED` 거래 저장 commit 뒤 DB 트랜잭션과 행 잠금 없이
+  External Risk를 조회한다.
+- 성공 Snapshot은 Provider 호출 뒤 별도 Snapshot assembly 경계에서
+  거래·행동 이벤트·활성 `RuleVersion`과 결합해 완전한 immutable 목표 v2 요청으로
+  확정한다. 이후 이 요청을 분석 시작 경계에 전달한다.
 - Rule 분석 시작 뒤에는 External Risk를 다시 조회하거나 기존 입력을 바꾸지
   않는다. `ANALYZED` 이후에는 이미 고정된 근거로 위험 대응만 수행한다.
-- External Risk 조회 실패 시 현재 분석을 계속하지 않는다. 후속 거래 연결에서는
-  거래와 분석 결과를 `FAILED`로 확정하고 기존 외부 오류 매핑을 사용한다. 이 연결과
-  공개 오류 매핑은 아직 구현되지 않았다.
+- External Risk 조회 실패 시 거래는 `RECEIVED`를 유지하고 DetectionResult를
+  생성하지 않으며 FastAPI·위험 대응 최종화를 호출하지 않는다. 멱등 실패를
+  확정한 같은 요청 재생은 Provider를 다시 호출하지 않는다. 이 연결과 공개 오류
+  매핑은 아직 구현되지 않았다.
 - cache·Circuit Breaker·fallback은 별도 Issue와 계약 승인이 필요하다.
+
+필수 v2 JSON, 시간과 canonical match 계약은
+[External Risk·Rule 분석 입력 계약](./external-risk-rule-analysis-input-contract.md)을
+따른다. 현재 v1 요청과 내부 오케스트레이터에는 External Risk 입력이 없다.
 
 ## 7. 분석 시작 쓰기 트랜잭션
 
 분석 시작은 `REQUIRES_NEW`, `REPEATABLE_READ`인 하나의 짧은 DB 쓰기
 트랜잭션으로 처리한다. 최종 거래 접수 목표에서는 상위 거래 흐름에서 External Risk
-조회와 정책 적용을 마친 뒤, 그 결과와 조회 상태를 포함해 고정한 immutable 분석
-입력을 Rule 분석 시작 경계에 전달한다. 시작 경계는 거래 상태와 입력의 소유 관계를
+조회와 정책 적용을 마친 뒤 Snapshot assembly 경계가 완성한 immutable v2 요청을
+Rule 분석 시작 경계에 전달한다. 시작 경계는 거래 상태·입력 소유 관계·시간 계약을
 검증해 분석 시도로 저장한다.
 
 1. `FinancialTransaction`을 pessimistic write lock으로 조회한다.
 2. 거래가 `RECEIVED`인지, 채택 결과가 없는지 확인한다. 이미
    `ANALYZING`이거나 다른 상태면 새 분석을 시작하지 않는다.
-3. 전달받은 거래·행동·RuleVersion·External Risk Snapshot과 불변 분석 버전
-   필드를 검증·확정한다.
+3. 전달받은 완성된 v2 요청의 거래·행동·RuleVersion·External Risk Snapshot과
+   불변 분석 버전 필드를 검증·확정한다.
 4. 같은 거래의 현재 최대 `detectionResultVersion + 1`을 할당한다.
 5. `DetectionResult PENDING`을 생성한다.
 6. outbound 호출 직전 시작 시각을 기록해 `PENDING → IN_PROGRESS`로 전이한다.
@@ -209,7 +221,7 @@ FastAPI 응답의 `analysis.ruleSetVersion`은 이 예상 값과 정확히 같�
 ## 9. 성공 응답 검증
 
 HTTP `200`만으로 성공으로 간주하지 않는다. 저장 전에
-[Rule v1 분석 API](../03-api/rule-v1-analysis-api.md)의 Client 계약에 따라 다음을
+[Rule v1 분석 API](../03-api/rule-v1-analysis-api.md)의 목표 v2 Client 계약에 따라 다음을
 모두 검증한다.
 
 - 지원 HTTP 상태, `application/json`, 단일 `X-Trace-ID`, 본문 trace 일치
@@ -273,8 +285,9 @@ Evidence는 저장하지 않으며 이미 시작한 성공 쓰기 트랜잭션�
 않는다. 거래와 DetectionResult의 `FAILED` commit이 확인된 경우에만 멱등
 레코드를 성공 Snapshot 없이 `FAILED`로 확정한다.
 
-분석 시작 전 실패로 거래가 `RECEIVED`이고 DetectionResult가 생성되지 않은
-것이 확인되면 승인된 내부 코드로 멱등 `FAILED`를 확정할 수 있다. 거래가
+External Risk 실패처럼 분석 시작 전 실패로 거래가 `RECEIVED`이고 DetectionResult가
+생성되지 않은 것이 확인되면 승인된 내부 코드로 멱등 `FAILED`를 확정한다. 같은
+요청 재생은 External Risk Provider를 다시 호출하지 않는다. 거래가
 `ANALYZING`이거나 DetectionResult terminal 상태가 불확실하면 멱등 레코드는
 `IN_PROGRESS`로 유지하고 같은 요청을 자동 재실행하지 않는다. 상태 확인과
 후속 조치는 ADR-006의 운영 복구 원칙을 따른다.
@@ -405,15 +418,19 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
   non-web one-shot 발행 Runner
 - 독립 External Risk Port, 응답 검증·match 기반 정책 Service, local/dev/test 전용
   결정적 Mock과 성공 결과용 immutable 인메모리 Snapshot
+- External Risk 선행 조회와 목표 `POST /api/v2/rule-analysis` 필수 입력·실패
+  경계 문서 계약
 
 ### 15.2 구현되지 않음
 
 - 거래 접수 Service에서 분석 오케스트레이터를 호출하는 전체 연결
 - 상위 거래 흐름에서 거래·행동·RuleVersion 기준을 고정하고 External Risk
   결과·조회 상태를 결합한 입력을 오케스트레이터에 전달하는 연결
+- Java·Python v2 요청 DTO, FastAPI v2 Endpoint와 Backend v2 Client
 - Client 오류 category를 거래 API 공통 오류로 매핑하는 경로
-- 실제 External Risk HTTP Provider와 Snapshot DB 영속화
-- 위험 대응, 최종 거래 상태 전이와 사건 생성·연결
+- 실제 External Risk HTTP Provider
+- ExternalRiskSnapshot DB 영속화는 이번 목표에 포함하지 않으며 별도 승인 대상
+- 거래 접수에서 구현된 위험 대응·최종 거래 상태·사건·감사 경계를 호출하는 연결
 - 최종 동기 응답과 Snapshot v2 codec·멱등 완료 연결
 - Snapshot 완료 간극과 불확실 분석 상태의 운영 복구 실행 경로
 - 공개 RuleVersion 관리 API와 production 발행·일반 버전 배포 관리
@@ -430,10 +447,12 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
 - Snapshot 조합과 canonical hash 선계산, commit된 immutable 요청의
   `RuleAnalysisHttpClient` 전달과 결과 채택은 연결되었지만 최종 거래 접수·멱등
   응답 경로에는 아직 연결되지 않았다.
-- 현재 내부 오케스트레이터는 External Risk가 없는 Rule v1 입력을 분석 시작
-  경계에서 조합한다. 상위 흐름이 External Risk 포함 고정 입력을 선행 구성해
-  전달하는 목표 연결은 아직 구현되지 않았다. 독립 조회 정책·Mock 경계의 구현은
-  이 `RuleAnalysisRequest` 연결을 완료했다는 의미가 아니다.
+- 현재 내부 오케스트레이터와 `POST /api/v1/rule-analysis`는 External Risk가 없는
+  Rule v1 입력을 분석 시작 경계에서 조합한다. 목표 v2는 Provider 호출 뒤 별도
+  Snapshot assembly 경계가 External Risk를 포함한 완성 요청을 만들고 시작 경계에
+  전달한다. 이 변경과 `POST /api/v2/rule-analysis` 호출은 아직 구현되지 않았다.
+  독립 조회 정책·Mock 경계와 이번 문서 계약은 이 `RuleAnalysisRequest` 연결을
+  완료했다는 의미가 아니다.
 - V5 초기 RuleVersion은 항상 모두 `DRAFT`다. 별도 one-shot 명령을 명시적으로
   실행한 local/dev/test 환경에서만 기본 네 버전이 실행 가능해지며, 정상 앱 시작은
   자동 발행하지 않는다.
@@ -446,6 +465,12 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
 - Snapshot 고정 후 생성된 행동 이벤트와 변경된 RuleVersion이 요청에 섞이지
   않는다.
 - FastAPI 호출 중 활성 DB 트랜잭션과 거래 잠금이 없다.
+- External Risk 실패 시 거래는 `RECEIVED`, DetectionResult는 0건이며 FastAPI와
+  위험 대응 최종화가 호출되지 않는다.
+- 같은 멱등 실패 재생은 External Risk Provider를 다시 호출하지 않는다.
+- v2의 External Risk 입력을 추가해도 R001~R004·점수·등급·Evidence와
+  `ruleSetVersion`, `scoring-policy-v1`, `featureVersion=rule-v1`,
+  `modelVersion=null`이 바뀌지 않는다.
 - Client 요청 횟수는 성공·Timeout·오류 모두 정확히 한 번이다.
 - 검증 실패 응답은 Evidence와 채택 결과를 남기지 않는다.
 - 성공 시 Evidence, `COMPLETED`, 채택과 `ANALYZED`가 모두 commit되거나 모두

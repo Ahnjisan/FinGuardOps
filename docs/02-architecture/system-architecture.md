@@ -57,11 +57,10 @@ Spring Boot `RuleAnalysisHttpClient`, Timeout·Trace 전달, 성공·오류 응�
 local/dev/test 결정적 Mock과 immutable 인메모리 성공 Snapshot도 구현되어 있다.
 네 위험 등급별 목표 거래 상태, `RiskResponseOutcome`과 사건 필수 여부를 반환하는
 Spring·DB 비의존 순수 decision 정책도 구현되어 있다.
-거래 접수 Service 연결, External Risk의 Rule 입력 연결,
-위험 대응 정책의 `FinancialTransaction` 적용과 최종 거래 상태 전이,
-대응 결과 영속화, 사건 경계의 거래 최종화 연결, Snapshot v2와 완료 간극 복구,
-감사와 AI 운영
-도메인은 아직 구현되지 않았다.
+거래 접수 Service 연결, External Risk의 목표 v2 Rule 입력 연결, Snapshot v2와
+완료 간극 복구, 감사 조회와 AI 운영 도메인은 아직 구현되지 않았다. 위험 대응
+정책의 `FinancialTransaction` 적용, 필요한 사건·연결, 최종 거래 상태·대응 결과와
+AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 구현되었다.
 
 ### 2.2 문서로 정의됨
 
@@ -108,7 +107,9 @@ FinGuardOps의 아키텍처 목표는 다음과 같다.
 
 거래, 탐지 결과, 위험 대응, 사건, 최종 판정과 감사 로그는 중복되거나 일부만 반영되어서는 안 된다. 상태 전이, 멱등성, 동시성 충돌과 실패 후 재시도는 Spring Boot가 중앙에서 검증한다.
 
-특히 HIGH·CRITICAL 거래의 상태 변경과 사건 생성, 사건 종료와 최종 판정, AI 리포트 상태와 사용량·비용 저장은 일부 결과만 성공했을 때 정합성을 확인할 수 있어야 한다. 구체적인 트랜잭션 및 보상 경계는 후속 설계에서 결정한다.
+특히 HIGH·CRITICAL 거래의 상태 변경·사건 생성·연결·AuditLog는 구현된 REQUIRED
+트랜잭션에서 함께 commit하거나 rollback한다. 사건 종료와 최종 판정, AI 리포트
+상태와 사용량·비용 저장의 정합성 경계는 후속 설계에서 결정한다.
 
 ### 4.2 장애 격리
 
@@ -118,8 +119,9 @@ FastAPI, External Risk Mock, Redis와 LLM Provider의 장애를 동일한 장애
 - AI 리포트 실패는 거래·탐지·사건 처리 실패와 구분한다.
 - Redis 장애는 캐시와 재생성 가능한 데이터의 이용 장애이지 업무 원본 데이터 유실이 아니다.
 - PostgreSQL 장애는 거래·사건·감사 데이터의 기록과 조회에 영향을 주는 핵심 업무 장애이다.
-- FastAPI와 External Risk 실패는 현재 분석을 계속하지 않고 typed failure로
-  전파한다. 거래·분석 `FAILED` 연결의 구현과 재분석·수동 복구는 후속 범위다.
+- FastAPI 실패는 시작된 DetectionResult와 `ANALYZING` 거래의 실패 경계로,
+  External Risk 실패는 시작 전 `RECEIVED` 거래·DetectionResult 미생성 경계로
+  구분한다. 둘 다 정상 결과로 변환하지 않는다.
 
 ### 4.3 변경 주기와 기술 특성
 
@@ -324,8 +326,11 @@ Entity가 아니다. 거래 접수와 FastAPI 분석 입력 연결, 실제 HTTP 
 - FastAPI가 외부 연동과 금융 업무 조정까지 맡아 책임이 과도하게 확대되는 것을 방지한다.
 
 현재 경계는 조회 실패를 위험정보 없음으로 해석하지 않고 typed exception으로
-전파한다. 자동 retry, fallback과 cache는 없으며 실패가 최종 거래 처리에 미치는
-영향과 공개 HTTP 오류 매핑은 상위 오케스트레이션 Issue에서 확정한다.
+전파한다. 승인된 목표 연결은 DB 트랜잭션 밖 선행 조회, 실패 시 거래 `RECEIVED`
+유지·DetectionResult 미생성·FastAPI 미호출을 적용한다. 자동 retry, fallback과
+cache는 없으며 공개 HTTP 오류 매핑 구현은 후속 범위다. 상세 계약은
+[`External Risk·Rule 분석 입력 계약`](../01-requirements/external-risk-rule-analysis-input-contract.md)을
+따른다.
 
 ### 7.5 PostgreSQL
 
@@ -573,9 +578,16 @@ FastAPI의 계산 결과와 LLM Provider의 생성 결과는 업무 원본이 �
 - Spring Boot에서 FastAPI로 Rule·ML 분석 요청
 - Spring Boot에서 PostgreSQL로 핵심 업무 결과 저장
 
-서비스 간 계약에는 전체 업무 Entity가 아니라 목적에 필요한 입력, 결과, 버전과 추적 정보를 전달해야 한다. 구체적인 API 경로와 DTO는 후속 API 설계에서 확정한다.
+서비스 간 계약에는 전체 업무 Entity가 아니라 목적에 필요한 입력, 결과, 버전과
+추적 정보를 전달해야 한다. 현재 Rule wire는 `/api/v1/rule-analysis`, External
+Risk 필수 입력의 목표 wire는 `/api/v2/rule-analysis`이며 exact DTO는
+[`External Risk·Rule 분석 입력 계약`](../01-requirements/external-risk-rule-analysis-input-contract.md)을
+따른다.
 
-현재 거래 접수 흐름은 이 최종 경계에 도달하지 않았다. 거래 접수는 PostgreSQL에
+목표 연결은 `RECEIVED` 거래 저장 commit과 멱등 단일 승자 확정 뒤 External Risk를
+DB 트랜잭션·행 잠금 없이 조회하고, 성공 Snapshot을 목표
+`POST /api/v2/rule-analysis`의 필수 입력에 포함한다. 현재 거래 접수 흐름은 이
+최종 경계에 도달하지 않았다. 거래 접수는 PostgreSQL에
 저장한 뒤 `RECEIVED`와 탐지 관련 null 값을 반환하며 External Risk나 구현된
 내부 Rule 분석 오케스트레이터를 호출하지 않고 위험 대응과 사건 연결도 수행하지
 않는다. 이 단계적 구현 상태는 ADR-003의 최종 동기 처리 결정을 변경하지 않는다.
@@ -614,9 +626,9 @@ Kafka는 다음 조건이 확인된 뒤 이 논리적 비동기 경계를 구현
 Client
 → Spring Boot 거래 접수
 → 입력 검증·멱등성 확인
-→ 거래·행동 데이터 준비
-→ External Risk 조회
-→ FastAPI Rule·ML 분석
+→ RECEIVED 거래 저장 commit
+→ DB 트랜잭션 밖 External Risk 조회·성공 Snapshot 고정
+→ 목표 FastAPI /api/v2/rule-analysis 요청 확정·호출
 → 위험 점수·Reason Code·탐지 근거 반환
 → Spring Boot 위험 대응 결정
 → 거래·탐지 결과 저장
@@ -634,15 +646,21 @@ sequenceDiagram
 
     Client->>Spring: 거래 요청
     Spring->>Spring: 요청 형식·도메인 Validation
-    Spring->>DB: 멱등성 선점·현재 처리 결과 확인 및 거래 저장
+    Spring->>DB: 멱등성 단일 승자·RECEIVED 거래 저장 commit
     Spring->>Risk: 외부 위험정보 조회
-    Risk-->>Spring: 위험정보 또는 조회 상태
-    Spring->>AI: 거래·행동·외부 조회 상태 분석 요청
+    Risk-->>Spring: 성공 immutable Snapshot
+    Spring->>DB: 목표 v2 immutable 입력 조합 read transaction
+    Spring->>DB: 분석 시작·ANALYZING commit
+    Spring->>AI: 목표 v2 거래·행동·RuleVersion·externalRisk 요청
     AI-->>Spring: 위험 점수·Reason Code·근거·버전
     Spring->>Spring: 결과 검증 및 위험 대응 결정
     Spring->>DB: 거래·탐지·사건 연결·감사 기록
     Spring-->>Client: Mock 거래 처리 결과
 ```
+
+External Risk 실패 경로에서는 분석 시작 DB commit과 FastAPI 호출 이후 단계가
+실행되지 않는다. 거래는 `RECEIVED`, DetectionResult·사건·연결·관련 AuditLog는
+없고 멱등 실패만 확정된다. 같은 요청 재생은 Provider를 다시 호출하지 않는다.
 
 거래 상태는 기존 상태 전이 문서의 `RECEIVED`, `ANALYZING`, `ANALYZED`와 최종 처리 상태를 따른다. 요청 형식과 도메인 Validation 실패는 거래로 저장하지 않으며 오류 응답, `traceId`, 로그와 운영 메트릭으로 관측한다. MEDIUM의 모니터링은 별도 위험 대응 결과로 표현하고 AI 리포트 실패로 거래를 `FAILED` 처리하지 않는다.
 
@@ -652,8 +670,8 @@ commit에서 v1으로 확정한다. 결과 채택과 거래 `ANALYZED`는 중간
 연결이 commit된 뒤에만 ADR-006의 Snapshot v2를 확정한다. 최종 업무 commit 뒤
 Snapshot 완료가 실패하면 업무 결과는 유지하고 멱등 레코드는 `IN_PROGRESS`로
 남긴다. 운영 복구는 외부 호출이나 업무 실행 없이 확정된 상태를 검증해 동일한
-Snapshot v2만 확정한다. 위험 대응·사건 연결·Snapshot v2·복구 실행 경로는
-아직 구현되지 않았다. 자세한 계약은
+Snapshot v2만 확정한다. 내부 위험 대응·사건·감사 최종화는 구현되었고, 거래 접수
+전체 연결·Snapshot v2·복구 실행 경로는 아직 구현되지 않았다. 자세한 계약은
 [`ADR-006`](../07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md)을
 따른다.
 
@@ -750,7 +768,7 @@ React는 서비스 상태, 배포 버전, 업무 영향, AI 비용과 장애·�
 | 장애 | 직접 영향 | 유지해야 할 원칙 | 미확정 사항 |
 | --- | --- | --- | --- |
 | FastAPI Timeout | Rule·ML 분석과 후속 위험 대응 실패 | 대상 DetectionResult와 거래를 `FAILED`로 기록하고 결과를 채택하지 않음. Rule v1 Client 자동 retry는 0회 | 실패 후 재분석·수동 복구 계약 |
-| External Risk Timeout·Unavailable·Invalid Response | 외부 위험계좌·기기 근거 사용 불가 | typed failure로 그대로 전파하며 현재 분석을 계속하지 않고 `UNMATCHED`·cache·fallback으로 변환하거나 자동 retry하지 않음 | 거래·분석 `FAILED` 연결과 기존 공개 HTTP 오류 매핑 구현 |
+| External Risk Timeout·Unavailable·Invalid Response | 외부 위험계좌·기기 근거 사용 불가 | 거래 `RECEIVED` 유지, DetectionResult 미생성, FastAPI·최종화 미호출. typed failure를 `UNMATCHED`·cache·fallback으로 변환하거나 자동 retry하지 않음 | 멱등 실패·공개 HTTP 오류 매핑 구현 |
 | LLM Timeout·연결 실패 | AI 사건 리포트 지연·실패 | 같은 `executionId`에서 최대 한 번 자동 재시도한 뒤 Rule·ML 결과 기반 템플릿 fallback. 거래·사건 처리 결과는 변경하지 않음 | 재시도 간격·Timeout 값 `TBD` |
 | 비일시적 LLM Provider 오류 | AI 리포트 생성 실패 | 자동 재시도 없이 템플릿 fallback과 오류·사용량 기록 | 다른 모델 전환 조건은 별도 승인 |
 | LLM 출력 형식 오류 | 리포트 품질 검증 실패 | 오류 출력을 정상 리포트로 표시하거나 자동 재시도하지 않고 템플릿 fallback | 품질 검증 기준 `TBD` |
@@ -859,6 +877,8 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 - 거래 분석 Snapshot 고정, 분석 시작 commit, FastAPI 1회 호출, 응답 변환,
   DetectionResult·Evidence 완료·채택과 거래 `ANALYZED` 전이의 내부
   오케스트레이션
+- `ANALYZED` 거래의 decision·필요한 사건·최종 상태·`RiskResponseOutcome`·
+  AuditLog를 같은 REQUIRED 트랜잭션으로 확정하는 내부 최종화
 - `FraudCase`·`CaseTransaction`과 Flyway V6, 거래 → 사건 → 연결 잠금 순서로
   HIGH·CRITICAL 거래의 새 사건·첫 연결 또는 기존 활성 연결을 원자적으로
   확정하는 내부 persistence boundary
@@ -877,15 +897,16 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 - Spring Boot → FastAPI Rule v1 내부 분석 HTTP API 계약
 - Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약
 - 독립 External Risk Port·정책 Service·결정적 local/dev/test Mock 계약
+- External Risk 선행 조회와 목표 `/api/v2/rule-analysis` 필수 입력·실패 계약
 
 ### 18.3 다음 구현 예정
 
-- 거래 접수 Service와 내부 Rule 분석 오케스트레이터 연결
+- AI Service v2 Endpoint·Java/Python DTO와 Backend v2 Client
+- 비트랜잭션 상위 거래 Service의 External Risk→Rule 분석→최종화 연결
 - RuleVersion publish·운영 준비
-- 위험 대응·최종 거래 상태 전이와 구현된 사건 영속 경계의 통합
 - 최종 Snapshot v2 확정과 완료 간극 운영 복구
 - 감사 조회 API와 기존 업무 Service의 AuditLog 통합
-- 실제 External Risk HTTP Provider와 Snapshot DB 영속화
+- 실제 External Risk HTTP Provider. Snapshot DB 영속화는 별도 승인 시 검토
 - Docker 및 Docker Compose 통합 환경
 
 Redis의 최초 적용 시점은 실제 캐시 필요와 원본 호출 부하를 확인해 사용자가 결정한다.

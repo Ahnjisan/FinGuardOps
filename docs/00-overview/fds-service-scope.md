@@ -1006,6 +1006,12 @@ ATM_WITHDRAWAL_REQUESTED
 - 로그·메트릭·트레이싱 기반 Observability
 - GitHub Actions 기반 CI/CD
 
+External Risk 선행 조회를 Rule v1 실행 입력에 연결하는 목표 계약은
+[`External Risk·Rule 분석 입력 계약`](../01-requirements/external-risk-rule-analysis-input-contract.md)을
+따른다. 현재 wire는 External Risk가 없는 `POST /api/v1/rule-analysis`이고, 목표
+wire는 필수 `externalRisk`를 가진 `POST /api/v2/rule-analysis`다. 문서 계약은
+확정됐지만 Java·Python v2 DTO와 거래 접수 전체 연결은 구현되지 않았다.
+
 - 카드 결제 FDS
 - 증권 거래 FDS
 - 기업 자금 이상거래
@@ -1061,8 +1067,9 @@ ATM_WITHDRAWAL_REQUESTED
 - 두 담당자의 동시 수정을 제어하는가
 - 허용되지 않은 상태 전이를 차단하는가
 - Kafka 도입 이후 메시지 중복 소비에도 결과가 중복 저장되지 않는가
-- External Risk 실패 시 Rule 분석을 시작하지 않고 typed failure와 후속 `FAILED`
-  경계를 유지하는가
+- External Risk 실패 시 거래가 `RECEIVED`를 유지하고 DetectionResult를 만들지
+  않으며 FastAPI를 호출하지 않는가. 멱등 실패 재생은 Provider를 다시 호출하지
+  않는가
 - LLM 장애 시 템플릿 리포트가 생성되는가
 - 동일 사건의 리포트가 불필요하게 재생성되지 않는가
 - 모델 라우팅 정책이 위험도에 맞게 적용되는가

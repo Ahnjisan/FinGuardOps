@@ -18,13 +18,14 @@ Rule 분석 성공 경로에서 DetectionResult `COMPLETED`, Evidence 저장, �
 다음 기능은 구현하지 않는다.
 
 - 거래 접수 Service에서 Spring Boot Rule 분석 실행 경로를 호출하는 연결
-- External Risk와 거래 접수 전체 실행 경로의 연결
+- External Risk와 목표 `POST /api/v2/rule-analysis`·거래 접수 전체 실행 경로의 연결
 - 최종 동기 응답과 Snapshot v2 확정
 - Snapshot 완료 간극 운영 복구
 - RuleVersion 운영 publish
 - ML 추론
 - 외부 탐지 실행 API와 탐지 결과 조회 API
-- 감사 로그와 AI 리포트
+- External Risk Snapshot의 DetectionEvidence·AuditLog 영속화와 AI 리포트 연결.
+  이번 목표에는 포함하지 않으며 별도 승인 대상
 
 FastAPI Rule v1 Endpoint, Spring Boot `RuleAnalysisHttpClient`와 이 영속 모델을
 자동으로 생성·완료·채택하거나 실패로 확정하는 실행 경로는 구현되어 있다.
@@ -38,6 +39,12 @@ Snapshot v2를 확정한다. 이 DetectionResult DB 계약은 Snapshot 완료를
 
 현재 `POST /api/v1/transactions`는 기존 계약대로 Transaction을
 `RECEIVED`로 저장하고 탐지 관련 null을 반환한다.
+
+External Risk는 목표 분석 시작보다 앞선 인메모리 조회다. 실패하면 거래가
+`RECEIVED`를 유지하고 DetectionResult와 DetectionEvidence 행을 생성하지 않으며
+FastAPI도 호출하지 않는다. 성공 Snapshot도 이 물리 모델, AuditLog 또는 별도
+External Risk 테이블에 저장하지 않는다. 따라서 Issue #160 문서 계약에는 신규
+컬럼·테이블·Flyway가 필요하지 않다.
 
 ## 2. 책임 경계
 
@@ -110,6 +117,11 @@ Rule v1 한 실행의 `evaluation_cutoff_at`은 거래 `occurred_at`으로 한 �
 canonical 해시를 계산해 저장하고, 성공 응답 해시와 exact 비교해야 한다.
 현재 Spring Boot 분석 시작 경계와 Client validator에 이 선계산·exact 비교
 경로가 구현되어 있다.
+
+목표 v2 요청에 External Risk를 추가해도 `rule_set_version`은 실행 RuleVersion
+집합의 canonical hash로 유지한다. `scoring_policy_version=scoring-policy-v1`,
+`feature_version=rule-v1`, `model_version=null`과 R001~R004 Evidence 계약도
+변경하지 않는다.
 
 ### 3.3 제약과 인덱스
 
@@ -301,3 +313,7 @@ PostgreSQL 17 Testcontainers에서 Migration 순서, Hibernate validation,
 제약·Trigger, 동시 버전 할당, RuleVersion snapshot 정합성, LAZY 관계,
 rollback과 기존 거래 접수·멱등·Snapshot 회귀를 검증한다. H2 호환
 결과를 근거로 사용하지 않는다.
+
+External Risk v2 연결을 후속 구현할 때도 V1~V7을 수정하거나 Snapshot을
+DetectionEvidence로 저장하지 않는다. 영속·감사 요구가 생기면 별도 DB 계약과
+Migration 승인을 거친다.

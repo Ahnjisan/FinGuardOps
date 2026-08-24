@@ -4,7 +4,9 @@
 
 이 문서는 Spring Boot가 FastAPI AI Service에 Rule v1 분석을 동기 요청하고,
 현재 구현된 `RuleAnalysisResult`를 응답받기 위한 내부 HTTP API 계약을
-정의한다.
+정의한다. 현재 wire는 `POST /api/v1/rule-analysis`, External Risk를 필수로
+결합하는 목표 wire는 `POST /api/v2/rule-analysis`다. v2의 단일 상세 기준은
+[External Risk·Rule 분석 입력 계약](../01-requirements/external-risk-rule-analysis-input-contract.md)이다.
 
 ```text
 Spring Boot
@@ -35,6 +37,8 @@ Spring Boot → FastAPI 내부 서비스 API다. 인증·인가는 아직 구현
 
 ## 2. Endpoint
 
+현재 구현 Endpoint는 다음과 같다.
+
 ```http
 POST /api/v1/rule-analysis
 Content-Type: application/json
@@ -48,6 +52,10 @@ X-Trace-Id: <traceId>
 - 요청과 응답 본문은 UTF-8 JSON을 사용한다.
 - 요청 본문 최대 크기는 1 MiB, 즉 1,048,576 bytes다. 구현된 FastAPI
   Middleware가 실제 수신 byte를 기준으로 이 제한을 적용한다.
+
+목표 `POST /api/v2/rule-analysis`도 Rule v1 엔진을 실행하지만 필수
+`externalRisk` 때문에 v1과 호환되지 않는 새 wire 계약이다. v1은 당장 제거하지
+않고, v1에 optional `externalRisk`나 기본 `UNMATCHED`를 추가하지 않는다.
 
 ## 3. 추적 계약
 
@@ -112,6 +120,8 @@ FastAPI는 Spring Boot 업무 DB를 직접 조회하거나 저장하지 않는�
 ## 5. 요청 DTO
 
 ### 5.1 최상위 구조
+
+다음은 현재 v1의 exact 구조다.
 
 ```text
 RuleAnalysisRequest
@@ -241,6 +251,28 @@ Registry capability를 검증한다. canonical weight는 downstream scoring이,
 검증한다. 사전 검증을 통과한 뒤 scoring 또는 Evidence에서 canonical
 불일치가 다시 발생하면 입력 오류로 재분류하지 않고 `500 INTERNAL_ERROR`인
 서버 내부 불변식 위반으로 처리한다.
+
+### 5.5 목표 v2 External Risk 입력
+
+목표 v2는 현재 네 최상위 필드에 필수·non-null `externalRisk`를 추가한다.
+`externalRisk`는 `providerCode`, `lookupStatus`, `policyResult`, `providerAsOf`,
+`lookedUpAt`, `matches`만 가지며 모든 중첩 DTO는 알 수 없는 필드를 거부한다.
+MATCHED는 canonical match 1~3개, UNMATCHED는 정확히 0개다. exact 필드·Enum·시간,
+중복 거부와 explicit rank 정렬은
+[External Risk·Rule 분석 입력 계약](../01-requirements/external-risk-rule-analysis-input-contract.md)을
+따른다.
+
+v2는 External Risk를 검증하지만 R001~R004 evaluator에는 전달하지 않는다.
+따라서 조건·점수·등급·Evidence, `ruleSetVersion`, `scoring-policy-v1`,
+`featureVersion=rule-v1`, `modelVersion=null`과 기존 성공 응답은 바뀌지 않는다.
+External Risk echo와 전용 hash를 응답에 추가하지 않는다. 이 절은 목표 계약이며
+Java·Python v2 DTO와 Endpoint는 아직 구현되지 않았다.
+
+v2의 JSON 타입·필수·null·Enum·UTC 형식·unknown field 오류는
+`400 INVALID_REQUEST`, match 조합·개수·canonical 순서와 시간 관계 오류는
+`422 RULE_CONTRACT_ERROR`다. Java가 생성한 요청의 이 실패는 거래 API 호출자
+오류가 아니므로 Spring Boot가 `500 INTERNAL_ERROR`로 축약한다. FastAPI는 배열을
+자동 정렬하거나 빈 Snapshot을 `UNMATCHED`로 보정하지 않는다.
 
 ## 6. conditionDefinition exact 계약
 
@@ -546,6 +578,7 @@ evidence = []
 - `sortOrder`
 - `featureVersion`
 - `modelVersion`
+- `externalRisk`와 External Risk 전용 hash
 
 ## 10. 오류 응답
 
@@ -668,9 +701,9 @@ FastAPI Middleware는 `Content-Length`만 신뢰하지 않고 실제 수신 byte
 ## 13. Spring Boot Client 연동 계약
 
 이 절은 Spring Boot가 이 문서의 wire 계약을 호출하는 Client의 단일 상세
-기준이다. 기존 요청·응답 DTO, HTTP 상태와 FastAPI 오류 envelope는 변경하지
-않는다. FastAPI HTTP 경계, Spring Boot Client와 결과 채택·영속화
-오케스트레이션이 구현되어 있다.
+기준이다. 현재 v1 요청·응답 DTO, HTTP 상태와 FastAPI 오류 envelope는 변경하지
+않는다. v1 FastAPI HTTP 경계, Spring Boot Client와 결과 채택·영속화
+오케스트레이션이 구현되어 있다. v2 Client는 후속 구현이다.
 
 ### 13.1 계층과 책임
 
@@ -694,7 +727,9 @@ Client는 Rule 적중 여부, scoring 또는 Evidence를 Java에서 다시 계�
 - Spring Framework의 동기 `RestClient`를 사용한다.
 - 현재 `spring-boot-starter-web` 의존성 안에서 구현하고 WebClient, Reactor,
   Apache HttpClient, Resilience4j 등 신규 의존성을 추가하지 않는다.
-- Endpoint path는 base URL과 분리된 고정값 `/api/v1/rule-analysis`를 사용한다.
+- 현재 Client Endpoint path는 base URL과 분리된 고정값
+  `/api/v1/rule-analysis`를 사용한다. 목표 전환은 `/api/v2/rule-analysis`를
+  사용하며 v1과 v2를 optional 필드로 자동 협상하지 않는다.
 - 하나의 Client 호출은 하나의 HTTP 요청만 수행한다.
 
 ### 13.3 설정 계약
@@ -830,21 +865,24 @@ Spring Boot가 만든 요청·Rule·배포 capability나 upstream 응답 계약�
 
 다음 순서를 지킨다.
 
-1. 상위 거래 처리 흐름이 단일 `evaluationCutoffAt`을 확정한다.
-2. 같은 cutoff로 거래·행동 이벤트·실행 가능한 활성 RuleVersion 기준과 예상
-   `ruleSetVersion`을 고정한다.
+1. 거래 접수와 멱등 단일 승자를 확정하고 `RECEIVED` 거래 저장을 commit한다.
+2. 상위 거래 처리 흐름이 거래 `occurredAt`을 단일 `evaluationCutoffAt`으로
+   사용한다.
 3. 상위 거래 처리 흐름이 DB 트랜잭션과 행 잠금 없이 External Risk를 조회한다.
    현재 승인된 실패 정책은 no retry·no cache·no stale data·no fallback·no
    Circuit Breaker다. timeout·unavailable·invalid response는 typed failure로
    전파하고 Rule 분석을 시작하지 않는다.
-4. External Risk 결과와 조회 상태를 포함한 immutable 분석 입력을 확정해
-   `RuleAnalysisOrchestrationService`에 전달한다. 이 Service는 External Risk를
-   직접 조회하거나 정책을 결정하지 않는다.
-5. 짧은 분석 시작 쓰기 트랜잭션에서 거래를 잠그고 전달받은 Snapshot과 다음
-   DetectionResult 버전을 고정한다.
+4. Provider 호출 뒤 Spring Boot 소유 Snapshot assembly 경계가 짧은 DB read
+   transaction에서 거래·행동 이벤트·실행 가능한 활성 RuleVersion과 External
+   Risk를 완전한 immutable 목표 v2 요청으로 조합한다. DetectionResult와 거래
+   상태는 바꾸지 않는다.
+5. 완성된 요청을 `RuleAnalysisOrchestrationService`에 전달한다. 짧은 분석 시작
+   쓰기 트랜잭션에서 거래를 잠그고 요청의 소유 관계·cutoff·시간을 재검증하며 예상
+   `ruleSetVersion`과 다음 DetectionResult 버전을 고정한다. 이 Service는 External
+   Risk를 직접 조회하거나 정책을 결정하지 않는다.
 6. 같은 트랜잭션에서 DetectionResult `PENDING → IN_PROGRESS`와 거래
    `RECEIVED → ANALYZING`을 commit한다.
-7. DB 트랜잭션과 잠금을 유지하지 않은 상태에서 FastAPI를 정확히 한 번 호출한다.
+7. DB 트랜잭션과 잠금을 유지하지 않은 상태에서 목표 FastAPI v2를 정확히 한 번 호출한다.
 8. 응답 wire 계약, 무결성과 선확정 Snapshot 대응을 검증·변환한다.
 9. 후속 별도 쓰기 트랜잭션에서 Evidence, DetectionResult `COMPLETED`, 결과
    채택과 거래 `ANALYZING → ANALYZED`를 원자적으로 수행한다.
@@ -857,15 +895,15 @@ Spring Boot가 만든 요청·Rule·배포 capability나 upstream 응답 계약�
 
 네트워크 응답을 기다리는 동안 DB 쓰기 트랜잭션과 잠금을 장시간 유지하지
 않는다. 현재 내부 구현은 External Risk가 없는 거래·행동·RuleVersion Snapshot을
-분석 시작 경계에서 조합한 뒤 5~10단계의 시작·HTTP·완료·채택 책임을 수행한다.
-상위 흐름이 1~4단계의 External Risk 포함 입력을 선행 구성해 전달하는 연결과
-11~12단계는 아직 구현되지 않았다. Rule 분석 HTTP 오케스트레이터는 External
+분석 시작 경계에서 조합한 뒤 시작·HTTP·완료·채택 책임을 수행한다. 목표 v2의
+별도 Snapshot assembly와 External Risk 포함 완성 요청 전달, 위험 대응과 Snapshot
+v2 단계는 아직 구현되지 않았다. Rule 분석 HTTP 오케스트레이터는 External
 Risk 조회·정책, 위험 대응, 사건 또는 Snapshot v2를 소유하지 않는다.
 
-현재 FastAPI `RuleAnalysisRequest`에는 External Risk 입력이 없다. Issue #150은
+현재 FastAPI v1 `RuleAnalysisRequest`에는 External Risk 입력이 없다. Issue #150은
 Spring Boot 내부의 독립 Port·Policy Service·local/dev/test Mock·인메모리 성공
 Snapshot만 구현했으며 FastAPI·Python·`RuleAnalysisRequest`를 변경하지 않았다.
-External Risk DTO와 FastAPI 호출 입력의 연결은 후속 Issue에서 별도로 승인한다.
+Issue #160에서 v2 DTO와 FastAPI 호출 입력 계약은 승인했지만 구현은 후속 Issue다.
 
 ### 13.8 로그와 정보 보호
 
@@ -917,9 +955,9 @@ connect·response timeout, 자동 retry 0회, 트랜잭션 밖 HTTP 호출과 �
 ## 14. 현재 구현 이후 제외 범위
 
 - 거래 접수 Service에서 Rule v1 오케스트레이터를 호출하는 연결
-- External Risk 정책과 연동
-- 분석 이후 위험 대응과 최종 거래 상태 전이
-- HIGH·CRITICAL 사건 생성 또는 기존 사건 연결
+- 목표 `/api/v2/rule-analysis` Java·Python DTO·Endpoint·Client와 External Risk 연결
+- 거래 접수에서 구현된 위험 대응·최종 거래 상태·사건·AuditLog 원자적 최종화
+  경계를 호출하는 연결
 - 최종 동기 응답과 Snapshot v2 확정
 - Snapshot 완료 간극 운영 복구
 - RuleVersion publish·운영 준비와 별도 동기화·캐시·배포 산출물

@@ -103,7 +103,7 @@ HIGH와 CRITICAL은 사건 생성 대상이지만, 재처리·연관 거래·사
 
 ### `RECEIVED`
 
-요청 형식과 거래 유형별 도메인 Validation을 통과한 거래가 최초 저장되어 분석 시작을 기다리는 상태이다. 접수 성공이 거래 승인이나 분석 성공을 의미하지 않는다.
+요청 형식과 거래 유형별 도메인 Validation을 통과한 거래가 최초 저장되어 분석 시작을 기다리는 상태이다. 접수 성공이 거래 승인이나 분석 성공을 의미하지 않는다. 목표 거래 연결에서 External Risk 선행 조회가 실패하면 DetectionResult를 만들지 않고 이 상태를 유지한다.
 
 ### `ANALYZING`
 
@@ -186,7 +186,8 @@ HIGH와 CRITICAL의 사건 생성은 거래 상태와 같은 필드에 포함하
 ### `RECEIVED` → `ANALYZING`
 
 - 전이 조건: 요청 검증이 성공하고 거래·행동 이벤트·활성 RuleVersion
-  Snapshot과 실행 식별자가 고정되어 분석을 시작할 수 있다.
+  Snapshot, 성공 External Risk Snapshot과 실행 식별자가 고정되어 분석을 시작할
+  수 있다. External Risk 없는 현재 내부 v1 실행과 목표 v2 연결은 구분한다.
 - 변경 주체: 시스템인 Spring Boot
 - 생성되는 결과: 거래 잠금 아래 할당한 `PENDING` DetectionResult를 같은 쓰기
   트랜잭션에서 `IN_PROGRESS`로 전이한 분석 요청과 추적 가능한 처리 컨텍스트
@@ -411,9 +412,10 @@ v1 Snapshot을 먼저 완료한다. 위험 등급별 목표 상태·대응 결�
 - External Risk timeout·unavailable·invalid response는 위험정보 없음 또는
   `UNMATCHED`로 해석하지 않고 typed failure로 전파하며 현재 분석을 계속하지 않는다.
   cache, stale data와 fallback은 현재 승인 계약에 없다.
-- 후속 거래 접수 연결에서는 External Risk 실패 시 거래와 분석 결과를 `FAILED`로
-  확정하고 기존 외부 의존성 오류 매핑을 사용한다. 이 연결과 공개 오류 매핑은 아직
-  구현되지 않았다.
+- 목표 거래 접수 연결에서는 External Risk 실패 시 거래를 `RECEIVED`로 유지하고
+  DetectionResult를 생성하지 않으며 FastAPI와 위험 대응 최종화를 호출하지 않는다.
+  멱등 레코드는 실패로 확정하고 같은 요청 재생에서는 Provider를 다시 호출하지
+  않는다. 이 연결과 공개 오류 매핑은 아직 구현되지 않았다.
 - DB 저장 결과가 불명확하면 성공으로 임의 처리하지 않는다.
 - 실패 후 재분석·수동 복구는 별도 후속 계약으로 정한다.
 - Rule v1 Client와 External Risk의 자동 retry는 0회다. External Risk cache,
@@ -430,8 +432,11 @@ v1 Snapshot을 먼저 완료한다. 위험 등급별 목표 상태·대응 결�
 - 위험 대응 결과 적용
 - 사건 생성 또는 기존 사건 연결 결과
 - 실패, 재시도, 중복 요청과 멱등 처리 결과
-- 외부 위험정보 조회 성공 상태·Provider 기준 시각 또는 실패 category
 - 운영자에 의한 승인된 수동 조치
+
+External Risk 조회 성공·실패는 민감정보 없는 운영 로그·메트릭 allowlist로
+관측한다. 현재 목표 계약은 External Risk Snapshot을 AuditLog에 저장하지 않으며,
+분석 시작 전 실패에는 거래·사건 관련 AuditLog도 만들지 않는다.
 
 감사 기록에는 다음 정보가 필요하다.
 
@@ -481,7 +486,7 @@ Validation 거절은 Transaction이나 AuditLog 행을 만들지 않는다. 오�
 다음 범위는 아직 구현되지 않았으며 후속 사용자 승인이 필요하다.
 
 - 거래 접수 전체 흐름 연결
-- External Risk 결과를 포함한 분석 입력 연결
+- External Risk 결과를 포함한 목표 `POST /api/v2/rule-analysis` 입력 연결
 - Snapshot v2 확정
 - Snapshot 완료 간극 운영 복구
 - 공개 최종화·사건·AuditLog API

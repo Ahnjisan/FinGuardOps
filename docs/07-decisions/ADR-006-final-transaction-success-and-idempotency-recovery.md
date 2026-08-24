@@ -7,6 +7,7 @@
   - [`ADR-003-transaction-processing-boundary.md`](./ADR-003-transaction-processing-boundary.md)
   - [`ADR-004-idempotency-response-snapshot-transition.md`](./ADR-004-idempotency-response-snapshot-transition.md)
   - [`../01-requirements/spring-rule-analysis-orchestration-contract.md`](../01-requirements/spring-rule-analysis-orchestration-contract.md)
+  - [`../01-requirements/external-risk-rule-analysis-input-contract.md`](../01-requirements/external-risk-rule-analysis-input-contract.md)
   - [`../01-requirements/transaction-state-transition.md`](../01-requirements/transaction-state-transition.md)
   - [`../03-api/transaction-detection-api.md`](../03-api/transaction-detection-api.md)
   - [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)
@@ -219,9 +220,12 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
   연결되기 전에는 최종 거래 접수 연결을 구현 완료로 표시하지 않는다.
 - External Risk timeout·unavailable·invalid response는 현재 분석을 계속하지 않고
   typed failure로 전파한다. cache, stale data, fallback과 `UNMATCHED` 변환은 없다.
-- 후속 거래 접수 연결에서는 거래와 분석 결과를 `FAILED`로 확정하고 기존 외부
-  오류 매핑을 사용한다. cache·Circuit Breaker·fallback은 별도 Issue와 계약
-  승인 없이는 도입하지 않는다.
+- 목표 거래 접수 연결에서는 `RECEIVED` 거래 저장 commit 뒤 DB 트랜잭션 밖에서
+  조회하고 성공 Snapshot만 목표 `POST /api/v2/rule-analysis` 입력으로 전달한다.
+- External Risk 실패 시 거래는 `RECEIVED`, DetectionResult는 미생성이며 FastAPI,
+  위험 대응 최종화와 성공 Snapshot v2를 호출·생성하지 않는다. 멱등 `FAILED`를
+  확정한 같은 요청 재생은 Provider를 다시 호출하지 않는다.
+- cache·Circuit Breaker·fallback은 별도 Issue와 계약 승인 없이는 도입하지 않는다.
 - V5의 `DRAFT` RuleVersion을 자동 실행하거나 암묵적으로 publish하지 않는다.
 - 기본 RuleVersion의 원자적 발행 경계와 제한된 local/dev/test one-shot 명령은
   구현되었지만 정상 시작 자동 발행과 production 실험값 발행은 없다.
@@ -250,8 +254,9 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
 ### 구현되지 않음
 
 - 거래 접수 Service와 Rule 분석 오케스트레이터 연결
-- 실제 External Risk HTTP Provider, FastAPI 입력·거래 접수 연결, 공개 오류 매핑과
-  Snapshot DB 영속화
+- 실제 External Risk HTTP Provider, 목표 v2 FastAPI 입력·거래 접수 연결과 공개
+  오류 매핑. 승인된 v2 wire는 아직 코드로 구현되지 않음
+- ExternalRiskSnapshot DB 영속화는 이번 목표에 포함하지 않으며 별도 승인 대상
 - 최종 v2 Snapshot codec과 거래 접수 완료 연결
 - Snapshot 완료 간극과 불확실 분석 상태의 운영 복구 실행 경로
 - RuleVersion 운영 publish 준비
@@ -260,7 +265,7 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
 
 1. 구현된 위험 대응 decision을 거래에 적용하고 최종 상태 전이 구현 — 완료
 2. AuditLog 계약과 물리 모델 및 내부 최종화 통합 — 완료
-3. 거래 접수–External Risk–Rule 분석–위험 대응–사건–Snapshot v2 연결
+3. AI Service v2·Java/Python DTO와 거래 접수–External Risk–Rule 분석–위험 대응–사건 연결
 4. Snapshot 완료 간극 운영 복구 구현
 
 각 단계는 이전 단계의 계약과 상태를 임시 기본값으로 대체하지 않는다. 4단계가

@@ -16,8 +16,9 @@
 Client
 → Spring Boot 거래 접수
 → 입력 검증·멱등성 확인
-→ External Risk 조회
-→ FastAPI Rule·ML 분석
+→ RECEIVED 거래 저장 commit
+→ DB 트랜잭션 밖 External Risk 조회
+→ 성공 Snapshot을 포함한 목표 FastAPI /api/v2/rule-analysis 호출
 → Spring Boot 결과 검증·저장·채택
 → Spring Boot 위험 대응 결정
 → 필요 시 사건 생성 또는 기존 사건 연결
@@ -43,6 +44,12 @@ decision 정책과 이를 거래 Entity에 적용하는 내부 경계가 구현�
 HIGH·CRITICAL은 새 사건·첫 연결 또는 기존 활성 연결을 최종 상태와 함께 확정한다.
 이 내부 경계는 Controller나 공개 API를 추가하지 않으며 거래 접수에는 연결되지 않았다.
 
+목표 `POST /api/v2/rule-analysis`는 External Risk를 필수 입력으로 받지만 계속
+Rule v1 R001~R004를 실행한다. 현재 v1 Endpoint는 당장 제거하지 않으며 v2
+Java·Python DTO·Client와 상위 연결은 미구현이다. 상세 계약은
+[External Risk·Rule 분석 입력 계약](../01-requirements/external-risk-rule-analysis-input-contract.md)을
+따른다.
+
 ### 2.2 Spring Boot 책임
 
 다음 항목은 최종 책임 범위이며, 현재 구현된 거래·행동 이벤트 접수 범위와 미구현 탐지 범위를 구분해야 한다.
@@ -51,6 +58,8 @@ HIGH·CRITICAL은 새 사건·첫 연결 또는 기존 활성 연결을 최종 �
 - 거래 생성 요청의 멱등성과 `transactionId` 중복을 관리한다.
 - 행동 이벤트의 `eventId` 중복을 관리한다.
 - External Risk Mock을 조회하고 조회 상태를 관리한다.
+- External Risk Provider 호출 전에 멱등 단일 승자를 확정하고 호출 중 DB
+  트랜잭션과 거래 잠금을 유지하지 않는다.
 - FastAPI 분석 호출을 오케스트레이션한다.
 - FastAPI가 반환한 결과의 요청 연결, 완전성, 버전과 처리 가능 여부를 검증한다.
 - DetectionResult와 DetectionEvidence를 저장한다.
@@ -65,8 +74,9 @@ HIGH·CRITICAL은 새 사건·첫 연결 또는 기존 활성 연결을 최종 �
 다음 항목은 목표 책임 범위이다. 현재 `ai-service/`에는 R001~R004 실행,
 scoring, Evidence 변환과 Rule 분석 결과 조합의 내부 경로에 더해 Pydantic
 요청·응답 DTO와 FastAPI `POST /api/v1/rule-analysis` HTTP 경계가 구현되어
-있다. Spring Boot Client도 구현되어 있으나 자동 DetectionResult 채택·영속화와
-ML은 아직 구현되지 않았다. 상세 Client 계약은
+있다. Spring Boot Client와 내부 DetectionResult 생성·채택·영속화도
+구현되어 있으나 거래 접수·External Risk v2 연결과 ML은 아직 구현되지 않았다.
+상세 Client 계약은
 [Rule v1 내부 분석 API](./rule-v1-analysis-api.md#13-spring-boot-client-연동-계약)를
 따른다.
 
@@ -420,8 +430,11 @@ FastAPI, External Risk, 위험 대응과 사건 생성을 반복하지 않는다
   `INVALID_RESPONSE` typed failure로 전파하고 현재 분석을 계속하지 않는다.
 - 실패를 cache, stale data, fallback, `UNMATCHED`, 위험정보 없음 또는 안전으로
   변환하지 않는다. 현재 `ExternalRiskSnapshot`은 성공 결과만 표현한다.
-- 후속 거래 접수 연결에서는 Transaction과 분석 결과를 `FAILED`로 확정하고 사건을
-  생성하지 않으며 기존 외부 의존성 오류 매핑을 사용한다.
+- 목표 거래 접수 연결에서는 Transaction을 `RECEIVED`로 유지하고 DetectionResult를
+  생성하지 않으며 FastAPI·위험 대응 최종화를 호출하지 않는다. 성공 Snapshot v2와
+  사건·AuditLog도 만들지 않는다.
+- 멱등 레코드는 실패를 확정하고 같은 operation scope·key·fingerprint 재생에서
+  Provider를 다시 호출하지 않는다.
 - timeout은 `503 Service Unavailable`과 `DEPENDENCY_TIMEOUT`, unavailable은
   `503 Service Unavailable`과 `DEPENDENCY_UNAVAILABLE`을 사용한다. 이 공개 매핑과
   거래 연결은 아직 구현되지 않았다.
@@ -1196,6 +1209,9 @@ Content-Type: application/json
 - Snapshot에는 cache·fallback·stale data·retry·실패 상태·`traceId`, 실제
   고객·계좌·기기 reference와 Provider 원문을 포함하지 않는다. External Risk
   실패 시 Snapshot을 생성하지 않고 typed exception을 전파한다.
+- 목표 v2 `externalRisk`에는 Provider·정책·시각과 제한된 match만 포함하며 기존
+  거래·행동의 비식별 reference를 중복하지 않는다. Snapshot과 v2 요청은 DB,
+  DetectionEvidence 또는 AuditLog에 저장하지 않는다.
 - Provider 응답 원문, 인증정보와 내부 예외 원문을 응답에 포함하지 않는다.
 
 ## 16. 사용자 결정 필요 항목
@@ -1206,12 +1222,17 @@ Content-Type: application/json
 
 ### 16.2 거래
 
-후속 거래 오케스트레이션 연결에서는 External Risk timeout·unavailable·invalid
-response 발생 시 분석을 계속하지 않고 거래와 해당 분석 결과를 `FAILED`로 확정한다.
-결과를 채택하거나 성공 Snapshot으로 변환하지 않는다. timeout은
+확정된 목표 계약은 다음과 같다.
+
+승인된 목표 거래 오케스트레이션은 External Risk timeout·unavailable·invalid
+response 발생 시 분석을 시작하지 않고 거래 `RECEIVED`를 유지하며 DetectionResult를
+생성하지 않는다. FastAPI·최종화·성공 Snapshot v2를 호출하거나 만들지 않는다.
+timeout은
 `DEPENDENCY_TIMEOUT`, unavailable은 `DEPENDENCY_UNAVAILABLE`, 계약·검증·변환
-오류는 `INTERNAL_ERROR`로 매핑한다. 이 거래 상태 전이와 공개 오류 매핑은 Issue
-#150에서 아직 구현되지 않았다.
+오류는 `INTERNAL_ERROR`로 매핑한다. 이 멱등 실패 연결과 공개 오류 매핑은 아직
+구현되지 않았다.
+
+다음은 아직 사용자 결정이 필요하다.
 
 - `FAILED` 거래의 재분석 허용 여부, 수동 복구 절차, 운영자 재처리 권한과 감사 방식
 - External Risk cache·Circuit Breaker·fallback 도입 여부. 별도 Issue와 계약 승인 필요

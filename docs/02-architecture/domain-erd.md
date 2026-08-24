@@ -22,8 +22,13 @@
 구현했다. 거래·멱등·행동 이벤트, `DetectionResult`·`DetectionEvidence`와
 분리된 `FraudRule`·`RuleVersion`, `FraudCase`·`CaseTransaction`, append-only
 `AuditLog`는 PostgreSQL 애플리케이션 연동과 Flyway 스키마가 구현되어 있다.
-Rule 실행, 공개 행동 이벤트 조회 API, 사건 조사·감사 조회 API, AI 운영
-엔티티와 운영 PostgreSQL 배포 환경은 아직 구현되지 않았다.
+FastAPI `POST /api/v1/rule-analysis`, R001~R004 실행·점수·RiskLevel·Evidence
+계산과 Spring Boot Rule 분석 HTTP Client·내부 오케스트레이션, 기본 Rule 집합
+발행 경계와 위험 대응·사건·AuditLog 원자적 최종화 경계도 구현되어 있다.
+External Risk가 포함된 v2 입력·실제 Provider·영속화·거래 접수 전체 연결,
+Snapshot v2와 운영 복구, 공개 행동 이벤트·사건·감사·최종화 API, USER 인증·인가,
+사건 조사 상태 전이·추가 거래 연결·병합·분리, AI 운영 엔티티와 운영 PostgreSQL
+배포 환경은 아직 구현되지 않았다.
 
 ## 2. 설계 범위와 제외 범위
 
@@ -32,11 +37,13 @@ Rule 실행, 공개 행동 이벤트 조회 API, 사건 조사·감사 조회 AP
 핵심 설계 범위는 다음과 같다.
 
 - 거래·행동: `Transaction`, `BehaviorEvent`
-- 탐지: `DetectionResult`, `DetectionEvidence`, `FraudRule`, `RuleVersion`, `ExternalRiskSnapshot`
+- 탐지: `DetectionResult`, `DetectionEvidence`, `FraudRule`, `RuleVersion`
 - 사건: `FraudCase`, `CaseTransaction`, `CaseNote`, `AuditLog`
 - AI 운영: `AiReportRequest`, `AiReportExecution`, `ProviderCallAttempt`, `AiReport`
 
-`ExternalRiskSnapshot`은 외부 위험계좌·기기 근거의 재현을 위해 초기 핵심 엔티티에 포함하는 방향을 권장한다. 현재 cache·fallback·IP 정책은 없으며 구체적인 영속 속성, 보존 기간과 보호 방식은 후속 설계에서 확정한다.
+`ExternalRiskSnapshot`은 ERD의 영속 Entity가 아니다. External Risk 성공 결과를
+목표 Rule v2 요청으로 조립하는 동안만 사용하는 immutable 인메모리 값이며
+PostgreSQL·DetectionEvidence·AuditLog에 저장하지 않는다.
 
 다음 엔티티는 필요성과 적용 범위를 구분해 관리한다.
 
@@ -210,7 +217,6 @@ PostgreSQL에 저장하는 거래·탐지·사건·감사·AI 사용량은 업�
 | `AiReportExecution` | 정확 일치 조건에 대한 실제 논리 실행과 최종 실행 상태 관리 | 핵심 후보 |
 | `ProviderCallAttempt` | 실행 중 발생한 실제 Provider 호출별 토큰·지연·비용·결과 기록 | 핵심 후보 |
 | `AiReport` | 검증된 LLM 또는 템플릿 fallback 결과 본문과 최초 생성 출처 보존 | 핵심 후보 |
-| `ExternalRiskSnapshot` | 탐지 당시 외부 위험정보 성공 조회의 최소 스냅샷 | 초기 핵심 권장 |
 | `IdempotencyRecord` | 요청의 처리 중·완료·실패와 완료 응답 재사용 정보 | 거래 접수 확정, 다른 API 후보 |
 | 최소 `Customer`·`Account` 참조 엔티티 | 테스트·Mock 관계의 외래 키 정합성 보조 | 후보 |
 
@@ -421,13 +427,15 @@ BEHAVIOR_PATTERN
 | `displayDescription` | 민감정보를 제외한 담당자 표시 설명 |
 | `scoreContribution` | 최종 점수에 대한 기여도 후보 |
 | Rule 버전 참조 | RULE 근거가 사용한 정확한 Rule 버전 |
-| ExternalRiskSnapshot 참조 후보 | 외부 위험 근거가 사용한 최소 스냅샷 |
 | `observationSummary` | 필요한 관측값 또는 Feature의 제한된 요약 |
 | `evidenceOccurredAt` | 근거가 관측되거나 확정된 시각 |
 | `sortOrder` | 화면에서 근거를 안정적으로 정렬하는 후보 |
 | `createdAt` | 근거 저장 시각 |
 
 Feature 전체 벡터, 원문 행동 로그, 실제 계좌번호, 원문 IP와 LLM 입력 전체를 근거에 무제한 저장하지 않는다. 재현에 필요한 Feature 버전과 제한된 요약을 저장하고, 상세 Feature 보존이 필요하면 별도 보안·보존 설계를 거쳐야 한다.
+
+`EXTERNAL_RISK` Evidence는 향후 별도 계약 후보일 뿐 Issue #160의 목표 v2 연결은
+DetectionEvidence를 생성하거나 `ExternalRiskSnapshot`을 참조하지 않는다.
 
 Rule v1의 행동 기반 근거는 선택된 `BehaviorEvent`의 내부 `BIGINT` PK가 아니라
 canonical lowercase UUID v4 업무 ID를 `observationSummary`에 기록한다. R002와
@@ -468,40 +476,27 @@ Code·가중치 snapshot을 함께 저장한다. 신규 생성은 PUBLISHED 버�
 
 R001~R004의 DRAFT seed와 상세 물리 계약은
 [FraudRule·RuleVersion DB 계약](../04-database/fraud-rule-version-schema.md)을
-따른다. Rule 실행과 공개 관리 API는 아직 구현되지 않았다.
+따른다. 기본 Rule 집합 발행 경계, FastAPI Rule v1 R001~R004 실행과
+Spring Boot Rule 분석 HTTP Client·내부 오케스트레이션은 구현되었다. 공개 Rule
+관리와 production 일반 발행, External Risk가 포함된 v2 입력·거래 접수 전체 연결은
+아직 구현되지 않았다.
 
-### 7.6 ExternalRiskSnapshot
+### 7.6 비영속 ExternalRiskSnapshot
 
-`ExternalRiskSnapshot`은 위험계좌·기기 조회의 원본 전체가 아니라 탐지 시점에 실제 사용한 최소 정보를 보존한다. 외부 위험 근거의 재현을 지원하므로 초기 핵심 엔티티로 포함하는 방향을 권장한다. cache·fallback·IP 정책은 현재 계약이 아니며 도입하려면 별도 Issue와 계약 승인이 필요하다.
+현재 구현된 `ExternalRiskSnapshot`은 Issue #150의 성공 조회 결과용 immutable
+인메모리 값 객체다. Issue #160의 목표 연결은 이를 거래·행동 이벤트·RuleVersion과
+조합해 `POST /api/v2/rule-analysis` 요청을 완성하는 동안만 사용한다. exact v2
+필드와 시간·canonical match 계약은
+[External Risk·Rule 분석 입력 계약](../01-requirements/external-risk-rule-analysis-input-contract.md)을
+따른다.
 
-현재 구현된 `ExternalRiskSnapshot`은 Issue #150의 성공 결과용 immutable 인메모리
-값 객체다. `transactionId`, `evaluationCutoffAt`, `lookedUpAt`, `providerCode`,
-`providerAsOf`, `SUCCEEDED` 조회 상태, match 기반 `MATCHED`/`UNMATCHED` 결과와
-제한된 match 목록만 가진다. `traceId`는 호출 경계까지만 전달하고 실제
-고객·계좌·기기 reference와 함께 업무 Snapshot 및 목표 영속 모델에 저장하지
-않는다. 이 절과 Mermaid의 Entity·관계는 목표 영속 모델이며 현재 JPA Entity나
-DB 테이블이 구현되었다는 의미가 아니다. IP·피싱, cache·fallback과 실패 Snapshot도
-현재 구현 범위가 아니다.
+`ExternalRiskSnapshot`은 PostgreSQL Entity가 아니며 별도 Repository·테이블·FK가
+없다. DetectionEvidence, AuditLog와 최종 멱등 Snapshot v2에도 저장하지 않는다.
+실제 고객·계좌·기기 reference, `traceId`와 Provider 원문도 포함하지 않는다.
+V1~V7 Migration은 변경하지 않고 신규 Flyway Migration을 추가하지 않는다.
 
-저장 목적은 다음과 같다.
-
-- 탐지 시점의 외부 위험정보를 재현한다.
-- 외부 데이터가 변경·정정된 뒤에도 당시 판단 근거를 감사할 수 있다.
-- 현재 성공 조회의 Provider 기준 시각과 match 근거를 구분한다.
-
-속성 후보는 다음과 같다.
-
-- 스냅샷 식별자
-- 대상 유형과 비식별 대상 참조값
-- 외부 위험 유형과 일치 여부
-- 외부 Reason Code 또는 제한된 설명
-- 제공자 기준 시각과 유효 기준 후보
-- 조회 시각
-- 조회 결과 상태
-- match 기반 정책 결과와 제한된 match 목록
-- 관련 `transactionId`와 DetectionResult
-
-외부 Provider 응답 원문 전체, 실제 계좌번호·IP·기기 식별자 원문과 불필요한 Provider 데이터는 저장하지 않는다. 목표 영속 모델의 구체 속성, 실패·cache 상태, 보존 기간과 암호화 방식은 후속 설계에서 사용자 승인으로 확정한다. `traceId`는 로그·추적에 전달하되 Snapshot에는 저장하지 않는다.
+External Risk 영속화·감사·복구가 필요해지면 별도 Issue와 DB 계약 승인을 받아야
+한다. IP·피싱, cache·fallback과 실패 Snapshot도 현재 계약에 포함하지 않는다.
 
 ### 7.7 FraudCase
 
@@ -881,7 +876,6 @@ API에서 캐시 요청의 토큰 합계를 0으로 보여줄 수는 있지만 �
 | Transaction–채택 DetectionResult | Transaction 1 : DetectionResult 0..1 | `adoptedDetectionResultId`가 같은 거래의 COMPLETED 결과를 가리키는 부분 관계 |
 | DetectionResult–DetectionEvidence | 1 : 0..N | 하나의 결과에 여러 설명 근거가 존재 |
 | FraudRule/RuleVersion–DetectionEvidence | Rule 버전 1 : Evidence 0..N, Evidence 참조는 0..1 | RULE 유형 근거만 특정 Rule 버전을 참조 |
-| DetectionResult–ExternalRiskSnapshot | 1 : 0..N | 분석 당시 여러 계좌·IP·기기 조회 결과의 최소 스냅샷을 사용할 수 있음 |
 | FraudCase–CaseTransaction | 1 : 1..N 후보 | 사건은 하나 이상의 거래를 조사하는 것을 기본으로 함 |
 | Transaction–CaseTransaction | 1 : 0..N | 한 거래가 사건에 연결되지 않거나 정책상 여러 사건에 연결될 수 있음 |
 | FraudCase–CaseNote | 1 : 0..N | 사건 조사 중 여러 메모 작성 가능 |
@@ -910,8 +904,8 @@ Transaction–CaseTransaction의 1:N 관계는 과거 `CLOSED` 사건 연결을 
 
 다음 그림은 핵심 식별자와 관계 중심의 논리 ERD이다. 거래·멱등·행동과
 DetectionResult·DetectionEvidence의 PostgreSQL 타입과 제약은 각각의
-전용 물리 계약을 우선한다. `ExternalRiskSnapshot`은 초기 핵심 권장
-방향이고 `AiReportExecution`과 `DetectionResult`의 관계는 대표 탐지
+전용 물리 계약을 우선한다. 비영속 `ExternalRiskSnapshot`은 ERD Entity나 관계로
+표시하지 않는다. `AiReportExecution`과 `DetectionResult`의 관계는 대표 탐지
 결과를 사용하는 초기 대안만 표시한다.
 
 ```mermaid
@@ -960,13 +954,6 @@ erDiagram
         string ruleCode
         string version
         boolean active
-    }
-
-    EXTERNAL_RISK_SNAPSHOT {
-        string snapshotId PK
-        string detectionResultRef FK
-        string subjectType
-        string lookupStatus
     }
 
     FRAUD_CASE {
@@ -1095,7 +1082,6 @@ erDiagram
     TRANSACTION o|--o| DETECTION_RESULT : "채택 결과 후보"
     DETECTION_RESULT ||--o{ DETECTION_EVIDENCE : "근거 포함"
     FRAUD_RULE o|--o{ DETECTION_EVIDENCE : "RULE 근거 참조"
-    DETECTION_RESULT ||--o{ EXTERNAL_RISK_SNAPSHOT : "최소 조회 스냅샷"
     FRAUD_CASE ||--|{ CASE_TRANSACTION : "거래 묶음"
     TRANSACTION ||--o{ CASE_TRANSACTION : "사건 연결"
     FRAUD_CASE ||--o{ CASE_NOTE : "조사 메모"
@@ -1228,7 +1214,7 @@ caseId
 + modelVersion
 ```
 
-초기 정확 일치 기준은 현재 단일·대표 결과의 네 요소를 유지한다. 복수 거래 사건에는 연결 거래, 각 거래의 채택 DetectionResult, 행동 타임라인 범위, ExternalRiskSnapshot과 입력 축약 규칙을 묶은 불변 `caseAnalysisSnapshotVersion`을 후속 확장 후보로 검토한다. 이 후보의 실제 도입 여부와 전환 범위는 별도 사용자 결정 사항이다.
+초기 정확 일치 기준은 현재 단일·대표 결과의 네 요소를 유지한다. 복수 거래 사건에는 연결 거래, 각 거래의 채택 DetectionResult, 행동 타임라인 범위와 입력 축약 규칙을 묶은 불변 `caseAnalysisSnapshotVersion`을 후속 확장 후보로 검토한다. External Risk 입력을 이 영속 버전 조건에 포함하려면 별도 영속·보안 계약 승인이 필요하다. 이 후보의 실제 도입 여부와 전환 범위는 별도 사용자 결정 사항이다.
 
 ### 11.4 동시성 버전
 
@@ -1497,11 +1483,14 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 - IP 원문이 필요한지 먼저 검토하고, 국가·지역·해외 여부·위험 여부 같은 축약 신호로 충분한지 비교한다.
 - 여러 계좌 접근 분석을 위해 기기·IP 연결성이 필요하더라도 보존 기간과 접근 범위를 별도 설계한다.
 
-### 16.3 DetectionEvidence와 ExternalRiskSnapshot
+### 16.3 DetectionEvidence와 비영속 ExternalRiskSnapshot
 
-- Feature 전체 원문과 외부 Provider 응답 전체를 저장하지 않는다.
-- 재현에 필요한 Reason Code, 제한된 관측값, 버전과 기준 시각을 저장한다.
-- 외부 위험 대상은 비식별 참조값으로 연결한다.
+- DetectionEvidence는 승인된 Rule 근거의 Reason Code, 제한된 관측값, 버전과 기준
+  시각을 저장하며 Feature 전체 원문을 저장하지 않는다.
+- Issue #160의 `ExternalRiskSnapshot`은 v2 요청 조립 중에만 유지하고 DB,
+  DetectionEvidence와 AuditLog에 저장하지 않는다.
+- External Risk 실제 reference, `traceId`와 Provider 요청·응답 원문을 Snapshot이나
+  영속 근거에 포함하지 않는다.
 
 ### 16.4 LLM 입력과 AI 이력
 
@@ -1626,7 +1615,6 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 | Transaction·BehaviorEvent | 조사·감사·개인정보 최소화 요구를 함께 고려해 기간 결정 |
 | DetectionResult·DetectionEvidence | 사건과 판정 근거가 남아 있는 동안 버전 보존 필요 |
 | FraudRule/RuleVersion | 과거 근거가 참조하는 버전은 물리 삭제 방지 |
-| ExternalRiskSnapshot | 외부 원문이 아닌 최소 스냅샷만 필요한 기간 보존 |
 | FraudCase·CaseTransaction | 사건 이력과 병합·분리 정책을 고려해 보존 |
 | CaseNote | 수정·논리 삭제·정정 메모 정책과 감사 원문 보존 여부 결정 |
 | AuditLog | 임의 수정·삭제를 전제로 하지 않으며 별도 접근·보존 정책 필요 |
@@ -1653,8 +1641,9 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 - Feature 요약 보존 범위와 Feature 버전 관리 방식
 - Rule 변경 승인 주체와 별도 AuditLog 연결 방식
 - PUBLISHED 적용 종료·신규 버전 게시를 외부 관리 기능에서 노출할 방식
-- ExternalRiskSnapshot의 구체 속성, 보존 기간, 참조 범위와 암호화 방식
-- 외부 위험정보 정정 후 기존 탐지·사건 근거 갱신 방식
+- External Risk 영속화·감사·복구가 향후 필요할 경우 별도 Issue와 DB 계약으로
+  승인할 범위
+- 별도 영속 승인이 있는 경우에만 검토할 외부 위험정보 정정과 기존 근거 관계
 
 ### 사건
 
@@ -1739,7 +1728,9 @@ Rule 물리 모델의 `FraudRule`·`RuleVersion`과 사건 영속 기반의
 
 ### 20.3 마이그레이션·DB 제약 설계
 
-- 구현된 거래·행동·탐지·Rule V1~V5와 사건 V6 이후 감사·AI 운영 Flyway Migration 설계
+- 구현된 거래·행동·탐지·Rule·사건·AuditLog V1~V7은 변경하지 않으며 External
+  Risk를 위한 신규 Flyway Migration을 추가하지 않음
+- V7 이후 사건 조사·AI 운영 DDL은 각 별도 승인 범위
 - 향후 Snapshot metadata 조회·인덱스 또는 DB 수준 version 제약이 필요할 때의 새 Migration 여부
 - 이 문서의 Unique 후보를 실제 제약으로 적용할 범위
 - `adoptedDetectionResultId`가 같은 Transaction의 DetectionResult만 참조하도록 보장하는 방식
@@ -1764,8 +1755,9 @@ seed와 DetectionEvidence nullable RuleVersion FK를 additive하게 추가하며
 V1~V4를 수정하거나 기존 Evidence를 backfill하지 않는다.
 V6는 `fraud_case`·`case_transaction`과 승인된 FK·Unique·Check·Index를
 additive하게 구현한다. V7은 승인된 네 action의 append-only AuditLog 물리 기반을
-additive하게 구현한다. 사건 조사 메모와 AI 운영 DDL, 실제 업무 Service와 AuditLog의
-통합은 별도 승인 작업이다.
+additive하게 구현한다. External Risk 비영속 v2 입력 계약은 V1~V7을 수정하거나
+신규 Migration을 요구하지 않는다. 사건 조사 메모와 AI 운영 DDL은 별도 승인
+작업이다.
 
 ### 20.4 트랜잭션·동시성 설계
 

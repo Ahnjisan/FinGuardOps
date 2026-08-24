@@ -10,6 +10,7 @@
   - [`ADR-006-final-transaction-success-and-idempotency-recovery.md`](./ADR-006-final-transaction-success-and-idempotency-recovery.md)
   - [`../03-api/api-conventions.md`](../03-api/api-conventions.md)
   - [`../03-api/transaction-detection-api.md`](../03-api/transaction-detection-api.md)
+  - [`../01-requirements/external-risk-rule-analysis-input-contract.md`](../01-requirements/external-risk-rule-analysis-input-contract.md)
   - [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)
   - [`../02-architecture/domain-erd.md`](../02-architecture/domain-erd.md)
 
@@ -249,6 +250,11 @@ legacy Snapshot은 엄격한 legacy codec으로만 복원하고 신규 envelope�
 
 현재 구현은 `DUPLICATE_TRANSACTION`, `DEPENDENCY_TIMEOUT`만 기존 HTTP 상태·공개 code·고정 message로 재현한다. ADR-006의 최종 연결에서는 `DEPENDENCY_UNAVAILABLE`도 `503 Service Unavailable`, `DEPENDENCY_UNAVAILABLE`, `탐지 서비스를 사용할 수 없습니다.`로 재현하고, 계약·payload·capability·invalid response·내부 오류와 mapping·adoption·transaction boundary 오류는 `500 Internal Server Error`, `INTERNAL_ERROR`로 축약한다. 저장된 Client category, 원본 FastAPI 오류와 민감정보는 공개하지 않는다.
 
+External Risk 실패는 분석 시작 전 확정 실패다. 목표 연결은 거래 `RECEIVED`와
+DetectionResult 미생성을 확인한 뒤 멱등 레코드를 승인된 `failureCode`로
+`FAILED` 처리한다. 같은 키·fingerprint 재생은 저장된 실패를 반환하며 External
+Risk Provider, FastAPI, 위험 대응과 사건을 다시 호출하지 않는다.
+
 실패 응답 전체를 성공 Snapshot envelope에 저장하거나 신규 오류 code를 추가하지 않는다. 향후 실패 응답 Snapshot이 필요하면 민감정보 제외, `traceId` 처리, 상태·스키마 버전과 기존 `failure_code` 관계를 별도 승인한다.
 
 ### Snapshot 완료 간극
@@ -323,10 +329,10 @@ rollback하는 내부 최종화 경계도 구현되었다.
 기존 사건에 추가 거래 연결, 사건 병합·분리, 거래 접수 전체 연결, 최종 v2
 Snapshot과 완료 간극 복구, 공개 사건 API는 구현되지 않았다. 따라서 내부 최종화
 경계의 구현을 공개 거래 처리 전체 완료로 간주하지 않는다. External Risk 실제
-Provider·FastAPI 입력·거래 접수 연결도 구현되지 않았다.
+Provider와 목표 `POST /api/v2/rule-analysis` 입력·거래 접수 연결도 구현되지 않았다.
 External Risk 실패는 현재 cache·stale data·fallback·`UNMATCHED`로 변환하지 않고
-typed failure로 전파한다. 후속 거래 접수 연결에서는 거래와 분석 결과를 `FAILED`로
-확정하고 기존 외부 오류 매핑을 사용한다. 현재 `responseBody`는 실제 단계적 거래
+typed failure로 전파한다. 목표 거래 접수 연결에서는 거래 `RECEIVED` 유지,
+DetectionResult 미생성, FastAPI 미호출과 멱등 `FAILED`를 적용한다. 현재 `responseBody`는 실제 단계적 거래
 접수 결과인 `RECEIVED`와 네 탐지 관련 null 값을 v1으로 보존한다.
 
 ## Migration 영향

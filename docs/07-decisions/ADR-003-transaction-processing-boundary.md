@@ -8,6 +8,7 @@
 - 관련 문서:
   - `docs/01-requirements/transaction-state-transition.md`
   - `docs/01-requirements/rule-v1-detection-contract.md`
+  - `docs/01-requirements/external-risk-rule-analysis-input-contract.md`
   - `docs/02-architecture/system-architecture.md`
   - `docs/02-architecture/domain-erd.md`
   - `docs/03-api/transaction-detection-api.md`
@@ -23,9 +24,9 @@
 ```text
 거래 접수
 → 입력 검증·멱등성 확인
-→ 거래 영속화
-→ External Risk 조회
-→ FastAPI Rule·ML 분석
+→ RECEIVED 거래 영속화 commit
+→ DB 트랜잭션 밖 External Risk 조회
+→ 목표 FastAPI /api/v2/rule-analysis Rule v1 분석
 → 탐지 결과 검증·저장·채택
 → 위험 대응 결정
 → 필요 시 사건 생성 또는 기존 사건 연결
@@ -73,6 +74,13 @@ HIGH·CRITICAL `ANALYZED` 거래의 사건·첫 연결 생성 또는 활성 연�
 최종화 경계가 구현되었다. 최종 멱등 Snapshot v2, Snapshot 완료 간극 복구, 거래
 접수 전체 연결과 일반 RuleVersion 운영 관리는 아직 수행하지 않는다.
 
+후속 승인(2026-08-24, Issue #160): External Risk는 멱등 단일 승자와 `RECEIVED`
+거래 저장 commit 뒤, 어떤 DB 트랜잭션·행 잠금도 유지하지 않은 상위 Service가
+조회한다. 성공 Snapshot은 목표 `POST /api/v2/rule-analysis`의 필수 입력이며 기존
+v1은 당장 제거하지 않는다. 실패하면 거래는 `RECEIVED`, DetectionResult는 미생성,
+FastAPI·최종화는 미호출이고 멱등 실패 재생은 Provider를 다시 호출하지 않는다.
+이 승인과 exact wire 계약은 문서로만 확정됐으며 실행 코드는 미구현이다.
+
 이 단계적 응답은 현재 구현 사실을 기록한 것이며, `POST /api/v1/transactions`를 비동기 접수 API로 바꾸거나 최종 동기 분석 결정을 뒤집는 새로운 결정이 아니다. 현행 단계 Controller는 이 ADR이 정한 중간 외부 노출 제한과 아직 정합화되지 않은 구현 차이로 기록한다. 후속 구현에서는 이 ADR의 최종 경계로 전환하거나, 결정 변경이 필요하면 별도 사용자 승인과 ADR 검토를 거쳐야 한다.
 
 현재 멱등 완료 응답 snapshot은 `RECEIVED`/null 구조를 저장·재생한다. [`ADR-004`](./ADR-004-idempotency-response-snapshot-transition.md)는 이 legacy Snapshot을 엄격하게 그대로 재생하고 소급 갱신하지 않으며, 최종 동기 응답 전환 이후 신규 요청부터 version envelope와 최초 확정 HTTP 상태를 저장하도록 결정한다. 이는 ADR-003의 최종 동기 처리 결정을 유지한 호환 정책이다. ADR-004 결정 당시에는 envelope·codec, 관련 Migration과 만료 처리가 아직 구현되지 않은 상태였다.
@@ -102,9 +110,10 @@ Snapshot v2와 복구 실행 경로는 아직 구현되지 않았다.
 
 1. 거래 식별자, 요청 지문과 멱등성 선점 규칙을 정의하고 거래 접수 영속화를 구현한다. — 완료
 2. 요청 형식·도메인 Validation을 거래 저장 전에 수행하고, 검증을 통과한 거래의 `RECEIVED` 영속 경계를 검증한다. Validation 실패는 거래로 저장하지 않는다. — 완료
-3. [Rule v1 탐지 계약](../01-requirements/rule-v1-detection-contract.md)에 따라 평가 Snapshot, 활성 Rule 집합, FastAPI 분석 호출 경계와 DetectionResult 저장·채택을 구현한다. — 내부 경계 완료
+3. [Rule v1 탐지 계약](../01-requirements/rule-v1-detection-contract.md)에 따라 평가 Snapshot, 활성 Rule 집합, FastAPI 분석 호출 경계와 DetectionResult 저장·채택을 구현한다. — External Risk 없는 현재 v1 내부 경계 완료
 4. 구현된 위험 대응 decision을 거래에 적용해 대응 결과와 최종 상태를 확정하고 HIGH·CRITICAL 사건 생성 또는 기존 사건 연결을 구현한다. — 내부 경계 완료
-5. 전체 성공·실패·멱등·동시성 흐름이 준비되면 현재 단계 응답을 최종 동기 Controller 계약으로 전환한다. — 미구현
+5. 목표 v2 DTO·Endpoint·Client와 비트랜잭션 상위 External Risk→Rule 분석 연결을 구현한다. — 미구현
+6. 전체 성공·실패·멱등·동시성 흐름이 준비되면 현재 단계 응답을 최종 동기 Controller 계약으로 전환한다. — 미구현
 
 각 단계는 내부 단위·통합 테스트로 검증한다. 최종 동기 응답 전환 전에는 내부 구현 완료 범위와 외부 API 제공 상태를 구분해 보고한다.
 
@@ -113,6 +122,8 @@ Snapshot v2와 복구 실행 경로는 아직 구현되지 않았다.
 - Spring Boot는 거래 상태, 위험 대응과 사건 연결의 업무 정합성을 최종 소유한다.
 - `POST /api/v1/transactions`의 최종 성공 응답은 채택된 탐지 결과와 위험 대응 및 사건 연결 결과를 반영한다.
 - 동일 멱등 요청은 새 거래·탐지 결과·사건을 중복 생성하지 않는다.
+- External Risk 실패는 거래를 `RECEIVED`에 두고 DetectionResult·FastAPI 호출을
+  만들지 않으며 같은 멱등 요청 재생에서 Provider를 재호출하지 않는다.
 - FastAPI Timeout이나 응답 부재를 이유로 Spring Boot가 임의 위험 점수를 만들거나 정상 거래로 승인하지 않는다.
 - HIGH·CRITICAL 처리에서 거래 상태와 사건 연결이 일부만 성공한 결과를 정상 완료로 공개하지 않는다.
 - AI 사건 리포트는 거래 동기 처리의 필수 경로가 아니며 거래 위험 판단을 변경하지 않는다.
