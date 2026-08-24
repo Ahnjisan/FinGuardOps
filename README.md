@@ -193,10 +193,11 @@ HTTP 오케스트레이터도 Snapshot과 분석 시작 commit, 분석 시도당
 1회 호출, 응답 변환, 결과 완료·Evidence 저장·거래 결과 채택 또는 실패 상태
 기록을 연결합니다.
 
-거래 접수 Service의 오케스트레이터 호출, External Risk 결과의 Rule 입력 연결,
-위험 대응의 거래 적용과 최종 사건 연결,
-최종 동기 거래 응답과 Snapshot v2, Snapshot 완료 간극 복구, 운영 배포·재분석은
-아직 구현되지 않았습니다. 네 위험 등급에서 목표 거래 상태,
+거래 접수 Service의 전체 오케스트레이션, External Risk 결과를 필수 입력으로 받는
+목표 `POST /api/v2/rule-analysis`, 최종 동기 거래 응답과 Snapshot v2, Snapshot
+완료 간극 복구, 운영 배포·재분석은 아직 구현되지 않았습니다. 기존
+`POST /api/v1/rule-analysis`는 External Risk가 없는 현재 구현이며 당장 제거하지
+않습니다. 네 위험 등급에서 목표 거래 상태,
 `RiskResponseOutcome`, 사건 필수 여부를 결정하는 순수 immutable 정책은
 구현되었습니다. 이 정책은 거래 상태·영속 결과·사건을 변경하지 않습니다.
 `FraudCase`·`CaseTransaction` Entity와 Flyway V6, HIGH·CRITICAL `ANALYZED`
@@ -252,7 +253,9 @@ Kafka
 
 ### Data
 
-* PostgreSQL: 현재 거래·멱등·행동 이벤트·탐지 결과·RuleVersion과 사건·첫 거래 연결 애플리케이션 연동 구현, 감사 로그·AI 사용량·비용은 목표 범위
+* PostgreSQL: 현재 거래·멱등·행동 이벤트·탐지 결과·RuleVersion, 사건·첫 거래
+  연결과 append-only AuditLog 애플리케이션 연동 구현. AuditLog 조회·보존·파기와
+  AI 사용량·비용은 목표 범위
 * Redis: 정확 일치 리포트 캐시와 집계 데이터 후보. External Risk cache는 별도
   Issue와 계약 승인 전에는 현재 기능으로 간주하지 않음
 * Kafka: 사건·리포트·통계 비동기 처리
@@ -360,11 +363,15 @@ Kafka
 * 독립 External Risk Port·응답 검증 정책 Service와 local/dev/test 전용 결정적
   Mock, 성공 결과용 immutable 인메모리 Snapshot 구현 및
   [`External Risk 조회 정책`](docs/01-requirements/external-risk-lookup-policy.md) 문서화
+* External Risk 선행 조회와 목표 `POST /api/v2/rule-analysis` 입력 연결 계약을
+  [`External Risk·Rule 분석 입력 계약`](docs/01-requirements/external-risk-rule-analysis-input-contract.md)으로 확정
 * LOW·MEDIUM·HIGH·CRITICAL별 목표 거래 상태, `RiskResponseOutcome`과 사건 필수
   여부를 반환하는 순수 위험 대응 결정 정책 구현
 * `FraudCase`·`CaseTransaction` Entity와 Flyway V6, 거래 우선 비관적 잠금으로
   HIGH·CRITICAL 거래의 사건·첫 연결을 원자적으로 생성하거나 기존 활성 연결을
   멱등 반환하는 내부 persistence boundary 구현
+* append-only AuditLog V7과 `ANALYZED` 거래의 decision·필요한 사건·최종 상태·
+  `RiskResponseOutcome`·AuditLog를 함께 commit하거나 rollback하는 내부 최종화 경계 구현
 * 최종 거래 성공 경계, 멱등 Snapshot v2와 완료 간극 복구 계약을
   [`ADR-006`](docs/07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md)으로 확정
 * Backend와 AI Service 전용 GitHub Actions CI 구성
@@ -375,10 +382,9 @@ Kafka
 
 최종 동기 거래 접수는 다음 선행 순서를 따른다.
 
-1. AuditLog 계약과 물리 모델 구현
-2. 구현된 위험 대응 결정과 사건 영속 경계를 같은 거래 최종화 트랜잭션에 연결하고 최종 상태 전이 구현
-3. 거래 접수–External Risk–Rule 분석–위험 대응–사건–Snapshot v2 연결
-4. Snapshot 완료 간극 운영 복구 구현
+1. AI Service의 목표 `/api/v2/rule-analysis`와 Java·Python 필수 `externalRisk` DTO 구현
+2. 비트랜잭션 상위 Service에서 거래 접수–External Risk–Rule 분석–위험 대응–사건 연결
+3. 최종 Snapshot v2 확정과 Snapshot 완료 간극 운영 복구 구현
 
 그 밖의 계획은 다음과 같습니다.
 
@@ -388,7 +394,7 @@ Kafka
 * ML 추론
 * AI 사건 리포트
 * AI 사용량·토큰·비용 기록
-* 실제 External Risk HTTP Provider와 ExternalRiskSnapshot DB 영속화
+* 실제 External Risk HTTP Provider. Snapshot 영속화는 별도 요구와 승인 시 검토
 * Redis 연동
 * Docker Compose
 * Kafka 비동기 처리

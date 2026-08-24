@@ -3,7 +3,9 @@
 ## 1. 목적
 
 이 문서는 Spring Boot가 외부 위험정보 Provider를 조회할 때 사용하는 내부 Port,
-정책 Service, 결정적 Mock과 성공 Snapshot의 계약을 정의한다. 현재 구현은
+정책 Service, 결정적 Mock과 성공 Snapshot의 계약을 정의한다. 목표 Rule 입력
+연결은 [External Risk·Rule 분석 입력 계약](./external-risk-rule-analysis-input-contract.md)이
+소유한다. 현재 구현은
 local/dev/test 검증용 인메모리 경계이며 거래 접수, FastAPI Rule 분석 입력,
 위험 점수·등급·최종 대응 또는 DB 영속화와 연결하지 않는다.
 
@@ -20,10 +22,11 @@ local/dev/test 검증용 인메모리 경계이며 거래 접수, FastAPI Rule �
 다음은 구현되지 않았다.
 
 - 실제 외부 HTTP Provider와 외부 네트워크 호출
-- `RuleAnalysisRequest` 또는 FastAPI 연결
+- 목표 `RuleAnalysisRequest` 또는 FastAPI `POST /api/v2/rule-analysis` 연결
 - 거래 접수 상위 오케스트레이션
 - External Risk 기반 점수·등급·위험 대응과 사건 처리
-- `ExternalRiskSnapshot` JPA Entity와 DB 영속화
+- `ExternalRiskSnapshot` 영속화·감사·복구. 현재 승인된 목표가 아니며 필요해질
+  경우 별도 Issue, DB 계약과 Migration 승인 대상
 - IP·피싱 또는 고객 단위 match 정책
 - 공개 Controller, API DTO와 HTTP 오류 매핑
 - retry, fallback, cache와 Circuit Breaker
@@ -72,6 +75,11 @@ trim하거나 보정하지 않는다. match는 최대 3개이고 Provider는 정
 `providerAsOf`와 조회 시각보다 미래인 `providerAsOf`를 `INVALID_RESPONSE`로
 거부한다. Provider 원문과 실제 reference는 match에 포함하지 않는다.
 
+현재 정책 Service는 Provider match 순서를 보존하며 canonical 정렬을 수행하지
+않는다. 목표 v2 요청 매핑은 중복을 정렬 전에 거부한 뒤 송신 계좌→수신 계좌→기기
+순서의 explicit rank tuple로 정렬한다. 이 후속 계약을 현재 Java 구현으로
+표현하지 않는다.
+
 ## 4. 정책 Service와 Snapshot
 
 `ExternalRiskPolicyService.lookup(command)`는 명령 검증, Provider request 변환,
@@ -93,8 +101,19 @@ Port 정확히 1회 호출, 응답 검증, 정책 결과 계산과 Snapshot 생�
 빈 match 목록은 `UNMATCHED`, 하나 이상은 `MATCHED`다. `traceId`와 고객·계좌·기기
 reference는 Snapshot에 저장하지 않는다. `lookedUpAt`은 응답 구조 검증 뒤 기존
 UTC `Clock`에서 한 번 얻고 PostgreSQL 호환 마이크로초 정밀도로 정규화한다.
-이 Snapshot은 현재 메모리 안에서만 전달되는 값 객체이며 논리 ERD의 목표 JPA
-영속 모델을 구현한 것이 아니다.
+이 Snapshot은 현재 구현과 Issue #160의 목표 모두에서 immutable 비영속 인메모리
+값이다. 성공한 Rule 분석 v2 요청을 조립하는 동안만 사용하며 Entity·Repository·
+테이블·FK가 없다. DB, DetectionEvidence, AuditLog와 최종 멱등 Snapshot v2에도
+저장하지 않는다. V1~V7을 변경하거나 신규 Flyway Migration을 추가하지 않는다.
+영속화·감사·복구는 현재 승인된 목표가 아니며, 필요해지면 별도 Issue와 DB 계약,
+Migration 승인을 받아야 한다.
+
+현재 독립 정책의 시각 검증은 `providerAsOf <= lookedUpAt`이다. 목표 분석 연결은
+`providerAsOf <= evaluationCutoffAt <= lookedUpAt`과
+`evaluationCutoffAt == transaction.occurredAt`을 분석 시작 전에 추가로 검증하며
+마이크로초 초과 값을 반올림·절삭하지 않는다. 현재 정책이 `Clock`에서 얻은
+`lookedUpAt`을 마이크로초로 정규화하는 동작과 목표 v2의 무절삭 입력 계약 차이는
+후속 구현에서 마이크로초 정밀도 Clock 또는 명시적 검증으로 해소해야 한다.
 
 ## 5. 실패 분류
 
@@ -110,10 +129,11 @@ UTC `Clock`에서 한 번 얻고 PostgreSQL 호환 마이크로초 정밀도로 
 예외 메시지는 category별 안전한 고정 문자열만 사용한다. nullable 원본 cause는
 보존하지만 메시지에 요청 reference나 Provider 원문을 복사하지 않는다. 실패를
 `UNMATCHED` 성공으로 바꾸거나 cache·stale data·fallback으로 대체하지 않고 현재
-분석을 계속하지 않는다. 후속 거래 접수 연결에서는 거래와 분석 결과를 `FAILED`로
-확정하고 기존 외부 의존성 오류 매핑을 사용한다. 해당 연결과 공개 오류 매핑은 아직
-구현되지 않았으며 cache·Circuit Breaker·fallback은 별도 Issue와 계약 승인이
-필요하다.
+분석을 계속하지 않는다. 승인된 목표 거래 접수 연결에서는 거래가 `RECEIVED`를
+유지하고 DetectionResult를 생성하지 않으며 FastAPI와 위험 대응 최종화를 호출하지
+않는다. 멱등 레코드는 실패를 확정하고 같은 요청 재생에서 Provider를 다시 호출하지
+않는다. 이 연결과 공개 오류 매핑은 아직 구현되지 않았으며
+cache·Circuit Breaker·fallback은 별도 Issue와 계약 승인이 필요하다.
 
 ## 6. 결정적 Mock
 

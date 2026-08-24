@@ -62,9 +62,9 @@ FinGuardOps는 금융거래와 사용자 행동을 기반으로 이상거래를 
 
 | 운영 대상 | 역할 | 현재 도입 상태와 운영 범위 |
 | --- | --- | --- |
-| Spring Boot Backend | 거래 접수·검증, 멱등성, 거래·사건 상태, 위험 대응과 업무 정합성의 최종 소유자 | 초기 설정과 Health API는 구현되어 있다. 나머지 업무 기능과 운영 항목은 로드맵에 따라 구현·검증한다. |
-| FastAPI AI Service | Feature 계산, Rule 실행, ML 추론, 모델 라우팅, AI 사건 리포트와 템플릿 fallback | 계획 범위이다. 실제 구현·연동 상태는 배포 버전과 함께 구분해 표시해야 한다. |
-| PostgreSQL | 거래, 행동 이벤트, 탐지 결과, 사건, 감사 로그와 AI 사용량·비용 데이터의 영속 저장 목표 | 향후 연동·검증 범위이다. 구체적인 테이블과 운영 구조는 DB 설계에서 확정한다. |
+| Spring Boot Backend | 거래 접수·검증, 멱등성, 거래·사건 상태, 위험 대응과 업무 정합성의 최종 소유자 | Health, 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion과 기본 Rule 집합 발행 경계, Rule 분석 HTTP Client·내부 오케스트레이션, External Risk 독립 정책·Mock, FraudCase·CaseTransaction과 위험 대응·AuditLog 원자적 최종화 경계가 구현되었다. External Risk v2 입력·실제 Provider·거래 접수 전체 연결, Snapshot v2·운영 복구, 공개 사건·감사·최종화 API, USER 인증·인가와 사건 조사 상태 전이·추가 연결·병합·분리는 미구현이다. |
+| FastAPI AI Service | Feature 계산, Rule 실행, ML 추론, 모델 라우팅, AI 사건 리포트와 템플릿 fallback | `POST /api/v1/rule-analysis`, R001~R004 실행과 점수·RiskLevel·Evidence 계산은 구현되었다. External Risk 필수 입력의 `/api/v2/rule-analysis`, ML 추론·모델 라우팅·AI 사건 리포트와 템플릿 fallback은 미구현이다. |
+| PostgreSQL | 거래, 행동 이벤트, 탐지 결과, 사건, 감사 로그와 AI 사용량·비용 데이터의 영속 저장 목표 | V1~V7의 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion, FraudCase·CaseTransaction과 append-only AuditLog 영속 기반이 구현되었다. External Risk 영속화와 사건 조사·AI 사용량·비용·운영 데이터는 미구현이며 별도 승인 범위이다. |
 | Redis | 정확 일치 AI 리포트 캐시와 집계 데이터 사용 목표 | 향후 연동·검증 범위이다. External Risk cache는 현재 계약이 아니며 별도 Issue와 승인이 필요하다. 시맨틱 캐시는 범위에 포함하지 않는다. |
 | Kafka | 사건·리포트·통계 등 비동기 처리 목표 | 핵심 거래·탐지·사건 기능 안정화 이후 도입한다. 현재 구현된 구성으로 간주하지 않는다. |
 | External Risk Mock | 위험 송신·수신 계좌와 위험 기기의 결정적 scenario 제공 | local/dev/test 전용 독립 Port·정책 Service·Mock과 성공 인메모리 Snapshot이 구현되었다. 실제 Provider·IP·거래 접수 연결은 미구현이며 실패를 cache·fallback·`UNMATCHED`로 변환하지 않는다. |
@@ -171,7 +171,10 @@ Rule·ML 탐지와 후속 사건 생성이 지연될 수 있다. 거래 접수 �
 
 #### 업무 지속 원칙
 
-FastAPI 없이 가능한 기본 처리 또는 중단 정책은 후속 상태 전이·아키텍처 문서에서 `TBD`로 확정한다. 응답이 없다는 이유로 위험정보가 없거나 거래가 정상이라고 간주하지 않는다.
+Rule 분석 시작 commit 뒤 FastAPI Timeout·분석·결과 채택에 실패하면 거래를
+`ANALYZING → FAILED`로, 해당 DetectionResult를 `FAILED`로 같은 쓰기 경계에서
+확정한다. 응답이 없다는 이유로 위험정보가 없거나 거래가 정상이라고 간주하지
+않는다. 실패 후 재분석·수동 복구는 별도 승인 범위이다.
 
 #### 운영자 행동
 
@@ -193,13 +196,21 @@ External Risk Mock 상태, 호출 지연·Timeout, `traceId`와 failure category
 
 #### 영향 범위
 
-현재 조회는 성공 Snapshot을 만들지 않고 분석을 계속하지 않는다. 후속 거래 연결에서는 거래와 분석 결과를 `FAILED`로 확정하며, 현재 독립 경계에는 그 연결이 구현되지 않았다.
+현재 독립 조회 경계는 실패 시 성공 Snapshot을 만들지 않고 분석을 계속하지 않는다.
+목표 거래 연결에서는 거래가 `RECEIVED`를 유지하고 DetectionResult와
+DetectionEvidence를 생성하지 않으며 FastAPI·위험 대응 최종화·성공 Snapshot v2를
+호출하거나 생성하지 않는다. 멱등 레코드는 실패를 확정하고 같은 요청 재생에서는
+External Risk Provider를 다시 호출하지 않는다. 이 거래 연결은 아직 구현되지 않았다.
 
 #### 업무 지속 원칙
 
 조회 실패를 위험정보 없음이나 `UNMATCHED`로 해석하지 않는다. 자동 retry, cache,
 stale data와 fallback 없이 typed failure를 전파한다. 향후 cache·Circuit Breaker·fallback은
 별도 Issue와 계약 승인이 필요하다.
+
+`ANALYZING → FAILED`와 DetectionResult `FAILED`는 External Risk 성공 뒤 Rule 분석
+시작 commit이 완료된 후 발생한 Rule 분석·FastAPI·결과 채택 실패에만 적용한다.
+External Risk 선행 조회 실패를 이 상태 전이로 변환하지 않는다.
 
 #### 운영자 행동
 
@@ -476,12 +487,16 @@ AI 운영 예산과 리포트 생성 기능에 영향을 주지만 위험 점수
 - 생성형 AI는 위험 점수, 최종 판정, 거래 차단, 고객 제재와 사건 상태 확정을 수행하지 않는다.
 - 외부 위험정보 timeout·unavailable·invalid response는 위험정보 없음이나
   `UNMATCHED`로 바꾸지 않고 typed failure로 전파하며 현재 분석을 계속하지 않는다.
-  후속 거래 연결에서는 거래와 분석 결과를 `FAILED`로 확정하고 기존 외부 오류
-  매핑을 사용한다.
+  목표 거래 연결에서는 거래 `RECEIVED` 유지, DetectionResult·Evidence 미생성,
+  FastAPI·최종화 미호출과 멱등 실패 확정을 적용한다. 같은 요청 재생은 Provider를
+  다시 호출하지 않는다. Rule 분석 시작 commit 이후의 `ANALYZING → FAILED` 및
+  DetectionResult `FAILED` 경계와 구분한다.
 - Redis 장애가 발생해도 캐시 미사용 또는 제한된 fallback 가능성을 검토한다. 정확 일치 조건을 우회하거나 다른 사건의 AI 리포트를 재사용하지 않는다.
 - Kafka 장애는 Kafka 도입 이후의 비동기 사건·리포트·통계 작업에 한정하여 영향 범위를 판단한다.
 - Spring Boot는 거래·사건 상태와 업무 정합성의 최종 소유자이다. 핵심 데이터의 저장 결과가 불명확하면 임의로 성공 처리하지 않는다.
-- FastAPI 장애 시 허용할 기본 분석과 거래 상태 전이는 후속 문서에서 `TBD`로 남기며 사용자가 결정한다.
+- Rule 분석 시작 commit 이후 FastAPI·분석·채택 실패는 거래
+  `ANALYZING → FAILED`와 DetectionResult `FAILED` 경계로 확정한다. 실패 후
+  재분석·수동 복구 정책은 후속 사용자 결정 사항이다.
 
 ## 11. 운영 알림 요구사항
 

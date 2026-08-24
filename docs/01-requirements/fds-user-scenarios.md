@@ -21,9 +21,9 @@
   local/dev/test 결정적 Mock 경계만 구현되어 있다.
 - 아래의 위험등급은 시나리오별 탐지 신호를 설명하기 위한 예상 범위이다. 실제 등급은 승인된 점수 통합 정책과 검증 결과에 따라 결정한다.
 - Rule v1은 거래 접수 시 현재 거래의 `occurredAt`을 기준으로 평가하며, 행동 이벤트 접수만으로 자동 재평가하지 않는다.
-- Rule v1 계약과 DetectionResult·Evidence 물리 영속 모델은 구현되었지만,
-  Rule 실행, 실행 결과 생성·검증·채택과 FastAPI 연동은 아직 구현되지
-  않았다.
+- Rule v1 계약, DetectionResult·Evidence 물리 모델, 현재
+  `POST /api/v1/rule-analysis`와 내부 결과 생성·검증·채택은 구현되었다. 거래
+  접수 연결과 External Risk를 필수 입력으로 받는 목표 v2 wire는 미구현이다.
 
 ### 외부 위험정보 서비스 장애 처리 정책
 
@@ -31,8 +31,9 @@
 - timeout·unavailable·invalid response는 분석을 계속하지 않고 typed exception으로
   전파한다. 실패를 위험정보 없음, 정상 결과 또는 `UNMATCHED`로 변환하지 않는다.
 - 현재 자동 retry, cache, stale data, fallback과 Circuit Breaker는 없다.
-- 후속 거래 접수 연결에서는 External Risk 실패 시 거래와 분석 결과를 `FAILED`로
-  확정한다. timeout은 `DEPENDENCY_TIMEOUT`, unavailable은
+- 목표 거래 접수 연결에서는 External Risk 실패 시 거래가 `RECEIVED`를 유지하고
+  DetectionResult를 생성하지 않으며 FastAPI와 위험 대응 최종화를 호출하지 않는다.
+  멱등 실패 재생은 Provider를 다시 호출하지 않는다. timeout은 `DEPENDENCY_TIMEOUT`, unavailable은
   `DEPENDENCY_UNAVAILABLE`, 그 밖의 계약·검증·변환 오류는 `INTERNAL_ERROR`에
   매핑한다. 거래 연결과 공개 HTTP 오류 매핑은 아직 구현되지 않았다.
 - cache·Circuit Breaker·fallback은 향후 별도 Issue·ADR 승인이 필요한 운영
@@ -42,8 +43,9 @@
 IP reference와 IP 조회는 현재 거래 모델에 없고 피싱 정책도 미구현이다. 아래의
 위험 IP·피싱·외부 위험 점수·등급·대응 표현은 최종 사용자 시나리오 또는 향후
 확장 후보이며 현재 구현 동작을 의미하지 않는다. 실제 외부 HTTP Provider,
-FastAPI `RuleAnalysisRequest`, 거래 접수 상위 오케스트레이션, 영속
-`ExternalRiskSnapshot`과 최종 위험 대응도 아직 구현되지 않았다.
+목표 FastAPI v2 `RuleAnalysisRequest`와 거래 접수 상위 오케스트레이션은 아직
+구현되지 않았다. `ExternalRiskSnapshot` 영속화는 이번 목표가 아니며 별도 승인
+대상이다.
 
 ### AI 리포트 생성 실패 처리 정책
 
@@ -341,8 +343,9 @@ Rule v1에서 이 시나리오와 직접 연결되는 Baseline은 R001, R003과 
 수취 계좌가 외부 위험정보 Mock 서비스의 의심 계좌와 일치하는 송금을 탐지하고, 외부 조회 결과와 내부 거래 근거를 함께 관리한다.
 
 이 절은 거래 접수–External Risk–Rule 분석–위험 대응의 최종 목표 시나리오다.
-현재는 수신 계좌 match를 재현하는 독립 Mock 경계까지만 구현되었고 점수·등급·거래
-대응과 사건 연결은 구현되지 않았다.
+현재는 수신 계좌 match를 재현하는 독립 Mock 경계까지만 구현되었다. 승인된 목표
+v2는 이 결과를 분석 Snapshot에 포함하지만 R001~R004·점수·등급·Evidence에는
+반영하지 않는다. 외부 위험정보를 점수·거래 대응에 사용하는 것은 별도 정책이다.
 
 ### 주요 행위자
 
@@ -367,7 +370,8 @@ Rule v1에서 이 시나리오와 직접 연결되는 Baseline은 R001, R003과 
 
 1. 고객이 계좌이체를 요청한다.
 2. 시스템이 수취 계좌의 외부 위험정보를 조회한다.
-3. 위험계좌와 일치하지 않으면 다른 Rule·ML 결과와 함께 위험도를 산출한다.
+3. 목표 v2가 일치·불일치 Snapshot을 검증하지만 현재 R001~R004는 이를 사용하지
+   않고 기존 Rule 결과를 산출한다.
 4. 최종 위험등급에 따라 Mock 거래 대응을 수행한다.
 
 ### 발생한 금융거래
@@ -400,7 +404,7 @@ Rule v1에서 이 시나리오와 직접 연결되는 Baseline은 R001, R003과 
 
 ### 적용 가능한 Rule
 
-- 외부 위험계좌 일치
+- 외부 위험계좌 일치 Rule은 향후 별도 Rule·scoring 승인 후보
 - 최초 수취 계좌
 - 고객 평균 대비 고액 거래
 - 신규 기기 또는 해외 IP 거래
@@ -419,15 +423,17 @@ Rule v1에서 이 시나리오와 직접 연결되는 Baseline은 R001, R003과 
 
 ### 예상 위험등급
 
-- 외부 위험계좌 일치는 HIGH 이상 후보의 핵심 근거로 사용한다.
-- 고액, 신규 수취인, 자금 집중 또는 기기 위험 신호가 결합되면 CRITICAL 후보가 될 수 있다.
-- 위험정보의 유형·최신성과 단독 일치 시 대응 수준은 별도 정책으로 확정한다.
+- 현재 R001~R004의 위험등급은 External Risk와 무관하게 기존 점수 계약으로
+  계산한다.
+- 외부 위험계좌 일치의 등급 가산, 단독 대응과 결합 조건은 별도 Rule·scoring
+  정책에서 확정한다.
 
 ### 시스템 자동 대응
 
 - 최종 위험등급이 HIGH이면 Mock 추가 인증을 요구하고 사건을 생성한다.
 - CRITICAL이면 Mock 거래 보류, 긴급 사건 생성과 담당자 알림을 수행한다.
-- 외부 정보의 원문 전체가 아니라 판정에 필요한 식별 정보, 근거, 기준 시각과 조회 상태를 감사 가능하게 기록한다.
+- 현재 목표 v2는 External Risk를 인메모리 요청에만 포함하고 Evidence·AuditLog·DB에
+  저장하지 않는다. 향후 감사·영속 요구는 별도 승인이 필요하다.
 
 ### 사건 생성 조건
 

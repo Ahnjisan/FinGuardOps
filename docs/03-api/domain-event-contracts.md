@@ -244,23 +244,26 @@ Envelope `eventType=BehaviorEventReceived`는 발생한 도메인 이벤트의 �
 
 | 항목 | 계약 |
 | --- | --- |
-| 발생 조건 | Transaction 검증이 완료되고 Spring Boot가 분석 대상·버전·입력 문맥을 고정해 분석 시작을 승인한 때 |
+| 발생 조건 | External Risk 성공 뒤 immutable v2 입력을 고정하고 분석 시작 트랜잭션에서 DetectionResult 생성·`IN_PROGRESS`, 거래 `ANALYZING`을 함께 commit한 때 |
 | 생산자 | Spring Boot |
 | 처리 주체·예상 소비자 | FastAPI AI Service의 Rule·ML 분석 처리 |
-| Aggregate | `Transaction` / `transactionId` |
-| 필수 식별자 | `transactionId`, `detectionResultVersion`, `traceId`, `correlationId` |
-| 최소 payload | `transactionId`, `detectionResultVersion`, 승인된 feature 입력 버전, 분석 요청 시각 |
+| Aggregate | `DetectionResult` / `detectionResultId` |
+| 필수 식별자 | `detectionResultId`, `transactionId`, `detectionResultVersion`, `traceId`, `correlationId` |
+| 최소 payload | `detectionResultId`, `transactionId`, `detectionResultVersion`, 승인된 feature 입력 버전, 분석 요청 시각 |
 | 중복 처리 | 같은 `transactionId+detectionResultVersion`의 완료·진행 상태를 확인하고 중복 분석 시작 방지 |
 | 원거래 판단 영향 | 요청 사실만으로 거래 상태를 최종 확정하지 않음 |
-| 처리 범위 | 현재 Spring Boot→FastAPI REST 가능. 향후 메시지 전달 가능 |
+| 처리 범위 | 현재 v1 Spring Boot→FastAPI REST 내부 경계는 구현됨. 이 이벤트 DTO·Producer·발행 경로와 External Risk 포함 v2 전체 연결은 미구현 |
 
-`detectionResultId`의 생성 시점과 실패한 분석이 버전을 소비하는지는 기존 문서에서 미확정이므로 요청 이벤트의 Aggregate는 현재 존재하는 Transaction으로 둔다. 물리 이벤트 Schema에서 별도 분석 요청 식별자를 추가할지는 사용자 결정 사항이다.
+`detectionResultId`와 `detectionResultVersion`은 분석 시작 트랜잭션에서 생성되고
+FastAPI 호출 전에 `IN_PROGRESS` 상태와 함께 commit된다. 이 commit 이후 실패한
+분석도 해당 ID와 버전을 유지한 채 `FAILED`로 확정한다. 이는 목표 논리 이벤트
+계약이며 이벤트 DTO·Producer·실제 발행 경로가 구현되었다는 의미는 아니다.
 
 ### 6.4 `DetectionAnalysisCompleted`
 
 | 항목 | 계약 |
 | --- | --- |
-| 발생 조건 | FastAPI 결과가 도착한 뒤 Spring Boot가 요청 연결·완전성·버전을 검증하고 `DetectionResult`와 근거를 저장해 분석 완료를 확정한 때 |
+| 발생 조건 | FastAPI 결과가 도착한 뒤 Spring Boot가 요청 연결·완전성·버전을 검증하고 Evidence 저장, 기존 `IN_PROGRESS` DetectionResult의 `COMPLETED`, 결과 채택과 거래 `ANALYZED`를 하나의 쓰기 경계에서 commit한 때 |
 | 생산자 | Spring Boot. FastAPI는 계산 원천이지만 업무 이벤트 최종 생산자는 아님 |
 | 처리 주체·예상 소비자 | 탐지 결과 채택, 위험 대응 결정, 사건 생성 판단, 감사·관측 모듈 |
 | Aggregate | `DetectionResult` / `detectionResultId` |
@@ -454,26 +457,70 @@ Provider 사용량은 payload에 복제하지 않고 `executionId` 아래 실제
 sequenceDiagram
     participant Client
     participant Spring as Spring Boot
+    participant Risk as External Risk
     participant FastAPI
     participant DB as PostgreSQL
 
     Client->>Spring: 거래 생성 요청 + Idempotency-Key
-    Spring->>DB: Transaction(RECEIVED) 저장
-    Spring-->>Spring: TransactionReceived
-    Spring-->>Spring: DetectionAnalysisRequested
-    Spring->>FastAPI: Rule·ML 분석 요청
-    FastAPI-->>Spring: 분석 결과
-    Spring->>DB: DetectionResult·Evidence 검증 저장
-    Spring-->>Spring: DetectionAnalysisCompleted
-    Spring->>DB: 채택 결과·위험 대응·상태·AuditLog 반영
-    Spring-->>Spring: RiskResponseDecided
-    alt HIGH 또는 CRITICAL이고 새 사건 필요
-        Spring->>DB: FraudCase·CaseTransaction·AuditLog 생성
-        Spring-->>Spring: FraudCaseCreated
-    else 기존 활성 사건 연결 또는 사건 불필요
-        Spring-->>Spring: 승인된 기존 사건 연결 또는 종료
+    Spring->>DB: 멱등 단일 승자 선점·Transaction(RECEIVED) 저장
+    DB-->>Spring: RECEIVED 저장 commit
+    Spring-->>Spring: 목표 논리 TransactionReceived
+    Spring->>Risk: DB 트랜잭션 밖 External Risk 조회
+    alt External Risk 성공
+        Risk-->>Spring: 성공 immutable ExternalRiskSnapshot
+        Spring->>DB: External Risk 포함 immutable v2 입력 조립 read transaction
+        DB-->>Spring: 상태 변경 없이 입력 확정·read transaction 종료
+        Spring->>DB: DetectionResult 생성·IN_PROGRESS, Transaction ANALYZING
+        DB-->>Spring: 분석 시작 상태 commit·detectionResultId 확정
+        Spring-->>Spring: 목표 논리 DetectionAnalysisRequested(발행 미구현)
+        Spring->>FastAPI: DB 트랜잭션 밖 목표 v2 Rule v1 요청 1회
+        FastAPI-->>Spring: 분석 결과
+        alt 응답 검증·변환·채택 성공
+            Spring->>DB: Evidence·DetectionResult COMPLETED·채택·Transaction ANALYZED
+            DB-->>Spring: 완료·채택 쓰기 경계 commit
+            Spring-->>Spring: 목표 논리 DetectionAnalysisCompleted
+            Note over Spring,DB: 아래 사건·거래·AuditLog는 하나의 REQUIRED 트랜잭션
+            alt LOW 또는 MEDIUM
+                Spring->>DB: 거래 outcome·최종 상태 적용·거래 AuditLog 2건
+            else HIGH 또는 CRITICAL 신규 사건
+                Spring->>DB: FraudCase 생성·CaseTransaction 첫 연결
+                Spring->>DB: 사건 AuditLog 2건·거래 outcome·최종 상태·거래 AuditLog 2건
+                Spring-->>Spring: 목표 논리 FraudCaseCreated
+            else HIGH 또는 CRITICAL 기존 활성 사건 재사용
+                Spring->>DB: 사건·연결 변경 없이 재사용·거래 outcome·최종 상태·거래 AuditLog 2건
+            end
+            DB-->>Spring: 사건·연결·거래·AuditLog REQUIRED commit
+            Spring-->>Spring: 목표 논리 RiskResponseDecided
+            Spring->>DB: 목표 최종 멱등 Snapshot v2 확정(미구현)
+            DB-->>Spring: 목표 Snapshot v2 commit(미구현)
+        else FastAPI·응답 검증·변환·채택 실패
+            Spring->>DB: DetectionResult FAILED·Transaction FAILED
+            DB-->>Spring: 동일 실패 쓰기 트랜잭션 commit
+            Note over Spring,DB: 실패 결과 미채택·retry와 fallback 없음
+        end
+    else External Risk 실패
+        Risk-->>Spring: typed failure
+        Spring->>DB: 멱등 FAILED, Transaction RECEIVED 유지
+        Note over Spring,DB: DetectionResult·Evidence 없음·FastAPI·최종화·Snapshot v2 미호출
+        Note over Spring,Risk: 같은 멱등 요청 재생은 Provider 미호출
     end
 ```
+
+External Risk 선행 실패는 Rule 분석 시작 전 경계다. 거래는 `RECEIVED`를 유지하고
+DetectionResult·Evidence를 생성하지 않으며 FastAPI와 위험 대응 최종화를 호출하지
+않는다. 멱등 실패를 확정한 같은 요청 재생은 Provider를 다시 호출하지 않는다.
+
+분석 시작 commit 이후 FastAPI 호출·응답 검증·변환·채택이 실패하면 거래는 이미
+`ANALYZING`, 해당 DetectionResult는 이미 `IN_PROGRESS`다. 실패 기록 경계는 같은
+쓰기 트랜잭션에서 거래와 DetectionResult를 모두 `FAILED`로 확정하고 실패 결과를
+채택하지 않는다. 원래 오류를 성공이나 fallback으로 바꾸지 않으며 자동 retry와
+fallback은 없다. 공개 오류 매핑과 도메인 이벤트 발행 경로는 아직 구현되지 않았다.
+
+내부 위험 대응 최종화는 LOW·MEDIUM에서 사건 없이 거래 AuditLog 2건을 기록하고,
+HIGH·CRITICAL 신규 사건에서는 사건·첫 연결을 먼저 만든 뒤 사건 AuditLog 2건과
+거래 AuditLog 2건을 기록한다. 기존 활성 사건 재사용 시 사건·연결을 변경하거나
+사건 AuditLog를 중복 생성하지 않고 거래 AuditLog 2건만 기록한다. 어느 단계에서든
+실패하면 사건·연결·거래·AuditLog의 REQUIRED 트랜잭션 전체를 rollback한다.
 
 거래 위험 판단은 AI 리포트 생성 완료를 기다리지 않는다.
 
@@ -866,15 +913,18 @@ Spring Boot는 유효한 추적 문맥이 없으면 새 `traceId`를 만들고 F
 - 요청별 화면에 공유 실행의 같은 attempts가 보이더라도 실행을 공유한 `AiReportRequest`별로 토큰과 비용을 다시 합산하지 않는다.
 - 캐시 요청에는 `ProviderCallAttempt`가 없으므로 새 토큰 사용량이나 비용이 발생하지 않는다.
 
-## 14. 정합성 정비 후 남은 문서 차이
+## 14. 정합성 정비 판정과 남은 문서 차이
 
-구현 전 정합성 정비에서 AI 완료 결과 조회 순서, 현재 유효 리포트 선택, 자동 재시도, 무실행 캐시와 요청·실행 식별자 표현을 API·ERD·상태 전이·아키텍처·운영 요구사항과 통일했다. 다음은 아직 사용자 결정이 필요한 문서 차이이다.
+구현 전 정합성 정비에서 AI 완료 결과 조회 순서, 현재 유효 리포트 선택, 자동 재시도,
+무실행 캐시와 요청·실행 식별자 표현을 API·ERD·상태 전이·아키텍처·운영 요구사항과
+통일했다. 다음 표는 남은 차이와 Issue #160에서 이미 확정한 장애 경계를 함께
+구분한다. 추가 사용자 결정이 필요한 항목은 15절에만 둔다.
 
-| 항목 | 문서별 표현 | 이 문서의 처리 |
+| 항목 | 기존 문서 표현 또는 발생 조건 | 이 문서의 확정·처리 |
 | --- | --- | --- |
 | `eventId` 의미 | `api-conventions.md`는 행동 이벤트 식별자로 정의. `system-architecture.md`와 `platform-operation-requirements.md`는 향후 Kafka 이벤트 발행·소비 식별자로 표현 | Envelope `eventId`와 BehaviorEvent 업무 식별자의 이름 충돌로 기록. 논리 Envelope에서는 이벤트 자체 ID, 행동 엔티티 ID는 `aggregateId`로 표현. 물리 필드 매핑은 후속 결정 |
-| External Risk 실패 | 현재 timeout·unavailable·invalid response는 Rule 분석을 시작하지 않고 typed failure로 전파. 실패를 `UNMATCHED`나 정상 결과로 이벤트화하지 않음 | 후속 거래 연결에서 거래와 분석 결과를 `FAILED`로 확정하고 기존 외부 오류 매핑을 사용한다. 이번 Issue는 External Risk 도메인 이벤트를 추가·발행하지 않음 |
-| FastAPI Timeout 거래 처리 | 거래 상태 전이·플랫폼 요구사항은 기본 분석·중단 정책을 `TBD`로 둠. 거래 API는 초기 권장 정책으로 Transaction `FAILED`와 `503`을 제시 | 이 문서는 탐지 완료 이벤트를 만들 수 없는 조건만 명시하고 최종 장애 정책은 새로 확정하지 않음 |
+| External Risk 선행 실패 | timeout·unavailable·invalid response는 Rule 분석을 시작하지 않고 typed failure로 전파. 실패를 `UNMATCHED`나 정상 결과로 이벤트화하지 않음 | 목표 거래 연결은 거래 `RECEIVED` 유지, DetectionResult·Evidence 미생성, FastAPI 미호출과 멱등 `FAILED`를 적용한다. 같은 요청 재생은 Provider를 다시 호출하지 않으며 이번 Issue는 External Risk 도메인 이벤트를 추가·발행하지 않음 |
+| Rule 분석 시작 commit 이후 실패 | FastAPI·응답 검증·변환·채택 실패 시 거래는 이미 `ANALYZING`, DetectionResult는 `IN_PROGRESS` | 동일 쓰기 트랜잭션에서 거래와 DetectionResult를 `FAILED`로 확정하고 실패 결과를 채택하지 않는다. 원래 오류를 성공·fallback으로 바꾸지 않고 자동 retry·fallback을 사용하지 않으며 공개 오류 매핑과 이벤트 발행은 미구현 |
 
 ## 15. 사용자 결정 필요 사항
 
@@ -890,11 +940,9 @@ Spring Boot는 유효한 추적 문맥이 없으면 새 `traceId`를 만들고 F
 | Aggregate 순서·오래된 이벤트 방지 | A. 현재 상태만 검증 / B. Envelope에 `aggregateVersion` 추가 / C. payload별 버전 사용 | B | `eventVersion`과 업무 버전을 혼합하지 않고 순서 역행을 탐지하기 쉬움 | Envelope Schema, Aggregate 저장·Consumer 로직에 영향 | Kafka/비동기 구현 전 결정 |
 | 이벤트 중복 처리 기록 저장 | A. PostgreSQL / B. Redis / C. Consumer별 저장소 / D. 혼합 | 초기에는 A 검토 | 영속 업무 결과와 장애 복구를 함께 검증하기 쉬움. 다만 실제 부하 측정 필요 | 테이블·보존 기간·트랜잭션 경계에 영향 | 현재 문서 비차단 |
 | 중복 처리 기록 보존 기간 | A. 업무 데이터와 동일 / B. 전달 재시도 기간 기준 / C. 계층별 차등 | C | HTTP·내부 이벤트·향후 Kafka의 재전달 기간이 다를 수 있음 | 재처리 안전 기간과 저장 비용에 영향 | 후속 결정 |
-| DetectionResult 식별자 생성 시점 | A. 분석 요청 전에 발급 / B. 완료 저장 시 발급 / C. 별도 analysisRequestId 도입 | C 검토 | 실패 시도와 완료 결과 식별자를 혼합하지 않기 쉬움 | 탐지 API·ERD·이벤트 Aggregate 선택에 영향 | 탐지 요청 물리 Schema 전 결정 |
 | 동일 거래의 중복 활성 사건 기준 | A. Service 트랜잭션 검증 / B. 별도 활성 관계 / C. 중복 상태+DB 제약 / D. Trigger | A 우선 | 현재 모델 변경을 최소화하면서 업무 규칙을 Service에 명시 가능 | 사건 생성 Handler, 격리·잠금·동시성 테스트에 영향 | 사건 구현 전 결정 |
 | AI 완료 결과·활성 실행 동시 존재 시 복구 | A. 완료 결과 유지 후 활성 실행 격리 / B. 전체 오류 격리 후 수동 복구 / C. 상태별 자동 복구 | B 검토 | 정상 조회는 완료 결과 → 활성 실행 순서로 확정되어 있으나 두 상태의 공존은 정합성 위반이므로 업무 결과를 임의 선택하지 않는 복구 절차가 필요 | 복구 작업, 관측·알림과 동시성 테스트에 영향 | AI 실행 구현 전 결정 |
 | External Risk cache·fallback 이벤트 | 현재 도입하지 않음 / 향후 별도 계약으로 도입 | 현재 도입하지 않음 | 현재 경계는 no retry·no cache·no stale data·no fallback·no Circuit Breaker이며 실패 시 Rule 분석을 시작하지 않음 | 향후 도입 시 event type·payload·순서·중복·거래 상태 영향에 별도 승인 필요 | 현재 비차단, 별도 Issue·ADR 승인 필요 |
-| 거래 분석 FastAPI Timeout 정책 | A. Transaction `FAILED` / B. 마지막 상태 유지 후 수동·자동 재개 / C. 승인된 로컬 baseline | A 우선 | 현재 거래 API의 초기 정책과 일치하고 임의 위험 점수 생성을 막음 | 상태 전이, 재처리 API, 감사와 장애 복구에 영향 | 거래 분석 구현 전 결정 |
 | AI 리포트 생성 가능 `caseStatus` | A. 모든 상태 / B. 활성 조사 상태 / C. `IN_REVIEW`만 | B | 조사 지원 목적과 `CLOSED` 읽기 전용 원칙을 함께 유지하기 쉬움 | 생성 Validation과 테스트에 영향 | AI 생성 구현 전 결정 |
 | AI `failureCode`·attempt `outcome` 목록 | A. Provider 자유 문자열 / B. 공통 Enum / C. 외부 공통 Enum+보호된 내부 코드 | C | 외부 계약 안정성과 운영 진단을 분리 | DTO·DB·Provider 매핑과 관측 지표에 영향 | Provider 연동 전 결정 |
 | 늦은 Provider 응답 기록 방식 | A. 폐기·메트릭만 / B. 종료 실행의 별도 진단 기록 / C. attempt에 저장하되 결과 변경 금지 | C 검토 | 실제 비용 보존과 업무 결과 불변성을 함께 만족할 가능성 | attempt 상태, 비용 집계와 동시성 로직에 영향 | Provider 구현 전 결정 |
@@ -905,6 +953,10 @@ Spring Boot는 유효한 추적 문맥이 없으면 새 `traceId`를 만들고 F
 이 문서는 목표 event catalog를 포함하지만 Issue #150에서는 External Risk 이벤트
 DTO, Producer 또는 발행 경로를 구현하지 않았다. cache·fallback 관련 이벤트도
 향후 별도 계약 대상이며 현재 구현 상태로 해석하지 않는다.
+
+Issue #160은 External Risk 선행 조회와 목표 `/api/v2/rule-analysis` 입력 계약을
+문서로 확정했을 뿐 이벤트 DTO나 실행 경로를 구현하지 않았다. v1은 현재 Endpoint,
+v2는 필수 `externalRisk`를 받는 목표 Endpoint다.
 
 - [ ] 이벤트가 Kafka 전용 계약으로 구현되지 않는가
 - [ ] Envelope `eventId`와 BehaviorEvent 업무 식별자를 혼합하지 않는가
@@ -918,6 +970,8 @@ DTO, Producer 또는 발행 경로를 구현하지 않았다. cache·fallback �
 - [ ] 실행 공유 요청의 attempts를 운영 집계에서 중복 합산하지 않는가
 - [ ] 중복 이벤트가 중복 사건·실행·리포트·attempt·비용을 만들지 않는가
 - [ ] 완료된 DetectionResult의 중복 응답이 기존 결과를 덮어쓰지 않는가
+- [ ] External Risk 실패가 거래 `RECEIVED`·DetectionResult 없음으로 끝나고
+      FastAPI·최종화·성공 이벤트를 호출하지 않는가
 - [ ] 늦은 Provider 응답이 종료된 실행 결과를 덮어쓰지 않는가
 - [ ] fallback 자체가 Provider attempt를 만들지 않는가
 - [ ] AI 리포트 실패가 거래 판단과 사건 처리를 중단시키지 않는가
