@@ -6,8 +6,10 @@
 정책 Service, 결정적 Mock과 성공 Snapshot의 계약을 정의한다. 목표 Rule 입력
 연결은 [External Risk·Rule 분석 입력 계약](./external-risk-rule-analysis-input-contract.md)이
 소유한다. 현재 구현은
-local/dev/test 검증용 인메모리 경계이며 거래 접수, FastAPI Rule 분석 입력,
-위험 점수·등급·최종 대응 또는 DB 영속화와 연결하지 않는다.
+local/dev/test 검증용 인메모리 경계이며 거래 접수와 Backend v2 Client에는 아직
+연결되지 않았다. FastAPI v2 입력 검증 Endpoint는 구현됐지만 실제 Provider 조회
+결과가 유입되는 전체 경로는 없으며 위험 점수·등급·최종 대응 또는 DB 영속화와
+연결하지 않는다.
 
 ## 2. 구현 범위
 
@@ -22,7 +24,7 @@ local/dev/test 검증용 인메모리 경계이며 거래 접수, FastAPI Rule �
 다음은 구현되지 않았다.
 
 - 실제 외부 HTTP Provider와 외부 네트워크 호출
-- 목표 `RuleAnalysisRequest` 또는 FastAPI `POST /api/v2/rule-analysis` 연결
+- Backend Java v2 `RuleAnalysisRequest`·Mapper·Client와 FastAPI v2 호출 연결
 - 거래 접수 상위 오케스트레이션
 - External Risk 기반 점수·등급·위험 대응과 사건 처리
 - `ExternalRiskSnapshot` 영속화·감사·복구. 현재 승인된 목표가 아니며 필요해질
@@ -76,9 +78,9 @@ trim하거나 보정하지 않는다. match는 최대 3개이고 Provider는 정
 거부한다. Provider 원문과 실제 reference는 match에 포함하지 않는다.
 
 현재 정책 Service는 Provider match 순서를 보존하며 canonical 정렬을 수행하지
-않는다. 목표 v2 요청 매핑은 중복을 정렬 전에 거부한 뒤 송신 계좌→수신 계좌→기기
-순서의 explicit rank tuple로 정렬한다. 이 후속 계약을 현재 Java 구현으로
-표현하지 않는다.
+않는다. 후속 Java v2 요청 매핑은 중복을 정렬 전에 거부한 뒤 송신 계좌→수신
+계좌→기기 순서의 explicit rank tuple로 정렬한다. 구현된 Python v2 요청 검증은
+이미 canonical한 배열만 허용하고 조용히 재정렬하지 않는다.
 
 ## 4. 정책 Service와 Snapshot
 
@@ -108,12 +110,13 @@ UTC `Clock`에서 한 번 얻고 PostgreSQL 호환 마이크로초 정밀도로 
 영속화·감사·복구는 현재 승인된 목표가 아니며, 필요해지면 별도 Issue와 DB 계약,
 Migration 승인을 받아야 한다.
 
-현재 독립 정책의 시각 검증은 `providerAsOf <= lookedUpAt`이다. 목표 분석 연결은
-`providerAsOf <= evaluationCutoffAt <= lookedUpAt`과
-`evaluationCutoffAt == transaction.occurredAt`을 분석 시작 전에 추가로 검증하며
-마이크로초 초과 값을 반올림·절삭하지 않는다. 현재 정책이 `Clock`에서 얻은
-`lookedUpAt`을 마이크로초로 정규화하는 동작과 목표 v2의 무절삭 입력 계약 차이는
-후속 구현에서 마이크로초 정밀도 Clock 또는 명시적 검증으로 해소해야 한다.
+현재 독립 정책의 시각 검증은 `providerAsOf <= lookedUpAt`이다. 구현된 FastAPI v2는
+`providerAsOf <= evaluationCutoffAt <= lookedUpAt`과 기존
+`evaluationCutoffAt == transaction.occurredAt`을 Rule 실행 전에 검증하며 마이크로초
+초과 값을 반올림·절삭하지 않는다. Backend 분석 시작 전에도 같은 관계를 검증해야
+한다. 현재 정책이 `Clock`에서 얻은 `lookedUpAt`을 마이크로초로 정규화하는 동작과
+목표 Java v2 무절삭 입력 계약 차이는 후속 Backend 구현에서 마이크로초 정밀도
+Clock 또는 명시적 검증으로 해소해야 한다.
 
 ## 5. 실패 분류
 

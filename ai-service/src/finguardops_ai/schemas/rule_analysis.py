@@ -4,6 +4,7 @@ import re
 from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
+from enum import StrEnum
 from types import MappingProxyType
 from typing import Annotated, Literal
 from uuid import RFC_4122, UUID
@@ -137,6 +138,10 @@ TraceId = Annotated[
     str,
     StringConstraints(strict=True, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,63}$"),
 ]
+ProviderCode = Annotated[
+    str,
+    StringConstraints(strict=True, pattern=r"^[A-Z][A-Z0-9_]{0,63}$"),
+]
 FrozenJsonObject = Annotated[
     dict[str, object],
     AfterValidator(_freeze_json_object),
@@ -194,6 +199,47 @@ class RuleVersionSnapshotRequest(RuleAnalysisDto):
     effective_to: UtcZDateTime | None
 
 
+class ExternalRiskLookupStatus(StrEnum):
+    SUCCEEDED = "SUCCEEDED"
+
+
+class ExternalRiskPolicyResult(StrEnum):
+    MATCHED = "MATCHED"
+    UNMATCHED = "UNMATCHED"
+
+
+class ExternalRiskSubjectType(StrEnum):
+    SENDER_ACCOUNT = "SENDER_ACCOUNT"
+    RECIPIENT_ACCOUNT = "RECIPIENT_ACCOUNT"
+    DEVICE = "DEVICE"
+
+
+class ExternalRiskType(StrEnum):
+    SUSPICIOUS_ACCOUNT = "SUSPICIOUS_ACCOUNT"
+    RISK_DEVICE = "RISK_DEVICE"
+
+
+class ExternalRiskReasonCode(StrEnum):
+    SUSPICIOUS_SENDER_ACCOUNT = "SUSPICIOUS_SENDER_ACCOUNT"
+    SUSPICIOUS_RECIPIENT_ACCOUNT = "SUSPICIOUS_RECIPIENT_ACCOUNT"
+    RISK_DEVICE = "RISK_DEVICE"
+
+
+class ExternalRiskMatchRequest(RuleAnalysisDto):
+    subject_type: ExternalRiskSubjectType = Field(strict=False)
+    external_risk_type: ExternalRiskType = Field(strict=False)
+    reason_code: ExternalRiskReasonCode = Field(strict=False)
+
+
+class ExternalRiskSnapshotRequest(RuleAnalysisDto):
+    provider_code: ProviderCode
+    lookup_status: ExternalRiskLookupStatus = Field(strict=False)
+    policy_result: ExternalRiskPolicyResult = Field(strict=False)
+    provider_as_of: UtcZDateTime
+    looked_up_at: UtcZDateTime
+    matches: Annotated[tuple[ExternalRiskMatchRequest, ...], Field(strict=False)]
+
+
 class RuleAnalysisRequest(RuleAnalysisDto):
     evaluation_cutoff_at: UtcZDateTime
     transaction: RuleTransactionSnapshotRequest
@@ -205,6 +251,10 @@ class RuleAnalysisRequest(RuleAnalysisDto):
         tuple[RuleVersionSnapshotRequest, ...],
         Field(strict=False),
     ]
+
+
+class RuleAnalysisRequestV2(RuleAnalysisRequest):
+    external_risk: ExternalRiskSnapshotRequest
 
 
 class RuleContributionResponse(RuleAnalysisDto):

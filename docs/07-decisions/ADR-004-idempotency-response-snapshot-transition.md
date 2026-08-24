@@ -329,7 +329,12 @@ rollback하는 내부 최종화 경계도 구현되었다.
 기존 사건에 추가 거래 연결, 사건 병합·분리, 거래 접수 전체 연결, 최종 v2
 Snapshot과 완료 간극 복구, 공개 사건 API는 구현되지 않았다. 따라서 내부 최종화
 경계의 구현을 공개 거래 처리 전체 완료로 간주하지 않는다. External Risk 실제
-Provider와 목표 `POST /api/v2/rule-analysis` 입력·거래 접수 연결도 구현되지 않았다.
+Provider와 거래 접수 연결도 구현되지 않았다. FastAPI에는 기존
+`POST /api/v1/rule-analysis`를 유지하면서 필수 External Risk v2 DTO·strict wire 및
+교차 필드 검증을 적용한 `POST /api/v2/rule-analysis`가 구현되어 있다. Backend Java
+v2 DTO·mapper·Client 전환, 공개 External Risk 오류 매핑, External Risk 영속화와
+Snapshot v2·완료 간극 운영 복구는 미구현이다. 이 FastAPI 내부 경계는 운영 배포나
+end-to-end 거래 처리 완료를 의미하지 않는다.
 External Risk 실패는 현재 cache·stale data·fallback·`UNMATCHED`로 변환하지 않고
 typed failure로 전파한다. 목표 거래 접수 연결에서는 거래 `RECEIVED` 유지,
 DetectionResult 미생성, FastAPI 미호출과 멱등 `FAILED`를 적용한다. 현재 `responseBody`는 실제 단계적 거래

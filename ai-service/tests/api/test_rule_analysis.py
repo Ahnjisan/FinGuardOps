@@ -19,6 +19,7 @@ from finguardops_ai.rules.v1 import (
     RuleEvaluatorRegistry,
     RuleEvidenceError,
     RuleEvidenceErrorCategory,
+    RuleEvidenceTransformer,
     RuleExecutionOrchestrator,
     RuleExecutionPlanBuilder,
     RuleExecutionPlanError,
@@ -27,6 +28,7 @@ from finguardops_ai.rules.v1 import (
     RuleExecutionPlanRunnerError,
     RuleExecutionPlanRunnerErrorCategory,
     RuleId,
+    RuleScoringCalculator,
     RuleScoringError,
     RuleScoringErrorCategory,
 )
@@ -37,6 +39,7 @@ from finguardops_ai.services.rule_analysis import (
 )
 
 ENDPOINT = "/api/v1/rule-analysis"
+V2_ENDPOINT = "/api/v2/rule-analysis"
 TRACE_ID = "trace_rule_endpoint_0001"
 TRACE_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 
@@ -89,6 +92,43 @@ def _valid_request() -> dict[str, object]:
     }
 
 
+def _external_match(
+    subject_type: str,
+    external_risk_type: str,
+    reason_code: str,
+) -> dict[str, object]:
+    return {
+        "subjectType": subject_type,
+        "externalRiskType": external_risk_type,
+        "reasonCode": reason_code,
+    }
+
+
+def _valid_external_risk(*, matched: bool = True) -> dict[str, object]:
+    return {
+        "providerCode": "EXTERNAL_RISK_MOCK_V1",
+        "lookupStatus": "SUCCEEDED",
+        "policyResult": "MATCHED" if matched else "UNMATCHED",
+        "providerAsOf": "2026-07-23T11:59:59.123456Z",
+        "lookedUpAt": "2026-07-23T12:00:00.654321Z",
+        "matches": [
+            _external_match(
+                "SENDER_ACCOUNT",
+                "SUSPICIOUS_ACCOUNT",
+                "SUSPICIOUS_SENDER_ACCOUNT",
+            )
+        ]
+        if matched
+        else [],
+    }
+
+
+def _valid_v2_request(*, matched: bool = True) -> dict[str, object]:
+    payload = _valid_request()
+    payload["externalRisk"] = _valid_external_risk(matched=matched)
+    return payload
+
+
 @pytest.fixture
 def application() -> FastAPI:
     return create_app()
@@ -100,8 +140,14 @@ def client(application: FastAPI) -> Iterator[TestClient]:
         yield test_client
 
 
-def _post(client: TestClient, payload: object, trace_id: str = TRACE_ID):
-    return client.post(ENDPOINT, json=payload, headers={"X-Trace-Id": trace_id})
+def _post(
+    client: TestClient,
+    payload: object,
+    trace_id: str = TRACE_ID,
+    *,
+    endpoint: str = ENDPOINT,
+):
+    return client.post(endpoint, json=payload, headers={"X-Trace-Id": trace_id})
 
 
 def _assert_error_envelope(response, status_code: int, code: str, trace_id: str) -> None:
@@ -157,6 +203,203 @@ def test_all_rules_unmatched_is_a_valid_low_zero_result(client: TestClient) -> N
     assert scoring["ruleContributions"][0]["matched"] is False
     assert scoring["ruleContributions"][0]["originalContribution"] == 0
     assert response.json()["analysis"]["evidence"] == []
+
+
+@pytest.mark.parametrize("matched", [True, False])
+def test_v2_matched_and_unmatched_reuse_the_exact_v1_result(
+    client: TestClient,
+    matched: bool,
+) -> None:
+    v1_response = _post(client, _valid_request())
+    v2_payload = _valid_v2_request(matched=matched)
+    v2_response = _post(client, v2_payload, endpoint=V2_ENDPOINT)
+
+    assert v1_response.status_code == 200
+    assert v2_response.status_code == 200
+    assert v2_response.json() == v1_response.json()
+    assert v2_response.headers["X-Trace-Id"] == TRACE_ID
+    assert "externalRisk" not in v2_response.json()
+    assert "EXTERNAL_RISK_MOCK_V1" not in v2_response.text
+
+
+def test_v2_external_risk_match_kind_does_not_change_rule_result(client: TestClient) -> None:
+    sender_payload = _valid_v2_request()
+    device_payload = _valid_v2_request()
+    device_payload["externalRisk"]["matches"] = [  # type: ignore[index]
+        _external_match("DEVICE", "RISK_DEVICE", "RISK_DEVICE")
+    ]
+
+    sender_response = _post(client, sender_payload, endpoint=V2_ENDPOINT)
+    device_response = _post(client, device_payload, endpoint=V2_ENDPOINT)
+
+    assert sender_response.status_code == 200
+    assert device_response.status_code == 200
+    assert sender_response.json() == device_response.json()
+
+
+def test_v1_continues_to_reject_external_risk(client: TestClient) -> None:
+    response = _post(client, _valid_v2_request())
+
+    _assert_error_envelope(response, 400, "INVALID_REQUEST", TRACE_ID)
+    assert response.json()["fieldErrors"][0]["field"] == "body"
+    assert "analysis" not in response.json()
+
+
+def _invalid_v2_wire_payloads() -> list[object]:
+    missing = _valid_request()
+    null_snapshot = _valid_v2_request()
+    null_snapshot["externalRisk"] = None
+    unknown = _valid_v2_request()
+    unknown["externalRisk"]["provider-secret"] = "provider-value-secret"  # type: ignore[index]
+    invalid_provider = _valid_v2_request()
+    invalid_provider["externalRisk"]["providerCode"] = "invalid-provider"  # type: ignore[index]
+    invalid_enum = _valid_v2_request()
+    invalid_enum["externalRisk"]["policyResult"] = "DEFAULT"  # type: ignore[index]
+    invalid_time = _valid_v2_request()
+    invalid_time["externalRisk"]["lookedUpAt"] = (  # type: ignore[index]
+        "2026-07-23T12:00:00.1234567Z"
+    )
+    return [missing, null_snapshot, unknown, invalid_provider, invalid_enum, invalid_time]
+
+
+@pytest.mark.parametrize("payload", _invalid_v2_wire_payloads())
+def test_v2_wire_errors_use_400_without_calling_service(
+    application: FastAPI,
+    client: TestClient,
+    payload: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service = _RaisingService(AssertionError("Rule Service must not be called"))
+    _override_service(application, service)
+
+    response = _post(client, payload, endpoint=V2_ENDPOINT)
+
+    _assert_error_envelope(response, 400, "INVALID_REQUEST", TRACE_ID)
+    assert service.calls == 0
+    assert "provider-secret" not in response.text
+    assert "provider-value-secret" not in response.text
+    assert "provider-secret" not in caplog.text
+    assert "provider-value-secret" not in caplog.text
+
+
+def _v2_wire_field_path_cases() -> list[tuple[object, str, str | None]]:
+    missing_external_risk = _valid_request()
+    invalid_provider = _valid_v2_request()
+    invalid_provider["externalRisk"]["providerCode"] = "provider-secret-value"  # type: ignore[index]
+    invalid_subject = _valid_v2_request()
+    invalid_subject["externalRisk"]["matches"][0]["subjectType"] = (  # type: ignore[index]
+        "SUBJECT_SECRET_VALUE"
+    )
+    return [
+        (missing_external_risk, "externalRisk", None),
+        (invalid_provider, "externalRisk.providerCode", "provider-secret-value"),
+        (
+            invalid_subject,
+            "externalRisk.matches[0].subjectType",
+            "SUBJECT_SECRET_VALUE",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_field", "sensitive_value"),
+    _v2_wire_field_path_cases(),
+)
+def test_v2_wire_errors_use_safe_literal_camel_case_field_paths(
+    application: FastAPI,
+    client: TestClient,
+    payload: object,
+    expected_field: str,
+    sensitive_value: str | None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service = _RaisingService(AssertionError("Rule Service must not be called"))
+    _override_service(application, service)
+
+    response = _post(client, payload, endpoint=V2_ENDPOINT)
+
+    _assert_error_envelope(response, 400, "INVALID_REQUEST", TRACE_ID)
+    assert [error["field"] for error in response.json()["fieldErrors"]] == [expected_field]
+    assert service.calls == 0
+    if sensitive_value is not None:
+        assert sensitive_value not in response.text
+        assert sensitive_value not in caplog.text
+
+
+def test_v2_cross_field_error_enters_service_but_stops_after_mapper(
+    application: FastAPI,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    downstream_calls = {
+        "plan": 0,
+        "runner": 0,
+        "evaluator": 0,
+        "scoring": 0,
+        "evidence": 0,
+    }
+
+    def fail_if_called(stage: str):
+        def fail(*args: object, **kwargs: object) -> None:
+            downstream_calls[stage] += 1
+            raise AssertionError(f"{stage} must not be called after mapper failure")
+
+        return fail
+
+    monkeypatch.setattr(RuleExecutionPlanBuilder, "build", fail_if_called("plan"))
+    monkeypatch.setattr(RuleExecutionPlanRunner, "execute", fail_if_called("runner"))
+    monkeypatch.setattr(RuleExecutionOrchestrator, "execute", fail_if_called("evaluator"))
+    monkeypatch.setattr(RuleScoringCalculator, "calculate", fail_if_called("scoring"))
+    monkeypatch.setattr(RuleEvidenceTransformer, "transform", fail_if_called("evidence"))
+    service = _DelegatingService(get_rule_analysis_service())
+    _override_service(application, service)
+    payload = _valid_v2_request()
+    payload["externalRisk"]["matches"] = []  # type: ignore[index]
+
+    response = _post(client, payload, endpoint=V2_ENDPOINT)
+
+    _assert_error_envelope(response, 422, "RULE_CONTRACT_ERROR", TRACE_ID)
+    assert service.calls == 1
+    assert downstream_calls == {
+        "plan": 0,
+        "runner": 0,
+        "evaluator": 0,
+        "scoring": 0,
+        "evidence": 0,
+    }
+    assert "analysis" not in response.json()
+
+
+@pytest.mark.parametrize("headers", [{}, {"X-Trace-Id": "invalid"}])
+def test_v2_applies_existing_trace_validation(
+    client: TestClient,
+    headers: dict[str, str],
+) -> None:
+    response = client.post(V2_ENDPOINT, json=_valid_v2_request(), headers=headers)
+
+    local_trace_id = response.headers["X-Trace-Id"]
+    _assert_error_envelope(response, 400, "INVALID_REQUEST", local_trace_id)
+    assert TRACE_PATTERN.fullmatch(local_trace_id)
+
+
+def test_v2_applies_existing_one_mib_body_limit(client: TestClient) -> None:
+    compact_json = json.dumps(_valid_v2_request(), separators=(",", ":")).encode()
+    exact_body = compact_json + b" " * (MAX_RULE_ANALYSIS_BODY_BYTES - len(compact_json))
+    assert len(exact_body) == MAX_RULE_ANALYSIS_BODY_BYTES
+
+    accepted = client.post(
+        V2_ENDPOINT,
+        content=exact_body,
+        headers={"Content-Type": "application/json", "X-Trace-Id": TRACE_ID},
+    )
+    rejected = client.post(
+        V2_ENDPOINT,
+        content=exact_body + b" ",
+        headers={"Content-Type": "application/json", "X-Trace-Id": TRACE_ID},
+    )
+
+    assert accepted.status_code == 200
+    _assert_error_envelope(rejected, 413, "PAYLOAD_TOO_LARGE", TRACE_ID)
 
 
 @pytest.mark.parametrize(
@@ -318,6 +561,16 @@ class _RaisingService:
     def analyze(self, request):
         self.calls += 1
         raise self.error
+
+
+class _DelegatingService:
+    def __init__(self, delegate: RuleAnalysisService) -> None:
+        self.delegate = delegate
+        self.calls = 0
+
+    def analyze(self, request):
+        self.calls += 1
+        return self.delegate.analyze(request)
 
 
 def _override_service(application: FastAPI, service: object) -> None:
@@ -654,6 +907,41 @@ def test_non_ascii_raw_trace_value_is_rejected_without_decoding_or_exposure() ->
     assert invalid_value not in body["body"]
 
 
+@pytest.mark.parametrize(
+    ("path", "expected_middleware_match"),
+    [
+        (ENDPOINT, True),
+        (V2_ENDPOINT, True),
+        ("/api/v2/rule-analysis/extra", False),
+        ("/internal/api/v2/rule-analysis", False),
+    ],
+)
+def test_middleware_uses_only_the_exact_v1_v2_path_allowlist(
+    path: str,
+    expected_middleware_match: bool,
+) -> None:
+    async def downstream(scope, receive, send) -> None:
+        assert ("trace_id" in scope["state"]) is expected_middleware_match
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    middleware = RuleAnalysisHttpMiddleware(downstream)
+    scope = _asgi_scope(path=path)
+    sent: list[dict[str, object]] = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(middleware(scope, receive, send))
+
+    start = next(message for message in sent if message["type"] == "http.response.start")
+    trace_headers = [header for header in start["headers"] if header[0].lower() == b"x-trace-id"]
+    assert bool(trace_headers) is expected_middleware_match
+
+
 def test_health_is_outside_rule_analysis_middleware(client: TestClient) -> None:
     response = client.get("/api/health", headers={"X-Trace-Id": "invalid"})
 
@@ -662,15 +950,19 @@ def test_health_is_outside_rule_analysis_middleware(client: TestClient) -> None:
     assert "X-Trace-Id" not in response.headers
 
 
-def _asgi_scope(trace_id: str = TRACE_ID) -> dict[str, object]:
+def _asgi_scope(
+    trace_id: str = TRACE_ID,
+    *,
+    path: str = ENDPOINT,
+) -> dict[str, object]:
     return {
         "type": "http",
         "asgi": {"version": "3.0"},
         "http_version": "1.1",
         "method": "POST",
         "scheme": "http",
-        "path": ENDPOINT,
-        "raw_path": ENDPOINT.encode(),
+        "path": path,
+        "raw_path": path.encode(),
         "query_string": b"",
         "root_path": "",
         "headers": [

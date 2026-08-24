@@ -5,15 +5,16 @@
 이 문서는 거래 접수의 External Risk 선행 조회 결과를 Rule v1 분석 입력에
 결합하는 목표 계약의 단일 기준이다. Issue
 [#160](https://github.com/Ahnjisan/FinGuardOps/issues/160)과 OWNER 승인 댓글
-`5390984333`에서 승인한 문서 계약만 다루며 Java·Python·테스트·DB·Flyway·Gradle,
-공개 Controller와 실제 Provider 구현을 완료한 것으로 간주하지 않는다.
+`5390984333`에서 승인한 계약과 Issue #162의 FastAPI v2 구현 상태를 함께 기록한다.
+Python v2 DTO·검증·Endpoint 구현을 Backend Java v2 Client, 거래 접수 전체 연결,
+DB·Flyway, 공개 Controller 또는 실제 Provider 구현 완료로 간주하지 않는다.
 
 현재 구현과 목표 계약은 다음과 같이 구분한다.
 
 | 구분 | 현재 구현 | 목표 계약 |
 | --- | --- | --- |
 | External Risk | 독립 Port·Policy Service, local/dev/test Mock, immutable 성공 Snapshot | 거래 접수의 멱등 단일 승자가 DB 트랜잭션 밖에서 선행 조회 |
-| Rule HTTP | `POST /api/v1/rule-analysis`, External Risk 없는 네 필드 요청 | `POST /api/v2/rule-analysis`, 필수 `externalRisk`를 추가한 다섯 필드 요청 |
+| Rule HTTP | `POST /api/v1/rule-analysis`와 필수 `externalRisk`를 추가한 `POST /api/v2/rule-analysis` FastAPI 경계 | Backend Java v2 DTO·Mapper·Client 전환 |
 | Rule 실행 의미 | Rule v1 R001~R004·scoring·Evidence | 같은 Rule v1 실행 의미를 그대로 유지 |
 | 거래 접수 | `RECEIVED`/null v1 Snapshot을 반환·재생 | External Risk→Rule 분석→위험 대응→Snapshot v2 전체 연결 |
 
@@ -84,9 +85,9 @@ ruleVersions
 v1 DTO와 Endpoint는 당장 제거하거나 의미를 확장하지 않는다. v1에 선택적
 `externalRisk`를 추가하지 않는다.
 
-### 4.2 목표 v2
+### 4.2 구현된 FastAPI v2
 
-목표 `POST /api/v2/rule-analysis`는 기존 네 필드와 필수·non-null
+구현된 `POST /api/v2/rule-analysis`는 기존 네 필드와 필수·non-null
 `externalRisk`를 정확히 가진다.
 
 ```text
@@ -261,7 +262,7 @@ External Risk 실패는 Rule 분석 시작 전 실패다. 다음 상태를 함�
 않았다. 실패를 성공 DetectionResult, `UNMATCHED`, 0점, `LOW` 또는 빈 Evidence로
 변환하지 않는다.
 
-목표 FastAPI v2가 `externalRisk`의 JSON 타입·필수·null·Enum·UTC 형식·unknown
+구현된 FastAPI v2가 `externalRisk`의 JSON 타입·필수·null·Enum·UTC 형식·unknown
 field를 거부하면 `400 INVALID_REQUEST`, match 조합·개수·canonical 순서와 시간
 관계 같은 cross-field 계약을 거부하면 `422 RULE_CONTRACT_ERROR`다. 둘 다 Spring
 Boot가 만든 upstream 요청의 결함이므로 공개 거래 API에서는 `500 INTERNAL_ERROR`로
@@ -289,10 +290,14 @@ Boot가 만든 upstream 요청의 결함이므로 공개 거래 API에서는 `50
 
 필수 필드 추가를 기존 v1에 적용하지 않는다. 배포는 다음 순서를 따른다.
 
-1. AI Service가 기존 v1을 유지하면서 v2 Endpoint·필수 DTO 검증을 선배포한다.
-2. Java·Python v2 fixture와 golden vector로 wire 호환성을 확인한다.
-3. Backend Client와 상위 거래 흐름을 v2로 전환한다.
-4. 전환 동안 v1과 v2의 호출량·오류를 구분해 관측한다.
+1. AI Service가 기존 v1을 유지하면서 v2 Endpoint·필수 DTO·strict 검증 코드를 준비한다. — 코드 구현 완료
+2. Backend 전환 전에 AI Service v2를 선배포한다. — 실제 운영 배포 미실행
+3. Java·Python v2 fixture와 golden vector로 wire 호환성을 확인한다.
+4. Backend Java v2 DTO·wire mapper·HTTP Client와 상위 거래 흐름을 v2로 전환한다. — 미구현
+5. 전환 동안 v1과 v2의 호출량·오류를 구분해 관측한다.
+
+FastAPI v2 코드 구현은 실제 선배포 또는 end-to-end 거래 연결 완료를 의미하지 않는다.
+Backend Java 전환과 거래 접수 전체 상위 오케스트레이션은 아직 구현되지 않았다.
 
 지원하지 않는 v2 배포 조합은 optional 필드나 빈 Snapshot으로 우회하지 않고
 fail-closed한다. v1 제거 시점은 별도 승인 대상이다.
@@ -325,13 +330,14 @@ fail-closed한다. v1 제거 시점은 별도 승인 대상이다.
 
 ## 14. 구현·미구현 범위와 영향
 
-이번 Issue에서 구현한 것은 문서 계약뿐이다. 독립 External Risk 도메인과 Mock,
-현재 v1 Rule 경로, R001~R004, 내부 위험 대응 최종화는 기존 구현이다.
+독립 External Risk 도메인과 Mock, 현재 v1 Rule 경로, R001~R004와 내부 위험 대응
+최종화는 기존 구현이다. Issue #162에서 FastAPI v2 strict DTO, External Risk
+wire·교차 필드 검증과 Endpoint를 구현했으며 v1과 같은 Rule v1 실행 경계를 재사용한다.
 
 다음은 아직 구현되지 않았다.
 
 - 실제 External Risk HTTP Provider
-- Java·Python v2 DTO와 Endpoint·Client
+- Backend Java v2 DTO·Mapper·Client와 상위 Snapshot assembly 연결
 - 상위 비트랜잭션 거래 오케스트레이션
 - 거래 접수 전체 연결과 공개 오류 매핑
 - Snapshot v2와 완료 간극 운영 복구

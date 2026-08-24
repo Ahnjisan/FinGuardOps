@@ -4,8 +4,8 @@
 
 이 문서는 Spring Boot가 FastAPI AI Service에 Rule v1 분석을 동기 요청하고,
 현재 구현된 `RuleAnalysisResult`를 응답받기 위한 내부 HTTP API 계약을
-정의한다. 현재 wire는 `POST /api/v1/rule-analysis`, External Risk를 필수로
-결합하는 목표 wire는 `POST /api/v2/rule-analysis`다. v2의 단일 상세 기준은
+정의한다. 현재 FastAPI wire는 `POST /api/v1/rule-analysis`와 External Risk를
+필수로 결합하는 `POST /api/v2/rule-analysis`다. v2의 단일 상세 기준은
 [External Risk·Rule 분석 입력 계약](../01-requirements/external-risk-rule-analysis-input-contract.md)이다.
 
 ```text
@@ -45,6 +45,12 @@ Content-Type: application/json
 X-Trace-Id: <traceId>
 ```
 
+```http
+POST /api/v2/rule-analysis
+Content-Type: application/json
+X-Trace-Id: <traceId>
+```
+
 - 분석은 요청 안에서 완료되는 동기 처리다.
 - 성공하면 `200 OK`를 반환한다.
 - FastAPI는 분석 결과를 영속화하지 않는다.
@@ -53,7 +59,7 @@ X-Trace-Id: <traceId>
 - 요청 본문 최대 크기는 1 MiB, 즉 1,048,576 bytes다. 구현된 FastAPI
   Middleware가 실제 수신 byte를 기준으로 이 제한을 적용한다.
 
-목표 `POST /api/v2/rule-analysis`도 Rule v1 엔진을 실행하지만 필수
+구현된 `POST /api/v2/rule-analysis`도 Rule v1 엔진을 실행하지만 필수
 `externalRisk` 때문에 v1과 호환되지 않는 새 wire 계약이다. v1은 당장 제거하지
 않고, v1에 optional `externalRisk`나 기본 `UNMATCHED`를 추가하지 않는다.
 
@@ -252,9 +258,9 @@ Registry capability를 검증한다. canonical weight는 downstream scoring이,
 불일치가 다시 발생하면 입력 오류로 재분류하지 않고 `500 INTERNAL_ERROR`인
 서버 내부 불변식 위반으로 처리한다.
 
-### 5.5 목표 v2 External Risk 입력
+### 5.5 v2 External Risk 입력
 
-목표 v2는 현재 네 최상위 필드에 필수·non-null `externalRisk`를 추가한다.
+v2는 기존 네 최상위 필드에 필수·non-null `externalRisk`를 추가한다.
 `externalRisk`는 `providerCode`, `lookupStatus`, `policyResult`, `providerAsOf`,
 `lookedUpAt`, `matches`만 가지며 모든 중첩 DTO는 알 수 없는 필드를 거부한다.
 MATCHED는 canonical match 1~3개, UNMATCHED는 정확히 0개다. exact 필드·Enum·시간,
@@ -265,8 +271,9 @@ MATCHED는 canonical match 1~3개, UNMATCHED는 정확히 0개다. exact 필드�
 v2는 External Risk를 검증하지만 R001~R004 evaluator에는 전달하지 않는다.
 따라서 조건·점수·등급·Evidence, `ruleSetVersion`, `scoring-policy-v1`,
 `featureVersion=rule-v1`, `modelVersion=null`과 기존 성공 응답은 바뀌지 않는다.
-External Risk echo와 전용 hash를 응답에 추가하지 않는다. 이 절은 목표 계약이며
-Java·Python v2 DTO와 Endpoint는 아직 구현되지 않았다.
+External Risk echo와 전용 hash를 응답에 추가하지 않는다. Python v2 DTO·검증과
+FastAPI Endpoint는 구현됐으며 Backend Java v2 DTO·Mapper·Client는 아직 구현되지
+않았다.
 
 v2의 JSON 타입·필수·null·Enum·UTC 형식·unknown field 오류는
 `400 INVALID_REQUEST`, match 조합·개수·canonical 순서와 시간 관계 오류는
@@ -903,7 +910,8 @@ Risk 조회·정책, 위험 대응, 사건 또는 Snapshot v2를 소유하지 �
 현재 FastAPI v1 `RuleAnalysisRequest`에는 External Risk 입력이 없다. Issue #150은
 Spring Boot 내부의 독립 Port·Policy Service·local/dev/test Mock·인메모리 성공
 Snapshot만 구현했으며 FastAPI·Python·`RuleAnalysisRequest`를 변경하지 않았다.
-Issue #160에서 v2 DTO와 FastAPI 호출 입력 계약은 승인했지만 구현은 후속 Issue다.
+Issue #160에서 승인한 v2 입력 계약에 따라 Issue #162에서 Python DTO·검증과
+FastAPI Endpoint를 구현했다. Backend Java v2 Client와 호출 연결은 후속 Issue다.
 
 ### 13.8 로그와 정보 보호
 
@@ -955,7 +963,7 @@ connect·response timeout, 자동 retry 0회, 트랜잭션 밖 HTTP 호출과 �
 ## 14. 현재 구현 이후 제외 범위
 
 - 거래 접수 Service에서 Rule v1 오케스트레이터를 호출하는 연결
-- 목표 `/api/v2/rule-analysis` Java·Python DTO·Endpoint·Client와 External Risk 연결
+- Backend Java v2 DTO·Mapper·Client와 External Risk→FastAPI v2 호출 연결
 - 거래 접수에서 구현된 위험 대응·최종 거래 상태·사건·AuditLog 원자적 최종화
   경계를 호출하는 연결
 - 최종 동기 응답과 Snapshot v2 확정

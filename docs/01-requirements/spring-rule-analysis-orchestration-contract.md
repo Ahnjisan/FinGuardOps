@@ -420,13 +420,16 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
   결정적 Mock과 성공 결과용 immutable 인메모리 Snapshot
 - External Risk 선행 조회와 목표 `POST /api/v2/rule-analysis` 필수 입력·실패
   경계 문서 계약
+- 기존 FastAPI `POST /api/v1/rule-analysis` 유지, Python v2 요청 DTO와 필수
+  External Risk strict wire·교차 필드 검증을 적용한 `POST /api/v2/rule-analysis`
 
 ### 15.2 구현되지 않음
 
 - 거래 접수 Service에서 분석 오케스트레이터를 호출하는 전체 연결
 - 상위 거래 흐름에서 거래·행동·RuleVersion 기준을 고정하고 External Risk
   결과·조회 상태를 결합한 입력을 오케스트레이터에 전달하는 연결
-- Java·Python v2 요청 DTO, FastAPI v2 Endpoint와 Backend v2 Client
+- Backend Java v2 요청 DTO, `ExternalRiskSnapshot`→v2 wire mapper,
+  `RuleAnalysisHttpClient` v2 전환과 내부 오케스트레이터의 v2 입력 전달
 - Client 오류 category를 거래 API 공통 오류로 매핑하는 경로
 - 실제 External Risk HTTP Provider
 - ExternalRiskSnapshot DB 영속화는 이번 목표에 포함하지 않으며 별도 승인 대상
@@ -448,11 +451,14 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
   `RuleAnalysisHttpClient` 전달과 결과 채택은 연결되었지만 최종 거래 접수·멱등
   응답 경로에는 아직 연결되지 않았다.
 - 현재 내부 오케스트레이터와 `POST /api/v1/rule-analysis`는 External Risk가 없는
-  Rule v1 입력을 분석 시작 경계에서 조합한다. 목표 v2는 Provider 호출 뒤 별도
-  Snapshot assembly 경계가 External Risk를 포함한 완성 요청을 만들고 시작 경계에
-  전달한다. 이 변경과 `POST /api/v2/rule-analysis` 호출은 아직 구현되지 않았다.
-  독립 조회 정책·Mock 경계와 이번 문서 계약은 이 `RuleAnalysisRequest` 연결을
-  완료했다는 의미가 아니다.
+  Rule v1 입력을 분석 시작 경계에서 조합한다. FastAPI에는 기존 v1을 유지하면서
+  Python v2 요청 DTO와 strict External Risk 검증을 적용한
+  `POST /api/v2/rule-analysis`가 구현되어 있다. 그러나 목표 v2의 Provider 호출 뒤
+  별도 Snapshot assembly, Backend Java v2 DTO·wire mapper·HTTP Client 전환과 내부
+  오케스트레이터의 v2 입력 전달은 아직 구현되지 않았다. 따라서 Spring Boot의 v2
+  호출, 실제 Provider·거래 접수 전체 연결, 공개 오류 매핑, External Risk 영속화,
+  Snapshot v2·운영 복구는 완료되지 않았다. FastAPI 내부 구현은 운영 배포 또는
+  end-to-end 거래 처리 완료를 의미하지 않는다.
 - V5 초기 RuleVersion은 항상 모두 `DRAFT`다. 별도 one-shot 명령을 명시적으로
   실행한 local/dev/test 환경에서만 기본 네 버전이 실행 가능해지며, 정상 앱 시작은
   자동 발행하지 않는다.

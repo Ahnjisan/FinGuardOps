@@ -11,6 +11,12 @@ from finguardops_ai.schemas.errors import RuleAnalysisErrorResponse
 
 TRACE_HEADER_NAME = "X-Trace-Id"
 MAX_RULE_ANALYSIS_BODY_BYTES = 1_048_576
+RULE_ANALYSIS_PATHS = frozenset(
+    {
+        "/api/v1/rule-analysis",
+        "/api/v2/rule-analysis",
+    }
+)
 
 _TRACE_HEADER_NAME_BYTES = b"x-trace-id"
 _TRACE_ID_PATTERN = re.compile(rb"^[A-Za-z0-9][A-Za-z0-9._:-]{7,63}$")
@@ -28,11 +34,11 @@ class RuleAnalysisHttpMiddleware:
         self,
         app: ASGIApp,
         *,
-        path: str = "/api/v1/rule-analysis",
+        paths: frozenset[str] = RULE_ANALYSIS_PATHS,
         max_body_bytes: int = MAX_RULE_ANALYSIS_BODY_BYTES,
     ) -> None:
         self._app = app
-        self._path = path
+        self._paths = paths
         self._max_body_bytes = max_body_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -116,7 +122,7 @@ class RuleAnalysisHttpMiddleware:
         return (
             scope["type"] == "http"
             and scope.get("method") == "POST"
-            and scope.get("path") == self._path
+            and scope.get("path") in self._paths
         )
 
     @staticmethod

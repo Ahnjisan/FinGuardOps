@@ -9,9 +9,12 @@ RuleExecutionPlanRunner·PlannedRuleResult와 `scoring-policy-v1`의
 RuleScoringCalculator, RuleEvidenceTransformer와 RuleAnalysisResult 조합이다.
 Pydantic 요청·응답 DTO와 명시적 매퍼, `POST /api/v1/rule-analysis`, Trace·실제
 수신 byte 기반 본문 제한 Middleware와 공통 오류 Handler도 구현되어 있다.
-Spring Boot `RuleAnalysisHttpClient`도 구현되어 있다. 다만 실제 RuleVersion 전체
-조회·Snapshot 조합, 거래 분석 오케스트레이션, DetectionResult·DetectionEvidence
-자동 영속화와 결과 채택은 구현되지 않았다.
+필수 External Risk를 strict하게 검증하되 같은 Rule v1 경계를 실행하는
+`POST /api/v2/rule-analysis`도 구현되어 있다. Spring Boot `RuleAnalysisHttpClient`,
+거래·행동 이벤트·활성 RuleVersion Snapshot 조합, 분석 시작 commit, FastAPI 1회
+호출, DetectionResult·DetectionEvidence 완료·채택과 실패 기록을 연결하는 내부
+오케스트레이션도 구현되어 있다. Backend Java v2 Client와 External Risk를 포함한
+Snapshot 조합, 거래 접수 전체 상위 오케스트레이션은 구현되지 않았다.
 
 Spring Boot → FastAPI 내부 Rule v1 분석 요청·응답, 추적, 직렬화와 오류 계약은
 [Rule v1 내부 분석 API](../docs/03-api/rule-v1-analysis-api.md)에 정의되어 있다.
@@ -109,20 +112,24 @@ fail-fast 정책은
 - [Rule v1 내부 분석 API 계약](../docs/03-api/rule-v1-analysis-api.md):
   문서 정의 및 FastAPI Endpoint·Pydantic DTO·Trace·본문 제한·오류 처리 구현 완료,
   Spring Boot Client·Timeout·Trace 전달·응답 검증·오류 분류 구현 완료
-- 실제 전체 활성 RuleVersion 조회와 거래·행동 이벤트 Snapshot 조합: 후속 범위
+- FastAPI `POST /api/v2/rule-analysis` 필수 External Risk DTO·wire/교차 계약 검증:
+  구현 완료. External Risk는 validation-only이며 Rule·점수·Evidence에는 전달하지 않음
+- 거래·행동 이벤트·활성 RuleVersion Snapshot 조합과 분석 시작·완료·채택 경계:
+  External Risk 없는 현재 v1 내부 경로 구현 완료
 - [Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../docs/01-requirements/spring-rule-analysis-orchestration-contract.md):
-  문서 정의 완료, 실행 경로 미구현
+  문서 정의 및 현재 v1 내부 실행 경로 구현 완료
 - R004 `observed_amount` facts 보강과 Evidence 변환·Rule 분석 결과 조합:
   구현 완료
-- DetectionResult·DetectionEvidence 자동 영속화와 결과 채택: 후속 범위
+- DetectionResult·DetectionEvidence 영속화와 결과 채택: 현재 v1 내부 경로 구현 완료
 
 개별 evaluator·Registry, raw evaluator orchestration과 plan 기반 실행·결합은
 구현되었고 Evidence·Reason Code 변환과 Rule 분석 결과 조합까지 순수 내부
 경로로 구현되어 있다. RuleVersion snapshot을 HTTP DTO로 수신해 기존 내부
 경로를 실행하고 응답 DTO로 반환하는 FastAPI Rule 분석 endpoint도 구현되어
-있다. Spring Boot HTTP Client도 구현되어 있으나 실제 전체 활성 RuleVersion
-조회·Snapshot 조합과 DetectionResult·DetectionEvidence 자동 영속화·결과
-채택을 연결하는 오케스트레이션은 후속 범위이다.
+있다. Spring Boot HTTP Client와 실제 활성 RuleVersion 조회·Snapshot 조합,
+DetectionResult·DetectionEvidence 영속화·결과 채택을 연결하는 현재 v1 내부
+오케스트레이션도 구현되어 있다. Backend Java v2 DTO·Mapper·Client, External Risk
+포함 Snapshot 조합과 거래 접수 전체 연결은 후속 범위이다.
 순수 builder는 전달받은
 `evaluationCutoffAt`의 UTC 표현과 RuleVersion 적용 기간을 검증하고, 구현된
 Runner는 plan의 cutoff와 거래 `occurredAt`의 정확한 일치 및 ordered raw result

@@ -29,7 +29,10 @@ from finguardops_ai.schemas.errors import (
     RuleAnalysisFieldError,
 )
 from finguardops_ai.schemas.rule_analysis import (
+    ExternalRiskMatchRequest,
+    ExternalRiskSnapshotRequest,
     RuleAnalysisRequest,
+    RuleAnalysisRequestV2,
     RuleBehaviorEventSnapshotRequest,
     RuleTransactionSnapshotRequest,
     RuleVersionSnapshotRequest,
@@ -66,7 +69,7 @@ async def _request_validation_error(
         code="INVALID_REQUEST",
         message=_INVALID_REQUEST_MESSAGE,
         trace_id=trace_id,
-        field_errors=_validation_field_errors(exc),
+        field_errors=_validation_field_errors(request, exc),
     )
 
 
@@ -215,25 +218,36 @@ def _trace_id(request: Request) -> str:
     return trace_id if isinstance(trace_id, str) else str(uuid4())
 
 
-def _validation_field_errors(exc: RequestValidationError) -> tuple[RuleAnalysisFieldError, ...]:
+def _validation_field_errors(
+    request: Request,
+    exc: RequestValidationError,
+) -> tuple[RuleAnalysisFieldError, ...]:
     field_errors: list[RuleAnalysisFieldError] = []
     for error in exc.errors():
         error_type = str(error.get("type", ""))
-        field, code, reason = _wire_error_details(error.get("loc", ()), error_type)
+        field, code, reason = _wire_error_details(
+            request,
+            error.get("loc", ()),
+            error_type,
+        )
         field_errors.append(RuleAnalysisFieldError(field=field, code=code, reason=reason))
     return tuple(field_errors)
 
 
-def _wire_error_details(location: object, error_type: str) -> tuple[str, str, str]:
+def _wire_error_details(
+    request: Request,
+    location: object,
+    error_type: str,
+) -> tuple[str, str, str]:
     if error_type == "json_invalid":
         return "body", "MALFORMED_JSON", "올바른 JSON 형식이어야 합니다."
-    field = _field_path(location)
+    field = _field_path(request, location)
     if error_type == "missing":
         return field, "REQUIRED_FIELD", "필수 필드입니다."
     return field, "INVALID_FIELD", "요청 필드 형식을 확인해 주세요."
 
 
-def _field_path(location: object) -> str:
+def _field_path(request: Request, location: object) -> str:
     if not isinstance(location, (tuple, list)):
         return "body"
     location_parts = list(location)
@@ -241,7 +255,8 @@ def _field_path(location: object) -> str:
         location_parts = location_parts[1:]
 
     safe_parts: list[str] = []
-    current_fields: Mapping[str, str] | None = _REQUEST_FIELD_ALIASES
+    root_fields = _request_field_aliases(request)
+    current_fields: Mapping[str, str] | None = root_fields
     array_item_fields: Mapping[str, str] | None = None
     for part in location_parts:
         if type(part) is int:
@@ -259,18 +274,30 @@ def _field_path(location: object) -> str:
             break
         safe_parts.append(alias)
 
-        if current_fields is _REQUEST_FIELD_ALIASES and alias == "transaction":
+        if current_fields is root_fields and alias == "transaction":
             current_fields = _TRANSACTION_FIELD_ALIASES
-        elif current_fields is _REQUEST_FIELD_ALIASES and alias == "behaviorEvents":
+        elif current_fields is root_fields and alias == "behaviorEvents":
             current_fields = None
             array_item_fields = _BEHAVIOR_EVENT_FIELD_ALIASES
-        elif current_fields is _REQUEST_FIELD_ALIASES and alias == "ruleVersions":
+        elif current_fields is root_fields and alias == "ruleVersions":
             current_fields = None
             array_item_fields = _RULE_VERSION_FIELD_ALIASES
+        elif current_fields is root_fields and alias == "externalRisk":
+            current_fields = _EXTERNAL_RISK_FIELD_ALIASES
+        elif current_fields is _EXTERNAL_RISK_FIELD_ALIASES and alias == "matches":
+            current_fields = None
+            array_item_fields = _EXTERNAL_RISK_MATCH_FIELD_ALIASES
         else:
             current_fields = None
             array_item_fields = None
     return ".".join(safe_parts) if safe_parts else "body"
+
+
+def _request_field_aliases(request: Request) -> Mapping[str, str]:
+    route = request.scope.get("route")
+    if getattr(route, "name", None) == "analyze_rule_v2":
+        return _REQUEST_V2_FIELD_ALIASES
+    return _REQUEST_FIELD_ALIASES
 
 
 def _model_field_aliases(model: type[BaseModel]) -> Mapping[str, str]:
@@ -283,6 +310,9 @@ def _model_field_aliases(model: type[BaseModel]) -> Mapping[str, str]:
 
 
 _REQUEST_FIELD_ALIASES = _model_field_aliases(RuleAnalysisRequest)
+_REQUEST_V2_FIELD_ALIASES = _model_field_aliases(RuleAnalysisRequestV2)
 _TRANSACTION_FIELD_ALIASES = _model_field_aliases(RuleTransactionSnapshotRequest)
 _BEHAVIOR_EVENT_FIELD_ALIASES = _model_field_aliases(RuleBehaviorEventSnapshotRequest)
 _RULE_VERSION_FIELD_ALIASES = _model_field_aliases(RuleVersionSnapshotRequest)
+_EXTERNAL_RISK_FIELD_ALIASES = _model_field_aliases(ExternalRiskSnapshotRequest)
+_EXTERNAL_RISK_MATCH_FIELD_ALIASES = _model_field_aliases(ExternalRiskMatchRequest)

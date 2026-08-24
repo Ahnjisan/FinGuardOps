@@ -1008,9 +1008,12 @@ ATM_WITHDRAWAL_REQUESTED
 
 External Risk 선행 조회를 Rule v1 실행 입력에 연결하는 목표 계약은
 [`External Risk·Rule 분석 입력 계약`](../01-requirements/external-risk-rule-analysis-input-contract.md)을
-따른다. 현재 wire는 External Risk가 없는 `POST /api/v1/rule-analysis`이고, 목표
-wire는 필수 `externalRisk`를 가진 `POST /api/v2/rule-analysis`다. 문서 계약은
-확정됐지만 Java·Python v2 DTO와 거래 접수 전체 연결은 구현되지 않았다.
+따른다. FastAPI에는 기존 External Risk 없는 `POST /api/v1/rule-analysis`와 필수
+`externalRisk`를 가진 `POST /api/v2/rule-analysis`가 함께 구현되어 있다. v2 요청
+DTO와 strict External Risk wire·교차 필드 검증은 구현됐지만 Backend Java v2 DTO·
+mapper·Client 전환, 실제 Provider, 거래 접수 전체 연결, 공개 오류 매핑, External
+Risk 영속화, Snapshot v2와 완료 간극 운영 복구는 구현되지 않았다. 이 FastAPI 내부
+경계 구현은 운영 배포 또는 end-to-end 거래 처리 완료를 의미하지 않는다.
 
 - 카드 결제 FDS
 - 증권 거래 FDS
