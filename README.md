@@ -196,8 +196,10 @@ HTTP 오케스트레이터도 Snapshot과 분석 시작 commit, 분석 시도당
 FastAPI에는 기존 `POST /api/v1/rule-analysis`와 함께 External Risk 결과를 필수
 입력으로 검증하는 `POST /api/v2/rule-analysis`가 구현되었습니다. 두 endpoint는
 같은 Rule v1 실행 경계를 사용하며 External Risk는 아직 점수·등급·Evidence에
-반영하지 않습니다. Backend Java v2 DTO·Mapper·Client, 거래 접수 Service의 전체
-오케스트레이션, 최종 동기 거래 응답과 Snapshot v2, Snapshot 완료 간극 복구,
+반영하지 않습니다. Backend에는 v1 계약을 유지하는 Java v2 exact wire DTO,
+`ExternalRiskSnapshot` mapper와 `/api/v2/rule-analysis` HTTP Client 경계가
+구현되었습니다. 거래 접수 Service의 전체 오케스트레이션, 실제 Provider, 공개
+오류 매핑, 최종 동기 거래 응답과 Snapshot v2, Snapshot 완료 간극 복구,
 운영 배포·재분석은 아직 구현되지 않았습니다. 기존 v1은 당장 제거하지 않습니다.
 네 위험 등급에서 목표 거래 상태,
 `RiskResponseOutcome`, 사건 필수 여부를 결정하는 순수 immutable 정책은
@@ -367,7 +369,8 @@ Kafka
   [`External Risk 조회 정책`](docs/01-requirements/external-risk-lookup-policy.md) 문서화
 * External Risk 선행 조회와 `POST /api/v2/rule-analysis` 입력 연결 계약을
   [`External Risk·Rule 분석 입력 계약`](docs/01-requirements/external-risk-rule-analysis-input-contract.md)으로 확정하고,
-  FastAPI v2 strict DTO·wire 및 교차 필드 검증·Endpoint 구현
+  FastAPI v2 strict DTO·wire 및 교차 필드 검증·Endpoint와 Backend Java v2
+  exact wire DTO·mapper·HTTP Client 경계 구현
 * LOW·MEDIUM·HIGH·CRITICAL별 목표 거래 상태, `RiskResponseOutcome`과 사건 필수
   여부를 반환하는 순수 위험 대응 결정 정책 구현
 * `FraudCase`·`CaseTransaction` Entity와 Flyway V6, 거래 우선 비관적 잠금으로
@@ -385,8 +388,8 @@ Kafka
 
 최종 동기 거래 접수는 다음 선행 순서를 따른다.
 
-1. Backend Java 필수 `externalRisk` DTO·Mapper·Client 구현과 FastAPI v2 전환
-2. 비트랜잭션 상위 Service에서 거래 접수–External Risk–Rule 분석–위험 대응–사건 연결
+1. 비트랜잭션 상위 Service에서 거래 접수–External Risk–Rule 분석 v2–위험 대응–사건 연결
+2. 실제 External Risk HTTP Provider와 공개 오류 매핑
 3. 최종 Snapshot v2 확정과 Snapshot 완료 간극 운영 복구 구현
 
 그 밖의 계획은 다음과 같습니다.

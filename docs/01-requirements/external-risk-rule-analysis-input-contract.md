@@ -5,16 +5,17 @@
 이 문서는 거래 접수의 External Risk 선행 조회 결과를 Rule v1 분석 입력에
 결합하는 목표 계약의 단일 기준이다. Issue
 [#160](https://github.com/Ahnjisan/FinGuardOps/issues/160)과 OWNER 승인 댓글
-`5390984333`에서 승인한 계약과 Issue #162의 FastAPI v2 구현 상태를 함께 기록한다.
-Python v2 DTO·검증·Endpoint 구현을 Backend Java v2 Client, 거래 접수 전체 연결,
-DB·Flyway, 공개 Controller 또는 실제 Provider 구현 완료로 간주하지 않는다.
+`5390984333`에서 승인한 계약, Issue #162의 FastAPI v2 구현과 Issue #164의
+Backend Java v2 경계 구현 상태를 함께 기록한다. Python·Java v2 DTO·검증·mapper·
+Client 구현을 거래 접수 전체 연결, DB·Flyway, 공개 Controller 또는 실제 Provider
+구현 완료로 간주하지 않는다.
 
 현재 구현과 목표 계약은 다음과 같이 구분한다.
 
 | 구분 | 현재 구현 | 목표 계약 |
 | --- | --- | --- |
 | External Risk | 독립 Port·Policy Service, local/dev/test Mock, immutable 성공 Snapshot | 거래 접수의 멱등 단일 승자가 DB 트랜잭션 밖에서 선행 조회 |
-| Rule HTTP | `POST /api/v1/rule-analysis`와 필수 `externalRisk`를 추가한 `POST /api/v2/rule-analysis` FastAPI 경계 | Backend Java v2 DTO·Mapper·Client 전환 |
+| Rule HTTP | `POST /api/v1/rule-analysis`와 필수 `externalRisk`를 추가한 `POST /api/v2/rule-analysis` FastAPI 경계, v1을 유지하는 Backend Java v2 exact wire DTO·mapper·직접 Client 경계 | 상위 오케스트레이터의 v2 입력 전달과 거래 접수 전체 연결 |
 | Rule 실행 의미 | Rule v1 R001~R004·scoring·Evidence | 같은 Rule v1 실행 의미를 그대로 유지 |
 | 거래 접수 | `RECEIVED`/null v1 Snapshot을 반환·재생 | External Risk→Rule 분석→위험 대응→Snapshot v2 전체 연결 |
 
@@ -293,11 +294,13 @@ Boot가 만든 upstream 요청의 결함이므로 공개 거래 API에서는 `50
 1. AI Service가 기존 v1을 유지하면서 v2 Endpoint·필수 DTO·strict 검증 코드를 준비한다. — 코드 구현 완료
 2. Backend 전환 전에 AI Service v2를 선배포한다. — 실제 운영 배포 미실행
 3. Java·Python v2 fixture와 golden vector로 wire 호환성을 확인한다.
-4. Backend Java v2 DTO·wire mapper·HTTP Client와 상위 거래 흐름을 v2로 전환한다. — 미구현
-5. 전환 동안 v1과 v2의 호출량·오류를 구분해 관측한다.
+4. Backend Java v2 DTO·wire mapper·HTTP Client를 구현한다. — 코드 구현 완료
+5. 상위 거래 흐름과 내부 Rule 분석 오케스트레이터를 v2로 전환한다. — 미구현
+6. 전환 동안 v1과 v2의 호출량·오류를 구분해 관측한다.
 
 FastAPI v2 코드 구현은 실제 선배포 또는 end-to-end 거래 연결 완료를 의미하지 않는다.
-Backend Java 전환과 거래 접수 전체 상위 오케스트레이션은 아직 구현되지 않았다.
+Backend Java 직접 v2 Client 경계는 구현됐지만 내부 분석 오케스트레이터 전환과
+거래 접수 전체 상위 오케스트레이션은 아직 구현되지 않았다.
 
 지원하지 않는 v2 배포 조합은 optional 필드나 빈 Snapshot으로 우회하지 않고
 fail-closed한다. v1 제거 시점은 별도 승인 대상이다.
@@ -334,10 +337,11 @@ fail-closed한다. v1 제거 시점은 별도 승인 대상이다.
 최종화는 기존 구현이다. Issue #162에서 FastAPI v2 strict DTO, External Risk
 wire·교차 필드 검증과 Endpoint를 구현했으며 v1과 같은 Rule v1 실행 경계를 재사용한다.
 
-다음은 아직 구현되지 않았다.
+Issue #164에서 Backend Java v2 DTO·exact wire mapper와 v1을 유지하는
+`/api/v2/rule-analysis` 직접 Client 경계를 구현했다. 다음은 아직 구현되지 않았다.
 
 - 실제 External Risk HTTP Provider
-- Backend Java v2 DTO·Mapper·Client와 상위 Snapshot assembly 연결
+- Backend Java v2 DTO·Mapper·Client를 사용하는 상위 Snapshot assembly 연결
 - 상위 비트랜잭션 거래 오케스트레이션
 - 거래 접수 전체 연결과 공개 오류 매핑
 - Snapshot v2와 완료 간극 운영 복구

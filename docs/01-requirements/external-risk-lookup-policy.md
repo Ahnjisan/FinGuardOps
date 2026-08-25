@@ -5,11 +5,11 @@
 이 문서는 Spring Boot가 외부 위험정보 Provider를 조회할 때 사용하는 내부 Port,
 정책 Service, 결정적 Mock과 성공 Snapshot의 계약을 정의한다. 목표 Rule 입력
 연결은 [External Risk·Rule 분석 입력 계약](./external-risk-rule-analysis-input-contract.md)이
-소유한다. 현재 구현은
-local/dev/test 검증용 인메모리 경계이며 거래 접수와 Backend v2 Client에는 아직
-연결되지 않았다. FastAPI v2 입력 검증 Endpoint는 구현됐지만 실제 Provider 조회
-결과가 유입되는 전체 경로는 없으며 위험 점수·등급·최종 대응 또는 DB 영속화와
-연결하지 않는다.
+소유한다. 현재 구현은 local/dev/test 검증용 인메모리 경계와 Backend Java v2
+exact wire DTO·mapper·HTTP Client 경계까지다. FastAPI v2 입력 검증 Endpoint와
+직접 호출할 Client는 구현됐지만 거래 접수·내부 분석 오케스트레이터에 연결되지
+않아 실제 Provider 조회 결과가 유입되는 전체 경로는 없다. 위험 점수·등급·최종
+대응 또는 DB 영속화와도 연결하지 않는다.
 
 ## 2. 구현 범위
 
@@ -24,8 +24,7 @@ local/dev/test 검증용 인메모리 경계이며 거래 접수와 Backend v2 C
 다음은 구현되지 않았다.
 
 - 실제 외부 HTTP Provider와 외부 네트워크 호출
-- Backend Java v2 `RuleAnalysisRequest`·Mapper·Client와 FastAPI v2 호출 연결
-- 거래 접수 상위 오케스트레이션
+- 거래 접수 상위 오케스트레이션과 그 경로의 FastAPI v2 Client 호출 연결
 - External Risk 기반 점수·등급·위험 대응과 사건 처리
 - `ExternalRiskSnapshot` 영속화·감사·복구. 현재 승인된 목표가 아니며 필요해질
   경우 별도 Issue, DB 계약과 Migration 승인 대상
@@ -78,9 +77,13 @@ trim하거나 보정하지 않는다. match는 최대 3개이고 Provider는 정
 거부한다. Provider 원문과 실제 reference는 match에 포함하지 않는다.
 
 현재 정책 Service는 Provider match 순서를 보존하며 canonical 정렬을 수행하지
-않는다. 후속 Java v2 요청 매핑은 중복을 정렬 전에 거부한 뒤 송신 계좌→수신
-계좌→기기 순서의 explicit rank tuple로 정렬한다. 구현된 Python v2 요청 검증은
-이미 canonical한 배열만 허용하고 조용히 재정렬하지 않는다.
+않는다. 구현된 Java v2 mapper는 기존 Rule 요청과 `ExternalRiskSnapshot`의
+`transactionId` 및 evaluation cutoff 일치를 검증하고, 요청 cutoff와 거래
+`occurredAt`의 일치도 방어적으로 직접 재검증한다. 중복 match를 canonical 정렬 전에
+거부한 뒤 subject/type/reason별 명시적 rank로 송신 계좌→수신 계좌→기기 순서의 새
+immutable 목록을 생성한다. Enum ordinal·이름·문자열 정렬에 의존하지 않으며 잘못된
+입력을 `UNMATCHED`로 보정하지 않는다. 구현된 Python v2 요청 검증은 이미 canonical한
+배열만 허용하고 조용히 재정렬하지 않는다.
 
 ## 4. 정책 Service와 Snapshot
 
@@ -113,10 +116,11 @@ Migration 승인을 받아야 한다.
 현재 독립 정책의 시각 검증은 `providerAsOf <= lookedUpAt`이다. 구현된 FastAPI v2는
 `providerAsOf <= evaluationCutoffAt <= lookedUpAt`과 기존
 `evaluationCutoffAt == transaction.occurredAt`을 Rule 실행 전에 검증하며 마이크로초
-초과 값을 반올림·절삭하지 않는다. Backend 분석 시작 전에도 같은 관계를 검증해야
-한다. 현재 정책이 `Clock`에서 얻은 `lookedUpAt`을 마이크로초로 정규화하는 동작과
-목표 Java v2 무절삭 입력 계약 차이는 후속 Backend 구현에서 마이크로초 정밀도
-Clock 또는 명시적 검증으로 해소해야 한다.
+초과 값을 반올림·절삭하지 않는다. 구현된 Java v2 mapper도 요청 조립 전에
+`providerAsOf <= evaluationCutoffAt <= lookedUpAt`과 요청 cutoff·거래
+`occurredAt`의 exact equality를 직접 검증한다. 기존 요청 DTO와 Snapshot 불변식 및
+mapper의 명시적 검증은 관련 시각의 마이크로초 이하 정밀도를 유지하며 값을
+반올림하거나 절삭하지 않는다.
 
 ## 5. 실패 분류
 

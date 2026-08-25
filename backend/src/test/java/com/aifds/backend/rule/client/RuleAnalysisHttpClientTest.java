@@ -3,9 +3,11 @@ package com.aifds.backend.rule.client;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.aifds.backend.externalrisk.domain.ExternalRiskSnapshot;
 import com.aifds.backend.rule.client.config.AiServiceProperties;
 import com.aifds.backend.rule.client.config.RuleAnalysisClientConfiguration;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequest;
+import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV2;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResponse;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResultResponse;
 import com.fasterxml.jackson.core.JsonParser;
@@ -36,6 +38,7 @@ import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.ConnectException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URI;
@@ -64,12 +67,17 @@ class RuleAnalysisHttpClientTest {
     private URI baseUrl;
     private ObjectMapper mapper;
     private RuleAnalysisRequest request;
+    private RuleAnalysisRequestV2 requestV2;
     private final AtomicReference<ResponseSpec> response = new AtomicReference<>();
     private final AtomicReference<byte[]> requestBody = new AtomicReference<>();
     private final AtomicReference<List<String>> requestTraceHeaders =
             new AtomicReference<>();
     private final AtomicReference<String> requestMethod = new AtomicReference<>();
     private final AtomicReference<String> requestPath = new AtomicReference<>();
+    private final AtomicReference<List<String>> requestContentTypes =
+            new AtomicReference<>();
+    private final AtomicReference<List<String>> requestAccepts =
+            new AtomicReference<>();
     private final AtomicInteger requestCount = new AtomicInteger();
     private final AtomicBoolean responseBodyPrefixFlushed = new AtomicBoolean();
 
@@ -81,9 +89,11 @@ class RuleAnalysisHttpClientTest {
                 new Jackson2ObjectMapperBuilder()
         );
         request = RuleAnalysisClientTestFixtures.request(mapper);
+        requestV2 = RuleAnalysisClientTestFixtures.requestV2(mapper);
 
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext(RuleAnalysisHttpClient.ENDPOINT, this::handle);
+        server.createContext(RuleAnalysisHttpClient.V2_ENDPOINT, this::handle);
         serverExecutor = Executors.newCachedThreadPool();
         server.setExecutor(serverExecutor);
         server.start();
@@ -134,6 +144,45 @@ class RuleAnalysisHttpClientTest {
                 .isTrue();
         assertThat(serialized.path("ruleVersions").get(0).get("effectiveTo").isNull())
                 .isTrue();
+    }
+
+    @Test
+    void performsOneV2RequestWithTheExactExternalRiskWireContract()
+            throws Exception {
+        response.set(jsonResponse(
+                200,
+                mapper.writeValueAsString(
+                        RuleAnalysisClientTestFixtures.matchedResponse(mapper)
+                )
+        ));
+
+        RuleAnalysisResponse actual = client(Duration.ofSeconds(1))
+                .analyzeV2(requestV2, TRACE_ID);
+
+        assertThat(actual.analysis().scoringResult().riskScore()).isEqualTo(25);
+        assertThat(requestCount).hasValue(1);
+        assertThat(requestMethod).hasValue("POST");
+        assertThat(requestPath).hasValue("/api/v2/rule-analysis");
+        assertThat(requestTraceHeaders.get()).containsExactly(TRACE_ID);
+        assertThat(requestContentTypes.get()).containsExactly("application/json");
+        assertThat(requestAccepts.get()).containsExactly("application/json");
+        JsonNode serialized = mapper.readTree(requestBody.get());
+        JsonNode externalRisk = serialized.path("externalRisk");
+        assertThat(externalRisk.fieldNames()).toIterable()
+                .containsExactlyInAnyOrder(
+                        "providerCode",
+                        "lookupStatus",
+                        "policyResult",
+                        "providerAsOf",
+                        "lookedUpAt",
+                        "matches"
+                );
+        assertThat(externalRisk.path("policyResult").asText())
+                .isEqualTo("MATCHED");
+        assertThat(externalRisk.has("result")).isFalse();
+        assertThat(externalRisk.path("matches").get(0)
+                .path("externalRiskType").asText())
+                .isEqualTo("SUSPICIOUS_ACCOUNT");
     }
 
     @Test
@@ -196,6 +245,205 @@ class RuleAnalysisHttpClientTest {
                                     .doesNotContain("upstream sensitive message");
                         }
                 );
+        assertThat(requestCount).hasValue(1);
+    }
+
+    @ParameterizedTest
+    @MethodSource("mappedErrors")
+    void mapsTheSameApprovedFastApiErrorsForV2(
+            int status,
+            String code,
+            RuleAnalysisClientErrorCategory expected
+    ) {
+        response.set(jsonResponse(status, errorJson(code, TRACE_ID)));
+
+        assertThatThrownBy(() -> client(Duration.ofSeconds(1))
+                .analyzeV2(requestV2, TRACE_ID))
+                .isInstanceOfSatisfying(
+                        RuleAnalysisClientException.class,
+                        exception -> {
+                            assertThat(exception.category()).isEqualTo(expected);
+                            assertThat(exception.httpStatus()).hasValue(status);
+                        }
+                );
+        assertThat(requestCount).hasValue(1);
+        assertThat(requestPath).hasValue("/api/v2/rule-analysis");
+    }
+
+    @Test
+    void appliesTheExistingResponseValidatorToV2() throws Exception {
+        RuleAnalysisResponse valid =
+                RuleAnalysisClientTestFixtures.matchedResponse(mapper);
+        RuleAnalysisResponse mismatched = new RuleAnalysisResponse(
+                valid.transactionId(),
+                valid.traceId(),
+                new RuleAnalysisResultResponse(
+                        valid.analysis().evaluationCutoffAt(),
+                        "0".repeat(64),
+                        valid.analysis().scoringResult(),
+                        valid.analysis().evidence()
+                )
+        );
+        String rawResponse = mapper.writeValueAsString(mismatched);
+        response.set(jsonResponse(200, rawResponse));
+
+        assertThatThrownBy(() -> client(Duration.ofSeconds(1))
+                .analyzeV2(requestV2, TRACE_ID))
+                .isInstanceOfSatisfying(
+                        RuleAnalysisClientException.class,
+                        exception -> {
+                            assertThat(exception.category()).isEqualTo(
+                                    RuleAnalysisClientErrorCategory
+                                            .AI_SERVICE_INVALID_RESPONSE
+                            );
+                            assertThat(exception.httpStatus()).hasValue(200);
+                            assertSafeException(
+                                    exception,
+                                    rawResponse,
+                                    "EXTERNAL_RISK_MOCK_V1",
+                                    "customer_sensitive_ref"
+                            );
+                        }
+                );
+        assertThat(requestCount).hasValue(1);
+    }
+
+    @Test
+    void doesNotPerformV2HttpRequestWhenMappingFails() {
+        ExternalRiskSnapshot valid =
+                RuleAnalysisClientTestFixtures.externalRiskSnapshot();
+        ExternalRiskSnapshot mismatched = new ExternalRiskSnapshot(
+                valid.transactionId(),
+                valid.evaluationCutoffAt().plusSeconds(1),
+                valid.lookedUpAt().plusSeconds(2),
+                valid.providerCode(),
+                valid.providerAsOf(),
+                valid.lookupStatus(),
+                valid.policyResult(),
+                valid.matches()
+        );
+        RuleAnalysisRequestV2Mapper requestMapper =
+                new RuleAnalysisRequestV2Mapper();
+
+        assertThatThrownBy(() -> {
+            RuleAnalysisRequestV2 mapped = requestMapper.map(
+                    request,
+                    mismatched
+            );
+            client(Duration.ofSeconds(1)).analyzeV2(mapped, TRACE_ID);
+        })
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("snapshot evaluationCutoffAt must match request");
+
+        assertThat(requestCount).hasValue(0);
+    }
+
+    @Test
+    void mapsV2ResponseTimeoutWithoutRetryOrInformationExposure() {
+        String rawResponse = "provider_response_secret";
+        response.set(new ResponseSpec(
+                200,
+                "application/json",
+                List.of(TRACE_ID),
+                rawResponse,
+                Duration.ofMillis(300)
+        ));
+
+        assertThatThrownBy(() -> client(Duration.ofMillis(50))
+                .analyzeV2(requestV2, TRACE_ID))
+                .isInstanceOfSatisfying(
+                        RuleAnalysisClientException.class,
+                        exception -> {
+                            assertThat(exception.category()).isEqualTo(
+                                    RuleAnalysisClientErrorCategory
+                                            .AI_SERVICE_RESPONSE_TIMEOUT
+                            );
+                            assertThat(exception.httpStatus()).isEmpty();
+                            assertSafeException(
+                                    exception,
+                                    rawResponse,
+                                    baseUrl.toString(),
+                                    "EXTERNAL_RISK_MOCK_V1",
+                                    "customer_sensitive_ref"
+                            );
+                        }
+                );
+
+        assertThat(requestCount).hasValue(1);
+    }
+
+    @Test
+    void mapsV2ConnectFailureAsUnavailableWithoutRetryOrInformationExposure() {
+        String marker = "v2_connect_failure_secret";
+        String originalMessage = "connect failure at " + baseUrl + " " + marker;
+        AtomicInteger attempts = new AtomicInteger();
+        ClientHttpRequestFactory failingRequestFactory = (uri, method) -> {
+            attempts.incrementAndGet();
+            throw new ResourceAccessException(
+                    originalMessage,
+                    new ConnectException(marker)
+            );
+        };
+        RestClient failingRestClient = RestClient.builder()
+                .baseUrl(baseUrl.toString())
+                .requestFactory(failingRequestFactory)
+                .build();
+        RuleAnalysisHttpClient failingClient = new RuleAnalysisHttpClient(
+                failingRestClient,
+                mapper,
+                new RuleAnalysisResponseValidator(),
+                Duration.ofSeconds(1)
+        );
+
+        assertThatThrownBy(() -> failingClient.analyzeV2(requestV2, TRACE_ID))
+                .isInstanceOfSatisfying(
+                        RuleAnalysisClientException.class,
+                        exception -> {
+                            assertThat(exception.category()).isEqualTo(
+                                    RuleAnalysisClientErrorCategory
+                                            .AI_SERVICE_UNAVAILABLE
+                            );
+                            assertThat(exception.httpStatus()).isEmpty();
+                            assertSafeException(
+                                    exception,
+                                    marker,
+                                    originalMessage,
+                                    baseUrl.toString(),
+                                    "EXTERNAL_RISK_MOCK_V1",
+                                    "customer_sensitive_ref"
+                            );
+                        }
+                );
+
+        assertThat(attempts).hasValue(1);
+        assertThat(requestCount).hasValue(0);
+    }
+
+    @Test
+    void rejectsMalformedV2JsonWithoutRetryOrInformationExposure() {
+        String rawResponse = "{\"transactionId\":\"provider_body_secret\"";
+        response.set(jsonResponse(200, rawResponse));
+
+        assertThatThrownBy(() -> client(Duration.ofSeconds(1))
+                .analyzeV2(requestV2, TRACE_ID))
+                .isInstanceOfSatisfying(
+                        RuleAnalysisClientException.class,
+                        exception -> {
+                            assertThat(exception.category()).isEqualTo(
+                                    RuleAnalysisClientErrorCategory
+                                            .AI_SERVICE_INVALID_RESPONSE
+                            );
+                            assertThat(exception.httpStatus()).hasValue(200);
+                            assertSafeException(
+                                    exception,
+                                    rawResponse,
+                                    "provider_body_secret",
+                                    "EXTERNAL_RISK_MOCK_V1",
+                                    "customer_sensitive_ref"
+                            );
+                        }
+                );
+
         assertThat(requestCount).hasValue(1);
     }
 
@@ -901,6 +1149,8 @@ class RuleAnalysisHttpClientTest {
         requestMethod.set(exchange.getRequestMethod());
         requestPath.set(exchange.getRequestURI().getPath());
         requestTraceHeaders.set(exchange.getRequestHeaders().get("X-Trace-Id"));
+        requestContentTypes.set(exchange.getRequestHeaders().get("Content-Type"));
+        requestAccepts.set(exchange.getRequestHeaders().get("Accept"));
         requestBody.set(exchange.getRequestBody().readAllBytes());
         ResponseSpec spec = response.get();
         delay(spec.headerDelay());
