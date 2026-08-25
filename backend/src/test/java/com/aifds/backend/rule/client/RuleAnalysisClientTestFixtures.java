@@ -1,6 +1,16 @@
 package com.aifds.backend.rule.client;
 
+import com.aifds.backend.externalrisk.domain.ExternalRiskLookupStatus;
+import com.aifds.backend.externalrisk.domain.ExternalRiskMatch;
+import com.aifds.backend.externalrisk.domain.ExternalRiskPolicyResult;
+import com.aifds.backend.externalrisk.domain.ExternalRiskReasonCode;
+import com.aifds.backend.externalrisk.domain.ExternalRiskSnapshot;
+import com.aifds.backend.externalrisk.domain.ExternalRiskSubjectType;
+import com.aifds.backend.externalrisk.domain.ExternalRiskType;
+import com.aifds.backend.rule.client.dto.ExternalRiskMatchRequest;
+import com.aifds.backend.rule.client.dto.ExternalRiskSnapshotRequest;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequest;
+import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV2;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResponse;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResultResponse;
 import com.aifds.backend.rule.client.dto.RuleBehaviorEventSnapshotRequest;
@@ -75,6 +85,211 @@ final class RuleAnalysisClientTestFixtures {
                 transaction,
                 List.of(event),
                 List.of(r001(mapper), r004(mapper))
+        );
+    }
+
+    static RuleAnalysisRequestV2 requestV2(ObjectMapper mapper) {
+        return new RuleAnalysisRequestV2Mapper().map(
+                request(mapper),
+                externalRiskSnapshot()
+        );
+    }
+
+    static RuleAnalysisRequestV2 pythonV2Request(ObjectMapper mapper) {
+        RuleTransactionSnapshotRequest transaction =
+                new RuleTransactionSnapshotRequest(
+                        TRANSACTION_ID,
+                        RuleTransactionType.ACCOUNT_TRANSFER,
+                        "12000000",
+                        "KRW",
+                        CUTOFF,
+                        "customer-a",
+                        "sender-a",
+                        "recipient-a",
+                        "device-a"
+                );
+        List<RuleBehaviorEventSnapshotRequest> events = List.of(
+                new RuleBehaviorEventSnapshotRequest(
+                        UUID.fromString("30000000-0000-4000-8000-000000000001"),
+                        RuleBehaviorEventType.DEVICE_REGISTERED,
+                        Instant.parse("2026-07-23T11:55:00Z"),
+                        "customer-a",
+                        null,
+                        "device-a",
+                        null
+                ),
+                new RuleBehaviorEventSnapshotRequest(
+                        UUID.fromString("30000000-0000-4000-8000-000000000002"),
+                        RuleBehaviorEventType.PASSWORD_CHANGED,
+                        Instant.parse("2026-07-23T11:56:00.123456Z"),
+                        "customer-a",
+                        null,
+                        null,
+                        null
+                ),
+                new RuleBehaviorEventSnapshotRequest(
+                        UUID.fromString("30000000-0000-4000-8000-000000000003"),
+                        RuleBehaviorEventType.TRANSFER_LIMIT_CHANGED,
+                        Instant.parse("2026-07-23T11:57:00Z"),
+                        "customer-a",
+                        "sender-a",
+                        null,
+                        null
+                ),
+                new RuleBehaviorEventSnapshotRequest(
+                        BENEFICIARY_EVENT_ID,
+                        RuleBehaviorEventType.BENEFICIARY_REGISTERED,
+                        Instant.parse("2026-07-23T11:59:00Z"),
+                        "customer-a",
+                        "sender-a",
+                        null,
+                        "recipient-a"
+                )
+        );
+
+        ObjectNode r001Condition = mapper.createObjectNode();
+        r001Condition.putArray("transactionTypes")
+                .add("ACCOUNT_TRANSFER")
+                .add("OPEN_BANKING_TRANSFER");
+        r001Condition.put("currencyCode", "KRW");
+        r001Condition.put("amountThreshold", "10000000");
+        ObjectNode r002Condition = mapper.createObjectNode()
+                .put("prerequisiteRuleCode", "TRANSFER_ABSOLUTE_HIGH_AMOUNT")
+                .put("eventType", "DEVICE_REGISTERED")
+                .put("windowSeconds", 86_400)
+                .put("matchPolicy", "SAME_CUSTOMER_AND_DEVICE")
+                .put(
+                        "selectionPolicy",
+                        "LATEST_OCCURRED_AT_THEN_EVENT_ID_ASC"
+                );
+        ObjectNode r003Condition = mapper.createObjectNode()
+                .put("prerequisiteRuleCode", "TRANSFER_ABSOLUTE_HIGH_AMOUNT")
+                .put("passwordEventType", "PASSWORD_CHANGED")
+                .put("transferLimitEventType", "TRANSFER_LIMIT_CHANGED")
+                .put("windowSeconds", 86_400)
+                .put("matchPolicy", "SAME_CUSTOMER_AND_SENDER_ACCOUNT")
+                .put(
+                        "sequencePolicy",
+                        "PASSWORD_CHANGED_AT_OR_BEFORE_TRANSFER_LIMIT_CHANGED"
+                )
+                .put(
+                        "selectionPolicy",
+                        "LATEST_TRANSFER_LIMIT_THEN_EVENT_ID_ASC_LATEST_PASSWORD_THEN_EVENT_ID_ASC"
+                );
+        ObjectNode r004Condition = mapper.createObjectNode()
+                .put("eventType", "BENEFICIARY_REGISTERED")
+                .put("windowSeconds", 86_400)
+                .put(
+                        "matchPolicy",
+                        "SAME_CUSTOMER_SENDER_ACCOUNT_AND_BENEFICIARY"
+                )
+                .put(
+                        "selectionPolicy",
+                        "LATEST_OCCURRED_AT_THEN_EVENT_ID_ASC"
+                );
+        Instant effectiveFrom = Instant.parse("2026-07-22T12:00:00Z");
+        List<RuleVersionSnapshotRequest> rules = List.of(
+                pythonRuleVersion(
+                        1,
+                        "TRANSFER_ABSOLUTE_HIGH_AMOUNT",
+                        15,
+                        r001Condition,
+                        effectiveFrom
+                ),
+                pythonRuleVersion(
+                        2,
+                        "RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT",
+                        20,
+                        r002Condition,
+                        effectiveFrom
+                ),
+                pythonRuleVersion(
+                        3,
+                        "RECENT_SECURITY_CHANGE_HIGH_AMOUNT",
+                        40,
+                        r003Condition,
+                        effectiveFrom
+                ),
+                pythonRuleVersion(
+                        4,
+                        "RECENT_BENEFICIARY_TRANSFER",
+                        10,
+                        r004Condition,
+                        effectiveFrom
+                )
+        );
+        ExternalRiskSnapshotRequest externalRisk =
+                new ExternalRiskSnapshotRequest(
+                        "EXTERNAL_RISK_MOCK_V1",
+                        ExternalRiskLookupStatus.SUCCEEDED,
+                        ExternalRiskPolicyResult.MATCHED,
+                        Instant.parse("2026-07-23T11:59:59.123456Z"),
+                        Instant.parse("2026-07-23T12:00:00.654321Z"),
+                        List.of(new ExternalRiskMatchRequest(
+                                ExternalRiskSubjectType.SENDER_ACCOUNT,
+                                ExternalRiskType.SUSPICIOUS_ACCOUNT,
+                                ExternalRiskReasonCode.SUSPICIOUS_SENDER_ACCOUNT
+                        ))
+                );
+        return new RuleAnalysisRequestV2(
+                CUTOFF,
+                transaction,
+                events,
+                rules,
+                externalRisk
+        );
+    }
+
+    static ExternalRiskSnapshot externalRiskSnapshot() {
+        return externalRiskSnapshot(List.of(
+                new ExternalRiskMatch(
+                        ExternalRiskSubjectType.SENDER_ACCOUNT,
+                        ExternalRiskType.SUSPICIOUS_ACCOUNT,
+                        ExternalRiskReasonCode.SUSPICIOUS_SENDER_ACCOUNT
+                )
+        ));
+    }
+
+    static ExternalRiskSnapshot externalRiskSnapshot(
+            List<ExternalRiskMatch> matches
+    ) {
+        return new ExternalRiskSnapshot(
+                TRANSACTION_ID,
+                CUTOFF,
+                Instant.parse("2026-07-23T12:00:00.654321Z"),
+                "EXTERNAL_RISK_MOCK_V1",
+                Instant.parse("2026-07-23T11:59:59.123456Z"),
+                ExternalRiskLookupStatus.SUCCEEDED,
+                matches.isEmpty()
+                        ? ExternalRiskPolicyResult.UNMATCHED
+                        : ExternalRiskPolicyResult.MATCHED,
+                matches
+        );
+    }
+
+    private static RuleVersionSnapshotRequest pythonRuleVersion(
+            int number,
+            String ruleCode,
+            int weight,
+            ObjectNode condition,
+            Instant effectiveFrom
+    ) {
+        return new RuleVersionSnapshotRequest(
+                UUID.fromString(
+                        "10000000-0000-4000-8000-00000000001" + number
+                ),
+                ruleCode,
+                RuleLifecycleStatus.ACTIVE,
+                UUID.fromString(
+                        "20000000-0000-4000-8000-00000000000" + number
+                ),
+                number,
+                RuleVersionStatus.PUBLISHED,
+                ruleCode,
+                weight,
+                condition,
+                effectiveFrom,
+                null
         );
     }
 

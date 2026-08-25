@@ -3,6 +3,7 @@ package com.aifds.backend.rule.client;
 import com.aifds.backend.common.trace.TraceIdFilter;
 import com.aifds.backend.rule.client.dto.RuleAnalysisErrorResponse;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequest;
+import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV2;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResponse;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -18,12 +19,14 @@ import java.io.IOException;
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 import java.util.regex.Pattern;
 
 public final class RuleAnalysisHttpClient {
 
     public static final String ENDPOINT = "/api/v1/rule-analysis";
+    public static final String V2_ENDPOINT = "/api/v2/rule-analysis";
 
     private static final Logger LOGGER =
             LoggerFactory.getLogger(RuleAnalysisHttpClient.class);
@@ -77,45 +80,72 @@ public final class RuleAnalysisHttpClient {
             String traceId
     ) {
         Objects.requireNonNull(request, "request must not be null");
+        return exchange(
+                request,
+                ENDPOINT,
+                traceId,
+                response -> validator.validate(request, response)
+        );
+    }
+
+    public RuleAnalysisResponse analyzeV2(
+            RuleAnalysisRequestV2 request,
+            String traceId
+    ) {
+        Objects.requireNonNull(request, "request must not be null");
+        return exchange(
+                request,
+                V2_ENDPOINT,
+                traceId,
+                response -> validator.validate(request, response)
+        );
+    }
+
+    private RuleAnalysisResponse exchange(
+            Object request,
+            String endpoint,
+            String traceId,
+            Consumer<RuleAnalysisResponse> responseValidation
+    ) {
         requireValidTraceId(traceId);
         long startedAt = ticker.getAsLong();
         try {
             RuleAnalysisResponse response = restClient.post()
-                    .uri(ENDPOINT)
+                    .uri(endpoint)
                     .contentType(MediaType.APPLICATION_JSON)
                     .accept(MediaType.APPLICATION_JSON)
                     .header(TraceIdFilter.TRACE_ID_HEADER, traceId)
                     .body(request)
                     .exchange((httpRequest, httpResponse) -> handleResponse(
-                            request,
                             traceId,
                             httpResponse,
-                            startedAt
+                            startedAt,
+                            responseValidation
                     ));
-            logSuccess(traceId, elapsedMillis(startedAt));
+            logSuccess(traceId, endpoint, elapsedMillis(startedAt));
             return response;
         } catch (RuleAnalysisClientException exception) {
-            logFailure(traceId, exception, elapsedMillis(startedAt));
+            logFailure(traceId, endpoint, exception, elapsedMillis(startedAt));
             throw exception;
         } catch (ResourceAccessException exception) {
             RuleAnalysisClientException classified = new RuleAnalysisClientException(
                     RuleAnalysisTransportErrorClassifier.classify(exception),
                     null
             );
-            logFailure(traceId, classified, elapsedMillis(startedAt));
+            logFailure(traceId, endpoint, classified, elapsedMillis(startedAt));
             throw classified;
         } catch (RestClientException exception) {
             RuleAnalysisClientException invalid = invalidResponse(null);
-            logFailure(traceId, invalid, elapsedMillis(startedAt));
+            logFailure(traceId, endpoint, invalid, elapsedMillis(startedAt));
             throw invalid;
         }
     }
 
     private RuleAnalysisResponse handleResponse(
-            RuleAnalysisRequest request,
             String requestTraceId,
             ClientHttpResponse response,
-            long startedAt
+            long startedAt,
+            Consumer<RuleAnalysisResponse> responseValidation
     ) {
         int status;
         try {
@@ -139,7 +169,7 @@ public final class RuleAnalysisHttpClient {
             );
             requireMatchingBodyTrace(requestTraceId, success.traceId(), status);
             try {
-                validator.validate(request, success);
+                responseValidation.accept(success);
             } catch (RuleAnalysisClientException exception) {
                 throw exception;
             } catch (RuntimeException exception) {
@@ -270,19 +300,24 @@ public final class RuleAnalysisHttpClient {
         );
     }
 
-    private void logSuccess(String traceId, long elapsedMillis) {
+    private void logSuccess(
+            String traceId,
+            String endpoint,
+            long elapsedMillis
+    ) {
         LOGGER.info(
                 "Rule analysis call completed traceId={} targetService={} endpoint={} "
                         + "httpStatusClass=2xx durationMs={}",
                 traceId,
                 TARGET_SERVICE,
-                ENDPOINT,
+                endpoint,
                 elapsedMillis
         );
     }
 
     private void logFailure(
             String traceId,
+            String endpoint,
             RuleAnalysisClientException exception,
             long elapsedMillis
     ) {
@@ -291,7 +326,7 @@ public final class RuleAnalysisHttpClient {
                         + "httpStatusClass={} category={} durationMs={}",
                 traceId,
                 TARGET_SERVICE,
-                ENDPOINT,
+                endpoint,
                 httpStatusClass(exception),
                 exception.category(),
                 elapsedMillis

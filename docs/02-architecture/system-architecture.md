@@ -901,13 +901,15 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 
 ### 18.3 다음 구현 예정
 
-- AI Service v2 Endpoint·Java/Python DTO와 Backend v2 Client
 - 비트랜잭션 상위 거래 Service의 External Risk→Rule 분석→최종화 연결
 - RuleVersion publish·운영 준비
 - 최종 Snapshot v2 확정과 완료 간극 운영 복구
 - 감사 조회 API와 기존 업무 Service의 AuditLog 통합
 - 실제 External Risk HTTP Provider. Snapshot DB 영속화는 별도 승인 시 검토
 - Docker 및 Docker Compose 통합 환경
+
+AI Service v2 Endpoint·Python DTO와 Backend Java v2 exact wire DTO·mapper·직접
+Client 경계는 구현됐으며, 위 목록의 상위 연결이나 운영 배포 완료를 의미하지 않는다.
 
 Redis의 최초 적용 시점은 실제 캐시 필요와 원본 호출 부하를 확인해 사용자가 결정한다.
 

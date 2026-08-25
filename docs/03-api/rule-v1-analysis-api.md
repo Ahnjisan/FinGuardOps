@@ -272,8 +272,9 @@ v2는 External Risk를 검증하지만 R001~R004 evaluator에는 전달하지 �
 따라서 조건·점수·등급·Evidence, `ruleSetVersion`, `scoring-policy-v1`,
 `featureVersion=rule-v1`, `modelVersion=null`과 기존 성공 응답은 바뀌지 않는다.
 External Risk echo와 전용 hash를 응답에 추가하지 않는다. Python v2 DTO·검증과
-FastAPI Endpoint는 구현됐으며 Backend Java v2 DTO·Mapper·Client는 아직 구현되지
-않았다.
+FastAPI Endpoint, Backend Java v2 exact wire DTO·mapper와 직접 Client 경계가
+구현됐다. 상위 Snapshot assembly와 내부 분석 오케스트레이터의 v2 전환은 아직
+구현되지 않았다.
 
 v2의 JSON 타입·필수·null·Enum·UTC 형식·unknown field 오류는
 `400 INVALID_REQUEST`, match 조합·개수·canonical 순서와 시간 관계 오류는
@@ -710,7 +711,8 @@ FastAPI Middleware는 `Content-Length`만 신뢰하지 않고 실제 수신 byte
 이 절은 Spring Boot가 이 문서의 wire 계약을 호출하는 Client의 단일 상세
 기준이다. 현재 v1 요청·응답 DTO, HTTP 상태와 FastAPI 오류 envelope는 변경하지
 않는다. v1 FastAPI HTTP 경계, Spring Boot Client와 결과 채택·영속화
-오케스트레이션이 구현되어 있다. v2 Client는 후속 구현이다.
+오케스트레이션이 구현되어 있다. v1 계약을 유지하면서 별도 메서드로 호출하는
+v2 Client 경계도 구현되어 있지만 기존 내부 오케스트레이터는 아직 v1을 사용한다.
 
 ### 13.1 계층과 책임
 
@@ -734,9 +736,13 @@ Client는 Rule 적중 여부, scoring 또는 Evidence를 Java에서 다시 계�
 - Spring Framework의 동기 `RestClient`를 사용한다.
 - 현재 `spring-boot-starter-web` 의존성 안에서 구현하고 WebClient, Reactor,
   Apache HttpClient, Resilience4j 등 신규 의존성을 추가하지 않는다.
-- 현재 Client Endpoint path는 base URL과 분리된 고정값
-  `/api/v1/rule-analysis`를 사용한다. 목표 전환은 `/api/v2/rule-analysis`를
-  사용하며 v1과 v2를 optional 필드로 자동 협상하지 않는다.
+- 기존 `analyze(...)`는 base URL과 분리된 고정값 `/api/v1/rule-analysis`를,
+  신규 `analyzeV2(...)`는 고정값 `/api/v2/rule-analysis`를 호출한다. 두 메서드는
+  하나의 공통 private HTTP exchange 경계를 재사용하며 자동 endpoint 협상·전환은
+  없다.
+- 현재 상위 거래 오케스트레이터는 계속 v1 `analyze(...)`를 사용한다. 실제 External
+  Risk Provider와 상위 오케스트레이터의 v2 연결은 미구현이며, 구현된 직접 v2 Client
+  경계는 운영 배포나 end-to-end 거래 처리 완료를 의미하지 않는다.
 - 하나의 Client 호출은 하나의 HTTP 요청만 수행한다.
 
 ### 13.3 설정 계약
@@ -911,7 +917,9 @@ Risk 조회·정책, 위험 대응, 사건 또는 Snapshot v2를 소유하지 �
 Spring Boot 내부의 독립 Port·Policy Service·local/dev/test Mock·인메모리 성공
 Snapshot만 구현했으며 FastAPI·Python·`RuleAnalysisRequest`를 변경하지 않았다.
 Issue #160에서 승인한 v2 입력 계약에 따라 Issue #162에서 Python DTO·검증과
-FastAPI Endpoint를 구현했다. Backend Java v2 Client와 호출 연결은 후속 Issue다.
+FastAPI Endpoint를 구현했고 Issue #164에서 Backend Java v2 exact wire DTO·mapper와
+직접 Client 경계를 구현했다. 내부 오케스트레이터와 거래 접수 호출 연결은 후속
+Issue다.
 
 ### 13.8 로그와 정보 보호
 
@@ -963,7 +971,8 @@ connect·response timeout, 자동 retry 0회, 트랜잭션 밖 HTTP 호출과 �
 ## 14. 현재 구현 이후 제외 범위
 
 - 거래 접수 Service에서 Rule v1 오케스트레이터를 호출하는 연결
-- Backend Java v2 DTO·Mapper·Client와 External Risk→FastAPI v2 호출 연결
+- Backend Java v2 요청을 조합·전달하는 상위 Snapshot assembly와 내부
+  오케스트레이터의 v2 전환
 - 거래 접수에서 구현된 위험 대응·최종 거래 상태·사건·AuditLog 원자적 최종화
   경계를 호출하는 연결
 - 최종 동기 응답과 Snapshot v2 확정

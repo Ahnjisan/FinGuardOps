@@ -1,6 +1,7 @@
 package com.aifds.backend.rule.client;
 
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequest;
+import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV2;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResponse;
 import com.aifds.backend.rule.client.dto.RuleBehaviorEventSnapshotRequest;
 import com.aifds.backend.rule.client.dto.RuleBehaviorEventType;
@@ -118,6 +119,21 @@ public final class RuleAnalysisResponseValidator {
                 behaviorEvents,
                 response.analysis().scoringResult().ruleContributions(),
                 response.analysis().evidence()
+        );
+    }
+
+    public void validate(
+            RuleAnalysisRequestV2 request,
+            RuleAnalysisResponse response
+    ) {
+        validate(
+                new RuleAnalysisRequest(
+                        request.evaluationCutoffAt(),
+                        request.transaction(),
+                        request.behaviorEvents(),
+                        request.ruleVersions()
+                ),
+                response
         );
     }
 

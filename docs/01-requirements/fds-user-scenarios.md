@@ -23,8 +23,9 @@
 - Rule v1은 거래 접수 시 현재 거래의 `occurredAt`을 기준으로 평가하며, 행동 이벤트 접수만으로 자동 재평가하지 않는다.
 - Rule v1 계약, DetectionResult·Evidence 물리 모델, 현재
   `POST /api/v1/rule-analysis`와 내부 결과 생성·검증·채택은 구현되었다. 거래
-  접수 연결과 Backend Java v2 Client는 미구현이지만 External Risk를 필수 입력으로
-  검증하는 FastAPI `POST /api/v2/rule-analysis` wire는 구현되었다.
+  접수 연결은 미구현이지만 External Risk를 필수 입력으로 검증하는 FastAPI
+  `POST /api/v2/rule-analysis` wire와 이를 exact wire로 호출하는 Backend Java v2
+  DTO·mapper·Client 경계는 구현되었다.
 
 ### 외부 위험정보 서비스 장애 처리 정책
 
@@ -44,8 +45,9 @@
 IP reference와 IP 조회는 현재 거래 모델에 없고 피싱 정책도 미구현이다. 아래의
 위험 IP·피싱·외부 위험 점수·등급·대응 표현은 최종 사용자 시나리오 또는 향후
 확장 후보이며 현재 구현 동작을 의미하지 않는다. FastAPI v2
-`RuleAnalysisRequestV2`와 검증 Endpoint는 구현됐지만 실제 외부 HTTP Provider,
-Backend Java v2 Client와 거래 접수 상위 오케스트레이션은 아직 구현되지 않았다.
+`RuleAnalysisRequestV2`와 검증 Endpoint, Backend Java v2 DTO·mapper·직접 Client
+경계는 구현됐지만 실제 외부 HTTP Provider와 거래 접수 상위 오케스트레이션은
+아직 구현되지 않았다.
 `ExternalRiskSnapshot` 영속화는 이번 목표가 아니며 별도 승인 대상이다.
 
 ### AI 리포트 생성 실패 처리 정책
