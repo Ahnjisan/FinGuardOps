@@ -6,9 +6,9 @@
 정책 Service, 결정적 Mock과 성공 Snapshot의 계약을 정의한다. 목표 Rule 입력
 연결은 [External Risk·Rule 분석 입력 계약](./external-risk-rule-analysis-input-contract.md)이
 소유한다. 현재 구현은 local/dev/test 검증용 인메모리 경계와 Backend Java v2
-exact wire DTO·mapper·HTTP Client 경계까지다. FastAPI v2 입력 검증 Endpoint와
-직접 호출할 Client는 구현됐지만 거래 접수·내부 분석 오케스트레이터에 연결되지
-않아 실제 Provider 조회 결과가 유입되는 전체 경로는 없다. 위험 점수·등급·최종
+exact wire DTO·mapper·HTTP Client·내부 오케스트레이션 경계까지다. 성공 Snapshot을
+받는 내부 v2 경계는 구현됐지만 거래 접수 상위 오케스트레이터에 연결되지 않아 실제
+Provider 조회 결과가 유입되는 전체 경로는 없다. 위험 점수·등급·최종
 대응 또는 DB 영속화와도 연결하지 않는다.
 
 ## 2. 구현 범위

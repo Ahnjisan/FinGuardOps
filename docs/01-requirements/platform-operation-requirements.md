@@ -62,7 +62,7 @@ FinGuardOps는 금융거래와 사용자 행동을 기반으로 이상거래를 
 
 | 운영 대상 | 역할 | 현재 도입 상태와 운영 범위 |
 | --- | --- | --- |
-| Spring Boot Backend | 거래 접수·검증, 멱등성, 거래·사건 상태, 위험 대응과 업무 정합성의 최종 소유자 | Health, 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion과 기본 Rule 집합 발행 경계, Rule 분석 HTTP Client·내부 오케스트레이션, External Risk 독립 정책·Mock, Backend Java v2 DTO·Mapper·직접 Client 경계, FraudCase·CaseTransaction과 위험 대응·AuditLog 원자적 최종화 경계가 구현되었다. 실제 Provider·내부 오케스트레이터 v2 전환·거래 접수 전체 연결, Snapshot v2·운영 복구, 공개 사건·감사·최종화 API, USER 인증·인가와 사건 조사 상태 전이·추가 연결·병합·분리는 미구현이다. |
+| Spring Boot Backend | 거래 접수·검증, 멱등성, 거래·사건 상태, 위험 대응과 업무 정합성의 최종 소유자 | Health, 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion과 기본 Rule 집합 발행 경계, Rule 분석 HTTP Client·내부 오케스트레이션, External Risk 독립 정책·Mock, Backend Java v2 DTO·Mapper·Client·내부 오케스트레이션 경계, FraudCase·CaseTransaction과 위험 대응·AuditLog 원자적 최종화 경계가 구현되었다. 실제 Provider·거래 접수 전체 연결, Snapshot v2·운영 복구, 공개 사건·감사·최종화 API, USER 인증·인가와 사건 조사 상태 전이·추가 연결·병합·분리는 미구현이다. |
 | FastAPI AI Service | Feature 계산, Rule 실행, ML 추론, 모델 라우팅, AI 사건 리포트와 템플릿 fallback | `POST /api/v1/rule-analysis`, External Risk 필수 입력의 `POST /api/v2/rule-analysis`, R001~R004 실행과 점수·RiskLevel·Evidence 계산은 구현되었다. v2 External Risk는 validation-only이며 ML 추론·모델 라우팅·AI 사건 리포트와 템플릿 fallback은 미구현이다. |
 | PostgreSQL | 거래, 행동 이벤트, 탐지 결과, 사건, 감사 로그와 AI 사용량·비용 데이터의 영속 저장 목표 | V1~V7의 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion, FraudCase·CaseTransaction과 append-only AuditLog 영속 기반이 구현되었다. External Risk 영속화와 사건 조사·AI 사용량·비용·운영 데이터는 미구현이며 별도 승인 범위이다. |
 | Redis | 정확 일치 AI 리포트 캐시와 집계 데이터 사용 목표 | 향후 연동·검증 범위이다. External Risk cache는 현재 계약이 아니며 별도 Issue와 승인이 필요하다. 시맨틱 캐시는 범위에 포함하지 않는다. |

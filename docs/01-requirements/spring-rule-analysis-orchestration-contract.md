@@ -85,14 +85,13 @@ FastAPI 내부에서 immutable execution plan을 만들고 evaluator를 순차 �
    cache·fallback·`UNMATCHED`로 바꾸지 않고 typed failure로 전파한다.
 4. External Risk 성공 Snapshot을 immutable 값으로 고정한다. 이후 다시 조회하거나
    재반영하지 않는다.
-5. Provider 호출이 끝난 뒤 Spring Boot 소유 Snapshot assembly 경계가 짧은 DB read
-   transaction에서 같은 cutoff의 거래·행동 이벤트와 실행 가능한 활성
-   `RuleVersion`을 읽고 External Risk와 조합해 완전한 immutable 목표 v2
-   `RuleAnalysisRequest`를 반환한다. DetectionResult나 상태는 만들거나 바꾸지 않는다.
-6. `RuleAnalysisOrchestrationService`는 완성된 요청을 분석 시작 쓰기 트랜잭션에
-   전달한다. 거래 행을 잠그고 요청 소유 관계·cutoff·시간 계약을 재검증하며 예상
-   `ruleSetVersion`을 계산한다.
-7. 거래 잠금 아래 다음 `detectionResultVersion`을 할당해 `PENDING`
+5. `RuleAnalysisOrchestrationService.analyzeV2(...)`는 거래 식별자와 성공 Snapshot을
+   잠긴 `REQUIRES_NEW`, `REPEATABLE_READ` 시작 경계에 전달한다. 시작 경계는 거래
+   행을 잠그고 시작 가능 상태를 검증한 뒤 기존 v1 assembler로 거래·행동 이벤트·
+   실행 가능한 활성 `RuleVersion` Snapshot을 조립하고 v2 mapper를 실행한다.
+6. mapper가 성공한 뒤 예상 `ruleSetVersion`과 다음 `detectionResultVersion`을
+   조회·계산한다. mapper가 실패하면 시작 트랜잭션 전체를 rollback한다.
+7. 거래 잠금 아래 할당한 버전으로 `PENDING`
    `DetectionResult`를 만들고 고정된 Snapshot·분석 버전 필드·trace를 저장한다.
 8. 같은 트랜잭션에서 `DetectionResult`를 `IN_PROGRESS`로, 거래를
    `RECEIVED → ANALYZING`으로 전이하고 commit한다.
@@ -168,39 +167,44 @@ FastAPI 응답의 `analysis.ruleSetVersion`은 이 예상 값과 정확히 같�
   아니라 상위 거래 처리 흐름의 책임이다.
 - 상위 흐름은 `RECEIVED` 거래 저장 commit 뒤 DB 트랜잭션과 행 잠금 없이
   External Risk를 조회한다.
-- 성공 Snapshot은 Provider 호출 뒤 별도 Snapshot assembly 경계에서
-  거래·행동 이벤트·활성 `RuleVersion`과 결합해 완전한 immutable 목표 v2 요청으로
-  확정한다. 이후 이 요청을 분석 시작 경계에 전달한다.
+- 성공 Snapshot은 `analyzeV2(...)`를 통해 잠긴 분석 시작 경계에 전달한다. 이 경계가
+  거래·행동 이벤트·활성 `RuleVersion`의 v1 Snapshot을 먼저 조립하고 v2 mapper로
+  결합한다. mapper 성공 뒤에만 version 조회·DetectionResult 생성·상태 전이를 한다.
 - Rule 분석 시작 뒤에는 External Risk를 다시 조회하거나 기존 입력을 바꾸지
   않는다. `ANALYZED` 이후에는 이미 고정된 근거로 위험 대응만 수행한다.
 - External Risk 조회 실패 시 거래는 `RECEIVED`를 유지하고 DetectionResult를
   생성하지 않으며 FastAPI·위험 대응 최종화를 호출하지 않는다. 멱등 실패를
-  확정한 같은 요청 재생은 Provider를 다시 호출하지 않는다. 이 연결과 공개 오류
-  매핑은 아직 구현되지 않았다.
+  확정한 같은 요청 재생은 Provider를 다시 호출하지 않는다. 내부 v2 분석 경계는
+  구현됐지만 거래 접수 연결과 공개 오류 매핑은 아직 구현되지 않았다.
 - cache·Circuit Breaker·fallback은 별도 Issue와 계약 승인이 필요하다.
 
 필수 v2 JSON, 시간과 canonical match 계약은
 [External Risk·Rule 분석 입력 계약](./external-risk-rule-analysis-input-contract.md)을
-따른다. 현재 v1 요청과 내부 오케스트레이터에는 External Risk 입력이 없다.
+따른다. 기존 v1 요청과 `analyze(...)`에는 External Risk 입력이 없으며, 별도
+`analyzeV2(...)`만 성공 Snapshot을 입력받는다.
 
 ## 7. 분석 시작 쓰기 트랜잭션
 
 분석 시작은 `REQUIRES_NEW`, `REPEATABLE_READ`인 하나의 짧은 DB 쓰기
-트랜잭션으로 처리한다. 최종 거래 접수 목표에서는 상위 거래 흐름에서 External Risk
-조회와 정책 적용을 마친 뒤 Snapshot assembly 경계가 완성한 immutable v2 요청을
-Rule 분석 시작 경계에 전달한다. 시작 경계는 거래 상태·입력 소유 관계·시간 계약을
-검증해 분석 시도로 저장한다.
+트랜잭션으로 처리한다. v2에서는 상위 거래 흐름이 External Risk 조회와 정책 적용을
+마친 뒤 성공 Snapshot을 전달하고, 시작 경계가 Snapshot 조립과 v2 mapper 실행을
+같은 잠금·트랜잭션 안에서 수행한다.
 
 1. `FinancialTransaction`을 pessimistic write lock으로 조회한다.
 2. 거래가 `RECEIVED`인지, 채택 결과가 없는지 확인한다. 이미
    `ANALYZING`이거나 다른 상태면 새 분석을 시작하지 않는다.
-3. 전달받은 완성된 v2 요청의 거래·행동·RuleVersion·External Risk Snapshot과
-   불변 분석 버전 필드를 검증·확정한다.
-4. 같은 거래의 현재 최대 `detectionResultVersion + 1`을 할당한다.
-5. `DetectionResult PENDING`을 생성한다.
-6. outbound 호출 직전 시작 시각을 기록해 `PENDING → IN_PROGRESS`로 전이한다.
-7. 같은 원자적 경계에서 거래를 `RECEIVED → ANALYZING`으로 전이한다.
-8. commit한 뒤 거래 잠금과 트랜잭션을 해제한다.
+3. 기존 v1 Snapshot assembler로 거래·행동 이벤트·RuleVersion을 고정한다.
+4. v2 mapper가 `ExternalRiskSnapshot`을 결합하고 전체 불변식을 검증한다.
+5. mapper 성공 뒤 현재 최대 `detectionResultVersion + 1`을 조회·할당한다.
+6. `DetectionResult PENDING`을 생성한다.
+7. outbound 호출 직전 시작 시각을 기록해 `PENDING → IN_PROGRESS`로 전이한다.
+8. 같은 원자적 경계에서 거래를 `RECEIVED → ANALYZING`으로 전이한다.
+9. commit한 뒤 거래 잠금과 트랜잭션을 해제한다.
+
+3~4단계가 실패하면 전체 rollback되어 거래는 `RECEIVED`, DetectionResult·Evidence는
+0건을 유지한다. 아직 시작된 분석이 없으므로 HTTP Client와 `failAnalysis()`도
+호출하지 않는다. commit 뒤 오케스트레이터는 활성 DB 트랜잭션이 없음을 확인하고
+`analyzeV2(...)` Client를 정확히 한 번 호출한다.
 
 거래 잠금과 `UNIQUE(financial_transaction_id, detection_result_version)` 제약을
 함께 사용한다. 실패한 버전도 소비하며 번호를 되돌리거나 재사용하지 않는다.
@@ -424,14 +428,18 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
   External Risk strict wire·교차 필드 검증을 적용한 `POST /api/v2/rule-analysis`
 - Backend Java v2 exact wire 요청 DTO, `ExternalRiskSnapshot` mapper와 기존 v1을
   유지하는 `RuleAnalysisHttpClient`의 직접 v2 호출 경계
+- 기존 `analyze(...)`와 v1 시작·Client 경계를 유지하는 별도 public
+  `analyzeV2(...)`와 immutable `StartedRuleAnalysisV2Execution`
+- 잠긴 `REQUIRES_NEW`, `REPEATABLE_READ` 시작 트랜잭션의 v1 Snapshot 조립→v2
+  mapper→version 조회→DetectionResult 생성→거래 `ANALYZING` 전이 순서
+- mapper 사전 실패 전체 rollback과 시작 commit 뒤 무트랜잭션 v2 Client 정확히
+  1회 호출, 기존 완료·채택·실패 및 원본 예외·category·suppressed failure 경계 재사용
 
 ### 15.2 구현되지 않음
 
 - 거래 접수 Service에서 분석 오케스트레이터를 호출하는 전체 연결
-- 상위 거래 흐름에서 거래·행동·RuleVersion 기준을 고정하고 External Risk
-  결과·조회 상태를 결합한 입력을 오케스트레이터에 전달하는 연결
-- Backend Java v2 요청을 조합하는 상위 Snapshot assembly와 내부 오케스트레이터의
-  v2 입력 전달
+- 상위 거래 흐름에서 실제 Provider 성공 Snapshot을 내부 v2 오케스트레이터에
+  전달하는 연결
 - Client 오류 category를 거래 API 공통 오류로 매핑하는 경로
 - 실제 External Risk HTTP Provider
 - ExternalRiskSnapshot DB 영속화는 이번 목표에 포함하지 않으며 별도 승인 대상
@@ -452,14 +460,12 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
 - Snapshot 조합과 canonical hash 선계산, commit된 immutable 요청의
   `RuleAnalysisHttpClient` 전달과 결과 채택은 연결되었지만 최종 거래 접수·멱등
   응답 경로에는 아직 연결되지 않았다.
-- 현재 내부 오케스트레이터와 `POST /api/v1/rule-analysis`는 External Risk가 없는
-  Rule v1 입력을 분석 시작 경계에서 조합한다. FastAPI에는 기존 v1을 유지하면서
-  Python v2 요청 DTO와 strict External Risk 검증을 적용한
-  `POST /api/v2/rule-analysis`가 구현되어 있다. 그러나 목표 v2의 Provider 호출 뒤
-  Backend Java v2 exact wire DTO·mapper와 직접 HTTP Client 경계도 구현됐다. 별도
-  Snapshot assembly와 내부 오케스트레이터의 v2 입력 전달은 아직 구현되지 않았다.
-  따라서 실제 Provider·거래 접수 전체 연결, 공개 오류 매핑, External Risk 영속화,
-  Snapshot v2·운영 복구는 완료되지 않았다. 양쪽 HTTP 경계 구현은 운영 배포 또는
+- 현재 `analyze(...)`와 `POST /api/v1/rule-analysis`는 External Risk가 없는 기존
+  Rule v1 경계를 그대로 유지한다. 별도 `analyzeV2(...)`는 성공 Snapshot을 잠긴
+  시작 트랜잭션에서 v1 Snapshot과 결합하고, 시작 commit 뒤
+  `POST /api/v2/rule-analysis`를 호출한다. 따라서 실제 Provider·거래 접수 전체 연결,
+  공개 오류 매핑, External Risk 영속화, Snapshot v2·운영 복구는 완료되지 않았다.
+  양쪽 HTTP 경계 구현은 운영 배포 또는
   end-to-end 거래 처리 완료를 의미하지 않는다.
 - V5 초기 RuleVersion은 항상 모두 `DRAFT`다. 별도 one-shot 명령을 명시적으로
   실행한 local/dev/test 환경에서만 기본 네 버전이 실행 가능해지며, 정상 앱 시작은

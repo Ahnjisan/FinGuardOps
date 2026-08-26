@@ -252,7 +252,7 @@ Envelope `eventType=BehaviorEventReceived`는 발생한 도메인 이벤트의 �
 | 최소 payload | `detectionResultId`, `transactionId`, `detectionResultVersion`, 승인된 feature 입력 버전, 분석 요청 시각 |
 | 중복 처리 | 같은 `transactionId+detectionResultVersion`의 완료·진행 상태를 확인하고 중복 분석 시작 방지 |
 | 원거래 판단 영향 | 요청 사실만으로 거래 상태를 최종 확정하지 않음 |
-| 처리 범위 | 현재 v1 Spring Boot→FastAPI REST 내부 경계는 구현됨. 이 이벤트 DTO·Producer·발행 경로와 External Risk 포함 v2 전체 연결은 미구현 |
+| 처리 범위 | FastAPI `/api/v1/rule-analysis`·`/api/v2/rule-analysis`, Backend Java v1 Client와 v2 exact DTO·mapper·직접 Client, 내부 `analyzeV2(...)`·`startAnalysisV2(...)`, 잠긴 시작 트랜잭션의 Snapshot 조립·v2 mapper·DetectionResult 생성, commit 이후 트랜잭션 밖 FastAPI v2 호출과 기존 완료·채택·실패 영속 경계는 구현됨. 이 이벤트 DTO·Producer·실제 발행, 실제 External Risk Provider·최상위 거래 접수 coordinator, 공개 External Risk 오류 매핑·영속화, Snapshot v2·운영 복구와 운영 배포·메트릭은 미구현 |
 
 `detectionResultId`와 `detectionResultVersion`은 분석 시작 트랜잭션에서 생성되고
 FastAPI 호출 전에 `IN_PROGRESS` 상태와 함께 commit된다. 이 commit 이후 실패한
@@ -453,6 +453,10 @@ Provider 사용량은 payload에 복제하지 않고 `executionId` 아래 실제
 
 ### 8.1 거래부터 사건 생성
 
+다음 sequence는 구현된 내부 Rule v2 시작·완료·실패 경계와 아직 미구현인 실제
+External Risk Provider·최상위 거래 coordinator를 함께 나타낸 목표 계약이다. 표시된
+논리 이벤트는 계약 이름이며 이벤트 DTO·Producer·실제 발행 경로는 구현되지 않았다.
+
 ```mermaid
 sequenceDiagram
     participant Client
@@ -465,38 +469,50 @@ sequenceDiagram
     Spring->>DB: 멱등 단일 승자 선점·Transaction(RECEIVED) 저장
     DB-->>Spring: RECEIVED 저장 commit
     Spring-->>Spring: 목표 논리 TransactionReceived
-    Spring->>Risk: DB 트랜잭션 밖 External Risk 조회
+    Spring->>Risk: 목표 DB 트랜잭션 밖 External Risk 조회(Provider·최상위 coordinator 미구현)
     alt External Risk 성공
-        Risk-->>Spring: 성공 immutable ExternalRiskSnapshot
-        Spring->>DB: External Risk 포함 immutable v2 입력 조립 read transaction
-        DB-->>Spring: 상태 변경 없이 입력 확정·read transaction 종료
-        Spring->>DB: DetectionResult 생성·IN_PROGRESS, Transaction ANALYZING
-        DB-->>Spring: 분석 시작 상태 commit·detectionResultId 확정
-        Spring-->>Spring: 목표 논리 DetectionAnalysisRequested(발행 미구현)
-        Spring->>FastAPI: DB 트랜잭션 밖 목표 v2 Rule v1 요청 1회
-        FastAPI-->>Spring: 분석 결과
-        alt 응답 검증·변환·채택 성공
-            Spring->>DB: Evidence·DetectionResult COMPLETED·채택·Transaction ANALYZED
-            DB-->>Spring: 완료·채택 쓰기 경계 commit
-            Spring-->>Spring: 목표 논리 DetectionAnalysisCompleted
-            Note over Spring,DB: 아래 사건·거래·AuditLog는 하나의 REQUIRED 트랜잭션
-            alt LOW 또는 MEDIUM
-                Spring->>DB: 거래 outcome·최종 상태 적용·거래 AuditLog 2건
-            else HIGH 또는 CRITICAL 신규 사건
-                Spring->>DB: FraudCase 생성·CaseTransaction 첫 연결
-                Spring->>DB: 사건 AuditLog 2건·거래 outcome·최종 상태·거래 AuditLog 2건
-                Spring-->>Spring: 목표 논리 FraudCaseCreated
-            else HIGH 또는 CRITICAL 기존 활성 사건 재사용
-                Spring->>DB: 사건·연결 변경 없이 재사용·거래 outcome·최종 상태·거래 AuditLog 2건
+        Risk-->>Spring: 호출자가 확보한 성공 ExternalRiskSnapshot 전달
+        Spring->>Spring: analyzeV2(transactionId, snapshot, traceId)
+        Spring->>DB: startAnalysisV2()·REQUIRES_NEW·REPEATABLE_READ 시작
+        Spring->>DB: FinancialTransaction PESSIMISTIC_WRITE
+        Spring->>Spring: RECEIVED·시작 가능 상태 검증
+        Spring->>DB: 같은 잠긴 시작 트랜잭션에서 v1 Rule Snapshot 조립
+        Spring->>Spring: 같은 트랜잭션에서 v2 mapper 검증·immutable 요청 확정
+        alt Snapshot 조립·v2 mapper 성공
+            Spring->>DB: mapper 성공 후 DetectionResult version 조회
+            Spring->>DB: DetectionResult 생성·IN_PROGRESS, Transaction ANALYZING·flush
+            DB-->>Spring: 분석 시작 commit·detectionResultId 확정
+            Spring-->>Spring: 목표 논리 DetectionAnalysisRequested(발행 미구현)
+            Spring->>FastAPI: 활성 DB 트랜잭션 없이 v2 Rule 요청 1회
+            alt 응답 검증·변환·채택 성공
+                FastAPI-->>Spring: 분석 결과
+                Spring->>DB: 기존 Evidence·DetectionResult COMPLETED·채택·Transaction ANALYZED
+                DB-->>Spring: 완료·채택 쓰기 경계 commit
+                Spring-->>Spring: 목표 논리 DetectionAnalysisCompleted
+                Note over Spring,DB: 아래 사건·거래·AuditLog는 하나의 REQUIRED 트랜잭션
+                alt LOW 또는 MEDIUM
+                    Spring->>DB: 거래 outcome·최종 상태 적용·거래 AuditLog 2건
+                else HIGH 또는 CRITICAL 신규 사건
+                    Spring->>DB: FraudCase 생성·CaseTransaction 첫 연결
+                    Spring->>DB: 사건 AuditLog 2건·거래 outcome·최종 상태·거래 AuditLog 2건
+                    Spring-->>Spring: 목표 논리 FraudCaseCreated
+                else HIGH 또는 CRITICAL 기존 활성 사건 재사용
+                    Spring->>DB: 사건·연결 변경 없이 재사용·거래 outcome·최종 상태·거래 AuditLog 2건
+                end
+                DB-->>Spring: 사건·연결·거래·AuditLog REQUIRED commit
+                Spring-->>Spring: 목표 논리 RiskResponseDecided
+                Spring->>DB: 목표 최종 멱등 Snapshot v2 확정(미구현)
+                DB-->>Spring: 목표 Snapshot v2 commit(미구현)
+            else 시작 commit 이후 FastAPI·응답 검증·변환·채택 실패
+                FastAPI--xSpring: 원본 오류
+                Spring->>DB: 기존 실패 경계로 DetectionResult FAILED·Transaction FAILED
+                DB-->>Spring: 동일 실패 쓰기 트랜잭션 commit
+                Note over Spring,DB: Evidence·실패 결과 채택 없음·원본 오류 전파·retry/fallback 없음
             end
-            DB-->>Spring: 사건·연결·거래·AuditLog REQUIRED commit
-            Spring-->>Spring: 목표 논리 RiskResponseDecided
-            Spring->>DB: 목표 최종 멱등 Snapshot v2 확정(미구현)
-            DB-->>Spring: 목표 Snapshot v2 commit(미구현)
-        else FastAPI·응답 검증·변환·채택 실패
-            Spring->>DB: DetectionResult FAILED·Transaction FAILED
-            DB-->>Spring: 동일 실패 쓰기 트랜잭션 commit
-            Note over Spring,DB: 실패 결과 미채택·retry와 fallback 없음
+        else v2 요청 확정 전 Snapshot 조립·mapper 실패
+            Spring-->>Spring: 시작 트랜잭션 전체 rollback·원본 오류 전파
+            Note over Spring,DB: Transaction RECEIVED·DetectionResult/Evidence 없음
+            Note over Spring,FastAPI: FastAPI·failAnalysis 미호출·FAILED 자동 보정·retry/fallback 없음
         end
     else External Risk 실패
         Risk-->>Spring: typed failure
@@ -508,13 +524,24 @@ sequenceDiagram
 
 External Risk 선행 실패는 Rule 분석 시작 전 경계다. 거래는 `RECEIVED`를 유지하고
 DetectionResult·Evidence를 생성하지 않으며 FastAPI와 위험 대응 최종화를 호출하지
-않는다. 멱등 실패를 확정한 같은 요청 재생은 Provider를 다시 호출하지 않는다.
+않는다. 이 조회와 멱등 실패 저장·재생을 수행할 실제 Provider·최상위 거래
+coordinator는 아직 구현되지 않았다.
+
+호출자가 성공 `ExternalRiskSnapshot`을 확보한 뒤 내부 `analyzeV2(...)`를 호출하는
+경계부터는 구현되어 있다. `startAnalysisV2(...)`의 같은 잠긴 시작 트랜잭션에서 v1
+Rule Snapshot 조립과 v2 mapper 검증을 수행하며, mapper 성공 후에만 DetectionResult
+version을 조회하고 DetectionResult `IN_PROGRESS`와 거래 `ANALYZING`을 commit한다.
+Snapshot 조립 또는 mapper가 실패하면 시작 트랜잭션 전체를 rollback하므로 거래는
+`RECEIVED`, DetectionResult·Evidence는 미생성 상태다. FastAPI와 `failAnalysis(...)`를
+호출하거나 `FAILED`로 자동 보정하지 않으며 원래 오류를 전파한다.
 
 분석 시작 commit 이후 FastAPI 호출·응답 검증·변환·채택이 실패하면 거래는 이미
 `ANALYZING`, 해당 DetectionResult는 이미 `IN_PROGRESS`다. 실패 기록 경계는 같은
 쓰기 트랜잭션에서 거래와 DetectionResult를 모두 `FAILED`로 확정하고 실패 결과를
-채택하지 않는다. 원래 오류를 성공이나 fallback으로 바꾸지 않으며 자동 retry와
-fallback은 없다. 공개 오류 매핑과 도메인 이벤트 발행 경로는 아직 구현되지 않았다.
+채택하지 않으며 Evidence를 만들지 않는다. 원래 오류를 성공이나 fallback으로 바꾸지
+않으며 자동 retry와 fallback은 없다. 공개 오류 매핑과 External Risk 영속화,
+Snapshot v2 운영 복구, 도메인 이벤트 DTO·Producer·실제 발행 경로 및 운영 메트릭은
+아직 구현되지 않았다.
 
 내부 위험 대응 최종화는 LOW·MEDIUM에서 사건 없이 거래 AuditLog 2건을 기록하고,
 HIGH·CRITICAL 신규 사건에서는 사건·첫 연결을 먼저 만든 뒤 사건 AuditLog 2건과
@@ -954,9 +981,19 @@ Spring Boot는 유효한 추적 문맥이 없으면 새 `traceId`를 만들고 F
 DTO, Producer 또는 발행 경로를 구현하지 않았다. cache·fallback 관련 이벤트도
 향후 별도 계약 대상이며 현재 구현 상태로 해석하지 않는다.
 
-Issue #160은 External Risk 선행 조회와 목표 `/api/v2/rule-analysis` 입력 계약을
-문서로 확정했을 뿐 이벤트 DTO나 실행 경로를 구현하지 않았다. v1은 현재 Endpoint,
-v2는 필수 `externalRisk`를 받는 목표 Endpoint다.
+Issue #160은 External Risk 선행 조회와 `/api/v2/rule-analysis` 입력 계약을 문서로
+확정했다. 후속 Issue #162에서 Python v2 요청 DTO, strict External Risk wire·교차 필드
+검증과 FastAPI `/api/v2/rule-analysis` Endpoint를 구현하고 기존 v1 Endpoint를 유지했다.
+Issue #164에서는 기존 Java v1 Client를 유지하면서 Backend Java v2 exact DTO·External
+Risk mapper·직접 HTTP Client를 구현했다. Issue #166에서는 내부 `analyzeV2(...)`·
+`startAnalysisV2(...)`, 잠긴 시작 트랜잭션의 Snapshot 조립·v2 mapper·DetectionResult
+생성, commit 이후 트랜잭션 밖 FastAPI v2 호출과 기존 완료·채택·실패 경계 재사용을
+구현했다.
+`/api/v1/rule-analysis`는 구현된 기존 Endpoint로 유지하고 `/api/v2/rule-analysis`도
+구현되어 있다. 실제 External Risk Provider·최상위 거래 접수 coordinator·공개 오류
+매핑·External Risk 영속화·Snapshot v2·이벤트 발행·운영 배포는 아직 구현되지
+않았으므로, 이 내부 코드 경계는 end-to-end 거래 처리나 운영 배포 완료를 의미하지
+않는다.
 
 - [ ] 이벤트가 Kafka 전용 계약으로 구현되지 않는가
 - [ ] Envelope `eventId`와 BehaviorEvent 업무 식별자를 혼합하지 않는가

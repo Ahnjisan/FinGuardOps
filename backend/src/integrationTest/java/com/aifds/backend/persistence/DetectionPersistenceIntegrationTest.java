@@ -14,6 +14,10 @@ import com.aifds.backend.detection.service.RuleAnalysisPersistenceService;
 import com.aifds.backend.detection.service.RuleEvidenceDraft;
 import com.aifds.backend.detection.service.StartedRuleAnalysis;
 import com.aifds.backend.detection.service.StartedRuleAnalysisExecution;
+import com.aifds.backend.detection.service.StartedRuleAnalysisV2Execution;
+import com.aifds.backend.externalrisk.domain.ExternalRiskLookupStatus;
+import com.aifds.backend.externalrisk.domain.ExternalRiskPolicyResult;
+import com.aifds.backend.externalrisk.domain.ExternalRiskSnapshot;
 import com.aifds.backend.rule.entity.RuleVersion;
 import com.aifds.backend.rule.entity.RuleVersionStatus;
 import com.aifds.backend.rule.repository.RuleVersionRepository;
@@ -39,7 +43,11 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.data.domain.PageRequest;
 
+import javax.sql.DataSource;
 import java.math.BigDecimal;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -49,10 +57,13 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.locks.LockSupport;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatObject;
@@ -61,6 +72,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 class DetectionPersistenceIntegrationTest
         extends PostgresqlIntegrationTestSupport {
+
+    private static final int V2_START_LOCK_NAMESPACE = 166;
+    private static final int V2_START_LOCK_KEY = 20_260_826;
+    private static final String V2_START_BLOCKER_FUNCTION =
+            "block_v2_analysis_start_before_commit_test";
+    private static final String V2_START_BLOCKER_TRIGGER =
+            "tg_block_v2_analysis_start_before_commit_test";
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -695,6 +713,237 @@ class DetectionPersistenceIntegrationTest
     }
 
     @Test
+    void startsV2WithTheExactRequestAndCommitsAnalyzingState() throws Exception {
+        FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
+        publishSeedRuleVersion(
+                RuleEvidenceObservationSummary.TRANSFER_ABSOLUTE_HIGH_AMOUNT
+        );
+        ExternalRiskSnapshot externalRisk = externalRiskSnapshot(transaction);
+
+        StartedRuleAnalysisV2Execution execution =
+                ruleAnalysisPersistenceService.startAnalysisV2(
+                        transaction.getTransactionId(),
+                        externalRisk,
+                        "score-v1",
+                        "feature-v1",
+                        null,
+                        "trace_boundary_start_v2_commit",
+                        Instant.now()
+                );
+
+        entityManager.clear();
+        FinancialTransaction storedTransaction = transactionRepository
+                .findByTransactionId(transaction.getTransactionId())
+                .orElseThrow();
+        DetectionResult storedResult = resultRepository
+                .findByDetectionResultId(
+                        execution.startedAnalysis().detectionResultId()
+                ).orElseThrow();
+        assertThat(storedTransaction.getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.ANALYZING);
+        assertThat(storedResult.getAnalysisStatus())
+                .isEqualTo(DetectionAnalysisStatus.IN_PROGRESS);
+        assertThat(execution.request().transaction().transactionId())
+                .isEqualTo(transaction.getTransactionId());
+        assertThat(execution.request().evaluationCutoffAt())
+                .isEqualTo(transaction.getOccurredAt());
+        assertThat(execution.request().externalRisk().providerCode())
+                .isEqualTo(externalRisk.providerCode());
+        assertThat(execution.startedAnalysis().ruleSetVersion())
+                .isEqualTo(storedResult.getRuleSetVersion());
+        assertThat(evidenceRepository
+                .findAllByDetectionResult_DetectionResultIdOrderBySortOrderAscIdAsc(
+                        storedResult.getDetectionResultId()
+                )).isEmpty();
+    }
+
+    @Test
+    void mapperFailureRollsBackAndLeavesReceivedWithoutResultsOrEvidence() {
+        FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
+        publishSeedRuleVersion(
+                RuleEvidenceObservationSummary.TRANSFER_ABSOLUTE_HIGH_AMOUNT
+        );
+        ExternalRiskSnapshot mismatched = new ExternalRiskSnapshot(
+                UUID.randomUUID(),
+                transaction.getOccurredAt(),
+                transaction.getOccurredAt().plusSeconds(1),
+                "EXTERNAL_RISK_MOCK_V1",
+                transaction.getOccurredAt().minusSeconds(1),
+                ExternalRiskLookupStatus.SUCCEEDED,
+                ExternalRiskPolicyResult.UNMATCHED,
+                List.of()
+        );
+
+        assertThatThrownBy(() ->
+                ruleAnalysisPersistenceService.startAnalysisV2(
+                        transaction.getTransactionId(),
+                        mismatched,
+                        "score-v1",
+                        "feature-v1",
+                        null,
+                        "trace_boundary_start_v2_rollback",
+                        Instant.now()
+                )
+        ).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("transactionId");
+
+        entityManager.clear();
+        assertThat(transactionRepository.findByTransactionId(
+                transaction.getTransactionId()
+        ).orElseThrow().getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.RECEIVED);
+        assertThat(resultRepository
+                .findAllByFinancialTransaction_TransactionIdOrderByDetectionResultVersionDesc(
+                        transaction.getTransactionId()
+                )).isEmpty();
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM detection_evidence",
+                Integer.class
+        )).isZero();
+    }
+
+    @Test
+    void v2StartIsInvisibleToAnotherConnectionBeforeCommit() throws Exception {
+        FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
+        publishSeedRuleVersion(
+                RuleEvidenceObservationSummary.TRANSFER_ABSOLUTE_HIGH_AMOUNT
+        );
+        ExternalRiskSnapshot externalRisk = externalRiskSnapshot(transaction);
+        DataSource dataSource = jdbcTemplate.getDataSource();
+        if (dataSource == null) {
+            throw new AssertionError("Integration DataSource was not available");
+        }
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        Connection blockerConnection = null;
+        Connection observerConnection = null;
+        Future<StartedRuleAnalysisV2Execution> future = null;
+        boolean blockerLockReleased = false;
+        Throwable primaryFailure = null;
+
+        try {
+            createV2StartCommitBlocker(transaction.getTransactionId());
+            blockerConnection = dataSource.getConnection();
+            blockerConnection.setAutoCommit(true);
+            acquireV2StartAdvisoryLock(blockerConnection);
+            observerConnection = dataSource.getConnection();
+            observerConnection.setAutoCommit(true);
+            assertThat(observerConnection).isNotSameAs(blockerConnection);
+
+            future = executor.submit(
+                    () -> ruleAnalysisPersistenceService.startAnalysisV2(
+                            transaction.getTransactionId(),
+                            externalRisk,
+                            "score-v1",
+                            "feature-v1",
+                            null,
+                            "trace_boundary_start_v2_visibility",
+                            Instant.now()
+                    )
+            );
+            AdvisoryLockState blocked = awaitV2StartAdvisoryLockWait(
+                    observerConnection,
+                    future,
+                    20,
+                    TimeUnit.SECONDS
+            );
+            assertThat(blocked.grantedCount()).isEqualTo(1);
+            assertThat(blocked.waitingCount()).isEqualTo(1);
+
+            V2StartDatabaseState beforeCommit = queryV2StartDatabaseState(
+                    observerConnection,
+                    transaction.getTransactionId()
+            );
+            assertThat(beforeCommit.processingStatus()).isEqualTo("RECEIVED");
+            assertThat(beforeCommit.resultCount()).isZero();
+            assertThat(beforeCommit.analysisStatus()).isNull();
+            assertThat(beforeCommit.evidenceCount()).isZero();
+
+            releaseV2StartAdvisoryLock(blockerConnection);
+            blockerLockReleased = true;
+            StartedRuleAnalysisV2Execution execution = future.get(
+                    20,
+                    TimeUnit.SECONDS
+            );
+
+            V2StartDatabaseState afterCommit = queryV2StartDatabaseState(
+                    observerConnection,
+                    transaction.getTransactionId()
+            );
+            assertThat(afterCommit.processingStatus()).isEqualTo("ANALYZING");
+            assertThat(afterCommit.resultCount()).isEqualTo(1);
+            assertThat(afterCommit.analysisStatus()).isEqualTo("IN_PROGRESS");
+            assertThat(afterCommit.evidenceCount()).isZero();
+            assertThat(execution.startedAnalysis().transactionId())
+                    .isEqualTo(transaction.getTransactionId());
+        } catch (Exception | AssertionError failure) {
+            primaryFailure = failure;
+            throw failure;
+        } finally {
+            Throwable cleanupFailure = null;
+            if (!blockerLockReleased && blockerConnection != null) {
+                try {
+                    releaseV2StartAdvisoryLock(blockerConnection);
+                } catch (Throwable failure) {
+                    cleanupFailure = failure;
+                }
+            }
+            if (future != null) {
+                try {
+                    future.get(20, TimeUnit.SECONDS);
+                } catch (ExecutionException failure) {
+                    cleanupFailure = appendCleanupFailure(
+                            cleanupFailure,
+                            failure.getCause()
+                    );
+                } catch (Throwable failure) {
+                    cleanupFailure = appendCleanupFailure(
+                            cleanupFailure,
+                            failure
+                    );
+                }
+            }
+            try {
+                removeV2StartCommitBlocker();
+            } catch (Throwable failure) {
+                cleanupFailure = appendCleanupFailure(
+                        cleanupFailure,
+                        failure
+                );
+            }
+            cleanupFailure = closeConnection(
+                    observerConnection,
+                    cleanupFailure
+            );
+            cleanupFailure = closeConnection(
+                    blockerConnection,
+                    cleanupFailure
+            );
+            executor.shutdownNow();
+            if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                cleanupFailure = appendCleanupFailure(
+                        cleanupFailure,
+                        new AssertionError(
+                                "V2 start executor did not terminate"
+                        )
+                );
+            }
+            if (cleanupFailure != null) {
+                if (primaryFailure != null) {
+                    if (primaryFailure != cleanupFailure) {
+                        primaryFailure.addSuppressed(cleanupFailure);
+                    }
+                } else if (cleanupFailure instanceof Exception exception) {
+                    throw exception;
+                } else if (cleanupFailure instanceof Error error) {
+                    throw error;
+                } else {
+                    throw new AssertionError(cleanupFailure);
+                }
+            }
+        }
+    }
+
+    @Test
     void rollsBackPendingInsertWhenStartTransitionFails() {
         FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
         publishSeedRuleVersion(
@@ -801,6 +1050,81 @@ class DetectionPersistenceIntegrationTest
             assertThat(result.getAnalysisStatus())
                     .isEqualTo(DetectionAnalysisStatus.IN_PROGRESS);
         });
+    }
+
+    @Test
+    void allowsOnlyOneWinnerAcrossConcurrentV1AndV2Starts() throws Exception {
+        FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
+        publishSeedRuleVersion(
+                RuleEvidenceObservationSummary.TRANSFER_ABSOLUTE_HIGH_AMOUNT
+        );
+        ExternalRiskSnapshot externalRisk = externalRiskSnapshot(transaction);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        try {
+            Future<Object> v1 = executor.submit(() -> startConcurrently(
+                    ready,
+                    start,
+                    () -> ruleAnalysisPersistenceService.startAnalysis(
+                            transaction.getTransactionId(),
+                            "score-v1",
+                            "feature-v1",
+                            null,
+                            "trace_boundary_v1_v2_v1",
+                            Instant.now()
+                    ).startedAnalysis()
+            ));
+            Future<Object> v2 = executor.submit(() -> startConcurrently(
+                    ready,
+                    start,
+                    () -> ruleAnalysisPersistenceService.startAnalysisV2(
+                            transaction.getTransactionId(),
+                            externalRisk,
+                            "score-v1",
+                            "feature-v1",
+                            null,
+                            "trace_boundary_v1_v2_v2",
+                            Instant.now()
+                    ).startedAnalysis()
+            ));
+
+            assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+            List<Object> attempts = List.of(
+                    v1.get(10, TimeUnit.SECONDS),
+                    v2.get(10, TimeUnit.SECONDS)
+            );
+            assertThat(attempts.stream()
+                    .filter(StartedRuleAnalysis.class::isInstance))
+                    .hasSize(1);
+            assertThat(attempts.stream()
+                    .filter(attempt -> !(attempt instanceof StartedRuleAnalysis)))
+                    .singleElement()
+                    .isInstanceOfAny(
+                            IllegalStateException.class,
+                            CannotAcquireLockException.class
+                    );
+        } finally {
+            executor.shutdownNow();
+            assertThat(executor.awaitTermination(5, TimeUnit.SECONDS))
+                    .isTrue();
+        }
+
+        entityManager.clear();
+        assertThat(transactionRepository.findByTransactionId(
+                transaction.getTransactionId()
+        ).orElseThrow().getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.ANALYZING);
+        assertThat(resultRepository
+                .findAllByFinancialTransaction_TransactionIdOrderByDetectionResultVersionDesc(
+                        transaction.getTransactionId()
+                )).singleElement().satisfies(result -> {
+                    assertThat(result.getDetectionResultVersion()).isEqualTo(1);
+                    assertThat(result.getAnalysisStatus())
+                            .isEqualTo(DetectionAnalysisStatus.IN_PROGRESS);
+                });
     }
 
     @Test
@@ -1310,6 +1634,24 @@ class DetectionPersistenceIntegrationTest
         }
     }
 
+    private Object startConcurrently(
+            CountDownLatch ready,
+            CountDownLatch start,
+            java.util.concurrent.Callable<StartedRuleAnalysis> action
+    ) throws InterruptedException {
+        ready.countDown();
+        if (!start.await(10, TimeUnit.SECONDS)) {
+            throw new AssertionError("Concurrent analysis start was not released");
+        }
+        try {
+            return action.call();
+        } catch (IllegalStateException | CannotAcquireLockException exception) {
+            return exception;
+        } catch (Exception exception) {
+            throw new IllegalStateException(exception);
+        }
+    }
+
     private StartedRuleAnalysis startRuleAnalysis(
             FinancialTransaction transaction,
             String traceId
@@ -1445,6 +1787,21 @@ class DetectionPersistenceIntegrationTest
                 null,
                 traceId,
                 Instant.now()
+        );
+    }
+
+    private ExternalRiskSnapshot externalRiskSnapshot(
+            FinancialTransaction transaction
+    ) {
+        return new ExternalRiskSnapshot(
+                transaction.getTransactionId(),
+                transaction.getOccurredAt(),
+                transaction.getOccurredAt().plusSeconds(1),
+                "EXTERNAL_RISK_MOCK_V1",
+                transaction.getOccurredAt().minusSeconds(1),
+                ExternalRiskLookupStatus.SUCCEEDED,
+                ExternalRiskPolicyResult.UNMATCHED,
+                List.of()
         );
     }
 
@@ -1846,6 +2203,246 @@ class DetectionPersistenceIntegrationTest
                 """, String.class));
     }
 
+    private void createV2StartCommitBlocker(UUID transactionId) {
+        jdbcTemplate.execute("""
+                CREATE FUNCTION %s()
+                RETURNS trigger
+                LANGUAGE plpgsql
+                AS $function$
+                BEGIN
+                    IF NEW.transaction_id = '%s'::uuid
+                       AND OLD.processing_status
+                           IS DISTINCT FROM NEW.processing_status
+                       AND NEW.processing_status = 'ANALYZING' THEN
+                        PERFORM pg_advisory_xact_lock(%d, %d);
+                    END IF;
+                    RETURN NEW;
+                END
+                $function$
+                """.formatted(
+                V2_START_BLOCKER_FUNCTION,
+                transactionId,
+                V2_START_LOCK_NAMESPACE,
+                V2_START_LOCK_KEY
+        ));
+        jdbcTemplate.execute("""
+                CREATE TRIGGER %s
+                AFTER UPDATE OF processing_status
+                ON financial_transaction
+                FOR EACH ROW
+                WHEN (
+                    NEW.transaction_id = '%s'::uuid
+                    AND OLD.processing_status
+                        IS DISTINCT FROM NEW.processing_status
+                    AND NEW.processing_status = 'ANALYZING'
+                )
+                EXECUTE FUNCTION %s()
+                """.formatted(
+                V2_START_BLOCKER_TRIGGER,
+                transactionId,
+                V2_START_BLOCKER_FUNCTION
+        ));
+    }
+
+    private void removeV2StartCommitBlocker() {
+        jdbcTemplate.execute("""
+                DROP TRIGGER IF EXISTS %s
+                ON financial_transaction
+                """.formatted(V2_START_BLOCKER_TRIGGER));
+        jdbcTemplate.execute("""
+                DROP FUNCTION IF EXISTS %s()
+                """.formatted(V2_START_BLOCKER_FUNCTION));
+    }
+
+    private void acquireV2StartAdvisoryLock(Connection connection)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT pg_advisory_lock(?, ?)"
+        )) {
+            statement.setInt(1, V2_START_LOCK_NAMESPACE);
+            statement.setInt(2, V2_START_LOCK_KEY);
+            statement.executeQuery();
+        }
+    }
+
+    private void releaseV2StartAdvisoryLock(Connection connection)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT pg_advisory_unlock(?, ?)"
+        )) {
+            statement.setInt(1, V2_START_LOCK_NAMESPACE);
+            statement.setInt(2, V2_START_LOCK_KEY);
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next() || !result.getBoolean(1)) {
+                    throw new AssertionError(
+                            "V2 start advisory lock was not held"
+                    );
+                }
+            }
+        }
+    }
+
+    private AdvisoryLockState awaitV2StartAdvisoryLockWait(
+            Connection observerConnection,
+            Future<?> future,
+            long timeout,
+            TimeUnit unit
+    ) throws Exception {
+        long deadline = System.nanoTime() + unit.toNanos(timeout);
+        AdvisoryLockState observed = new AdvisoryLockState(0, 0);
+        while (System.nanoTime() < deadline) {
+            rethrowWorkerCompletionBeforeAdvisoryWait(future, observed);
+            observed = queryV2StartAdvisoryLockState(observerConnection);
+            if (observed.grantedCount() == 1
+                    && observed.waitingCount() == 1) {
+                return observed;
+            }
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(20));
+        }
+        rethrowWorkerCompletionBeforeAdvisoryWait(future, observed);
+        throw new AssertionError(
+                "Timed out waiting for V2 start advisory lock: "
+                        + "futureDone=" + future.isDone()
+                        + ", granted=" + observed.grantedCount()
+                        + ", waiting=" + observed.waitingCount()
+        );
+    }
+
+    private void rethrowWorkerCompletionBeforeAdvisoryWait(
+            Future<?> future,
+            AdvisoryLockState observed
+    ) throws Exception {
+        if (!future.isDone()) {
+            return;
+        }
+        try {
+            future.get(0, TimeUnit.MILLISECONDS);
+        } catch (ExecutionException failure) {
+            Throwable original = failure.getCause();
+            if (original instanceof Exception exception) {
+                throw exception;
+            }
+            if (original instanceof Error error) {
+                throw error;
+            }
+            throw new AssertionError(
+                    "V2 start worker failed before advisory lock wait",
+                    original
+            );
+        } catch (TimeoutException impossible) {
+            throw new AssertionError(
+                    "Completed V2 start Future unexpectedly timed out",
+                    impossible
+            );
+        }
+        throw new AssertionError(
+                "V2 start worker completed before advisory lock wait: "
+                        + "granted=" + observed.grantedCount()
+                        + ", waiting=" + observed.waitingCount()
+        );
+    }
+
+    private AdvisoryLockState queryV2StartAdvisoryLockState(
+            Connection connection
+    ) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT
+                    COUNT(*) FILTER (WHERE granted),
+                    COUNT(*) FILTER (WHERE NOT granted)
+                FROM pg_locks
+                WHERE locktype = 'advisory'
+                  AND classid::bigint = ?
+                  AND objid::bigint = ?
+                  AND objsubid = 2
+                """)) {
+            statement.setInt(1, V2_START_LOCK_NAMESPACE);
+            statement.setInt(2, V2_START_LOCK_KEY);
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) {
+                    throw new AssertionError(
+                            "Advisory lock state was not returned"
+                    );
+                }
+                return new AdvisoryLockState(
+                        result.getInt(1),
+                        result.getInt(2)
+                );
+            }
+        }
+    }
+
+    private V2StartDatabaseState queryV2StartDatabaseState(
+            Connection connection,
+            UUID transactionId
+    ) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT
+                    tx.processing_status,
+                    (
+                        SELECT COUNT(*)
+                        FROM detection_result result
+                        WHERE result.financial_transaction_id = tx.id
+                    ),
+                    (
+                        SELECT MIN(result.analysis_status)
+                        FROM detection_result result
+                        WHERE result.financial_transaction_id = tx.id
+                    ),
+                    (
+                        SELECT COUNT(*)
+                        FROM detection_evidence evidence
+                        JOIN detection_result result
+                          ON result.id = evidence.detection_result_id
+                        WHERE result.financial_transaction_id = tx.id
+                    )
+                FROM financial_transaction tx
+                WHERE tx.transaction_id = ?
+                """)) {
+            statement.setObject(1, transactionId);
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) {
+                    throw new AssertionError(
+                            "V2 start transaction state was not returned"
+                    );
+                }
+                return new V2StartDatabaseState(
+                        result.getString(1),
+                        result.getInt(2),
+                        result.getString(3),
+                        result.getInt(4)
+                );
+            }
+        }
+    }
+
+    private Throwable closeConnection(
+            Connection connection,
+            Throwable currentFailure
+    ) {
+        if (connection == null) {
+            return currentFailure;
+        }
+        try {
+            connection.close();
+            return currentFailure;
+        } catch (Throwable failure) {
+            return appendCleanupFailure(currentFailure, failure);
+        }
+    }
+
+    private Throwable appendCleanupFailure(
+            Throwable currentFailure,
+            Throwable addedFailure
+    ) {
+        if (currentFailure == null) {
+            return addedFailure;
+        }
+        if (currentFailure != addedFailure) {
+            currentFailure.addSuppressed(addedFailure);
+        }
+        return currentFailure;
+    }
+
     private void assertConstraint(Runnable operation, String constraint) {
         assertThatThrownBy(operation::run)
                 .isInstanceOf(DataAccessException.class)
@@ -1880,6 +2477,20 @@ class DetectionPersistenceIntegrationTest
     private record DetectionAuditSnapshot(
             UUID detectionResultId,
             Instant createdAt
+    ) {
+    }
+
+    private record AdvisoryLockState(
+            int grantedCount,
+            int waitingCount
+    ) {
+    }
+
+    private record V2StartDatabaseState(
+            String processingStatus,
+            int resultCount,
+            String analysisStatus,
+            int evidenceCount
     ) {
     }
 }

@@ -11,6 +11,7 @@ import com.aifds.backend.rule.client.dto.ExternalRiskMatchRequest;
 import com.aifds.backend.rule.client.dto.ExternalRiskSnapshotRequest;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequest;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV2;
+import org.springframework.stereotype.Component;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -21,6 +22,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+@Component
 public final class RuleAnalysisRequestV2Mapper {
 
     private static final Map<ExternalRiskSubjectType, Integer> SUBJECT_ORDER = Map.of(
