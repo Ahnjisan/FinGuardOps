@@ -1,10 +1,12 @@
 package com.aifds.backend.detection.service;
 
 import com.aifds.backend.detection.entity.RiskLevel;
+import com.aifds.backend.externalrisk.domain.ExternalRiskSnapshot;
 import com.aifds.backend.rule.client.RuleAnalysisClientErrorCategory;
 import com.aifds.backend.rule.client.RuleAnalysisClientException;
 import com.aifds.backend.rule.client.RuleAnalysisHttpClient;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequest;
+import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV2;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResponse;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -53,7 +55,10 @@ class RuleAnalysisOrchestrationServiceTest {
     private RuleAnalysisOrchestrationService service;
     private StartedRuleAnalysis started;
     private StartedRuleAnalysisExecution execution;
+    private StartedRuleAnalysisV2Execution executionV2;
     private RuleAnalysisRequest request;
+    private RuleAnalysisRequestV2 requestV2;
+    private ExternalRiskSnapshot externalRiskSnapshot;
     private RuleAnalysisResponse response;
 
     @BeforeEach
@@ -79,10 +84,15 @@ class RuleAnalysisOrchestrationServiceTest {
                 TRACE_ID
         );
         execution = mock(StartedRuleAnalysisExecution.class);
+        executionV2 = mock(StartedRuleAnalysisV2Execution.class);
         request = mock(RuleAnalysisRequest.class);
+        requestV2 = mock(RuleAnalysisRequestV2.class);
+        externalRiskSnapshot = mock(ExternalRiskSnapshot.class);
         response = mock(RuleAnalysisResponse.class);
         when(execution.startedAnalysis()).thenReturn(started);
         when(execution.request()).thenReturn(request);
+        when(executionV2.startedAnalysis()).thenReturn(started);
+        when(executionV2.request()).thenReturn(requestV2);
         when(persistenceService.startAnalysis(
                 TRANSACTION_ID,
                 "scoring-policy-v1",
@@ -91,7 +101,17 @@ class RuleAnalysisOrchestrationServiceTest {
                 TRACE_ID,
                 NOW
         )).thenReturn(execution);
+        when(persistenceService.startAnalysisV2(
+                TRANSACTION_ID,
+                externalRiskSnapshot,
+                "scoring-policy-v1",
+                "rule-v1",
+                null,
+                TRACE_ID,
+                NOW
+        )).thenReturn(executionV2);
         when(httpClient.analyze(request, TRACE_ID)).thenReturn(response);
+        when(httpClient.analyzeV2(requestV2, TRACE_ID)).thenReturn(response);
         when(responseMapper.map(response)).thenReturn(mapped());
     }
 
@@ -145,6 +165,61 @@ class RuleAnalysisOrchestrationServiceTest {
     }
 
     @Test
+    void callsEachV2BoundaryInOrderWithoutUsingTheV1StartOrClient() {
+        CompletedRuleAnalysis completed = service.analyzeV2(
+                TRANSACTION_ID,
+                externalRiskSnapshot,
+                TRACE_ID
+        );
+
+        assertThat(completed).isEqualTo(new CompletedRuleAnalysis(
+                TRANSACTION_ID,
+                RESULT_ID,
+                2,
+                55,
+                RiskLevel.HIGH
+        ));
+        InOrder order = inOrder(
+                persistenceService,
+                httpClient,
+                responseMapper
+        );
+        order.verify(persistenceService).startAnalysisV2(
+                TRANSACTION_ID,
+                externalRiskSnapshot,
+                "scoring-policy-v1",
+                "rule-v1",
+                null,
+                TRACE_ID,
+                NOW
+        );
+        order.verify(httpClient).analyzeV2(requestV2, TRACE_ID);
+        order.verify(responseMapper).map(response);
+        order.verify(persistenceService).completeAndAdopt(
+                started,
+                55,
+                RiskLevel.HIGH,
+                NOW,
+                List.of()
+        );
+        verify(httpClient, times(1)).analyzeV2(requestV2, TRACE_ID);
+        verify(httpClient, never()).analyze(any(), any());
+        verify(persistenceService, never()).startAnalysis(
+                any(),
+                any(),
+                any(),
+                any(),
+                any(),
+                any()
+        );
+        verify(persistenceService, never()).failAnalysis(
+                any(),
+                any(),
+                any()
+        );
+    }
+
+    @Test
     void startFailureDoesNotCallAnyLaterBoundary() {
         RuntimeException original = new IllegalStateException("start failed");
         when(persistenceService.startAnalysis(
@@ -163,6 +238,44 @@ class RuleAnalysisOrchestrationServiceTest {
 
         assertThat(thrown).isSameAs(original);
         verifyNoInteractions(httpClient, responseMapper);
+        verify(persistenceService, never()).completeAndAdopt(
+                any(),
+                anyInt(),
+                any(),
+                any(),
+                any()
+        );
+        verify(persistenceService, never()).failAnalysis(
+                any(),
+                any(),
+                any()
+        );
+    }
+
+    @Test
+    void v2StartFailureDoesNotCallHttpCompletionOrFailureWriter() {
+        RuntimeException original = new IllegalArgumentException(
+                "v2 request mapping failed"
+        );
+        when(persistenceService.startAnalysisV2(
+                TRANSACTION_ID,
+                externalRiskSnapshot,
+                "scoring-policy-v1",
+                "rule-v1",
+                null,
+                TRACE_ID,
+                NOW
+        )).thenThrow(original);
+
+        Throwable thrown = catchThrowable(() -> service.analyzeV2(
+                TRANSACTION_ID,
+                externalRiskSnapshot,
+                TRACE_ID
+        ));
+
+        assertThat(thrown).isSameAs(original);
+        verify(httpClient, never()).analyzeV2(any(), any());
+        verify(responseMapper, never()).map(any());
         verify(persistenceService, never()).completeAndAdopt(
                 any(),
                 anyInt(),
@@ -200,6 +313,41 @@ class RuleAnalysisOrchestrationServiceTest {
                 NOW
         );
         verify(httpClient, times(1)).analyze(request, TRACE_ID);
+        verify(responseMapper, never()).map(any());
+        verify(persistenceService, never()).completeAndAdopt(
+                any(),
+                anyInt(),
+                any(),
+                any(),
+                any()
+        );
+    }
+
+    @ParameterizedTest
+    @EnumSource(RuleAnalysisClientErrorCategory.class)
+    void v2StoresEveryClientCategoryNameAndRethrowsTheSameException(
+            RuleAnalysisClientErrorCategory category
+    ) {
+        RuleAnalysisClientException original = mock(
+                RuleAnalysisClientException.class
+        );
+        when(original.category()).thenReturn(category);
+        when(httpClient.analyzeV2(requestV2, TRACE_ID)).thenThrow(original);
+
+        Throwable thrown = catchThrowable(() -> service.analyzeV2(
+                TRANSACTION_ID,
+                externalRiskSnapshot,
+                TRACE_ID
+        ));
+
+        assertThat(thrown).isSameAs(original);
+        verify(persistenceService).failAnalysis(
+                started,
+                category.name(),
+                NOW
+        );
+        verify(httpClient, times(1)).analyzeV2(requestV2, TRACE_ID);
+        verify(httpClient, never()).analyze(any(), any());
         verify(responseMapper, never()).map(any());
         verify(persistenceService, never()).completeAndAdopt(
                 any(),
@@ -248,6 +396,22 @@ class RuleAnalysisOrchestrationServiceTest {
 
         Throwable thrown = catchThrowable(() -> service.analyze(
                 TRANSACTION_ID,
+                TRACE_ID
+        ));
+
+        assertThat(thrown)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("no active transaction");
+        verifyNoInteractions(persistenceService, httpClient, responseMapper);
+    }
+
+    @Test
+    void rejectsAnEntryTransactionBeforeStartingV2() {
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+
+        Throwable thrown = catchThrowable(() -> service.analyzeV2(
+                TRANSACTION_ID,
+                externalRiskSnapshot,
                 TRACE_ID
         ));
 
@@ -311,6 +475,78 @@ class RuleAnalysisOrchestrationServiceTest {
     }
 
     @Test
+    void v2PreservesOriginalAndSuppressesARecordingFailure() {
+        RuntimeException original = new IllegalStateException("v2 http");
+        RuntimeException recording = new IllegalStateException("recording");
+        when(httpClient.analyzeV2(requestV2, TRACE_ID)).thenThrow(original);
+        org.mockito.Mockito.doThrow(recording)
+                .when(persistenceService)
+                .failAnalysis(
+                        started,
+                        RuleAnalysisOrchestrationService.HTTP_CALL_FAILED,
+                        NOW
+                );
+
+        Throwable thrown = catchThrowable(() -> service.analyzeV2(
+                TRANSACTION_ID,
+                externalRiskSnapshot,
+                TRACE_ID
+        ));
+
+        assertThat(thrown).isSameAs(original);
+        assertThat(thrown.getSuppressed()).containsExactly(recording);
+    }
+
+    @Test
+    void v2RecordsResponseMappingAndAdoptionFailures() {
+        RuntimeException mapping = new IllegalArgumentException("v2 mapping");
+        when(responseMapper.map(response)).thenThrow(mapping);
+
+        Throwable mappingThrown = catchThrowable(() -> service.analyzeV2(
+                TRANSACTION_ID,
+                externalRiskSnapshot,
+                TRACE_ID
+        ));
+
+        assertThat(mappingThrown).isSameAs(mapping);
+        verify(persistenceService).failAnalysis(
+                started,
+                RuleAnalysisOrchestrationService.RESPONSE_MAPPING_FAILED,
+                NOW
+        );
+
+        org.mockito.Mockito.reset(
+                persistenceService,
+                httpClient,
+                responseMapper
+        );
+        resetSuccessfulV2Stubs();
+        RuntimeException adoption = new IllegalStateException("v2 adoption");
+        org.mockito.Mockito.doThrow(adoption)
+                .when(persistenceService)
+                .completeAndAdopt(
+                        started,
+                        55,
+                        RiskLevel.HIGH,
+                        NOW,
+                        List.of()
+                );
+
+        Throwable adoptionThrown = catchThrowable(() -> service.analyzeV2(
+                TRANSACTION_ID,
+                externalRiskSnapshot,
+                TRACE_ID
+        ));
+
+        assertThat(adoptionThrown).isSameAs(adoption);
+        verify(persistenceService).failAnalysis(
+                started,
+                RuleAnalysisOrchestrationService.ADOPTION_FAILED,
+                NOW
+        );
+    }
+
+    @Test
     void avoidsSelfSuppressionWhenRecordingThrowsTheOriginal() {
         RuntimeException original = new IllegalStateException("same");
         when(httpClient.analyze(request, TRACE_ID)).thenThrow(original);
@@ -339,10 +575,17 @@ class RuleAnalysisOrchestrationServiceTest {
                 UUID.class,
                 String.class
         );
+        Method analyzeV2 = RuleAnalysisOrchestrationService.class.getMethod(
+                "analyzeV2",
+                UUID.class,
+                ExternalRiskSnapshot.class,
+                String.class
+        );
 
         assertThat(RuleAnalysisOrchestrationService.class
                 .getAnnotation(Transactional.class)).isNull();
         assertThat(analyze.getAnnotation(Transactional.class)).isNull();
+        assertThat(analyzeV2.getAnnotation(Transactional.class)).isNull();
     }
 
     private void assertFailureCodeAtHttp(
@@ -381,6 +624,22 @@ class RuleAnalysisOrchestrationServiceTest {
                 NOW
         )).thenReturn(execution);
         when(httpClient.analyze(request, TRACE_ID)).thenReturn(response);
+        when(responseMapper.map(response)).thenReturn(mapped());
+    }
+
+    private void resetSuccessfulV2Stubs() {
+        when(executionV2.startedAnalysis()).thenReturn(started);
+        when(executionV2.request()).thenReturn(requestV2);
+        when(persistenceService.startAnalysisV2(
+                TRANSACTION_ID,
+                externalRiskSnapshot,
+                "scoring-policy-v1",
+                "rule-v1",
+                null,
+                TRACE_ID,
+                NOW
+        )).thenReturn(executionV2);
+        when(httpClient.analyzeV2(requestV2, TRACE_ID)).thenReturn(response);
         when(responseMapper.map(response)).thenReturn(mapped());
     }
 

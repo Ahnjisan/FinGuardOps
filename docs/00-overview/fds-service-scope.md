@@ -1011,9 +1011,9 @@ External Risk 선행 조회를 Rule v1 실행 입력에 연결하는 목표 계�
 따른다. FastAPI에는 기존 External Risk 없는 `POST /api/v1/rule-analysis`와 필수
 `externalRisk`를 가진 `POST /api/v2/rule-analysis`가 함께 구현되어 있다. v2 요청
 DTO와 strict External Risk wire·교차 필드 검증에 더해 Backend Java v2 exact wire
-DTO·mapper와 `/api/v2/rule-analysis` Client 경계가 구현됐다. 실제 Provider, 거래
-접수 전체 연결과 내부 오케스트레이터의 v2 전환, 공개 오류 매핑, External Risk
-영속화, Snapshot v2와 완료 간극 운영 복구는 구현되지 않았다. 이 양쪽 HTTP 경계
+DTO·mapper와 `/api/v2/rule-analysis` Client, 기존 v1을 유지하는 별도 내부 v2
+오케스트레이션 경계가 구현됐다. 실제 Provider, 거래 접수 전체 연결, 공개 오류 매핑,
+External Risk 영속화, Snapshot v2와 완료 간극 운영 복구는 구현되지 않았다. 이 양쪽 HTTP 경계
 구현은 운영 배포 또는 end-to-end 거래 처리 완료를 의미하지 않는다.
 
 - 카드 결제 FDS
@@ -1134,7 +1134,7 @@ DTO·mapper와 `/api/v2/rule-analysis` Client 경계가 구현됐다. 실제 Pro
 
 ### 20.2 백엔드
 
-> Spring Boot의 거래 멱등성과 상태 전이 경계를 구현하고 있습니다. 현재 External Risk는 독립 Port·정책 Service와 local/dev/test Mock에서 timeout·unavailable·invalid response를 typed failure로 전파하는 fail-closed 경계를 구현했으며 자동 retry, cache, stale data, Circuit Breaker와 fallback은 적용하지 않았습니다. 실제 Provider와 거래·FastAPI 연결은 후속 범위입니다.
+> Spring Boot의 거래 멱등성과 상태 전이 경계를 구현하고 있습니다. 현재 External Risk는 독립 Port·정책 Service와 local/dev/test Mock에서 timeout·unavailable·invalid response를 typed failure로 전파하는 fail-closed 경계와 성공 Snapshot을 받는 내부 Rule v2 오케스트레이션 경계를 구현했으며 자동 retry, cache, stale data, Circuit Breaker와 fallback은 적용하지 않았습니다. 실제 Provider와 거래 접수 상위 연결은 후속 범위입니다.
 
 ### 20.3 AI 활용
 
@@ -1239,7 +1239,7 @@ DTO·mapper와 `/api/v2/rule-analysis` Client 경계가 구현됐다. 실제 Pro
 ### 23.6 외부 연동과 비동기 처리 목표
 
 - 현재 독립 External Risk Port·정책 Service와 local/dev/test 결정적 Mock
-- 실제 외부 위험정보 HTTP Provider와 거래·FastAPI 연결은 미구현
+- 내부 Rule v2 오케스트레이션은 구현, 실제 외부 위험정보 HTTP Provider와 거래 접수 연결은 미구현
 - Timeout·Unavailable·Invalid Response의 현재 fail-closed 처리
 - Redis cache·retry·Circuit Breaker·fallback은 별도 Issue·ADR 승인 후의 향후 후보
 - Kafka

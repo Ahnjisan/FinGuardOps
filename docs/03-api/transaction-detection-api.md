@@ -46,7 +46,8 @@ HIGH·CRITICAL은 새 사건·첫 연결 또는 기존 활성 연결을 최종 �
 
 목표 `POST /api/v2/rule-analysis`는 External Risk를 필수 입력으로 받지만 계속
 Rule v1 R001~R004를 실행한다. 현재 v1 Endpoint는 당장 제거하지 않으며 v2
-Java·Python DTO·Client와 상위 연결은 미구현이다. 상세 계약은
+Java·Python DTO·Client와 내부 오케스트레이션은 구현됐다. 실제 Provider와 거래
+접수 상위 연결은 미구현이다. 상세 계약은
 [External Risk·Rule 분석 입력 계약](../01-requirements/external-risk-rule-analysis-input-contract.md)을
 따른다.
 
@@ -74,8 +75,8 @@ Java·Python DTO·Client와 상위 연결은 미구현이다. 상세 계약은
 다음 항목은 목표 책임 범위이다. 현재 `ai-service/`에는 R001~R004 실행,
 scoring, Evidence 변환과 Rule 분석 결과 조합의 내부 경로에 더해 Pydantic
 요청·응답 DTO와 FastAPI `POST /api/v1/rule-analysis` HTTP 경계가 구현되어
-있다. Spring Boot Client와 내부 DetectionResult 생성·채택·영속화도
-구현되어 있으나 거래 접수·External Risk v2 연결과 ML은 아직 구현되지 않았다.
+있다. Spring Boot Client와 v1·v2 내부 DetectionResult 생성·채택·영속화도
+구현되어 있으나 실제 Provider·거래 접수 v2 연결과 ML은 아직 구현되지 않았다.
 상세 Client 계약은
 [Rule v1 내부 분석 API](./rule-v1-analysis-api.md#13-spring-boot-client-연동-계약)를
 따른다.

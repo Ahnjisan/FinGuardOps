@@ -273,8 +273,8 @@ v2는 External Risk를 검증하지만 R001~R004 evaluator에는 전달하지 �
 `featureVersion=rule-v1`, `modelVersion=null`과 기존 성공 응답은 바뀌지 않는다.
 External Risk echo와 전용 hash를 응답에 추가하지 않는다. Python v2 DTO·검증과
 FastAPI Endpoint, Backend Java v2 exact wire DTO·mapper와 직접 Client 경계가
-구현됐다. 상위 Snapshot assembly와 내부 분석 오케스트레이터의 v2 전환은 아직
-구현되지 않았다.
+구현됐다. 별도 내부 `analyzeV2(...)`와 잠긴 시작 트랜잭션의 Snapshot 조립·mapper
+경계도 구현됐으며, 실제 Provider와 거래 접수 상위 연결은 아직 구현되지 않았다.
 
 v2의 JSON 타입·필수·null·Enum·UTC 형식·unknown field 오류는
 `400 INVALID_REQUEST`, match 조합·개수·canonical 순서와 시간 관계 오류는
@@ -712,7 +712,8 @@ FastAPI Middleware는 `Content-Length`만 신뢰하지 않고 실제 수신 byte
 기준이다. 현재 v1 요청·응답 DTO, HTTP 상태와 FastAPI 오류 envelope는 변경하지
 않는다. v1 FastAPI HTTP 경계, Spring Boot Client와 결과 채택·영속화
 오케스트레이션이 구현되어 있다. v1 계약을 유지하면서 별도 메서드로 호출하는
-v2 Client 경계도 구현되어 있지만 기존 내부 오케스트레이터는 아직 v1을 사용한다.
+v2 Client와 내부 오케스트레이션 경계도 구현되어 있다. 기존 `analyze(...)`는 v1만,
+별도 `analyzeV2(...)`는 v2만 명시적으로 호출하며 자동 endpoint 전환은 없다.
 
 ### 13.1 계층과 책임
 
@@ -740,9 +741,9 @@ Client는 Rule 적중 여부, scoring 또는 Evidence를 Java에서 다시 계�
   신규 `analyzeV2(...)`는 고정값 `/api/v2/rule-analysis`를 호출한다. 두 메서드는
   하나의 공통 private HTTP exchange 경계를 재사용하며 자동 endpoint 협상·전환은
   없다.
-- 현재 상위 거래 오케스트레이터는 계속 v1 `analyze(...)`를 사용한다. 실제 External
-  Risk Provider와 상위 오케스트레이터의 v2 연결은 미구현이며, 구현된 직접 v2 Client
-  경계는 운영 배포나 end-to-end 거래 처리 완료를 의미하지 않는다.
+- 현재 상위 거래 오케스트레이터는 내부 v2 메서드를 아직 호출하지 않는다. 실제
+  External Risk Provider와 상위 오케스트레이터의 v2 연결은 미구현이며, 구현된 내부
+  v2 경계는 운영 배포나 end-to-end 거래 처리 완료를 의미하지 않는다.
 - 하나의 Client 호출은 하나의 HTTP 요청만 수행한다.
 
 ### 13.3 설정 계약
@@ -885,14 +886,13 @@ Spring Boot가 만든 요청·Rule·배포 capability나 upstream 응답 계약�
    현재 승인된 실패 정책은 no retry·no cache·no stale data·no fallback·no
    Circuit Breaker다. timeout·unavailable·invalid response는 typed failure로
    전파하고 Rule 분석을 시작하지 않는다.
-4. Provider 호출 뒤 Spring Boot 소유 Snapshot assembly 경계가 짧은 DB read
-   transaction에서 거래·행동 이벤트·실행 가능한 활성 RuleVersion과 External
-   Risk를 완전한 immutable 목표 v2 요청으로 조합한다. DetectionResult와 거래
-   상태는 바꾸지 않는다.
-5. 완성된 요청을 `RuleAnalysisOrchestrationService`에 전달한다. 짧은 분석 시작
-   쓰기 트랜잭션에서 거래를 잠그고 요청의 소유 관계·cutoff·시간을 재검증하며 예상
-   `ruleSetVersion`과 다음 DetectionResult 버전을 고정한다. 이 Service는 External
+4. Provider 호출 뒤 거래 식별자와 성공 `ExternalRiskSnapshot`을
+   `RuleAnalysisOrchestrationService.analyzeV2(...)`에 전달한다. 이 Service는 External
    Risk를 직접 조회하거나 정책을 결정하지 않는다.
+5. 잠긴 `REQUIRES_NEW`, `REPEATABLE_READ` 시작 트랜잭션에서 거래 상태를 검증하고
+   기존 v1 assembler로 거래·행동 이벤트·실행 가능한 활성 RuleVersion Snapshot을
+   조립한 뒤 v2 mapper를 실행한다. mapper 성공 뒤에만 예상 `ruleSetVersion`과 다음
+   DetectionResult 버전을 조회·고정한다.
 6. 같은 트랜잭션에서 DetectionResult `PENDING → IN_PROGRESS`와 거래
    `RECEIVED → ANALYZING`을 commit한다.
 7. DB 트랜잭션과 잠금을 유지하지 않은 상태에서 목표 FastAPI v2를 정확히 한 번 호출한다.
@@ -906,20 +906,20 @@ Spring Boot가 만든 요청·Rule·배포 capability나 upstream 응답 계약�
     HIGH·CRITICAL의 사건 생성 또는 기존 사건 연결을 수행하고 commit한다.
 12. 모든 최종 업무 commit 이후에만 ADR-006의 Snapshot v2를 확정한다.
 
-네트워크 응답을 기다리는 동안 DB 쓰기 트랜잭션과 잠금을 장시간 유지하지
-않는다. 현재 내부 구현은 External Risk가 없는 거래·행동·RuleVersion Snapshot을
-분석 시작 경계에서 조합한 뒤 시작·HTTP·완료·채택 책임을 수행한다. 목표 v2의
-별도 Snapshot assembly와 External Risk 포함 완성 요청 전달, 위험 대응과 Snapshot
-v2 단계는 아직 구현되지 않았다. Rule 분석 HTTP 오케스트레이터는 External
-Risk 조회·정책, 위험 대응, 사건 또는 Snapshot v2를 소유하지 않는다.
+mapper가 실패하면 시작 트랜잭션 전체를 rollback해 거래 `RECEIVED`,
+DetectionResult·Evidence 0건을 유지하고 HTTP Client와 `failAnalysis()`를 호출하지
+않는다. 시작 commit 뒤 활성 DB 트랜잭션이 없을 때만 v2 Client를 정확히 한 번
+호출한다. 성공·사후 실패는 v1과 같은 응답 mapper, 완료·채택·실패 경계를 재사용한다.
+Rule 분석 HTTP 오케스트레이터는 External Risk 조회·정책, 위험 대응, 사건 또는
+Snapshot v2를 소유하지 않는다.
 
 현재 FastAPI v1 `RuleAnalysisRequest`에는 External Risk 입력이 없다. Issue #150은
 Spring Boot 내부의 독립 Port·Policy Service·local/dev/test Mock·인메모리 성공
 Snapshot만 구현했으며 FastAPI·Python·`RuleAnalysisRequest`를 변경하지 않았다.
 Issue #160에서 승인한 v2 입력 계약에 따라 Issue #162에서 Python DTO·검증과
 FastAPI Endpoint를 구현했고 Issue #164에서 Backend Java v2 exact wire DTO·mapper와
-직접 Client 경계를 구현했다. 내부 오케스트레이터와 거래 접수 호출 연결은 후속
-Issue다.
+직접 Client 경계를 구현했다. Issue #166에서 별도 내부 v2 오케스트레이션 경계를
+구현했으며 실제 Provider와 거래 접수 호출 연결은 후속 Issue다.
 
 ### 13.8 로그와 정보 보호
 
@@ -946,7 +946,7 @@ stack trace와 내부 예외 상세는 외부 응답에 노출하지 않는다. 
 
 ### 13.9 Java Client 테스트 상태와 후속 오케스트레이션 검증
 
-현재 Java Client와 오케스트레이션 단위·통합 테스트는 정상 요청,
+현재 Java Client와 v1·v2 오케스트레이션 단위·통합 테스트는 정상 요청,
 all-unmatched 성공, 엄격한 Trace·wire·업무 응답 검증, Client category 분류,
 connect·response timeout, 자동 retry 0회, 트랜잭션 밖 HTTP 호출과 결과
 완료·실패 경계를 검증한다. 유지해야 할 회귀 항목은 다음과 같다.
@@ -967,12 +967,15 @@ connect·response timeout, 자동 retry 0회, 트랜잭션 밖 HTTP 호출과 �
 - 한 Client 호출에서 HTTP 요청이 한 번만 수행되어 자동 retry가 없음
 - 로그와 외부 오류 응답에 요청·응답 원문, 참조값, Evidence, upstream 오류
   메시지와 인증정보가 노출되지 않음
+- v2 mapper가 version 조회와 어떤 쓰기보다 먼저 실행되고 실패 시 시작 전체 rollback
+- v2 시작 commit 뒤 활성 트랜잭션 없이 `analyzeV2(...)`가 정확히 1회 호출됨
+- v1/v2 동시 시작에서 기존 거래 우선 잠금과 단일 승자 계약이 유지됨
+- v2 사후 실패에서 원본 예외·Client category·suppressed recording failure가 유지됨
 
 ## 14. 현재 구현 이후 제외 범위
 
 - 거래 접수 Service에서 Rule v1 오케스트레이터를 호출하는 연결
-- Backend Java v2 요청을 조합·전달하는 상위 Snapshot assembly와 내부
-  오케스트레이터의 v2 전환
+- 실제 Provider 성공 Snapshot을 내부 v2 오케스트레이터에 전달하는 상위 거래 연결
 - 거래 접수에서 구현된 위험 대응·최종 거래 상태·사건·AuditLog 원자적 최종화
   경계를 호출하는 연결
 - 최종 동기 응답과 Snapshot v2 확정

@@ -53,12 +53,15 @@ DTO와 FastAPI `POST /api/v1/rule-analysis` HTTP 경계가 구현되어 있다.
 Spring Boot `RuleAnalysisHttpClient`, Timeout·Trace 전달, 성공·오류 응답 검증과
 오류 분류도 구현되어 있다. 거래 분석 Snapshot 조합, 분석 시작·HTTP 호출,
 탐지 결과 자동 생성·완료·Evidence 영속화·채택과 거래 `ANALYZED` 전이까지의
-내부 오케스트레이션도 구현되어 있다. 독립 External Risk Port·정책 Service,
+v1 내부 오케스트레이션과, 성공 `ExternalRiskSnapshot`을 입력받아 잠긴 시작
+트랜잭션 안에서 Rule Snapshot·v2 요청을 확정하고 commit 뒤 FastAPI v2를 호출하는
+내부 v2 오케스트레이션도 구현되어 있다. 독립 External Risk Port·정책 Service,
 local/dev/test 결정적 Mock과 immutable 인메모리 성공 Snapshot도 구현되어 있다.
 네 위험 등급별 목표 거래 상태, `RiskResponseOutcome`과 사건 필수 여부를 반환하는
 Spring·DB 비의존 순수 decision 정책도 구현되어 있다.
-거래 접수 Service 연결, External Risk의 목표 v2 Rule 입력 연결, Snapshot v2와
-완료 간극 복구, 감사 조회와 AI 운영 도메인은 아직 구현되지 않았다. 위험 대응
+External Risk 연계에서 미구현인 범위는 실제 Provider와, 거래 접수 뒤 Provider를
+호출해 성공 Snapshot을 내부 v2 경계에 전달하는 최상위 coordinator다. Snapshot v2와
+완료 간극 복구, 감사 조회와 AI 운영 도메인도 아직 구현되지 않았다. 위험 대응
 정책의 `FinancialTransaction` 적용, 필요한 사건·연결, 최종 거래 상태·대응 결과와
 AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 구현되었다.
 
@@ -618,9 +621,9 @@ Kafka는 다음 조건이 확인된 뒤 이 논리적 비동기 경계를 구현
 ### 13.1 거래 접수·탐지
 
 다음 흐름은 ADR-003이 유지하는 최종 동기 분석 목표이다. 현재 거래 접수 구현은
-입력 검증·멱등성 확인·거래 저장과 `RECEIVED` 응답까지이며, 구현된 내부 Rule
-분석 오케스트레이터를 접수에서 호출하는 연결과 이후 위험 대응·사건 단계는
-미구현이다.
+입력 검증·멱등성 확인·거래 저장과 `RECEIVED` 응답까지다. 실제 External Risk
+Provider와, 성공 Snapshot을 확보해 구현된 내부 Rule v2 오케스트레이터를 호출하는
+최상위 거래 coordinator 및 이후 위험 대응·사건 연결은 미구현이다.
 
 ```text
 Client
@@ -628,10 +631,12 @@ Client
 → 입력 검증·멱등성 확인
 → RECEIVED 거래 저장 commit
 → DB 트랜잭션 밖 External Risk 조회·성공 Snapshot 고정
-→ 목표 FastAPI /api/v2/rule-analysis 요청 확정·호출
-→ 위험 점수·Reason Code·탐지 근거 반환
-→ Spring Boot 위험 대응 결정
-→ 거래·탐지 결과 저장
+→ 성공 Snapshot을 내부 analyzeV2에 전달
+→ 잠긴 분석 시작 트랜잭션에서 Rule Snapshot·v2 요청 확정
+→ DetectionResult IN_PROGRESS·거래 ANALYZING commit
+→ 트랜잭션 밖 FastAPI /api/v2/rule-analysis 호출
+→ 완료·채택 또는 실패 persistence
+→ 성공 시 Spring Boot 위험 대응 결정
 → 필요 시 사건 생성 또는 기존 사건 연결
 → 감사 로그
 ```
@@ -641,26 +646,42 @@ sequenceDiagram
     actor Client
     participant Spring as Spring Boot
     participant DB as PostgreSQL
-    participant Risk as External Risk Mock
+    participant Risk as External Risk Provider (미구현)
     participant AI as FastAPI
 
     Client->>Spring: 거래 요청
     Spring->>Spring: 요청 형식·도메인 Validation
     Spring->>DB: 멱등성 단일 승자·RECEIVED 거래 저장 commit
-    Spring->>Risk: 외부 위험정보 조회
-    Risk-->>Spring: 성공 immutable Snapshot
-    Spring->>DB: 목표 v2 immutable 입력 조합 read transaction
-    Spring->>DB: 분석 시작·ANALYZING commit
-    Spring->>AI: 목표 v2 거래·행동·RuleVersion·externalRisk 요청
-    AI-->>Spring: 위험 점수·Reason Code·근거·버전
-    Spring->>Spring: 결과 검증 및 위험 대응 결정
-    Spring->>DB: 거래·탐지·사건 연결·감사 기록
-    Spring-->>Client: Mock 거래 처리 결과
+    Spring->>Risk: 목표 DB 트랜잭션 밖 External Risk 조회
+    Risk-->>Spring: 성공 ExternalRiskSnapshot 전달
+    Spring->>Spring: analyzeV2(transactionId, snapshot, traceId)
+    Spring->>DB: startAnalysisV2()·REQUIRES_NEW·REPEATABLE_READ 시작
+    Spring->>DB: FinancialTransaction PESSIMISTIC_WRITE
+    Spring->>Spring: RECEIVED·시작 가능 상태 검증
+    Spring->>DB: 같은 잠긴 시작 트랜잭션에서 v1 Rule Snapshot 조립
+    Spring->>Spring: 같은 트랜잭션에서 v2 mapper 검증·immutable 요청 확정
+    alt Snapshot 조립·v2 mapper 성공
+        Spring->>DB: mapper 성공 후 DetectionResult version 조회
+        Spring->>DB: DetectionResult IN_PROGRESS·거래 ANALYZING·flush
+        DB-->>Spring: 분석 시작 commit
+        Spring->>AI: 활성 DB 트랜잭션 없이 FastAPI v2 요청 1회
+        alt 응답 검증·변환·완료·채택 성공
+            AI-->>Spring: 위험 점수·Reason Code·근거·버전
+            Spring->>DB: 기존 Evidence·COMPLETED·채택·ANALYZED commit
+        else 시작 commit 이후 Client·응답·완료 실패
+            AI--xSpring: 원본 오류
+            Spring->>DB: 기존 실패 경계로 DetectionResult·거래 FAILED
+        end
+    else v2 요청 확정 전 실패
+        Spring-->>Spring: 시작 트랜잭션 전체 rollback·원본 오류 전파
+        Note over Spring,DB: 거래 RECEIVED·DetectionResult/Evidence 없음·FastAPI/failAnalysis 미호출·FAILED 보정 없음
+    end
 ```
 
-External Risk 실패 경로에서는 분석 시작 DB commit과 FastAPI 호출 이후 단계가
+목표 External Risk 실패 경로에서는 분석 시작 DB commit과 FastAPI 호출 이후 단계가
 실행되지 않는다. 거래는 `RECEIVED`, DetectionResult·사건·연결·관련 AuditLog는
-없고 멱등 실패만 확정된다. 같은 요청 재생은 Provider를 다시 호출하지 않는다.
+없다. 이 선행 조회와 멱등 실패 저장·재생을 담당할 실제 Provider·최상위 거래
+coordinator는 아직 구현되지 않았다.
 
 거래 상태는 기존 상태 전이 문서의 `RECEIVED`, `ANALYZING`, `ANALYZED`와 최종 처리 상태를 따른다. 요청 형식과 도메인 Validation 실패는 거래로 저장하지 않으며 오류 응답, `traceId`, 로그와 운영 메트릭으로 관측한다. MEDIUM의 모니터링은 별도 위험 대응 결과로 표현하고 AI 리포트 실패로 거래를 `FAILED` 처리하지 않는다.
 
@@ -908,8 +929,9 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 - 실제 External Risk HTTP Provider. Snapshot DB 영속화는 별도 승인 시 검토
 - Docker 및 Docker Compose 통합 환경
 
-AI Service v2 Endpoint·Python DTO와 Backend Java v2 exact wire DTO·mapper·직접
-Client 경계는 구현됐으며, 위 목록의 상위 연결이나 운영 배포 완료를 의미하지 않는다.
+AI Service v2 Endpoint·Python DTO와 Backend Java v2 exact wire DTO·mapper·Client·
+내부 오케스트레이션 경계는 구현됐으며, 위 목록의 상위 연결이나 운영 배포 완료를
+의미하지 않는다.
 
 Redis의 최초 적용 시점은 실제 캐시 필요와 원본 호출 부하를 확인해 사용자가 결정한다.
 

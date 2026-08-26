@@ -8,7 +8,11 @@ import com.aifds.backend.detection.repository.DetectionEvidenceRepository;
 import com.aifds.backend.detection.repository.DetectionResultRepository;
 import com.aifds.backend.detection.service.CompletedRuleAnalysis;
 import com.aifds.backend.detection.service.RuleAnalysisOrchestrationService;
+import com.aifds.backend.externalrisk.domain.ExternalRiskLookupStatus;
+import com.aifds.backend.externalrisk.domain.ExternalRiskPolicyResult;
+import com.aifds.backend.externalrisk.domain.ExternalRiskSnapshot;
 import com.aifds.backend.rule.client.RuleAnalysisHttpClient;
+import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV2;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResponse;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResultResponse;
 import com.aifds.backend.rule.client.dto.RuleEvidenceResponse;
@@ -27,6 +31,7 @@ import com.aifds.backend.transaction.entity.TransactionType;
 import com.aifds.backend.transaction.repository.FinancialTransactionRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -127,6 +132,119 @@ class RuleAnalysisOrchestrationIntegrationTest
                 .containsEntry("analysis_status", "IN_PROGRESS");
         assertCompletedState(completed, 15, RiskLevel.MEDIUM, 1);
         verify(httpClient, times(1)).analyze(any(), eq(TRACE_ID));
+    }
+
+    @Test
+    void v2CallsOnlyV2ClientAfterCommitAndDoesNotScoreExternalRisk() {
+        FinancialTransaction transaction = saveTransaction();
+        RuleVersion version = publishAmountRule();
+        ExternalRiskSnapshot externalRisk = externalRiskSnapshot(transaction);
+        AtomicBoolean transactionActive = new AtomicBoolean(true);
+        AtomicReference<Map<String, Object>> committedState =
+                new AtomicReference<>();
+        when(httpClient.analyzeV2(any(), eq(TRACE_ID))).thenAnswer(invocation -> {
+            transactionActive.set(
+                    TransactionSynchronizationManager
+                            .isActualTransactionActive()
+            );
+            committedState.set(jdbcTemplate.queryForMap("""
+                    SELECT
+                        tx.processing_status,
+                        result.analysis_status
+                    FROM financial_transaction tx
+                    JOIN detection_result result
+                      ON result.financial_transaction_id = tx.id
+                    WHERE tx.transaction_id = ?
+                    """, transaction.getTransactionId()));
+            return response(transaction, version, List.of(
+                    amountEvidence(transaction, version)
+            ), 15, RuleRiskLevel.MEDIUM);
+        });
+
+        CompletedRuleAnalysis completed = orchestrationService.analyzeV2(
+                transaction.getTransactionId(),
+                externalRisk,
+                TRACE_ID
+        );
+
+        assertThat(transactionActive).isFalse();
+        assertThat(committedState.get())
+                .containsEntry("processing_status", "ANALYZING")
+                .containsEntry("analysis_status", "IN_PROGRESS");
+        assertCompletedState(completed, 15, RiskLevel.MEDIUM, 1);
+        ArgumentCaptor<RuleAnalysisRequestV2> requestCaptor =
+                ArgumentCaptor.forClass(RuleAnalysisRequestV2.class);
+        verify(httpClient, times(1)).analyzeV2(
+                requestCaptor.capture(),
+                eq(TRACE_ID)
+        );
+        verify(httpClient, never()).analyze(any(), any());
+        assertThat(requestCaptor.getValue().externalRisk().providerCode())
+                .isEqualTo(externalRisk.providerCode());
+        assertThat(completed.riskScore()).isEqualTo(15);
+        assertThat(completed.riskLevel()).isEqualTo(RiskLevel.MEDIUM);
+    }
+
+    @Test
+    void v2ClientFailureUsesTheExistingFailedPersistenceBoundary() {
+        FinancialTransaction transaction = saveTransaction();
+        publishAmountRule();
+        ExternalRiskSnapshot externalRisk = externalRiskSnapshot(transaction);
+        RuntimeException original = new IllegalStateException(
+                "v2 client failed"
+        );
+        when(httpClient.analyzeV2(any(), eq(TRACE_ID))).thenThrow(original);
+
+        assertThatThrownBy(() -> orchestrationService.analyzeV2(
+                transaction.getTransactionId(),
+                externalRisk,
+                TRACE_ID
+        )).isSameAs(original);
+
+        assertFailedState(
+                transaction.getTransactionId(),
+                "RULE_ANALYSIS_HTTP_CALL_FAILED"
+        );
+        verify(httpClient, times(1)).analyzeV2(any(), eq(TRACE_ID));
+        verify(httpClient, never()).analyze(any(), any());
+    }
+
+    @Test
+    void v2MapperFailureRollsBackBeforeHttpAndFailurePersistence() {
+        FinancialTransaction transaction = saveTransaction();
+        publishAmountRule();
+        ExternalRiskSnapshot mismatched = new ExternalRiskSnapshot(
+                UUID.randomUUID(),
+                transaction.getOccurredAt(),
+                transaction.getOccurredAt().plusSeconds(1),
+                "EXTERNAL_RISK_MOCK_V1",
+                transaction.getOccurredAt().minusSeconds(1),
+                ExternalRiskLookupStatus.SUCCEEDED,
+                ExternalRiskPolicyResult.UNMATCHED,
+                List.of()
+        );
+
+        assertThatThrownBy(() -> orchestrationService.analyzeV2(
+                transaction.getTransactionId(),
+                mismatched,
+                TRACE_ID
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("transactionId");
+
+        assertThat(transactionRepository.findByTransactionId(
+                transaction.getTransactionId()
+        ).orElseThrow().getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.RECEIVED);
+        assertThat(resultRepository
+                .findAllByFinancialTransaction_TransactionIdOrderByDetectionResultVersionDesc(
+                        transaction.getTransactionId()
+                )).isEmpty();
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM detection_evidence",
+                Integer.class
+        )).isZero();
+        verify(httpClient, never()).analyzeV2(any(), any());
+        verify(httpClient, never()).analyze(any(), any());
     }
 
     @Test
@@ -405,5 +523,20 @@ class RuleAnalysisOrchestrationIntegrationTest
                 TransactionChannel.MOBILE_BANKING,
                 "device_ref_rule_orchestration"
         ));
+    }
+
+    private ExternalRiskSnapshot externalRiskSnapshot(
+            FinancialTransaction transaction
+    ) {
+        return new ExternalRiskSnapshot(
+                transaction.getTransactionId(),
+                transaction.getOccurredAt(),
+                transaction.getOccurredAt().plusSeconds(1),
+                "EXTERNAL_RISK_MOCK_V1",
+                transaction.getOccurredAt().minusSeconds(1),
+                ExternalRiskLookupStatus.SUCCEEDED,
+                ExternalRiskPolicyResult.UNMATCHED,
+                List.of()
+        );
     }
 }

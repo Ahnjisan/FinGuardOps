@@ -18,7 +18,7 @@ Rule 분석 성공 경로에서 DetectionResult `COMPLETED`, Evidence 저장, �
 다음 기능은 구현하지 않는다.
 
 - 거래 접수 Service에서 Spring Boot Rule 분석 실행 경로를 호출하는 연결
-- External Risk와 목표 `POST /api/v2/rule-analysis`·거래 접수 전체 실행 경로의 연결
+- 실제 External Risk Provider와 거래 접수 전체 실행 경로의 연결
 - 최종 동기 응답과 Snapshot v2 확정
 - Snapshot 완료 간극 운영 복구
 - RuleVersion 운영 publish
@@ -314,6 +314,6 @@ PostgreSQL 17 Testcontainers에서 Migration 순서, Hibernate validation,
 rollback과 기존 거래 접수·멱등·Snapshot 회귀를 검증한다. H2 호환
 결과를 근거로 사용하지 않는다.
 
-External Risk v2 연결을 후속 구현할 때도 V1~V7을 수정하거나 Snapshot을
+External Risk v2 내부 오케스트레이션 연결에도 V1~V7을 수정하거나 Snapshot을
 DetectionEvidence로 저장하지 않는다. 영속·감사 요구가 생기면 별도 DB 계약과
 Migration 승인을 거친다.

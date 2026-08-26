@@ -23,9 +23,9 @@
 분리된 `FraudRule`·`RuleVersion`, `FraudCase`·`CaseTransaction`, append-only
 `AuditLog`는 PostgreSQL 애플리케이션 연동과 Flyway 스키마가 구현되어 있다.
 FastAPI `POST /api/v1/rule-analysis`, R001~R004 실행·점수·RiskLevel·Evidence
-계산과 Spring Boot Rule 분석 HTTP Client·내부 오케스트레이션, 기본 Rule 집합
+계산과 Spring Boot Rule 분석 HTTP Client·v1·v2 내부 오케스트레이션, 기본 Rule 집합
 발행 경계와 위험 대응·사건·AuditLog 원자적 최종화 경계도 구현되어 있다.
-External Risk가 포함된 v2 입력·실제 Provider·영속화·거래 접수 전체 연결,
+실제 External Risk Provider·영속화·거래 접수 전체 연결,
 Snapshot v2와 운영 복구, 공개 행동 이벤트·사건·감사·최종화 API, USER 인증·인가,
 사건 조사 상태 전이·추가 거래 연결·병합·분리, AI 운영 엔티티와 운영 PostgreSQL
 배포 환경은 아직 구현되지 않았다.
@@ -477,8 +477,8 @@ Code·가중치 snapshot을 함께 저장한다. 신규 생성은 PUBLISHED 버�
 R001~R004의 DRAFT seed와 상세 물리 계약은
 [FraudRule·RuleVersion DB 계약](../04-database/fraud-rule-version-schema.md)을
 따른다. 기본 Rule 집합 발행 경계, FastAPI Rule v1 R001~R004 실행과
-Spring Boot Rule 분석 HTTP Client·내부 오케스트레이션은 구현되었다. 공개 Rule
-관리와 production 일반 발행, External Risk가 포함된 v2 입력·거래 접수 전체 연결은
+Spring Boot Rule 분석 HTTP Client·v1·v2 내부 오케스트레이션은 구현되었다. 공개 Rule
+관리와 production 일반 발행, 실제 External Risk Provider·거래 접수 전체 연결은
 아직 구현되지 않았다.
 
 ### 7.6 비영속 ExternalRiskSnapshot

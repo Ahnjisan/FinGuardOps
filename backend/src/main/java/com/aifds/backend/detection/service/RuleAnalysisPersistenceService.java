@@ -6,6 +6,9 @@ import com.aifds.backend.detection.entity.DetectionResult;
 import com.aifds.backend.detection.entity.RiskLevel;
 import com.aifds.backend.detection.repository.DetectionEvidenceRepository;
 import com.aifds.backend.detection.repository.DetectionResultRepository;
+import com.aifds.backend.externalrisk.domain.ExternalRiskSnapshot;
+import com.aifds.backend.rule.client.RuleAnalysisRequestV2Mapper;
+import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV2;
 import com.aifds.backend.rule.entity.RuleVersion;
 import com.aifds.backend.rule.repository.RuleVersionRepository;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
@@ -30,19 +33,22 @@ public class RuleAnalysisPersistenceService {
     private final DetectionEvidenceRepository evidenceRepository;
     private final RuleVersionRepository ruleVersionRepository;
     private final RuleAnalysisSnapshotAssembler snapshotAssembler;
+    private final RuleAnalysisRequestV2Mapper requestV2Mapper;
 
     public RuleAnalysisPersistenceService(
             FinancialTransactionRepository transactionRepository,
             DetectionResultRepository detectionResultRepository,
             DetectionEvidenceRepository evidenceRepository,
             RuleVersionRepository ruleVersionRepository,
-            RuleAnalysisSnapshotAssembler snapshotAssembler
+            RuleAnalysisSnapshotAssembler snapshotAssembler,
+            RuleAnalysisRequestV2Mapper requestV2Mapper
     ) {
         this.transactionRepository = transactionRepository;
         this.detectionResultRepository = detectionResultRepository;
         this.evidenceRepository = evidenceRepository;
         this.ruleVersionRepository = ruleVersionRepository;
         this.snapshotAssembler = snapshotAssembler;
+        this.requestV2Mapper = requestV2Mapper;
     }
 
     @Transactional(
@@ -57,6 +63,51 @@ public class RuleAnalysisPersistenceService {
             String analysisTraceId,
             Instant startedAt
     ) {
+        PreparedRuleAnalysisStart prepared = prepareStart(transactionId);
+        StartedRuleAnalysis started = persistStart(
+                prepared,
+                scoringPolicyVersion,
+                featureVersion,
+                modelVersion,
+                analysisTraceId,
+                startedAt
+        );
+        return new StartedRuleAnalysisExecution(
+                started,
+                prepared.snapshot().request()
+        );
+    }
+
+    @Transactional(
+            propagation = Propagation.REQUIRES_NEW,
+            isolation = Isolation.REPEATABLE_READ
+    )
+    public StartedRuleAnalysisV2Execution startAnalysisV2(
+            UUID transactionId,
+            ExternalRiskSnapshot externalRiskSnapshot,
+            String scoringPolicyVersion,
+            String featureVersion,
+            String modelVersion,
+            String analysisTraceId,
+            Instant startedAt
+    ) {
+        PreparedRuleAnalysisStart prepared = prepareStart(transactionId);
+        RuleAnalysisRequestV2 request = requestV2Mapper.map(
+                prepared.snapshot().request(),
+                externalRiskSnapshot
+        );
+        StartedRuleAnalysis started = persistStart(
+                prepared,
+                scoringPolicyVersion,
+                featureVersion,
+                modelVersion,
+                analysisTraceId,
+                startedAt
+        );
+        return new StartedRuleAnalysisV2Execution(started, request);
+    }
+
+    private PreparedRuleAnalysisStart prepareStart(UUID transactionId) {
         Objects.requireNonNull(transactionId, "transactionId must not be null");
         FinancialTransaction transaction = transactionRepository
                 .findByTransactionIdForUpdate(transactionId)
@@ -64,6 +115,20 @@ public class RuleAnalysisPersistenceService {
         validateCanStart(transaction);
         RuleAnalysisSnapshotAssembler.AssembledRuleAnalysisSnapshot snapshot =
                 snapshotAssembler.assemble(transaction);
+        return new PreparedRuleAnalysisStart(transaction, snapshot);
+    }
+
+    private StartedRuleAnalysis persistStart(
+            PreparedRuleAnalysisStart prepared,
+            String scoringPolicyVersion,
+            String featureVersion,
+            String modelVersion,
+            String analysisTraceId,
+            Instant startedAt
+    ) {
+        FinancialTransaction transaction = prepared.transaction();
+        RuleAnalysisSnapshotAssembler.AssembledRuleAnalysisSnapshot snapshot =
+                prepared.snapshot();
 
         int nextVersion = Math.addExact(
                 detectionResultRepository.findMaximumVersionByTransactionPk(
@@ -100,7 +165,7 @@ public class RuleAnalysisPersistenceService {
                 saved.getEvaluationCutoffAt(),
                 saved.getAnalysisTraceId()
         );
-        return new StartedRuleAnalysisExecution(started, snapshot.request());
+        return started;
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -284,5 +349,11 @@ public class RuleAnalysisPersistenceService {
                     "Started analysis does not match the stored result"
             );
         }
+    }
+
+    private record PreparedRuleAnalysisStart(
+            FinancialTransaction transaction,
+            RuleAnalysisSnapshotAssembler.AssembledRuleAnalysisSnapshot snapshot
+    ) {
     }
 }

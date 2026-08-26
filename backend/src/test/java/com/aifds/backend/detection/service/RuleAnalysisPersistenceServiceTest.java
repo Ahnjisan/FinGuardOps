@@ -5,8 +5,13 @@ import com.aifds.backend.detection.entity.DetectionResult;
 import com.aifds.backend.detection.entity.RiskLevel;
 import com.aifds.backend.detection.repository.DetectionEvidenceRepository;
 import com.aifds.backend.detection.repository.DetectionResultRepository;
+import com.aifds.backend.externalrisk.domain.ExternalRiskLookupStatus;
+import com.aifds.backend.externalrisk.domain.ExternalRiskPolicyResult;
+import com.aifds.backend.externalrisk.domain.ExternalRiskSnapshot;
+import com.aifds.backend.rule.client.RuleAnalysisRequestV2Mapper;
 import com.aifds.backend.rule.contract.RuleV1ContractRegistry;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequest;
+import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV2;
 import com.aifds.backend.rule.client.dto.RuleLifecycleStatus;
 import com.aifds.backend.rule.client.dto.RuleTransactionSnapshotRequest;
 import com.aifds.backend.rule.client.dto.RuleTransactionType;
@@ -52,6 +57,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -71,6 +77,8 @@ class RuleAnalysisPersistenceServiceTest {
     private RuleVersionRepository ruleVersionRepository;
     @Mock
     private RuleAnalysisSnapshotAssembler snapshotAssembler;
+    @Mock
+    private RuleAnalysisRequestV2Mapper requestV2Mapper;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private RuleAnalysisPersistenceService service;
@@ -82,7 +90,8 @@ class RuleAnalysisPersistenceServiceTest {
                 resultRepository,
                 evidenceRepository,
                 ruleVersionRepository,
-                snapshotAssembler
+                snapshotAssembler,
+                requestV2Mapper
         );
     }
 
@@ -141,6 +150,107 @@ class RuleAnalysisPersistenceServiceTest {
                 .isEqualTo("trace_analysis_start_01");
         assertThat(execution.request()).isSameAs(snapshot.request());
         verify(transaction).startAnalysis();
+    }
+
+    @Test
+    void startsV2OnlyAfterMappingAndReturnsTheExactImmutableRequest() {
+        UUID transactionId = UUID.randomUUID();
+        FinancialTransaction transaction = storedTransaction(transactionId);
+        RuleAnalysisSnapshotAssembler.AssembledRuleAnalysisSnapshot snapshot =
+                snapshot(transactionId);
+        ExternalRiskSnapshot externalRisk = externalRiskSnapshot(transactionId);
+        RuleAnalysisRequestV2 requestV2 = new RuleAnalysisRequestV2Mapper()
+                .map(snapshot.request(), externalRisk);
+        when(transactionRepository.findByTransactionIdForUpdate(transactionId))
+                .thenReturn(Optional.of(transaction));
+        when(snapshotAssembler.assemble(transaction)).thenReturn(snapshot);
+        when(requestV2Mapper.map(snapshot.request(), externalRisk))
+                .thenReturn(requestV2);
+        when(resultRepository.findMaximumVersionByTransactionPk(41L))
+                .thenReturn(2);
+        when(resultRepository.saveAndFlush(any(DetectionResult.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        StartedRuleAnalysisV2Execution execution = service.startAnalysisV2(
+                transactionId,
+                externalRisk,
+                "score-v1",
+                "feature-v1",
+                null,
+                "trace_analysis_start_v2_01",
+                STARTED_AT
+        );
+
+        InOrder order = inOrder(
+                transactionRepository,
+                snapshotAssembler,
+                requestV2Mapper,
+                resultRepository
+        );
+        order.verify(transactionRepository)
+                .findByTransactionIdForUpdate(transactionId);
+        order.verify(snapshotAssembler).assemble(transaction);
+        order.verify(requestV2Mapper).map(snapshot.request(), externalRisk);
+        order.verify(resultRepository)
+                .findMaximumVersionByTransactionPk(41L);
+        order.verify(resultRepository).saveAndFlush(any(DetectionResult.class));
+        order.verify(transactionRepository).saveAndFlush(transaction);
+        assertThat(execution.request()).isSameAs(requestV2);
+        assertThat(execution.startedAnalysis().transactionId())
+                .isEqualTo(transactionId);
+        assertThat(execution.startedAnalysis().detectionResultVersion())
+                .isEqualTo(3);
+        assertThat(execution.startedAnalysis().ruleSetVersion())
+                .isEqualTo(snapshot.ruleSetVersion());
+        verify(transaction).startAnalysis();
+        verifyNoInteractions(evidenceRepository);
+    }
+
+    @Test
+    void v2MapperFailureHappensBeforeVersionLookupOrAnyWrite() {
+        UUID transactionId = UUID.randomUUID();
+        FinancialTransaction transaction = org.mockito.Mockito.mock(
+                FinancialTransaction.class
+        );
+        when(transaction.getProcessingStatus())
+                .thenReturn(TransactionProcessingStatus.RECEIVED);
+        RuleAnalysisSnapshotAssembler.AssembledRuleAnalysisSnapshot snapshot =
+                snapshot(transactionId);
+        ExternalRiskSnapshot externalRisk = externalRiskSnapshot(transactionId);
+        RuntimeException original = new IllegalArgumentException(
+                "snapshot cutoff mismatch"
+        );
+        when(transactionRepository.findByTransactionIdForUpdate(transactionId))
+                .thenReturn(Optional.of(transaction));
+        when(snapshotAssembler.assemble(transaction)).thenReturn(snapshot);
+        when(requestV2Mapper.map(snapshot.request(), externalRisk))
+                .thenThrow(original);
+
+        assertThatThrownBy(() -> service.startAnalysisV2(
+                transactionId,
+                externalRisk,
+                "score-v1",
+                "feature-v1",
+                null,
+                "trace_analysis_start_v2_failure",
+                STARTED_AT
+        )).isSameAs(original);
+
+        InOrder order = inOrder(
+                transactionRepository,
+                snapshotAssembler,
+                requestV2Mapper
+        );
+        order.verify(transactionRepository)
+                .findByTransactionIdForUpdate(transactionId);
+        order.verify(snapshotAssembler).assemble(transaction);
+        order.verify(requestV2Mapper).map(snapshot.request(), externalRisk);
+        verify(resultRepository, never())
+                .findMaximumVersionByTransactionPk(anyLong());
+        verify(resultRepository, never()).saveAndFlush(any());
+        verify(transactionRepository, never()).saveAndFlush(any());
+        verify(transaction, never()).startAnalysis();
+        verifyNoInteractions(evidenceRepository);
     }
 
     @Test
@@ -474,6 +584,80 @@ class RuleAnalysisPersistenceServiceTest {
         )).isInstanceOf(IllegalArgumentException.class);
     }
 
+    @Test
+    void startedV2ExecutionRejectsNullAndIdentityMismatches() {
+        UUID transactionId = UUID.randomUUID();
+        RuleAnalysisSnapshotAssembler.AssembledRuleAnalysisSnapshot snapshot =
+                snapshot(transactionId);
+        RuleAnalysisRequestV2 request = new RuleAnalysisRequestV2Mapper().map(
+                snapshot.request(),
+                externalRiskSnapshot(transactionId)
+        );
+        StartedRuleAnalysis validStarted = new StartedRuleAnalysis(
+                transactionId,
+                UUID.randomUUID(),
+                1,
+                snapshot.ruleSetVersion(),
+                "score-v1",
+                "feature-v1",
+                null,
+                CUTOFF,
+                "trace_analysis_v2_record"
+        );
+
+        assertThatThrownBy(() -> new StartedRuleAnalysisV2Execution(
+                null,
+                request
+        )).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new StartedRuleAnalysisV2Execution(
+                validStarted,
+                null
+        )).isInstanceOf(NullPointerException.class);
+
+        RuleAnalysisRequestV2 transactionMismatch = org.mockito.Mockito.mock(
+                RuleAnalysisRequestV2.class
+        );
+        RuleTransactionSnapshotRequest transaction = org.mockito.Mockito.mock(
+                RuleTransactionSnapshotRequest.class
+        );
+        when(transactionMismatch.transaction()).thenReturn(transaction);
+        when(transaction.transactionId()).thenReturn(UUID.randomUUID());
+        assertThatThrownBy(() -> new StartedRuleAnalysisV2Execution(
+                validStarted,
+                transactionMismatch
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("transaction");
+
+        RuleAnalysisRequestV2 cutoffMismatch = org.mockito.Mockito.mock(
+                RuleAnalysisRequestV2.class
+        );
+        when(cutoffMismatch.transaction()).thenReturn(request.transaction());
+        when(cutoffMismatch.evaluationCutoffAt())
+                .thenReturn(CUTOFF.plusSeconds(1));
+        assertThatThrownBy(() -> new StartedRuleAnalysisV2Execution(
+                validStarted,
+                cutoffMismatch
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("cutoff");
+
+        StartedRuleAnalysis ruleSetMismatch = new StartedRuleAnalysis(
+                transactionId,
+                UUID.randomUUID(),
+                1,
+                "b".repeat(64),
+                "score-v1",
+                "feature-v1",
+                null,
+                CUTOFF,
+                "trace_analysis_v2_record"
+        );
+        assertThatThrownBy(() -> new StartedRuleAnalysisV2Execution(
+                ruleSetMismatch,
+                request
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("ruleSetVersion");
+    }
+
     private void stubLockedAttempt(
             FinancialTransaction transaction,
             DetectionResult result
@@ -669,6 +853,23 @@ class RuleAnalysisPersistenceServiceTest {
                 .isEqualTo(Propagation.REQUIRES_NEW);
         assertThat(transactional.isolation())
                 .isEqualTo(Isolation.REPEATABLE_READ);
+        Method v2Method = RuleAnalysisPersistenceService.class.getMethod(
+                "startAnalysisV2",
+                UUID.class,
+                ExternalRiskSnapshot.class,
+                String.class,
+                String.class,
+                String.class,
+                String.class,
+                Instant.class
+        );
+        Transactional v2Transactional = v2Method.getAnnotation(
+                Transactional.class
+        );
+        assertThat(v2Transactional.propagation())
+                .isEqualTo(Propagation.REQUIRES_NEW);
+        assertThat(v2Transactional.isolation())
+                .isEqualTo(Isolation.REPEATABLE_READ);
 
         UUID transactionId = UUID.randomUUID();
         CannotAcquireLockException failure =
@@ -743,6 +944,19 @@ class RuleAnalysisPersistenceServiceTest {
         return new RuleAnalysisSnapshotAssembler.AssembledRuleAnalysisSnapshot(
                 ruleSetVersion,
                 request
+        );
+    }
+
+    private ExternalRiskSnapshot externalRiskSnapshot(UUID transactionId) {
+        return new ExternalRiskSnapshot(
+                transactionId,
+                CUTOFF,
+                CUTOFF.plusSeconds(1),
+                "EXTERNAL_RISK_MOCK_V1",
+                CUTOFF.minusSeconds(1),
+                ExternalRiskLookupStatus.SUCCEEDED,
+                ExternalRiskPolicyResult.UNMATCHED,
+                List.of()
         );
     }
 

@@ -5,17 +5,18 @@
 이 문서는 거래 접수의 External Risk 선행 조회 결과를 Rule v1 분석 입력에
 결합하는 목표 계약의 단일 기준이다. Issue
 [#160](https://github.com/Ahnjisan/FinGuardOps/issues/160)과 OWNER 승인 댓글
-`5390984333`에서 승인한 계약, Issue #162의 FastAPI v2 구현과 Issue #164의
-Backend Java v2 경계 구현 상태를 함께 기록한다. Python·Java v2 DTO·검증·mapper·
-Client 구현을 거래 접수 전체 연결, DB·Flyway, 공개 Controller 또는 실제 Provider
-구현 완료로 간주하지 않는다.
+`5390984333`에서 승인한 계약, Issue #162의 FastAPI v2 구현, Issue #164의
+Backend Java v2 Client 경계와 Issue #166의 내부 오케스트레이션 구현 상태를 함께
+기록한다. Python·Java v2 DTO·검증·mapper·Client·내부 오케스트레이션 구현을 거래
+접수 전체 연결, DB·Flyway, 공개 Controller 또는 실제 Provider 구현 완료로 간주하지
+않는다.
 
 현재 구현과 목표 계약은 다음과 같이 구분한다.
 
 | 구분 | 현재 구현 | 목표 계약 |
 | --- | --- | --- |
 | External Risk | 독립 Port·Policy Service, local/dev/test Mock, immutable 성공 Snapshot | 거래 접수의 멱등 단일 승자가 DB 트랜잭션 밖에서 선행 조회 |
-| Rule HTTP | `POST /api/v1/rule-analysis`와 필수 `externalRisk`를 추가한 `POST /api/v2/rule-analysis` FastAPI 경계, v1을 유지하는 Backend Java v2 exact wire DTO·mapper·직접 Client 경계 | 상위 오케스트레이터의 v2 입력 전달과 거래 접수 전체 연결 |
+| Rule HTTP | `POST /api/v1/rule-analysis`와 필수 `externalRisk`를 추가한 `POST /api/v2/rule-analysis` FastAPI 경계, v1을 유지하는 Backend Java v2 exact wire DTO·mapper·Client·내부 오케스트레이션 경계 | 실제 Provider와 상위 거래 오케스트레이터의 v2 호출 연결 |
 | Rule 실행 의미 | Rule v1 R001~R004·scoring·Evidence | 같은 Rule v1 실행 의미를 그대로 유지 |
 | 거래 접수 | `RECEIVED`/null v1 Snapshot을 반환·재생 | External Risk→Rule 분석→위험 대응→Snapshot v2 전체 연결 |
 
@@ -31,9 +32,8 @@ scoring 정책을 Rule v2로 바꾸는 이름이 아니다.
 → RECEIVED 거래 저장 commit
 → DB 트랜잭션과 행 잠금이 없는 상태에서 External Risk 조회·정책 적용
 → 성공 ExternalRiskSnapshot 고정
-→ External Risk 결과를 포함한 immutable Rule 분석 입력 확정
-→ Rule 분석 시작 persistence 경계
-→ DetectionResult IN_PROGRESS·거래 ANALYZING commit
+→ 잠긴 분석 시작 트랜잭션에서 v1 Snapshot 조립·v2 mapper 실행
+→ mapper 성공 뒤 DetectionResult IN_PROGRESS·거래 ANALYZING commit
 → DB 트랜잭션과 행 잠금이 없는 상태에서 FastAPI 1회 호출
 → 응답 검증·변환·채택
 → 위험 대응 최종화
@@ -43,28 +43,28 @@ scoring 정책을 Rule v2로 바꾸는 이름이 아니다.
 상위 Service가 `ExternalRiskPolicyService`, `RuleAnalysisOrchestrationService`,
 `RiskResponseFinalizationService`를 이 순서로 호출한다. 기존 Rule 분석
 오케스트레이터는 Provider 호출이나 External Risk 정책 결정을 소유하지 않는다.
-Provider 호출을 `startAnalysis()` 트랜잭션 안에 넣거나 성공 Snapshot 전에
-DetectionResult를 생성해서는 안 된다.
+Provider 호출을 `startAnalysisV2()` 트랜잭션 안에 넣거나 v2 mapper 성공 전에
+DetectionResult를 생성해서는 안 된다. 기존 `startAnalysis()`와 `analyze(...)`는
+External Risk 없는 v1 전용 경계로 유지한다.
 
 한 분석 시도의 External Risk Port 호출은 최대 한 번이다. retry, cache, stale
 data, Circuit Breaker와 fallback은 없으며 실패를 `UNMATCHED`로 바꾸지 않는다.
 
 ## 3. immutable 전달 계약
 
-External Risk 성공 뒤 상위 Service는 Spring Boot가 소유하는 Snapshot assembly
-경계에 `ExternalRiskSnapshot`과 거래 식별자를 전달한다. 이 경계는 Provider 호출이
-끝난 뒤 필요한 짧은 DB read transaction에서 거래·행동 이벤트·실행 가능한
-RuleVersion을 읽고 External Risk와 조합해 완전한 immutable v2
-`RuleAnalysisRequest`를 반환한다. 이 read transaction에는 외부 호출이 없고
-DetectionResult 생성이나 거래 상태 변경도 없다.
+External Risk 성공 뒤 상위 Service는 `RuleAnalysisOrchestrationService.analyzeV2(...)`에
+거래 식별자, 성공한 `ExternalRiskSnapshot`과 trace만 전달한다. 이 public 메서드는
+`@Transactional`이 아니며 외부 호출자가 `RuleAnalysisRequestV2`,
+`evaluationCutoffAt`이나 `ruleSetVersion`을 직접 제공해 조작할 수 없게 한다.
 
-상위 Service는 이 완성된 요청을 Rule 분석 시작 persistence 경계에 전달한다. 시작
-경계는 거래를 잠근 뒤 `transactionId`, `evaluationCutoffAt`, 거래 소유 관계와 시간
-계약을 다시 검증하고 요청 RuleVersion으로 예상 `ruleSetVersion`을 계산한다. 현재
-`startAnalysis()`가 External Risk 없는 요청을 내부에서 조합하는 구현은 목표 v2에
-맞게 변경해야 하며, 문서 계약만으로 변경된 것으로 간주하지 않는다. 외부 호출자가
-`RuleAnalysisRequest`, `evaluationCutoffAt`이나 `ruleSetVersion`을 직접 제공해
-조작할 수 없어야 한다.
+`startAnalysisV2(...)`는 `REQUIRES_NEW`, `REPEATABLE_READ` 트랜잭션에서 거래 행을
+먼저 잠그고 시작 가능 상태를 검증한다. 같은 잠금 아래 기존 v1 Snapshot assembler로
+거래·행동 이벤트·실행 가능한 RuleVersion을 고정한 다음 v2 mapper로 성공 Snapshot을
+결합한다. mapper가 성공한 뒤에만 다음 DetectionResult version을 조회하고
+DetectionResult 생성과 거래 `ANALYZING` 전이를 수행한다. mapper가 실패하면 전체
+트랜잭션이 rollback되어 거래는 `RECEIVED`, DetectionResult·Evidence는 0건이며
+HTTP Client와 `failAnalysis()`는 호출하지 않는다. 시작 commit 뒤에만 활성 DB
+트랜잭션 없이 `RuleAnalysisHttpClient.analyzeV2(...)`를 정확히 한 번 호출한다.
 
 `ExternalRiskSnapshot`은 Rule HTTP 호출을 위한 인메모리 값이다. 이 계약은
 External Risk DB Entity, DetectionEvidence, AuditLog 또는 최종 Snapshot v2에
@@ -295,12 +295,14 @@ Boot가 만든 upstream 요청의 결함이므로 공개 거래 API에서는 `50
 2. Backend 전환 전에 AI Service v2를 선배포한다. — 실제 운영 배포 미실행
 3. Java·Python v2 fixture와 golden vector로 wire 호환성을 확인한다.
 4. Backend Java v2 DTO·wire mapper·HTTP Client를 구현한다. — 코드 구현 완료
-5. 상위 거래 흐름과 내부 Rule 분석 오케스트레이터를 v2로 전환한다. — 미구현
-6. 전환 동안 v1과 v2의 호출량·오류를 구분해 관측한다.
+5. 내부 Rule 분석 오케스트레이터에 별도 v2 경계를 추가한다. — 코드 구현 완료
+6. 상위 거래 흐름이 실제 Provider 성공 Snapshot을 내부 v2 경계에 전달한다. — 미구현
+7. 전환 동안 v1과 v2의 호출량·오류를 구분해 관측한다.
 
 FastAPI v2 코드 구현은 실제 선배포 또는 end-to-end 거래 연결 완료를 의미하지 않는다.
-Backend Java 직접 v2 Client 경계는 구현됐지만 내부 분석 오케스트레이터 전환과
-거래 접수 전체 상위 오케스트레이션은 아직 구현되지 않았다.
+Backend Java 내부 오케스트레이터는 기존 v1을 유지하면서 명시적인 별도 v2 메서드를
+구현했다. 실제 Provider와 거래 접수 전체 상위 오케스트레이션 연결은 아직 구현되지
+않았다.
 
 지원하지 않는 v2 배포 조합은 optional 필드나 빈 Snapshot으로 우회하지 않고
 fail-closed한다. v1 제거 시점은 별도 승인 대상이다.
@@ -338,10 +340,12 @@ fail-closed한다. v1 제거 시점은 별도 승인 대상이다.
 wire·교차 필드 검증과 Endpoint를 구현했으며 v1과 같은 Rule v1 실행 경계를 재사용한다.
 
 Issue #164에서 Backend Java v2 DTO·exact wire mapper와 v1을 유지하는
-`/api/v2/rule-analysis` 직접 Client 경계를 구현했다. 다음은 아직 구현되지 않았다.
+`/api/v2/rule-analysis` 직접 Client 경계를 구현했다. Issue #166에서는 기존 v1
+`analyze(...)`를 유지하면서 별도 `analyzeV2(...)`와 잠긴 시작 경계, mapper 선실행,
+commit 뒤 v2 Client 호출 및 기존 완료·실패 경계 재사용을 구현했다. 다음은 아직
+구현되지 않았다.
 
 - 실제 External Risk HTTP Provider
-- Backend Java v2 DTO·Mapper·Client를 사용하는 상위 Snapshot assembly 연결
 - 상위 비트랜잭션 거래 오케스트레이션
 - 거래 접수 전체 연결과 공개 오류 매핑
 - Snapshot v2와 완료 간극 운영 복구

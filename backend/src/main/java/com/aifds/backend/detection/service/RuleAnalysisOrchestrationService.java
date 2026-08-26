@@ -1,5 +1,6 @@
 package com.aifds.backend.detection.service;
 
+import com.aifds.backend.externalrisk.domain.ExternalRiskSnapshot;
 import com.aifds.backend.rule.client.RuleAnalysisClientException;
 import com.aifds.backend.rule.client.RuleAnalysisHttpClient;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResponse;
@@ -9,6 +10,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import java.time.Clock;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 @Service
 public class RuleAnalysisOrchestrationService {
@@ -57,6 +59,48 @@ public class RuleAnalysisOrchestrationService {
                 );
         StartedRuleAnalysis started = execution.startedAnalysis();
 
+        return executeStartedAnalysis(
+                started,
+                () -> httpClient.analyze(
+                        execution.request(),
+                        started.analysisTraceId()
+                )
+        );
+    }
+
+    public CompletedRuleAnalysis analyzeV2(
+            UUID transactionId,
+            ExternalRiskSnapshot externalRiskSnapshot,
+            String analysisTraceId
+    ) {
+        requireNoActiveTransaction();
+        RuleV1ContractRegistry.RuleAnalysisMetadata metadata =
+                RuleV1ContractRegistry.ruleAnalysisMetadata();
+        StartedRuleAnalysisV2Execution execution =
+                persistenceService.startAnalysisV2(
+                        transactionId,
+                        externalRiskSnapshot,
+                        metadata.scoringPolicyVersion(),
+                        metadata.featureVersion(),
+                        metadata.modelVersion(),
+                        analysisTraceId,
+                        clock.instant()
+                );
+        StartedRuleAnalysis started = execution.startedAnalysis();
+
+        return executeStartedAnalysis(
+                started,
+                () -> httpClient.analyzeV2(
+                        execution.request(),
+                        started.analysisTraceId()
+                )
+        );
+    }
+
+    private CompletedRuleAnalysis executeStartedAnalysis(
+            StartedRuleAnalysis started,
+            Supplier<RuleAnalysisResponse> clientCall
+    ) {
         try {
             requireNoActiveTransaction();
         } catch (RuntimeException original) {
@@ -69,10 +113,7 @@ public class RuleAnalysisOrchestrationService {
 
         RuleAnalysisResponse response;
         try {
-            response = httpClient.analyze(
-                    execution.request(),
-                    started.analysisTraceId()
-            );
+            response = clientCall.get();
         } catch (RuleAnalysisClientException original) {
             throw recordFailure(
                     started,
