@@ -63,16 +63,22 @@ FraudRule·RuleVersion PostgreSQL 물리 영속 모델 및 거래 접수 Control
 있다. RuleVersion 적용 기간·불변성·Evidence FK 정합성은 구현되었지만
 공개 행동 이벤트 조회 API는 구현되지 않았다. FastAPI Rule v1 실행과 Spring
 Boot의 Snapshot 고정·HTTP 호출·탐지 결과 생성·검증·채택 및 실패 기록은
-구현되었다. 독립 External Risk Port·정책 Service, local/dev/test 결정적 Mock과
-immutable 인메모리 성공 Snapshot도 구현되었다. 실제 Provider, 거래 접수와
-Rule 분석 입력 연결,
-위험 등급별 목표 거래 상태·`RiskResponseOutcome`·사건 필수 여부를 반환하는
-순수 decision 정책도 구현되었다. `FraudCase`·`CaseTransaction`, Flyway V6와
+구현되었다. 독립 External Risk Port·정책 Service와 local/dev/test 결정적 Mock,
+immutable 인메모리 성공 Snapshot이 구현되었다. Issue #168에서는 Mock 활성
+환경에서 거래 기반 immutable command를 읽고, read transaction 종료 뒤 Policy를
+호출해 성공 Snapshot을 내부 `analyzeV2(...)`에 전달하는 per-invocation coordinator를
+구현했다. 기존 Rule v2 시작·완료·채택·실패 경계도 그대로 유지된다. 실제 External
+Risk HTTP Provider, production coordinator Bean, public 거래 접수 연결, 멱등 External
+Risk 실패 저장·재생과 공개 오류 매핑은 아직 구현되지 않았다. 위험 등급별 목표 거래
+상태·`RiskResponseOutcome`·사건 필수 여부를 반환하는 순수 decision 정책은 구현되어
+있다. `FraudCase`·`CaseTransaction`, Flyway V6와
 HIGH·CRITICAL `ANALYZED` 거래의 사건·첫 연결 생성 또는 활성 연결 멱등 반환
 경계도 구현되었다. 이어서 decision의 거래 적용과 최종 상태·대응 결과 영속화,
 필요한 사건 경계, V7 AuditLog 실제 기록을 같은 REQUIRED 트랜잭션으로 묶는 내부
-최종화 경계가 구현되었다. 최종 멱등 Snapshot v2, Snapshot 완료 간극 복구, 거래
-접수 전체 연결과 일반 RuleVersion 운영 관리는 아직 수행하지 않는다.
+최종화 경계가 구현되었다. 이 내부 최종화 경계를 상위 coordinator에서 호출하는
+연결과 최종 동기 응답, 최종 멱등 Snapshot v2, Snapshot 완료 간극 운영 복구,
+운영 배포·운영 메트릭, 거래 접수 전체 연결과 일반 RuleVersion 운영 관리는 아직
+구현되지 않았다.
 
 후속 승인(2026-08-24, Issue #160): External Risk는 멱등 단일 승자와 `RECEIVED`
 거래 저장 commit 뒤, 어떤 DB 트랜잭션·행 잠금도 유지하지 않은 상위 Service가
@@ -82,6 +88,13 @@ FastAPI·최종화는 미호출이고 멱등 실패 재생은 Provider를 다시
 FastAPI v2 exact wire DTO·검증·Endpoint와 Backend Java v2 exact wire DTO·mapper·
 직접 Client 경계는 구현됐다. Issue #166에서 기존 v1을 유지하는 별도 내부 v2
 오케스트레이션 경계도 구현됐으며 실제 Provider와 거래 접수 연결은 미구현이다.
+
+후속 구현 상태(2026-08-26, Issue #168): 별도 `READ_COMMITTED` read transaction에서
+거래 기반 immutable External Risk command를 조립하고 transaction 종료 뒤 Mock
+Policy를 정확히 한 번 호출해 성공 Snapshot을 `analyzeV2(...)`에 전달하는 내부
+coordinator가 구현되었다. 이 경계는 per-invocation이며 직접 재호출·멱등 경계 밖
+동시 호출은 Provider를 다시 호출할 수 있다. 실제 Provider·public 거래 접수·멱등
+실패 저장·재생·위험 대응 최종화 연결은 후속 범위다.
 
 이 단계적 응답은 현재 구현 사실을 기록한 것이며, `POST /api/v1/transactions`를 비동기 접수 API로 바꾸거나 최종 동기 분석 결정을 뒤집는 새로운 결정이 아니다. 현행 단계 Controller는 이 ADR이 정한 중간 외부 노출 제한과 아직 정합화되지 않은 구현 차이로 기록한다. 후속 구현에서는 이 ADR의 최종 경계로 전환하거나, 결정 변경이 필요하면 별도 사용자 승인과 ADR 검토를 거쳐야 한다.
 
@@ -105,7 +118,7 @@ DetectionResult 완료·채택 또는 실패 기록을 연결하는 내부 Rule 
 mapper를 실행하고, mapper 성공 뒤에만 version 조회·DetectionResult 생성·거래
 `ANALYZING` 전이를 수행한다. 시작 commit 뒤에는 활성 DB 트랜잭션 없이 FastAPI
 v2를 정확히 한 번 호출하며 기존 완료·채택·실패 경계를 재사용한다. 실제 Provider,
-상위 거래 오케스트레이션, 공개 API와 Snapshot v2는 여전히 후속 범위다.
+public 거래 접수 오케스트레이션, 공개 API와 Snapshot v2는 여전히 후속 범위다.
 
 후속 결정(2026-08-14): [`ADR-006`](./ADR-006-final-transaction-success-and-idempotency-recovery.md)은
 위험 대응, 최종 거래 상태와 HIGH·CRITICAL 사건 연결을 포함한 모든 업무 commit
@@ -122,7 +135,7 @@ Snapshot v2와 복구 실행 경로는 아직 구현되지 않았다.
 2. 요청 형식·도메인 Validation을 거래 저장 전에 수행하고, 검증을 통과한 거래의 `RECEIVED` 영속 경계를 검증한다. Validation 실패는 거래로 저장하지 않는다. — 완료
 3. [Rule v1 탐지 계약](../01-requirements/rule-v1-detection-contract.md)에 따라 평가 Snapshot, 활성 Rule 집합, FastAPI 분석 호출 경계와 DetectionResult 저장·채택을 구현한다. — External Risk 없는 현재 v1 내부 경계 완료
 4. 구현된 위험 대응 decision을 거래에 적용해 대응 결과와 최종 상태를 확정하고 HIGH·CRITICAL 사건 생성 또는 기존 사건 연결을 구현한다. — 내부 경계 완료
-5. 목표 v2 DTO·Endpoint·Client와 비트랜잭션 상위 External Risk→Rule 분석 연결을 구현한다. — Python DTO·검증·FastAPI Endpoint, Backend Java DTO·mapper·Client와 내부 v2 오케스트레이션 완료, 실제 Provider·상위 거래 연결 미구현
+5. 목표 v2 DTO·Endpoint·Client와 비트랜잭션 상위 External Risk→Rule 분석 연결을 구현한다. — Python DTO·검증·FastAPI Endpoint, Backend Java DTO·mapper·Client와 내부 v2 오케스트레이션, Mock Policy→Rule v2 coordinator 완료. 실제 Provider·public 거래 접수·멱등 실패 재생 미구현
 6. 전체 성공·실패·멱등·동시성 흐름이 준비되면 현재 단계 응답을 최종 동기 Controller 계약으로 전환한다. — 미구현
 
 각 단계는 내부 단위·통합 테스트로 검증한다. 최종 동기 응답 전환 전에는 내부 구현 완료 범위와 외부 API 제공 상태를 구분해 보고한다.

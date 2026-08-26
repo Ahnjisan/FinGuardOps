@@ -5,11 +5,12 @@
 이 문서는 Spring Boot가 외부 위험정보 Provider를 조회할 때 사용하는 내부 Port,
 정책 Service, 결정적 Mock과 성공 Snapshot의 계약을 정의한다. 목표 Rule 입력
 연결은 [External Risk·Rule 분석 입력 계약](./external-risk-rule-analysis-input-contract.md)이
-소유한다. 현재 구현은 local/dev/test 검증용 인메모리 경계와 Backend Java v2
-exact wire DTO·mapper·HTTP Client·내부 오케스트레이션 경계까지다. 성공 Snapshot을
-받는 내부 v2 경계는 구현됐지만 거래 접수 상위 오케스트레이터에 연결되지 않아 실제
-Provider 조회 결과가 유입되는 전체 경로는 없다. 위험 점수·등급·최종
-대응 또는 DB 영속화와도 연결하지 않는다.
+소유한다. 현재 구현은 local/dev/test 검증용 인메모리 경계, Backend Java v2 exact
+wire DTO·mapper·HTTP Client·내부 오케스트레이션과 Mock 활성 환경의 내부
+per-invocation coordinator까지다. coordinator는 무잠금 `READ_COMMITTED` read를
+종료한 뒤 Policy를 호출하고 성공 Snapshot을 `analyzeV2(...)`에 전달한다. 실제
+Provider·public 거래 접수·멱등 실패 재생은 연결되지 않았으며 위험 점수·등급·최종
+대응 또는 DB 영속화에도 관여하지 않는다.
 
 ## 2. 구현 범위
 
@@ -20,17 +21,23 @@ Provider 조회 결과가 유입되는 전체 경로는 없다. 위험 점수·�
 - local/dev/test 전용 결정적 Mock Adapter와 조건부 Configuration
 - 성공 결과만 표현하는 immutable 인메모리 `ExternalRiskSnapshot`
 - Timeout, unavailable, 요청·capability·응답·변환 오류의 내부 failure category
+- Mock profile·property 전용 `ExternalRiskLookupCommandReader`→Policy→Rule v2
+  내부 coordinator. 외부 호출 중 DB 트랜잭션·거래 잠금 없음
 
 다음은 구현되지 않았다.
 
 - 실제 외부 HTTP Provider와 외부 네트워크 호출
-- 거래 접수 상위 오케스트레이션과 그 경로의 FastAPI v2 Client 호출 연결
+- 실제 Provider, 거래 접수 Controller와 public intake·멱등 실패 저장·재생 연결
 - External Risk 기반 점수·등급·위험 대응과 사건 처리
 - `ExternalRiskSnapshot` 영속화·감사·복구. 현재 승인된 목표가 아니며 필요해질
   경우 별도 Issue, DB 계약과 Migration 승인 대상
 - IP·피싱 또는 고객 단위 match 정책
 - 공개 Controller, API DTO와 HTTP 오류 매핑
 - retry, fallback, cache와 Circuit Breaker
+
+내부 coordinator는 호출당 자동 retry가 없는 per-invocation 경계다. 직접 재호출이나
+멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수 있고, 기존 거래 잠금은 Rule 분석
+시작의 단일 승자만 보장한다.
 
 ## 3. 입력과 Provider 경계
 

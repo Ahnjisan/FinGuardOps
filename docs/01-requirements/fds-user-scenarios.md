@@ -17,8 +17,9 @@
 - 생성형 AI는 위험 점수 계산이나 최종 판정을 수행하지 않는다.
 - 거래 대응 정책과 거래 상태의 최종 변경은 백엔드가 담당하고, 최종 정상·오탐·이상거래 판정은 FDS 담당자가 수행한다.
 - 외부 금융기관 연동, 실제 본인인증, 실제 거래 차단과 실제 대출 실행은 목표
-  시나리오의 Mock 후보다. External Risk는 현재 독립 Port·Policy Service와
-  local/dev/test 결정적 Mock 경계만 구현되어 있다.
+  시나리오의 Mock 후보다. External Risk는 현재 독립 Port·Policy Service,
+  local/dev/test 결정적 Mock과 성공 Snapshot을 Rule v2에 전달하는 내부
+  per-invocation coordinator까지 구현되어 있다.
 - 아래의 위험등급은 시나리오별 탐지 신호를 설명하기 위한 예상 범위이다. 실제 등급은 승인된 점수 통합 정책과 검증 결과에 따라 결정한다.
 - Rule v1은 거래 접수 시 현재 거래의 `occurredAt`을 기준으로 평가하며, 행동 이벤트 접수만으로 자동 재평가하지 않는다.
 - Rule v1 계약, DetectionResult·Evidence 물리 모델, 현재
@@ -46,8 +47,10 @@ IP reference와 IP 조회는 현재 거래 모델에 없고 피싱 정책도 미
 위험 IP·피싱·외부 위험 점수·등급·대응 표현은 최종 사용자 시나리오 또는 향후
 확장 후보이며 현재 구현 동작을 의미하지 않는다. FastAPI v2
 `RuleAnalysisRequestV2`와 검증 Endpoint, Backend Java v2 DTO·mapper·직접 Client·
-내부 오케스트레이션 경계는 구현됐지만 실제 외부 HTTP Provider와 거래 접수 상위
-오케스트레이션은 아직 구현되지 않았다.
+내부 오케스트레이션 경계와 Mock 성공 Snapshot을 전달하는 coordinator는 구현됐지만
+실제 외부 HTTP Provider와 public 거래 접수 상위 오케스트레이션은 아직 구현되지
+않았다. coordinator 직접 재호출·멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수
+있으며 자동 retry·fallback·cache와 멱등 실패 재생은 없다.
 `ExternalRiskSnapshot` 영속화는 이번 목표가 아니며 별도 승인 대상이다.
 
 ### AI 리포트 생성 실패 처리 정책

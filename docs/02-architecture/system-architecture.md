@@ -59,9 +59,11 @@ v1 내부 오케스트레이션과, 성공 `ExternalRiskSnapshot`을 입력받�
 local/dev/test 결정적 Mock과 immutable 인메모리 성공 Snapshot도 구현되어 있다.
 네 위험 등급별 목표 거래 상태, `RiskResponseOutcome`과 사건 필수 여부를 반환하는
 Spring·DB 비의존 순수 decision 정책도 구현되어 있다.
-External Risk 연계에서 미구현인 범위는 실제 Provider와, 거래 접수 뒤 Provider를
-호출해 성공 Snapshot을 내부 v2 경계에 전달하는 최상위 coordinator다. Snapshot v2와
-완료 간극 복구, 감사 조회와 AI 운영 도메인도 아직 구현되지 않았다. 위험 대응
+External Risk 연계에는 무잠금 `READ_COMMITTED` read 종료 뒤 Mock Policy를 호출하고
+성공 Snapshot을 내부 v2 경계에 전달하는 per-invocation coordinator가 구현되어 있다.
+직접 재호출·멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수 있다. 실제 Provider,
+public 거래 접수·멱등 실패 재생, Snapshot v2와 완료 간극 복구, 감사 조회와 AI 운영
+도메인은 아직 구현되지 않았다. 위험 대응
 정책의 `FinancialTransaction` 적용, 필요한 사건·연결, 최종 거래 상태·대응 결과와
 AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 구현되었다.
 
@@ -589,8 +591,9 @@ Risk 필수 입력의 목표 wire는 `/api/v2/rule-analysis`이며 exact DTO는
 
 목표 연결은 `RECEIVED` 거래 저장 commit과 멱등 단일 승자 확정 뒤 External Risk를
 DB 트랜잭션·행 잠금 없이 조회하고, 성공 Snapshot을 목표
-`POST /api/v2/rule-analysis`의 필수 입력에 포함한다. 현재 거래 접수 흐름은 이
-최종 경계에 도달하지 않았다. 거래 접수는 PostgreSQL에
+`POST /api/v2/rule-analysis`의 필수 입력에 포함한다. 현재 Mock 활성 환경의 내부
+coordinator는 read transaction 종료 뒤 이 Policy→Rule v2 순서만 구현한다. 거래 접수
+흐름은 이 최종 경계에 도달하지 않았다. 거래 접수는 PostgreSQL에
 저장한 뒤 `RECEIVED`와 탐지 관련 null 값을 반환하며 External Risk나 구현된
 내부 Rule 분석 오케스트레이터를 호출하지 않고 위험 대응과 사건 연결도 수행하지
 않는다. 이 단계적 구현 상태는 ADR-003의 최종 동기 처리 결정을 변경하지 않는다.
@@ -622,8 +625,9 @@ Kafka는 다음 조건이 확인된 뒤 이 논리적 비동기 경계를 구현
 
 다음 흐름은 ADR-003이 유지하는 최종 동기 분석 목표이다. 현재 거래 접수 구현은
 입력 검증·멱등성 확인·거래 저장과 `RECEIVED` 응답까지다. 실제 External Risk
-Provider와, 성공 Snapshot을 확보해 구현된 내부 Rule v2 오케스트레이터를 호출하는
-최상위 거래 coordinator 및 이후 위험 대응·사건 연결은 미구현이다.
+Provider, public 거래 접수·멱등 실패 저장·재생 및 이후 위험 대응·사건 연결은
+미구현이다. Mock 성공 Snapshot을 확보해 내부 Rule v2 오케스트레이터를 호출하는
+per-invocation coordinator는 구현되어 있다.
 
 ```text
 Client
@@ -678,10 +682,11 @@ sequenceDiagram
     end
 ```
 
-목표 External Risk 실패 경로에서는 분석 시작 DB commit과 FastAPI 호출 이후 단계가
-실행되지 않는다. 거래는 `RECEIVED`, DetectionResult·사건·연결·관련 AuditLog는
-없다. 이 선행 조회와 멱등 실패 저장·재생을 담당할 실제 Provider·최상위 거래
-coordinator는 아직 구현되지 않았다.
+External Risk 실패 경로에서는 분석 시작 DB commit과 FastAPI 호출 이후 단계가
+실행되지 않는다. 내부 coordinator는 거래 write 없이 원본 typed failure를 전파한다.
+거래는 `RECEIVED`, DetectionResult·사건·연결·관련 AuditLog는 없다. 실제 Provider와
+public 거래 접수, 멱등 실패 저장·재생은 아직 구현되지 않았다. coordinator 직접
+재호출이나 멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수 있다.
 
 거래 상태는 기존 상태 전이 문서의 `RECEIVED`, `ANALYZING`, `ANALYZED`와 최종 처리 상태를 따른다. 요청 형식과 도메인 Validation 실패는 거래로 저장하지 않으며 오류 응답, `traceId`, 로그와 운영 메트릭으로 관측한다. MEDIUM의 모니터링은 별도 위험 대응 결과로 표현하고 AI 리포트 실패로 거래를 `FAILED` 처리하지 않는다.
 

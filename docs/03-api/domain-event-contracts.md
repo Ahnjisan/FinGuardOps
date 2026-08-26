@@ -252,7 +252,7 @@ Envelope `eventType=BehaviorEventReceived`는 발생한 도메인 이벤트의 �
 | 최소 payload | `detectionResultId`, `transactionId`, `detectionResultVersion`, 승인된 feature 입력 버전, 분석 요청 시각 |
 | 중복 처리 | 같은 `transactionId+detectionResultVersion`의 완료·진행 상태를 확인하고 중복 분석 시작 방지 |
 | 원거래 판단 영향 | 요청 사실만으로 거래 상태를 최종 확정하지 않음 |
-| 처리 범위 | FastAPI `/api/v1/rule-analysis`·`/api/v2/rule-analysis`, Backend Java v1 Client와 v2 exact DTO·mapper·직접 Client, 내부 `analyzeV2(...)`·`startAnalysisV2(...)`, 잠긴 시작 트랜잭션의 Snapshot 조립·v2 mapper·DetectionResult 생성, commit 이후 트랜잭션 밖 FastAPI v2 호출과 기존 완료·채택·실패 영속 경계는 구현됨. 이 이벤트 DTO·Producer·실제 발행, 실제 External Risk Provider·최상위 거래 접수 coordinator, 공개 External Risk 오류 매핑·영속화, Snapshot v2·운영 복구와 운영 배포·메트릭은 미구현 |
+| 처리 범위 | FastAPI `/api/v1/rule-analysis`·`/api/v2/rule-analysis`, Backend Java v1 Client와 v2 exact DTO·mapper·직접 Client, 내부 `analyzeV2(...)`·`startAnalysisV2(...)`, 잠긴 시작 트랜잭션의 Snapshot 조립·v2 mapper·DetectionResult 생성, commit 이후 트랜잭션 밖 FastAPI v2 호출과 기존 완료·채택·실패 영속 경계, Mock Policy 성공 Snapshot을 전달하는 per-invocation coordinator는 구현됨. 이 이벤트 DTO·Producer·실제 발행, 실제 External Risk Provider·public 거래 접수·멱등 실패 재생, 공개 External Risk 오류 매핑·영속화, Snapshot v2·운영 복구와 운영 배포·메트릭은 미구현 |
 
 `detectionResultId`와 `detectionResultVersion`은 분석 시작 트랜잭션에서 생성되고
 FastAPI 호출 전에 `IN_PROGRESS` 상태와 함께 commit된다. 이 commit 이후 실패한
@@ -453,9 +453,10 @@ Provider 사용량은 payload에 복제하지 않고 `executionId` 아래 실제
 
 ### 8.1 거래부터 사건 생성
 
-다음 sequence는 구현된 내부 Rule v2 시작·완료·실패 경계와 아직 미구현인 실제
-External Risk Provider·최상위 거래 coordinator를 함께 나타낸 목표 계약이다. 표시된
-논리 이벤트는 계약 이름이며 이벤트 DTO·Producer·실제 발행 경로는 구현되지 않았다.
+다음 sequence는 구현된 Mock Policy→Rule v2 per-invocation coordinator와 내부 Rule v2
+시작·완료·실패 경계, 아직 미구현인 실제 Provider·public 거래 접수·멱등 실패 재생을
+함께 나타낸 목표 계약이다. 표시된 논리 이벤트는 계약 이름이며 이벤트 DTO·Producer·
+실제 발행 경로는 구현되지 않았다.
 
 ```mermaid
 sequenceDiagram
@@ -469,7 +470,7 @@ sequenceDiagram
     Spring->>DB: 멱등 단일 승자 선점·Transaction(RECEIVED) 저장
     DB-->>Spring: RECEIVED 저장 commit
     Spring-->>Spring: 목표 논리 TransactionReceived
-    Spring->>Risk: 목표 DB 트랜잭션 밖 External Risk 조회(Provider·최상위 coordinator 미구현)
+    Spring->>Risk: DB 트랜잭션 밖 External Risk 조회(Mock coordinator 구현·실제 Provider 미구현)
     alt External Risk 성공
         Risk-->>Spring: 호출자가 확보한 성공 ExternalRiskSnapshot 전달
         Spring->>Spring: analyzeV2(transactionId, snapshot, traceId)
@@ -524,8 +525,10 @@ sequenceDiagram
 
 External Risk 선행 실패는 Rule 분석 시작 전 경계다. 거래는 `RECEIVED`를 유지하고
 DetectionResult·Evidence를 생성하지 않으며 FastAPI와 위험 대응 최종화를 호출하지
-않는다. 이 조회와 멱등 실패 저장·재생을 수행할 실제 Provider·최상위 거래
-coordinator는 아직 구현되지 않았다.
+않는다. 내부 coordinator는 별도 read transaction 종료 뒤 Mock Policy를 호출하고 실패를
+원본 typed exception으로 전파한다. 실제 Provider·public 거래 접수와 멱등 실패
+저장·재생은 아직 구현되지 않았다. 직접 재호출·멱등 경계 밖 동시 호출은 Provider를
+다시 호출할 수 있다.
 
 호출자가 성공 `ExternalRiskSnapshot`을 확보한 뒤 내부 `analyzeV2(...)`를 호출하는
 경계부터는 구현되어 있다. `startAnalysisV2(...)`의 같은 잠긴 시작 트랜잭션에서 v1
@@ -988,9 +991,11 @@ Issue #164에서는 기존 Java v1 Client를 유지하면서 Backend Java v2 exa
 Risk mapper·직접 HTTP Client를 구현했다. Issue #166에서는 내부 `analyzeV2(...)`·
 `startAnalysisV2(...)`, 잠긴 시작 트랜잭션의 Snapshot 조립·v2 mapper·DetectionResult
 생성, commit 이후 트랜잭션 밖 FastAPI v2 호출과 기존 완료·채택·실패 경계 재사용을
-구현했다.
+구현했다. Issue #168에서는 Mock profile·property에서만 활성화되는 비트랜잭션 내부
+coordinator와 `READ_COMMITTED` command reader를 구현해 성공 Snapshot을
+`analyzeV2(...)`에 전달한다.
 `/api/v1/rule-analysis`는 구현된 기존 Endpoint로 유지하고 `/api/v2/rule-analysis`도
-구현되어 있다. 실제 External Risk Provider·최상위 거래 접수 coordinator·공개 오류
+구현되어 있다. 실제 External Risk Provider·public 거래 접수·멱등 실패 재생·공개 오류
 매핑·External Risk 영속화·Snapshot v2·이벤트 발행·운영 배포는 아직 구현되지
 않았으므로, 이 내부 코드 경계는 end-to-end 거래 처리나 운영 배포 완료를 의미하지
 않는다.

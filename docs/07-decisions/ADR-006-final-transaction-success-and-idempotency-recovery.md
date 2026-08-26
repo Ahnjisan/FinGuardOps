@@ -216,8 +216,9 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
 ## 10. External Risk와 RuleVersion 선행 조건
 
 - ADR-003의 External Risk 단계를 최종 동기 목표에서 제거하지 않는다.
-- 독립 External Risk 정책·Mock 경계는 구현되었지만 거래 접수·Rule 분석 입력과
-  연결되기 전에는 최종 거래 접수 연결을 구현 완료로 표시하지 않는다.
+- 독립 External Risk 정책·Mock과 Mock 성공 Snapshot을 Rule v2에 전달하는 내부
+  per-invocation coordinator는 구현되었지만 실제 Provider·public 거래 접수·멱등
+  실패 재생과 연결되기 전에는 최종 거래 접수 연결을 구현 완료로 표시하지 않는다.
 - External Risk timeout·unavailable·invalid response는 현재 분석을 계속하지 않고
   typed failure로 전파한다. cache, stale data, fallback과 `UNMATCHED` 변환은 없다.
 - 목표 거래 접수 연결에서는 `RECEIVED` 거래 저장 commit 뒤 DB 트랜잭션 밖에서
@@ -240,6 +241,8 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
 - 내부 Rule v1 HTTP 오케스트레이터와 분석 결과 저장·채택·실패 기록
 - 독립 External Risk Port·정책 Service, local/dev/test 결정적 Mock과 immutable
   인메모리 성공 Snapshot
+- 별도 `READ_COMMITTED` read transaction 종료 뒤 Mock Policy를 호출하고 성공
+  Snapshot을 `analyzeV2(...)`에 전달하는 비트랜잭션 내부 coordinator
 - LOW·MEDIUM·HIGH·CRITICAL별 목표 거래 상태, `RiskResponseOutcome`과 사건 필수
   여부를 반환하는 순수 immutable 위험 대응 decision
 - `FraudCase`·`CaseTransaction` Entity, Flyway V6와 HIGH·CRITICAL
@@ -254,8 +257,8 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
 ### 구현되지 않음
 
 - 거래 접수 Service와 Rule 분석 오케스트레이터 연결
-- 실제 External Risk HTTP Provider, 목표 v2 FastAPI 입력·거래 접수 연결과 공개
-  오류 매핑. 승인된 v2 wire는 아직 코드로 구현되지 않음
+- 실제 External Risk HTTP Provider, public 거래 접수·멱등 실패 재생과 공개 오류 매핑
+- 위험 대응 최종화와 최종 동기 거래 응답 연결
 - ExternalRiskSnapshot DB 영속화는 이번 목표에 포함하지 않으며 별도 승인 대상
 - 최종 v2 Snapshot codec과 거래 접수 완료 연결
 - Snapshot 완료 간극과 불확실 분석 상태의 운영 복구 실행 경로
