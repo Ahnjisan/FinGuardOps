@@ -6,8 +6,9 @@
 결합하는 목표 계약의 단일 기준이다. Issue
 [#160](https://github.com/Ahnjisan/FinGuardOps/issues/160)과 OWNER 승인 댓글
 `5390984333`에서 승인한 계약, Issue #162의 FastAPI v2 구현, Issue #164의
-Backend Java v2 Client 경계와 Issue #166의 내부 오케스트레이션 구현 상태를 함께
-기록한다. Python·Java v2 DTO·검증·mapper·Client·내부 오케스트레이션 구현을 거래
+Backend Java v2 Client 경계, Issue #166의 내부 오케스트레이션과 Issue #168의 Mock
+활성 환경용 상위 내부 coordinator 구현 상태를 함께 기록한다. Python·Java v2
+DTO·검증·mapper·Client·내부 오케스트레이션과 per-invocation coordinator 구현을 거래
 접수 전체 연결, DB·Flyway, 공개 Controller 또는 실제 Provider 구현 완료로 간주하지
 않는다.
 
@@ -15,8 +16,8 @@ Backend Java v2 Client 경계와 Issue #166의 내부 오케스트레이션 구�
 
 | 구분 | 현재 구현 | 목표 계약 |
 | --- | --- | --- |
-| External Risk | 독립 Port·Policy Service, local/dev/test Mock, immutable 성공 Snapshot | 거래 접수의 멱등 단일 승자가 DB 트랜잭션 밖에서 선행 조회 |
-| Rule HTTP | `POST /api/v1/rule-analysis`와 필수 `externalRisk`를 추가한 `POST /api/v2/rule-analysis` FastAPI 경계, v1을 유지하는 Backend Java v2 exact wire DTO·mapper·Client·내부 오케스트레이션 경계 | 실제 Provider와 상위 거래 오케스트레이터의 v2 호출 연결 |
+| External Risk | 독립 Port·Policy Service, local/dev/test Mock, immutable 성공 Snapshot, 무잠금 `READ_COMMITTED` read 뒤 Policy를 호출하는 내부 per-invocation coordinator | 거래 접수의 멱등 단일 승자가 DB 트랜잭션 밖에서 실제 Provider 선행 조회 |
+| Rule HTTP | `POST /api/v1/rule-analysis`와 필수 `externalRisk`를 추가한 `POST /api/v2/rule-analysis` FastAPI 경계, v1을 유지하는 Backend Java v2 exact wire DTO·mapper·Client·내부 오케스트레이션, Mock 성공 Snapshot 전달 coordinator | 실제 Provider와 public 거래 접수 오케스트레이터의 v2 호출 연결 |
 | Rule 실행 의미 | Rule v1 R001~R004·scoring·Evidence | 같은 Rule v1 실행 의미를 그대로 유지 |
 | 거래 접수 | `RECEIVED`/null v1 Snapshot을 반환·재생 | External Risk→Rule 분석→위험 대응→Snapshot v2 전체 연결 |
 
@@ -49,6 +50,10 @@ External Risk 없는 v1 전용 경계로 유지한다.
 
 한 분석 시도의 External Risk Port 호출은 최대 한 번이다. retry, cache, stale
 data, Circuit Breaker와 fallback은 없으며 실패를 `UNMATCHED`로 바꾸지 않는다.
+현재 coordinator는 per-invocation 내부 경계이므로 직접 재호출과 멱등 경계 밖 동시
+호출에서는 Provider가 다시 호출될 수 있다. 기존 거래 잠금은 Rule 분석 시작의 단일
+승자만 보장하며 같은 멱등 요청의 Provider 재호출 방지는 후속 public intake 경계가
+소유한다.
 
 ## 3. immutable 전달 계약
 
@@ -296,12 +301,14 @@ Boot가 만든 upstream 요청의 결함이므로 공개 거래 API에서는 `50
 3. Java·Python v2 fixture와 golden vector로 wire 호환성을 확인한다.
 4. Backend Java v2 DTO·wire mapper·HTTP Client를 구현한다. — 코드 구현 완료
 5. 내부 Rule 분석 오케스트레이터에 별도 v2 경계를 추가한다. — 코드 구현 완료
-6. 상위 거래 흐름이 실제 Provider 성공 Snapshot을 내부 v2 경계에 전달한다. — 미구현
-7. 전환 동안 v1과 v2의 호출량·오류를 구분해 관측한다.
+6. Mock Policy 성공 Snapshot을 내부 v2 경계에 전달하는 per-invocation coordinator를 구현한다. — 코드 구현 완료
+7. 실제 Provider와 public 거래 접수·멱등 실패 재생을 coordinator에 연결한다. — 미구현
+8. 전환 동안 v1과 v2의 호출량·오류를 구분해 관측한다.
 
 FastAPI v2 코드 구현은 실제 선배포 또는 end-to-end 거래 연결 완료를 의미하지 않는다.
 Backend Java 내부 오케스트레이터는 기존 v1을 유지하면서 명시적인 별도 v2 메서드를
-구현했다. 실제 Provider와 거래 접수 전체 상위 오케스트레이션 연결은 아직 구현되지
+구현했고 Mock 활성 환경의 내부 coordinator가 성공 Snapshot을 해당 메서드에
+전달한다. 실제 Provider와 거래 접수 전체 상위 오케스트레이션 연결은 아직 구현되지
 않았다.
 
 지원하지 않는 v2 배포 조합은 optional 필드나 빈 Snapshot으로 우회하지 않고
@@ -342,11 +349,13 @@ wire·교차 필드 검증과 Endpoint를 구현했으며 v1과 같은 Rule v1 �
 Issue #164에서 Backend Java v2 DTO·exact wire mapper와 v1을 유지하는
 `/api/v2/rule-analysis` 직접 Client 경계를 구현했다. Issue #166에서는 기존 v1
 `analyze(...)`를 유지하면서 별도 `analyzeV2(...)`와 잠긴 시작 경계, mapper 선실행,
-commit 뒤 v2 Client 호출 및 기존 완료·실패 경계 재사용을 구현했다. 다음은 아직
-구현되지 않았다.
+commit 뒤 v2 Client 호출 및 기존 완료·실패 경계 재사용을 구현했다. Issue #168에서는
+별도 `READ_COMMITTED` command read와 Mock Policy 호출, 성공 Snapshot의
+`analyzeV2(...)` 전달을 조정하는 비트랜잭션 내부 coordinator를 구현했다. 다음은
+아직 구현되지 않았다.
 
 - 실제 External Risk HTTP Provider
-- 상위 비트랜잭션 거래 오케스트레이션
+- 실제 Provider를 사용하는 상위 오케스트레이션
 - 거래 접수 전체 연결과 공개 오류 매핑
 - Snapshot v2와 완료 간극 운영 복구
 - External Risk 영속화·Evidence·AuditLog는 이번 목표에서 제외되며 별도 승인 필요

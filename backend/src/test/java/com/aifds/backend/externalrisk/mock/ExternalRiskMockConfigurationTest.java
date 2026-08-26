@@ -1,9 +1,12 @@
 package com.aifds.backend.externalrisk.mock;
 
 import com.aifds.backend.common.config.TimeConfiguration;
+import com.aifds.backend.detection.service.RuleAnalysisOrchestrationService;
 import com.aifds.backend.externalrisk.domain.ExternalRiskLookupCommand;
 import com.aifds.backend.externalrisk.domain.ExternalRiskPolicyResult;
+import com.aifds.backend.externalrisk.service.ExternalRiskLookupCommandReader;
 import com.aifds.backend.externalrisk.service.ExternalRiskPolicyService;
+import com.aifds.backend.externalrisk.service.ExternalRiskRuleAnalysisCoordinator;
 import com.aifds.backend.transaction.entity.TransactionType;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.context.properties.ConfigurationPropertiesBindException;
@@ -15,14 +18,24 @@ import java.time.ZoneOffset;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 class ExternalRiskMockConfigurationTest {
 
     private final ApplicationContextRunner contextRunner =
-            new ApplicationContextRunner().withUserConfiguration(
-                    TimeConfiguration.class,
-                    ExternalRiskMockConfiguration.class
-            );
+            new ApplicationContextRunner()
+                    .withBean(
+                            ExternalRiskLookupCommandReader.class,
+                            () -> mock(ExternalRiskLookupCommandReader.class)
+                    )
+                    .withBean(
+                            RuleAnalysisOrchestrationService.class,
+                            () -> mock(RuleAnalysisOrchestrationService.class)
+                    )
+                    .withUserConfiguration(
+                            TimeConfiguration.class,
+                            ExternalRiskMockConfiguration.class
+                    );
 
     @Test
     void approvedEnvironmentDedicatedProfileEnabledAndScenarioCreateBeans() {
@@ -37,6 +50,9 @@ class ExternalRiskMockConfigurationTest {
                         );
                         assertThat(context).hasSingleBean(
                                 ExternalRiskPolicyService.class
+                        );
+                        assertThat(context).hasSingleBean(
+                                ExternalRiskRuleAnalysisCoordinator.class
                         );
                         Clock clock = context.getBean(Clock.class);
                         assertThat(clock.getZone()).isEqualTo(ZoneOffset.UTC);
@@ -184,6 +200,9 @@ class ExternalRiskMockConfigurationTest {
         assertThat(context).doesNotHaveBean(ExternalRiskMockConfiguration.class);
         assertThat(context).doesNotHaveBean(ExternalRiskMockAdapter.class);
         assertThat(context).doesNotHaveBean(ExternalRiskPolicyService.class);
+        assertThat(context).doesNotHaveBean(
+                ExternalRiskRuleAnalysisCoordinator.class
+        );
     }
 
     private ExternalRiskLookupCommand command() {

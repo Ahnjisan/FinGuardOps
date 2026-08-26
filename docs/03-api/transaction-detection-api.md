@@ -31,8 +31,9 @@ DetectionResult·DetectionEvidence의 물리 영속 모델과 FastAPI
 `POST /api/v1/rule-analysis` HTTP 경계, Spring Boot `RuleAnalysisHttpClient`,
 Timeout·Trace 전달과 응답 검증·오류 분류, 거래 분석 Snapshot 조합·HTTP
 오케스트레이션과 탐지 실행 결과 자동 생성·채택은 구현되었다. 독립 External Risk
-Port·정책 Service·local/dev/test Mock·성공 인메모리 Snapshot도 구현되었지만
-FastAPI 입력과 거래 접수에는 연결되지 않았다. `ANALYZED` 거래를 잠그고 채택 결과를
+Port·정책 Service·local/dev/test Mock·성공 인메모리 Snapshot과 Mock 활성 환경의
+per-invocation Policy→Rule v2 coordinator도 구현되었지만 실제 Provider와 public 거래
+접수·멱등 실패 재생에는 연결되지 않았다. `ANALYZED` 거래를 잠그고 채택 결과를
 검증한 뒤 위험 대응·필요한 사건·거래 최종 상태·AuditLog를 원자적으로 확정하는
 내부 최종화 경계는 구현되었다. 거래 접수 Service 연결, 최종 멱등 응답 v2, Snapshot
 완료 간극 복구와 RuleVersion 운영 publish는 아직 구현되지 않았다. 현재 단계 응답은 최종 동기
@@ -46,8 +47,9 @@ HIGH·CRITICAL은 새 사건·첫 연결 또는 기존 활성 연결을 최종 �
 
 목표 `POST /api/v2/rule-analysis`는 External Risk를 필수 입력으로 받지만 계속
 Rule v1 R001~R004를 실행한다. 현재 v1 Endpoint는 당장 제거하지 않으며 v2
-Java·Python DTO·Client와 내부 오케스트레이션은 구현됐다. 실제 Provider와 거래
-접수 상위 연결은 미구현이다. 상세 계약은
+Java·Python DTO·Client, 내부 오케스트레이션과 Mock 성공 Snapshot 전달 coordinator는
+구현됐다. coordinator 직접 재호출·멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수
+있다. 실제 Provider와 public 거래 접수·멱등 실패 재생은 미구현이다. 상세 계약은
 [External Risk·Rule 분석 입력 계약](../01-requirements/external-risk-rule-analysis-input-contract.md)을
 따른다.
 

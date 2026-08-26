@@ -163,8 +163,9 @@ FastAPI 응답의 `analysis.ruleSetVersion`은 이 예상 값과 정확히 같�
 
 ### 6.5 External Risk 결합 경계
 
-- External Risk 조회와 실패 전파는 `RuleAnalysisOrchestrationService`가
-  아니라 상위 거래 처리 흐름의 책임이다.
+- External Risk 조회와 실패 전파는 `RuleAnalysisOrchestrationService`가 아니라
+  상위 경계의 책임이다. Mock 활성 환경에서는 별도 per-invocation coordinator가
+  이 책임을 소유하고 public 거래 접수 연결은 후속 범위다.
 - 상위 흐름은 `RECEIVED` 거래 저장 commit 뒤 DB 트랜잭션과 행 잠금 없이
   External Risk를 조회한다.
 - 성공 Snapshot은 `analyzeV2(...)`를 통해 잠긴 분석 시작 경계에 전달한다. 이 경계가
@@ -173,9 +174,10 @@ FastAPI 응답의 `analysis.ruleSetVersion`은 이 예상 값과 정확히 같�
 - Rule 분석 시작 뒤에는 External Risk를 다시 조회하거나 기존 입력을 바꾸지
   않는다. `ANALYZED` 이후에는 이미 고정된 근거로 위험 대응만 수행한다.
 - External Risk 조회 실패 시 거래는 `RECEIVED`를 유지하고 DetectionResult를
-  생성하지 않으며 FastAPI·위험 대응 최종화를 호출하지 않는다. 멱등 실패를
-  확정한 같은 요청 재생은 Provider를 다시 호출하지 않는다. 내부 v2 분석 경계는
-  구현됐지만 거래 접수 연결과 공개 오류 매핑은 아직 구현되지 않았다.
+  생성하지 않으며 FastAPI·위험 대응 최종화를 호출하지 않는다. 현재 내부
+  coordinator는 자동 retry 없이 원본 typed failure를 전파한다. 직접 재호출·멱등
+  경계 밖 동시 호출은 Provider를 다시 호출할 수 있으며, 멱등 실패를 확정한 같은
+  요청의 무호출 재생은 후속 public intake 경계가 소유한다.
 - cache·Circuit Breaker·fallback은 별도 Issue와 계약 승인이 필요하다.
 
 필수 v2 JSON, 시간과 canonical match 계약은
@@ -434,12 +436,14 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
   mapper→version 조회→DetectionResult 생성→거래 `ANALYZING` 전이 순서
 - mapper 사전 실패 전체 rollback과 시작 commit 뒤 무트랜잭션 v2 Client 정확히
   1회 호출, 기존 완료·채택·실패 및 원본 예외·category·suppressed failure 경계 재사용
+- Mock profile·property에서만 명시적으로 활성화되는 비트랜잭션 coordinator와 별도
+  `READ_COMMITTED` command reader. read 종료 뒤 Policy 1회와 `analyzeV2(...)` 1회 호출
 
 ### 15.2 구현되지 않음
 
 - 거래 접수 Service에서 분석 오케스트레이터를 호출하는 전체 연결
-- 상위 거래 흐름에서 실제 Provider 성공 Snapshot을 내부 v2 오케스트레이터에
-  전달하는 연결
+- 실제 Provider 성공 Snapshot과 public 거래 접수를 내부 coordinator에 연결하는 경로
+- 멱등 External Risk 실패 저장·재생
 - Client 오류 category를 거래 API 공통 오류로 매핑하는 경로
 - 실제 External Risk HTTP Provider
 - ExternalRiskSnapshot DB 영속화는 이번 목표에 포함하지 않으며 별도 승인 대상
@@ -463,8 +467,10 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
 - 현재 `analyze(...)`와 `POST /api/v1/rule-analysis`는 External Risk가 없는 기존
   Rule v1 경계를 그대로 유지한다. 별도 `analyzeV2(...)`는 성공 Snapshot을 잠긴
   시작 트랜잭션에서 v1 Snapshot과 결합하고, 시작 commit 뒤
-  `POST /api/v2/rule-analysis`를 호출한다. 따라서 실제 Provider·거래 접수 전체 연결,
-  공개 오류 매핑, External Risk 영속화, Snapshot v2·운영 복구는 완료되지 않았다.
+  `POST /api/v2/rule-analysis`를 호출한다. Mock 활성 환경의 내부 coordinator는 별도
+  read transaction 종료 뒤 Policy 성공 Snapshot을 이 v2 경계에 전달한다. 따라서
+  실제 Provider·public 거래 접수·멱등 실패 재생, 공개 오류 매핑, External Risk
+  영속화, Snapshot v2·운영 복구는 완료되지 않았다.
   양쪽 HTTP 경계 구현은 운영 배포 또는
   end-to-end 거래 처리 완료를 의미하지 않는다.
 - V5 초기 RuleVersion은 항상 모두 `DRAFT`다. 별도 one-shot 명령을 명시적으로

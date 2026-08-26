@@ -372,6 +372,10 @@ Kafka
   [`External Risk·Rule 분석 입력 계약`](docs/01-requirements/external-risk-rule-analysis-input-contract.md)으로 확정하고,
   FastAPI v2 strict DTO·wire 및 교차 필드 검증·Endpoint와 Backend Java v2
   exact wire DTO·mapper·HTTP Client와 별도 내부 v2 오케스트레이션 경계 구현
+* Mock profile·property에서만 활성화되는 내부 per-invocation coordinator가
+  `READ_COMMITTED` 거래 read 뒤 트랜잭션 밖 External Risk Policy를 호출하고 성공
+  Snapshot을 `analyzeV2(...)`에 전달하는 경계 구현. 직접 재호출·멱등 경계 밖 동시
+  호출은 Provider를 다시 호출할 수 있으며 public intake·멱등 실패 재생은 미구현
 * LOW·MEDIUM·HIGH·CRITICAL별 목표 거래 상태, `RiskResponseOutcome`과 사건 필수
   여부를 반환하는 순수 위험 대응 결정 정책 구현
 * `FraudCase`·`CaseTransaction` Entity와 Flyway V6, 거래 우선 비관적 잠금으로

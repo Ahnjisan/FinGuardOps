@@ -21,7 +21,7 @@ public final class ExternalRiskContracts {
     private ExternalRiskContracts() {
     }
 
-    static boolean isUuidV4(UUID value) {
+    public static boolean isUuidV4(UUID value) {
         return value != null && value.version() == 4 && value.variant() == 2;
     }
 
@@ -39,7 +39,7 @@ public final class ExternalRiskContracts {
         return value == null || isReference(value);
     }
 
-    static boolean isTraceId(String value) {
+    public static boolean isTraceId(String value) {
         return value != null && TRACE_ID.matcher(value).matches();
     }
 

@@ -1012,9 +1012,13 @@ External Risk 선행 조회를 Rule v1 실행 입력에 연결하는 목표 계�
 `externalRisk`를 가진 `POST /api/v2/rule-analysis`가 함께 구현되어 있다. v2 요청
 DTO와 strict External Risk wire·교차 필드 검증에 더해 Backend Java v2 exact wire
 DTO·mapper와 `/api/v2/rule-analysis` Client, 기존 v1을 유지하는 별도 내부 v2
-오케스트레이션 경계가 구현됐다. 실제 Provider, 거래 접수 전체 연결, 공개 오류 매핑,
-External Risk 영속화, Snapshot v2와 완료 간극 운영 복구는 구현되지 않았다. 이 양쪽 HTTP 경계
-구현은 운영 배포 또는 end-to-end 거래 처리 완료를 의미하지 않는다.
+오케스트레이션 경계가 구현됐다. Mock profile·property에서는 별도 `READ_COMMITTED`
+read 경계로 immutable command를 조립한 뒤 트랜잭션 밖 Policy를 호출하고 성공
+Snapshot을 `analyzeV2(...)`에 전달하는 내부 per-invocation coordinator도 구현됐다.
+직접 재호출·멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수 있다. 실제 Provider,
+public 거래 접수·멱등 실패 재생, 공개 오류 매핑, External Risk 영속화, Snapshot v2와
+완료 간극 운영 복구는 구현되지 않았다. 이 내부 경계는 운영 배포 또는 end-to-end
+거래 처리 완료를 의미하지 않는다.
 
 - 카드 결제 FDS
 - 증권 거래 FDS

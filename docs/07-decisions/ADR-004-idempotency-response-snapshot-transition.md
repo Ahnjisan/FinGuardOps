@@ -319,7 +319,9 @@ Risk Provider, FastAPI, 위험 대응과 사건을 다시 호출하지 않는다
 DetectionResult·DetectionEvidence와 ADR-005의 FraudRule·RuleVersion 물리 영속 모델,
 Rule 분석 내부 HTTP 오케스트레이터, 기본 RuleVersion 원자적 발행 경계, 독립
 External Risk Port·정책 Service·local/dev/test Mock·성공 인메모리 Snapshot은
-구현되었다. `FraudCase`·`CaseTransaction` 영속 모델과 사건·첫 거래 연결의
+구현되었다. Mock 활성 환경에서 별도 `READ_COMMITTED` read 종료 뒤 Policy 성공
+Snapshot을 `analyzeV2(...)`에 전달하는 per-invocation coordinator도 구현되었다.
+`FraudCase`·`CaseTransaction` 영속 모델과 사건·첫 거래 연결의
 `REQUIRED` 단일 트랜잭션 경계도 구현되었다. 이 경계는 동일 거래 재호출에서 기존
 활성 사건을 멱등 반환하고, 거래 잠금으로 동시 중복 생성을 방지하며, 사건 생성과
 첫 연결을 함께 commit하거나 rollback한다. `ANALYZED` 거래에 decision을 적용하고
@@ -332,13 +334,17 @@ Snapshot과 완료 간극 복구, 공개 사건 API는 구현되지 않았다. �
 Provider와 거래 접수 연결도 구현되지 않았다. FastAPI에는 기존
 `POST /api/v1/rule-analysis`를 유지하면서 필수 External Risk v2 DTO·strict wire 및
 교차 필드 검증을 적용한 `POST /api/v2/rule-analysis`가 구현되어 있다. Backend Java
-v2 DTO·mapper·Client 전환, 공개 External Risk 오류 매핑, External Risk 영속화와
-Snapshot v2·완료 간극 운영 복구는 미구현이다. 이 FastAPI 내부 경계는 운영 배포나
+v2 DTO·mapper·Client와 내부 v2 오케스트레이션도 구현되어 있다. 실제 Provider·public
+거래 접수·멱등 실패 재생, 공개 External Risk 오류 매핑, External Risk 영속화와
+Snapshot v2·완료 간극 운영 복구는 미구현이다. 이 내부 경계는 운영 배포나
 end-to-end 거래 처리 완료를 의미하지 않는다.
 External Risk 실패는 현재 cache·stale data·fallback·`UNMATCHED`로 변환하지 않고
 typed failure로 전파한다. 목표 거래 접수 연결에서는 거래 `RECEIVED` 유지,
 DetectionResult 미생성, FastAPI 미호출과 멱등 `FAILED`를 적용한다. 현재 `responseBody`는 실제 단계적 거래
 접수 결과인 `RECEIVED`와 네 탐지 관련 null 값을 v1으로 보존한다.
+내부 coordinator는 per-invocation이므로 직접 재호출·멱등 경계 밖 동시 호출에서
+Provider가 다시 호출될 수 있으며, 같은 멱등 요청의 Provider 무호출 재생은 아직
+구현되지 않았다.
 
 ## Migration 영향
 

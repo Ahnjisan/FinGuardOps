@@ -274,7 +274,8 @@ v2는 External Risk를 검증하지만 R001~R004 evaluator에는 전달하지 �
 External Risk echo와 전용 hash를 응답에 추가하지 않는다. Python v2 DTO·검증과
 FastAPI Endpoint, Backend Java v2 exact wire DTO·mapper와 직접 Client 경계가
 구현됐다. 별도 내부 `analyzeV2(...)`와 잠긴 시작 트랜잭션의 Snapshot 조립·mapper
-경계도 구현됐으며, 실제 Provider와 거래 접수 상위 연결은 아직 구현되지 않았다.
+경계, Mock Policy 성공 Snapshot을 전달하는 per-invocation coordinator도 구현됐다.
+실제 Provider와 public 거래 접수·멱등 실패 재생은 아직 구현되지 않았다.
 
 v2의 JSON 타입·필수·null·Enum·UTC 형식·unknown field 오류는
 `400 INVALID_REQUEST`, match 조합·개수·canonical 순서와 시간 관계 오류는
@@ -741,9 +742,10 @@ Client는 Rule 적중 여부, scoring 또는 Evidence를 Java에서 다시 계�
   신규 `analyzeV2(...)`는 고정값 `/api/v2/rule-analysis`를 호출한다. 두 메서드는
   하나의 공통 private HTTP exchange 경계를 재사용하며 자동 endpoint 협상·전환은
   없다.
-- 현재 상위 거래 오케스트레이터는 내부 v2 메서드를 아직 호출하지 않는다. 실제
-  External Risk Provider와 상위 오케스트레이터의 v2 연결은 미구현이며, 구현된 내부
-  v2 경계는 운영 배포나 end-to-end 거래 처리 완료를 의미하지 않는다.
+- Mock 활성 환경의 내부 coordinator는 `READ_COMMITTED` read 종료 뒤 Policy 성공
+  Snapshot으로 v2 메서드를 호출한다. 실제 External Risk Provider와 public 거래 접수·
+  멱등 실패 재생은 미구현이며, 구현된 내부 경계는 운영 배포나 end-to-end 거래 처리
+  완료를 의미하지 않는다.
 - 하나의 Client 호출은 하나의 HTTP 요청만 수행한다.
 
 ### 13.3 설정 계약
@@ -919,7 +921,9 @@ Snapshot만 구현했으며 FastAPI·Python·`RuleAnalysisRequest`를 변경하�
 Issue #160에서 승인한 v2 입력 계약에 따라 Issue #162에서 Python DTO·검증과
 FastAPI Endpoint를 구현했고 Issue #164에서 Backend Java v2 exact wire DTO·mapper와
 직접 Client 경계를 구현했다. Issue #166에서 별도 내부 v2 오케스트레이션 경계를
-구현했으며 실제 Provider와 거래 접수 호출 연결은 후속 Issue다.
+구현했고 Issue #168에서 Mock Policy 성공 Snapshot을 전달하는 비트랜잭션 내부
+coordinator를 구현했다. 직접 재호출·멱등 경계 밖 동시 호출은 Provider를 다시 호출할
+수 있으며 실제 Provider와 public 거래 접수·멱등 실패 재생은 후속 Issue다.
 
 ### 13.8 로그와 정보 보호
 
@@ -975,7 +979,8 @@ connect·response timeout, 자동 retry 0회, 트랜잭션 밖 HTTP 호출과 �
 ## 14. 현재 구현 이후 제외 범위
 
 - 거래 접수 Service에서 Rule v1 오케스트레이터를 호출하는 연결
-- 실제 Provider 성공 Snapshot을 내부 v2 오케스트레이터에 전달하는 상위 거래 연결
+- 실제 Provider와 public 거래 접수를 내부 coordinator에 연결하는 경로
+- 멱등 External Risk 실패 저장·재생
 - 거래 접수에서 구현된 위험 대응·최종 거래 상태·사건·AuditLog 원자적 최종화
   경계를 호출하는 연결
 - 최종 동기 응답과 Snapshot v2 확정

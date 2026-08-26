@@ -1,6 +1,9 @@
 package com.aifds.backend.externalrisk.mock;
 
+import com.aifds.backend.detection.service.RuleAnalysisOrchestrationService;
+import com.aifds.backend.externalrisk.service.ExternalRiskLookupCommandReader;
 import com.aifds.backend.externalrisk.service.ExternalRiskPolicyService;
+import com.aifds.backend.externalrisk.service.ExternalRiskRuleAnalysisCoordinator;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -61,5 +64,18 @@ public class ExternalRiskMockConfiguration {
             Clock clock
     ) {
         return new ExternalRiskPolicyService(adapter, clock);
+    }
+
+    @Bean
+    ExternalRiskRuleAnalysisCoordinator externalRiskRuleAnalysisCoordinator(
+            ExternalRiskLookupCommandReader commandReader,
+            ExternalRiskPolicyService policyService,
+            RuleAnalysisOrchestrationService ruleAnalysisOrchestrationService
+    ) {
+        return new ExternalRiskRuleAnalysisCoordinator(
+                commandReader,
+                policyService,
+                ruleAnalysisOrchestrationService
+        );
     }
 }
