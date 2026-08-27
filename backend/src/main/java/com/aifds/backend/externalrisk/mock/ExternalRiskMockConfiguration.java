@@ -34,6 +34,16 @@ public class ExternalRiskMockConfiguration {
             Profiles.of("local", "dev", "test");
 
     public ExternalRiskMockConfiguration(Environment environment) {
+        boolean httpEnabled = environment.getProperty(
+                "finguardops.external-risk.http.enabled",
+                Boolean.class,
+                false
+        );
+        if (httpEnabled) {
+            throw new IllegalStateException(
+                    "External Risk Mock and HTTP Provider are mutually exclusive"
+            );
+        }
         if (environment.acceptsProfiles(PRODUCTION_PROFILES)) {
             throw new IllegalStateException(
                     "External Risk Mock is forbidden in production"

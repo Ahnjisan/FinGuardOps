@@ -4,12 +4,15 @@ import com.aifds.backend.common.config.TimeConfiguration;
 import com.aifds.backend.detection.service.RuleAnalysisOrchestrationService;
 import com.aifds.backend.externalrisk.domain.ExternalRiskLookupCommand;
 import com.aifds.backend.externalrisk.domain.ExternalRiskPolicyResult;
+import com.aifds.backend.externalrisk.client.config.ExternalRiskHttpConfiguration;
 import com.aifds.backend.externalrisk.service.ExternalRiskLookupCommandReader;
 import com.aifds.backend.externalrisk.service.ExternalRiskPolicyService;
 import com.aifds.backend.externalrisk.service.ExternalRiskRuleAnalysisCoordinator;
 import com.aifds.backend.transaction.entity.TransactionType;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.context.properties.ConfigurationPropertiesBindException;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.autoconfigure.jackson.JacksonAutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 import java.time.Clock;
@@ -125,6 +128,40 @@ class ExternalRiskMockConfigurationTest {
                         );
             });
         }
+    }
+
+    @Test
+    void mockAndHttpEnabledTogetherFailFast() {
+        contextRunner
+                .withConfiguration(AutoConfigurations.of(
+                        JacksonAutoConfiguration.class
+                ))
+                .withUserConfiguration(ExternalRiskHttpConfiguration.class)
+                .withInitializer(context -> context.getEnvironment()
+                        .setActiveProfiles(
+                                "test",
+                                ExternalRiskMockConfiguration.MOCK_PROFILE,
+                                ExternalRiskHttpConfiguration.HTTP_PROFILE
+                        ))
+                .withPropertyValues(
+                        ExternalRiskMockConfiguration.PROPERTY_PREFIX
+                                + ".enabled=true",
+                        ExternalRiskMockConfiguration.PROPERTY_PREFIX
+                                + ".scenario=UNMATCHED",
+                        ExternalRiskHttpConfiguration.PROPERTY_PREFIX
+                                + ".enabled=true",
+                        ExternalRiskHttpConfiguration.PROPERTY_PREFIX
+                                + ".base-url=http://127.0.0.1:9000",
+                        ExternalRiskHttpConfiguration.PROPERTY_PREFIX
+                                + ".api-key=test-key"
+                )
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasRootCauseMessage(
+                                    "External Risk Mock and HTTP Provider are mutually exclusive"
+                            );
+                });
     }
 
     @Test
