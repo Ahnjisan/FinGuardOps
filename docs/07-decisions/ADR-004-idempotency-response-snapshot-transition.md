@@ -165,7 +165,7 @@ fingerprint 입력 필드, 정규화 또는 해시 알고리즘을 바꾸려면 
     "riskLevel": "CRITICAL",
     "riskResponseOutcome": "HELD",
     "adoptedDetectionResultId": "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430101",
-    "caseId": "case_example",
+    "caseId": "9f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430201",
     "createdAt": "2026-07-29T01:15:31Z"
   },
   "httpStatus": 201,
@@ -217,8 +217,8 @@ Snapshot이 terminal 성공으로 확정되면 다음 값을 같은 멱등 레�
 - decoder는 `codecVersion`으로 envelope를 해석한 뒤 `responseSchemaVersion`에 대응하는 typed 응답을 복원한다.
 - 지원 중인 구버전 decoder는 해당 Snapshot 보존·재생 범위 동안 제거하지 않는다.
 - 버전이 달라도 기존 Snapshot을 새 버전으로 제자리 갱신하지 않는다.
-- 현재 구현의 `responseSchemaVersion`은 `transaction-create-response-v1`, `codecVersion`은 `transaction-intake-snapshot-envelope-v1`이다. 현재 registry는 이 한 조합만 지원하며 다른 값은 추측하지 않고 거부한다.
-- 최종 성공 계약은 `transaction-create-response-v2`와 `transaction-intake-snapshot-envelope-v2`를 사용한다. 이 v2 codec과 registry 등록은 아직 구현되지 않았다.
+- 현재 registry는 기존 `transaction-create-response-v1`/`transaction-intake-snapshot-envelope-v1`과 최종 성공 `transaction-create-response-v2`/`transaction-intake-snapshot-envelope-v2` tuple을 명시적으로 지원한다. 성공 Snapshot에 별도 `snapshotType` discriminator를 추가하지 않으며, 두 version 필드가 없거나 타입·조합이 잘못됐거나 알 수 없는 값이면 legacy로 fallback하지 않고 거부한다.
+- v2 typed 모델·body codec·envelope codec과 registry 등록은 구현되었다. v2 성공 body에는 오류 응답 전용 `fieldErrors`가 없고, codec이 고정 순서로 만든 canonical JSON은 pretty printing과 불필요한 공백 없이 기존 `ObjectMapper`로 직렬화하며 canonical UTF-8 기준 최대 4096 byte다. 이 제한은 legacy와 v1에 소급하지 않는다.
 
 ## 기존 `RECEIVED`/null Snapshot 전환 정책
 
@@ -255,7 +255,7 @@ DetectionResult 미생성을 확인한 뒤 멱등 레코드를 승인된 `failur
 `FAILED` 처리한다. 같은 키·fingerprint 재생은 저장된 실패를 반환하며 External
 Risk Provider, FastAPI, 위험 대응과 사건을 다시 호출하지 않는다.
 
-실패 응답 전체를 성공 Snapshot envelope에 저장하거나 신규 오류 code를 추가하지 않는다. 향후 실패 응답 Snapshot이 필요하면 민감정보 제외, `traceId` 처리, 상태·스키마 버전과 기존 `failure_code` 관계를 별도 승인한다.
+실패 응답 전체를 성공 Snapshot envelope에 저장하거나 신규 오류 code를 추가하지 않는다. ADR-007에 따라 구현된 External Risk Failure Snapshot은 별도 `snapshotType`·모델·codec을 사용하며 성공 legacy·v1·v2 dispatcher와 혼합하지 않는다.
 
 ### Snapshot 완료 간극
 
@@ -307,7 +307,7 @@ Risk Provider, FastAPI, 위험 대응과 사건을 다시 호출하지 않는다
 
 ## 구현 영향
 
-다음 항목은 2026-07-30 Snapshot codec 전환에서 구현되었다.
+다음 항목은 단계별 Snapshot codec 전환에서 구현되었다.
 
 - 신규 envelope encoder·decoder와 명시적 version dispatch
 - 정확한 일곱 필드, `RECEIVED`, 네 탐지 관련 JSON null만 허용하는 strict legacy decoder
@@ -315,6 +315,9 @@ Risk Provider, FastAPI, 위험 대응과 사건을 다시 호출하지 않는다
 - legacy `200`, 신규 envelope `201`, 현재 요청 `traceId` 결합
 - unknown version, 손상 데이터와 역직렬화 실패의 fail-closed 처리
 - envelope 확정 시 `Clock`을 한 번 읽고 PostgreSQL `TIMESTAMPTZ` 기본 마이크로초 정밀도로 정규화한 동일 값을 `finalizedAt`과 `finished_at`에 사용
+- 최종 성공 typed v2 모델, exact 7-field body와 exact 5-field envelope codec
+- 별도 discriminator 없이 확정 version tuple을 사용하는 legacy·v1·v2 dispatcher
+- 고정 순서 canonical UTF-8 최대 4096 byte와 v2 전용 encode·decode 검증
 
 DetectionResult·DetectionEvidence와 ADR-005의 FraudRule·RuleVersion 물리 영속 모델,
 Rule 분석 내부 HTTP 오케스트레이터, 기본 RuleVersion 원자적 발행 경계, 독립
@@ -329,14 +332,16 @@ Snapshot을 `analyzeV2(...)`에 전달하는 per-invocation coordinator도 구�
 rollback하는 내부 최종화 경계도 구현되었다.
 
 기존 사건에 추가 거래 연결, 사건 병합·분리, 거래 접수 전체 연결, 최종 v2
-Snapshot과 완료 간극 복구, 공개 사건 API는 구현되지 않았다. 따라서 내부 최종화
+Snapshot writer 연결과 완료 간극 복구, 공개 사건 API는 구현되지 않았다. 따라서 내부 최종화
 경계의 구현을 공개 거래 처리 전체 완료로 간주하지 않는다. External Risk 실제
 Provider와 거래 접수 연결도 구현되지 않았다. FastAPI에는 기존
 `POST /api/v1/rule-analysis`를 유지하면서 필수 External Risk v2 DTO·strict wire 및
 교차 필드 검증을 적용한 `POST /api/v2/rule-analysis`가 구현되어 있다. Backend Java
 v2 DTO·mapper·Client와 내부 v2 오케스트레이션도 구현되어 있다. 실제 Provider·public
 거래 접수·멱등 실패 재생, 공개 External Risk 오류 매핑, External Risk 영속화와
-Snapshot v2·완료 간극 운영 복구는 미구현이다. 이 내부 경계는 운영 배포나
+Snapshot v2 완료 writer·완료 간극 운영 복구는 미구현이다. v2 모델·codec·dispatcher가
+구현되었다는 사실은 public intake·최종화 호출·Idempotency 완료 writer가 연결되었다는
+뜻이 아니다. 이 내부 경계는 운영 배포나
 end-to-end 거래 처리 완료를 의미하지 않는다.
 External Risk 실패는 현재 cache·stale data·fallback·`UNMATCHED`로 변환하지 않고
 typed failure로 전파한다. 목표 거래 접수 연결에서는 거래 `RECEIVED` 유지,

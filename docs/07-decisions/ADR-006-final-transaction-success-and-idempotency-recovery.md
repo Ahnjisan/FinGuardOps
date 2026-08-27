@@ -18,7 +18,7 @@ ADR-003과 ADR-004는 `POST /api/v1/transactions`가 거래 접수부터 Externa
 Rule 분석, 위험 대응과 필요한 사건 연결까지 완료한 뒤 최초 명령의 최종 업무
 결과를 멱등 Snapshot으로 확정하도록 결정했다.
 
-현재 구현은 거래 접수의 단계적 `RECEIVED` Snapshot과 내부 Rule v1 분석
+ADR 작성 당시 구현은 거래 접수의 단계적 `RECEIVED` Snapshot과 내부 Rule v1 분석
 오케스트레이터, 위험 등급별 목표 거래 상태·`RiskResponseOutcome`·사건 필수
 여부를 반환하는 순수 decision 정책을 제공한다. Rule 분석 성공은 DetectionResult와
 Evidence를 저장하고 결과를 채택해 거래를 `ANALYZED`로 만든다. 별도 내부
@@ -29,7 +29,9 @@ AuditLog를 원자적으로 확정한다. 다만 거래 접수 전체 연결과 
 
 이 ADR은 기존 최종 동기 목표를 유지하면서 최종 성공 경계, Snapshot v2,
 완료 간극 복구, 실패 공개 매핑과 선행 구현 순서를 확정한다. 이 문서 확정은
-Java·Python·DB 또는 운영 복구 실행 경로의 구현 완료를 의미하지 않는다.
+Java·Python·DB 또는 운영 복구 실행 경로의 구현 완료를 의미하지 않는다. 이후
+Snapshot v2 typed 모델·codec·dispatcher와 JSONB 저장·조회 검증은 구현되었지만
+public 실행 경로와 완료 writer 연결은 아직 구현되지 않았다.
 
 ## 2. 최종 성공 경계
 
@@ -83,6 +85,10 @@ HIGH·CRITICAL 거래에서 사건 연결이 완료되지 않으면 일부 결�
 - 최초 HTTP 상태: `201 Created`
 - 완료 재생 HTTP 상태: 저장된 `201 Created`
 
+성공 v2는 별도 `snapshotType`을 추가하지 않고 위 version tuple 자체를
+discriminator로 사용한다. envelope 최상위는 `responseBody`, `httpStatus`,
+`responseSchemaVersion`, `codecVersion`, `finalizedAt` 다섯 필드만 정확히 허용한다.
+
 v2 `responseBody`는 기존과 같은 일곱 업무 필드를 정확히 가진다.
 
 ```text
@@ -105,6 +111,10 @@ v2는 다음 조건을 모두 검증한다.
 - `RECEIVED`, `ANALYZING`, `ANALYZED`, `FAILED`는 v2에 저장할 수 없다.
 - `traceId`는 envelope 어느 깊이에도 저장하지 않는다.
 - 내부 PK, 요청 지문, 멱등 키와 민감 참조값을 저장하지 않는다.
+- 성공 body에는 오류 응답 전용 `fieldErrors`를 추가하지 않는다.
+- 위에 나열한 envelope·body 순서로 생성한 compact JSON을 기존 `ObjectMapper`로
+  직렬화한 canonical UTF-8 크기는 최대 4096 byte다. encode와 decode에 모두
+  fail-closed로 적용하며 legacy·v1에는 소급하지 않는다.
 
 예시는 다음과 같다.
 
@@ -116,7 +126,7 @@ v2는 다음 조건을 모두 검증한다.
     "riskLevel": "CRITICAL",
     "riskResponseOutcome": "HELD",
     "adoptedDetectionResultId": "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430101",
-    "caseId": "case_example",
+    "caseId": "9f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430201",
     "createdAt": "2026-08-14T01:15:31Z"
   },
   "httpStatus": 201,
@@ -253,6 +263,10 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
 - `ANALYZED` 거래를 잠그고 채택 결과를 검증한 뒤 decision, 필요한 사건,
   최종 거래 상태·`RiskResponseOutcome`, AuditLog를 함께 commit하거나 rollback하는
   내부 위험 대응 최종화 경계
+- `RiskResponseFinalizationResult`로 생성하고 공식 네 위험 조합을 재검증하는 immutable
+  최종 성공 Snapshot v2 모델
+- exact 7-field body·exact 5-field envelope, canonical UTF-8 4096 byte 제한과
+  확정 version tuple을 검증하는 v2 codec 및 legacy·v1·v2 dispatcher
 
 ### 구현되지 않음
 
@@ -260,7 +274,7 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
 - 실제 External Risk HTTP Provider, public 거래 접수·멱등 실패 재생과 공개 오류 매핑
 - 위험 대응 최종화와 최종 동기 거래 응답 연결
 - ExternalRiskSnapshot DB 영속화는 이번 목표에 포함하지 않으며 별도 승인 대상
-- 최종 v2 Snapshot codec과 거래 접수 완료 연결
+- 최종 v2 Snapshot의 public 거래 접수·최종화 호출·Idempotency 완료 writer 연결
 - Snapshot 완료 간극과 불확실 분석 상태의 운영 복구 실행 경로
 - RuleVersion 운영 publish 준비
 
@@ -276,9 +290,10 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
 
 ## 13. 영향과 제외 범위
 
-이 결정으로 기존 DB 컬럼, Flyway Migration, Java·Python 코드, seed 또는
-의존성이 변경되지는 않는다. v2는 기존 `response_snapshot JSONB`에 저장할 수
-있지만 codec과 실행 경로는 후속 구현 대상이다. 사건 영속 모델과 External Risk의
+이 결정 자체로 기존 DB 컬럼, Flyway Migration, seed 또는 의존성은 변경되지 않았다.
+후속 구현으로 v2 typed 모델·codec·dispatcher가 추가되었고 기존
+`response_snapshot JSONB` 저장·조회도 검증되었지만 public 실행 경로와 완료 writer
+연결은 여전히 후속 대상이다. 사건 영속 모델과 External Risk의
 구체적인 물리 설계는 각 선행 Issue의 승인 범위다.
 
 완료·진행 중·충돌·실패 재생과 완료 간극 복구는 새 External Risk·FastAPI·LLM

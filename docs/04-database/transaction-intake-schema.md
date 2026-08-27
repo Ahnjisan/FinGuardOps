@@ -286,7 +286,12 @@ FAILED
 `APPROVED`, `ADDITIONAL_AUTH_REQUIRED`, `HELD`만 허용하고 위험 등급·대응·채택
 결과를 필수로 가진다. LOW·MEDIUM은 `caseId`가 null이고 HIGH·CRITICAL은
 `caseId`가 필수다. `RECEIVED`, `ANALYZING`, `ANALYZED`, `FAILED`는 v2에 저장할
-수 없다. v2 codec과 실행 경로는 아직 구현되지 않았다.
+수 없다. 성공 v2에는 별도 `snapshotType`과 오류 응답 전용 `fieldErrors`가 없고,
+두 version 필드의 tuple이 discriminator다. exact 5-field envelope와 exact 7-field
+body를 고정 순서 compact JSON으로 재직렬화한 canonical UTF-8 크기는 최대 4096
+byte이며 이 제한은 v2 encode·decode에만 적용한다. typed 모델·codec·dispatcher와
+PostgreSQL JSONB 저장·조회 검증은 구현되었지만 public intake·최종화 호출·멱등
+`COMPLETED` writer 연결은 아직 구현되지 않았다.
 
 legacy와 v1 Snapshot은 수정·backfill하지 않고 최신 DB 상태로 보정하지 않는다.
 기존 version의 의미를 확장하지 않으며 기존 Snapshot 재생에서 분석·위험 대응·사건
@@ -466,7 +471,7 @@ V1의 무정밀도 지정 `TIMESTAMPTZ`는 PostgreSQL 기본 마이크로초 정
 | `request_fingerprint` | `VARCHAR(64)` | NOT NULL | 없음 | SHA-256 소문자 16진수 |
 | `processing_status` | `VARCHAR(16)` | NOT NULL | 없음 | `IN_PROGRESS`, `COMPLETED`, `FAILED` |
 | `financial_transaction_id` | `BIGINT` | nullable | 없음 | 처리 중에는 null 가능, 거래 결과 FK |
-| `response_snapshot` | `JSONB` | nullable | 없음 | strict legacy·성공 v1 object와 V8 External Risk failure envelope에 재사용. 목표 성공 v2도 재사용하며 `traceId`와 금지 정보 제외 |
+| `response_snapshot` | `JSONB` | nullable | 없음 | strict legacy·성공 v1·성공 v2 object와 V8 External Risk failure envelope에 재사용. `traceId`와 금지 정보 제외 |
 | `failure_code` | `VARCHAR(64)` | nullable | 없음 | `FAILED`의 안전한 내부 실패 분류. 공개 응답은 whitelist로만 고정 매핑 |
 | `expires_at` | `TIMESTAMPTZ` | NOT NULL | `CURRENT_TIMESTAMP + INTERVAL '24 hours'` | 최초 선점 기준 24시간 후의 업무 만료 기준 시각 |
 | `created_at` | `TIMESTAMPTZ` | NOT NULL | `CURRENT_TIMESTAMP` | 최초 INSERT 감사 시각 |
@@ -882,6 +887,12 @@ Java 매핑 변경은 이 물리 DB 계약과 함께 검증한다.
   Snapshot이 필수이며 `responseBody.code = failure_code`를 만족한다.
 - Failure Snapshot codec은 exact 필드·type·version, 빈 `fieldErrors`, UTC
   `finalizedAt`, canonical UTF-8 4 KiB 이하와 금지 정보 미포함을 검증한다.
+- 성공 v2 codec은 별도 discriminator 없이 확정 version tuple, exact field·type,
+  네 위험 조합, UTC 시각과 canonical UTF-8 4096 byte 이하를 검증하고 legacy·v1에는
+  크기 제한을 소급하지 않는다.
+- 성공 v2 JSONB 완료 record는 `COMPLETED`로 조회·decode되고 `finished_at`과
+  envelope `finalizedAt`이 일치하며 terminal 재전이가 거부된다. legacy·v1 완료
+  record 재생도 함께 회귀 검증한다.
 - `created_at`, `updated_at`, `expires_at`, `finished_at`의 `datetime_precision`은 모두 6이다.
 - 명시적 INSERT 트랜잭션에서 `created_at`과 `updated_at`은 해당 PostgreSQL `CURRENT_TIMESTAMP`와 정확히 일치하고 서로 같다.
 - `expires_at`은 `created_at`의 정확히 24시간 후여야 한다.
@@ -908,8 +919,8 @@ Java 매핑 변경은 이 물리 DB 계약과 함께 검증한다.
 이번 물리 계약 이후에도 다음 항목은 별도 승인과 구현 설계가 필요하다.
 
 - 멱등 만료 레코드 정리 주기, batch 크기, 잠금과 장애 재시도 방식
-- ADR-006·ADR-007 순서에 따른 External Risk·탐지·위험 대응·사건·성공 v2·Failure Snapshot 구현
-- 기존 V1은 유지하고 `FAILED` Check를 변경하는 신규 Flyway Migration·Entity·codec·decoder·mapper·테스트 구현
+- ADR-006·ADR-007 순서에 따른 External Risk·탐지·위험 대응·사건과 성공 v2·Failure Snapshot의 public 거래 접수 연결
+- 성공 v2와 Failure Snapshot의 public writer·replay mapper 연결
 - 상태 변경 충돌 후 자동 재시도 여부
 - 최종 상태 거래의 재분석·정정 이력 모델
 - External Risk 불확실 `IN_PROGRESS`와 완료 간극을 복구하는 별도 operation scope의 승인된 명령·운영 절차

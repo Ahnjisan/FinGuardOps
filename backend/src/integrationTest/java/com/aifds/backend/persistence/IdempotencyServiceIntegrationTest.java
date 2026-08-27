@@ -8,10 +8,18 @@ import com.aifds.backend.idempotency.fingerprint.TransactionFingerprintInput;
 import com.aifds.backend.idempotency.repository.IdempotencyRecordRepository;
 import com.aifds.backend.idempotency.service.IdempotencyClaimResult;
 import com.aifds.backend.idempotency.service.IdempotencyService;
+import com.aifds.backend.detection.entity.RiskLevel;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
+import com.aifds.backend.transaction.entity.RiskResponseOutcome;
 import com.aifds.backend.transaction.entity.TransactionChannel;
+import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
 import com.aifds.backend.transaction.entity.TransactionType;
 import com.aifds.backend.transaction.repository.FinancialTransactionRepository;
+import com.aifds.backend.transaction.service.RiskResponseFinalizationResult;
+import com.aifds.backend.transaction.service.TransactionFinalResponseSnapshot;
+import com.aifds.backend.transaction.service.TransactionIntakeSnapshot;
+import com.aifds.backend.transaction.service.TransactionIntakeSnapshotCodec;
+import com.aifds.backend.transaction.service.TransactionIntakeSnapshotReplay;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
@@ -55,6 +63,9 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
 
     @Autowired
     private ObjectMapper objectMapper;
+
+    @Autowired
+    private TransactionIntakeSnapshotCodec snapshotCodec;
 
     @MockitoBean
     private DatabaseTransactionTimestampProvider timestampProvider;
@@ -123,6 +134,160 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
         assertThat(stored.getFailureCode()).isNull();
         assertThat(stored.getFinishedAt()).isEqualTo(finishedAt);
         assertThat(replay).isEqualTo(completed);
+    }
+
+    @Test
+    void persistsClaimsAndDecodesFinalSuccessV2WithTerminalImmutability()
+            throws Exception {
+        String key = key("completed-v2");
+        TransactionFingerprintInput input = fingerprintInput();
+        FinancialTransaction transaction = financialTransactionRepository.saveAndFlush(
+                transaction(input.transactionId())
+        );
+        long recordId = acquiredRecordId(idempotencyService.claim(key, input));
+        Instant finalizedAt = finishedAtFor(recordId);
+        UUID detectionResultId = UUID.randomUUID();
+        TransactionFinalResponseSnapshot snapshot =
+                new TransactionFinalResponseSnapshot(
+                        new RiskResponseFinalizationResult(
+                                transaction.getTransactionId(),
+                                detectionResultId,
+                                RiskLevel.MEDIUM,
+                                TransactionProcessingStatus.APPROVED,
+                                RiskResponseOutcome.APPROVED_WITH_MONITORING,
+                                null,
+                                false
+                        ),
+                        transaction.getCreatedAt()
+                );
+        ObjectNode encoded = (ObjectNode) snapshotCodec.encodeV2(
+                snapshot,
+                201,
+                finalizedAt
+        );
+
+        IdempotencyClaimResult.Completed completed = idempotencyService.complete(
+                recordId,
+                transaction.getTransactionId(),
+                encoded,
+                finalizedAt
+        );
+        IdempotencyRecord stored = idempotencyRecordRepository
+                .findById(recordId)
+                .orElseThrow();
+        IdempotencyClaimResult replay = idempotencyService.claim(key, input);
+
+        assertThat(stored.getProcessingStatus())
+                .isEqualTo(IdempotencyProcessingStatus.COMPLETED);
+        assertThat(stored.getResponseSnapshot())
+                .isEqualTo(objectMapper.valueToTree(encoded));
+        assertThat(stored.getResponseSnapshot().get("responseSchemaVersion")
+                .textValue()).isEqualTo("transaction-create-response-v2");
+        assertThat(stored.getResponseSnapshot().get("codecVersion").textValue())
+                .isEqualTo("transaction-intake-snapshot-envelope-v2");
+        assertThat(stored.getFinishedAt()).isEqualTo(finalizedAt);
+        assertThat(Instant.parse(stored.getResponseSnapshot()
+                .get("finalizedAt").textValue())).isEqualTo(finalizedAt);
+        assertThat(replay).isInstanceOf(IdempotencyClaimResult.Completed.class);
+        IdempotencyClaimResult.Completed replayed =
+                (IdempotencyClaimResult.Completed) replay;
+        assertThat(objectMapper.readTree(replayed.responseSnapshotJson()))
+                .isEqualTo(objectMapper.readTree(
+                        completed.responseSnapshotJson()
+                ));
+        assertThat(snapshotCodec.decode(completed.responseSnapshotJson()))
+                .isEqualTo(new TransactionIntakeSnapshotReplay(
+                        snapshot.toTransactionIntakeSnapshot(),
+                        201
+                ));
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> idempotencyService.complete(
+                        recordId,
+                        transaction.getTransactionId(),
+                        encoded,
+                        finalizedAt.plusSeconds(1)
+                )
+        ).isInstanceOf(IdempotencyStateTransitionNotAllowedException.class);
+        IdempotencyRecord unchanged = idempotencyRecordRepository
+                .findById(recordId)
+                .orElseThrow();
+        assertThat(unchanged.getResponseSnapshot()).isEqualTo(encoded);
+        assertThat(unchanged.getFinishedAt()).isEqualTo(finalizedAt);
+    }
+
+    @Test
+    void preservesLegacyAndV1CompletedRecordReplayAlongsideV2() {
+        TransactionFingerprintInput legacyInput = fingerprintInput();
+        FinancialTransaction legacyTransaction = financialTransactionRepository
+                .saveAndFlush(transaction(legacyInput.transactionId()));
+        String legacyKey = key("completed-legacy");
+        long legacyRecordId = acquiredRecordId(
+                idempotencyService.claim(legacyKey, legacyInput)
+        );
+        Instant legacyFinishedAt = finishedAtFor(legacyRecordId);
+        ObjectNode legacy = receivedBody(legacyTransaction);
+        idempotencyService.complete(
+                legacyRecordId,
+                legacyTransaction.getTransactionId(),
+                legacy,
+                legacyFinishedAt
+        );
+
+        TransactionFingerprintInput v1Input = fingerprintInput();
+        FinancialTransaction v1Transaction = financialTransactionRepository
+                .saveAndFlush(transaction(v1Input.transactionId()));
+        String v1Key = key("completed-v1");
+        long v1RecordId = acquiredRecordId(
+                idempotencyService.claim(v1Key, v1Input)
+        );
+        Instant v1FinishedAt = finishedAtFor(v1RecordId);
+        TransactionIntakeSnapshot v1Body = new TransactionIntakeSnapshot(
+                v1Transaction.getTransactionId(),
+                TransactionProcessingStatus.RECEIVED,
+                null,
+                null,
+                null,
+                null,
+                v1Transaction.getCreatedAt()
+        );
+        idempotencyService.complete(
+                v1RecordId,
+                v1Transaction.getTransactionId(),
+                snapshotCodec.encode(v1Body, 201, v1FinishedAt),
+                v1FinishedAt
+        );
+
+        IdempotencyClaimResult.Completed legacyCompleted =
+                (IdempotencyClaimResult.Completed) idempotencyService.claim(
+                        legacyKey,
+                        legacyInput
+                );
+        IdempotencyClaimResult.Completed v1Completed =
+                (IdempotencyClaimResult.Completed) idempotencyService.claim(
+                        v1Key,
+                        v1Input
+                );
+
+        assertThat(snapshotCodec.decode(legacyCompleted.responseSnapshotJson()))
+                .isEqualTo(new TransactionIntakeSnapshotReplay(
+                        new TransactionIntakeSnapshot(
+                                legacyTransaction.getTransactionId(),
+                                TransactionProcessingStatus.RECEIVED,
+                                null,
+                                null,
+                                null,
+                                null,
+                                legacyTransaction.getCreatedAt()
+                        ),
+                        200
+                ));
+        assertThat(snapshotCodec.decode(v1Completed.responseSnapshotJson()))
+                .isEqualTo(new TransactionIntakeSnapshotReplay(v1Body, 201));
+        assertThat(idempotencyRecordRepository.findById(legacyRecordId)
+                .orElseThrow().getFinishedAt()).isEqualTo(legacyFinishedAt);
+        assertThat(idempotencyRecordRepository.findById(v1RecordId)
+                .orElseThrow().getFinishedAt()).isEqualTo(v1FinishedAt);
     }
 
     @Test
@@ -585,6 +750,18 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
         );
         snapshot.put("finalizedAt", finalizedAt.toString());
         return snapshot;
+    }
+
+    private ObjectNode receivedBody(FinancialTransaction transaction) {
+        ObjectNode body = objectMapper.createObjectNode();
+        body.put("transactionId", transaction.getTransactionId().toString());
+        body.put("processingStatus", "RECEIVED");
+        body.putNull("riskLevel");
+        body.putNull("riskResponseOutcome");
+        body.putNull("adoptedDetectionResultId");
+        body.putNull("caseId");
+        body.put("createdAt", transaction.getCreatedAt().toString());
+        return body;
     }
 
     private record TransitionAttempt(boolean succeeded, Throwable failure) {
