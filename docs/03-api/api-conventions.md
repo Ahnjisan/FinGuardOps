@@ -193,7 +193,11 @@ Idempotency-Key: <key>
 - `(operationScope, Idempotency-Key)` 조합을 Unique로 관리한다.
 - 현재 DB는 `expiresAt`에 최초 선점 시각의 24시간 후를 저장한다. 그러나 Service의 만료 판정과 정리 작업은 구현되지 않았으므로 이를 시행 중인 멱등 유효기간으로 해석하지 않는다.
 
-멱등 응답의 현재 구현, 신규 version envelope, legacy 재생과 최종 동기 응답 전환 정책은 [`../07-decisions/ADR-004-idempotency-response-snapshot-transition.md`](../07-decisions/ADR-004-idempotency-response-snapshot-transition.md)를 따른다.
+멱등 응답의 현재 구현, 신규 version envelope, legacy 재생과 최종 동기 응답 전환
+정책은 [`ADR-004`](../07-decisions/ADR-004-idempotency-response-snapshot-transition.md)를
+따른다. External Risk 선행 실패의 terminal 저장·재생은
+[`ADR-007`](../07-decisions/ADR-007-external-risk-idempotent-failure-replay-contract.md)을
+따른다.
 
 ### 6.2 처리 규칙
 
@@ -204,6 +208,7 @@ Spring Boot가 멱등성 확인과 업무 결과의 최종 소유자이다.
 | 같은 키 + 같은 요청, legacy 처리 완료 | 새 거래·탐지·사건을 만들지 않고 `200 OK`로 기존 완료 결과를 반환한다. |
 | 같은 키 + 같은 요청, 신규 envelope 처리 완료 | 새 거래·탐지·사건을 만들지 않고 저장된 최초 확정 업무 결과와 검증된 `201 Created`를 재생한다. `traceId`는 현재 재요청 값을 사용한다. |
 | 같은 키 + 같은 요청, 최초 처리 중 | 새 처리를 시작하지 않고 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다. |
+| 같은 키 + 같은 요청, External Risk 실패 확정 | Provider·FastAPI·위험 대응 최종화를 호출하지 않고 저장된 안전한 실패 응답을 재생한다. `traceId`는 현재 재요청 값을 사용한다. |
 | 같은 키 + 다른 요청 | 키 재사용 충돌로 거부하고 `409 Conflict`와 `IDEMPOTENCY_KEY_CONFLICT`를 반환한다. |
 | 다른 키 + 같은 `transactionId` | 새 거래로 처리하지 않고 `409 Conflict`와 `DUPLICATE_TRANSACTION`을 반환한다. |
 | 같은 `transactionId` + 다른 요청 내용 | 기존 거래를 덮어쓰거나 재분석으로 해석하지 않고 `409 Conflict`와 `DUPLICATE_TRANSACTION`을 반환한다. |
@@ -272,6 +277,20 @@ deviceRef
 | `DEPENDENCY_TIMEOUT` | `503 Service Unavailable` | `DEPENDENCY_TIMEOUT` | `탐지 서비스를 사용할 수 없습니다.` |
 
 null, 빈 값, 알 수 없는 값과 `TRANSACTION_INTAKE_FAILED` 같은 내부 전용 값은 `500 Internal Server Error`, `INTERNAL_ERROR`, `요청을 처리하는 중 오류가 발생했습니다.`로 축약한다. 내부 `failureCode`는 오류 응답이나 로그에 노출하지 않는다.
+
+ADR-007이 확정한 여섯 External Risk typed category는 정상적으로 저장된 경우 같은
+operation scope·key에서 모두 terminal이다. 신규 typed 실패는 성공 Snapshot
+legacy·v1·v2를 재사용하지 않고 별도 strict Failure Snapshot에 공개 응답을 저장하는
+목표다.
+같은 fingerprint 재요청은 Provider를 호출하지 않고 저장 HTTP status·공개 code·
+안전 message·빈 `fieldErrors`를 의미적으로 재생한다. category별 authoritative 공개
+매핑과 현재 구현 여부는
+[`transaction-detection-api.md`](./transaction-detection-api.md)를 따른다.
+
+신규 Failure Snapshot과 기존 code-only `FAILED`의 물리 호환성은
+[`transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따른다.
+현재 DB·Entity는 신규 Failure Snapshot을 저장할 수 없고 전용 codec·mapper와 신규
+Migration은 아직 구현되지 않았다.
 
 다음 항목은 후속 구현 전에 추가 결정한다.
 
@@ -427,14 +446,18 @@ Spring Boot는 `X-Trace-Id`가 정확히 하나의 헤더 값으로 전달되고
 - 오류 처리 과정에서 다른 `traceId`를 생성하지 않는다.
 - 요청 처리가 끝나면 실행 스레드의 MDC에서 `traceId`를 제거한다.
 - `traceId`는 `transactionId`, `eventId`, `detectionResultId`를 대체하지 않는다.
-- `traceId`는 거래 요청 fingerprint와 멱등 완료 응답 snapshot에서 제외한다. 완료된 동일 요청의 재전송에는 저장된 업무 결과와 현재 HTTP 요청의 `traceId`를 결합한다.
+- `traceId`는 거래 요청 fingerprint, 멱등 성공 Snapshot과 External Risk Failure
+  Snapshot에서 제외한다. 완료·실패 재전송에는 저장된 업무 결과와 현재 HTTP 요청의
+  `traceId`를 결합한다. exact replay는 저장 HTTP status·공개 code·안전 message·
+  `fieldErrors`의 의미적 동일성이며 trace, HTTP 헤더와 JSON byte ordering은 포함하지
+  않는다. 공개 `replayed` 필드는 추가하지 않는다.
 - 로그·메트릭·트레이스에 고객·계좌·IP 원문을 `traceId`와 함께 기록하지 않으며 `traceId`를 메트릭 레이블로 추가하지 않는다.
 
 OpenTelemetry, W3C Trace Context의 `traceparent`, 외부 HTTP 호출, Kafka와 비동기 작업으로의 전파, 샘플링과 보존 기간은 이 문서의 현재 구현 범위에서 제외한다.
 
 ## 9. 사용자 결정 필요 항목
 
-- `FAILED` 멱등 요청의 같은 키 재전송 정책과 만료 기록 정리 방식
+- 멱등 만료 기록 정리 방식과 만료 후 키 재사용 정책
 - Validation 오류의 최상위 오류 코드를 더 세분화할지
 - `fieldErrors.code`의 코드 목록과 버전 관리 방식
 - 오류 응답의 `resource` 최종 이름과 범용 구조

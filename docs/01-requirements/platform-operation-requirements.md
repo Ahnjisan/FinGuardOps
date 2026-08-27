@@ -62,12 +62,12 @@ FinGuardOps는 금융거래와 사용자 행동을 기반으로 이상거래를 
 
 | 운영 대상 | 역할 | 현재 도입 상태와 운영 범위 |
 | --- | --- | --- |
-| Spring Boot Backend | 거래 접수·검증, 멱등성, 거래·사건 상태, 위험 대응과 업무 정합성의 최종 소유자 | Health, 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion과 기본 Rule 집합 발행 경계, Rule 분석 HTTP Client·내부 오케스트레이션, External Risk 독립 정책·Mock, Backend Java v2 DTO·Mapper·Client·내부 오케스트레이션과 Mock 전용 per-invocation coordinator, FraudCase·CaseTransaction과 위험 대응·AuditLog 원자적 최종화 경계가 구현되었다. 실제 Provider·public 거래 접수·멱등 실패 재생, Snapshot v2·운영 복구, 공개 사건·감사·최종화 API, USER 인증·인가와 사건 조사 상태 전이·추가 연결·병합·분리는 미구현이다. |
+| Spring Boot Backend | 거래 접수·검증, 멱등성, 거래·사건 상태, 위험 대응과 업무 정합성의 최종 소유자 | Health, public `POST /api/v1/transactions`, 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion과 기본 Rule 집합 발행 경계, Rule 분석 HTTP Client·내부 오케스트레이션, External Risk 독립 정책·Mock, Backend Java v2 DTO·Mapper·Client·내부 오케스트레이션과 Mock 전용 per-invocation coordinator, FraudCase·CaseTransaction과 위험 대응·AuditLog 원자적 최종화 경계가 구현되었다. 실제 Provider, public intake와 External Risk coordinator·Rule v2·위험 대응 최종화·멱등 실패 저장·재생의 end-to-end 연결, Snapshot v2·운영 복구, 공개 사건·감사·최종화 API, USER 인증·인가와 사건 조사 상태 전이·추가 연결·병합·분리는 미구현이다. |
 | FastAPI AI Service | Feature 계산, Rule 실행, ML 추론, 모델 라우팅, AI 사건 리포트와 템플릿 fallback | `POST /api/v1/rule-analysis`, External Risk 필수 입력의 `POST /api/v2/rule-analysis`, R001~R004 실행과 점수·RiskLevel·Evidence 계산은 구현되었다. v2 External Risk는 validation-only이며 ML 추론·모델 라우팅·AI 사건 리포트와 템플릿 fallback은 미구현이다. |
 | PostgreSQL | 거래, 행동 이벤트, 탐지 결과, 사건, 감사 로그와 AI 사용량·비용 데이터의 영속 저장 목표 | V1~V7의 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion, FraudCase·CaseTransaction과 append-only AuditLog 영속 기반이 구현되었다. External Risk 영속화와 사건 조사·AI 사용량·비용·운영 데이터는 미구현이며 별도 승인 범위이다. |
 | Redis | 정확 일치 AI 리포트 캐시와 집계 데이터 사용 목표 | 향후 연동·검증 범위이다. External Risk cache는 현재 계약이 아니며 별도 Issue와 승인이 필요하다. 시맨틱 캐시는 범위에 포함하지 않는다. |
 | Kafka | 사건·리포트·통계 등 비동기 처리 목표 | 핵심 거래·탐지·사건 기능 안정화 이후 도입한다. 현재 구현된 구성으로 간주하지 않는다. |
-| External Risk Mock | 위험 송신·수신 계좌와 위험 기기의 결정적 scenario 제공 | local/dev/test 전용 독립 Port·정책 Service·Mock, 성공 인메모리 Snapshot과 Rule v2 전달 coordinator가 구현되었다. 직접 재호출·멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수 있다. 실제 Provider·IP·public 거래 접수·멱등 실패 재생은 미구현이며 실패를 cache·fallback·`UNMATCHED`로 변환하지 않는다. |
+| External Risk Mock | 위험 송신·수신 계좌와 위험 기기의 결정적 scenario 제공 | local/dev/test 전용 독립 Port·정책 Service·Mock, 성공 인메모리 Snapshot과 Rule v2 전달 coordinator가 구현되었다. 직접 재호출·멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수 있다. 실제 Provider·IP와 public intake end-to-end 연결·멱등 실패 재생은 미구현이며 실패를 cache·fallback·`UNMATCHED`로 변환하지 않는다. Provider 호출 단일 승자는 목표 public transaction intake의 Idempotency claim이 소유한다. |
 | LLM Provider | HIGH·CRITICAL 사건 중심의 생성형 AI 사건 리포트 생성 | 향후 외부 연동 범위이다. 위험 점수, 최종 판정, 거래 차단, 고객 제재와 사건 상태 확정을 수행하지 않는다. |
 | Observability Stack | 로그·메트릭·트레이싱 수집 및 기술 상태 분석 | 핵심 기능 안정화 이후 단계적으로 도입할 범위이다. 논리 메트릭 계약은 `observability-metrics-spec.md`에 정의했으며 제품 선택과 실제 수집 구현은 후속 범위이다. |
 | 배포 환경 | 로컬·컨테이너·클라우드 환경에서 버전 배포와 실행 상태 관리 | Docker, CI/CD, Kubernetes와 AWS는 로드맵에 따른 단계적 도입·검증 대상이다. Kubernetes와 AWS가 현재 구현된 것으로 간주하지 않는다. |
@@ -193,6 +193,10 @@ FastAPI Health·자원·최근 배포를 확인하고, 특정 요청·모델·Ru
 #### 탐지 정보
 
 External Risk Mock 상태, 호출 지연·Timeout, `traceId`와 failure category를 확인한다.
+목표 멱등 연결의 운영 탐지 후보는 오래 지속되는 `IN_PROGRESS`, 거래 없이 남은
+`IN_PROGRESS`, `RECEIVED` 거래가 연결된 `IN_PROGRESS`, terminal 도메인 상태와
+`IN_PROGRESS`의 공존, External Risk failure writer 실패와 final success completion
+gap이다. 이 상태를 수집하는 실제 metric·경보·scheduler는 아직 구현되지 않았다.
 
 #### 영향 범위
 
@@ -200,7 +204,10 @@ External Risk Mock 상태, 호출 지연·Timeout, `traceId`와 failure category
 목표 거래 연결에서는 거래가 `RECEIVED`를 유지하고 DetectionResult와
 DetectionEvidence를 생성하지 않으며 FastAPI·위험 대응 최종화·성공 Snapshot v2를
 호출하거나 생성하지 않는다. 멱등 레코드는 실패를 확정하고 같은 요청 재생에서는
-External Risk Provider를 다시 호출하지 않는다. 이 거래 연결은 아직 구현되지 않았다.
+External Risk Provider를 다시 호출하지 않는다. 여섯 typed category가 정상적으로
+저장된 경우 같은 key에서 모두 terminal이며 자세한 저장·재생 계약은
+[ADR-007](../07-decisions/ADR-007-external-risk-idempotent-failure-replay-contract.md)을
+따른다. 이 거래 연결과 Failure Snapshot은 아직 구현되지 않았다.
 
 #### 업무 지속 원칙
 
@@ -214,11 +221,16 @@ External Risk 선행 조회 실패를 이 상태 전이로 변환하지 않는�
 
 #### 운영자 행동
 
-Mock 활성 profile·property와 scenario, 성공·failure category를 구분한다. 복구 후 재조회는 별도 승인된 실행 경로 없이 자동 수행하지 않는다.
+Mock 활성 profile·property와 scenario, 성공·failure category를 구분한다. Provider
+호출 여부를 DB만으로 확정할 수 없는 `IN_PROGRESS`에서는 Provider를 자동 재호출하지
+않는다. 실제 복구 명령·scheduler·batch·자동화는 후속 Issue다.
 
 #### 기록 항목
 
-장애 시각, 안전한 trace, failure category, 임시 대응, 원인과 재발 방지를 기록한다. 고객·계좌·기기 reference와 Provider 원문은 로그에 기록하지 않는다.
+장애 시각, 안전한 현재 trace, failure category, 멱등 상태, writer 결과, 임시 대응,
+원인과 재발 방지를 기록한다. 고객·계좌·기기 reference, Provider 원문과 cause 전체는
+로그에 기록하지 않는다. 예상된 typed failure의 후속 안전 mapper는 category와 현재
+trace만 기록하며 아직 구현되지 않았다.
 
 ### 9.3 LLM Timeout
 
@@ -485,12 +497,15 @@ AI 운영 예산과 리포트 생성 기능에 영향을 주지만 위험 점수
 - LLM 실패가 Rule·ML 위험 판단 결과를 변경하지 않는다.
 - AI 리포트 실패는 거래 접수·탐지·사건 처리 실패와 구분한다.
 - 생성형 AI는 위험 점수, 최종 판정, 거래 차단, 고객 제재와 사건 상태 확정을 수행하지 않는다.
-- 외부 위험정보 timeout·unavailable·invalid response는 위험정보 없음이나
-  `UNMATCHED`로 바꾸지 않고 typed failure로 전파하며 현재 분석을 계속하지 않는다.
+- External Risk의 `TIMEOUT`, `UNAVAILABLE`, `INVALID_REQUEST`,
+  `UNSUPPORTED_CAPABILITY`, `INVALID_RESPONSE`, `TRANSFORMATION_ERROR`는 위험정보
+  없음이나 `UNMATCHED`로 바꾸지 않고 typed failure로 전파하며 현재 분석을 계속하지 않는다.
   목표 거래 연결에서는 거래 `RECEIVED` 유지, DetectionResult·Evidence 미생성,
-  FastAPI·최종화 미호출과 멱등 실패 확정을 적용한다. 같은 요청 재생은 Provider를
-  다시 호출하지 않는다. Rule 분석 시작 commit 이후의 `ANALYZING → FAILED` 및
-  DetectionResult `FAILED` 경계와 구분한다.
+  FastAPI·최종화 미호출과 멱등 실패 확정을 적용한다. 여섯 typed category는 저장
+  commit이 확인되면 같은 key에서 terminal이고 재생은 Provider를 다시 호출하지
+  않는다. 저장 여부가 불확실한 `IN_PROGRESS`도 자동 실행하지 않는다. Rule 분석
+  시작 commit 이후의 `ANALYZING → FAILED` 및 DetectionResult `FAILED` 경계와
+  구분한다.
 - Redis 장애가 발생해도 캐시 미사용 또는 제한된 fallback 가능성을 검토한다. 정확 일치 조건을 우회하거나 다른 사건의 AI 리포트를 재사용하지 않는다.
 - Kafka 장애는 Kafka 도입 이후의 비동기 사건·리포트·통계 작업에 한정하여 영향 범위를 판단한다.
 - Spring Boot는 거래·사건 상태와 업무 정합성의 최종 소유자이다. 핵심 데이터의 저장 결과가 불명확하면 임의로 성공 처리하지 않는다.
@@ -596,7 +611,7 @@ React에서 Grafana와 동일한 기술 대시보드를 전부 다시 구현하�
 | 장애 등급 | `TBD` | 영향 서비스·기능, 지속 시간과 데이터 정합성 영향 |
 | 장애 이력 저장 방식 | `TBD` | 조회·감사·보존 요구와 후속 DB·API 설계 |
 | 배포 이력 저장 방식 | `TBD` | CI/CD·배포 환경과 감사 요구 |
-| External Risk 실패 후 재분석·수동 복구 정책 | `TBD` | 별도 승인된 실행 경로, 멱등성과 업무 정합성 |
+| External Risk 실패 후 별도 operation scope의 복구·재분석 명령과 운영 복구 구현 | `TBD` | ADR-007의 same-key terminal·자동 재실행 금지, 실행 권한, 감사와 업무 정합성 |
 | AI 리포트 재시도 간격과 Timeout 값 | `TBD` | 확정된 최대 1회 재시도 안에서 지연·비용과 중복 실행 방지 |
 
 추가로 공통 운영 식별자의 생성·전파·보존 방식, 메트릭 집계 차원, 알림 해제 조건, 배포 복구 조건, AI 리포트 품질 기준과 비용 가격·환율 반영 방식도 후속 문서에서 사용자 승인으로 확정한다.

@@ -4,7 +4,7 @@
 
 이 문서는 FinGuardOps의 거래 접수·조회, 행동 이벤트 수집·조회와 탐지 결과 조회 REST API 계약을 정의한다.
 
-이 계약은 이후 Spring Boot Controller, 요청·응답 DTO, Validation, Service, 테스트와 OpenAPI 구현의 기준이다. API 공통 표현, 금액, 페이지네이션, 멱등성, 오류 응답과 추적 원칙은 [`api-conventions.md`](./api-conventions.md)를 따른다. 기존 멱등 Snapshot 전환은 [`ADR-004`](../07-decisions/ADR-004-idempotency-response-snapshot-transition.md), 최종 성공과 Snapshot v2·완료 간극 복구는 [`ADR-006`](../07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md)을 따른다.
+이 계약은 이후 Spring Boot Controller, 요청·응답 DTO, Validation, Service, 테스트와 OpenAPI 구현의 기준이다. API 공통 표현, 금액, 페이지네이션, 멱등성, 오류 응답과 추적 원칙은 [`api-conventions.md`](./api-conventions.md)를 따른다. 기존 멱등 Snapshot 전환은 [`ADR-004`](../07-decisions/ADR-004-idempotency-response-snapshot-transition.md), 최종 성공과 Snapshot v2·완료 간극 복구는 [`ADR-006`](../07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md), External Risk 선행 실패 저장·재생 결정은 [`ADR-007`](../07-decisions/ADR-007-external-risk-idempotent-failure-replay-contract.md)을 따른다.
 
 ## 2. 범위와 책임 경계
 
@@ -15,25 +15,29 @@
 ```text
 Client
 → Spring Boot 거래 접수
-→ 입력 검증·멱등성 확인
-→ RECEIVED 거래 저장 commit
+→ 헤더·요청 Validation
+→ fingerprint 계산
+→ Idempotency IN_PROGRESS 단일 승자 선점 commit
+→ RECEIVED 거래 저장·Idempotency record 연결 commit
 → DB 트랜잭션 밖 External Risk 조회
-→ 성공 Snapshot을 포함한 목표 FastAPI /api/v2/rule-analysis 호출
-→ Spring Boot 결과 검증·저장·채택
-→ Spring Boot 위험 대응 결정
-→ 필요 시 사건 생성 또는 기존 사건 연결
-→ Client 응답
+→ 성공이면 목표 FastAPI /api/v2/rule-analysis와 위험 대응 최종화
+→ 최종 성공 Snapshot v2 또는 External Risk Failure Snapshot으로 terminal 전이 commit
+→ Client 응답 또는 같은 key·fingerprint의 저장 응답 재생
 ```
 
-현재 외부 거래 흐름은 입력 검증·멱등성 확인·거래 PostgreSQL 저장 후
-`RECEIVED`와 탐지 관련 null 값을 반환하는 단계까지이다.
+현재 public `POST /api/v1/transactions`는 구현되어 있다. 이 흐름은 입력 검증,
+fingerprint 계산, `IN_PROGRESS` 선점 뒤 거래 `RECEIVED`·성공 Snapshot v1·
+`COMPLETED`를 원자적으로 저장하고 단계적 응답을 반환한다. 위 목표처럼 거래를
+Idempotency record에 연결한 채 `IN_PROGRESS`를 commit한 후 외부 호출하는 경계는
+아직 구현되지 않았다.
 DetectionResult·DetectionEvidence의 물리 영속 모델과 FastAPI
 `POST /api/v1/rule-analysis` HTTP 경계, Spring Boot `RuleAnalysisHttpClient`,
 Timeout·Trace 전달과 응답 검증·오류 분류, 거래 분석 Snapshot 조합·HTTP
 오케스트레이션과 탐지 실행 결과 자동 생성·채택은 구현되었다. 독립 External Risk
 Port·정책 Service·local/dev/test Mock·성공 인메모리 Snapshot과 Mock 활성 환경의
-per-invocation Policy→Rule v2 coordinator도 구현되었지만 실제 Provider와 public 거래
-접수·멱등 실패 재생에는 연결되지 않았다. `ANALYZED` 거래를 잠그고 채택 결과를
+per-invocation Policy→Rule v2 coordinator도 구현되었지만 실제 Provider는 없고 public
+거래 접수와 External Risk coordinator·Rule v2·위험 대응 최종화·멱등 External Risk
+실패 저장·재생의 end-to-end 연결도 구현되지 않았다. `ANALYZED` 거래를 잠그고 채택 결과를
 검증한 뒤 위험 대응·필요한 사건·거래 최종 상태·AuditLog를 원자적으로 확정하는
 내부 최종화 경계는 구현되었다. 거래 접수 Service 연결, 최종 멱등 응답 v2, Snapshot
 완료 간극 복구와 RuleVersion 운영 publish는 아직 구현되지 않았다. 현재 단계 응답은 최종 동기
@@ -49,7 +53,8 @@ HIGH·CRITICAL은 새 사건·첫 연결 또는 기존 활성 연결을 최종 �
 Rule v1 R001~R004를 실행한다. 현재 v1 Endpoint는 당장 제거하지 않으며 v2
 Java·Python DTO·Client, 내부 오케스트레이션과 Mock 성공 Snapshot 전달 coordinator는
 구현됐다. coordinator 직접 재호출·멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수
-있다. 실제 Provider와 public 거래 접수·멱등 실패 재생은 미구현이다. 상세 계약은
+있다. 실제 Provider와 public 거래 접수부터 coordinator까지의 end-to-end 연결, 멱등
+실패 저장·재생은 미구현이다. 상세 계약은
 [External Risk·Rule 분석 입력 계약](../01-requirements/external-risk-rule-analysis-input-contract.md)을
 따른다.
 
@@ -367,7 +372,7 @@ X-Trace-Id: trace_demo_tx_0001
 ### 5.7 멱등성과 중복
 
 - 같은 `Idempotency-Key`와 같은 요청의 최초 처리가 완료되었으면 새 거래·탐지·사건을 생성하지 않고 기존 업무 결과를 반환한다. 무버전 legacy Snapshot은 `200 OK`, v1과 v2 envelope는 저장되고 검증된 `201 Created`를 사용한다.
-- 모든 Snapshot 형식은 최초 확정 업무 값을 유지하고 `traceId`만 현재 재전송 요청의 값을 사용한다. 따라서 동일 응답 재생은 업무 결과와 정책상 HTTP 상태의 재생이며 응답 전체의 바이트 단위 복제를 뜻하지 않는다.
+- 모든 Snapshot 형식은 최초 확정 업무 값을 유지하고 `traceId`만 현재 재전송 요청의 값을 사용한다. External Risk 확정 실패의 exact replay 범위는 HTTP 상태, 공개 `code`, 안전한 `message`, 빈 `fieldErrors`의 의미적 동일성이다. `traceId`, HTTP 헤더, JSON byte ordering은 exact replay 범위가 아니며 공개 `replayed` 필드를 추가하지 않는다.
 - 같은 `Idempotency-Key`와 같은 요청의 최초 처리가 진행 중이면 새 처리를 시작하지 않고 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다.
 - 같은 키에 다른 요청 내용이 오면 `409 Conflict`와 `IDEMPOTENCY_KEY_CONFLICT`를 반환한다.
 - 다른 키로 같은 `transactionId`가 오면 `409 Conflict`와 `DUPLICATE_TRANSACTION`을 반환한다.
@@ -404,45 +409,73 @@ Content-Type: application/json
 }
 ```
 
-`FAILED`인 같은 키·같은 요청은 자동 재실행하지 않는다. 거래 접수 API가 기존 실패를 공개 응답으로 재현하는 whitelist는 다음과 같다.
+`FAILED`인 같은 operation scope·키·fingerprint 요청은 자동 재실행하지 않는다.
+현재 code-only legacy `FAILED`를 공개 응답으로 축약하는 whitelist는 다음과 같다.
 
 | 저장된 `failureCode` | HTTP 상태 | 공개 오류 코드 | 고정 message |
 | --- | --- | --- | --- |
 | `DUPLICATE_TRANSACTION` | `409 Conflict` | `DUPLICATE_TRANSACTION` | `이미 존재하는 transactionId입니다.` |
 | `DEPENDENCY_TIMEOUT` | `503 Service Unavailable` | `DEPENDENCY_TIMEOUT` | `탐지 서비스를 사용할 수 없습니다.` |
-| `DEPENDENCY_UNAVAILABLE` | `503 Service Unavailable` | `DEPENDENCY_UNAVAILABLE` | `탐지 서비스를 사용할 수 없습니다.` |
-| `INTERNAL_ERROR` | `500 Internal Server Error` | `INTERNAL_ERROR` | `요청을 처리하는 중 오류가 발생했습니다.` |
 
 저장된 `failureCode`가 null, 빈 값, 알 수 없는 값 또는 내부 전용 값이면 `500 Internal Server Error`, `INTERNAL_ERROR`, `요청을 처리하는 중 오류가 발생했습니다.`로 축약한다. 원래 `failureCode` 문자열을 공개 code나 message로 전달하지 않는다. 현재 거래 저장 또는 멱등 완료의 예기치 않은 실패를 기록하는 내부 코드 `TRANSACTION_INTAKE_FAILED`도 공개 whitelist가 아니므로 `INTERNAL_ERROR`로 처리한다.
 
-위 whitelist의 `DEPENDENCY_UNAVAILABLE`과 `INTERNAL_ERROR` 거래 접수 연결은
-아직 구현되지 않았다. 최초 응답과 FAILED 재생은 같은 HTTP 상태·공개 code·고정
-message를 사용해야 하며 Client category 원문을 노출하지 않는다.
+ADR-007이 확정한 목표 External Risk 전용 공개 매핑은 다음과 같다. 내부
+`failureCategory`나 Provider 상세는 공개 body에 포함하지 않는다.
 
-최종 업무 상태 commit 뒤 v2 Snapshot 완료가 실패하면 멱등 레코드를 `FAILED`로
-바꾸지 않고 `IN_PROGRESS`로 유지한다. 최초 요청은 `500 INTERNAL_ERROR`, 같은
-키·같은 요청은 `409 IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다. 재요청은
-FastAPI, External Risk, 위험 대응과 사건 생성을 반복하지 않는다. 운영 복구만
-확정된 도메인 상태를 검증해 동일 v2 Snapshot을 완료할 수 있다.
+| 내부 category | HTTP 상태 | 공개 오류 code | 공개 안전 message |
+| --- | --- | --- | --- |
+| `TIMEOUT` | `503 Service Unavailable` | `DEPENDENCY_TIMEOUT` | `탐지 서비스를 사용할 수 없습니다.` |
+| `UNAVAILABLE` | `503 Service Unavailable` | `DEPENDENCY_UNAVAILABLE` | `탐지 서비스를 사용할 수 없습니다.` |
+| `INVALID_REQUEST` | `500 Internal Server Error` | `INTERNAL_ERROR` | `요청을 처리하는 중 오류가 발생했습니다.` |
+| `UNSUPPORTED_CAPABILITY` | `500 Internal Server Error` | `INTERNAL_ERROR` | `요청을 처리하는 중 오류가 발생했습니다.` |
+| `INVALID_RESPONSE` | `500 Internal Server Error` | `INTERNAL_ERROR` | `요청을 처리하는 중 오류가 발생했습니다.` |
+| `TRANSFORMATION_ERROR` | `500 Internal Server Error` | `INTERNAL_ERROR` | `요청을 처리하는 중 오류가 발생했습니다.` |
+
+목표 저장 형식은 성공 Snapshot v1·v2와 구분되는
+`snapshotType=external-risk-failure`,
+`responseSchemaVersion=transaction-create-error-v1`,
+`codecVersion=external-risk-failure-snapshot-envelope-v1`이다. strict envelope의
+정확한 필드·4 KiB 제한·fail-closed decoder 계약은 ADR-007을, 현재와 목표 물리
+제약은 [거래 접수 스키마](../04-database/transaction-intake-schema.md)를 따른다.
+`responseBody.code`는 `idempotency_record.failure_code`와 같아야 하고
+`fieldErrors`는 빈 배열이다.
+
+최초 확정 실패와 같은 키·fingerprint 재생은 위 표의 HTTP 상태·공개 code·안전
+message·빈 `fieldErrors`를 의미적으로 동일하게 반환한다. 재생 시 External Risk
+Provider, FastAPI와 위험 대응 최종화는 모두 `0회` 호출한다. 새
+`Idempotency-Key`를 사용한 같은 `transactionId` 접수는 unique constraint와 충돌하므로
+공식 재처리 수단이 아니다. 재처리는 후속 Issue에서 별도 operation scope의 승인된
+복구·재분석 명령으로 설계한다.
+
+이 category mapper, Failure Snapshot codec·decoder, DB Migration, public intake 연결과
+재생 경로는 아직 구현되지 않았다. 전용 대상은 `ExternalRiskLookupException`의 위
+여섯 category뿐이며 예상하지 못한 일반 `RuntimeException`을 category로 변환하거나
+전용 Snapshot으로 저장하지 않는다.
+
+External Risk failure writer 실패·저장 직전 crash 또는 최종 성공 완료 간극은
+durable terminal 결과가 아니다. 멱등 레코드는 `IN_PROGRESS`로 남을 수 있고 최초
+요청의 목표 공개 응답은 `500 INTERNAL_ERROR`, 같은 키·fingerprint 재요청은
+`409 IDEMPOTENCY_REQUEST_IN_PROGRESS`이다. DB만으로 Provider 호출 여부를 확정할 수
+없으므로 External Risk를 자동 재호출하지 않는다. 원본 typed exception을 유지하고
+writer 오류를 suppressed로 보존하며 실제 운영 복구는 후속 Issue에서 정한다.
 
 ### 5.8 의존 서비스 Timeout
 
-#### 5.8.1 External Risk Timeout
+#### 5.8.1 External Risk 선행 실패
 
-- timeout은 `TIMEOUT`, unavailable은 `UNAVAILABLE`, 비정상 응답은
-  `INVALID_RESPONSE` typed failure로 전파하고 현재 분석을 계속하지 않는다.
+- `TIMEOUT`, `UNAVAILABLE`, `INVALID_REQUEST`, `UNSUPPORTED_CAPABILITY`,
+  `INVALID_RESPONSE`, `TRANSFORMATION_ERROR`는 typed failure로 전파하고 현재 분석을
+  계속하지 않는다.
 - 실패를 cache, stale data, fallback, `UNMATCHED`, 위험정보 없음 또는 안전으로
   변환하지 않는다. 현재 `ExternalRiskSnapshot`은 성공 결과만 표현한다.
 - 목표 거래 접수 연결에서는 Transaction을 `RECEIVED`로 유지하고 DetectionResult를
   생성하지 않으며 FastAPI·위험 대응 최종화를 호출하지 않는다. 성공 Snapshot v2와
   사건·AuditLog도 만들지 않는다.
-- 멱등 레코드는 실패를 확정하고 같은 operation scope·key·fingerprint 재생에서
-  Provider를 다시 호출하지 않는다.
-- timeout은 `503 Service Unavailable`과 `DEPENDENCY_TIMEOUT`, unavailable은
-  `503 Service Unavailable`과 `DEPENDENCY_UNAVAILABLE`을 사용한다. 이 공개 매핑과
-  거래 연결은 아직 구현되지 않았다.
-- cache, Circuit Breaker 또는 fallback을 도입하려면 별도 Issue와 계약 승인이
-  필요하다.
+- Failure Snapshot과 `FAILED`가 정상 commit된 경우 여섯 category 모두 같은
+  operation scope·key에서 terminal이다. 같은 fingerprint 재생은 Provider를 다시
+  호출하지 않고 5.7의 저장된 안전 응답을 반환한다.
+- 자동 retry, fallback, cache, Circuit Breaker 또는 stale data는 이 계약에 포함하지
+  않는다.
 
 #### 5.8.2 FastAPI Timeout
 
@@ -1191,9 +1224,10 @@ Content-Type: application/json
 - 최초 거래 생성 HTTP 요청의 `traceId`를 별도 생성 없이 분석
   `analysisTraceId`로 그대로 전달해 Spring Boot, External Risk Mock과 FastAPI
   호출을 연결한다.
-- Snapshot에는 `traceId`를 저장하지 않는다. 완료·실패 재생 응답은 현재
-  재요청의 `traceId`를 사용하며 최초 분석 trace를 재요청 trace로 재사용하지
-  않는다.
+- 성공 Snapshot과 External Risk Failure Snapshot에는 `traceId`를 저장하지 않는다.
+  완료·실패 재생 응답은 현재 재요청의 `traceId`를 결합하며 최초 분석 trace를
+  재요청 trace로 재사용하지 않는다. External Risk 실패 exact replay는 HTTP 상태,
+  공개 code, 안전 message와 `fieldErrors`의 의미적 동일성만 보장한다.
 - 조회 API의 `traceId`는 해당 조회 요청을 추적하며 저장된 과거 분석의 `traceId`와 같을 필요가 없다.
 - 탐지 결과에 저장된 분석 당시 추적값과 현재 조회 요청의 `traceId`를 함께 제공할 필요가 있으면 서로 다른 필드명과 의미로 구분한다.
 - OpenTelemetry 전파 헤더의 구체적인 이름과 구현은 이 문서에서 확정하지 않는다.
@@ -1209,12 +1243,17 @@ Content-Type: application/json
   `transactionId`, `evaluationCutoffAt`, `lookedUpAt`, `providerCode`,
   `providerAsOf`, `SUCCEEDED` 조회 상태, `MATCHED` 또는 `UNMATCHED` 정책 결과와
   최대 3개의 제한된 match만 제공한다.
-- Snapshot에는 cache·fallback·stale data·retry·실패 상태·`traceId`, 실제
-  고객·계좌·기기 reference와 Provider 원문을 포함하지 않는다. External Risk
-  실패 시 Snapshot을 생성하지 않고 typed exception을 전파한다.
+- 성공 업무용 `ExternalRiskSnapshot`에는 cache·fallback·stale data·retry·실패
+  상태를 포함하지 않는다. 별도 External Risk Failure Snapshot은 Provider 업무 응답
+  원문이 아니라 안전한 공개 실패를 재생하기 위한 envelope이다.
+- Failure Snapshot에는 `traceId`, `transactionId`, `evaluationCutoffAt`, 원본
+  `Idempotency-Key`, fingerprint, Provider request·response body·원문 code·URL,
+  고객·계좌·기기 reference, IP·행동 원문, low-level exception message, stack trace,
+  인증정보, Provider 구현 클래스와 내부 설정을 저장하지 않는다. `transactionId`는
+  idempotency record의 거래 FK로 확인한다.
 - 목표 v2 `externalRisk`에는 Provider·정책·시각과 제한된 match만 포함하며 기존
-  거래·행동의 비식별 reference를 중복하지 않는다. Snapshot과 v2 요청은 DB,
-  DetectionEvidence 또는 AuditLog에 저장하지 않는다.
+  거래·행동의 비식별 reference를 중복하지 않는다. 성공 `ExternalRiskSnapshot`과
+  v2 요청은 DB, DetectionEvidence 또는 AuditLog에 저장하지 않는다.
 - Provider 응답 원문, 인증정보와 내부 예외 원문을 응답에 포함하지 않는다.
 
 ## 16. 사용자 결정 필요 항목
@@ -1227,18 +1266,16 @@ Content-Type: application/json
 
 확정된 목표 계약은 다음과 같다.
 
-승인된 목표 거래 오케스트레이션은 External Risk timeout·unavailable·invalid
-response 발생 시 분석을 시작하지 않고 거래 `RECEIVED`를 유지하며 DetectionResult를
-생성하지 않는다. FastAPI·최종화·성공 Snapshot v2를 호출하거나 만들지 않는다.
-timeout은
-`DEPENDENCY_TIMEOUT`, unavailable은 `DEPENDENCY_UNAVAILABLE`, 계약·검증·변환
-오류는 `INTERNAL_ERROR`로 매핑한다. 이 멱등 실패 연결과 공개 오류 매핑은 아직
-구현되지 않았다.
+승인된 목표 거래 오케스트레이션은 여섯 External Risk typed failure 발생 시 분석을
+시작하지 않고 거래 `RECEIVED`를 유지하며 DetectionResult를 생성하지 않는다.
+FastAPI·위험 대응 최종화·성공 Snapshot v2를 호출하거나 만들지 않는다. 정상 확정된
+Failure Snapshot은 같은 key·fingerprint에서 terminal `FAILED`로 재생한다. 공개 매핑과
+public intake end-to-end 연결은 아직 구현되지 않았다.
 
 다음은 아직 사용자 결정이 필요하다.
 
-- `FAILED` 거래의 재분석 허용 여부, 수동 복구 절차, 운영자 재처리 권한과 감사 방식
-- External Risk cache·Circuit Breaker·fallback 도입 여부. 별도 Issue와 계약 승인 필요
+- 별도 operation scope의 External Risk 복구·재분석 명령, 운영자 권한과 감사 방식
+- External Risk 불확실 `IN_PROGRESS`와 완료 간극의 실제 수동·운영 복구 절차
 - Rule v1 분석 실패 후 재분석·수동 복구 정책. 최초 시도는 DetectionResult와
   거래를 `FAILED`로 기록하고 Client 자동 retry는 `0회`
 - 오류 응답의 `resource` 최종 이름과 범용 구조

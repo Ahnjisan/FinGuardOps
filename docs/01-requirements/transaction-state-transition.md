@@ -25,6 +25,8 @@ Rule v1 분석의 실행 시점·트랜잭션·결과 채택은
 [Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](./spring-rule-analysis-orchestration-contract.md)에서
 구체화한다. 최종 거래 성공 상태와 멱등 Snapshot·완료 간극 복구는
 [`ADR-006`](../07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md)을
+따른다. External Risk 분석 전 실패의 terminal 저장·재생은
+[`ADR-007`](../07-decisions/ADR-007-external-risk-idempotent-failure-replay-contract.md)을
 따른다.
 
 FinGuardOps는 실제 금융기관 거래를 승인·인증·보류·차단하지 않는다. 이 문서의 승인, 추가 인증과 보류는 프로젝트 내부의 Mock 처리 결과를 뜻한다.
@@ -344,8 +346,17 @@ FastAPI는 Feature 계산, Rule 실행과 ML 추론 결과를 제공할 수 있�
 - 같은 키와 같은 지문의 최초 처리가 진행 중이면 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다.
 - 같은 키에 다른 지문이 도착하면 `409 Conflict`와 `IDEMPOTENCY_KEY_CONFLICT`로 거부한다.
 - `Idempotency-Key`는 8~128자의 승인된 ASCII 문자만 사용하며 `(operationScope, idempotencyKey)`를 Unique로 관리한다.
-- 정규화 요청 지문은 SHA-256으로 계산하고 멱등 기록은 최초 선점부터 24시간 보존한다.
+- 정규화 요청 지문은 SHA-256으로 계산하고 멱등 기록에는 최초 선점부터 24시간 후의
+  `expires_at`을 저장한다. Service 만료 판정·정리·키 재사용은 구현되지 않았다.
 - 정확한 필드, 정규화, 저장과 만료 정책은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따른다.
+
+External Risk의 `TIMEOUT`, `UNAVAILABLE`, `INVALID_REQUEST`,
+`UNSUPPORTED_CAPABILITY`, `INVALID_RESPONSE`, `TRANSFORMATION_ERROR`는 실패
+저장 commit이 확인되면 같은 operation scope·key에서 모두 terminal `FAILED`다.
+같은 fingerprint 재요청은 별도 Failure Snapshot에 저장된 안전한 실패를 재생하고
+External Risk Provider·FastAPI·위험 대응 최종화를 호출하지 않는다. 새 key는 같은
+`transactionId`의 공식 재처리 수단이 아니며, 재처리는 후속 별도 operation scope의
+승인된 복구·재분석 명령으로 설계한다.
 
 Rule 결과 채택과 `ANALYZING → ANALYZED` commit만으로는 최종 동기 성공 응답을
 확정하지 않는다. 위험 대응 결과와 최종 거래 상태가 확정되고,
@@ -364,7 +375,11 @@ v1 Snapshot을 먼저 완료한다. 위험 등급별 목표 상태·대응 결�
 
 ### 같은 요청의 동시 도착
 
-- 하나의 요청만 최초 처리를 획득하고 나머지는 동일 거래의 기존 처리 결과를 참조해야 한다.
+- public transaction intake의 Idempotency claim 하나만 최초 처리를 획득하고 External
+  Risk Provider 호출 단일 승자를 소유한다. Policy, per-invocation coordinator와 Rule
+  분석 시작 거래 잠금은 Provider 단일성을 보장하지 않는다.
+- 같은 key·fingerprint가 `IN_PROGRESS`이면 후속 요청은 기다리거나 Provider를
+  호출하지 않고 즉시 `409 IDEMPOTENCY_REQUEST_IN_PROGRESS`다.
 - 두 요청이 각각 별도 거래와 사건을 생성해서는 안 된다.
 
 ### 탐지 요청 재시도
@@ -409,15 +424,21 @@ v1 Snapshot을 먼저 완료한다. 위험 등급별 목표 상태·대응 결�
   기록하고 결과를 채택하지 않는다.
 - FastAPI 없이 Rule v1 성공으로 처리하지 않는다. 응답이 없다는 이유로 정상
   거래로 승인하지 않으며 Client 자동 retry와 fallback은 없다.
-- External Risk timeout·unavailable·invalid response는 위험정보 없음 또는
-  `UNMATCHED`로 해석하지 않고 typed failure로 전파하며 현재 분석을 계속하지 않는다.
+- External Risk의 `TIMEOUT`, `UNAVAILABLE`, `INVALID_REQUEST`,
+  `UNSUPPORTED_CAPABILITY`, `INVALID_RESPONSE`, `TRANSFORMATION_ERROR`는 위험정보 없음
+  또는 `UNMATCHED`로 해석하지 않고 typed failure로 전파하며 현재 분석을 계속하지 않는다.
   cache, stale data와 fallback은 현재 승인 계약에 없다.
 - 목표 거래 접수 연결에서는 External Risk 실패 시 거래를 `RECEIVED`로 유지하고
   DetectionResult를 생성하지 않으며 FastAPI와 위험 대응 최종화를 호출하지 않는다.
-  멱등 레코드는 실패로 확정하고 같은 요청 재생에서는 Provider를 다시 호출하지
-  않는다. 이 연결과 공개 오류 매핑은 아직 구현되지 않았다.
+  여섯 typed category의 저장 commit이 확인되면 멱등 레코드는 terminal `FAILED`로
+  확정하고 같은 요청 재생에서는 Provider를 다시 호출하지 않는다. 이 연결, 별도
+  Failure Snapshot과 공개 오류 mapper는 아직 구현되지 않았다.
 - DB 저장 결과가 불명확하면 성공으로 임의 처리하지 않는다.
-- 실패 후 재분석·수동 복구는 별도 후속 계약으로 정한다.
+- failure writer 실패·저장 직전 crash와 Provider 호출 여부를 DB만으로 확정할 수 없는
+  `IN_PROGRESS`에서는 terminal 실패를 추측하거나 Provider를 자동 재호출하지 않는다.
+  같은 key는 409를 유지하고 실제 복구는 후속 운영 Issue에서 정한다.
+- failure writer 오류는 원본 예외를 덮어쓰지 않고 suppressed로 보존하며 가능한 최초
+  공개 응답의 목표는 `500 INTERNAL_ERROR`다.
 - Rule v1 Client와 External Risk의 자동 retry는 0회다. External Risk cache,
   Circuit Breaker 또는 fallback은 별도 Issue와 계약 승인 없이 도입하지 않는다.
 - Kafka는 현재 필수 처리 흐름이 아니다. 향후 도입 시 중복 이벤트에도 같은 거래·사건 결과가 유지되어야 한다.
@@ -435,8 +456,9 @@ v1 Snapshot을 먼저 완료한다. 위험 등급별 목표 상태·대응 결�
 - 운영자에 의한 승인된 수동 조치
 
 External Risk 조회 성공·실패는 민감정보 없는 운영 로그·메트릭 allowlist로
-관측한다. 현재 목표 계약은 External Risk Snapshot을 AuditLog에 저장하지 않으며,
-분석 시작 전 실패에는 거래·사건 관련 AuditLog도 만들지 않는다.
+관측한다. 성공 업무용 `ExternalRiskSnapshot`과 별도 Idempotency Failure Snapshot은
+모두 AuditLog에 저장하지 않으며, 분석 시작 전 실패에는 거래·사건 관련 AuditLog도
+만들지 않는다.
 
 감사 기록에는 다음 정보가 필요하다.
 
@@ -463,8 +485,8 @@ Validation 거절은 Transaction이나 AuditLog 행을 만들지 않는다. 오�
 
 - 추가 인증 성공·실패·만료 후 허용할 거래 상태 전이
 - 최종 상태에서 재분석·정정이 필요할 때 기존 상태 변경 또는 새 이력 생성 여부
-- `FAILED` 멱등 요청의 새 키 재처리와 재분석 정책
-- External Risk 실패 후 재분석·수동 복구 정책
+- External Risk terminal 실패 이후 별도 operation scope의 복구·재분석 명령
+- `IN_PROGRESS`·failure writer·최종 완료 간극의 운영 복구 구현
 - 탐지·상태 전이 재시도 가능 오류, 횟수와 간격
 - 동일 거래 또는 연관 거래의 사건 중복 방지와 병합·분리 기준
 - 거래 접수 전체 연결 뒤 최종 업무 commit과 Snapshot v2 완료 사이 간극의 운영 복구 방식
@@ -483,10 +505,13 @@ Validation 거절은 Transaction이나 AuditLog 행을 만들지 않는다. 오�
 - 사건 생성·첫 거래 연결 Persistence 경계
 - 거래·사건·연결·감사 원자적 최종화 Persistence 경계
 
-다음 범위는 아직 구현되지 않았으며 후속 사용자 승인이 필요하다.
+다음 범위는 아직 구현되지 않았으며 후속 사용자 승인이 필요하다. public
+`POST /api/v1/transactions` 자체는 구현되어 있고 아래 항목은 그 API의 end-to-end
+연결을 뜻한다.
 
-- 거래 접수 전체 흐름 연결
-- External Risk 결과를 포함한 목표 `POST /api/v2/rule-analysis` 입력 연결
+- public intake→External Risk coordinator·Rule v2·위험 대응 최종화 연결
+- 거래를 연결한 `IN_PROGRESS` commit과 External Risk Failure Snapshot 저장·재생
+- 실제 External Risk Provider와 production coordinator Bean
 - Snapshot v2 확정
 - Snapshot 완료 간극 운영 복구
 - 공개 최종화·사건·AuditLog API

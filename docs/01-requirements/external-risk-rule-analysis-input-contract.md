@@ -17,7 +17,7 @@ DTO·검증·mapper·Client·내부 오케스트레이션과 per-invocation coor
 | 구분 | 현재 구현 | 목표 계약 |
 | --- | --- | --- |
 | External Risk | 독립 Port·Policy Service, local/dev/test Mock, immutable 성공 Snapshot, 무잠금 `READ_COMMITTED` read 뒤 Policy를 호출하는 내부 per-invocation coordinator | 거래 접수의 멱등 단일 승자가 DB 트랜잭션 밖에서 실제 Provider 선행 조회 |
-| Rule HTTP | `POST /api/v1/rule-analysis`와 필수 `externalRisk`를 추가한 `POST /api/v2/rule-analysis` FastAPI 경계, v1을 유지하는 Backend Java v2 exact wire DTO·mapper·Client·내부 오케스트레이션, Mock 성공 Snapshot 전달 coordinator | 실제 Provider와 public 거래 접수 오케스트레이터의 v2 호출 연결 |
+| Rule HTTP | `POST /api/v1/rule-analysis`와 필수 `externalRisk`를 추가한 `POST /api/v2/rule-analysis` FastAPI 경계, v1을 유지하는 Backend Java v2 exact wire DTO·mapper·Client·내부 오케스트레이션, Mock 성공 Snapshot 전달 coordinator | 실제 Provider와 구현된 public 거래 접수 API를 coordinator·Rule v2에 연결하는 상위 오케스트레이션 |
 | Rule 실행 의미 | Rule v1 R001~R004·scoring·Evidence | 같은 Rule v1 실행 의미를 그대로 유지 |
 | 거래 접수 | `RECEIVED`/null v1 Snapshot을 반환·재생 | External Risk→Rule 분석→위험 대응→Snapshot v2 전체 연결 |
 
@@ -29,8 +29,10 @@ scoring 정책을 Rule v2로 바꾸는 이름이 아니다.
 상위 거래 처리 Service는 `@Transactional`을 적용하지 않고 다음을 조정한다.
 
 ```text
-거래 접수와 멱등 선점
-→ RECEIVED 거래 저장 commit
+헤더·요청 Validation
+→ fingerprint 계산
+→ Idempotency IN_PROGRESS 단일 승자 선점 commit
+→ RECEIVED 거래 저장·Idempotency 거래 연결 commit
 → DB 트랜잭션과 행 잠금이 없는 상태에서 External Risk 조회·정책 적용
 → 성공 ExternalRiskSnapshot 고정
 → 잠긴 분석 시작 트랜잭션에서 v1 Snapshot 조립·v2 mapper 실행
@@ -40,6 +42,11 @@ scoring 정책을 Rule v2로 바꾸는 이름이 아니다.
 → 위험 대응 최종화
 → 최종 멱등 Snapshot v2 확정
 ```
+
+Validation 실패는 claim 전에 끝나므로 Transaction, Idempotency record와 Failure
+Snapshot을 생성하지 않는다. 현재 public intake는 위 목표 순서와 달리 `RECEIVED`
+거래·성공 Snapshot v1·멱등 `COMPLETED`를 원자적으로 저장하며, 거래를 연결한
+`IN_PROGRESS` commit 뒤 External Risk를 호출하는 경계는 아직 구현되지 않았다.
 
 상위 Service가 `ExternalRiskPolicyService`, `RuleAnalysisOrchestrationService`,
 `RiskResponseFinalizationService`를 이 순서로 호출한다. 기존 Rule 분석
@@ -52,8 +59,9 @@ External Risk 없는 v1 전용 경계로 유지한다.
 data, Circuit Breaker와 fallback은 없으며 실패를 `UNMATCHED`로 바꾸지 않는다.
 현재 coordinator는 per-invocation 내부 경계이므로 직접 재호출과 멱등 경계 밖 동시
 호출에서는 Provider가 다시 호출될 수 있다. 기존 거래 잠금은 Rule 분석 시작의 단일
-승자만 보장하며 같은 멱등 요청의 Provider 재호출 방지는 후속 public intake 경계가
-소유한다.
+승자만 보장한다. [ADR-007](../07-decisions/ADR-007-external-risk-idempotent-failure-replay-contract.md)에
+따라 같은 멱등 요청의 Provider 단일 승자와 재호출 방지는 public transaction
+intake의 Idempotency claim이 소유한다. 이 end-to-end 연결은 아직 구현되지 않았다.
 
 ## 3. immutable 전달 계약
 
@@ -254,9 +262,10 @@ External Risk 실패는 Rule 분석 시작 전 실패다. 다음 상태를 함�
 - 위험 대응 최종화를 호출하지 않음
 - 성공 Snapshot v2를 생성하지 않음
 - 사건·연결·관련 AuditLog를 생성하지 않음
-- 멱등 레코드는 확인된 실패 category로 `FAILED` 확정
+- 여섯 typed category의 실패 저장 commit이 확인되면 별도 Failure Snapshot과
+  공개 `failure_code`로 멱등 `FAILED` 확정
 - 같은 operation scope·Idempotency-Key·fingerprint 재생은 저장된 실패를 반환하고
-  Provider를 다시 호출하지 않음
+  Provider·FastAPI·위험 대응 최종화를 다시 호출하지 않음
 
 | External Risk 내부 category | 목표 공개 응답 |
 | --- | --- |
@@ -268,6 +277,19 @@ External Risk 실패는 Rule 분석 시작 전 실패다. 다음 상태를 함�
 않았다. 실패를 성공 DetectionResult, `UNMATCHED`, 0점, `LOW` 또는 빈 Evidence로
 변환하지 않는다.
 
+`TIMEOUT`, `UNAVAILABLE`, `INVALID_REQUEST`, `UNSUPPORTED_CAPABILITY`,
+`INVALID_RESPONSE`, `TRANSFORMATION_ERROR`는 durably confirmed되면 같은 key에서
+모두 terminal이다. 같은 key로 자동 재실행하지 않고 새 Idempotency-Key도 같은
+`transactionId`의 공식 재처리 수단으로 사용하지 않는다. 재처리는 후속 별도
+operation scope의 승인된 복구·재분석 명령으로 설계한다. 예상하지 못한 일반
+`RuntimeException`은 이 여섯 category나 전용 Failure Snapshot 대상으로 확장하지
+않는다.
+
+별도 Failure Snapshot의 exact type·version·필드·4 KiB 상한은 ADR-007이 소유하고,
+공개 응답은 [거래·탐지 API](../03-api/transaction-detection-api.md)가 소유한다. 성공
+`ExternalRiskSnapshot`, 성공 Snapshot v1과 목표 성공 Snapshot v2를 실패 재생에
+사용하지 않는다.
+
 구현된 FastAPI v2가 `externalRisk`의 JSON 타입·필수·null·Enum·UTC 형식·unknown
 field를 거부하면 `400 INVALID_REQUEST`, match 조합·개수·canonical 순서와 시간
 관계 같은 cross-field 계약을 거부하면 `422 RULE_CONTRACT_ERROR`다. 둘 다 Spring
@@ -276,18 +298,32 @@ Boot가 만든 upstream 요청의 결함이므로 공개 거래 API에서는 `50
 요청 검증 실패를 같은 category로 혼합하지 않는다.
 
 동일 멱등 요청의 Provider 중복 호출 방지는 거래 접수의 기존 단일 승자 선점에
-의존한다. 상위 오케스트레이션을 독립 공개 분석 API로 노출하지 않는다. 재분석이나
-독립 내부 호출에는 별도의 durable analysis claim 계약과 승인이 필요하다.
+의존한다. `IN_PROGRESS` 재요청은 Provider를 호출하거나 기다리지 않고 즉시
+`409 IDEMPOTENCY_REQUEST_IN_PROGRESS`다. 같은 key·다른 fingerprint는 상태와
+무관하게 key conflict다. 상위 오케스트레이션을 독립 공개 분석 API로 노출하지
+않는다. 재분석이나 독립 내부 호출에는 별도의 durable analysis claim 계약과
+승인이 필요하다.
+
+Failure Snapshot 저장 직전 crash, writer 실패 또는 Provider 호출 여부를 DB만으로
+확정할 수 없는 `IN_PROGRESS`에서는 External Risk 실패를 terminal로 추측하지 않고
+Provider를 자동 재호출하지 않는다. 같은 key에는 409를 반환하며 운영 복구 실행은
+후속 Issue다.
 
 ## 11. trace·민감정보·관측
 
 최초 거래 요청의 `traceId`를 External Risk Provider 호출과 FastAPI 호출에 그대로
 전달한다. `ExternalRiskSnapshot`, `externalRisk` JSON과 멱등 Snapshot에는
 `traceId`를 저장하지 않는다. 완료·실패 재생은 현재 재요청 trace를 사용한다.
+Failure Snapshot의 exact replay는 저장 HTTP status·공개 code·안전 message·빈
+`fieldErrors`의 의미적 동일성이고 trace, HTTP 추적 헤더와 JSON byte ordering은
+재생 범위가 아니다. 공개 `replayed` 필드는 추가하지 않는다.
 
 로그는 `traceId`, Provider 식별자, 성공·실패 category, policy result, match 수,
 호출 지연처럼 승인된 allowlist만 사용한다. 실제 reference, Provider 원문,
 요청·응답 JSON, 인증정보는 로그·AuditLog·DetectionEvidence에 저장하지 않는다.
+후속 전용 안전 mapper의 예상된 typed failure 로그는 category와 현재 trace만 기록하고
+Provider cause 전체를 generic stack trace 로그로 보내지 않는다. 이 mapper와 로그
+변경은 아직 구현되지 않았다.
 
 후속 구현의 최소 관측 후보는 External Risk 호출 수·지연·category, v2 요청 검증
 실패와 FastAPI 미호출 수다. metric 구현은 이번 Issue 범위가 아니다.
@@ -302,7 +338,8 @@ Boot가 만든 upstream 요청의 결함이므로 공개 거래 API에서는 `50
 4. Backend Java v2 DTO·wire mapper·HTTP Client를 구현한다. — 코드 구현 완료
 5. 내부 Rule 분석 오케스트레이터에 별도 v2 경계를 추가한다. — 코드 구현 완료
 6. Mock Policy 성공 Snapshot을 내부 v2 경계에 전달하는 per-invocation coordinator를 구현한다. — 코드 구현 완료
-7. 실제 Provider와 public 거래 접수·멱등 실패 재생을 coordinator에 연결한다. — 미구현
+7. 실제 Provider와 구현된 public 거래 접수 API를 coordinator·멱등 실패 재생에
+   연결한다. — 미구현
 8. 전환 동안 v1과 v2의 호출량·오류를 구분해 관측한다.
 
 FastAPI v2 코드 구현은 실제 선배포 또는 end-to-end 거래 연결 완료를 의미하지 않는다.
@@ -356,7 +393,9 @@ commit 뒤 v2 Client 호출 및 기존 완료·실패 경계 재사용을 구현
 
 - 실제 External Risk HTTP Provider
 - 실제 Provider를 사용하는 상위 오케스트레이션
-- 거래 접수 전체 연결과 공개 오류 매핑
+- public intake→External Risk coordinator·Rule v2·위험 대응 최종화·멱등 실패
+  저장·재생의 end-to-end 연결과 공개 오류 매핑
+- Failure Snapshot codec·decoder와 이를 허용하는 신규 Migration
 - Snapshot v2와 완료 간극 운영 복구
 - External Risk 영속화·Evidence·AuditLog는 이번 목표에서 제외되며 별도 승인 필요
 - retry·cache·Circuit Breaker·fallback
