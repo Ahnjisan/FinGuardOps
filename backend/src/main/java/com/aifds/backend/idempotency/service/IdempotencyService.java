@@ -18,6 +18,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.util.UUID;
+import java.util.function.Function;
 
 @Service
 public class IdempotencyService {
@@ -85,7 +86,7 @@ public class IdempotencyService {
             case COMPLETED -> new IdempotencyClaimResult.Completed(
                     existing.getResponseSnapshot().toString()
             );
-            case FAILED -> new IdempotencyClaimResult.Failed(existing.getFailureCode());
+            case FAILED -> failedResult(existing);
         };
     }
 
@@ -126,6 +127,42 @@ public class IdempotencyService {
         );
 
         return new IdempotencyClaimResult.Failed(record.getFailureCode());
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public IdempotencyClaimResult.FailedWithSnapshot failWithSnapshot(
+            long recordId,
+            String failureCode,
+            Function<Instant, JsonNode> snapshotFactory
+    ) {
+        if (snapshotFactory == null) {
+            throw new NullPointerException("snapshotFactory must not be null");
+        }
+        IdempotencyRecord record = idempotencyRecordRepository
+                .findByIdForUpdate(recordId)
+                .orElseThrow(() -> new IdempotencyRecordNotFoundException(recordId));
+        Instant finishedAt = timestampProvider.currentTransactionTimestamp();
+        JsonNode failureSnapshot = snapshotFactory.apply(finishedAt);
+
+        record.fail(failureCode, failureSnapshot, finishedAt);
+
+        return new IdempotencyClaimResult.FailedWithSnapshot(
+                record.getFailureCode(),
+                record.getResponseSnapshot().toString(),
+                record.getFinishedAt()
+        );
+    }
+
+    private IdempotencyClaimResult failedResult(IdempotencyRecord record) {
+        JsonNode snapshot = record.getResponseSnapshot();
+        if (snapshot == null) {
+            return new IdempotencyClaimResult.Failed(record.getFailureCode());
+        }
+        return new IdempotencyClaimResult.FailedWithSnapshot(
+                record.getFailureCode(),
+                snapshot.toString(),
+                record.getFinishedAt()
+        );
     }
 
     private boolean isScopeKeyUniqueViolation(DataIntegrityViolationException exception) {

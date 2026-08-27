@@ -50,10 +50,10 @@ class FraudCasePersistenceIntegrationTest
     private Flyway flyway;
 
     @Test
-    void appliesFreshV1ThroughV7SchemaWithApprovedConstraintsAndIndexes() {
-        assertThat(flyway.info().applied()).hasSize(7);
+    void appliesFreshV1ThroughV8SchemaWithApprovedConstraintsAndIndexes() {
+        assertThat(flyway.info().applied()).hasSize(8);
         assertThat(flyway.info().current().getVersion().getVersion())
-                .isEqualTo("7");
+                .isEqualTo("8");
         assertThat(columns("fraud_case")).containsExactlyInAnyOrder(
                 "id",
                 "case_id",

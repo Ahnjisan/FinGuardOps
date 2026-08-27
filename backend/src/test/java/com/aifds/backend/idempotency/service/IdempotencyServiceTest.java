@@ -23,6 +23,7 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -110,6 +111,50 @@ class IdempotencyServiceTest {
     }
 
     @Test
+    void distinguishesLegacyAndSnapshotFailuresWhenClaiming() {
+        TransactionFingerprintInput input = fingerprintInput();
+        IdempotencyRecord legacy = IdempotencyRecord.inProgress(
+                IdempotencyService.TRANSACTION_CREATE_OPERATION_SCOPE,
+                KEY,
+                REQUEST_FINGERPRINT
+        );
+        legacy.fail("DEPENDENCY_TIMEOUT", NOW);
+        stubScopeKeyUniqueViolation(input, legacy);
+
+        assertThat(idempotencyService.claim(KEY, input))
+                .isEqualTo(new IdempotencyClaimResult.Failed(
+                        "DEPENDENCY_TIMEOUT"
+                ));
+
+        IdempotencyRecord typed = IdempotencyRecord.inProgress(
+                IdempotencyService.TRANSACTION_CREATE_OPERATION_SCOPE,
+                KEY,
+                REQUEST_FINGERPRINT
+        );
+        typed.linkTransaction(transaction(input.transactionId()));
+        typed.fail(
+                "DEPENDENCY_TIMEOUT",
+                objectMapper.createObjectNode().put(
+                        "snapshotType",
+                        "external-risk-failure"
+                ),
+                NOW
+        );
+        when(idempotencyRecordRepository
+                .findByOperationScopeAndIdempotencyKey(
+                        IdempotencyService.TRANSACTION_CREATE_OPERATION_SCOPE,
+                        KEY
+                )).thenReturn(Optional.of(typed));
+
+        assertThat(idempotencyService.claim(KEY, input))
+                .isEqualTo(new IdempotencyClaimResult.FailedWithSnapshot(
+                        "DEPENDENCY_TIMEOUT",
+                        "{\"snapshotType\":\"external-risk-failure\"}",
+                        NOW
+                ));
+    }
+
+    @Test
     void rethrowsUniqueViolationForDifferentConstraint() {
         TransactionFingerprintInput input = fingerprintInput();
         DataIntegrityViolationException exception = violation(
@@ -190,6 +235,62 @@ class IdempotencyServiceTest {
         assertThat(result.failureCode()).isEqualTo("DEPENDENCY_TIMEOUT");
         assertThat(record.getFinishedAt()).isEqualTo(databaseTimestamp);
         verify(timestampProvider).currentTransactionTimestamp();
+    }
+
+    @Test
+    void typedFailureUsesOneDatabaseTimestampForFactoryAndFinishedAt() {
+        long recordId = 12L;
+        IdempotencyRecord record = IdempotencyRecord.inProgress(
+                IdempotencyService.TRANSACTION_CREATE_OPERATION_SCOPE,
+                KEY,
+                REQUEST_FINGERPRINT
+        );
+        record.linkTransaction(transaction(UUID.randomUUID()));
+        AtomicReference<Instant> factoryTimestamp = new AtomicReference<>();
+        when(idempotencyRecordRepository.findByIdForUpdate(recordId))
+                .thenReturn(Optional.of(record));
+        when(timestampProvider.currentTransactionTimestamp()).thenReturn(NOW);
+
+        IdempotencyClaimResult.FailedWithSnapshot result =
+                idempotencyService.failWithSnapshot(
+                        recordId,
+                        "DEPENDENCY_TIMEOUT",
+                        finalizedAt -> {
+                            factoryTimestamp.set(finalizedAt);
+                            return objectMapper.createObjectNode()
+                                    .put("finalizedAt", finalizedAt.toString());
+                        }
+                );
+
+        assertThat(factoryTimestamp).hasValue(NOW);
+        assertThat(result.finishedAt()).isEqualTo(NOW);
+        assertThat(record.getFinishedAt()).isEqualTo(NOW);
+        assertThat(result.responseSnapshotJson()).contains(NOW.toString());
+        verify(timestampProvider).currentTransactionTimestamp();
+    }
+
+    @Test
+    void typedFailureRejectsMissingTransactionAndDoesNotMutateRecord() {
+        long recordId = 13L;
+        IdempotencyRecord record = IdempotencyRecord.inProgress(
+                IdempotencyService.TRANSACTION_CREATE_OPERATION_SCOPE,
+                KEY,
+                REQUEST_FINGERPRINT
+        );
+        when(idempotencyRecordRepository.findByIdForUpdate(recordId))
+                .thenReturn(Optional.of(record));
+        when(timestampProvider.currentTransactionTimestamp()).thenReturn(NOW);
+
+        assertThatThrownBy(() -> idempotencyService.failWithSnapshot(
+                recordId,
+                "DEPENDENCY_TIMEOUT",
+                finalizedAt -> objectMapper.createObjectNode()
+        )).isInstanceOf(IllegalStateException.class);
+
+        assertThat(record.getProcessingStatus())
+                .isEqualTo(com.aifds.backend.idempotency.entity.IdempotencyProcessingStatus.IN_PROGRESS);
+        assertThat(record.getResponseSnapshot()).isNull();
+        assertThat(record.getFinishedAt()).isNull();
     }
 
     private void stubScopeKeyUniqueViolation(

@@ -63,10 +63,10 @@ class AuditLogPersistenceIntegrationTest
     private Flyway flyway;
 
     @Test
-    void appliesFreshV1ThroughV7WithAuditSchemaAndAppendOnlyTrigger() {
-        assertThat(flyway.info().applied()).hasSize(7);
+    void appliesFreshV1ThroughV8WithAuditSchemaAndAppendOnlyTrigger() {
+        assertThat(flyway.info().applied()).hasSize(8);
         assertThat(flyway.info().current().getVersion().getVersion())
-                .isEqualTo("7");
+                .isEqualTo("8");
         assertThat(columns("audit_log")).containsExactlyInAnyOrder(
                 "id",
                 "audit_id",

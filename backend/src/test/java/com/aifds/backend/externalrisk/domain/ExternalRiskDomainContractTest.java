@@ -134,6 +134,64 @@ class ExternalRiskDomainContractTest {
     }
 
     @Test
+    void failureSnapshotMapsEveryCategoryToApprovedPublicResponse() {
+        for (ExternalRiskFailureCategory category
+                : ExternalRiskFailureCategory.values()) {
+            ExternalRiskFailureSnapshot snapshot =
+                    ExternalRiskFailureSnapshot.from(category, CUTOFF);
+
+            assertThat(snapshot.finalizedAt()).isEqualTo(CUTOFF);
+            assertThat(snapshot.responseBody().fieldErrors()).isEmpty();
+            switch (category) {
+                case TIMEOUT -> assertFailureMapping(
+                        snapshot,
+                        503,
+                        "DEPENDENCY_TIMEOUT",
+                        "탐지 서비스를 사용할 수 없습니다."
+                );
+                case UNAVAILABLE -> assertFailureMapping(
+                        snapshot,
+                        503,
+                        "DEPENDENCY_UNAVAILABLE",
+                        "탐지 서비스를 사용할 수 없습니다."
+                );
+                case INVALID_REQUEST,
+                     UNSUPPORTED_CAPABILITY,
+                     INVALID_RESPONSE,
+                     TRANSFORMATION_ERROR -> assertFailureMapping(
+                        snapshot,
+                        500,
+                        "INTERNAL_ERROR",
+                        "요청을 처리하는 중 오류가 발생했습니다."
+                );
+            }
+        }
+    }
+
+    @Test
+    void failureSnapshotRejectsMappingChangesAndCopiesFieldErrors() {
+        java.util.ArrayList<String> fieldErrors = new java.util.ArrayList<>();
+        ExternalRiskFailureSnapshot.ResponseBody body =
+                new ExternalRiskFailureSnapshot.ResponseBody(
+                        "DEPENDENCY_TIMEOUT",
+                        "탐지 서비스를 사용할 수 없습니다.",
+                        fieldErrors
+                );
+        fieldErrors.add("unsafe");
+
+        assertThat(body.fieldErrors()).isEmpty();
+        assertThatThrownBy(() -> body.fieldErrors().add("unsafe"))
+                .isInstanceOf(UnsupportedOperationException.class);
+        assertThatThrownBy(() -> new ExternalRiskFailureSnapshot(
+                body,
+                500,
+                ExternalRiskFailureCategory.TIMEOUT,
+                CUTOFF
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageNotContaining("DEPENDENCY_TIMEOUT");
+    }
+
+    @Test
     void snapshotExposesNeitherTraceNorReferencesAndCopiesMatches() {
         List<ExternalRiskMatch> matches = List.of(new ExternalRiskMatch(
                 ExternalRiskSubjectType.DEVICE,
@@ -307,6 +365,17 @@ class ExternalRiskDomainContractTest {
                         "SENTINEL_DEVICE",
                         "SENTINEL_TRACE_0001"
                 );
+    }
+
+    private void assertFailureMapping(
+            ExternalRiskFailureSnapshot snapshot,
+            int httpStatus,
+            String code,
+            String message
+    ) {
+        assertThat(snapshot.httpStatus()).isEqualTo(httpStatus);
+        assertThat(snapshot.responseBody().code()).isEqualTo(code);
+        assertThat(snapshot.responseBody().message()).isEqualTo(message);
     }
 
     private void assertInvalidResponse(

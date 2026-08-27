@@ -32,7 +32,7 @@
 - 거래 금액, 통화와 발생 시각 검증
 - 거래 상태 변경을 위한 낙관적 잠금
 - 거래 생성 요청의 멱등 선점, 충돌 판별과 완료 결과 재사용
-- External Risk Failure Snapshot을 위한 현재 DB 제약과 목표 Migration의 구분
+- External Risk Failure Snapshot을 위한 V1 초기 제약과 V8 적용 제약의 구분
 - 멱등 기록의 24시간 후 `expires_at` 시각 저장
 - Flyway와 실제 PostgreSQL 기반 검증 원칙
 
@@ -291,14 +291,14 @@ FAILED
 legacy와 v1 Snapshot은 수정·backfill하지 않고 최신 DB 상태로 보정하지 않는다.
 기존 version의 의미를 확장하지 않으며 기존 Snapshot 재생에서 분석·위험 대응·사건
 처리를 시작하지 않는다. 기존 `response_snapshot JSONB`와 object Check는 v2
-성공 envelope 자체를 저장할 수 있다. 그러나 아래 External Risk Failure Snapshot은
-현재 `FAILED` Check와 충돌하므로 후속 신규 Flyway Migration이 필요하다.
+성공 envelope 자체를 저장할 수 있다. External Risk Failure Snapshot은 V8에서
+`FAILED` Check를 안전하게 교체해 저장할 수 있게 되었다.
 
 `finalizedAt`과 `finished_at`은 완료 경로에서 `Clock`을 한 번 읽은 같은 확정 시각이다. V1의 무정밀도 지정 `TIMESTAMPTZ`가 PostgreSQL 기본 마이크로초 정밀도를 사용하므로 애플리케이션은 이 값을 마이크로초로 정규화한 뒤 두 위치에 동일하게 저장한다.
 
-### 6.3.1 External Risk Failure Snapshot: 현재와 목표
+### 6.3.1 External Risk Failure Snapshot: V1과 V8
 
-**현재 적용된 V1 물리 구조**의 `ck_idempotency_record_state_fields`는 `FAILED`에
+**초기 V1 물리 구조**의 `ck_idempotency_record_state_fields`는 `FAILED`에
 대해 다음을 강제한다.
 
 ```text
@@ -308,14 +308,13 @@ AND failure_code IS NOT NULL
 AND finished_at IS NOT NULL
 ```
 
-따라서 현재 DB·Entity·codec은 ADR-007의 External Risk Failure Snapshot을 저장할 수
-없고 code-only `FAILED`만 저장한다. 아래 9절 DDL도 현재 적용된 V1 구조를 설명하며
-목표 제약이 이미 배포됐다는 뜻이 아니다.
+따라서 V1만 적용된 DB·Entity는 ADR-007의 External Risk Failure Snapshot을 저장할 수
+없고 code-only `FAILED`만 저장했다. 아래 9절 DDL은 이 초기 V1 구조를 설명한다.
 
-**목표 구조**는 기존 `response_snapshot JSONB` 컬럼을 재사용하고 별도 신규 컬럼을
-필수로 추가하지 않는다. 신규 Migration은 기존 V1 파일을 수정하지 않고
-`ck_idempotency_record_state_fields`를 다음 두 `FAILED` 형태를 모두 허용하도록
-변경해야 한다.
+**현재 V8 적용 구조**는 기존 `response_snapshot JSONB` 컬럼을 재사용하고 별도 신규
+컬럼을 추가하지 않는다. V8은 기존 V1 파일을 수정하지 않고 같은 이름의
+`ck_idempotency_record_state_fields`를 안전하게 교체해 다음 두 `FAILED` 형태를 모두
+허용한다.
 
 | `FAILED` 형태 | 거래 FK | `response_snapshot` | `failure_code` | `finished_at` |
 | --- | --- | --- | --- | --- |
@@ -327,8 +326,11 @@ discriminator는 `snapshotType=external-risk-failure`, 공개 응답 schema는
 `transaction-create-error-v1`, codec은
 `external-risk-failure-snapshot-envelope-v1`이다. UTF-8 canonical JSON은 최대
 4 KiB이고 알 수 없는 type·version·필드와 손상 데이터는 fail-closed 처리한다.
-`failureCategory`는 내부 영속·관측용이며 공개 응답에는 포함하지 않는다. strict
-codec·decoder와 Migration 구현은 후속 Issue 범위다.
+`failureCategory`는 내부 영속·관측용이며 공개 응답에는 포함하지 않는다. V8은 exact
+필드, discriminator·version·category·공개 code 관계와 거래 FK를 검증하고, Java
+strict codec은 canonical UTF-8 크기·UTC 시각·`finished_at` 일치와 손상 데이터를
+fail-closed로 검증한다. 4 KiB는 JSONB 출력 크기가 아니라 Java canonical UTF-8
+직렬화 크기에 적용한다.
 
 Failure Snapshot에는 `traceId`, `transactionId`, `evaluationCutoffAt`, 원본
 `Idempotency-Key`, fingerprint, Provider request·response body·원문 code·URL,
@@ -336,10 +338,9 @@ Failure Snapshot에는 `traceId`, `transactionId`, `evaluationCutoffAt`, 원본
 인증정보, Provider 구현 클래스와 내부 설정을 저장하지 않는다. `transactionId`는
 `financial_transaction_id` FK로 조회한다.
 
-신규 typed failure의 `finalizedAt`과 record의 `finished_at`은 애플리케이션 Clock을 한
-번 읽은 동일한 확정 시각을 사용하며 UTC ISO-8601 Instant와 DB 마이크로초 정밀도
-정규화가 모순되지 않아야 한다. 기존 행은 backfill하지 않고 legacy null Snapshot과
-nullable 거래 FK의 의미를 유지한다.
+신규 typed failure의 `finalizedAt`과 record의 `finished_at`은 `REQUIRES_NEW` 저장
+트랜잭션에서 DB transaction timestamp를 한 번 읽은 동일한 확정 시각을 사용한다.
+기존 행은 backfill하지 않고 legacy null Snapshot과 nullable 거래 FK의 의미를 유지한다.
 
 Failure Snapshot과 `FAILED`가 정상 commit된 같은 키·같은 지문 요청은 자동
 재실행하지 않는다. 공개 HTTP·code·message는
@@ -465,7 +466,7 @@ V1의 무정밀도 지정 `TIMESTAMPTZ`는 PostgreSQL 기본 마이크로초 정
 | `request_fingerprint` | `VARCHAR(64)` | NOT NULL | 없음 | SHA-256 소문자 16진수 |
 | `processing_status` | `VARCHAR(16)` | NOT NULL | 없음 | `IN_PROGRESS`, `COMPLETED`, `FAILED` |
 | `financial_transaction_id` | `BIGINT` | nullable | 없음 | 처리 중에는 null 가능, 거래 결과 FK |
-| `response_snapshot` | `JSONB` | nullable | 없음 | 현재 strict legacy·성공 v1 object. 목표 성공 v2와 External Risk failure envelope도 신규 Migration 뒤 재사용하며 `traceId`와 금지 정보 제외 |
+| `response_snapshot` | `JSONB` | nullable | 없음 | strict legacy·성공 v1 object와 V8 External Risk failure envelope에 재사용. 목표 성공 v2도 재사용하며 `traceId`와 금지 정보 제외 |
 | `failure_code` | `VARCHAR(64)` | nullable | 없음 | `FAILED`의 안전한 내부 실패 분류. 공개 응답은 whitelist로만 고정 매핑 |
 | `expires_at` | `TIMESTAMPTZ` | NOT NULL | `CURRENT_TIMESTAMP + INTERVAL '24 hours'` | 최초 선점 기준 24시간 후의 업무 만료 기준 시각 |
 | `created_at` | `TIMESTAMPTZ` | NOT NULL | `CURRENT_TIMESTAMP` | 최초 INSERT 감사 시각 |
@@ -523,16 +524,15 @@ External Risk failure는 envelope `finalizedAt`과 `finished_at`에 동일한 �
 
 `financial_transaction_id` Unique는 하나의 거래 결과가 서로 다른 멱등 기록의 완료 결과로 중복 연결되는 것을 막는다. 다른 키로 같은 `transactionId`가 요청되면 `financial_transaction.transaction_id` Unique가 최종 방어선이며 애플리케이션은 `DUPLICATE_TRANSACTION`으로 매핑한다.
 
-위 표는 현재 적용된 V1 제약을 나타낸다. 특히 현재
-`ck_idempotency_record_state_fields`는 `FAILED`의 `response_snapshot IS NULL`을
-강제한다. 신규 typed External Risk failure를 허용하는 목표 제약은 6.3.1과 ADR-007을
-따르며 아직 Migration으로 적용되지 않았다.
+위 표의 제약 이름은 V1부터 유지된다. V8의
+`ck_idempotency_record_state_fields`는 legacy `FAILED`의 null Snapshot·nullable 거래
+FK를 유지하면서 신규 typed External Risk failure에는 strict Snapshot과 거래 FK를
+강제한다. 세부 조건은 6.3.1과 ADR-007을 따른다.
 
 ## 9. PostgreSQL 기준 DDL
 
-다음 DDL은 현재 적용된 V1 기반 물리 구조를 표현한다. 특히 `FAILED`의 null Snapshot
-조건은 현재 사실이며 ADR-007 목표 Migration이 적용된 구조가 아니다. 후속 변경은
-이미 적용된 V1을 수정하지 않고 신규 Flyway Migration으로만 수행한다.
+다음 DDL은 초기 V1 물리 구조를 표현한다. V8은 이 파일을 수정하지 않고
+`ck_idempotency_record_state_fields`만 6.3.1의 현재 조건으로 교체한다.
 
 ```sql
 CREATE TABLE financial_transaction (
@@ -831,8 +831,8 @@ Java 매핑 변경은 이 물리 DB 계약과 함께 검증한다.
 - Migration은 `financial_transaction`을 먼저 만들고 FK 참조자인 `idempotency_record`를 다음에 만든다.
 - 테이블, 제약조건과 인덱스 이름은 이 문서의 이름을 사용한다.
 - 이미 적용된 Migration 파일을 수정하지 않고 변경이 필요하면 새 버전 Migration을 추가한다.
-- 적용 완료된 V1 Migration은 수정하지 않는다. External Risk Failure Snapshot을 위해
-  `FAILED` 상태 제약을 변경하는 신규 Migration은 후속 구현 Issue에서 추가한다.
+- 적용 완료된 V1 Migration은 수정하지 않는다. External Risk Failure Snapshot을 위한
+  V8은 같은 이름의 `FAILED` 상태 제약을 교체하고 기존 행을 backfill하지 않는다.
 - 로컬 H2나 다른 호환 DB 결과를 PostgreSQL 동작의 증거로 사용하지 않는다.
 - 실제 Migration 경로와 버전 번호는 Flyway 의존성 도입·구성 작업에서 현재 백엔드 구조와 선행 버전을 확인한 뒤 확정한다.
 
@@ -876,9 +876,9 @@ Java 매핑 변경은 이 물리 DB 계약과 함께 검증한다.
 - 존재하지 않는 `financial_transaction_id`는 FK 위반이다.
 - 한 거래를 두 멱등 완료 기록에 연결하면 Unique 위반이다.
 - 상태별 FK, 응답 snapshot, 실패 코드와 종료 시각 조합이 Check로 검증된다.
-- 후속 Migration 뒤 legacy `FAILED + response_snapshot NULL + nullable 거래 FK`가 계속
+- V8 적용 뒤 legacy `FAILED + response_snapshot NULL + nullable 거래 FK`가 계속
   허용되고 기존 행 backfill이 필요하지 않다.
-- 후속 Migration 뒤 신규 typed External Risk `FAILED`는 거래 FK와 strict Failure
+- V8 적용 뒤 신규 typed External Risk `FAILED`는 거래 FK와 strict Failure
   Snapshot이 필수이며 `responseBody.code = failure_code`를 만족한다.
 - Failure Snapshot codec은 exact 필드·type·version, 빈 `fieldErrors`, UTC
   `finalizedAt`, canonical UTF-8 4 KiB 이하와 금지 정보 미포함을 검증한다.

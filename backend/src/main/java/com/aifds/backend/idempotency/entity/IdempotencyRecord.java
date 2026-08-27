@@ -159,16 +159,51 @@ public class IdempotencyRecord {
     public void fail(String failureCode, Instant finishedAt) {
         requireInProgress(IdempotencyProcessingStatus.FAILED);
         Objects.requireNonNull(finishedAt, "finishedAt must not be null");
-        if (failureCode == null || !FAILURE_CODE_PATTERN.matcher(failureCode).matches()) {
-            throw new IllegalArgumentException(
-                    "failureCode must match ^[A-Z][A-Z0-9_]{0,63}$"
-            );
-        }
+        requireValidFailureCode(failureCode);
 
         this.processingStatus = IdempotencyProcessingStatus.FAILED;
         this.responseSnapshot = null;
         this.failureCode = failureCode;
         this.finishedAt = finishedAt;
+    }
+
+    public void fail(
+            String failureCode,
+            JsonNode failureSnapshot,
+            Instant finishedAt
+    ) {
+        requireInProgress(IdempotencyProcessingStatus.FAILED);
+        requireValidFailureCode(failureCode);
+        Objects.requireNonNull(finishedAt, "finishedAt must not be null");
+        if (financialTransaction == null) {
+            throw new IllegalStateException(
+                    "Typed failure requires a linked financial transaction"
+            );
+        }
+        if (failureSnapshot == null || !failureSnapshot.isObject()) {
+            throw new IllegalArgumentException(
+                    "failureSnapshot must be a JSON object"
+            );
+        }
+        if (containsTraceId(failureSnapshot)) {
+            throw new IllegalArgumentException(
+                    "failureSnapshot must not contain traceId"
+            );
+        }
+
+        this.processingStatus = IdempotencyProcessingStatus.FAILED;
+        this.responseSnapshot = failureSnapshot.deepCopy();
+        this.failureCode = failureCode;
+        this.finishedAt = finishedAt;
+    }
+
+    private void requireValidFailureCode(String failureCode) {
+        if (failureCode == null
+                || !FAILURE_CODE_PATTERN.matcher(failureCode).matches()) {
+            throw new IllegalArgumentException(
+                    "failureCode must match ^[A-Z][A-Z0-9_]{0,63}$"
+            );
+        }
     }
 
     private void requireInProgress(IdempotencyProcessingStatus targetStatus) {

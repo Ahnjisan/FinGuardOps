@@ -87,7 +87,7 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
         MigrationInfo[] appliedMigrations = flyway.info().applied();
 
         assertThat(jdbcTemplate.queryForObject("SELECT 1", Integer.class)).isEqualTo(1);
-        assertThat(appliedMigrations).hasSize(7);
+        assertThat(appliedMigrations).hasSize(8);
         assertThat(appliedMigrations[0].getVersion().getVersion()).isEqualTo("1");
         assertThat(appliedMigrations[0].getState()).isEqualTo(MigrationState.SUCCESS);
         assertThat(appliedMigrations[1].getVersion().getVersion()).isEqualTo("2");
@@ -102,6 +102,8 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
         assertThat(appliedMigrations[5].getState()).isEqualTo(MigrationState.SUCCESS);
         assertThat(appliedMigrations[6].getVersion().getVersion()).isEqualTo("7");
         assertThat(appliedMigrations[6].getState()).isEqualTo(MigrationState.SUCCESS);
+        assertThat(appliedMigrations[7].getVersion().getVersion()).isEqualTo("8");
+        assertThat(appliedMigrations[7].getState()).isEqualTo(MigrationState.SUCCESS);
         assertThat(tableNames()).contains(
                 "financial_transaction",
                 "idempotency_record",
@@ -628,6 +630,11 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
                 createdAt.minusSeconds(1), "cust_ref_states", "acct_ref_states",
                 null, "ATM", null, "RECEIVED", createdAt
         );
+        long typedFailureTransactionPk = insertTransaction(
+                UUID.randomUUID(), "ATM_WITHDRAWAL", new BigDecimal("1000"), "KRW",
+                createdAt.minusSeconds(1), "cust_ref_typed_states",
+                "acct_ref_typed_states", null, "ATM", null, "RECEIVED", createdAt
+        );
         insertInProgressIdempotencyRecord("in-progress-state-key");
         jdbcTemplate.update("""
                         INSERT INTO idempotency_record (
@@ -660,12 +667,91 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
                 "2".repeat(64),
                 "DEPENDENCY_TIMEOUT"
         );
+        insertTypedFailure(
+                "typed-failed-state-key",
+                "3".repeat(64),
+                typedFailureTransactionPk,
+                "DEPENDENCY_TIMEOUT",
+                timeoutFailureSnapshotJson()
+        );
 
         assertThat(jdbcTemplate.queryForObject("""
                 SELECT COUNT(*)
                 FROM idempotency_record
                 WHERE expires_at = created_at + INTERVAL '24 hours'
-                """, Integer.class)).isEqualTo(3);
+                """, Integer.class)).isEqualTo(4);
+    }
+
+    @Test
+    void enforcesTypedFailureSnapshotCheckMappingAndForeignKey() {
+        Instant createdAt = Instant.now();
+        long transactionPk = insertTransaction(
+                UUID.randomUUID(), "ATM_WITHDRAWAL", new BigDecimal("1000"), "KRW",
+                createdAt.minusSeconds(1), "cust_ref_typed", "acct_ref_typed",
+                null, "ATM", null, "RECEIVED", createdAt
+        );
+
+        assertConstraintViolation(
+                () -> insertTypedFailure(
+                        "typed-missing-transaction",
+                        "4".repeat(64),
+                        null,
+                        "DEPENDENCY_TIMEOUT",
+                        timeoutFailureSnapshotJson()
+                ),
+                "23514",
+                "ck_idempotency_record_state_fields"
+        );
+        assertConstraintViolation(
+                () -> insertTypedFailure(
+                        "typed-code-mismatch",
+                        "5".repeat(64),
+                        transactionPk,
+                        "DEPENDENCY_UNAVAILABLE",
+                        timeoutFailureSnapshotJson()
+                ),
+                "23514",
+                "ck_idempotency_record_state_fields"
+        );
+        assertConstraintViolation(
+                () -> insertTypedFailure(
+                        "typed-category-mismatch",
+                        "6".repeat(64),
+                        transactionPk,
+                        "DEPENDENCY_TIMEOUT",
+                        timeoutFailureSnapshotJson().replace(
+                                "\"TIMEOUT\"",
+                                "\"UNAVAILABLE\""
+                        )
+                ),
+                "23514",
+                "ck_idempotency_record_state_fields"
+        );
+        assertConstraintViolation(
+                () -> insertTypedFailure(
+                        "typed-extra-field",
+                        "7".repeat(64),
+                        transactionPk,
+                        "DEPENDENCY_TIMEOUT",
+                        timeoutFailureSnapshotJson().replace(
+                                "{",
+                                "{\"traceId\":\"unsafe\","
+                        )
+                ),
+                "23514",
+                "ck_idempotency_record_state_fields"
+        );
+        assertConstraintViolation(
+                () -> insertTypedFailure(
+                        "typed-missing-fk",
+                        "8".repeat(64),
+                        Long.MAX_VALUE,
+                        "DEPENDENCY_TIMEOUT",
+                        timeoutFailureSnapshotJson()
+                ),
+                "23503",
+                "fk_idempotency_record_transaction"
+        );
     }
 
     @Test
@@ -1478,6 +1564,52 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
                 requestFingerprint,
                 financialTransactionId
         );
+    }
+
+    private void insertTypedFailure(
+            String idempotencyKey,
+            String requestFingerprint,
+            Long financialTransactionId,
+            String failureCode,
+            String snapshotJson
+    ) {
+        jdbcTemplate.update("""
+                        INSERT INTO idempotency_record (
+                            operation_scope,
+                            idempotency_key,
+                            request_fingerprint,
+                            processing_status,
+                            financial_transaction_id,
+                            response_snapshot,
+                            failure_code,
+                            finished_at
+                        ) VALUES (?, ?, ?, 'FAILED', ?, CAST(? AS jsonb), ?, CURRENT_TIMESTAMP)
+                        """,
+                "POST:/api/v1/transactions",
+                idempotencyKey,
+                requestFingerprint,
+                financialTransactionId,
+                snapshotJson,
+                failureCode
+        );
+    }
+
+    private String timeoutFailureSnapshotJson() {
+        return """
+                {
+                  "snapshotType": "external-risk-failure",
+                  "responseBody": {
+                    "code": "DEPENDENCY_TIMEOUT",
+                    "message": "탐지 서비스를 사용할 수 없습니다.",
+                    "fieldErrors": []
+                  },
+                  "httpStatus": 503,
+                  "failureCategory": "TIMEOUT",
+                  "responseSchemaVersion": "transaction-create-error-v1",
+                  "codecVersion": "external-risk-failure-snapshot-envelope-v1",
+                  "finalizedAt": "2026-08-27T00:00:00Z"
+                }
+                """;
     }
 
     private void assertConstraintViolation(
