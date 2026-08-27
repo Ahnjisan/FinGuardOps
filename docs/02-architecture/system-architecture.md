@@ -62,8 +62,10 @@ Spring·DB 비의존 순수 decision 정책도 구현되어 있다.
 External Risk 연계에는 무잠금 `READ_COMMITTED` read 종료 뒤 Mock Policy를 호출하고
 성공 Snapshot을 내부 v2 경계에 전달하는 per-invocation coordinator가 구현되어 있다.
 직접 재호출·멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수 있다. 실제 Provider,
-public 거래 접수·멱등 실패 재생, Snapshot v2와 완료 간극 복구, 감사 조회와 AI 운영
-도메인은 아직 구현되지 않았다. 위험 대응
+public intake와 External Risk coordinator·Rule v2·위험 대응 최종화·멱등 실패
+저장·재생의 end-to-end 연결, Snapshot v2와 완료 간극 복구, 감사 조회와 AI 운영
+도메인은 아직 구현되지 않았다. public `POST /api/v1/transactions` 자체는 구현되어
+현재 `RECEIVED`·성공 Snapshot v1을 반환한다. 위험 대응
 정책의 `FinancialTransaction` 적용, 필요한 사건·연결, 최종 거래 상태·대응 결과와
 AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 구현되었다.
 
@@ -625,16 +627,20 @@ Kafka는 다음 조건이 확인된 뒤 이 논리적 비동기 경계를 구현
 
 다음 흐름은 ADR-003이 유지하는 최종 동기 분석 목표이다. 현재 거래 접수 구현은
 입력 검증·멱등성 확인·거래 저장과 `RECEIVED` 응답까지다. 실제 External Risk
-Provider, public 거래 접수·멱등 실패 저장·재생 및 이후 위험 대응·사건 연결은
-미구현이다. Mock 성공 Snapshot을 확보해 내부 Rule v2 오케스트레이터를 호출하는
-per-invocation coordinator는 구현되어 있다.
+Provider, public intake와 External Risk coordinator·Rule v2·위험 대응 최종화·멱등
+실패 저장·재생의 end-to-end 연결은 미구현이다. Mock 성공 Snapshot을 확보해 내부
+Rule v2 오케스트레이터를 호출하는 per-invocation coordinator는 구현되어 있다.
+Provider 호출 단일 승자는 목표 public transaction intake의 Idempotency claim이
+소유하며 Policy, coordinator와 Rule 분석 시작 거래 잠금은 이를 보장하지 않는다.
 
 ```text
 Client
 → Spring Boot 거래 접수
-→ 입력 검증·멱등성 확인
-→ RECEIVED 거래 저장 commit
-→ DB 트랜잭션 밖 External Risk 조회·성공 Snapshot 고정
+→ 헤더·요청 Validation·fingerprint 계산
+→ Idempotency IN_PROGRESS 단일 승자 선점 commit
+→ RECEIVED 거래 저장·Idempotency 거래 연결 commit
+→ DB 트랜잭션 밖 External Risk Provider 최대 1회
+→ 성공이면 ExternalRiskSnapshot 고정
 → 성공 Snapshot을 내부 analyzeV2에 전달
 → 잠긴 분석 시작 트랜잭션에서 Rule Snapshot·v2 요청 확정
 → DetectionResult IN_PROGRESS·거래 ANALYZING commit
@@ -654,39 +660,50 @@ sequenceDiagram
     participant AI as FastAPI
 
     Client->>Spring: 거래 요청
-    Spring->>Spring: 요청 형식·도메인 Validation
-    Spring->>DB: 멱등성 단일 승자·RECEIVED 거래 저장 commit
+    Spring->>Spring: 헤더·요청 Validation·fingerprint 계산
+    Spring->>DB: Idempotency IN_PROGRESS 단일 승자 선점 commit
+    Spring->>DB: RECEIVED 거래 저장·Idempotency 거래 연결 commit
     Spring->>Risk: 목표 DB 트랜잭션 밖 External Risk 조회
-    Risk-->>Spring: 성공 ExternalRiskSnapshot 전달
-    Spring->>Spring: analyzeV2(transactionId, snapshot, traceId)
-    Spring->>DB: startAnalysisV2()·REQUIRES_NEW·REPEATABLE_READ 시작
-    Spring->>DB: FinancialTransaction PESSIMISTIC_WRITE
-    Spring->>Spring: RECEIVED·시작 가능 상태 검증
-    Spring->>DB: 같은 잠긴 시작 트랜잭션에서 v1 Rule Snapshot 조립
-    Spring->>Spring: 같은 트랜잭션에서 v2 mapper 검증·immutable 요청 확정
-    alt Snapshot 조립·v2 mapper 성공
-        Spring->>DB: mapper 성공 후 DetectionResult version 조회
-        Spring->>DB: DetectionResult IN_PROGRESS·거래 ANALYZING·flush
-        DB-->>Spring: 분석 시작 commit
-        Spring->>AI: 활성 DB 트랜잭션 없이 FastAPI v2 요청 1회
-        alt 응답 검증·변환·완료·채택 성공
-            AI-->>Spring: 위험 점수·Reason Code·근거·버전
-            Spring->>DB: 기존 Evidence·COMPLETED·채택·ANALYZED commit
-        else 시작 commit 이후 Client·응답·완료 실패
-            AI--xSpring: 원본 오류
-            Spring->>DB: 기존 실패 경계로 DetectionResult·거래 FAILED
+    alt External Risk 성공
+        Risk-->>Spring: 성공 ExternalRiskSnapshot 전달
+        Spring->>Spring: analyzeV2(transactionId, snapshot, traceId)
+        Spring->>DB: startAnalysisV2()·REQUIRES_NEW·REPEATABLE_READ 시작
+        Spring->>DB: FinancialTransaction PESSIMISTIC_WRITE
+        Spring->>Spring: RECEIVED·시작 가능 상태 검증
+        Spring->>DB: 같은 잠긴 시작 트랜잭션에서 v1 Rule Snapshot 조립
+        Spring->>Spring: 같은 트랜잭션에서 v2 mapper 검증·immutable 요청 확정
+        alt Snapshot 조립·v2 mapper 성공
+            Spring->>DB: mapper 성공 후 DetectionResult version 조회
+            Spring->>DB: DetectionResult IN_PROGRESS·거래 ANALYZING·flush
+            DB-->>Spring: 분석 시작 commit
+            Spring->>AI: 활성 DB 트랜잭션 없이 FastAPI v2 요청 1회
+            alt 응답 검증·변환·완료·채택 성공
+                AI-->>Spring: 위험 점수·Reason Code·근거·버전
+                Spring->>DB: 기존 Evidence·COMPLETED·채택·ANALYZED commit
+            else 시작 commit 이후 Client·응답·완료 실패
+                AI--xSpring: 원본 오류
+                Spring->>DB: 기존 실패 경계로 DetectionResult·거래 FAILED
+            end
+        else v2 요청 확정 전 실패
+            Spring-->>Spring: 시작 트랜잭션 전체 rollback·원본 오류 전파
+            Note over Spring,DB: 거래 RECEIVED·DetectionResult/Evidence 없음·FastAPI/failAnalysis 미호출·FAILED 보정 없음
         end
-    else v2 요청 확정 전 실패
-        Spring-->>Spring: 시작 트랜잭션 전체 rollback·원본 오류 전파
-        Note over Spring,DB: 거래 RECEIVED·DetectionResult/Evidence 없음·FastAPI/failAnalysis 미호출·FAILED 보정 없음
+    else External Risk typed failure
+        Risk--xSpring: 여섯 category 중 하나
+        Spring->>DB: 목표 Failure Snapshot·failure_code·FAILED commit
+        Note over Spring,DB: 거래 RECEIVED·DetectionResult/Evidence 없음·FastAPI·최종화 미호출
     end
 ```
 
 External Risk 실패 경로에서는 분석 시작 DB commit과 FastAPI 호출 이후 단계가
 실행되지 않는다. 내부 coordinator는 거래 write 없이 원본 typed failure를 전파한다.
 거래는 `RECEIVED`, DetectionResult·사건·연결·관련 AuditLog는 없다. 실제 Provider와
-public 거래 접수, 멱등 실패 저장·재생은 아직 구현되지 않았다. coordinator 직접
-재호출이나 멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수 있다.
+public intake end-to-end 연결, 멱등 실패 저장·재생은 아직 구현되지 않았다.
+coordinator 직접 재호출이나 멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수
+있다. [ADR-007](../07-decisions/ADR-007-external-risk-idempotent-failure-replay-contract.md)의
+목표에서는 여섯 typed category가 durably confirmed되면 같은 key에서 terminal이고,
+재생은 Provider·FastAPI·최종화를 호출하지 않는다. 실패 저장 전 crash처럼 호출
+여부를 확정할 수 없는 `IN_PROGRESS`에서도 Provider를 자동 재호출하지 않는다.
 
 거래 상태는 기존 상태 전이 문서의 `RECEIVED`, `ANALYZING`, `ANALYZED`와 최종 처리 상태를 따른다. 요청 형식과 도메인 Validation 실패는 거래로 저장하지 않으며 오류 응답, `traceId`, 로그와 운영 메트릭으로 관측한다. MEDIUM의 모니터링은 별도 위험 대응 결과로 표현하고 AI 리포트 실패로 거래를 `FAILED` 처리하지 않는다.
 
@@ -794,7 +811,7 @@ React는 서비스 상태, 배포 버전, 업무 영향, AI 비용과 장애·�
 | 장애 | 직접 영향 | 유지해야 할 원칙 | 미확정 사항 |
 | --- | --- | --- | --- |
 | FastAPI Timeout | Rule·ML 분석과 후속 위험 대응 실패 | 대상 DetectionResult와 거래를 `FAILED`로 기록하고 결과를 채택하지 않음. Rule v1 Client 자동 retry는 0회 | 실패 후 재분석·수동 복구 계약 |
-| External Risk Timeout·Unavailable·Invalid Response | 외부 위험계좌·기기 근거 사용 불가 | 거래 `RECEIVED` 유지, DetectionResult 미생성, FastAPI·최종화 미호출. typed failure를 `UNMATCHED`·cache·fallback으로 변환하거나 자동 retry하지 않음 | 멱등 실패·공개 HTTP 오류 매핑 구현 |
+| External Risk 여섯 typed category | 외부 위험계좌·기기 근거 사용 불가 | 거래 `RECEIVED` 유지, DetectionResult 미생성, FastAPI·최종화 미호출. `TIMEOUT`, `UNAVAILABLE`, `INVALID_REQUEST`, `UNSUPPORTED_CAPABILITY`, `INVALID_RESPONSE`, `TRANSFORMATION_ERROR`를 `UNMATCHED`·cache·fallback으로 변환하거나 자동 retry하지 않음 | ADR-007에 따른 멱등 Failure Snapshot·공개 HTTP mapper 구현 |
 | LLM Timeout·연결 실패 | AI 사건 리포트 지연·실패 | 같은 `executionId`에서 최대 한 번 자동 재시도한 뒤 Rule·ML 결과 기반 템플릿 fallback. 거래·사건 처리 결과는 변경하지 않음 | 재시도 간격·Timeout 값 `TBD` |
 | 비일시적 LLM Provider 오류 | AI 리포트 생성 실패 | 자동 재시도 없이 템플릿 fallback과 오류·사용량 기록 | 다른 모델 전환 조건은 별도 승인 |
 | LLM 출력 형식 오류 | 리포트 품질 검증 실패 | 오류 출력을 정상 리포트로 표시하거나 자동 재시도하지 않고 템플릿 fallback | 품질 검증 기준 `TBD` |

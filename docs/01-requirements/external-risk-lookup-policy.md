@@ -8,9 +8,11 @@
 소유한다. 현재 구현은 local/dev/test 검증용 인메모리 경계, Backend Java v2 exact
 wire DTO·mapper·HTTP Client·내부 오케스트레이션과 Mock 활성 환경의 내부
 per-invocation coordinator까지다. coordinator는 무잠금 `READ_COMMITTED` read를
-종료한 뒤 Policy를 호출하고 성공 Snapshot을 `analyzeV2(...)`에 전달한다. 실제
-Provider·public 거래 접수·멱등 실패 재생은 연결되지 않았으며 위험 점수·등급·최종
-대응 또는 DB 영속화에도 관여하지 않는다.
+종료한 뒤 Policy를 호출하고 성공 Snapshot을 `analyzeV2(...)`에 전달한다. public
+거래 접수 API 자체는 구현되어 있지만 실제 Provider와 public intake→External Risk
+coordinator·Rule v2·위험 대응 최종화·멱등 External Risk 실패 저장·재생의
+end-to-end 연결은 구현되지 않았다. 이 독립 정책은 위험 점수·등급·최종 대응 또는
+DB 영속화를 소유하지 않는다.
 
 ## 2. 구현 범위
 
@@ -27,7 +29,8 @@ Provider·public 거래 접수·멱등 실패 재생은 연결되지 않았으�
 다음은 구현되지 않았다.
 
 - 실제 외부 HTTP Provider와 외부 네트워크 호출
-- 실제 Provider, 거래 접수 Controller와 public intake·멱등 실패 저장·재생 연결
+- 실제 Provider와 public intake→External Risk coordinator·Rule v2·위험 대응
+  최종화·멱등 실패 저장·재생 연결
 - External Risk 기반 점수·등급·위험 대응과 사건 처리
 - `ExternalRiskSnapshot` 영속화·감사·복구. 현재 승인된 목표가 아니며 필요해질
   경우 별도 Issue, DB 계약과 Migration 승인 대상
@@ -113,12 +116,17 @@ Port 정확히 1회 호출, 응답 검증, 정책 결과 계산과 Snapshot 생�
 빈 match 목록은 `UNMATCHED`, 하나 이상은 `MATCHED`다. `traceId`와 고객·계좌·기기
 reference는 Snapshot에 저장하지 않는다. `lookedUpAt`은 응답 구조 검증 뒤 기존
 UTC `Clock`에서 한 번 얻고 PostgreSQL 호환 마이크로초 정밀도로 정규화한다.
-이 Snapshot은 현재 구현과 Issue #160의 목표 모두에서 immutable 비영속 인메모리
-값이다. 성공한 Rule 분석 v2 요청을 조립하는 동안만 사용하며 Entity·Repository·
-테이블·FK가 없다. DB, DetectionEvidence, AuditLog와 최종 멱등 Snapshot v2에도
-저장하지 않는다. V1~V7을 변경하거나 신규 Flyway Migration을 추가하지 않는다.
-영속화·감사·복구는 현재 승인된 목표가 아니며, 필요해지면 별도 Issue와 DB 계약,
-Migration 승인을 받아야 한다.
+이 성공 `ExternalRiskSnapshot`은 현재 구현과 Issue #160의 목표 모두에서 immutable
+비영속 인메모리 값이다. 성공한 Rule 분석 v2 요청을 조립하는 동안만 사용하며
+Entity·Repository·테이블·FK가 없다. DB, DetectionEvidence, AuditLog와 최종 멱등
+성공 Snapshot v2에도 저장하지 않는다.
+
+이 원칙은 [ADR-007](../07-decisions/ADR-007-external-risk-idempotent-failure-replay-contract.md)의
+Idempotency Failure Snapshot과 다른 책임이다. Failure Snapshot은 Provider 업무 응답
+원문이나 성공 `ExternalRiskSnapshot`을 영속하는 모델이 아니라, public 거래 접수의
+안전한 실패 응답을 동일 key에서 Provider 없이 재생하는 strict envelope다. 현재
+V1~V7과 Entity는 이 실패 envelope를 저장할 수 없으며 실제 저장에는 후속 신규
+Migration과 Java 구현이 필요하다.
 
 현재 독립 정책의 시각 검증은 `providerAsOf <= lookedUpAt`이다. 구현된 FastAPI v2는
 `providerAsOf <= evaluationCutoffAt <= lookedUpAt`과 기존
@@ -143,11 +151,18 @@ mapper의 명시적 검증은 관련 시각의 마이크로초 이하 정밀도�
 예외 메시지는 category별 안전한 고정 문자열만 사용한다. nullable 원본 cause는
 보존하지만 메시지에 요청 reference나 Provider 원문을 복사하지 않는다. 실패를
 `UNMATCHED` 성공으로 바꾸거나 cache·stale data·fallback으로 대체하지 않고 현재
-분석을 계속하지 않는다. 승인된 목표 거래 접수 연결에서는 거래가 `RECEIVED`를
-유지하고 DetectionResult를 생성하지 않으며 FastAPI와 위험 대응 최종화를 호출하지
-않는다. 멱등 레코드는 실패를 확정하고 같은 요청 재생에서 Provider를 다시 호출하지
-않는다. 이 연결과 공개 오류 매핑은 아직 구현되지 않았으며
-cache·Circuit Breaker·fallback은 별도 Issue와 계약 승인이 필요하다.
+분석을 계속하지 않는다.
+
+ADR-007은 여섯 typed category가 정상적으로 저장된 경우 같은 operation scope·key에서
+모두 terminal `FAILED`로 확정하고, 같은 fingerprint 재생에서는 Provider·FastAPI·
+위험 대응 최종화를 호출하지 않는다고 결정했다. 새 key는 같은 `transactionId`의 공식
+재처리 수단이 아니며 재처리는 후속 별도 operation scope로 설계한다. public intake
+연결, Failure Snapshot과 공개 mapper는 아직 구현되지 않았다. 독립 Policy나 내부
+coordinator를 직접 재호출하면 여전히 Provider를 다시 호출할 수 있다.
+
+자동 retry·cache·stale data·fallback·Circuit Breaker는 도입하지 않는다. 예상하지
+못한 일반 `RuntimeException`은 여섯 category 중 하나로 임의 변환하거나 전용 Failure
+Snapshot 대상으로 확장하지 않는다.
 
 ## 6. 결정적 Mock
 
@@ -190,4 +205,7 @@ finguardops.external-risk.mock.scenario=MATCHED_SENDER_ACCOUNT
 성공 로그는 `traceId`, `providerCode`, `lookupStatus`, `policyResult`, match 개수만
 기록한다. 실패 로그는 `traceId`와 `failureCategory`만 기록한다. `transactionId`,
 고객·계좌·기기 reference, Provider 요청·응답 원문과 전체 configuration은 기록하지
-않는다. 현재 구현은 외부 네트워크, DB, FastAPI와 LLM 호출을 발생시키지 않는다.
+않는다. 목표 전용 안전 mapper도 예상된 typed failure의 category와 현재 trace만
+기록하고 Provider cause 전체를 generic stack trace 로그로 보내지 않는다. 이 mapper와
+로그 변경은 아직 구현되지 않았다. 현재 Mock 정책 자체는 외부 네트워크, DB,
+FastAPI와 LLM 호출을 발생시키지 않는다.
