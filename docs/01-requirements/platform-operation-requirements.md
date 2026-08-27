@@ -62,12 +62,12 @@ FinGuardOps는 금융거래와 사용자 행동을 기반으로 이상거래를 
 
 | 운영 대상 | 역할 | 현재 도입 상태와 운영 범위 |
 | --- | --- | --- |
-| Spring Boot Backend | 거래 접수·검증, 멱등성, 거래·사건 상태, 위험 대응과 업무 정합성의 최종 소유자 | Health, public `POST /api/v1/transactions`, 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion과 기본 Rule 집합 발행 경계, Rule 분석 HTTP Client·내부 오케스트레이션, External Risk 독립 정책·Mock·실제 HTTP Adapter와 production coordinator Bean, Backend Java v2 DTO·Mapper·Client·내부 오케스트레이션, FraudCase·CaseTransaction과 위험 대응·AuditLog 원자적 최종화 경계가 구현되었다. public intake와 External Risk coordinator·Rule v2·위험 대응 최종화·멱등 실패 저장·재생의 end-to-end 연결, Snapshot v2·운영 복구, 공개 사건·감사·최종화 API, USER 인증·인가와 사건 조사 상태 전이·추가 연결·병합·분리는 미구현이다. |
+| Spring Boot Backend | 거래 접수·검증, 멱등성, 거래·사건 상태, 위험 대응과 업무 정합성의 최종 소유자 | Health, public `POST /api/v1/transactions`, 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion과 기본 Rule 집합 발행 경계, Rule 분석 HTTP Client·내부 오케스트레이션, External Risk 독립 정책·Mock·실제 HTTP Adapter와 production coordinator Bean, Backend Java v2 DTO·Mapper·Client·내부 오케스트레이션, FraudCase·CaseTransaction과 위험 대응·AuditLog 원자적 최종화 경계가 구현되었다. Public intake의 Idempotency 단일 승자 뒤 External Risk·Rule v2·위험 대응 최종화·멱등 실패 저장·재생을 연결하는 end-to-end 흐름과 성공 Snapshot v2 저장·재생도 구현되었다. Crash·완료 간극과 장기 `IN_PROGRESS` 운영 복구, 공개 사건·감사·최종화 API, USER 인증·인가와 사건 조사 상태 전이·추가 연결·병합·분리는 미구현이다. |
 | FastAPI AI Service | Feature 계산, Rule 실행, ML 추론, 모델 라우팅, AI 사건 리포트와 템플릿 fallback | `POST /api/v1/rule-analysis`, External Risk 필수 입력의 `POST /api/v2/rule-analysis`, R001~R004 실행과 점수·RiskLevel·Evidence 계산은 구현되었다. v2 External Risk는 validation-only이며 ML 추론·모델 라우팅·AI 사건 리포트와 템플릿 fallback은 미구현이다. |
-| PostgreSQL | 거래, 행동 이벤트, 탐지 결과, 사건, 감사 로그와 AI 사용량·비용 데이터의 영속 저장 목표 | V1~V7의 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion, FraudCase·CaseTransaction과 append-only AuditLog 영속 기반이 구현되었다. External Risk 영속화와 사건 조사·AI 사용량·비용·운영 데이터는 미구현이며 별도 승인 범위이다. |
+| PostgreSQL | 거래, 행동 이벤트, 탐지 결과, 사건, 감사 로그와 AI 사용량·비용 데이터의 영속 저장 목표 | V1~V8의 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion, FraudCase·CaseTransaction, append-only AuditLog와 Idempotency Failure Snapshot 영속 기반이 구현되었다. 성공 업무용 External Risk Snapshot의 별도 DB 영속화와 사건 조사·AI 사용량·비용·운영 데이터는 미구현이며 별도 승인 범위이다. |
 | Redis | 정확 일치 AI 리포트 캐시와 집계 데이터 사용 목표 | 향후 연동·검증 범위이다. External Risk cache는 현재 계약이 아니며 별도 Issue와 승인이 필요하다. 시맨틱 캐시는 범위에 포함하지 않는다. |
 | Kafka | 사건·리포트·통계 등 비동기 처리 목표 | 핵심 거래·탐지·사건 기능 안정화 이후 도입한다. 현재 구현된 구성으로 간주하지 않는다. |
-| External Risk Provider | 위험 송신·수신 계좌와 위험 기기의 조회 | local/dev/test 결정적 Mock과 실제 HTTP Adapter, strict mapper, timeout·bounded body·failure classifier, production Policy·coordinator Bean이 구현되었다. Mock과 HTTP Bean은 상호 배타적이다. public intake end-to-end 연결·멱등 실패 저장 호출·공개 오류 mapper·운영 credential 배포와 metric은 미구현이며 실패를 cache·fallback·`UNMATCHED`로 변환하지 않는다. Provider 호출 단일 승자는 목표 public transaction intake의 Idempotency claim이 소유한다. |
+| External Risk Provider | 위험 송신·수신 계좌와 위험 기기의 조회 | 선행 PR #177까지 local/dev/test 결정적 Mock과 실제 HTTP Adapter, strict mapper, timeout·bounded body·failure classifier, production Policy·coordinator Bean이 구현되었다. PR #179는 기존 Provider를 public intake의 Idempotency 단일 승자 흐름에 연결하고 Failure Snapshot 저장·재생과 공개 안전 오류 mapping을 연결했다. Mock과 HTTP Bean은 상호 배타적이며 실패를 cache·fallback·`UNMATCHED`로 변환하지 않는다. 운영 credential 실제 배포와 신규 운영 metric은 미구현이다. |
 | LLM Provider | HIGH·CRITICAL 사건 중심의 생성형 AI 사건 리포트 생성 | 향후 외부 연동 범위이다. 위험 점수, 최종 판정, 거래 차단, 고객 제재와 사건 상태 확정을 수행하지 않는다. |
 | Observability Stack | 로그·메트릭·트레이싱 수집 및 기술 상태 분석 | 핵심 기능 안정화 이후 단계적으로 도입할 범위이다. 논리 메트릭 계약은 `observability-metrics-spec.md`에 정의했으며 제품 선택과 실제 수집 구현은 후속 범위이다. |
 | 배포 환경 | 로컬·컨테이너·클라우드 환경에서 버전 배포와 실행 상태 관리 | Docker, CI/CD, Kubernetes와 AWS는 로드맵에 따른 단계적 도입·검증 대상이다. Kubernetes와 AWS가 현재 구현된 것으로 간주하지 않는다. |
@@ -200,14 +200,14 @@ gap이다. 이 상태를 수집하는 실제 metric·경보·scheduler는 아직
 
 #### 영향 범위
 
-현재 독립 조회 경계는 실패 시 성공 Snapshot을 만들지 않고 분석을 계속하지 않는다.
-목표 거래 연결에서는 거래가 `RECEIVED`를 유지하고 DetectionResult와
+Public 거래 연결에서 External Risk 조회 실패는 성공 Snapshot을 만들지 않고 분석을
+계속하지 않는다. 거래는 `RECEIVED`를 유지하고 DetectionResult와
 DetectionEvidence를 생성하지 않으며 FastAPI·위험 대응 최종화·성공 Snapshot v2를
 호출하거나 생성하지 않는다. 멱등 레코드는 실패를 확정하고 같은 요청 재생에서는
 External Risk Provider를 다시 호출하지 않는다. 여섯 typed category가 정상적으로
 저장된 경우 같은 key에서 모두 terminal이며 자세한 저장·재생 계약은
 [ADR-007](../07-decisions/ADR-007-external-risk-idempotent-failure-replay-contract.md)을
-따른다. 이 거래 연결과 Failure Snapshot은 아직 구현되지 않았다.
+따른다. 이 public 거래 연결과 Failure Snapshot 저장·재생은 구현되었다.
 
 #### 업무 지속 원칙
 
@@ -229,8 +229,8 @@ Mock 활성 profile·property와 scenario, 성공·failure category를 구분한
 
 장애 시각, 안전한 현재 trace, failure category, 멱등 상태, writer 결과, 임시 대응,
 원인과 재발 방지를 기록한다. 고객·계좌·기기 reference, Provider 원문과 cause 전체는
-로그에 기록하지 않는다. 예상된 typed failure의 후속 안전 mapper는 category와 현재
-trace만 기록하며 아직 구현되지 않았다.
+로그에 기록하지 않는다. 예상된 typed failure의 안전 mapper는 category와 현재
+trace만 승인된 형식으로 기록한다.
 
 ### 9.3 LLM Timeout
 

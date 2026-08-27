@@ -185,35 +185,32 @@ CONFIRMED_FRAUD
 
 처음부터 전체 시스템을 마이크로서비스로 분리하지 않습니다.
 
-아래 구성은 목표 아키텍처를 포함합니다. 현재는 Spring Boot의 거래·행동 이벤트
-접수와 PostgreSQL 연동, 탐지 결과·RuleVersion 영속 모델, FastAPI Rule v1 실행
-Endpoint, Spring Boot `RuleAnalysisHttpClient`, 거래 분석 Snapshot 조합과 분석
-시작·결과 채택 persistence boundary가 구현되었습니다. 비트랜잭션 내부 Rule 분석
-HTTP 오케스트레이터도 Snapshot과 분석 시작 commit, 분석 시도당 FastAPI 최대
-1회 호출, 응답 변환, 결과 완료·Evidence 저장·거래 결과 채택 또는 실패 상태
-기록을 연결합니다.
+아래 구성은 목표 아키텍처를 포함합니다. 현재 Spring Boot에는 거래·행동 이벤트
+접수와 PostgreSQL 연동, 탐지 결과·RuleVersion 영속 모델, External Risk 조회,
+Rule 분석, 위험 대응·사건·AuditLog 최종화를 연결하는 public 최종 동기 거래 접수
+흐름이 구현되었습니다.
 
 FastAPI에는 기존 `POST /api/v1/rule-analysis`와 함께 External Risk 결과를 필수
 입력으로 검증하는 `POST /api/v2/rule-analysis`가 구현되었습니다. 두 endpoint는
 같은 Rule v1 실행 경계를 사용하며 External Risk는 아직 점수·등급·Evidence에
 반영하지 않습니다. Backend에는 v1 계약을 유지하는 Java v2 exact wire DTO,
-`ExternalRiskSnapshot` mapper, `/api/v2/rule-analysis` HTTP Client와 기존 v1을
-유지하는 별도 내부 v2 오케스트레이션 경계가 구현되었습니다. 거래 접수 Service의
-전체 오케스트레이션, 실제 Provider, 공개 오류 매핑, 최종 동기 거래 응답과
-Snapshot v2, Snapshot 완료 간극 복구,
-운영 배포·재분석은 아직 구현되지 않았습니다. 기존 v1은 당장 제거하지 않습니다.
-네 위험 등급에서 목표 거래 상태,
-`RiskResponseOutcome`, 사건 필수 여부를 결정하는 순수 immutable 정책은
-구현되었습니다. 이 정책은 거래 상태·영속 결과·사건을 변경하지 않습니다.
-`FraudCase`·`CaseTransaction` Entity와 Flyway V6, HIGH·CRITICAL `ANALYZED`
-거래의 새 `OPEN` 사건·첫 연결을 원자적으로 생성하거나 기존 활성 연결을
-멱등 반환하는 내부 영속 경계도 구현되었습니다. 이 경계는 최종 거래 상태나
-`RiskResponseOutcome`을 변경하지 않으며 AuditLog와 공개 사건 API도 없습니다.
-독립 External Risk Port·정책 Service와 local/dev/test
-전용 결정적 Mock·immutable 인메모리 Snapshot은 구현되었습니다. Rule v1 기본 RuleVersion 집합의 제한된 local/dev/test
-one-shot 발행 경계만 구현되어 있으며 공개 관리 API나 정상 시작 자동 발행은 없습니다.
-`ANALYZED`는 위험 대응
-전 중간 상태이므로 최종 성공으로 반환하거나 성공 Snapshot으로 확정하지 않습니다.
+`ExternalRiskSnapshot` mapper, `/api/v2/rule-analysis` HTTP Client, 실제 External Risk
+HTTP Provider와 production Provider·Policy·coordinator Bean이 구현되었습니다.
+
+Public 거래 접수는 Idempotency claim의 단일 승자가 거래 `RECEIVED` 저장·연결을
+commit한 뒤 활성 DB transaction 없이 External Risk와 Rule 분석 v2를 호출합니다.
+분석 성공 후 위험 대응·필요한 사건·AuditLog를 최종화하고, 별도 completion
+transaction에서 성공 Snapshot v2와 Idempotency `COMPLETED`를 확정해 HTTP `201`을
+반환합니다. External Risk typed failure는 공개 안전 오류로 매핑해 Failure Snapshot으로
+저장·재생하며, legacy·Snapshot v1·Snapshot v2 성공 replay와 terminal 실패 replay는
+Provider·Rule·최종화를 다시 호출하지 않습니다.
+
+Crash·완료 간극과 장기 `IN_PROGRESS`의 운영 복구, 자동 retry·fallback·cache,
+운영 credential 실제 배포, 신규 운영 metric·alert·dashboard와 운영 배포·재분석은
+아직 구현되지 않았습니다. 기존 Rule 분석 v1은 당장 제거하지 않으며 Rule v1 기본
+RuleVersion 집합의 제한된 local/dev/test one-shot 발행 경계만 제공하고 공개 관리
+API나 정상 시작 자동 발행은 제공하지 않습니다. `ANALYZED`는 위험 대응 전 중간
+상태이므로 최종 성공으로 반환하거나 성공 Snapshot으로 확정하지 않습니다.
 
 ```text
 React·TypeScript
@@ -366,16 +363,17 @@ Kafka
 * V5 R001~R004 기본 RuleVersion의 원자적 발행 Service와 local/dev/test 전용
   비활성 one-shot Runner 구현
 * 독립 External Risk Port·응답 검증 정책 Service와 local/dev/test 전용 결정적
-  Mock, 성공 결과용 immutable 인메모리 Snapshot 구현 및
+  Mock, 실제 HTTP Provider, production Provider·Policy·coordinator Bean과 성공 결과용
+  immutable 인메모리 Snapshot 구현 및
   [`External Risk 조회 정책`](docs/01-requirements/external-risk-lookup-policy.md) 문서화
 * External Risk 선행 조회와 `POST /api/v2/rule-analysis` 입력 연결 계약을
   [`External Risk·Rule 분석 입력 계약`](docs/01-requirements/external-risk-rule-analysis-input-contract.md)으로 확정하고,
   FastAPI v2 strict DTO·wire 및 교차 필드 검증·Endpoint와 Backend Java v2
   exact wire DTO·mapper·HTTP Client와 별도 내부 v2 오케스트레이션 경계 구현
-* Mock profile·property에서만 활성화되는 내부 per-invocation coordinator가
-  `READ_COMMITTED` 거래 read 뒤 트랜잭션 밖 External Risk Policy를 호출하고 성공
-  Snapshot을 `analyzeV2(...)`에 전달하는 경계 구현. 직접 재호출·멱등 경계 밖 동시
-  호출은 Provider를 다시 호출할 수 있으며 public intake·멱등 실패 재생은 미구현
+* Public 거래 접수의 Idempotency 단일 승자가 거래 `RECEIVED` 저장·연결 commit 뒤
+  트랜잭션 밖 External Risk Policy와 Rule 분석 v2를 호출하는 최종 동기 orchestration 구현
+* External Risk typed failure의 공개 안전 오류 매핑과 Failure Snapshot 저장·재생,
+  terminal replay의 Provider·Rule·최종화 미호출 구현
 * LOW·MEDIUM·HIGH·CRITICAL별 목표 거래 상태, `RiskResponseOutcome`과 사건 필수
   여부를 반환하는 순수 위험 대응 결정 정책 구현
 * `FraudCase`·`CaseTransaction` Entity와 Flyway V6, 거래 우선 비관적 잠금으로
@@ -383,35 +381,35 @@ Kafka
   멱등 반환하는 내부 persistence boundary 구현
 * append-only AuditLog V7과 `ANALYZED` 거래의 decision·필요한 사건·최종 상태·
   `RiskResponseOutcome`·AuditLog를 함께 commit하거나 rollback하는 내부 최종화 경계 구현
-* 최종 거래 성공 경계, 멱등 Snapshot v2와 완료 간극 복구 계약을
+* 위험 대응·필요한 사건·AuditLog 최종화와 별도 completion transaction의 성공
+  Snapshot v2·Idempotency `COMPLETED`·신규 HTTP `201` 연결 구현
+* 최종 성공 Snapshot v2 모델·codec·저장·재생과 strict legacy·Snapshot v1·Snapshot v2
+  replay 호환 구현. 완료 간극 복구 계약은
   [`ADR-006`](docs/07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md)으로 확정
 * Backend와 AI Service 전용 GitHub Actions CI 구성
 
-현재 PostgreSQL 연동은 애플리케이션 코드와 Testcontainers 검증 범위입니다. 운영 PostgreSQL, Docker Compose, Kubernetes와 AWS 배포 환경이 구현되었다는 의미는 아닙니다. 거래 접수 성공 응답도 현재는 단계적 구현 상태인 `RECEIVED`와 탐지 관련 null 값을 반환하며, 최종 동기 분석 목표는 [`ADR-003`](docs/07-decisions/ADR-003-transaction-processing-boundary.md)을 유지합니다.
+현재 PostgreSQL 연동은 애플리케이션 코드와 Testcontainers 검증 범위입니다. 운영 PostgreSQL, Docker Compose, Kubernetes와 AWS 배포 환경이 구현되었다는 의미는 아닙니다. Public 거래 접수의 신규 성공 응답은 최종 거래·탐지·위험 대응·필요한 사건 결과를 반영한 HTTP `201`이며, 최종 동기 분석 경계는 [`ADR-003`](docs/07-decisions/ADR-003-transaction-processing-boundary.md)을 따릅니다.
 
 ### Planned
 
-최종 동기 거래 접수는 다음 선행 순서를 따른다.
+Public 최종 동기 거래 접수와 실제 External Risk HTTP Provider, 공개 오류 매핑 및
+성공 Snapshot v2 연결은 구현되었습니다. 후속 계획은 다음과 같습니다.
 
-1. 비트랜잭션 상위 Service에서 거래 접수–External Risk–Rule 분석 v2–위험 대응–사건 연결
-2. 실제 External Risk HTTP Provider와 공개 오류 매핑
-3. 최종 Snapshot v2 확정과 Snapshot 완료 간극 운영 복구 구현
-
-그 밖의 계획은 다음과 같습니다.
-
-* 실패 후 재분석 계약
-* 사건 조회·상태 변경
-* 조사 메모·감사 로그
+* crash·Snapshot 완료 간극과 장기 `IN_PROGRESS` 운영 복구
+* 불확실한 `ANALYZING`·상태 불일치의 운영 판정
+* recovery command·scheduler·batch와 별도 operation scope의 복구·재분석 계약
+* 공개 사건 조회·상태 변경·조사 메모·AuditLog API와 USER 인증·인가
 * ML 추론
 * AI 사건 리포트
 * AI 사용량·토큰·비용 기록
-* 실제 External Risk HTTP Provider. Snapshot 영속화는 별도 요구와 승인 시 검토
+* External Risk 운영 credential 실제 배포와 신규 운영 metric·alert·dashboard
+* 자동 retry·fallback·cache는 별도 Issue와 계약 승인 전까지 도입하지 않음
 * Redis 연동
 * Docker Compose
 * Kafka 비동기 처리
-* React 관리자 화면
+* 프론트엔드 최종 응답·사건 조회 연동과 React 관리자 화면
 * 이미지 빌드·배포를 포함한 GitHub Actions CI/CD 확장
-* Kubernetes·AWS 배포
+* Kubernetes·AWS 배포와 실제 배포 환경 E2E
 * Observability
 * 장애·비용 실험
 
@@ -440,12 +438,14 @@ profile이 하나라도 함께 활성화되면 실행을 거부한다. 따라서
 새 정책은 기존 PUBLISHED 버전을 되돌리거나 덮어쓰지 않고 새 `versionNumber`로
 설계해야 한다.
 
-현재 `RECEIVED`/null 멱등 response snapshot은 거래 접수 commit에서 확정되어 그대로
-재생됩니다. strict legacy codec과 v1 envelope, 저장 HTTP 상태 재생은 구현되어
-있지만 최종 `transaction-create-response-v2`와
-`transaction-intake-snapshot-envelope-v2` codec은 미구현입니다. 최종 성공은
-Rule 결과 채택뿐 아니라 위험 대응, 최종 거래 상태와 HIGH·CRITICAL 사건 연결의
-모든 업무 commit 이후에만 확정합니다. 상세 경계와 완료 간극 복구 정책은
+신규 최종 성공은 Rule 결과 채택뿐 아니라 위험 대응, 최종 거래 상태와
+HIGH·CRITICAL 사건 연결의 모든 업무 commit 이후 별도 completion transaction에서
+`transaction-create-response-v2`와 `transaction-intake-snapshot-envelope-v2`로
+저장되고 HTTP `201`로 반환됩니다. strict legacy·Snapshot v1·Snapshot v2는 저장된
+응답과 HTTP 상태를 재생하며 terminal replay는 Provider·Rule·최종화를 다시 호출하지
+않습니다. 최종 업무 commit 뒤 completion이 실패하면 업무 결과는 유지하고
+Idempotency는 `IN_PROGRESS`로 남으며 자동 재실행하지 않습니다. 상세 경계와 아직
+구현되지 않은 완료 간극 운영 복구 정책은
 [`ADR-006`](docs/07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md)을
 따릅니다. DB의 24시간 `expires_at` 저장값도 Service 만료 판정과 정리 작업이
 없어 실질적인 만료 정책은 아닙니다.
