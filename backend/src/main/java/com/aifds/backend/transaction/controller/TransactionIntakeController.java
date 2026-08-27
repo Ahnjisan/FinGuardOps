@@ -37,7 +37,11 @@ public class TransactionIntakeController {
             String traceId
     ) {
         TransactionIntakeResult result =
-                transactionIntakeService.receive(idempotencyKey, request);
+                transactionIntakeService.receive(
+                        idempotencyKey,
+                        request,
+                        traceId
+                );
 
         if (result instanceof TransactionIntakeResult.Received received) {
             return ResponseEntity.status(received.httpStatus()).body(
@@ -65,6 +69,26 @@ public class TransactionIntakeController {
             throw TransactionIntakeRejectedException.previousFailure(
                     failure.failureCode()
             );
+        }
+        if (result
+                instanceof TransactionIntakeResult.ExternalRiskFailure failure) {
+            throw TransactionIntakeRejectedException.typedFailure(
+                    failure.httpStatus(),
+                    failure.code(),
+                    failure.message()
+            );
+        }
+        if (result instanceof TransactionIntakeResult.ExternalRiskFailureReplay
+                failure) {
+            throw TransactionIntakeRejectedException.typedFailure(
+                    failure.httpStatus(),
+                    failure.code(),
+                    failure.message()
+            );
+        }
+        if (result instanceof TransactionIntakeResult.ProviderUnavailable
+                || result instanceof TransactionIntakeResult.RuleFailure) {
+            throw TransactionIntakeRejectedException.dependencyUnavailable();
         }
         throw new IllegalStateException(
                 "Unsupported transaction intake result: "

@@ -22,11 +22,14 @@ ADR 작성 당시 구현은 그중 입력 검증, 멱등 선점과 거래 영속
 
 이 ADR은 다음 세 범위를 구분한다.
 
-- **현재 구현**: 저장소의 Java 코드와 V1 Flyway Migration이 지금 수행하는 동작
+- **ADR 작성 당시 구현**: 저장소의 Java 코드와 V1 Flyway Migration이 당시 수행한 동작
 - **목표 계약**: 최종 동기 탐지 응답 전환 시 지켜야 할 멱등 재생 의미
 - **후속 구현 필요**: 최종 동기 탐지·위험 대응·사건 연결처럼 이번 Snapshot codec 전환에 포함되지 않은 항목
 
-## 현재 단계적 구현
+## Issue #178 이전 단계적 구현
+
+이 절은 단계적 전환 당시의 역사적 상태다. 현재 public 연결 상태는 마지막의
+Issue #178 후속 구현 절을 따른다.
 
 ### 요청 선점과 동일성 비교
 
@@ -104,7 +107,7 @@ UUID는 canonical 문자열, 금액은 10진 정수 문자열, 시각은 UTC ISO
 | `DEPENDENCY_TIMEOUT` | `503 Service Unavailable` | `DEPENDENCY_TIMEOUT` | `탐지 서비스를 사용할 수 없습니다.` |
 | null·빈 값·알 수 없는 값·내부 전용 값 | `500 Internal Server Error` | `INTERNAL_ERROR` | `요청을 처리하는 중 오류가 발생했습니다.` |
 
-ADR-006이 승인한 최종 연결 목표에서는 `DEPENDENCY_UNAVAILABLE`을 `503 Service Unavailable`, `DEPENDENCY_UNAVAILABLE`, `탐지 서비스를 사용할 수 없습니다.`로 재생하고, 계약·payload·capability·invalid response·내부 오류와 mapping·adoption·transaction boundary 오류를 `INTERNAL_ERROR`로 저장·재생한다. 이 확대된 whitelist와 실패 저장 경계는 아직 거래 접수 흐름에 구현되지 않았다.
+ADR-006이 승인한 최종 연결에서는 `DEPENDENCY_UNAVAILABLE`을 `503 Service Unavailable`, `DEPENDENCY_UNAVAILABLE`, `탐지 서비스를 사용할 수 없습니다.`로 재생하고, 계약·payload·capability·invalid response·내부 오류를 안전한 `INTERNAL_ERROR`로 축약한다. Issue #178은 External Risk typed 실패와 Rule 확정 실패의 public 저장·재생 경계를 연결했다.
 
 현재 DB와 Entity는 `expires_at = created_at + 24 hours`를 저장한다. 그러나 Service는 claim 시 `expires_at`을 판정하지 않고 만료 레코드 정리 작업도 구현하지 않았다. 따라서 24시간은 현재 저장된 시각과 DB 제약일 뿐, 만료 후 키 재사용까지 시행하는 실질적인 만료 정책이 아니다.
 
@@ -143,7 +146,7 @@ Migration 없이 구현하기 쉽지만 필드 추가·삭제가 codec 변경인
 - 멱등 응답 재생은 최초 명령 결과를 재현하는 기능이며 최신 거래·탐지·사건 상태 조회 기능이 아니다.
 - 확정된 Snapshot은 후속 탐지 결과, 재분석, 거래 상태 또는 사건 상태가 바뀌어도 수정하지 않는다.
 - 기존 무버전 `RECEIVED`/null Snapshot은 신규 최종 응답으로 소급 교체하지 않는다.
-- Snapshot codec 전환 이후 새로 선점된 요청부터 그 요청에서 실제 확정한 업무 응답을 버전 envelope로 저장한다. 현재 단계적 `RECEIVED` 응답은 v1이고, 최종 동기 성공 응답은 해당 기능이 구현된 뒤 ADR-006의 v2로 저장한다.
+- Snapshot codec 전환 이후 새로 선점된 요청부터 그 요청에서 실제 확정한 업무 응답을 버전 envelope로 저장한다. Issue #178 이전 단계적 `RECEIVED` 응답은 v1이며, 현재 신규 최종 동기 성공 응답은 ADR-006의 v2로 저장한다.
 
 ## 요청 동일성 기준
 
@@ -248,9 +251,12 @@ legacy Snapshot은 엄격한 legacy codec으로만 복원하고 신규 envelope�
 
 `FAILED`인 같은 키·같은 fingerprint는 자동 재처리하지 않는다. 이는 실패 원인이 사라졌는지와 무관하게 같은 키로 새로운 거래·탐지 실행을 만들지 않는다는 결정이다.
 
-현재 구현은 `DUPLICATE_TRANSACTION`, `DEPENDENCY_TIMEOUT`만 기존 HTTP 상태·공개 code·고정 message로 재현한다. ADR-006의 최종 연결에서는 `DEPENDENCY_UNAVAILABLE`도 `503 Service Unavailable`, `DEPENDENCY_UNAVAILABLE`, `탐지 서비스를 사용할 수 없습니다.`로 재현하고, 계약·payload·capability·invalid response·내부 오류와 mapping·adoption·transaction boundary 오류는 `500 Internal Server Error`, `INTERNAL_ERROR`로 축약한다. 저장된 Client category, 원본 FastAPI 오류와 민감정보는 공개하지 않는다.
+현재 구현은 legacy `DUPLICATE_TRANSACTION`, `DEPENDENCY_TIMEOUT`과 Rule 확정 실패의
+`DEPENDENCY_UNAVAILABLE`을 승인된 상태·code·고정 message로 재현한다. External Risk
+typed Failure Snapshot은 저장된 status·공개 code·안전 message를 strict decode해
+재생한다. 저장된 category, 원본 Provider·FastAPI 오류와 민감정보는 공개하지 않는다.
 
-External Risk 실패는 분석 시작 전 확정 실패다. 목표 연결은 거래 `RECEIVED`와
+External Risk 실패는 분석 시작 전 확정 실패다. 현재 연결은 거래 `RECEIVED`와
 DetectionResult 미생성을 확인한 뒤 멱등 레코드를 승인된 `failureCode`로
 `FAILED` 처리한다. 같은 키·fingerprint 재생은 저장된 실패를 반환하며 External
 Risk Provider, FastAPI, 위험 대응과 사건을 다시 호출하지 않는다.
@@ -331,25 +337,21 @@ Snapshot을 `analyzeV2(...)`에 전달하는 per-invocation coordinator도 구�
 필요한 사건 경계, 최종 상태·`RiskResponseOutcome`, AuditLog를 함께 commit하거나
 rollback하는 내부 최종화 경계도 구현되었다.
 
-기존 사건에 추가 거래 연결, 사건 병합·분리, 거래 접수 전체 연결, 최종 v2
-Snapshot writer 연결과 완료 간극 복구, 공개 사건 API는 구현되지 않았다. 따라서 내부 최종화
-경계의 구현을 공개 거래 처리 전체 완료로 간주하지 않는다. External Risk 실제
-Provider와 거래 접수 연결도 구현되지 않았다. FastAPI에는 기존
+기존 사건에 추가 거래 연결, 사건 병합·분리, 완료 간극 운영 복구와 공개 사건 API는
+구현되지 않았다. FastAPI에는 기존
 `POST /api/v1/rule-analysis`를 유지하면서 필수 External Risk v2 DTO·strict wire 및
 교차 필드 검증을 적용한 `POST /api/v2/rule-analysis`가 구현되어 있다. Backend Java
-v2 DTO·mapper·Client와 내부 v2 오케스트레이션도 구현되어 있다. 실제 Provider·public
-거래 접수·멱등 실패 재생, 공개 External Risk 오류 매핑, External Risk 영속화와
-Snapshot v2 완료 writer·완료 간극 운영 복구는 미구현이다. v2 모델·codec·dispatcher가
-구현되었다는 사실은 public intake·최종화 호출·Idempotency 완료 writer가 연결되었다는
-뜻이 아니다. 이 내부 경계는 운영 배포나
-end-to-end 거래 처리 완료를 의미하지 않는다.
-External Risk 실패는 현재 cache·stale data·fallback·`UNMATCHED`로 변환하지 않고
-typed failure로 전파한다. 목표 거래 접수 연결에서는 거래 `RECEIVED` 유지,
-DetectionResult 미생성, FastAPI 미호출과 멱등 `FAILED`를 적용한다. 현재 `responseBody`는 실제 단계적 거래
-접수 결과인 `RECEIVED`와 네 탐지 관련 null 값을 v1으로 보존한다.
+v2 DTO·mapper·Client와 내부 v2 오케스트레이션도 구현되어 있다. Issue #178은 실제
+Provider·public 거래 접수·멱등 실패 재생, 공개 External Risk 오류 mapping과 Snapshot
+v2 완료 writer를 연결했다. External Risk 영속화, crash·완료 간극과 장기
+`IN_PROGRESS` 운영 복구는 미구현이다.
+External Risk 실패는 cache·stale data·fallback·`UNMATCHED`로 변환하지 않고 typed
+failure로 전파한다. public 거래 접수는 거래 `RECEIVED` 유지, DetectionResult 미생성,
+FastAPI 미호출과 멱등 `FAILED`를 적용한다. legacy·v1 `RECEIVED` Snapshot은 그대로
+보존·재생하고 신규 성공은 최종 Snapshot v2로 저장한다.
 내부 coordinator는 per-invocation이므로 직접 재호출·멱등 경계 밖 동시 호출에서
-Provider가 다시 호출될 수 있으며, 같은 멱등 요청의 Provider 무호출 재생은 아직
-구현되지 않았다.
+Provider가 다시 호출될 수 있으나 public 단일 승자와 terminal 재생은 Provider를
+재호출하지 않는다.
 
 ## Migration 영향
 
@@ -396,3 +398,17 @@ Provider가 다시 호출될 수 있으며, 같은 멱등 요청의 Provider 무
 4. Snapshot 완료 간극 운영 복구 구현
 
 만료 후 키 재사용, 실제 보존 기간, 정리 작업과 동시성 정책은 위 순서와 별도로 승인한다.
+
+## 후속 구현 상태 (2026-08-27, Issue #178)
+
+후속 작업 3의 public 연결을 구현했다. 신규 최종 성공은
+`transaction-create-response-v2`/`transaction-intake-snapshot-envelope-v2`와
+HTTP `201`로 별도 transaction에서 저장하고, 동일 요청은 저장된 body·status와
+현재 요청 trace를 결합해 재생한다. strict legacy `200`, v1 저장 status와 v2 저장
+status 재생은 기존 dispatcher를 그대로 사용하며 소급 변환하지 않는다.
+
+External Risk typed 실패는 성공 dispatcher가 아니라 ADR-007 strict decoder로
+재생한다. Rule 확정 실패의 code-only `DEPENDENCY_UNAVAILABLE`과 기존
+`DEPENDENCY_TIMEOUT` 재생을 유지한다. 최종 업무 commit 뒤 완료 writer가 실패하면
+업무 결과는 유지하고 Idempotency는 `IN_PROGRESS`로 남는다. 이 간극과 장기
+`IN_PROGRESS`의 운영 복구는 여전히 구현되지 않았다.

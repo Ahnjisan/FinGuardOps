@@ -30,8 +30,9 @@ AuditLog를 원자적으로 확정한다. 다만 거래 접수 전체 연결과 
 이 ADR은 기존 최종 동기 목표를 유지하면서 최종 성공 경계, Snapshot v2,
 완료 간극 복구, 실패 공개 매핑과 선행 구현 순서를 확정한다. 이 문서 확정은
 Java·Python·DB 또는 운영 복구 실행 경로의 구현 완료를 의미하지 않는다. 이후
-Snapshot v2 typed 모델·codec·dispatcher와 JSONB 저장·조회 검증은 구현되었지만
-public 실행 경로와 완료 writer 연결은 아직 구현되지 않았다.
+Snapshot v2 typed 모델·codec·dispatcher와 JSONB 저장·조회 검증을 구현했고,
+Issue #178에서 public 실행 경로와 완료 writer를 연결했다. 운영 복구 실행 경로는
+아직 구현되지 않았다.
 
 ## 2. 최종 성공 경계
 
@@ -226,12 +227,12 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
 ## 10. External Risk와 RuleVersion 선행 조건
 
 - ADR-003의 External Risk 단계를 최종 동기 목표에서 제거하지 않는다.
-- 독립 External Risk 정책·Mock과 Mock 성공 Snapshot을 Rule v2에 전달하는 내부
-  per-invocation coordinator는 구현되었지만 실제 Provider·public 거래 접수·멱등
-  실패 재생과 연결되기 전에는 최종 거래 접수 연결을 구현 완료로 표시하지 않는다.
+- 독립 External Risk 정책·Mock과 성공 Snapshot을 Rule v2에 전달하는 내부
+  per-invocation coordinator는 실제 Provider·public 거래 접수·멱등 실패 재생까지
+  연결되어야 최종 거래 접수 구현 완료로 표시한다. Issue #178이 이 조건을 충족했다.
 - External Risk timeout·unavailable·invalid response는 현재 분석을 계속하지 않고
   typed failure로 전파한다. cache, stale data, fallback과 `UNMATCHED` 변환은 없다.
-- 목표 거래 접수 연결에서는 `RECEIVED` 거래 저장 commit 뒤 DB 트랜잭션 밖에서
+- public 거래 접수는 `RECEIVED` 거래 저장 commit 뒤 DB 트랜잭션 밖에서
   조회하고 성공 Snapshot만 목표 `POST /api/v2/rule-analysis` 입력으로 전달한다.
 - External Risk 실패 시 거래는 `RECEIVED`, DetectionResult는 미생성이며 FastAPI,
   위험 대응 최종화와 성공 Snapshot v2를 호출·생성하지 않는다. 멱등 `FAILED`를
@@ -242,7 +243,9 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
   구현되었지만 정상 시작 자동 발행과 production 실험값 발행은 없다.
 - 이 결정은 RuleVersion seed나 Flyway Migration을 변경하지 않는다.
 
-## 11. 현재 구현 상태
+## 11. Issue #178 이전 구현 상태
+
+이 절은 Issue #178 연결 전의 역사적 상태다. 현재 상태는 14절을 따른다.
 
 ### 구현됨
 
@@ -282,19 +285,37 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
 
 1. 구현된 위험 대응 decision을 거래에 적용하고 최종 상태 전이 구현 — 완료
 2. AuditLog 계약과 물리 모델 및 내부 최종화 통합 — 완료
-3. AI Service v2·Java/Python DTO와 거래 접수–External Risk–Rule 분석–위험 대응–사건 연결
+3. AI Service v2·Java/Python DTO와 거래 접수–External Risk–Rule 분석–위험 대응–사건 연결 — Issue #178 완료
 4. Snapshot 완료 간극 운영 복구 구현
 
-각 단계는 이전 단계의 계약과 상태를 임시 기본값으로 대체하지 않는다. 4단계가
-완료되기 전까지 현행 `RECEIVED` v1 응답을 최종 동기 거래 처리로 표현하지 않는다.
+각 단계는 이전 단계의 계약과 상태를 임시 기본값으로 대체하지 않는다. 3단계 완료
+전의 `RECEIVED` v1 응답은 최종 동기 거래 처리로 표현하지 않는다. 4단계 운영 복구는
+현재 v2 성공 경로와 분리된 미구현 범위다.
 
 ## 13. 영향과 제외 범위
 
 이 결정 자체로 기존 DB 컬럼, Flyway Migration, seed 또는 의존성은 변경되지 않았다.
 후속 구현으로 v2 typed 모델·codec·dispatcher가 추가되었고 기존
-`response_snapshot JSONB` 저장·조회도 검증되었지만 public 실행 경로와 완료 writer
-연결은 여전히 후속 대상이다. 사건 영속 모델과 External Risk의
-구체적인 물리 설계는 각 선행 Issue의 승인 범위다.
+`response_snapshot JSONB` 저장·조회도 검증되었다. Issue #178 이전에는 public 실행
+경로와 완료 writer 연결이 후속 대상이었고, 현재는 14절과 같이 연결되었다. 사건
+영속 모델과 External Risk의 구체적인 물리 설계는 각 선행 Issue의 승인 범위다.
 
 완료·진행 중·충돌·실패 재생과 완료 간극 복구는 새 External Risk·FastAPI·LLM
 호출을 만들지 않아야 한다. 이 Rule v1 경로는 LLM을 호출하지 않는다.
+
+## 14. 후속 구현 상태 (2026-08-27, Issue #178)
+
+public 거래 접수에서 External Risk→Rule v2→위험 대응 최종화를 연결하고, 최종화
+commit 뒤 별도 `REQUIRES_NEW` transaction에서 DB timestamp를 한 번 읽어 성공
+Snapshot v2의 `finalizedAt`과 Idempotency `finished_at`을 같은 값으로 확정한다.
+LOW·MEDIUM·HIGH·CRITICAL의 승인된 최종 조합만 HTTP `201` 성공으로 반환한다.
+
+최종화 실패는 해당 transaction 전체가 rollback되어 거래 `ANALYZED`와
+Idempotency `IN_PROGRESS`를 유지하며 성공 Snapshot을 저장하지 않는다. 완료 writer
+실패는 최종 거래·사건·AuditLog를 되돌리지 않고 Idempotency를 `IN_PROGRESS`로
+유지하며 최초 요청은 `500`이다. 자동 복구·재시도와 완료 간극 운영 복구는 구현하지
+않았다.
+
+External Risk lookup과 Rule 분석 단계를 분리해 command read·Provider 단계의 일반
+예외는 Rule 실패 reader 대상에서 제외한다. External Risk 성공 뒤 Rule 단계 예외만
+확정 상태 판정을 거치며, 그 밖의 불확실 오류는 원본 객체와 `IN_PROGRESS`를 유지한다.

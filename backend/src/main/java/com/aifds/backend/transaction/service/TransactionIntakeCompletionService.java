@@ -2,7 +2,6 @@ package com.aifds.backend.transaction.service;
 
 import com.aifds.backend.common.time.DatabaseTransactionTimestampProvider;
 import com.aifds.backend.idempotency.service.IdempotencyService;
-import com.aifds.backend.transaction.command.ValidatedTransactionCommand;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -13,18 +12,15 @@ import java.time.Instant;
 @Service
 public class TransactionIntakeCompletionService {
 
-    private final TransactionIntakeWriter transactionIntakeWriter;
     private final TransactionIntakeSnapshotCodec snapshotCodec;
     private final IdempotencyService idempotencyService;
     private final DatabaseTransactionTimestampProvider timestampProvider;
 
     public TransactionIntakeCompletionService(
-            TransactionIntakeWriter transactionIntakeWriter,
             TransactionIntakeSnapshotCodec snapshotCodec,
             IdempotencyService idempotencyService,
             DatabaseTransactionTimestampProvider timestampProvider
     ) {
-        this.transactionIntakeWriter = transactionIntakeWriter;
         this.snapshotCodec = snapshotCodec;
         this.idempotencyService = idempotencyService;
         this.timestampProvider = timestampProvider;
@@ -33,29 +29,31 @@ public class TransactionIntakeCompletionService {
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public TransactionIntakeResult.Received complete(
             long idempotencyRecordId,
-            ValidatedTransactionCommand command
+            RiskResponseFinalizationResult finalizationResult,
+            Instant createdAt
     ) {
-        PersistedTransactionIntake persisted =
-                transactionIntakeWriter.saveAndLink(
-                        idempotencyRecordId,
-                        command
-                );
-        TransactionIntakeSnapshot snapshot =
-                TransactionIntakeSnapshot.received(persisted);
         Instant finalizedAt = timestampProvider.currentTransactionTimestamp();
-        int httpStatus =
-                TransactionIntakeSnapshotEnvelopeCodec.SUPPORTED_HTTP_STATUS;
-        JsonNode encodedSnapshot = snapshotCodec.encode(
-                snapshot,
+        TransactionFinalResponseSnapshot finalSnapshot =
+                new TransactionFinalResponseSnapshot(
+                        finalizationResult,
+                        createdAt
+                );
+        int httpStatus = TransactionIntakeSnapshotEnvelopeV2Codec
+                .SUPPORTED_HTTP_STATUS;
+        JsonNode encodedSnapshot = snapshotCodec.encodeV2(
+                finalSnapshot,
                 httpStatus,
                 finalizedAt
         );
         idempotencyService.complete(
                 idempotencyRecordId,
-                snapshot.transactionId(),
+                finalSnapshot.transactionId(),
                 encodedSnapshot,
                 finalizedAt
         );
-        return new TransactionIntakeResult.Received(snapshot, httpStatus);
+        return new TransactionIntakeResult.Received(
+                finalSnapshot.toTransactionIntakeSnapshot(),
+                httpStatus
+        );
     }
 }

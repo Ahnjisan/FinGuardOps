@@ -95,7 +95,7 @@ FastAPI 내부에서 immutable execution plan을 만들고 evaluator를 순차 �
    `DetectionResult`를 만들고 고정된 Snapshot·분석 버전 필드·trace를 저장한다.
 8. 같은 트랜잭션에서 `DetectionResult`를 `IN_PROGRESS`로, 거래를
    `RECEIVED → ANALYZING`으로 전이하고 commit한다.
-9. 어떤 DB 트랜잭션이나 행 잠금도 유지하지 않은 상태에서 목표
+9. 어떤 DB 트랜잭션이나 행 잠금도 유지하지 않은 상태에서
    `POST /api/v2/rule-analysis`를 정확히
    한 번 호출한다.
 10. 성공 응답의 wire, trace, 업무 의미와 요청 Snapshot 대응을 Client 계약에
@@ -164,8 +164,8 @@ FastAPI 응답의 `analysis.ruleSetVersion`은 이 예상 값과 정확히 같�
 ### 6.5 External Risk 결합 경계
 
 - External Risk 조회와 실패 전파는 `RuleAnalysisOrchestrationService`가 아니라
-  상위 경계의 책임이다. Mock 활성 환경에서는 별도 per-invocation coordinator가
-  이 책임을 소유하고 public 거래 접수 연결은 후속 범위다.
+  상위 경계의 책임이다. 실제 HTTP Provider와 Mock 환경의 per-invocation
+  coordinator가 이 책임을 소유하며 Issue #178에서 public 거래 접수에 연결되었다.
 - 상위 흐름은 `RECEIVED` 거래 저장 commit 뒤 DB 트랜잭션과 행 잠금 없이
   External Risk를 조회한다.
 - 성공 Snapshot은 `analyzeV2(...)`를 통해 잠긴 분석 시작 경계에 전달한다. 이 경계가
@@ -177,7 +177,7 @@ FastAPI 응답의 `analysis.ruleSetVersion`은 이 예상 값과 정확히 같�
   생성하지 않으며 FastAPI·위험 대응 최종화를 호출하지 않는다. 현재 내부
   coordinator는 자동 retry 없이 원본 typed failure를 전파한다. 직접 재호출·멱등
   경계 밖 동시 호출은 Provider를 다시 호출할 수 있으며, 멱등 실패를 확정한 같은
-  요청의 무호출 재생은 후속 public intake 경계가 소유한다.
+  요청의 무호출 재생은 현재 public intake 경계가 소유한다.
 - cache·Circuit Breaker·fallback은 별도 Issue와 계약 승인이 필요하다.
 
 필수 v2 JSON, 시간과 canonical match 계약은
@@ -227,7 +227,7 @@ FastAPI 응답의 `analysis.ruleSetVersion`은 이 예상 값과 정확히 같�
 ## 9. 성공 응답 검증
 
 HTTP `200`만으로 성공으로 간주하지 않는다. 저장 전에
-[Rule v1 분석 API](../03-api/rule-v1-analysis-api.md)의 목표 v2 Client 계약에 따라 다음을
+[Rule v1 분석 API](../03-api/rule-v1-analysis-api.md)의 v2 Client 계약에 따라 다음을
 모두 검증한다.
 
 - 지원 HTTP 상태, `application/json`, 단일 `X-Trace-ID`, 본문 trace 일치
@@ -424,7 +424,7 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
   non-web one-shot 발행 Runner
 - 독립 External Risk Port, 응답 검증·match 기반 정책 Service, local/dev/test 전용
   결정적 Mock과 성공 결과용 immutable 인메모리 Snapshot
-- External Risk 선행 조회와 목표 `POST /api/v2/rule-analysis` 필수 입력·실패
+- External Risk 선행 조회와 `POST /api/v2/rule-analysis` 필수 입력·실패
   경계 문서 계약
 - 기존 FastAPI `POST /api/v1/rule-analysis` 유지, Python v2 요청 DTO와 필수
   External Risk strict wire·교차 필드 검증을 적용한 `POST /api/v2/rule-analysis`
@@ -438,41 +438,40 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
   1회 호출, 기존 완료·채택·실패 및 원본 예외·category·suppressed failure 경계 재사용
 - Mock profile·property에서만 명시적으로 활성화되는 비트랜잭션 coordinator와 별도
   `READ_COMMITTED` command reader. read 종료 뒤 Policy 1회와 `analyzeV2(...)` 1회 호출
+- 실제 HTTP Provider와 Mock coordinator 중 정확히 하나를 선택하는 public 거래 접수
+  최종 동기 orchestration
+- 거래 `RECEIVED`·Idempotency 연결 commit 뒤 `IN_PROGRESS`를 유지한 채 External
+  Risk→Rule v2→위험 대응 최종화→별도 성공 Snapshot v2 완료를 실행하는 경계
+- External Risk typed Failure Snapshot 저장·strict 재생과 공개 오류 mapping
+- Rule 확정 실패의 code-only `DEPENDENCY_UNAVAILABLE`, terminal 성공·실패 재생의
+  downstream 0회 호출
 
 ### 15.2 구현되지 않음
 
-- 거래 접수 Service에서 분석 오케스트레이터를 호출하는 전체 연결
-- 실제 Provider 성공 Snapshot과 public 거래 접수를 내부 coordinator에 연결하는 경로
-- 멱등 External Risk 실패 저장·재생
-- Client 오류 category를 거래 API 공통 오류로 매핑하는 경로
-- 실제 External Risk HTTP Provider
 - ExternalRiskSnapshot DB 영속화는 이번 목표에 포함하지 않으며 별도 승인 대상
-- 거래 접수에서 구현된 위험 대응·최종 거래 상태·사건·감사 경계를 호출하는 연결
-- 최종 동기 응답과 Snapshot v2 codec·멱등 완료 연결
-- Snapshot 완료 간극과 불확실 분석 상태의 운영 복구 실행 경로
+- crash·Snapshot 완료 간극과 장기 `IN_PROGRESS` 운영 복구 실행 경로
+- 자동 retry·fallback·cache
+- 운영 credential 배포와 신규 metric·dashboard
 - 공개 RuleVersion 관리 API와 production 발행·일반 버전 배포 관리
 
-### 15.3 현재 구현과 목표 계약의 차이
+### 15.3 Issue #178 이전 차이와 현재 상태
 
-- 현재 `TransactionIntakeCompletionService`는 거래를 `RECEIVED`로 저장한
-  트랜잭션에서 `RECEIVED`/탐지 null 응답 Snapshot을 즉시 `COMPLETED`로
-  확정한다. 13절과 ADR-006의 최종 업무 완료 이후 v2 확정과 다르다.
+- Issue #178 이전에는 `TransactionIntakeCompletionService`가 `RECEIVED`/탐지 null
+  Snapshot v1을 즉시 `COMPLETED`로 확정했다. 현재 신규 요청은 거래 저장과 연결만
+  commit한 뒤 `IN_PROGRESS`를 유지하고 최종 업무 commit 이후 Snapshot v2를 별도
+  completion transaction으로 확정한다.
 - `FinancialTransaction` 상태 전이와 `RuleAnalysisPersistenceService`의 시작·성공·실패
-  원자적 경계는 오케스트레이터에서 사용하지만 아직 거래 접수에서 호출하지 않는다.
+  원자적 경계는 현재 public 거래 접수에서 호출된다.
 - 기존 `DetectionResultPersistenceService`의 저수준 primitive는 호환성을 위해 유지하며,
   향후 상위 분석 실행 경로는 복합 persistence boundary만 사용해야 한다.
-- Snapshot 조합과 canonical hash 선계산, commit된 immutable 요청의
-  `RuleAnalysisHttpClient` 전달과 결과 채택은 연결되었지만 최종 거래 접수·멱등
-  응답 경로에는 아직 연결되지 않았다.
+- Snapshot 조합, canonical hash 선계산, commit된 immutable 요청의 Client 전달과
+  결과 채택, 위험 대응 최종화와 멱등 응답 경로가 연결되었다.
 - 현재 `analyze(...)`와 `POST /api/v1/rule-analysis`는 External Risk가 없는 기존
   Rule v1 경계를 그대로 유지한다. 별도 `analyzeV2(...)`는 성공 Snapshot을 잠긴
   시작 트랜잭션에서 v1 Snapshot과 결합하고, 시작 commit 뒤
-  `POST /api/v2/rule-analysis`를 호출한다. Mock 활성 환경의 내부 coordinator는 별도
-  read transaction 종료 뒤 Policy 성공 Snapshot을 이 v2 경계에 전달한다. 따라서
-  실제 Provider·public 거래 접수·멱등 실패 재생, 공개 오류 매핑, External Risk
-  영속화, Snapshot v2·운영 복구는 완료되지 않았다.
-  양쪽 HTTP 경계 구현은 운영 배포 또는
-  end-to-end 거래 처리 완료를 의미하지 않는다.
+  `POST /api/v2/rule-analysis`를 호출한다. 실제 Provider와 Mock coordinator는 별도
+  read transaction 종료 뒤 Policy 성공 Snapshot을 이 v2 경계에 전달한다. External
+  Risk 영속화와 운영 복구·credential·metric은 여전히 후속 범위다.
 - V5 초기 RuleVersion은 항상 모두 `DRAFT`다. 별도 one-shot 명령을 명시적으로
   실행한 local/dev/test 환경에서만 기본 네 버전이 실행 가능해지며, 정상 앱 시작은
   자동 발행하지 않는다.
@@ -502,3 +501,20 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
   확정된다.
 - Snapshot 완료 실패는 업무 결과를 되돌리거나 멱등 `FAILED`로 바꾸지 않는다.
 - 0점·`LOW`·빈 Evidence는 검증된 정상 all-unmatched 결과일 때만 성공이다.
+
+## 17. Issue #178 public 연결 상태 (2026-08-27)
+
+비트랜잭션 상위 coordinator가 거래 `RECEIVED` 저장 commit 뒤 기존 External Risk
+coordinator와 `analyzeV2(...)`를 호출한다. Provider와 FastAPI 호출 직전에는 활성
+DB transaction이 없어야 하며, Idempotency 단일 승자만 이 경로에 진입한다. 같은
+요청의 `IN_PROGRESS`, 완료 재생, code-only 실패 재생과 typed External Risk 실패
+재생은 Rule·FastAPI를 호출하지 않는다.
+
+Rule 예외 후 확정 실패 상태만 code-only `DEPENDENCY_UNAVAILABLE`로 terminal
+처리한다. 판정 불가 또는 상태 reader·failure writer 오류에서는 원본 예외를
+보존하고 Idempotency `IN_PROGRESS`를 유지한다. Rule·scoring·Evidence·버전 정책,
+retry·fallback·cache는 변경하지 않았다.
+
+External Risk lookup과 Rule 분석 단계를 분리해 command read·Provider 단계의 일반
+예외는 reader를 호출하지 않고 원본 객체 그대로 전파한다. External Risk 성공 뒤
+Rule 단계의 예외만 reader가 판정한다.

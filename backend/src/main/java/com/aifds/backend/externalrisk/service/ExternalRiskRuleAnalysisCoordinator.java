@@ -39,6 +39,21 @@ public final class ExternalRiskRuleAnalysisCoordinator {
             UUID transactionId,
             String traceId
     ) {
+        ExternalRiskSnapshot snapshot = lookupExternalRisk(
+                transactionId,
+                traceId
+        );
+        return analyzeWithExternalRiskSnapshot(
+                transactionId,
+                traceId,
+                snapshot
+        );
+    }
+
+    public ExternalRiskSnapshot lookupExternalRisk(
+            UUID transactionId,
+            String traceId
+    ) {
         validateInput(transactionId, traceId);
         requireNoActiveTransaction();
 
@@ -52,6 +67,27 @@ public final class ExternalRiskRuleAnalysisCoordinator {
         if (snapshot == null) {
             throw new IllegalStateException(
                     "External Risk Policy returned no snapshot"
+            );
+        }
+        requireNoActiveTransaction();
+
+        return snapshot;
+    }
+
+    public CompletedRuleAnalysis analyzeWithExternalRiskSnapshot(
+            UUID transactionId,
+            String traceId,
+            ExternalRiskSnapshot snapshot
+    ) {
+        validateInput(transactionId, traceId);
+        if (snapshot == null) {
+            throw new IllegalStateException(
+                    "External Risk Policy returned no snapshot"
+            );
+        }
+        if (!transactionId.equals(snapshot.transactionId())) {
+            throw new IllegalArgumentException(
+                    "External Risk snapshot transactionId must match input"
             );
         }
         requireNoActiveTransaction();

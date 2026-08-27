@@ -11,8 +11,12 @@ import com.aifds.backend.externalrisk.domain.ExternalRiskFailureCategory;
 import com.aifds.backend.externalrisk.domain.ExternalRiskLookupException;
 import com.aifds.backend.externalrisk.mock.ExternalRiskMockAdapter;
 import com.aifds.backend.externalrisk.service.ExternalRiskRuleAnalysisCoordinator;
+import com.aifds.backend.idempotency.entity.IdempotencyProcessingStatus;
+import com.aifds.backend.idempotency.entity.IdempotencyRecord;
+import com.aifds.backend.idempotency.repository.IdempotencyRecordRepository;
 import com.aifds.backend.rule.client.RuleAnalysisHttpClient;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResponse;
+import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV2;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResultResponse;
 import com.aifds.backend.rule.client.dto.RuleEvidenceResponse;
 import com.aifds.backend.rule.client.dto.RuleId;
@@ -27,9 +31,14 @@ import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.aifds.backend.transaction.entity.TransactionChannel;
 import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
 import com.aifds.backend.transaction.entity.TransactionType;
+import com.aifds.backend.transaction.dto.TransactionCreateRequest;
 import com.aifds.backend.transaction.repository.FinancialTransactionRepository;
+import com.aifds.backend.transaction.service.TransactionIntakeResult;
+import com.aifds.backend.transaction.service.TransactionIntakeService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -52,6 +61,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -80,9 +90,17 @@ class ExternalRiskRuleAnalysisCoordinatorIntegrationTest
             "trace_ext_risk_coordinator_concurrent_01";
     private static final String CONCURRENT_TRACE_TWO =
             "trace_ext_risk_coordinator_concurrent_02";
+    private static final String OPERATION_SCOPE =
+            "POST:/api/v1/transactions";
 
     @Autowired
     private ExternalRiskRuleAnalysisCoordinator coordinator;
+
+    @Autowired
+    private TransactionIntakeService intakeService;
+
+    @Autowired
+    private IdempotencyRecordRepository idempotencyRecordRepository;
 
     @Autowired
     private FinancialTransactionRepository transactionRepository;
@@ -110,6 +128,87 @@ class ExternalRiskRuleAnalysisCoordinatorIntegrationTest
 
     @MockitoBean
     private RuleAnalysisHttpClient httpClient;
+
+    @ParameterizedTest
+    @EnumSource(RuleRiskLevel.class)
+    void publicIntakeFinalizesEveryRiskLevelAndReplaysWithoutDownstream(
+            RuleRiskLevel ruleRiskLevel
+    ) {
+        RuleVersion version = publishAmountRule();
+        TransactionCreateRequest request = request(UUID.randomUUID(), "10000000");
+        String key = key("public-" + ruleRiskLevel.name());
+        String traceId = "trace_public_" + ruleRiskLevel.name().toLowerCase();
+        when(httpClient.analyzeV2(any(), eq(traceId))).thenAnswer(
+                invocation -> response(
+                        invocation.getArgument(0),
+                        version,
+                        ruleRiskLevel,
+                        traceId
+                )
+        );
+
+        TransactionIntakeResult first = intakeService.receive(
+                key,
+                request,
+                traceId
+        );
+
+        assertThat(first).isInstanceOf(TransactionIntakeResult.Received.class);
+        TransactionIntakeResult.Received received =
+                (TransactionIntakeResult.Received) first;
+        assertFinalMapping(received, ruleRiskLevel);
+        FinancialTransaction stored = transactionRepository
+                .findByTransactionId(received.snapshot().transactionId())
+                .orElseThrow();
+        assertThat(stored.getAdoptedDetectionResult()).isNotNull();
+        assertThat(results(stored.getTransactionId())).singleElement()
+                .satisfies(result -> {
+                    assertThat(result.getAnalysisStatus())
+                            .isEqualTo(DetectionAnalysisStatus.COMPLETED);
+                    assertThat(evidenceRepository
+                            .findAllByDetectionResult_DetectionResultIdOrderBySortOrderAscIdAsc(
+                                    result.getDetectionResultId()
+                            )).hasSize(1);
+                });
+        IdempotencyRecord record = idempotencyRecordRepository
+                .findByOperationScopeAndIdempotencyKey(
+                        OPERATION_SCOPE,
+                        key
+                )
+                .orElseThrow();
+        assertThat(record.getProcessingStatus())
+                .isEqualTo(IdempotencyProcessingStatus.COMPLETED);
+        assertThat(record.getResponseSnapshot().get("responseSchemaVersion")
+                .textValue()).isEqualTo("transaction-create-response-v2");
+        assertThat(record.getResponseSnapshot().get("codecVersion")
+                .textValue()).isEqualTo(
+                "transaction-intake-snapshot-envelope-v2"
+        );
+        boolean caseRequired = ruleRiskLevel == RuleRiskLevel.HIGH
+                || ruleRiskLevel == RuleRiskLevel.CRITICAL;
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM fraud_case",
+                Integer.class
+        )).isEqualTo(caseRequired ? 1 : 0);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM audit_log",
+                Integer.class
+        )).isEqualTo(caseRequired ? 4 : 2);
+
+        TransactionIntakeResult replay = intakeService.receive(
+                key,
+                request,
+                traceId + "_replay"
+        );
+        assertThat(replay).isEqualTo(
+                new TransactionIntakeResult.CompletedReplay(
+                        received.snapshot(),
+                        201
+                )
+        );
+        verify(externalRiskMockAdapter, times(1)).lookup(any());
+        verify(httpClient, times(1)).analyzeV2(any(), eq(traceId));
+    }
 
     @Test
     void externalRiskFailureLeavesReceivedWithoutAnalysisWritesOrHttp() {
@@ -143,6 +242,311 @@ class ExternalRiskRuleAnalysisCoordinatorIntegrationTest
         verify(externalRiskMockAdapter, times(1)).lookup(any());
         verify(httpClient, never()).analyzeV2(any(), anyString());
         verify(httpClient, never()).analyze(any(), anyString());
+    }
+
+    @ParameterizedTest
+    @EnumSource(ExternalRiskFailureCategory.class)
+    void publicIntakePersistsAndReplaysEveryTypedExternalRiskFailure(
+            ExternalRiskFailureCategory category
+    ) {
+        TransactionCreateRequest request = request(UUID.randomUUID(), "10000000");
+        String key = key("typed-" + category.name());
+        ExternalRiskLookupException original =
+                new ExternalRiskLookupException(category);
+        doThrow(original).when(externalRiskMockAdapter).lookup(any());
+
+        TransactionIntakeResult first = intakeService.receive(
+                key,
+                request,
+                TRACE_ID
+        );
+
+        assertThat(first)
+                .isInstanceOf(TransactionIntakeResult.ExternalRiskFailure.class);
+        IdempotencyRecord record = idempotencyRecordRepository
+                .findByOperationScopeAndIdempotencyKey(OPERATION_SCOPE, key)
+                .orElseThrow();
+        assertThat(record.getProcessingStatus())
+                .isEqualTo(IdempotencyProcessingStatus.FAILED);
+        assertThat(record.getResponseSnapshot().get("snapshotType").textValue())
+                .isEqualTo("external-risk-failure");
+        assertThat(record.getResponseSnapshot().has("traceId")).isFalse();
+        FinancialTransaction stored = transactionRepository
+                .findByTransactionId(UUID.fromString(request.transactionId()))
+                .orElseThrow();
+        assertThat(stored.getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.RECEIVED);
+        assertThat(results(stored.getTransactionId())).isEmpty();
+        assertThat(evidenceCount()).isZero();
+
+        TransactionIntakeResult replay = intakeService.receive(
+                key,
+                request,
+                TRACE_ID + "_replay"
+        );
+        assertThat(replay).isInstanceOf(
+                TransactionIntakeResult.ExternalRiskFailureReplay.class
+        );
+        TransactionIntakeResult.ExternalRiskFailure initial =
+                (TransactionIntakeResult.ExternalRiskFailure) first;
+        TransactionIntakeResult.ExternalRiskFailureReplay replayed =
+                (TransactionIntakeResult.ExternalRiskFailureReplay) replay;
+        assertThat(replayed.httpStatus()).isEqualTo(initial.httpStatus());
+        assertThat(replayed.code()).isEqualTo(initial.code());
+        assertThat(replayed.message()).isEqualTo(initial.message());
+        verify(externalRiskMockAdapter, times(1)).lookup(any());
+        verify(httpClient, never()).analyzeV2(any(), anyString());
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM fraud_case",
+                Integer.class
+        )).isZero();
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM audit_log",
+                Integer.class
+        )).isZero();
+    }
+
+    @Test
+    void confirmedRuleFailureBecomesCodeOnlyFailureAndReplaysWithoutCalls() {
+        publishAmountRule();
+        TransactionCreateRequest request = request(UUID.randomUUID(), "10000000");
+        String key = key("rule-failed");
+        RuntimeException original = new IllegalStateException("rule unavailable");
+        when(httpClient.analyzeV2(any(), eq(TRACE_ID))).thenThrow(original);
+
+        assertThat(intakeService.receive(key, request, TRACE_ID))
+                .isEqualTo(new TransactionIntakeResult.RuleFailure());
+        FinancialTransaction stored = transactionRepository
+                .findByTransactionId(UUID.fromString(request.transactionId()))
+                .orElseThrow();
+        assertThat(stored.getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.FAILED);
+        assertThat(results(stored.getTransactionId())).singleElement()
+                .satisfies(result -> assertThat(result.getAnalysisStatus())
+                        .isEqualTo(DetectionAnalysisStatus.FAILED));
+        IdempotencyRecord record = idempotencyRecordRepository
+                .findByOperationScopeAndIdempotencyKey(OPERATION_SCOPE, key)
+                .orElseThrow();
+        assertThat(record.getProcessingStatus())
+                .isEqualTo(IdempotencyProcessingStatus.FAILED);
+        assertThat(record.getFailureCode())
+                .isEqualTo("DEPENDENCY_UNAVAILABLE");
+        assertThat(record.getResponseSnapshot()).isNull();
+
+        assertThat(intakeService.receive(key, request, TRACE_ID + "_replay"))
+                .isEqualTo(new TransactionIntakeResult.PreviousFailure(
+                        "DEPENDENCY_UNAVAILABLE"
+                ));
+        verify(externalRiskMockAdapter, times(1)).lookup(any());
+        verify(httpClient, times(1)).analyzeV2(any(), eq(TRACE_ID));
+    }
+
+    @Test
+    void ruleStartFailureAtReceivedBecomesCodeOnlyFailure() {
+        TransactionCreateRequest request = request(UUID.randomUUID(), "10000000");
+        String key = key("rule-start-failed");
+
+        assertThat(intakeService.receive(key, request, TRACE_ID))
+                .isEqualTo(new TransactionIntakeResult.RuleFailure());
+
+        FinancialTransaction transaction = transactionRepository
+                .findByTransactionId(UUID.fromString(request.transactionId()))
+                .orElseThrow();
+        assertThat(transaction.getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.RECEIVED);
+        assertThat(results(transaction.getTransactionId())).isEmpty();
+        IdempotencyRecord record = idempotencyRecordRepository
+                .findByOperationScopeAndIdempotencyKey(OPERATION_SCOPE, key)
+                .orElseThrow();
+        assertThat(record.getProcessingStatus())
+                .isEqualTo(IdempotencyProcessingStatus.FAILED);
+        assertThat(record.getFailureCode())
+                .isEqualTo("DEPENDENCY_UNAVAILABLE");
+        verify(externalRiskMockAdapter, times(1)).lookup(any());
+        verify(httpClient, never()).analyzeV2(any(), anyString());
+    }
+
+    @Test
+    void finalizationFailureRollsBackAndKeepsAnalyzedInProgress() {
+        RuleVersion version = publishAmountRule();
+        TransactionCreateRequest request = request(UUID.randomUUID(), "10000000");
+        String key = key("finalization-gap");
+        when(httpClient.analyzeV2(any(), eq(TRACE_ID))).thenAnswer(
+                invocation -> response(
+                        invocation.getArgument(0),
+                        version,
+                        RuleRiskLevel.LOW,
+                        TRACE_ID
+                )
+        );
+        installAuditFailureTrigger();
+        try {
+            assertThatThrownBy(() -> intakeService.receive(
+                    key,
+                    request,
+                    TRACE_ID
+            )).isInstanceOf(RuntimeException.class);
+        } finally {
+            removeAuditFailureTrigger();
+        }
+
+        FinancialTransaction transaction = transactionRepository
+                .findByTransactionId(UUID.fromString(request.transactionId()))
+                .orElseThrow();
+        assertThat(transaction.getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.ANALYZED);
+        assertThat(transaction.getRiskResponseOutcome()).isNull();
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM audit_log",
+                Integer.class
+        )).isZero();
+        IdempotencyRecord record = idempotencyRecordRepository
+                .findByOperationScopeAndIdempotencyKey(OPERATION_SCOPE, key)
+                .orElseThrow();
+        assertThat(record.getProcessingStatus())
+                .isEqualTo(IdempotencyProcessingStatus.IN_PROGRESS);
+        assertThat(record.getResponseSnapshot()).isNull();
+    }
+
+    @Test
+    void completionFailureKeepsFinalBusinessStateAndInProgress() {
+        RuleVersion version = publishAmountRule();
+        TransactionCreateRequest request = request(UUID.randomUUID(), "10000000");
+        String key = key("completion-gap");
+        when(httpClient.analyzeV2(any(), eq(TRACE_ID))).thenAnswer(
+                invocation -> response(
+                        invocation.getArgument(0),
+                        version,
+                        RuleRiskLevel.LOW,
+                        TRACE_ID
+                )
+        );
+        installCompletionFailureTrigger();
+        try {
+            assertThatThrownBy(() -> intakeService.receive(
+                    key,
+                    request,
+                    TRACE_ID
+            )).isInstanceOf(RuntimeException.class);
+        } finally {
+            removeCompletionFailureTrigger();
+        }
+
+        FinancialTransaction transaction = transactionRepository
+                .findByTransactionId(UUID.fromString(request.transactionId()))
+                .orElseThrow();
+        assertThat(transaction.getProcessingStatus())
+                .isEqualTo(TransactionProcessingStatus.APPROVED);
+        assertThat(transaction.getRiskResponseOutcome().name())
+                .isEqualTo("APPROVED");
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM audit_log",
+                Integer.class
+        )).isEqualTo(2);
+        IdempotencyRecord record = idempotencyRecordRepository
+                .findByOperationScopeAndIdempotencyKey(OPERATION_SCOPE, key)
+                .orElseThrow();
+        assertThat(record.getProcessingStatus())
+                .isEqualTo(IdempotencyProcessingStatus.IN_PROGRESS);
+        assertThat(record.getResponseSnapshot()).isNull();
+        assertThat(record.getFinishedAt()).isNull();
+    }
+
+    @Test
+    void concurrentSameRequestHasOneProviderWinnerAndConflictSkipsProvider()
+            throws Exception {
+        RuleVersion version = publishAmountRule();
+        TransactionCreateRequest request = request(UUID.randomUUID(), "10000000");
+        String key = key("public-concurrent");
+        CountDownLatch providerReached = new CountDownLatch(1);
+        CountDownLatch releaseProvider = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            assertThat(TransactionSynchronizationManager
+                    .isActualTransactionActive()).isFalse();
+            providerReached.countDown();
+            assertThat(releaseProvider.await(10, TimeUnit.SECONDS)).isTrue();
+            return invocation.callRealMethod();
+        }).when(externalRiskMockAdapter).lookup(any());
+        when(httpClient.analyzeV2(any(), eq(CONCURRENT_TRACE_ONE))).thenAnswer(
+                invocation -> response(
+                        invocation.getArgument(0),
+                        version,
+                        RuleRiskLevel.LOW,
+                        CONCURRENT_TRACE_ONE
+                )
+        );
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<TransactionIntakeResult> winner = executor.submit(
+                    () -> intakeService.receive(
+                            key,
+                            request,
+                            CONCURRENT_TRACE_ONE
+                    )
+            );
+            assertThat(providerReached.await(10, TimeUnit.SECONDS)).isTrue();
+
+            assertThat(intakeService.receive(
+                    key,
+                    request,
+                    CONCURRENT_TRACE_TWO
+            )).isEqualTo(new TransactionIntakeResult.InProgress());
+            TransactionCreateRequest different = request(
+                    UUID.fromString(request.transactionId()),
+                    "10000001"
+            );
+            assertThat(intakeService.receive(
+                    key,
+                    different,
+                    CONCURRENT_TRACE_TWO
+            )).isEqualTo(new TransactionIntakeResult.KeyConflict());
+
+            releaseProvider.countDown();
+            assertThat(winner.get(20, TimeUnit.SECONDS))
+                    .isInstanceOf(TransactionIntakeResult.Received.class);
+        } finally {
+            releaseProvider.countDown();
+            executor.shutdownNow();
+        }
+        assertThat(transactionRepository.count()).isEqualTo(1);
+        assertThat(idempotencyRecordRepository.count()).isEqualTo(1);
+        verify(externalRiskMockAdapter, times(1)).lookup(any());
+        verify(httpClient, times(1)).analyzeV2(
+                any(),
+                eq(CONCURRENT_TRACE_ONE)
+        );
+    }
+
+    @Test
+    void differentKeySameTransactionIsDuplicateBeforeSecondProviderCall() {
+        RuleVersion version = publishAmountRule();
+        TransactionCreateRequest request = request(UUID.randomUUID(), "10000000");
+        when(httpClient.analyzeV2(any(), eq(TRACE_ID))).thenAnswer(
+                invocation -> response(
+                        invocation.getArgument(0),
+                        version,
+                        RuleRiskLevel.LOW,
+                        TRACE_ID
+                )
+        );
+
+        assertThat(intakeService.receive(
+                key("duplicate-first"),
+                request,
+                TRACE_ID
+        )).isInstanceOf(TransactionIntakeResult.Received.class);
+        assertThat(intakeService.receive(
+                key("duplicate-second"),
+                request,
+                TRACE_ID + "_duplicate"
+        )).isEqualTo(new TransactionIntakeResult.DuplicateTransaction(
+                UUID.fromString(request.transactionId())
+        ));
+
+        assertThat(transactionRepository.count()).isEqualTo(1);
+        assertThat(idempotencyRecordRepository.count()).isEqualTo(2);
+        verify(externalRiskMockAdapter, times(1)).lookup(any());
+        verify(httpClient, times(1)).analyzeV2(any(), eq(TRACE_ID));
     }
 
     @Test
@@ -282,6 +686,163 @@ class ExternalRiskRuleAnalysisCoordinatorIntegrationTest
         } catch (ExecutionException exception) {
             return exception.getCause();
         }
+    }
+
+    private void assertFinalMapping(
+            TransactionIntakeResult.Received received,
+            RuleRiskLevel riskLevel
+    ) {
+        assertThat(received.httpStatus()).isEqualTo(201);
+        assertThat(received.snapshot().riskLevel())
+                .isEqualTo(riskLevel.name());
+        switch (riskLevel) {
+            case LOW -> {
+                assertThat(received.snapshot().processingStatus())
+                        .isEqualTo(TransactionProcessingStatus.APPROVED);
+                assertThat(received.snapshot().riskResponseOutcome())
+                        .isEqualTo("APPROVED");
+                assertThat(received.snapshot().caseId()).isNull();
+            }
+            case MEDIUM -> {
+                assertThat(received.snapshot().processingStatus())
+                        .isEqualTo(TransactionProcessingStatus.APPROVED);
+                assertThat(received.snapshot().riskResponseOutcome())
+                        .isEqualTo("APPROVED_WITH_MONITORING");
+                assertThat(received.snapshot().caseId()).isNull();
+            }
+            case HIGH -> {
+                assertThat(received.snapshot().processingStatus()).isEqualTo(
+                        TransactionProcessingStatus.ADDITIONAL_AUTH_REQUIRED
+                );
+                assertThat(received.snapshot().riskResponseOutcome())
+                        .isEqualTo("ADDITIONAL_AUTH_REQUIRED");
+                assertThat(received.snapshot().caseId()).isNotNull();
+            }
+            case CRITICAL -> {
+                assertThat(received.snapshot().processingStatus())
+                        .isEqualTo(TransactionProcessingStatus.HELD);
+                assertThat(received.snapshot().riskResponseOutcome())
+                        .isEqualTo("HELD");
+                assertThat(received.snapshot().caseId()).isNotNull();
+            }
+        }
+        assertThat(received.snapshot().adoptedDetectionResultId()).isNotNull();
+    }
+
+    private RuleAnalysisResponse response(
+            RuleAnalysisRequestV2 request,
+            RuleVersion version,
+            RuleRiskLevel riskLevel,
+            String traceId
+    ) {
+        FinancialTransaction transaction = transactionRepository
+                .findByTransactionId(request.transaction().transactionId())
+                .orElseThrow();
+        int riskScore = switch (riskLevel) {
+            case LOW -> 0;
+            case MEDIUM -> 15;
+            case HIGH -> 55;
+            case CRITICAL -> 85;
+        };
+        return new RuleAnalysisResponse(
+                request.transaction().transactionId(),
+                traceId,
+                new RuleAnalysisResultResponse(
+                        request.evaluationCutoffAt(),
+                        "a".repeat(64),
+                        new RuleScoringResultResponse(
+                                "scoring-policy-v1",
+                                riskScore,
+                                riskLevel,
+                                List.of(),
+                                List.of()
+                        ),
+                        List.of(amountEvidence(transaction, version))
+                )
+        );
+    }
+
+    private TransactionCreateRequest request(UUID transactionId, String amount) {
+        return new TransactionCreateRequest(
+                transactionId.toString(),
+                "ACCOUNT_TRANSFER",
+                amount,
+                "KRW",
+                Instant.now().minus(1, ChronoUnit.MINUTES)
+                        .truncatedTo(ChronoUnit.MICROS).toString(),
+                "customer_ref_public_intake",
+                "sender_ref_public_intake",
+                "recipient_ref_public_intake",
+                "MOBILE_BANKING",
+                "device_ref_public_intake"
+        );
+    }
+
+    private String key(String prefix) {
+        return prefix.toLowerCase() + "-" + UUID.randomUUID();
+    }
+
+    private void installAuditFailureTrigger() {
+        jdbcTemplate.execute("""
+                CREATE OR REPLACE FUNCTION fail_audit_finalization_test()
+                RETURNS trigger
+                LANGUAGE plpgsql
+                AS $$
+                BEGIN
+                    RAISE EXCEPTION 'forced audit finalization failure'
+                        USING ERRCODE = 'P0001';
+                END
+                $$
+                """);
+        jdbcTemplate.execute("""
+                CREATE TRIGGER tg_fail_audit_finalization_test
+                BEFORE INSERT ON audit_log
+                FOR EACH ROW
+                EXECUTE FUNCTION fail_audit_finalization_test()
+                """);
+    }
+
+    private void removeAuditFailureTrigger() {
+        jdbcTemplate.execute("""
+                DROP TRIGGER IF EXISTS tg_fail_audit_finalization_test
+                ON audit_log
+                """);
+        jdbcTemplate.execute(
+                "DROP FUNCTION IF EXISTS fail_audit_finalization_test()"
+        );
+    }
+
+    private void installCompletionFailureTrigger() {
+        jdbcTemplate.execute("""
+                CREATE OR REPLACE FUNCTION fail_v2_completion_test()
+                RETURNS trigger
+                LANGUAGE plpgsql
+                AS $$
+                BEGIN
+                    IF NEW.processing_status = 'COMPLETED' THEN
+                        RAISE EXCEPTION 'forced v2 completion failure'
+                            USING ERRCODE = 'P0001';
+                    END IF;
+                    RETURN NEW;
+                END
+                $$
+                """);
+        jdbcTemplate.execute("""
+                CREATE TRIGGER tg_fail_v2_completion_test
+                BEFORE UPDATE ON idempotency_record
+                FOR EACH ROW
+                EXECUTE FUNCTION fail_v2_completion_test()
+                """);
+    }
+
+    private void removeCompletionFailureTrigger() {
+        jdbcTemplate.execute("""
+                DROP TRIGGER IF EXISTS tg_fail_v2_completion_test
+                ON idempotency_record
+                """);
+        jdbcTemplate.execute(
+                "DROP FUNCTION IF EXISTS fail_v2_completion_test()"
+        );
     }
 
     private void assertCompletedState(

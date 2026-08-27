@@ -189,7 +189,7 @@ HIGH와 CRITICAL의 사건 생성은 거래 상태와 같은 필드에 포함하
 
 - 전이 조건: 요청 검증이 성공하고 거래·행동 이벤트·활성 RuleVersion
   Snapshot, 성공 External Risk Snapshot과 실행 식별자가 고정되어 분석을 시작할
-  수 있다. External Risk 없는 현재 내부 v1 실행과 목표 v2 연결은 구분한다.
+  수 있다. External Risk 없는 기존 내부 v1 실행과 현재 public v2 연결은 구분한다.
 - 변경 주체: 시스템인 Spring Boot
 - 생성되는 결과: 거래 잠금 아래 할당한 `PENDING` DetectionResult를 같은 쓰기
   트랜잭션에서 `IN_PROGRESS`로 전이한 분석 요청과 추적 가능한 처리 컨텍스트
@@ -361,12 +361,11 @@ External Risk Provider·FastAPI·위험 대응 최종화를 호출하지 않는�
 Rule 결과 채택과 `ANALYZING → ANALYZED` commit만으로는 최종 동기 성공 응답을
 확정하지 않는다. 위험 대응 결과와 최종 거래 상태가 확정되고,
 HIGH·CRITICAL이면 사건 생성 또는 기존 사건 연결까지 commit된 뒤에만 v2 성공
-Snapshot을 확정한다. 현재 구현은 거래 접수 commit에서 `RECEIVED`/탐지 null
-v1 Snapshot을 먼저 완료한다. 위험 등급별 목표 상태·대응 결과·사건 필수 여부를
-반환하는 순수 정책과 `ANALYZED` 거래를 최종화하는 내부 경계는 구현되었다. 이
-경계는 LOW·MEDIUM의 최종 상태·대응 결과와 HIGH·CRITICAL의 신규 또는 기존 활성
-사건 연결, 거래 최종 상태·대응 결과, 필요한 AuditLog를 하나의 commit으로
-확정한다. 거래 접수 전체 연결과 최종 v2 Snapshot 확정은 아직 구현되지 않았다.
+Snapshot을 확정한다. Issue #178 public 거래 접수는 `RECEIVED` 저장·멱등 연결 뒤
+`IN_PROGRESS`를 유지하고, LOW·MEDIUM의 최종 상태·대응 결과와 HIGH·CRITICAL의
+활성 사건 연결, 필요한 AuditLog를 하나의 최종화 commit으로 확정한다. 그 뒤 별도
+completion transaction에서 성공 Snapshot v2와 `COMPLETED`를 확정한다. 기존
+legacy·v1 완료 Snapshot은 저장 status 그대로 재생한다.
 
 최종 업무 commit 뒤 Snapshot 완료가 실패하면 멱등 레코드는 `FAILED`로 전이하지
 않고 `IN_PROGRESS`로 유지한다. 최초 요청은 `500 INTERNAL_ERROR`, 같은 요청은
@@ -428,17 +427,17 @@ v1 Snapshot을 먼저 완료한다. 위험 등급별 목표 상태·대응 결�
   `UNSUPPORTED_CAPABILITY`, `INVALID_RESPONSE`, `TRANSFORMATION_ERROR`는 위험정보 없음
   또는 `UNMATCHED`로 해석하지 않고 typed failure로 전파하며 현재 분석을 계속하지 않는다.
   cache, stale data와 fallback은 현재 승인 계약에 없다.
-- 목표 거래 접수 연결에서는 External Risk 실패 시 거래를 `RECEIVED`로 유지하고
+- public 거래 접수에서는 External Risk 실패 시 거래를 `RECEIVED`로 유지하고
   DetectionResult를 생성하지 않으며 FastAPI와 위험 대응 최종화를 호출하지 않는다.
   여섯 typed category의 저장 commit이 확인되면 멱등 레코드는 terminal `FAILED`로
-  확정하고 같은 요청 재생에서는 Provider를 다시 호출하지 않는다. 이 연결, 별도
-  Failure Snapshot과 공개 오류 mapper는 아직 구현되지 않았다.
+  확정하고 같은 요청 재생에서는 Provider를 다시 호출하지 않는다. Failure Snapshot과
+  공개 typed 오류 mapper는 Issue #178 public 경로에 연결되었다.
 - DB 저장 결과가 불명확하면 성공으로 임의 처리하지 않는다.
 - failure writer 실패·저장 직전 crash와 Provider 호출 여부를 DB만으로 확정할 수 없는
   `IN_PROGRESS`에서는 terminal 실패를 추측하거나 Provider를 자동 재호출하지 않는다.
   같은 key는 409를 유지하고 실제 복구는 후속 운영 Issue에서 정한다.
 - failure writer 오류는 원본 예외를 덮어쓰지 않고 suppressed로 보존하며 가능한 최초
-  공개 응답의 목표는 `500 INTERNAL_ERROR`다.
+  공개 응답은 `500 INTERNAL_ERROR`다.
 - Rule v1 Client와 External Risk의 자동 retry는 0회다. External Risk cache,
   Circuit Breaker 또는 fallback은 별도 Issue와 계약 승인 없이 도입하지 않는다.
 - Kafka는 현재 필수 처리 흐름이 아니다. 향후 도입 시 중복 이벤트에도 같은 거래·사건 결과가 유지되어야 한다.
@@ -504,16 +503,18 @@ Validation 거절은 Transaction이나 AuditLog 행을 만들지 않는다. 오�
 - V7 append-only AuditLog 물리 스키마
 - 사건 생성·첫 거래 연결 Persistence 경계
 - 거래·사건·연결·감사 원자적 최종화 Persistence 경계
+- public intake의 `RECEIVED`·Idempotency `IN_PROGRESS` 연결 commit
+- External Risk→Rule v2→위험 대응 최종화와 별도 성공 Snapshot v2 완료
+- External Risk Failure Snapshot 저장·재생과 공개 typed 오류 mapping
+- Provider 미설정 환경의 claim 전 `503 DEPENDENCY_UNAVAILABLE`
+- Rule 안전 실패 상태의 code-only `FAILED(DEPENDENCY_UNAVAILABLE)`
+- terminal 성공·실패 재생의 downstream 0회 호출
 
-다음 범위는 아직 구현되지 않았으며 후속 사용자 승인이 필요하다. public
-`POST /api/v1/transactions` 자체는 구현되어 있고 아래 항목은 그 API의 end-to-end
-연결을 뜻한다.
+다음 운영 범위는 아직 구현되지 않았으며 후속 사용자 승인이 필요하다.
 
-- public intake→External Risk coordinator·Rule v2·위험 대응 최종화 연결
-- 거래를 연결한 `IN_PROGRESS` commit과 External Risk Failure Snapshot 저장·재생
-- 실제 External Risk Provider와 production coordinator Bean
-- Snapshot v2 확정
-- Snapshot 완료 간극 운영 복구
+- crash·Snapshot 완료 간극 운영 복구와 장기 `IN_PROGRESS` 복구
+- 자동 retry·fallback·cache
+- 운영 credential 배포와 신규 metric·dashboard
 - 공개 최종화·사건·AuditLog API
 - 실제 USER 인증·인가 연결
 - 사건 조사 상태 전이
@@ -524,3 +525,20 @@ Validation 거절은 Transaction이나 AuditLog 행을 만들지 않는다. 오�
 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를
 따른다. 위 미구현 범위를 현재 내부 최종화 또는 V3·V6·V7 물리 스키마의 미구현으로
 표현하지 않는다.
+
+## 17. Issue #178 구현 상태 (2026-08-27)
+
+public 거래 접수는 이제 `RECEIVED → ANALYZING → ANALYZED → 최종 상태`를 동기로
+연결한다. Rule 실패 후 거래 `RECEIVED`·DetectionResult 없음 또는 거래 `FAILED`·
+대응 DetectionResult `FAILED`가 read-only `REQUIRES_NEW/READ_COMMITTED` 경계에서
+확인된 경우에만 Idempotency를 code-only `FAILED(DEPENDENCY_UNAVAILABLE)`로
+확정한다. `ANALYZING`, DetectionResult `IN_PROGRESS`, 상태 불일치·판정 불가와
+reader 실패에서는 `IN_PROGRESS`를 유지한다.
+
+External Risk lookup과 Rule 단계를 분리해 command read·Provider 단계의 일반 예외는
+Rule 실패 reader가 판정하지 않는다. 이 경우 원본 예외 identity를 유지하고
+Idempotency는 `IN_PROGRESS`다.
+
+최종화 실패는 거래 `ANALYZED`를 유지하고, 최종화 성공 뒤 Snapshot 완료 실패는
+최종 거래·사건·AuditLog를 유지한다. 두 경우 모두 Idempotency는 `IN_PROGRESS`이며
+자동 재실행하지 않는다. 장기 상태와 완료 간극의 운영 복구는 미구현이다.

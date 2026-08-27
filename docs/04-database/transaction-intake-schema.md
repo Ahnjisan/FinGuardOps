@@ -55,7 +55,7 @@ Migration으로 추가한다.
 
 ### 3.1 처리 순서
 
-ADR-007의 목표 거래 요청은 다음 순서로 처리한다.
+ADR-007에 따라 현재 거래 요청은 다음 순서로 처리한다.
 
 ```text
 JSON·헤더 형식 검증
@@ -68,10 +68,10 @@ JSON·헤더 형식 검증
 → 최종 성공 Snapshot v2 또는 External Risk Failure Snapshot terminal 확정 commit
 ```
 
-현재 구현은 Validation→지문 계산→`IN_PROGRESS` 선점 뒤
-`financial_transaction(RECEIVED)`·연결·성공 Snapshot v1·`COMPLETED`를 하나의 짧은
-업무 트랜잭션으로 원자 저장한다. 거래 연결 상태를 `IN_PROGRESS`로 먼저 commit한 뒤
-External Risk를 호출하는 위 목표 경계는 아직 구현되지 않았다.
+Issue #178 public 거래 접수는 Validation→지문 계산→`IN_PROGRESS` 선점 commit 뒤
+`financial_transaction(RECEIVED)`·멱등 연결을 별도 commit하고 External Risk와 Rule
+v2를 transaction 밖에서 호출한다. 위험 대응 최종화 commit 뒤 성공 Snapshot v2와
+`COMPLETED`를 별도 completion transaction으로 확정한다.
 
 - JSON 파싱, `Idempotency-Key` 검증, 필수 필드·UUID·Enum·금액·통화·시각 형식 검증 실패는 `400 Bad Request`와 `VALIDATION_ERROR`로 처리한다.
 - 형식은 올바르지만 거래 유형별 `recipientAccountRef`·`channel` 또는 그 밖의 도메인 규칙을 위반하면 `422 Unprocessable Entity`와 `VALIDATION_ERROR`로 처리한다.
@@ -255,8 +255,8 @@ FAILED
 
 충돌 판별은 기존 레코드의 상태를 해석하기 전에 지문 일치 여부를 먼저 확인한다. 따라서 같은 키의 지문이 다르면 기존 처리가 진행 중이어도 `IDEMPOTENCY_KEY_CONFLICT`이다.
 
-현재 단계적 구현의 신규 최초 성공은 `response_snapshot`에 다음 v1 envelope를
-보존한다.
+Issue #178 이전 단계적 구현의 신규 최초 성공은 `response_snapshot`에 다음 v1
+envelope를 보존했다. 기존 v1 record의 재생 계약은 계속 유지한다.
 
 ```json
 {
@@ -289,9 +289,9 @@ FAILED
 수 없다. 성공 v2에는 별도 `snapshotType`과 오류 응답 전용 `fieldErrors`가 없고,
 두 version 필드의 tuple이 discriminator다. exact 5-field envelope와 exact 7-field
 body를 고정 순서 compact JSON으로 재직렬화한 canonical UTF-8 크기는 최대 4096
-byte이며 이 제한은 v2 encode·decode에만 적용한다. typed 모델·codec·dispatcher와
-PostgreSQL JSONB 저장·조회 검증은 구현되었지만 public intake·최종화 호출·멱등
-`COMPLETED` writer 연결은 아직 구현되지 않았다.
+byte이며 이 제한은 v2 encode·decode에만 적용한다. typed 모델·codec·dispatcher,
+PostgreSQL JSONB 저장·조회, public intake·최종화 호출과 멱등 `COMPLETED` writer
+연결은 구현되었다.
 
 legacy와 v1 Snapshot은 수정·backfill하지 않고 최신 DB 상태로 보정하지 않는다.
 기존 version의 의미를 확장하지 않으며 기존 Snapshot 재생에서 분석·위험 대응·사건
@@ -408,9 +408,10 @@ FAILED
 ```
 
 `VALIDATION_FAILED`는 포함하지 않는다. V3는 nullable
-`adopted_detection_result_id`, `risk_level`, `risk_response_outcome`을
-추가했지만 현재 거래 접수는 이 값을 설정하지 않고 기존
-`RECEIVED`/null 응답을 유지한다. 구체적인 제약은
+`adopted_detection_result_id`, `risk_level`, `risk_response_outcome`을 추가했다.
+Issue #178 이전 거래 접수는 이 값을 설정하지 않고 `RECEIVED`/null 응답을
+유지했지만, 현재 신규 요청은 분석·최종화 뒤 이 값을 채운 최종 상태를 Snapshot
+v2로 반환한다. 구체적인 제약은
 [`detection-result-schema.md`](./detection-result-schema.md)를 따른다.
 
 ### 7.2 감사 시각 clock과 정밀도
@@ -796,11 +797,9 @@ CREATE INDEX ix_idempotency_record_status_updated_at
 - 거래 연결과 완료·실패 상태 확정은 Repository의 `findByIdForUpdate`가 JPA `PESSIMISTIC_WRITE`로 대상 PK 행을 먼저 잠근 뒤 엔티티 상태 전이와 dirty checking UPDATE를 수행한다.
 - 현재 구현은 `processing_status = 'IN_PROGRESS'`를 SQL UPDATE 조건에 직접 포함하지 않는다. 경합 실행은 같은 행의 비관적 잠금 획득 순서로 직렬화되고, 뒤에 잠금을 얻은 실행은 이미 terminal 상태인 엔티티의 상태 전이 검증에서 거부되어 단일 승자를 유지한다.
 - `IN_PROGRESS` 선점 DB 트랜잭션을 External Risk나 FastAPI 네트워크 호출 동안 열어 두지 않는다.
-- **현재 구현**은 `financial_transaction` 생성, 멱등 거래 연결, v1 typed Snapshot
-  저장과 `COMPLETED` 전이를 하나의 짧은 업무 트랜잭션으로 처리한다. 실패하면
-  거래 저장과 완료 전이를 rollback하고 별도 트랜잭션에서 선점 기록을
-  `FAILED`로 확정한다.
-- **최종 목표**는 거래 저장·연결 commit 뒤 External Risk와 Rule 분석을 DB
+- **Issue #178 이전 구현**은 `financial_transaction` 생성, 멱등 거래 연결, v1 typed
+  Snapshot 저장과 `COMPLETED` 전이를 하나의 짧은 업무 트랜잭션으로 처리했다.
+- **현재 구현**은 거래 저장·연결 commit 뒤 External Risk와 Rule 분석을 DB
   트랜잭션 밖에서 수행하고, External Risk 확정 실패는 별도 짧은 트랜잭션에서
   Failure Snapshot과 `FAILED`로 확정한다. 성공이면 위험 대응·최종 상태·필요한 사건
   연결의 모든 업무 commit 뒤 별도 짧은 트랜잭션에서 v2 Snapshot과 멱등
@@ -919,12 +918,37 @@ Java 매핑 변경은 이 물리 DB 계약과 함께 검증한다.
 이번 물리 계약 이후에도 다음 항목은 별도 승인과 구현 설계가 필요하다.
 
 - 멱등 만료 레코드 정리 주기, batch 크기, 잠금과 장애 재시도 방식
-- ADR-006·ADR-007 순서에 따른 External Risk·탐지·위험 대응·사건과 성공 v2·Failure Snapshot의 public 거래 접수 연결
-- 성공 v2와 Failure Snapshot의 public writer·replay mapper 연결
+- crash·완료 간극과 장기 `IN_PROGRESS` 운영 복구
+- 자동 retry·fallback·cache
+- 운영 credential 배포와 신규 metric·dashboard
 - 상태 변경 충돌 후 자동 재시도 여부
 - 최종 상태 거래의 재분석·정정 이력 모델
 - External Risk 불확실 `IN_PROGRESS`와 완료 간극을 복구하는 별도 operation scope의 승인된 명령·운영 절차
 - 참조값 생성 주체, 추가 문자 제한, 암호화·마스킹과 보존 기간
-- 실제 Flyway 의존성, Migration 버전과 Testcontainers 의존성 도입 승인
+- 추가 Migration과 스키마 변경은 별도 승인
 
 이번 계약에서 확정한 UUID v4, 거래 유형별 recipient/channel, 양의 정수 금액, KRW, 미래 5분, Validation 미저장, 낙관적 잠금, 멱등 키 형식·지문·상태 코드와 `expires_at = created_at + 24 hours` 저장 제약은 위 TBD에 포함하지 않는다. 실제 만료 시행과 보존 기간은 여전히 후속 결정이다.
+
+## 17. Issue #178 실제 transaction sequence (2026-08-27)
+
+물리 스키마와 Flyway는 변경하지 않고 기존 경계를 다음 순서로 연결했다.
+
+```text
+Idempotency IN_PROGRESS claim commit
+→ financial_transaction RECEIVED 저장·Idempotency FK 연결 commit
+→ DB transaction 밖 External Risk·Rule 호출
+→ Rule 완료·채택 commit
+→ 위험 대응·필요한 사건·AuditLog 최종화 commit
+→ 별도 성공 Snapshot v2·Idempotency COMPLETED commit
+```
+
+External Risk 확정 실패는 별도 Failure Snapshot·`FAILED` commit을 사용한다. Rule
+실패 판정 read는 비잠금 `REQUIRES_NEW/READ_COMMITTED/readOnly`이며 안전 상태에서만
+별도 code-only `FAILED` writer를 호출한다. 최종화 commit과 성공 완료 commit은
+ADR-006에 따라 분리한다. 완료 실패 시 업무 행은 유지되고 Idempotency는
+`IN_PROGRESS`다. 스키마·인덱스·제약·Migration 추가, 완료 간극·장기
+`IN_PROGRESS` 운영 복구는 이번 구현에 없다.
+
+External Risk lookup과 Rule 단계를 분리해 command read·Provider 단계의 일반 예외는
+Rule 실패로 terminal 처리하지 않는다. typed External Risk 실패와 External Risk
+성공 뒤 Rule 실패만 각 전용 경계를 사용한다.

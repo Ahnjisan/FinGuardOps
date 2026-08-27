@@ -68,9 +68,9 @@ class TransactionIntakeControllerTest {
     @Test
     void newIntakeReturns201AndExactlyEightContractFields() throws Exception {
         String traceId = "trace_new_intake_01";
-        when(transactionIntakeService.receive(anyString(), any()))
+        when(transactionIntakeService.receive(anyString(), any(), anyString()))
                 .thenReturn(new TransactionIntakeResult.Received(
-                        snapshot(),
+                        finalSnapshot(),
                         201
                 ));
 
@@ -86,11 +86,11 @@ class TransactionIntakeControllerTest {
                 .andExpect(header().doesNotExist("Location"))
                 .andExpect(jsonPath("$.transactionId")
                         .value(TRANSACTION_ID.toString()))
-                .andExpect(jsonPath("$.processingStatus").value("RECEIVED"))
-                .andExpect(jsonPath("$.riskLevel").value(nullValue()))
-                .andExpect(jsonPath("$.riskResponseOutcome").value(nullValue()))
+                .andExpect(jsonPath("$.processingStatus").value("APPROVED"))
+                .andExpect(jsonPath("$.riskLevel").value("LOW"))
+                .andExpect(jsonPath("$.riskResponseOutcome").value("APPROVED"))
                 .andExpect(jsonPath("$.adoptedDetectionResultId")
-                        .value(nullValue()))
+                        .value("7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430101"))
                 .andExpect(jsonPath("$.caseId").value(nullValue()))
                 .andExpect(jsonPath("$.createdAt")
                         .value("2026-07-23T01:15:31.123456Z"))
@@ -110,13 +110,18 @@ class TransactionIntakeControllerTest {
                 "createdAt",
                 "traceId"
         );
+        verify(transactionIntakeService).receive(
+                anyString(),
+                any(),
+                eq(traceId)
+        );
     }
 
     @Test
     void envelopeCompletedReplayReturnsStored201WithCurrentTraceId()
             throws Exception {
         String replayTraceId = "trace_replay_current_01";
-        when(transactionIntakeService.receive(anyString(), any()))
+        when(transactionIntakeService.receive(anyString(), any(), anyString()))
                 .thenReturn(new TransactionIntakeResult.CompletedReplay(
                         snapshot(),
                         201
@@ -145,7 +150,7 @@ class TransactionIntakeControllerTest {
     void legacyCompletedReplayReturns200WithCurrentTraceId()
             throws Exception {
         String replayTraceId = "trace_legacy_replay_01";
-        when(transactionIntakeService.receive(anyString(), any()))
+        when(transactionIntakeService.receive(anyString(), any(), anyString()))
                 .thenReturn(new TransactionIntakeResult.CompletedReplay(
                         snapshot(),
                         200
@@ -181,12 +186,16 @@ class TransactionIntakeControllerTest {
                         .value("Idempotency-Key"));
 
         verify(transactionIntakeService, never())
-                .receive(anyString(), any());
+                .receive(anyString(), any(), anyString());
     }
 
     @Test
     void invalidIdempotencyKeyReturns400ValidationError() throws Exception {
-        when(transactionIntakeService.receive(eq("short"), any()))
+        when(transactionIntakeService.receive(
+                eq("short"),
+                any(),
+                anyString()
+        ))
                 .thenThrow(validation(
                         TransactionValidationType.FORMAT,
                         "Idempotency-Key",
@@ -301,7 +310,8 @@ class TransactionIntakeControllerTest {
     void invalidEnumReturns400ValidationError() throws Exception {
         when(transactionIntakeService.receive(
                 eq(KEY),
-                argThat(request -> "WIRE".equals(request.transactionType()))
+                argThat(request -> "WIRE".equals(request.transactionType())),
+                anyString()
         )).thenThrow(validation(
                 TransactionValidationType.FORMAT,
                 "transactionType",
@@ -350,7 +360,7 @@ class TransactionIntakeControllerTest {
 
     @Test
     void domainValidationReturns422ValidationError() throws Exception {
-        when(transactionIntakeService.receive(anyString(), any()))
+        when(transactionIntakeService.receive(anyString(), any(), anyString()))
                 .thenThrow(validation(
                         TransactionValidationType.DOMAIN,
                         "recipientAccountRef",
@@ -367,7 +377,7 @@ class TransactionIntakeControllerTest {
 
     @Test
     void unexpectedErrorsReturnSafe500() throws Exception {
-        when(transactionIntakeService.receive(anyString(), any()))
+        when(transactionIntakeService.receive(anyString(), any(), anyString()))
                 .thenThrow(new IllegalStateException(
                         "secret database account and request body"
                 ));
@@ -402,6 +412,55 @@ class TransactionIntakeControllerTest {
                 503,
                 "DEPENDENCY_TIMEOUT"
         );
+        assertResultError(
+                new TransactionIntakeResult.PreviousFailure(
+                        "DEPENDENCY_UNAVAILABLE"
+                ),
+                "trace_failed_unavailable_01",
+                503,
+                "DEPENDENCY_UNAVAILABLE"
+        );
+    }
+
+    @Test
+    void providerAndRuleUnavailableUseFixedSafe503() throws Exception {
+        assertResultError(
+                new TransactionIntakeResult.ProviderUnavailable(),
+                "trace_provider_unavailable_01",
+                503,
+                "DEPENDENCY_UNAVAILABLE"
+        );
+        assertResultError(
+                new TransactionIntakeResult.RuleFailure(),
+                "trace_rule_unavailable_01",
+                503,
+                "DEPENDENCY_UNAVAILABLE"
+        );
+    }
+
+    @Test
+    void typedExternalRiskFirstAndReplayUseStoredPublicValues()
+            throws Exception {
+        assertResultError(
+                new TransactionIntakeResult.ExternalRiskFailure(
+                        503,
+                        "DEPENDENCY_TIMEOUT",
+                        "탐지 서비스를 사용할 수 없습니다."
+                ),
+                "trace_external_first_01",
+                503,
+                "DEPENDENCY_TIMEOUT"
+        );
+        assertResultError(
+                new TransactionIntakeResult.ExternalRiskFailureReplay(
+                        500,
+                        "INTERNAL_ERROR",
+                        "요청을 처리하는 중 오류가 발생했습니다."
+                ),
+                "trace_external_replay_01",
+                500,
+                "INTERNAL_ERROR"
+        );
     }
 
     @Test
@@ -424,7 +483,7 @@ class TransactionIntakeControllerTest {
             throws Exception {
         String rawSnapshot =
                 "{\"accountRef\":\"secret_account\",\"traceId\":\"old_trace\"}";
-        when(transactionIntakeService.receive(anyString(), any()))
+        when(transactionIntakeService.receive(anyString(), any(), anyString()))
                 .thenThrow(new InvalidTransactionIntakeSnapshotException(
                         new IllegalArgumentException(rawSnapshot)
                 ));
@@ -446,7 +505,7 @@ class TransactionIntakeControllerTest {
             String failureCode,
             String traceId
     ) throws Exception {
-        when(transactionIntakeService.receive(anyString(), any()))
+        when(transactionIntakeService.receive(anyString(), any(), anyString()))
                 .thenReturn(new TransactionIntakeResult.PreviousFailure(
                         failureCode
                 ));
@@ -470,7 +529,7 @@ class TransactionIntakeControllerTest {
             int status,
             String code
     ) throws Exception {
-        when(transactionIntakeService.receive(anyString(), any()))
+        when(transactionIntakeService.receive(anyString(), any(), anyString()))
                 .thenReturn(intakeResult);
 
         assertErrorTrace(
@@ -539,6 +598,18 @@ class TransactionIntakeControllerTest {
                 null,
                 null,
                 null,
+                null,
+                CREATED_AT
+        );
+    }
+
+    private TransactionIntakeSnapshot finalSnapshot() {
+        return new TransactionIntakeSnapshot(
+                TRANSACTION_ID,
+                TransactionProcessingStatus.APPROVED,
+                "LOW",
+                "APPROVED",
+                "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430101",
                 null,
                 CREATED_AT
         );

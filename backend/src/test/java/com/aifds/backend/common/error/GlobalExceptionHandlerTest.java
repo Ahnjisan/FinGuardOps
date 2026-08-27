@@ -7,6 +7,7 @@ import com.aifds.backend.idempotency.exception.IdempotencyRecordNotFoundExceptio
 import com.aifds.backend.idempotency.exception.IdempotencyStateTransitionNotAllowedException;
 import com.aifds.backend.transaction.validation.TransactionValidationException;
 import com.aifds.backend.transaction.validation.TransactionValidationType;
+import com.aifds.backend.transaction.exception.TransactionIntakeRejectedException;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -128,6 +129,62 @@ class GlobalExceptionHandlerTest {
 
         assertThat(missingAttribute.getBody().traceId()).isNull();
         assertThat(missingRequest.getBody().traceId()).isNull();
+    }
+
+    @Test
+    void mapsIntakeDependencyUnavailableToFixedSafe503() {
+        ResponseEntity<ApiErrorResponse> response =
+                handler.handleTransactionIntakeRejected(
+                        TransactionIntakeRejectedException
+                                .dependencyUnavailable(),
+                        requestWithTraceId()
+                );
+
+        assertThat(response.getStatusCode())
+                .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(response.getBody().code())
+                .isEqualTo(GlobalExceptionHandler.DEPENDENCY_UNAVAILABLE);
+        assertThat(response.getBody().message()).isEqualTo(
+                GlobalExceptionHandler
+                        .INTAKE_DEPENDENCY_UNAVAILABLE_MESSAGE
+        );
+        assertThat(response.getBody().traceId()).isEqualTo(TRACE_ID);
+    }
+
+    @Test
+    void mapsTypedFailureWithoutExposingInternalContext() {
+        TransactionIntakeRejectedException exception =
+                TransactionIntakeRejectedException.typedFailure(
+                        500,
+                        "INTERNAL_ERROR",
+                        "요청을 처리하는 중 오류가 발생했습니다."
+                );
+
+        ResponseEntity<ApiErrorResponse> response =
+                handler.handleTransactionIntakeRejected(
+                        exception,
+                        requestWithTraceId()
+                );
+
+        assertThat(response.getStatusCode())
+                .isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(response.getBody().code()).isEqualTo("INTERNAL_ERROR");
+        assertThat(response.getBody().message())
+                .isEqualTo("요청을 처리하는 중 오류가 발생했습니다.");
+        assertThat(response.getBody().traceId()).isEqualTo(TRACE_ID);
+        assertThat(response.getBody().fieldErrors()).isEmpty();
+    }
+
+    @Test
+    void rejectsUnapprovedTypedFailureMappingBeforeResponseCreation() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                TransactionIntakeRejectedException.typedFailure(
+                        503,
+                        "PROVIDER_SECRET",
+                        "credential=secret"
+                )
+        ).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageNotContaining("credential=secret");
     }
 
     private void assertSafeInternalError(
