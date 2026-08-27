@@ -167,6 +167,60 @@ class IdempotencyRecordTest {
     }
 
     @Test
+    void storesTypedFailureOnlyWithLinkedTransactionAndDefensiveCopy() {
+        IdempotencyRecord record = inProgress();
+        record.linkTransaction(transaction());
+        ObjectNode snapshot = objectMapper.createObjectNode()
+                .put("snapshotType", "external-risk-failure");
+
+        record.fail("DEPENDENCY_TIMEOUT", snapshot, FINISHED_AT);
+        snapshot.put("mutatedAfterTransition", true);
+        ObjectNode returned = (ObjectNode) record.getResponseSnapshot();
+        returned.put("mutatedThroughGetter", true);
+
+        assertThat(record.getProcessingStatus())
+                .isEqualTo(IdempotencyProcessingStatus.FAILED);
+        assertThat(record.getResponseSnapshot().has("mutatedAfterTransition"))
+                .isFalse();
+        assertThat(record.getResponseSnapshot().has("mutatedThroughGetter"))
+                .isFalse();
+        assertThat(record.getFailureCode()).isEqualTo("DEPENDENCY_TIMEOUT");
+        assertThat(record.getFinishedAt()).isEqualTo(FINISHED_AT);
+    }
+
+    @Test
+    void rejectsTypedFailureWithoutTransactionOrWithUnsafeSnapshot() {
+        ObjectNode snapshot = objectMapper.createObjectNode()
+                .put("snapshotType", "external-risk-failure");
+
+        assertThatThrownBy(() -> inProgress().fail(
+                "DEPENDENCY_TIMEOUT",
+                snapshot,
+                FINISHED_AT
+        )).isInstanceOf(IllegalStateException.class);
+
+        IdempotencyRecord linked = inProgress();
+        linked.linkTransaction(transaction());
+        assertThatThrownBy(() -> linked.fail(
+                "DEPENDENCY_TIMEOUT",
+                objectMapper.createArrayNode(),
+                FINISHED_AT
+        )).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> linked.fail(
+                "DEPENDENCY_TIMEOUT",
+                objectMapper.createObjectNode().set(
+                        "nested",
+                        objectMapper.createObjectNode().put(
+                                "traceId",
+                                "sensitive-trace"
+                        )
+                ),
+                FINISHED_AT
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("traceId");
+    }
+
+    @Test
     void rejectsTransitionsFromCompletedAndFailedStates() {
         IdempotencyRecord completed = inProgress();
         completed.complete(
@@ -188,6 +242,22 @@ class IdempotencyRecordTest {
                 .isInstanceOf(IdempotencyStateTransitionNotAllowedException.class);
         assertThatThrownBy(() -> failed.complete(
                 transaction(),
+                objectMapper.createObjectNode(),
+                FINISHED_AT.plusSeconds(1)
+        )).isInstanceOf(IdempotencyStateTransitionNotAllowedException.class);
+
+        IdempotencyRecord typedFailed = inProgress();
+        typedFailed.linkTransaction(transaction());
+        typedFailed.fail(
+                "DEPENDENCY_TIMEOUT",
+                objectMapper.createObjectNode().put(
+                        "snapshotType",
+                        "external-risk-failure"
+                ),
+                FINISHED_AT
+        );
+        assertThatThrownBy(() -> typedFailed.fail(
+                "DEPENDENCY_TIMEOUT",
                 objectMapper.createObjectNode(),
                 FINISHED_AT.plusSeconds(1)
         )).isInstanceOf(IdempotencyStateTransitionNotAllowedException.class);

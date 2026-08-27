@@ -219,6 +219,55 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
     }
 
     @Test
+    void persistsTypedFailureAndReturnsStoredSnapshotSeparatelyFromLegacy()
+            throws Exception {
+        String key = key("typed-failed");
+        TransactionFingerprintInput input = fingerprintInput();
+        FinancialTransaction transaction = financialTransactionRepository.saveAndFlush(
+                transaction(input.transactionId())
+        );
+        long recordId = acquiredRecordId(idempotencyService.claim(key, input));
+        IdempotencyRecord record = idempotencyRecordRepository
+                .findById(recordId)
+                .orElseThrow();
+        record.linkTransaction(transaction);
+        idempotencyRecordRepository.saveAndFlush(record);
+        Instant failedAt = finishedAtFor(recordId);
+        when(timestampProvider.currentTransactionTimestamp()).thenReturn(failedAt);
+
+        IdempotencyClaimResult.FailedWithSnapshot failed =
+                idempotencyService.failWithSnapshot(
+                        recordId,
+                        "DEPENDENCY_TIMEOUT",
+                        this::timeoutFailureSnapshot
+                );
+        IdempotencyRecord stored = idempotencyRecordRepository
+                .findById(recordId)
+                .orElseThrow();
+        IdempotencyClaimResult replay = idempotencyService.claim(key, input);
+
+        assertThat(failed.finishedAt()).isEqualTo(failedAt);
+        assertThat(failed.responseSnapshotJson())
+                .contains("external-risk-failure", failedAt.toString());
+        assertThat(stored.getProcessingStatus())
+                .isEqualTo(IdempotencyProcessingStatus.FAILED);
+        assertThat(stored.getFinancialTransaction().getId())
+                .isEqualTo(transaction.getId());
+        assertThat(stored.getResponseSnapshot())
+                .isEqualTo(timeoutFailureSnapshot(failedAt));
+        assertThat(stored.getFailureCode()).isEqualTo("DEPENDENCY_TIMEOUT");
+        assertThat(stored.getFinishedAt()).isEqualTo(failedAt);
+        assertThat(replay)
+                .isInstanceOf(IdempotencyClaimResult.FailedWithSnapshot.class);
+        IdempotencyClaimResult.FailedWithSnapshot replayed =
+                (IdempotencyClaimResult.FailedWithSnapshot) replay;
+        assertThat(replayed.failureCode()).isEqualTo(failed.failureCode());
+        assertThat(replayed.finishedAt()).isEqualTo(failed.finishedAt());
+        assertThat(objectMapper.readTree(replayed.responseSnapshotJson()))
+                .isEqualTo(objectMapper.readTree(failed.responseSnapshotJson()));
+    }
+
+    @Test
     void treatsExpiredRecordAsExistingWithoutDeletionOrReacquisition() {
         String key = key("expired");
         TransactionFingerprintInput input = fingerprintInput();
@@ -289,13 +338,18 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
     }
 
     @Test
-    void concurrentCompleteAndFailAllowOneTerminalTransitionAndRejectTheOther() throws Exception {
+    void concurrentCompleteAndTypedFailAllowOneTerminalTransitionAndRejectTheOther() throws Exception {
         String key = key("terminal-race");
         TransactionFingerprintInput input = fingerprintInput();
         FinancialTransaction transaction = financialTransactionRepository.saveAndFlush(
                 transaction(input.transactionId())
         );
         long recordId = acquiredRecordId(idempotencyService.claim(key, input));
+        IdempotencyRecord linkedRecord = idempotencyRecordRepository
+                .findById(recordId)
+                .orElseThrow();
+        linkedRecord.linkTransaction(transaction);
+        idempotencyRecordRepository.saveAndFlush(linkedRecord);
         Instant finishedAt = finishedAtFor(recordId);
         when(timestampProvider.currentTransactionTimestamp())
                 .thenReturn(finishedAt);
@@ -312,9 +366,10 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
                     ))
             );
             Future<TransitionAttempt> failFuture = executor.submit(
-                    transitionTask(barrier, () -> idempotencyService.fail(
+                    transitionTask(barrier, () -> idempotencyService.failWithSnapshot(
                             recordId,
-                            "DEPENDENCY_TIMEOUT"
+                            "DEPENDENCY_TIMEOUT",
+                            this::timeoutFailureSnapshot
                     ))
             );
             List<TransitionAttempt> attempts = List.of(
@@ -339,6 +394,67 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
             );
             assertThat(stored.getFinishedAt()).isEqualTo(finishedAt);
             assertThat(countByKey(key)).isEqualTo(1);
+        } finally {
+            shutdown(executor);
+        }
+    }
+
+    @Test
+    void concurrentTypedFailureWritersAllowExactlyOneTransition() throws Exception {
+        String key = key("typed-terminal-race");
+        TransactionFingerprintInput input = fingerprintInput();
+        FinancialTransaction transaction = financialTransactionRepository.saveAndFlush(
+                transaction(input.transactionId())
+        );
+        long recordId = acquiredRecordId(idempotencyService.claim(key, input));
+        IdempotencyRecord record = idempotencyRecordRepository
+                .findById(recordId)
+                .orElseThrow();
+        record.linkTransaction(transaction);
+        idempotencyRecordRepository.saveAndFlush(record);
+        Instant finishedAt = finishedAtFor(recordId);
+        when(timestampProvider.currentTransactionTimestamp()).thenReturn(finishedAt);
+        CyclicBarrier barrier = new CyclicBarrier(2);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        try {
+            List<Future<TransitionAttempt>> futures = List.of(
+                    executor.submit(transitionTask(
+                            barrier,
+                            () -> idempotencyService.failWithSnapshot(
+                                    recordId,
+                                    "DEPENDENCY_TIMEOUT",
+                                    this::timeoutFailureSnapshot
+                            )
+                    )),
+                    executor.submit(transitionTask(
+                            barrier,
+                            () -> idempotencyService.failWithSnapshot(
+                                    recordId,
+                                    "DEPENDENCY_TIMEOUT",
+                                    this::timeoutFailureSnapshot
+                            )
+                    ))
+            );
+            List<TransitionAttempt> attempts = List.of(
+                    futures.get(0).get(30, TimeUnit.SECONDS),
+                    futures.get(1).get(30, TimeUnit.SECONDS)
+            );
+
+            assertThat(attempts.stream().filter(TransitionAttempt::succeeded).count())
+                    .isEqualTo(1);
+            assertThat(attempts.stream()
+                    .filter(attempt -> !attempt.succeeded())
+                    .map(TransitionAttempt::failure))
+                    .singleElement()
+                    .isInstanceOf(IdempotencyStateTransitionNotAllowedException.class);
+            IdempotencyRecord stored = idempotencyRecordRepository
+                    .findById(recordId)
+                    .orElseThrow();
+            assertThat(stored.getProcessingStatus())
+                    .isEqualTo(IdempotencyProcessingStatus.FAILED);
+            assertThat(stored.getResponseSnapshot())
+                    .isEqualTo(timeoutFailureSnapshot(finishedAt));
         } finally {
             shutdown(executor);
         }
@@ -450,6 +566,25 @@ class IdempotencyServiceIntegrationTest extends PostgresqlIntegrationTestSupport
                 TransactionChannel.MOBILE_BANKING,
                 "device_ref_service_integration"
         );
+    }
+
+    private ObjectNode timeoutFailureSnapshot(Instant finalizedAt) {
+        ObjectNode responseBody = objectMapper.createObjectNode();
+        responseBody.put("code", "DEPENDENCY_TIMEOUT");
+        responseBody.put("message", "탐지 서비스를 사용할 수 없습니다.");
+        responseBody.putArray("fieldErrors");
+        ObjectNode snapshot = objectMapper.createObjectNode();
+        snapshot.put("snapshotType", "external-risk-failure");
+        snapshot.set("responseBody", responseBody);
+        snapshot.put("httpStatus", 503);
+        snapshot.put("failureCategory", "TIMEOUT");
+        snapshot.put("responseSchemaVersion", "transaction-create-error-v1");
+        snapshot.put(
+                "codecVersion",
+                "external-risk-failure-snapshot-envelope-v1"
+        );
+        snapshot.put("finalizedAt", finalizedAt.toString());
+        return snapshot;
     }
 
     private record TransitionAttempt(boolean succeeded, Throwable failure) {

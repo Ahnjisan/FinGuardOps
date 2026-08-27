@@ -419,7 +419,8 @@ Content-Type: application/json
 
 저장된 `failureCode`가 null, 빈 값, 알 수 없는 값 또는 내부 전용 값이면 `500 Internal Server Error`, `INTERNAL_ERROR`, `요청을 처리하는 중 오류가 발생했습니다.`로 축약한다. 원래 `failureCode` 문자열을 공개 code나 message로 전달하지 않는다. 현재 거래 저장 또는 멱등 완료의 예기치 않은 실패를 기록하는 내부 코드 `TRANSACTION_INTAKE_FAILED`도 공개 whitelist가 아니므로 `INTERNAL_ERROR`로 처리한다.
 
-ADR-007이 확정한 목표 External Risk 전용 공개 매핑은 다음과 같다. 내부
+ADR-007이 확정했고 현재 내부 Failure Snapshot 모델·codec이 사용하는 External Risk
+전용 매핑은 다음과 같다. 내부
 `failureCategory`나 Provider 상세는 공개 body에 포함하지 않는다.
 
 | 내부 category | HTTP 상태 | 공개 오류 code | 공개 안전 message |
@@ -431,11 +432,11 @@ ADR-007이 확정한 목표 External Risk 전용 공개 매핑은 다음과 같�
 | `INVALID_RESPONSE` | `500 Internal Server Error` | `INTERNAL_ERROR` | `요청을 처리하는 중 오류가 발생했습니다.` |
 | `TRANSFORMATION_ERROR` | `500 Internal Server Error` | `INTERNAL_ERROR` | `요청을 처리하는 중 오류가 발생했습니다.` |
 
-목표 저장 형식은 성공 Snapshot v1·v2와 구분되는
+현재 구현된 내부 저장 형식은 성공 Snapshot v1·v2와 구분되는
 `snapshotType=external-risk-failure`,
 `responseSchemaVersion=transaction-create-error-v1`,
 `codecVersion=external-risk-failure-snapshot-envelope-v1`이다. strict envelope의
-정확한 필드·4 KiB 제한·fail-closed decoder 계약은 ADR-007을, 현재와 목표 물리
+정확한 필드·4 KiB 제한·fail-closed decoder 계약은 ADR-007을, V8 적용 물리
 제약은 [거래 접수 스키마](../04-database/transaction-intake-schema.md)를 따른다.
 `responseBody.code`는 `idempotency_record.failure_code`와 같아야 하고
 `fieldErrors`는 빈 배열이다.
@@ -447,10 +448,13 @@ Provider, FastAPI와 위험 대응 최종화는 모두 `0회` 호출한다. 새
 공식 재처리 수단이 아니다. 재처리는 후속 Issue에서 별도 operation scope의 승인된
 복구·재분석 명령으로 설계한다.
 
-이 category mapper, Failure Snapshot codec·decoder, DB Migration, public intake 연결과
-재생 경로는 아직 구현되지 않았다. 전용 대상은 `ExternalRiskLookupException`의 위
-여섯 category뿐이며 예상하지 못한 일반 `RuntimeException`을 category로 변환하거나
-전용 Snapshot으로 저장하지 않는다.
+category mapper, Failure Snapshot strict codec·decoder, V8 Migration과
+`REQUIRES_NEW` 기반 내부 저장·조회 경계는 구현되었다. Snapshot이 null인 legacy
+`FAILED`와 non-null typed `FAILED`를 멱등 계층에서 구분하고, typed 데이터는 External
+Risk 계층에서 strict decode한다. public intake 연결·공개 mapper·HTTP 재생 경로는 아직
+구현되지 않았다. 전용 대상은 `ExternalRiskLookupException`의 위 여섯 category뿐이며
+예상하지 못한 일반 `RuntimeException`을 category로 변환하거나 전용 Snapshot으로
+저장하지 않는다.
 
 External Risk failure writer 실패·저장 직전 crash 또는 최종 성공 완료 간극은
 durable terminal 결과가 아니다. 멱등 레코드는 `IN_PROGRESS`로 남을 수 있고 최초
@@ -1269,8 +1273,9 @@ Content-Type: application/json
 승인된 목표 거래 오케스트레이션은 여섯 External Risk typed failure 발생 시 분석을
 시작하지 않고 거래 `RECEIVED`를 유지하며 DetectionResult를 생성하지 않는다.
 FastAPI·위험 대응 최종화·성공 Snapshot v2를 호출하거나 만들지 않는다. 정상 확정된
-Failure Snapshot은 같은 key·fingerprint에서 terminal `FAILED`로 재생한다. 공개 매핑과
-public intake end-to-end 연결은 아직 구현되지 않았다.
+Failure Snapshot의 내부 저장·조회와 strict decode 경계는 구현되었고 같은
+key·fingerprint에서 terminal `FAILED`로 판별한다. 공개 mapper와 public intake
+end-to-end 연결은 아직 구현되지 않았다.
 
 다음은 아직 사용자 결정이 필요하다.
 
