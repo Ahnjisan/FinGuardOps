@@ -59,9 +59,10 @@ v1 내부 오케스트레이션과, 성공 `ExternalRiskSnapshot`을 입력받�
 local/dev/test 결정적 Mock과 immutable 인메모리 성공 Snapshot도 구현되어 있다.
 네 위험 등급별 목표 거래 상태, `RiskResponseOutcome`과 사건 필수 여부를 반환하는
 Spring·DB 비의존 순수 decision 정책도 구현되어 있다.
-External Risk 연계에는 무잠금 `READ_COMMITTED` read 종료 뒤 Mock Policy를 호출하고
+External Risk 연계에는 무잠금 `READ_COMMITTED` read 종료 뒤 Mock 또는 실제 HTTP Policy를 호출하고
 성공 Snapshot을 내부 v2 경계에 전달하는 per-invocation coordinator가 구현되어 있다.
-직접 재호출·멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수 있다. 실제 Provider,
+실제 HTTP Adapter와 production Provider·Policy·coordinator Bean은 구현되었다. 직접
+재호출·멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수 있다. 다만
 public intake와 External Risk coordinator·Rule v2·위험 대응 최종화·멱등 실패
 저장·재생의 end-to-end 연결, Snapshot v2와 완료 간극 복구, 감사 조회와 AI 운영
 도메인은 아직 구현되지 않았다. public `POST /api/v1/transactions` 자체는 구현되어
@@ -93,7 +94,7 @@ AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 
 - `infra/`: 자리표시자만 있으며 Docker Compose 등 인프라 구현 없음
 - `.github/`: Issue·PR 템플릿과 Backend·AI Service 테스트 Workflow가 있으며 이미지 빌드·배포 자동화 없음
 - 운영 PostgreSQL 배포 환경, Redis와 Kafka 연동
-- 실제 External Risk HTTP Provider·DB 영속화와 LLM Provider 연동
+- External Risk DB 영속화와 LLM Provider 연동
 - Prometheus, Grafana, Loki와 분산 추적 구성
 - Kubernetes와 AWS 배포 구성
 
@@ -656,7 +657,7 @@ sequenceDiagram
     actor Client
     participant Spring as Spring Boot
     participant DB as PostgreSQL
-    participant Risk as External Risk Provider (미구현)
+    participant Risk as External Risk Provider
     participant AI as FastAPI
 
     Client->>Spring: 거래 요청
@@ -697,8 +698,8 @@ sequenceDiagram
 
 External Risk 실패 경로에서는 분석 시작 DB commit과 FastAPI 호출 이후 단계가
 실행되지 않는다. 내부 coordinator는 거래 write 없이 원본 typed failure를 전파한다.
-거래는 `RECEIVED`, DetectionResult·사건·연결·관련 AuditLog는 없다. 실제 Provider와
-public intake end-to-end 연결, 멱등 실패 저장·재생은 아직 구현되지 않았다.
+거래는 `RECEIVED`, DetectionResult·사건·연결·관련 AuditLog는 없다. 실제 HTTP Provider
+기반은 구현되었지만 public intake end-to-end 연결, 멱등 실패 저장·재생은 아직 구현되지 않았다.
 coordinator 직접 재호출이나 멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수
 있다. [ADR-007](../07-decisions/ADR-007-external-risk-idempotent-failure-replay-contract.md)의
 목표에서는 여섯 typed category가 durably confirmed되면 같은 key에서 terminal이고,
@@ -948,7 +949,7 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 - RuleVersion publish·운영 준비
 - 최종 Snapshot v2 확정과 완료 간극 운영 복구
 - 감사 조회 API와 기존 업무 Service의 AuditLog 통합
-- 실제 External Risk HTTP Provider. Snapshot DB 영속화는 별도 승인 시 검토
+- External Risk public intake 연결과 실패 Snapshot 저장 호출. 성공 Snapshot DB 영속화는 별도 승인 시 검토
 - Docker 및 Docker Compose 통합 환경
 
 AI Service v2 Endpoint·Python DTO와 Backend Java v2 exact wire DTO·mapper·Client·

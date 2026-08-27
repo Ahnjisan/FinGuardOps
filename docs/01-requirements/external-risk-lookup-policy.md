@@ -9,7 +9,7 @@
 wire DTO·mapper·HTTP Client·내부 오케스트레이션과 Mock 활성 환경의 내부
 per-invocation coordinator까지다. coordinator는 무잠금 `READ_COMMITTED` read를
 종료한 뒤 Policy를 호출하고 성공 Snapshot을 `analyzeV2(...)`에 전달한다. public
-거래 접수 API 자체는 구현되어 있지만 실제 Provider와 public intake→External Risk
+거래 접수 API 자체와 실제 HTTP Provider 기반은 구현되어 있지만 public intake→External Risk
 coordinator·Rule v2·위험 대응 최종화·멱등 External Risk 실패 저장·재생의
 end-to-end 연결은 구현되지 않았다. 이 독립 정책은 위험 점수·등급·최종 대응 또는
 DB 영속화를 소유하지 않는다.
@@ -21,6 +21,8 @@ DB 영속화를 소유하지 않는다.
 - `ExternalRiskLookupPort`의 호출당 1회 조회 계약
 - Provider 응답을 신뢰하지 않고 검증하는 `ExternalRiskPolicyService`
 - local/dev/test 전용 결정적 Mock Adapter와 조건부 Configuration
+- strict JSON·timeout·65,536바이트 응답 상한·typed failure 분류를 적용하는 실제 HTTP Adapter
+- production HTTP Provider→Policy→coordinator Bean과 Mock 상호 배타 fail-fast
 - 성공 결과만 표현하는 immutable 인메모리 `ExternalRiskSnapshot`
 - Timeout, unavailable, 요청·capability·응답·변환 오류의 내부 failure category
 - Mock profile·property 전용 `ExternalRiskLookupCommandReader`→Policy→Rule v2
@@ -28,7 +30,6 @@ DB 영속화를 소유하지 않는다.
 
 다음은 구현되지 않았다.
 
-- 실제 외부 HTTP Provider와 외부 네트워크 호출
 - 실제 Provider와 public intake→External Risk coordinator·Rule v2·위험 대응
   최종화·멱등 실패 저장·재생 연결
 - External Risk 기반 점수·등급·위험 대응과 사건 처리
@@ -206,6 +207,6 @@ finguardops.external-risk.mock.scenario=MATCHED_SENDER_ACCOUNT
 기록한다. 실패 로그는 `traceId`와 `failureCategory`만 기록한다. `transactionId`,
 고객·계좌·기기 reference, Provider 요청·응답 원문과 전체 configuration은 기록하지
 않는다. 목표 전용 안전 mapper도 예상된 typed failure의 category와 현재 trace만
-기록하고 Provider cause 전체를 generic stack trace 로그로 보내지 않는다. 이 mapper와
-로그 변경은 아직 구현되지 않았다. 현재 Mock 정책 자체는 외부 네트워크, DB,
+기록하고 Provider cause 전체를 generic stack trace 로그로 보내지 않는다. 실제 HTTP
+Adapter도 parsing cause와 body를 보존하지 않는다. 현재 Mock 정책 자체는 외부 네트워크, DB,
 FastAPI와 LLM 호출을 발생시키지 않는다.
