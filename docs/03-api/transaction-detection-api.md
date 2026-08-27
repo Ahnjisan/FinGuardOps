@@ -39,8 +39,9 @@ per-invocation Policy→Rule v2 coordinator도 구현되었지만 실제 Provide
 거래 접수와 External Risk coordinator·Rule v2·위험 대응 최종화·멱등 External Risk
 실패 저장·재생의 end-to-end 연결도 구현되지 않았다. `ANALYZED` 거래를 잠그고 채택 결과를
 검증한 뒤 위험 대응·필요한 사건·거래 최종 상태·AuditLog를 원자적으로 확정하는
-내부 최종화 경계는 구현되었다. 거래 접수 Service 연결, 최종 멱등 응답 v2, Snapshot
-완료 간극 복구와 RuleVersion 운영 publish는 아직 구현되지 않았다. 현재 단계 응답은 최종 동기
+내부 최종화 경계는 구현되었다. 거래 접수 Service와 최종 멱등 응답 v2의 public
+writer 연결, Snapshot 완료 간극 복구와 RuleVersion 운영 publish는 아직 구현되지
+않았다. 현재 단계 응답은 최종 동기
 분석 목표를 변경하지 않는다. Spring Boot 분석 처리의 기준은
 [Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../01-requirements/spring-rule-analysis-orchestration-contract.md)이다.
 위험 등급별 목표 거래 상태·`RiskResponseOutcome`·사건 필수 여부를 반환하는 순수
@@ -324,8 +325,9 @@ string으로 취급한다. 최종 v2의 비-null `riskLevel`과
 신규 요청은 이 단계적 업무 결과를 v1 envelope에 저장한다. DetectionResult
 채택과 거래 `ANALYZED`는 위험 대응 전 중간 상태이므로 최종 성공 응답이나
 성공 Snapshot을 확정하지 않는다. 내부 위험 대응·사건·AuditLog 원자적 최종화는
-구현되었지만 거래 접수·External Risk 입력과의 연결, Snapshot v2의 Java·DB 반영은
-여전히 후속 구현이다.
+구현되었고 Snapshot v2 typed 모델·strict codec·dispatcher와 JSONB 저장·조회 검증도
+완료되었다. 다만 거래 접수·External Risk 입력·최종화 호출·Idempotency 완료 writer의
+public 연결은 여전히 후속 구현이다.
 
 #### 5.5.1 최종 동기 성공 응답
 
@@ -343,6 +345,14 @@ commit된 뒤에만 허용한다.
 최종 v2 response body도 현재와 같은 일곱 업무 필드를 사용하며 HTTP 응답에서만
 현재 요청의 `traceId`를 여덟 번째 필드로 결합한다. `RECEIVED`, `ANALYZING`,
 `ANALYZED`, `FAILED`는 v2 성공 body에 사용할 수 없다.
+
+저장 envelope는 별도 `snapshotType` 없이
+`responseSchemaVersion=transaction-create-response-v2`와
+`codecVersion=transaction-intake-snapshot-envelope-v2` tuple로 식별한다. 최상위는
+`responseBody`, `httpStatus`, 두 version 필드와 `finalizedAt`만, body는 위 일곱
+업무 필드만 정확히 허용한다. 성공 v2에는 오류 응답 전용 `fieldErrors`가 없다.
+고정 순서 compact JSON의 canonical UTF-8 크기는 최대 4096 byte이며 이 제한은 v2
+encode·decode에만 적용한다.
 
 ### 5.6 성공 응답 예시
 
@@ -382,14 +392,15 @@ X-Trace-Id: trace_demo_tx_0001
 - 요청 지문, `IN_PROGRESS`·`COMPLETED`·`FAILED` 상태와 현재 완료 응답 snapshot의 물리 저장 기준은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따른다. `expires_at`의 24시간 값은 현재 저장 제약이며 만료 판정·키 재사용·정리 정책은 구현되지 않았다.
 - `eventId` 중복과 `DUPLICATE_EVENT`는 행동 이벤트 API의 책임이며 이 거래 접수 API 범위에 포함하지 않는다.
 
-**현재 구현**은 신규 완료 요청을 `responseBody`, `httpStatus=201`, `responseSchemaVersion=transaction-create-response-v1`, `codecVersion=transaction-intake-snapshot-envelope-v1`, `finalizedAt`의 정확한 envelope로 저장한다. `responseBody`는 현재 단계적 `RECEIVED`와 네 탐지 관련 JSON null을 가진 일곱 업무 필드이다. 기존 무버전 Snapshot은 정확한 일곱 필드, `RECEIVED`, 네 JSON null일 때만 strict legacy codec으로 복원하고 신규 envelope나 탐지 완료 결과로 소급 갱신하지 않으며 재요청은 `200 OK`를 유지한다. 별도 metadata 컬럼이나 Flyway Migration은 추가하지 않았다.
+**현재 public 구현**은 신규 완료 요청을 `responseBody`, `httpStatus=201`, `responseSchemaVersion=transaction-create-response-v1`, `codecVersion=transaction-intake-snapshot-envelope-v1`, `finalizedAt`의 정확한 envelope로 저장한다. `responseBody`는 현재 단계적 `RECEIVED`와 네 탐지 관련 JSON null을 가진 일곱 업무 필드이다. 기존 무버전 Snapshot은 정확한 일곱 필드, `RECEIVED`, 네 JSON null일 때만 strict legacy codec으로 복원하고 신규 envelope나 탐지 완료 결과로 소급 갱신하지 않으며 재요청은 `200 OK`를 유지한다. 별도 metadata 컬럼이나 Flyway Migration은 추가하지 않았다.
 
-**최종 목표**는 신규 최종 성공 요청을
+**구현된 내부 v2 경계와 남은 연결**: 신규 최종 성공 요청은
 `responseSchemaVersion=transaction-create-response-v2`,
 `codecVersion=transaction-intake-snapshot-envelope-v2`, `httpStatus=201`로
-저장한다. v2 codec과 거래 접수 연결은 아직 구현되지 않았다. legacy와 v1을
-수정·backfill하거나 최신 DB 상태로 보정하지 않으며 기존 version의 의미를
-확장하지 않는다.
+저장한다. typed 모델·codec·dispatcher와 PostgreSQL JSONB 저장·조회 검증은
+구현되었지만 public intake·최종화 호출·Idempotency 완료 writer 연결은 아직
+구현되지 않았다. legacy와 v1을 수정·backfill하거나 최신 DB 상태로 보정하지 않으며
+기존 version의 의미를 확장하지 않는다.
 
 알 수 없는 구조·버전 또는 역직렬화 실패를 최신 거래 상태로 보정하거나 신규 거래·탐지 처리로 우회하지 않는다. 멱등 재생은 최초 명령 결과의 책임이고 최신 거래·탐지 상태는 별도 조회 API의 책임이다.
 

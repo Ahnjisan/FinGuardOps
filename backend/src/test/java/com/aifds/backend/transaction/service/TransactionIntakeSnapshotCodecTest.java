@@ -39,11 +39,19 @@ class TransactionIntakeSnapshotCodecTest {
                     objectMapper,
                     bodyCodec
             );
+    private final TransactionFinalResponseSnapshotBodyCodec finalBodyCodec =
+            new TransactionFinalResponseSnapshotBodyCodec(objectMapper);
+    private final TransactionIntakeSnapshotEnvelopeV2Codec envelopeV2Codec =
+            new TransactionIntakeSnapshotEnvelopeV2Codec(
+                    objectMapper,
+                    finalBodyCodec
+            );
     private final TransactionIntakeSnapshotCodec codec =
             new TransactionIntakeSnapshotCodec(
                     objectMapper,
                     legacyCodec,
-                    envelopeCodec
+                    envelopeCodec,
+                    envelopeV2Codec
             );
 
     @Test
@@ -221,7 +229,8 @@ class TransactionIntakeSnapshotCodecTest {
                 new TransactionIntakeSnapshotCodec(
                         objectMapper,
                         legacySpy,
-                        envelopeCodec
+                        envelopeCodec,
+                        envelopeV2Codec
                 );
         ObjectNode envelopeCandidate = legacySnapshot();
         envelopeCandidate.put(
@@ -234,6 +243,22 @@ class TransactionIntakeSnapshotCodecTest {
         )).isInstanceOf(InvalidTransactionIntakeSnapshotException.class);
 
         verify(legacySpy, never()).decode(any());
+    }
+
+    @Test
+    void rejectsMixedUnknownAndMissingVersionTuplesWithoutLegacyFallback() {
+        assertInvalid(envelope().put(
+                "codecVersion",
+                "transaction-intake-snapshot-envelope-v2"
+        ));
+        assertInvalid(envelope().put(
+                "responseSchemaVersion",
+                "transaction-create-response-v2"
+        ));
+        assertInvalid(envelope().remove("responseSchemaVersion"));
+        assertInvalid(envelope().remove("codecVersion"));
+        assertInvalid(envelope().putNull("responseSchemaVersion"));
+        assertInvalid(envelope().put("codecVersion", 2));
     }
 
     @Test
