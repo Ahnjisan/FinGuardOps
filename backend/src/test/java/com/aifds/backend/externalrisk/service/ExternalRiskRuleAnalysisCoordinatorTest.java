@@ -116,6 +116,36 @@ class ExternalRiskRuleAnalysisCoordinatorTest {
     }
 
     @Test
+    void lookupStagePreservesCommandReaderFailureIdentity() {
+        RuntimeException original = new IllegalStateException("command read failed");
+        when(commandReader.read(TRANSACTION_ID, TRACE_ID)).thenThrow(original);
+
+        Throwable thrown = catchThrowable(() -> coordinator()
+                .lookupExternalRisk(TRANSACTION_ID, TRACE_ID));
+
+        assertThat(thrown).isSameAs(original);
+        assertThat(thrown.getCause()).isNull();
+        assertThat(thrown.getSuppressed()).isEmpty();
+        verifyNoInteractions(policyService, orchestrationService);
+    }
+
+    @Test
+    void lookupStagePreservesUntypedPolicyFailureIdentity() {
+        ExternalRiskLookupCommand command = command();
+        RuntimeException original = new IllegalStateException("policy failed");
+        when(commandReader.read(TRANSACTION_ID, TRACE_ID)).thenReturn(command);
+        when(policyService.lookup(command)).thenThrow(original);
+
+        Throwable thrown = catchThrowable(() -> coordinator()
+                .lookupExternalRisk(TRANSACTION_ID, TRACE_ID));
+
+        assertThat(thrown).isSameAs(original);
+        assertThat(thrown.getCause()).isNull();
+        assertThat(thrown.getSuppressed()).isEmpty();
+        verifyNoInteractions(orchestrationService);
+    }
+
+    @Test
     void propagatesRuleFailureWithoutRetryOrFallback() {
         ExternalRiskLookupCommand command = command();
         ExternalRiskSnapshot snapshot = snapshot();
@@ -141,6 +171,41 @@ class ExternalRiskRuleAnalysisCoordinatorTest {
                 TRACE_ID
         );
         verify(orchestrationService, never()).analyze(any(), anyString());
+    }
+
+    @Test
+    void splitStagesReturnTheSameSnapshotAndCompletedResult() {
+        ExternalRiskLookupCommand command = command();
+        ExternalRiskSnapshot snapshot = snapshot();
+        CompletedRuleAnalysis completed = completed();
+        when(commandReader.read(TRANSACTION_ID, TRACE_ID)).thenReturn(command);
+        when(policyService.lookup(command)).thenReturn(snapshot);
+        when(orchestrationService.analyzeV2(
+                TRANSACTION_ID,
+                snapshot,
+                TRACE_ID
+        )).thenReturn(completed);
+
+        ExternalRiskRuleAnalysisCoordinator coordinator = coordinator();
+        ExternalRiskSnapshot lookedUp = coordinator.lookupExternalRisk(
+                TRANSACTION_ID,
+                TRACE_ID
+        );
+        CompletedRuleAnalysis analyzed = coordinator
+                .analyzeWithExternalRiskSnapshot(
+                        TRANSACTION_ID,
+                        TRACE_ID,
+                        lookedUp
+                );
+
+        assertThat(lookedUp).isSameAs(snapshot);
+        assertThat(analyzed).isSameAs(completed);
+        verify(policyService, times(1)).lookup(command);
+        verify(orchestrationService, times(1)).analyzeV2(
+                TRANSACTION_ID,
+                snapshot,
+                TRACE_ID
+        );
     }
 
     @Test
@@ -223,6 +288,38 @@ class ExternalRiskRuleAnalysisCoordinatorTest {
     }
 
     @Test
+    void splitRuleStageRejectsActiveTransactionAndMismatchedSnapshot() {
+        ExternalRiskSnapshot snapshot = snapshot();
+        TransactionSynchronizationManager.setActualTransactionActive(true);
+
+        Throwable activeTransaction = catchThrowable(() -> coordinator()
+                .analyzeWithExternalRiskSnapshot(
+                        TRANSACTION_ID,
+                        TRACE_ID,
+                        snapshot
+                ));
+
+        assertThat(activeTransaction).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("no active transaction");
+        verifyNoInteractions(orchestrationService);
+
+        TransactionSynchronizationManager.clear();
+        UUID differentTransactionId = UUID.fromString(
+                "53000000-0000-4000-8000-000000000009"
+        );
+        Throwable mismatch = catchThrowable(() -> coordinator()
+                .analyzeWithExternalRiskSnapshot(
+                        differentTransactionId,
+                        TRACE_ID,
+                        snapshot
+                ));
+
+        assertThat(mismatch).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("transactionId must match");
+        verifyNoInteractions(orchestrationService);
+    }
+
+    @Test
     void rejectsNullSnapshotWithoutCallingRuleAnalysis() {
         ExternalRiskLookupCommand command = command();
         when(commandReader.read(TRANSACTION_ID, TRACE_ID)).thenReturn(command);
@@ -245,6 +342,17 @@ class ExternalRiskRuleAnalysisCoordinatorTest {
                 "analyzeWithExternalRisk",
                 UUID.class,
                 String.class
+        ).getAnnotation(Transactional.class)).isNull();
+        assertThat(ExternalRiskRuleAnalysisCoordinator.class.getMethod(
+                "lookupExternalRisk",
+                UUID.class,
+                String.class
+        ).getAnnotation(Transactional.class)).isNull();
+        assertThat(ExternalRiskRuleAnalysisCoordinator.class.getMethod(
+                "analyzeWithExternalRiskSnapshot",
+                UUID.class,
+                String.class,
+                ExternalRiskSnapshot.class
         ).getAnnotation(Transactional.class)).isNull();
         assertThat(Arrays.stream(
                 ExternalRiskRuleAnalysisCoordinator.class.getDeclaredFields()

@@ -77,6 +77,8 @@ public class GlobalExceptionHandler {
             "조회 요청이 제한 시간 안에 완료되지 않았습니다.";
     static final String DEPENDENCY_UNAVAILABLE_MESSAGE =
             "조회 저장소를 일시적으로 사용할 수 없습니다.";
+    static final String INTAKE_DEPENDENCY_UNAVAILABLE_MESSAGE =
+            "탐지 서비스를 사용할 수 없습니다.";
     static final String BEHAVIOR_DEPENDENCY_TIMEOUT_MESSAGE =
             "행동 이벤트 저장소 요청이 제한 시간 안에 완료되지 않았습니다.";
     static final String BEHAVIOR_DEPENDENCY_UNAVAILABLE_MESSAGE =
@@ -239,6 +241,20 @@ public class GlobalExceptionHandler {
                     HttpStatus.SERVICE_UNAVAILABLE,
                     DEPENDENCY_TIMEOUT,
                     DEPENDENCY_TIMEOUT_MESSAGE,
+                    List.of(),
+                    request
+            );
+            case DEPENDENCY_UNAVAILABLE -> response(
+                    HttpStatus.SERVICE_UNAVAILABLE,
+                    DEPENDENCY_UNAVAILABLE,
+                    INTAKE_DEPENDENCY_UNAVAILABLE_MESSAGE,
+                    List.of(),
+                    request
+            );
+            case TYPED_FAILURE -> response(
+                    HttpStatus.valueOf(exception.httpStatus()),
+                    exception.publicCode(),
+                    exception.publicMessage(),
                     List.of(),
                     request
             );

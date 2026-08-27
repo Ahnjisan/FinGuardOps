@@ -1,5 +1,9 @@
 package com.aifds.backend.transaction.service;
 
+import com.aifds.backend.externalrisk.domain.ExternalRiskFailureCategory;
+import com.aifds.backend.externalrisk.domain.ExternalRiskFailureSnapshot;
+import com.aifds.backend.externalrisk.service.ExternalRiskFailureSnapshotService;
+import com.aifds.backend.idempotency.fingerprint.TransactionRequestFingerprint;
 import com.aifds.backend.idempotency.service.IdempotencyClaimResult;
 import com.aifds.backend.idempotency.service.IdempotencyService;
 import com.aifds.backend.transaction.command.ValidatedTransactionCommand;
@@ -9,25 +13,22 @@ import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
 import com.aifds.backend.transaction.entity.TransactionType;
 import com.aifds.backend.transaction.validation.IdempotencyKeyValidator;
 import com.aifds.backend.transaction.validation.TransactionRequestValidator;
-import com.aifds.backend.transaction.validation.TransactionValidationException;
-import com.aifds.backend.transaction.validation.TransactionValidationType;
-import org.hibernate.exception.ConstraintViolationException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.dao.DataIntegrityViolationException;
 
 import java.math.BigDecimal;
-import java.sql.SQLException;
 import java.time.Instant;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.doThrow;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -38,307 +39,185 @@ import static org.mockito.Mockito.when;
 class TransactionIntakeServiceTest {
 
     private static final String KEY = "intake-unit-key";
+    private static final String TRACE_ID = "trace_intake_unit_01";
     private static final long RECORD_ID = 42L;
 
-    @Mock
-    private IdempotencyKeyValidator idempotencyKeyValidator;
-    @Mock
-    private TransactionRequestValidator transactionRequestValidator;
-    @Mock
-    private IdempotencyService idempotencyService;
-    @Mock
-    private TransactionIntakeCompletionService completionService;
-    @Mock
-    private TransactionIntakeSnapshotCodec snapshotCodec;
+    @Mock private IdempotencyKeyValidator idempotencyKeyValidator;
+    @Mock private TransactionRequestValidator transactionRequestValidator;
+    @Mock private TransactionRequestFingerprint transactionRequestFingerprint;
+    @Mock private IdempotencyService idempotencyService;
+    @Mock private TransactionSynchronousProcessingCoordinator coordinator;
+    @Mock private TransactionIntakeSnapshotCodec snapshotCodec;
+    @Mock private ExternalRiskFailureSnapshotService failureSnapshotService;
 
-    private TransactionIntakeService transactionIntakeService;
+    private TransactionIntakeService service;
 
     @BeforeEach
     void setUp() {
-        transactionIntakeService = new TransactionIntakeService(
+        service = new TransactionIntakeService(
                 idempotencyKeyValidator,
                 transactionRequestValidator,
+                transactionRequestFingerprint,
                 idempotencyService,
-                completionService,
-                snapshotCodec
+                coordinator,
+                snapshotCodec,
+                failureSnapshotService
         );
     }
 
     @Test
-    void stopsBeforeRequestValidationAndClaimWhenIdempotencyKeyIsInvalid() {
-        TransactionValidationException failure = validationFailure(
-                TransactionValidationType.FORMAT,
-                "Idempotency-Key"
-        );
-        when(idempotencyKeyValidator.validate(KEY)).thenThrow(failure);
-
-        assertThatThrownBy(() -> transactionIntakeService.receive(KEY, request()))
-                .isSameAs(failure);
-
-        verifyNoInteractions(
-                transactionRequestValidator,
-                idempotencyService,
-                completionService,
-                snapshotCodec
-        );
-    }
-
-    @Test
-    void stopsBeforeClaimForFormatAndDomainValidationFailures() {
-        for (TransactionValidationType type : TransactionValidationType.values()) {
-            TransactionCreateRequest request = request();
-            TransactionValidationException failure =
-                    validationFailure(type, "transactionType");
-            when(idempotencyKeyValidator.validate(KEY)).thenReturn(KEY);
-            doThrow(failure).when(transactionRequestValidator).validate(request);
-
-            assertThatThrownBy(() -> transactionIntakeService.receive(KEY, request))
-                    .isSameAs(failure);
-
-            verifyNoInteractions(
-                    idempotencyService,
-                    completionService,
-                    snapshotCodec
-            );
-        }
-    }
-
-    @Test
-    void validatesThenClaimsAndPersistsOnlyAnAcquiredRequest() {
+    void validatesAndFingerprintsBeforeUnavailableProviderStopsClaim() {
         TransactionCreateRequest request = request();
         ValidatedTransactionCommand command = command();
-        TransactionIntakeSnapshot snapshot = snapshot();
-        TransactionIntakeResult.Received received =
-                new TransactionIntakeResult.Received(snapshot, 201);
         when(idempotencyKeyValidator.validate(KEY)).thenReturn(KEY);
         when(transactionRequestValidator.validate(request)).thenReturn(command);
-        when(idempotencyService.claim(KEY, command.toFingerprintInput()))
-                .thenReturn(new IdempotencyClaimResult.Acquired(RECORD_ID));
-        when(completionService.complete(RECORD_ID, command))
-                .thenReturn(received);
+        when(transactionRequestFingerprint.calculate(
+                command.toFingerprintInput()
+        )).thenReturn("fingerprint");
+        when(coordinator.isAvailable()).thenReturn(false);
 
-        TransactionIntakeResult result =
-                transactionIntakeService.receive(KEY, request);
-
-        assertThat(result).isSameAs(received);
-        assertThat(received.snapshot().transactionId())
-                .isEqualTo(command.transactionId());
-        assertThat(received.snapshot().processingStatus())
-                .isEqualTo(TransactionProcessingStatus.RECEIVED);
-        assertThat(received.snapshot().createdAt())
-                .isEqualTo(snapshot.createdAt());
+        assertThat(service.receive(KEY, request, TRACE_ID))
+                .isEqualTo(new TransactionIntakeResult.ProviderUnavailable());
 
         InOrder order = inOrder(
                 idempotencyKeyValidator,
                 transactionRequestValidator,
-                idempotencyService,
-                completionService
+                transactionRequestFingerprint,
+                coordinator
         );
         order.verify(idempotencyKeyValidator).validate(KEY);
         order.verify(transactionRequestValidator).validate(request);
-        order.verify(idempotencyService).claim(
-                KEY,
+        order.verify(transactionRequestFingerprint).calculate(
                 command.toFingerprintInput()
         );
-        order.verify(completionService).complete(RECORD_ID, command);
+        order.verify(coordinator).isAvailable();
+        verifyNoInteractions(idempotencyService, snapshotCodec,
+                failureSnapshotService);
     }
 
     @Test
-    void mapsNonAcquiredClaimResultsWithoutWriting() {
-        assertMappedResult(
-                new IdempotencyClaimResult.KeyConflict(),
-                TransactionIntakeResult.KeyConflict.class
-        );
-        assertMappedResult(
-                new IdempotencyClaimResult.InProgress(),
-                TransactionIntakeResult.InProgress.class
-        );
+    void acquiredClaimDelegatesOnceWithCurrentTrace() {
+        TransactionCreateRequest request = request();
+        ValidatedTransactionCommand command = stubAvailable(request);
+        TransactionIntakeResult.Received received =
+                new TransactionIntakeResult.Received(finalSnapshot(), 201);
+        when(idempotencyService.claim(KEY, command.toFingerprintInput()))
+                .thenReturn(new IdempotencyClaimResult.Acquired(RECORD_ID));
+        when(coordinator.process(RECORD_ID, command, TRACE_ID))
+                .thenReturn(received);
 
-        String storedJson = "{\"result\":\"stored\"}";
-        TransactionIntakeSnapshot snapshot = snapshot();
-        when(snapshotCodec.decode(storedJson)).thenReturn(
-                new TransactionIntakeSnapshotReplay(snapshot, 201)
-        );
-        TransactionIntakeResult completed = receiveWithClaim(
-                new IdempotencyClaimResult.Completed(storedJson)
-        );
-        assertThat(completed)
+        assertThat(service.receive(KEY, request, TRACE_ID)).isSameAs(received);
+        verify(coordinator).process(RECORD_ID, command, TRACE_ID);
+    }
+
+    @Test
+    void mapsConflictInProgressAndCodeOnlyFailureWithoutProcessing() {
+        assertThat(receiveWithClaim(new IdempotencyClaimResult.KeyConflict()))
+                .isInstanceOf(TransactionIntakeResult.KeyConflict.class);
+        assertThat(receiveWithClaim(new IdempotencyClaimResult.InProgress()))
+                .isInstanceOf(TransactionIntakeResult.InProgress.class);
+        assertThat(receiveWithClaim(new IdempotencyClaimResult.Failed(
+                "DEPENDENCY_UNAVAILABLE"
+        ))).isEqualTo(new TransactionIntakeResult.PreviousFailure(
+                "DEPENDENCY_UNAVAILABLE"
+        ));
+        verify(coordinator, never()).process(anyLong(), any(), anyString());
+    }
+
+    @Test
+    void replaysCompletedSnapshotThroughExistingDispatcher() {
+        String stored = "{\"stored\":true}";
+        TransactionIntakeSnapshotReplay decoded =
+                new TransactionIntakeSnapshotReplay(finalSnapshot(), 201);
+        when(snapshotCodec.decode(stored)).thenReturn(decoded);
+
+        assertThat(receiveWithClaim(new IdempotencyClaimResult.Completed(stored)))
                 .isEqualTo(new TransactionIntakeResult.CompletedReplay(
-                        snapshot,
-                        201
+                        decoded.snapshot(),
+                        decoded.httpStatus()
                 ));
+    }
 
-        TransactionIntakeResult failed = receiveWithClaim(
-                new IdempotencyClaimResult.Failed("DEPENDENCY_TIMEOUT")
+    @Test
+    void strictDecodesTypedFailureAndDistinguishesReplay() {
+        Instant finishedAt = Instant.parse("2026-08-27T01:00:00Z");
+        IdempotencyClaimResult.FailedWithSnapshot stored =
+                new IdempotencyClaimResult.FailedWithSnapshot(
+                        "DEPENDENCY_TIMEOUT",
+                        "{\"snapshotType\":\"external-risk-failure\"}",
+                        finishedAt
+                );
+        ExternalRiskFailureSnapshot decoded = ExternalRiskFailureSnapshot.from(
+                ExternalRiskFailureCategory.TIMEOUT,
+                finishedAt
         );
-        assertThat(failed)
-                .isEqualTo(new TransactionIntakeResult.PreviousFailure(
-                        "DEPENDENCY_TIMEOUT"
-                ));
+        when(failureSnapshotService.decode(stored)).thenReturn(decoded);
 
-        verify(completionService, never()).complete(RECORD_ID, command());
-    }
-
-    @Test
-    void mapsOnlyExactPostgresqlTransactionIdUniqueViolationToDuplicate() {
-        ValidatedTransactionCommand command = stubAcquired();
-        DataIntegrityViolationException writerFailure = violation(
-                "23505",
-                "uq_financial_transaction_transaction_id"
+        assertThat(receiveWithClaim(stored)).isEqualTo(
+                new TransactionIntakeResult.ExternalRiskFailureReplay(
+                        503,
+                        "DEPENDENCY_TIMEOUT",
+                        "탐지 서비스를 사용할 수 없습니다."
+                )
         );
-        doThrow(writerFailure).when(completionService)
-                .complete(RECORD_ID, command);
-        when(idempotencyService.fail(
-                RECORD_ID,
-                TransactionIntakeService.DUPLICATE_TRANSACTION
-        )).thenReturn(new IdempotencyClaimResult.Failed(
-                TransactionIntakeService.DUPLICATE_TRANSACTION
-        ));
-
-        TransactionIntakeResult result =
-                transactionIntakeService.receive(KEY, request());
-
-        assertThat(result)
-                .isEqualTo(new TransactionIntakeResult.DuplicateTransaction(
-                        command.transactionId()
-                ));
-        assertThat(((TransactionIntakeResult.DuplicateTransaction) result)
-                .failureCode())
-                .isEqualTo(TransactionIntakeService.DUPLICATE_TRANSACTION);
     }
 
     @Test
-    void doesNotMapPartialOrDifferentConstraintEvidenceAsDuplicate() {
-        assertGeneralIntegrityFailure(violation(
-                "23505",
-                "uq_idempotency_record_scope_key"
-        ));
-        assertGeneralIntegrityFailure(violation(
-                "23514",
-                "uq_financial_transaction_transaction_id"
-        ));
-        assertGeneralIntegrityFailure(violation("23505", null));
-        assertGeneralIntegrityFailure(violation(
-                "23502",
-                "uq_financial_transaction_transaction_id"
-        ));
-    }
+    void validationFailureStopsBeforeFingerprintAndAvailability() {
+        RuntimeException original = new IllegalArgumentException("invalid");
+        when(idempotencyKeyValidator.validate(KEY)).thenThrow(original);
 
-    @Test
-    void rethrowsOriginalGeneralWriterFailureAfterFailedTransition() {
-        ValidatedTransactionCommand command = stubAcquired();
-        RuntimeException writerFailure =
-                new IllegalStateException("transaction link failed");
-        doThrow(writerFailure).when(completionService)
-                .complete(RECORD_ID, command);
-        when(idempotencyService.fail(
-                RECORD_ID,
-                TransactionIntakeService.TRANSACTION_INTAKE_FAILED
-        )).thenReturn(new IdempotencyClaimResult.Failed(
-                TransactionIntakeService.TRANSACTION_INTAKE_FAILED
-        ));
-
-        assertThatThrownBy(() -> transactionIntakeService.receive(KEY, request()))
-                .isSameAs(writerFailure);
-    }
-
-    @Test
-    void preservesOriginalWriterExceptionAndSuppressesFailedTransitionException() {
-        ValidatedTransactionCommand command = stubAcquired();
-        DataIntegrityViolationException writerFailure = violation(
-                "23505",
-                "uq_financial_transaction_transaction_id"
+        assertThatThrownBy(() -> service.receive(KEY, request(), TRACE_ID))
+                .isSameAs(original);
+        verifyNoInteractions(
+                transactionRequestValidator,
+                transactionRequestFingerprint,
+                coordinator,
+                idempotencyService
         );
-        RuntimeException transitionFailure =
-                new IllegalStateException("failed transition unavailable");
-        doThrow(writerFailure).when(completionService)
-                .complete(RECORD_ID, command);
-        when(idempotencyService.fail(
-                RECORD_ID,
-                TransactionIntakeService.DUPLICATE_TRANSACTION
-        )).thenThrow(transitionFailure);
-
-        assertThatThrownBy(() -> transactionIntakeService.receive(KEY, request()))
-                .isSameAs(writerFailure)
-                .satisfies(exception -> assertThat(exception.getSuppressed())
-                        .containsExactly(transitionFailure));
     }
 
-    private void assertMappedResult(
-            IdempotencyClaimResult claimResult,
-            Class<? extends TransactionIntakeResult> expectedType
-    ) {
-        assertThat(receiveWithClaim(claimResult)).isInstanceOf(expectedType);
+    @Test
+    void typedFailureResultRejectsUnapprovedProviderDetail() {
+        assertThatThrownBy(() ->
+                new TransactionIntakeResult.ExternalRiskFailure(
+                        503,
+                        "PROVIDER_SECRET",
+                        "credential=secret"
+                )
+        ).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageNotContaining("credential=secret");
     }
 
     private TransactionIntakeResult receiveWithClaim(
-            IdempotencyClaimResult claimResult
+            IdempotencyClaimResult claim
     ) {
         TransactionCreateRequest request = request();
-        ValidatedTransactionCommand command = command();
-        when(idempotencyKeyValidator.validate(KEY)).thenReturn(KEY);
-        when(transactionRequestValidator.validate(request)).thenReturn(command);
+        ValidatedTransactionCommand command = stubAvailable(request);
         when(idempotencyService.claim(KEY, command.toFingerprintInput()))
-                .thenReturn(claimResult);
-
-        return transactionIntakeService.receive(KEY, request);
+                .thenReturn(claim);
+        return service.receive(KEY, request, TRACE_ID);
     }
 
-    private ValidatedTransactionCommand stubAcquired() {
-        TransactionCreateRequest request = request();
+    private ValidatedTransactionCommand stubAvailable(
+            TransactionCreateRequest request
+    ) {
         ValidatedTransactionCommand command = command();
         when(idempotencyKeyValidator.validate(KEY)).thenReturn(KEY);
         when(transactionRequestValidator.validate(request)).thenReturn(command);
-        when(idempotencyService.claim(KEY, command.toFingerprintInput()))
-                .thenReturn(new IdempotencyClaimResult.Acquired(RECORD_ID));
+        when(coordinator.isAvailable()).thenReturn(true);
         return command;
     }
 
-    private void assertGeneralIntegrityFailure(
-            DataIntegrityViolationException writerFailure
-    ) {
-        ValidatedTransactionCommand command = stubAcquired();
-        doThrow(writerFailure).when(completionService)
-                .complete(RECORD_ID, command);
-        when(idempotencyService.fail(
-                RECORD_ID,
-                TransactionIntakeService.TRANSACTION_INTAKE_FAILED
-        )).thenReturn(new IdempotencyClaimResult.Failed(
-                TransactionIntakeService.TRANSACTION_INTAKE_FAILED
-        ));
-
-        assertThatThrownBy(() -> transactionIntakeService.receive(KEY, request()))
-                .isSameAs(writerFailure);
-    }
-
-    private DataIntegrityViolationException violation(
-            String sqlState,
-            String constraintName
-    ) {
-        SQLException sqlException =
-                new SQLException("database constraint violation", sqlState);
-        ConstraintViolationException hibernateException =
-                new ConstraintViolationException(
-                        "could not execute statement",
-                        sqlException,
-                        "insert into financial_transaction",
-                        constraintName
-                );
-        return new DataIntegrityViolationException(
-                "persistence constraint violation",
-                hibernateException
-        );
-    }
-
-    private TransactionValidationException validationFailure(
-            TransactionValidationType type,
-            String field
-    ) {
-        return new TransactionValidationException(
-                type,
-                field,
-                "TEST_VALIDATION_FAILURE",
-                "validation failed"
+    private TransactionIntakeSnapshot finalSnapshot() {
+        return new TransactionIntakeSnapshot(
+                command().transactionId(),
+                TransactionProcessingStatus.APPROVED,
+                "LOW",
+                "APPROVED",
+                "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430101",
+                null,
+                Instant.parse("2026-07-23T01:15:31Z")
         );
     }
 
@@ -355,18 +234,6 @@ class TransactionIntakeServiceTest {
                 command.recipientAccountRef(),
                 command.channel().name(),
                 command.deviceRef()
-        );
-    }
-
-    private TransactionIntakeSnapshot snapshot() {
-        return new TransactionIntakeSnapshot(
-                command().transactionId(),
-                TransactionProcessingStatus.RECEIVED,
-                null,
-                null,
-                null,
-                null,
-                Instant.parse("2026-07-23T01:15:31Z")
         );
     }
 

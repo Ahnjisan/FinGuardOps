@@ -50,9 +50,10 @@
 
 논리적 도메인 이벤트를 내부 애플리케이션 흐름에서 사용할 수 있지만, 이것이 `POST /api/v1/transactions`를 비동기 접수 계약으로 변경하거나 Kafka를 선행 도입한다는 뜻은 아니다.
 
-### 현재 구현 상태
+### Issue #178 이전 구현 상태
 
-현재 저장소에는 거래·멱등·행동 이벤트,
+아래 내용은 단계적 구현 당시의 역사적 상태이며, 현재 상태는 이 ADR 마지막의
+Issue #178 후속 구현 절을 따른다. 당시 저장소에는 거래·멱등·행동 이벤트,
 DetectionResult·DetectionEvidence와 ADR-005의
 FraudRule·RuleVersion PostgreSQL 물리 영속 모델 및 거래 접수 Controller가
 구현되어 있다. 거래 접수 성공 응답은
@@ -96,9 +97,9 @@ coordinator가 구현되었다. 이 경계는 per-invocation이며 직접 재호
 동시 호출은 Provider를 다시 호출할 수 있다. 실제 Provider·public 거래 접수·멱등
 실패 저장·재생·위험 대응 최종화 연결은 후속 범위다.
 
-이 단계적 응답은 현재 구현 사실을 기록한 것이며, `POST /api/v1/transactions`를 비동기 접수 API로 바꾸거나 최종 동기 분석 결정을 뒤집는 새로운 결정이 아니다. 현행 단계 Controller는 이 ADR이 정한 중간 외부 노출 제한과 아직 정합화되지 않은 구현 차이로 기록한다. 후속 구현에서는 이 ADR의 최종 경계로 전환하거나, 결정 변경이 필요하면 별도 사용자 승인과 ADR 검토를 거쳐야 한다.
+이 단계적 응답은 당시 구현 사실을 기록한 것이며, `POST /api/v1/transactions`를 비동기 접수 API로 바꾸거나 최종 동기 분석 결정을 뒤집는 새로운 결정이 아니다. Issue #178에서 이 ADR의 최종 동기 경계로 전환했다.
 
-현재 멱등 완료 응답 snapshot은 `RECEIVED`/null 구조를 저장·재생한다. [`ADR-004`](./ADR-004-idempotency-response-snapshot-transition.md)는 이 legacy Snapshot을 엄격하게 그대로 재생하고 소급 갱신하지 않으며, 최종 동기 응답 전환 이후 신규 요청부터 version envelope와 최초 확정 HTTP 상태를 저장하도록 결정한다. 이는 ADR-003의 최종 동기 처리 결정을 유지한 호환 정책이다. ADR-004 결정 당시에는 envelope·codec, 관련 Migration과 만료 처리가 아직 구현되지 않은 상태였다.
+당시 멱등 완료 응답 snapshot은 `RECEIVED`/null 구조를 저장·재생했다. [`ADR-004`](./ADR-004-idempotency-response-snapshot-transition.md)는 이 legacy Snapshot을 엄격하게 그대로 재생하고 소급 갱신하지 않으며, 최종 동기 응답 전환 이후 신규 요청부터 version envelope와 최초 확정 HTTP 상태를 저장하도록 결정한다. 이는 ADR-003의 최종 동기 처리 결정을 유지한 호환 정책이다. ADR-004 결정 당시에는 envelope·codec, 관련 Migration과 만료 처리가 아직 구현되지 않은 상태였다.
 
 후속 구현 상태(2026-07-30): 신규 요청의 version envelope encoder·decoder와
 version dispatch는 구현되었다. 기존 `response_snapshot JSONB` 안에 저장하므로
@@ -135,8 +136,8 @@ Snapshot v2와 복구 실행 경로는 아직 구현되지 않았다.
 2. 요청 형식·도메인 Validation을 거래 저장 전에 수행하고, 검증을 통과한 거래의 `RECEIVED` 영속 경계를 검증한다. Validation 실패는 거래로 저장하지 않는다. — 완료
 3. [Rule v1 탐지 계약](../01-requirements/rule-v1-detection-contract.md)에 따라 평가 Snapshot, 활성 Rule 집합, FastAPI 분석 호출 경계와 DetectionResult 저장·채택을 구현한다. — External Risk 없는 현재 v1 내부 경계 완료
 4. 구현된 위험 대응 decision을 거래에 적용해 대응 결과와 최종 상태를 확정하고 HIGH·CRITICAL 사건 생성 또는 기존 사건 연결을 구현한다. — 내부 경계 완료
-5. 목표 v2 DTO·Endpoint·Client와 비트랜잭션 상위 External Risk→Rule 분석 연결을 구현한다. — Python DTO·검증·FastAPI Endpoint, Backend Java DTO·mapper·Client와 내부 v2 오케스트레이션, Mock Policy→Rule v2 coordinator 완료. 실제 Provider·public 거래 접수·멱등 실패 재생 미구현
-6. 전체 성공·실패·멱등·동시성 흐름이 준비되면 현재 단계 응답을 최종 동기 Controller 계약으로 전환한다. — 미구현
+5. 목표 v2 DTO·Endpoint·Client와 비트랜잭션 상위 External Risk→Rule 분석 연결을 구현한다. — Issue #178 최종 연결 완료
+6. 전체 성공·실패·멱등·동시성 흐름이 준비되면 현재 단계 응답을 최종 동기 Controller 계약으로 전환한다. — Issue #178 완료
 
 각 단계는 내부 단위·통합 테스트로 검증한다. 최종 동기 응답 전환 전에는 내부 구현 완료 범위와 외부 API 제공 상태를 구분해 보고한다.
 
@@ -178,4 +179,19 @@ Snapshot v2와 복구 실행 경로는 아직 구현되지 않았다.
 - DB DDL과 마이그레이션
 - Kafka Topic, Producer, Consumer와 Outbox 구현
 - FastAPI, External Risk Mock과 실제 금융거래 처리 구현
+
+## 후속 구현 상태 (2026-08-27, Issue #178)
+
+이 ADR의 결정은 변경하지 않고 public 거래 접수의 최종 동기 연결을 구현했다.
+최신 실제 순서는 Validation·fingerprint, coordinator 가용성 확인, Idempotency
+`IN_PROGRESS` 선점 commit, 거래 `RECEIVED`·연결 commit, 트랜잭션 밖 External
+Risk와 Rule v2, 분석 완료 commit, 위험 대응·사건·AuditLog 최종화 commit, 별도
+성공 Snapshot v2·`COMPLETED` commit이다. 완료·실패 재생은 downstream을 다시
+호출하지 않는다.
+
+Provider가 없는 기본·local·test context는 시작 가능하며 claim 전에
+`503 DEPENDENCY_UNAVAILABLE`로 종료한다. production HTTP 설정의 startup
+fail-fast는 유지한다. crash·완료 간극과 장기 `IN_PROGRESS` 운영 복구,
+자동 retry·fallback·cache, 운영 credential 배포와 metric·dashboard는 구현하지
+않았다.
 

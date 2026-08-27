@@ -10,6 +10,7 @@ import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.aifds.backend.transaction.entity.TransactionChannel;
 import com.aifds.backend.transaction.entity.TransactionType;
 import com.aifds.backend.transaction.repository.FinancialTransactionRepository;
+import com.aifds.backend.transaction.service.TransactionSynchronousProcessingCoordinator;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterAll;
@@ -59,6 +60,10 @@ class ExternalRiskHttpRuleAnalysisCoordinatorIntegrationTest
 
     @Autowired
     private ExternalRiskRuleAnalysisCoordinator coordinator;
+
+    @Autowired
+    private TransactionSynchronousProcessingCoordinator
+            synchronousProcessingCoordinator;
 
     @Autowired
     private ExternalRiskPolicyService policyService;
@@ -114,6 +119,7 @@ class ExternalRiskHttpRuleAnalysisCoordinatorIntegrationTest
         );
 
         assertThat(actual).isEqualTo(expected);
+        assertThat(synchronousProcessingCoordinator.isAvailable()).isTrue();
         assertThat(policyService).isNotNull();
         assertThat(transactionActive).isFalse();
         assertThat(PROVIDER_CALLS).hasValue(1);

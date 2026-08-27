@@ -3,23 +3,21 @@
 ## 1. 목적과 승인 범위
 
 이 문서는 거래 접수의 External Risk 선행 조회 결과를 Rule v1 분석 입력에
-결합하는 목표 계약의 단일 기준이다. Issue
+결합하는 승인 계약과 현재 구현의 단일 기준이다. Issue
 [#160](https://github.com/Ahnjisan/FinGuardOps/issues/160)과 OWNER 승인 댓글
-`5390984333`에서 승인한 계약, Issue #162의 FastAPI v2 구현, Issue #164의
-Backend Java v2 Client 경계, Issue #166의 내부 오케스트레이션과 Issue #168의 Mock
-활성 환경용 상위 내부 coordinator 구현 상태를 함께 기록한다. Python·Java v2
-DTO·검증·mapper·Client·내부 오케스트레이션과 per-invocation coordinator 구현을 거래
-접수 전체 연결, DB·Flyway, 공개 Controller 또는 실제 Provider 구현 완료로 간주하지
-않는다.
+`5390984333`에서 승인한 계약과 Issue #162·164·166·168의 단계별 내부 구현,
+Issue #178의 실제 Provider·public 거래 접수 최종 동기 연결 상태를 함께 기록한다.
+Rule 실행 의미와 기존 v1 경계는 유지하면서 public 단일 승자가 External Risk,
+Rule v2, 위험 대응 최종화와 성공·실패 멱등 재생을 조정한다.
 
-현재 구현과 목표 계약은 다음과 같이 구분한다.
+현재 구현과 남은 운영 범위는 다음과 같이 구분한다.
 
-| 구분 | 현재 구현 | 목표 계약 |
+| 구분 | 현재 구현 | 남은 운영 범위 |
 | --- | --- | --- |
-| External Risk | 독립 Port·Policy Service, local/dev/test Mock, immutable 성공 Snapshot, 무잠금 `READ_COMMITTED` read 뒤 Policy를 호출하는 내부 per-invocation coordinator | 거래 접수의 멱등 단일 승자가 DB 트랜잭션 밖에서 실제 Provider 선행 조회 |
-| Rule HTTP | `POST /api/v1/rule-analysis`와 필수 `externalRisk`를 추가한 `POST /api/v2/rule-analysis` FastAPI 경계, v1을 유지하는 Backend Java v2 exact wire DTO·mapper·Client·내부 오케스트레이션, Mock 성공 Snapshot 전달 coordinator | 실제 Provider와 구현된 public 거래 접수 API를 coordinator·Rule v2에 연결하는 상위 오케스트레이션 |
-| Rule 실행 의미 | Rule v1 R001~R004·scoring·Evidence | 같은 Rule v1 실행 의미를 그대로 유지 |
-| 거래 접수 | `RECEIVED`/null v1 Snapshot을 반환·재생 | External Risk→Rule 분석→위험 대응→Snapshot v2 전체 연결 |
+| External Risk | 실제 HTTP Provider와 local/dev/test Mock, 무잠금 command read·Policy lookup, typed Failure Snapshot 저장·재생 | 운영 credential 배포와 신규 metric·dashboard |
+| Rule HTTP | v1 유지, 필수 `externalRisk`를 갖는 v2 DTO·Client·오케스트레이션과 public intake 연결 | 자동 retry·fallback·cache 없음 유지 |
+| Rule 실행 의미 | Rule v1 R001~R004·scoring·Evidence 불변 | 운영 배포 검증 |
+| 거래 접수 | 단일 승자의 `RECEIVED`·`IN_PROGRESS` commit 뒤 External Risk→Rule v2→최종화→Snapshot v2 | crash·완료 간극과 장기 `IN_PROGRESS` 운영 복구 |
 
 `POST /api/v2/rule-analysis`는 wire schema의 새 버전이다. Rule 엔진, evaluator와
 scoring 정책을 Rule v2로 바꾸는 이름이 아니다.
@@ -44,9 +42,9 @@ scoring 정책을 Rule v2로 바꾸는 이름이 아니다.
 ```
 
 Validation 실패는 claim 전에 끝나므로 Transaction, Idempotency record와 Failure
-Snapshot을 생성하지 않는다. 현재 public intake는 위 목표 순서와 달리 `RECEIVED`
-거래·성공 Snapshot v1·멱등 `COMPLETED`를 원자적으로 저장하며, 거래를 연결한
-`IN_PROGRESS` commit 뒤 External Risk를 호출하는 경계는 아직 구현되지 않았다.
+Snapshot을 생성하지 않는다. Issue #178 public intake는 위 순서를 구현하며 신규
+성공을 Snapshot v2로 저장한다. legacy·v1 완료 Snapshot은 저장 status 그대로
+재생하고 소급 변환하지 않는다.
 
 상위 Service가 `ExternalRiskPolicyService`, `RuleAnalysisOrchestrationService`,
 `RiskResponseFinalizationService`를 이 순서로 호출한다. 기존 Rule 분석
@@ -61,7 +59,7 @@ data, Circuit Breaker와 fallback은 없으며 실패를 `UNMATCHED`로 바꾸�
 호출에서는 Provider가 다시 호출될 수 있다. 기존 거래 잠금은 Rule 분석 시작의 단일
 승자만 보장한다. [ADR-007](../07-decisions/ADR-007-external-risk-idempotent-failure-replay-contract.md)에
 따라 같은 멱등 요청의 Provider 단일 승자와 재호출 방지는 public transaction
-intake의 Idempotency claim이 소유한다. 이 end-to-end 연결은 아직 구현되지 않았다.
+intake의 Idempotency claim이 소유하며 Issue #178에서 연결되었다.
 
 ## 3. immutable 전달 계약
 
@@ -267,15 +265,15 @@ External Risk 실패는 Rule 분석 시작 전 실패다. 다음 상태를 함�
 - 같은 operation scope·Idempotency-Key·fingerprint 재생은 저장된 실패를 반환하고
   Provider·FastAPI·위험 대응 최종화를 다시 호출하지 않음
 
-| External Risk 내부 category | 목표 공개 응답 |
+| External Risk 내부 category | 현재 공개 응답 |
 | --- | --- |
 | `TIMEOUT` | `503 Service Unavailable`, `DEPENDENCY_TIMEOUT` |
 | `UNAVAILABLE` | `503 Service Unavailable`, `DEPENDENCY_UNAVAILABLE` |
 | `INVALID_REQUEST`, `UNSUPPORTED_CAPABILITY`, `INVALID_RESPONSE`, `TRANSFORMATION_ERROR` | `500 Internal Server Error`, `INTERNAL_ERROR` |
 
-이 공개 매핑과 멱등 실패 연결은 목표 계약이며 현재 거래 접수 코드에는 구현되지
-않았다. 실패를 성공 DetectionResult, `UNMATCHED`, 0점, `LOW` 또는 빈 Evidence로
-변환하지 않는다.
+이 공개 매핑과 멱등 실패 연결은 Issue #178에서 거래 접수 코드에 구현되었다.
+실패를 성공 DetectionResult, `UNMATCHED`, 0점, `LOW` 또는 빈 Evidence로 변환하지
+않는다.
 
 `TIMEOUT`, `UNAVAILABLE`, `INVALID_REQUEST`, `UNSUPPORTED_CAPABILITY`,
 `INVALID_RESPONSE`, `TRANSFORMATION_ERROR`는 durably confirmed되면 같은 key에서
@@ -287,7 +285,7 @@ operation scope의 승인된 복구·재분석 명령으로 설계한다. 예상
 
 별도 Failure Snapshot의 exact type·version·필드·4 KiB 상한은 ADR-007이 소유하고,
 공개 응답은 [거래·탐지 API](../03-api/transaction-detection-api.md)가 소유한다. 성공
-`ExternalRiskSnapshot`, 성공 Snapshot v1과 목표 성공 Snapshot v2를 실패 재생에
+`ExternalRiskSnapshot`, 성공 Snapshot v1과 성공 Snapshot v2를 실패 재생에
 사용하지 않는다.
 
 구현된 FastAPI v2가 `externalRisk`의 JSON 타입·필수·null·Enum·UTC 형식·unknown
@@ -321,9 +319,9 @@ Failure Snapshot의 exact replay는 저장 HTTP status·공개 code·안전 mess
 로그는 `traceId`, Provider 식별자, 성공·실패 category, policy result, match 수,
 호출 지연처럼 승인된 allowlist만 사용한다. 실제 reference, Provider 원문,
 요청·응답 JSON, 인증정보는 로그·AuditLog·DetectionEvidence에 저장하지 않는다.
-후속 전용 안전 mapper의 예상된 typed failure 로그는 category와 현재 trace만 기록하고
-Provider cause 전체를 generic stack trace 로그로 보내지 않는다. 이 mapper와 로그
-변경은 아직 구현되지 않았다.
+구현된 공개 안전 mapper는 저장된 status·code·안전 message와 현재 trace만 응답에
+사용하고 Provider cause·category를 공개하지 않는다. category별 신규 운영 로그와
+metric은 아직 구현되지 않았다.
 
 후속 구현의 최소 관측 후보는 External Risk 호출 수·지연·category, v2 요청 검증
 실패와 FastAPI 미호출 수다. metric 구현은 이번 Issue 범위가 아니다.
@@ -338,15 +336,13 @@ Provider cause 전체를 generic stack trace 로그로 보내지 않는다. 이 
 4. Backend Java v2 DTO·wire mapper·HTTP Client를 구현한다. — 코드 구현 완료
 5. 내부 Rule 분석 오케스트레이터에 별도 v2 경계를 추가한다. — 코드 구현 완료
 6. Mock Policy 성공 Snapshot을 내부 v2 경계에 전달하는 per-invocation coordinator를 구현한다. — 코드 구현 완료
-7. 실제 Provider와 구현된 public 거래 접수 API를 coordinator·멱등 실패 재생에
-   연결한다. — 미구현
+7. 실제 Provider와 public 거래 접수 API를 coordinator·멱등 실패 재생에
+   연결한다. — Issue #178 코드 구현 완료
 8. 전환 동안 v1과 v2의 호출량·오류를 구분해 관측한다.
 
-FastAPI v2 코드 구현은 실제 선배포 또는 end-to-end 거래 연결 완료를 의미하지 않는다.
-Backend Java 내부 오케스트레이터는 기존 v1을 유지하면서 명시적인 별도 v2 메서드를
-구현했고 Mock 활성 환경의 내부 coordinator가 성공 Snapshot을 해당 메서드에
-전달한다. 실제 Provider와 거래 접수 전체 상위 오케스트레이션 연결은 아직 구현되지
-않았다.
+FastAPI v2 코드 구현은 실제 운영 선배포를 의미하지 않는다. Backend Java 내부
+오케스트레이터는 기존 v1을 유지하면서 명시적인 별도 v2 메서드를 제공하고, 실제
+Provider와 Mock 경로 모두 public 거래 접수 상위 오케스트레이션에 연결되어 있다.
 
 지원하지 않는 v2 배포 조합은 optional 필드나 빈 Snapshot으로 우회하지 않고
 fail-closed한다. v1 제거 시점은 별도 승인 대상이다.
@@ -388,22 +384,34 @@ Issue #164에서 Backend Java v2 DTO·exact wire mapper와 v1을 유지하는
 `analyze(...)`를 유지하면서 별도 `analyzeV2(...)`와 잠긴 시작 경계, mapper 선실행,
 commit 뒤 v2 Client 호출 및 기존 완료·실패 경계 재사용을 구현했다. Issue #168에서는
 별도 `READ_COMMITTED` command read와 Mock Policy 호출, 성공 Snapshot의
-`analyzeV2(...)` 전달을 조정하는 비트랜잭션 내부 coordinator를 구현했다. 다음은
-아직 구현되지 않았다.
+`analyzeV2(...)` 전달을 조정하는 비트랜잭션 내부 coordinator를 구현했다. Issue
+#178에서는 실제 HTTP Provider와 Mock 경로를 public 단일 승자에 연결하고 성공
+Snapshot v2, External Risk Failure Snapshot, typed 오류 재생과 위험 대응 최종화를
+구현했다. 다음은 아직 구현되지 않았다.
 
-- 실제 External Risk HTTP Provider
-- 실제 Provider를 사용하는 상위 오케스트레이션
-- public intake→External Risk coordinator·Rule v2·위험 대응 최종화·멱등 실패
-  저장·재생의 end-to-end 연결과 공개 오류 매핑
-- Failure Snapshot codec·decoder와 이를 허용하는 신규 Migration
-- Snapshot v2와 완료 간극 운영 복구
+- crash·완료 간극 운영 복구와 장기 `IN_PROGRESS` 복구
 - External Risk 영속화·Evidence·AuditLog는 이번 목표에서 제외되며 별도 승인 필요
 - retry·cache·Circuit Breaker·fallback
-- 운영 metric
+- 운영 credential 배포와 신규 metric·dashboard
 
-문서 변경 자체는 DB·Flyway·Gradle·공개 API 동작을 바꾸지 않고 외부 호출이나
-AI 비용을 발생시키지 않는다. 후속 연결은 성공한 단일 승자에 External Risk 1회와
-FastAPI 1회를 추가하지만 LLM 호출·토큰 비용은 발생시키지 않는다. fail-closed
+Issue #178 연결은 성공한 단일 승자에 External Risk 1회와 FastAPI 1회를 실행하지만
+LLM 호출·토큰 비용은 발생시키지 않는다. terminal 재생은 downstream을 호출하지
+않는다. fail-closed
 경계는 불완전한 외부 정보로 Rule 분석을 진행하는 업무 정합성 위험을 줄이는 대신
 Provider 장애가 거래 최종 처리 실패로 노출되므로 category별 관측과 운영 절차가
 필요하다.
+
+## 15. Issue #178 구현 상태 (2026-08-27)
+
+실제 HTTP Provider와 Mock coordinator Bean 경로를 public 거래 접수의 단일
+Idempotency 승자에 연결했다. 순서는 Validation·fingerprint, coordinator 가용성,
+claim commit, 거래 `RECEIVED`·연결 commit, 트랜잭션 밖 Provider, Rule v2, 위험 대응
+최종화 commit, 별도 성공 Snapshot v2 완료 commit이다. 성공 재생과 External Risk
+실패 재생은 Provider·FastAPI·최종화를 다시 호출하지 않는다.
+
+lookup과 Rule 단계를 명시적으로 분리하므로 command read·Provider 단계의 일반
+오류는 Rule 실패 reader 대상이 아니며 Idempotency를 `IN_PROGRESS`로 유지한다. 여섯
+External Risk typed category만 Failure Snapshot으로 확정하고, External Risk 성공 뒤
+Rule 단계 예외만 안전 상태 판정을 거친다. Provider 미설정은 claim 전에 고정
+`503 DEPENDENCY_UNAVAILABLE`이며 DB write가 없다. retry·cache·Circuit Breaker·
+fallback, 운영 credential·metric과 복구 자동화는 구현하지 않았다.

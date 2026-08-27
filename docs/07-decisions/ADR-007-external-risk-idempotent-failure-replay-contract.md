@@ -20,8 +20,8 @@ FinGuardOps에는 거래 생성 요청의 Validation·fingerprint·Idempotency �
 성공 `ExternalRiskSnapshot`을 내부 Rule 분석 v2 경계에 전달하는 per-invocation
 coordinator가 구현되어 있다.
 
-그러나 public `POST /api/v1/transactions`와 이 coordinator는 연결되어 있지 않다.
-현재 public 거래 접수는 `RECEIVED` 거래, 성공 Snapshot v1과 멱등 `COMPLETED`를
+ADR 작성 당시 public `POST /api/v1/transactions`와 이 coordinator는 연결되어 있지
+않았다. 당시 public 거래 접수는 `RECEIVED` 거래, 성공 Snapshot v1과 멱등 `COMPLETED`를
 하나의 짧은 트랜잭션에서 확정한다. 내부 coordinator를 직접 또는 동시에 호출하면
 각 호출이 External Risk Provider를 호출할 수 있고, 기존 거래 잠금은 그 뒤 Rule
 분석 시작의 단일 승자만 보장한다.
@@ -31,9 +31,10 @@ coordinator가 구현되어 있다.
 Idempotency 상태, 동일 요청 재호출의 Provider 호출 여부와 공개 응답을 결정적으로
 고정해야 한다.
 
-## 2. 현재 구현 상태
+## 2. ADR 작성 당시 구현 상태
 
-현재 구현된 범위는 다음과 같다.
+이 절은 ADR 작성 당시의 역사적 상태다. 현재 상태는 23절을 따른다. 당시 구현된
+범위는 다음과 같다.
 
 - public `POST /api/v1/transactions`
 - 요청 Validation과 정규화 SHA-256 fingerprint
@@ -46,7 +47,7 @@ Idempotency 상태, 동일 요청 재호출의 Provider 호출 여부와 공개 
 - Rule 분석 v2 시작·완료·채택·실패 persistence 경계
 - 위험 대응·필요한 사건·AuditLog의 내부 원자적 최종화 경계
 
-현재 구현되지 않은 범위는 다음과 같다.
+당시 구현되지 않은 범위는 다음과 같다.
 
 - 실제 External Risk HTTP Provider와 production coordinator Bean
 - public intake와 External Risk coordinator·Rule v2·위험 대응 최종화의
@@ -161,7 +162,7 @@ Risk 성공 뒤 Rule 분석 시작의 단일 승자만 보장한다.
 트랜잭션이어야 한다. External Risk 호출 동안 DB write transaction, 거래 행 잠금,
 Idempotency 행 잠금과 장시간 read transaction을 유지하지 않는다.
 
-현재 구현은 다음과 다르다.
+ADR 작성 당시 구현은 다음과 달랐다.
 
 ```text
 Validation
@@ -170,7 +171,7 @@ Validation
 → RECEIVED 거래·성공 Snapshot v1·COMPLETED 원자적 저장
 ```
 
-목표 transaction sequence와 public end-to-end 연결은 아직 구현되지 않았다.
+이 차이는 Issue #178에서 해소되었다.
 
 ## 8. terminal failure category
 
@@ -230,7 +231,7 @@ External Risk Failure Snapshot 대상으로 확장하지 않는다.
 - 알 수 없는 type·version·필드, 타입 오류, 크기 초과와 손상 데이터는 fail-closed다.
 - JSON의 의미적 재생을 보장하며 원본 byte 배열·공백·필드 출력 순서를 보존하지 않는다.
 
-현재 성공 legacy·v1 decoder와 목표 성공 v2의 의미를 바꾸거나 failure decoder로
+현재 성공 legacy·v1·v2 decoder의 의미를 바꾸거나 failure decoder로
 재사용하지 않는다.
 
 ## 10. 공개 오류 매핑
@@ -299,7 +300,7 @@ External Risk 실패 저장 직전 crash 또는 failure writer 실패에서는 t
 durably confirmed된 것으로 간주하지 않고 exact External Risk 실패 replay를 제공하지
 않는다. Idempotency가 `IN_PROGRESS`로 남을 수 있고 같은 key 재요청은 409다. 원본
 예외를 유지하고 failure writer 오류는 동일 객체가 아닐 때 suppressed exception으로
-보존한다. 최초 공개 응답을 만들 수 있는 경우 목표 응답은 `500 INTERNAL_ERROR`다.
+보존한다. 최초 공개 응답을 만들 수 있는 경우 응답은 `500 INTERNAL_ERROR`다.
 
 최종 업무 commit 뒤 성공 Snapshot v2 완료 간극은 ADR-006을 따른다. 이미 확정된
 업무를 되돌리거나 외부 호출을 반복하지 않고, 후속 운영 복구가 검증된 상태에서
@@ -325,9 +326,9 @@ Failure Snapshot에는 다음을 저장하지 않는다.
 
 ## 15. DB Migration 전제
 
-현재 V1과 Entity는 `FAILED`에서 `response_snapshot IS NULL`, non-null
+ADR 작성 당시 V1과 Entity는 `FAILED`에서 `response_snapshot IS NULL`, non-null
 `failure_code`, non-null `finished_at`을 강제하므로 Failure Snapshot을 저장할 수
-없다. 후속 Java 구현에는 신규 Flyway Migration이 필요하다.
+없었다. 후속 Issue에서 신규 Flyway V8과 Java 구현을 적용했다.
 
 - 적용 완료된 V1 Migration을 수정하지 않는다.
 - 기존 `response_snapshot JSONB`를 재사용할 수 있으며 신규 컬럼은 필수가 아니다.
@@ -335,7 +336,7 @@ Failure Snapshot에는 다음을 저장하지 않는다.
 - legacy code-only `FAILED + response_snapshot NULL`을 계속 허용한다.
 - 신규 typed External Risk failure는 strict Failure Snapshot과 거래 FK가 필수다.
 - 기존 행을 backfill하지 않는다.
-- Entity·codec·decoder·mapper·테스트는 후속 구현에서 변경한다.
+- Entity·codec·decoder·mapper·테스트는 후속 구현에서 변경한다. — Issue #170 완료
 
 현재 terminal 불변성은 Entity 상태 검증, Service와 `PESSIMISTIC_WRITE` row lock
 수준이다. 직접 SQL까지 막는 DB trigger 수준의 절대 불변성은 구현되지 않았다.
@@ -343,7 +344,7 @@ DB trigger 추가는 Issue #170과 후속 필수 구현 범위에 포함하지 �
 
 ## 16. legacy 호환성
 
-기존 strict legacy 성공 Snapshot, 성공 envelope v1과 목표 성공 v2의 type·version·
+기존 strict legacy 성공 Snapshot과 성공 envelope v1·v2의 type·version·
 decoder 의미를 변경하지 않는다. 기존 Snapshot을 Failure Snapshot으로 추측하거나
 제자리 변환하지 않는다.
 
@@ -354,9 +355,9 @@ decoder 의미를 변경하지 않는다. 기존 Snapshot을 Failure Snapshot으
 
 알 수 없는 데이터는 현재 거래 상태나 Provider 재호출로 보정하지 않는다.
 
-## 17. 현재 구현과 목표 구현 구분
+## 17. Issue #178 이전 구현과 목표 구현 구분
 
-현재 public intake:
+Issue #178 이전 public intake:
 
 ```text
 Validation
@@ -365,7 +366,7 @@ Validation
 → RECEIVED 거래·성공 Snapshot v1·COMPLETED 원자적 commit
 ```
 
-목표 public intake:
+Issue #178에서 구현한 public intake:
 
 ```text
 Validation
@@ -377,9 +378,9 @@ Validation
 → 확정 실패는 Failure Snapshot·FAILED
 ```
 
-public API가 존재한다는 사실과 목표 end-to-end 연결이 구현되었다는 사실을 혼동하지
-않는다. 내부 coordinator의 존재도 production Provider, public failure replay 또는
-최종 동기 거래 완료를 의미하지 않는다.
+당시에는 public API와 내부 coordinator의 존재만으로 production Provider, public
+failure replay 또는 최종 동기 거래 완료를 의미하지 않았다. Issue #178은 별도의
+테스트와 public 연결로 이 목표를 구현했다.
 
 ## 18. 장점
 
@@ -393,8 +394,8 @@ public API가 존재한다는 사실과 목표 end-to-end 연결이 구현되었
 
 ## 19. 단점·위험
 
-- 현재 DB 제약과 Entity로는 목표 Snapshot을 저장할 수 없어 Migration과 Java
-  구현이 필요하다.
+- ADR 작성 당시 DB 제약과 Entity로는 목표 Snapshot을 저장할 수 없었으며, 현재는
+  V8 Migration과 Java 구현으로 저장·strict 재생한다.
 - 일시적 TIMEOUT·UNAVAILABLE도 같은 key에서 재실행되지 않으므로 별도 복구·재분석
   operation scope가 필요하다.
 - crash 뒤 `IN_PROGRESS`가 장기 잔류할 수 있고 운영 복구 구현 전에는 자동 해소되지
@@ -404,18 +405,22 @@ public API가 존재한다는 사실과 목표 end-to-end 연결이 구현되었
 
 ## 20. 후속 구현
 
-- public intake에서 `RECEIVED` 거래와 Idempotency 연결만 commit하는 새 경계
-- 실제 External Risk HTTP Provider와 production coordinator Bean
-- public intake와 External Risk·Rule v2·위험 대응 최종화 연결
-- 신규 Failure Snapshot codec·strict decoder·4 KiB 검증
-- 신규 Flyway Migration과 Entity·Service·Repository 변경
-- External Risk typed failure 전용 안전 mapper·로그 처리
-- 최초·재생 응답과 동시 요청 통합 테스트
+아래 ADR 작성 당시 후속 목록 중 public 연결 항목은 Issue #178까지 완료되었다.
+
+- public intake에서 `RECEIVED` 거래와 Idempotency 연결만 commit하는 새 경계 — 완료
+- 실제 External Risk HTTP Provider와 production coordinator Bean — 완료
+- public intake와 External Risk·Rule v2·위험 대응 최종화 연결 — 완료
+- 신규 Failure Snapshot codec·strict decoder·4 KiB 검증 — 완료
+- 신규 Flyway Migration과 Entity·Service·Repository 변경 — 완료
+- External Risk typed failure 전용 안전 mapper·로그 처리 — 완료
+- 최초·재생 응답과 동시 요청 통합 테스트 — 완료
 - 오래된 `IN_PROGRESS`와 완료 간극 운영 탐지·복구 Issue
 - 별도 operation scope의 승인된 복구·재분석 계약
-- 최종 성공 Snapshot v2 구현
+- 최종 성공 Snapshot v2 구현 — 완료
 
 ## 21. 제외 범위
+
+이 절은 ADR 결정 당시 구현 Issue의 제외 범위이며 현재 구현 상태 목록이 아니다.
 
 - Java Production·Test 코드와 Flyway Migration 변경
 - 실제 Provider·Controller·공개 DTO 구현
@@ -435,3 +440,22 @@ public API가 존재한다는 사실과 목표 end-to-end 연결이 구현되었
 - ADR-006의 분석 전 확정 실패, 불확실한 `IN_PROGRESS`, 원본 예외와 suppressed
   writer 오류, 최종 업무 commit 뒤 완료 간극 불변식을 구체화한다.
 - 기존 ADR을 대체하거나 소급 수정하지 않는다.
+
+## 23. 후속 구현 상태 (2026-08-27, Issue #178)
+
+public intake의 Idempotency 단일 승자 뒤 External Risk를 호출하고, 여섯
+`ExternalRiskLookupException` category를 기존 Failure Snapshot 서비스로 저장해
+`FAILED`로 확정하는 연결을 구현했다. 동일 key·fingerprint는 strict decode한 저장
+HTTP status·공개 code·안전 message와 현재 요청 trace를 반환하며 Provider·Rule·
+최종화를 다시 호출하지 않는다. Snapshot에는 trace, Provider 원문, credential,
+reference와 내부 예외 정보를 저장하거나 공개하지 않는다.
+
+Failure Snapshot writer가 실패하면 원본 External Risk 예외를 유지하고 writer
+오류만 suppressed로 보존하며 Idempotency는 `IN_PROGRESS`일 수 있다. Provider가
+없는 context는 claim 전에 고정 `503 DEPENDENCY_UNAVAILABLE`로 종료하므로 terminal
+replay도 제공하지 않는다. crash·장기 `IN_PROGRESS` 복구와 자동 retry·fallback·
+cache는 구현하지 않았다.
+
+External Risk lookup과 Rule 분석 단계를 분리했다. command read·Provider 단계의 일반
+`RuntimeException`은 Failure Snapshot이나 Rule 실패 reader 대상으로 확장하지 않고
+원본 객체 그대로 전파해 Idempotency `IN_PROGRESS`를 유지한다.
