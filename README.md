@@ -210,7 +210,9 @@ Provider·Rule·최종화를 다시 호출하지 않습니다.
 Runner·CLI가 구현되었습니다. 실행 절차는
 [`Idempotency 복구 one-shot runbook`](docs/09-deployment/idempotency-recovery-one-shot-runbook.md)을
 따릅니다. scheduler·batch, 자동 retry·fallback·cache, 운영 credential 실제 배포,
-USER 인증·인가와 신규 metric·alert·dashboard는 아직 구현되지 않았습니다. 기존 Rule 분석
+USER 인증·인가, Issue #186 외 사건·AI·복구 상태 등의 추가 업무 metric과
+production Prometheus 수집·Actuator 노출·alert·dashboard는 아직 구현되지
+않았습니다. 기존 Rule 분석
 v1은 당장 제거하지 않으며 Rule v1 기본
 RuleVersion 집합의 제한된 local/dev/test one-shot 발행 경계만 제공하고 공개 관리
 API나 정상 시작 자동 발행은 제공하지 않습니다. `ANALYZED`는 위험 대응 전 중간
@@ -404,13 +406,13 @@ Kafka
 Public 최종 동기 거래 접수와 실제 External Risk HTTP Provider, 공개 오류 매핑 및
 성공 Snapshot v2 연결은 구현되었습니다. 후속 계획은 다음과 같습니다.
 
-* recovery scheduler·batch와 metric·alert·dashboard
+* recovery scheduler·batch와 장기 `IN_PROGRESS` Gauge·completion gap alert·dashboard
 * 불확실 상태 재실행과 `FAILED` 재분석은 별도 operation scope·승인 계약 전까지 금지
 * 공개 사건 조회·상태 변경·조사 메모·AuditLog API와 USER 인증·인가
 * ML 추론
 * AI 사건 리포트
 * AI 사용량·토큰·비용 기록
-* External Risk 운영 credential 실제 배포와 신규 운영 metric·alert·dashboard
+* External Risk 운영 credential 실제 배포와 stuck·completion-gap 탐지 metric·alert·dashboard
 * 자동 retry·fallback·cache는 별도 Issue와 계약 승인 전까지 도입하지 않음
 * Redis 연동
 * Docker Compose

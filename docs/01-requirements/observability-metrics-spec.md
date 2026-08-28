@@ -34,15 +34,24 @@ API 요청·응답과 상태 코드는 `docs/03-api/`, 시스템 책임은 `docs
 
 ### 3.1 적용 상태 분류
 
-이 문서에서 `적용` 열은 메트릭 구현 완료 여부가 아니라 적용 대상을 구분한다.
+현재 관측 상태는 다음 세 계층으로 구분한다.
 
-| 구분 | 의미 |
-| --- | --- |
-| `현재 최소 범위` | 저장소에서 현재 구현이 확인된 Spring Boot Health API에 우선 적용할 계약. Observability 수집 구현은 아직 완료되지 않았다. |
-| `핵심 기능 구현 시` | 문서로 계약되어 있으나 아직 구현되지 않은 거래·탐지·사건·FastAPI·PostgreSQL·AI 리포트 기능과 함께 적용할 계약 |
-| `향후 도입 시` | Redis, Kafka, Kubernetes 또는 AWS를 실제로 도입하고 운영 책임이 확정될 때 적용할 계약 |
+| 계층 | 현재 상태 | 범위 |
+| --- | --- | --- |
+| 애플리케이션 내부 계측 | 부분 구현 | Issue #186의 Spring Boot 업무 Meter 10개가 구현되었다. public 거래 intake outcome, 최초 `RECEIVED`, terminal outcome·processing duration, 멱등 replay·`IN_PROGRESS`·conflict, External Risk outcome·duration, Spring Rule orchestration outcome·duration으로 한정한다. |
+| 운영 수집·노출 | 미구현 | production Prometheus registry·exporter, `/actuator/prometheus`, 인증·네트워크가 적용된 management endpoint가 없다. |
+| 활용 계층 | 미구현 | Prometheus scrape, recording rule, alert rule, Grafana dashboard가 없다. |
 
-현재 저장소에서 구현이 확인된 범위는 Spring Boot 초기 설정과 Health API이다. 거래·탐지·사건, FastAPI, PostgreSQL, AI 리포트, Provider 연동과 Observability Stack은 문서 또는 로드맵 범위이며 현재 수집 중인 것으로 표현하지 않는다.
+메트릭 표의 `적용` 열은 애플리케이션 내부 계측이 확인된 10개에만
+`애플리케이션 내부 계측 구현 (Issue #186)`을 사용한다. 나머지 계약은
+`애플리케이션 내부 계측 미구현`, `활용 계층 미구현` 또는 기술 도입을 전제로 한
+`향후 도입 시`로 표시하며, 어느 경우도 운영 수집·노출이 활성화되었다는 의미가
+아니다.
+
+Issue #186은 거래 전체나 사건·감사 조회 API 계측을 완료한 것이 아니다. FastAPI 내부
+Meter, ML·LLM·AI 리포트 Meter도 미구현이다. `spring-boot-starter-actuator`는 production
+`implementation`이지만, `micrometer-registry-prometheus`는 Prometheus naming 검증을 위한
+`testImplementation`이므로 production exporter나 `/actuator/prometheus`를 제공하지 않는다.
 
 ### 3.2 수집 경계
 
@@ -67,7 +76,23 @@ PostgreSQL client·pool 계층
 ### 4.1 논리 이름과 구현 후보
 
 - `논리 이름`은 제품과 라이브러리에 독립적인 계약 이름이다.
-- `구현 후보`는 Prometheus 계열 이름을 사용할 경우의 후보이며 확정된 라이브러리 이름이 아니다.
+- `구현 후보`는 아직 미구현인 행에서 Prometheus 계열 이름을 사용할 경우의 후보이며 확정된 라이브러리 이름이 아니다.
+- `애플리케이션 내부 계측 구현 (Issue #186)`으로 표시한 10개 행은 예외이다. 다음 Micrometer 이름과 각 행의 type·tag key·현재 사용 중인 tag value enum은 이미 확정되고 구현된 계약이다.
+
+```text
+finguardops.transaction.intake.outcomes
+finguardops.transactions.received
+finguardops.transaction.outcomes
+finguardops.transaction.processing.duration
+finguardops.http.duplicate.requests
+finguardops.http.idempotency.conflicts
+finguardops.external.risk.outcomes
+finguardops.external.risk.duration
+finguardops.rule.analysis.outcomes
+finguardops.rule.analysis.duration
+```
+
+- 위 10개 밖에서 향후 추가할 Meter와 아직 구현되지 않은 서비스의 이름·tag·category 계약은 해당 구현 전에 별도 승인하며, 이 문서가 자동으로 확정하지 않는다.
 - Counter 구현 후보는 누적값임을 나타내는 `_total` 접미사를 사용한다.
 - 시간 Histogram은 초 단위 `_seconds`, 데이터 크기는 `_bytes`, 토큰은 `_tokens`, 연결과 요청 수는 개수 단위를 사용한다.
 - 실제 프레임워크의 자동 계측 이름을 채택할 경우 논리 의미, 라벨 정책과 집계 기준을 유지하고 중복 계측을 피한다.
@@ -168,23 +193,27 @@ Kafka 도입 시 `topic`과 `consumerGroup`, AWS 도입 시 `dependency` 같은 
 
 | 논리 이름 | 구현 후보 | 목적 | 수집 주체 | 유형 | 단위 | 증가·관측 시점 | 허용 라벨 | 집계 기준 | 대시보드 활용 | 알림 활용 | 적용 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `spring.http.requests` | `finguardops_http_server_requests_total` | API 요청 수와 처리량 확인 | Spring Boot HTTP 경계 | Counter | 요청 건 | HTTP 응답 상태가 확정될 때 1 증가 | `service`, `route`, `method`, `status`, `deploymentVersion` | 실제 path가 아닌 route template별 요청. 같은 요청을 filter와 controller에서 중복 계수하지 않음 | API 처리량, 상태 코드 분포, 배포 전후 비교 | 요청 급감·급증은 기준선 측정 후 결정 | Health는 `현재 최소 범위`, 나머지는 `핵심 기능 구현 시` |
-| `spring.http.duration` | `finguardops_http_server_request_duration_seconds` | 사용자 관점 API 응답시간 분포 확인 | Spring Boot HTTP 경계 | Histogram | 초 | 요청 수신부터 응답 완료까지 한 번 관측 | `service`, `route`, `method`, `status`, `deploymentVersion` | route·method·status별 분포. 비동기 AI 생성은 `202` 접수시간이며 최종 생성시간과 분리 | p50·p95·p99 후보, 느린 route, 배포 비교 | 임계값은 부하 테스트 후 결정 | Health는 `현재 최소 범위`, 나머지는 `핵심 기능 구현 시` |
-| `spring.http.errors` | `finguardops_http_server_errors_total` 또는 `spring.http.requests`의 오류 상태 필터 | HTTP 상태별 오류 수 확인 | Spring Boot HTTP 경계 | Counter | 오류 응답 건 | 4xx·5xx 응답 확정 시 1 증가 | `service`, `route`, `method`, `status`, `failureCategory`, `deploymentVersion` | 가능하면 HTTP 요청 Counter에서 파생해 중복 계측을 피함. 4xx와 5xx를 분리 | 오류율, 오류 코드 계열, 영향 route | 기준선 측정 후 결정. 5xx와 4xx의 심각도는 분리 | Health는 `현재 최소 범위`, 나머지는 `핵심 기능 구현 시` |
-| `spring.transaction.intake_outcomes` | `finguardops_transaction_intake_outcomes_total` | public 거래 접수 최종 결과 구분 | Spring Boot finish-once Filter | Counter | 접수 시도 건 | exact public POST 응답 결과 확정 시 | `service`, `result` | 요청당 정확히 한 번. `result`는 `accepted`, `validation_rejected`, `dependency_unavailable`, `external_risk_failed`, `rule_failed`, `finalization_failed`, `completion_failed`, `idempotent_replay`, `in_progress`, `conflict`, `internal_failure`만 허용 | 접수 결과 분포 | 기준선 측정 후 결정 | Issue #186 구현 |
-| `spring.transaction.received` | `finguardops_transactions_received_total` | 최초 거래 접수량 확인 | Spring Boot 거래 Service | Counter | 거래 건 | Transaction과 Idempotency 연결 transaction의 `afterCommit` | `service`, `result` | `result=received`. rollback·replay·conflict 제외 | 거래 유입량 | 기준선 측정 후 결정 | Issue #186 구현 |
-| `spring.transaction.outcomes` | `finguardops_transaction_outcomes_total` | 최초 terminal 거래 결과 확인 | Spring Boot 거래 Service | Counter | 거래 건 | `APPROVED`, `ADDITIONAL_AUTH_REQUIRED`, `HELD`, `FAILED` 최초 transaction의 `afterCommit` | `service`, `status`, `riskLevel`, `failureCategory` | 성공 `failureCategory=none`; Rule 실패는 확정 category, 분류 불가 실패만 `unknown`; External Risk 실패로 `RECEIVED`에 남은 거래 제외 | terminal 분포 | 기준선 측정 후 결정 | Issue #186 구현 |
-| `spring.transaction.processing_duration` | `finguardops_transaction_processing_duration_seconds` | 거래 접수부터 최초 terminal 확정까지의 업무 지연 확인 | Spring Boot 거래 Service | Timer | 초 | terminal outcome과 같은 `afterCommit` | `service`, `status`, `riskLevel`, `failureCategory` | DB `created_at`부터 최초 terminal `updated_at`. 음수는 기록하지 않고 replay·복구에서 재관측하지 않음 | 처리시간 분포 | custom bucket·percentile 없음 | Issue #186 구현 |
-| `spring.external_risk.outcomes` | `finguardops_external_risk_outcomes_total` | 실제 External Risk policy/provider 결과 확인 | Spring Boot External Risk Policy | Counter | 시도 건 | 실제 policy/provider 호출 종료 시 | `service`, `result`, `failureCategory` | 성공 `matched|unmatched`와 `none`; 실패 `failed`와 `TIMEOUT|UNAVAILABLE|INVALID_REQUEST|UNSUPPORTED_CAPABILITY|INVALID_RESPONSE|TRANSFORMATION_ERROR` | Provider 의존성 결과 | 기준선 측정 후 결정 | Issue #186 구현 |
-| `spring.external_risk.duration` | `finguardops_external_risk_duration_seconds` | External Risk 소요시간 확인 | Spring Boot External Risk Policy | Timer | 초 | outcome과 같은 실제 시도 단위 | `service`, `result`, `failureCategory` | `System.nanoTime()` 단조 시간. replay·command read 실패는 시도 자체가 없어 제외 | External Risk 지연 | custom bucket·percentile 없음 | Issue #186 구현 |
-| `spring.detection.requests` | `finguardops_detection_requests_total` | 승인된 탐지 시작 요청량 확인 | Spring Boot 탐지 오케스트레이션 | Counter | 탐지 요청 건 | `transactionId+detectionResultVersion` 분석 시작이 최초 승인될 때 | `service`, `result`, `deploymentVersion` | 동일 버전 중복 요청·늦은 재전달은 증가하지 않음 | 탐지 입력량과 완료량 비교 | 요청 대비 완료 감소는 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `spring.rule_analysis.outcomes` | `finguardops_rule_analysis_outcomes_total` | Spring 관점 Rule orchestration 결과 확인 | Spring Boot Rule 오케스트레이션 | Counter | 시도 건 | start·client·mapping·adoption 경계를 포함한 실제 orchestration 종료 시 | `service`, `result`, `riskLevel`, `failureCategory` | 성공 `completed`/`none`; 실패 `failed`와 아래 allowlist. command read·External Risk 실패·replay 제외 | 완료율·단계별 실패 | 기준선 측정 후 결정 | Issue #186 구현 |
-| `spring.rule_analysis.duration` | `finguardops_rule_analysis_duration_seconds` | Spring 관점 Rule orchestration 소요시간 확인 | Spring Boot Rule 오케스트레이션 | Timer | 초 | outcome과 같은 시도 단위 | `service`, `result`, `riskLevel`, `failureCategory` | `System.nanoTime()` 단조 시간, 시도당 한 번. FastAPI 내부 Rule 시간과 분리 | 전체 Rule 지연 | custom bucket·percentile 없음 | Issue #186 구현 |
-| `spring.risk_response.outcomes` | `finguardops_risk_response_outcomes_total` | 승인된 위험 대응 결과 확인 | Spring Boot 위험 대응 Service | Counter | 대응 건 | 채택 DetectionResult와 `riskResponseOutcome`, 최종 처리 상태가 최초 확정될 때 | `service`, `result`, `riskLevel`, `deploymentVersion` | 동일 채택 결과의 반복 적용은 증가하지 않음 | 위험 등급별 Mock 대응 분포 | 정책 이탈 또는 결과 급변은 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `spring.cases.created` | `finguardops_cases_created_total` | 사건 신규 생성량 확인 | Spring Boot 사건 Service | Counter | 사건 건 | FraudCase와 최초 CaseTransaction 연결이 정합하게 확정될 때 | `service`, `riskLevel`, `result`, `deploymentVersion` | 새 `caseId`별 한 번. 기존 사건 연결은 신규 생성으로 계수하지 않음 | 신규 사건량, 위험 등급별 대기 유입 | 중복 생성·급증은 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `spring.case.status_change_outcomes` | `finguardops_case_status_change_outcomes_total` | 사건 상태 변경 성공과 거부된 시도의 결과 확인 | Spring Boot 사건 Service | Counter | 상태 변경 시도 건 | 성공 전이 또는 승인된 거부 결과가 확정될 때 | `service`, `status`, `result`, `failureCategory`, `deploymentVersion` | 성공과 거부를 `result`로 분리. 거부는 실제 상태 변경으로 해석하지 않으며 같은 멱등 종료 재전송은 새 변경으로 계수하지 않음 | 사건 흐름, 전이 충돌, 종료 처리량 | 충돌·거부율은 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `spring.http.duplicate_requests` | `finguardops_http_duplicate_requests_total` | 동일 멱등 요청 재전송 확인 | Spring Boot finish-once Filter | Counter | 중복 요청 건 | 같은 key·fingerprint가 기존 상태로 판별된 HTTP 요청 종료 시 | `service`, `result` | `result=in_progress|completed|failed`; replay당 한 번, 새 업무 meter 미증가 | 재전송 분포 | 기준선 측정 후 결정 | Issue #186 구현 |
-| `spring.http.idempotency_conflicts` | `finguardops_http_idempotency_conflicts_total` | 같은 key의 다른 fingerprint 충돌 확인 | Spring Boot finish-once Filter | Counter | 충돌 건 | `IDEMPOTENCY_KEY_CONFLICT` 확정 시 | `service`, `result` | `result=conflict`; key·fingerprint 원문 미포함 | 충돌 추세 | 기준선 측정 후 결정 | Issue #186 구현 |
+| `spring.http.requests` | `finguardops_http_server_requests_total` | API 요청 수와 처리량 확인 | Spring Boot HTTP 경계 | Counter | 요청 건 | HTTP 응답 상태가 확정될 때 1 증가 | `service`, `route`, `method`, `status`, `deploymentVersion` | 실제 path가 아닌 route template별 요청. 같은 요청을 filter와 controller에서 중복 계수하지 않음 | API 처리량, 상태 코드 분포, 배포 전후 비교 | 요청 급감·급증은 기준선 측정 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `spring.http.duration` | `finguardops_http_server_request_duration_seconds` | 사용자 관점 API 응답시간 분포 확인 | Spring Boot HTTP 경계 | Histogram | 초 | 요청 수신부터 응답 완료까지 한 번 관측 | `service`, `route`, `method`, `status`, `deploymentVersion` | route·method·status별 분포. 비동기 AI 생성은 `202` 접수시간이며 최종 생성시간과 분리 | p50·p95·p99 후보, 느린 route, 배포 비교 | 임계값은 부하 테스트 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `spring.http.errors` | `finguardops_http_server_errors_total` 또는 `spring.http.requests`의 오류 상태 필터 | HTTP 상태별 오류 수 확인 | Spring Boot HTTP 경계 | Counter | 오류 응답 건 | 4xx·5xx 응답 확정 시 1 증가 | `service`, `route`, `method`, `status`, `failureCategory`, `deploymentVersion` | 가능하면 HTTP 요청 Counter에서 파생해 중복 계측을 피함. 4xx와 5xx를 분리 | 오류율, 오류 코드 계열, 영향 route | 기준선 측정 후 결정. 5xx와 4xx의 심각도는 분리 | `애플리케이션 내부 계측 미구현` |
+| `spring.transaction.intake_outcomes` | `finguardops_transaction_intake_outcomes_total` | public 거래 접수 최종 결과 구분 | Spring Boot finish-once Filter | Counter | 접수 시도 건 | exact public POST 응답 결과 확정 시 | `service`, `result` | 요청당 정확히 한 번. `result`는 `accepted`, `validation_rejected`, `dependency_unavailable`, `external_risk_failed`, `rule_failed`, `finalization_failed`, `completion_failed`, `idempotent_replay`, `in_progress`, `conflict`, `internal_failure`만 허용 | 접수 결과 분포 | 기준선 측정 후 결정 | `애플리케이션 내부 계측 구현 (Issue #186)` |
+| `spring.transaction.received` | `finguardops_transactions_received_total` | 최초 거래 접수량 확인 | Spring Boot 거래 Service | Counter | 거래 건 | Transaction과 Idempotency 연결 transaction의 `afterCommit` | `service`, `result` | `result=received`. rollback·replay·conflict 제외 | 거래 유입량 | 기준선 측정 후 결정 | `애플리케이션 내부 계측 구현 (Issue #186)` |
+| `spring.transaction.outcomes` | `finguardops_transaction_outcomes_total` | 최초 terminal 거래 결과 확인 | Spring Boot 거래 Service | Counter | 거래 건 | `APPROVED`, `ADDITIONAL_AUTH_REQUIRED`, `HELD`, `FAILED` 최초 transaction의 `afterCommit` | `service`, `status`, `riskLevel`, `failureCategory` | 성공 `failureCategory=none`; Rule 실패는 확정 category, 분류 불가 실패만 `unknown`; External Risk 실패로 `RECEIVED`에 남은 거래 제외 | terminal 분포 | 기준선 측정 후 결정 | `애플리케이션 내부 계측 구현 (Issue #186)` |
+| `spring.transaction.processing_duration` | `finguardops_transaction_processing_duration_seconds` | 거래 접수부터 최초 terminal 확정까지의 업무 지연 확인 | Spring Boot 거래 Service | Timer | 초 | terminal outcome과 같은 `afterCommit` | `service`, `status`, `riskLevel`, `failureCategory` | DB `created_at`부터 최초 terminal `updated_at`. 음수는 기록하지 않고 replay·복구에서 재관측하지 않음 | 처리시간 분포 | custom bucket·percentile 없음 | `애플리케이션 내부 계측 구현 (Issue #186)` |
+| `spring.external_risk.outcomes` | `finguardops_external_risk_outcomes_total` | 실제 External Risk policy/provider 결과 확인 | Spring Boot External Risk Policy | Counter | 시도 건 | 실제 policy/provider 호출 종료 시 | `service`, `result`, `failureCategory` | 성공 `matched|unmatched`와 `none`; 실패 `failed`와 `TIMEOUT|UNAVAILABLE|INVALID_REQUEST|UNSUPPORTED_CAPABILITY|INVALID_RESPONSE|TRANSFORMATION_ERROR` | Provider 의존성 결과 | 기준선 측정 후 결정 | `애플리케이션 내부 계측 구현 (Issue #186)` |
+| `spring.external_risk.duration` | `finguardops_external_risk_duration_seconds` | External Risk 소요시간 확인 | Spring Boot External Risk Policy | Timer | 초 | outcome과 같은 실제 시도 단위 | `service`, `result`, `failureCategory` | `System.nanoTime()` 단조 시간. replay·command read 실패는 시도 자체가 없어 제외 | External Risk 지연 | custom bucket·percentile 없음 | `애플리케이션 내부 계측 구현 (Issue #186)` |
+| `spring.detection.requests` | `finguardops_detection_requests_total` | 승인된 탐지 시작 요청량 확인 | Spring Boot 탐지 오케스트레이션 | Counter | 탐지 요청 건 | `transactionId+detectionResultVersion` 분석 시작이 최초 승인될 때 | `service`, `result`, `deploymentVersion` | 동일 버전 중복 요청·늦은 재전달은 증가하지 않음 | 탐지 입력량과 완료량 비교 | 요청 대비 완료 감소는 기준선 측정 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `spring.rule_analysis.outcomes` | `finguardops_rule_analysis_outcomes_total` | Spring 관점 Rule orchestration 결과 확인 | Spring Boot Rule 오케스트레이션 | Counter | 시도 건 | start·client·mapping·adoption 경계를 포함한 실제 orchestration 종료 시 | `service`, `result`, `riskLevel`, `failureCategory` | 성공 `completed`/`none`; 실패 `failed`와 아래 allowlist. command read·External Risk 실패·replay 제외 | 완료율·단계별 실패 | 기준선 측정 후 결정 | `애플리케이션 내부 계측 구현 (Issue #186)` |
+| `spring.rule_analysis.duration` | `finguardops_rule_analysis_duration_seconds` | Spring 관점 Rule orchestration 소요시간 확인 | Spring Boot Rule 오케스트레이션 | Timer | 초 | outcome과 같은 시도 단위 | `service`, `result`, `riskLevel`, `failureCategory` | `System.nanoTime()` 단조 시간, 시도당 한 번. FastAPI 내부 Rule 시간과 분리 | 전체 Rule 지연 | custom bucket·percentile 없음 | `애플리케이션 내부 계측 구현 (Issue #186)` |
+| `spring.risk_response.outcomes` | `finguardops_risk_response_outcomes_total` | 승인된 위험 대응 결과 확인 | Spring Boot 위험 대응 Service | Counter | 대응 건 | 채택 DetectionResult와 `riskResponseOutcome`, 최종 처리 상태가 최초 확정될 때 | `service`, `result`, `riskLevel`, `deploymentVersion` | 동일 채택 결과의 반복 적용은 증가하지 않음 | 위험 등급별 Mock 대응 분포 | 정책 이탈 또는 결과 급변은 기준선 측정 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `spring.cases.created` | `finguardops_cases_created_total` | 사건 신규 생성량 확인 | Spring Boot 사건 Service | Counter | 사건 건 | FraudCase와 최초 CaseTransaction 연결이 정합하게 확정될 때 | `service`, `riskLevel`, `result`, `deploymentVersion` | 새 `caseId`별 한 번. 기존 사건 연결은 신규 생성으로 계수하지 않음 | 신규 사건량, 위험 등급별 대기 유입 | 중복 생성·급증은 기준선 측정 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `spring.case.status_change_outcomes` | `finguardops_case_status_change_outcomes_total` | 사건 상태 변경 성공과 거부된 시도의 결과 확인 | Spring Boot 사건 Service | Counter | 상태 변경 시도 건 | 성공 전이 또는 승인된 거부 결과가 확정될 때 | `service`, `status`, `result`, `failureCategory`, `deploymentVersion` | 성공과 거부를 `result`로 분리. 거부는 실제 상태 변경으로 해석하지 않으며 같은 멱등 종료 재전송은 새 변경으로 계수하지 않음 | 사건 흐름, 전이 충돌, 종료 처리량 | 충돌·거부율은 기준선 측정 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `spring.http.duplicate_requests` | `finguardops_http_duplicate_requests_total` | 동일 멱등 요청 재전송 확인 | Spring Boot finish-once Filter | Counter | 중복 요청 건 | 같은 key·fingerprint가 기존 상태로 판별된 HTTP 요청 종료 시 | `service`, `result` | `result=in_progress|completed|failed`; replay당 한 번, 새 업무 meter 미증가 | 재전송 분포 | 기준선 측정 후 결정 | `애플리케이션 내부 계측 구현 (Issue #186)` |
+| `spring.http.idempotency_conflicts` | `finguardops_http_idempotency_conflicts_total` | 같은 key의 다른 fingerprint 충돌 확인 | Spring Boot finish-once Filter | Counter | 충돌 건 | `IDEMPOTENCY_KEY_CONFLICT` 확정 시 | `service`, `result` | `result=conflict`; key·fingerprint 원문 미포함 | 충돌 추세 | 기준선 측정 후 결정 | `애플리케이션 내부 계측 구현 (Issue #186)` |
+
+`spring.http.requests`, `spring.http.duration`, `spring.http.errors`는 일반 HTTP framework
+metric을 재사용하려는 논리 계약이며 Issue #186 custom intake Meter 10개에 포함되지
+않는다. 해당 framework metric이 production에서 실제 수집·노출 중이라고 간주하지 않는다.
 
 Issue #186 custom meter의 `service`는 모두 `spring-backend` 고정값이다.
 `provider`와 `deploymentVersion` tag는 사용하지 않는다. Rule 실패 category는
@@ -201,8 +230,9 @@ category로 분류할 수 없는 실패만 `unknown`이다.
 MeterRegistry 조회·meter 등록·기록 및 `afterCommit` callback 실패는 모두 업무
 응답·원본 예외·transaction 결과와 격리한다. 이 보장은 정상 JVM 안의 commit callback
 경계까지이며, DB commit 직후 process crash에도 전달을 보장하는 durable metric/outbox는
-구현하지 않았다. Prometheus exporter, Actuator exposure 변경, custom bucket·percentile,
-scheduler, alert와 dashboard도 Issue #186 범위가 아니다.
+구현하지 않았다. production Prometheus registry·exporter, `/actuator/prometheus`,
+management endpoint 보안·노출, custom bucket·percentile, scheduler, scrape·recording rule,
+alert와 dashboard도 Issue #186 범위가 아니다.
 
 `spring.http.errors`는 `spring.http.requests`에서 계산할 수 있으면 별도 Counter를 만들지 않는 것을 권장한다. 문서상 논리 지표는 유지하되 하나의 HTTP 요청이 두 독립 계측 경로에서 서로 다른 값으로 집계되지 않도록 한다.
 
@@ -210,16 +240,16 @@ scheduler, alert와 dashboard도 Issue #186 범위가 아니다.
 
 | 논리 이름 | 구현 후보 | 목적 | 수집 주체 | 유형 | 단위 | 증가·관측 시점 | 허용 라벨 | 집계 기준 | 대시보드 활용 | 알림 활용 | 적용 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `fastapi.rule.evaluations` | `finguardops_rule_evaluations_total` | Rule별 실행량과 결과 확인 | FastAPI Rule Service | Counter | Rule 평가 건 | 승인된 Rule 평가가 종료될 때 | `service`, `ruleId`, `ruleVersion`, `result`, `failureCategory`, `deploymentVersion` | 거래 분석 1건 안에서 실제 평가한 Rule마다 1회. Rule registry 값만 라벨 허용 | 느리거나 실패하는 Rule, 버전별 처리량 | 실패율은 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `fastapi.rule.duration` | `finguardops_rule_evaluation_duration_seconds` | Rule 처리시간 분포 확인 | FastAPI Rule Service | Histogram | 초 | 개별 Rule 평가 시작부터 종료까지 | `service`, `ruleId`, `ruleVersion`, `result`, `deploymentVersion` | 개별 Rule 평가 단위. 전체 Rule 묶음 시간과 혼합하지 않음 | Rule별 p95 후보, 버전 비교 | 임계값은 부하 테스트 후 결정 | `핵심 기능 구현 시` |
-| `fastapi.rule.failures` | `finguardops_rule_failures_total` 또는 Rule 평가 Counter의 실패 필터 | Rule 실패 유형 확인 | FastAPI Rule Service | Counter | 실패 건 | Rule 평가가 예외·Timeout·승인된 실패로 종료될 때 | `service`, `ruleId`, `ruleVersion`, `failureCategory`, `deploymentVersion` | 가능하면 평가 Counter에서 파생. 오류 원문은 로그로 보냄 | 실패 Rule과 배포 버전 확인 | 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `fastapi.ml.inferences` | `finguardops_ml_inferences_total` | 모델·버전별 추론량과 성공 상태 확인 | FastAPI ML Service | Counter | 추론 건 | 실제 ML 추론이 종료될 때 | `service`, `modelName`, `modelVersion`, `result`, `failureCategory`, `deploymentVersion` | 실제 추론 실행 단위. 모델 미도입 시 0이 아니라 미수집으로 표시 | 모델별 처리량·실패 비교 | 실패율은 기준선 측정 후 결정 | ML 도입 후 `핵심 기능 구현 시` |
-| `fastapi.ml.duration` | `finguardops_ml_inference_duration_seconds` | ML 추론시간 분포 확인 | FastAPI ML Service | Histogram | 초 | 모델 입력 준비 완료부터 추론 결과 반환까지 | `service`, `modelName`, `modelVersion`, `result`, `deploymentVersion` | 실제 추론 단위. Feature 계산시간과 분리 | 모델·버전별 지연 비교 | 임계값은 부하 테스트 후 결정 | ML 도입 후 `핵심 기능 구현 시` |
-| `fastapi.ml.failures` | `finguardops_ml_inference_failures_total` 또는 추론 Counter의 실패 필터 | ML 실패 유형 확인 | FastAPI ML Service | Counter | 실패 건 | 추론 실패가 확정될 때 | `service`, `modelName`, `modelVersion`, `failureCategory`, `deploymentVersion` | 가능하면 추론 Counter에서 파생 | 모델 장애와 버전 회귀 확인 | 기준선 측정 후 결정 | ML 도입 후 `핵심 기능 구현 시` |
-| `fastapi.analysis.duration` | `finguardops_analysis_duration_seconds` | Feature·Rule·ML을 포함한 FastAPI 전체 분석시간 확인 | FastAPI 분석 Service | Histogram | 초 | 분석 요청 검증 후 계산 시작부터 응답 생성까지 | `service`, `result`, `riskLevel`, `modelVersion`, `failureCategory`, `deploymentVersion` | FastAPI가 실제 처리한 분석 요청 단위. Spring Boot 저장시간 제외 | 전체 분석 지연과 내부 단계 비교 | 임계값은 부하 테스트 후 결정 | `핵심 기능 구현 시` |
-| `fastapi.analysis.outcomes` | `finguardops_analysis_outcomes_total` | FastAPI 분석 완료·실패 확인 | FastAPI 분석 Service | Counter | 분석 건 | 분석 응답 성공 또는 실패가 확정될 때 | `service`, `result`, `riskLevel`, `modelVersion`, `failureCategory`, `deploymentVersion` | FastAPI 처리 시도 단위. Spring Boot의 DetectionResult 완료 Counter와 동일 지표가 아님 | 요청·완료·실패, 모델 버전 비교 | 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `fastapi.client.failures` | `finguardops_fastapi_client_failures_total` | Spring Boot에서 본 FastAPI Timeout·연결 실패 확인 | Spring Boot FastAPI client 경계 | Counter | 호출 실패 건 | FastAPI 호출이 Timeout 또는 연결 실패로 종료될 때 | `service`, `result`, `failureCategory`, `deploymentVersion` | 실제 client 호출 시도별 1회. 거래 최종 실패와 별개 | 호출자 관점 의존성 장애 | 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `fastapi.component.ready` | `finguardops_ai_component_ready` | Rule·모델 버전의 로드·준비 상태 확인 | FastAPI 시작·상태 점검 계층 | Gauge | 0 또는 1 | 승인된 Rule 또는 모델 구성의 준비 상태가 바뀔 때 | `service`, `ruleVersion` 또는 `modelName`·`modelVersion`, `deploymentVersion` | 서로 다른 component 유형을 한 시계열에 무제한 혼합하지 않음 | 배포 버전별 Rule·모델 준비 상태 | 준비 상태 0의 지속 시간은 기준선 측정 후 결정 | `핵심 기능 구현 시` |
+| `fastapi.rule.evaluations` | `finguardops_rule_evaluations_total` | Rule별 실행량과 결과 확인 | FastAPI Rule Service | Counter | Rule 평가 건 | 승인된 Rule 평가가 종료될 때 | `service`, `ruleId`, `ruleVersion`, `result`, `failureCategory`, `deploymentVersion` | 거래 분석 1건 안에서 실제 평가한 Rule마다 1회. Rule registry 값만 라벨 허용 | 느리거나 실패하는 Rule, 버전별 처리량 | 실패율은 기준선 측정 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `fastapi.rule.duration` | `finguardops_rule_evaluation_duration_seconds` | Rule 처리시간 분포 확인 | FastAPI Rule Service | Histogram | 초 | 개별 Rule 평가 시작부터 종료까지 | `service`, `ruleId`, `ruleVersion`, `result`, `deploymentVersion` | 개별 Rule 평가 단위. 전체 Rule 묶음 시간과 혼합하지 않음 | Rule별 p95 후보, 버전 비교 | 임계값은 부하 테스트 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `fastapi.rule.failures` | `finguardops_rule_failures_total` 또는 Rule 평가 Counter의 실패 필터 | Rule 실패 유형 확인 | FastAPI Rule Service | Counter | 실패 건 | Rule 평가가 예외·Timeout·승인된 실패로 종료될 때 | `service`, `ruleId`, `ruleVersion`, `failureCategory`, `deploymentVersion` | 가능하면 평가 Counter에서 파생. 오류 원문은 로그로 보냄 | 실패 Rule과 배포 버전 확인 | 기준선 측정 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `fastapi.ml.inferences` | `finguardops_ml_inferences_total` | 모델·버전별 추론량과 성공 상태 확인 | FastAPI ML Service | Counter | 추론 건 | 실제 ML 추론이 종료될 때 | `service`, `modelName`, `modelVersion`, `result`, `failureCategory`, `deploymentVersion` | 실제 추론 실행 단위. 모델 미도입 시 0이 아니라 미수집으로 표시 | 모델별 처리량·실패 비교 | 실패율은 기준선 측정 후 결정 | ML 도입 후 `애플리케이션 내부 계측 미구현` |
+| `fastapi.ml.duration` | `finguardops_ml_inference_duration_seconds` | ML 추론시간 분포 확인 | FastAPI ML Service | Histogram | 초 | 모델 입력 준비 완료부터 추론 결과 반환까지 | `service`, `modelName`, `modelVersion`, `result`, `deploymentVersion` | 실제 추론 단위. Feature 계산시간과 분리 | 모델·버전별 지연 비교 | 임계값은 부하 테스트 후 결정 | ML 도입 후 `애플리케이션 내부 계측 미구현` |
+| `fastapi.ml.failures` | `finguardops_ml_inference_failures_total` 또는 추론 Counter의 실패 필터 | ML 실패 유형 확인 | FastAPI ML Service | Counter | 실패 건 | 추론 실패가 확정될 때 | `service`, `modelName`, `modelVersion`, `failureCategory`, `deploymentVersion` | 가능하면 추론 Counter에서 파생 | 모델 장애와 버전 회귀 확인 | 기준선 측정 후 결정 | ML 도입 후 `애플리케이션 내부 계측 미구현` |
+| `fastapi.analysis.duration` | `finguardops_analysis_duration_seconds` | Feature·Rule·ML을 포함한 FastAPI 전체 분석시간 확인 | FastAPI 분석 Service | Histogram | 초 | 분석 요청 검증 후 계산 시작부터 응답 생성까지 | `service`, `result`, `riskLevel`, `modelVersion`, `failureCategory`, `deploymentVersion` | FastAPI가 실제 처리한 분석 요청 단위. Spring Boot 저장시간 제외 | 전체 분석 지연과 내부 단계 비교 | 임계값은 부하 테스트 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `fastapi.analysis.outcomes` | `finguardops_analysis_outcomes_total` | FastAPI 분석 완료·실패 확인 | FastAPI 분석 Service | Counter | 분석 건 | 분석 응답 성공 또는 실패가 확정될 때 | `service`, `result`, `riskLevel`, `modelVersion`, `failureCategory`, `deploymentVersion` | FastAPI 처리 시도 단위. Spring Boot의 DetectionResult 완료 Counter와 동일 지표가 아님 | 요청·완료·실패, 모델 버전 비교 | 기준선 측정 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `fastapi.client.failures` | `finguardops_fastapi_client_failures_total` | Spring Boot에서 본 FastAPI Timeout·연결 실패 확인 | Spring Boot FastAPI client 경계 | Counter | 호출 실패 건 | FastAPI 호출이 Timeout 또는 연결 실패로 종료될 때 | `service`, `result`, `failureCategory`, `deploymentVersion` | 실제 client 호출 시도별 1회. 거래 최종 실패와 별개 | 호출자 관점 의존성 장애 | 기준선 측정 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `fastapi.component.ready` | `finguardops_ai_component_ready` | Rule·모델 버전의 로드·준비 상태 확인 | FastAPI 시작·상태 점검 계층 | Gauge | 0 또는 1 | 승인된 Rule 또는 모델 구성의 준비 상태가 바뀔 때 | `service`, `ruleVersion` 또는 `modelName`·`modelVersion`, `deploymentVersion` | 서로 다른 component 유형을 한 시계열에 무제한 혼합하지 않음 | 배포 버전별 Rule·모델 준비 상태 | 준비 상태 0의 지속 시간은 기준선 측정 후 결정 | `애플리케이션 내부 계측 미구현` |
 
 `fastapi.client.failures`는 호출자 관점의 네트워크 결과이고 `fastapi.analysis.outcomes`는 FastAPI가 실제 처리한 결과이다. 연결에 실패해 FastAPI에 도달하지 않은 요청을 FastAPI 내부 실패로 중복 계수하지 않는다.
 
@@ -249,23 +279,23 @@ ProviderCallAttempt
 
 | 논리 이름 | 구현 후보 | 목적 | 수집 주체 | 유형 | 단위 | 증가·관측 시점 | 허용 라벨 | 집계 기준 | 대시보드 활용 | 알림 활용 | 적용 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `ai.report.requests.accepted` | `finguardops_ai_report_requests_accepted_total` | 새 외부 AiReportRequest 접수량 확인 | Spring Boot AI operations Service | Counter | 요청 건 | 새 `AiReportRequest`와 `aiRequestId`가 영속적으로 확정될 때 | `service`, `result`, `riskLevel`, `deploymentVersion` | 새 요청 행 기준. 같은 키 재전송은 제외 | 요청량, 상태별 유입 | 요청 급증은 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `ai.report.executions.created` | `finguardops_ai_report_executions_created_total` | 신규 실제 실행 수 확인 | Spring Boot AI operations Service | Counter | 실행 건 | 새 `AiReportExecution`이 생성되고 최초 요청과 연결될 때 | `service`, `modelVersion`, `deploymentVersion` | distinct `executionId` 기준. 공유·캐시 요청은 제외 | 요청 수 대비 실행 수 | 실행 급증은 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `ai.report.execution_shared_requests` | `finguardops_ai_report_execution_shared_requests_total` | 진행 중 실행을 공유한 외부 요청 수 확인 | Spring Boot AI operations Service | Counter | 요청 건 | 새 AiReportRequest가 기존 활성 실행에 연결될 때 | `service`, `modelVersion`, `deploymentVersion` | `executionShared=true`인 새 요청 기준. 동일 키 재전송 제외 | 동시 요청 흡수 효과, 실행 중복 방지 | 비정상 급증은 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `ai.report.cache_hits` | `finguardops_ai_report_cache_hits_total` | 완료 리포트 정확 일치 재사용 수 확인 | Spring Boot AI operations Service | Counter | 요청 건 | 새 요청이 `cacheHit=true`, `executionId=null`로 종결될 때 | `service`, `modelVersion`, `result`, `deploymentVersion` | 새 AiReportRequest 기준. 캐시 원본 상태는 `result=completed` 또는 `fallback_completed` 후보 | 캐시 적중량과 적중률 | 적중률 급락은 기준선 측정 후 결정 | 논리 캐시는 `핵심 기능 구현 시`, Redis 저장은 `향후 도입 시` |
-| `ai.report.execution_outcomes` | `finguardops_ai_report_execution_outcomes_total` | 정상 완료·fallback 완료·최종 실패 실행 수 확인 | Spring Boot AI operations Service | Counter | 실행 건 | 실행이 `COMPLETED`, `FALLBACK_COMPLETED`, `FAILED` 중 하나로 최초 종료될 때 | `service`, `result`, `modelVersion`, `failureCategory`, `fallbackType`, `deploymentVersion` | distinct `executionId`별 종료 상태 한 번. 연결 요청 수만큼 복제하지 않음 | 생성 완료, fallback, 실패 비율 | 실패·fallback 증가는 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `ai.report.generated` | `finguardops_ai_reports_generated_total` | 사용 가능한 AiReport 결과 생성 수 확인 | Spring Boot AI operations Service | Counter | 리포트 건 | 검증된 `AiReport`가 `LLM` 또는 `TEMPLATE_FALLBACK` 출처로 저장될 때 | `service`, `result`, `modelVersion`, `fallbackType`, `deploymentVersion` | distinct `reportId` 기준. 캐시 재사용은 새 생성으로 계수하지 않음 | 실제 생성량과 출처 | 생성 급감·fallback 증가 확인 | `핵심 기능 구현 시` |
-| `ai.report.fallbacks` | `finguardops_ai_report_fallbacks_total` | template fallback 결과와 원인 확인 | Spring Boot AI operations Service | Counter | fallback 완료 건 | 같은 실행 안에서 template 결과가 사용 가능해 `FALLBACK_COMPLETED`로 확정될 때 | `service`, `fallbackType`, `failureCategory`, `modelVersion`, `deploymentVersion` | distinct 실행당 최대 한 번. 공유 요청·캐시 요청 수만큼 복제하지 않음 | 원인별 fallback 실행 수 | 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `ai.report.final_failures` | `finguardops_ai_report_final_failures_total` | LLM과 fallback이 모두 실패한 실행 확인 | Spring Boot AI operations Service | Counter | 실패 실행 건 | 실행이 최종 `FAILED`로 최초 확정될 때 | `service`, `failureCategory`, `modelVersion`, `deploymentVersion` | distinct 실행 기준. 기존 유효 리포트가 유지되어도 실패 실행은 계수 | 최종 실패율, 원인 분포 | 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `ai.report.generation_duration` | `finguardops_ai_report_generation_duration_seconds` | 신규 실행의 실제 생성시간 확인 | Spring Boot AI operations Service | Histogram | 초 | `AiReportExecution.startedAt`부터 `COMPLETED`, `FALLBACK_COMPLETED`, `FAILED` 중 최초 종료 상태 확정 시각까지 | `service`, `result`, `modelVersion`, `fallbackType`, `deploymentVersion` | distinct 실행 단위. 실행 생성 후 시작 전 대기시간은 제외. 캐시 요청은 실행이 없어 제외하고 공유 요청의 개별 대기시간은 request duration에서만 관측 | 전체 생성 p95 후보, 정상·fallback 비교 | 임계값은 부하 테스트 후 결정 | `핵심 기능 구현 시` |
-| `ai.report.request_duration` | `finguardops_ai_report_request_duration_seconds` | 외부 요청 접수부터 요청 종료까지의 사용자 경험 확인 | Spring Boot AI operations Service | Histogram | 초 | 각 새 AiReportRequest가 종료될 때 | `service`, `result`, `modelVersion`, `deploymentVersion` | 요청 단위. 공유 요청은 자신의 대기시간을 한 번 관측하고 비용은 복제하지 않음. 캐시는 즉시 종료시간 관측 가능 | 신규·공유·캐시 요청 대기 비교 | 임계값은 부하 테스트 후 결정 | `핵심 기능 구현 시` |
-| `ai.provider.calls_started` | `finguardops_ai_provider_calls_started_total` | 실제 외부 Provider 네트워크 호출 시작 수 확인 | FastAPI Provider client 경계 | Counter | 호출 시도 건 | FastAPI Provider client가 실제 외부 Provider 호출을 시작할 때 | `service`, `provider`, `modelName`, `modelVersion`, `deploymentVersion` | 실제 네트워크 호출 시도 기준. 시작 시점에는 결과와 실패 원인을 알 수 없으므로 `result`, `failureCategory`를 사용하지 않음. template fallback과 Provider 호출 전 FastAPI 실패는 제외 | 시작 수, 미완료 호출 조사 | 결과 수와 차이는 기준선 측정 후 조사 | `핵심 기능 구현 시` |
-| `ai.provider.call_outcomes` | `finguardops_ai_provider_call_outcomes_total` | 실제 Provider 호출의 성공·실패·Timeout 결과 확인 | FastAPI Provider client 경계 | Counter | 호출 결과 건 | 실제 외부 Provider 호출이 성공, 실패 또는 Timeout으로 종료될 때 | `service`, `provider`, `modelName`, `modelVersion`, `result`, `failureCategory`, `deploymentVersion` | 호출 결과가 확정된 실제 attempt 기준. FastAPI 기술 Counter로 한 번만 증가시키며 Spring Boot의 ProviderCallAttempt 영속 시 같은 메트릭을 다시 증가시키지 않음 | Provider·모델별 완료·실패와 시작 대비 결과 수 | 실패율과 미완료 차이는 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `ai.provider.duration` | `finguardops_ai_provider_call_duration_seconds` | 실제 Provider 호출 지연시간 확인 | FastAPI Provider client 경계 | Histogram | 초 | Provider 요청 시작부터 성공·실패·Timeout 결과 확정까지 | `service`, `provider`, `modelName`, `modelVersion`, `result`, `failureCategory`, `deploymentVersion` | 실제 호출 결과가 확인된 attempt에 대해 한 번만 관측. 결과가 확인되지 않은 미완료 호출에는 관측값을 만들지 않음 | Provider·모델별 p95·p99 후보 | 임계값은 부하 테스트 후 결정 | `핵심 기능 구현 시` |
-| `ai.provider.input_tokens` | `finguardops_ai_provider_input_tokens_total` | 실제 입력 토큰 누적량 확인 | ProviderCallAttempt 영속 집계 계층 | Counter | 토큰 | attempt 종료 후 Provider가 확인한 입력 토큰이 있을 때 그 값만 증가 | `service`, `provider`, `modelName`, `modelVersion`, `result`, `deploymentVersion` | distinct attempt 기준. null을 0으로 만들지 않고 캐시·fallback 가상 토큰을 생성하지 않음 | 모델별 입력 토큰, 비용 원인 | 비용 예산 확정 후 결정 | `핵심 기능 구현 시` |
-| `ai.provider.output_tokens` | `finguardops_ai_provider_output_tokens_total` | 실제 출력 토큰 누적량 확인 | ProviderCallAttempt 영속 집계 계층 | Counter | 토큰 | attempt 종료 후 Provider가 확인한 출력 토큰이 있을 때 그 값만 증가 | `service`, `provider`, `modelName`, `modelVersion`, `result`, `deploymentVersion` | distinct attempt 기준. null을 0으로 만들지 않음 | 모델별 출력 토큰, 출력 제한 영향 | 비용 예산 확정 후 결정 | `핵심 기능 구현 시` |
-| `ai.provider.estimated_cost` | `finguardops_ai_provider_estimated_cost_total` | 실제 호출 사용량 기반 추정 비용 확인 | ProviderCallAttempt 영속 집계 계층 | Counter | `costCurrency`별 통화 금액 | attempt의 `estimatedCost`와 `costCurrency`가 확인될 때 해당 원통화 값만 증가 | `service`, `provider`, `modelName`, `modelVersion`, `costCurrency`, `result`, `deploymentVersion` | distinct attempt 기준. 서로 다른 통화는 별도 시계열이며 환율 없이 합산 금지. 추정값이며 실제 청구액 아님 | 모델·통화별 비용, 예산 추세 | 비용 예산 확정 후 결정 | `핵심 기능 구현 시` |
-| `ai.report.quality_validations` | `finguardops_ai_report_quality_validations_total` | 승인된 품질 검증 통과·실패 확인 | FastAPI 출력 검증 계층, 최종 결과는 Spring Boot 검증 | Counter | 품질 평가 건 | 승인된 품질 검증이 실제 수행되어 pass 또는 fail로 확정될 때 | `service`, `modelName`, `modelVersion`, `result`, `failureCategory`, `deploymentVersion` | 실제 검증 수행 결과 기준. 미정 기준은 `not_evaluated`로 성공 분모에 넣지 않음 | 모델·버전별 품질 통과율 | 기준과 목표는 품질 기준 확정 후 결정 | 품질 정책 확정 후 `핵심 기능 구현 시` |
+| `ai.report.requests.accepted` | `finguardops_ai_report_requests_accepted_total` | 새 외부 AiReportRequest 접수량 확인 | Spring Boot AI operations Service | Counter | 요청 건 | 새 `AiReportRequest`와 `aiRequestId`가 영속적으로 확정될 때 | `service`, `result`, `riskLevel`, `deploymentVersion` | 새 요청 행 기준. 같은 키 재전송은 제외 | 요청량, 상태별 유입 | 요청 급증은 기준선 측정 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `ai.report.executions.created` | `finguardops_ai_report_executions_created_total` | 신규 실제 실행 수 확인 | Spring Boot AI operations Service | Counter | 실행 건 | 새 `AiReportExecution`이 생성되고 최초 요청과 연결될 때 | `service`, `modelVersion`, `deploymentVersion` | distinct `executionId` 기준. 공유·캐시 요청은 제외 | 요청 수 대비 실행 수 | 실행 급증은 기준선 측정 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `ai.report.execution_shared_requests` | `finguardops_ai_report_execution_shared_requests_total` | 진행 중 실행을 공유한 외부 요청 수 확인 | Spring Boot AI operations Service | Counter | 요청 건 | 새 AiReportRequest가 기존 활성 실행에 연결될 때 | `service`, `modelVersion`, `deploymentVersion` | `executionShared=true`인 새 요청 기준. 동일 키 재전송 제외 | 동시 요청 흡수 효과, 실행 중복 방지 | 비정상 급증은 기준선 측정 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `ai.report.cache_hits` | `finguardops_ai_report_cache_hits_total` | 완료 리포트 정확 일치 재사용 수 확인 | Spring Boot AI operations Service | Counter | 요청 건 | 새 요청이 `cacheHit=true`, `executionId=null`로 종결될 때 | `service`, `modelVersion`, `result`, `deploymentVersion` | 새 AiReportRequest 기준. 캐시 원본 상태는 `result=completed` 또는 `fallback_completed` 후보 | 캐시 적중량과 적중률 | 적중률 급락은 기준선 측정 후 결정 | 논리 캐시는 `애플리케이션 내부 계측 미구현`, Redis 저장은 `향후 도입 시` |
+| `ai.report.execution_outcomes` | `finguardops_ai_report_execution_outcomes_total` | 정상 완료·fallback 완료·최종 실패 실행 수 확인 | Spring Boot AI operations Service | Counter | 실행 건 | 실행이 `COMPLETED`, `FALLBACK_COMPLETED`, `FAILED` 중 하나로 최초 종료될 때 | `service`, `result`, `modelVersion`, `failureCategory`, `fallbackType`, `deploymentVersion` | distinct `executionId`별 종료 상태 한 번. 연결 요청 수만큼 복제하지 않음 | 생성 완료, fallback, 실패 비율 | 실패·fallback 증가는 기준선 측정 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `ai.report.generated` | `finguardops_ai_reports_generated_total` | 사용 가능한 AiReport 결과 생성 수 확인 | Spring Boot AI operations Service | Counter | 리포트 건 | 검증된 `AiReport`가 `LLM` 또는 `TEMPLATE_FALLBACK` 출처로 저장될 때 | `service`, `result`, `modelVersion`, `fallbackType`, `deploymentVersion` | distinct `reportId` 기준. 캐시 재사용은 새 생성으로 계수하지 않음 | 실제 생성량과 출처 | 생성 급감·fallback 증가 확인 | `애플리케이션 내부 계측 미구현` |
+| `ai.report.fallbacks` | `finguardops_ai_report_fallbacks_total` | template fallback 결과와 원인 확인 | Spring Boot AI operations Service | Counter | fallback 완료 건 | 같은 실행 안에서 template 결과가 사용 가능해 `FALLBACK_COMPLETED`로 확정될 때 | `service`, `fallbackType`, `failureCategory`, `modelVersion`, `deploymentVersion` | distinct 실행당 최대 한 번. 공유 요청·캐시 요청 수만큼 복제하지 않음 | 원인별 fallback 실행 수 | 기준선 측정 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `ai.report.final_failures` | `finguardops_ai_report_final_failures_total` | LLM과 fallback이 모두 실패한 실행 확인 | Spring Boot AI operations Service | Counter | 실패 실행 건 | 실행이 최종 `FAILED`로 최초 확정될 때 | `service`, `failureCategory`, `modelVersion`, `deploymentVersion` | distinct 실행 기준. 기존 유효 리포트가 유지되어도 실패 실행은 계수 | 최종 실패율, 원인 분포 | 기준선 측정 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `ai.report.generation_duration` | `finguardops_ai_report_generation_duration_seconds` | 신규 실행의 실제 생성시간 확인 | Spring Boot AI operations Service | Histogram | 초 | `AiReportExecution.startedAt`부터 `COMPLETED`, `FALLBACK_COMPLETED`, `FAILED` 중 최초 종료 상태 확정 시각까지 | `service`, `result`, `modelVersion`, `fallbackType`, `deploymentVersion` | distinct 실행 단위. 실행 생성 후 시작 전 대기시간은 제외. 캐시 요청은 실행이 없어 제외하고 공유 요청의 개별 대기시간은 request duration에서만 관측 | 전체 생성 p95 후보, 정상·fallback 비교 | 임계값은 부하 테스트 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `ai.report.request_duration` | `finguardops_ai_report_request_duration_seconds` | 외부 요청 접수부터 요청 종료까지의 사용자 경험 확인 | Spring Boot AI operations Service | Histogram | 초 | 각 새 AiReportRequest가 종료될 때 | `service`, `result`, `modelVersion`, `deploymentVersion` | 요청 단위. 공유 요청은 자신의 대기시간을 한 번 관측하고 비용은 복제하지 않음. 캐시는 즉시 종료시간 관측 가능 | 신규·공유·캐시 요청 대기 비교 | 임계값은 부하 테스트 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `ai.provider.calls_started` | `finguardops_ai_provider_calls_started_total` | 실제 외부 Provider 네트워크 호출 시작 수 확인 | FastAPI Provider client 경계 | Counter | 호출 시도 건 | FastAPI Provider client가 실제 외부 Provider 호출을 시작할 때 | `service`, `provider`, `modelName`, `modelVersion`, `deploymentVersion` | 실제 네트워크 호출 시도 기준. 시작 시점에는 결과와 실패 원인을 알 수 없으므로 `result`, `failureCategory`를 사용하지 않음. template fallback과 Provider 호출 전 FastAPI 실패는 제외 | 시작 수, 미완료 호출 조사 | 결과 수와 차이는 기준선 측정 후 조사 | `애플리케이션 내부 계측 미구현` |
+| `ai.provider.call_outcomes` | `finguardops_ai_provider_call_outcomes_total` | 실제 Provider 호출의 성공·실패·Timeout 결과 확인 | FastAPI Provider client 경계 | Counter | 호출 결과 건 | 실제 외부 Provider 호출이 성공, 실패 또는 Timeout으로 종료될 때 | `service`, `provider`, `modelName`, `modelVersion`, `result`, `failureCategory`, `deploymentVersion` | 호출 결과가 확정된 실제 attempt 기준. FastAPI 기술 Counter로 한 번만 증가시키며 Spring Boot의 ProviderCallAttempt 영속 시 같은 메트릭을 다시 증가시키지 않음 | Provider·모델별 완료·실패와 시작 대비 결과 수 | 실패율과 미완료 차이는 기준선 측정 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `ai.provider.duration` | `finguardops_ai_provider_call_duration_seconds` | 실제 Provider 호출 지연시간 확인 | FastAPI Provider client 경계 | Histogram | 초 | Provider 요청 시작부터 성공·실패·Timeout 결과 확정까지 | `service`, `provider`, `modelName`, `modelVersion`, `result`, `failureCategory`, `deploymentVersion` | 실제 호출 결과가 확인된 attempt에 대해 한 번만 관측. 결과가 확인되지 않은 미완료 호출에는 관측값을 만들지 않음 | Provider·모델별 p95·p99 후보 | 임계값은 부하 테스트 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `ai.provider.input_tokens` | `finguardops_ai_provider_input_tokens_total` | 실제 입력 토큰 누적량 확인 | ProviderCallAttempt 영속 집계 계층 | Counter | 토큰 | attempt 종료 후 Provider가 확인한 입력 토큰이 있을 때 그 값만 증가 | `service`, `provider`, `modelName`, `modelVersion`, `result`, `deploymentVersion` | distinct attempt 기준. null을 0으로 만들지 않고 캐시·fallback 가상 토큰을 생성하지 않음 | 모델별 입력 토큰, 비용 원인 | 비용 예산 확정 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `ai.provider.output_tokens` | `finguardops_ai_provider_output_tokens_total` | 실제 출력 토큰 누적량 확인 | ProviderCallAttempt 영속 집계 계층 | Counter | 토큰 | attempt 종료 후 Provider가 확인한 출력 토큰이 있을 때 그 값만 증가 | `service`, `provider`, `modelName`, `modelVersion`, `result`, `deploymentVersion` | distinct attempt 기준. null을 0으로 만들지 않음 | 모델별 출력 토큰, 출력 제한 영향 | 비용 예산 확정 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `ai.provider.estimated_cost` | `finguardops_ai_provider_estimated_cost_total` | 실제 호출 사용량 기반 추정 비용 확인 | ProviderCallAttempt 영속 집계 계층 | Counter | `costCurrency`별 통화 금액 | attempt의 `estimatedCost`와 `costCurrency`가 확인될 때 해당 원통화 값만 증가 | `service`, `provider`, `modelName`, `modelVersion`, `costCurrency`, `result`, `deploymentVersion` | distinct attempt 기준. 서로 다른 통화는 별도 시계열이며 환율 없이 합산 금지. 추정값이며 실제 청구액 아님 | 모델·통화별 비용, 예산 추세 | 비용 예산 확정 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `ai.report.quality_validations` | `finguardops_ai_report_quality_validations_total` | 승인된 품질 검증 통과·실패 확인 | FastAPI 출력 검증 계층, 최종 결과는 Spring Boot 검증 | Counter | 품질 평가 건 | 승인된 품질 검증이 실제 수행되어 pass 또는 fail로 확정될 때 | `service`, `modelName`, `modelVersion`, `result`, `failureCategory`, `deploymentVersion` | 실제 검증 수행 결과 기준. 미정 기준은 `not_evaluated`로 성공 분모에 넣지 않음 | 모델·버전별 품질 통과율 | 기준과 목표는 품질 기준 확정 후 결정 | 품질 정책 확정 후 `애플리케이션 내부 계측 미구현` |
 
 Provider 호출 계측 경계에는 다음 원칙을 적용한다.
 
@@ -293,14 +323,14 @@ FinOps 파생 Gauge는 애플리케이션이 직접 누적하거나 현재값을
 
 | 논리 이름 | 구현 후보 | 목적 | 수집 주체 | 유형 | 단위 | 증가·관측 시점 | 허용 라벨 | 집계 기준 | 대시보드 활용 | 알림 활용 | 적용 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `finops.provider_calls_per_1000_transactions` | `finguardops_ai_provider_calls_per_1000_transactions` | 거래량 대비 실제 LLM 호출 정책 확인 | 운영 집계 계층 | Gauge | 거래 1,000건당 attempt 건 | 선택 시간 구간 조회 시 계산 | `provider`, `modelName`, `modelVersion`, `deploymentVersion` 후보 | `distinct ProviderCallAttempt 수 / 최초 접수 Transaction 수 × 1000`. 분모 0이면 값 없음 | 호출 정책·재시도 영향 | 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `finops.estimated_ai_cost_per_1000_transactions` | `finguardops_ai_estimated_cost_per_1000_transactions` | 거래량 대비 예상 AI 비용 확인 | 운영 집계 계층 | Gauge | `costCurrency`별 통화 금액/1,000거래 | 선택 시간 구간 조회 시 계산 | `provider`, `modelName`, `modelVersion`, `costCurrency`, `deploymentVersion` 후보 | `distinct attempts의 통화별 비용 합 / 최초 접수 Transaction 수 × 1000`. 환율 없이 통화별 분리 | 비용 효율과 트래픽 영향 | 비용 예산 확정 후 결정 | `핵심 기능 구현 시` |
-| `finops.estimated_ai_cost_per_case` | `finguardops_ai_estimated_cost_per_case` | 사건당 실제 AI 실행 비용 확인 | 운영 집계 계층 | Gauge | `costCurrency`별 통화 금액/사건 | 선택 시간 구간 조회 시 계산 | `provider`, `modelName`, `modelVersion`, `costCurrency` 후보 | 구간 내 attempts의 통화별 비용 합 / AI 실행과 연결된 distinct 사건 수. 공유 요청 비용 복제 금지 | 사건 복잡도·모델별 비용 비교 | 비용 예산 확정 후 결정 | `핵심 기능 구현 시` |
-| `finops.model_call_ratio` | `finguardops_ai_model_call_ratio` | 실제 Provider 호출의 모델별 비율 확인 | 운영 집계 계층 | Gauge | 비율 0~1 | 선택 시간 구간 조회 시 계산 | `provider`, `modelName`, `modelVersion` | 해당 모델 distinct attempts / 전체 distinct attempts | 라우팅 쏠림과 모델 전환 확인 | 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `finops.cache_hit_ratio` | `finguardops_ai_report_cache_hit_ratio` | 외부 AI 요청 중 완료 결과 재사용 비율 확인 | 운영 집계 계층 | Gauge | 비율 0~1 | 선택 시간 구간 조회 시 계산 | `modelVersion`, `deploymentVersion` 후보 | `cacheHit=true인 새 AiReportRequest / 새 AiReportRequest`. 동일 키 재전송 제외 | 정확 일치 캐시 효과와 원본 호출 변화 | 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `finops.fallback_execution_ratio` | `finguardops_ai_report_fallback_execution_ratio` | 실제 실행 중 template fallback 결과 비율 확인 | 운영 집계 계층 | Gauge | 비율 0~1 | 선택 시간 구간 조회 시 계산 | `modelVersion`, `failureCategory`, `fallbackType`, `deploymentVersion` 후보 | `FALLBACK_COMPLETED distinct executions / 종료된 distinct executions`. 공유·캐시 요청을 분모·분자에 복제하지 않음 | Provider·품질 장애와 fallback 의존도 | 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `finops.report_quality_pass_ratio` | `finguardops_ai_report_quality_pass_ratio` | 승인된 리포트 품질 기준 통과율 확인 | 운영 집계 계층 | Gauge | 비율 0~1 | 선택 시간 구간 조회 시 계산 | `modelName`, `modelVersion`, `deploymentVersion` | `pass 품질 평가 / 실제 완료된 품질 평가`. 미평가 결과 제외 | Cost·Latency·Quality 동시 비교 | 품질 기준과 기준선 확정 후 결정 | 품질 정책 확정 후 `핵심 기능 구현 시` |
-| `finops.estimated_cost_by_currency` | `finguardops_ai_provider_estimated_cost_total`의 통화별 increase | 환율 없이 통화별 예상 비용 합계 확인 | 운영 집계 계층 | Gauge | `costCurrency`별 통화 금액 | 선택 시간 구간 조회 시 계산 | `provider`, `modelName`, `modelVersion`, `costCurrency` | distinct attempts의 확인된 비용만 통화별 합산. 일부 attempt 비용이 미측정이면 완전·불완전 집계를 구분 | USD·KRW 등 통화별 비용 표 | 비용 예산 확정 후 결정 | `핵심 기능 구현 시` |
+| `finops.provider_calls_per_1000_transactions` | `finguardops_ai_provider_calls_per_1000_transactions` | 거래량 대비 실제 LLM 호출 정책 확인 | 운영 집계 계층 | Gauge | 거래 1,000건당 attempt 건 | 선택 시간 구간 조회 시 계산 | `provider`, `modelName`, `modelVersion`, `deploymentVersion` 후보 | `distinct ProviderCallAttempt 수 / 최초 접수 Transaction 수 × 1000`. 분모 0이면 값 없음 | 호출 정책·재시도 영향 | 기준선 측정 후 결정 | `활용 계층 미구현` |
+| `finops.estimated_ai_cost_per_1000_transactions` | `finguardops_ai_estimated_cost_per_1000_transactions` | 거래량 대비 예상 AI 비용 확인 | 운영 집계 계층 | Gauge | `costCurrency`별 통화 금액/1,000거래 | 선택 시간 구간 조회 시 계산 | `provider`, `modelName`, `modelVersion`, `costCurrency`, `deploymentVersion` 후보 | `distinct attempts의 통화별 비용 합 / 최초 접수 Transaction 수 × 1000`. 환율 없이 통화별 분리 | 비용 효율과 트래픽 영향 | 비용 예산 확정 후 결정 | `활용 계층 미구현` |
+| `finops.estimated_ai_cost_per_case` | `finguardops_ai_estimated_cost_per_case` | 사건당 실제 AI 실행 비용 확인 | 운영 집계 계층 | Gauge | `costCurrency`별 통화 금액/사건 | 선택 시간 구간 조회 시 계산 | `provider`, `modelName`, `modelVersion`, `costCurrency` 후보 | 구간 내 attempts의 통화별 비용 합 / AI 실행과 연결된 distinct 사건 수. 공유 요청 비용 복제 금지 | 사건 복잡도·모델별 비용 비교 | 비용 예산 확정 후 결정 | `활용 계층 미구현` |
+| `finops.model_call_ratio` | `finguardops_ai_model_call_ratio` | 실제 Provider 호출의 모델별 비율 확인 | 운영 집계 계층 | Gauge | 비율 0~1 | 선택 시간 구간 조회 시 계산 | `provider`, `modelName`, `modelVersion` | 해당 모델 distinct attempts / 전체 distinct attempts | 라우팅 쏠림과 모델 전환 확인 | 기준선 측정 후 결정 | `활용 계층 미구현` |
+| `finops.cache_hit_ratio` | `finguardops_ai_report_cache_hit_ratio` | 외부 AI 요청 중 완료 결과 재사용 비율 확인 | 운영 집계 계층 | Gauge | 비율 0~1 | 선택 시간 구간 조회 시 계산 | `modelVersion`, `deploymentVersion` 후보 | `cacheHit=true인 새 AiReportRequest / 새 AiReportRequest`. 동일 키 재전송 제외 | 정확 일치 캐시 효과와 원본 호출 변화 | 기준선 측정 후 결정 | `활용 계층 미구현` |
+| `finops.fallback_execution_ratio` | `finguardops_ai_report_fallback_execution_ratio` | 실제 실행 중 template fallback 결과 비율 확인 | 운영 집계 계층 | Gauge | 비율 0~1 | 선택 시간 구간 조회 시 계산 | `modelVersion`, `failureCategory`, `fallbackType`, `deploymentVersion` 후보 | `FALLBACK_COMPLETED distinct executions / 종료된 distinct executions`. 공유·캐시 요청을 분모·분자에 복제하지 않음 | Provider·품질 장애와 fallback 의존도 | 기준선 측정 후 결정 | `활용 계층 미구현` |
+| `finops.report_quality_pass_ratio` | `finguardops_ai_report_quality_pass_ratio` | 승인된 리포트 품질 기준 통과율 확인 | 운영 집계 계층 | Gauge | 비율 0~1 | 선택 시간 구간 조회 시 계산 | `modelName`, `modelVersion`, `deploymentVersion` | `pass 품질 평가 / 실제 완료된 품질 평가`. 미평가 결과 제외 | Cost·Latency·Quality 동시 비교 | 품질 기준과 기준선 확정 후 결정 | 품질 정책 확정 후 `활용 계층 미구현` |
+| `finops.estimated_cost_by_currency` | `finguardops_ai_provider_estimated_cost_total`의 통화별 increase | 환율 없이 통화별 예상 비용 합계 확인 | 운영 집계 계층 | Gauge | `costCurrency`별 통화 금액 | 선택 시간 구간 조회 시 계산 | `provider`, `modelName`, `modelVersion`, `costCurrency` | distinct attempts의 확인된 비용만 통화별 합산. 일부 attempt 비용이 미측정이면 완전·불완전 집계를 구분 | USD·KRW 등 통화별 비용 표 | 비용 예산 확정 후 결정 | `활용 계층 미구현` |
 
 ### 9.1 비용 완전성
 
@@ -317,14 +347,14 @@ FinOps 파생 Gauge는 애플리케이션이 직접 누적하거나 현재값을
 
 | 논리 이름 | 구현 후보 | 목적 | 수집 주체 | 유형 | 단위 | 증가·관측 시점 | 허용 라벨 | 집계 기준 | 대시보드 활용 | 알림 활용 | 적용 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `postgres.pool.active` | `finguardops_db_pool_active_connections` | 현재 사용 중인 DB 연결 수 확인 | Spring Boot DB Pool 계층 | Gauge | 연결 수 | Pool 상태 수집 시 | `service`, `deploymentVersion` | 인스턴스별 원본을 서비스 합계·최댓값으로 구분 | Pool 사용량과 포화 추세 | 임계값은 부하 테스트 후 결정 | PostgreSQL 연동 시 `핵심 기능 구현 시` |
-| `postgres.pool.idle` | `finguardops_db_pool_idle_connections` | 즉시 사용 가능한 유휴 연결 수 확인 | Spring Boot DB Pool 계층 | Gauge | 연결 수 | Pool 상태 수집 시 | `service`, `deploymentVersion` | active와 같은 Pool 범위 | 가용 연결과 설정 검토 | 임계값은 부하 테스트 후 결정 | PostgreSQL 연동 시 `핵심 기능 구현 시` |
-| `postgres.pool.pending` | `finguardops_db_pool_pending_requests` | 연결 획득 대기 요청 수 확인 | Spring Boot DB Pool 계층 | Gauge | 대기 요청 수 | Pool 상태 수집 시 | `service`, `deploymentVersion` | 현재 대기 수. 누적 요청 Counter가 아님 | Pool 고갈 조기 징후 | 임계값은 부하 테스트 후 결정 | PostgreSQL 연동 시 `핵심 기능 구현 시` |
-| `postgres.pool.max` | `finguardops_db_pool_max_connections` | Pool 최대 크기와 사용률 계산 | Spring Boot DB Pool 설정·상태 계층 | Gauge | 연결 수 | 설정 로드·변경 또는 상태 수집 시 | `service`, `deploymentVersion` | Pool별 설정값. Secret과 접속 정보 제외 | active/max, pending과 함께 표시 | 설정 불일치 확인. 수치는 부하 테스트 후 결정 | PostgreSQL 연동 시 `핵심 기능 구현 시` |
-| `postgres.connection.acquire_duration` | `finguardops_db_connection_acquire_duration_seconds` | DB 연결 획득 지연 확인 | Spring Boot DB Pool 계층 | Histogram | 초 | 연결 요청부터 획득·Timeout까지 | `service`, `result`, `failureCategory`, `deploymentVersion` | 연결 획득 시도 단위 | Pool 병목과 API 지연 상관관계 | 임계값은 부하 테스트 후 결정 | PostgreSQL 연동 시 `핵심 기능 구현 시` |
-| `postgres.connection.timeouts` | `finguardops_db_connection_timeouts_total` | 연결 획득 Timeout 확인 | Spring Boot DB Pool 계층 | Counter | Timeout 건 | 연결 획득이 Timeout으로 종료될 때 | `service`, `failureCategory`, `deploymentVersion` | 실제 획득 Timeout별 한 번 | Pool 고갈·DB 장애 | 기준선 및 부하 테스트 후 결정 | PostgreSQL 연동 시 `핵심 기능 구현 시` |
-| `postgres.query.duration` | `finguardops_db_query_duration_seconds` | DB 작업 지연 분포 확인 | Spring Boot 데이터 접근 경계 | Histogram | 초 | 승인된 DB 작업 시작부터 성공·실패 종료까지 | `service`, `result`, `deploymentVersion` | SQL 원문·파라미터를 라벨로 사용하지 않음. 세부 원인은 trace·로그에서 확인 | DB 지연과 API 지연 비교 | 느린 쿼리 기준은 부하 테스트 후 결정 | PostgreSQL 연동 시 `핵심 기능 구현 시` |
-| `postgres.errors` | `finguardops_db_errors_total` | DB 연결·쿼리·트랜잭션 오류 확인 | Spring Boot 데이터 접근 경계 | Counter | 오류 건 | DB 작업 오류가 안전한 범주로 확정될 때 | `service`, `result`, `failureCategory`, `deploymentVersion` | 오류 원문·SQLState 전체를 라벨로 쓰지 않고 제한 분류 사용 | 오류 유형과 업무 영향 확인 | 기준선 측정 후 결정 | PostgreSQL 연동 시 `핵심 기능 구현 시` |
+| `postgres.pool.active` | `finguardops_db_pool_active_connections` | 현재 사용 중인 DB 연결 수 확인 | Spring Boot DB Pool 계층 | Gauge | 연결 수 | Pool 상태 수집 시 | `service`, `deploymentVersion` | 인스턴스별 원본을 서비스 합계·최댓값으로 구분 | Pool 사용량과 포화 추세 | 임계값은 부하 테스트 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `postgres.pool.idle` | `finguardops_db_pool_idle_connections` | 즉시 사용 가능한 유휴 연결 수 확인 | Spring Boot DB Pool 계층 | Gauge | 연결 수 | Pool 상태 수집 시 | `service`, `deploymentVersion` | active와 같은 Pool 범위 | 가용 연결과 설정 검토 | 임계값은 부하 테스트 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `postgres.pool.pending` | `finguardops_db_pool_pending_requests` | 연결 획득 대기 요청 수 확인 | Spring Boot DB Pool 계층 | Gauge | 대기 요청 수 | Pool 상태 수집 시 | `service`, `deploymentVersion` | 현재 대기 수. 누적 요청 Counter가 아님 | Pool 고갈 조기 징후 | 임계값은 부하 테스트 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `postgres.pool.max` | `finguardops_db_pool_max_connections` | Pool 최대 크기와 사용률 계산 | Spring Boot DB Pool 설정·상태 계층 | Gauge | 연결 수 | 설정 로드·변경 또는 상태 수집 시 | `service`, `deploymentVersion` | Pool별 설정값. Secret과 접속 정보 제외 | active/max, pending과 함께 표시 | 설정 불일치 확인. 수치는 부하 테스트 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `postgres.connection.acquire_duration` | `finguardops_db_connection_acquire_duration_seconds` | DB 연결 획득 지연 확인 | Spring Boot DB Pool 계층 | Histogram | 초 | 연결 요청부터 획득·Timeout까지 | `service`, `result`, `failureCategory`, `deploymentVersion` | 연결 획득 시도 단위 | Pool 병목과 API 지연 상관관계 | 임계값은 부하 테스트 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `postgres.connection.timeouts` | `finguardops_db_connection_timeouts_total` | 연결 획득 Timeout 확인 | Spring Boot DB Pool 계층 | Counter | Timeout 건 | 연결 획득이 Timeout으로 종료될 때 | `service`, `failureCategory`, `deploymentVersion` | 실제 획득 Timeout별 한 번 | Pool 고갈·DB 장애 | 기준선 및 부하 테스트 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `postgres.query.duration` | `finguardops_db_query_duration_seconds` | DB 작업 지연 분포 확인 | Spring Boot 데이터 접근 경계 | Histogram | 초 | 승인된 DB 작업 시작부터 성공·실패 종료까지 | `service`, `result`, `deploymentVersion` | SQL 원문·파라미터를 라벨로 사용하지 않음. 세부 원인은 trace·로그에서 확인 | DB 지연과 API 지연 비교 | 느린 쿼리 기준은 부하 테스트 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `postgres.errors` | `finguardops_db_errors_total` | DB 연결·쿼리·트랜잭션 오류 확인 | Spring Boot 데이터 접근 경계 | Counter | 오류 건 | DB 작업 오류가 안전한 범주로 확정될 때 | `service`, `result`, `failureCategory`, `deploymentVersion` | 오류 원문·SQLState 전체를 라벨로 쓰지 않고 제한 분류 사용 | 오류 유형과 업무 영향 확인 | 기준선 측정 후 결정 | `애플리케이션 내부 계측 미구현` |
 
 DB 쿼리 원문, 테이블 키, 고객·거래·사건 식별자를 메트릭에 기록하지 않는다. 느린 쿼리의 구체적인 SQL과 실행 문맥은 접근 통제된 로그 또는 trace에서 확인한다.
 
@@ -332,9 +362,9 @@ DB 쿼리 원문, 테이블 키, 고객·거래·사건 식별자를 메트릭�
 
 | 논리 이름 | 구현 후보 | 목적 | 수집 주체 | 유형 | 단위 | 증가·관측 시점 | 허용 라벨 | 집계 기준 | 대시보드 활용 | 알림 활용 | 적용 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `deployment.version.info` | `finguardops_deployment_info` | 실행 중인 서비스와 배포 버전 식별 | 각 애플리케이션 | Gauge | 0 또는 1 | 프로세스 시작·종료 또는 배포 상태 수집 시 | `service`, `deploymentVersion` | 실행 중 버전은 1. 인스턴스 수를 표현하는 지표로 사용하지 않음 | 현재 버전, 버전 공존 확인 | 승인되지 않은 버전 공존은 배포 정책 확정 후 결정 | Spring Health는 `현재 최소 범위`, 나머지는 해당 기능 구현 시 |
-| `deployment.error_ratio` | HTTP·업무 Counter에서 파생 | 버전별 오류 회귀 확인 | 운영 집계 계층 | Gauge | 비율 0~1 | 선택 시간 구간 조회 시 계산 | `service`, `route`, `deploymentVersion` | 동일 route·부하 조건에서 오류 응답/전체 응답 | 배포 전후 오류율 비교 | 기준선 측정 후 결정 | 해당 서비스 계측 시 |
-| `deployment.latency` | HTTP·분석 Histogram에서 파생 | 버전별 지연 회귀 확인 | 운영 집계 계층 | Gauge | 초 | 선택 시간 구간의 백분위 계산 | `service`, `route`, `deploymentVersion` | 동일 route·시간대·처리량 조건 비교 | 배포 전후 p95·p99 후보 | 임계값은 부하 테스트 후 결정 | 해당 서비스 계측 시 |
+| `deployment.version.info` | `finguardops_deployment_info` | 실행 중인 서비스와 배포 버전 식별 | 각 애플리케이션 | Gauge | 0 또는 1 | 프로세스 시작·종료 또는 배포 상태 수집 시 | `service`, `deploymentVersion` | 실행 중 버전은 1. 인스턴스 수를 표현하는 지표로 사용하지 않음 | 현재 버전, 버전 공존 확인 | 승인되지 않은 버전 공존은 배포 정책 확정 후 결정 | `애플리케이션 내부 계측 미구현` |
+| `deployment.error_ratio` | HTTP·업무 Counter에서 파생 | 버전별 오류 회귀 확인 | 운영 집계 계층 | Gauge | 비율 0~1 | 선택 시간 구간 조회 시 계산 | `service`, `route`, `deploymentVersion` | 동일 route·부하 조건에서 오류 응답/전체 응답 | 배포 전후 오류율 비교 | 기준선 측정 후 결정 | `활용 계층 미구현` |
+| `deployment.latency` | HTTP·분석 Histogram에서 파생 | 버전별 지연 회귀 확인 | 운영 집계 계층 | Gauge | 초 | 선택 시간 구간의 백분위 계산 | `service`, `route`, `deploymentVersion` | 동일 route·시간대·처리량 조건 비교 | 배포 전후 p95·p99 후보 | 임계값은 부하 테스트 후 결정 | `활용 계층 미구현` |
 
 배포 버전별 비교는 `deploymentVersion`만 보고 단정하지 않고 같은 route, 트래픽, 모델·Rule 버전과 시간 구간을 함께 확인한다.
 
@@ -454,11 +484,15 @@ React 관리자 화면은 업무 영향과 조치 요약에 집중하고 Grafana
 
 구현 전 정합성 정비에서 AI 조회 순서, 요청·실행 식별자, 자동 재시도, 무실행 캐시와 사건 담당자·종료 조건을 API·ERD·상태 전이·이벤트·아키텍처 문서와 통일했다. 다음은 아직 사용자 결정이 필요한 문서 차이이다.
 
+관측 구현 상태는 3.1절과 같이 애플리케이션 내부 계측, 운영 수집·노출,
+활용 계층으로 구분한다. 첫 계층에서만 Issue #186 Meter 10개가 구현되었고,
+나머지 두 계층은 미구현이다.
+
 | 항목 | 문서별 표현 | 메트릭 명세의 처리 |
 | --- | --- | --- |
 | 도메인 `eventId` 명명 | API 공통 규칙은 행동 이벤트 식별자로, 시스템·운영 문서는 향후 Kafka 이벤트 식별자로 사용 | 어떤 `eventId`도 메트릭 라벨에 사용하지 않는다. 로그·이벤트 물리 명명은 후속 결정 |
 | External Risk 실패 관측 | 성공은 match 기반 `MATCHED` 또는 `UNMATCHED`. timeout·unavailable·invalid response는 분석을 중단하고 typed failure로 전파 | Issue #186 meter는 성공 결과와 6개 typed failure category를 구분한다. cache hit·stale data·fallback meter는 현재 계약이 아님 |
-| FastAPI Timeout 거래 처리 | 상태 전이·운영 요구사항은 정책 `TBD`, 거래 API는 초기 권장으로 Transaction `FAILED`와 `503` | 실제 Spring Boot가 확정한 결과만 거래 결과로 계수. Timeout 자체는 client 실패 Counter로 별도 계수 |
+| FastAPI Timeout 거래 처리 | 상태 전이·운영 요구사항은 정책 `TBD`, 거래 API는 초기 권장으로 Transaction `FAILED`와 `503` | 실제 Spring Boot가 확정한 결과만 거래 결과로 계수. Timeout 자체는 향후 client 실패 Counter로 별도 계수하는 계약 |
 
 Validation 거절은 public intake outcome Counter에 `validation_rejected`로 포함한다.
 Validation 전에 Transaction과 IdempotencyRecord가 생성되지 않으므로 received Counter에는
@@ -472,11 +506,11 @@ Breaker가 없다. 따라서 이를 현재 구현 metric이나 성공 결과로 
 
 ## 17. 사용자 결정 필요 사항
 
-이미 확정된 요청·실행 분리, 정확 일치 네 요소, 진행 중 실행 공유, 캐시 무실행, `FAILED` 이후 새 키 요청, ProviderCallAttempt 비용 원본과 Kafka 단계적 도입은 다시 결정 사항으로 올리지 않는다.
+이미 확정된 요청·실행 분리, 정확 일치 네 요소, 진행 중 실행 공유, 캐시 무실행, `FAILED` 이후 새 키 요청, ProviderCallAttempt 비용 원본과 Kafka 단계적 도입은 다시 결정 사항으로 올리지 않는다. Issue #186에서 구현된 10개 Meter의 이름·type·tag key·현재 사용 중인 tag value enum도 아래 결정 대상에서 제외한다. 물리 이름 체계와 `failureCategory` 공통 Enum 결정은 Issue #186 범위 밖에서 향후 추가할 Meter와 아직 구현되지 않은 서비스에만 적용한다.
 
 | 결정 항목 | 선택 가능한 안 | 권장안 | 권장 이유 | 구현·데이터 모델 영향 | 차단 여부 |
 | --- | --- | --- | --- | --- | --- |
-| 물리 메트릭 이름 체계 | A. 프레임워크 기본 이름 / B. `finguardops_` 전용 이름 / C. 기본 이름+업무 메트릭만 전용 | C | 표준 HTTP·runtime 계측을 재사용하면서 업무 메트릭 의미를 명확히 하고 중복 계측을 줄임 | Meter 등록 이름, recording rule, dashboard query에 영향 | 현재 문서 비차단, 계측 구현 전 결정 |
+| 물리 메트릭 이름 체계 | A. 프레임워크 기본 이름 / B. `finguardops_` 전용 이름 / C. 기본 이름+업무 메트릭만 전용 | C | 표준 HTTP·runtime 계측을 재사용하면서 업무 메트릭 의미를 명확히 하고 중복 계측을 줄임 | Meter 등록 이름, recording rule, dashboard query에 영향 | Issue #186 범위 밖의 향후 Meter·미구현 서비스 계측 전 결정 |
 | HTTP route 라벨명 | A. `endpoint` / B. `route` / C. 둘 다 | B | route template 의미가 명확하고 중복 차원을 피함 | Spring·FastAPI 공통 라벨 변환과 dashboard query에 영향 | 계측 구현 전 결정 |
 | 비용 통화 라벨명 | A. `currency` / B. `costCurrency` | B | AI API와 ProviderCallAttempt의 필드 의미를 그대로 유지하기 쉬움 | 비용 meter와 recording rule 이름에 영향. DB 모델 변경은 없음 | 계측 구현 전 결정 |
 | Histogram bucket과 목표 백분위 | A. 프레임워크 기본 / B. 서비스 공통 / C. API·Rule·ML·DB·Provider별 부하 테스트 기반 | C | 단계별 지연 분포가 크게 다르므로 실제 측정 근거를 반영할 수 있음 | 시계열 수, 메모리·보존 비용과 dashboard 정밀도에 영향 | Histogram 구현 전 결정 |
@@ -485,7 +519,7 @@ Breaker가 없다. 따라서 이를 현재 구현 metric이나 성공 결과로 
 | FinOps 시간 귀속 | A. 요청 접수 시각 / B. execution 생성 시각 / C. ProviderCallAttempt 시작 시각 | C | 비용 원본 발생 시점과 일치하고 긴 실행·재시도의 실제 비용 시점을 보존 | 집계 query와 기간 경계에 영향. 업무 Entity 변경은 없음 | FinOps dashboard 구현 전 결정 |
 | 사건당 비용의 분모 | A. 기간 내 전체 사건 / B. 기간 내 AI 요청 사건 / C. 기간 내 Provider attempt가 있는 distinct 사건 | C | 실제 비용 발생 사건을 분모로 사용해 캐시·미요청 사건이 평균을 왜곡하지 않음 | 집계 query와 화면 설명에 영향 | FinOps dashboard 구현 전 결정 |
 | AI 품질 통과 기준 | A. 구조 검증만 / B. 구조+필수 내용 규칙 / C. B+담당자 평가 표본 | C | 자동 검증과 실제 조사 유용성을 분리해 Cost·Latency·Quality를 비교 가능 | 품질 평가 데이터, 권한, 보존과 metric 분모에 영향 | 품질 지표·알림 구현 전 결정 |
-| failureCategory 공통 Enum | A. 서비스별 자유 값 / B. 전역 제한 Enum / C. 공통 상위 Enum+서비스별 내부 코드 | C | dashboard 집계 안정성과 상세 진단을 함께 확보 | 로그 매핑, API failureCode와 meter label에 영향 | 계측 구현 전 결정 |
+| failureCategory 공통 Enum | A. 서비스별 자유 값 / B. 전역 제한 Enum / C. 공통 상위 Enum+서비스별 내부 코드 | C | dashboard 집계 안정성과 상세 진단을 함께 확보 | 로그 매핑, API failureCode와 meter label에 영향 | Issue #186의 현재 Enum은 유지하고 범위 밖 향후 Meter·미구현 서비스 공통화 전 결정 |
 | deploymentVersion 원본 | A. 수동 환경 변수 / B. 빌드 산출물 버전 / C. CI/CD 배포 record | 초기 B, CI/CD 도입 후 C | 현재 단계에서 재현 가능하고 향후 배포 감사와 연결 가능 | 빌드 정보 노출, 배포 pipeline과 dashboard에 영향 | 배포 비교 구현 전 결정 |
 | Kafka 운영 라벨 | A. `topic`만 / B. `topic+consumerGroup` / C. partition까지 상시 노출 | B | 책임 흐름과 Consumer 적체를 구분하면서 partition 곱집합을 제한 | Kafka exporter·recording rule과 시계열 수에 영향 | Kafka 도입 전 결정 |
 | Kubernetes 인스턴스 라벨 보존 | A. pod/container 원본 장기 보존 / B. 단기 원본+service/workload 집계 장기 / C. 집계만 | B | 장애 순간 진단과 장기 카디널리티 통제를 함께 만족 | 수집·recording rule·보존 비용에 영향 | Kubernetes 도입 전 결정 |
@@ -513,7 +547,9 @@ Breaker가 없다. 따라서 이를 현재 구현 metric이나 성공 결과로 
 - [ ] FinOps 파생 Gauge를 애플리케이션 원본 Gauge로 중복 발행하지 않고 시간 구간과 분모 0 처리를 명시했는가
 - [ ] route는 실제 path가 아닌 route template을 사용하는가
 - [ ] 오류 메시지, Prompt와 Provider 응답 원문이 라벨·로그·trace에 포함되지 않는가
-- [ ] 현재 최소 범위, 핵심 기능 구현 시와 향후 도입 시를 구분했는가
+- [ ] 애플리케이션 내부 계측, 운영 수집·노출, 활용 계층을 구분했는가
+- [ ] 내부 계측 구현을 Issue #186 Meter 10개로만 한정하고 나머지 Meter를 미구현으로 표시했는가
+- [ ] 일반 HTTP framework metric을 Issue #186 custom intake Meter와 혼합하거나 production 수집 중으로 표현하지 않았는가
 - [ ] Redis, Kafka, Kubernetes와 AWS를 현재 구현·수집 중인 것으로 표현하지 않았는가
 - [ ] 알림 임계값을 기준선·부하 테스트·비용 예산 근거 없이 확정하지 않았는가
 - [ ] 이미 통일한 계약을 다시 충돌로 기록하지 않고, 남은 문서 차이와 사용자 결정 사항만 미확정으로 유지하는가
