@@ -206,9 +206,11 @@ transaction에서 성공 Snapshot v2와 Idempotency `COMPLETED`를 확정해 HTT
 Provider·Rule·최종화를 다시 호출하지 않습니다.
 
 장기 `IN_PROGRESS` bounded 후보 조회, typed 상태 판정, 확정된 Snapshot v2 완료
-간극의 단건 복구와 별도 append-only 운영 복구 감사 경계가 구현되었습니다. 실제
-one-shot Runner·CLI, scheduler·batch, 자동 retry·fallback·cache, 운영 credential
-실제 배포와 신규 metric·alert·dashboard는 아직 구현되지 않았습니다. 기존 Rule 분석
+간극의 단건 복구, 별도 append-only 운영 복구 감사와 제한된 non-web one-shot
+Runner·CLI가 구현되었습니다. 실행 절차는
+[`Idempotency 복구 one-shot runbook`](docs/09-deployment/idempotency-recovery-one-shot-runbook.md)을
+따릅니다. scheduler·batch, 자동 retry·fallback·cache, 운영 credential 실제 배포,
+USER 인증·인가와 신규 metric·alert·dashboard는 아직 구현되지 않았습니다. 기존 Rule 분석
 v1은 당장 제거하지 않으며 Rule v1 기본
 RuleVersion 집합의 제한된 local/dev/test one-shot 발행 경계만 제공하고 공개 관리
 API나 정상 시작 자동 발행은 제공하지 않습니다. `ANALYZED`는 위험 대응 전 중간
@@ -391,6 +393,8 @@ Kafka
 * `updated_at` 기준 장기 `IN_PROGRESS` bounded 후보 조회, typed fail-closed 판정,
   검증된 Snapshot v2 completion gap 단건 복구와 별도 append-only 복구 감사 구현
 * Idempotency→거래 잠금 순서와 terminal 재검증으로 동시 복구 단일 승자 구현
+* strict 입력 검증과 제한된 non-web context를 사용하는 inspect·단건 recover one-shot
+  Runner 및 운영 runbook 구현
 * Backend와 AI Service 전용 GitHub Actions CI 구성
 
 현재 PostgreSQL 연동은 애플리케이션 코드와 Testcontainers 검증 범위입니다. 운영 PostgreSQL, Docker Compose, Kubernetes와 AWS 배포 환경이 구현되었다는 의미는 아닙니다. Public 거래 접수의 신규 성공 응답은 최종 거래·탐지·위험 대응·필요한 사건 결과를 반영한 HTTP `201`이며, 최종 동기 분석 경계는 [`ADR-003`](docs/07-decisions/ADR-003-transaction-processing-boundary.md)을 따릅니다.
@@ -400,7 +404,6 @@ Kafka
 Public 최종 동기 거래 접수와 실제 External Risk HTTP Provider, 공개 오류 매핑 및
 성공 Snapshot v2 연결은 구현되었습니다. 후속 계획은 다음과 같습니다.
 
-* 실제 one-shot recovery Runner·CLI와 실행 권한·운영 절차
 * recovery scheduler·batch와 metric·alert·dashboard
 * 불확실 상태 재실행과 `FAILED` 재분석은 별도 operation scope·승인 계약 전까지 금지
 * 공개 사건 조회·상태 변경·조사 메모·AuditLog API와 USER 인증·인가
@@ -451,7 +454,8 @@ HIGH·CRITICAL 사건 연결의 모든 업무 commit 이후 별도 completion tr
 않습니다. 최종 업무 commit 뒤 completion이 실패하면 업무 결과는 유지하고
 Idempotency는 `IN_PROGRESS`로 남으며 자동 재실행하지 않습니다. 내부 운영 복구
 경계는 확정된 최종 업무 상태만 검증해 같은 Snapshot v2를 복원하며 Provider·Rule·
-최종화·사건 생성을 호출하지 않습니다. 상세 경계는
+최종화·사건 생성을 호출하지 않습니다. 실제 one-shot 명령도 정확한 내부 record 하나만
+이 경계에 위임하며 scheduler·batch·자동 retry를 제공하지 않습니다. 상세 경계는
 [`ADR-006`](docs/07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md)을
 따릅니다. DB의 24시간 `expires_at` 저장값도 Service 만료 판정과 정리 작업이
 없어 실질적인 만료 정책은 아닙니다.

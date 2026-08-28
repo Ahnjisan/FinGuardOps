@@ -263,8 +263,9 @@ HIGH·CRITICAL 내부 최종화에서는 사건 생성, 사건–거래 연결, 
 최종 업무 commit 전 내부 최종화가 실패하면 전체 업무 트랜잭션을 rollback하고
 거래는 `ANALYZED`를 유지한다. 최종 업무 commit 후 Snapshot v2 저장이 실패하면
 이미 확정된 업무 결과는 유지하고 Snapshot만 전용 운영 복구 대상으로 다룬다.
-Snapshot v2 완료 간극의 운영 복구는 아직 구현되지 않은 별도 후속 경계이며, 위험
-대응·사건·감사 업무의 부분 성공을 복구하는 절차가 아니다.
+Snapshot v2 완료 간극의 내부 복구와 제한된 non-web one-shot 명령은 구현되었으며,
+위험 대응·사건·감사 업무의 부분 성공을 복구하는 절차가 아니다. 명령은 후보 inspect
+또는 정확한 내부 record 하나의 recover만 수행하고 외부 처리를 재실행하지 않는다.
 
 ### `ANALYZING` → `FAILED`
 
@@ -375,6 +376,9 @@ Issue #182 내부 복구 경계는 Idempotency와 거래를 순서대로 잠그�
 채택 DetectionResult·Evidence, 사건 관계와 최종화 AuditLog를 모두 검증한 경우에만
 Snapshot v2·`COMPLETED`·복구 감사를 원자적으로 저장한다. 불확실하거나 불일치한
 상태는 typed `REJECTED` 감사만 남기며 업무·Idempotency 상태를 바꾸지 않는다.
+Issue #184 one-shot 명령은 context 생성 전 strict 검증 후 제한된 non-web context에서
+이 기존 경계를 정확히 한 번 호출하며 SYSTEM actor를 고정한다. scheduler·batch·자동
+retry·fallback·cache와 public·internal 관리 API는 제공하지 않는다.
 
 ### 같은 요청의 동시 도착
 
@@ -489,7 +493,7 @@ Validation 거절은 Transaction이나 AuditLog 행을 만들지 않는다. 오�
 - 추가 인증 성공·실패·만료 후 허용할 거래 상태 전이
 - 최종 상태에서 재분석·정정이 필요할 때 기존 상태 변경 또는 새 이력 생성 여부
 - External Risk terminal 실패 이후 별도 operation scope의 복구·재분석 명령
-- 실제 one-shot 복구 Runner·CLI의 실행 권한과 운영 절차
+- one-shot 복구 명령을 실행할 OS·배포 플랫폼 권한과 실제 운영 credential 배포
 - 탐지·상태 전이 재시도 가능 오류, 횟수와 간격
 - 동일 거래 또는 연관 거래의 사건 중복 방지와 병합·분리 기준
 - 장기 후보의 scheduler·batch·metric·alert 운영 방식
@@ -516,12 +520,14 @@ Validation 거절은 Transaction이나 AuditLog 행을 만들지 않는다. 오�
 - `updated_at` 기반 bounded 장기 `IN_PROGRESS` 후보 조회와 typed 판정
 - 확정된 Snapshot v2 completion gap 단건 복구와 append-only 운영 복구 감사
 - Idempotency→거래 잠금 및 최신 상태 재검증을 통한 동시 복구 단일 승자
+- strict 입력 검증, 제한된 non-web context와 안전한 JSONL·exit code를 사용하는
+  inspect·단건 recover one-shot 명령 및 운영 runbook
 
 다음 운영 범위는 아직 구현되지 않았으며 후속 사용자 승인이 필요하다.
 
-- 실제 one-shot 복구 Runner·CLI와 scheduler·batch·metric·alert
+- scheduler·batch·metric·alert·dashboard
 - 자동 retry·fallback·cache
-- 운영 credential 배포와 신규 metric·dashboard
+- 실제 운영 credential 배포
 - 공개 최종화·사건·AuditLog API
 - 실제 USER 인증·인가 연결
 - 사건 조사 상태 전이
@@ -549,5 +555,5 @@ Idempotency는 `IN_PROGRESS`다.
 최종화 실패는 거래 `ANALYZED`를 유지하고, 최종화 성공 뒤 Snapshot 완료 실패는
 최종 거래·사건·AuditLog를 유지한다. 두 경우 모두 Idempotency는 `IN_PROGRESS`이며
 자동 재실행하지 않는다. Issue #182의 내부 운영 복구 경계는 확정된 성공 completion
-gap만 Snapshot v2로 복원하고, 나머지는 typed 거부한다. 실제 실행 명령과 자동화는
-미구현이다.
+gap만 Snapshot v2로 복원하고, 나머지는 typed 거부한다. 실제 실행 명령은 Issue #184의
+명시적 one-shot으로 구현되었고 자동화는 미구현이다.
