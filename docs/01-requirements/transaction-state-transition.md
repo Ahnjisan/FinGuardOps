@@ -371,6 +371,10 @@ legacy·v1 완료 Snapshot은 저장 status 그대로 재생한다.
 않고 `IN_PROGRESS`로 유지한다. 최초 요청은 `500 INTERNAL_ERROR`, 같은 요청은
 `409 IDEMPOTENCY_REQUEST_IN_PROGRESS`이며 외부 호출과 업무 처리를 반복하지
 않는다. 운영 복구만 확정된 상태를 검증해 동일 v2 Snapshot을 완료할 수 있다.
+Issue #182 내부 복구 경계는 Idempotency와 거래를 순서대로 잠그고 공식 최종 상태,
+채택 DetectionResult·Evidence, 사건 관계와 최종화 AuditLog를 모두 검증한 경우에만
+Snapshot v2·`COMPLETED`·복구 감사를 원자적으로 저장한다. 불확실하거나 불일치한
+상태는 typed `REJECTED` 감사만 남기며 업무·Idempotency 상태를 바꾸지 않는다.
 
 ### 같은 요청의 동시 도착
 
@@ -485,10 +489,10 @@ Validation 거절은 Transaction이나 AuditLog 행을 만들지 않는다. 오�
 - 추가 인증 성공·실패·만료 후 허용할 거래 상태 전이
 - 최종 상태에서 재분석·정정이 필요할 때 기존 상태 변경 또는 새 이력 생성 여부
 - External Risk terminal 실패 이후 별도 operation scope의 복구·재분석 명령
-- `IN_PROGRESS`·failure writer·최종 완료 간극의 운영 복구 구현
+- 실제 one-shot 복구 Runner·CLI의 실행 권한과 운영 절차
 - 탐지·상태 전이 재시도 가능 오류, 횟수와 간격
 - 동일 거래 또는 연관 거래의 사건 중복 방지와 병합·분리 기준
-- 거래 접수 전체 연결 뒤 최종 업무 commit과 Snapshot v2 완료 사이 간극의 운영 복구 방식
+- 장기 후보의 scheduler·batch·metric·alert 운영 방식
 - 동시 상태 변경 충돌 후 재조회·자동 재시도·운영 확인 방식
 - 감사 로그 보존 기간과 접근 범위
 
@@ -509,10 +513,13 @@ Validation 거절은 Transaction이나 AuditLog 행을 만들지 않는다. 오�
 - Provider 미설정 환경의 claim 전 `503 DEPENDENCY_UNAVAILABLE`
 - Rule 안전 실패 상태의 code-only `FAILED(DEPENDENCY_UNAVAILABLE)`
 - terminal 성공·실패 재생의 downstream 0회 호출
+- `updated_at` 기반 bounded 장기 `IN_PROGRESS` 후보 조회와 typed 판정
+- 확정된 Snapshot v2 completion gap 단건 복구와 append-only 운영 복구 감사
+- Idempotency→거래 잠금 및 최신 상태 재검증을 통한 동시 복구 단일 승자
 
 다음 운영 범위는 아직 구현되지 않았으며 후속 사용자 승인이 필요하다.
 
-- crash·Snapshot 완료 간극 운영 복구와 장기 `IN_PROGRESS` 복구
+- 실제 one-shot 복구 Runner·CLI와 scheduler·batch·metric·alert
 - 자동 retry·fallback·cache
 - 운영 credential 배포와 신규 metric·dashboard
 - 공개 최종화·사건·AuditLog API
@@ -541,4 +548,6 @@ Idempotency는 `IN_PROGRESS`다.
 
 최종화 실패는 거래 `ANALYZED`를 유지하고, 최종화 성공 뒤 Snapshot 완료 실패는
 최종 거래·사건·AuditLog를 유지한다. 두 경우 모두 Idempotency는 `IN_PROGRESS`이며
-자동 재실행하지 않는다. 장기 상태와 완료 간극의 운영 복구는 미구현이다.
+자동 재실행하지 않는다. Issue #182의 내부 운영 복구 경계는 확정된 성공 completion
+gap만 Snapshot v2로 복원하고, 나머지는 typed 거부한다. 실제 실행 명령과 자동화는
+미구현이다.

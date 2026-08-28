@@ -806,6 +806,12 @@ CREATE INDEX ix_idempotency_record_status_updated_at
   `COMPLETED`를 확정한다.
 - 최종 업무 commit 뒤 멱등 완료 실패는 업무 rollback이나 멱등 `FAILED`로
   변환하지 않는다. `IN_PROGRESS` 상태에서 ADR-006의 운영 복구를 기다린다.
+- 장기 후보 조회는 `POST:/api/v1/transactions`, `IN_PROGRESS`, `updated_at <= cutoff`를
+  `(updated_at ASC, id ASC)`와 1~100 limit로 조회하며 lock·count·offset을 사용하지
+  않는다. DB transaction timestamp를 한 번 읽어 cutoff를 계산하고 `expires_at`은
+  후보·만료·삭제·키 재사용 근거로 사용하지 않는다.
+- 단건 복구는 `REQUIRES_NEW`에서 Idempotency record를 먼저 잠그고 거래를 두 번째로
+  잠근다. 뒤에 잠금을 얻은 경합 실행은 최신 terminal 상태를 재검증해 거부된다.
 
 현재 terminal 상태 불변성은 Entity 상태 전이 검증, Service writer와 row lock으로
 보호한다. DB Check는 terminal 행의 필드 조합을 검사하지만 terminal 행에 대한 후속
@@ -898,6 +904,8 @@ Java 매핑 변경은 이 물리 DB 계약과 함께 검증한다.
 - 별도 명시적 UPDATE 트랜잭션에서 실제 거래 연결·완료·실패 변경 후 `created_at`과 `expires_at`은 불변이고 `updated_at`은 해당 트랜잭션의 `CURRENT_TIMESTAMP`와 정확히 일치한다.
 - 완료·실패의 `finished_at`은 호출자가 전달한 마이크로초 정밀도 업무 시각을 그대로 보존한다.
 - `expires_at` 인덱스로 만료 정리 대상 조회가 가능하다.
+- V9 partial index `(operation_scope, updated_at, id) WHERE processing_status =
+  'IN_PROGRESS'`는 bounded 복구 후보 조회와 일치한다.
 
 테스트는 예외 타입만 확인하지 않고 위반한 PostgreSQL constraint 이름 또는 SQLState를 함께 확인해 의도한 제약이 실제로 동작했는지 검증한다.
 
@@ -918,7 +926,7 @@ Java 매핑 변경은 이 물리 DB 계약과 함께 검증한다.
 이번 물리 계약 이후에도 다음 항목은 별도 승인과 구현 설계가 필요하다.
 
 - 멱등 만료 레코드 정리 주기, batch 크기, 잠금과 장애 재시도 방식
-- crash·완료 간극과 장기 `IN_PROGRESS` 운영 복구
+- 실제 one-shot 복구 Runner·CLI와 scheduler·batch·metric·alert
 - 자동 retry·fallback·cache
 - 운영 credential 배포와 신규 metric·dashboard
 - 상태 변경 충돌 후 자동 재시도 여부
@@ -946,9 +954,24 @@ External Risk 확정 실패는 별도 Failure Snapshot·`FAILED` commit을 사�
 실패 판정 read는 비잠금 `REQUIRES_NEW/READ_COMMITTED/readOnly`이며 안전 상태에서만
 별도 code-only `FAILED` writer를 호출한다. 최종화 commit과 성공 완료 commit은
 ADR-006에 따라 분리한다. 완료 실패 시 업무 행은 유지되고 Idempotency는
-`IN_PROGRESS`다. 스키마·인덱스·제약·Migration 추가, 완료 간극·장기
-`IN_PROGRESS` 운영 복구는 이번 구현에 없다.
+`IN_PROGRESS`다. 완료 간극·장기 `IN_PROGRESS` 내부 운영 복구 경계와 필요한
+스키마·인덱스는 Issue #182에서 후속 구현되었다.
 
 External Risk lookup과 Rule 단계를 분리해 command read·Provider 단계의 일반 예외는
 Rule 실패로 terminal 처리하지 않는다. typed External Risk 실패와 External Risk
 성공 뒤 Rule 실패만 각 전용 경계를 사용한다.
+
+## 18. Issue #182 V9 복구 감사와 후보 인덱스 (2026-08-28)
+
+V9는 `idempotency_recovery_audit_log`와 두 인덱스만 추가한다. 감사 행은 identity PK,
+immutable UUID v4 `audit_id`, FK 없는 양수 `idempotency_record_id`, nullable UUID v4
+`transaction_id`, 기존 actor 계약, typed recovery decision/result와
+`TIMESTAMPTZ(6) attempted_at`을 저장한다. decision/result 조합은 성공
+`RECOVERABLE_COMPLETION_GAP/RECOVERED`, 정상 거부의 typed decision/`REJECTED`,
+내부 실패 `INTERNAL_FAILURE/FAILED`만 허용한다.
+
+성공 복구는 같은 DB transaction timestamp를 Snapshot `finalizedAt`, Idempotency
+`finished_at`, 감사 `attempted_at`에 사용하고 Snapshot·`COMPLETED`·감사를 원자적으로
+commit한다. 정상 거부는 업무·Idempotency를 변경하지 않고 감사만 commit한다. 내부
+실패는 원 transaction rollback 뒤 별도 transaction에서 실패 감사를 저장한다. 신규
+DB trigger는 없으며 기존 V1~V8은 변경하지 않는다.

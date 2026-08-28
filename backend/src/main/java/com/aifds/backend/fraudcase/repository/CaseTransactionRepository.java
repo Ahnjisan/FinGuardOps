@@ -29,6 +29,18 @@ public interface CaseTransactionRepository
             Collection<FraudCaseStatus> activeStatuses
     );
 
+    @Query("""
+            SELECT caseTransaction
+            FROM CaseTransaction caseTransaction
+            JOIN FETCH caseTransaction.fraudCase fraudCase
+            JOIN FETCH caseTransaction.financialTransaction transaction
+            WHERE transaction.id = :transactionPk
+            ORDER BY fraudCase.caseId ASC
+            """)
+    List<CaseTransaction> findAllByTransactionPk(
+            @Param("transactionPk") long transactionPk
+    );
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("""
             SELECT caseTransaction
