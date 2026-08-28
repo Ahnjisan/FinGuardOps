@@ -211,8 +211,9 @@ Runner·CLI가 구현되었습니다. 실행 절차는
 [`Idempotency 복구 one-shot runbook`](docs/09-deployment/idempotency-recovery-one-shot-runbook.md)을
 따릅니다. scheduler·batch, 자동 retry·fallback·cache, 운영 credential 실제 배포,
 USER 인증·인가, Issue #186 외 사건·AI·복구 상태 등의 추가 업무 metric과
-production Prometheus 수집·Actuator 노출·alert·dashboard는 아직 구현되지
-않았습니다. 기존 Rule 분석
+Prometheus 서버·scrape·recording rule·alert·dashboard는 아직 구현되지
+않았습니다. Spring Boot runtime Prometheus registry와 opt-in Actuator endpoint의
+경계는 구현되었습니다. 기존 Rule 분석
 v1은 당장 제거하지 않으며 Rule v1 기본
 RuleVersion 집합의 제한된 local/dev/test one-shot 발행 경계만 제공하고 공개 관리
 API나 정상 시작 자동 발행은 제공하지 않습니다. `ANALYZED`는 위험 대응 전 중간
@@ -347,6 +348,8 @@ Kafka
 * AI 리포트·AI 사용량·비용 API 계약 작성
 * 도메인 이벤트 계약 작성
 * 관측성·운영 메트릭 명세 작성
+* Spring Boot runtime Prometheus registry와 `prometheus` profile 전용
+  `/actuator/prometheus` endpoint 구현
 * 거래 접수·목록·상세 조회와 거래 멱등성 구현
 * 9개 유형 행동 이벤트 접수와 `eventId` 자연 멱등성 구현
 * 금융거래·멱등성·행동 이벤트 PostgreSQL 애플리케이션 연동과 Flyway 스키마 구현
@@ -471,9 +474,19 @@ terminal 결과는 실제 DB commit 뒤에만 증가하고, 처리시간은
 request만 증가시키며 Provider·Rule·거래 terminal 결과를 다시 기록하지 않습니다.
 External Risk와 Spring Rule orchestration은 실제 시도만 단조 시간으로 관측하고,
 모든 custom tag는 `spring-backend`와 문서화된 enum 집합으로 제한합니다. Metric
-등록·기록 실패는 업무 응답과 transaction을 변경하지 않습니다. Prometheus exporter,
-Actuator exposure 확대, custom bucket·percentile, alert·dashboard와 process crash까지
-보장하는 durable metric/outbox는 아직 구현하지 않았습니다. 정확한 이름·tag·category는
+등록·기록 실패는 업무 응답과 transaction을 변경하지 않습니다.
+
+`micrometer-registry-prometheus`는 production runtime에 포함되지만 기본 profile에서는
+export와 `/actuator/prometheus`가 비활성입니다. `prometheus` profile을 활성화하면
+별도 management listener가 기본 `127.0.0.1:8081`에서 시작되고 web endpoint는 정확히
+`health,prometheus`만 노출됩니다. port와 address는 각각 `MANAGEMENT_SERVER_PORT`,
+`MANAGEMENT_SERVER_ADDRESS`로 재정의할 수 있습니다. 실행·확인 방법과 외부 bind 시
+보안 책임은 [`Management endpoint 운영 경계`](docs/03-api/management-endpoints.md)를
+따릅니다.
+
+Prometheus 서버·scrape 설정, recording rule, custom bucket·percentile, alert·dashboard와
+process crash까지 보장하는 durable metric/outbox는 아직 구현하지 않았습니다.
+정확한 이름·tag·category는
 [`관측성 메트릭 명세`](docs/01-requirements/observability-metrics-spec.md)를 따릅니다.
 
 ---

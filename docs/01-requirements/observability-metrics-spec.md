@@ -39,19 +39,22 @@ API 요청·응답과 상태 코드는 `docs/03-api/`, 시스템 책임은 `docs
 | 계층 | 현재 상태 | 범위 |
 | --- | --- | --- |
 | 애플리케이션 내부 계측 | 부분 구현 | Issue #186의 Spring Boot 업무 Meter 10개가 구현되었다. public 거래 intake outcome, 최초 `RECEIVED`, terminal outcome·processing duration, 멱등 replay·`IN_PROGRESS`·conflict, External Risk outcome·duration, Spring Rule orchestration outcome·duration으로 한정한다. |
-| 운영 수집·노출 | 미구현 | production Prometheus registry·exporter, `/actuator/prometheus`, 인증·네트워크가 적용된 management endpoint가 없다. |
-| 활용 계층 | 미구현 | Prometheus scrape, recording rule, alert rule, Grafana dashboard가 없다. |
+| 운영 수집·노출 | 부분 구현 | production runtime Prometheus registry와 `prometheus` profile 전용 `/actuator/prometheus`는 구현되었다. 기본 profile에서는 export가 비활성이고 health만 노출한다. 별도 management listener의 기본 경계는 `127.0.0.1:8081`이며 인증은 미구현이다. Prometheus 서버와 scrape 설정은 미구현이다. |
+| 활용 계층 | 미구현 | recording rule, alert rule, Grafana dashboard가 없다. |
 
 메트릭 표의 `적용` 열은 애플리케이션 내부 계측이 확인된 10개에만
 `애플리케이션 내부 계측 구현 (Issue #186)`을 사용한다. 나머지 계약은
 `애플리케이션 내부 계측 미구현`, `활용 계층 미구현` 또는 기술 도입을 전제로 한
-`향후 도입 시`로 표시하며, 어느 경우도 운영 수집·노출이 활성화되었다는 의미가
-아니다.
+`향후 도입 시`로 표시한다. runtime registry와 opt-in endpoint 구현은 Prometheus
+서버·scrape·recording rule·alert·dashboard가 운영 중이라는 의미가 아니다.
 
 Issue #186은 거래 전체나 사건·감사 조회 API 계측을 완료한 것이 아니다. FastAPI 내부
 Meter, ML·LLM·AI 리포트 Meter도 미구현이다. `spring-boot-starter-actuator`는 production
-`implementation`이지만, `micrometer-registry-prometheus`는 Prometheus naming 검증을 위한
-`testImplementation`이므로 production exporter나 `/actuator/prometheus`를 제공하지 않는다.
+`implementation`이고, `micrometer-registry-prometheus`는 production `runtimeOnly`와 기존
+scrape naming 검증용 `testImplementation`으로 분리한다. 기본 profile에서는 export를
+명시적으로 비활성화하고, `prometheus` profile에서만 registry·export와
+`/actuator/prometheus`를 활성화한다. endpoint 운영 경계는
+[`Management endpoint 운영 경계`](../03-api/management-endpoints.md)를 따른다.
 
 ### 3.2 수집 경계
 
@@ -230,9 +233,10 @@ category로 분류할 수 없는 실패만 `unknown`이다.
 MeterRegistry 조회·meter 등록·기록 및 `afterCommit` callback 실패는 모두 업무
 응답·원본 예외·transaction 결과와 격리한다. 이 보장은 정상 JVM 안의 commit callback
 경계까지이며, DB commit 직후 process crash에도 전달을 보장하는 durable metric/outbox는
-구현하지 않았다. production Prometheus registry·exporter, `/actuator/prometheus`,
-management endpoint 보안·노출, custom bucket·percentile, scheduler, scrape·recording rule,
-alert와 dashboard도 Issue #186 범위가 아니다.
+구현하지 않았다. Issue #190에서 production runtime Prometheus registry와 opt-in
+`/actuator/prometheus` 노출을 구현했지만 management endpoint 인증, custom
+bucket·percentile, scheduler, Prometheus 서버·scrape·recording rule·alert·dashboard는
+미구현이다.
 
 `spring.http.errors`는 `spring.http.requests`에서 계산할 수 있으면 별도 Counter를 만들지 않는 것을 권장한다. 문서상 논리 지표는 유지하되 하나의 HTTP 요청이 두 독립 계측 경로에서 서로 다른 값으로 집계되지 않도록 한다.
 
@@ -485,8 +489,9 @@ React 관리자 화면은 업무 영향과 조치 요약에 집중하고 Grafana
 구현 전 정합성 정비에서 AI 조회 순서, 요청·실행 식별자, 자동 재시도, 무실행 캐시와 사건 담당자·종료 조건을 API·ERD·상태 전이·이벤트·아키텍처 문서와 통일했다. 다음은 아직 사용자 결정이 필요한 문서 차이이다.
 
 관측 구현 상태는 3.1절과 같이 애플리케이션 내부 계측, 운영 수집·노출,
-활용 계층으로 구분한다. 첫 계층에서만 Issue #186 Meter 10개가 구현되었고,
-나머지 두 계층은 미구현이다.
+활용 계층으로 구분한다. 첫 계층의 Issue #186 Meter 10개와 두 번째 계층의 runtime
+Prometheus registry·opt-in endpoint가 구현되었다. Prometheus 서버·scrape와 활용 계층은
+미구현이다.
 
 | 항목 | 문서별 표현 | 메트릭 명세의 처리 |
 | --- | --- | --- |
@@ -550,13 +555,14 @@ Breaker가 없다. 따라서 이를 현재 구현 metric이나 성공 결과로 
 - [ ] 애플리케이션 내부 계측, 운영 수집·노출, 활용 계층을 구분했는가
 - [ ] 내부 계측 구현을 Issue #186 Meter 10개로만 한정하고 나머지 Meter를 미구현으로 표시했는가
 - [ ] 일반 HTTP framework metric을 Issue #186 custom intake Meter와 혼합하거나 production 수집 중으로 표현하지 않았는가
+- [ ] runtime registry·opt-in endpoint 구현과 Prometheus 서버·scrape·recording rule·alert·dashboard 미구현을 구분했는가
 - [ ] Redis, Kafka, Kubernetes와 AWS를 현재 구현·수집 중인 것으로 표현하지 않았는가
 - [ ] 알림 임계값을 기준선·부하 테스트·비용 예산 근거 없이 확정하지 않았는가
 - [ ] 이미 통일한 계약을 다시 충돌로 기록하지 않고, 남은 문서 차이와 사용자 결정 사항만 미확정으로 유지하는가
 
 ## 19. 제외 범위
 
-- Java와 Python 코드 구현
+- 신규 Java와 Python Meter 코드 구현
 - Prometheus 설치·scrape·recording rule 설정
 - Grafana 대시보드 구현
 - OpenTelemetry 적용과 sampling 설정

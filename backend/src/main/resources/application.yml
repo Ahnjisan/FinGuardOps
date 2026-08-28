@@ -10,6 +10,16 @@ spring:
       ddl-auto: validate
     open-in-view: false
 
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "health"
+  prometheus:
+    metrics:
+      export:
+        enabled: false
+
 logging:
   pattern:
     correlation: "[traceId=%X{traceId:-no-trace}] "
