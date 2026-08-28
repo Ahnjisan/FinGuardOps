@@ -1,6 +1,8 @@
 package com.aifds.backend.common.error;
 
 import com.aifds.backend.common.trace.TraceIdFilter;
+import com.aifds.backend.observability.TransactionIntakeMetricsFilter;
+import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.idempotency.entity.IdempotencyProcessingStatus;
 import com.aifds.backend.idempotency.exception.IdempotencyCompletionTransactionNotFoundException;
 import com.aifds.backend.idempotency.exception.IdempotencyRecordNotFoundException;
@@ -24,6 +26,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -34,6 +37,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
@@ -45,6 +49,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @Import({
         GlobalExceptionHandler.class,
         TraceIdFilter.class,
+        TransactionIntakeMetricsFilter.class,
         GlobalExceptionHandlerMockMvcTest.TestController.class
 })
 class GlobalExceptionHandlerMockMvcTest {
@@ -57,6 +62,9 @@ class GlobalExceptionHandlerMockMvcTest {
 
     @Autowired
     private MockMvc mockMvc;
+
+    @MockitoBean
+    private TransactionProcessingMetricsRecorder metricsRecorder;
 
     @Test
     void malformedJsonReturnsValidationErrorWithoutFieldErrors() throws Exception {
@@ -81,6 +89,7 @@ class GlobalExceptionHandlerMockMvcTest {
                 .andExpect(jsonPath("$.traceId").value(MALFORMED_TRACE_ID))
                 .andExpect(jsonPath("$.fieldErrors").isArray())
                 .andExpect(jsonPath("$.fieldErrors").isEmpty());
+        verifyNoInteractions(metricsRecorder);
     }
 
     @Test

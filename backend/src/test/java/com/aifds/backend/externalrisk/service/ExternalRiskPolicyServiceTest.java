@@ -13,6 +13,7 @@ import com.aifds.backend.externalrisk.domain.ExternalRiskSnapshot;
 import com.aifds.backend.externalrisk.domain.ExternalRiskSubjectType;
 import com.aifds.backend.externalrisk.domain.ExternalRiskType;
 import com.aifds.backend.externalrisk.port.ExternalRiskLookupPort;
+import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.transaction.entity.TransactionType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -29,6 +30,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -48,6 +50,41 @@ class ExternalRiskPolicyServiceTest {
     );
     private static final Clock CLOCK = Clock.fixed(CLOCK_INSTANT, ZoneOffset.UTC);
     private static final String TRACE_ID = "trace-ext-risk-0001";
+
+    @Test
+    void recordsOnePolicyAttemptWithTypedOutcomeAndMonotonicDuration() {
+        TransactionProcessingMetricsRecorder recorder = mock(
+                TransactionProcessingMetricsRecorder.class
+        );
+        ExternalRiskLookupPort port = request -> response(List.of(senderMatch()));
+
+        new ExternalRiskPolicyService(port, CLOCK, recorder).lookup(command());
+
+        verify(recorder).recordExternalRisk(
+                eq(TransactionProcessingMetricsRecorder.ExternalRiskResult
+                        .MATCHED),
+                eq(TransactionProcessingMetricsRecorder.FailureCategory.NONE),
+                any(java.time.Duration.class)
+        );
+
+        ExternalRiskLookupPort failedPort = request -> {
+            throw new ExternalRiskLookupException(
+                    ExternalRiskFailureCategory.TIMEOUT
+            );
+        };
+        assertThatThrownBy(() -> new ExternalRiskPolicyService(
+                failedPort,
+                CLOCK,
+                recorder
+        ).lookup(command())).isInstanceOf(ExternalRiskLookupException.class);
+        verify(recorder).recordExternalRisk(
+                eq(TransactionProcessingMetricsRecorder.ExternalRiskResult
+                        .FAILED),
+                eq(TransactionProcessingMetricsRecorder.FailureCategory
+                        .TIMEOUT),
+                any(java.time.Duration.class)
+        );
+    }
 
     @Test
     void derivesMatchedResultForEverySupportedMatch() {

@@ -8,6 +8,8 @@ import com.aifds.backend.behavior.exception.DuplicateBehaviorEventException;
 import com.aifds.backend.behavior.validation.BehaviorEventValidationException;
 import com.aifds.backend.behavior.validation.BehaviorEventValidationType;
 import com.aifds.backend.common.trace.TraceIdFilter;
+import com.aifds.backend.observability.TransactionIntakeMetricsFilter;
+import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.idempotency.exception.IdempotencyCompletionTransactionNotFoundException;
 import com.aifds.backend.idempotency.exception.IdempotencyRecordNotFoundException;
 import com.aifds.backend.idempotency.exception.IdempotencyStateTransitionNotAllowedException;
@@ -201,6 +203,10 @@ public class GlobalExceptionHandler {
             IdempotencyStateTransitionNotAllowedException exception,
             HttpServletRequest request
     ) {
+        TransactionIntakeMetricsFilter.markOutcomeIfAbsent(
+                request,
+                TransactionProcessingMetricsRecorder.IntakeOutcome.CONFLICT
+        );
         return response(
                 HttpStatus.CONFLICT,
                 STATE_TRANSITION_NOT_ALLOWED,
@@ -215,6 +221,7 @@ public class GlobalExceptionHandler {
             TransactionIntakeRejectedException exception,
             HttpServletRequest request
     ) {
+        markRejectedIntakeOutcome(exception, request);
         return switch (exception.reason()) {
             case IDEMPOTENCY_KEY_CONFLICT -> response(
                     HttpStatus.CONFLICT,
@@ -397,6 +404,11 @@ public class GlobalExceptionHandler {
             List<FieldErrorResponse> fieldErrors,
             HttpServletRequest request
     ) {
+        TransactionIntakeMetricsFilter.markOutcome(
+                request,
+                TransactionProcessingMetricsRecorder.IntakeOutcome
+                        .VALIDATION_REJECTED
+        );
         return response(
                 status,
                 VALIDATION_ERROR,
@@ -410,6 +422,11 @@ public class GlobalExceptionHandler {
             Exception exception,
             HttpServletRequest request
     ) {
+        TransactionIntakeMetricsFilter.markOutcomeIfAbsent(
+                request,
+                TransactionProcessingMetricsRecorder.IntakeOutcome
+                        .INTERNAL_FAILURE
+        );
         LOGGER.error(
                 "Internal server error [traceId={}, method={}, path={}]",
                 currentTraceId(request),
@@ -440,6 +457,46 @@ public class GlobalExceptionHandler {
                 fieldErrors
         );
         return ResponseEntity.status(status).body(response);
+    }
+
+    private void markRejectedIntakeOutcome(
+            TransactionIntakeRejectedException exception,
+            HttpServletRequest request
+    ) {
+        TransactionProcessingMetricsRecorder.IntakeOutcome outcome =
+                switch (exception.reason()) {
+                    case IDEMPOTENCY_KEY_CONFLICT,
+                            DUPLICATE_TRANSACTION ->
+                            TransactionProcessingMetricsRecorder.IntakeOutcome
+                                    .CONFLICT;
+                    case IDEMPOTENCY_REQUEST_IN_PROGRESS ->
+                            TransactionProcessingMetricsRecorder.IntakeOutcome
+                                    .IN_PROGRESS;
+                    case DEPENDENCY_TIMEOUT, DEPENDENCY_UNAVAILABLE ->
+                            TransactionProcessingMetricsRecorder.IntakeOutcome
+                                    .DEPENDENCY_UNAVAILABLE;
+                    case TYPED_FAILURE ->
+                            TransactionProcessingMetricsRecorder.IntakeOutcome
+                                    .EXTERNAL_RISK_FAILED;
+                    case INTERNAL_FAILURE ->
+                            TransactionProcessingMetricsRecorder.IntakeOutcome
+                                    .INTERNAL_FAILURE;
+                };
+        TransactionIntakeMetricsFilter.markOutcomeIfAbsent(request, outcome);
+        if (exception.reason()
+                == TransactionIntakeRejectedException.Reason
+                .IDEMPOTENCY_REQUEST_IN_PROGRESS) {
+            TransactionIntakeMetricsFilter.markDuplicate(
+                    request,
+                    TransactionProcessingMetricsRecorder.DuplicateResult
+                            .IN_PROGRESS
+            );
+        }
+        if (exception.reason()
+                == TransactionIntakeRejectedException.Reason
+                .IDEMPOTENCY_KEY_CONFLICT) {
+            TransactionIntakeMetricsFilter.markIdempotencyConflict(request);
+        }
     }
 
     private String currentTraceId(HttpServletRequest request) {

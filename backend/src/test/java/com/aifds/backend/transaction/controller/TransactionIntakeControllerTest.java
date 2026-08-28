@@ -2,6 +2,8 @@ package com.aifds.backend.transaction.controller;
 
 import com.aifds.backend.common.error.GlobalExceptionHandler;
 import com.aifds.backend.common.trace.TraceIdFilter;
+import com.aifds.backend.observability.TransactionIntakeMetricsFilter;
+import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
 import com.aifds.backend.transaction.exception.InvalidTransactionIntakeSnapshotException;
 import com.aifds.backend.transaction.service.TransactionIntakeResult;
@@ -45,7 +47,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @WebMvcTest(TransactionIntakeController.class)
-@Import({GlobalExceptionHandler.class, TraceIdFilter.class})
+@Import({
+        GlobalExceptionHandler.class,
+        TraceIdFilter.class,
+        TransactionIntakeMetricsFilter.class
+})
 class TransactionIntakeControllerTest {
 
     private static final String PATH = "/api/v1/transactions";
@@ -64,6 +70,9 @@ class TransactionIntakeControllerTest {
 
     @MockitoBean
     private TransactionIntakeService transactionIntakeService;
+
+    @MockitoBean
+    private TransactionProcessingMetricsRecorder metricsRecorder;
 
     @Test
     void newIntakeReturns201AndExactlyEightContractFields() throws Exception {
@@ -115,6 +124,9 @@ class TransactionIntakeControllerTest {
                 any(),
                 eq(traceId)
         );
+        verify(metricsRecorder).recordIntakeOutcome(
+                TransactionProcessingMetricsRecorder.IntakeOutcome.ACCEPTED
+        );
     }
 
     @Test
@@ -165,6 +177,13 @@ class TransactionIntakeControllerTest {
                 .andExpect(jsonPath("$.transactionId")
                         .value(TRANSACTION_ID.toString()))
                 .andExpect(jsonPath("$.traceId").value(replayTraceId));
+        verify(metricsRecorder).recordIntakeOutcome(
+                TransactionProcessingMetricsRecorder.IntakeOutcome
+                        .IDEMPOTENT_REPLAY
+        );
+        verify(metricsRecorder).recordDuplicateRequest(
+                TransactionProcessingMetricsRecorder.DuplicateResult.COMPLETED
+        );
     }
 
     @Test

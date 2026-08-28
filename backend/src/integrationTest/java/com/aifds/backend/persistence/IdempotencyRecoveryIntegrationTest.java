@@ -69,7 +69,7 @@ class IdempotencyRecoveryIntegrationTest
 
     private static final String OPERATION_SCOPE =
             "POST:/api/v1/transactions";
-    private static final Instant DATABASE_NOW =
+    private static final Instant FIXED_CANDIDATE_TIME =
             Instant.parse("2026-08-28T06:00:00.123456Z");
     private static final Instant OCCURRED_AT =
             Instant.parse("2026-08-28T00:00:00Z");
@@ -103,8 +103,8 @@ class IdempotencyRecoveryIntegrationTest
     @Test
     void findsBoundedCandidatesAtInclusiveCutoffWithStableOrderAndScope() {
         when(timestampProvider.currentTransactionTimestamp())
-                .thenReturn(DATABASE_NOW);
-        Instant cutoff = DATABASE_NOW.minus(Duration.ofMinutes(30));
+                .thenReturn(FIXED_CANDIDATE_TIME);
+        Instant cutoff = FIXED_CANDIDATE_TIME.minus(Duration.ofMinutes(30));
         long first = insertCandidate(
                 OPERATION_SCOPE,
                 cutoff.minusSeconds(1),
@@ -150,8 +150,8 @@ class IdempotencyRecoveryIntegrationTest
     @Test
     void appliesLimitsOneFiftyAndOneHundredWithoutCountOrOffsetContract() {
         when(timestampProvider.currentTransactionTimestamp())
-                .thenReturn(DATABASE_NOW);
-        Instant updatedAt = DATABASE_NOW.minus(Duration.ofHours(1));
+                .thenReturn(FIXED_CANDIDATE_TIME);
+        Instant updatedAt = FIXED_CANDIDATE_TIME.minus(Duration.ofHours(1));
         IntStream.range(0, 105).forEach(index -> insertCandidate(
                 OPERATION_SCOPE,
                 updatedAt.plusNanos(index * 1_000L),
@@ -193,7 +193,11 @@ class IdempotencyRecoveryIntegrationTest
 
     @Test
     void appendOnlyRepositoryInsertsAndRejectsDuplicateAuditId() {
-        IdempotencyRecoveryAuditLog original = safeRejectedAudit(901L);
+        Instant attemptedAt = databaseRecoveryTimestamp();
+        IdempotencyRecoveryAuditLog original = safeRejectedAudit(
+                901L,
+                attemptedAt
+        );
         TransactionTemplate transactions = new TransactionTemplate(
                 transactionManager
         );
@@ -211,7 +215,10 @@ class IdempotencyRecoveryIntegrationTest
                             .isEqualTo("REJECTED");
                 });
 
-        IdempotencyRecoveryAuditLog duplicate = safeRejectedAudit(902L);
+        IdempotencyRecoveryAuditLog duplicate = safeRejectedAudit(
+                902L,
+                attemptedAt
+        );
         ReflectionTestUtils.setField(
                 duplicate,
                 "auditId",
@@ -234,9 +241,10 @@ class IdempotencyRecoveryIntegrationTest
             RiskResponseOutcome expectedOutcome,
             boolean caseRequired
     ) throws Exception {
-        when(timestampProvider.currentTransactionTimestamp())
-                .thenReturn(DATABASE_NOW);
         RecoveryFixture fixture = finalizedFixture(riskLevel);
+        Instant recoveryTimestamp = recoveryTimestampFor(fixture.recordId());
+        when(timestampProvider.currentTransactionTimestamp())
+                .thenReturn(recoveryTimestamp);
 
         IdempotencyRecoveryResult result = recoveryService.recover(
                 fixture.recordId(),
@@ -262,9 +270,9 @@ class IdempotencyRecoveryIntegrationTest
         );
         assertThat(stored.get("processing_status")).isEqualTo("COMPLETED");
         assertThat(((Timestamp) stored.get("finished_at")).toInstant())
-                .isEqualTo(DATABASE_NOW);
+                .isEqualTo(recoveryTimestamp);
         assertThat(Instant.parse(snapshot.get("finalizedAt").textValue()))
-                .isEqualTo(DATABASE_NOW);
+                .isEqualTo(recoveryTimestamp);
         assertThat(snapshot.get("httpStatus").intValue()).isEqualTo(201);
         assertThat(snapshot.get("responseSchemaVersion").textValue())
                 .isEqualTo("transaction-create-response-v2");
@@ -285,14 +293,15 @@ class IdempotencyRecoveryIntegrationTest
                     assertThat(audit.get("audit_result"))
                             .isEqualTo("RECOVERED");
                     assertThat(((Timestamp) audit.get("attempted_at"))
-                            .toInstant()).isEqualTo(DATABASE_NOW);
+                            .toInstant()).isEqualTo(recoveryTimestamp);
                 });
     }
 
     @Test
     void rejectsMissingReceivedAnalyzedFailedCaseAndAuditStatesWithoutMutation() {
+        Instant recoveryTimestamp = databaseRecoveryTimestamp();
         when(timestampProvider.currentTransactionTimestamp())
-                .thenReturn(DATABASE_NOW);
+                .thenReturn(recoveryTimestamp);
 
         assertRejected(
                 99_999L,
@@ -300,8 +309,8 @@ class IdempotencyRecoveryIntegrationTest
         );
         long missingTransaction = insertCandidate(
                 OPERATION_SCOPE,
-                DATABASE_NOW.minus(Duration.ofHours(1)),
-                DATABASE_NOW.minus(Duration.ofHours(1))
+                FIXED_CANDIDATE_TIME.minus(Duration.ofHours(1)),
+                FIXED_CANDIDATE_TIME.minus(Duration.ofHours(1))
         );
         assertRejected(
                 missingTransaction,
@@ -344,9 +353,10 @@ class IdempotencyRecoveryIntegrationTest
 
     @Test
     void rejectsAlreadyTerminalRecordAndLeavesSnapshotUnchanged() {
-        when(timestampProvider.currentTransactionTimestamp())
-                .thenReturn(DATABASE_NOW);
         RecoveryFixture fixture = finalizedFixture(RiskLevel.LOW);
+        Instant recoveryTimestamp = recoveryTimestampFor(fixture.recordId());
+        when(timestampProvider.currentTransactionTimestamp())
+                .thenReturn(recoveryTimestamp);
         recoveryService.recover(
                 fixture.recordId(),
                 AuditActorType.SYSTEM,
@@ -378,9 +388,10 @@ class IdempotencyRecoveryIntegrationTest
 
     @Test
     void rollsBackCompletionWhenSuccessAuditInsertFails() {
-        when(timestampProvider.currentTransactionTimestamp())
-                .thenReturn(DATABASE_NOW);
         RecoveryFixture fixture = finalizedFixture(RiskLevel.MEDIUM);
+        Instant recoveryTimestamp = recoveryTimestampFor(fixture.recordId());
+        when(timestampProvider.currentTransactionTimestamp())
+                .thenReturn(recoveryTimestamp);
         installRecoveryAuditRejectionTrigger(
                 "NEW.audit_result = 'RECOVERED'"
         );
@@ -408,16 +419,17 @@ class IdempotencyRecoveryIntegrationTest
 
     @Test
     void rollsBackCodecFailureThenWritesOneSafeInternalFailureAudit() {
-        when(timestampProvider.currentTransactionTimestamp())
-                .thenReturn(DATABASE_NOW);
         RecoveryFixture fixture = finalizedFixture(RiskLevel.LOW);
+        Instant recoveryTimestamp = recoveryTimestampFor(fixture.recordId());
+        when(timestampProvider.currentTransactionTimestamp())
+                .thenReturn(recoveryTimestamp);
         IllegalStateException original = new IllegalStateException(
                 "codec low-level detail must not be persisted"
         );
         doThrow(original).when(snapshotCodec).encodeV2(
                 any(TransactionFinalResponseSnapshot.class),
                 eq(201),
-                eq(DATABASE_NOW)
+                eq(recoveryTimestamp)
         );
 
         assertThatThrownBy(() -> recoveryService.recover(
@@ -441,16 +453,17 @@ class IdempotencyRecoveryIntegrationTest
 
     @Test
     void preservesOriginalFailureAndSuppressesFailureAuditError() {
-        when(timestampProvider.currentTransactionTimestamp())
-                .thenReturn(DATABASE_NOW);
         RecoveryFixture fixture = finalizedFixture(RiskLevel.LOW);
+        Instant recoveryTimestamp = recoveryTimestampFor(fixture.recordId());
+        when(timestampProvider.currentTransactionTimestamp())
+                .thenReturn(recoveryTimestamp);
         IllegalStateException original = new IllegalStateException(
                 "original codec failure"
         );
         doThrow(original).when(snapshotCodec).encodeV2(
                 any(TransactionFinalResponseSnapshot.class),
                 eq(201),
-                eq(DATABASE_NOW)
+                eq(recoveryTimestamp)
         );
         installRecoveryAuditRejectionTrigger("TRUE");
         try {
@@ -469,8 +482,6 @@ class IdempotencyRecoveryIntegrationTest
     @Test
     void recoveredSnapshotIsExactReplayWithoutNewProcessing()
             throws Exception {
-        when(timestampProvider.currentTransactionTimestamp())
-                .thenReturn(DATABASE_NOW);
         when(coordinator.isAvailable()).thenReturn(true);
         TransactionFingerprintInput input = fingerprintInput(UUID.randomUUID());
         String key = "recovery-public-replay-key";
@@ -481,6 +492,9 @@ class IdempotencyRecoveryIntegrationTest
                 key,
                 fingerprint
         );
+        Instant recoveryTimestamp = recoveryTimestampFor(fixture.recordId());
+        when(timestampProvider.currentTransactionTimestamp())
+                .thenReturn(recoveryTimestamp);
         clearInvocations(finalizationService, coordinator);
         recoveryService.recover(
                 fixture.recordId(),
@@ -905,7 +919,42 @@ class IdempotencyRecoveryIntegrationTest
         );
     }
 
-    private IdempotencyRecoveryAuditLog safeRejectedAudit(long recordId) {
+    private Instant recoveryTimestampFor(long recordId) {
+        Map<String, Object> row = jdbcTemplate.queryForMap(
+                """
+                        SELECT created_at,
+                               expires_at,
+                               transaction_timestamp()
+                                   + INTERVAL '1 second' AS recovery_at
+                        FROM idempotency_record
+                        WHERE id = ?
+                        """,
+                recordId
+        );
+        Instant createdAt = ((Timestamp) row.get("created_at")).toInstant();
+        Instant expiresAt = ((Timestamp) row.get("expires_at")).toInstant();
+        Instant recoveryTimestamp = ((Timestamp) row.get("recovery_at"))
+                .toInstant();
+        assertThat(recoveryTimestamp).isAfter(createdAt).isBefore(expiresAt);
+        return recoveryTimestamp;
+    }
+
+    private Instant databaseRecoveryTimestamp() {
+        Timestamp timestamp = jdbcTemplate.queryForObject(
+                """
+                        SELECT transaction_timestamp()
+                            + INTERVAL '1 second'
+                        """,
+                Timestamp.class
+        );
+        assertThat(timestamp).isNotNull();
+        return timestamp.toInstant();
+    }
+
+    private IdempotencyRecoveryAuditLog safeRejectedAudit(
+            long recordId,
+            Instant attemptedAt
+    ) {
         return IdempotencyRecoveryAuditLog.create(
                 recordId,
                 null,
@@ -913,7 +962,7 @@ class IdempotencyRecoveryIntegrationTest
                 AuditLog.SYSTEM_ACTOR_ID,
                 IdempotencyRecoveryDecision.MISSING_IDEMPOTENCY_RECORD,
                 IdempotencyRecoveryAuditResult.REJECTED,
-                DATABASE_NOW
+                attemptedAt
         );
     }
 

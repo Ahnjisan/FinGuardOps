@@ -2,6 +2,7 @@ package com.aifds.backend.detection.service;
 
 import com.aifds.backend.detection.entity.RiskLevel;
 import com.aifds.backend.externalrisk.domain.ExternalRiskSnapshot;
+import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.rule.client.RuleAnalysisClientErrorCategory;
 import com.aifds.backend.rule.client.RuleAnalysisClientException;
 import com.aifds.backend.rule.client.RuleAnalysisHttpClient;
@@ -60,17 +61,20 @@ class RuleAnalysisOrchestrationServiceTest {
     private RuleAnalysisRequestV2 requestV2;
     private ExternalRiskSnapshot externalRiskSnapshot;
     private RuleAnalysisResponse response;
+    private TransactionProcessingMetricsRecorder metricsRecorder;
 
     @BeforeEach
     void setUp() {
         persistenceService = mock(RuleAnalysisPersistenceService.class);
         httpClient = mock(RuleAnalysisHttpClient.class);
         responseMapper = mock(RuleAnalysisResponseMapper.class);
+        metricsRecorder = mock(TransactionProcessingMetricsRecorder.class);
         service = new RuleAnalysisOrchestrationService(
                 persistenceService,
                 httpClient,
                 responseMapper,
-                Clock.fixed(NOW, ZoneOffset.UTC)
+                Clock.fixed(NOW, ZoneOffset.UTC),
+                metricsRecorder
         );
         started = new StartedRuleAnalysis(
                 TRANSACTION_ID,
@@ -149,6 +153,16 @@ class RuleAnalysisOrchestrationServiceTest {
         );
         order.verify(httpClient).analyze(request, TRACE_ID);
         order.verify(responseMapper).map(response);
+        verify(metricsRecorder).recordRuleAnalysis(
+                org.mockito.ArgumentMatchers.eq(
+                        TransactionProcessingMetricsRecorder.RuleResult.COMPLETED
+                ),
+                org.mockito.ArgumentMatchers.eq(RiskLevel.HIGH),
+                org.mockito.ArgumentMatchers.eq(
+                        TransactionProcessingMetricsRecorder.FailureCategory.NONE
+                ),
+                any()
+        );
         order.verify(persistenceService).completeAndAdopt(
                 started,
                 55,

@@ -1,6 +1,8 @@
 package com.aifds.backend.common.error;
 
 import com.aifds.backend.common.trace.TraceIdFilter;
+import com.aifds.backend.observability.TransactionIntakeMetricsFilter;
+import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.idempotency.entity.IdempotencyProcessingStatus;
 import com.aifds.backend.idempotency.exception.IdempotencyCompletionTransactionNotFoundException;
 import com.aifds.backend.idempotency.exception.IdempotencyRecordNotFoundException;
@@ -12,16 +14,53 @@ import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.mock.web.MockHttpServletResponse;
 
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 class GlobalExceptionHandlerTest {
 
     private static final String TRACE_ID = "trace_unit_test_01";
 
     private final GlobalExceptionHandler handler = new GlobalExceptionHandler();
+
+    @Test
+    void validationHandlerMarksPublicIntakeAtTheSharedFinishOnceBoundary()
+            throws Exception {
+        TransactionProcessingMetricsRecorder recorder = mock(
+                TransactionProcessingMetricsRecorder.class
+        );
+        TransactionIntakeMetricsFilter filter =
+                new TransactionIntakeMetricsFilter(recorder);
+        MockHttpServletRequest request = requestWithTraceId();
+        request.setMethod("POST");
+        request.setRequestURI("/api/v1/transactions");
+        request.setServletPath("/api/v1/transactions");
+
+        filter.doFilter(
+                request,
+                new MockHttpServletResponse(),
+                (servletRequest, servletResponse) ->
+                        handler.handleTransactionValidation(
+                                new TransactionValidationException(
+                                        TransactionValidationType.FORMAT,
+                                        "amount",
+                                        "INVALID_AMOUNT_FORMAT",
+                                        "amount format is invalid"
+                                ),
+                                request
+                        )
+        );
+
+        verify(recorder).recordIntakeOutcome(
+                TransactionProcessingMetricsRecorder.IntakeOutcome
+                        .VALIDATION_REJECTED
+        );
+    }
 
     @Test
     void mapsFormatAndDomainValidationToTheirApprovedStatuses() {

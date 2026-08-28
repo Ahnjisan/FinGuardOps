@@ -171,18 +171,38 @@ Kafka 도입 시 `topic`과 `consumerGroup`, AWS 도입 시 `dependency` 같은 
 | `spring.http.requests` | `finguardops_http_server_requests_total` | API 요청 수와 처리량 확인 | Spring Boot HTTP 경계 | Counter | 요청 건 | HTTP 응답 상태가 확정될 때 1 증가 | `service`, `route`, `method`, `status`, `deploymentVersion` | 실제 path가 아닌 route template별 요청. 같은 요청을 filter와 controller에서 중복 계수하지 않음 | API 처리량, 상태 코드 분포, 배포 전후 비교 | 요청 급감·급증은 기준선 측정 후 결정 | Health는 `현재 최소 범위`, 나머지는 `핵심 기능 구현 시` |
 | `spring.http.duration` | `finguardops_http_server_request_duration_seconds` | 사용자 관점 API 응답시간 분포 확인 | Spring Boot HTTP 경계 | Histogram | 초 | 요청 수신부터 응답 완료까지 한 번 관측 | `service`, `route`, `method`, `status`, `deploymentVersion` | route·method·status별 분포. 비동기 AI 생성은 `202` 접수시간이며 최종 생성시간과 분리 | p50·p95·p99 후보, 느린 route, 배포 비교 | 임계값은 부하 테스트 후 결정 | Health는 `현재 최소 범위`, 나머지는 `핵심 기능 구현 시` |
 | `spring.http.errors` | `finguardops_http_server_errors_total` 또는 `spring.http.requests`의 오류 상태 필터 | HTTP 상태별 오류 수 확인 | Spring Boot HTTP 경계 | Counter | 오류 응답 건 | 4xx·5xx 응답 확정 시 1 증가 | `service`, `route`, `method`, `status`, `failureCategory`, `deploymentVersion` | 가능하면 HTTP 요청 Counter에서 파생해 중복 계측을 피함. 4xx와 5xx를 분리 | 오류율, 오류 코드 계열, 영향 route | 기준선 측정 후 결정. 5xx와 4xx의 심각도는 분리 | Health는 `현재 최소 범위`, 나머지는 `핵심 기능 구현 시` |
-| `spring.transaction.intake_outcomes` | `finguardops_transaction_intake_outcomes_total` | 거래 접수 성공·검증 거부·저장 실패와 기존 결과 반환을 구분 | Spring Boot 거래 접수 Service | Counter | 접수 시도 건 | 거래 생성 HTTP 요청의 접수 결과가 `accepted`, `validation_rejected`, `persistence_failed`, `idempotent_replay`, `conflict` 중 하나로 확정될 때 | `service`, `result`, `failureCategory`, `deploymentVersion` | 거래 접수 경계까지 도달한 HTTP 요청 시도별 한 번. 기본 검증 거부, 저장 실패, 멱등 재전송과 충돌을 포함하며 새 Transaction 생성 수와 별도로 집계. 같은 멱등 요청 재전송은 intake outcome과 duplicate request에 각각 기술적 의미로 계수할 수 있지만 새 Transaction이나 새 업무 결과로 계수하지 않음 | 접수 성공률, 검증·저장·중복 결과 분포 | 실패율은 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `spring.transaction.received` | `finguardops_transactions_received_total` | 최초 거래 접수량 확인 | Spring Boot 거래 Service | Counter | 거래 건 | 기본 검증을 통과한 Transaction이 최초 `RECEIVED`로 확정될 때 | `service`, `result`, `deploymentVersion` | 동일 멱등 요청 재전송은 증가하지 않음. `TransactionReceived` 업무 사실과 1:1 | 거래 유입량, 시간대별 처리량 | 기준선 대비 접수 급감은 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `spring.transaction.outcomes` | `finguardops_transaction_outcomes_total` | 거래 처리 성공·실패와 최종 Mock 대응 확인 | Spring Boot 거래 Service | Counter | 거래 건 | 거래가 `APPROVED`, `ADDITIONAL_AUTH_REQUIRED`, `HELD`, `FAILED` 등 승인된 종료 결과로 최초 확정될 때 | `service`, `status`, `result`, `riskLevel`, `deploymentVersion` | Transaction별 해당 처리 버전의 최초 확정만 계수. AI 리포트 실패는 거래 실패로 계수하지 않음 | 승인·추가 인증·보류·실패 분포 | 실패율은 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `spring.transaction.processing_duration` | `finguardops_transaction_processing_duration_seconds` | 거래 접수부터 위험 대응 확정까지의 업무 지연 확인 | Spring Boot 거래 Service | Histogram | 초 | 최초 접수 시각부터 최종 거래 처리 결과 확정까지 관측 | `service`, `result`, `riskLevel`, `deploymentVersion` | 완료된 Transaction 단위. HTTP 재전송 대기시간을 복제하지 않음 | 거래 처리시간 분포와 병목 비교 | 임계값은 부하 테스트 후 결정 | `핵심 기능 구현 시` |
+| `spring.transaction.intake_outcomes` | `finguardops_transaction_intake_outcomes_total` | public 거래 접수 최종 결과 구분 | Spring Boot finish-once Filter | Counter | 접수 시도 건 | exact public POST 응답 결과 확정 시 | `service`, `result` | 요청당 정확히 한 번. `result`는 `accepted`, `validation_rejected`, `dependency_unavailable`, `external_risk_failed`, `rule_failed`, `finalization_failed`, `completion_failed`, `idempotent_replay`, `in_progress`, `conflict`, `internal_failure`만 허용 | 접수 결과 분포 | 기준선 측정 후 결정 | Issue #186 구현 |
+| `spring.transaction.received` | `finguardops_transactions_received_total` | 최초 거래 접수량 확인 | Spring Boot 거래 Service | Counter | 거래 건 | Transaction과 Idempotency 연결 transaction의 `afterCommit` | `service`, `result` | `result=received`. rollback·replay·conflict 제외 | 거래 유입량 | 기준선 측정 후 결정 | Issue #186 구현 |
+| `spring.transaction.outcomes` | `finguardops_transaction_outcomes_total` | 최초 terminal 거래 결과 확인 | Spring Boot 거래 Service | Counter | 거래 건 | `APPROVED`, `ADDITIONAL_AUTH_REQUIRED`, `HELD`, `FAILED` 최초 transaction의 `afterCommit` | `service`, `status`, `riskLevel`, `failureCategory` | 성공 `failureCategory=none`; Rule 실패는 확정 category, 분류 불가 실패만 `unknown`; External Risk 실패로 `RECEIVED`에 남은 거래 제외 | terminal 분포 | 기준선 측정 후 결정 | Issue #186 구현 |
+| `spring.transaction.processing_duration` | `finguardops_transaction_processing_duration_seconds` | 거래 접수부터 최초 terminal 확정까지의 업무 지연 확인 | Spring Boot 거래 Service | Timer | 초 | terminal outcome과 같은 `afterCommit` | `service`, `status`, `riskLevel`, `failureCategory` | DB `created_at`부터 최초 terminal `updated_at`. 음수는 기록하지 않고 replay·복구에서 재관측하지 않음 | 처리시간 분포 | custom bucket·percentile 없음 | Issue #186 구현 |
+| `spring.external_risk.outcomes` | `finguardops_external_risk_outcomes_total` | 실제 External Risk policy/provider 결과 확인 | Spring Boot External Risk Policy | Counter | 시도 건 | 실제 policy/provider 호출 종료 시 | `service`, `result`, `failureCategory` | 성공 `matched|unmatched`와 `none`; 실패 `failed`와 `TIMEOUT|UNAVAILABLE|INVALID_REQUEST|UNSUPPORTED_CAPABILITY|INVALID_RESPONSE|TRANSFORMATION_ERROR` | Provider 의존성 결과 | 기준선 측정 후 결정 | Issue #186 구현 |
+| `spring.external_risk.duration` | `finguardops_external_risk_duration_seconds` | External Risk 소요시간 확인 | Spring Boot External Risk Policy | Timer | 초 | outcome과 같은 실제 시도 단위 | `service`, `result`, `failureCategory` | `System.nanoTime()` 단조 시간. replay·command read 실패는 시도 자체가 없어 제외 | External Risk 지연 | custom bucket·percentile 없음 | Issue #186 구현 |
 | `spring.detection.requests` | `finguardops_detection_requests_total` | 승인된 탐지 시작 요청량 확인 | Spring Boot 탐지 오케스트레이션 | Counter | 탐지 요청 건 | `transactionId+detectionResultVersion` 분석 시작이 최초 승인될 때 | `service`, `result`, `deploymentVersion` | 동일 버전 중복 요청·늦은 재전달은 증가하지 않음 | 탐지 입력량과 완료량 비교 | 요청 대비 완료 감소는 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `spring.detection.outcomes` | `finguardops_detection_outcomes_total` | 탐지 완료·실패 결과 확인 | Spring Boot 탐지 Service | Counter | 탐지 결과 건 | Spring Boot가 FastAPI 결과를 검증·저장해 완료하거나 실패를 최종 확정할 때 | `service`, `result`, `riskLevel`, `modelVersion`, `failureCategory`, `deploymentVersion` | `transactionId+detectionResultVersion`별 한 번. FastAPI 응답 수와 별개 | 완료율, 실패 원인, 위험 등급 분포 | 실패율은 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `spring.detection.orchestration_duration` | `finguardops_detection_orchestration_duration_seconds` | Spring Boot 관점 전체 탐지 소요시간 확인 | Spring Boot 탐지 오케스트레이션 | Histogram | 초 | 분석 시작 승인부터 DetectionResult 완료·실패 확정까지 | `service`, `result`, `riskLevel`, `deploymentVersion` | 탐지 결과 버전 단위. FastAPI 내부 Rule·ML 시간과 분리 | 전체 분석시간과 FastAPI 내부시간 비교 | 임계값은 부하 테스트 후 결정 | `핵심 기능 구현 시` |
+| `spring.rule_analysis.outcomes` | `finguardops_rule_analysis_outcomes_total` | Spring 관점 Rule orchestration 결과 확인 | Spring Boot Rule 오케스트레이션 | Counter | 시도 건 | start·client·mapping·adoption 경계를 포함한 실제 orchestration 종료 시 | `service`, `result`, `riskLevel`, `failureCategory` | 성공 `completed`/`none`; 실패 `failed`와 아래 allowlist. command read·External Risk 실패·replay 제외 | 완료율·단계별 실패 | 기준선 측정 후 결정 | Issue #186 구현 |
+| `spring.rule_analysis.duration` | `finguardops_rule_analysis_duration_seconds` | Spring 관점 Rule orchestration 소요시간 확인 | Spring Boot Rule 오케스트레이션 | Timer | 초 | outcome과 같은 시도 단위 | `service`, `result`, `riskLevel`, `failureCategory` | `System.nanoTime()` 단조 시간, 시도당 한 번. FastAPI 내부 Rule 시간과 분리 | 전체 Rule 지연 | custom bucket·percentile 없음 | Issue #186 구현 |
 | `spring.risk_response.outcomes` | `finguardops_risk_response_outcomes_total` | 승인된 위험 대응 결과 확인 | Spring Boot 위험 대응 Service | Counter | 대응 건 | 채택 DetectionResult와 `riskResponseOutcome`, 최종 처리 상태가 최초 확정될 때 | `service`, `result`, `riskLevel`, `deploymentVersion` | 동일 채택 결과의 반복 적용은 증가하지 않음 | 위험 등급별 Mock 대응 분포 | 정책 이탈 또는 결과 급변은 기준선 측정 후 결정 | `핵심 기능 구현 시` |
 | `spring.cases.created` | `finguardops_cases_created_total` | 사건 신규 생성량 확인 | Spring Boot 사건 Service | Counter | 사건 건 | FraudCase와 최초 CaseTransaction 연결이 정합하게 확정될 때 | `service`, `riskLevel`, `result`, `deploymentVersion` | 새 `caseId`별 한 번. 기존 사건 연결은 신규 생성으로 계수하지 않음 | 신규 사건량, 위험 등급별 대기 유입 | 중복 생성·급증은 기준선 측정 후 결정 | `핵심 기능 구현 시` |
 | `spring.case.status_change_outcomes` | `finguardops_case_status_change_outcomes_total` | 사건 상태 변경 성공과 거부된 시도의 결과 확인 | Spring Boot 사건 Service | Counter | 상태 변경 시도 건 | 성공 전이 또는 승인된 거부 결과가 확정될 때 | `service`, `status`, `result`, `failureCategory`, `deploymentVersion` | 성공과 거부를 `result`로 분리. 거부는 실제 상태 변경으로 해석하지 않으며 같은 멱등 종료 재전송은 새 변경으로 계수하지 않음 | 사건 흐름, 전이 충돌, 종료 처리량 | 충돌·거부율은 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `spring.http.duplicate_requests` | `finguardops_http_duplicate_requests_total` | 동일 멱등 요청 재전송과 업무 중복 방지 동작 확인 | Spring Boot 멱등성 경계 | Counter | 중복 요청 건 | 같은 키+같은 fingerprint가 기존 진행·완료·실패 요청으로 판별될 때 | `service`, `route`, `method`, `result`, `deploymentVersion` | HTTP 재전송 1건당 증가. 새 Transaction·AiReportRequest·상태 변경으로 계수하지 않음 | 재전송량, 진행/완료 결과 재사용 분포 | 비정상 급증은 기준선 측정 후 결정 | `핵심 기능 구현 시` |
-| `spring.http.idempotency_conflicts` | `finguardops_http_idempotency_conflicts_total` | 같은 키에 다른 fingerprint가 들어온 충돌 확인 | Spring Boot 멱등성 경계 | Counter | 충돌 건 | `IDEMPOTENCY_KEY_CONFLICT`가 확정될 때 | `service`, `route`, `method`, `result`, `deploymentVersion` | 충돌 HTTP 요청별 1회. 키 원문은 라벨에 기록하지 않음 | API·클라이언트별 충돌 추세 | 기준선 측정 후 결정 | `핵심 기능 구현 시` |
+| `spring.http.duplicate_requests` | `finguardops_http_duplicate_requests_total` | 동일 멱등 요청 재전송 확인 | Spring Boot finish-once Filter | Counter | 중복 요청 건 | 같은 key·fingerprint가 기존 상태로 판별된 HTTP 요청 종료 시 | `service`, `result` | `result=in_progress|completed|failed`; replay당 한 번, 새 업무 meter 미증가 | 재전송 분포 | 기준선 측정 후 결정 | Issue #186 구현 |
+| `spring.http.idempotency_conflicts` | `finguardops_http_idempotency_conflicts_total` | 같은 key의 다른 fingerprint 충돌 확인 | Spring Boot finish-once Filter | Counter | 충돌 건 | `IDEMPOTENCY_KEY_CONFLICT` 확정 시 | `service`, `result` | `result=conflict`; key·fingerprint 원문 미포함 | 충돌 추세 | 기준선 측정 후 결정 | Issue #186 구현 |
+
+Issue #186 custom meter의 `service`는 모두 `spring-backend` 고정값이다.
+`provider`와 `deploymentVersion` tag는 사용하지 않는다. Rule 실패 category는
+`RULE_ANALYSIS_START_FAILED`, `RULE_ANALYSIS_HTTP_CALL_FAILED`,
+`RULE_ANALYSIS_RESPONSE_MAPPING_FAILED`, `RULE_ANALYSIS_ADOPTION_FAILED`,
+`RULE_ANALYSIS_TRANSACTION_BOUNDARY_VIOLATION`과 기존 Rule client enum
+`AI_SERVICE_REQUEST_CONTRACT_ERROR`, `AI_SERVICE_PAYLOAD_TOO_LARGE`,
+`AI_SERVICE_RULE_CONTRACT_ERROR`, `AI_SERVICE_CAPABILITY_MISMATCH`,
+`AI_SERVICE_INTERNAL_ERROR`, `AI_SERVICE_CONNECT_TIMEOUT`,
+`AI_SERVICE_RESPONSE_TIMEOUT`, `AI_SERVICE_UNAVAILABLE`,
+`AI_SERVICE_INVALID_RESPONSE`만 허용한다. 성공은 `failureCategory=none`, 승인된
+category로 분류할 수 없는 실패만 `unknown`이다.
+
+MeterRegistry 조회·meter 등록·기록 및 `afterCommit` callback 실패는 모두 업무
+응답·원본 예외·transaction 결과와 격리한다. 이 보장은 정상 JVM 안의 commit callback
+경계까지이며, DB commit 직후 process crash에도 전달을 보장하는 durable metric/outbox는
+구현하지 않았다. Prometheus exporter, Actuator exposure 변경, custom bucket·percentile,
+scheduler, alert와 dashboard도 Issue #186 범위가 아니다.
 
 `spring.http.errors`는 `spring.http.requests`에서 계산할 수 있으면 별도 Counter를 만들지 않는 것을 권장한다. 문서상 논리 지표는 유지하되 하나의 HTTP 요청이 두 독립 계측 경로에서 서로 다른 값으로 집계되지 않도록 한다.
 
@@ -437,10 +457,13 @@ React 관리자 화면은 업무 영향과 조치 요약에 집중하고 Grafana
 | 항목 | 문서별 표현 | 메트릭 명세의 처리 |
 | --- | --- | --- |
 | 도메인 `eventId` 명명 | API 공통 규칙은 행동 이벤트 식별자로, 시스템·운영 문서는 향후 Kafka 이벤트 식별자로 사용 | 어떤 `eventId`도 메트릭 라벨에 사용하지 않는다. 로그·이벤트 물리 명명은 후속 결정 |
-| External Risk 실패 관측 | 성공은 match 기반 `MATCHED` 또는 `UNMATCHED`. timeout·unavailable·invalid response는 분석을 중단하고 typed failure로 전파 | 현재 구현된 신규 meter는 없다. 후속 계측은 성공 결과와 failure category를 구분하고 실제 확정된 거래 결과만 계수한다. cache hit·stale data·fallback meter는 현재 계약이 아님 |
+| External Risk 실패 관측 | 성공은 match 기반 `MATCHED` 또는 `UNMATCHED`. timeout·unavailable·invalid response는 분석을 중단하고 typed failure로 전파 | Issue #186 meter는 성공 결과와 6개 typed failure category를 구분한다. cache hit·stale data·fallback meter는 현재 계약이 아님 |
 | FastAPI Timeout 거래 처리 | 상태 전이·운영 요구사항은 정책 `TBD`, 거래 API는 초기 권장으로 Transaction `FAILED`와 `503` | 실제 Spring Boot가 확정한 결과만 거래 결과로 계수. Timeout 자체는 client 실패 Counter로 별도 계수 |
 
-Validation 거절은 Transaction과 IdempotencyRecord를 생성하지 않는다. 거래 접수·상태 결과 Counter에 포함하지 않고 HTTP 오류, Validation 오류 코드, `traceId`, 로그와 승인된 저카디널리티 오류 메트릭으로 관측한다.
+Validation 거절은 public intake outcome Counter에 `validation_rejected`로 포함한다.
+Validation 전에 Transaction과 IdempotencyRecord가 생성되지 않으므로 received Counter에는
+포함하지 않으며, terminal 업무 결과 Counter와 processing duration에도 포함하지 않는다.
+HTTP 오류, Validation 오류 코드, `traceId`와 로그는 요청별 조사에 사용한다.
 
 External Risk의 현재 운영 경계에는 자동 retry, cache, stale data, fallback과 Circuit
 Breaker가 없다. 따라서 이를 현재 구현 metric이나 성공 결과로 계수하지 않는다.
