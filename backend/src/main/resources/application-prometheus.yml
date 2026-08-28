@@ -1,0 +1,15 @@
+management:
+  server:
+    port: ${MANAGEMENT_SERVER_PORT:8081}
+    address: ${MANAGEMENT_SERVER_ADDRESS:127.0.0.1}
+  endpoint:
+    prometheus:
+      access: read-only
+  endpoints:
+    web:
+      exposure:
+        include: "health,prometheus"
+  prometheus:
+    metrics:
+      export:
+        enabled: true
