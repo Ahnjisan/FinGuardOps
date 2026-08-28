@@ -62,7 +62,7 @@ FinGuardOps는 금융거래와 사용자 행동을 기반으로 이상거래를 
 
 | 운영 대상 | 역할 | 현재 도입 상태와 운영 범위 |
 | --- | --- | --- |
-| Spring Boot Backend | 거래 접수·검증, 멱등성, 거래·사건 상태, 위험 대응과 업무 정합성의 최종 소유자 | Health, public `POST /api/v1/transactions`, 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion과 기본 Rule 집합 발행 경계, Rule 분석 HTTP Client·내부 오케스트레이션, External Risk 독립 정책·Mock·실제 HTTP Adapter와 production coordinator Bean, Backend Java v2 DTO·Mapper·Client·내부 오케스트레이션, FraudCase·CaseTransaction과 위험 대응·AuditLog 원자적 최종화 경계가 구현되었다. Public intake의 end-to-end 흐름과 성공·실패 replay, 장기 `IN_PROGRESS` bounded 후보 조회, typed 판정, 안전한 completion gap 단건 복구와 append-only 복구 감사도 구현되었다. 실제 Runner·CLI·scheduler·batch·metric·alert, 공개 사건·감사·최종화 API, USER 인증·인가와 사건 조사 상태 전이·추가 연결·병합·분리는 미구현이다. |
+| Spring Boot Backend | 거래 접수·검증, 멱등성, 거래·사건 상태, 위험 대응과 업무 정합성의 최종 소유자 | Health, public `POST /api/v1/transactions`, 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion과 기본 Rule 집합 발행 경계, Rule 분석 HTTP Client·내부 오케스트레이션, External Risk 독립 정책·Mock·실제 HTTP Adapter와 production coordinator Bean, Backend Java v2 DTO·Mapper·Client·내부 오케스트레이션, FraudCase·CaseTransaction과 위험 대응·AuditLog 원자적 최종화 경계가 구현되었다. Public intake의 end-to-end 흐름과 성공·실패 replay, 장기 `IN_PROGRESS` bounded 후보 조회, typed 판정, 안전한 completion gap 단건 복구, append-only 복구 감사와 제한된 non-web one-shot inspect·recover 명령도 구현되었다. scheduler·batch·metric·alert, 공개 사건·감사·최종화 API, 실제 운영 credential 배포, USER 인증·인가와 사건 조사 상태 전이·추가 연결·병합·분리는 미구현이다. |
 | FastAPI AI Service | Feature 계산, Rule 실행, ML 추론, 모델 라우팅, AI 사건 리포트와 템플릿 fallback | `POST /api/v1/rule-analysis`, External Risk 필수 입력의 `POST /api/v2/rule-analysis`, R001~R004 실행과 점수·RiskLevel·Evidence 계산은 구현되었다. v2 External Risk는 validation-only이며 ML 추론·모델 라우팅·AI 사건 리포트와 템플릿 fallback은 미구현이다. |
 | PostgreSQL | 거래, 행동 이벤트, 탐지 결과, 사건, 감사 로그와 AI 사용량·비용 데이터의 영속 저장 목표 | V1~V9의 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion, FraudCase·CaseTransaction, 업무 AuditLog, Idempotency Failure Snapshot과 별도 append-only 복구 감사 기반이 구현되었다. 성공 업무용 External Risk Snapshot의 별도 DB 영속화와 사건 조사·AI 사용량·비용 데이터는 미구현이며 별도 승인 범위이다. |
 | Redis | 정확 일치 AI 리포트 캐시와 집계 데이터 사용 목표 | 향후 연동·검증 범위이다. External Risk cache는 현재 계약이 아니며 별도 Issue와 승인이 필요하다. 시맨틱 캐시는 범위에 포함하지 않는다. |
@@ -223,12 +223,15 @@ External Risk 선행 조회 실패를 이 상태 전이로 변환하지 않는�
 
 Mock 활성 profile·property와 scenario, 성공·failure category를 구분한다. Provider
 호출 여부를 DB만으로 확정할 수 없는 `IN_PROGRESS`에서는 Provider를 자동 재호출하지
-않는다. 실제 복구 명령·scheduler·batch·자동화는 후속 Issue다.
+않는다. 실제 one-shot 복구 명령은 구현되었지만 scheduler·batch·자동화는 후속 Issue다.
 
 내부 복구 경계는 `updated_at` 30분 기본 threshold와 최대 100건의 bounded 후보를
 제공한다. 단건 시도는 확정된 최종 업무 상태를 모두 검증해 복구하거나 typed 거부하며,
 Provider·Rule·최종화·사건 생성을 호출하지 않는다. 후보 조회는 감사하지 않고 명시적
 단건 시도는 성공·거부·내부 실패 중 정확히 한 append-only 복구 감사를 남긴다.
+one-shot 명령은 SYSTEM actor를 고정하고 입력을 Spring context 전 strict 검증하며
+안전한 JSONL과 exit code만 출력한다. 실제 운영자 인증·인가는 애플리케이션에 없으므로
+OS·배포 플랫폼 실행 권한과 credential 관리는 외부 운영 경계에서 통제한다.
 
 #### 기록 항목
 

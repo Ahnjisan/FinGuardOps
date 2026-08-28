@@ -32,8 +32,9 @@ AuditLog를 원자적으로 확정한다. 다만 거래 접수 전체 연결과 
 Java·Python·DB 또는 운영 복구 실행 경로의 구현 완료를 의미하지 않는다. 이후
 Snapshot v2 typed 모델·codec·dispatcher와 JSONB 저장·조회 검증을 구현했고,
 Issue #178에서 public 실행 경로와 완료 writer를 연결했고, Issue #182에서 내부
-운영 복구 application·transaction·감사 경계를 구현했다. 실제 Runner·CLI와
-scheduler·batch·metric·alert는 후속 범위다.
+운영 복구 application·transaction·감사 경계를 구현했다. Issue #184에서 제한된
+non-web one-shot Runner·CLI와 운영 runbook을 구현했다. scheduler·batch·metric·
+alert는 후속 범위다.
 
 ## 2. 최종 성공 경계
 
@@ -179,8 +180,9 @@ DetectionResult, Evidence, 위험 대응과 사건 연결의 식별자·상태·
 DetectionResult·사건을 생성해서는 안 된다.
 
 복구 작업은 대상 레코드 잠금, 검증 결과, 실행 주체, 실행 시각과 성공·실패를
-감사 가능하게 남겨야 한다. 구체적인 운영 명령·권한·재시도 횟수와 배치 방식은
-후속 구현에서 정하되 이 불변 원칙을 변경하지 않는다.
+감사 가능하게 남긴다. Issue #184의 명시적 one-shot 명령은 고정 SYSTEM actor로
+정확한 record 하나만 처리하며 Runner retry를 수행하지 않는다. OS·배포 플랫폼의
+실행 권한, scheduler·batch와 자동 반복은 애플리케이션 밖의 후속 승인 범위다.
 
 ## 7. 분석 실패와 불확실성
 
@@ -288,12 +290,13 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
 2. AuditLog 계약과 물리 모델 및 내부 최종화 통합 — 완료
 3. AI Service v2·Java/Python DTO와 거래 접수–External Risk–Rule 분석–위험 대응–사건 연결 — Issue #178 완료
 4. Snapshot 완료 간극 내부 운영 복구 경계 구현 — Issue #182 완료
-5. 실제 one-shot Runner·CLI와 scheduler·metric·alert 구현 — 후속
+5. 제한된 non-web one-shot Runner·CLI와 운영 runbook — Issue #184 완료
+6. scheduler·batch·metric·alert — 후속
 
 각 단계는 이전 단계의 계약과 상태를 임시 기본값으로 대체하지 않는다. 3단계 완료
 전의 `RECEIVED` v1 응답은 최종 동기 거래 처리로 표현하지 않는다. 4단계 운영 복구는
-현재 v2 성공 경로와 분리한다. 내부 복구 경계는 Issue #182에서 구현했고 실제 실행
-명령과 자동화는 후속 범위다.
+현재 v2 성공 경로와 분리한다. 내부 복구 경계는 Issue #182에서 구현했고 Issue #184의
+실제 one-shot 명령은 이를 정확히 한 번 호출한다. 자동화는 후속 범위다.
 
 ## 13. 영향과 제외 범위
 
@@ -345,6 +348,23 @@ timestamp로 cutoff를 계산하고 행을 잠그지 않는다. `expires_at`은 
 
 `RECEIVED`, `ANALYZING`, 미완료 DetectionResult, `ANALYZED`, 확정 실패, 상태·사건·
 AuditLog 불일치, conflicting Idempotency data와 terminal Idempotency는 typed
-`REJECTED`만 기록하고 업무·Idempotency 데이터를 변경하지 않는다. 실제 one-shot
-Runner·CLI, scheduler·batch, metric·alert·dashboard, 자동 retry·fallback·cache,
-불확실 상태 재실행, `FAILED` 재분석, key 만료·삭제·재사용과 관리 HTTP API는 미구현이다.
+`REJECTED`만 기록하고 업무·Idempotency 데이터를 변경하지 않는다.
+
+## 16. Issue #184 one-shot 실행 경계 (2026-08-28)
+
+`--finguardops.idempotency-recovery.` prefix가 하나라도 있으면 정상 Backend startup을
+시작하지 않고 모든 입력을 context 생성 전에 strict 검증한다. 유효한 `inspect` 또는
+`recover`만 JPA·Flyway·복구 Bean을 명시한 `WebApplicationType.NONE` context에서 일반
+Runner Bean을 정확히 한 번 호출한다. context는 모든 경로에서 닫고 실제 `System.exit`는
+`BackendApplication.main()`의 recovery 최외곽에만 존재한다.
+
+CLI actor는 `SYSTEM`·`finguardops-backend`로 고정한다. UTF-8 단일-line JSONL과 exit
+code 0·1·2·3을 사용하며 입력 원문, 예외 message·class·stack trace와 민감정보를
+출력하지 않는다. Provider·FastAPI·Rule·최종화·사건 생성·업무 AuditLog·LLM을
+로드하거나 재실행하지 않으며 자동 retry·fallback·cache도 없다. 실제 절차는
+[`../09-deployment/idempotency-recovery-one-shot-runbook.md`](../09-deployment/idempotency-recovery-one-shot-runbook.md)를
+따른다.
+
+scheduler·batch, metric·alert·dashboard, 실제 운영 credential 배포, USER 인증·인가,
+불확실 상태 자동 재실행, `FAILED` 재분석, key 만료·삭제·재사용과 public·internal 관리
+HTTP API는 미구현이다.
