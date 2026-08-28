@@ -12,6 +12,7 @@ import com.aifds.backend.detection.entity.DetectionResult;
 import com.aifds.backend.fraudcase.entity.FraudCaseStatus;
 import com.aifds.backend.fraudcase.service.FraudCaseLinkResult;
 import com.aifds.backend.fraudcase.service.FraudCasePersistenceService;
+import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
 import com.aifds.backend.transaction.exception.TransactionNotFoundException;
@@ -21,8 +22,13 @@ import com.aifds.backend.transaction.repository.FinancialTransactionRepository;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -33,16 +39,35 @@ public class RiskResponseFinalizationService {
     private final FraudCasePersistenceService fraudCasePersistenceService;
     private final AuditLogPersistenceService auditLogPersistenceService;
     private final RiskResponseDecisionPolicy decisionPolicy;
+    private final TransactionProcessingMetricsRecorder metricsRecorder;
+
+    @Autowired
+    public RiskResponseFinalizationService(
+            FinancialTransactionRepository transactionRepository,
+            FraudCasePersistenceService fraudCasePersistenceService,
+            AuditLogPersistenceService auditLogPersistenceService,
+            TransactionProcessingMetricsRecorder metricsRecorder
+    ) {
+        this.transactionRepository = transactionRepository;
+        this.fraudCasePersistenceService = fraudCasePersistenceService;
+        this.auditLogPersistenceService = auditLogPersistenceService;
+        this.decisionPolicy = new RiskResponseDecisionPolicy();
+        this.metricsRecorder = metricsRecorder == null
+                ? TransactionProcessingMetricsRecorder.noop()
+                : metricsRecorder;
+    }
 
     public RiskResponseFinalizationService(
             FinancialTransactionRepository transactionRepository,
             FraudCasePersistenceService fraudCasePersistenceService,
             AuditLogPersistenceService auditLogPersistenceService
     ) {
-        this.transactionRepository = transactionRepository;
-        this.fraudCasePersistenceService = fraudCasePersistenceService;
-        this.auditLogPersistenceService = auditLogPersistenceService;
-        this.decisionPolicy = new RiskResponseDecisionPolicy();
+        this(
+                transactionRepository,
+                fraudCasePersistenceService,
+                auditLogPersistenceService,
+                TransactionProcessingMetricsRecorder.noop()
+        );
     }
 
     @Transactional
@@ -82,6 +107,8 @@ public class RiskResponseFinalizationService {
                 caseResult
         );
 
+        recordTerminalAfterCommit(transaction);
+
         return new RiskResponseFinalizationResult(
                 transaction.getTransactionId(),
                 adoptedResult.getDetectionResultId(),
@@ -91,6 +118,51 @@ public class RiskResponseFinalizationService {
                 caseResult == null ? null : caseResult.caseId(),
                 caseResult != null && caseResult.newlyCreated()
         );
+    }
+
+    private void recordTerminalAfterCommit(
+            FinancialTransaction transaction
+    ) {
+        Instant createdAt = transaction.getCreatedAt();
+        Instant terminalAt = transaction.getUpdatedAt();
+        Runnable recording = () -> metricsRecorder.recordTransactionTerminal(
+                transaction.getProcessingStatus(),
+                transaction.getRiskLevel(),
+                TransactionProcessingMetricsRecorder.FailureCategory.NONE,
+                duration(createdAt, terminalAt)
+        );
+        afterCommit(recording);
+    }
+
+    private Duration duration(Instant createdAt, Instant terminalAt) {
+        if (createdAt == null || terminalAt == null) {
+            return null;
+        }
+        Duration duration = Duration.between(createdAt, terminalAt);
+        return duration.isNegative() ? null : duration;
+    }
+
+    private void afterCommit(Runnable operation) {
+        try {
+            if (!TransactionSynchronizationManager
+                    .isSynchronizationActive()) {
+                return;
+            }
+            TransactionSynchronizationManager.registerSynchronization(
+                    new TransactionSynchronization() {
+                        @Override
+                        public void afterCommit() {
+                            try {
+                                operation.run();
+                            } catch (Throwable ignored) {
+                                // Observability cannot change committed work.
+                            }
+                        }
+                    }
+            );
+        } catch (Throwable ignored) {
+            // Synchronization registration cannot change business work.
+        }
     }
 
     private DetectionResult validateEligible(

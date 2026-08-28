@@ -7,6 +7,7 @@ import com.aifds.backend.detection.entity.RiskLevel;
 import com.aifds.backend.detection.repository.DetectionEvidenceRepository;
 import com.aifds.backend.detection.repository.DetectionResultRepository;
 import com.aifds.backend.externalrisk.domain.ExternalRiskSnapshot;
+import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.rule.client.RuleAnalysisRequestV2Mapper;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV2;
 import com.aifds.backend.rule.entity.RuleVersion;
@@ -16,10 +17,14 @@ import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
 import com.aifds.backend.transaction.exception.TransactionNotFoundException;
 import com.aifds.backend.transaction.repository.FinancialTransactionRepository;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
@@ -34,6 +39,28 @@ public class RuleAnalysisPersistenceService {
     private final RuleVersionRepository ruleVersionRepository;
     private final RuleAnalysisSnapshotAssembler snapshotAssembler;
     private final RuleAnalysisRequestV2Mapper requestV2Mapper;
+    private final TransactionProcessingMetricsRecorder metricsRecorder;
+
+    @Autowired
+    public RuleAnalysisPersistenceService(
+            FinancialTransactionRepository transactionRepository,
+            DetectionResultRepository detectionResultRepository,
+            DetectionEvidenceRepository evidenceRepository,
+            RuleVersionRepository ruleVersionRepository,
+            RuleAnalysisSnapshotAssembler snapshotAssembler,
+            RuleAnalysisRequestV2Mapper requestV2Mapper,
+            TransactionProcessingMetricsRecorder metricsRecorder
+    ) {
+        this.transactionRepository = transactionRepository;
+        this.detectionResultRepository = detectionResultRepository;
+        this.evidenceRepository = evidenceRepository;
+        this.ruleVersionRepository = ruleVersionRepository;
+        this.snapshotAssembler = snapshotAssembler;
+        this.requestV2Mapper = requestV2Mapper;
+        this.metricsRecorder = metricsRecorder == null
+                ? TransactionProcessingMetricsRecorder.noop()
+                : metricsRecorder;
+    }
 
     public RuleAnalysisPersistenceService(
             FinancialTransactionRepository transactionRepository,
@@ -43,12 +70,15 @@ public class RuleAnalysisPersistenceService {
             RuleAnalysisSnapshotAssembler snapshotAssembler,
             RuleAnalysisRequestV2Mapper requestV2Mapper
     ) {
-        this.transactionRepository = transactionRepository;
-        this.detectionResultRepository = detectionResultRepository;
-        this.evidenceRepository = evidenceRepository;
-        this.ruleVersionRepository = ruleVersionRepository;
-        this.snapshotAssembler = snapshotAssembler;
-        this.requestV2Mapper = requestV2Mapper;
+        this(
+                transactionRepository,
+                detectionResultRepository,
+                evidenceRepository,
+                ruleVersionRepository,
+                snapshotAssembler,
+                requestV2Mapper,
+                TransactionProcessingMetricsRecorder.noop()
+        );
     }
 
     @Transactional(
@@ -253,6 +283,53 @@ public class RuleAnalysisPersistenceService {
         result.fail(failureCode, failedAt);
         transaction.failAnalysis();
         transactionRepository.saveAndFlush(transaction);
+        recordFailedTerminalAfterCommit(transaction, failureCode);
+    }
+
+    private void recordFailedTerminalAfterCommit(
+            FinancialTransaction transaction,
+            String failureCode
+    ) {
+        Instant createdAt = transaction.getCreatedAt();
+        Instant terminalAt = transaction.getUpdatedAt();
+        Duration duration = null;
+        if (createdAt != null && terminalAt != null) {
+            Duration candidate = Duration.between(createdAt, terminalAt);
+            if (!candidate.isNegative()) {
+                duration = candidate;
+            }
+        }
+        Duration recordedDuration = duration;
+        afterCommit(() -> metricsRecorder.recordTransactionTerminal(
+                TransactionProcessingStatus.FAILED,
+                null,
+                TransactionProcessingMetricsRecorder.FailureCategory
+                        .fromRule(failureCode),
+                recordedDuration
+        ));
+    }
+
+    private void afterCommit(Runnable operation) {
+        try {
+            if (!TransactionSynchronizationManager
+                    .isSynchronizationActive()) {
+                return;
+            }
+            TransactionSynchronizationManager.registerSynchronization(
+                    new TransactionSynchronization() {
+                        @Override
+                        public void afterCommit() {
+                            try {
+                                operation.run();
+                            } catch (Throwable ignored) {
+                                // Observability cannot change committed work.
+                            }
+                        }
+                    }
+            );
+        } catch (Throwable ignored) {
+            // Synchronization registration cannot change business work.
+        }
     }
 
     private FinancialTransaction transactionForUpdate(UUID transactionId) {

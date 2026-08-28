@@ -460,6 +460,20 @@ Idempotency는 `IN_PROGRESS`로 남으며 자동 재실행하지 않습니다. �
 따릅니다. DB의 24시간 `expires_at` 저장값도 Service 만료 판정과 정리 작업이
 없어 실질적인 만료 정책은 아닙니다.
 
+거래 처리 운영 메트릭은 Micrometer로 구현되어 public
+`POST /api/v1/transactions`의 최종 intake 결과를 요청당 한 번 기록합니다.
+최초 `RECEIVED`와 `APPROVED`·`ADDITIONAL_AUTH_REQUIRED`·`HELD`·`FAILED`
+terminal 결과는 실제 DB commit 뒤에만 증가하고, 처리시간은
+`financial_transaction.created_at`부터 최초 terminal `updated_at`까지의 DB 시각을
+사용합니다. 같은 key·fingerprint의 진행·완료·실패 replay는 intake와 duplicate
+request만 증가시키며 Provider·Rule·거래 terminal 결과를 다시 기록하지 않습니다.
+External Risk와 Spring Rule orchestration은 실제 시도만 단조 시간으로 관측하고,
+모든 custom tag는 `spring-backend`와 문서화된 enum 집합으로 제한합니다. Metric
+등록·기록 실패는 업무 응답과 transaction을 변경하지 않습니다. Prometheus exporter,
+Actuator exposure 확대, custom bucket·percentile, alert·dashboard와 process crash까지
+보장하는 durable metric/outbox는 아직 구현하지 않았습니다. 정확한 이름·tag·category는
+[`관측성 메트릭 명세`](docs/01-requirements/observability-metrics-spec.md)를 따릅니다.
+
 ---
 
 ## 로드맵

@@ -12,6 +12,7 @@ import com.aifds.backend.detection.entity.RiskLevel;
 import com.aifds.backend.fraudcase.entity.FraudCaseStatus;
 import com.aifds.backend.fraudcase.service.FraudCaseLinkResult;
 import com.aifds.backend.fraudcase.service.FraudCasePersistenceService;
+import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.aifds.backend.transaction.entity.RiskResponseOutcome;
 import com.aifds.backend.transaction.entity.TransactionChannel;
@@ -74,6 +75,9 @@ class RiskResponseFinalizationServiceTest {
     @Mock
     private AuditLogPersistenceService auditLogPersistenceService;
 
+    @Mock
+    private TransactionProcessingMetricsRecorder metricsRecorder;
+
     private RiskResponseFinalizationService service;
 
     @BeforeEach
@@ -81,7 +85,8 @@ class RiskResponseFinalizationServiceTest {
         service = new RiskResponseFinalizationService(
                 transactionRepository,
                 fraudCasePersistenceService,
-                auditLogPersistenceService
+                auditLogPersistenceService,
+                metricsRecorder
         );
     }
 
@@ -127,6 +132,7 @@ class RiskResponseFinalizationServiceTest {
         verify(transactionRepository).saveAndFlush(transaction);
         verify(auditLogPersistenceService, times(caseRequired ? 4 : 2))
                 .append(any(AuditLogDraft.class));
+        verifyNoInteractions(metricsRecorder);
     }
 
     @ParameterizedTest

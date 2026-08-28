@@ -11,6 +11,8 @@ import com.aifds.backend.externalrisk.service.ExternalRiskFailureSnapshotService
 import com.aifds.backend.externalrisk.service.ExternalRiskRuleAnalysisCoordinator;
 import com.aifds.backend.idempotency.service.IdempotencyClaimResult;
 import com.aifds.backend.idempotency.service.IdempotencyService;
+import com.aifds.backend.observability.TransactionIntakeMetricsFilter;
+import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.transaction.command.ValidatedTransactionCommand;
 import com.aifds.backend.transaction.entity.RiskResponseOutcome;
 import com.aifds.backend.transaction.entity.TransactionChannel;
@@ -25,6 +27,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
@@ -38,6 +44,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -306,15 +313,21 @@ class TransactionSynchronousProcessingCoordinatorTest {
     @Test
     void finalizationOrCompletionFailureDoesNotWriteAlternativeTerminalState() {
         stubAvailableAndPersisted();
+        TransactionProcessingMetricsRecorder metricsRecorder = mock(
+                TransactionProcessingMetricsRecorder.class
+        );
         RuntimeException finalizationFailure =
                 new IllegalStateException("finalization");
         when(finalizationService.finalizeRiskResponse(TRANSACTION_ID))
                 .thenThrow(finalizationFailure);
-        assertThatThrownBy(() -> coordinator.process(
-                RECORD_ID,
-                command(),
-                TRACE_ID
+        assertThatThrownBy(() -> inMetricsBoundary(
+                () -> coordinator.process(RECORD_ID, command(), TRACE_ID),
+                metricsRecorder
         )).isSameAs(finalizationFailure);
+        verify(metricsRecorder).recordIntakeOutcome(
+                TransactionProcessingMetricsRecorder.IntakeOutcome
+                        .FINALIZATION_FAILED
+        );
         verifyNoInteractions(completionService);
         verify(idempotencyService, never()).fail(anyLong(), any());
 
@@ -325,6 +338,7 @@ class TransactionSynchronousProcessingCoordinatorTest {
                 finalizationService,
                 completionService
         );
+        org.mockito.Mockito.reset(metricsRecorder);
         stubAvailableAndPersisted();
         RiskResponseFinalizationResult finalized = finalization(RiskLevel.LOW);
         RuntimeException completionFailure =
@@ -333,12 +347,40 @@ class TransactionSynchronousProcessingCoordinatorTest {
                 .thenReturn(finalized);
         when(completionService.complete(RECORD_ID, finalized, CREATED_AT))
                 .thenThrow(completionFailure);
-        assertThatThrownBy(() -> coordinator.process(
-                RECORD_ID,
-                command(),
-                TRACE_ID
+        assertThatThrownBy(() -> inMetricsBoundary(
+                () -> coordinator.process(RECORD_ID, command(), TRACE_ID),
+                metricsRecorder
         )).isSameAs(completionFailure);
+        verify(metricsRecorder).recordIntakeOutcome(
+                TransactionProcessingMetricsRecorder.IntakeOutcome
+                        .COMPLETION_FAILED
+        );
         verify(idempotencyService, never()).fail(anyLong(), any());
+    }
+
+    private void inMetricsBoundary(
+            Runnable invocation,
+            TransactionProcessingMetricsRecorder metricsRecorder
+    ) throws Exception {
+        MockHttpServletRequest request = new MockHttpServletRequest(
+                "POST", "/api/v1/transactions"
+        );
+        request.setServletPath("/api/v1/transactions");
+        ServletRequestAttributes attributes =
+                new ServletRequestAttributes(request);
+        try {
+            new TransactionIntakeMetricsFilter(metricsRecorder).doFilter(
+                    request,
+                    new MockHttpServletResponse(),
+                    (servletRequest, servletResponse) -> {
+                        RequestContextHolder.setRequestAttributes(attributes);
+                        invocation.run();
+                    }
+            );
+        } finally {
+            RequestContextHolder.resetRequestAttributes();
+            attributes.requestCompleted();
+        }
     }
 
     @Test

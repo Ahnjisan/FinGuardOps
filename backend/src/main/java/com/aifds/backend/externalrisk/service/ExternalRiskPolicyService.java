@@ -11,10 +11,13 @@ import com.aifds.backend.externalrisk.domain.ExternalRiskProviderRequest;
 import com.aifds.backend.externalrisk.domain.ExternalRiskProviderResponse;
 import com.aifds.backend.externalrisk.domain.ExternalRiskSnapshot;
 import com.aifds.backend.externalrisk.port.ExternalRiskLookupPort;
+import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
@@ -28,27 +31,52 @@ public final class ExternalRiskPolicyService {
 
     private final ExternalRiskLookupPort lookupPort;
     private final Clock clock;
+    private volatile TransactionProcessingMetricsRecorder metricsRecorder;
 
     public ExternalRiskPolicyService(
             ExternalRiskLookupPort lookupPort,
             Clock clock
+    ) {
+        this(
+                lookupPort,
+                clock,
+                TransactionProcessingMetricsRecorder.noop()
+        );
+    }
+
+    public ExternalRiskPolicyService(
+            ExternalRiskLookupPort lookupPort,
+            Clock clock,
+            TransactionProcessingMetricsRecorder metricsRecorder
     ) {
         this.lookupPort = Objects.requireNonNull(
                 lookupPort,
                 "lookupPort must not be null"
         );
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
+        this.metricsRecorder = metricsRecorder == null
+                ? TransactionProcessingMetricsRecorder.noop()
+                : metricsRecorder;
+    }
+
+    @Autowired(required = false)
+    void setMetricsRecorder(
+            TransactionProcessingMetricsRecorder metricsRecorder
+    ) {
+        if (metricsRecorder != null) {
+            this.metricsRecorder = metricsRecorder;
+        }
     }
 
     public ExternalRiskSnapshot lookup(ExternalRiskLookupCommand command) {
-        if (command == null) {
-            throw new ExternalRiskLookupException(
-                    ExternalRiskFailureCategory.INVALID_REQUEST
-            );
-        }
-        command.validate();
-
+        long startedAt = System.nanoTime();
         try {
+            if (command == null) {
+                throw new ExternalRiskLookupException(
+                        ExternalRiskFailureCategory.INVALID_REQUEST
+                );
+            }
+            command.validate();
             ExternalRiskProviderRequest request = toProviderRequest(command);
             ExternalRiskProviderResponse response = lookupPort.lookup(request);
             ValidatedResponse validated = validateResponse(response);
@@ -75,14 +103,56 @@ public final class ExternalRiskPolicyService {
                     snapshot.policyResult(),
                     snapshot.matches().size()
             );
+            record(
+                    policyResult == ExternalRiskPolicyResult.MATCHED
+                            ? TransactionProcessingMetricsRecorder
+                            .ExternalRiskResult.MATCHED
+                            : TransactionProcessingMetricsRecorder
+                            .ExternalRiskResult.UNMATCHED,
+                    TransactionProcessingMetricsRecorder.FailureCategory.NONE,
+                    startedAt
+            );
             return snapshot;
         } catch (ExternalRiskLookupException exception) {
             LOGGER.warn(
                     "event=external_risk_lookup traceId={} failureCategory={}",
-                    command.traceId(),
+                    command == null ? null : command.traceId(),
                     exception.category()
             );
+            record(
+                    TransactionProcessingMetricsRecorder.ExternalRiskResult
+                            .FAILED,
+                    TransactionProcessingMetricsRecorder.FailureCategory
+                            .fromExternalRisk(exception.category()),
+                    startedAt
+            );
             throw exception;
+        } catch (RuntimeException exception) {
+            record(
+                    TransactionProcessingMetricsRecorder.ExternalRiskResult
+                            .FAILED,
+                    TransactionProcessingMetricsRecorder.FailureCategory
+                            .UNKNOWN,
+                    startedAt
+            );
+            throw exception;
+        }
+    }
+
+    private void record(
+            TransactionProcessingMetricsRecorder.ExternalRiskResult result,
+            TransactionProcessingMetricsRecorder.FailureCategory category,
+            long startedAt
+    ) {
+        try {
+            long elapsed = System.nanoTime() - startedAt;
+            metricsRecorder.recordExternalRisk(
+                    result,
+                    category,
+                    Duration.ofNanos(Math.max(0L, elapsed))
+            );
+        } catch (Throwable ignored) {
+            // Metrics cannot replace policy or provider results.
         }
     }
 

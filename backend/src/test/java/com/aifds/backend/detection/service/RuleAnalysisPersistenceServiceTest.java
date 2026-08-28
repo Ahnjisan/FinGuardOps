@@ -8,6 +8,7 @@ import com.aifds.backend.detection.repository.DetectionResultRepository;
 import com.aifds.backend.externalrisk.domain.ExternalRiskLookupStatus;
 import com.aifds.backend.externalrisk.domain.ExternalRiskPolicyResult;
 import com.aifds.backend.externalrisk.domain.ExternalRiskSnapshot;
+import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.rule.client.RuleAnalysisRequestV2Mapper;
 import com.aifds.backend.rule.contract.RuleV1ContractRegistry;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequest;
@@ -79,6 +80,8 @@ class RuleAnalysisPersistenceServiceTest {
     private RuleAnalysisSnapshotAssembler snapshotAssembler;
     @Mock
     private RuleAnalysisRequestV2Mapper requestV2Mapper;
+    @Mock
+    private TransactionProcessingMetricsRecorder metricsRecorder;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private RuleAnalysisPersistenceService service;
@@ -91,7 +94,8 @@ class RuleAnalysisPersistenceServiceTest {
                 evidenceRepository,
                 ruleVersionRepository,
                 snapshotAssembler,
-                requestV2Mapper
+                requestV2Mapper,
+                metricsRecorder
         );
     }
 
@@ -149,6 +153,7 @@ class RuleAnalysisPersistenceServiceTest {
         assertThat(started.analysisTraceId())
                 .isEqualTo("trace_analysis_start_01");
         assertThat(execution.request()).isSameAs(snapshot.request());
+        verifyNoInteractions(metricsRecorder);
         verify(transaction).startAnalysis();
     }
 

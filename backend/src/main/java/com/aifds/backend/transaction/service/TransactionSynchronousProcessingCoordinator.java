@@ -6,6 +6,8 @@ import com.aifds.backend.externalrisk.domain.ExternalRiskSnapshot;
 import com.aifds.backend.externalrisk.service.ExternalRiskFailureSnapshotService;
 import com.aifds.backend.externalrisk.service.ExternalRiskRuleAnalysisCoordinator;
 import com.aifds.backend.idempotency.service.IdempotencyService;
+import com.aifds.backend.observability.TransactionIntakeMetricsFilter;
+import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.transaction.command.ValidatedTransactionCommand;
 import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.beans.factory.ObjectProvider;
@@ -102,16 +104,32 @@ public class TransactionSynchronousProcessingCoordinator {
         }
 
         requireNoActiveTransaction();
-        RiskResponseFinalizationResult finalized =
-                finalizationService.finalizeRiskResponse(
-                        persisted.transactionId()
-                );
+        final RiskResponseFinalizationResult finalized;
+        try {
+            finalized = finalizationService.finalizeRiskResponse(
+                    persisted.transactionId()
+            );
+        } catch (RuntimeException original) {
+            markIntakeFailure(
+                    TransactionProcessingMetricsRecorder.IntakeOutcome
+                            .FINALIZATION_FAILED
+            );
+            throw original;
+        }
         requireNoActiveTransaction();
-        return completionService.complete(
-                idempotencyRecordId,
-                finalized,
-                persisted.createdAt()
-        );
+        try {
+            return completionService.complete(
+                    idempotencyRecordId,
+                    finalized,
+                    persisted.createdAt()
+            );
+        } catch (RuntimeException original) {
+            markIntakeFailure(
+                    TransactionProcessingMetricsRecorder.IntakeOutcome
+                            .COMPLETION_FAILED
+            );
+            throw original;
+        }
     }
 
     private PersistedTransactionIntake persistReceived(
@@ -219,6 +237,12 @@ public class TransactionSynchronousProcessingCoordinator {
                     "Synchronous transaction processing requires no active transaction"
             );
         }
+    }
+
+    private void markIntakeFailure(
+            TransactionProcessingMetricsRecorder.IntakeOutcome outcome
+    ) {
+        TransactionIntakeMetricsFilter.markCurrentOutcomeIfAbsent(outcome);
     }
 
     private boolean isDuplicateTransactionIdViolation(
