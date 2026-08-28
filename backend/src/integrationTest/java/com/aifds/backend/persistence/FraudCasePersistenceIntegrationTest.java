@@ -50,10 +50,12 @@ class FraudCasePersistenceIntegrationTest
     private Flyway flyway;
 
     @Test
-    void appliesFreshV1ThroughV8SchemaWithApprovedConstraintsAndIndexes() {
-        assertThat(flyway.info().applied()).hasSize(8);
+    void appliesFreshV1ThroughV9SchemaWithApprovedConstraintsAndIndexes() {
+        assertThat(flyway.info().applied()).hasSize(9);
         assertThat(flyway.info().current().getVersion().getVersion())
-                .isEqualTo("8");
+                .isEqualTo("9");
+        assertThat(flyway.info().current().getDescription())
+                .isEqualTo("create idempotency recovery audit log");
         assertThat(columns("fraud_case")).containsExactlyInAnyOrder(
                 "id",
                 "case_id",

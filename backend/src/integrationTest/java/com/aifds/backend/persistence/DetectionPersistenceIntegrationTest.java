@@ -121,7 +121,7 @@ class DetectionPersistenceIntegrationTest
 
     @Test
     void migrationCreatesExactColumnsConstraintsIndexesAndTriggers() {
-        assertThat(flyway.info().applied()).hasSize(8);
+        assertThat(flyway.info().applied()).hasSize(9);
         assertThat(columns("detection_result")).containsExactlyInAnyOrder(
                 "id",
                 "detection_result_id",

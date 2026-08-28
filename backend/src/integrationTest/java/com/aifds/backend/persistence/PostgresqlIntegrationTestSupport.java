@@ -36,6 +36,7 @@ abstract class PostgresqlIntegrationTestSupport {
     void cleanDatabase() {
         cleanupJdbcTemplate.execute("""
                 TRUNCATE TABLE
+                    idempotency_recovery_audit_log,
                     audit_log,
                     case_transaction,
                     fraud_case,

@@ -62,9 +62,9 @@ FinGuardOps는 금융거래와 사용자 행동을 기반으로 이상거래를 
 
 | 운영 대상 | 역할 | 현재 도입 상태와 운영 범위 |
 | --- | --- | --- |
-| Spring Boot Backend | 거래 접수·검증, 멱등성, 거래·사건 상태, 위험 대응과 업무 정합성의 최종 소유자 | Health, public `POST /api/v1/transactions`, 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion과 기본 Rule 집합 발행 경계, Rule 분석 HTTP Client·내부 오케스트레이션, External Risk 독립 정책·Mock·실제 HTTP Adapter와 production coordinator Bean, Backend Java v2 DTO·Mapper·Client·내부 오케스트레이션, FraudCase·CaseTransaction과 위험 대응·AuditLog 원자적 최종화 경계가 구현되었다. Public intake의 Idempotency 단일 승자 뒤 External Risk·Rule v2·위험 대응 최종화·멱등 실패 저장·재생을 연결하는 end-to-end 흐름과 성공 Snapshot v2 저장·재생도 구현되었다. Crash·완료 간극과 장기 `IN_PROGRESS` 운영 복구, 공개 사건·감사·최종화 API, USER 인증·인가와 사건 조사 상태 전이·추가 연결·병합·분리는 미구현이다. |
+| Spring Boot Backend | 거래 접수·검증, 멱등성, 거래·사건 상태, 위험 대응과 업무 정합성의 최종 소유자 | Health, public `POST /api/v1/transactions`, 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion과 기본 Rule 집합 발행 경계, Rule 분석 HTTP Client·내부 오케스트레이션, External Risk 독립 정책·Mock·실제 HTTP Adapter와 production coordinator Bean, Backend Java v2 DTO·Mapper·Client·내부 오케스트레이션, FraudCase·CaseTransaction과 위험 대응·AuditLog 원자적 최종화 경계가 구현되었다. Public intake의 end-to-end 흐름과 성공·실패 replay, 장기 `IN_PROGRESS` bounded 후보 조회, typed 판정, 안전한 completion gap 단건 복구와 append-only 복구 감사도 구현되었다. 실제 Runner·CLI·scheduler·batch·metric·alert, 공개 사건·감사·최종화 API, USER 인증·인가와 사건 조사 상태 전이·추가 연결·병합·분리는 미구현이다. |
 | FastAPI AI Service | Feature 계산, Rule 실행, ML 추론, 모델 라우팅, AI 사건 리포트와 템플릿 fallback | `POST /api/v1/rule-analysis`, External Risk 필수 입력의 `POST /api/v2/rule-analysis`, R001~R004 실행과 점수·RiskLevel·Evidence 계산은 구현되었다. v2 External Risk는 validation-only이며 ML 추론·모델 라우팅·AI 사건 리포트와 템플릿 fallback은 미구현이다. |
-| PostgreSQL | 거래, 행동 이벤트, 탐지 결과, 사건, 감사 로그와 AI 사용량·비용 데이터의 영속 저장 목표 | V1~V8의 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion, FraudCase·CaseTransaction, append-only AuditLog와 Idempotency Failure Snapshot 영속 기반이 구현되었다. 성공 업무용 External Risk Snapshot의 별도 DB 영속화와 사건 조사·AI 사용량·비용·운영 데이터는 미구현이며 별도 승인 범위이다. |
+| PostgreSQL | 거래, 행동 이벤트, 탐지 결과, 사건, 감사 로그와 AI 사용량·비용 데이터의 영속 저장 목표 | V1~V9의 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion, FraudCase·CaseTransaction, 업무 AuditLog, Idempotency Failure Snapshot과 별도 append-only 복구 감사 기반이 구현되었다. 성공 업무용 External Risk Snapshot의 별도 DB 영속화와 사건 조사·AI 사용량·비용 데이터는 미구현이며 별도 승인 범위이다. |
 | Redis | 정확 일치 AI 리포트 캐시와 집계 데이터 사용 목표 | 향후 연동·검증 범위이다. External Risk cache는 현재 계약이 아니며 별도 Issue와 승인이 필요하다. 시맨틱 캐시는 범위에 포함하지 않는다. |
 | Kafka | 사건·리포트·통계 등 비동기 처리 목표 | 핵심 거래·탐지·사건 기능 안정화 이후 도입한다. 현재 구현된 구성으로 간주하지 않는다. |
 | External Risk Provider | 위험 송신·수신 계좌와 위험 기기의 조회 | 선행 PR #177까지 local/dev/test 결정적 Mock과 실제 HTTP Adapter, strict mapper, timeout·bounded body·failure classifier, production Policy·coordinator Bean이 구현되었다. PR #179는 기존 Provider를 public intake의 Idempotency 단일 승자 흐름에 연결하고 Failure Snapshot 저장·재생과 공개 안전 오류 mapping을 연결했다. Mock과 HTTP Bean은 상호 배타적이며 실패를 cache·fallback·`UNMATCHED`로 변환하지 않는다. 운영 credential 실제 배포와 신규 운영 metric은 미구현이다. |
@@ -224,6 +224,11 @@ External Risk 선행 조회 실패를 이 상태 전이로 변환하지 않는�
 Mock 활성 profile·property와 scenario, 성공·failure category를 구분한다. Provider
 호출 여부를 DB만으로 확정할 수 없는 `IN_PROGRESS`에서는 Provider를 자동 재호출하지
 않는다. 실제 복구 명령·scheduler·batch·자동화는 후속 Issue다.
+
+내부 복구 경계는 `updated_at` 30분 기본 threshold와 최대 100건의 bounded 후보를
+제공한다. 단건 시도는 확정된 최종 업무 상태를 모두 검증해 복구하거나 typed 거부하며,
+Provider·Rule·최종화·사건 생성을 호출하지 않는다. 후보 조회는 감사하지 않고 명시적
+단건 시도는 성공·거부·내부 실패 중 정확히 한 append-only 복구 감사를 남긴다.
 
 #### 기록 항목
 
@@ -512,6 +517,9 @@ AI 운영 예산과 리포트 생성 기능에 영향을 주지만 위험 점수
 - Rule 분석 시작 commit 이후 FastAPI·분석·채택 실패는 거래
   `ANALYZING → FAILED`와 DetectionResult `FAILED` 경계로 확정한다. 실패 후
   재분석·수동 복구 정책은 후속 사용자 결정 사항이다.
+- 장기 `IN_PROGRESS` 후보 조회와 completion gap 복구는 업무 상태를 추측·보정하지
+  않는다. 공식 최종 성공 상태와 결과·사건·AuditLog가 exact 일치할 때만 기존
+  Snapshot v2를 복원하며 나머지는 typed 거부한다.
 
 ## 11. 운영 알림 요구사항
 
@@ -548,6 +556,12 @@ AI 운영 예산과 리포트 생성 기능에 영향을 주지만 위험 점수
 - AI 호출량·토큰·비용·품질에 미친 영향
 
 운영 이력은 변경 전후와 판단 근거를 감사 가능하게 남겨야 한다. 별도의 `ServiceIncident` 또는 `DeploymentRecord` Entity 도입, 저장 위치, 데이터 구조, 보존 기간과 API는 이번 문서에서 확정하지 않으며 `TBD`이다.
+
+Idempotency completion gap의 명시적 단건 복구 시도는 일반 장애 이력과 분리된
+`idempotency_recovery_audit_log`에 actor, numeric record ID, nullable transactionId,
+typed decision, `RECOVERED|REJECTED|FAILED`, DB transaction 시각을 기록한다. 원본
+Idempotency-Key·fingerprint·Snapshot·Provider payload·금융 reference·예외 원문은
+저장하지 않는다. 이 감사 테이블은 업무 `audit_log` action·reason을 재사용하지 않는다.
 
 ## 13. 화면과 도구의 책임 경계
 

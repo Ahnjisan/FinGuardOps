@@ -31,8 +31,9 @@ AuditLog를 원자적으로 확정한다. 다만 거래 접수 전체 연결과 
 완료 간극 복구, 실패 공개 매핑과 선행 구현 순서를 확정한다. 이 문서 확정은
 Java·Python·DB 또는 운영 복구 실행 경로의 구현 완료를 의미하지 않는다. 이후
 Snapshot v2 typed 모델·codec·dispatcher와 JSONB 저장·조회 검증을 구현했고,
-Issue #178에서 public 실행 경로와 완료 writer를 연결했다. 운영 복구 실행 경로는
-아직 구현되지 않았다.
+Issue #178에서 public 실행 경로와 완료 writer를 연결했고, Issue #182에서 내부
+운영 복구 application·transaction·감사 경계를 구현했다. 실제 Runner·CLI와
+scheduler·batch·metric·alert는 후속 범위다.
 
 ## 2. 최종 성공 경계
 
@@ -286,11 +287,13 @@ Client 내부 category와 로컬 오케스트레이션 오류는 다음과 같�
 1. 구현된 위험 대응 decision을 거래에 적용하고 최종 상태 전이 구현 — 완료
 2. AuditLog 계약과 물리 모델 및 내부 최종화 통합 — 완료
 3. AI Service v2·Java/Python DTO와 거래 접수–External Risk–Rule 분석–위험 대응–사건 연결 — Issue #178 완료
-4. Snapshot 완료 간극 운영 복구 구현
+4. Snapshot 완료 간극 내부 운영 복구 경계 구현 — Issue #182 완료
+5. 실제 one-shot Runner·CLI와 scheduler·metric·alert 구현 — 후속
 
 각 단계는 이전 단계의 계약과 상태를 임시 기본값으로 대체하지 않는다. 3단계 완료
 전의 `RECEIVED` v1 응답은 최종 동기 거래 처리로 표현하지 않는다. 4단계 운영 복구는
-현재 v2 성공 경로와 분리된 미구현 범위다.
+현재 v2 성공 경로와 분리한다. 내부 복구 경계는 Issue #182에서 구현했고 실제 실행
+명령과 자동화는 후속 범위다.
 
 ## 13. 영향과 제외 범위
 
@@ -319,3 +322,29 @@ Idempotency `IN_PROGRESS`를 유지하며 성공 Snapshot을 저장하지 않는
 External Risk lookup과 Rule 분석 단계를 분리해 command read·Provider 단계의 일반
 예외는 Rule 실패 reader 대상에서 제외한다. External Risk 성공 뒤 Rule 단계 예외만
 확정 상태 판정을 거치며, 그 밖의 불확실 오류는 원본 객체와 `IN_PROGRESS`를 유지한다.
+
+## 15. Issue #182 내부 운영 복구 경계 (2026-08-28)
+
+`POST:/api/v1/transactions` scope에서 `processing_status = IN_PROGRESS AND
+updated_at <= cutoff`인 후보만 `(updated_at ASC, id ASC)`와 1~100 limit로 조회한다.
+기본 threshold는 30분, 허용 범위는 5분~7일이며 후보 조회는 한 DB transaction
+timestamp로 cutoff를 계산하고 행을 잠그지 않는다. `expires_at`은 후보·만료·삭제·
+키 재사용 근거가 아니다.
+
+단건 복구는 `REQUIRES_NEW`에서 Idempotency record를 먼저 `PESSIMISTIC_WRITE`로
+잠그고 기존 거래 잠금 경계를 재사용한다. 공식 네 위험 조합, 채택 DetectionResult
+`COMPLETED`와 소유 관계, Evidence 소유, LOW·MEDIUM 사건 부재, HIGH·CRITICAL의
+정확히 한 사건 연결, 위험 대응·상태 변경 AuditLog 각 1건의 exact 내용을 모두
+검증한 경우에만 기존 v2 codec과 완료 writer로 `COMPLETED`를 확정한다.
+
+복구 transaction의 DB timestamp 한 값을 Snapshot `finalizedAt`, Idempotency
+`finished_at`, 성공 감사 `attempted_at`에 사용한다. 성공·거부는 업무 변경과 별도
+`idempotency_recovery_audit_log` INSERT를 원자화한다. 예상하지 못한 내부 실패는
+원 transaction rollback 뒤 별도 `REQUIRES_NEW` 감사로 기록하고, 감사 실패는 원본
+예외에 suppressed 처리한다. Provider·Rule·최종화·사건 생성 호출은 없다.
+
+`RECEIVED`, `ANALYZING`, 미완료 DetectionResult, `ANALYZED`, 확정 실패, 상태·사건·
+AuditLog 불일치, conflicting Idempotency data와 terminal Idempotency는 typed
+`REJECTED`만 기록하고 업무·Idempotency 데이터를 변경하지 않는다. 실제 one-shot
+Runner·CLI, scheduler·batch, metric·alert·dashboard, 자동 retry·fallback·cache,
+불확실 상태 재실행, `FAILED` 재분석, key 만료·삭제·재사용과 관리 HTTP API는 미구현이다.
