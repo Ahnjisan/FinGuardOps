@@ -341,6 +341,16 @@ Migration은 아직 구현되지 않았다.
 - 필드 오류가 없어도 `fieldErrors`는 빈 배열로 반환한다.
 - 내부 예외 메시지, SQL, 스택 트레이스와 외부 Provider 원문을 반환하지 않는다.
 
+등록되지 않은 일반 API 경로와 정적 리소스 경로 요청은 `404 Not Found`,
+`RESOURCE_NOT_FOUND`, `요청한 리소스를 찾을 수 없습니다.`로 응답한다. 이 응답은
+공통 오류 구조와 현재 요청의 `traceId`를 유지하고 `fieldErrors`는 빈 배열이다. 요청
+path·query, 내부 예외 class·message·cause·stack trace는 응답에 포함하지 않는다.
+
+이 프레임워크 미등록 경로 계약은 식별자로 조회한 거래·탐지 결과 등 명시적인 업무
+리소스가 존재하지 않는 경우와 구분한다. 두 경우 모두 `RESOURCE_NOT_FOUND`를
+사용할 수 있지만, 업무 not-found 응답은 각 업무 API가 승인한 공개 message를
+유지하며 미등록 경로의 고정 message와 혼합하지 않는다.
+
 요청 처리 중 영속 리소스가 생성된 뒤 오류가 발생하면 해당 리소스를 다시 조회할 수 있도록 `resource` 문맥을 추가하는 방안을 사용한다. 거래 Timeout 오류의 후보 문맥은 `transactionId`와 현재 `processingStatus`이다. JSON 파싱·필수 헤더·기본 필드 형식 오류처럼 리소스를 생성하지 않은 오류에는 `resource`를 반환하지 않는다. `resource`의 최종 이름과 API 전반의 범용 구조는 사용자 결정 사항이다.
 
 검증 오류 예:
@@ -365,7 +375,7 @@ Migration은 아직 구현되지 않았다.
 | 오류 코드 | 의미 | HTTP 상태 |
 | --- | --- | --- |
 | `VALIDATION_ERROR` | JSON 파싱, 필수 헤더, 필드 형식 또는 도메인 입력 검증 실패 | 형식 오류는 `400 Bad Request`, 형식이 맞는 도메인 규칙 위반은 `422 Unprocessable Entity` |
-| `RESOURCE_NOT_FOUND` | 요청한 거래 또는 탐지 결과가 없음 | `404 Not Found` |
+| `RESOURCE_NOT_FOUND` | 요청한 업무 리소스가 없거나 일반 API·정적 리소스 경로가 등록되지 않음 | `404 Not Found` |
 | `DUPLICATE_TRANSACTION` | 이미 존재하는 `transactionId`로 새 거래 생성을 시도함 | `409 Conflict` |
 | `DUPLICATE_EVENT` | 같은 `eventId`에 다른 내용이 도착하거나 중복 정책과 충돌함 | `409 Conflict` |
 | `IDEMPOTENCY_KEY_CONFLICT` | 같은 멱등성 키가 다른 요청 내용에 재사용됨 | `409 Conflict` |
@@ -388,7 +398,7 @@ JSON·필수 헤더·필드 형식 오류와 도메인 규칙 위반을 구분�
 | `201 Created` | 거래 또는 행동 이벤트가 처음 생성됨 |
 | `202 Accepted` | 명시적으로 비동기 접수 계약을 가진 API가 요청 또는 진행 중 리소스 상태를 반환함. 거래 생성의 동일 멱등 요청 처리 중 응답에는 사용하지 않음 |
 | `400 Bad Request` | 잘못된 JSON, 필수 헤더 누락, 필드·쿼리 형식 오류 등 요청을 해석·기본 검증할 수 없음 |
-| `404 Not Found` | 식별자로 요청한 리소스가 없음 |
+| `404 Not Found` | 식별자로 요청한 업무 리소스가 없거나 요청 경로가 등록되지 않음 |
 | `409 Conflict` | 멱등성 키, 업무 식별자, 상태 또는 동시성 충돌 |
 | `422 Unprocessable Entity` | 형식은 올바르지만 거래 유형별 도메인 규칙 등 업무 의미상 처리할 수 없는 입력 |
 | `503 Service Unavailable` | 필수 의존성 Timeout 또는 일시적인 서비스 처리 불가 |

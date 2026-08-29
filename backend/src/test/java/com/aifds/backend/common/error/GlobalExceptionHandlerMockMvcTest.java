@@ -1,5 +1,7 @@
 package com.aifds.backend.common.error;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.aifds.backend.common.trace.TraceIdFilter;
 import com.aifds.backend.observability.TransactionIntakeMetricsFilter;
 import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
@@ -8,9 +10,12 @@ import com.aifds.backend.idempotency.exception.IdempotencyCompletionTransactionN
 import com.aifds.backend.idempotency.exception.IdempotencyRecordNotFoundException;
 import com.aifds.backend.idempotency.exception.IdempotencyStateTransitionNotAllowedException;
 import com.aifds.backend.transaction.dto.TransactionCreateRequest;
+import com.aifds.backend.transaction.exception.TransactionNotFoundException;
 import com.aifds.backend.transaction.exception.TransactionQueryUnavailableException;
 import com.aifds.backend.transaction.validation.TransactionValidationException;
 import com.aifds.backend.transaction.validation.TransactionValidationType;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
@@ -33,7 +38,10 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -59,9 +67,22 @@ class GlobalExceptionHandlerMockMvcTest {
             "trace_bean_validation_01";
     private static final String DOMAIN_TRACE_ID = "trace_domain_01";
     private static final String INTERNAL_TRACE_ID = "trace_internal_01";
+    private static final String NO_RESOURCE_TRACE_ID =
+            "trace_no_resource_01";
+    private static final String TEST_CREDENTIAL_SENTINEL =
+            "TEST_ONLY_CREDENTIAL_SENTINEL";
+    private static final String TEST_CUSTOMER_SENTINEL =
+            "TEST_ONLY_CUSTOMER_SENTINEL";
+    private static final String TEST_ACCOUNT_SENTINEL =
+            "TEST_ONLY_ACCOUNT_SENTINEL";
+    private static final String TEST_HEADER_SENTINEL =
+            "TEST_ONLY_HEADER_SENTINEL";
 
     @Autowired
     private MockMvc mockMvc;
+
+    @Autowired
+    private ObjectMapper objectMapper;
 
     @MockitoBean
     private TransactionProcessingMetricsRecorder metricsRecorder;
@@ -230,6 +251,48 @@ class GlobalExceptionHandlerMockMvcTest {
                 .getContentAsString();
 
         assertThat(response).doesNotContain("COMPLETED", "IN_PROGRESS");
+    }
+
+    @Test
+    void missingApiAndStaticResourceUseSafeNoResourceContractWithoutLogs()
+            throws Exception {
+        String missingApiPath = "/api/v1/test-only-missing-resource";
+        String missingStaticPath = "/assets/test-only-missing-resource.js";
+        ch.qos.logback.classic.Logger handlerLogger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(
+                        GlobalExceptionHandler.class
+                );
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        handlerLogger.addAppender(appender);
+
+        try {
+            assertSafeNoResourceError(missingApiPath);
+            assertSafeNoResourceError(missingStaticPath);
+        } finally {
+            handlerLogger.detachAppender(appender);
+            appender.stop();
+        }
+
+        assertThat(appender.list).isEmpty();
+    }
+
+    @Test
+    void explicitBusinessNotFoundKeepsItsApprovedMessage() throws Exception {
+        mockMvc.perform(get("/test/errors/transaction-not-found")
+                        .header(
+                                TraceIdFilter.TRACE_ID_HEADER,
+                                NO_RESOURCE_TRACE_ID
+                        ))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code")
+                        .value(GlobalExceptionHandler.RESOURCE_NOT_FOUND))
+                .andExpect(jsonPath("$.message")
+                        .value(GlobalExceptionHandler.RESOURCE_NOT_FOUND_MESSAGE))
+                .andExpect(jsonPath("$.traceId")
+                        .value(NO_RESOURCE_TRACE_ID))
+                .andExpect(jsonPath("$.fieldErrors").isArray())
+                .andExpect(jsonPath("$.fieldErrors").isEmpty());
     }
 
     @Test
@@ -433,6 +496,62 @@ class GlobalExceptionHandlerMockMvcTest {
         );
     }
 
+    private void assertSafeNoResourceError(String requestPath)
+            throws Exception {
+        String response = mockMvc.perform(get(requestPath)
+                        .queryParam("credential", TEST_CREDENTIAL_SENTINEL)
+                        .queryParam("customer", TEST_CUSTOMER_SENTINEL)
+                        .queryParam("account", TEST_ACCOUNT_SENTINEL)
+                        .header("X-Test-Only-Credential", TEST_HEADER_SENTINEL)
+                        .header(
+                                TraceIdFilter.TRACE_ID_HEADER,
+                                NO_RESOURCE_TRACE_ID
+                        ))
+                .andExpect(status().isNotFound())
+                .andExpect(content().contentTypeCompatibleWith(
+                        MediaType.APPLICATION_JSON
+                ))
+                .andExpect(header().string(
+                        TraceIdFilter.TRACE_ID_HEADER,
+                        NO_RESOURCE_TRACE_ID
+                ))
+                .andExpect(jsonPath("$.code")
+                        .value(GlobalExceptionHandler.RESOURCE_NOT_FOUND))
+                .andExpect(jsonPath("$.message")
+                        .value(GlobalExceptionHandler.NO_RESOURCE_FOUND_MESSAGE))
+                .andExpect(jsonPath("$.traceId")
+                        .value(NO_RESOURCE_TRACE_ID))
+                .andExpect(jsonPath("$.fieldErrors").isArray())
+                .andExpect(jsonPath("$.fieldErrors").isEmpty())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+
+        JsonNode error = objectMapper.readTree(response);
+        List<String> fieldNames = new ArrayList<>();
+        error.fieldNames().forEachRemaining(fieldNames::add);
+        assertThat(fieldNames).containsExactlyInAnyOrder(
+                "code",
+                "message",
+                "traceId",
+                "fieldErrors"
+        );
+        assertThat(response).doesNotContain(
+                requestPath,
+                TEST_CREDENTIAL_SENTINEL,
+                TEST_CUSTOMER_SENTINEL,
+                TEST_ACCOUNT_SENTINEL,
+                TEST_HEADER_SENTINEL,
+                NoResourceFoundException.class.getName(),
+                NoResourceFoundException.class.getSimpleName(),
+                "No static resource",
+                "resourcePath",
+                "requestURI",
+                "queryString",
+                "\tat "
+        );
+    }
+
     @RestController
     @RequestMapping("/test/errors")
     public static class TestController {
@@ -502,6 +621,11 @@ class GlobalExceptionHandlerMockMvcTest {
                             "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001"
                     )
             );
+        }
+
+        @GetMapping("/transaction-not-found")
+        void transactionNotFound() {
+            throw new TransactionNotFoundException();
         }
 
         @GetMapping("/unexpected")
