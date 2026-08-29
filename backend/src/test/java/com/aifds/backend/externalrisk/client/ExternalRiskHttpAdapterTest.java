@@ -24,16 +24,20 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
@@ -48,6 +52,9 @@ class ExternalRiskHttpAdapterTest {
     private static final String API_KEY = "unit-test-secret-api-key";
     private static final String CUSTOMER_REF = "sensitive-customer-reference";
     private static final String SENDER_REF = "sensitive-sender-reference";
+    // The response gate causes the timeout; this budget only covers request dispatch.
+    private static final Duration TEST_READ_TIMEOUT = Duration.ofMillis(500);
+    private static final Duration TEST_CONTROL_TIMEOUT = Duration.ofSeconds(5);
 
     private HttpServer server;
     private ExecutorService executor;
@@ -70,6 +77,7 @@ class ExternalRiskHttpAdapterTest {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         executor = Executors.newCachedThreadPool();
         server.setExecutor(executor);
+        server.createContext("/ready", this::handleReady);
         server.createContext("/", this::handle);
         server.start();
         baseUrl = URI.create("http://127.0.0.1:" + server.getAddress().getPort());
@@ -79,12 +87,11 @@ class ExternalRiskHttpAdapterTest {
     @AfterEach
     void tearDown() {
         TransactionSynchronizationManager.clear();
-        Thread.interrupted();
         if (server != null) {
             server.stop(0);
         }
         if (executor != null) {
-            executor.shutdownNow();
+            shutdownAndAwait(executor);
         }
     }
 
@@ -95,36 +102,7 @@ class ExternalRiskHttpAdapterTest {
 
         assertThat(actual.providerCode()).isEqualTo("PROVIDER_V1");
         assertThat(actual.matches()).hasSize(1);
-        assertThat(requestCount).hasValue(1);
-        assertThat(requestMethod).hasValue("POST");
-        assertThat(requestPath)
-                .hasValue(ExternalRiskHttpAdapter.ENDPOINT);
-        assertThat(authorization.get()).containsExactly("Bearer " + API_KEY);
-        assertThat(traceHeaders.get()).containsExactly(TRACE_ID);
-        assertThat(contentTypes.get()).singleElement()
-                .satisfies(value -> assertThat(value)
-                        .startsWith("application/json"));
-        assertThat(accepts.get()).containsExactly("application/json");
-
-        JsonNode json = new com.fasterxml.jackson.databind.ObjectMapper()
-                .readTree(requestBody.get());
-        assertThat(json.size()).isEqualTo(7);
-        assertThat(fieldNames(json)).containsExactlyInAnyOrder(
-                "transactionType",
-                "evaluationCutoffAt",
-                "externalCustomerRef",
-                "senderAccountRef",
-                "recipientAccountRef",
-                "deviceRef",
-                "traceId"
-        );
-        assertThat(json.path("transactionType").asText())
-                .isEqualTo("ACCOUNT_TRANSFER");
-        assertThat(json.path("evaluationCutoffAt").asText())
-                .isEqualTo("2026-08-27T01:02:03.123456Z");
-        assertThat(json.get("recipientAccountRef").isNull()).isTrue();
-        assertThat(json.get("deviceRef").isNull()).isTrue();
-        assertThat(json.has("transactionId")).isFalse();
+        assertExactRequestRecorded();
     }
 
     @ParameterizedTest
@@ -158,7 +136,8 @@ class ExternalRiskHttpAdapterTest {
                 "application/json",
                 "{}".getBytes(StandardCharsets.UTF_8),
                 false,
-                Duration.ZERO,
+                null,
+                null,
                 baseUrl.resolve("/redirect-target").toString()
         ));
 
@@ -170,32 +149,73 @@ class ExternalRiskHttpAdapterTest {
     }
 
     @Test
-    void mapsReadTimeoutAndConnectionFailureWithoutRetry() throws Exception {
+    void mapsReadTimeoutWithoutRetryAfterRequestIsReceived() throws Exception {
+        CountDownLatch requestReceived = new CountDownLatch(1);
+        CountDownLatch responseGate = new CountDownLatch(1);
         response.set(new ResponseSpec(
                 200,
                 "application/json",
                 validResponse().getBytes(StandardCharsets.UTF_8),
                 false,
-                Duration.ofMillis(250),
+                requestReceived,
+                responseGate,
                 null
         ));
-        assertFailure(
-                ExternalRiskFailureCategory.TIMEOUT,
-                () -> client(baseUrl, Duration.ofMillis(50), 65_536)
-                        .lookup(request())
+        ClientFixture fixture = clientFixture(
+                baseUrl,
+                TEST_READ_TIMEOUT,
+                65_536
         );
-        assertThat(requestCount).hasValue(1);
+        warmUpTransport(fixture.httpClient());
+        ExecutorService clientExecutor = Executors.newSingleThreadExecutor();
+        try {
+            Future<ExternalRiskLookupException> timeoutResult =
+                    clientExecutor.submit(() -> catchThrowableOfType(
+                            ExternalRiskLookupException.class,
+                            () -> fixture.adapter().lookup(request())
+                    ));
+            assertThat(requestReceived.await(
+                    TEST_CONTROL_TIMEOUT.toMillis(),
+                    TimeUnit.MILLISECONDS
+            )).as("loopback server received the request").isTrue();
+            assertThat(timeoutResult.isDone())
+                    .as("timeout completed before the handler received the request")
+                    .isFalse();
 
-        int unusedPort;
-        try (ServerSocket socket = new ServerSocket(0)) {
-            unusedPort = socket.getLocalPort();
+            ExternalRiskLookupException failure = timeoutResult.get(
+                    TEST_CONTROL_TIMEOUT.toMillis(),
+                    TimeUnit.MILLISECONDS
+            );
+            assertThat(failure.category())
+                    .isEqualTo(ExternalRiskFailureCategory.TIMEOUT);
+            assertThat(failure.getCause()).isNull();
+            assertExactRequestRecorded();
+        } finally {
+            responseGate.countDown();
+            shutdownAndAwait(clientExecutor);
         }
-        URI unavailable = URI.create("http://127.0.0.1:" + unusedPort);
+    }
+
+    @Test
+    void mapsUnavailableWhenServerClosesConnectionWithoutResponseAndWithoutRetry()
+            throws Exception {
+        AtomicInteger failureRequestCount = new AtomicInteger();
+        server.createContext(
+                ExternalRiskHttpAdapter.ENDPOINT,
+                exchange -> handleConnectionFailure(exchange, failureRequestCount)
+        );
+        ClientFixture fixture = clientFixture(
+                baseUrl,
+                Duration.ofMillis(100),
+                65_536
+        );
+        warmUpTransport(fixture.httpClient());
         assertFailure(
                 ExternalRiskFailureCategory.UNAVAILABLE,
-                () -> client(unavailable, Duration.ofMillis(100), 65_536)
-                        .lookup(request())
+                () -> fixture.adapter().lookup(request())
         );
+        assertThat(failureRequestCount).hasValue(1);
+        assertThat(requestCount).hasValue(0);
     }
 
     @ParameterizedTest
@@ -223,7 +243,8 @@ class ExternalRiskHttpAdapterTest {
                 "application/json; charset=UTF-8; boundary=forbidden",
                 validResponse().getBytes(StandardCharsets.UTF_8),
                 false,
-                Duration.ZERO,
+                null,
+                null,
                 null
         ));
         assertFailure(
@@ -237,7 +258,8 @@ class ExternalRiskHttpAdapterTest {
                 "text/plain",
                 validResponse().getBytes(StandardCharsets.UTF_8),
                 false,
-                Duration.ZERO,
+                null,
+                null,
                 null
         ));
         assertFailure(
@@ -256,7 +278,8 @@ class ExternalRiskHttpAdapterTest {
                 "application/json",
                 oversized,
                 false,
-                Duration.ZERO,
+                null,
+                null,
                 null
         ));
         assertFailure(
@@ -271,7 +294,8 @@ class ExternalRiskHttpAdapterTest {
                 "application/json; charset=UTF-8",
                 oversized,
                 true,
-                Duration.ZERO,
+                null,
+                null,
                 null
         ));
         assertFailure(
@@ -376,6 +400,14 @@ class ExternalRiskHttpAdapterTest {
             Duration readTimeout,
             int maxResponseBytes
     ) {
+        return clientFixture(url, readTimeout, maxResponseBytes).adapter();
+    }
+
+    private ClientFixture clientFixture(
+            URI url,
+            Duration readTimeout,
+            int maxResponseBytes
+    ) {
         ExternalRiskHttpProperties properties = new ExternalRiskHttpProperties(
                 true,
                 url,
@@ -397,12 +429,13 @@ class ExternalRiskHttpAdapterTest {
                 httpClient,
                 jsonCodec
         );
-        return configuration.externalRiskHttpAdapter(
+        ExternalRiskHttpAdapter adapter = configuration.externalRiskHttpAdapter(
                 restClient,
                 jsonCodec,
                 new ExternalRiskHttpMapper(),
                 properties
         );
+        return new ClientFixture(adapter, httpClient);
     }
 
     private ExternalRiskProviderRequest request() {
@@ -441,7 +474,8 @@ class ExternalRiskHttpAdapterTest {
                 "application/json; charset=UTF-8",
                 body.getBytes(StandardCharsets.UTF_8),
                 false,
-                Duration.ZERO,
+                null,
+                null,
                 null
         );
     }
@@ -462,39 +496,146 @@ class ExternalRiskHttpAdapterTest {
                 """;
     }
 
+    private void assertExactRequestRecorded() throws IOException {
+        assertThat(requestCount).hasValue(1);
+        assertThat(requestMethod).hasValue("POST");
+        assertThat(requestPath).hasValue(ExternalRiskHttpAdapter.ENDPOINT);
+        assertThat(authorization.get()).containsExactly("Bearer " + API_KEY);
+        assertThat(traceHeaders.get()).containsExactly(TRACE_ID);
+        assertThat(contentTypes.get()).singleElement()
+                .satisfies(value -> assertThat(value)
+                        .startsWith("application/json"));
+        assertThat(accepts.get()).containsExactly("application/json");
+
+        JsonNode json = new com.fasterxml.jackson.databind.ObjectMapper()
+                .readTree(requestBody.get());
+        assertThat(json.size()).isEqualTo(7);
+        assertThat(fieldNames(json)).containsExactlyInAnyOrder(
+                "transactionType",
+                "evaluationCutoffAt",
+                "externalCustomerRef",
+                "senderAccountRef",
+                "recipientAccountRef",
+                "deviceRef",
+                "traceId"
+        );
+        assertThat(json.path("transactionType").asText())
+                .isEqualTo("ACCOUNT_TRANSFER");
+        assertThat(json.path("evaluationCutoffAt").asText())
+                .isEqualTo("2026-08-27T01:02:03.123456Z");
+        assertThat(json.get("recipientAccountRef").isNull()).isTrue();
+        assertThat(json.get("deviceRef").isNull()).isTrue();
+        assertThat(json.has("transactionId")).isFalse();
+    }
+
     private void handle(HttpExchange exchange) throws IOException {
-        requestCount.incrementAndGet();
-        requestMethod.set(exchange.getRequestMethod());
-        requestPath.set(exchange.getRequestURI().getPath());
-        authorization.set(exchange.getRequestHeaders().get("Authorization"));
-        traceHeaders.set(exchange.getRequestHeaders().get("X-Trace-Id"));
-        contentTypes.set(exchange.getRequestHeaders().get("Content-Type"));
-        accepts.set(exchange.getRequestHeaders().get("Accept"));
-        requestBody.set(exchange.getRequestBody().readAllBytes());
-        ResponseSpec spec = response.get();
-        delay(spec.delay());
-        if (spec.contentType() != null) {
-            exchange.getResponseHeaders().set("Content-Type", spec.contentType());
-        }
-        if (spec.location() != null) {
-            exchange.getResponseHeaders().set("Location", spec.location());
-        }
-        long responseLength = spec.chunked() ? 0 : spec.body().length;
         try {
-            exchange.sendResponseHeaders(spec.status(), responseLength);
-            exchange.getResponseBody().write(spec.body());
-        } catch (IOException ignored) {
-            // A timeout or bounded reader may close the client side first.
+            requestCount.incrementAndGet();
+            requestMethod.set(exchange.getRequestMethod());
+            requestPath.set(exchange.getRequestURI().getPath());
+            authorization.set(exchange.getRequestHeaders().get("Authorization"));
+            traceHeaders.set(exchange.getRequestHeaders().get("X-Trace-Id"));
+            contentTypes.set(exchange.getRequestHeaders().get("Content-Type"));
+            accepts.set(exchange.getRequestHeaders().get("Accept"));
+            requestBody.set(exchange.getRequestBody().readAllBytes());
+            ResponseSpec spec = response.get();
+            if (spec.requestReceived() != null) {
+                spec.requestReceived().countDown();
+            }
+            if (!awaitResponseGate(spec.responseGate())) {
+                return;
+            }
+            if (spec.contentType() != null) {
+                exchange.getResponseHeaders().set("Content-Type", spec.contentType());
+            }
+            if (spec.location() != null) {
+                exchange.getResponseHeaders().set("Location", spec.location());
+            }
+            long responseLength = spec.chunked() ? 0 : spec.body().length;
+            try {
+                exchange.sendResponseHeaders(spec.status(), responseLength);
+                exchange.getResponseBody().write(spec.body());
+            } catch (IOException ignored) {
+                // A timeout or bounded reader may close the client side first.
+            }
         } finally {
             exchange.close();
         }
     }
 
-    private void delay(Duration duration) {
+    private void handleReady(HttpExchange exchange) throws IOException {
         try {
-            Thread.sleep(duration.toMillis());
+            exchange.sendResponseHeaders(204, -1);
+        } finally {
+            exchange.close();
+        }
+    }
+
+    private void handleConnectionFailure(
+            HttpExchange exchange,
+            AtomicInteger failureRequestCount
+    ) throws IOException {
+        try {
+            exchange.getRequestBody().readAllBytes();
+            failureRequestCount.incrementAndGet();
+        } finally {
+            exchange.close();
+        }
+    }
+
+    private void warmUpTransport(HttpClient httpClient) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(baseUrl.resolve("/ready"))
+                .timeout(TEST_CONTROL_TIMEOUT)
+                .GET()
+                .build();
+        HttpResponse<Void> response = httpClient.send(
+                request,
+                HttpResponse.BodyHandlers.discarding()
+        );
+        assertThat(response.statusCode()).isEqualTo(204);
+    }
+
+    private boolean awaitResponseGate(CountDownLatch responseGate) {
+        if (responseGate == null) {
+            return true;
+        }
+        try {
+            return responseGate.await(
+                    TEST_CONTROL_TIMEOUT.toMillis(),
+                    TimeUnit.MILLISECONDS
+            );
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    private void shutdownAndAwait(ExecutorService target) {
+        target.shutdownNow();
+        long deadline = System.nanoTime() + TEST_CONTROL_TIMEOUT.toNanos();
+        boolean interrupted = Thread.interrupted();
+        boolean terminated = target.isTerminated();
+        try {
+            while (!terminated) {
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) {
+                    break;
+                }
+                try {
+                    terminated = target.awaitTermination(
+                            remaining,
+                            TimeUnit.NANOSECONDS
+                    );
+                } catch (InterruptedException exception) {
+                    interrupted = true;
+                    target.shutdownNow();
+                }
+            }
+            assertThat(terminated).as("test executor terminated").isTrue();
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 
@@ -503,8 +644,15 @@ class ExternalRiskHttpAdapterTest {
             String contentType,
             byte[] body,
             boolean chunked,
-            Duration delay,
+            CountDownLatch requestReceived,
+            CountDownLatch responseGate,
             String location
+    ) {
+    }
+
+    private record ClientFixture(
+            ExternalRiskHttpAdapter adapter,
+            HttpClient httpClient
     ) {
     }
 }
