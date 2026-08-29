@@ -33,6 +33,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -87,6 +88,8 @@ public class GlobalExceptionHandler {
             "행동 이벤트 저장소를 일시적으로 사용할 수 없습니다.";
     static final String RESOURCE_NOT_FOUND_MESSAGE =
             "요청한 거래를 찾을 수 없습니다.";
+    static final String NO_RESOURCE_FOUND_MESSAGE =
+            "요청한 리소스를 찾을 수 없습니다.";
     static final String INTERNAL_ERROR_MESSAGE =
             "요청을 처리하는 중 오류가 발생했습니다.";
 
@@ -304,6 +307,20 @@ public class GlobalExceptionHandler {
                 HttpStatus.NOT_FOUND,
                 RESOURCE_NOT_FOUND,
                 RESOURCE_NOT_FOUND_MESSAGE,
+                List.of(),
+                request
+        );
+    }
+
+    @ExceptionHandler(NoResourceFoundException.class)
+    ResponseEntity<ApiErrorResponse> handleNoResourceFound(
+            NoResourceFoundException exception,
+            HttpServletRequest request
+    ) {
+        return response(
+                HttpStatus.NOT_FOUND,
+                RESOURCE_NOT_FOUND,
+                NO_RESOURCE_FOUND_MESSAGE,
                 List.of(),
                 request
         );

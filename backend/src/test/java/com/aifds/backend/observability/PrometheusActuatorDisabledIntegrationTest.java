@@ -1,5 +1,8 @@
 package com.aifds.backend.observability;
 
+import com.aifds.backend.common.trace.TraceIdFilter;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -45,10 +48,14 @@ class PrometheusActuatorDisabledIntegrationTest {
     private TestRestTemplate restTemplate;
 
     @Autowired
+    private ObjectMapper objectMapper;
+
+    @Autowired
     private WebMvcEndpointHandlerMapping actuatorHandlerMapping;
 
     @Test
-    void keepsPrometheusDisabledAndExistingHealthEndpointsAvailable() {
+    void keepsPrometheusDisabledAndExistingHealthEndpointsAvailable()
+            throws Exception {
         assertThat(environment.getActiveProfiles())
                 .doesNotContain("prometheus");
         assertThat(environment.getProperty(
@@ -62,8 +69,31 @@ class PrometheusActuatorDisabledIntegrationTest {
         assertThat(actuatorEndpointRoots(actuatorHandlerMapping))
                 .containsExactly("health");
 
-        assertThat(get("/actuator/prometheus").getStatusCode())
-                .matches(status -> status.isError());
+        String requestQuerySentinel = "TEST_ONLY_PROMETHEUS_QUERY_SENTINEL";
+        ResponseEntity<String> prometheus = get(
+                "/actuator/prometheus?probe=" + requestQuerySentinel
+        );
+        assertThat(prometheus.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(prometheus.getBody()).isNotNull();
+        JsonNode error = objectMapper.readTree(prometheus.getBody());
+        assertThat(error.get("code").asText())
+                .isEqualTo("RESOURCE_NOT_FOUND");
+        assertThat(error.get("message").asText())
+                .isEqualTo("요청한 리소스를 찾을 수 없습니다.");
+        assertThat(error.get("fieldErrors").isArray()).isTrue();
+        assertThat(error.get("fieldErrors").size()).isZero();
+        assertThat(error.get("traceId").asText()).isNotBlank();
+        assertThat(prometheus.getHeaders().getFirst(
+                TraceIdFilter.TRACE_ID_HEADER
+        )).isEqualTo(error.get("traceId").asText());
+        assertThat(prometheus.getBody()).doesNotContain(
+                "/actuator/prometheus",
+                requestQuerySentinel,
+                "NoResourceFoundException",
+                "No static resource",
+                "org.springframework.web.servlet.resource",
+                "\tat "
+        );
 
         ResponseEntity<String> actuatorHealth = get("/actuator/health");
         assertThat(actuatorHealth.getStatusCode()).isEqualTo(HttpStatus.OK);

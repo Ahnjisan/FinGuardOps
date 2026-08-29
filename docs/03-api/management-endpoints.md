@@ -14,13 +14,16 @@ Prometheus 서버가 실행 중이거나 실제 scrape·집계·알림이 구성
 | `prometheus` profile | production `PrometheusMeterRegistry`와 export 활성 | 정확히 `health,prometheus` | 별도 management listener, 기본 `127.0.0.1:8081` |
 
 기본 profile에서는 기존 `/api/health`와 `/actuator/health`를 유지하고
-`/actuator/prometheus`를 노출하지 않는다. `prometheus` profile에서는 다음 GET
-endpoint만 web으로 노출한다.
+`/actuator/prometheus`를 노출하지 않는다. 이 경로 요청은 endpoint가 존재하거나
+인증으로 차단된 응답이 아니라 미등록 리소스의 `404 Not Found`로 처리된다. 응답은
+공통 오류 계약의 `RESOURCE_NOT_FOUND`, `요청한 리소스를 찾을 수 없습니다.`, 빈
+`fieldErrors`를 사용하며 요청 path·query와 내부 예외 정보는 포함하지 않는다.
+`prometheus` profile에서는 다음 GET endpoint만 web으로 노출한다.
 
 | Endpoint | 기본 profile | `prometheus` profile | 용도 |
 | --- | --- | --- | --- |
 | `/actuator/health` | 노출 | 노출 | Backend health 확인 |
-| `/actuator/prometheus` | 미노출 | 노출 | Prometheus 호환 scrape payload |
+| `/actuator/prometheus` | 미노출, 요청 시 `404 Not Found` | 노출, `200 OK` | Prometheus 호환 scrape payload |
 
 `env`, `beans`, `configprops`, `mappings`, `metrics`, `loggers`, `heapdump`,
 `threaddump`를 포함한 그 밖의 Actuator endpoint는 web에 노출하지 않는다.
@@ -56,7 +59,8 @@ curl.exe --fail-with-body http://127.0.0.1:8081/actuator/prometheus
 
 기본 profile 확인 시 `SPRING_PROFILES_ACTIVE=prometheus`를 사용하지 않는다.
 `/actuator/health`는 애플리케이션 listener에서 정상이어야 하고
-`/actuator/prometheus`는 노출되지 않아야 한다.
+`/actuator/prometheus` 요청은 `404 Not Found`여야 한다. `prometheus` profile에서
+`/actuator/prometheus` 요청은 `200 OK`와 Prometheus 호환 payload를 반환해야 한다.
 
 ## 5. 보안과 네트워크 경계
 
