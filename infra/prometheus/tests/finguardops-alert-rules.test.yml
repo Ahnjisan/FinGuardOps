@@ -1,0 +1,461 @@
+rule_files:
+  - ../rules/finguardops-recording-rules.yml
+  - ../rules/finguardops-alert-rules.yml
+
+evaluation_interval: 30s
+group_eval_order:
+  - finguardops-service-derived
+  - finguardops-service-alerts
+fuzzy_compare: true
+
+tests:
+  - name: thresholds traffic guards labels annotations and missing inputs
+    interval: 30s
+    input_series:
+      - series: 'finguardops_transaction_outcomes_total{service="transaction-warning-equal",status="FAILED",job="removed",instance="removed",riskLevel="unknown",failureCategory="unknown"}'
+        values: '0+0.3x20'
+      - series: 'finguardops_transaction_outcomes_total{service="transaction-warning-equal",status="APPROVED",job="removed",instance="removed",riskLevel="LOW",failureCategory="none"}'
+        values: '0+2.7x20'
+      - series: 'finguardops_transaction_outcomes_total{service="transaction-warning-below",status="FAILED"}'
+        values: '0+0.3x20'
+      - series: 'finguardops_transaction_outcomes_total{service="transaction-warning-below",status="APPROVED"}'
+        values: '0+5.7x20'
+      - series: 'finguardops_transaction_outcomes_total{service="transaction-critical-equal",status="FAILED"}'
+        values: '0+0.9x20'
+      - series: 'finguardops_transaction_outcomes_total{service="transaction-critical-equal",status="APPROVED"}'
+        values: '0+2.1x20'
+      - series: 'finguardops_transaction_outcomes_total{service="transaction-guard-equal",status="FAILED"}'
+        values: '0+2.4x20'
+      - series: 'finguardops_transaction_outcomes_total{service="transaction-guard-equal",status="APPROVED"}'
+        values: '0+3.6x20'
+      - series: 'finguardops_transaction_outcomes_total{service="transaction-guard-below",status="FAILED"}'
+        values: '0+1.08x20'
+      - series: 'finguardops_transaction_outcomes_total{service="transaction-guard-below",status="APPROVED"}'
+        values: '0+1.62x20'
+      - series: 'finguardops_transaction_outcomes_total{service="transaction-zero-ratio",status="FAILED"}'
+        values: '0+0x20'
+      - series: 'finguardops_transaction_outcomes_total{service="transaction-zero-ratio",status="APPROVED"}'
+        values: '0+3x20'
+      - series: 'finguardops_transaction_outcomes_total{service="transaction-zero-denominator",status="FAILED"}'
+        values: '5+0x20'
+
+      - series: 'finguardops_external_risk_outcomes_total{service="external-warning-equal",result="failed",job="removed",instance="removed",failureCategory="TIMEOUT"}'
+        values: '0+0.3x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="external-warning-equal",result="matched",job="removed",instance="removed",failureCategory="none"}'
+        values: '0+2.7x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="external-warning-below",result="failed"}'
+        values: '0+0.3x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="external-warning-below",result="matched"}'
+        values: '0+5.7x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="external-critical-equal",result="failed"}'
+        values: '0+0.9x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="external-critical-equal",result="unmatched"}'
+        values: '0+2.1x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="external-guard-equal",result="failed"}'
+        values: '0+2.4x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="external-guard-equal",result="matched"}'
+        values: '0+3.6x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="external-guard-below",result="failed"}'
+        values: '0+1.08x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="external-guard-below",result="matched"}'
+        values: '0+1.62x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="external-zero-ratio",result="failed"}'
+        values: '0+0x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="external-zero-ratio",result="matched"}'
+        values: '0+3x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="external-zero-denominator",result="failed"}'
+        values: '5+0x20'
+
+      - series: 'finguardops_rule_analysis_outcomes_total{service="rule-warning-equal",result="failed",job="removed",instance="removed",riskLevel="unknown",failureCategory="AI_SERVICE_UNAVAILABLE"}'
+        values: '0+0.3x20'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="rule-warning-equal",result="completed",job="removed",instance="removed",riskLevel="LOW",failureCategory="none"}'
+        values: '0+2.7x20'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="rule-warning-below",result="failed"}'
+        values: '0+0.3x20'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="rule-warning-below",result="completed"}'
+        values: '0+5.7x20'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="rule-critical-equal",result="failed"}'
+        values: '0+0.9x20'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="rule-critical-equal",result="completed"}'
+        values: '0+2.1x20'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="rule-guard-equal",result="failed"}'
+        values: '0+2.4x20'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="rule-guard-equal",result="completed"}'
+        values: '0+3.6x20'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="rule-guard-below",result="failed"}'
+        values: '0+1.08x20'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="rule-guard-below",result="completed"}'
+        values: '0+1.62x20'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="rule-zero-ratio",result="failed"}'
+        values: '0+0x20'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="rule-zero-ratio",result="completed"}'
+        values: '0+3x20'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="rule-zero-denominator",result="failed"}'
+        values: '5+0x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: FinGuardOpsTransactionTerminalFailureRatioWarning
+        exp_alerts:
+          - exp_labels:
+              service: transaction-critical-equal
+              severity: warning
+            exp_annotations:
+              summary: Transaction terminal failure ratio warning
+              description: Service transaction-critical-equal transaction terminal failure ratio is 0.300.
+              runbook_url: https://github.com/Ahnjisan/FinGuardOps/blob/main/docs/09-deployment/prometheus-local-scrape-runbook.md#prometheus-alert-response
+          - exp_labels:
+              service: transaction-guard-equal
+              severity: warning
+            exp_annotations:
+              summary: Transaction terminal failure ratio warning
+              description: Service transaction-guard-equal transaction terminal failure ratio is 0.400.
+              runbook_url: https://github.com/Ahnjisan/FinGuardOps/blob/main/docs/09-deployment/prometheus-local-scrape-runbook.md#prometheus-alert-response
+      - eval_time: 10m
+        alertname: FinGuardOpsTransactionTerminalFailureRatioCritical
+        exp_alerts:
+          - exp_labels:
+              service: transaction-guard-equal
+              severity: critical
+            exp_annotations:
+              summary: Transaction terminal failure ratio critical
+              description: Service transaction-guard-equal transaction terminal failure ratio is 0.400.
+              runbook_url: https://github.com/Ahnjisan/FinGuardOps/blob/main/docs/09-deployment/prometheus-local-scrape-runbook.md#prometheus-alert-response
+      - eval_time: 10m
+        alertname: FinGuardOpsExternalRiskFailureRatioWarning
+        exp_alerts:
+          - exp_labels:
+              service: external-critical-equal
+              severity: warning
+            exp_annotations:
+              summary: External Risk failure ratio warning
+              description: Service external-critical-equal External Risk failure ratio is 0.300.
+              runbook_url: https://github.com/Ahnjisan/FinGuardOps/blob/main/docs/09-deployment/prometheus-local-scrape-runbook.md#prometheus-alert-response
+          - exp_labels:
+              service: external-guard-equal
+              severity: warning
+            exp_annotations:
+              summary: External Risk failure ratio warning
+              description: Service external-guard-equal External Risk failure ratio is 0.400.
+              runbook_url: https://github.com/Ahnjisan/FinGuardOps/blob/main/docs/09-deployment/prometheus-local-scrape-runbook.md#prometheus-alert-response
+      - eval_time: 10m
+        alertname: FinGuardOpsExternalRiskFailureRatioCritical
+        exp_alerts:
+          - exp_labels:
+              service: external-guard-equal
+              severity: critical
+            exp_annotations:
+              summary: External Risk failure ratio critical
+              description: Service external-guard-equal External Risk failure ratio is 0.400.
+              runbook_url: https://github.com/Ahnjisan/FinGuardOps/blob/main/docs/09-deployment/prometheus-local-scrape-runbook.md#prometheus-alert-response
+      - eval_time: 10m
+        alertname: FinGuardOpsRuleAnalysisFailureRatioWarning
+        exp_alerts:
+          - exp_labels:
+              service: rule-critical-equal
+              severity: warning
+            exp_annotations:
+              summary: Rule Analysis failure ratio warning
+              description: Service rule-critical-equal Rule Analysis failure ratio is 0.300.
+              runbook_url: https://github.com/Ahnjisan/FinGuardOps/blob/main/docs/09-deployment/prometheus-local-scrape-runbook.md#prometheus-alert-response
+          - exp_labels:
+              service: rule-guard-equal
+              severity: warning
+            exp_annotations:
+              summary: Rule Analysis failure ratio warning
+              description: Service rule-guard-equal Rule Analysis failure ratio is 0.400.
+              runbook_url: https://github.com/Ahnjisan/FinGuardOps/blob/main/docs/09-deployment/prometheus-local-scrape-runbook.md#prometheus-alert-response
+      - eval_time: 10m
+        alertname: FinGuardOpsRuleAnalysisFailureRatioCritical
+        exp_alerts:
+          - exp_labels:
+              service: rule-guard-equal
+              severity: critical
+            exp_annotations:
+              summary: Rule Analysis failure ratio critical
+              description: Service rule-guard-equal Rule Analysis failure ratio is 0.400.
+              runbook_url: https://github.com/Ahnjisan/FinGuardOps/blob/main/docs/09-deployment/prometheus-local-scrape-runbook.md#prometheus-alert-response
+
+  # With a partial 5m rate window, Prometheus limits extrapolation toward the
+  # unobserved start boundary and still divides by 300s. The aggregate 0.2/s
+  # counter therefore records 0.09/s at 2m (adjusted increase 27 / 300) and
+  # 0.11/s at 2m30s (adjusted increase 33 / 300). The condition first becomes
+  # true at 2m30s: warning is pending at 4m and fires at 4m30s; critical is
+  # pending at 7m and fires at 7m30s.
+  - name: pending firing simultaneous and service isolation with monotonic counters
+    interval: 30s
+    input_series:
+      - series: 'finguardops_transaction_outcomes_total{service="service-a",status="FAILED",job="removed",instance="removed",riskLevel="unknown",failureCategory="unknown"}'
+        values: '0+2.4x30'
+      - series: 'finguardops_transaction_outcomes_total{service="service-a",status="APPROVED",job="removed",instance="removed",riskLevel="LOW",failureCategory="none"}'
+        values: '0+3.6x30'
+      - series: 'finguardops_transaction_outcomes_total{service="service-b",status="FAILED"}'
+        values: '0+1.2x30'
+      - series: 'finguardops_transaction_outcomes_total{service="service-b",status="APPROVED"}'
+        values: '0+4.8x30'
+      - series: 'finguardops_external_risk_outcomes_total{service="service-a",result="failed",job="removed",instance="removed",failureCategory="TIMEOUT"}'
+        values: '0+2.4x30'
+      - series: 'finguardops_external_risk_outcomes_total{service="service-a",result="matched",job="removed",instance="removed",failureCategory="none"}'
+        values: '0+3.6x30'
+      - series: 'finguardops_external_risk_outcomes_total{service="service-b",result="failed"}'
+        values: '0+1.2x30'
+      - series: 'finguardops_external_risk_outcomes_total{service="service-b",result="matched"}'
+        values: '0+4.8x30'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="service-a",result="failed",job="removed",instance="removed",riskLevel="unknown",failureCategory="AI_SERVICE_UNAVAILABLE"}'
+        values: '0+2.4x30'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="service-a",result="completed",job="removed",instance="removed",riskLevel="LOW",failureCategory="none"}'
+        values: '0+3.6x30'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="service-b",result="failed"}'
+        values: '0+1.2x30'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="service-b",result="completed"}'
+        values: '0+4.8x30'
+    promql_expr_test:
+      - expr: 'ALERTS{alertstate="pending",service="service-a"}'
+        eval_time: 4m
+        exp_samples:
+          - labels: 'ALERTS{alertname="FinGuardOpsExternalRiskFailureRatioCritical",alertstate="pending",service="service-a",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsExternalRiskFailureRatioWarning",alertstate="pending",service="service-a",severity="warning"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsRuleAnalysisFailureRatioCritical",alertstate="pending",service="service-a",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsRuleAnalysisFailureRatioWarning",alertstate="pending",service="service-a",severity="warning"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsTransactionTerminalFailureRatioCritical",alertstate="pending",service="service-a",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsTransactionTerminalFailureRatioWarning",alertstate="pending",service="service-a",severity="warning"}'
+            value: 1
+      - expr: 'ALERTS{alertstate="firing",severity="warning"}'
+        eval_time: 4m30s
+        exp_samples:
+          - labels: 'ALERTS{alertname="FinGuardOpsExternalRiskFailureRatioWarning",alertstate="firing",service="service-a",severity="warning"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsExternalRiskFailureRatioWarning",alertstate="firing",service="service-b",severity="warning"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsRuleAnalysisFailureRatioWarning",alertstate="firing",service="service-a",severity="warning"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsRuleAnalysisFailureRatioWarning",alertstate="firing",service="service-b",severity="warning"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsTransactionTerminalFailureRatioWarning",alertstate="firing",service="service-a",severity="warning"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsTransactionTerminalFailureRatioWarning",alertstate="firing",service="service-b",severity="warning"}'
+            value: 1
+      - expr: 'ALERTS{alertstate="pending",severity="critical"}'
+        eval_time: 7m
+        exp_samples:
+          - labels: 'ALERTS{alertname="FinGuardOpsExternalRiskFailureRatioCritical",alertstate="pending",service="service-a",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsRuleAnalysisFailureRatioCritical",alertstate="pending",service="service-a",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsTransactionTerminalFailureRatioCritical",alertstate="pending",service="service-a",severity="critical"}'
+            value: 1
+      - expr: 'ALERTS{alertstate="firing",service="service-a"}'
+        eval_time: 7m30s
+        exp_samples:
+          - labels: 'ALERTS{alertname="FinGuardOpsExternalRiskFailureRatioCritical",alertstate="firing",service="service-a",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsExternalRiskFailureRatioWarning",alertstate="firing",service="service-a",severity="warning"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsRuleAnalysisFailureRatioCritical",alertstate="firing",service="service-a",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsRuleAnalysisFailureRatioWarning",alertstate="firing",service="service-a",severity="warning"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsTransactionTerminalFailureRatioCritical",alertstate="firing",service="service-a",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsTransactionTerminalFailureRatioWarning",alertstate="firing",service="service-a",severity="warning"}'
+            value: 1
+
+  # At 30s intervals each counter component rises by 3, or 0.1/s. At 5m30s
+  # each counter resets from 30 to 3. Prometheus rate() compensates by adding
+  # the post-reset value; after extrapolation the adjusted 5m increase is 30,
+  # so each component remains 30 / 300 = 0.1/s. The aggregate guard is 0.2/s
+  # and the failed ratio is 0.1 / 0.2 = 0.5 before, immediately after, and
+  # once the window contains only post-reset samples. The condition therefore
+  # never disappears and neither warning nor critical restarts its for state.
+  - name: counter reset compensation preserves recording values and alert state
+    interval: 30s
+    input_series:
+      - series: 'finguardops_transaction_outcomes_total{service="counter-reset",status="FAILED"}'
+        values: '0+3x10 3+3x20'
+      - series: 'finguardops_transaction_outcomes_total{service="counter-reset",status="APPROVED"}'
+        values: '0+3x10 3+3x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="counter-reset",result="failed"}'
+        values: '0+3x10 3+3x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="counter-reset",result="matched"}'
+        values: '0+3x10 3+3x20'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="counter-reset",result="failed"}'
+        values: '0+3x10 3+3x20'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="counter-reset",result="completed"}'
+        values: '0+3x10 3+3x20'
+    promql_expr_test:
+      - expr: '{__name__=~"finguardops:(transaction_terminal_failure|external_risk_failure|rule_analysis_failure):ratio5m",service="counter-reset"}'
+        eval_time: 5m
+        exp_samples:
+          - labels: 'finguardops:external_risk_failure:ratio5m{service="counter-reset"}'
+            value: 0.5
+          - labels: 'finguardops:rule_analysis_failure:ratio5m{service="counter-reset"}'
+            value: 0.5
+          - labels: 'finguardops:transaction_terminal_failure:ratio5m{service="counter-reset"}'
+            value: 0.5
+      - expr: 'finguardops:transaction_terminal:rate5m{service="counter-reset"}'
+        eval_time: 5m
+        exp_samples:
+          - labels: 'finguardops:transaction_terminal:rate5m{service="counter-reset"}'
+            value: 0.2
+      - expr: 'sum by (service) (finguardops:external_risk_by_result:rate5m{service="counter-reset"})'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{service="counter-reset"}'
+            value: 0.2
+      - expr: 'sum by (service) (finguardops:rule_analysis_by_result:rate5m{service="counter-reset"})'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{service="counter-reset"}'
+            value: 0.2
+      - expr: '{__name__=~"finguardops:(transaction_terminal_failure|external_risk_failure|rule_analysis_failure):ratio5m",service="counter-reset"}'
+        eval_time: 5m30s
+        exp_samples:
+          - labels: 'finguardops:external_risk_failure:ratio5m{service="counter-reset"}'
+            value: 0.5
+          - labels: 'finguardops:rule_analysis_failure:ratio5m{service="counter-reset"}'
+            value: 0.5
+          - labels: 'finguardops:transaction_terminal_failure:ratio5m{service="counter-reset"}'
+            value: 0.5
+      - expr: 'finguardops:transaction_terminal:rate5m{service="counter-reset"}'
+        eval_time: 5m30s
+        exp_samples:
+          - labels: 'finguardops:transaction_terminal:rate5m{service="counter-reset"}'
+            value: 0.2
+      - expr: 'sum by (service) (finguardops:external_risk_by_result:rate5m{service="counter-reset"})'
+        eval_time: 5m30s
+        exp_samples:
+          - labels: '{service="counter-reset"}'
+            value: 0.2
+      - expr: 'sum by (service) (finguardops:rule_analysis_by_result:rate5m{service="counter-reset"})'
+        eval_time: 5m30s
+        exp_samples:
+          - labels: '{service="counter-reset"}'
+            value: 0.2
+      - expr: 'ALERTS{alertstate="firing",service="counter-reset"}'
+        eval_time: 5m30s
+        exp_samples:
+          - labels: 'ALERTS{alertname="FinGuardOpsExternalRiskFailureRatioWarning",alertstate="firing",service="counter-reset",severity="warning"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsRuleAnalysisFailureRatioWarning",alertstate="firing",service="counter-reset",severity="warning"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsTransactionTerminalFailureRatioWarning",alertstate="firing",service="counter-reset",severity="warning"}'
+            value: 1
+      - expr: 'ALERTS{alertstate="pending",service="counter-reset"}'
+        eval_time: 5m30s
+        exp_samples:
+          - labels: 'ALERTS{alertname="FinGuardOpsExternalRiskFailureRatioCritical",alertstate="pending",service="counter-reset",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsRuleAnalysisFailureRatioCritical",alertstate="pending",service="counter-reset",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsTransactionTerminalFailureRatioCritical",alertstate="pending",service="counter-reset",severity="critical"}'
+            value: 1
+      - expr: 'ALERTS{alertstate="firing",service="counter-reset"}'
+        eval_time: 7m30s
+        exp_samples:
+          - labels: 'ALERTS{alertname="FinGuardOpsExternalRiskFailureRatioCritical",alertstate="firing",service="counter-reset",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsExternalRiskFailureRatioWarning",alertstate="firing",service="counter-reset",severity="warning"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsRuleAnalysisFailureRatioCritical",alertstate="firing",service="counter-reset",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsRuleAnalysisFailureRatioWarning",alertstate="firing",service="counter-reset",severity="warning"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsTransactionTerminalFailureRatioCritical",alertstate="firing",service="counter-reset",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsTransactionTerminalFailureRatioWarning",alertstate="firing",service="counter-reset",severity="warning"}'
+            value: 1
+      - expr: '{__name__=~"finguardops:(transaction_terminal_failure|external_risk_failure|rule_analysis_failure):ratio5m",service="counter-reset"}'
+        eval_time: 10m30s
+        exp_samples:
+          - labels: 'finguardops:external_risk_failure:ratio5m{service="counter-reset"}'
+            value: 0.5
+          - labels: 'finguardops:rule_analysis_failure:ratio5m{service="counter-reset"}'
+            value: 0.5
+          - labels: 'finguardops:transaction_terminal_failure:ratio5m{service="counter-reset"}'
+            value: 0.5
+      - expr: 'finguardops:transaction_terminal:rate5m{service="counter-reset"}'
+        eval_time: 10m30s
+        exp_samples:
+          - labels: 'finguardops:transaction_terminal:rate5m{service="counter-reset"}'
+            value: 0.2
+      - expr: 'sum by (service) (finguardops:external_risk_by_result:rate5m{service="counter-reset"})'
+        eval_time: 10m30s
+        exp_samples:
+          - labels: '{service="counter-reset"}'
+            value: 0.2
+      - expr: 'sum by (service) (finguardops:rule_analysis_by_result:rate5m{service="counter-reset"})'
+        eval_time: 10m30s
+        exp_samples:
+          - labels: '{service="counter-reset"}'
+            value: 0.2
+      - expr: 'ALERTS{alertstate="firing",service="counter-reset"}'
+        eval_time: 10m30s
+        exp_samples:
+          - labels: 'ALERTS{alertname="FinGuardOpsExternalRiskFailureRatioCritical",alertstate="firing",service="counter-reset",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsExternalRiskFailureRatioWarning",alertstate="firing",service="counter-reset",severity="warning"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsRuleAnalysisFailureRatioCritical",alertstate="firing",service="counter-reset",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsRuleAnalysisFailureRatioWarning",alertstate="firing",service="counter-reset",severity="warning"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsTransactionTerminalFailureRatioCritical",alertstate="firing",service="counter-reset",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsTransactionTerminalFailureRatioWarning",alertstate="firing",service="counter-reset",severity="warning"}'
+            value: 1
+
+  - name: recovery removes all active alerts
+    interval: 30s
+    input_series:
+      - series: 'finguardops_transaction_outcomes_total{service="recovered",status="FAILED"}'
+        values: '0+1.2x20 24+0x20'
+      - series: 'finguardops_transaction_outcomes_total{service="recovered",status="APPROVED"}'
+        values: '0+1.8x20 36+30x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="recovered",result="failed"}'
+        values: '0+1.2x20 24+0x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="recovered",result="matched"}'
+        values: '0+1.8x20 36+30x20'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="recovered",result="failed"}'
+        values: '0+1.2x20 24+0x20'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="recovered",result="completed"}'
+        values: '0+1.8x20 36+30x20'
+    promql_expr_test:
+      - expr: 'ALERTS{service="recovered"}'
+        eval_time: 16m
+        exp_samples: []
+
+  - name: exact minimum traffic boundary supplements raw meter coverage
+    interval: 30s
+    input_series:
+      - series: 'finguardops:transaction_terminal_failure:ratio5m{service="exact-guard"}'
+        values: '0.4+0x20'
+      - series: 'finguardops:transaction_terminal:rate5m{service="exact-guard"}'
+        values: '0.1+0x20'
+      - series: 'finguardops:external_risk_failure:ratio5m{service="exact-guard"}'
+        values: '0.4+0x20'
+      - series: 'finguardops:external_risk_by_result:rate5m{service="exact-guard",result="failed"}'
+        values: '0.1+0x20'
+      - series: 'finguardops:rule_analysis_failure:ratio5m{service="exact-guard"}'
+        values: '0.4+0x20'
+      - series: 'finguardops:rule_analysis_by_result:rate5m{service="exact-guard",result="failed"}'
+        values: '0.1+0x20'
+    promql_expr_test:
+      - expr: 'ALERTS{alertstate="firing",service="exact-guard"}'
+        eval_time: 5m
+        exp_samples:
+          - labels: 'ALERTS{alertname="FinGuardOpsExternalRiskFailureRatioCritical",alertstate="firing",service="exact-guard",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsExternalRiskFailureRatioWarning",alertstate="firing",service="exact-guard",severity="warning"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsRuleAnalysisFailureRatioCritical",alertstate="firing",service="exact-guard",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsRuleAnalysisFailureRatioWarning",alertstate="firing",service="exact-guard",severity="warning"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsTransactionTerminalFailureRatioCritical",alertstate="firing",service="exact-guard",severity="critical"}'
+            value: 1
+          - labels: 'ALERTS{alertname="FinGuardOpsTransactionTerminalFailureRatioWarning",alertstate="firing",service="exact-guard",severity="warning"}'
+            value: 1

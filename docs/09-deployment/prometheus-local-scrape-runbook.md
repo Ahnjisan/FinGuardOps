@@ -4,8 +4,9 @@
 
 이 runbook은 Issue #196의 로컬 Docker Compose 검증 절차이다. PostgreSQL, AI
 Service, External Risk fixture, Backend와 Prometheus를 함께 실행하고 Backend의
-`/actuator/prometheus`를 실제 scrape하고 기존 업무 Meter 기반 recording rule 14개를
-평가한다. production 배포·scrape·recording rule, 인증·TLS, alert·Alertmanager·Grafana,
+`/actuator/prometheus`를 실제 scrape하고 기존 업무 Meter 기반 recording rule 14개와
+로컬 실패율 alert rule 6개를 평가한다. production 배포·scrape·recording rule·alert,
+인증·TLS, Alertmanager·Grafana,
 SLA·SLO·운영 임계값, HA와 장기 보존을 제공하지 않는다. completion gap·장기
 `IN_PROGRESS` Gauge, `deployment.error_ratio`와 `deployment.latency`도 구현하지 않는다.
 loopback bind와 Docker network 분리도 인증을 대신하지 않는다.
@@ -31,12 +32,19 @@ docker run --rm --entrypoint /bin/promtool \
 docker run --rm --entrypoint /bin/promtool \
   --mount "type=bind,source=${repo_root}/infra/prometheus/rules,target=/etc/prometheus/rules,readonly" \
   "$prometheus_image" \
-  check rules /etc/prometheus/rules/finguardops-recording-rules.yml
+  check rules \
+  /etc/prometheus/rules/finguardops-recording-rules.yml \
+  /etc/prometheus/rules/finguardops-alert-rules.yml
 docker run --rm --entrypoint /bin/promtool \
   --mount "type=bind,source=${repo_root}/infra/prometheus,target=/workspace,readonly" \
   --workdir /workspace/tests \
   "$prometheus_image" \
   test rules finguardops-recording-rules.test.yml
+docker run --rm --entrypoint /bin/promtool \
+  --mount "type=bind,source=${repo_root}/infra/prometheus,target=/workspace,readonly" \
+  --workdir /workspace/tests \
+  "$prometheus_image" \
+  test rules finguardops-alert-rules.test.yml
 ```
 
 config와 rule은 runtime container에 read-only로 mount한다. test fixture는 standalone
@@ -461,7 +469,962 @@ timestamp와 같은 Prometheus 엔진을 사용하므로 `rate` extrapolation을
 존재하는 상태를 성공으로 인정하지 않는다. 현재 traffic만 격리해 검증해야 하면 별도 Compose
 project와 새 named volume을 사용하고 종료 시 그 검증용 volume만 제거한다.
 
-## 8. restart·Backend 재생성과 종료
+<a id="prometheus-alert-response"></a>
+
+## 8. Prometheus alert response
+
+### 8.1 로컬 alert 계약
+
+`finguardops-service-alerts` group은 기존 recording rule 결과만 30초마다 평가한다.
+
+| Alert | 조건 | 지속시간 | severity |
+| --- | --- | --- | --- |
+| `FinGuardOpsTransactionTerminalFailureRatioWarning` | terminal failure ratio `> 0.10`, terminal rate `>= 0.10/s` | 2분 | `warning` |
+| `FinGuardOpsTransactionTerminalFailureRatioCritical` | terminal failure ratio `> 0.30`, terminal rate `>= 0.10/s` | 5분 | `critical` |
+| `FinGuardOpsExternalRiskFailureRatioWarning` | External Risk failure ratio `> 0.10`, 전체 result rate `>= 0.10/s` | 2분 | `warning` |
+| `FinGuardOpsExternalRiskFailureRatioCritical` | External Risk failure ratio `> 0.30`, 전체 result rate `>= 0.10/s` | 5분 | `critical` |
+| `FinGuardOpsRuleAnalysisFailureRatioWarning` | Rule Analysis failure ratio `> 0.10`, 전체 result rate `>= 0.10/s` | 2분 | `warning` |
+| `FinGuardOpsRuleAnalysisFailureRatioCritical` | Rule Analysis failure ratio `> 0.30`, 전체 result rate `>= 0.10/s` | 5분 | `critical` |
+
+이 값은 local validation contract이며 production SLA·SLO나 업무 실패 허용률이 아니다.
+ratio가 threshold와 같으면 inactive이고 최소 처리율 0.10/s는 guard를 통과한다. ratio
+입력이 missing이거나 분모가 0이라 series가 없으면 inactive이며 실제 failure ratio 0도
+inactive다. warning과 critical은 독립적으로 평가하므로 동시에 firing할 수 있다. 현재
+Alertmanager inhibition·routing·receiver·notification은 없으며 firing은 외부 알림 전송을
+의미하지 않는다. `keep_firing_for`도 사용하지 않는다.
+
+alert label은 `service`, `severity`, 자동 `alertname`뿐이다. annotation은 `summary`,
+`description`, `runbook_url`만 사용하며 description에는 service와 소수점 셋째 자리 ratio만
+포함한다. 거래·고객·계좌 식별자, credential, request path·query·body·header와 exception
+원문을 label이나 annotation에 추가하지 않는다.
+
+### 8.2 fresh project와 API 확인 함수
+
+기존 보존 volume과 분리된 project에서 2~7절을 실행한다. 아래 대입 뒤 기존 `compose`
+배열을 사용하는 명령은 모두 이 검증 project만 대상으로 한다.
+
+```bash
+alert_project="finguardops-alert-e2e-$RANDOM"
+compose=(docker compose -p "$alert_project" -f infra/compose.yml)
+"${compose[@]}" config --quiet
+```
+
+다음 함수는 이미 빌드된 AI Service image를 `prometheus-ui` network에 일회성 `--rm`
+helper로 연결해 Prometheus API를 polling한다. External Risk Mock이나 AI Service를 중단한
+장애 시나리오에서도 조회 경로를 유지하며 임시 query·response 파일을 만들지 않는다.
+
+```bash
+wait_for_condition_readiness() {
+  local scenario="$1"
+  local timeout_seconds="$2"
+  docker run --rm -i \
+    --network "${alert_project}_prometheus-ui" \
+    --entrypoint python \
+    finguardops-ai-service:local \
+    - "$scenario" "$timeout_seconds" <<'PY'
+import json
+import math
+import sys
+import time
+import urllib.parse
+import urllib.request
+from datetime import UTC, datetime
+
+scenario, timeout_seconds = sys.argv[1], int(sys.argv[2])
+base_url = "http://prometheus:9090/api/v1"
+service = "spring-backend"
+common = {
+    "terminal_ratio": (
+        'finguardops:transaction_terminal_failure:ratio5m{service="spring-backend"}',
+        'timestamp(finguardops:transaction_terminal_failure:ratio5m{service="spring-backend"})',
+        ">",
+        0.30,
+    ),
+    "terminal_guard": (
+        'finguardops:transaction_terminal:rate5m{service="spring-backend"}',
+        'timestamp(finguardops:transaction_terminal:rate5m{service="spring-backend"})',
+        ">=",
+        0.15,
+    ),
+}
+scenario_queries = {
+    "external-risk": {
+        "external_ratio": (
+            'finguardops:external_risk_failure:ratio5m{service="spring-backend"}',
+            'timestamp(finguardops:external_risk_failure:ratio5m{service="spring-backend"})',
+            ">",
+            0.30,
+        ),
+        "external_guard": (
+            'sum by (service) (finguardops:external_risk_by_result:rate5m{service="spring-backend"})',
+            'min without (result) (timestamp(finguardops:external_risk_by_result:rate5m{service="spring-backend"}))',
+            ">=",
+            0.15,
+        ),
+    },
+    "rule-analysis": {
+        "rule_ratio": (
+            'finguardops:rule_analysis_failure:ratio5m{service="spring-backend"}',
+            'timestamp(finguardops:rule_analysis_failure:ratio5m{service="spring-backend"})',
+            ">",
+            0.30,
+        ),
+        "rule_guard": (
+            'sum by (service) (finguardops:rule_analysis_by_result:rate5m{service="spring-backend"})',
+            'min without (result) (timestamp(finguardops:rule_analysis_by_result:rate5m{service="spring-backend"}))',
+            ">=",
+            0.15,
+        ),
+        **common,
+    },
+}
+queries = scenario_queries[scenario]
+
+
+def query(expression):
+    encoded = urllib.parse.urlencode({"query": expression})
+    with urllib.request.urlopen(base_url + "/query?" + encoded, timeout=5) as response:
+        payload = json.load(response)
+    if payload.get("status") != "success":
+        raise RuntimeError(f"Prometheus query failed: {payload}")
+    return payload["data"]["result"]
+
+
+def scalar(expression, *, missing_allowed):
+    result = query(expression)
+    if not result and missing_allowed:
+        return None
+    if len(result) != 1 or result[0]["metric"].get("service") != service:
+        raise RuntimeError(f"expected exactly one {service} series: {expression}: {result}")
+    value = float(result[0]["value"][1])
+    if not math.isfinite(value):
+        raise RuntimeError(f"non-finite query value: {expression}: {value}")
+    return value
+
+
+deadline = time.monotonic() + timeout_seconds
+while time.monotonic() < deadline:
+    values = {}
+    missing = False
+    for name, (expression, _, comparison, threshold) in queries.items():
+        value = scalar(expression, missing_allowed=True)
+        if value is None:
+            missing = True
+            break
+        values[name] = value
+        if comparison == ">" and not value > threshold:
+            break
+        if comparison == ">=" and not value >= threshold:
+            break
+    else:
+        sample_timestamps = {
+            name: scalar(timestamp_expression, missing_allowed=False)
+            for name, (_, timestamp_expression, _, _) in queries.items()
+        }
+        print(
+            json.dumps(
+                {
+                    "scenario": scenario,
+                    "service": service,
+                    "values": values,
+                    "sample_timestamps": {
+                        name: datetime.fromtimestamp(value, UTC).isoformat()
+                        for name, value in sample_timestamps.items()
+                    },
+                },
+                sort_keys=True,
+            )
+        )
+        break
+    time.sleep(2)
+else:
+    raise RuntimeError(
+        f"condition readiness not observed: scenario={scenario} "
+        f"last_values={values} missing={missing}"
+    )
+PY
+}
+
+wait_for_correlated_alert_transition() {
+  local scenario="$1"
+  local pending_timeout_seconds="$2"
+  local warning_deadline_seconds="$3"
+  local critical_deadline_seconds="$4"
+  docker run --rm -i \
+    --network "${alert_project}_prometheus-ui" \
+    --entrypoint python \
+    finguardops-ai-service:local \
+    - "$scenario" "$pending_timeout_seconds" "$warning_deadline_seconds" \
+    "$critical_deadline_seconds" <<'PY'
+import json
+import math
+import sys
+import time
+import urllib.request
+from datetime import UTC, datetime
+
+scenario = sys.argv[1]
+pending_timeout = int(sys.argv[2])
+warning_deadline_seconds = int(sys.argv[3])
+critical_deadline_seconds = int(sys.argv[4])
+base_url = "http://prometheus:9090/api/v1"
+families = {
+    "external-risk": (
+        "FinGuardOpsExternalRiskFailureRatio",
+    ),
+    "rule-analysis": (
+        "FinGuardOpsRuleAnalysisFailureRatio",
+        "FinGuardOpsTransactionTerminalFailureRatio",
+    ),
+}[scenario]
+expected_names = {
+    family + severity
+    for family in families
+    for severity in ("Warning", "Critical")
+}
+warning_names = {name for name in expected_names if name.endswith("Warning")}
+critical_names = {name for name in expected_names if name.endswith("Critical")}
+annotation_subjects = {
+    "FinGuardOpsTransactionTerminalFailureRatio": (
+        "Transaction terminal failure ratio",
+        "transaction terminal failure ratio",
+    ),
+    "FinGuardOpsExternalRiskFailureRatio": (
+        "External Risk failure ratio",
+        "External Risk failure ratio",
+    ),
+    "FinGuardOpsRuleAnalysisFailureRatio": (
+        "Rule Analysis failure ratio",
+        "Rule Analysis failure ratio",
+    ),
+}
+runbook_url = (
+    "https://github.com/Ahnjisan/FinGuardOps/blob/main/"
+    "docs/09-deployment/prometheus-local-scrape-runbook.md#prometheus-alert-response"
+)
+
+
+def parse_time(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+
+
+def get_alerts():
+    with urllib.request.urlopen(base_url + "/alerts", timeout=5) as response:
+        payload = json.load(response)
+    if payload.get("status") != "success":
+        raise RuntimeError(f"Prometheus alerts query failed: {payload}")
+    alerts = payload["data"]["alerts"]
+    unexpected = [
+        alert for alert in alerts
+        if alert["labels"].get("alertname") not in expected_names
+    ]
+    if unexpected:
+        raise RuntimeError(f"unexpected active alerts: {unexpected}")
+    return alerts
+
+
+def validate(alert):
+    labels = alert["labels"]
+    annotations = alert["annotations"]
+    if set(labels) != {"alertname", "service", "severity"}:
+        raise RuntimeError(f"unexpected alert labels: {labels}")
+    if labels["service"] != "spring-backend":
+        raise RuntimeError(f"unexpected alert service: {labels}")
+    expected_severity = "warning" if labels["alertname"].endswith("Warning") else "critical"
+    if labels["severity"] != expected_severity:
+        raise RuntimeError(f"unexpected alert severity: {labels}")
+    if set(annotations) != {"summary", "description", "runbook_url"}:
+        raise RuntimeError(f"unexpected alert annotations: {annotations}")
+    summary_subject, description_subject = next(
+        value for prefix, value in annotation_subjects.items()
+        if labels["alertname"].startswith(prefix)
+    )
+    value = float(alert["value"])
+    if not math.isfinite(value):
+        raise RuntimeError(f"non-finite alert value: {alert}")
+    expected_annotations = {
+        "summary": f"{summary_subject} {expected_severity}",
+        "description": (
+            f"Service spring-backend {description_subject} is {value:.3f}."
+        ),
+        "runbook_url": runbook_url,
+    }
+    if annotations != expected_annotations:
+        raise RuntimeError(f"unexpected alert annotation values: {annotations}")
+    parse_time(alert["activeAt"])
+
+
+def indexed(alerts):
+    for alert in alerts:
+        validate(alert)
+    return {alert["labels"]["alertname"]: alert for alert in alerts}
+
+
+pending_deadline = time.monotonic() + pending_timeout
+while time.monotonic() < pending_deadline:
+    alerts = indexed(get_alerts())
+    if set(alerts) == expected_names and all(
+        alert["state"] == "pending" for alert in alerts.values()
+    ):
+        active_at = {name: alert["activeAt"] for name, alert in alerts.items()}
+        print(json.dumps({"state": "pending", "activeAt": active_at}, sort_keys=True))
+        break
+    time.sleep(2)
+else:
+    raise RuntimeError(f"correlated pending alerts not observed: scenario={scenario}")
+
+warning_deadline = max(parse_time(active_at[name]) for name in warning_names) + warning_deadline_seconds
+while time.time() < warning_deadline:
+    alerts = indexed(get_alerts())
+    if set(alerts) == expected_names and all(
+        alerts[name]["state"] == "firing" for name in warning_names
+    ) and all(alerts[name]["state"] == "pending" for name in critical_names):
+        now = datetime.now(UTC).timestamp()
+        elapsed = {name: now - parse_time(active_at[name]) for name in warning_names}
+        if any(value < 120 for value in elapsed.values()):
+            raise RuntimeError(f"warning fired before two minutes: {elapsed}")
+        print(json.dumps({"state": "warning-firing", "elapsed": elapsed}, sort_keys=True))
+        break
+    time.sleep(2)
+else:
+    raise RuntimeError(f"warning firing deadline exceeded: scenario={scenario}")
+
+critical_deadline = max(parse_time(active_at[name]) for name in critical_names) + critical_deadline_seconds
+while time.time() < critical_deadline:
+    alerts = indexed(get_alerts())
+    if set(alerts) == expected_names and all(
+        alert["state"] == "firing" for alert in alerts.values()
+    ):
+        now = datetime.now(UTC).timestamp()
+        elapsed = {name: now - parse_time(active_at[name]) for name in critical_names}
+        if any(value < 300 for value in elapsed.values()):
+            raise RuntimeError(f"critical fired before five minutes: {elapsed}")
+        print(
+            json.dumps(
+                {
+                    "state": "warning-critical-simultaneous-firing",
+                    "elapsed": elapsed,
+                    "alerts": sorted(alerts),
+                },
+                sort_keys=True,
+            )
+        )
+        break
+    time.sleep(2)
+else:
+    raise RuntimeError(f"critical firing deadline exceeded: scenario={scenario}")
+PY
+}
+
+terminal_failure_snapshot() {
+  local phase="$1"
+  docker run --rm -i \
+    --network "${alert_project}_prometheus-ui" \
+    --entrypoint python \
+    finguardops-ai-service:local \
+    - "$phase" <<'PY'
+import json
+import math
+import sys
+import urllib.parse
+import urllib.request
+
+phase = sys.argv[1]
+base_url = "http://prometheus:9090/api/v1"
+service = "spring-backend"
+queries = {
+    "raw_failed_counter": (
+        'sum(finguardops_transaction_outcomes_total{service="spring-backend",status="FAILED"})',
+        'max(timestamp(finguardops_transaction_outcomes_total{service="spring-backend",status="FAILED"}))',
+        False,
+    ),
+    "recorded_failure_ratio": (
+        'finguardops:transaction_terminal_failure:ratio5m{service="spring-backend"}',
+        'timestamp(finguardops:transaction_terminal_failure:ratio5m{service="spring-backend"})',
+        True,
+    ),
+}
+
+
+def query(expression):
+    encoded = urllib.parse.urlencode({"query": expression})
+    with urllib.request.urlopen(base_url + "/query?" + encoded, timeout=5) as response:
+        payload = json.load(response)
+    if payload.get("status") != "success":
+        raise RuntimeError(f"Prometheus query failed: {payload}")
+    return payload["data"]["result"]
+
+
+def sample(expression, timestamp_expression, require_service):
+    result = query(expression)
+    if not result:
+        return {"kind": "missing", "value": None, "sample_timestamp": None}
+    if len(result) != 1:
+        raise RuntimeError(f"expected at most one series: {expression}: {result}")
+    if require_service and result[0]["metric"].get("service") != service:
+        raise RuntimeError(f"unexpected service series: {expression}: {result}")
+    value = float(result[0]["value"][1])
+    if not math.isfinite(value):
+        raise RuntimeError(f"non-finite query value: {expression}: {value}")
+    timestamp_result = query(timestamp_expression)
+    if len(timestamp_result) != 1:
+        raise RuntimeError(f"expected one timestamp series: {timestamp_expression}: {timestamp_result}")
+    sample_timestamp = float(timestamp_result[0]["value"][1])
+    if not math.isfinite(sample_timestamp):
+        raise RuntimeError(f"non-finite sample timestamp: {timestamp_expression}: {sample_timestamp}")
+    return {"kind": "numeric", "value": value, "sample_timestamp": sample_timestamp}
+
+
+snapshot = {
+    name: sample(expression, timestamp_expression, require_service)
+    for name, (expression, timestamp_expression, require_service) in queries.items()
+}
+print(json.dumps({"phase": phase, "terminal_failure": snapshot}, sort_keys=True), file=sys.stderr)
+raw = snapshot["raw_failed_counter"]
+ratio = snapshot["recorded_failure_ratio"]
+print(
+    int(raw["kind"] == "numeric"),
+    raw["value"] if raw["value"] is not None else 0,
+    int(ratio["kind"] == "numeric"),
+    ratio["value"] if ratio["value"] is not None else 0,
+)
+PY
+}
+
+assert_terminal_failure_not_increased() {
+  local before_raw_present="$1"
+  local before_raw_value="$2"
+  local before_ratio_present="$3"
+  local before_ratio_value="$4"
+  docker run --rm -i \
+    --network "${alert_project}_prometheus-ui" \
+    --entrypoint python \
+    finguardops-ai-service:local \
+    - "$before_raw_present" "$before_raw_value" \
+    "$before_ratio_present" "$before_ratio_value" <<'PY'
+import json
+import math
+import sys
+import urllib.parse
+import urllib.request
+
+before = {
+    "raw_failed_counter": {
+        "kind": "numeric" if sys.argv[1] == "1" else "missing",
+        "value": float(sys.argv[2]) if sys.argv[1] == "1" else None,
+    },
+    "recorded_failure_ratio": {
+        "kind": "numeric" if sys.argv[3] == "1" else "missing",
+        "value": float(sys.argv[4]) if sys.argv[3] == "1" else None,
+    },
+}
+base_url = "http://prometheus:9090/api/v1"
+service = "spring-backend"
+queries = {
+    "raw_failed_counter": (
+        'sum(finguardops_transaction_outcomes_total{service="spring-backend",status="FAILED"})',
+        'max(timestamp(finguardops_transaction_outcomes_total{service="spring-backend",status="FAILED"}))',
+        False,
+    ),
+    "recorded_failure_ratio": (
+        'finguardops:transaction_terminal_failure:ratio5m{service="spring-backend"}',
+        'timestamp(finguardops:transaction_terminal_failure:ratio5m{service="spring-backend"})',
+        True,
+    ),
+}
+
+
+def query(expression):
+    encoded = urllib.parse.urlencode({"query": expression})
+    with urllib.request.urlopen(base_url + "/query?" + encoded, timeout=5) as response:
+        payload = json.load(response)
+    if payload.get("status") != "success":
+        raise RuntimeError(f"Prometheus query failed: {payload}")
+    return payload["data"]["result"]
+
+
+def sample(expression, timestamp_expression, require_service):
+    result = query(expression)
+    if not result:
+        return {"kind": "missing", "value": None, "sample_timestamp": None}
+    if len(result) != 1:
+        raise RuntimeError(f"expected at most one series: {expression}: {result}")
+    if require_service and result[0]["metric"].get("service") != service:
+        raise RuntimeError(f"unexpected service series: {expression}: {result}")
+    value = float(result[0]["value"][1])
+    if not math.isfinite(value):
+        raise RuntimeError(f"non-finite query value: {expression}: {value}")
+    timestamp_result = query(timestamp_expression)
+    if len(timestamp_result) != 1:
+        raise RuntimeError(f"expected one timestamp series: {timestamp_expression}: {timestamp_result}")
+    sample_timestamp = float(timestamp_result[0]["value"][1])
+    if not math.isfinite(sample_timestamp):
+        raise RuntimeError(f"non-finite timestamp: {timestamp_expression}: {sample_timestamp}")
+    return {"kind": "numeric", "value": value, "sample_timestamp": sample_timestamp}
+
+
+after = {
+    name: sample(expression, timestamp_expression, require_service)
+    for name, (expression, timestamp_expression, require_service) in queries.items()
+}
+for name in queries:
+    earlier = before[name]
+    later = after[name]
+    if later["kind"] == "numeric":
+        baseline = earlier["value"] if earlier["kind"] == "numeric" else 0.0
+        if later["value"] > baseline + 1e-12:
+            raise RuntimeError(f"terminal failure increased: {name}: before={earlier} after={later}")
+evidence = {
+    "phase": "external-risk-failure",
+    "terminal_failure_before": before,
+    "terminal_failure_after": after,
+    "interpretation": (
+        "terminal failure sample not created"
+        if after["raw_failed_counter"]["kind"] == "missing"
+        else "terminal FAILED counter unchanged"
+    ),
+}
+print(json.dumps(evidence, sort_keys=True))
+PY
+}
+
+assert_alert_rules_healthy() {
+  docker run --rm -i \
+    --network "${alert_project}_prometheus-ui" \
+    --entrypoint python \
+    finguardops-ai-service:local \
+    - <<'PY'
+import json
+import urllib.request
+
+with urllib.request.urlopen("http://prometheus:9090/api/v1/rules?type=alert", timeout=5) as response:
+    groups = json.load(response)["data"]["groups"]
+group = next(group for group in groups if group["name"] == "finguardops-service-alerts")
+if len(group["rules"]) != 6 or any(rule["health"] != "ok" for rule in group["rules"]):
+    raise RuntimeError(f"unhealthy alert group: {group}")
+print(f"group={group['name']} rules={len(group['rules'])} evaluation={group['lastEvaluation']}")
+PY
+}
+```
+
+정상 traffic 뒤 `assert_alert_rules_healthy`를 실행하고
+`/api/v1/alerts` 결과가 비어 있는지 확인한다. 장애 복구 뒤에는 같은 함수가 alert 6개의
+inactive 상태와 실제 ratio·guard·마지막 evaluation을 bounded polling한다.
+
+```bash
+wait_for_alerts_inactive() {
+  local scenario="$1"
+  local timeout_seconds="$2"
+  docker run --rm -i \
+    --network "${alert_project}_prometheus-ui" \
+    --entrypoint python \
+    finguardops-ai-service:local \
+    - "$scenario" "$timeout_seconds" <<'PY'
+import json
+import math
+import sys
+import time
+import urllib.parse
+import urllib.request
+
+scenario, timeout_seconds = sys.argv[1], int(sys.argv[2])
+base_url = "http://prometheus:9090/api/v1"
+expressions = {
+    "external-risk": {
+        "external_ratio": 'finguardops:external_risk_failure:ratio5m{service="spring-backend"}',
+        "external_guard": 'sum by (service) (finguardops:external_risk_by_result:rate5m{service="spring-backend"})',
+        "terminal_ratio": 'finguardops:transaction_terminal_failure:ratio5m{service="spring-backend"}',
+        "terminal_guard": 'finguardops:transaction_terminal:rate5m{service="spring-backend"}',
+    },
+    "rule-analysis": {
+        "rule_ratio": 'finguardops:rule_analysis_failure:ratio5m{service="spring-backend"}',
+        "rule_guard": 'sum by (service) (finguardops:rule_analysis_by_result:rate5m{service="spring-backend"})',
+        "terminal_ratio": 'finguardops:transaction_terminal_failure:ratio5m{service="spring-backend"}',
+        "terminal_guard": 'finguardops:transaction_terminal:rate5m{service="spring-backend"}',
+    },
+}[scenario]
+
+
+def get_json(path, params=None):
+    query = "" if params is None else "?" + urllib.parse.urlencode(params)
+    with urllib.request.urlopen(base_url + path + query, timeout=5) as response:
+        payload = json.load(response)
+    if payload.get("status") != "success":
+        raise RuntimeError(f"Prometheus API failed: {path}: {payload}")
+    return payload
+
+
+deadline = time.monotonic() + timeout_seconds
+while time.monotonic() < deadline:
+    alerts = get_json("/alerts")["data"]["alerts"]
+    groups = get_json("/rules", {"type": "alert"})["data"]["groups"]
+    group = next(item for item in groups if item["name"] == "finguardops-service-alerts")
+    rules = group["rules"]
+    if (
+        not alerts
+        and len(rules) == 6
+        and all(rule["health"] == "ok" and rule["state"] == "inactive" for rule in rules)
+    ):
+        values = {}
+        sample_timestamps = {}
+        series_ready = True
+        for name, expression in expressions.items():
+            result = get_json("/query", {"query": expression})["data"]["result"]
+            if not result:
+                series_ready = False
+                break
+            if len(result) != 1 or result[0]["metric"].get("service") != "spring-backend":
+                raise RuntimeError(f"expected one recovery series: {name}: {result}")
+            value = float(result[0]["value"][1])
+            if not math.isfinite(value):
+                raise RuntimeError(f"non-finite recovery value: {name}: {value}")
+            values[name] = value
+            sample_timestamps[name] = result[0]["value"][0]
+        if not series_ready:
+            time.sleep(2)
+            continue
+        print(
+            json.dumps(
+                {
+                    "alerts": "inactive",
+                    "scenario": scenario,
+                    "values": values,
+                    "sample_timestamps": sample_timestamps,
+                    "evaluation": group["lastEvaluation"],
+                },
+                sort_keys=True,
+            )
+        )
+        break
+    time.sleep(2)
+else:
+    raise RuntimeError(f"alerts did not become inactive: scenario={scenario} alerts={alerts}")
+PY
+}
+```
+
+### 8.3 bounded 장애 traffic
+
+고정 요청 수와 순차 sleep은 요청 latency·15초 scrape·30초 evaluation과 5분 `rate`의
+extrapolation 때문에 최소 처리율을 보장하지 않는다. 아래 generator는 worker를 2개 이하로
+제한하고 각 요청 완료 1초 뒤 다음 요청을 보내며 최대 12분 동안 동작한다. failure 단계는
+HTTP 503만, recovery 단계는 HTTP 201만 허용한다. 예상 밖 status, 요청 오류, 12분 timeout은
+worker exit non-zero이며 로그에 남는다. 고유 key·transaction만 사용하고 실제 외부
+Provider·LLM·유료 서비스를 호출하지 않는다.
+
+```bash
+set -euo pipefail
+
+traffic_pid=""
+traffic_source=""
+traffic_stop_file=""
+traffic_log=""
+traffic_dir="$(mktemp -d "${TMPDIR:-/tmp}/finguardops-alert-traffic.XXXXXX")"
+
+start_bounded_traffic() {
+  local source_service="$1"
+  local backend_url="$2"
+  local expected_status="$3"
+  local phase="$4"
+  local maximum_seconds="$5"
+  local worker_count="$6"
+  local interval_seconds="$7"
+  if [[ -n "$traffic_pid" ]]; then
+    printf '%s\n' 'A traffic worker is already running' >&2
+    return 1
+  fi
+  traffic_source="$source_service"
+  traffic_stop_file="/tmp/finguardops-alert-${phase}-${RANDOM}.stop"
+  traffic_log="${traffic_dir}/${phase}.log"
+  "${compose[@]}" exec -T "$source_service" \
+    python - "$backend_url" "$expected_status" "$maximum_seconds" \
+    "$worker_count" "$interval_seconds" "$traffic_stop_file" "$phase" \
+    >"$traffic_log" 2>&1 <<'PY' &
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+import json
+from pathlib import Path
+import signal
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+import uuid
+from datetime import UTC, datetime
+
+backend_url = sys.argv[1]
+expected_status = int(sys.argv[2])
+maximum_seconds = int(sys.argv[3])
+worker_count = int(sys.argv[4])
+interval_seconds = float(sys.argv[5])
+stop_file = Path(sys.argv[6])
+phase = sys.argv[7]
+if not 1 <= worker_count <= 2:
+    raise RuntimeError(f"worker count outside bounded range: {worker_count}")
+if not 1 <= maximum_seconds <= 720:
+    raise RuntimeError(f"traffic duration outside bounded range: {maximum_seconds}")
+if not 0 <= interval_seconds <= 2:
+    raise RuntimeError(f"traffic interval outside bounded range: {interval_seconds}")
+
+stop_event = threading.Event()
+lock = threading.Lock()
+statuses = Counter()
+errors = []
+deadline = time.monotonic() + maximum_seconds
+
+
+def handle_signal(signum, _frame):
+    with lock:
+        errors.append(f"unexpected signal={signum}")
+    stop_event.set()
+
+
+signal.signal(signal.SIGINT, handle_signal)
+signal.signal(signal.SIGTERM, handle_signal)
+
+
+def send_one(worker_id):
+    while not stop_event.is_set():
+        if stop_file.exists():
+            stop_event.set()
+            break
+        if time.monotonic() >= deadline:
+            with lock:
+                errors.append(f"bounded traffic reached its {maximum_seconds} second limit")
+            stop_event.set()
+            break
+        payload = {
+            "transactionId": str(uuid.uuid4()),
+            "transactionType": "ACCOUNT_TRANSFER",
+            "amount": "10000",
+            "currencyCode": "KRW",
+            "occurredAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "externalCustomerRef": "local-alert-customer",
+            "senderAccountRef": "local-alert-sender",
+            "recipientAccountRef": "local-alert-recipient",
+            "channel": "MOBILE_BANKING",
+            "deviceRef": f"local-alert-worker-{worker_id}",
+        }
+        request = urllib.request.Request(
+            backend_url + "/api/v1/transactions",
+            data=json.dumps(payload).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Idempotency-Key": uuid.uuid4().hex,
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                response.read()
+                status = response.status
+        except urllib.error.HTTPError as error:
+            error.read()
+            status = error.code
+        except OSError as error:
+            with lock:
+                errors.append(f"request error worker={worker_id}: {error}")
+            stop_event.set()
+            break
+        with lock:
+            statuses[status] += 1
+            if status != expected_status:
+                errors.append(
+                    f"unexpected HTTP status worker={worker_id}: "
+                    f"expected={expected_status} actual={status}"
+                )
+                stop_event.set()
+        stop_event.wait(interval_seconds)
+
+
+with ThreadPoolExecutor(max_workers=worker_count) as executor:
+    futures = [executor.submit(send_one, worker_id) for worker_id in range(worker_count)]
+    while not stop_event.is_set():
+        if stop_file.exists():
+            stop_event.set()
+            break
+        if all(future.done() for future in futures):
+            break
+        time.sleep(0.2)
+    for future in futures:
+        future.result()
+
+summary = {
+    "phase": phase,
+    "expected_status": expected_status,
+    "statuses": dict(sorted(statuses.items())),
+    "errors": errors,
+}
+print(json.dumps(summary, sort_keys=True), flush=True)
+if not statuses:
+    raise RuntimeError(f"traffic worker produced no request: {summary}")
+if errors:
+    raise RuntimeError(f"traffic worker failed: {summary}")
+PY
+  traffic_pid="$!"
+  printf 'traffic phase=%s pid=%s log=%s\n' "$phase" "$traffic_pid" "$traffic_log"
+}
+
+stop_bounded_traffic() {
+  if [[ -z "$traffic_pid" ]]; then
+    return 0
+  fi
+  "${compose[@]}" exec -T "$traffic_source" \
+    python - "$traffic_stop_file" <<'PY'
+from pathlib import Path
+import sys
+
+Path(sys.argv[1]).touch()
+PY
+  local worker_status=0
+  if wait "$traffic_pid"; then
+    worker_status=0
+  else
+    worker_status="$?"
+  fi
+  cat "$traffic_log"
+  "${compose[@]}" exec -T "$traffic_source" \
+    python - "$traffic_stop_file" <<'PY'
+from pathlib import Path
+import sys
+
+Path(sys.argv[1]).unlink(missing_ok=True)
+PY
+  traffic_pid=""
+  traffic_source=""
+  traffic_stop_file=""
+  traffic_log=""
+  if (( worker_status != 0 )); then
+    printf 'Traffic worker failed with exit code %s\n' "$worker_status" >&2
+    return "$worker_status"
+  fi
+}
+
+assert_bounded_traffic_running() {
+  if [[ -z "$traffic_pid" ]] || ! kill -0 "$traffic_pid" 2>/dev/null; then
+    stop_bounded_traffic || true
+    printf '%s\n' 'Traffic worker exited before validation completed' >&2
+    return 1
+  fi
+}
+
+cleanup_alert_validation() {
+  local exit_status="$?"
+  trap - EXIT INT TERM
+  set +e
+  if [[ -n "$traffic_pid" ]]; then
+    stop_bounded_traffic
+    local worker_status="$?"
+    if (( exit_status == 0 && worker_status != 0 )); then
+      exit_status="$worker_status"
+    fi
+  fi
+  if [[ -d "$traffic_dir" ]]; then
+    rm -rf -- "$traffic_dir"
+  fi
+  exit "$exit_status"
+}
+
+finish_alert_validation() {
+  stop_bounded_traffic
+  trap - EXIT INT TERM
+  rm -rf -- "$traffic_dir"
+}
+
+trap cleanup_alert_validation EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+```
+
+readiness gate는 alert polling보다 먼저 실행한다. missing series는 최대 180초 동안 다시
+조회하지만 빈 값·NaN·Inf·중복 service series와 API 오류는 즉시 실패한다. ratio는 실제
+`>0.30`, guard는 alert 경계 0.10/s보다 여유 있는 실제 `>=0.15/s`를 만족해야 한다.
+성공 출력에는 값과 recording sample timestamp가 포함된다. 이후 pending은 120초,
+warning firing은 `activeAt`부터 최대 240초, critical firing은 `activeAt`부터 최대 420초로
+검증한다. alert 자체의 threshold·guard·`for`는 변경하지 않는다.
+
+External Risk 장애는 Mock을 중단하고 application network의 AI Service에서 Backend로
+HTTP 503 traffic을 보낸다. 이 transport failure는 거래가 terminal outcome에 도달하기 전에
+발생하므로 External Risk ratio·guard만 readiness로 사용하며 External Risk warning·critical
+두 alert만 active여야 한다. 같은 시각 Transaction terminal과 Rule Analysis 네 alert가 하나라도
+active이면 실패한다. 장애 전후 raw terminal FAILED Counter와 recorded failure ratio를 비교하고,
+raw series가 없으면 숫자 0으로 바꾸지 않고 `terminal failure sample not created`로 출력한다.
+이는 현재 계측 경계에 검증 기대값을 맞춘 것이며 production 장애 전파 정책 변경, 신규 Meter·tag
+추가 또는 향후 terminal 계측 확대의 구현 완료를 의미하지 않는다. critical firing 확인 전에는
+failure worker를 중단하지 않는다. 복구 뒤 HTTP 201 traffic을 유지하면서 5분 window의
+희석·만료와 전체 alert 6개 inactive를 bounded polling한다.
+
+```bash
+read -r external_terminal_raw_present external_terminal_raw_before \
+  external_terminal_ratio_present external_terminal_ratio_before < <(
+  terminal_failure_snapshot before-external-risk-failure
+)
+"${compose[@]}" stop external-risk-mock
+start_bounded_traffic \
+  ai-service http://backend:8080 503 external-risk-failure 720 2 1
+wait_for_condition_readiness external-risk 180
+assert_bounded_traffic_running
+wait_for_correlated_alert_transition external-risk 120 240 420
+assert_bounded_traffic_running
+assert_terminal_failure_not_increased \
+  "$external_terminal_raw_present" "$external_terminal_raw_before" \
+  "$external_terminal_ratio_present" "$external_terminal_ratio_before"
+stop_bounded_traffic
+
+"${compose[@]}" up -d --wait external-risk-mock
+start_bounded_traffic \
+  external-risk-mock http://127.0.0.1:8080 201 external-risk-recovery 420 1 1
+wait_for_alerts_inactive external-risk 390
+assert_bounded_traffic_running
+stop_bounded_traffic
+```
+
+Rule Analysis 장애는 정상 상태의 External Risk Mock을 유지한 채 AI Service를 중단하고
+loopback sidecar에서 Backend로 traffic을 보낸다. 현재 구현에서 Rule Analysis failure는
+Transaction terminal failure와 함께 관찰되므로 두 ratio·guard readiness를 모두 확인한 뒤 두
+family의 warning·critical 네 alert가 pending→firing하고 동시에 firing하는지 확인한다. 이때
+External Risk 두 alert가 하나라도 active이면 실패한다. 이 시나리오 차이도 production 장애 전파
+정책을 변경한다는 뜻이 아니다. AI Service를 복구한 뒤 HTTP 201 traffic을 유지하면서 최종
+alert 6개가 모두 inactive인지 확인한다.
+
+```bash
+"${compose[@]}" stop ai-service
+start_bounded_traffic \
+  external-risk-mock http://127.0.0.1:8080 503 rule-analysis-failure 720 2 1
+wait_for_condition_readiness rule-analysis 180
+assert_bounded_traffic_running
+wait_for_correlated_alert_transition rule-analysis 120 240 420
+assert_bounded_traffic_running
+stop_bounded_traffic
+
+"${compose[@]}" up -d --wait ai-service
+start_bounded_traffic \
+  external-risk-mock http://127.0.0.1:8080 201 rule-analysis-recovery 420 1 1
+wait_for_alerts_inactive rule-analysis 390
+assert_bounded_traffic_running
+stop_bounded_traffic
+finish_alert_validation
+```
+
+worker는 stop file, PID와 로그를 `$traffic_dir` 아래에서 관리한다. 정상 완료, timeout,
+assertion 실패, API 오류, `INT`와 `TERM` 모두 trap을 통해 worker를 중단하고 `wait`한 뒤
+임시 파일을 제거한다. worker 조기 종료도 다음 readiness·상태 checkpoint에서 실패한다.
+`keep_firing_for`가 없으므로 condition이 false가 된 다음 evaluation에서 inactive다.
+
+Prometheus-only restart는 같은 named volume을 유지한 채 target `UP`, 두 rule group의
+health `ok`, `lastEvaluation` 증가를 확인한다. 현재 `for` 2분·5분은 기본 10분 grace보다
+짧으므로 pending 시간이 restart 전과 동일하게 보존된다고 가정하지 않는다. restart
+검증은 회복 후 inactive 상태에서 수행한다.
+
+검증 종료 시 아래 명령은 현재 `$alert_project`의 container·network와 fresh 검증 volume만
+제거한다. 기존 기본 project의 보존 Prometheus volume은 삭제하지 않는다.
+
+```bash
+"${compose[@]}" down --volumes --remove-orphans
+```
+
+## 9. restart·Backend 재생성과 종료
 
 Prometheus의 단독 restart는 같은 container를 재시작하며 named volume의 TSDB를 유지한다.
 

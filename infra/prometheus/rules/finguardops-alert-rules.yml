@@ -1,0 +1,89 @@
+groups:
+  - name: finguardops-service-alerts
+    interval: 30s
+    rules:
+      - alert: FinGuardOpsTransactionTerminalFailureRatioWarning
+        expr: |
+          finguardops:transaction_terminal_failure:ratio5m > 0.10
+          and on (service)
+          finguardops:transaction_terminal:rate5m >= 0.10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Transaction terminal failure ratio warning
+          description: 'Service {{ $labels.service }} transaction terminal failure ratio is {{ printf "%.3f" $value }}.'
+          runbook_url: https://github.com/Ahnjisan/FinGuardOps/blob/main/docs/09-deployment/prometheus-local-scrape-runbook.md#prometheus-alert-response
+
+      - alert: FinGuardOpsTransactionTerminalFailureRatioCritical
+        expr: |
+          finguardops:transaction_terminal_failure:ratio5m > 0.30
+          and on (service)
+          finguardops:transaction_terminal:rate5m >= 0.10
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Transaction terminal failure ratio critical
+          description: 'Service {{ $labels.service }} transaction terminal failure ratio is {{ printf "%.3f" $value }}.'
+          runbook_url: https://github.com/Ahnjisan/FinGuardOps/blob/main/docs/09-deployment/prometheus-local-scrape-runbook.md#prometheus-alert-response
+
+      - alert: FinGuardOpsExternalRiskFailureRatioWarning
+        expr: |
+          finguardops:external_risk_failure:ratio5m > 0.10
+          and on (service)
+          sum by (service) (
+            finguardops:external_risk_by_result:rate5m
+          ) >= 0.10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: External Risk failure ratio warning
+          description: 'Service {{ $labels.service }} External Risk failure ratio is {{ printf "%.3f" $value }}.'
+          runbook_url: https://github.com/Ahnjisan/FinGuardOps/blob/main/docs/09-deployment/prometheus-local-scrape-runbook.md#prometheus-alert-response
+
+      - alert: FinGuardOpsExternalRiskFailureRatioCritical
+        expr: |
+          finguardops:external_risk_failure:ratio5m > 0.30
+          and on (service)
+          sum by (service) (
+            finguardops:external_risk_by_result:rate5m
+          ) >= 0.10
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: External Risk failure ratio critical
+          description: 'Service {{ $labels.service }} External Risk failure ratio is {{ printf "%.3f" $value }}.'
+          runbook_url: https://github.com/Ahnjisan/FinGuardOps/blob/main/docs/09-deployment/prometheus-local-scrape-runbook.md#prometheus-alert-response
+
+      - alert: FinGuardOpsRuleAnalysisFailureRatioWarning
+        expr: |
+          finguardops:rule_analysis_failure:ratio5m > 0.10
+          and on (service)
+          sum by (service) (
+            finguardops:rule_analysis_by_result:rate5m
+          ) >= 0.10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Rule Analysis failure ratio warning
+          description: 'Service {{ $labels.service }} Rule Analysis failure ratio is {{ printf "%.3f" $value }}.'
+          runbook_url: https://github.com/Ahnjisan/FinGuardOps/blob/main/docs/09-deployment/prometheus-local-scrape-runbook.md#prometheus-alert-response
+
+      - alert: FinGuardOpsRuleAnalysisFailureRatioCritical
+        expr: |
+          finguardops:rule_analysis_failure:ratio5m > 0.30
+          and on (service)
+          sum by (service) (
+            finguardops:rule_analysis_by_result:rate5m
+          ) >= 0.10
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Rule Analysis failure ratio critical
+          description: 'Service {{ $labels.service }} Rule Analysis failure ratio is {{ printf "%.3f" $value }}.'
+          runbook_url: https://github.com/Ahnjisan/FinGuardOps/blob/main/docs/09-deployment/prometheus-local-scrape-runbook.md#prometheus-alert-response

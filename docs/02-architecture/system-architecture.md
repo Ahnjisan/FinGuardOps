@@ -91,9 +91,9 @@ AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 
 - Spring Boot Rule v1 Client와 내부 분석 오케스트레이션·결과 채택은
   구현되었으나 거래 접수 Service와 최종 업무 흐름 연결은 없음
 - `frontend/`: 역할 규칙과 자리표시자만 있으며 React 구현 없음
-- `infra/`: Issue #196의 로컬 Compose Prometheus scrape·External Risk 검증 fixture와
-  Issue #199의 service 수준 recording rule 14개·deterministic test가 구현되었으며
-  production 배포 구성은 없음
+- `infra/`: Issue #196의 로컬 Compose Prometheus scrape·External Risk 검증 fixture,
+  Issue #199의 service 수준 recording rule 14개와 Issue #201의 로컬 실패율 alert rule
+  6개·deterministic test가 구현되었으며 production 배포 구성은 없음
 - `.github/`: Issue·PR 템플릿과 Backend·AI Service 테스트 Workflow가 있으며 이미지 빌드·배포 자동화 없음
 - 운영 PostgreSQL 배포 환경, Redis와 Kafka 연동
 - External Risk DB 영속화와 LLM Provider 연동
@@ -1013,6 +1013,8 @@ Kubernetes 도입 후 검증할 목표는 Rolling Update, 복구, 리소스 제�
 Health와 Issue #186의 Spring Boot 업무 Meter 10개에 이어 Issue #196에서 로컬
 Compose Prometheus scrape를 연결하고 Issue #199에서 기존 Meter만 사용하는 service 수준
 recording rule 14개, deterministic promtool test와 raw·recorded query 대조 경계를 추가했다.
+Issue #201은 이 recording 결과만 사용하는 거래 terminal·External Risk·Rule Analysis
+실패율 warning·critical alert 6개와 로컬 상태 전이 검증을 추가했다.
 Backend의 management 기본 loopback 계약은
 유지하고 Compose에서만 internal observability network bind를 사용한다. Backend는
 internal application·observability network에만 연결하고 port를 host에 publish하지 않는다.
@@ -1025,10 +1027,12 @@ Backend의 network namespace를 공유하고 `127.0.0.1:8001`에만 bind하며 B
 호출한다. 이는 기존 non-production plain HTTP 제한을 보존하는 검증 sidecar일 뿐 production
 External Risk Provider 정책이나 인증·TLS를 대체하지 않는다.
 
-이 구성은 24시간 로컬 검증 경계다. 로컬 rule은 5분 window·30초 evaluation으로
-`service`와 분류형 `status|result`만 보존한다. completion gap·장기 `IN_PROGRESS` Gauge,
+이 구성은 24시간 로컬 검증 경계다. recording rule은 5분 window·30초 evaluation으로
+`service`와 분류형 `status|result`만 보존한다. alert group도 30초마다 평가하며 0.10/s
+최소 처리율 위에서 warning `> 0.10`/2분, critical `> 0.30`/5분을 적용한다. 이 값은
+production SLA·SLO가 아니고 두 severity의 동시 firing을 허용한다. completion gap·장기 `IN_PROGRESS` Gauge,
 `deployment.error_ratio`·`deployment.latency`는 구현하지 않는다. production 수집
-제품·보존 기간·비용, 인증·TLS, production recording rule, alert·Alertmanager·Grafana·
+제품·보존 기간·비용, 인증·TLS, production recording rule·alert, Alertmanager·Grafana·
 HA와 추적은 `TBD`이다. 업무 식별자와 민감정보 보호가
 준비되지 않은 상태에서 로그·레이블을 확대하지 않는다.
 
