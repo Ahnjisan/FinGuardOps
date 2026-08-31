@@ -212,9 +212,9 @@ Runner·CLI가 구현되었습니다. 실행 절차는
 따릅니다. scheduler·batch, 자동 retry·fallback·cache, 운영 credential 실제 배포,
 USER 인증·인가, Issue #186 외 사건·AI·복구 상태 등의 추가 업무 metric은 아직
 구현되지 않았습니다. 로컬 Docker Compose의 Prometheus 서버·Backend scrape와 기존
-업무 Meter 기반 recording rule 14개, deterministic promtool test, raw·recorded query
-검증 경계가 구현되었습니다. production Prometheus·scrape와 production recording rule,
-alert·Alertmanager·Grafana는 미구현입니다.
+업무 Meter 기반 recording rule 14개와 실패율 alert rule 6개, 각각의 deterministic
+promtool test, raw·recorded query와 로컬 alert 상태 검증 경계가 구현되었습니다.
+production Prometheus·scrape·recording rule·alert와 Alertmanager·Grafana는 미구현입니다.
 Spring Boot runtime Prometheus registry와 opt-in Actuator endpoint의 경계도
 구현되었습니다. 기존 Rule 분석
 v1은 당장 제거하지 않으며 Rule v1 기본
@@ -499,10 +499,13 @@ loopback으로 fixture를 호출하므로 non-production plain HTTP loopback 제
 이 sidecar 경계는 production External Risk Provider 정책이나 인증·TLS를 대체하지 않습니다.
 
 로컬 recording rule은 5분 window와 30초 evaluation으로 service 수준의 rate·failure
-ratio·평균 duration만 계산합니다. completion gap, `deployment.error_ratio`,
+ratio·평균 duration만 계산합니다. 로컬 alert rule 6개는 거래 terminal, External Risk,
+Rule Analysis 실패율에 warning `> 0.10`/`for: 2m`, critical `> 0.30`/`for: 5m`과
+최소 처리율 `>= 0.10/s`를 적용합니다. 이 값은 production SLA·SLO가 아니며
+Alertmanager·receiver·notification은 없습니다. completion gap, `deployment.error_ratio`,
 `deployment.latency`, 장기 `IN_PROGRESS` Gauge는 구현하지 않았습니다. production
-Prometheus 배포·scrape와 production recording rule, custom bucket·percentile,
-alert·Alertmanager·Grafana, HA·장기 retention, OpenTelemetry와 process crash까지
+Prometheus 배포·scrape와 production recording rule·alert, custom bucket·percentile,
+Alertmanager·Grafana, HA·장기 retention, OpenTelemetry와 process crash까지
 보장하는 durable metric/outbox도 아직 구현하지 않았습니다.
 정확한 이름·tag·category는
 [`관측성 메트릭 명세`](docs/01-requirements/observability-metrics-spec.md)를 따릅니다.

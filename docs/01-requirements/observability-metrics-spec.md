@@ -40,7 +40,7 @@ API 요청·응답과 상태 코드는 `docs/03-api/`, 시스템 책임은 `docs
 | --- | --- | --- |
 | 애플리케이션 내부 계측 | 부분 구현 | Issue #186의 Spring Boot 업무 Meter 10개가 구현되었다. public 거래 intake outcome, 최초 `RECEIVED`, terminal outcome·processing duration, 멱등 replay·`IN_PROGRESS`·conflict, External Risk outcome·duration, Spring Rule orchestration outcome·duration으로 한정한다. |
 | 운영 수집·노출 | 부분 구현 | production runtime Prometheus registry와 `prometheus` profile 전용 `/actuator/prometheus`가 구현되었다. 기본 profile에서는 export가 비활성이고 health만 노출한다. 별도 management listener의 기본 경계는 `127.0.0.1:8081`이며 인증은 미구현이다. Issue #196의 로컬 Compose Prometheus 서버와 Backend scrape·24시간 보존 경계가 구현되었지만 production 배포·scrape는 미구현이다. |
-| 활용 계층 | 부분 구현 | 로컬 Prometheus에 기존 업무 Meter만 사용하는 service 수준 recording rule 14개와 deterministic promtool test가 구현되었다. production recording rule, alert rule·Alertmanager와 Grafana dashboard는 없다. |
+| 활용 계층 | 부분 구현 | 로컬 Prometheus에 기존 업무 Meter만 사용하는 service 수준 recording rule 14개, 실패율 alert rule 6개와 각각의 deterministic promtool test가 구현되었다. production recording rule·alert rule, Alertmanager와 Grafana dashboard는 없다. |
 
 로컬 검증에서 PostgreSQL·AI Service·Backend는 internal application network를 사용하고,
 Backend·Prometheus는 별도 internal observability network를 사용한다. Prometheus만 host UI
@@ -243,8 +243,9 @@ MeterRegistry 조회·meter 등록·기록 및 `afterCommit` callback 실패는 
 구현하지 않았다. Issue #190에서 production runtime Prometheus registry와 opt-in
 `/actuator/prometheus` 노출을 구현했지만 management endpoint 인증, custom
 bucket·percentile, scheduler, production Prometheus 배포·scrape와 production recording
-rule·alert·dashboard는 미구현이다. Issue #196의 로컬 Compose scrape에 이어 Issue #199에서
-기존 업무 Meter만 사용하는 로컬 recording rule 14개와 deterministic rule test를 구현했다.
+rule·alert·dashboard는 미구현이다. Issue #196의 로컬 Compose scrape, Issue #199의
+recording rule 14개에 이어 Issue #201에서 recording 결과만 사용하는 로컬 실패율 alert
+rule 6개와 deterministic rule test를 구현했다.
 
 ### 6.1 로컬 recording rule 계약
 
@@ -277,6 +278,26 @@ series를 생성하지 않는다. Timer는 평균만 제공하며 bucket·percen
 추가하지 않는다. completion gap과 장기 `IN_PROGRESS` Gauge는 process crash·복구·window
 경계를 왜곡 없이 표현할 durable 원본이 없어 제외한다. `deployment.error_ratio`와
 `deployment.latency`도 필요한 `route`·`deploymentVersion` 원본이 없어 계속 미구현이다.
+
+### 6.2 로컬 alert rule 계약
+
+`finguardops-service-alerts` group은 30초마다 recording 결과를 평가한다. 거래 terminal,
+External Risk와 Rule Analysis 실패율 각각에 warning과 critical을 한 개씩 두어 정확히
+6개 alert를 제공한다. warning은 ratio `> 0.10`, `for: 2m`, critical은 ratio `> 0.30`,
+`for: 5m`이며 둘 다 해당 service의 5분 처리율 `>= 0.10/s`를 요구한다. External Risk와
+Rule Analysis 처리율은 분류형 rate를 `sum by (service)`로 합산해 `result`를 제거한다.
+
+이 threshold·최소 처리율·지속시간은 local validation contract이며 production SLA·SLO가
+아니다. equality는 inactive이고 최소 처리율 0.10/s는 guard를 통과한다. ratio 입력이
+missing이거나 분모가 0이라 series가 없으면 inactive이며 실제 ratio 0도 inactive다.
+warning과 critical은 독립 rule이라 동시에 firing할 수 있다. `keep_firing_for`는 사용하지
+않으며 Alertmanager inhibition·routing·receiver·notification은 구현하지 않는다.
+
+alert label은 recording 결과의 `service`, 고정 `severity`와 Prometheus가 생성하는
+`alertname`뿐이다. annotation은 고정 `summary`, service와 소수점 셋째 자리 ratio만 담는
+`description`, 정적 `runbook_url`만 사용한다. 업무 식별자, 개인정보, credential, request
+내용과 예외 원문은 label·annotation에 포함하지 않는다. idempotency conflict, completion
+gap, 장기 `IN_PROGRESS`와 deployment 파생 지표 alert는 구현하지 않는다.
 
 `spring.http.errors`는 `spring.http.requests`에서 계산할 수 있으면 별도 Counter를 만들지 않는 것을 권장한다. 문서상 논리 지표는 유지하되 하나의 HTTP 요청이 두 독립 계측 경로에서 서로 다른 값으로 집계되지 않도록 한다.
 
@@ -531,8 +552,9 @@ React 관리자 화면은 업무 영향과 조치 요약에 집중하고 Grafana
 관측 구현 상태는 3.1절과 같이 애플리케이션 내부 계측, 운영 수집·노출,
 활용 계층으로 구분한다. 첫 계층의 Issue #186 Meter 10개와 두 번째 계층의 runtime
 Prometheus registry·opt-in endpoint와 로컬 Compose scrape가 구현되었다. 활용 계층은
-로컬 service 수준 recording rule 14개와 deterministic test만 부분 구현되었다. production
-Prometheus 배포·scrape·recording rule과 alert·dashboard는 미구현이다.
+로컬 service 수준 recording rule 14개와 실패율 alert rule 6개, deterministic test까지
+부분 구현되었다. production Prometheus 배포·scrape·recording rule·alert와 dashboard는
+미구현이다.
 
 | 항목 | 문서별 표현 | 메트릭 명세의 처리 |
 | --- | --- | --- |
@@ -596,7 +618,7 @@ Breaker가 없다. 따라서 이를 현재 구현 metric이나 성공 결과로 
 - [ ] 애플리케이션 내부 계측, 운영 수집·노출, 활용 계층을 구분했는가
 - [ ] 내부 계측 구현을 Issue #186 Meter 10개로만 한정하고 나머지 Meter를 미구현으로 표시했는가
 - [ ] 일반 HTTP framework metric을 Issue #186 custom intake Meter와 혼합하거나 production 수집 중으로 표현하지 않았는가
-- [ ] runtime registry·opt-in endpoint·로컬 Compose scrape·로컬 service recording rule 구현과 production scrape·recording rule·alert·dashboard 미구현을 구분했는가
+- [ ] runtime registry·opt-in endpoint·로컬 Compose scrape·로컬 recording rule·실패율 alert rule 구현과 production scrape·recording rule·alert·dashboard 미구현을 구분했는가
 - [ ] Redis, Kafka, Kubernetes와 AWS를 현재 구현·수집 중인 것으로 표현하지 않았는가
 - [ ] 알림 임계값을 기준선·부하 테스트·비용 예산 근거 없이 확정하지 않았는가
 - [ ] 이미 통일한 계약을 다시 충돌로 기록하지 않고, 남은 문서 차이와 사용자 결정 사항만 미확정으로 유지하는가

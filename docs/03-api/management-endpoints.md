@@ -4,8 +4,9 @@
 
 이 문서는 Spring Boot Backend의 Actuator web endpoint와 production runtime
 Prometheus registry의 현재 운영 경계를 정의한다. 금융거래 API 계약을 변경하지 않는다.
-Issue #196의 로컬 Compose scrape와 Issue #199의 service 수준 recording rule 14개는
-구현되었지만 production scrape·recording rule·집계·알림이 구성되었다는 의미가 아니다.
+Issue #196의 로컬 Compose scrape, Issue #199의 service 수준 recording rule 14개와
+Issue #201의 로컬 실패율 alert rule 6개는 구현되었지만 production scrape·recording
+rule·alert·집계·알림 전송이 구성되었다는 의미가 아니다.
 
 ## 2. profile별 상태
 
@@ -103,7 +104,7 @@ Docker의 network 분리와 host loopback은 접근면을 제한하지만 인증
 ## 7. 현재 미구현 범위
 
 - production Prometheus 서버와 scrape target 설정
-- production recording rule과 alert rule·Alertmanager
+- production recording rule·alert rule과 Alertmanager
 - Grafana dashboard
 - Spring Security·인증·credential
 - production Docker·Kubernetes·AWS 배포 설정
