@@ -210,10 +210,11 @@ Provider·Rule·최종화를 다시 호출하지 않습니다.
 Runner·CLI가 구현되었습니다. 실행 절차는
 [`Idempotency 복구 one-shot runbook`](docs/09-deployment/idempotency-recovery-one-shot-runbook.md)을
 따릅니다. scheduler·batch, 자동 retry·fallback·cache, 운영 credential 실제 배포,
-USER 인증·인가, Issue #186 외 사건·AI·복구 상태 등의 추가 업무 metric과
-Prometheus 서버·scrape·recording rule·alert·dashboard는 아직 구현되지
-않았습니다. Spring Boot runtime Prometheus registry와 opt-in Actuator endpoint의
-경계는 구현되었습니다. 기존 Rule 분석
+USER 인증·인가, Issue #186 외 사건·AI·복구 상태 등의 추가 업무 metric은 아직
+구현되지 않았습니다. 로컬 Docker Compose의 Prometheus 서버·Backend scrape 경계는
+구현되었지만 production scrape·recording rule·alert·dashboard는 미구현입니다.
+Spring Boot runtime Prometheus registry와 opt-in Actuator endpoint의 경계도
+구현되었습니다. 기존 Rule 분석
 v1은 당장 제거하지 않으며 Rule v1 기본
 RuleVersion 집합의 제한된 local/dev/test one-shot 발행 경계만 제공하고 공개 관리
 API나 정상 시작 자동 발행은 제공하지 않습니다. `ANALYZED`는 위험 대응 전 중간
@@ -402,7 +403,7 @@ Kafka
   Runner 및 운영 runbook 구현
 * Backend와 AI Service 전용 GitHub Actions CI 구성
 
-현재 PostgreSQL 연동은 애플리케이션 코드와 Testcontainers 검증 범위입니다. 운영 PostgreSQL, Docker Compose, Kubernetes와 AWS 배포 환경이 구현되었다는 의미는 아닙니다. Public 거래 접수의 신규 성공 응답은 최종 거래·탐지·위험 대응·필요한 사건 결과를 반영한 HTTP `201`이며, 최종 동기 분석 경계는 [`ADR-003`](docs/07-decisions/ADR-003-transaction-processing-boundary.md)을 따릅니다.
+현재 PostgreSQL 연동은 애플리케이션 코드·Testcontainers와 로컬 Compose 검증 범위입니다. 운영 PostgreSQL과 production container, Kubernetes·AWS 배포 환경이 구현되었다는 의미는 아닙니다. Public 거래 접수의 신규 성공 응답은 최종 거래·탐지·위험 대응·필요한 사건 결과를 반영한 HTTP `201`이며, 최종 동기 분석 경계는 [`ADR-003`](docs/07-decisions/ADR-003-transaction-processing-boundary.md)을 따릅니다.
 
 ### Planned
 
@@ -418,12 +419,11 @@ Public 최종 동기 거래 접수와 실제 External Risk HTTP Provider, 공개
 * External Risk 운영 credential 실제 배포와 stuck·completion-gap 탐지 metric·alert·dashboard
 * 자동 retry·fallback·cache는 별도 Issue와 계약 승인 전까지 도입하지 않음
 * Redis 연동
-* Docker Compose
 * Kafka 비동기 처리
 * 프론트엔드 최종 응답·사건 조회 연동과 React 관리자 화면
 * 이미지 빌드·배포를 포함한 GitHub Actions CI/CD 확장
 * Kubernetes·AWS 배포와 실제 배포 환경 E2E
-* Observability
+* production Prometheus·보안·HA를 포함한 Observability
 * 장애·비용 실험
 
 ## Rule v1 기본 RuleVersion one-shot 발행
@@ -484,8 +484,20 @@ export와 `/actuator/prometheus`가 비활성입니다. `prometheus` profile을 
 보안 책임은 [`Management endpoint 운영 경계`](docs/03-api/management-endpoints.md)를
 따릅니다.
 
-Prometheus 서버·scrape 설정, recording rule, custom bucket·percentile, alert·dashboard와
-process crash까지 보장하는 durable metric/outbox는 아직 구현하지 않았습니다.
+로컬 Compose 실행·target `UP`·업무 Meter query 절차는
+[`Prometheus 로컬 scrape runbook`](docs/09-deployment/prometheus-local-scrape-runbook.md)을
+따릅니다. Compose에서만 management address를 `0.0.0.0`으로 override합니다. Backend는
+application·management port를 host에 publish하지 않고 internal application·observability
+network에만 연결합니다. Prometheus만 별도 UI bridge에도 연결하며 UI는
+`127.0.0.1:9090`에 bind합니다. 이 경계는 인증을 대신하지 않습니다.
+
+PostgreSQL과 AI Service는 application network DNS를 사용하지만 External Risk fixture는
+Backend의 network namespace를 공유하며 `127.0.0.1:8001`에만 bind합니다. Backend도
+loopback으로 fixture를 호출하므로 non-production plain HTTP loopback 제한은 유지됩니다.
+이 sidecar 경계는 production External Risk Provider 정책이나 인증·TLS를 대체하지 않습니다.
+
+production Prometheus 배포·scrape, recording rule, custom bucket·percentile,
+alert·dashboard와 process crash까지 보장하는 durable metric/outbox는 아직 구현하지 않았습니다.
 정확한 이름·tag·category는
 [`관측성 메트릭 명세`](docs/01-requirements/observability-metrics-spec.md)를 따릅니다.
 

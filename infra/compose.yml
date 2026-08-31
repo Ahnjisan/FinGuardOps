@@ -1,0 +1,163 @@
+name: finguardops-local-observability
+
+services:
+  postgresql:
+    image: postgres:17.6-alpine3.22@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-finguardops}
+      POSTGRES_USER: ${POSTGRES_USER:-finguardops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks:
+      - application
+
+  ai-service:
+    image: finguardops-ai-service:local
+    build:
+      context: ../ai-service
+      dockerfile: Dockerfile
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2).read()"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - application
+
+  external-risk-mock:
+    image: finguardops-ai-service:local
+    build:
+      context: ../ai-service
+      dockerfile: Dockerfile
+    entrypoint:
+      - python
+      - /opt/external-risk-mock/app.py
+    volumes:
+      - ./external-risk-mock/app.py:/opt/external-risk-mock/app.py:ro
+    network_mode: "service:backend"
+    depends_on:
+      backend:
+        condition: service_healthy
+        restart: true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; [urllib.request.urlopen(url, timeout=2).read() for url in ('http://127.0.0.1:8001/health', 'http://127.0.0.1:8080/api/health')]"
+      interval: 5s
+      timeout: 3s
+      retries: 1
+      start_period: 5s
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+  backend:
+    image: finguardops-backend:local
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    environment:
+      SPRING_PROFILES_ACTIVE: local,external-risk-http,prometheus
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgresql:5432/${POSTGRES_DB:-finguardops}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-finguardops}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      FINGUARDOPS_AI_SERVICE_BASE_URL: http://ai-service:8000
+      FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED: "true"
+      FINGUARDOPS_EXTERNAL_RISK_HTTP_BASE_URL: http://127.0.0.1:8001
+      FINGUARDOPS_EXTERNAL_RISK_HTTP_API_KEY: local-compose-fixture-not-a-secret
+      MANAGEMENT_SERVER_ADDRESS: 0.0.0.0
+      MANAGEMENT_SERVER_PORT: "8081"
+    expose:
+      - "8081"
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      ai-service:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -ec
+        - "exec 3<>/dev/tcp/127.0.0.1/8081; printf 'GET /actuator/health HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3; read -r status <&3; [[ $$status == *' 200 '* ]]"
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - application
+      - observability
+
+  prometheus:
+    image: prom/prometheus:v3.14.0@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=24h
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - /bin/promtool
+        - check
+        - ready
+        - --url=http://127.0.0.1:9090
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - observability
+      - prometheus-ui
+
+networks:
+  application:
+    internal: true
+  observability:
+    internal: true
+  prometheus-ui:
+
+volumes:
+  prometheus-data:

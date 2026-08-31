@@ -3,8 +3,9 @@
 ## 1. 목적과 범위
 
 이 문서는 Spring Boot Backend의 Actuator web endpoint와 production runtime
-Prometheus registry의 현재 운영 경계를 정의한다. 금융거래 API 계약을 변경하지 않으며,
-Prometheus 서버가 실행 중이거나 실제 scrape·집계·알림이 구성되었다는 의미가 아니다.
+Prometheus registry의 현재 운영 경계를 정의한다. 금융거래 API 계약을 변경하지 않는다.
+Issue #196의 로컬 Compose scrape는 구현되었지만 production scrape·집계·알림이
+구성되었다는 의미가 아니다.
 
 ## 2. profile별 상태
 
@@ -78,13 +79,34 @@ curl.exe --fail-with-body http://127.0.0.1:8081/actuator/prometheus
 
 이 보호 경계가 준비되지 않은 상태에서 public address로 bind하면 안 된다.
 
-## 6. 현재 미구현 범위
+## 6. 로컬 Docker Compose 경계
 
-- Prometheus 서버와 scrape target 설정
+[`Prometheus 로컬 scrape runbook`](../09-deployment/prometheus-local-scrape-runbook.md)은
+Backend와 Prometheus를 internal observability network에 연결한다. Backend는 internal
+application·observability network에만 연결하고 application `8080`과 management `8081`을
+host에 publish하지 않는다. 이 환경에서만 `MANAGEMENT_SERVER_ADDRESS=0.0.0.0`을
+override한다. Prometheus는 internal network에서
+`http://backend:8081/actuator/prometheus`를 scrape하며, Prometheus만 별도 UI bridge에
+연결해 UI를 host `127.0.0.1:9090`에 bind한다.
+
+PostgreSQL과 AI Service는 application network DNS를 사용한다. External Risk fixture는
+Backend의 network namespace를 공유하여 `127.0.0.1:8001`에만 bind하고 Backend도 이
+loopback 주소로 호출한다. fixture port는 host에 publish하지 않는다. 이 구조는 기존
+non-production plain HTTP loopback 제한을 보존하지만 production Provider 정책이나
+인증·TLS를 대체하지 않는다.
+
+Docker의 network 분리와 host loopback은 접근면을 제한하지만 인증·TLS를 제공하지
+않는다. Backend 재생성은 loopback sidecar의 network namespace도 안전 순서에 따라
+재생성해야 하며 상세 절차는 runbook을 따른다. 이 Compose 설정을 production 보안 또는
+배포 구성으로 재사용하면 안 된다.
+
+## 7. 현재 미구현 범위
+
+- production Prometheus 서버와 scrape target 설정
 - recording rule과 alert rule
 - Grafana dashboard
 - Spring Security·인증·credential
-- Docker Compose·Kubernetes·AWS 배포 설정
+- production Docker·Kubernetes·AWS 배포 설정
 - OpenTelemetry
 - 신규 Meter·tag·SLA·SLO·임계값
 - 자동 retry·fallback·cache와 recovery scheduler·batch
