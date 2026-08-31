@@ -40,7 +40,7 @@ API 요청·응답과 상태 코드는 `docs/03-api/`, 시스템 책임은 `docs
 | --- | --- | --- |
 | 애플리케이션 내부 계측 | 부분 구현 | Issue #186의 Spring Boot 업무 Meter 10개가 구현되었다. public 거래 intake outcome, 최초 `RECEIVED`, terminal outcome·processing duration, 멱등 replay·`IN_PROGRESS`·conflict, External Risk outcome·duration, Spring Rule orchestration outcome·duration으로 한정한다. |
 | 운영 수집·노출 | 부분 구현 | production runtime Prometheus registry와 `prometheus` profile 전용 `/actuator/prometheus`가 구현되었다. 기본 profile에서는 export가 비활성이고 health만 노출한다. 별도 management listener의 기본 경계는 `127.0.0.1:8081`이며 인증은 미구현이다. Issue #196의 로컬 Compose Prometheus 서버와 Backend scrape·24시간 보존 경계가 구현되었지만 production 배포·scrape는 미구현이다. |
-| 활용 계층 | 미구현 | recording rule, alert rule, Grafana dashboard가 없다. |
+| 활용 계층 | 부분 구현 | 로컬 Prometheus에 기존 업무 Meter만 사용하는 service 수준 recording rule 14개와 deterministic promtool test가 구현되었다. production recording rule, alert rule·Alertmanager와 Grafana dashboard는 없다. |
 
 로컬 검증에서 PostgreSQL·AI Service·Backend는 internal application network를 사용하고,
 Backend·Prometheus는 별도 internal observability network를 사용한다. Prometheus만 host UI
@@ -242,8 +242,41 @@ MeterRegistry 조회·meter 등록·기록 및 `afterCommit` callback 실패는 
 경계까지이며, DB commit 직후 process crash에도 전달을 보장하는 durable metric/outbox는
 구현하지 않았다. Issue #190에서 production runtime Prometheus registry와 opt-in
 `/actuator/prometheus` 노출을 구현했지만 management endpoint 인증, custom
-bucket·percentile, scheduler, production Prometheus 배포·scrape, recording
-rule·alert·dashboard는 미구현이다. 로컬 Compose scrape만 Issue #196에서 구현했다.
+bucket·percentile, scheduler, production Prometheus 배포·scrape와 production recording
+rule·alert·dashboard는 미구현이다. Issue #196의 로컬 Compose scrape에 이어 Issue #199에서
+기존 업무 Meter만 사용하는 로컬 recording rule 14개와 deterministic rule test를 구현했다.
+
+### 6.1 로컬 recording rule 계약
+
+모든 rule은 `finguardops-service-derived` group에서 30초마다 평가하고 Counter에는 5분
+`rate`, 평균 duration에는 같은 5분의 `_sum`/`_count` rate를 사용한다. 모든 결과는
+`service`를 보존하며 분류형 rate만 `status` 또는 `result`를 추가로 보존한다.
+`job`, `instance`, `failureCategory`, `riskLevel`은 집계에서 제거한다.
+
+| Recording rule | 단위 | 보존 label |
+| --- | --- | --- |
+| `finguardops:transaction_intake:rate5m` | 요청/초 | `service` |
+| `finguardops:transactions_received:rate5m` | 거래/초 | `service` |
+| `finguardops:transaction_terminal:rate5m` | 거래/초 | `service` |
+| `finguardops:transaction_terminal_by_status:rate5m` | 거래/초 | `service`, `status` |
+| `finguardops:transaction_terminal_failure:ratio5m` | 0~1 비율 | `service` |
+| `finguardops:transaction_processing_duration:avg5m` | 초 | `service` |
+| `finguardops:http_duplicate_by_result:rate5m` | 요청/초 | `service`, `result` |
+| `finguardops:http_idempotency_conflict:rate5m` | 요청/초 | `service` |
+| `finguardops:external_risk_by_result:rate5m` | 시도/초 | `service`, `result` |
+| `finguardops:external_risk_failure:ratio5m` | 0~1 비율 | `service` |
+| `finguardops:external_risk_duration:avg5m` | 초 | `service` |
+| `finguardops:rule_analysis_by_result:rate5m` | 시도/초 | `service`, `result` |
+| `finguardops:rule_analysis_failure:ratio5m` | 0~1 비율 | `service` |
+| `finguardops:rule_analysis_duration:avg5m` | 초 | `service` |
+
+거래 failure는 `status=FAILED`, External Risk와 Rule failure는 `result=failed`로만
+판정한다. `failureCategory=none|unknown`은 성공·실패 판정에 사용하지 않는다. 분모가
+양수인데 분자 series가 없으면 같은 `service`의 0을 생성하고, 분모가 없거나 0이면 결과
+series를 생성하지 않는다. Timer는 평균만 제공하며 bucket·percentile·histogram quantile을
+추가하지 않는다. completion gap과 장기 `IN_PROGRESS` Gauge는 process crash·복구·window
+경계를 왜곡 없이 표현할 durable 원본이 없어 제외한다. `deployment.error_ratio`와
+`deployment.latency`도 필요한 `route`·`deploymentVersion` 원본이 없어 계속 미구현이다.
 
 `spring.http.errors`는 `spring.http.requests`에서 계산할 수 있으면 별도 Counter를 만들지 않는 것을 권장한다. 문서상 논리 지표는 유지하되 하나의 HTTP 요청이 두 독립 계측 경로에서 서로 다른 값으로 집계되지 않도록 한다.
 
@@ -497,8 +530,9 @@ React 관리자 화면은 업무 영향과 조치 요약에 집중하고 Grafana
 
 관측 구현 상태는 3.1절과 같이 애플리케이션 내부 계측, 운영 수집·노출,
 활용 계층으로 구분한다. 첫 계층의 Issue #186 Meter 10개와 두 번째 계층의 runtime
-Prometheus registry·opt-in endpoint와 로컬 Compose scrape가 구현되었다. production
-Prometheus 배포·scrape와 활용 계층은 미구현이다.
+Prometheus registry·opt-in endpoint와 로컬 Compose scrape가 구현되었다. 활용 계층은
+로컬 service 수준 recording rule 14개와 deterministic test만 부분 구현되었다. production
+Prometheus 배포·scrape·recording rule과 alert·dashboard는 미구현이다.
 
 | 항목 | 문서별 표현 | 메트릭 명세의 처리 |
 | --- | --- | --- |
@@ -562,7 +596,7 @@ Breaker가 없다. 따라서 이를 현재 구현 metric이나 성공 결과로 
 - [ ] 애플리케이션 내부 계측, 운영 수집·노출, 활용 계층을 구분했는가
 - [ ] 내부 계측 구현을 Issue #186 Meter 10개로만 한정하고 나머지 Meter를 미구현으로 표시했는가
 - [ ] 일반 HTTP framework metric을 Issue #186 custom intake Meter와 혼합하거나 production 수집 중으로 표현하지 않았는가
-- [ ] runtime registry·opt-in endpoint·로컬 Compose scrape 구현과 production scrape·recording rule·alert·dashboard 미구현을 구분했는가
+- [ ] runtime registry·opt-in endpoint·로컬 Compose scrape·로컬 service recording rule 구현과 production scrape·recording rule·alert·dashboard 미구현을 구분했는가
 - [ ] Redis, Kafka, Kubernetes와 AWS를 현재 구현·수집 중인 것으로 표현하지 않았는가
 - [ ] 알림 임계값을 기준선·부하 테스트·비용 예산 근거 없이 확정하지 않았는가
 - [ ] 이미 통일한 계약을 다시 충돌로 기록하지 않고, 남은 문서 차이와 사용자 결정 사항만 미확정으로 유지하는가
@@ -570,7 +604,7 @@ Breaker가 없다. 따라서 이를 현재 구현 metric이나 성공 결과로 
 ## 19. 제외 범위
 
 - 신규 Java와 Python Meter 코드 구현
-- production Prometheus 설치·scrape와 recording rule 설정
+- production Prometheus 설치·scrape와 production recording rule 설정
 - Grafana 대시보드 구현
 - OpenTelemetry 적용과 sampling 설정
 - 실제 알림 발송과 담당자 routing

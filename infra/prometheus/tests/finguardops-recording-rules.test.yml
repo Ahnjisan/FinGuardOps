@@ -1,0 +1,255 @@
+rule_files:
+  - ../rules/finguardops-recording-rules.yml
+
+evaluation_interval: 30s
+fuzzy_compare: true
+
+tests:
+  - name: service rates ratios durations labels and counter reset
+    interval: 15s
+    input_series:
+      - series: 'finguardops_transaction_intake_outcomes_total{service="service-a",result="accepted",job="backend-a",instance="a-1",unexpected="removed"}'
+        values: '0+15x20'
+      - series: 'finguardops_transaction_intake_outcomes_total{service="service-a",result="conflict",job="backend-a",instance="a-2",unexpected="removed"}'
+        values: '0+30x20'
+      - series: 'finguardops_transaction_intake_outcomes_total{service="service-b",result="accepted",job="backend-b",instance="b-1"}'
+        values: '0+60x20'
+      - series: 'finguardops_transactions_received_total{service="service-a",result="received",job="backend-a",instance="a-1"}'
+        values: '0+15x20'
+      - series: 'finguardops_transactions_received_total{service="service-b",result="received",job="backend-b",instance="b-1"}'
+        values: '0+30x20'
+      - series: 'finguardops_transaction_outcomes_total{service="service-a",status="APPROVED",riskLevel="LOW",failureCategory="none",job="backend-a",instance="a-1",unexpected="removed"}'
+        values: '0+45x20'
+      - series: 'finguardops_transaction_outcomes_total{service="service-a",status="FAILED",riskLevel="unknown",failureCategory="unknown",job="backend-a",instance="a-2"}'
+        values: '0+15x20'
+      - series: 'finguardops_transaction_outcomes_total{service="service-b",status="HELD",riskLevel="HIGH",failureCategory="none",job="backend-b",instance="b-1"}'
+        values: '0+45x20'
+      - series: 'finguardops_transaction_processing_duration_seconds_sum{service="service-a",status="APPROVED",riskLevel="LOW",failureCategory="none",job="backend-a",instance="a-1"}'
+        values: '0+90x20'
+      - series: 'finguardops_transaction_processing_duration_seconds_count{service="service-a",status="APPROVED",riskLevel="LOW",failureCategory="none",job="backend-a",instance="a-1"}'
+        values: '0+45x20'
+      - series: 'finguardops_transaction_processing_duration_seconds_sum{service="service-b",status="HELD",riskLevel="HIGH",failureCategory="none",job="backend-b",instance="b-1"}'
+        values: '0+135x20'
+      - series: 'finguardops_transaction_processing_duration_seconds_count{service="service-b",status="HELD",riskLevel="HIGH",failureCategory="none",job="backend-b",instance="b-1"}'
+        values: '0+45x20'
+      - series: 'finguardops_http_duplicate_requests_total{service="service-a",result="completed",job="backend-a",instance="a-1"}'
+        values: '0+15x20'
+      - series: 'finguardops_http_duplicate_requests_total{service="service-a",result="failed",job="backend-a",instance="a-2"}'
+        values: '0+30x20'
+      - series: 'finguardops_http_duplicate_requests_total{service="service-b",result="in_progress",job="backend-b",instance="b-1"}'
+        values: '0+45x20'
+      - series: 'finguardops_http_idempotency_conflicts_total{service="service-a",result="conflict",job="backend-a",instance="a-1",unexpected="removed"}'
+        values: '0+15x10 0+15x9'
+      - series: 'finguardops_http_idempotency_conflicts_total{service="service-b",result="conflict",job="backend-b",instance="b-1"}'
+        values: '0+15x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="service-a",result="matched",failureCategory="none",job="backend-a",instance="a-1"}'
+        values: '0+45x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="service-a",result="failed",failureCategory="TIMEOUT",job="backend-a",instance="a-2"}'
+        values: '0+15x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="service-b",result="unmatched",failureCategory="none",job="backend-b",instance="b-1"}'
+        values: '0+30x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="service-c",result="matched",failureCategory="none",job="backend-c",instance="c-1"}'
+        values: '0+15x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="service-c",result="failed",failureCategory="unknown",job="backend-c",instance="c-1"}'
+        values: '5+0x20'
+      - series: 'finguardops_external_risk_duration_seconds_sum{service="service-a",result="matched",failureCategory="none",job="backend-a",instance="a-1"}'
+        values: '0+120x20'
+      - series: 'finguardops_external_risk_duration_seconds_count{service="service-a",result="matched",failureCategory="none",job="backend-a",instance="a-1"}'
+        values: '0+60x20'
+      - series: 'finguardops_external_risk_duration_seconds_sum{service="service-b",result="unmatched",failureCategory="none",job="backend-b",instance="b-1"}'
+        values: '0+90x20'
+      - series: 'finguardops_external_risk_duration_seconds_count{service="service-b",result="unmatched",failureCategory="none",job="backend-b",instance="b-1"}'
+        values: '0+30x20'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="service-a",result="completed",riskLevel="LOW",failureCategory="none",job="backend-a",instance="a-1"}'
+        values: '0+45x20'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="service-a",result="failed",riskLevel="unknown",failureCategory="AI_SERVICE_RESPONSE_TIMEOUT",job="backend-a",instance="a-2"}'
+        values: '0+15x20'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="service-b",result="completed",riskLevel="MEDIUM",failureCategory="none",job="backend-b",instance="b-1"}'
+        values: '0+30x20'
+      - series: 'finguardops_rule_analysis_duration_seconds_sum{service="service-a",result="completed",riskLevel="LOW",failureCategory="none",job="backend-a",instance="a-1"}'
+        values: '0+120x20'
+      - series: 'finguardops_rule_analysis_duration_seconds_count{service="service-a",result="completed",riskLevel="LOW",failureCategory="none",job="backend-a",instance="a-1"}'
+        values: '0+60x20'
+      - series: 'finguardops_rule_analysis_duration_seconds_sum{service="service-b",result="completed",riskLevel="MEDIUM",failureCategory="none",job="backend-b",instance="b-1"}'
+        values: '0+90x20'
+      - series: 'finguardops_rule_analysis_duration_seconds_count{service="service-b",result="completed",riskLevel="MEDIUM",failureCategory="none",job="backend-b",instance="b-1"}'
+        values: '0+30x20'
+    promql_expr_test:
+      - expr: 'finguardops:transaction_intake:rate5m'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="finguardops:transaction_intake:rate5m",service="service-a"}'
+            value: 3
+          - labels: '{__name__="finguardops:transaction_intake:rate5m",service="service-b"}'
+            value: 4
+      - expr: 'finguardops:transactions_received:rate5m'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="finguardops:transactions_received:rate5m",service="service-a"}'
+            value: 1
+          - labels: '{__name__="finguardops:transactions_received:rate5m",service="service-b"}'
+            value: 2
+      - expr: 'finguardops:transaction_terminal:rate5m'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="finguardops:transaction_terminal:rate5m",service="service-a"}'
+            value: 4
+          - labels: '{__name__="finguardops:transaction_terminal:rate5m",service="service-b"}'
+            value: 3
+      - expr: 'finguardops:transaction_terminal_by_status:rate5m'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="finguardops:transaction_terminal_by_status:rate5m",service="service-a",status="APPROVED"}'
+            value: 3
+          - labels: '{__name__="finguardops:transaction_terminal_by_status:rate5m",service="service-a",status="FAILED"}'
+            value: 1
+          - labels: '{__name__="finguardops:transaction_terminal_by_status:rate5m",service="service-b",status="HELD"}'
+            value: 3
+      - expr: 'finguardops:transaction_terminal_failure:ratio5m'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="finguardops:transaction_terminal_failure:ratio5m",service="service-a"}'
+            value: 0.25
+          - labels: '{__name__="finguardops:transaction_terminal_failure:ratio5m",service="service-b"}'
+            value: 0
+      - expr: 'finguardops:transaction_processing_duration:avg5m'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="finguardops:transaction_processing_duration:avg5m",service="service-a"}'
+            value: 2
+          - labels: '{__name__="finguardops:transaction_processing_duration:avg5m",service="service-b"}'
+            value: 3
+      - expr: 'finguardops:http_duplicate_by_result:rate5m'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="finguardops:http_duplicate_by_result:rate5m",result="completed",service="service-a"}'
+            value: 1
+          - labels: '{__name__="finguardops:http_duplicate_by_result:rate5m",result="failed",service="service-a"}'
+            value: 2
+          - labels: '{__name__="finguardops:http_duplicate_by_result:rate5m",result="in_progress",service="service-b"}'
+            value: 3
+      - expr: 'finguardops:http_idempotency_conflict:rate5m'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="finguardops:http_idempotency_conflict:rate5m",service="service-a"}'
+            value: 0.9473684210526315
+          - labels: '{__name__="finguardops:http_idempotency_conflict:rate5m",service="service-b"}'
+            value: 1
+      - expr: 'finguardops:external_risk_by_result:rate5m'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="finguardops:external_risk_by_result:rate5m",result="failed",service="service-a"}'
+            value: 1
+          - labels: '{__name__="finguardops:external_risk_by_result:rate5m",result="matched",service="service-a"}'
+            value: 3
+          - labels: '{__name__="finguardops:external_risk_by_result:rate5m",result="unmatched",service="service-b"}'
+            value: 2
+          - labels: '{__name__="finguardops:external_risk_by_result:rate5m",result="failed",service="service-c"}'
+            value: 0
+          - labels: '{__name__="finguardops:external_risk_by_result:rate5m",result="matched",service="service-c"}'
+            value: 1
+      - expr: 'finguardops:external_risk_failure:ratio5m'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="finguardops:external_risk_failure:ratio5m",service="service-a"}'
+            value: 0.25
+          - labels: '{__name__="finguardops:external_risk_failure:ratio5m",service="service-b"}'
+            value: 0
+          - labels: '{__name__="finguardops:external_risk_failure:ratio5m",service="service-c"}'
+            value: 0
+      - expr: 'finguardops:external_risk_duration:avg5m'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="finguardops:external_risk_duration:avg5m",service="service-a"}'
+            value: 2
+          - labels: '{__name__="finguardops:external_risk_duration:avg5m",service="service-b"}'
+            value: 3
+      - expr: 'finguardops:rule_analysis_by_result:rate5m'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="finguardops:rule_analysis_by_result:rate5m",result="completed",service="service-a"}'
+            value: 3
+          - labels: '{__name__="finguardops:rule_analysis_by_result:rate5m",result="failed",service="service-a"}'
+            value: 1
+          - labels: '{__name__="finguardops:rule_analysis_by_result:rate5m",result="completed",service="service-b"}'
+            value: 2
+      - expr: 'finguardops:rule_analysis_failure:ratio5m'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="finguardops:rule_analysis_failure:ratio5m",service="service-a"}'
+            value: 0.25
+          - labels: '{__name__="finguardops:rule_analysis_failure:ratio5m",service="service-b"}'
+            value: 0
+      - expr: 'finguardops:rule_analysis_duration:avg5m'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="finguardops:rule_analysis_duration:avg5m",service="service-a"}'
+            value: 2
+          - labels: '{__name__="finguardops:rule_analysis_duration:avg5m",service="service-b"}'
+            value: 3
+
+  - name: zero denominators suppress ratios and averages
+    interval: 15s
+    input_series:
+      - series: 'finguardops_transaction_outcomes_total{service="zero-service",status="FAILED",riskLevel="unknown",failureCategory="unknown"}'
+        values: '5+0x20'
+      - series: 'finguardops_external_risk_outcomes_total{service="zero-service",result="failed",failureCategory="unknown"}'
+        values: '5+0x20'
+      - series: 'finguardops_rule_analysis_outcomes_total{service="zero-service",result="failed",riskLevel="unknown",failureCategory="unknown"}'
+        values: '5+0x20'
+      - series: 'finguardops_transaction_processing_duration_seconds_sum{service="zero-service",status="FAILED",riskLevel="unknown",failureCategory="unknown"}'
+        values: '10+0x20'
+      - series: 'finguardops_transaction_processing_duration_seconds_count{service="zero-service",status="FAILED",riskLevel="unknown",failureCategory="unknown"}'
+        values: '5+0x20'
+      - series: 'finguardops_external_risk_duration_seconds_sum{service="zero-service",result="failed",failureCategory="unknown"}'
+        values: '10+0x20'
+      - series: 'finguardops_external_risk_duration_seconds_count{service="zero-service",result="failed",failureCategory="unknown"}'
+        values: '5+0x20'
+      - series: 'finguardops_rule_analysis_duration_seconds_sum{service="zero-service",result="failed",riskLevel="unknown",failureCategory="unknown"}'
+        values: '10+0x20'
+      - series: 'finguardops_rule_analysis_duration_seconds_count{service="zero-service",result="failed",riskLevel="unknown",failureCategory="unknown"}'
+        values: '5+0x20'
+    promql_expr_test:
+      - expr: 'finguardops:transaction_terminal_failure:ratio5m'
+        eval_time: 5m
+        exp_samples: []
+      - expr: 'finguardops:external_risk_failure:ratio5m'
+        eval_time: 5m
+        exp_samples: []
+      - expr: 'finguardops:rule_analysis_failure:ratio5m'
+        eval_time: 5m
+        exp_samples: []
+      - expr: 'finguardops:transaction_processing_duration:avg5m'
+        eval_time: 5m
+        exp_samples: []
+      - expr: 'finguardops:external_risk_duration:avg5m'
+        eval_time: 5m
+        exp_samples: []
+      - expr: 'finguardops:rule_analysis_duration:avg5m'
+        eval_time: 5m
+        exp_samples: []
+
+  - name: missing denominators produce no series
+    interval: 15s
+    input_series:
+      - series: 'up{service="unrelated"}'
+        values: '1+0x20'
+    promql_expr_test:
+      - expr: 'finguardops:transaction_terminal_failure:ratio5m'
+        eval_time: 5m
+        exp_samples: []
+      - expr: 'finguardops:external_risk_failure:ratio5m'
+        eval_time: 5m
+        exp_samples: []
+      - expr: 'finguardops:rule_analysis_failure:ratio5m'
+        eval_time: 5m
+        exp_samples: []
+      - expr: 'finguardops:transaction_processing_duration:avg5m'
+        eval_time: 5m
+        exp_samples: []
+      - expr: 'finguardops:external_risk_duration:avg5m'
+        eval_time: 5m
+        exp_samples: []
+      - expr: 'finguardops:rule_analysis_duration:avg5m'
+        eval_time: 5m
+        exp_samples: []
