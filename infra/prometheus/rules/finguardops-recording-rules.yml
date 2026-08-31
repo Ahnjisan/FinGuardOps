@@ -1,0 +1,165 @@
+groups:
+  - name: finguardops-service-derived
+    interval: 30s
+    rules:
+      - record: finguardops:transaction_intake:rate5m
+        expr: |
+          sum by (service) (
+            rate(finguardops_transaction_intake_outcomes_total[5m])
+          )
+
+      - record: finguardops:transactions_received:rate5m
+        expr: |
+          sum by (service) (
+            rate(finguardops_transactions_received_total[5m])
+          )
+
+      - record: finguardops:transaction_terminal:rate5m
+        expr: |
+          sum by (service) (
+            rate(finguardops_transaction_outcomes_total[5m])
+          )
+
+      - record: finguardops:transaction_terminal_by_status:rate5m
+        expr: |
+          sum by (service, status) (
+            rate(finguardops_transaction_outcomes_total[5m])
+          )
+
+      - record: finguardops:transaction_terminal_failure:ratio5m
+        expr: |
+          (
+            (
+              sum by (service) (
+                rate(finguardops_transaction_outcomes_total{status="FAILED"}[5m])
+              )
+              or on (service)
+              0 * sum by (service) (
+                rate(finguardops_transaction_outcomes_total[5m])
+              )
+            )
+            /
+            sum by (service) (
+              rate(finguardops_transaction_outcomes_total[5m])
+            )
+          )
+          and on (service)
+          sum by (service) (
+            rate(finguardops_transaction_outcomes_total[5m])
+          ) > 0
+
+      - record: finguardops:transaction_processing_duration:avg5m
+        expr: |
+          (
+            sum by (service) (
+              rate(finguardops_transaction_processing_duration_seconds_sum[5m])
+            )
+            /
+            sum by (service) (
+              rate(finguardops_transaction_processing_duration_seconds_count[5m])
+            )
+          )
+          and on (service)
+          sum by (service) (
+            rate(finguardops_transaction_processing_duration_seconds_count[5m])
+          ) > 0
+
+      - record: finguardops:http_duplicate_by_result:rate5m
+        expr: |
+          sum by (service, result) (
+            rate(finguardops_http_duplicate_requests_total[5m])
+          )
+
+      - record: finguardops:http_idempotency_conflict:rate5m
+        expr: |
+          sum by (service) (
+            rate(finguardops_http_idempotency_conflicts_total[5m])
+          )
+
+      - record: finguardops:external_risk_by_result:rate5m
+        expr: |
+          sum by (service, result) (
+            rate(finguardops_external_risk_outcomes_total[5m])
+          )
+
+      - record: finguardops:external_risk_failure:ratio5m
+        expr: |
+          (
+            (
+              sum by (service) (
+                rate(finguardops_external_risk_outcomes_total{result="failed"}[5m])
+              )
+              or on (service)
+              0 * sum by (service) (
+                rate(finguardops_external_risk_outcomes_total[5m])
+              )
+            )
+            /
+            sum by (service) (
+              rate(finguardops_external_risk_outcomes_total[5m])
+            )
+          )
+          and on (service)
+          sum by (service) (
+            rate(finguardops_external_risk_outcomes_total[5m])
+          ) > 0
+
+      - record: finguardops:external_risk_duration:avg5m
+        expr: |
+          (
+            sum by (service) (
+              rate(finguardops_external_risk_duration_seconds_sum[5m])
+            )
+            /
+            sum by (service) (
+              rate(finguardops_external_risk_duration_seconds_count[5m])
+            )
+          )
+          and on (service)
+          sum by (service) (
+            rate(finguardops_external_risk_duration_seconds_count[5m])
+          ) > 0
+
+      - record: finguardops:rule_analysis_by_result:rate5m
+        expr: |
+          sum by (service, result) (
+            rate(finguardops_rule_analysis_outcomes_total[5m])
+          )
+
+      - record: finguardops:rule_analysis_failure:ratio5m
+        expr: |
+          (
+            (
+              sum by (service) (
+                rate(finguardops_rule_analysis_outcomes_total{result="failed"}[5m])
+              )
+              or on (service)
+              0 * sum by (service) (
+                rate(finguardops_rule_analysis_outcomes_total[5m])
+              )
+            )
+            /
+            sum by (service) (
+              rate(finguardops_rule_analysis_outcomes_total[5m])
+            )
+          )
+          and on (service)
+          sum by (service) (
+            rate(finguardops_rule_analysis_outcomes_total[5m])
+          ) > 0
+
+      - record: finguardops:rule_analysis_duration:avg5m
+        expr: |
+          (
+            sum by (service) (
+              rate(finguardops_rule_analysis_duration_seconds_sum[5m])
+            )
+            /
+            sum by (service) (
+              rate(finguardops_rule_analysis_duration_seconds_count[5m])
+            )
+          )
+          and on (service)
+          sum by (service) (
+            rate(finguardops_rule_analysis_duration_seconds_count[5m])
+          ) > 0

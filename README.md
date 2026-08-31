@@ -211,8 +211,10 @@ Runner·CLI가 구현되었습니다. 실행 절차는
 [`Idempotency 복구 one-shot runbook`](docs/09-deployment/idempotency-recovery-one-shot-runbook.md)을
 따릅니다. scheduler·batch, 자동 retry·fallback·cache, 운영 credential 실제 배포,
 USER 인증·인가, Issue #186 외 사건·AI·복구 상태 등의 추가 업무 metric은 아직
-구현되지 않았습니다. 로컬 Docker Compose의 Prometheus 서버·Backend scrape 경계는
-구현되었지만 production scrape·recording rule·alert·dashboard는 미구현입니다.
+구현되지 않았습니다. 로컬 Docker Compose의 Prometheus 서버·Backend scrape와 기존
+업무 Meter 기반 recording rule 14개, deterministic promtool test, raw·recorded query
+검증 경계가 구현되었습니다. production Prometheus·scrape와 production recording rule,
+alert·Alertmanager·Grafana는 미구현입니다.
 Spring Boot runtime Prometheus registry와 opt-in Actuator endpoint의 경계도
 구현되었습니다. 기존 Rule 분석
 v1은 당장 제거하지 않으며 Rule v1 기본
@@ -484,7 +486,7 @@ export와 `/actuator/prometheus`가 비활성입니다. `prometheus` profile을 
 보안 책임은 [`Management endpoint 운영 경계`](docs/03-api/management-endpoints.md)를
 따릅니다.
 
-로컬 Compose 실행·target `UP`·업무 Meter query 절차는
+로컬 Compose 실행·target `UP`·업무 Meter와 recording rule query 절차는
 [`Prometheus 로컬 scrape runbook`](docs/09-deployment/prometheus-local-scrape-runbook.md)을
 따릅니다. Compose에서만 management address를 `0.0.0.0`으로 override합니다. Backend는
 application·management port를 host에 publish하지 않고 internal application·observability
@@ -496,8 +498,12 @@ Backend의 network namespace를 공유하며 `127.0.0.1:8001`에만 bind합니�
 loopback으로 fixture를 호출하므로 non-production plain HTTP loopback 제한은 유지됩니다.
 이 sidecar 경계는 production External Risk Provider 정책이나 인증·TLS를 대체하지 않습니다.
 
-production Prometheus 배포·scrape, recording rule, custom bucket·percentile,
-alert·dashboard와 process crash까지 보장하는 durable metric/outbox는 아직 구현하지 않았습니다.
+로컬 recording rule은 5분 window와 30초 evaluation으로 service 수준의 rate·failure
+ratio·평균 duration만 계산합니다. completion gap, `deployment.error_ratio`,
+`deployment.latency`, 장기 `IN_PROGRESS` Gauge는 구현하지 않았습니다. production
+Prometheus 배포·scrape와 production recording rule, custom bucket·percentile,
+alert·Alertmanager·Grafana, HA·장기 retention, OpenTelemetry와 process crash까지
+보장하는 durable metric/outbox도 아직 구현하지 않았습니다.
 정확한 이름·tag·category는
 [`관측성 메트릭 명세`](docs/01-requirements/observability-metrics-spec.md)를 따릅니다.
 

@@ -91,8 +91,9 @@ AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 
 - Spring Boot Rule v1 Client와 내부 분석 오케스트레이션·결과 채택은
   구현되었으나 거래 접수 Service와 최종 업무 흐름 연결은 없음
 - `frontend/`: 역할 규칙과 자리표시자만 있으며 React 구현 없음
-- `infra/`: Issue #196의 로컬 Compose Prometheus scrape와 External Risk 검증 fixture가
-  구현되었으며 production 배포 구성은 없음
+- `infra/`: Issue #196의 로컬 Compose Prometheus scrape·External Risk 검증 fixture와
+  Issue #199의 service 수준 recording rule 14개·deterministic test가 구현되었으며
+  production 배포 구성은 없음
 - `.github/`: Issue·PR 템플릿과 Backend·AI Service 테스트 Workflow가 있으며 이미지 빌드·배포 자동화 없음
 - 운영 PostgreSQL 배포 환경, Redis와 Kafka 연동
 - External Risk DB 영속화와 LLM Provider 연동
@@ -1010,7 +1011,9 @@ Kubernetes 도입 후 검증할 목표는 Rolling Update, 복구, 리소스 제�
 ### 19.4 Observability Stack
 
 Health와 Issue #186의 Spring Boot 업무 Meter 10개에 이어 Issue #196에서 로컬
-Compose Prometheus scrape를 연결했다. Backend의 management 기본 loopback 계약은
+Compose Prometheus scrape를 연결하고 Issue #199에서 기존 Meter만 사용하는 service 수준
+recording rule 14개, deterministic promtool test와 raw·recorded query 대조 경계를 추가했다.
+Backend의 management 기본 loopback 계약은
 유지하고 Compose에서만 internal observability network bind를 사용한다. Backend는
 internal application·observability network에만 연결하고 port를 host에 publish하지 않는다.
 Prometheus만 UI용 일반 bridge에도 연결하며 UI는 host loopback에 제한한다. 자세한 절차는
@@ -1022,8 +1025,11 @@ Backend의 network namespace를 공유하고 `127.0.0.1:8001`에만 bind하며 B
 호출한다. 이는 기존 non-production plain HTTP 제한을 보존하는 검증 sidecar일 뿐 production
 External Risk Provider 정책이나 인증·TLS를 대체하지 않는다.
 
-이 구성은 24시간 로컬 검증 경계다. production 수집 제품·보존 기간·비용, 인증·TLS,
-recording rule·alert·Grafana·HA와 추적은 `TBD`이다. 업무 식별자와 민감정보 보호가
+이 구성은 24시간 로컬 검증 경계다. 로컬 rule은 5분 window·30초 evaluation으로
+`service`와 분류형 `status|result`만 보존한다. completion gap·장기 `IN_PROGRESS` Gauge,
+`deployment.error_ratio`·`deployment.latency`는 구현하지 않는다. production 수집
+제품·보존 기간·비용, 인증·TLS, production recording rule, alert·Alertmanager·Grafana·
+HA와 추적은 `TBD`이다. 업무 식별자와 민감정보 보호가
 준비되지 않은 상태에서 로그·레이블을 확대하지 않는다.
 
 ### 19.5 GitHub Actions
