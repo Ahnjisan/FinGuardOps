@@ -46,6 +46,18 @@ public final class AuditMetadataPolicy {
                     afterValueSummary,
                     metadata
             );
+            case CASE_STATUS_CHANGED -> validateCaseStatusChanged(
+                    draft.reasonCode(),
+                    beforeValueSummary,
+                    afterValueSummary,
+                    metadata
+            );
+            case CASE_ASSIGNEE_CHANGED -> validateCaseAssigneeChanged(
+                    draft.reasonCode(),
+                    beforeValueSummary,
+                    afterValueSummary,
+                    metadata
+            );
             case TRANSACTION_RISK_RESPONSE_APPLIED ->
                     validateRiskResponseApplied(
                             beforeValueSummary,
@@ -105,6 +117,116 @@ public final class AuditMetadataPolicy {
             );
         }
         validateMetadata(metadata, DETECTION_METADATA_FIELDS);
+    }
+
+    private void validateCaseStatusChanged(
+            com.aifds.backend.audit.entity.AuditReasonCode reasonCode,
+            JsonNode before,
+            JsonNode after,
+            JsonNode metadata
+    ) {
+        validateCaseSnapshot(before, "beforeValueSummary");
+        validateCaseSnapshot(after, "afterValueSummary");
+        requireEmptyMetadata(metadata);
+
+        String beforeStatus = before.get("caseStatus").textValue();
+        String afterStatus = after.get("caseStatus").textValue();
+        String beforeAssignee = textOrNull(before, "assigneeRef");
+        String afterAssignee = textOrNull(after, "assigneeRef");
+        boolean valid = switch (reasonCode) {
+            case CASE_REVIEW_STARTED ->
+                    "OPEN".equals(beforeStatus)
+                            && beforeAssignee == null
+                            && "IN_REVIEW".equals(afterStatus)
+                            && afterAssignee != null;
+            case CASE_ADDITIONAL_INFORMATION_REQUESTED ->
+                    "IN_REVIEW".equals(beforeStatus)
+                            && "ADDITIONAL_INFORMATION_REQUIRED"
+                            .equals(afterStatus)
+                            && beforeAssignee != null
+                            && beforeAssignee.equals(afterAssignee);
+            case CASE_REVIEW_RESUMED ->
+                    "ADDITIONAL_INFORMATION_REQUIRED".equals(beforeStatus)
+                            && "IN_REVIEW".equals(afterStatus)
+                            && beforeAssignee != null
+                            && beforeAssignee.equals(afterAssignee);
+            default -> false;
+        };
+        if (!valid) {
+            throw new IllegalArgumentException(
+                    "case status snapshot does not match reasonCode"
+            );
+        }
+    }
+
+    private void validateCaseAssigneeChanged(
+            com.aifds.backend.audit.entity.AuditReasonCode reasonCode,
+            JsonNode before,
+            JsonNode after,
+            JsonNode metadata
+    ) {
+        validateCaseSnapshot(before, "beforeValueSummary");
+        validateCaseSnapshot(after, "afterValueSummary");
+        requireEmptyMetadata(metadata);
+
+        String beforeStatus = before.get("caseStatus").textValue();
+        String afterStatus = after.get("caseStatus").textValue();
+        String beforeAssignee = textOrNull(before, "assigneeRef");
+        String afterAssignee = textOrNull(after, "assigneeRef");
+        boolean editableState = beforeStatus.equals(afterStatus)
+                && ("IN_REVIEW".equals(beforeStatus)
+                || "ADDITIONAL_INFORMATION_REQUIRED".equals(beforeStatus));
+        boolean valid = editableState && switch (reasonCode) {
+            case CASE_ASSIGNEE_ASSIGNED ->
+                    "ADDITIONAL_INFORMATION_REQUIRED".equals(beforeStatus)
+                            && beforeAssignee == null
+                            && afterAssignee != null;
+            case CASE_ASSIGNEE_CHANGED ->
+                    beforeAssignee != null
+                            && afterAssignee != null
+                            && !beforeAssignee.equals(afterAssignee);
+            case CASE_ASSIGNEE_RELEASED ->
+                    "ADDITIONAL_INFORMATION_REQUIRED".equals(beforeStatus)
+                            && beforeAssignee != null
+                            && afterAssignee == null;
+            default -> false;
+        };
+        if (!valid) {
+            throw new IllegalArgumentException(
+                    "case assignee snapshot does not match reasonCode"
+            );
+        }
+    }
+
+    private void validateCaseSnapshot(JsonNode value, String fieldName) {
+        if (value == null) {
+            throw new IllegalArgumentException(
+                    fieldName + " must not be null"
+            );
+        }
+        Set<String> actualFields = fields(value);
+        if (!actualFields.equals(Set.of("caseStatus"))
+                && !actualFields.equals(Set.of("caseStatus", "assigneeRef"))) {
+            throw new IllegalArgumentException(
+                    fieldName + " fields do not match the case workflow action"
+            );
+        }
+        requireEnum(value, "caseStatus", FraudCaseStatus.class);
+        if (value.has("assigneeRef")) {
+            requireUuidV4(value, "assigneeRef");
+        }
+    }
+
+    private String textOrNull(JsonNode value, String field) {
+        return value.has(field) ? value.get(field).textValue() : null;
+    }
+
+    private void requireEmptyMetadata(JsonNode metadata) {
+        if (!fields(metadata).isEmpty()) {
+            throw new IllegalArgumentException(
+                    "case workflow metadata must be empty"
+            );
+        }
     }
 
     private void validateRiskResponseApplied(

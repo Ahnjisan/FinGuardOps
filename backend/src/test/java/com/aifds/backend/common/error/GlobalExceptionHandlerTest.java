@@ -7,6 +7,9 @@ import com.aifds.backend.idempotency.entity.IdempotencyProcessingStatus;
 import com.aifds.backend.idempotency.exception.IdempotencyCompletionTransactionNotFoundException;
 import com.aifds.backend.idempotency.exception.IdempotencyRecordNotFoundException;
 import com.aifds.backend.idempotency.exception.IdempotencyStateTransitionNotAllowedException;
+import com.aifds.backend.fraudcase.exception.FraudCaseWorkflowException;
+import com.aifds.backend.fraudcase.validation.FraudCaseValidationException;
+import com.aifds.backend.fraudcase.validation.FraudCaseValidationType;
 import com.aifds.backend.transaction.validation.TransactionValidationException;
 import com.aifds.backend.transaction.validation.TransactionValidationType;
 import com.aifds.backend.transaction.exception.TransactionIntakeRejectedException;
@@ -224,6 +227,95 @@ class GlobalExceptionHandlerTest {
                 )
         ).isInstanceOf(IllegalArgumentException.class)
                 .hasMessageNotContaining("credential=secret");
+    }
+
+    @Test
+    void mapsFraudCaseWorkflowConflictsAndDependenciesSafely() {
+        assertWorkflow(
+                FraudCaseWorkflowException.Reason.CASE_STATUS_CONFLICT,
+                HttpStatus.CONFLICT,
+                GlobalExceptionHandler.CASE_STATUS_CONFLICT
+        );
+        assertWorkflow(
+                FraudCaseWorkflowException.Reason.CASE_ASSIGNEE_CONFLICT,
+                HttpStatus.CONFLICT,
+                GlobalExceptionHandler.CASE_ASSIGNEE_CONFLICT
+        );
+        assertWorkflow(
+                FraudCaseWorkflowException.Reason.CASE_ALREADY_CLOSED,
+                HttpStatus.CONFLICT,
+                GlobalExceptionHandler.CASE_ALREADY_CLOSED
+        );
+        assertWorkflow(
+                FraudCaseWorkflowException.Reason.CONCURRENT_MODIFICATION,
+                HttpStatus.CONFLICT,
+                GlobalExceptionHandler.CONCURRENT_MODIFICATION
+        );
+        assertWorkflow(
+                FraudCaseWorkflowException.Reason.ASSIGNEE_REQUIRED,
+                HttpStatus.UNPROCESSABLE_ENTITY,
+                GlobalExceptionHandler.ASSIGNEE_REQUIRED
+        );
+        assertWorkflow(
+                FraudCaseWorkflowException.Reason.DEPENDENCY_TIMEOUT,
+                HttpStatus.SERVICE_UNAVAILABLE,
+                GlobalExceptionHandler.DEPENDENCY_TIMEOUT
+        );
+        assertWorkflow(
+                FraudCaseWorkflowException.Reason.DEPENDENCY_UNAVAILABLE,
+                HttpStatus.SERVICE_UNAVAILABLE,
+                GlobalExceptionHandler.DEPENDENCY_UNAVAILABLE
+        );
+    }
+
+    @Test
+    void mapsInvalidAssigneeToDedicated422WithoutInputReflection() {
+        FraudCaseValidationException exception =
+                new FraudCaseValidationException(
+                        FraudCaseValidationType.DOMAIN,
+                        "assigneeRef",
+                        "INVALID_ASSIGNEE_REF",
+                        "assigneeRef must be a canonical lowercase UUID v4"
+                );
+
+        ResponseEntity<ApiErrorResponse> response =
+                handler.handleFraudCaseValidation(
+                        exception,
+                        requestWithTraceId()
+                );
+
+        assertThat(response.getStatusCode())
+                .isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+        assertThat(response.getBody().code())
+                .isEqualTo(GlobalExceptionHandler.INVALID_ASSIGNEE_REF);
+        assertThat(response.getBody().message())
+                .isEqualTo(
+                        GlobalExceptionHandler.INVALID_ASSIGNEE_REF_MESSAGE
+                );
+        assertThat(response.getBody().traceId()).isEqualTo(TRACE_ID);
+    }
+
+    private void assertWorkflow(
+            FraudCaseWorkflowException.Reason reason,
+            HttpStatus status,
+            String code
+    ) {
+        ResponseEntity<ApiErrorResponse> response =
+                handler.handleFraudCaseWorkflow(
+                        new FraudCaseWorkflowException(
+                                reason,
+                                new IllegalStateException(
+                                        "SELECT password FROM credential"
+                                )
+                        ),
+                        requestWithTraceId()
+                );
+        assertThat(response.getStatusCode()).isEqualTo(status);
+        assertThat(response.getBody().code()).isEqualTo(code);
+        assertThat(response.getBody().message()).doesNotContain(
+                "SELECT", "password", "credential", "IllegalStateException"
+        );
+        assertThat(response.getBody().traceId()).isEqualTo(TRACE_ID);
     }
 
     private void assertSafeInternalError(

@@ -50,12 +50,12 @@ class FraudCasePersistenceIntegrationTest
     private Flyway flyway;
 
     @Test
-    void appliesFreshV1ThroughV10SchemaWithApprovedConstraintsAndIndexes() {
-        assertThat(flyway.info().applied()).hasSize(10);
+    void appliesFreshV1ThroughV11SchemaWithApprovedConstraintsAndIndexes() {
+        assertThat(flyway.info().applied()).hasSize(11);
         assertThat(flyway.info().current().getVersion().getVersion())
-                .isEqualTo("10");
+                .isEqualTo("11");
         assertThat(flyway.info().current().getDescription())
-                .isEqualTo("create fraud case query index");
+                .isEqualTo("extend audit log for fraud case workflow");
         assertThat(columns("fraud_case")).containsExactlyInAnyOrder(
                 "id",
                 "case_id",

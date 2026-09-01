@@ -2,17 +2,17 @@
 
 ## 1. 범위
 
-이 문서는 Issue #154에서 구현한 `FraudCase`와 첫 거래 연결 및 Issue #207의
-사건 목록·상세 조회에 필요한 PostgreSQL 물리 계약을 정의한다. Flyway V6는 기존
+이 문서는 Issue #154의 `FraudCase`·첫 거래 연결, Issue #207의 사건 조회 및
+Issue #209의 조사 상태·담당자 변경 경계를 정의한다. Flyway V6는 기존
 V1~V5를 수정하지 않고 `fraud_case`와 `case_transaction`을 추가하며, Flyway V10은
 기존 migration을 수정하지 않고 무필터 변경 시각 조회 인덱스를 추가한다.
 
 구현 범위는 사건 영속 모델, 거래 연결, 중복 연결 제약과 내부 persistence
 boundary이며, 위험 대응 최종화 경계가 이를 재사용해 신규 사건·첫 연결 또는 기존
 활성 사건을 거래 최종 상태·대응 결과·AuditLog와 같은 REQUIRED 트랜잭션에서
-확정한다. Issue #207의 read-only 목록·상세 API는 포함하지만 사건 조사 상태 전이,
-기존 사건에 다른 거래 추가, 사건 병합·분리, 수정 API, 거래 접수 전체 연결과
-Snapshot v2는 포함하지 않는다. AuditLog 계약은
+확정한다. Issue #209의 상태·담당자 mutation은 포함하지만 사건 종료, 기존 사건에
+다른 거래 추가, 사건 병합·분리, 거래 접수 전체 연결과 Snapshot v2는 포함하지
+않는다. AuditLog 계약은
 [`audit-log-schema.md`](audit-log-schema.md)를 따른다.
 
 ## 2. 관계와 식별자
@@ -88,10 +88,10 @@ rollback한다.
 
 ## 7. 미구현 경계
 
-- 사건 조사 상태 전이와 종료
+- 사건 종료와 최종 판정
 - 기존 사건에 추가 거래 연결
 - 사건 병합·분리
-- 사건 상태 변경·담당자 배정 Controller·DTO
+- 인증·인가 기반 실제 USER actor
 - 거래 접수 전체 오케스트레이션과 Snapshot v2
 
 ## 8. 조회 경계
@@ -108,3 +108,14 @@ Entity collection 추가와 전체 연관 거래 로딩은 사용하지 않는�
 
 내부 위험 대응·사건·감사 최종화는 구현되었지만, 이를 사건 업무 전체나 공개 거래
 처리 완료로 간주하지 않는다.
+
+## 9. 조사 mutation 동시성
+
+상태·담당자 명령은 `caseId` 일반 조회 후 body의 `expectedVersion`을 먼저 비교하고
+Entity 업무 메서드를 적용한다. `JpaRepository.flush()`에서 실제 `@Version` 증가를
+확정한 뒤 같은 기본 `REQUIRED` 트랜잭션의 AuditLog append·flush를 수행한다.
+row lock과 자동 retry는 사용하지 않으며 optimistic conflict 또는 감사 INSERT 실패
+시 사건과 감사 변경을 모두 rollback한다.
+
+신규 write API는 `assignee_ref`에 canonical lowercase UUID v4만 허용하지만 V6의
+DB-wide 1~128자 trimmed check는 기존 행과 조회 계약을 위해 변경하지 않는다.

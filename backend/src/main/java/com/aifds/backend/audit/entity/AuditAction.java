@@ -3,6 +3,8 @@ package com.aifds.backend.audit.entity;
 public enum AuditAction {
     CASE_CREATED,
     CASE_TRANSACTION_LINKED,
+    CASE_STATUS_CHANGED,
+    CASE_ASSIGNEE_CHANGED,
     TRANSACTION_RISK_RESPONSE_APPLIED,
     TRANSACTION_STATUS_CHANGED
 }

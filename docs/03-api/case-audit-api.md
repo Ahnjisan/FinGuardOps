@@ -6,8 +6,8 @@
 
 이 계약은 이후 Spring Boot Controller, 요청·응답 DTO, Validation, Service, 테스트와 OpenAPI 구현의 기준이다. API 공통 표현, 시간, 금액, 페이지네이션, 오류 응답과 추적 원칙은 [`api-conventions.md`](./api-conventions.md)를 따른다.
 
-Issue #207에서 사건 목록·상세 조회 Controller·DTO·Validation·read-only Service와
-PostgreSQL 조회 경계를 구현했다. 사건 상태 변경, 담당자 배정, 조사 메모, 최종 판정,
+Issue #207에서 사건 목록·상세 조회를 구현했고 Issue #209에서 아래 두 mutation과
+PostgreSQL 낙관적 동시성·감사 원자성 경계를 구현했다. 조사 메모, 최종 판정,
 연관 거래 목록과 감사 조회 API 및 인증·인가는 구현되지 않았다. 사건 영속 계약은
 [`../04-database/fraud-case-schema.md`](../04-database/fraud-case-schema.md)를 따른다.
 실제 `caseId`와 `auditId`는 UUID v4를 사용한다.
@@ -453,11 +453,11 @@ PATCH /api/v1/cases/{caseId}/status
 Content-Type: application/json
 ```
 
-| 필드 | 타입 후보 | 필수 후보 | 설명 |
+| 필드 | 타입 | 필수 | 설명 |
 | --- | --- | --- | --- |
 | `targetStatus` | string | 필수 | 변경할 사건 상태 |
 | `assigneeRef` | string 또는 null | 조건부 필수 | `OPEN` → `IN_REVIEW` 전이에서 지정할 담당자 참조값 |
-| `reason` | string | 필수 | 상태 변경 사유 |
+| `reasonCode` | string | 필수 | 전이와 정확히 일치하는 승인된 구조화 사유 |
 | `expectedVersion` | integer | 필수 | 클라이언트가 조회한 사건의 `concurrencyVersion` |
 
 요청 예:
@@ -465,9 +465,9 @@ Content-Type: application/json
 ```json
 {
   "targetStatus": "IN_REVIEW",
-  "assigneeRef": "analyst_ref_demo_07",
-  "reason": "담당자를 지정하고 사건 검토를 시작합니다.",
-  "expectedVersion": 1
+  "assigneeRef": "20000000-0000-4000-9000-000000000007",
+  "reasonCode": "CASE_REVIEW_STARTED",
+  "expectedVersion": 0
 }
 ```
 
@@ -480,6 +480,11 @@ Content-Type: application/json
   - `ADDITIONAL_INFORMATION_REQUIRED` → `IN_REVIEW`
 - `OPEN` → `IN_REVIEW` 전이에서는 요청의 `assigneeRef`가 필수이다. 값이 없으면 사건을 변경하지 않고 `422 Unprocessable Entity`와 `ASSIGNEE_REQUIRED`를 반환한다.
 - `OPEN` → `IN_REVIEW` 요청의 `assigneeRef` 형식 또는 승인된 허용 목록 검증에 실패하면 `422 Unprocessable Entity`와 `INVALID_ASSIGNEE_REF`를 반환한다.
+- 신규 write `assigneeRef`는 정확히 36 ASCII 문자인 canonical lowercase UUID v4만
+  허용하며 trim·소문자 변환 등 정규화를 수행하지 않는다.
+- `IN_REVIEW` → `ADDITIONAL_INFORMATION_REQUIRED`에는
+  `CASE_ADDITIONAL_INFORMATION_REQUESTED`, 복귀에는 `CASE_REVIEW_RESUMED`를
+  사용한다. 이 두 전이에 `assigneeRef` 필드를 함께 보내면 `422` 의미 오류다.
 - `ADDITIONAL_INFORMATION_REQUIRED` → `IN_REVIEW` 전이에서는 사건에 기존 담당자가 있어야 한다. 담당자가 없으면 사건을 변경하지 않고 `422 Unprocessable Entity`와 `ASSIGNEE_REQUIRED`를 반환한다.
 - `reviewStartedAt`은 다음 조건에서만 현재 시각으로 설정한다.
 
@@ -491,11 +496,14 @@ reviewStartedAt == null
 
 - 이후 `ADDITIONAL_INFORMATION_REQUIRED` → `IN_REVIEW` 전이에서는 기존 `reviewStartedAt`을 변경하지 않는다.
 - `OPEN` → `IN_REVIEW`의 담당자 지정, 상태 변경, 최초 `reviewStartedAt` 기록, `lastChangedAt` 변경, `concurrencyVersion` 증가와 AuditLog 기록은 하나의 업무 정합성 경계에서 처리한다.
-- 현재 상태와 `targetStatus`가 같으면 무변경 성공으로 처리하지 않는다. `409 Conflict`와 `CASE_STATUS_CONFLICT`를 반환하고 사건 현재값과 `concurrencyVersion`을 변경하지 않으며 거부 요청은 감사 기록 후보로 남긴다.
+- 현재 상태와 `targetStatus`가 같으면 무변경 성공으로 처리하지 않는다. `409 Conflict`와 `CASE_STATUS_CONFLICT`를 반환하고 사건 현재값과 `concurrencyVersion`을 변경하지 않는다.
 - `targetStatus = CLOSED` 요청은 적용하지 않고 `409 Conflict`와 `CASE_STATUS_CONFLICT`를 반환한다.
 - 이미 `CLOSED`인 사건에 대한 상태 변경은 `409 Conflict`와 `CASE_ALREADY_CLOSED`를 반환한다.
 - 허용되지 않은 다른 전이는 `409 Conflict`와 `CASE_STATUS_CONFLICT`를 반환한다.
 - 성공한 상태 변경과 AuditLog 기록은 일부만 성공하지 않도록 같은 업무 정합성 경계에서 처리한다.
+- 조회 후 `expectedVersion`을 업무 충돌보다 먼저 비교한다. 명시적 flush에서 실제
+  `@Version` 증가를 확정한 후 성공 응답을 만들며 row lock·자동 retry·`If-Match`는
+  사용하지 않는다.
 
 ### 8.3 성공 응답 예시
 
@@ -506,11 +514,12 @@ Content-Type: application/json
 
 ```json
 {
-  "caseId": "case_demo_20260724_0031",
+  "caseId": "10000000-0000-4000-9000-000000000003",
   "caseStatus": "IN_REVIEW",
   "finalDisposition": null,
-  "assigneeRef": "analyst_ref_demo_07",
+  "assigneeRef": "20000000-0000-4000-9000-000000000007",
   "reviewStartedAt": "2026-07-24T01:25:00Z",
+  "closedAt": null,
   "lastChangedAt": "2026-07-24T01:25:00Z",
   "concurrencyVersion": 2,
   "traceId": "trace_demo_case_status_01"
@@ -529,17 +538,11 @@ Content-Type: application/json
   "code": "CASE_STATUS_CONFLICT",
   "message": "현재 사건 상태에서는 요청한 상태로 변경할 수 없습니다.",
   "traceId": "trace_demo_case_status_conflict_01",
-  "fieldErrors": [
-    {
-      "field": "targetStatus",
-      "code": "CASE_TRANSITION_NOT_ALLOWED",
-      "reason": "사건 종료는 resolution API를 사용해야 합니다."
-    }
-  ]
+  "fieldErrors": []
 }
 ```
 
-거부된 전이 시도도 변경 주체, 현재 상태, 요청 상태, 사유, `caseId`와 `traceId`를 민감정보 없이 감사 기록 대상으로 남긴다.
+실패·거부·stale 요청은 이번 구현에서 별도 감사 기록을 만들지 않는다.
 
 ### 8.5 상태 코드
 
@@ -550,6 +553,7 @@ Content-Type: application/json
 | `404 Not Found` | 해당 사건이 없음 |
 | `409 Conflict` | 허용되지 않은 상태 전이, 종료 사건 변경 또는 동시성 충돌 |
 | `422 Unprocessable Entity` | 담당자 없는 `IN_REVIEW` 전이, 잘못된 `assigneeRef` 또는 상태 변경 사유 등 업무 입력 조건을 충족하지 못함 |
+| `503 Service Unavailable` | 저장소 timeout 또는 일시적 가용성 장애 |
 | `500 Internal Server Error` | 공개할 수 없는 예기치 않은 서버 오류 |
 
 ## 9. 사건 담당자 변경
@@ -561,31 +565,36 @@ PATCH /api/v1/cases/{caseId}/assignee
 Content-Type: application/json
 ```
 
-| 필드 | 타입 후보 | 필수 후보 | 설명 |
+| 필드 | 타입 | 필수 | 설명 |
 | --- | --- | --- | --- |
-| `assigneeRef` | string | 필수 | 새 담당자 참조값 |
-| `reason` | string | 필수 | 담당자 변경 사유 |
+| `assigneeRef` | string 또는 null | 필수 | 새 담당자. 명시적 null만 해제 명령 |
+| `reasonCode` | string | 필수 | `CASE_ASSIGNEE_ASSIGNED`, `CASE_ASSIGNEE_CHANGED`, `CASE_ASSIGNEE_RELEASED` 중 현재/새 값과 일치하는 값 |
 | `expectedVersion` | integer | 필수 | 클라이언트가 조회한 사건의 `concurrencyVersion` |
 
 요청 예:
 
 ```json
 {
-  "assigneeRef": "analyst_ref_demo_12",
-  "reason": "관련 거래 유형 담당자에게 재배정합니다.",
+  "assigneeRef": "20000000-0000-4000-9000-000000000012",
+  "reasonCode": "CASE_ASSIGNEE_CHANGED",
   "expectedVersion": 5
 }
 ```
 
 ### 9.2 처리 규칙
 
-- 별도 담당자 변경 API는 이미 `IN_REVIEW`인 사건의 담당자 재배정에 사용한다.
+- `OPEN`에서는 별도 담당자 변경을 금지하고 최초 배정은 검토 시작과 함께 한다.
+- `IN_REVIEW`에서는 변경만 허용하고 해제는 금지한다.
+- `ADDITIONAL_INFORMATION_REQUIRED`에서는 배정·변경·해제를 허용한다. 담당자가
+  null이면 다시 `IN_REVIEW`로 전이할 수 없다.
 - 담당자 변경 API는 담당자만 변경하며 사건 상태를 암묵적으로 변경하지 않는다.
 - `assigneeRef`는 실제 사용자 프로필이나 인증정보가 아닌 제한된 참조값을 사용한다.
-- `assigneeRef`가 없으면 `422 Unprocessable Entity`와 `ASSIGNEE_REQUIRED`를 반환한다.
+- `assigneeRef` 누락은 `400 VALIDATION_ERROR`이며 명시적 null과 구분한다.
 - `assigneeRef` 형식 또는 승인된 허용 목록 검증에 실패하면 `422 Unprocessable Entity`와 `INVALID_ASSIGNEE_REF`를 반환한다.
 - 사용자·담당자 디렉터리와 인증 시스템이 아직 없으므로 잘못된 `assigneeRef`를 담당자 리소스 없음으로 해석해 `404 Not Found`로 확정하지 않는다.
 - 현재 담당자, 새 담당자, 변경 사유와 변경 주체를 AuditLog에 기록한다.
+- 같은 담당자 재요청은 `409 CASE_ASSIGNEE_CONFLICT`이며 무변경·무감사다.
+- stale version이면서 같은 값이면 `409 CONCURRENT_MODIFICATION`을 우선한다.
 - 담당자 변경, `lastChangedAt` 변경, `concurrencyVersion` 증가와 AuditLog 기록은 하나의 업무 정합성 경계에서 처리한다.
 - 이미 `CLOSED`인 사건의 담당자 변경은 초기 범위에서 거부하고 `409 Conflict`와 `CASE_ALREADY_CLOSED`를 반환한다.
 
@@ -598,9 +607,12 @@ Content-Type: application/json
 
 ```json
 {
-  "caseId": "case_demo_20260724_0031",
+  "caseId": "10000000-0000-4000-9000-000000000003",
   "caseStatus": "IN_REVIEW",
-  "assigneeRef": "analyst_ref_demo_12",
+  "finalDisposition": null,
+  "assigneeRef": "20000000-0000-4000-9000-000000000012",
+  "reviewStartedAt": "2026-07-24T01:25:00Z",
+  "closedAt": null,
   "lastChangedAt": "2026-07-24T02:25:40Z",
   "concurrencyVersion": 6,
   "traceId": "trace_demo_case_assignee_01"
@@ -616,6 +628,7 @@ Content-Type: application/json
 | `404 Not Found` | 해당 사건이 없음 |
 | `409 Conflict` | 종료 사건 변경, 담당자 업무 조건 또는 동시성 충돌 |
 | `422 Unprocessable Entity` | 담당자가 없거나 `assigneeRef` 형식·허용 목록 또는 변경 사유 규칙을 충족하지 못함 |
+| `503 Service Unavailable` | 저장소 timeout 또는 일시적 가용성 장애 |
 | `500 Internal Server Error` | 공개할 수 없는 예기치 않은 서버 오류 |
 
 ## 10. 사건 종료와 최종 판정
@@ -990,12 +1003,12 @@ Content-Type: application/json
 ```text
 PATCH /api/v1/cases/{caseId}/status
 PATCH /api/v1/cases/{caseId}/assignee
-POST  /api/v1/cases/{caseId}/resolution
 ```
 
 `expectedVersion`은 클라이언트가 사건을 조회했을 때 받은 `concurrencyVersion`이다. 업무 내용 버전, 탐지 결과 버전, Rule 버전과 혼합하지 않는다.
 
-사건 종료 API의 완료된 동일 멱등 요청 재전송은 멱등성 결과를 먼저 확인한다. 최초 요청과 같은 `expectedVersion`이 현재 버전보다 오래되었더라도 기존 종료 결과를 반환하며, 새로운 키 또는 다른 요청에는 일반 동시성 검증을 적용한다.
+두 API는 body의 `expectedVersion`을 사용하며 `If-Match`는 도입하지 않는다. 사건 종료와
+`finalDisposition`, resolution API는 Issue #209 구현 범위가 아니다.
 
 ### 14.2 충돌 처리
 
@@ -1005,8 +1018,10 @@ POST  /api/v1/cases/{caseId}/resolution
 - 먼저 저장된 사건 상태, 담당자, 최종 판정과 감사 기록을 오래된 요청으로 덮어쓰지 않는다.
 - 서버는 오래된 요청을 자동으로 덮어쓰거나 무조건 재시도하지 않는다.
 - 클라이언트는 최신 사건을 다시 조회하고 사용자 입력을 보존한 뒤 재입력 또는 승인된 병합 절차를 수행해야 한다.
-- 충돌한 요청도 변경 주체, 요청 작업, 요청 버전, 현재 버전, `caseId`와 `traceId`를 민감정보 없이 감사 기록 대상으로 남긴다.
-- JPA `@Version`, 잠금 방식과 트랜잭션 격리 수준은 이 문서에서 확정하지 않는다.
+- 사건은 JPA `@Version`을 사용한다. 일반 `caseId` 조회와 version 비교 후 Entity 업무
+  메서드를 적용하고 명시적 flush에서 실제 version 증가를 확정한다.
+- row lock과 자동 retry를 추가하지 않는다. stale·충돌·거부·validation 실패 요청은
+  사건을 변경하거나 AuditLog를 생성하지 않는다.
 
 ### 14.3 충돌 오류 예시
 
@@ -1020,13 +1035,7 @@ Content-Type: application/json
   "code": "CONCURRENT_MODIFICATION",
   "message": "사건이 다른 요청에 의해 변경되었습니다. 최신 정보를 다시 조회해 주세요.",
   "traceId": "trace_demo_case_concurrency_01",
-  "fieldErrors": [
-    {
-      "field": "expectedVersion",
-      "code": "VERSION_MISMATCH",
-      "reason": "요청 버전이 현재 사건 버전과 일치하지 않습니다."
-    }
-  ]
+  "fieldErrors": []
 }
 ```
 
@@ -1034,18 +1043,14 @@ Content-Type: application/json
 
 ## 15. 감사 원칙
 
-다음 작업과 거부 결과는 반드시 감사 기록 대상이다.
+Issue #209에서 성공한 다음 명령은 AuditLog를 정확히 1건 생성한다.
 
 - 사건 상태 변경
-- 담당자 지정과 변경
-- 최종 판정 설정과 사건 종료
-- 일반 조사 메모 생성
-- 정정 메모 생성
-- 허용되지 않은 상태 전이와 같은 상태 요청
-- 동시성 충돌
-- 종료된 사건에 대한 거부된 상태·담당자·메모·판정 변경
-- 잘못된 정정 메모 요청
-- 담당자 없는 `IN_REVIEW` 전이 요청
+- 담당자 배정·변경·해제
+
+stale version, 같은 상태·담당자, 금지 전이, 종료 사건 변경과 validation 실패는 현재
+감사 로그를 생성하지 않는다. 사건 종료·최종 판정, 조사 메모와 거부 요청 별도 감사는
+후속 범위이다.
 
 감사 기록에는 다음 정보를 포함하는 방향을 사용한다.
 
@@ -1065,19 +1070,22 @@ actorType
 ```
 
 V7은 성공한 네 action만 저장하며 자유 텍스트 사유와 거부 감사는 허용하지 않는다.
-각 action의 summary·metadata exact schema는
+V11은 성공한 사건 상태·담당자 action과 승인 reasonCode 6개를 확장한다. 임시 actor는
+`SYSTEM / finguardops-backend`이며 실제 USER actor와 RBAC는 구현하지 않았다. 각
+action의 summary·metadata exact schema는
 [`audit-log-schema.md`](../04-database/audit-log-schema.md)를 따른다.
 
 ### 15.1 성공한 업무 변경의 트랜잭션 경계
 
-- 상태 변경, 담당자 변경과 사건 종료에서는 FraudCase 현재값 변경, `lastChangedAt`·`reviewStartedAt`·`closedAt` 중 해당 값의 변경, `concurrencyVersion` 증가와 AuditLog 기록을 같은 업무 트랜잭션으로 처리한다.
-- 조사 메모 생성에서는 CaseNote 생성, FraudCase의 `lastChangedAt` 변경, `concurrencyVersion` 증가와 AuditLog 기록을 같은 업무 트랜잭션으로 처리한다.
+- 상태·담당자 변경에서는 FraudCase 현재값, `lastChangedAt`과 해당하는
+  `reviewStartedAt`, `concurrencyVersion` 증가와 AuditLog 1건을 같은 REQUIRED
+  트랜잭션으로 처리한다.
 - 적용 대상 중 일부만 저장되는 결과를 허용하지 않는다. AuditLog 저장에 실패한 성공 변경을 정상 완료로 확정하지 않는다.
-- 완료된 동일 멱등 요청 재전송은 기존 결과를 반환하는 조회 성격의 처리이며 FraudCase, CaseNote, `concurrencyVersion`과 AuditLog를 다시 변경하거나 생성하지 않는다.
 
 ### 15.2 거부된 요청의 감사 경계
 
-다음 거부 요청은 FraudCase 현재값, CaseNote와 `concurrencyVersion`을 변경하지 않는다.
+다음 거부 요청은 FraudCase 현재값과 `concurrencyVersion`을 변경하지 않고 AuditLog도
+생성하지 않는다.
 
 - 허용되지 않은 상태 전이와 같은 상태 요청
 - 동시성 충돌
@@ -1085,9 +1093,9 @@ V7은 성공한 네 action만 저장하며 자유 텍스트 사유와 거부 감
 - 잘못된 정정 메모
 - 담당자 없는 `IN_REVIEW` 전이
 
-거부 감사 기록은 실패한 업무 변경 트랜잭션과 함께 rollback되어 사라지지 않아야 한다. 따라서 업무 변경을 반영하지 않으면서 거부 결과를 보존할 수 있는 별도의 커밋 가능한 감사 경계가 필요하다.
-
-구체적인 Spring Transaction 전파 방식, 예외 처리와 저장 구현은 이번 문서에서 확정하지 않는다. 감사 로그에는 실제 고객번호, 실제 계좌번호, 비밀번호, OTP, 인증 토큰, 원문 IP, 전체 프롬프트와 LLM 원문 입출력을 기록하지 않는다.
+거부 요청을 보존하는 별도 commit 감사 경계는 현재 구현하지 않으며 후속 승인 범위다.
+감사 로그에는 실제 고객번호, 실제 계좌번호, 비밀번호, OTP, 인증 토큰, 원문 IP,
+전체 프롬프트와 LLM 원문 입출력을 기록하지 않는다.
 
 ## 16. 오류 계약
 
@@ -1113,11 +1121,14 @@ V7은 성공한 네 action만 저장하며 자유 텍스트 사유와 거부 감
 | `RESOURCE_NOT_FOUND` | 요청한 사건 등 식별된 API 리소스를 찾을 수 없음 | `404 Not Found` |
 | `IDEMPOTENCY_KEY_CONFLICT` | 같은 멱등성 키가 다른 정규화 요청에 재사용됨 | `409 Conflict` |
 | `CASE_STATUS_CONFLICT` | 현재 사건 상태에서 요청한 상태 전이 또는 종료를 허용할 수 없음 | `409 Conflict` |
+| `CASE_ASSIGNEE_CONFLICT` | 현재 사건 상태 또는 담당자 값에서 요청한 담당자 변경을 허용할 수 없음 | `409 Conflict` |
 | `CASE_ALREADY_CLOSED` | 이미 종료된 사건에 허용되지 않은 변경을 요청함 | `409 Conflict` |
 | `FINAL_DISPOSITION_REQUIRED` | 사건 종료에 필요한 최종 판정이 없음 | `422 Unprocessable Entity` |
 | `ASSIGNEE_REQUIRED` | `IN_REVIEW`에 필요한 담당자가 없음 | `422 Unprocessable Entity` |
 | `INVALID_ASSIGNEE_REF` | `assigneeRef` 형식 또는 승인된 허용 목록 검증에 실패함 | `422 Unprocessable Entity` |
 | `CONCURRENT_MODIFICATION` | 요청 버전과 현재 사건 버전이 달라 변경할 수 없음 | `409 Conflict` |
+| `DEPENDENCY_TIMEOUT` | 저장소 요청이 제한 시간 안에 완료되지 않음 | `503 Service Unavailable` |
+| `DEPENDENCY_UNAVAILABLE` | 저장소를 일시적으로 사용할 수 없음 | `503 Service Unavailable` |
 | `NOTE_NOT_ALLOWED` | 현재 사건 상태에서 새 메모를 추가할 수 없음 | `409 Conflict` |
 | `INVALID_CORRECTION_NOTE` | 정정 대상 메모가 없거나 같은 사건에 속하지 않음 | `422 Unprocessable Entity` |
 | `VALIDATION_ERROR` | JSON, 필드, Enum, 식별자, 시각, 페이지 또는 도메인 입력 검증 실패 | 형식 오류는 `400 Bad Request`, 의미상 오류는 `422 Unprocessable Entity` |
