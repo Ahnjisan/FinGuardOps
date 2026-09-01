@@ -8,6 +8,11 @@ import com.aifds.backend.behavior.exception.DuplicateBehaviorEventException;
 import com.aifds.backend.behavior.validation.BehaviorEventValidationException;
 import com.aifds.backend.behavior.validation.BehaviorEventValidationType;
 import com.aifds.backend.common.trace.TraceIdFilter;
+import com.aifds.backend.fraudcase.exception.FraudCaseNotFoundException;
+import com.aifds.backend.fraudcase.exception.FraudCaseQueryTimeoutException;
+import com.aifds.backend.fraudcase.exception.FraudCaseQueryUnavailableException;
+import com.aifds.backend.fraudcase.validation.FraudCaseValidationException;
+import com.aifds.backend.fraudcase.validation.FraudCaseValidationType;
 import com.aifds.backend.observability.TransactionIntakeMetricsFilter;
 import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.idempotency.exception.IdempotencyCompletionTransactionNotFoundException;
@@ -88,6 +93,8 @@ public class GlobalExceptionHandler {
             "행동 이벤트 저장소를 일시적으로 사용할 수 없습니다.";
     static final String RESOURCE_NOT_FOUND_MESSAGE =
             "요청한 거래를 찾을 수 없습니다.";
+    static final String CASE_RESOURCE_NOT_FOUND_MESSAGE =
+            "요청한 사건을 찾을 수 없습니다.";
     static final String NO_RESOURCE_FOUND_MESSAGE =
             "요청한 리소스를 찾을 수 없습니다.";
     static final String INTERNAL_ERROR_MESSAGE =
@@ -176,6 +183,22 @@ public class GlobalExceptionHandler {
             HttpServletRequest request
     ) {
         HttpStatus status = exception.getType() == TransactionValidationType.DOMAIN
+                ? HttpStatus.UNPROCESSABLE_ENTITY
+                : HttpStatus.BAD_REQUEST;
+        return validationResponse(
+                status,
+                List.of(toFieldError(exception)),
+                request
+        );
+    }
+
+    @ExceptionHandler(FraudCaseValidationException.class)
+    ResponseEntity<ApiErrorResponse> handleFraudCaseValidation(
+            FraudCaseValidationException exception,
+            HttpServletRequest request
+    ) {
+        HttpStatus status = exception.getType()
+                == FraudCaseValidationType.DOMAIN
                 ? HttpStatus.UNPROCESSABLE_ENTITY
                 : HttpStatus.BAD_REQUEST;
         return validationResponse(
@@ -298,6 +321,20 @@ public class GlobalExceptionHandler {
         );
     }
 
+    @ExceptionHandler(FraudCaseNotFoundException.class)
+    ResponseEntity<ApiErrorResponse> handleFraudCaseNotFound(
+            FraudCaseNotFoundException exception,
+            HttpServletRequest request
+    ) {
+        return response(
+                HttpStatus.NOT_FOUND,
+                RESOURCE_NOT_FOUND,
+                CASE_RESOURCE_NOT_FOUND_MESSAGE,
+                List.of(),
+                request
+        );
+    }
+
     @ExceptionHandler(BehaviorEventTransactionNotFoundException.class)
     ResponseEntity<ApiErrorResponse> handleBehaviorEventTransactionNotFound(
             BehaviorEventTransactionNotFoundException exception,
@@ -397,6 +434,34 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(TransactionQueryUnavailableException.class)
     ResponseEntity<ApiErrorResponse> handleTransactionQueryUnavailable(
             TransactionQueryUnavailableException exception,
+            HttpServletRequest request
+    ) {
+        return response(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                DEPENDENCY_UNAVAILABLE,
+                DEPENDENCY_UNAVAILABLE_MESSAGE,
+                List.of(),
+                request
+        );
+    }
+
+    @ExceptionHandler(FraudCaseQueryTimeoutException.class)
+    ResponseEntity<ApiErrorResponse> handleFraudCaseQueryTimeout(
+            FraudCaseQueryTimeoutException exception,
+            HttpServletRequest request
+    ) {
+        return response(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                DEPENDENCY_TIMEOUT,
+                QUERY_DEPENDENCY_TIMEOUT_MESSAGE,
+                List.of(),
+                request
+        );
+    }
+
+    @ExceptionHandler(FraudCaseQueryUnavailableException.class)
+    ResponseEntity<ApiErrorResponse> handleFraudCaseQueryUnavailable(
+            FraudCaseQueryUnavailableException exception,
             HttpServletRequest request
     ) {
         return response(
@@ -546,6 +611,16 @@ public class GlobalExceptionHandler {
 
     private FieldErrorResponse toFieldError(
             BehaviorEventValidationException exception
+    ) {
+        return new FieldErrorResponse(
+                exception.getField(),
+                exception.getCode(),
+                exception.getReason()
+        );
+    }
+
+    private FieldErrorResponse toFieldError(
+            FraudCaseValidationException exception
     ) {
         return new FieldErrorResponse(
                 exception.getField(),

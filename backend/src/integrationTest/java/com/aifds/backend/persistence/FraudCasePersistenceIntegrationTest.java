@@ -50,12 +50,12 @@ class FraudCasePersistenceIntegrationTest
     private Flyway flyway;
 
     @Test
-    void appliesFreshV1ThroughV9SchemaWithApprovedConstraintsAndIndexes() {
-        assertThat(flyway.info().applied()).hasSize(9);
+    void appliesFreshV1ThroughV10SchemaWithApprovedConstraintsAndIndexes() {
+        assertThat(flyway.info().applied()).hasSize(10);
         assertThat(flyway.info().current().getVersion().getVersion())
-                .isEqualTo("9");
+                .isEqualTo("10");
         assertThat(flyway.info().current().getDescription())
-                .isEqualTo("create idempotency recovery audit log");
+                .isEqualTo("create fraud case query index");
         assertThat(columns("fraud_case")).containsExactlyInAnyOrder(
                 "id",
                 "case_id",
@@ -92,7 +92,22 @@ class FraudCasePersistenceIntegrationTest
         );
         assertThat(indexes("fraud_case")).contains(
                 "uq_fraud_case_case_id",
-                "ix_fraud_case_status_last_changed"
+                "ix_fraud_case_status_last_changed",
+                "ix_fraud_case_last_changed"
+        );
+        assertThat(jdbcTemplate.queryForObject(
+                """
+                        SELECT indexdef
+                        FROM pg_indexes
+                        WHERE schemaname = 'public'
+                          AND tablename = 'fraud_case'
+                          AND indexname = 'ix_fraud_case_last_changed'
+                        """,
+                String.class
+        )).isEqualTo(
+                "CREATE INDEX ix_fraud_case_last_changed "
+                        + "ON public.fraud_case USING btree "
+                        + "(last_changed_at, id)"
         );
         assertThat(indexes("case_transaction")).contains(
                 "uq_case_transaction_case_transaction",

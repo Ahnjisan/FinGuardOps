@@ -402,7 +402,7 @@ class IdempotencyRecoveryCommandIntegrationTest
     }
 
     @Test
-    void concurrentCommandsHaveOneWinnerAndMigrationsRemainV1ThroughV9()
+    void concurrentCommandsHaveOneWinnerAndMigrationsRemainV1ThroughV10()
             throws Exception {
         RecoveryFixture fixture = finalizedFixture(
                 RiskLevel.LOW,
@@ -435,7 +435,9 @@ class IdempotencyRecoveryCommandIntegrationTest
                         + "WHERE success = TRUE AND type = 'SQL' "
                         + "ORDER BY installed_rank",
                 String.class
-        )).containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9");
+        )).containsExactly(
+                "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"
+        );
     }
 
     private ConfigurableApplicationContext startLimitedContext() {

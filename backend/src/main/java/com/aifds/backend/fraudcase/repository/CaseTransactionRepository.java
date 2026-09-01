@@ -15,6 +15,24 @@ import java.util.UUID;
 public interface CaseTransactionRepository
         extends JpaRepository<CaseTransaction, Long> {
 
+    interface FraudCaseTransactionCount {
+
+        Long getFraudCasePk();
+
+        long getTransactionCount();
+    }
+
+    @Query("""
+            SELECT caseTransaction.fraudCase.id AS fraudCasePk,
+                   COUNT(caseTransaction.id) AS transactionCount
+            FROM CaseTransaction caseTransaction
+            WHERE caseTransaction.fraudCase.id IN :fraudCasePks
+            GROUP BY caseTransaction.fraudCase.id
+            """)
+    List<FraudCaseTransactionCount> countByFraudCasePks(
+            @Param("fraudCasePks") Collection<Long> fraudCasePks
+    );
+
     @Query("""
             SELECT fraudCase.caseId
             FROM CaseTransaction caseTransaction
