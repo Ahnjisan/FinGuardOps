@@ -8,6 +8,8 @@ Issue #196의 로컬 Compose scrape, Issue #199의 service 수준 recording rule
 Issue #201의 로컬 실패율 alert rule 6개, Issue #203의 로컬 Alertmanager 연결·routing·
 inhibition·webhook 전달 검증은 구현되었지만 production scrape·Alertmanager·receiver·
 credential·외부 알림이 구성되었다는 의미가 아니다.
+Issue #205의 Grafana UI와 datasource·dashboard provisioning은 별도 로컬 운영 도구이며
+Spring Boot management endpoint 또는 금융거래 API가 아니다.
 
 ## 2. profile별 상태
 
@@ -97,6 +99,12 @@ host port를 publish하지 않는다. Alertmanager API·UI와 receiver event 확
 또는 `docker compose exec`를 사용한다. local webhook은 production receiver가 아니며
 network 격리는 인증·TLS를 대신하지 않는다.
 
+Grafana는 같은 observability network에서 `http://prometheus:9090`을 datasource로 사용하고
+별도 `grafana-ui` bridge를 통해 UI만 host `127.0.0.1:3000`에 publish한다. Backend는
+grafana-ui에 연결되지 않으며 Grafana UI가 `/actuator/health` 또는 `/actuator/prometheus`의
+일부인 것처럼 문서화하거나 노출하지 않는다. Grafana admin 인증과 anonymous access 차단은
+Spring Boot management endpoint의 미구현 인증 경계를 보완하거나 대체하지 않는다.
+
 PostgreSQL과 AI Service는 application network DNS를 사용한다. External Risk fixture는
 Backend의 network namespace를 공유하여 `127.0.0.1:8001`에만 bind하고 Backend도 이
 loopback 주소로 호출한다. fixture port는 host에 publish하지 않는다. 이 구조는 기존
@@ -113,7 +121,7 @@ Docker의 network 분리와 host loopback은 접근면을 제한하지만 인증
 - production Prometheus 서버와 scrape target 설정
 - production recording rule·alert rule·Alertmanager·receiver·credential과 외부 알림
 - Alertmanager HA와 장기 retention
-- Grafana dashboard
+- production Grafana, TLS·SSO·RBAC·HA·장기 retention과 추가 dashboard
 - Spring Security·인증·credential
 - production Docker·Kubernetes·AWS 배포 설정
 - OpenTelemetry

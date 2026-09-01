@@ -2,28 +2,51 @@
 
 ## 1. 목적과 경계
 
-이 runbook은 Issue #196의 로컬 Docker Compose 검증 절차이다. PostgreSQL, AI
-Service, External Risk fixture, Backend와 Prometheus를 함께 실행하고 Backend의
+이 runbook은 Issue #196부터 Issue #205까지의 로컬 Docker Compose 관측 검증 절차이다.
+PostgreSQL, AI Service, External Risk fixture, Backend, Prometheus, Alertmanager와 Grafana를
+함께 실행하고 Backend의
 `/actuator/prometheus`를 실제 scrape하고 기존 업무 Meter 기반 recording rule 14개와
-로컬 실패율 alert rule 6개를 평가하며 local Alertmanager routing·receiver 전달을 검증한다.
-production Prometheus·Alertmanager·receiver 배포, 외부 알림·credential, 인증·TLS, Grafana,
+로컬 실패율 alert rule 6개를 평가하며 local Alertmanager routing·receiver 전달과 Grafana
+datasource·16-panel dashboard provisioning·query를 검증한다. production Prometheus·
+Alertmanager·Grafana·receiver 배포, 외부 알림·credential 배포, 인증·TLS·SSO·RBAC,
 SLA·SLO·운영 임계값, HA와 장기 보존을 제공하지 않는다. completion gap·장기
 `IN_PROGRESS` Gauge, `deployment.error_ratio`와 `deployment.latency`도 구현하지 않는다.
 loopback bind와 Docker network 분리도 인증을 대신하지 않는다.
 
 ## 2. 사전 조건과 설정 검증
 
-Docker Desktop, Compose v2와 Git Bash를 준비하고 저장소 루트의 같은 shell session에서
-실행한다. 실제 `.env`를 만들거나 commit하지 않고 현재 shell process에만 로컬 DB
-password를 둔다.
+Docker Desktop, Compose v2, Python 3와 Git Bash를 준비하고 저장소 루트의 같은 shell
+session에서 실행한다. `infra/.env.example`을 ignored `infra/.env`로 복사한 뒤 DB password와
+`GRAFANA_ADMIN_USER`, `GRAFANA_ADMIN_PASSWORD`를 로컬 전용 값으로 교체한다. 실제 credential은
+이 ignored 파일에만 두고 shell history, 명령 인자, 로그, 응답 또는 임시 파일에 기록하지 않는다.
+재사용 가능한 기본 password를 사용하지 않는다.
 
 ```bash
-export POSTGRES_PASSWORD="replace-with-a-local-only-password"
-compose=(docker compose -f infra/compose.yml)
+if [[ ! -f infra/.env ]]; then
+  cp infra/.env.example infra/.env
+  printf '%s\n' 'Edit ignored infra/.env, then rerun this section.' >&2
+  exit 1
+fi
+[[ -z "$(git ls-files -- infra/.env)" ]]
+git check-ignore --quiet infra/.env
+set +x
+set -a
+source infra/.env
+set +a
+: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+: "${GRAFANA_ADMIN_USER:?GRAFANA_ADMIN_USER is required}"
+: "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required}"
+compose=(docker compose --env-file infra/.env -f infra/compose.yml)
 repo_root="$(pwd -W)"
 prometheus_image="prom/prometheus:v3.14.0@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0"
+grafana_image="grafana/grafana:13.2.0@sha256:3fd54ae1214669f8355f065ec9f6445d5279a3d77095ab048ca045685272429b"
 
+docker buildx imagetools inspect "$grafana_image"
+docker pull "$grafana_image"
+[[ "$(docker image inspect "$grafana_image" --format '{{.Os}}/{{.Architecture}}')" == "linux/amd64" ]]
 "${compose[@]}" config --quiet
+python infra/grafana/tests/verify_dashboard.py static
+python infra/grafana/tests/verify_dashboard.py mutations
 docker run --rm --entrypoint /bin/promtool \
   --mount "type=bind,source=${repo_root}/infra/prometheus/prometheus.yml,target=/etc/prometheus/prometheus.yml,readonly" \
   --mount "type=bind,source=${repo_root}/infra/prometheus/rules,target=/etc/prometheus/rules,readonly" \
@@ -40,11 +63,13 @@ docker run --rm --entrypoint /bin/promtool \
   --workdir /workspace/tests \
   "$prometheus_image" \
   test rules finguardops-recording-rules.test.yml
-docker run --rm --entrypoint /bin/promtool \
-  --mount "type=bind,source=${repo_root}/infra/prometheus,target=/workspace,readonly" \
-  --workdir /workspace/tests \
-  "$prometheus_image" \
-  test rules finguardops-alert-rules.test.yml
+for run in 1 2 3; do
+  docker run --rm --entrypoint /bin/promtool \
+    --mount "type=bind,source=${repo_root}/infra/prometheus,target=/workspace,readonly" \
+    --workdir /workspace/tests \
+    "$prometheus_image" \
+    test rules finguardops-alert-rules.test.yml
+done
 ```
 
 config와 rule은 runtime container에 read-only로 mount한다. test fixture는 standalone
@@ -69,38 +94,279 @@ network namespace를 공유하고 `127.0.0.1:8001`에만 bind한다. Backend는 
 양쪽 health를 확인한다. fixture가 `healthy`인지 확인한 뒤 Prometheus를 시작한다.
 
 ```bash
-"${compose[@]}" up -d prometheus
+"${compose[@]}" up -d prometheus grafana
 "${compose[@]}" ps
 ```
 
 모든 service가 `healthy`인지 확인한다. host에는 Prometheus UI
-`http://127.0.0.1:9090`만 노출된다. Backend application `8080`, management `8081`,
+`http://127.0.0.1:9090`과 Grafana UI `http://127.0.0.1:3000`만 노출된다. Backend application `8080`, management `8081`,
 PostgreSQL `5432`, AI Service `8000`, External Risk `8001`은 host에 publish되지 않는다.
 업무 traffic도 host에서 Backend로 직접 보내지 않고 같은 network namespace의 fixture에서
 `127.0.0.1:8080`으로 보낸다. loopback sidecar는 기존 non-production plain HTTP 제한을
 보존하는 로컬 fixture이며 production External Risk Provider 정책이나 인증·TLS를 대체하지
 않는다.
 
+Grafana는 internal observability와 전용 `grafana-ui` bridge에만 연결한다. `grafana-ui`에는
+Grafana만 연결하며 Backend는 `prometheus-ui`와 `grafana-ui` 어느 쪽에도 연결하지 않는다.
+Grafana에는 Backend·Prometheus·Alertmanager dependency를 두지 않으므로 Grafana 장애는
+업무 처리, scrape·rule evaluation 또는 alert routing으로 전파되지 않는다.
+
 ## 4. 로컬 Rule 집합 발행
 
-V5 seed는 DRAFT이므로 실제 거래 전에 기존 local 전용 one-shot 경계로 발행하고
-`effectiveFrom` 이후까지 기다린다. production profile에서는 실행하지 않는다.
+V5 seed는 DRAFT이므로 실제 거래 전에 기존 local 전용 one-shot 경계로 발행한다.
+이 절차는 8개 service가 모두 healthy가 된 뒤, one-shot 발행 명령을 실행하기 직전에 매번
+새 `effectiveFrom`을 계산한다. production profile에서는 실행하지 않는다. 발행 명령의
+deadline은 180초, startup 변동을 흡수하는 safety margin은 60초, `effectiveFrom` lead는
+300초이며 `300 >= 180 + 60`을 명령에서도 검증한다. 발행 후 activation은 최대 420초 동안
+polling하며 고정 sleep으로 추정하지 않는다.
 
 ```bash
-effective_from_epoch="$(( $(date -u +%s) + 60 ))"
-effective_from="$(date -u -d "@${effective_from_epoch}" '+%Y-%m-%dT%H:%M:%SZ')"
-"${compose[@]}" run --rm --no-deps \
+"${compose[@]}" up -d --wait --wait-timeout 180
+expected_publication_services="$(
+  printf '%s\n' \
+    postgresql ai-service external-risk-mock backend prometheus \
+    alertmanager alertmanager-webhook grafana | sort
+)"
+actual_publication_services="$(
+  "${compose[@]}" ps --services --status running | sort
+)"
+if [[ "$actual_publication_services" != "$expected_publication_services" ]]; then
+  printf '%s\n' 'All eight services must be running before Rule publication' >&2
+  exit 1
+fi
+for publication_service in \
+  postgresql ai-service external-risk-mock backend prometheus \
+  alertmanager alertmanager-webhook grafana; do
+  publication_service_id="$("${compose[@]}" ps -q "$publication_service")"
+  publication_service_health="$(
+    docker inspect "$publication_service_id" \
+      --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}'
+  )"
+  if [[ "$publication_service_health" != "healthy" ]]; then
+    printf 'Service is not healthy before Rule publication: %s=%s\n' \
+      "$publication_service" "$publication_service_health" >&2
+    exit 1
+  fi
+done
+
+# Publication cleanup traps are scoped to this subshell so an enclosing fresh-project
+# cleanup trap remains installed for all later E2E steps.
+(
+publication_command_deadline_seconds=180
+publication_safety_margin_seconds=60
+effective_from_lead_seconds=300
+activation_polling_deadline_seconds=420
+if (( effective_from_lead_seconds <
+  publication_command_deadline_seconds + publication_safety_margin_seconds )); then
+  printf '%s\n' 'Rule publication lead does not cover deadline plus safety margin' >&2
+  exit 1
+fi
+
+publication_temp_dir="$(
+  mktemp -d "${TMPDIR:-/tmp}/finguardops-rule-publication.XXXXXX"
+)"
+publication_log="${publication_temp_dir}/publication.log"
+publication_timestamp_file="${publication_temp_dir}/effective-from"
+publication_container="finguardops-rule-publication-${RANDOM}-$$"
+
+cleanup_rule_publication() {
+  local exit_status="$?"
+  trap - EXIT INT TERM
+  set +e
+  docker rm -f "$publication_container" >/dev/null 2>&1 || true
+  rm -rf -- "$publication_temp_dir"
+  exit "$exit_status"
+}
+trap cleanup_rule_publication EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+publication_started_epoch="$(date -u +%s)"
+publication_started_at="$(
+  date -u -d "@${publication_started_epoch}" '+%Y-%m-%dT%H:%M:%SZ'
+)"
+effective_from_epoch="$((
+  publication_started_epoch + effective_from_lead_seconds
+))"
+effective_from="$(
+  date -u -d "@${effective_from_epoch}" '+%Y-%m-%dT%H:%M:%SZ'
+)"
+printf '%s\n' "$effective_from" >"$publication_timestamp_file"
+python - "$effective_from" "$effective_from_epoch" <<'PY'
+import sys
+from datetime import datetime, timezone
+
+value = sys.argv[1]
+expected_epoch = int(sys.argv[2])
+parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+    tzinfo=timezone.utc
+)
+if parsed.strftime("%Y-%m-%dT%H:%M:%SZ") != value:
+    raise RuntimeError(f"effectiveFrom is not canonical UTC RFC3339: {value}")
+if int(parsed.timestamp()) != expected_epoch:
+    raise RuntimeError("effectiveFrom text and epoch do not match")
+if expected_epoch <= int(datetime.now(timezone.utc).timestamp()):
+    raise RuntimeError("effectiveFrom must be in the future")
+PY
+printf 'publication startedAt=%s effectiveFrom=%s deadline=%ss lead=%ss\n' \
+  "$publication_started_at" "$effective_from" \
+  "$publication_command_deadline_seconds" "$effective_from_lead_seconds"
+
+publication_status=0
+timeout --foreground --kill-after=10s \
+  "${publication_command_deadline_seconds}s" \
+  "${compose[@]}" run --rm --no-deps -T --name "$publication_container" \
   -e SPRING_PROFILES_ACTIVE=local,rule-v1-default-publication \
   -e FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED=false \
   backend \
   --spring.main.web-application-type=none \
   --finguardops.rule-v1-default-publication.enabled=true \
   --finguardops.rule-v1-default-publication.confirmation=PUBLISH_RULE_V1_DEFAULT_V1 \
-  "--finguardops.rule-v1-default-publication.effective-from=${effective_from}"
-wait_seconds="$(( effective_from_epoch - $(date -u +%s) + 1 ))"
-if (( wait_seconds > 0 )); then
-  sleep "$wait_seconds"
+  "--finguardops.rule-v1-default-publication.effective-from=${effective_from}" \
+  </dev/null >"$publication_log" 2>&1 || publication_status="$?"
+cat "$publication_log"
+if (( publication_status == 124 || publication_status == 137 )); then
+  printf 'Rule publication exceeded %s seconds\n' \
+    "$publication_command_deadline_seconds" >&2
+  exit 124
 fi
+if (( publication_status != 0 )); then
+  printf 'Rule publication failed with exit code %s\n' \
+    "$publication_status" >&2
+  exit "$publication_status"
+fi
+grep -Fq 'outcome=PUBLISHED' "$publication_log"
+grep -Fq "effectiveFrom=${effective_from}" "$publication_log"
+publication_completed_epoch="$(date -u +%s)"
+if (( publication_completed_epoch >= effective_from_epoch )); then
+  printf '%s\n' 'effectiveFrom was not future after publication completed' >&2
+  exit 1
+fi
+
+stored_query_status=0
+stored_publication="$(
+  timeout --foreground --signal=KILL \
+    "${publication_command_deadline_seconds}s" \
+    "${compose[@]}" exec -T postgresql \
+    psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+    --set ON_ERROR_STOP=1 --tuples-only --no-align --field-separator='|' \
+    --command "
+      SELECT
+        count(*),
+        count(*) FILTER (
+          WHERE status = 'PUBLISHED' AND published_at IS NOT NULL
+        ),
+        count(DISTINCT effective_from),
+        min(extract(epoch FROM effective_from)::bigint),
+        max(extract(epoch FROM effective_from)::bigint)
+      FROM rule_version
+      WHERE rule_version_id IN (
+        '20000000-0000-4000-8000-000000000001',
+        '20000000-0000-4000-8000-000000000002',
+        '20000000-0000-4000-8000-000000000003',
+        '20000000-0000-4000-8000-000000000004'
+      );
+    " </dev/null
+)" || stored_query_status="$?"
+if (( stored_query_status != 0 )); then
+  printf 'Stored RuleVersion verification failed with exit code %s\n' \
+    "$stored_query_status" >&2
+  exit "$stored_query_status"
+fi
+stored_publication="${stored_publication//$'\r'/}"
+if [[ "$stored_publication" != \
+  "4|4|1|${effective_from_epoch}|${effective_from_epoch}" ]]; then
+  printf 'Stored RuleVersion publication does not match requested effectiveFrom: %s\n' \
+    "$stored_publication" >&2
+  exit 1
+fi
+printf 'RuleVersion publication stored exact effectiveFrom=%s\n' \
+  "$effective_from"
+
+activation_started_epoch="$(date -u +%s)"
+activation_deadline_epoch="$((
+  activation_started_epoch + activation_polling_deadline_seconds
+))"
+activation_last_report_epoch=0
+printf 'RuleVersion activation polling started deadline=%ss\n' \
+  "$activation_polling_deadline_seconds"
+while (( $(date -u +%s) < activation_deadline_epoch )); do
+  now_epoch="$(date -u +%s)"
+  activation_remaining_seconds="$((activation_deadline_epoch - now_epoch))"
+  if (( activation_remaining_seconds <= 0 )); then
+    break
+  fi
+  executable_count=0
+  if (( now_epoch >= effective_from_epoch )); then
+    activation_query_status=0
+    executable_count="$(
+      timeout --foreground --signal=KILL \
+        "${activation_remaining_seconds}s" \
+        "${compose[@]}" exec -T postgresql \
+        psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
+        --set ON_ERROR_STOP=1 --tuples-only --no-align \
+        --command "
+          SELECT count(*)
+          FROM rule_version version
+          JOIN fraud_rule rule ON rule.id = version.fraud_rule_id
+          WHERE version.rule_version_id IN (
+            '20000000-0000-4000-8000-000000000001',
+            '20000000-0000-4000-8000-000000000002',
+            '20000000-0000-4000-8000-000000000003',
+            '20000000-0000-4000-8000-000000000004'
+          )
+            AND rule.lifecycle_status = 'ACTIVE'
+            AND version.status = 'PUBLISHED'
+            AND version.effective_from <= CURRENT_TIMESTAMP
+            AND (
+              version.effective_to IS NULL
+              OR CURRENT_TIMESTAMP < version.effective_to
+            );
+        " </dev/null
+    )" || activation_query_status="$?"
+    if (( activation_query_status != 0 )); then
+      printf 'RuleVersion activation query failed with exit code %s\n' \
+        "$activation_query_status" >&2
+      exit "$activation_query_status"
+    fi
+    executable_count="${executable_count//[[:space:]]/}"
+  fi
+  if [[ "$executable_count" == "4" ]]; then
+    if (( now_epoch < effective_from_epoch )); then
+      printf '%s\n' 'RuleVersion was reported executable before effectiveFrom' >&2
+      exit 1
+    fi
+    printf 'RuleVersion activation ready effectiveFrom=%s executable=%s\n' \
+      "$effective_from" "$executable_count"
+    break
+  fi
+  if (( now_epoch - activation_last_report_epoch >= 30 )); then
+    printf 'RuleVersion activation pending now=%s effectiveFrom=%s executable=%s\n' \
+      "$(date -u -d "@${now_epoch}" '+%Y-%m-%dT%H:%M:%SZ')" \
+      "$effective_from" "$executable_count"
+    activation_last_report_epoch="$now_epoch"
+  fi
+  now_epoch="$(date -u +%s)"
+  activation_remaining_seconds="$((activation_deadline_epoch - now_epoch))"
+  if (( activation_remaining_seconds <= 0 )); then
+    break
+  fi
+  if (( activation_remaining_seconds < 2 )); then
+    sleep "$activation_remaining_seconds"
+  else
+    sleep 2
+  fi
+done
+if [[ "$executable_count" != "4" ]]; then
+  printf 'RuleVersion activation was not ready within %s seconds\n' \
+    "$activation_polling_deadline_seconds" >&2
+  exit 1
+fi
+
+trap - EXIT INT TERM
+docker rm -f "$publication_container" >/dev/null 2>&1 || true
+rm -rf -- "$publication_temp_dir"
+)
 ```
 
 ## 5. 1차 traffic으로 Meter 등록
@@ -506,7 +772,7 @@ alert label은 `service`, `severity`, 자동 `alertname`뿐이다. annotation은
 
 ```bash
 alert_project="finguardops-alert-e2e-$RANDOM"
-compose=(docker compose -p "$alert_project" -f infra/compose.yml)
+compose=(docker compose --env-file infra/.env -p "$alert_project" -f infra/compose.yml)
 "${compose[@]}" config --quiet
 ```
 
@@ -1008,98 +1274,175 @@ PY
 }
 ```
 
-정상 traffic 뒤 `assert_alert_rules_healthy`를 실행하고
-`/api/v1/alerts` 결과가 비어 있는지 확인한다. 장애 복구 뒤에는 같은 함수가 alert 6개의
-inactive 상태와 실제 ratio·guard·마지막 evaluation을 bounded polling한다.
+정상 traffic 뒤 `assert_alert_rules_healthy`를 실행하고 `/api/v1/alerts` 결과가 비어 있는지
+확인한다. 장애 복구 뒤에는 아래 함수가 단일 600초 deadline 안에서 실제 recording ratio·guard의
+복구 조건을 먼저 확인하고, 그 시점보다 새로운 alert group evaluation을 기다린다. 그 뒤
+Prometheus `ALERTS` active series 부재와 alert rule 6개의 inactive를 30초 이상 간격으로 두 번
+연속 확인한다. API 오류·요청 timeout·active alert 잔존은 즉시 또는 deadline에서 non-zero이며,
+deadline 뒤 별도 조회로 timeout을 성공 처리하지 않는다.
 
 ```bash
 wait_for_alerts_inactive() {
   local scenario="$1"
-  local timeout_seconds="$2"
   docker run --rm -i \
     --network "${alert_project}_prometheus-ui" \
     --entrypoint python \
     finguardops-ai-service:local \
-    - "$scenario" "$timeout_seconds" <<'PY'
+    - "$scenario" <<'PY'
 import json
 import math
 import sys
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime
 
-scenario, timeout_seconds = sys.argv[1], int(sys.argv[2])
+scenario = sys.argv[1]
 base_url = "http://prometheus:9090/api/v1"
-expressions = {
+recovery_contract = {
     "external-risk": {
-        "external_ratio": 'finguardops:external_risk_failure:ratio5m{service="spring-backend"}',
-        "external_guard": 'sum by (service) (finguardops:external_risk_by_result:rate5m{service="spring-backend"})',
-        "terminal_ratio": 'finguardops:transaction_terminal_failure:ratio5m{service="spring-backend"}',
-        "terminal_guard": 'finguardops:transaction_terminal:rate5m{service="spring-backend"}',
+        "external_ratio": (
+            'finguardops:external_risk_failure:ratio5m{service="spring-backend"}',
+            "<=",
+            0.10,
+        ),
+        "external_guard": (
+            'sum by (service) (finguardops:external_risk_by_result:rate5m{service="spring-backend"})',
+            ">=",
+            0.10,
+        ),
     },
     "rule-analysis": {
-        "rule_ratio": 'finguardops:rule_analysis_failure:ratio5m{service="spring-backend"}',
-        "rule_guard": 'sum by (service) (finguardops:rule_analysis_by_result:rate5m{service="spring-backend"})',
-        "terminal_ratio": 'finguardops:transaction_terminal_failure:ratio5m{service="spring-backend"}',
-        "terminal_guard": 'finguardops:transaction_terminal:rate5m{service="spring-backend"}',
+        "rule_ratio": (
+            'finguardops:rule_analysis_failure:ratio5m{service="spring-backend"}',
+            "<=",
+            0.10,
+        ),
+        "rule_guard": (
+            'sum by (service) (finguardops:rule_analysis_by_result:rate5m{service="spring-backend"})',
+            ">=",
+            0.10,
+        ),
+        "terminal_ratio": (
+            'finguardops:transaction_terminal_failure:ratio5m{service="spring-backend"}',
+            "<=",
+            0.10,
+        ),
+        "terminal_guard": (
+            'finguardops:transaction_terminal:rate5m{service="spring-backend"}',
+            ">=",
+            0.10,
+        ),
     },
 }[scenario]
+alert_query = (
+    'ALERTS{alertname=~"FinGuardOpsTransactionTerminalFailureRatioWarning|'
+    'FinGuardOpsTransactionTerminalFailureRatioCritical|'
+    'FinGuardOpsExternalRiskFailureRatioWarning|'
+    'FinGuardOpsExternalRiskFailureRatioCritical|'
+    'FinGuardOpsRuleAnalysisFailureRatioWarning|'
+    'FinGuardOpsRuleAnalysisFailureRatioCritical",'
+    'alertstate=~"pending|firing",service="spring-backend"}'
+)
+deadline = time.monotonic() + 600
 
 
 def get_json(path, params=None):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("600 second recovery deadline exceeded")
     query = "" if params is None else "?" + urllib.parse.urlencode(params)
-    with urllib.request.urlopen(base_url + path + query, timeout=5) as response:
+    with urllib.request.urlopen(
+        base_url + path + query,
+        timeout=min(5, remaining),
+    ) as response:
         payload = json.load(response)
     if payload.get("status") != "success":
         raise RuntimeError(f"Prometheus API failed: {path}: {payload}")
     return payload
 
 
-deadline = time.monotonic() + timeout_seconds
-while time.monotonic() < deadline:
-    alerts = get_json("/alerts")["data"]["alerts"]
+def alert_group():
     groups = get_json("/rules", {"type": "alert"})["data"]["groups"]
-    group = next(item for item in groups if item["name"] == "finguardops-service-alerts")
+    matches = [item for item in groups if item["name"] == "finguardops-service-alerts"]
+    if len(matches) != 1:
+        raise RuntimeError(f"expected one alert group: {matches}")
+    return matches[0]
+
+
+def evaluation_timestamp(group):
+    return datetime.fromisoformat(group["lastEvaluation"].replace("Z", "+00:00")).timestamp()
+
+
+readiness_evaluation = None
+last_values = {}
+while time.monotonic() < deadline:
+    values = {}
+    for name, (expression, comparison, threshold) in recovery_contract.items():
+        result = get_json("/query", {"query": expression})["data"]["result"]
+        if len(result) != 1 or result[0]["metric"].get("service") != "spring-backend":
+            break
+        value = float(result[0]["value"][1])
+        if not math.isfinite(value):
+            raise RuntimeError(f"non-finite recovery value: {name}: {value}")
+        values[name] = value
+        if comparison == "<=" and value > threshold:
+            break
+        if comparison == ">=" and value < threshold:
+            break
+    else:
+        group = alert_group()
+        if len(group["rules"]) != 6 or any(rule["health"] != "ok" for rule in group["rules"]):
+            raise RuntimeError(f"unhealthy alert group at recovery readiness: {group}")
+        readiness_evaluation = evaluation_timestamp(group)
+        last_values = values
+        break
+    time.sleep(min(2, max(0, deadline - time.monotonic())))
+else:
+    raise RuntimeError(f"recovery readiness not reached in 600 seconds: {last_values}")
+
+confirmations = []
+last_state = None
+while time.monotonic() < deadline:
+    group = alert_group()
+    active_series = get_json("/query", {"query": alert_query})["data"]["result"]
+    active_alerts = get_json("/alerts")["data"]["alerts"]
     rules = group["rules"]
-    if (
-        not alerts
+    evaluation = evaluation_timestamp(group)
+    inactive = (
+        evaluation > readiness_evaluation
+        and not active_series
+        and not active_alerts
         and len(rules) == 6
         and all(rule["health"] == "ok" and rule["state"] == "inactive" for rule in rules)
-    ):
-        values = {}
-        sample_timestamps = {}
-        series_ready = True
-        for name, expression in expressions.items():
-            result = get_json("/query", {"query": expression})["data"]["result"]
-            if not result:
-                series_ready = False
+    )
+    last_state = {
+        "evaluation": group["lastEvaluation"],
+        "active_series": len(active_series),
+        "active_alerts": len(active_alerts),
+        "rule_states": [rule["state"] for rule in rules],
+    }
+    now = time.monotonic()
+    if inactive:
+        if not confirmations:
+            confirmations.append(now)
+        elif now - confirmations[0] >= 30:
+            confirmations.append(now)
+            if time.monotonic() >= deadline:
                 break
-            if len(result) != 1 or result[0]["metric"].get("service") != "spring-backend":
-                raise RuntimeError(f"expected one recovery series: {name}: {result}")
-            value = float(result[0]["value"][1])
-            if not math.isfinite(value):
-                raise RuntimeError(f"non-finite recovery value: {name}: {value}")
-            values[name] = value
-            sample_timestamps[name] = result[0]["value"][0]
-        if not series_ready:
-            time.sleep(2)
-            continue
-        print(
-            json.dumps(
-                {
-                    "alerts": "inactive",
-                    "scenario": scenario,
-                    "values": values,
-                    "sample_timestamps": sample_timestamps,
-                    "evaluation": group["lastEvaluation"],
-                },
-                sort_keys=True,
-            )
-        )
-        break
-    time.sleep(2)
-else:
-    raise RuntimeError(f"alerts did not become inactive: scenario={scenario} alerts={alerts}")
+            print(json.dumps({
+                "alerts": "inactive",
+                "confirmations": 2,
+                "interval_seconds": confirmations[1] - confirmations[0],
+                "recovery_values": last_values,
+                "scenario": scenario,
+                **last_state,
+            }, sort_keys=True))
+            sys.exit(0)
+    else:
+        confirmations.clear()
+    time.sleep(min(2, max(0, deadline - time.monotonic())))
+raise RuntimeError(f"inactive was not confirmed twice within 600 seconds: {last_state}")
 PY
 }
 ```
@@ -1112,6 +1455,8 @@ extrapolation 때문에 최소 처리율을 보장하지 않는다. 아래 gener
 HTTP 503만, recovery 단계는 HTTP 201만 허용한다. 예상 밖 status, 요청 오류, 12분 timeout은
 worker exit non-zero이며 로그에 남는다. 고유 key·transaction만 사용하고 실제 외부
 Provider·LLM·유료 서비스를 호출하지 않는다.
+Stop marker는 container 내부 `/tmp`에만 만들며 Git Bash의 자동 Windows path 변환을
+`MSYS_NO_PATHCONV=1`로 차단한다.
 
 ```bash
 set -euo pipefail
@@ -1137,7 +1482,7 @@ start_bounded_traffic() {
   traffic_source="$source_service"
   traffic_stop_file="/tmp/finguardops-alert-${phase}-${RANDOM}.stop"
   traffic_log="${traffic_dir}/${phase}.log"
-  "${compose[@]}" exec -T "$source_service" \
+  MSYS_NO_PATHCONV=1 "${compose[@]}" exec -T "$source_service" \
     python - "$backend_url" "$expected_status" "$maximum_seconds" \
     "$worker_count" "$interval_seconds" "$traffic_stop_file" "$phase" \
     >"$traffic_log" 2>&1 <<'PY' &
@@ -1271,7 +1616,7 @@ stop_bounded_traffic() {
   if [[ -z "$traffic_pid" ]]; then
     return 0
   fi
-  "${compose[@]}" exec -T "$traffic_source" \
+  MSYS_NO_PATHCONV=1 "${compose[@]}" exec -T "$traffic_source" \
     python - "$traffic_stop_file" <<'PY'
 from pathlib import Path
 import sys
@@ -1285,7 +1630,7 @@ PY
     worker_status="$?"
   fi
   cat "$traffic_log"
-  "${compose[@]}" exec -T "$traffic_source" \
+  MSYS_NO_PATHCONV=1 "${compose[@]}" exec -T "$traffic_source" \
     python - "$traffic_stop_file" <<'PY'
 from pathlib import Path
 import sys
@@ -1375,8 +1720,8 @@ stop_bounded_traffic
 
 "${compose[@]}" up -d --wait external-risk-mock
 start_bounded_traffic \
-  external-risk-mock http://127.0.0.1:8080 201 external-risk-recovery 420 1 1
-wait_for_alerts_inactive external-risk 390
+  external-risk-mock http://127.0.0.1:8080 201 external-risk-recovery 720 1 1
+wait_for_alerts_inactive external-risk
 assert_bounded_traffic_running
 stop_bounded_traffic
 ```
@@ -1401,8 +1746,8 @@ stop_bounded_traffic
 
 "${compose[@]}" up -d --wait ai-service
 start_bounded_traffic \
-  external-risk-mock http://127.0.0.1:8080 201 rule-analysis-recovery 420 1 1
-wait_for_alerts_inactive rule-analysis 390
+  external-risk-mock http://127.0.0.1:8080 201 rule-analysis-recovery 720 1 1
+wait_for_alerts_inactive rule-analysis
 assert_bounded_traffic_running
 stop_bounded_traffic
 finish_alert_validation
@@ -1533,14 +1878,15 @@ fi
 "${compose[@]}" up -d --force-recreate --wait backend
 "${compose[@]}" up -d --force-recreate --wait external-risk-mock
 
-backend_namespace="$("${compose[@]}" exec -T backend readlink /proc/self/ns/net | tr -d '\r')"
-mock_namespace="$("${compose[@]}" exec -T external-risk-mock readlink /proc/self/ns/net | tr -d '\r')"
+backend_namespace="$("${compose[@]}" exec -T backend readlink /proc/self/ns/net </dev/null | tr -d '\r')"
+mock_namespace="$("${compose[@]}" exec -T external-risk-mock readlink /proc/self/ns/net </dev/null | tr -d '\r')"
 if [[ "$backend_namespace" != "$mock_namespace" ]]; then
   printf '%s\n' 'Backend and External Risk Mock network namespaces differ' >&2
   exit 1
 fi
 mock_listener="$("${compose[@]}" exec -T external-risk-mock \
   python -c "print(any('0100007F:1F41' in line and ' 0A ' in line for line in open('/proc/net/tcp')))" \
+  </dev/null \
   | tr -d '\r')"
 if [[ "$mock_listener" != "True" ]]; then
   printf '%s\n' 'Mock is not listening on 127.0.0.1:8001' >&2
@@ -1557,9 +1903,10 @@ fi
 "${compose[@]}" ps --all
 ```
 
-`down`에 `--volumes`를 사용하지 않는다. 업무 container와 세 network는 제거되고
+`down`에 `--volumes`를 사용하지 않는다. 업무 container와 네 network는 제거되고
 `finguardops-local-observability_prometheus-data`와
-`finguardops-local-observability_alertmanager-data` named volume만 유지되어야 한다.
+`finguardops-local-observability_alertmanager-data`,
+`finguardops-local-observability_grafana-data` named volume만 유지되어야 한다.
 
 ## 10. Alertmanager local routing·receiver 검증
 
@@ -1568,7 +1915,7 @@ fi
 Prometheus는 `http://alertmanager:9093`의 v2 API로 연결한다. Alertmanager와
 `alertmanager-webhook`은 internal `observability` network에만 연결하며 각각 `9093`, `8080`을
 container에 expose하지만 host `ports`는 없다. Alertmanager UI도 publish하지 않는다. API 확인은
-internal helper 또는 `docker compose exec`를 사용한다. 세 network 이름, Backend의
+internal helper 또는 `docker compose exec`를 사용한다. network topology, Backend의
 network·host publish·egress 계약과 Prometheus의 `127.0.0.1:9090` publish는 바뀌지 않는다.
 internal network는 인증·TLS를 대신하지 않는다.
 
@@ -1622,21 +1969,23 @@ docker run --rm \
 ### 10.3 fresh project readiness와 internal API
 
 기존 보존 volume과 분리된 project를 사용한다. 종료 trap은 이 project의 container·network와
-fresh Prometheus·Alertmanager volume만 제거한다.
+fresh Prometheus·Alertmanager·Grafana volume만 제거한다.
 
 ```bash
 delivery_project="finguardops-delivery-e2e-$RANDOM"
-delivery_compose=(docker compose -p "$delivery_project" -f infra/compose.yml)
+delivery_compose=(docker compose --env-file infra/.env -p "$delivery_project" -f infra/compose.yml)
 cleanup_delivery() {
   "${delivery_compose[@]}" down --volumes --remove-orphans
 }
 trap cleanup_delivery EXIT INT TERM
 
-"${delivery_compose[@]}" up -d --build --wait
+"${delivery_compose[@]}" up -d --build --wait --wait-timeout 180
 "${delivery_compose[@]}" ps
-"${delivery_compose[@]}" exec -T alertmanager wget -qO- http://127.0.0.1:9093/-/ready
+"${delivery_compose[@]}" exec -T alertmanager \
+  wget -qO- http://127.0.0.1:9093/-/ready </dev/null
 "${delivery_compose[@]}" exec -T alertmanager-webhook \
-  python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5).read().decode())"
+  python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5).read().decode())" \
+  </dev/null
 "${delivery_compose[@]}" exec -T external-risk-mock python - <<'PY'
 import json
 import urllib.request
@@ -1714,11 +2063,534 @@ Prometheus volume은 제거하지 않는다.
 
 ```bash
 "${delivery_compose[@]}" exec -T alertmanager-webhook \
-  python -c "import urllib.request; print(urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8080/events/reset', data=b'', method='POST'), timeout=5).read().decode())"
+  python -c "import urllib.request; print(urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8080/events/reset', data=b'', method='POST'), timeout=5).read().decode())" \
+  </dev/null
 "${delivery_compose[@]}" down --volumes --remove-orphans
 trap - EXIT INT TERM
 ```
 
-외부 Slack·email·SMS·PagerDuty, production receiver·Alertmanager·credential·SLA·SLO,
-Grafana, 인증·TLS, Kubernetes·AWS, Alertmanager HA·장기 retention과 OpenTelemetry는 계속
-미구현이다.
+외부 Slack·email·SMS·PagerDuty, production receiver·Prometheus·Alertmanager·Grafana·
+credential 배포·SLA·SLO, 인증·TLS·SSO·RBAC, Kubernetes·AWS, HA·장기 retention과
+OpenTelemetry는 계속 미구현이다.
+
+## 11. Grafana local dashboard 검증
+
+### 11.1 runtime·credential·volume 경계
+
+Grafana image는
+`grafana/grafana:13.2.0@sha256:3fd54ae1214669f8355f065ec9f6445d5279a3d77095ab048ca045685272429b`
+manifest-list로 고정하며 `linux/amd64` child를 지원한다. container는 `472:0`, read-only root
+filesystem, `no-new-privileges`, `/tmp` tmpfs를 사용한다. provisioning과 dashboard source는
+read-only bind mount이고 `/var/lib/grafana`만 `grafana-data` named volume이다. console logging만
+사용하고 analytics·Grafana update check·plugin update와 plugin 설치 UI를 비활성화한다.
+
+`GRAFANA_ADMIN_USER`와 `GRAFANA_ADMIN_PASSWORD`는 기본값이 없는 필수 변수다. 실제 값은
+ignored `infra/.env`에서만 제공하고 출력하지 않는다. 이 두 값은 fresh volume의 bootstrap에만
+사용된다. existing volume에서 환경 변수 값을 바꿔도 기존 admin 계정 ID·password가 자동으로
+변경되지 않는다. 기존 계정을 변경해야 하면 별도의 승인된 Grafana admin 절차를 사용하거나,
+보존할 필요가 없는 로컬 검증 volume임을 확인한 뒤 fresh volume으로 다시 시작한다.
+
+Datasource와 dashboard source 계약은 다음 명령으로 외부 Python dependency 없이 검증한다.
+
+```bash
+python infra/grafana/tests/verify_dashboard.py static
+python infra/grafana/tests/verify_dashboard.py mutations
+```
+
+Mutation mode는 임시 디렉터리의 복사본만 변경한다. 기존 5종인 잘못된 datasource URL,
+존재하지 않는 recording rule, 누락 panel, 잘못된 unit, dashboard UID와 함께 승인되지 않은
+datasource/dashboard 추가, 잘못된 title, 누락 description, 중복 panel ID를 non-zero로 검출한다.
+또한 Grafana frame의 numeric sample matrix, runtime inventory exact count와 credential 전송 전
+CLI URL·timeout 경계를 self-test한다. source 파일은 변경하지 않는다.
+
+### 11.2 fresh provisioning·traffic·query
+
+기존 기본 project와 보존 volume을 건드리지 않는 fresh project를 만든다. trap은 이 project의
+container·network·Prometheus·Alertmanager·Grafana volume만 제거한다. `up --wait`의 실제
+deadline은 180초이며 각 service healthcheck를 polling해 고정 sleep으로 readiness를 추정하지 않는다.
+
+```bash
+dashboard_project="finguardops-grafana-e2e-$RANDOM"
+dashboard_compose=(
+  docker compose
+  --env-file infra/.env
+  -p "$dashboard_project"
+  -f infra/compose.yml
+)
+cleanup_dashboard() {
+  "${dashboard_compose[@]}" down --volumes --remove-orphans
+}
+trap cleanup_dashboard EXIT INT TERM
+
+"${dashboard_compose[@]}" config --quiet
+"${dashboard_compose[@]}" up -d --build --wait --wait-timeout 180
+"${dashboard_compose[@]}" ps
+curl --fail-with-body http://127.0.0.1:3000/api/health
+
+anonymous_status="$(
+  curl --silent --output /dev/null --write-out '%{http_code}' \
+    http://127.0.0.1:3000/api/search?type=dash-db
+)"
+[[ "$anonymous_status" == "401" ]]
+
+python infra/grafana/tests/verify_dashboard.py runtime \
+  --allow-empty-recording \
+  --require-alert-state inactive
+```
+
+Runtime mode는 admin credential을 환경 변수에서 읽되 출력하지 않는다. `--grafana-url`은
+명시적인 1~65535 port를 가진 `http://127.0.0.1`의 빈 path 또는 `/`만 허용하고 userinfo,
+query, fragment, IPv6, 다른 host·scheme·하위 path는 HTTP 요청 전에 거절한다. HTTP timeout은
+finite `(0, 60]`, 전체 deadline은 finite `(0, 1800]`이면서 HTTP timeout 이상이어야 한다.
+Grafana health와 anonymous 차단, datasource 정확히 1개, folder 정확히 1개, dashboard 정확히
+1개, datasource UID·type·내부 URL·default·editable=false·health, source/API의
+UID·title·refresh·time·16개 exact title·description 계약을 확인한다. 또한 `/api/ds/query`를 통해
+target과 recording·alert PromQL을 실제 실행하며 time field가 아닌 number field의 finite numeric
+sample만 non-empty로 인정한다.
+
+이 fresh project에서 4절의 Rule v1 local 발행, 5절의 1차 traffic, 6절의 실제 scrape와 2차
+traffic, 7절의 raw·recording 대조를 순서대로 수행한다. 아래처럼 기존 변수명을 fresh project에
+연결하면 앞 절의 명령을 그대로 재사용할 수 있다.
+
+```bash
+compose=("${dashboard_compose[@]}")
+alert_project="$dashboard_project"
+```
+
+후속 scrape와 recording evaluation 뒤 정확히 14개 recording panel query가 모두 non-empty이고
+target panel이 `UP=1`인지 bounded polling한다.
+
+```bash
+python infra/grafana/tests/verify_dashboard.py runtime \
+  --deadline-seconds 180 \
+  --require-alert-state inactive
+```
+
+Ratio panel은 원본 0~1을 percent unit으로 표시하며 duration은 seconds다. inactive alert는
+`ALERTS` series 부재를 뜻한다. 검증기와 dashboard 어디에서도 `or vector(0)`, `clamp_min` 또는
+다른 zero synthesis를 사용하지 않는다.
+
+### 11.3 pending·firing·inactive alert query
+
+8.2절과 8.3절의 함수 및 bounded traffic을 같은 fresh project에서 사용한다. 장애 traffic을
+시작하기 전에 pending 검증을 background에서 시작하면 worker와 Grafana query가 함께 bounded
+polling된다. 다음은 External Risk signal 예시다. background 검증도 `wait` exit code로 확인하고
+marker 출력만으로 성공 처리하지 않는다.
+Alert-state 검증은 앞 단계에서 별도로 통과한 recording 14개 non-empty 계약을 다시 결합하지
+않는다. 장애가 5분 이상 지속되어 정상 outcome rate series가 만료되어도 alert query의 실제
+pending·firing·inactive 판정만 검증하도록 `--allow-empty-recording`을 명시한다.
+
+```bash
+"${compose[@]}" stop external-risk-mock
+start_bounded_traffic \
+  ai-service http://backend:8080 503 grafana-external-risk-failure 720 2 1
+python infra/grafana/tests/verify_dashboard.py runtime \
+  --deadline-seconds 240 \
+  --allow-empty-recording \
+  --require-alert-state pending &
+pending_check_pid=$!
+
+wait_for_condition_readiness external-risk 180
+assert_bounded_traffic_running
+wait_for_correlated_alert_transition external-risk 120 240 420
+wait "$pending_check_pid"
+python infra/grafana/tests/verify_dashboard.py runtime \
+  --deadline-seconds 120 \
+  --allow-empty-recording \
+  --require-alert-state firing
+assert_bounded_traffic_running
+stop_bounded_traffic
+
+"${compose[@]}" up -d --wait external-risk-mock
+start_bounded_traffic \
+  external-risk-mock http://127.0.0.1:8080 201 grafana-alert-recovery 720 1 1
+wait_for_alerts_inactive external-risk
+assert_bounded_traffic_running
+stop_bounded_traffic
+python infra/grafana/tests/verify_dashboard.py runtime \
+  --deadline-seconds 120 \
+  --allow-empty-recording \
+  --require-alert-state inactive
+```
+
+Transaction terminal과 Rule Analysis도 8절의 기존 장애 시나리오로 같은 검증을 반복한다.
+Dashboard alert query는 기존 alertname 6개, `service="spring-backend"`, `pending|firing`만
+허용한다. recovery 뒤 query가 빈 결과인 것은 정상 inactive 의미이며 값 0 series를 만들지 않는다.
+
+### 11.4 restart·recreate·장애 격리
+
+먼저 Prometheus만 restart하고 datasource health와 14개 recording query가 다시 성공하는지
+확인한다. 그 다음 Grafana를 restart하고 같은 named volume과 provisioning·query를 확인한다.
+Grafana force-recreate도 source provisioning으로 같은 UID·folder·16 panel에 수렴해야 한다.
+
+```bash
+grafana_volume_before="$(
+  docker inspect "$("${compose[@]}" ps -q grafana)" \
+    --format '{{range .Mounts}}{{if eq .Destination "/var/lib/grafana"}}{{.Name}}{{end}}{{end}}'
+)"
+[[ -n "$grafana_volume_before" ]]
+
+"${compose[@]}" restart prometheus
+python infra/grafana/tests/verify_dashboard.py runtime \
+  --deadline-seconds 180 \
+  --require-alert-state inactive
+
+"${compose[@]}" restart grafana
+python infra/grafana/tests/verify_dashboard.py runtime \
+  --deadline-seconds 180 \
+  --require-alert-state inactive
+
+"${compose[@]}" up -d --force-recreate --wait grafana
+grafana_volume_after="$(
+  docker inspect "$("${compose[@]}" ps -q grafana)" \
+    --format '{{range .Mounts}}{{if eq .Destination "/var/lib/grafana"}}{{.Name}}{{end}}{{end}}'
+)"
+[[ "$grafana_volume_after" == "$grafana_volume_before" ]]
+python infra/grafana/tests/verify_dashboard.py runtime \
+  --deadline-seconds 180 \
+  --require-alert-state inactive
+```
+
+Grafana 장애 격리는 앞선 alert 검증의 상태를 재사용하지 않고 별도의 External Risk
+firing→resolved 시나리오로 실행한다. Grafana만 중단하고 나머지 service의 container ID,
+`State.StartedAt`, `RestartCount`를 고정한 뒤,
+Backend·Prometheus·recording 14개·alert 6개·Alertmanager·receiver를 확인한다. 이후 실제 장애
+traffic은 Mock container를 재시작하지 않고 pause하여 만들고, pending→warning firing→critical
+firing과 Alertmanager/receiver firing 전달을 확인한다. recovery 전에 같은 container를 unpause하고,
+복구 traffic과 600초 recovery polling으로 Prometheus·Alertmanager active 0 및 receiver resolved를
+확인한다. 이 전체 구간에서 Grafana는 계속 stopped여야 한다.
+
+```bash
+isolation_services=(
+  postgresql
+  ai-service
+  external-risk-mock
+  backend
+  prometheus
+  alertmanager
+  alertmanager-webhook
+)
+
+snapshot_non_grafana_services() {
+  local ids_name="$1"
+  local started_name="$2"
+  local restarts_name="$3"
+  local -n ids_ref="$ids_name"
+  local -n started_ref="$started_name"
+  local -n restarts_ref="$restarts_name"
+  local expected_services actual_services service container_id state_line
+  local inspected_id started_at restart_count
+  local -a service_ids
+
+  ids_ref=()
+  started_ref=()
+  restarts_ref=()
+  expected_services="$(printf '%s\n' "${isolation_services[@]}" | sort)"
+  actual_services="$(
+    "${compose[@]}" ps --services --status running |
+      grep -v '^grafana$' |
+      sort
+  )"
+  if [[ "$actual_services" != "$expected_services" ]]; then
+    printf '%s\n' 'Non-Grafana running service set changed' >&2
+    return 1
+  fi
+
+  for service in "${isolation_services[@]}"; do
+    mapfile -t service_ids < <("${compose[@]}" ps -q "$service")
+    if (( ${#service_ids[@]} != 1 )); then
+      printf 'Expected exactly one container for %s, got %s\n' \
+        "$service" "${#service_ids[@]}" >&2
+      return 1
+    fi
+    container_id="${service_ids[0]}"
+    state_line="$(
+      docker inspect "$container_id" \
+        --format '{{.Id}} {{.State.StartedAt}} {{.RestartCount}}'
+    )"
+    read -r inspected_id started_at restart_count <<<"$state_line"
+    if [[ -z "$inspected_id" || -z "$started_at" || ! "$restart_count" =~ ^[0-9]+$ ]]; then
+      printf 'Invalid container state for %s\n' "$service" >&2
+      return 1
+    fi
+    ids_ref["$service"]="$inspected_id"
+    started_ref["$service"]="$started_at"
+    restarts_ref["$service"]="$restart_count"
+  done
+}
+
+assert_non_grafana_services_unchanged() {
+  local ids_name="$1"
+  local started_name="$2"
+  local restarts_name="$3"
+  local -n expected_ids="$ids_name"
+  local -n expected_started="$started_name"
+  local -n expected_restarts="$restarts_name"
+  local service
+  local -A current_ids=()
+  local -A current_started=()
+  local -A current_restarts=()
+
+  if ! snapshot_non_grafana_services \
+    current_ids current_started current_restarts; then
+    return 1
+  fi
+  for service in "${isolation_services[@]}"; do
+    if [[ "${current_ids[$service]}" != "${expected_ids[$service]}" ||
+      "${current_started[$service]}" != "${expected_started[$service]}" ||
+      "${current_restarts[$service]}" != "${expected_restarts[$service]}" ]]; then
+      printf 'Non-Grafana service restarted or was replaced: %s\n' "$service" >&2
+      return 1
+    fi
+  done
+}
+
+declare -A isolation_ids_before
+declare -A isolation_started_before
+declare -A isolation_restarts_before
+snapshot_non_grafana_services \
+  isolation_ids_before isolation_started_before isolation_restarts_before
+
+"${compose[@]}" exec -T alertmanager-webhook \
+  python -c "import urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8080/events/reset', data=b'', method='POST'), timeout=5).read()" \
+  </dev/null
+"${compose[@]}" stop grafana
+[[ "$(docker inspect "$("${compose[@]}" ps -aq grafana)" --format '{{.State.Status}}')" == "exited" ]]
+
+"${compose[@]}" exec -T external-risk-mock python - <<'PY'
+import json
+import urllib.request
+
+with urllib.request.urlopen("http://127.0.0.1:8080/api/health", timeout=5) as response:
+    assert response.status == 200
+with urllib.request.urlopen("http://prometheus:9090/api/v1/targets", timeout=5) as response:
+    targets = json.load(response)["data"]["activeTargets"]
+assert any(item["health"] == "up" for item in targets), targets
+with urllib.request.urlopen("http://prometheus:9090/api/v1/rules", timeout=5) as response:
+    groups = json.load(response)["data"]["groups"]
+recording = next(group for group in groups if group["name"] == "finguardops-service-derived")
+alerts = next(group for group in groups if group["name"] == "finguardops-service-alerts")
+assert len(recording["rules"]) == 14 and all(rule["health"] == "ok" for rule in recording["rules"])
+assert len(alerts["rules"]) == 6 and all(rule["health"] == "ok" for rule in alerts["rules"])
+PY
+"${compose[@]}" exec -T alertmanager \
+  wget -qO- http://127.0.0.1:9093/-/ready </dev/null
+
+isolation_mock_id="$("${compose[@]}" ps -q external-risk-mock)"
+docker pause "$isolation_mock_id"
+[[ "$(docker inspect "$isolation_mock_id" --format '{{.State.Paused}}')" == "true" ]]
+start_bounded_traffic \
+  ai-service http://backend:8080 503 grafana-down-external-risk-failure 720 2 1
+wait_for_condition_readiness external-risk 180
+assert_bounded_traffic_running
+wait_for_correlated_alert_transition external-risk 120 240 420
+assert_bounded_traffic_running
+stop_bounded_traffic
+
+"${compose[@]}" exec -T alertmanager-webhook python - <<'PY'
+import json
+import time
+import urllib.request
+
+deadline = time.monotonic() + 120
+while time.monotonic() < deadline:
+    with urllib.request.urlopen("http://alertmanager:9093/api/v2/alerts", timeout=5) as response:
+        active = json.load(response)
+    with urllib.request.urlopen("http://127.0.0.1:8080/events", timeout=5) as response:
+        events = json.load(response)["events"]
+    external = [
+        alert for alert in active
+        if alert["labels"].get("alertname", "").startswith(
+            "FinGuardOpsExternalRiskFailureRatio"
+        )
+    ]
+    firing_events = [
+        event for event in events
+        if event["status"] == "firing"
+        and event["commonLabels"].get("alertname", "").startswith(
+            "FinGuardOpsExternalRiskFailureRatio"
+        )
+    ]
+    if external and firing_events:
+        print(json.dumps({"active": len(external), "firing_events": len(firing_events)}))
+        break
+    time.sleep(2)
+else:
+    raise RuntimeError("Alertmanager active and receiver firing delivery not observed")
+PY
+[[ "$(docker inspect "$("${compose[@]}" ps -aq grafana)" --format '{{.State.Status}}')" == "exited" ]]
+
+docker unpause "$isolation_mock_id"
+isolation_mock_health_deadline="$(( $(date -u +%s) + 60 ))"
+while (( $(date -u +%s) < isolation_mock_health_deadline )); do
+  isolation_mock_health="$(
+    docker inspect "$isolation_mock_id" \
+      --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}'
+  )"
+  if [[ "$isolation_mock_health" == "healthy" ]]; then
+    break
+  fi
+  sleep 2
+done
+if [[ "$isolation_mock_health" != "healthy" ]]; then
+  printf '%s\n' 'External Risk Mock did not recover after unpause' >&2
+  exit 1
+fi
+start_bounded_traffic \
+  external-risk-mock http://127.0.0.1:8080 201 grafana-down-alert-recovery 720 1 1
+wait_for_alerts_inactive external-risk
+assert_bounded_traffic_running
+stop_bounded_traffic
+
+"${compose[@]}" exec -T alertmanager-webhook python - <<'PY'
+import json
+import time
+import urllib.request
+
+deadline = time.monotonic() + 120
+while time.monotonic() < deadline:
+    with urllib.request.urlopen("http://alertmanager:9093/api/v2/alerts", timeout=5) as response:
+        active = json.load(response)
+    with urllib.request.urlopen("http://127.0.0.1:8080/events", timeout=5) as response:
+        events = json.load(response)["events"]
+    resolved_events = [
+        event for event in events
+        if event["status"] == "resolved"
+        and event["commonLabels"].get("alertname", "").startswith(
+            "FinGuardOpsExternalRiskFailureRatio"
+        )
+    ]
+    if not active and resolved_events:
+        print(json.dumps({"active": 0, "resolved_events": len(resolved_events)}))
+        break
+    time.sleep(2)
+else:
+    raise RuntimeError("Alertmanager active 0 and receiver resolved delivery not observed")
+PY
+[[ "$(docker inspect "$("${compose[@]}" ps -aq grafana)" --format '{{.State.Status}}')" == "exited" ]]
+
+assert_non_grafana_services_unchanged \
+  isolation_ids_before isolation_started_before isolation_restarts_before
+
+"${compose[@]}" up -d --wait grafana
+python infra/grafana/tests/verify_dashboard.py runtime \
+  --deadline-seconds 180 \
+  --allow-empty-recording \
+  --require-alert-state inactive
+
+declare -A restart_mutation_ids
+declare -A restart_mutation_started
+declare -A restart_mutation_restarts
+snapshot_non_grafana_services \
+  restart_mutation_ids restart_mutation_started restart_mutation_restarts
+"${compose[@]}" restart external-risk-mock
+if assert_non_grafana_services_unchanged \
+  restart_mutation_ids restart_mutation_started restart_mutation_restarts; then
+  printf '%s\n' 'Non-Grafana restart mutation was not detected' >&2
+  exit 1
+else
+  printf '%s\n' 'Non-Grafana restart mutation detected'
+fi
+"${compose[@]}" up -d --wait external-risk-mock
+```
+
+Grafana 재기동 뒤 datasource·folder·dashboard exact count와 16개 panel provisioning이 자동
+복구되고 현재 `ALERTS` panel이 inactive series 부재를 유지해야 한다. 위 비교는 Backend,
+Prometheus, Alertmanager, receiver를 포함한 7개 service 각각의 ID·시작 시각·restart 횟수를
+확인한다. 같은 fresh 임시 project에서 External Risk Mock을 실제 restart한 mutation이 non-zero로
+검출되는지 확인하며, project와 mutation 상태는 11.6 cleanup에서 함께 제거한다.
+delivery는 exactly-once나 고정 retry 횟수를 주장하지 않는다.
+
+### 11.5 network·port·egress·sidecar 회귀
+
+모든 service의 host publish를 합치면 정확히 두 줄이어야 한다. `docker port` 결과에 wildcard나
+IPv6 bind가 하나라도 추가되면 비교가 실패한다.
+
+```bash
+actual_ports="$(
+  for service in \
+    postgresql ai-service external-risk-mock backend prometheus grafana \
+    alertmanager alertmanager-webhook; do
+    container_id="$("${compose[@]}" ps -q "$service")"
+    if [[ -n "$container_id" ]]; then
+      docker port "$container_id"
+    fi
+  done | sort
+)"
+expected_ports="$(
+  printf '%s\n' \
+    '3000/tcp -> 127.0.0.1:3000' \
+    '9090/tcp -> 127.0.0.1:9090' | sort
+)"
+[[ "$actual_ports" == "$expected_ports" ]]
+```
+
+Backend와 Grafana network, grafana-ui 단독 membership, Backend default route 부재와 Mock의
+동일 namespace·loopback socket을 검사한다. project 이름은 Compose network prefix와 같아야 한다.
+
+```bash
+network_names() {
+  docker inspect "$1" \
+    --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' \
+    | sed "s/^${dashboard_project}_//" \
+    | sed '/^$/d' \
+    | sort
+}
+
+backend_id="$("${compose[@]}" ps -q backend)"
+grafana_id="$("${compose[@]}" ps -q grafana)"
+[[ "$(network_names "$backend_id")" == $'application\nobservability' ]]
+[[ "$(network_names "$grafana_id")" == $'grafana-ui\nobservability' ]]
+[[ "$(
+  docker network inspect "${dashboard_project}_grafana-ui" \
+    --format '{{len .Containers}}'
+)" == "1" ]]
+
+if "${compose[@]}" exec -T backend bash -ec '
+  while read -r _ destination _; do
+    [[ "$destination" == "00000000" ]] && exit 0
+  done < /proc/net/route
+  exit 1
+' </dev/null; then
+  printf '%s\n' 'Backend unexpectedly has a default route' >&2
+  exit 1
+fi
+
+backend_namespace="$("${compose[@]}" exec -T backend readlink /proc/self/ns/net </dev/null | tr -d '\r')"
+mock_namespace="$("${compose[@]}" exec -T external-risk-mock readlink /proc/self/ns/net </dev/null | tr -d '\r')"
+[[ "$backend_namespace" == "$mock_namespace" ]]
+mock_listener="$("${compose[@]}" exec -T external-risk-mock \
+  python -c "print(any('0100007F:1F41' in line and ' 0A ' in line for line in open('/proc/net/tcp')))" \
+  </dev/null \
+  | tr -d '\r')"
+[[ "$mock_listener" == "True" ]]
+```
+
+9절의 stale Mock unhealthy 검출과 안전 재생성을 다시 수행한 뒤 거래 `201`, replay `201`,
+conflict `409`를 확인한다. Backend는 application·observability에만, Mock은 Backend network
+namespace에만 남아야 하며 외부 default route가 없어야 한다.
+
+### 11.6 종료와 production 경계
+
+종료 전에 모든 bounded traffic worker를 중지하고 background pending 검증 process를 `wait`한다.
+임시 query·response·mutation 파일을 repository에 만들지 않았는지 확인한다. 아래 명령은 fresh
+검증 project의 container·network·volume만 제거하며 기존 사용자가 보존한 기본 project volume은
+삭제하지 않는다.
+
+```bash
+finish_alert_validation
+"${compose[@]}" exec -T alertmanager-webhook \
+  python -c "import urllib.request; print(urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8080/events/reset', data=b'', method='POST'), timeout=5).read().decode())" \
+  </dev/null
+"${dashboard_compose[@]}" down --volumes --remove-orphans
+trap - EXIT INT TERM
+
+[[ -z "$(docker ps -aq --filter "label=com.docker.compose.project=${dashboard_project}")" ]]
+[[ -z "$(docker network ls -q --filter "label=com.docker.compose.project=${dashboard_project}")" ]]
+[[ -z "$(docker volume ls -q --filter "label=com.docker.compose.project=${dashboard_project}")" ]]
+```
+
+이 로컬 Grafana는 production credential 배포, TLS·SSO·RBAC, HA·장기 retention, production
+Prometheus·Alertmanager, 외부 Slack·email·SMS·PagerDuty, Kubernetes·AWS·OpenTelemetry,
+production SLA·SLO·threshold를 구현하지 않는다. 추가 사건·AI·복구 metric, completion-gap
+alert와 장기 `IN_PROGRESS` Gauge도 계속 미구현이다.

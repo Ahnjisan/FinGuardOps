@@ -1,0 +1,787 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finguardops-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finguardops-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "finguardops:transaction_intake:rate5m{service=\"spring-backend\"}",
+          "legendFormat": "spring-backend",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Public transaction intake outcomes per second over the last 5 minutes.",
+      "title": "Transaction Intake Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finguardops-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finguardops-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "finguardops:transactions_received:rate5m{service=\"spring-backend\"}",
+          "legendFormat": "spring-backend",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "description": "New transactions recorded as RECEIVED per second over the last 5 minutes.",
+      "title": "Transactions Received Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finguardops-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finguardops-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "finguardops:transaction_terminal:rate5m{service=\"spring-backend\"}",
+          "legendFormat": "spring-backend",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Terminal transaction outcomes per second over the last 5 minutes.",
+      "title": "Transaction Terminal Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finguardops-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finguardops-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "finguardops:transaction_terminal_by_status:rate5m{service=\"spring-backend\"}",
+          "legendFormat": "{{status}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Terminal transaction outcomes per second by status over the last 5 minutes.",
+      "title": "Transaction Terminal Rate by Status",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finguardops-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "max": 1,
+          "min": 0,
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finguardops-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "finguardops:transaction_terminal_failure:ratio5m{service=\"spring-backend\"}",
+          "legendFormat": "spring-backend",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "description": "FAILED terminal outcomes divided by all terminal outcomes over the last 5 minutes.",
+      "title": "Transaction Terminal Failure Ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finguardops-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finguardops-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "finguardops:transaction_processing_duration:avg5m{service=\"spring-backend\"}",
+          "legendFormat": "spring-backend",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Average transaction processing duration in seconds over the last 5 minutes.",
+      "title": "Transaction Processing Duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finguardops-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finguardops-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "finguardops:http_duplicate_by_result:rate5m{service=\"spring-backend\"}",
+          "legendFormat": "{{result}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Duplicate transaction requests per second by result over the last 5 minutes.",
+      "title": "Duplicate Requests by Result",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finguardops-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finguardops-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "finguardops:http_idempotency_conflict:rate5m{service=\"spring-backend\"}",
+          "legendFormat": "spring-backend",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Idempotency conflict requests per second over the last 5 minutes.",
+      "title": "Idempotency Conflict Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finguardops-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finguardops-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "finguardops:external_risk_by_result:rate5m{service=\"spring-backend\"}",
+          "legendFormat": "{{result}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "description": "External Risk attempts per second by result over the last 5 minutes.",
+      "title": "External Risk Outcomes by Result",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finguardops-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "max": 1,
+          "min": 0,
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finguardops-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "finguardops:external_risk_failure:ratio5m{service=\"spring-backend\"}",
+          "legendFormat": "spring-backend",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Failed External Risk outcomes divided by all External Risk outcomes over the last 5 minutes.",
+      "title": "External Risk Failure Ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finguardops-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "id": 11,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finguardops-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "finguardops:external_risk_duration:avg5m{service=\"spring-backend\"}",
+          "legendFormat": "spring-backend",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Average External Risk attempt duration in seconds over the last 5 minutes.",
+      "title": "External Risk Duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finguardops-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "id": 12,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finguardops-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "finguardops:rule_analysis_by_result:rate5m{service=\"spring-backend\"}",
+          "legendFormat": "{{result}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Rule Analysis attempts per second by result over the last 5 minutes.",
+      "title": "Rule Analysis Outcomes by Result",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finguardops-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "max": 1,
+          "min": 0,
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "id": 13,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finguardops-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "finguardops:rule_analysis_failure:ratio5m{service=\"spring-backend\"}",
+          "legendFormat": "spring-backend",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Failed Rule Analysis outcomes divided by all Rule Analysis outcomes over the last 5 minutes.",
+      "title": "Rule Analysis Failure Ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finguardops-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "id": 14,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finguardops-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "finguardops:rule_analysis_duration:avg5m{service=\"spring-backend\"}",
+          "legendFormat": "spring-backend",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Average Rule Analysis attempt duration in seconds over the last 5 minutes.",
+      "title": "Rule Analysis Duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finguardops-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 56
+      },
+      "id": 15,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finguardops-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "up{job=\"finguardops-backend\"}",
+          "legendFormat": "finguardops-backend",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Current Prometheus scrape availability for the FinGuardOps Backend target.",
+      "title": "Backend Prometheus Target",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finguardops-prometheus"
+      },
+      "description": "Pending and firing states for the six approved FinGuardOps alert rules; inactive alerts have no series.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 56
+      },
+      "id": 16,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finguardops-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "ALERTS{alertname=~\"FinGuardOpsTransactionTerminalFailureRatioWarning|FinGuardOpsTransactionTerminalFailureRatioCritical|FinGuardOpsExternalRiskFailureRatioWarning|FinGuardOpsExternalRiskFailureRatioCritical|FinGuardOpsRuleAnalysisFailureRatioWarning|FinGuardOpsRuleAnalysisFailureRatioCritical\",alertstate=~\"pending|firing\",service=\"spring-backend\"}",
+          "legendFormat": "{{alertname}} {{alertstate}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "FinGuardOps Alert States",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "tags": [
+    "finguardops",
+    "local",
+    "observability"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "FinGuardOps Local Observability",
+  "uid": "finguardops-local-overview"
+}
