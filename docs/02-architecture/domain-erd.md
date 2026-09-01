@@ -26,8 +26,8 @@ FastAPI `POST /api/v1/rule-analysis`, R001~R004 실행·점수·RiskLevel·Evide
 계산과 Spring Boot Rule 분석 HTTP Client·v1·v2 내부 오케스트레이션, 기본 Rule 집합
 발행 경계와 위험 대응·사건·AuditLog 원자적 최종화 경계도 구현되어 있다.
 실제 External Risk Provider·영속화·거래 접수 전체 연결,
-Snapshot v2와 운영 복구, 공개 행동 이벤트·사건·감사·최종화 API, USER 인증·인가,
-사건 조사 상태 전이·추가 거래 연결·병합·분리, AI 운영 엔티티와 운영 PostgreSQL
+Snapshot v2와 운영 복구, 감사·최종화 API, USER 인증·인가,
+사건 추가 거래 연결·병합·분리, AI 운영 엔티티와 운영 PostgreSQL
 배포 환경은 아직 구현되지 않았다.
 
 ## 2. 설계 범위와 제외 범위
@@ -510,7 +510,7 @@ External Risk 영속화·감사·복구가 필요해지면 별도 Issue와 DB �
 | `finalDisposition` | 담당자의 최종 조사 결과. 조사 중 null 가능 |
 | `assigneeRef` | 담당자 원문 프로필이 아닌 참조값. 현재 생성 시 null |
 | `createdAt` | 사건 생성 시각 |
-| `reviewStartedAt` | 최초 검토 시작 시각. 상태 전이 Service는 미구현 |
+| `reviewStartedAt` | 최초 `OPEN` → `IN_REVIEW` 시각. 이후 왕복에서 유지 |
 | `closedAt` | 종료 시각 |
 | `lastChangedAt` | 목록 정렬과 충돌 안내에 사용하는 마지막 변경 시각 |
 | `concurrencyVersion` | JPA 낙관적 잠금 버전 |
@@ -538,6 +538,10 @@ caseStatus
 ```
 
 초기 사건 API 계약에서는 `OPEN`, `IN_REVIEW`, `ADDITIONAL_INFORMATION_REQUIRED` 동안 `finalDisposition = null`을 유지한다. `IN_REVIEW` 사건을 종료할 때 `NORMAL`, `FALSE_POSITIVE`, `CONFIRMED_FRAUD` 중 하나의 최종 판정을 필수로 설정하고 `caseStatus = CLOSED`, `closedAt`과 AuditLog를 같은 업무 트랜잭션에서 반영한다. `IN_REVIEW`에는 담당자가 필요하다.
+
+Issue #209 mutation은 body `expectedVersion`과 `concurrencyVersion`을 비교하고
+Entity 업무 메서드, 사건 flush, 감사 append·flush를 같은 REQUIRED 트랜잭션에서
+수행한다. 상태와 담당자 endpoint는 분리하며 row lock·자동 retry는 사용하지 않는다.
 
 `representativeRiskLevel`, 대표 거래와 대표 Reason Code는 선정 정책이 없어 V6에
 포함하지 않았다. 필요하면 후속 Issue와 additive Migration으로 도입한다.
@@ -615,8 +619,8 @@ Issue #154는 방안 A를 채택했다. `FinancialTransaction`을 먼저
 
 `AuditLog`는 업무 원본의 현재값을 대신하지 않고 주요 변경을 감사 가능하게
 남기는 append-only 기록이다. Issue #156과 Flyway V7에서 물리 모델과 INSERT
-전용 Persistence 경계를 구현했으며 기존 사건·거래 Service와의 실제 통합,
-거부 감사, 조회 API는 아직 구현하지 않았다. 물리 계약은
+전용 Persistence 경계를 구현했고 V11에서 사건 상태·담당자 action/reason 및
+제한 snapshot을 확장했다. 거부 감사와 조회 API는 아직 구현하지 않았다. 물리 계약은
 [`../04-database/audit-log-schema.md`](../04-database/audit-log-schema.md)를
 따른다.
 
@@ -638,7 +642,8 @@ Issue #154는 방안 A를 채택했다. `FinancialTransaction`을 먼저
 개인정보 원문은 저장하지 않으며, 실제 `USER` actor 연결은 아직
 구현하지 않았다.
 
-V7은 최초 네 action별 exact JSON key·scalar 타입·형식을 Java와 PostgreSQL에서
+V7의 최초 네 action과 V11의 두 사건 workflow action은 exact JSON key·scalar
+타입·형식을 Java와 PostgreSQL에서
 검증한다. 자유 텍스트 reason과 임의 metadata를 허용하지 않으며 세 JSON의 UTF-8
 `jsonb::text` 표현 크기 합계를 8192 byte로 제한한다. Java도 제한된
 scalar JSON 계약에서 같은 크기를 계산하며, 첫 deep copy 전에 구조·크기를
@@ -1319,8 +1324,12 @@ HIGH·CRITICAL 거래 처리의 재시도와 중복 이벤트가 새 사건을 �
 - `UNIQUE(fraud_case_id, financial_transaction_id)`로 동일 pair 중복 방지
 - 잠금 후 사건 상태와 거래 관계 재검증
 
-기존 사건에 다른 거래를 추가하는 선정 정책, 사건 병합·분리와 실제 AuditLog
-기록 통합은 후속 승인·구현 범위이다. AuditLog 물리 기반은 V7에 구현되어 있다.
+기존 사건에 다른 거래를 추가하는 선정 정책과 사건 병합·분리는 후속 승인·구현
+범위이다. 사건 생성·첫 연결 감사와 조사 상태·담당자 감사 통합은 구현되어 있다.
+
+조사 mutation은 일반 `caseId` 조회, expected version 우선 비교, 업무 검증, Entity
+변경, 명시적 flush와 감사 1건 순서다. 동일 version 동시 명령은 하나만 성공하며
+optimistic conflict나 감사 실패에서는 사건과 감사를 모두 rollback한다.
 
 동일 거래의 과거 `CLOSED` 사건 연결 수를 하나로 제한하지 않는다. 사건 생성·연결
 시 활성 사건이 없으면 새 `OPEN` 사건과 첫 거래 연결을 생성한다. 활성 사건이

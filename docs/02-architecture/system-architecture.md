@@ -37,6 +37,8 @@
 - `FraudCase`·`CaseTransaction` Entity, Flyway V6와 HIGH·CRITICAL 거래의 사건·첫 연결 내부 영속 경계
 - 사건 목록·상세 조회 API, read-only Service, 동적 필터와 현재 페이지의 연관 거래
   일괄 집계 경계 및 Flyway V10 조회 인덱스
+- 사건 상태·담당자 PATCH API, body `expectedVersion`, JPA 낙관적 잠금과 성공 감사
+  1건의 REQUIRED 트랜잭션 경계 및 Flyway V11
 - append-only `AuditLog` Entity, Flyway V7, INSERT 전용 Persistence 경계와
   PostgreSQL UPDATE·DELETE 차단 trigger
 - Issue 및 Pull Request 템플릿
@@ -122,8 +124,9 @@ FinGuardOps의 아키텍처 목표는 다음과 같다.
 
 거래, 탐지 결과, 위험 대응, 사건, 최종 판정과 감사 로그는 중복되거나 일부만 반영되어서는 안 된다. 상태 전이, 멱등성, 동시성 충돌과 실패 후 재시도는 Spring Boot가 중앙에서 검증한다.
 
-특히 HIGH·CRITICAL 거래의 상태 변경·사건 생성·연결·AuditLog는 구현된 REQUIRED
-트랜잭션에서 함께 commit하거나 rollback한다. 사건 종료와 최종 판정, AI 리포트
+특히 HIGH·CRITICAL 거래의 상태 변경·사건 생성·연결·AuditLog와 사건 조사 상태·
+담당자 변경·AuditLog는 각 구현된 REQUIRED 트랜잭션에서 함께 commit하거나
+rollback한다. 사건 종료와 최종 판정, AI 리포트
 상태와 사용량·비용 저장의 정합성 경계는 후속 설계에서 결정한다.
 
 ### 4.2 장애 격리
@@ -961,6 +964,9 @@ Grafana는 Prometheus·Backend·Alertmanager의 시작 또는 health dependency�
 - `GET /api/v1/cases`, `GET /api/v1/cases/{caseId}`와 Flyway V10. 사건 Page와
   현재 페이지 대상 `CaseTransaction` GROUP BY를 분리하고 transaction 필터는
   `EXISTS`로 처리해 Entity 컬렉션·전체 연관 거래 로딩과 N+1을 만들지 않음
+- `PATCH /api/v1/cases/{caseId}/status`, `/assignee`와 Flyway V11. 사건 조회,
+  expected version 우선 비교, Entity 불변식, 명시적 flush, 성공 AuditLog 1건을
+  같은 REQUIRED 트랜잭션에서 처리하고 row lock·자동 retry는 사용하지 않음
 - Backend와 AI Service 전용 GitHub Actions 테스트 Workflow
 - 로컬 Prometheus→Alertmanager 연결, grouping·routing·signal별 warning inhibition과
   bounded webhook firing·resolved·restart·장애 검증 경계
@@ -987,7 +993,7 @@ Grafana는 Prometheus·Backend·Alertmanager의 시작 또는 health dependency�
 - 비트랜잭션 상위 거래 Service의 External Risk→Rule 분석→최종화 연결
 - RuleVersion publish·운영 준비
 - 최종 Snapshot v2 확정과 완료 간극 운영 복구
-- 감사 조회 API와 기존 업무 Service의 AuditLog 통합
+- 감사 조회 API와 아직 미구현인 메모·종료 업무의 AuditLog 통합
 - External Risk public intake 연결과 실패 Snapshot 저장 호출. 성공 Snapshot DB 영속화는 별도 승인 시 검토
 - production container 배포 환경과 Compose 고도화
 

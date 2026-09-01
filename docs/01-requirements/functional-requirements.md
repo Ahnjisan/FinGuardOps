@@ -40,18 +40,34 @@
   [`../04-database/fraud-case-schema.md`](../04-database/fraud-case-schema.md)를
   따른다.
 
-## 4. AI 분석 리포트
+## 4. 사건 상태·담당자 변경
+
+- FDS 분석 담당자는 승인된 세 조사 상태 전이와 상태별 담당자 배정·변경·해제만
+  요청할 수 있다.
+- `OPEN` → `IN_REVIEW`는 담당자 지정과 최초 `reviewStartedAt` 설정을 원자적으로
+  수행하고 이후 상태 왕복에서는 최초 시각을 유지해야 한다.
+- 신규 write 담당자 참조는 canonical lowercase UUID v4이며 입력을 정규화하거나
+  오류·로그에 반사해서는 안 된다.
+- 사건을 조회한 `expectedVersion`을 현재 `concurrencyVersion`과 비교하고 실제 JPA
+  version 증가와 성공 감사 1건을 같은 REQUIRED 트랜잭션에서 확정해야 한다.
+- stale·동일 값·금지 전이·종료 사건 요청은 사건과 감사를 변경하지 않아야 한다.
+- 종료·최종 판정, 인증·인가와 거부 요청 별도 감사는 이 구현 범위가 아니다.
+- 구체적인 API와 오류 계약은
+  [`../03-api/case-audit-api.md`](../03-api/case-audit-api.md), 상태 matrix는
+  [`case-state-transition.md`](./case-state-transition.md)를 따른다.
+
+## 5. AI 분석 리포트
 
 - 시스템은 이상거래에 대한 분석 리포트를 생성한다.
 - 리포트에는 탐지 사유, 위험 요인, 권장 대응이 포함된다.
 
-## 5. 관리자 대시보드
+## 6. 관리자 대시보드
 
 - 관리자는 전체 거래 수를 확인할 수 있다.
 - 관리자는 위험 거래 수를 확인할 수 있다.
 - 관리자는 최근 이상거래 목록을 확인할 수 있다.
 
-## 6. 운영 및 모니터링
+## 7. 운영 및 모니터링
 
 - 시스템은 서비스 로그를 수집한다.
 - 시스템은 API 응답 시간과 에러율을 모니터링한다.

@@ -11,6 +11,7 @@ import com.aifds.backend.common.trace.TraceIdFilter;
 import com.aifds.backend.fraudcase.exception.FraudCaseNotFoundException;
 import com.aifds.backend.fraudcase.exception.FraudCaseQueryTimeoutException;
 import com.aifds.backend.fraudcase.exception.FraudCaseQueryUnavailableException;
+import com.aifds.backend.fraudcase.exception.FraudCaseWorkflowException;
 import com.aifds.backend.fraudcase.validation.FraudCaseValidationException;
 import com.aifds.backend.fraudcase.validation.FraudCaseValidationType;
 import com.aifds.backend.observability.TransactionIntakeMetricsFilter;
@@ -66,6 +67,12 @@ public class GlobalExceptionHandler {
     static final String DEPENDENCY_TIMEOUT = "DEPENDENCY_TIMEOUT";
     static final String DEPENDENCY_UNAVAILABLE = "DEPENDENCY_UNAVAILABLE";
     static final String RESOURCE_NOT_FOUND = "RESOURCE_NOT_FOUND";
+    static final String CASE_STATUS_CONFLICT = "CASE_STATUS_CONFLICT";
+    static final String CASE_ASSIGNEE_CONFLICT = "CASE_ASSIGNEE_CONFLICT";
+    static final String CASE_ALREADY_CLOSED = "CASE_ALREADY_CLOSED";
+    static final String CONCURRENT_MODIFICATION = "CONCURRENT_MODIFICATION";
+    static final String ASSIGNEE_REQUIRED = "ASSIGNEE_REQUIRED";
+    static final String INVALID_ASSIGNEE_REF = "INVALID_ASSIGNEE_REF";
     static final String INTERNAL_ERROR = "INTERNAL_ERROR";
 
     static final String VALIDATION_MESSAGE = "요청 필드를 확인해 주세요.";
@@ -95,6 +102,18 @@ public class GlobalExceptionHandler {
             "요청한 거래를 찾을 수 없습니다.";
     static final String CASE_RESOURCE_NOT_FOUND_MESSAGE =
             "요청한 사건을 찾을 수 없습니다.";
+    static final String CASE_STATUS_CONFLICT_MESSAGE =
+            "현재 사건 상태에서는 요청한 상태로 변경할 수 없습니다.";
+    static final String CASE_ASSIGNEE_CONFLICT_MESSAGE =
+            "현재 사건 상태에서는 요청한 담당자 변경을 수행할 수 없습니다.";
+    static final String CASE_ALREADY_CLOSED_MESSAGE =
+            "종료된 사건은 변경할 수 없습니다.";
+    static final String CONCURRENT_MODIFICATION_MESSAGE =
+            "사건이 다른 요청에 의해 변경되었습니다. 최신 상태를 다시 조회해 주세요.";
+    static final String ASSIGNEE_REQUIRED_MESSAGE =
+            "요청한 상태 변경에는 담당자가 필요합니다.";
+    static final String INVALID_ASSIGNEE_REF_MESSAGE =
+            "담당자 참조값 형식을 확인해 주세요.";
     static final String NO_RESOURCE_FOUND_MESSAGE =
             "요청한 리소스를 찾을 수 없습니다.";
     static final String INTERNAL_ERROR_MESSAGE =
@@ -125,6 +144,14 @@ public class GlobalExceptionHandler {
             return validationResponse(
                     HttpStatus.BAD_REQUEST,
                     List.of(toFieldError(behaviorValidation.get())),
+                    request
+            );
+        }
+        Optional<FraudCaseValidationException> fraudCaseValidation =
+                findCause(exception, FraudCaseValidationException.class);
+        if (fraudCaseValidation.isPresent()) {
+            return handleFraudCaseValidation(
+                    fraudCaseValidation.get(),
                     request
             );
         }
@@ -201,11 +228,79 @@ public class GlobalExceptionHandler {
                 == FraudCaseValidationType.DOMAIN
                 ? HttpStatus.UNPROCESSABLE_ENTITY
                 : HttpStatus.BAD_REQUEST;
+        if (status == HttpStatus.UNPROCESSABLE_ENTITY
+                && INVALID_ASSIGNEE_REF.equals(exception.getCode())) {
+            return response(
+                    status,
+                    INVALID_ASSIGNEE_REF,
+                    INVALID_ASSIGNEE_REF_MESSAGE,
+                    List.of(toFieldError(exception)),
+                    request
+            );
+        }
         return validationResponse(
                 status,
                 List.of(toFieldError(exception)),
                 request
         );
+    }
+
+    @ExceptionHandler(FraudCaseWorkflowException.class)
+    ResponseEntity<ApiErrorResponse> handleFraudCaseWorkflow(
+            FraudCaseWorkflowException exception,
+            HttpServletRequest request
+    ) {
+        return switch (exception.getReason()) {
+            case CASE_STATUS_CONFLICT -> response(
+                    HttpStatus.CONFLICT,
+                    CASE_STATUS_CONFLICT,
+                    CASE_STATUS_CONFLICT_MESSAGE,
+                    List.of(),
+                    request
+            );
+            case CASE_ASSIGNEE_CONFLICT -> response(
+                    HttpStatus.CONFLICT,
+                    CASE_ASSIGNEE_CONFLICT,
+                    CASE_ASSIGNEE_CONFLICT_MESSAGE,
+                    List.of(),
+                    request
+            );
+            case CASE_ALREADY_CLOSED -> response(
+                    HttpStatus.CONFLICT,
+                    CASE_ALREADY_CLOSED,
+                    CASE_ALREADY_CLOSED_MESSAGE,
+                    List.of(),
+                    request
+            );
+            case CONCURRENT_MODIFICATION -> response(
+                    HttpStatus.CONFLICT,
+                    CONCURRENT_MODIFICATION,
+                    CONCURRENT_MODIFICATION_MESSAGE,
+                    List.of(),
+                    request
+            );
+            case ASSIGNEE_REQUIRED -> response(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    ASSIGNEE_REQUIRED,
+                    ASSIGNEE_REQUIRED_MESSAGE,
+                    List.of(),
+                    request
+            );
+            case DEPENDENCY_TIMEOUT -> response(
+                    HttpStatus.SERVICE_UNAVAILABLE,
+                    DEPENDENCY_TIMEOUT,
+                    QUERY_DEPENDENCY_TIMEOUT_MESSAGE,
+                    List.of(),
+                    request
+            );
+            case DEPENDENCY_UNAVAILABLE -> response(
+                    HttpStatus.SERVICE_UNAVAILABLE,
+                    DEPENDENCY_UNAVAILABLE,
+                    DEPENDENCY_UNAVAILABLE_MESSAGE,
+                    List.of(),
+                    request
+            );
+        };
     }
 
     @ExceptionHandler(BehaviorEventValidationException.class)

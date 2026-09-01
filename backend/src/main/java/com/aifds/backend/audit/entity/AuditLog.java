@@ -263,6 +263,18 @@ public class AuditLog {
             case CASE_CREATED, CASE_TRANSACTION_LINKED ->
                     reasonCode
                             == AuditReasonCode.CASE_REQUIRED_BY_RISK_POLICY;
+            case CASE_STATUS_CHANGED -> switch (reasonCode) {
+                case CASE_REVIEW_STARTED,
+                        CASE_ADDITIONAL_INFORMATION_REQUESTED,
+                        CASE_REVIEW_RESUMED -> true;
+                default -> false;
+            };
+            case CASE_ASSIGNEE_CHANGED -> switch (reasonCode) {
+                case CASE_ASSIGNEE_ASSIGNED,
+                        CASE_ASSIGNEE_CHANGED,
+                        CASE_ASSIGNEE_RELEASED -> true;
+                default -> false;
+            };
             case TRANSACTION_RISK_RESPONSE_APPLIED ->
                     reasonCode
                             == AuditReasonCode.RISK_RESPONSE_DECIDED_BY_POLICY;
@@ -284,6 +296,11 @@ public class AuditLog {
                     targetType == AuditTargetType.FRAUD_CASE
                             && caseId != null
                             && transactionId != null
+                            && targetId.equals(caseId);
+            case CASE_STATUS_CHANGED, CASE_ASSIGNEE_CHANGED ->
+                    targetType == AuditTargetType.FRAUD_CASE
+                            && caseId != null
+                            && transactionId == null
                             && targetId.equals(caseId);
             case TRANSACTION_RISK_RESPONSE_APPLIED,
                     TRANSACTION_STATUS_CHANGED ->

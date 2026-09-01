@@ -54,6 +54,34 @@ class AuditMetadataPolicyTest {
                 detectionMetadata()
         ));
         policy.validate(draft(
+                AuditAction.CASE_STATUS_CHANGED,
+                AuditReasonCode.CASE_REVIEW_STARTED,
+                AuditTargetType.FRAUD_CASE,
+                caseId,
+                null,
+                caseId,
+                object("caseStatus", "OPEN"),
+                caseSnapshot("IN_REVIEW", UUID.randomUUID().toString()),
+                emptyObject()
+        ));
+        policy.validate(draft(
+                AuditAction.CASE_ASSIGNEE_CHANGED,
+                AuditReasonCode.CASE_ASSIGNEE_ASSIGNED,
+                AuditTargetType.FRAUD_CASE,
+                caseId,
+                null,
+                caseId,
+                object(
+                        "caseStatus",
+                        "ADDITIONAL_INFORMATION_REQUIRED"
+                ),
+                caseSnapshot(
+                        "ADDITIONAL_INFORMATION_REQUIRED",
+                        UUID.randomUUID().toString()
+                ),
+                emptyObject()
+        ));
+        policy.validate(draft(
                 AuditAction.TRANSACTION_RISK_RESPONSE_APPLIED,
                 AuditReasonCode.RISK_RESPONSE_DECIDED_BY_POLICY,
                 AuditTargetType.FINANCIAL_TRANSACTION,
@@ -450,6 +478,37 @@ class AuditMetadataPolicyTest {
                     object("linked", true),
                     detectionMetadata()
             );
+            case CASE_STATUS_CHANGED -> draft(
+                    action,
+                    AuditReasonCode.CASE_REVIEW_STARTED,
+                    AuditTargetType.FRAUD_CASE,
+                    caseId,
+                    null,
+                    caseId,
+                    object("caseStatus", "OPEN"),
+                    caseSnapshot(
+                            "IN_REVIEW",
+                            UUID.randomUUID().toString()
+                    ),
+                    emptyObject()
+            );
+            case CASE_ASSIGNEE_CHANGED -> draft(
+                    action,
+                    AuditReasonCode.CASE_ASSIGNEE_ASSIGNED,
+                    AuditTargetType.FRAUD_CASE,
+                    caseId,
+                    null,
+                    caseId,
+                    object(
+                            "caseStatus",
+                            "ADDITIONAL_INFORMATION_REQUIRED"
+                    ),
+                    caseSnapshot(
+                            "ADDITIONAL_INFORMATION_REQUIRED",
+                            UUID.randomUUID().toString()
+                    ),
+                    emptyObject()
+            );
             case TRANSACTION_RISK_RESPONSE_APPLIED -> draft(
                     action,
                     AuditReasonCode.RISK_RESPONSE_DECIDED_BY_POLICY,
@@ -501,6 +560,14 @@ class AuditMetadataPolicyTest {
         return switch (action) {
             case CASE_CREATED -> object("caseStatus", "OPEN");
             case CASE_TRANSACTION_LINKED -> object("linked", true);
+            case CASE_STATUS_CHANGED -> caseSnapshot(
+                    "IN_REVIEW",
+                    UUID.randomUUID().toString()
+            );
+            case CASE_ASSIGNEE_CHANGED -> caseSnapshot(
+                    "ADDITIONAL_INFORMATION_REQUIRED",
+                    UUID.randomUUID().toString()
+            );
             case TRANSACTION_RISK_RESPONSE_APPLIED ->
                     object("riskResponseOutcome", "HELD");
             case TRANSACTION_STATUS_CHANGED ->
@@ -512,6 +579,11 @@ class AuditMetadataPolicyTest {
         return switch (action) {
             case CASE_CREATED -> object("caseStatus", "CLOSED");
             case CASE_TRANSACTION_LINKED -> object("linked", false);
+            case CASE_STATUS_CHANGED -> object("caseStatus", "CLOSED");
+            case CASE_ASSIGNEE_CHANGED -> object(
+                    "caseStatus",
+                    "ADDITIONAL_INFORMATION_REQUIRED"
+            );
             case TRANSACTION_RISK_RESPONSE_APPLIED ->
                     object("riskResponseOutcome", "UNKNOWN");
             case TRANSACTION_STATUS_CHANGED ->
@@ -539,6 +611,10 @@ class AuditMetadataPolicyTest {
                 after,
                 metadata
         );
+    }
+
+    private ObjectNode caseSnapshot(String status, String assigneeRef) {
+        return object("caseStatus", status).put("assigneeRef", assigneeRef);
     }
 
     private int bytes(JsonNode value) {

@@ -129,7 +129,7 @@ class AuditLogTest {
                 contract.reasonCode(),
                 contract.targetType(),
                 contract.caseTarget() ? caseId : transactionId,
-                transactionId,
+                contract.transactionRequired() ? transactionId : null,
                 contract.caseTarget() ? caseId : null
         );
 
@@ -154,7 +154,7 @@ class AuditLogTest {
                         wrongReason(contract),
                         contract.targetType(),
                         contract.caseTarget() ? caseId : transactionId,
-                        transactionId,
+                        contract.transactionRequired() ? transactionId : null,
                         contract.caseTarget() ? caseId : null
                 )
         ).withMessageContaining("reasonCode");
@@ -179,7 +179,7 @@ class AuditLogTest {
                         contract.reasonCode(),
                         wrongTargetType,
                         targetId,
-                        transactionId,
+                        contract.transactionRequired() ? transactionId : null,
                         contextCaseId
                 )
         ).withMessageContaining("target and context");
@@ -189,14 +189,14 @@ class AuditLogTest {
                         contract.reasonCode(),
                         contract.targetType(),
                         UUID.randomUUID(),
-                        transactionId,
+                        contract.transactionRequired() ? transactionId : null,
                         contextCaseId
                 )
         ).withMessageContaining("target and context");
     }
 
     @ParameterizedTest
-    @MethodSource("approvedActionContracts")
+    @MethodSource("transactionRequiredActionContracts")
     void rejectsMissingTransactionContextForEveryAction(
             ActionContract contract
     ) {
@@ -211,6 +211,27 @@ class AuditLogTest {
                         targetId,
                         null,
                         contract.caseTarget() ? caseId : null
+                )
+        ).withMessageContaining("target and context");
+    }
+
+    @ParameterizedTest
+    @EnumSource(
+            value = AuditAction.class,
+            names = {"CASE_STATUS_CHANGED", "CASE_ASSIGNEE_CHANGED"}
+    )
+    void rejectsTransactionContextForWorkflowActions(AuditAction action) {
+        ActionContract contract = contract(action);
+        UUID caseId = UUID.randomUUID();
+
+        assertThatIllegalArgumentException().isThrownBy(() ->
+                createActionAudit(
+                        contract,
+                        contract.reasonCode(),
+                        contract.targetType(),
+                        caseId,
+                        UUID.randomUUID(),
+                        caseId
                 )
         ).withMessageContaining("target and context");
     }
@@ -377,6 +398,32 @@ class AuditLogTest {
             case CASE_TRANSACTION_LINKED -> after = objectMapper
                     .createObjectNode()
                     .put("linked", true);
+            case CASE_STATUS_CHANGED -> {
+                before = objectMapper.createObjectNode()
+                        .put("caseStatus", "OPEN");
+                after = objectMapper.createObjectNode()
+                        .put("caseStatus", "IN_REVIEW")
+                        .put(
+                                "assigneeRef",
+                                "10000000-0000-4000-9000-000000000001"
+                        );
+            }
+            case CASE_ASSIGNEE_CHANGED -> {
+                before = objectMapper.createObjectNode()
+                        .put(
+                                "caseStatus",
+                                "ADDITIONAL_INFORMATION_REQUIRED"
+                        );
+                after = objectMapper.createObjectNode()
+                        .put(
+                                "caseStatus",
+                                "ADDITIONAL_INFORMATION_REQUIRED"
+                        )
+                        .put(
+                                "assigneeRef",
+                                "10000000-0000-4000-9000-000000000001"
+                        );
+            }
             case TRANSACTION_RISK_RESPONSE_APPLIED -> after = objectMapper
                     .createObjectNode()
                     .put("riskResponseOutcome", "HELD");
@@ -422,6 +469,7 @@ class AuditLogTest {
                         "CASE_REQUIRED_BY_RISK_POLICY",
                         AuditTargetType.FRAUD_CASE,
                         "FRAUD_CASE",
+                        true,
                         true
                 ),
                 new ActionContract(
@@ -431,7 +479,28 @@ class AuditLogTest {
                         "CASE_REQUIRED_BY_RISK_POLICY",
                         AuditTargetType.FRAUD_CASE,
                         "FRAUD_CASE",
+                        true,
                         true
+                ),
+                new ActionContract(
+                        AuditAction.CASE_STATUS_CHANGED,
+                        "CASE_STATUS_CHANGED",
+                        AuditReasonCode.CASE_REVIEW_STARTED,
+                        "CASE_REVIEW_STARTED",
+                        AuditTargetType.FRAUD_CASE,
+                        "FRAUD_CASE",
+                        true,
+                        false
+                ),
+                new ActionContract(
+                        AuditAction.CASE_ASSIGNEE_CHANGED,
+                        "CASE_ASSIGNEE_CHANGED",
+                        AuditReasonCode.CASE_ASSIGNEE_ASSIGNED,
+                        "CASE_ASSIGNEE_ASSIGNED",
+                        AuditTargetType.FRAUD_CASE,
+                        "FRAUD_CASE",
+                        true,
+                        false
                 ),
                 new ActionContract(
                         AuditAction.TRANSACTION_RISK_RESPONSE_APPLIED,
@@ -440,7 +509,8 @@ class AuditLogTest {
                         "RISK_RESPONSE_DECIDED_BY_POLICY",
                         AuditTargetType.FINANCIAL_TRANSACTION,
                         "FINANCIAL_TRANSACTION",
-                        false
+                        false,
+                        true
                 ),
                 new ActionContract(
                         AuditAction.TRANSACTION_STATUS_CHANGED,
@@ -449,8 +519,15 @@ class AuditLogTest {
                         "TRANSACTION_FINALIZED_BY_RISK_POLICY",
                         AuditTargetType.FINANCIAL_TRANSACTION,
                         "FINANCIAL_TRANSACTION",
-                        false
+                        false,
+                        true
                 )
+        );
+    }
+
+    private static Stream<ActionContract> transactionRequiredActionContracts() {
+        return approvedActionContracts().filter(
+                ActionContract::transactionRequired
         );
     }
 
@@ -468,7 +545,8 @@ class AuditLogTest {
             String expectedReasonCode,
             AuditTargetType targetType,
             String expectedTargetType,
-            boolean caseTarget
+            boolean caseTarget,
+            boolean transactionRequired
     ) {
     }
 }

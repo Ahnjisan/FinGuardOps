@@ -16,10 +16,17 @@ import jakarta.persistence.Version;
 import java.time.Instant;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 @Entity
 @Table(name = "fraud_case")
 public class FraudCase {
+
+    private static final Pattern WORKFLOW_ASSIGNEE_REF_PATTERN =
+            Pattern.compile(
+                    "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}"
+                            + "-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            );
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -72,6 +79,77 @@ public class FraudCase {
 
     public boolean isActive() {
         return caseStatus != null && caseStatus.isActive();
+    }
+
+    public void startReview(String newAssigneeRef, Instant changedAt) {
+        requireNotClosed();
+        if (caseStatus != FraudCaseStatus.OPEN) {
+            throw new IllegalStateException(
+                    "Review can only start from an open case"
+            );
+        }
+        assigneeRef = requireWorkflowAssigneeRef(newAssigneeRef);
+        caseStatus = FraudCaseStatus.IN_REVIEW;
+        Instant workflowTime = requireWorkflowTime(changedAt);
+        if (reviewStartedAt == null) {
+            reviewStartedAt = workflowTime;
+        }
+        lastChangedAt = workflowTime;
+        validateInvariants();
+    }
+
+    public void requestAdditionalInformation(Instant changedAt) {
+        requireNotClosed();
+        if (caseStatus != FraudCaseStatus.IN_REVIEW) {
+            throw new IllegalStateException(
+                    "Additional information can only be requested in review"
+            );
+        }
+        caseStatus = FraudCaseStatus.ADDITIONAL_INFORMATION_REQUIRED;
+        lastChangedAt = requireWorkflowTime(changedAt);
+        validateInvariants();
+    }
+
+    public void resumeReview(Instant changedAt) {
+        requireNotClosed();
+        if (caseStatus
+                != FraudCaseStatus.ADDITIONAL_INFORMATION_REQUIRED) {
+            throw new IllegalStateException(
+                    "Review can only resume after additional information"
+            );
+        }
+        if (assigneeRef == null) {
+            throw new IllegalStateException(
+                    "Review cannot resume without an assignee"
+            );
+        }
+        caseStatus = FraudCaseStatus.IN_REVIEW;
+        lastChangedAt = requireWorkflowTime(changedAt);
+        validateInvariants();
+    }
+
+    public void changeAssignee(String newAssigneeRef, Instant changedAt) {
+        requireNotClosed();
+        if (caseStatus == FraudCaseStatus.OPEN) {
+            throw new IllegalStateException(
+                    "Open case assignee changes require review start"
+            );
+        }
+        if (newAssigneeRef == null) {
+            if (caseStatus == FraudCaseStatus.IN_REVIEW) {
+                throw new IllegalStateException(
+                        "In-review cases cannot release the assignee"
+                );
+            }
+        } else {
+            requireWorkflowAssigneeRef(newAssigneeRef);
+        }
+        if (Objects.equals(assigneeRef, newAssigneeRef)) {
+            throw new IllegalStateException("Assignee must change");
+        }
+        assigneeRef = newAssigneeRef;
+        lastChangedAt = requireWorkflowTime(changedAt);
+        validateInvariants();
     }
 
     @PostLoad
@@ -139,6 +217,33 @@ public class FraudCase {
                     "In-review cases must have an assignee"
             );
         }
+    }
+
+    private void requireNotClosed() {
+        if (caseStatus == FraudCaseStatus.CLOSED) {
+            throw new IllegalStateException("Closed cases cannot be changed");
+        }
+    }
+
+    private Instant requireWorkflowTime(Instant value) {
+        Instant validated = requireMicrosecondInstant(value, "changedAt");
+        if (validated.isBefore(lastChangedAt)) {
+            throw new IllegalArgumentException(
+                    "changedAt must not be before lastChangedAt"
+            );
+        }
+        return validated;
+    }
+
+    private String requireWorkflowAssigneeRef(String value) {
+        if (value == null
+                || value.length() != 36
+                || !WORKFLOW_ASSIGNEE_REF_PATTERN.matcher(value).matches()) {
+            throw new IllegalArgumentException(
+                    "assigneeRef must be a canonical lowercase UUID v4"
+            );
+        }
+        return value;
     }
 
     private static UUID requireUuidV4(UUID value) {

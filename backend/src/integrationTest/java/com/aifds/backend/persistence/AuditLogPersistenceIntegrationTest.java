@@ -63,12 +63,12 @@ class AuditLogPersistenceIntegrationTest
     private Flyway flyway;
 
     @Test
-    void appliesFreshV1ThroughV10WithAuditSchemaAndAppendOnlyTrigger() {
-        assertThat(flyway.info().applied()).hasSize(10);
+    void appliesFreshV1ThroughV11WithAuditSchemaAndAppendOnlyTrigger() {
+        assertThat(flyway.info().applied()).hasSize(11);
         assertThat(flyway.info().current().getVersion().getVersion())
-                .isEqualTo("10");
+                .isEqualTo("11");
         assertThat(flyway.info().current().getDescription())
-                .isEqualTo("create fraud case query index");
+                .isEqualTo("extend audit log for fraud case workflow");
         assertThat(columns("audit_log")).containsExactlyInAnyOrder(
                 "id",
                 "audit_id",
@@ -282,6 +282,99 @@ class AuditLogPersistenceIntegrationTest
                 String.class,
                 transactionId
         )).isEqualTo(action);
+    }
+
+    @Test
+    void insertsAllV11WorkflowReasonsAndRejectsInvalidCombinations() {
+        UUID caseId = insertCase();
+        String firstAssignee = UUID.randomUUID().toString();
+        String secondAssignee = UUID.randomUUID().toString();
+        List<RawAuditContract> contracts = List.of(
+                workflowContract(
+                        caseId,
+                        "CASE_STATUS_CHANGED",
+                        "CASE_REVIEW_STARTED",
+                        object("caseStatus", "OPEN"),
+                        caseSnapshot("IN_REVIEW", firstAssignee)
+                ),
+                workflowContract(
+                        caseId,
+                        "CASE_STATUS_CHANGED",
+                        "CASE_ADDITIONAL_INFORMATION_REQUESTED",
+                        caseSnapshot("IN_REVIEW", firstAssignee),
+                        caseSnapshot(
+                                "ADDITIONAL_INFORMATION_REQUIRED",
+                                firstAssignee
+                        )
+                ),
+                workflowContract(
+                        caseId,
+                        "CASE_STATUS_CHANGED",
+                        "CASE_REVIEW_RESUMED",
+                        caseSnapshot(
+                                "ADDITIONAL_INFORMATION_REQUIRED",
+                                firstAssignee
+                        ),
+                        caseSnapshot("IN_REVIEW", firstAssignee)
+                ),
+                workflowContract(
+                        caseId,
+                        "CASE_ASSIGNEE_CHANGED",
+                        "CASE_ASSIGNEE_ASSIGNED",
+                        object(
+                                "caseStatus",
+                                "ADDITIONAL_INFORMATION_REQUIRED"
+                        ),
+                        caseSnapshot(
+                                "ADDITIONAL_INFORMATION_REQUIRED",
+                                firstAssignee
+                        )
+                ),
+                workflowContract(
+                        caseId,
+                        "CASE_ASSIGNEE_CHANGED",
+                        "CASE_ASSIGNEE_CHANGED",
+                        caseSnapshot("IN_REVIEW", firstAssignee),
+                        caseSnapshot("IN_REVIEW", secondAssignee)
+                ),
+                workflowContract(
+                        caseId,
+                        "CASE_ASSIGNEE_CHANGED",
+                        "CASE_ASSIGNEE_RELEASED",
+                        caseSnapshot(
+                                "ADDITIONAL_INFORMATION_REQUIRED",
+                                firstAssignee
+                        ),
+                        object(
+                                "caseStatus",
+                                "ADDITIONAL_INFORMATION_REQUIRED"
+                        )
+                )
+        );
+
+        for (RawAuditContract contract : contracts) {
+            insertRawAudit(
+                    UUID.randomUUID(),
+                    "SYSTEM",
+                    "finguardops-backend",
+                    contract,
+                    "trace_audit_workflow_01"
+            );
+        }
+
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM audit_log WHERE case_id = ?",
+                Integer.class,
+                caseId
+        )).isEqualTo(6);
+        RawAuditContract started = contracts.get(0);
+        assertRejected(started.withReasonCode("CASE_REVIEW_RESUMED"));
+        assertRejected(started.withTransactionId(insertTransaction()));
+        assertRejected(started.withMetadata(object("customerId", "forbidden")));
+        assertRejected(started.withAfter(caseSnapshot(
+                "IN_REVIEW",
+                "A0000000-0000-4000-9000-000000000001"
+        )));
     }
 
     @ParameterizedTest
@@ -802,6 +895,30 @@ class AuditLogPersistenceIntegrationTest
                     "unsupported test action: " + action
             );
         };
+    }
+
+    private RawAuditContract workflowContract(
+            UUID caseId,
+            String action,
+            String reasonCode,
+            JsonNode before,
+            JsonNode after
+    ) {
+        return new RawAuditContract(
+                action,
+                reasonCode,
+                "FRAUD_CASE",
+                caseId,
+                null,
+                caseId,
+                before,
+                after,
+                emptyObject()
+        );
+    }
+
+    private ObjectNode caseSnapshot(String status, String assigneeRef) {
+        return object("caseStatus", status).put("assigneeRef", assigneeRef);
     }
 
     private void assertRejected(RawAuditContract contract) {
