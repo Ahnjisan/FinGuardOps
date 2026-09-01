@@ -213,10 +213,12 @@ Runner·CLI가 구현되었습니다. 실행 절차는
 USER 인증·인가, Issue #186 외 사건·AI·복구 상태 등의 추가 업무 metric은 아직
 구현되지 않았습니다. 로컬 Docker Compose의 Prometheus 서버·Backend scrape와 기존
 업무 Meter 기반 recording rule 14개와 실패율 alert rule 6개, 각각의 deterministic
-promtool test, raw·recorded query와 로컬 alert 상태 검증 경계가 구현되었습니다. 로컬
+promtool test, raw·recorded query와 로컬 alert 상태 검증 경계가 구현되었습니다. 기존
+recording rule 14개와 target·alert 상태를 표시하는 로컬 Grafana dashboard도 file
+provisioning과 결정적 검증 경계로 구현되었습니다. 로컬
 Alertmanager runtime, Prometheus 연결, grouping·routing, signal별 warning inhibition,
 bounded in-memory webhook receiver와 firing·resolved·restart·장애 검증 경계도 구현되었습니다.
-production Prometheus·Alertmanager·receiver·credential과 외부 알림·Grafana는 미구현입니다.
+production Prometheus·Alertmanager·Grafana·credential 배포와 외부 알림은 미구현입니다.
 Spring Boot runtime Prometheus registry와 opt-in Actuator endpoint의 경계도
 구현되었습니다. 기존 Rule 분석
 v1은 당장 제거하지 않으며 Rule v1 기본
@@ -357,6 +359,8 @@ Kafka
   `/actuator/prometheus` endpoint 구현
 * 로컬 Alertmanager routing·signal별 inhibition, Prometheus 연결과 bounded webhook
   receiver fixture의 firing·resolved·restart·장애 검증 경계 구현
+* 로컬 Grafana loopback UI, Prometheus datasource·dashboard file provisioning과
+  recording rule 14개·target·alert 상태의 16-panel 검증 경계 구현
 * 거래 접수·목록·상세 조회와 거래 멱등성 구현
 * 9개 유형 행동 이벤트 접수와 `eventId` 자연 멱등성 구현
 * 금융거래·멱등성·행동 이벤트 PostgreSQL 애플리케이션 연동과 Flyway 스키마 구현
@@ -429,7 +433,8 @@ Public 최종 동기 거래 접수와 실제 External Risk HTTP Provider, 공개
 * 프론트엔드 최종 응답·사건 조회 연동과 React 관리자 화면
 * 이미지 빌드·배포를 포함한 GitHub Actions CI/CD 확장
 * Kubernetes·AWS 배포와 실제 배포 환경 E2E
-* production Prometheus·보안·HA를 포함한 Observability
+* production Prometheus·Alertmanager·Grafana, 보안·TLS·SSO·RBAC·HA·장기 보존을
+  포함한 Observability
 * 장애·비용 실험
 
 ## Rule v1 기본 RuleVersion one-shot 발행
@@ -494,8 +499,10 @@ export와 `/actuator/prometheus`가 비활성입니다. `prometheus` profile을 
 [`Prometheus 로컬 scrape runbook`](docs/09-deployment/prometheus-local-scrape-runbook.md)을
 따릅니다. Compose에서만 management address를 `0.0.0.0`으로 override합니다. Backend는
 application·management port를 host에 publish하지 않고 internal application·observability
-network에만 연결합니다. Prometheus만 별도 UI bridge에도 연결하며 UI는
-`127.0.0.1:9090`에 bind합니다. Alertmanager와 local webhook receiver는 internal
+network에만 연결합니다. Prometheus만 `prometheus-ui` bridge에도 연결하며 UI는
+`127.0.0.1:9090`에 bind합니다. Grafana는 internal observability와 Grafana 전용
+`grafana-ui` bridge에만 연결하며 UI는 `127.0.0.1:3000`에 bind합니다. Alertmanager와
+local webhook receiver는 internal
 observability network에만 연결하며 host port와 Alertmanager UI를 publish하지 않습니다.
 내부 API 확인은 helper 또는 `docker compose exec`를 사용합니다. 이 network 경계는
 인증·TLS를 대신하지 않습니다.
@@ -513,10 +520,14 @@ Rule Analysis 실패율에 warning `> 0.10`/`for: 2m`, critical `> 0.30`/`for: 5
 전달하고 동일 service·동일 signal의 critical로 warning을 억제합니다. inhibition 전에
 전달된 warning은 취소되지 않습니다. 이 로컬 전달은 exactly-once나 고정 retry 횟수를
 보장하지 않으며 restart·ambiguous failure에서 duplicate 또는 loss가 가능합니다. local
-webhook은 production receiver가 아닙니다. completion gap, `deployment.error_ratio`,
-`deployment.latency`, 장기 `IN_PROGRESS` Gauge는 구현하지 않았습니다. production
-Prometheus·Alertmanager·receiver·credential·외부 Slack·email·SMS·PagerDuty, Grafana,
-인증·TLS, HA·장기 retention, Kubernetes·AWS, OpenTelemetry와 process crash까지 보장하는
+webhook은 production receiver가 아닙니다. 로컬 Grafana는 datasource UID
+`finguardops-prometheus`, dashboard UID `finguardops-local-overview`를 fresh·existing named
+volume에 file provisioning하며 admin credential은 ignored `infra/.env`에서만 받습니다.
+anonymous access는 비활성화되고 bootstrap credential 변경은 기존 volume의 admin 계정을
+자동 변경하지 않습니다. completion gap, `deployment.error_ratio`, `deployment.latency`, 장기
+`IN_PROGRESS` Gauge는 구현하지 않았습니다. production Prometheus·Alertmanager·Grafana·
+receiver·credential 배포와 외부 Slack·email·SMS·PagerDuty, 인증·TLS·SSO·RBAC,
+HA·장기 retention, Kubernetes·AWS, OpenTelemetry와 process crash까지 보장하는
 durable metric/outbox도 아직 구현하지 않았습니다.
 정확한 이름·tag·category는
 [`관측성 메트릭 명세`](docs/01-requirements/observability-metrics-spec.md)를 따릅니다.

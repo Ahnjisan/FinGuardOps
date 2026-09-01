@@ -9,7 +9,9 @@
 - FDS 분석 담당자: 거래 접수·탐지·위험 대응·사건·AI 리포트의 업무 처리 현황과 조사 지원 기능의 가용성을 확인한다.
 - 플랫폼·클라우드 운영자: Spring Boot, FastAPI, PostgreSQL, AI Provider와 배포 버전별 오류·지연·처리량·비용을 확인하고 장애 범위를 판단한다.
 
-이 문서는 메트릭의 의미와 집계 경계를 정의하는 설계 문서이다. Java, Python, Prometheus, Grafana, OpenTelemetry, Docker, Kubernetes와 AWS 설정 또는 코드를 구현하지 않는다.
+이 문서는 메트릭의 의미와 집계 경계를 정의한다. 로컬 Prometheus·Alertmanager·Grafana
+검증 상태를 기록하지만 production Observability, OpenTelemetry, Kubernetes와 AWS 구성을
+확정하지 않는다.
 
 ## 2. 기준 문서
 
@@ -40,11 +42,13 @@ API 요청·응답과 상태 코드는 `docs/03-api/`, 시스템 책임은 `docs
 | --- | --- | --- |
 | 애플리케이션 내부 계측 | 부분 구현 | Issue #186의 Spring Boot 업무 Meter 10개가 구현되었다. public 거래 intake outcome, 최초 `RECEIVED`, terminal outcome·processing duration, 멱등 replay·`IN_PROGRESS`·conflict, External Risk outcome·duration, Spring Rule orchestration outcome·duration으로 한정한다. |
 | 운영 수집·노출 | 부분 구현 | production runtime Prometheus registry와 `prometheus` profile 전용 `/actuator/prometheus`가 구현되었다. 기본 profile에서는 export가 비활성이고 health만 노출한다. 별도 management listener의 기본 경계는 `127.0.0.1:8081`이며 인증은 미구현이다. Issue #196의 로컬 Compose Prometheus 서버와 Backend scrape·24시간 보존 경계가 구현되었지만 production 배포·scrape는 미구현이다. |
-| 활용 계층 | 부분 구현 | 로컬 Prometheus의 service 수준 recording rule 14개와 실패율 alert rule 6개, deterministic promtool test, 로컬 Alertmanager routing·signal별 inhibition·webhook firing/resolved 전달 검증이 구현되었다. production recording rule·alert rule·Alertmanager·receiver와 Grafana dashboard는 없다. |
+| 활용 계층 | 부분 구현 | 로컬 Prometheus의 service 수준 recording rule 14개와 실패율 alert rule 6개, deterministic promtool test, 로컬 Alertmanager routing·signal별 inhibition·webhook firing/resolved 전달, 로컬 Grafana datasource·16-panel dashboard file provisioning과 fresh·restart·query 검증이 구현되었다. production recording rule·alert rule·Prometheus·Alertmanager·Grafana·receiver와 외부 알림은 없다. |
 
 로컬 검증에서 PostgreSQL·AI Service·Backend는 internal application network를 사용하고,
 Backend·Prometheus·Alertmanager·local webhook receiver는 별도 internal observability
-network를 사용한다. Prometheus만 host UI publish용 일반 bridge에도 연결하고 Backend,
+network를 사용한다. Prometheus는 host UI용 `prometheus-ui`, Grafana는 host UI용
+`grafana-ui` bridge에 각각 추가 연결하고 loopback `9090`, `3000`만 publish한다. Grafana는
+observability와 grafana-ui에만 연결하며 grafana-ui에는 Grafana만 연결한다. Backend,
 Alertmanager와 receiver port는 host에 publish하지 않는다. External Risk
 fixture는 Backend network namespace를 공유하고 `127.0.0.1:8001`에만 bind하며 Backend도
 loopback으로 호출한다. 이는 기존 non-production plain HTTP 제한을 보존하지만 production
@@ -54,7 +58,7 @@ loopback으로 호출한다. 이는 기존 non-production plain HTTP 제한을 �
 `애플리케이션 내부 계측 구현 (Issue #186)`을 사용한다. 나머지 계약은
 `애플리케이션 내부 계측 미구현`, `활용 계층 미구현` 또는 기술 도입을 전제로 한
 `향후 도입 시`로 표시한다. runtime registry와 opt-in endpoint 구현은 Prometheus
-로컬 검증을 넘어 production scrape·recording rule·alert·dashboard가 운영 중이라는 의미가 아니다.
+로컬 검증을 넘어 production scrape·recording rule·alert·Grafana가 운영 중이라는 의미가 아니다.
 
 Issue #186은 거래 전체나 사건·감사 조회 API 계측을 완료한 것이 아니다. FastAPI 내부
 Meter, ML·LLM·AI 리포트 Meter도 미구현이다. `spring-boot-starter-actuator`는 production
@@ -244,7 +248,7 @@ MeterRegistry 조회·meter 등록·기록 및 `afterCommit` callback 실패는 
 구현하지 않았다. Issue #190에서 production runtime Prometheus registry와 opt-in
 `/actuator/prometheus` 노출을 구현했지만 management endpoint 인증, custom
 bucket·percentile, scheduler, production Prometheus 배포·scrape와 production recording
-rule·alert·dashboard는 미구현이다. Issue #196의 로컬 Compose scrape, Issue #199의
+rule·alert·Grafana는 미구현이다. Issue #196의 로컬 Compose scrape, Issue #199의
 recording rule 14개에 이어 Issue #201에서 recording 결과만 사용하는 로컬 실패율 alert
 rule 6개와 deterministic rule test를 구현했다.
 
@@ -322,6 +326,28 @@ credential·개인정보를 저장·logging하지 않는다. event는 메모리�
 16개이고 Alertmanager v0.34의 `notification_reason`과 빈 `routeLabels`는 검증 후 저장하지
 않는다. 외부 호출·파일 저장은 없다. 이 fixture와 24시간 named volume은 local validation
 contract이며 production receiver·retention·SLA·SLO가 아니다.
+
+### 6.4 로컬 Grafana dashboard 계약
+
+로컬 Grafana는 `127.0.0.1:3000`에만 UI를 publish하고 internal observability network의
+`http://prometheus:9090`을 proxy datasource로 file provisioning한다. datasource UID는
+`finguardops-prometheus`, dashboard UID는 `finguardops-local-overview`, folder는
+`FinGuardOps Local`이다. dashboard title은 `FinGuardOps Local Observability`, refresh는
+30초, 기본 시간 범위는 최근 30분이다. anonymous access는 비활성화하며 admin ID·password는
+ignored `infra/.env`의 필수 환경 변수로만 주입한다.
+
+Dashboard는 `service="spring-backend"`로 고정한 recording rule 14개를 다시 집계하지 않고
+직접 조회한다. 분류형 rate의 legend는 해당 `status` 또는 `result`만 사용한다. rate는
+requests/sec 또는 operations/sec, ratio 원본은 0~1을 유지한 Grafana percent unit, 평균
+duration은 seconds로 표현한다. 나머지 두 panel은 `up{job="finguardops-backend"}`과 기존
+alert 6개에 한정한 `ALERTS` pending/firing 상태다. inactive alert는 series 부재로 유지하고
+missing series를 0으로 합성하지 않는다.
+
+Provisioning 파일과 dashboard JSON은 read-only source of truth이고 data는 별도 named volume에
+보존한다. fresh volume은 UI 클릭 없이 생성되고 existing volume도 같은 UID·source 정의로
+수렴한다. Grafana 중단은 Backend 처리, Prometheus scrape·rule evaluation과 Alertmanager
+routing의 dependency가 아니다. 이 경계는 production credential 배포, TLS·SSO·RBAC,
+Grafana HA·장기 retention 또는 production SLA·SLO를 제공하지 않는다.
 
 `spring.http.errors`는 `spring.http.requests`에서 계산할 수 있으면 별도 Counter를 만들지 않는 것을 권장한다. 문서상 논리 지표는 유지하되 하나의 HTTP 요청이 두 독립 계측 경로에서 서로 다른 값으로 집계되지 않도록 한다.
 
@@ -542,6 +568,10 @@ FDS 분석 담당자 화면에는 ProviderCallAttempt, 모델별 토큰·추정 
 | 배포 비교 | `deploymentVersion`별 동일 route 오류율·지연·처리량 | 배포 전후 이상 징후 확인 |
 | 향후 인프라 | Redis 상태, Kafka Lag·재처리·DLQ, Kubernetes 재시작·CPU·메모리, AWS 의존성 | 실제 도입된 구성만 단계적으로 표시 |
 
+현재 구현된 `FinGuardOps Local Observability` dashboard는 위 후보 전체가 아니라 Spring Boot
+업무 recording rule 14개와 Prometheus target·기존 alert 상태만 제공한다. 추가 사건·AI·복구
+metric, completion-gap alert와 장기 `IN_PROGRESS` Gauge는 계속 미구현이다.
+
 React 관리자 화면은 업무 영향과 조치 요약에 집중하고 Grafana는 기술 시계열과 원인 분석에 집중한다. 동일한 상세 기술 대시보드를 두 화면에 중복 구현하지 않는다.
 
 ## 15. 알림 후보
@@ -577,9 +607,10 @@ React 관리자 화면은 업무 영향과 조치 요약에 집중하고 Grafana
 활용 계층으로 구분한다. 첫 계층의 Issue #186 Meter 10개와 두 번째 계층의 runtime
 Prometheus registry·opt-in endpoint와 로컬 Compose scrape가 구현되었다. 활용 계층은
 로컬 service 수준 recording rule 14개와 실패율 alert rule 6개, deterministic test,
-Alertmanager grouping·routing·signal별 inhibition과 local webhook firing·resolved 전달까지
-부분 구현되었다. production Prometheus·Alertmanager·receiver·credential·외부 알림과
-dashboard는 미구현이다.
+Alertmanager grouping·routing·signal별 inhibition과 local webhook firing·resolved 전달,
+Grafana datasource·16-panel dashboard file provisioning과 fresh·restart·query 검증까지 부분
+구현되었다. production Prometheus·Alertmanager·Grafana·receiver·credential 배포와 외부
+알림은 미구현이다.
 
 | 항목 | 문서별 표현 | 메트릭 명세의 처리 |
 | --- | --- | --- |
@@ -643,20 +674,21 @@ Breaker가 없다. 따라서 이를 현재 구현 metric이나 성공 결과로 
 - [ ] 애플리케이션 내부 계측, 운영 수집·노출, 활용 계층을 구분했는가
 - [ ] 내부 계측 구현을 Issue #186 Meter 10개로만 한정하고 나머지 Meter를 미구현으로 표시했는가
 - [ ] 일반 HTTP framework metric을 Issue #186 custom intake Meter와 혼합하거나 production 수집 중으로 표현하지 않았는가
-- [ ] runtime registry·opt-in endpoint·로컬 Compose scrape·로컬 recording rule·실패율 alert rule 구현과 production scrape·recording rule·alert·dashboard 미구현을 구분했는가
+- [ ] runtime registry·opt-in endpoint·로컬 Compose scrape·recording rule·alert·Alertmanager·Grafana 구현과 production Observability 미구현을 구분했는가
+- [ ] 로컬 dashboard가 recording rule 14개를 직접 조회하고 missing series를 정상 0으로 합성하지 않는가
 - [ ] Redis, Kafka, Kubernetes와 AWS를 현재 구현·수집 중인 것으로 표현하지 않았는가
 - [ ] 알림 임계값을 기준선·부하 테스트·비용 예산 근거 없이 확정하지 않았는가
 - [ ] 이미 통일한 계약을 다시 충돌로 기록하지 않고, 남은 문서 차이와 사용자 결정 사항만 미확정으로 유지하는가
 
 ## 19. 제외 범위
 
-로컬 Alertmanager·webhook 검증은 외부 Slack·email·SMS·PagerDuty, production receiver와
-credential, production Alertmanager·SLA·SLO, Grafana, 인증·TLS, Kubernetes·AWS,
-Alertmanager HA·장기 retention과 OpenTelemetry를 구현하지 않는다.
+로컬 Alertmanager·webhook·Grafana 검증은 외부 Slack·email·SMS·PagerDuty, production
+Prometheus·Alertmanager·Grafana·receiver와 credential 배포, production SLA·SLO,
+인증·TLS·SSO·RBAC, Kubernetes·AWS, HA·장기 retention과 OpenTelemetry를 구현하지 않는다.
 
 - 신규 Java와 Python Meter 코드 구현
 - production Prometheus 설치·scrape와 production recording rule 설정
-- Grafana 대시보드 구현
+- production Grafana 배포와 추가 사건·AI·복구 dashboard
 - OpenTelemetry 적용과 sampling 설정
 - 실제 알림 발송과 담당자 routing
 - Redis와 Kafka 구현
