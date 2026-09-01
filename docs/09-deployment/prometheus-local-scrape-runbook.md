@@ -5,8 +5,8 @@
 이 runbook은 Issue #196의 로컬 Docker Compose 검증 절차이다. PostgreSQL, AI
 Service, External Risk fixture, Backend와 Prometheus를 함께 실행하고 Backend의
 `/actuator/prometheus`를 실제 scrape하고 기존 업무 Meter 기반 recording rule 14개와
-로컬 실패율 alert rule 6개를 평가한다. production 배포·scrape·recording rule·alert,
-인증·TLS, Alertmanager·Grafana,
+로컬 실패율 alert rule 6개를 평가하며 local Alertmanager routing·receiver 전달을 검증한다.
+production Prometheus·Alertmanager·receiver 배포, 외부 알림·credential, 인증·TLS, Grafana,
 SLA·SLO·운영 임계값, HA와 장기 보존을 제공하지 않는다. completion gap·장기
 `IN_PROGRESS` Gauge, `deployment.error_ratio`와 `deployment.latency`도 구현하지 않는다.
 loopback bind와 Docker network 분리도 인증을 대신하지 않는다.
@@ -489,9 +489,10 @@ project와 새 named volume을 사용하고 종료 시 그 검증용 volume만 �
 이 값은 local validation contract이며 production SLA·SLO나 업무 실패 허용률이 아니다.
 ratio가 threshold와 같으면 inactive이고 최소 처리율 0.10/s는 guard를 통과한다. ratio
 입력이 missing이거나 분모가 0이라 series가 없으면 inactive이며 실제 failure ratio 0도
-inactive다. warning과 critical은 독립적으로 평가하므로 동시에 firing할 수 있다. 현재
-Alertmanager inhibition·routing·receiver·notification은 없으며 firing은 외부 알림 전송을
-의미하지 않는다. `keep_firing_for`도 사용하지 않는다.
+inactive다. warning과 critical은 독립적으로 평가하므로 동시에 firing할 수 있다.
+Prometheus는 internal observability network의 Alertmanager v2 API로 전달한다. Alertmanager는
+`alertname,service`로 grouping하고 같은 service·같은 signal의 critical로 warning을 억제한다.
+`keep_firing_for`는 사용하지 않는다.
 
 alert label은 `service`, `severity`, 자동 `alertname`뿐이다. annotation은 `summary`,
 `description`, `runbook_url`만 사용하며 description에는 service와 소수점 셋째 자리 ratio만
@@ -1557,4 +1558,167 @@ fi
 ```
 
 `down`에 `--volumes`를 사용하지 않는다. 업무 container와 세 network는 제거되고
-`finguardops-local-observability_prometheus-data` named volume만 유지되어야 한다.
+`finguardops-local-observability_prometheus-data`와
+`finguardops-local-observability_alertmanager-data` named volume만 유지되어야 한다.
+
+## 10. Alertmanager local routing·receiver 검증
+
+### 10.1 topology와 delivery 의미
+
+Prometheus는 `http://alertmanager:9093`의 v2 API로 연결한다. Alertmanager와
+`alertmanager-webhook`은 internal `observability` network에만 연결하며 각각 `9093`, `8080`을
+container에 expose하지만 host `ports`는 없다. Alertmanager UI도 publish하지 않는다. API 확인은
+internal helper 또는 `docker compose exec`를 사용한다. 세 network 이름, Backend의
+network·host publish·egress 계약과 Prometheus의 `127.0.0.1:9090` publish는 바뀌지 않는다.
+internal network는 인증·TLS를 대신하지 않는다.
+
+route는 `group_by: [alertname, service]`, `group_wait: 15s`, `group_interval: 30s`,
+`repeat_interval: 30m`이다. `local-webhook`은 timeout 5초, `send_resolved: true`,
+`max_alerts: 16`으로 설정한다. Transaction terminal, External Risk, Rule Analysis마다
+alertname이 명시된 inhibition rule을 한 개씩 사용하고 모두 `equal: [service]`를 사용한다.
+따라서 critical은 같은 service·같은 signal의 warning만 억제한다.
+
+warning notification은 critical 발생 전에 이미 전달될 수 있다. inhibition은 과거
+notification을 취소하지 않는다. delivery는 exactly-once나 고정 retry 횟수를 보장하지 않으며
+receiver 장애, restart와 ambiguous failure에서 duplicate 또는 loss가 가능하다. event sequence와
+재전달 여부는 관찰 결과이지 production 보장 계약이 아니다.
+
+receiver는 production receiver가 아닌 표준 라이브러리 기반 local fixture다. 허용 endpoint는
+`GET /health`, `POST /api/v1/alerts`, `GET /events`, `POST /events/reset`뿐이다. request body는
+256 KiB, alert는 16개, in-memory ring은 256개로 제한한다. request 원문·credential·개인정보를
+저장하거나 logging하지 않고 파일 저장·외부 호출도 하지 않는다. Alertmanager v0.34가 추가하는
+`notification_reason`과 빈 `routeLabels`는 검증 후 event에 저장하지 않는다. reset은 event를
+지우지만 sequence는 process 수명 동안 계속 단조 증가한다. receiver restart는 메모리 event와
+sequence를 초기화한다.
+
+### 10.2 image·config 확인
+
+Alertmanager `v0.34.0` release와 Quay manifest-list digest, `linux/amd64` child를 먼저 확인한다.
+
+```bash
+alertmanager_image='quay.io/prometheus/alertmanager:v0.34.0@sha256:690c7b525f4367aa91f73e2f91c632206d32e97c6384bdbf2fb7a861b420340d'
+repo_root="$(pwd -W)"
+docker buildx imagetools inspect "$alertmanager_image"
+docker pull "$alertmanager_image"
+docker image inspect "$alertmanager_image" --format '{{json .Config.User}}'
+
+export POSTGRES_PASSWORD='local-validation-only'
+docker compose -f infra/compose.yml config --quiet
+docker run --rm \
+  -v "$repo_root/infra/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro" \
+  --entrypoint /bin/amtool \
+  "$alertmanager_image" \
+  check-config /etc/alertmanager/alertmanager.yml
+docker run --rm \
+  -v "$repo_root/infra/prometheus:/etc/prometheus:ro" \
+  --entrypoint /bin/promtool \
+  prom/prometheus:v3.14.0@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0 \
+  check config /etc/prometheus/prometheus.yml
+```
+
+`amtool`은 runtime 설정 자체를 검사한다. 별도 test config, custom template와 config reload는
+사용하지 않는다.
+
+### 10.3 fresh project readiness와 internal API
+
+기존 보존 volume과 분리된 project를 사용한다. 종료 trap은 이 project의 container·network와
+fresh Prometheus·Alertmanager volume만 제거한다.
+
+```bash
+delivery_project="finguardops-delivery-e2e-$RANDOM"
+delivery_compose=(docker compose -p "$delivery_project" -f infra/compose.yml)
+cleanup_delivery() {
+  "${delivery_compose[@]}" down --volumes --remove-orphans
+}
+trap cleanup_delivery EXIT INT TERM
+
+"${delivery_compose[@]}" up -d --build --wait
+"${delivery_compose[@]}" ps
+"${delivery_compose[@]}" exec -T alertmanager wget -qO- http://127.0.0.1:9093/-/ready
+"${delivery_compose[@]}" exec -T alertmanager-webhook \
+  python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5).read().decode())"
+"${delivery_compose[@]}" exec -T external-risk-mock python - <<'PY'
+import json
+import urllib.request
+
+with urllib.request.urlopen("http://prometheus:9090/api/v1/alertmanagers", timeout=5) as response:
+    data = json.load(response)["data"]
+assert len(data["activeAlertmanagers"]) == 1, data
+assert not data["droppedAlertmanagers"], data
+print(data)
+PY
+```
+
+정상 traffic 뒤 receiver `/events`의 `count`는 0이어야 한다. Prometheus target은 `UP`, recording
+rule 14개와 alert rule 6개는 모두 `health=ok`, Alertmanager는 ready여야 한다.
+
+### 10.4 firing·inhibition·resolved 확인
+
+8절의 bounded traffic·readiness 절차를 같은 fresh project에서 사용한다. External Risk Mock을
+중단하면 External warning notification 뒤 critical notification을 확인하고 Alertmanager v2
+API에서 External warning이 inhibited인지 확인한다. Transaction·Rule alert는 inactive여야 한다.
+복구 뒤 resolved event와 최종 active alert 0개를 확인한다.
+
+AI Service를 중단하면 Transaction·Rule warning과 critical notification을 signal별로 확인한다.
+각 warning은 대응 critical에만 inhibited되고 두 signal 사이 inhibition 오염이 없어야 하며 External
+alert는 inactive여야 한다. AI Service 복구 뒤 resolved event와 최종 active alert 0개를 확인한다.
+각 receiver event에서 `sequence`, `status`, `receiver`, group/common label·annotation, alert의
+status·label·annotation·startsAt·endsAt·fingerprint를 확인한다. 최초 notification이 alert firing
+시각보다 최소 15초 뒤인지 확인하고 30분 repeat interval 안에 불필요한 동일 firing event가 없는지
+확인한다.
+
+실제 traffic으로 만들기 어려운 교차 signal·service 격리는 Alertmanager v2 API에 bounded synthetic
+alert를 전송해 확인할 수 있다. 기존 여섯 alertname과 label·annotation만 사용하고 service는
+`synthetic-routing-test`처럼 명백한 test 값으로 제한한다. 실제 고객·거래·계좌 ID를 사용하지
+않으며 짧은 `startsAt`·`endsAt`을 사용한다. 종료 시 같은 alert를 resolved로 보내고 receiver
+event를 reset한다. runtime config를 그대로 사용하며 별도 test config로 바꾸지 않는다.
+
+반드시 다음 조합을 확인한다.
+
+- Transaction critical은 Transaction warning만 억제한다.
+- External critical은 External warning만 억제하고 Transaction·Rule warning을 억제하지 않는다.
+- Rule critical은 Rule warning만 억제한다.
+- 같은 signal이라도 다른 service의 warning은 억제하지 않는다.
+- critical resolved 뒤 남아 있는 warning은 inhibited 상태에서 벗어난다.
+- critical 전에 receiver로 전달된 warning event는 취소되지 않는다.
+
+### 10.5 receiver HTTP와 bounded store 직접 검증
+
+receiver에 internal helper로 요청해 health, valid firing·resolved, event order, reset 뒤 단조 sequence,
+ring 256 eviction, alert 16개 허용과 17개 거절을 확인한다. 유효 JSON 뒤 공백으로 body를 정확히
+256 KiB로 맞춘 요청은 허용하고 1 byte 초과는 `413`이어야 한다. malformed JSON, schema 오류,
+unexpected label·annotation, invalid·negative Content-Length와 chunked body는 안전하게 거절해야
+한다. missing Content-Length는 `411`, 잘못된 Content-Type은 `415`, unknown path는 `404`,
+unsupported method는 `405`다. 모든 JSON 응답은 `Content-Type`과 `Content-Length`를 명시한다.
+
+container의 writable layer가 없고 receiver volume이 source read-only 하나뿐인지 확인한다.
+`docker compose logs alertmanager-webhook`에는 request body나 stack trace가 없어야 하며 event reset
+뒤 `/events`는 빈 배열이어야 한다. receiver는 외부 network에 연결되지 않는다.
+
+### 10.6 장애·restart와 종료
+
+Alertmanager 중단 중에도 Backend 업무 요청, Prometheus target·scrape, recording rule 14개와 alert
+rule 6개 evaluation이 계속되어야 한다. `/api/v1/alertmanagers`의 active/dropped 상태를 확인하고
+복구 뒤 연결이 재개되는지 확인한다. receiver 중단에서는 Alertmanager ready와 notification 전달
+실패를 구분하고 Backend·Prometheus가 계속 동작하는지 확인한다. receiver 복구 뒤 실제 delivery
+결과를 관찰하되 retry 횟수나 exactly-once를 보장으로 기록하지 않는다.
+
+Alertmanager-only, receiver-only, Prometheus-only restart 뒤 target·health·rule evaluation과 연결이
+재개되는지 확인한다. Alertmanager의 `/alertmanager` mount가 같은 named volume인지 확인한다.
+receiver-only restart는 in-memory event를 잃는 것이 정상이다. restart 전후 event sequence로
+duplicate·재전달을 관찰하지만 이를 무손실 계약으로 해석하지 않는다.
+
+종료 전에 synthetic alert를 resolved 처리하고 receiver event를 reset하며 bounded traffic worker가
+0개인지 확인한다. trap 또는 아래 명령으로 검증 project만 제거한다. 기본 project의 기존
+Prometheus volume은 제거하지 않는다.
+
+```bash
+"${delivery_compose[@]}" exec -T alertmanager-webhook \
+  python -c "import urllib.request; print(urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8080/events/reset', data=b'', method='POST'), timeout=5).read().decode())"
+"${delivery_compose[@]}" down --volumes --remove-orphans
+trap - EXIT INT TERM
+```
+
+외부 Slack·email·SMS·PagerDuty, production receiver·Alertmanager·credential·SLA·SLO,
+Grafana, 인증·TLS, Kubernetes·AWS, Alertmanager HA·장기 retention과 OpenTelemetry는 계속
+미구현이다.

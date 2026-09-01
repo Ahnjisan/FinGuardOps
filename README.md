@@ -213,8 +213,10 @@ Runner·CLI가 구현되었습니다. 실행 절차는
 USER 인증·인가, Issue #186 외 사건·AI·복구 상태 등의 추가 업무 metric은 아직
 구현되지 않았습니다. 로컬 Docker Compose의 Prometheus 서버·Backend scrape와 기존
 업무 Meter 기반 recording rule 14개와 실패율 alert rule 6개, 각각의 deterministic
-promtool test, raw·recorded query와 로컬 alert 상태 검증 경계가 구현되었습니다.
-production Prometheus·scrape·recording rule·alert와 Alertmanager·Grafana는 미구현입니다.
+promtool test, raw·recorded query와 로컬 alert 상태 검증 경계가 구현되었습니다. 로컬
+Alertmanager runtime, Prometheus 연결, grouping·routing, signal별 warning inhibition,
+bounded in-memory webhook receiver와 firing·resolved·restart·장애 검증 경계도 구현되었습니다.
+production Prometheus·Alertmanager·receiver·credential과 외부 알림·Grafana는 미구현입니다.
 Spring Boot runtime Prometheus registry와 opt-in Actuator endpoint의 경계도
 구현되었습니다. 기존 Rule 분석
 v1은 당장 제거하지 않으며 Rule v1 기본
@@ -353,6 +355,8 @@ Kafka
 * 관측성·운영 메트릭 명세 작성
 * Spring Boot runtime Prometheus registry와 `prometheus` profile 전용
   `/actuator/prometheus` endpoint 구현
+* 로컬 Alertmanager routing·signal별 inhibition, Prometheus 연결과 bounded webhook
+  receiver fixture의 firing·resolved·restart·장애 검증 경계 구현
 * 거래 접수·목록·상세 조회와 거래 멱등성 구현
 * 9개 유형 행동 이벤트 접수와 `eventId` 자연 멱등성 구현
 * 금융거래·멱등성·행동 이벤트 PostgreSQL 애플리케이션 연동과 Flyway 스키마 구현
@@ -491,7 +495,10 @@ export와 `/actuator/prometheus`가 비활성입니다. `prometheus` profile을 
 따릅니다. Compose에서만 management address를 `0.0.0.0`으로 override합니다. Backend는
 application·management port를 host에 publish하지 않고 internal application·observability
 network에만 연결합니다. Prometheus만 별도 UI bridge에도 연결하며 UI는
-`127.0.0.1:9090`에 bind합니다. 이 경계는 인증을 대신하지 않습니다.
+`127.0.0.1:9090`에 bind합니다. Alertmanager와 local webhook receiver는 internal
+observability network에만 연결하며 host port와 Alertmanager UI를 publish하지 않습니다.
+내부 API 확인은 helper 또는 `docker compose exec`를 사용합니다. 이 network 경계는
+인증·TLS를 대신하지 않습니다.
 
 PostgreSQL과 AI Service는 application network DNS를 사용하지만 External Risk fixture는
 Backend의 network namespace를 공유하며 `127.0.0.1:8001`에만 bind합니다. Backend도
@@ -502,11 +509,15 @@ loopback으로 fixture를 호출하므로 non-production plain HTTP loopback 제
 ratio·평균 duration만 계산합니다. 로컬 alert rule 6개는 거래 terminal, External Risk,
 Rule Analysis 실패율에 warning `> 0.10`/`for: 2m`, critical `> 0.30`/`for: 5m`과
 최소 처리율 `>= 0.10/s`를 적용합니다. 이 값은 production SLA·SLO가 아니며
-Alertmanager·receiver·notification은 없습니다. completion gap, `deployment.error_ratio`,
+로컬 Alertmanager는 `alertname,service`로 묶어 local webhook으로 firing·resolved를
+전달하고 동일 service·동일 signal의 critical로 warning을 억제합니다. inhibition 전에
+전달된 warning은 취소되지 않습니다. 이 로컬 전달은 exactly-once나 고정 retry 횟수를
+보장하지 않으며 restart·ambiguous failure에서 duplicate 또는 loss가 가능합니다. local
+webhook은 production receiver가 아닙니다. completion gap, `deployment.error_ratio`,
 `deployment.latency`, 장기 `IN_PROGRESS` Gauge는 구현하지 않았습니다. production
-Prometheus 배포·scrape와 production recording rule·alert, custom bucket·percentile,
-Alertmanager·Grafana, HA·장기 retention, OpenTelemetry와 process crash까지
-보장하는 durable metric/outbox도 아직 구현하지 않았습니다.
+Prometheus·Alertmanager·receiver·credential·외부 Slack·email·SMS·PagerDuty, Grafana,
+인증·TLS, HA·장기 retention, Kubernetes·AWS, OpenTelemetry와 process crash까지 보장하는
+durable metric/outbox도 아직 구현하지 않았습니다.
 정확한 이름·tag·category는
 [`관측성 메트릭 명세`](docs/01-requirements/observability-metrics-spec.md)를 따릅니다.
 

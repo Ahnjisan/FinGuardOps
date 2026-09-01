@@ -1,0 +1,37 @@
+route:
+  receiver: local-webhook
+  group_by: [alertname, service]
+  group_wait: 15s
+  group_interval: 30s
+  repeat_interval: 30m
+
+receivers:
+  - name: local-webhook
+    webhook_configs:
+      - url: http://alertmanager-webhook:8080/api/v1/alerts
+        send_resolved: true
+        max_alerts: 16
+        timeout: 5s
+
+inhibit_rules:
+  - source_matchers:
+      - alertname="FinGuardOpsTransactionTerminalFailureRatioCritical"
+      - severity="critical"
+    target_matchers:
+      - alertname="FinGuardOpsTransactionTerminalFailureRatioWarning"
+      - severity="warning"
+    equal: [service]
+  - source_matchers:
+      - alertname="FinGuardOpsExternalRiskFailureRatioCritical"
+      - severity="critical"
+    target_matchers:
+      - alertname="FinGuardOpsExternalRiskFailureRatioWarning"
+      - severity="warning"
+    equal: [service]
+  - source_matchers:
+      - alertname="FinGuardOpsRuleAnalysisFailureRatioCritical"
+      - severity="critical"
+    target_matchers:
+      - alertname="FinGuardOpsRuleAnalysisFailureRatioWarning"
+      - severity="warning"
+    equal: [service]
