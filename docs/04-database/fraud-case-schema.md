@@ -2,15 +2,17 @@
 
 ## 1. 범위
 
-이 문서는 Issue #154에서 구현한 `FraudCase`와 첫 거래 연결의 PostgreSQL 물리
-계약을 정의한다. Flyway V6는 기존 V1~V5를 수정하지 않고 `fraud_case`와
-`case_transaction`을 추가한다.
+이 문서는 Issue #154에서 구현한 `FraudCase`와 첫 거래 연결 및 Issue #207의
+사건 목록·상세 조회에 필요한 PostgreSQL 물리 계약을 정의한다. Flyway V6는 기존
+V1~V5를 수정하지 않고 `fraud_case`와 `case_transaction`을 추가하며, Flyway V10은
+기존 migration을 수정하지 않고 무필터 변경 시각 조회 인덱스를 추가한다.
 
 구현 범위는 사건 영속 모델, 거래 연결, 중복 연결 제약과 내부 persistence
 boundary이며, 위험 대응 최종화 경계가 이를 재사용해 신규 사건·첫 연결 또는 기존
 활성 사건을 거래 최종 상태·대응 결과·AuditLog와 같은 REQUIRED 트랜잭션에서
-확정한다. 사건 조사 상태 전이 Service, 기존 사건에 다른 거래 추가, 사건 병합·분리,
-공개 API, 거래 접수 전체 연결과 Snapshot v2는 포함하지 않는다. AuditLog 계약은
+확정한다. Issue #207의 read-only 목록·상세 API는 포함하지만 사건 조사 상태 전이,
+기존 사건에 다른 거래 추가, 사건 병합·분리, 수정 API, 거래 접수 전체 연결과
+Snapshot v2는 포함하지 않는다. AuditLog 계약은
 [`audit-log-schema.md`](audit-log-schema.md)를 따른다.
 
 ## 2. 관계와 식별자
@@ -59,6 +61,7 @@ FraudCase 1 ─ N CaseTransaction N ─ 1 FinancialTransaction
 
 - `uq_fraud_case_case_id`
 - `ix_fraud_case_status_last_changed(case_status, last_changed_at, id)`
+- `ix_fraud_case_last_changed(last_changed_at, id)` — 무필터 기본 정렬과 변경 시각 범위
 - `uq_case_transaction_case_transaction(fraud_case_id, financial_transaction_id)`
 - `ix_case_transaction_transaction_case(financial_transaction_id, fraud_case_id)`
 
@@ -88,8 +91,20 @@ rollback한다.
 - 사건 조사 상태 전이와 종료
 - 기존 사건에 추가 거래 연결
 - 사건 병합·분리
-- 공개 사건 Controller·DTO
+- 사건 상태 변경·담당자 배정 Controller·DTO
 - 거래 접수 전체 오케스트레이션과 Snapshot v2
+
+## 8. 조회 경계
+
+사건 목록은 `fraud_case` Page query와 해당 페이지의 PK만 사용하는
+`case_transaction GROUP BY fraud_case_id` 집계를 분리한다. 목록 항목별 count query,
+Entity collection 추가와 전체 연관 거래 로딩은 사용하지 않는다. 관련 거래
+`transactionId` 필터는 `EXISTS`로 처리하며 거래 UUID unique와
+`ix_case_transaction_transaction_case`를 사용한다.
+
+기본 정렬은 `last_changed_at, id` 같은 방향이며 내부 `id`는 API에 노출하지 않는다.
+정확한 필터·응답·오류 계약은
+[`../03-api/case-audit-api.md`](../03-api/case-audit-api.md)를 따른다.
 
 내부 위험 대응·사건·감사 최종화는 구현되었지만, 이를 사건 업무 전체나 공개 거래
 처리 완료로 간주하지 않는다.

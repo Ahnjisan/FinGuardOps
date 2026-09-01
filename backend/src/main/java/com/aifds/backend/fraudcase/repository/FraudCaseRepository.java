@@ -3,6 +3,7 @@ package com.aifds.backend.fraudcase.repository;
 import com.aifds.backend.fraudcase.entity.FraudCase;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -11,7 +12,9 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
-public interface FraudCaseRepository extends JpaRepository<FraudCase, Long> {
+public interface FraudCaseRepository
+        extends JpaRepository<FraudCase, Long>,
+        JpaSpecificationExecutor<FraudCase> {
 
     Optional<FraudCase> findByCaseId(UUID caseId);
 

@@ -35,6 +35,8 @@
 - 9개 유형의 행동 이벤트 접수, 거래 정합성 검증과 `eventId` 자연 멱등성
 - 공통 오류 응답과 `TraceIdFilter`
 - `FraudCase`·`CaseTransaction` Entity, Flyway V6와 HIGH·CRITICAL 거래의 사건·첫 연결 내부 영속 경계
+- 사건 목록·상세 조회 API, read-only Service, 동적 필터와 현재 페이지의 연관 거래
+  일괄 집계 경계 및 Flyway V10 조회 인덱스
 - append-only `AuditLog` Entity, Flyway V7, INSERT 전용 Persistence 경계와
   PostgreSQL UPDATE·DELETE 차단 trigger
 - Issue 및 Pull Request 템플릿
@@ -464,7 +466,7 @@ GitHub Actions는 반복 가능한 빌드·테스트·이미지 생성과 배포
 | behavior | 로그인·기기·보안 변경 등 행동 이벤트 관리와 조회 |
 | detection | External Risk 및 FastAPI 호출 조정, 분석 결과 검증과 탐지 근거 관리 |
 | risk response | 승인된 위험 등급별 Mock 대응 정책 적용 |
-| case management | 사건 생성·연결, 담당자 조사, 메모, 상태와 최종 판정 |
+| case management | 사건 생성·연결·목록·상세 조회, 담당자 조사, 메모, 상태와 최종 판정 |
 | rule management | Rule 정의, 버전과 활성 상태의 원본 관리 |
 | audit | 거래·사건·Rule·AI 처리의 주요 변경 이력 |
 | AI operations | AI 리포트 요청·상태, 결과, 모델·토큰·지연시간·비용 관리 |
@@ -956,6 +958,9 @@ Grafana는 Prometheus·Backend·Alertmanager의 시작 또는 health dependency�
 - `FraudCase`·`CaseTransaction`과 Flyway V6, 거래 → 사건 → 연결 잠금 순서로
   HIGH·CRITICAL 거래의 새 사건·첫 연결 또는 기존 활성 연결을 원자적으로
   확정하는 내부 persistence boundary
+- `GET /api/v1/cases`, `GET /api/v1/cases/{caseId}`와 Flyway V10. 사건 Page와
+  현재 페이지 대상 `CaseTransaction` GROUP BY를 분리하고 transaction 필터는
+  `EXISTS`로 처리해 Entity 컬렉션·전체 연관 거래 로딩과 N+1을 만들지 않음
 - Backend와 AI Service 전용 GitHub Actions 테스트 Workflow
 - 로컬 Prometheus→Alertmanager 연결, grouping·routing·signal별 warning inhibition과
   bounded webhook firing·resolved·restart·장애 검증 경계

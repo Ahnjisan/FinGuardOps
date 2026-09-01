@@ -23,18 +23,35 @@
   아직 구현되지 않았다.
 - 현재 거래 생성은 `RECEIVED`/null legacy Snapshot을 저장한다. 최종 동기 탐지 응답 전환, Snapshot 불변성과 version 재생 정책은 [`../07-decisions/ADR-004-idempotency-response-snapshot-transition.md`](../07-decisions/ADR-004-idempotency-response-snapshot-transition.md)를 따르며 후속 구현이 필요하다.
 
-## 3. AI 분석 리포트
+## 3. 사건 조회
+
+- FDS 분석 담당자는 사건 목록과 사건 상세를 조회할 수 있다.
+- 목록은 0-based 페이지와 `lastChangedAt` 단일 정렬을 사용하고 내부 `id`로
+  동일 시각의 순서를 결정적으로 유지해야 한다.
+- 목록은 사건 상태, 최종 판정, opaque 담당자 참조, 생성·변경 시각과 연관 거래
+  식별자로 필터할 수 있으며 시간 범위는 `[from,to)`이다.
+- 목록과 상세의 연관 거래 수는 현재 조회 페이지를 대상으로 한 일괄 집계로
+  계산하고 건별 조회나 전체 연관 거래 로딩을 해서는 안 된다.
+- 사건 상세가 없으면 안전한 `404 RESOURCE_NOT_FOUND`를 반환해야 한다.
+- 내부 PK·예외·SQL·credential, 불필요한 고객·계좌·기기 원문과 내부 snapshot·
+  Provider payload를 응답에 포함해서는 안 된다.
+- 구체적인 계약은 [`../03-api/case-audit-api.md`](../03-api/case-audit-api.md),
+  저장·인덱스 계약은
+  [`../04-database/fraud-case-schema.md`](../04-database/fraud-case-schema.md)를
+  따른다.
+
+## 4. AI 분석 리포트
 
 - 시스템은 이상거래에 대한 분석 리포트를 생성한다.
 - 리포트에는 탐지 사유, 위험 요인, 권장 대응이 포함된다.
 
-## 4. 관리자 대시보드
+## 5. 관리자 대시보드
 
 - 관리자는 전체 거래 수를 확인할 수 있다.
 - 관리자는 위험 거래 수를 확인할 수 있다.
 - 관리자는 최근 이상거래 목록을 확인할 수 있다.
 
-## 5. 운영 및 모니터링
+## 6. 운영 및 모니터링
 
 - 시스템은 서비스 로그를 수집한다.
 - 시스템은 API 응답 시간과 에러율을 모니터링한다.

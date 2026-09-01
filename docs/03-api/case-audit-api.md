@@ -6,12 +6,13 @@
 
 이 계약은 이후 Spring Boot Controller, 요청·응답 DTO, Validation, Service, 테스트와 OpenAPI 구현의 기준이다. API 공통 표현, 시간, 금액, 페이지네이션, 오류 응답과 추적 원칙은 [`api-conventions.md`](./api-conventions.md)를 따른다.
 
-이 문서는 API 계약이며 공개 사건 API 구현 완료 내역이 아니다. Issue #154에서
-`FraudCase`·`CaseTransaction` JPA 영속 기반과 Flyway V6, 사건·첫 거래 연결 내부
-Service가 구현되었다. Issue #156에서는 append-only `AuditLog` JPA 영속 기반과
-Flyway V7만 구현되었다. Controller·API DTO, 조사 상태 전이, 실제 업무 변경과
-AuditLog의 연결, 인증·인가는 구현되지 않았다. 문서의 `case_demo_...` 값은 읽기
-쉬운 예시이며 실제 영속 `caseId`와 `auditId`는 UUID v4를 사용한다.
+Issue #207에서 사건 목록·상세 조회 Controller·DTO·Validation·read-only Service와
+PostgreSQL 조회 경계를 구현했다. 사건 상태 변경, 담당자 배정, 조사 메모, 최종 판정,
+연관 거래 목록과 감사 조회 API 및 인증·인가는 구현되지 않았다. 사건 영속 계약은
+[`../04-database/fraud-case-schema.md`](../04-database/fraud-case-schema.md)를 따른다.
+실제 `caseId`와 `auditId`는 UUID v4를 사용한다.
+Issue #207 범위 밖의 후속 API 절에 남아 있는 `case_demo_...` 값은 읽기 쉬운
+미구현 예시일 뿐 실제 식별자 형식이 아니다.
 
 ## 2. 범위와 책임 경계
 
@@ -158,7 +159,10 @@ sort
 }
 ```
 
-페이지 시작값, 기본·최대 크기와 API별 허용 정렬 필드는 사용자 결정 사항이다. 정렬 필드는 서버 허용 목록으로 제한하며 동일한 정렬값에는 업무 식별자 등 안정적인 보조 정렬키를 적용한다.
+사건 목록은 0부터 시작하고 기본 `page=0`, `size=20`, 최대 `size=100`을 사용한다.
+정렬은 `lastChangedAt,asc` 또는 `lastChangedAt,desc` 하나만 허용하며 기본값은
+`lastChangedAt,desc`이다. 같은 변경 시각에는 내부 `id`를 같은 방향의 보조
+정렬키로 사용하되 요청·응답에 내부 `id`를 노출하지 않는다.
 
 ### 3.6 사건 종료·조사 메모 멱등성
 
@@ -205,30 +209,32 @@ GET   /api/v1/cases/{caseId}/audit-logs
 GET /api/v1/cases
 ```
 
-### 5.2 필터와 페이지네이션 후보
+### 5.2 필터와 페이지네이션
 
-| 쿼리 파라미터 | 설명 |
-| --- | --- |
-| `caseStatus` | 사건 상태 |
-| `finalDisposition` | 최종 판정 |
-| `representativeRiskLevel` | 대표 위험 등급 |
-| `assigneeRef` | 담당자 참조값 |
-| `createdAtFrom` | 사건 생성 시각 범위 시작, UTC ISO-8601 |
-| `createdAtTo` | 사건 생성 시각 범위 끝, UTC ISO-8601 |
-| `lastChangedAtFrom` | 마지막 변경 시각 범위 시작, UTC ISO-8601 |
-| `lastChangedAtTo` | 마지막 변경 시각 범위 끝, UTC ISO-8601 |
-| `transactionId` | 관련 거래 업무 식별자 |
-| `page` | 페이지 번호 |
-| `size` | 페이지 크기 |
-| `sort` | 정렬 조건 |
+| 쿼리 파라미터 | 기본값 | 설명 |
+| --- | --- | --- |
+| `caseStatus` | 없음 | 사건 상태 단일 Enum |
+| `finalDisposition` | 없음 | 최종 판정 단일 Enum. null 전용 필터 없음 |
+| `assigneeRef` | 없음 | opaque 운영자 참조값 exact 검색 |
+| `createdAtFrom` | 없음 | 생성 시각 시작, UTC ISO-8601 `Z`, 포함 |
+| `createdAtTo` | 없음 | 생성 시각 끝, UTC ISO-8601 `Z`, 미포함 |
+| `lastChangedAtFrom` | 없음 | 변경 시각 시작, UTC ISO-8601 `Z`, 포함 |
+| `lastChangedAtTo` | 없음 | 변경 시각 끝, UTC ISO-8601 `Z`, 미포함 |
+| `transactionId` | 없음 | 연관 거래 canonical UUID v4 |
+| `page` | `0` | 0부터 시작하는 페이지 번호 |
+| `size` | `20` | 1~100의 페이지 크기 |
+| `sort` | `lastChangedAt,desc` | 단일 변경 시각 정렬 |
 
 요청 예:
 
 ```http
-GET /api/v1/cases?caseStatus=IN_REVIEW&representativeRiskLevel=HIGH&page=0&size=20&sort=lastChangedAt,asc
+GET /api/v1/cases?caseStatus=IN_REVIEW&page=0&size=20&sort=lastChangedAt,asc
 ```
 
-시각 범위 끝값의 포함 여부, 복수 Enum 필터, 기본 정렬과 허용 정렬 필드는 사용자 결정 사항이다.
+모든 쿼리 파라미터는 최대 한 번만 허용한다. Enum은 정확한 대문자 단일 값이며
+`assigneeRef`는 trim하지 않는 exact·case-sensitive 값이다. 시간 범위는
+`[from,to)`이고 같은 시작·끝은 빈 범위이며, 시작이 끝보다 늦으면 `422`이다.
+형식·중복·미지원 값과 정렬 오류는 `400`이다.
 
 ### 5.3 목록 항목
 
@@ -239,14 +245,13 @@ GET /api/v1/cases?caseStatus=IN_REVIEW&representativeRiskLevel=HIGH&page=0&size=
 | `caseId` | 사건 업무 식별자 |
 | `caseStatus` | 현재 사건 상태 |
 | `finalDisposition` | 최종 판정. 조사 중에는 null 가능 |
-| `representativeRiskLevel` | 대표 위험 등급 후보 |
-| `representativeReasonCodes` | 대표 탐지 사유 코드의 제한된 목록 후보 |
-| `assigneeRef` | 담당자 참조값. 미배정이면 null 가능 |
+| `assigneeRef` | opaque 운영자 참조값. 미배정이면 null 가능 |
 | `relatedTransactionCount` | 연관 거래 수 |
 | `createdAt` | 사건 생성 시각 |
 | `lastChangedAt` | 사건 마지막 변경 시각 |
 
-전체 연관 거래, 조사 메모, 감사 로그와 AI 리포트 본문·상태는 목록에 포함하지 않는다.
+대표 거래·위험등급·사유, 전체 연관 거래, 조사 메모, 감사 로그와 AI 리포트는
+목록에 포함하지 않는다.
 
 ### 5.4 성공 응답 예시
 
@@ -259,14 +264,9 @@ Content-Type: application/json
 {
   "content": [
     {
-      "caseId": "case_demo_20260724_0031",
+      "caseId": "20000000-0000-4000-9000-000000000003",
       "caseStatus": "IN_REVIEW",
       "finalDisposition": null,
-      "representativeRiskLevel": "HIGH",
-      "representativeReasonCodes": [
-        "NEW_DEVICE_HIGH_AMOUNT",
-        "EXTERNAL_RISK_MATCH"
-      ],
       "assigneeRef": "analyst_ref_demo_07",
       "relatedTransactionCount": 3,
       "createdAt": "2026-07-24T01:15:33Z",
@@ -292,6 +292,7 @@ Content-Type: application/json
 | `200 OK` | 조회 성공. 결과가 없으면 빈 `content` 반환 |
 | `400 Bad Request` | Enum, 식별자, 시각, 페이지 또는 정렬 형식 오류 |
 | `422 Unprocessable Entity` | 시작 시각이 종료 시각보다 늦는 등 의미상 처리할 수 없는 필터 |
+| `503 Service Unavailable` | 명확한 조회 Timeout 또는 저장소 가용성 장애 |
 | `500 Internal Server Error` | 공개할 수 없는 예기치 않은 서버 오류 |
 
 ## 6. 사건 상세 조회
@@ -305,27 +306,24 @@ GET /api/v1/cases/{caseId}
 요청 예:
 
 ```http
-GET /api/v1/cases/case_demo_20260724_0031
+GET /api/v1/cases/20000000-0000-4000-9000-000000000003
 ```
 
 ### 6.2 응답 범위
 
-응답 후보는 다음을 포함한다.
+응답은 다음 저장값과 집계값만 포함한다.
 
 - `caseId`
 - `caseStatus`
 - `finalDisposition`
-- 대표 위험 등급과 대표 탐지 사유
-- 담당자 참조값
+- opaque 담당자 참조값
 - 생성·검토 시작·종료·마지막 변경 시각
 - `concurrencyVersion`
-- 대표 거래 요약
 - 연관 거래 수
-- 조사 메모 수
-- 최근 감사 이력 요약 후보
 - `traceId`
 
-전체 연관 거래, 전체 조사 메모, 전체 감사 로그와 AI 리포트는 포함하지 않는다. 각 전체 목록은 별도 API에서 조회한다.
+대표 거래·위험등급·사유, 조사 메모 수, 감사 요약, 전체 연관 거래와 AI 리포트는
+포함하지 않는다.
 
 ### 6.3 성공 응답 예시
 
@@ -337,53 +335,23 @@ Content-Type: application/json
 ```json
 {
   "case": {
-    "caseId": "case_demo_20260724_0031",
+    "caseId": "20000000-0000-4000-9000-000000000003",
     "caseStatus": "IN_REVIEW",
     "finalDisposition": null,
-    "representativeRiskLevel": "HIGH",
-    "representativeReasons": [
-      {
-        "reasonCode": "NEW_DEVICE_HIGH_AMOUNT",
-        "displayDescription": "신규 기기 등록 후 고객 기준선보다 큰 금액의 이체가 요청되었습니다."
-      },
-      {
-        "reasonCode": "EXTERNAL_RISK_MATCH",
-        "displayDescription": "비식별 대상 참조값에 외부 위험 신호가 확인되었습니다."
-      }
-    ],
     "assigneeRef": "analyst_ref_demo_07",
+    "relatedTransactionCount": 3,
     "createdAt": "2026-07-24T01:15:33Z",
     "reviewStartedAt": "2026-07-24T01:25:00Z",
     "closedAt": null,
     "lastChangedAt": "2026-07-24T02:05:10Z",
     "concurrencyVersion": 4
   },
-  "representativeTransaction": {
-    "transactionId": "91a2b3c4-d5e6-47f8-9a0b-1c2d3e4f5003",
-    "transactionType": "ACCOUNT_TRANSFER",
-    "amount": "1250000",
-    "currencyCode": "KRW",
-    "occurredAt": "2026-07-24T01:15:30Z",
-    "processingStatus": "ADDITIONAL_AUTH_REQUIRED",
-    "riskLevel": "HIGH",
-    "riskResponseOutcome": "ADDITIONAL_AUTH_REQUIRED",
-    "adoptedDetectionResultId": "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430101"
-  },
-  "relatedTransactionCount": 3,
-  "noteCount": 2,
-  "recentAuditSummary": {
-    "auditLogId": "8bf3c9a2-7d0e-4a51-9b36-1c2d3e4f5a60",
-    "action": "CASE_CREATED",
-    "actorType": "SYSTEM",
-    "actorId": "finguardops-backend",
-    "changedAt": "2026-07-24T02:05:10Z",
-    "reasonCode": "CASE_REQUIRED_BY_RISK_POLICY"
-  },
   "traceId": "trace_demo_case_detail_01"
 }
 ```
 
-대표 거래와 최근 감사 요약이 없을 때의 null 규칙, 대표 거래·대표 위험 등급의 선정 규칙과 최근 감사 요약 포함 여부는 사용자 결정 사항이다.
+nullable 필드는 JSON에 명시적으로 `null`을 반환한다. 내부 PK·FK와 내부 예외,
+고객·계좌·기기 원문, 내부 snapshot·Provider payload는 반환하지 않는다.
 
 ### 6.4 상태 코드
 
@@ -392,6 +360,7 @@ Content-Type: application/json
 | `200 OK` | 사건 상세 조회 성공 |
 | `400 Bad Request` | `caseId` 형식 오류 |
 | `404 Not Found` | 해당 사건이 없음 |
+| `503 Service Unavailable` | 명확한 조회 Timeout 또는 저장소 가용성 장애 |
 | `500 Internal Server Error` | 공개할 수 없는 예기치 않은 서버 오류 |
 
 ## 7. 사건 연관 거래 조회

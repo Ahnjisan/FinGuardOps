@@ -63,12 +63,12 @@ class AuditLogPersistenceIntegrationTest
     private Flyway flyway;
 
     @Test
-    void appliesFreshV1ThroughV9WithAuditSchemaAndAppendOnlyTrigger() {
-        assertThat(flyway.info().applied()).hasSize(9);
+    void appliesFreshV1ThroughV10WithAuditSchemaAndAppendOnlyTrigger() {
+        assertThat(flyway.info().applied()).hasSize(10);
         assertThat(flyway.info().current().getVersion().getVersion())
-                .isEqualTo("9");
+                .isEqualTo("10");
         assertThat(flyway.info().current().getDescription())
-                .isEqualTo("create idempotency recovery audit log");
+                .isEqualTo("create fraud case query index");
         assertThat(columns("audit_log")).containsExactlyInAnyOrder(
                 "id",
                 "audit_id",
