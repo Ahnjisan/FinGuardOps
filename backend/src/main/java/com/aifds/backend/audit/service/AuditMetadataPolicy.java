@@ -1,7 +1,9 @@
 package com.aifds.backend.audit.service;
 
 import com.aifds.backend.audit.validation.AuditJsonPayloadGuard;
+import com.aifds.backend.audit.entity.AuditReasonCode;
 import com.aifds.backend.detection.entity.RiskLevel;
+import com.aifds.backend.fraudcase.entity.FraudCaseFinalDisposition;
 import com.aifds.backend.fraudcase.entity.FraudCaseStatus;
 import com.aifds.backend.transaction.entity.RiskResponseOutcome;
 import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
@@ -53,6 +55,12 @@ public final class AuditMetadataPolicy {
                     metadata
             );
             case CASE_ASSIGNEE_CHANGED -> validateCaseAssigneeChanged(
+                    draft.reasonCode(),
+                    beforeValueSummary,
+                    afterValueSummary,
+                    metadata
+            );
+            case CASE_RESOLVED -> validateCaseResolved(
                     draft.reasonCode(),
                     beforeValueSummary,
                     afterValueSummary,
@@ -194,6 +202,49 @@ public final class AuditMetadataPolicy {
         if (!valid) {
             throw new IllegalArgumentException(
                     "case assignee snapshot does not match reasonCode"
+            );
+        }
+    }
+
+    private void validateCaseResolved(
+            AuditReasonCode reasonCode,
+            JsonNode before,
+            JsonNode after,
+            JsonNode metadata
+    ) {
+        requireExactFields(
+                before,
+                "beforeValueSummary",
+                Set.of("caseStatus", "assigneeRef")
+        );
+        requireExactFields(
+                after,
+                "afterValueSummary",
+                Set.of("caseStatus", "finalDisposition", "assigneeRef")
+        );
+        requireEnum(before, "caseStatus", FraudCaseStatus.class);
+        requireUuidV4(before, "assigneeRef");
+        requireEnum(after, "caseStatus", FraudCaseStatus.class);
+        requireEnum(
+                after,
+                "finalDisposition",
+                FraudCaseFinalDisposition.class
+        );
+        requireUuidV4(after, "assigneeRef");
+        requireEmptyMetadata(metadata);
+
+        boolean valid = reasonCode
+                == AuditReasonCode.CASE_RESOLUTION_COMPLETED
+                && "IN_REVIEW".equals(
+                before.get("caseStatus").textValue()
+        )
+                && "CLOSED".equals(after.get("caseStatus").textValue())
+                && before.get("assigneeRef").textValue().equals(
+                after.get("assigneeRef").textValue()
+        );
+        if (!valid) {
+            throw new IllegalArgumentException(
+                    "case resolution snapshot does not match reasonCode"
             );
         }
     }

@@ -2,12 +2,12 @@
 
 ## 1. 범위
 
-이 문서는 Issue #156의 append-only `AuditLog`와 Issue #209의 사건 workflow 감사
+이 문서는 Issue #156의 append-only `AuditLog`, Issue #209의 사건 workflow 감사와 Issue #211의 resolution 감사
 확장을 정의한다. Flyway V7은 테이블·Index·UPDATE/DELETE 차단 trigger를 추가하고,
-V11은 V1~V10을 수정하지 않고 action·reason·snapshot check만 확장한다.
+V11은 V1~V10을 수정하지 않고 workflow check를 확장하며 V12는 V1~V11을 수정하지 않고 resolution action·reason·snapshot check만 additive 확장한다.
 
 구현 범위는 typed 감사 INSERT, 내부 위험 대응 최종화 및 성공한 사건 조사
-상태·담당자 명령의 실제 통합까지다. 공개 조회 API, 실제 인증 사용자 연결과 실패·
+상태·담당자·종료 명령의 실제 통합까지다. 공개 조회 API, 실제 인증 사용자 연결과 실패·
 거부 요청 별도 감사는 포함하지 않는다.
 
 관련 논리·API 계약은 다음 문서를 함께 따른다.
@@ -64,6 +64,7 @@ UTC `Clock`을 한 번 호출하고 마이크로초로 정규화한다.
 | `TRANSACTION_STATUS_CHANGED` | `TRANSACTION_FINALIZED_BY_RISK_POLICY` | `FINANCIAL_TRANSACTION` | `targetId=transactionId`, `transactionId` |
 | `CASE_STATUS_CHANGED` | `CASE_REVIEW_STARTED`, `CASE_ADDITIONAL_INFORMATION_REQUESTED`, `CASE_REVIEW_RESUMED` | `FRAUD_CASE` | `targetId=caseId`, `caseId`, `transactionId=null` |
 | `CASE_ASSIGNEE_CHANGED` | `CASE_ASSIGNEE_ASSIGNED`, `CASE_ASSIGNEE_CHANGED`, `CASE_ASSIGNEE_RELEASED` | `FRAUD_CASE` | `targetId=caseId`, `caseId`, `transactionId=null` |
+| `CASE_RESOLVED` | `CASE_RESOLUTION_COMPLETED` | `FRAUD_CASE` | `targetId=caseId`, `caseId`, `transactionId=null` |
 
 `transaction_id`는 `financial_transaction(transaction_id)`, `case_id`는
 `fraud_case(case_id)`를 `ON DELETE RESTRICT`로 참조한다. 다형적인
@@ -92,6 +93,7 @@ copy한다. 저장 경계와 Draft·Entity accessor의 defensive copy 계약은 
 | `TRANSACTION_STATUS_CHANGED` | `processingStatus` | `processingStatus` | `sourceRiskLevel`, `detectionResultId`, `detectionResultVersion` |
 | `CASE_STATUS_CHANGED` | `caseStatus`, optional canonical UUID v4 `assigneeRef` | 동일 제한 필드 | 없음 (`{}`) |
 | `CASE_ASSIGNEE_CHANGED` | `caseStatus`, optional canonical UUID v4 `assigneeRef` | 동일 제한 필드 | 없음 (`{}`) |
+| `CASE_RESOLVED` | `caseStatus=IN_REVIEW`, canonical UUID v4 `assigneeRef` | `caseStatus=CLOSED`, 승인 `finalDisposition`, 동일 `assigneeRef` | 없음 (`{}`) |
 
 UUID는 canonical lowercase UUID v4, version은 양의 32-bit 정수, Enum은 현재 Java
 계약에 존재하는 값만 허용한다. 자유 텍스트 reason과 임의 metadata를 저장하지
@@ -132,10 +134,12 @@ rollback한다.
 기존 활성 사건 재사용은 사건 또는 연결의 새 변경이 아니므로 사건 감사를 중복
 append하지 않는다.
 
-사건 workflow는 성공한 명령마다 정확히 1건만 append한다. 사건 flush와 감사
+사건 workflow는 성공한 명령마다 정확히 1건만 append한다. resolution은 성공한
+종료에만 `SYSTEM/finguardops-backend` actor로 정확히 1건을 append한다. 사건 flush와 감사
 append·flush는 같은 기본 `REQUIRED` 트랜잭션에 참여하며 optimistic conflict 또는
 감사 저장 실패 시 모두 rollback한다. 상태·담당자 snapshot의 reasonCode 조합은
-Java 정책과 V11 check에서 함께 제한한다.
+Java 정책과 V11/V12 check에서 함께 제한한다. stale·CLOSED·금지 상태·validation
+실패에는 감사를 만들지 않는다.
 
 ## 7. append-only 보장과 한계
 
@@ -174,7 +178,7 @@ deduplication key와 action 단독 Index는 추가하지 않는다. 후속 호�
 - 거부 감사와 별도 commit 경계
 - 공개 AuditLog 조회 API
 - 인증·인가 기반 USER actor
-- 사건 메모·최종 판정 감사
+- 사건 메모 감사
 - 실패·거부·stale 사건 요청 별도 감사
 - deduplication key
 - runtime DB role 분리

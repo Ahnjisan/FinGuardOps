@@ -4,6 +4,8 @@ import com.aifds.backend.audit.entity.AuditReasonCode;
 import com.aifds.backend.fraudcase.command.FraudCaseWorkflowCommand;
 import com.aifds.backend.fraudcase.dto.FraudCaseAssigneeChangeRequest;
 import com.aifds.backend.fraudcase.dto.FraudCaseStatusChangeRequest;
+import com.aifds.backend.fraudcase.dto.FraudCaseResolutionRequest;
+import com.aifds.backend.fraudcase.entity.FraudCaseFinalDisposition;
 import com.aifds.backend.fraudcase.entity.FraudCaseStatus;
 import org.springframework.stereotype.Component;
 
@@ -33,6 +35,10 @@ public class FraudCaseWorkflowValidator {
             "REASON_CODE_MISMATCH";
     public static final String ASSIGNEE_NOT_ALLOWED =
             "ASSIGNEE_NOT_ALLOWED";
+    public static final String FINAL_DISPOSITION_REQUIRED =
+            "FINAL_DISPOSITION_REQUIRED";
+    public static final String UNSUPPORTED_FINAL_DISPOSITION =
+            "UNSUPPORTED_FINAL_DISPOSITION";
 
     private static final Pattern CANONICAL_UUID_V4 = Pattern.compile(
             "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}"
@@ -111,6 +117,73 @@ public class FraudCaseWorkflowValidator {
                 parseReasonCode(request.reasonCode()),
                 request.expectedVersion()
         );
+    }
+
+    public FraudCaseWorkflowCommand.Resolution validateResolution(
+            String rawCaseId,
+            FraudCaseResolutionRequest request
+    ) {
+        UUID caseId = parseUuid("caseId", rawCaseId);
+        if (request == null) {
+            throw format(
+                    "$", REQUEST_REQUIRED, "Case resolution request is required"
+            );
+        }
+        if (request.finalDisposition() == null) {
+            throw domain(
+                    "finalDisposition",
+                    FINAL_DISPOSITION_REQUIRED,
+                    "finalDisposition is required"
+            );
+        }
+        require(request.reasonCode(), "reasonCode");
+        require(request.expectedVersion(), "expectedVersion");
+        if (request.expectedVersion() < 0) {
+            throw format(
+                    "expectedVersion",
+                    INVALID_EXPECTED_VERSION,
+                    "expectedVersion must be zero or greater"
+            );
+        }
+        return new FraudCaseWorkflowCommand.Resolution(
+                caseId,
+                request.finalDisposition(),
+                request.reasonCode(),
+                request.expectedVersion()
+        );
+    }
+
+    public FraudCaseFinalDisposition parseResolutionDisposition(String value) {
+        try {
+            return FraudCaseFinalDisposition.valueOf(value);
+        } catch (IllegalArgumentException exception) {
+            throw domain(
+                    "finalDisposition",
+                    UNSUPPORTED_FINAL_DISPOSITION,
+                    "finalDisposition is not supported"
+            );
+        }
+    }
+
+    public AuditReasonCode parseResolutionReason(String value) {
+        AuditReasonCode reasonCode;
+        try {
+            reasonCode = AuditReasonCode.valueOf(value);
+        } catch (IllegalArgumentException exception) {
+            throw domain(
+                    "reasonCode",
+                    UNSUPPORTED_REASON_CODE,
+                    "reasonCode is not supported"
+            );
+        }
+        if (reasonCode != AuditReasonCode.CASE_RESOLUTION_COMPLETED) {
+            throw domain(
+                    "reasonCode",
+                    REASON_CODE_MISMATCH,
+                    "reasonCode does not match case resolution"
+            );
+        }
+        return reasonCode;
     }
 
     public void requireReason(

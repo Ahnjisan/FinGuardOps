@@ -10,6 +10,7 @@ public class FraudCaseWorkflowException extends RuntimeException {
         CASE_ALREADY_CLOSED,
         CONCURRENT_MODIFICATION,
         ASSIGNEE_REQUIRED,
+        INCONSISTENT_CASE_DATA,
         DEPENDENCY_TIMEOUT,
         DEPENDENCY_UNAVAILABLE
     }

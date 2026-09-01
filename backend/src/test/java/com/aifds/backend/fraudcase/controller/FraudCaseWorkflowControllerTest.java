@@ -3,6 +3,7 @@ package com.aifds.backend.fraudcase.controller;
 import com.aifds.backend.common.error.GlobalExceptionHandler;
 import com.aifds.backend.common.trace.TraceIdFilter;
 import com.aifds.backend.fraudcase.dto.FraudCaseMutationResponse;
+import com.aifds.backend.fraudcase.entity.FraudCaseFinalDisposition;
 import com.aifds.backend.fraudcase.entity.FraudCaseStatus;
 import com.aifds.backend.fraudcase.exception.FraudCaseNotFoundException;
 import com.aifds.backend.fraudcase.exception.FraudCaseWorkflowException;
@@ -28,6 +29,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -49,6 +51,8 @@ class FraudCaseWorkflowControllerTest {
             "/api/v1/cases/" + CASE_ID + "/status";
     private static final String ASSIGNEE_PATH =
             "/api/v1/cases/" + CASE_ID + "/assignee";
+    private static final String RESOLUTION_PATH =
+            "/api/v1/cases/" + CASE_ID + "/resolution";
 
     @Autowired
     private MockMvc mockMvc;
@@ -360,6 +364,162 @@ class FraudCaseWorkflowControllerTest {
         );
     }
 
+    @Test
+    void returnsExactResolutionContractAndMatchingTraceId() throws Exception {
+        when(service.resolve(any(), eq(TRACE_ID)))
+                .thenReturn(resolutionResponse());
+
+        String body = mockMvc.perform(post(RESOLUTION_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .header(TraceIdFilter.TRACE_ID_HEADER, TRACE_ID)
+                        .content(validResolutionBody()))
+                .andExpect(status().isOk())
+                .andExpect(header().string(
+                        TraceIdFilter.TRACE_ID_HEADER,
+                        TRACE_ID
+                ))
+                .andExpect(jsonPath("$.caseId").value(CASE_ID))
+                .andExpect(jsonPath("$.caseStatus").value("CLOSED"))
+                .andExpect(jsonPath("$.finalDisposition")
+                        .value("CONFIRMED_FRAUD"))
+                .andExpect(jsonPath("$.assigneeRef").value(ASSIGNEE))
+                .andExpect(jsonPath("$.reviewStartedAt")
+                        .value("2026-09-01T00:05:00.123456Z"))
+                .andExpect(jsonPath("$.closedAt")
+                        .value("2026-09-01T00:10:00.123456Z"))
+                .andExpect(jsonPath("$.lastChangedAt")
+                        .value("2026-09-01T00:10:00.123456Z"))
+                .andExpect(jsonPath("$.concurrencyVersion").value(7))
+                .andExpect(jsonPath("$.traceId").value(TRACE_ID))
+                .andReturn().getResponse().getContentAsString();
+
+        assertThat(body).doesNotContain(
+                "id\"", "transactionId", "credential", "stackTrace"
+        );
+    }
+
+    @Test
+    void resolutionReturnsDedicated422ForMissingOrNullDisposition()
+            throws Exception {
+        for (String body : new String[]{
+                "{\"reasonCode\":\"CASE_RESOLUTION_COMPLETED\","
+                        + "\"expectedVersion\":6}",
+                "{\"finalDisposition\":null,"
+                        + "\"reasonCode\":\"CASE_RESOLUTION_COMPLETED\","
+                        + "\"expectedVersion\":6}"
+        }) {
+            mockMvc.perform(post(RESOLUTION_PATH)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .header(TraceIdFilter.TRACE_ID_HEADER, TRACE_ID)
+                            .content(body))
+                    .andExpect(status().isUnprocessableEntity())
+                    .andExpect(jsonPath("$.code")
+                            .value("FINAL_DISPOSITION_REQUIRED"))
+                    .andExpect(jsonPath("$.fieldErrors[0].field")
+                            .value("finalDisposition"))
+                    .andExpect(jsonPath("$.traceId").value(TRACE_ID));
+        }
+    }
+
+    @Test
+    void resolutionRejectsStructuralTypePathAndCoercionMatrixSafely()
+            throws Exception {
+        String unsafe = "credential-secret";
+        for (String body : new String[]{
+                "null",
+                "[]",
+                "1",
+                "{\"unknown\":\"" + unsafe + "\"}",
+                "{\"finalDisposition\":\"NORMAL\","
+                        + "\"finalDisposition\":\"FALSE_POSITIVE\"}",
+                "{\"finalDisposition\":1}",
+                "{\"reasonCode\":true}",
+                "{\"expectedVersion\":\"6\"}",
+                "{\"expectedVersion\":6.5}",
+                "{\"expectedVersion\":true}",
+                "{\"expectedVersion\":9223372036854775808}",
+                validResolutionBody() + " {}"
+        }) {
+            String response = mockMvc.perform(post(RESOLUTION_PATH)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .header(TraceIdFilter.TRACE_ID_HEADER, TRACE_ID)
+                            .content(body))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                    .andExpect(jsonPath("$.traceId").value(TRACE_ID))
+                    .andReturn().getResponse().getContentAsString();
+            assertThat(response).doesNotContain(
+                    unsafe,
+                    "JsonMappingException",
+                    "InputCoercionException",
+                    "stackTrace"
+            );
+        }
+
+        mockMvc.perform(post(
+                        "/api/v1/cases/1a000000-0000-1000-9000-000000000001"
+                                + "/resolution"
+                ).contentType(MediaType.APPLICATION_JSON)
+                        .header(TraceIdFilter.TRACE_ID_HEADER, TRACE_ID)
+                        .content(validResolutionBody()))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"));
+    }
+
+    @Test
+    void resolutionMaps404Conflict422DependencyAndInternalErrorsSafely()
+            throws Exception {
+        assertResolutionFailure(
+                new FraudCaseNotFoundException(),
+                404,
+                "RESOURCE_NOT_FOUND"
+        );
+        for (FraudCaseWorkflowException.Reason reason
+                : new FraudCaseWorkflowException.Reason[]{
+                FraudCaseWorkflowException.Reason.CONCURRENT_MODIFICATION,
+                FraudCaseWorkflowException.Reason.CASE_ALREADY_CLOSED,
+                FraudCaseWorkflowException.Reason.CASE_STATUS_CONFLICT
+        }) {
+            assertResolutionFailure(
+                    new FraudCaseWorkflowException(reason),
+                    409,
+                    reason.name()
+            );
+        }
+        assertResolutionFailure(
+                new FraudCaseValidationException(
+                        FraudCaseValidationType.DOMAIN,
+                        "reasonCode",
+                        "REASON_CODE_MISMATCH",
+                        "reasonCode does not match case resolution"
+                ),
+                422,
+                "VALIDATION_ERROR"
+        );
+        assertResolutionFailure(
+                new FraudCaseWorkflowException(
+                        FraudCaseWorkflowException.Reason.DEPENDENCY_TIMEOUT
+                ),
+                503,
+                "DEPENDENCY_TIMEOUT"
+        );
+        assertResolutionFailure(
+                new FraudCaseWorkflowException(
+                        FraudCaseWorkflowException.Reason
+                                .DEPENDENCY_UNAVAILABLE
+                ),
+                503,
+                "DEPENDENCY_UNAVAILABLE"
+        );
+        assertResolutionFailure(
+                new IllegalStateException(
+                        "SELECT password FROM credential"
+                ),
+                500,
+                "INTERNAL_ERROR"
+        );
+    }
+
     private void assertWorkflowError(
             FraudCaseWorkflowException.Reason reason,
             int status,
@@ -419,6 +579,36 @@ class FraudCaseWorkflowControllerTest {
                 """.formatted(ASSIGNEE);
     }
 
+    private String validResolutionBody() {
+        return """
+                {
+                  "finalDisposition": "CONFIRMED_FRAUD",
+                  "reasonCode": "CASE_RESOLUTION_COMPLETED",
+                  "expectedVersion": 6
+                }
+                """;
+    }
+
+    private void assertResolutionFailure(
+            RuntimeException failure,
+            int expectedStatus,
+            String expectedCode
+    ) throws Exception {
+        reset(service);
+        when(service.resolve(any(), any())).thenThrow(failure);
+        String body = mockMvc.perform(post(RESOLUTION_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .header(TraceIdFilter.TRACE_ID_HEADER, TRACE_ID)
+                        .content(validResolutionBody()))
+                .andExpect(status().is(expectedStatus))
+                .andExpect(jsonPath("$.code").value(expectedCode))
+                .andExpect(jsonPath("$.traceId").value(TRACE_ID))
+                .andReturn().getResponse().getContentAsString();
+        assertThat(body).doesNotContain(
+                "SELECT", "password", "credential", "stackTrace"
+        );
+    }
+
     private FraudCaseMutationResponse response() {
         Instant now = Instant.parse("2026-09-01T00:10:00.123456Z");
         return new FraudCaseMutationResponse(
@@ -430,6 +620,24 @@ class FraudCaseWorkflowControllerTest {
                 null,
                 now,
                 1L,
+                TRACE_ID
+        );
+    }
+
+    private FraudCaseMutationResponse resolutionResponse() {
+        Instant reviewStartedAt =
+                Instant.parse("2026-09-01T00:05:00.123456Z");
+        Instant resolutionTime =
+                Instant.parse("2026-09-01T00:10:00.123456Z");
+        return new FraudCaseMutationResponse(
+                UUID.fromString(CASE_ID),
+                FraudCaseStatus.CLOSED,
+                FraudCaseFinalDisposition.CONFIRMED_FRAUD,
+                ASSIGNEE,
+                reviewStartedAt,
+                resolutionTime,
+                resolutionTime,
+                7L,
                 TRACE_ID
         );
     }

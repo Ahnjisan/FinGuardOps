@@ -191,5 +191,104 @@ class FraudCaseTest {
                 .isInstanceOf(IllegalStateException.class);
         assertThatThrownBy(() -> closed.changeAssignee(null, changedAt))
                 .isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> closed.resolve(
+                FraudCaseFinalDisposition.CONFIRMED_FRAUD,
+                changedAt
+        )).isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void resolvesInReviewForEveryDispositionWithOneExactTimestamp() {
+        String assignee = "10000000-0000-4000-9000-000000000001";
+        Instant startedAt = CREATED_AT.plusSeconds(1);
+        Instant resolvedAt = CREATED_AT.plusSeconds(2);
+
+        for (FraudCaseFinalDisposition disposition
+                : FraudCaseFinalDisposition.values()) {
+            FraudCase fraudCase = FraudCase.open(
+                    UUID.randomUUID(),
+                    CREATED_AT
+            );
+            fraudCase.startReview(assignee, startedAt);
+            fraudCase.resolve(disposition, resolvedAt);
+
+            assertThat(fraudCase.getCaseStatus())
+                    .isEqualTo(FraudCaseStatus.CLOSED);
+            assertThat(fraudCase.getFinalDisposition()).isEqualTo(disposition);
+            assertThat(fraudCase.getAssigneeRef()).isEqualTo(assignee);
+            assertThat(fraudCase.getReviewStartedAt()).isEqualTo(startedAt);
+            assertThat(fraudCase.getClosedAt()).isEqualTo(resolvedAt);
+            assertThat(fraudCase.getLastChangedAt()).isEqualTo(resolvedAt);
+            assertThat(fraudCase.getCreatedAt()).isEqualTo(CREATED_AT);
+        }
+    }
+
+    @Test
+    void rejectsResolutionFromEveryStateExceptInReview() {
+        FraudCase open = FraudCase.open(UUID.randomUUID(), CREATED_AT);
+        assertThatThrownBy(() -> open.resolve(
+                FraudCaseFinalDisposition.NORMAL,
+                CREATED_AT.plusSeconds(1)
+        )).isInstanceOf(IllegalStateException.class);
+
+        FraudCase additional = FraudCase.open(UUID.randomUUID(), CREATED_AT);
+        additional.startReview(
+                "10000000-0000-4000-9000-000000000001",
+                CREATED_AT.plusSeconds(1)
+        );
+        additional.requestAdditionalInformation(CREATED_AT.plusSeconds(2));
+        assertThatThrownBy(() -> additional.resolve(
+                FraudCaseFinalDisposition.FALSE_POSITIVE,
+                CREATED_AT.plusSeconds(3)
+        )).isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void abnormalInReviewResolutionFailsBeforeChangingAnyField() {
+        for (String missingField : new String[]{
+                "assigneeRef", "reviewStartedAt"
+        }) {
+            FraudCase fraudCase = FraudCase.open(
+                    UUID.randomUUID(),
+                    CREATED_AT
+            );
+            fraudCase.startReview(
+                    "10000000-0000-4000-9000-000000000001",
+                    CREATED_AT.plusSeconds(1)
+            );
+            ReflectionTestUtils.setField(fraudCase, missingField, null);
+
+            assertThatThrownBy(() -> fraudCase.resolve(
+                    FraudCaseFinalDisposition.CONFIRMED_FRAUD,
+                    CREATED_AT.plusSeconds(2)
+            )).isInstanceOf(IllegalStateException.class);
+            assertThat(fraudCase.getCaseStatus())
+                    .isEqualTo(FraudCaseStatus.IN_REVIEW);
+            assertThat(fraudCase.getFinalDisposition()).isNull();
+            assertThat(fraudCase.getClosedAt()).isNull();
+            assertThat(fraudCase.getLastChangedAt())
+                    .isEqualTo(CREATED_AT.plusSeconds(1));
+            assertThat(fraudCase.getConcurrencyVersion()).isZero();
+        }
+    }
+
+    @Test
+    void invalidResolutionTimeDoesNotPartiallySetDisposition() {
+        FraudCase fraudCase = FraudCase.open(UUID.randomUUID(), CREATED_AT);
+        fraudCase.startReview(
+                "10000000-0000-4000-9000-000000000001",
+                CREATED_AT.plusSeconds(2)
+        );
+
+        assertThatThrownBy(() -> fraudCase.resolve(
+                FraudCaseFinalDisposition.CONFIRMED_FRAUD,
+                CREATED_AT.plusSeconds(1)
+        )).isInstanceOf(IllegalArgumentException.class);
+        assertThat(fraudCase.getCaseStatus())
+                .isEqualTo(FraudCaseStatus.IN_REVIEW);
+        assertThat(fraudCase.getFinalDisposition()).isNull();
+        assertThat(fraudCase.getClosedAt()).isNull();
+        assertThat(fraudCase.getLastChangedAt())
+                .isEqualTo(CREATED_AT.plusSeconds(2));
     }
 }

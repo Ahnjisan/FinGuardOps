@@ -23,6 +23,9 @@ import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException
 
 class AuditMetadataPolicyTest {
 
+    private static final String ASSIGNEE_REF =
+            "10000000-0000-4000-9000-000000000001";
+
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final AuditMetadataPolicy policy = new AuditMetadataPolicy();
 
@@ -79,6 +82,17 @@ class AuditMetadataPolicyTest {
                         "ADDITIONAL_INFORMATION_REQUIRED",
                         UUID.randomUUID().toString()
                 ),
+                emptyObject()
+        ));
+        policy.validate(draft(
+                AuditAction.CASE_RESOLVED,
+                AuditReasonCode.CASE_RESOLUTION_COMPLETED,
+                AuditTargetType.FRAUD_CASE,
+                caseId,
+                null,
+                caseId,
+                caseSnapshot("IN_REVIEW", ASSIGNEE_REF),
+                resolutionSnapshot("CONFIRMED_FRAUD", ASSIGNEE_REF),
                 emptyObject()
         ));
         policy.validate(draft(
@@ -509,6 +523,17 @@ class AuditMetadataPolicyTest {
                     ),
                     emptyObject()
             );
+            case CASE_RESOLVED -> draft(
+                    action,
+                    AuditReasonCode.CASE_RESOLUTION_COMPLETED,
+                    AuditTargetType.FRAUD_CASE,
+                    caseId,
+                    null,
+                    caseId,
+                    caseSnapshot("IN_REVIEW", ASSIGNEE_REF),
+                    resolutionSnapshot("CONFIRMED_FRAUD", ASSIGNEE_REF),
+                    emptyObject()
+            );
             case TRANSACTION_RISK_RESPONSE_APPLIED -> draft(
                     action,
                     AuditReasonCode.RISK_RESPONSE_DECIDED_BY_POLICY,
@@ -568,6 +593,10 @@ class AuditMetadataPolicyTest {
                     "ADDITIONAL_INFORMATION_REQUIRED",
                     UUID.randomUUID().toString()
             );
+            case CASE_RESOLVED -> resolutionSnapshot(
+                    "CONFIRMED_FRAUD",
+                    ASSIGNEE_REF
+            );
             case TRANSACTION_RISK_RESPONSE_APPLIED ->
                     object("riskResponseOutcome", "HELD");
             case TRANSACTION_STATUS_CHANGED ->
@@ -583,6 +612,10 @@ class AuditMetadataPolicyTest {
             case CASE_ASSIGNEE_CHANGED -> object(
                     "caseStatus",
                     "ADDITIONAL_INFORMATION_REQUIRED"
+            );
+            case CASE_RESOLVED -> resolutionSnapshot(
+                    "UNKNOWN",
+                    ASSIGNEE_REF
             );
             case TRANSACTION_RISK_RESPONSE_APPLIED ->
                     object("riskResponseOutcome", "UNKNOWN");
@@ -615,6 +648,15 @@ class AuditMetadataPolicyTest {
 
     private ObjectNode caseSnapshot(String status, String assigneeRef) {
         return object("caseStatus", status).put("assigneeRef", assigneeRef);
+    }
+
+    private ObjectNode resolutionSnapshot(
+            String disposition,
+            String assigneeRef
+    ) {
+        return object("caseStatus", "CLOSED")
+                .put("finalDisposition", disposition)
+                .put("assigneeRef", assigneeRef);
     }
 
     private int bytes(JsonNode value) {

@@ -13,7 +13,8 @@
 이 문서는 사건 생성 이후 담당자 검토, 추가 정보 요청, 조사 종료와 최종 판정의 관계를 다룬다.
 
 Issue #154에서 사건 영속 기반을 구현했고 Issue #209에서 조사 상태·담당자 변경
-API, 낙관적 동시성 및 V11 감사 확장을 구현했다. 구체적인 물리 계약은
+API, 낙관적 동시성 및 V11 감사 확장을 구현했다. Issue #211은 `IN_REVIEW`
+사건의 최종 판정·종료와 V12 감사를 구현했다. 구체적인 물리 계약은
 [`fraud-case-schema.md`](../04-database/fraud-case-schema.md)를 따른다.
 
 다음 항목은 여전히 확정하거나 구현하지 않는다.
@@ -166,15 +167,15 @@ CLOSED → IN_REVIEW
 
 ### `IN_REVIEW` → `CLOSED`
 
-- 전이 조건: 조사 결과가 확정되고 `NORMAL`, `FALSE_POSITIVE`, `CONFIRMED_FRAUD` 중 하나의 `finalDisposition`과 종료 사유가 제공된다.
+- 전이 조건: 조사 결과가 확정되고 `NORMAL`, `FALSE_POSITIVE`, `CONFIRMED_FRAUD` 중 하나의 `finalDisposition`과 `CASE_RESOLUTION_COMPLETED` 사유 코드가 제공된다.
 - 변경 주체: FDS 분석 담당자
-- 생성되는 결과: 필수 최종 판정, `CLOSED`, `closedAt`, `lastChangedAt`, `concurrencyVersion`과 변경 사유
+- 생성되는 결과: 필수 최종 판정, `CLOSED`, 같은 마이크로초 시각의 `closedAt`·`lastChangedAt`, 실제 증가한 `concurrencyVersion`과 구조화된 감사
 - 최종 판정: 필수
 - 실패 시 처리: 상태와 판정 중 일부만 반영되지 않도록 정합성을 유지한다.
-- 재시도 가능 여부: 가능. 동일 종료 요청은 같은 결과를 유지해야 한다.
+- 재시도 가능 여부: 최신 사건을 다시 조회한 뒤 새 `expectedVersion`으로 가능. 기존 응답을 replay하지 않는다.
 - 감사 로그 여부: 필요
 
-종료는 일반 상태 변경 API가 아니라 사건 resolution API에서만 수행하며, 최종 판정 설정과 `CLOSED` 전이를 하나의 업무 트랜잭션으로 처리한다.
+종료는 일반 상태 변경 API가 아니라 `POST /api/v1/cases/{caseId}/resolution`에서만 수행하며, 최종 판정 설정과 `CLOSED` 전이를 하나의 REQUIRED 트랜잭션으로 처리한다. `Idempotency-Key`, 자유 텍스트 사유, row lock과 자동 retry는 사용하지 않는다.
 
 ## 8. 금지 전이
 
@@ -200,7 +201,7 @@ CLOSED → IN_REVIEW
 
 - 모든 전이는 현재 `caseStatus`와 요청한 다음 상태의 조합을 검증해야 한다. 같은 상태 요청은 무변경 성공으로 처리하지 않고 `409 Conflict`와 `CASE_STATUS_CONFLICT`로 거부한다.
 - 사건 종료 시 현재 상태가 `IN_REVIEW`인지 확인하고 `caseStatus`, 필수 `finalDisposition`과 `closedAt`의 정합성을 함께 검증해야 한다.
-- 상태 변경 사유를 기록해야 하며 추가 정보 요청과 종료에는 구체적인 조사 근거가 필요하다.
+- 상태 변경은 승인된 사유 코드를 기록한다. 종료는 자유 텍스트 조사 근거를 받지 않고 `CASE_RESOLUTION_COMPLETED`만 허용한다.
 - 담당자 권한과 사건 접근 권한을 검증해야 한다.
 - `IN_REVIEW`에는 담당자가 필요하다. `OPEN`에서 최초 진입할 때 담당자를 함께 지정하고 추가 정보 상태에서 복귀할 때는 기존 담당자를 확인한다.
 - 상태와 판정의 변경은 관련 사건과 거래 식별자를 유지해야 한다.
@@ -258,14 +259,13 @@ CLOSED → IN_REVIEW
 - 탐지 근거, 행동 타임라인과 담당자 확인 항목을 리포트로 요약할 수 있다.
 - 위험 점수, 최종 판정과 사건 상태를 결정하거나 확정하지 않는다.
 
-## 11. 멱등성 고려사항
+## 11. 멱등성과 재요청
 
 - 동일 위험 거래의 재처리나 중복 이벤트가 같은 사건을 중복 생성하지 않아야 한다.
 - 사건 생성 요청이 재시도되면 기존 사건 생성 또는 연결 결과를 유지해야 한다.
 - 같은 상태나 같은 담당자 요청은 충돌로 거부하고 사건·감사 이력을 변경하지 않는다.
-- 동일 사건에 같은 최종 판정 요청이 반복되면 같은 업무 결과를 유지해야 한다.
-- 멱등 요청과 실제 재검토·판정 변경을 구분할 수 있어야 한다.
-- 멱등성 키 구조, 저장 방식과 보존 기간은 후속 설계에서 확정한다.
+- resolution API는 `Idempotency-Key`를 요구하거나 replay하지 않는다.
+- 종료 성공 후 같은·다른 판정 재요청은 모두 `CASE_ALREADY_CLOSED`이며, stale version이면 `CONCURRENT_MODIFICATION`이 먼저다.
 - 여러 연관 거래를 기존 사건에 연결할지 새 사건을 만들지에 대한 병합·분리 기준은 `TBD`이다.
 
 ## 12. 동시성 고려사항
@@ -281,6 +281,7 @@ CLOSED → IN_REVIEW
 - 사건 생성·첫 연결은 거래 → 사건 → 연결 순서의 비관적 잠금을 사용한다. 조사
   상태·담당자 변경은 body `expectedVersion`과 JPA `@Version` 낙관적 잠금을
   사용하고 row lock과 자동 retry는 추가하지 않는다.
+- 사건 resolution도 같은 `expectedVersion`·JPA `@Version` 경계를 사용한다.
 - 사건 조회와 version 비교 후 업무 규칙을 검증한다. 명시적 flush에서 version
   증가를 확정하고 같은 REQUIRED 트랜잭션에서 AuditLog를 append·flush한다.
 - 동일 version 동시 요청은 정확히 하나만 성공하며 충돌 또는 감사 실패는 사건과
@@ -330,7 +331,8 @@ CLOSED → IN_REVIEW
 수정·삭제하지 않는다. V7 append-only AuditLog 물리 기반과 위험 대응에 따른 신규
 사건·첫 연결 감사 통합은 구현되었다. 기존 활성 사건 재사용에는 사건 변경이 없으므로
 사건 감사를 중복 기록하지 않는다. 성공한 조사 상태·담당자 명령은 V11의 구조화
-action/reason으로 정확히 1건 기록한다. 실패·거부·stale 요청의 별도 감사, 감사 조회
+action/reason으로 정확히 1건 기록하고 성공한 종료는 V12의
+`CASE_RESOLVED/CASE_RESOLUTION_COMPLETED`를 정확히 1건 기록한다. 실패·거부·stale 요청의 별도 감사, 감사 조회
 API, 보존 기간과 접근 범위는 후속 범위이다.
 
 ## 15. 사용자 결정 필요 항목
@@ -360,5 +362,5 @@ API, 보존 기간과 접근 범위는 후속 범위이다.
 
 이 문서는 사건 상태와 최종 판정 계약의 기준이다. Issue #154에서 Java Enum,
 사건·첫 거래 연결 Entity와 V6 물리 스키마를 구현했고, Issue #156에서 V7
-append-only AuditLog 물리 기반을 구현했다. Issue #209는 종료·최종 판정을 제외한
-상태·담당자 mutation과 V11 감사 통합을 구현했다.
+append-only AuditLog 물리 기반을 구현했다. Issue #209는 상태·담당자 mutation과
+V11 감사 통합을 구현했고 Issue #211은 사건 resolution과 V12 감사를 구현했다.

@@ -257,6 +257,11 @@ class GlobalExceptionHandlerTest {
                 GlobalExceptionHandler.ASSIGNEE_REQUIRED
         );
         assertWorkflow(
+                FraudCaseWorkflowException.Reason.INCONSISTENT_CASE_DATA,
+                HttpStatus.INTERNAL_SERVER_ERROR,
+                GlobalExceptionHandler.INTERNAL_ERROR
+        );
+        assertWorkflow(
                 FraudCaseWorkflowException.Reason.DEPENDENCY_TIMEOUT,
                 HttpStatus.SERVICE_UNAVAILABLE,
                 GlobalExceptionHandler.DEPENDENCY_TIMEOUT
@@ -292,6 +297,31 @@ class GlobalExceptionHandlerTest {
                 .isEqualTo(
                         GlobalExceptionHandler.INVALID_ASSIGNEE_REF_MESSAGE
                 );
+        assertThat(response.getBody().traceId()).isEqualTo(TRACE_ID);
+    }
+
+    @Test
+    void mapsMissingFinalDispositionToDedicatedSafe422() {
+        FraudCaseValidationException exception =
+                new FraudCaseValidationException(
+                        FraudCaseValidationType.DOMAIN,
+                        "finalDisposition",
+                        "FINAL_DISPOSITION_REQUIRED",
+                        "finalDisposition is required"
+                );
+
+        ResponseEntity<ApiErrorResponse> response =
+                handler.handleFraudCaseValidation(
+                        exception,
+                        requestWithTraceId()
+                );
+
+        assertThat(response.getStatusCode())
+                .isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+        assertThat(response.getBody().code())
+                .isEqualTo(GlobalExceptionHandler.FINAL_DISPOSITION_REQUIRED);
+        assertThat(response.getBody().message())
+                .doesNotContain("finalDisposition", "credential", "SELECT");
         assertThat(response.getBody().traceId()).isEqualTo(TRACE_ID);
     }
 

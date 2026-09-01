@@ -40,7 +40,7 @@
   [`../04-database/fraud-case-schema.md`](../04-database/fraud-case-schema.md)를
   따른다.
 
-## 4. 사건 상태·담당자 변경
+## 4. 사건 상태·담당자 변경과 종료
 
 - FDS 분석 담당자는 승인된 세 조사 상태 전이와 상태별 담당자 배정·변경·해제만
   요청할 수 있다.
@@ -51,7 +51,18 @@
 - 사건을 조회한 `expectedVersion`을 현재 `concurrencyVersion`과 비교하고 실제 JPA
   version 증가와 성공 감사 1건을 같은 REQUIRED 트랜잭션에서 확정해야 한다.
 - stale·동일 값·금지 전이·종료 사건 요청은 사건과 감사를 변경하지 않아야 한다.
-- 종료·최종 판정, 인증·인가와 거부 요청 별도 감사는 이 구현 범위가 아니다.
+- `POST /api/v1/cases/{caseId}/resolution`은 담당자와 최초 조사 시각이 있는
+  `IN_REVIEW` 사건만 `NORMAL`, `FALSE_POSITIVE`, `CONFIRMED_FRAUD` 중 하나로
+  판정하고 종료해야 한다.
+- resolution은 자유 텍스트 reason과 `Idempotency-Key`를 사용하지 않고
+  `reasonCode=CASE_RESOLUTION_COMPLETED`, 필수 `expectedVersion`을 사용한다.
+- 최종 판정, `CLOSED`, 하나의 마이크로초 정밀도 종료·변경 시각, 실제 JPA version
+  증가와 성공 AuditLog 1건을 같은 REQUIRED 트랜잭션에서 확정해야 한다.
+- stale version은 종료 상태·동일 판정보다 먼저 거부하고, 이미 종료된 사건의
+  같은·다른 판정 재요청은 모두 거부해야 한다.
+- 종료는 Transaction·RiskLevel·RiskResponseOutcome·CaseTransaction과 AI 처리를
+  변경하지 않아야 한다.
+- 인증·인가, RBAC, 실제 USER actor, 조사 메모와 거부 요청 별도 감사는 미구현이다.
 - 구체적인 API와 오류 계약은
   [`../03-api/case-audit-api.md`](../03-api/case-audit-api.md), 상태 matrix는
   [`case-state-transition.md`](./case-state-transition.md)를 따른다.
