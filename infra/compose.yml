@@ -153,6 +153,66 @@ services:
       - observability
       - prometheus-ui
 
+  alertmanager:
+    image: quay.io/prometheus/alertmanager:v0.34.0@sha256:690c7b525f4367aa91f73e2f91c632206d32e97c6384bdbf2fb7a861b420340d
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --data.retention=24h
+      - --web.listen-address=0.0.0.0:9093
+      - --cluster.listen-address=
+    expose:
+      - "9093"
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    healthcheck:
+      test:
+        - CMD
+        - /bin/wget
+        - --spider
+        - --timeout=2
+        - http://127.0.0.1:9093/-/ready
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    networks:
+      - observability
+
+  alertmanager-webhook:
+    image: finguardops-ai-service:local
+    build:
+      context: ../ai-service
+      dockerfile: Dockerfile
+    entrypoint:
+      - python
+      - /opt/alertmanager-webhook/app.py
+    volumes:
+      - ./alertmanager-webhook/app.py:/opt/alertmanager-webhook/app.py:ro
+    expose:
+      - "8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2).read()"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 10s
+    networks:
+      - observability
+
 networks:
   application:
     internal: true
@@ -162,3 +222,4 @@ networks:
 
 volumes:
   prometheus-data:
+  alertmanager-data:

@@ -5,8 +5,9 @@
 이 문서는 Spring Boot Backend의 Actuator web endpoint와 production runtime
 Prometheus registry의 현재 운영 경계를 정의한다. 금융거래 API 계약을 변경하지 않는다.
 Issue #196의 로컬 Compose scrape, Issue #199의 service 수준 recording rule 14개와
-Issue #201의 로컬 실패율 alert rule 6개는 구현되었지만 production scrape·recording
-rule·alert·집계·알림 전송이 구성되었다는 의미가 아니다.
+Issue #201의 로컬 실패율 alert rule 6개, Issue #203의 로컬 Alertmanager 연결·routing·
+inhibition·webhook 전달 검증은 구현되었지만 production scrape·Alertmanager·receiver·
+credential·외부 알림이 구성되었다는 의미가 아니다.
 
 ## 2. profile별 상태
 
@@ -45,18 +46,18 @@ profile은 별도 management port·address를 지정하지 않으므로 기존 �
 
 기존 Spring datasource 환경 변수를 먼저 구성한 뒤 Backend 디렉터리에서 실행한다.
 
-```powershell
-$env:SPRING_PROFILES_ACTIVE = "prometheus"
-$env:MANAGEMENT_SERVER_PORT = "8081"
-$env:MANAGEMENT_SERVER_ADDRESS = "127.0.0.1"
-.\gradlew.bat bootRun
+```bash
+export SPRING_PROFILES_ACTIVE=prometheus
+export MANAGEMENT_SERVER_PORT=8081
+export MANAGEMENT_SERVER_ADDRESS=127.0.0.1
+./gradlew.bat bootRun
 ```
 
 별도 터미널에서 health와 scrape 응답을 확인한다.
 
-```powershell
-curl.exe --fail-with-body http://127.0.0.1:8081/actuator/health
-curl.exe --fail-with-body http://127.0.0.1:8081/actuator/prometheus
+```bash
+curl --fail-with-body http://127.0.0.1:8081/actuator/health
+curl --fail-with-body http://127.0.0.1:8081/actuator/prometheus
 ```
 
 기본 profile 확인 시 `SPRING_PROFILES_ACTIVE=prometheus`를 사용하지 않는다.
@@ -90,6 +91,12 @@ override한다. Prometheus는 internal network에서
 `http://backend:8081/actuator/prometheus`를 scrape하며, Prometheus만 별도 UI bridge에
 연결해 UI를 host `127.0.0.1:9090`에 bind한다.
 
+Prometheus는 같은 internal observability network의 `http://alertmanager:9093`으로만
+notification을 전송한다. Alertmanager와 local webhook receiver는 이 network에만 연결하고
+host port를 publish하지 않는다. Alertmanager API·UI와 receiver event 확인은 internal helper
+또는 `docker compose exec`를 사용한다. local webhook은 production receiver가 아니며
+network 격리는 인증·TLS를 대신하지 않는다.
+
 PostgreSQL과 AI Service는 application network DNS를 사용한다. External Risk fixture는
 Backend의 network namespace를 공유하여 `127.0.0.1:8001`에만 bind하고 Backend도 이
 loopback 주소로 호출한다. fixture port는 host에 publish하지 않는다. 이 구조는 기존
@@ -104,7 +111,8 @@ Docker의 network 분리와 host loopback은 접근면을 제한하지만 인증
 ## 7. 현재 미구현 범위
 
 - production Prometheus 서버와 scrape target 설정
-- production recording rule·alert rule과 Alertmanager
+- production recording rule·alert rule·Alertmanager·receiver·credential과 외부 알림
+- Alertmanager HA와 장기 retention
 - Grafana dashboard
 - Spring Security·인증·credential
 - production Docker·Kubernetes·AWS 배포 설정

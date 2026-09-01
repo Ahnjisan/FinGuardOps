@@ -93,7 +93,8 @@ AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 
 - `frontend/`: 역할 규칙과 자리표시자만 있으며 React 구현 없음
 - `infra/`: Issue #196의 로컬 Compose Prometheus scrape·External Risk 검증 fixture,
   Issue #199의 service 수준 recording rule 14개와 Issue #201의 로컬 실패율 alert rule
-  6개·deterministic test가 구현되었으며 production 배포 구성은 없음
+  6개·deterministic test, Issue #203의 로컬 Alertmanager routing·signal별 inhibition·
+  bounded webhook delivery·restart·장애 검증이 구현되었으며 production 배포 구성은 없음
 - `.github/`: Issue·PR 템플릿과 Backend·AI Service 테스트 Workflow가 있으며 이미지 빌드·배포 자동화 없음
 - 운영 PostgreSQL 배포 환경, Redis와 Kafka 연동
 - External Risk DB 영속화와 LLM Provider 연동
@@ -439,7 +440,10 @@ LLM Provider는 외부 생성 서비스이며 FinGuardOps 업무 데이터 저�
 - 지연시간, 오류율, 처리량, 자원 상태와 비동기 적체를 구분한다.
 - 장애 주입과 배포 전후 차이를 근거로 검증한다.
 
-후속 후보는 Prometheus, Grafana, Loki와 OpenTelemetry 기반 추적이다. 제품별 상세 구성과 메트릭 이름은 확정하지 않는다.
+현재 local validation은 Prometheus, Alertmanager와 bounded webhook fixture를 사용한다.
+Alertmanager와 receiver는 internal observability network에만 연결하고 host UI·port를
+publish하지 않는다. production 후보인 Grafana, Loki와 OpenTelemetry 기반 추적은 아직
+구현하지 않았으며 제품별 production 구성도 확정하지 않는다.
 
 ### 7.10 GitHub Actions·Kubernetes·AWS 배포 환경 후보
 
@@ -892,6 +896,18 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
 
 구체적인 메트릭 이름, 레이블, 수집 주기, 보존 기간, 경보 임계값과 알림 채널은 후속 메트릭·운영 설계에서 확정한다.
 
+로컬 Prometheus는 Alertmanager v2 API로 연결하지만 Alertmanager를 시작 또는 health의 hard
+dependency로 두지 않는다. Alertmanager와 local webhook receiver가 중단돼도 Backend 업무와
+Prometheus scrape·recording·alert evaluation은 계속된다. Alertmanager는 alertname과 service로
+grouping하고 signal별 명시적 inhibition으로 같은 service의 critical이 대응 warning만 억제한다.
+
+local webhook은 허용 label·annotation만 보관하는 256개 bounded in-memory fixture이며 파일
+저장·외부 호출·application logging이 없다. Alertmanager data는 별도 named volume에 24시간만
+보존한다. 이 구성은 인증·TLS, production receiver, 외부 notification, exactly-once delivery,
+고정 retry 횟수나 무손실을 제공하지 않는다. warning은 critical 전에 전달될 수 있고 inhibition은
+이미 전달된 warning을 취소하지 않으며 restart·ambiguous failure에서 duplicate 또는 loss가
+가능하다.
+
 ## 18. 단계별 도입 계획
 
 ### 18.1 현재 구현됨
@@ -929,6 +945,8 @@ React에서 Grafana의 상세 기술 대시보드를 전부 중복 구현하지 
   HIGH·CRITICAL 거래의 새 사건·첫 연결 또는 기존 활성 연결을 원자적으로
   확정하는 내부 persistence boundary
 - Backend와 AI Service 전용 GitHub Actions 테스트 Workflow
+- 로컬 Prometheus→Alertmanager 연결, grouping·routing·signal별 warning inhibition과
+  bounded webhook firing·resolved·restart·장애 검증 경계
 
 ### 18.2 문서로 정의됨
 
@@ -1015,10 +1033,15 @@ Compose Prometheus scrape를 연결하고 Issue #199에서 기존 Meter만 사�
 recording rule 14개, deterministic promtool test와 raw·recorded query 대조 경계를 추가했다.
 Issue #201은 이 recording 결과만 사용하는 거래 terminal·External Risk·Rule Analysis
 실패율 warning·critical alert 6개와 로컬 상태 전이 검증을 추가했다.
+Issue #203은 Prometheus의 Alertmanager v2 연결, `alertname,service` grouping, alertname별
+세 inhibition rule, firing·resolved를 받는 bounded local webhook과 장애·restart 검증을
+추가했다.
 Backend의 management 기본 loopback 계약은
 유지하고 Compose에서만 internal observability network bind를 사용한다. Backend는
 internal application·observability network에만 연결하고 port를 host에 publish하지 않는다.
-Prometheus만 UI용 일반 bridge에도 연결하며 UI는 host loopback에 제한한다. 자세한 절차는
+Prometheus만 UI용 일반 bridge에도 연결하며 UI는 host loopback에 제한한다. Alertmanager와
+receiver는 observability network에만 연결해 host port와 Alertmanager UI를 publish하지 않는다.
+내부 API는 helper 또는 `docker compose exec`로 확인한다. 자세한 절차는
 [`Prometheus 로컬 scrape runbook`](../09-deployment/prometheus-local-scrape-runbook.md)을
 따른다.
 
@@ -1032,8 +1055,9 @@ External Risk Provider 정책이나 인증·TLS를 대체하지 않는다.
 최소 처리율 위에서 warning `> 0.10`/2분, critical `> 0.30`/5분을 적용한다. 이 값은
 production SLA·SLO가 아니고 두 severity의 동시 firing을 허용한다. completion gap·장기 `IN_PROGRESS` Gauge,
 `deployment.error_ratio`·`deployment.latency`는 구현하지 않는다. production 수집
-제품·보존 기간·비용, 인증·TLS, production recording rule·alert, Alertmanager·Grafana·
-HA와 추적은 `TBD`이다. 업무 식별자와 민감정보 보호가
+제품·보존 기간·비용, 인증·TLS, production recording rule·alert·Alertmanager·receiver·
+credential·외부 알림, Grafana·HA·장기 retention과 OpenTelemetry 추적은 `TBD`이다.
+local delivery는 exactly-once가 아니며 duplicate·loss가 가능하다. 업무 식별자와 민감정보 보호가
 준비되지 않은 상태에서 로그·레이블을 확대하지 않는다.
 
 ### 19.5 GitHub Actions

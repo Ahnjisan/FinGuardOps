@@ -40,11 +40,12 @@ API 요청·응답과 상태 코드는 `docs/03-api/`, 시스템 책임은 `docs
 | --- | --- | --- |
 | 애플리케이션 내부 계측 | 부분 구현 | Issue #186의 Spring Boot 업무 Meter 10개가 구현되었다. public 거래 intake outcome, 최초 `RECEIVED`, terminal outcome·processing duration, 멱등 replay·`IN_PROGRESS`·conflict, External Risk outcome·duration, Spring Rule orchestration outcome·duration으로 한정한다. |
 | 운영 수집·노출 | 부분 구현 | production runtime Prometheus registry와 `prometheus` profile 전용 `/actuator/prometheus`가 구현되었다. 기본 profile에서는 export가 비활성이고 health만 노출한다. 별도 management listener의 기본 경계는 `127.0.0.1:8081`이며 인증은 미구현이다. Issue #196의 로컬 Compose Prometheus 서버와 Backend scrape·24시간 보존 경계가 구현되었지만 production 배포·scrape는 미구현이다. |
-| 활용 계층 | 부분 구현 | 로컬 Prometheus에 기존 업무 Meter만 사용하는 service 수준 recording rule 14개, 실패율 alert rule 6개와 각각의 deterministic promtool test가 구현되었다. production recording rule·alert rule, Alertmanager와 Grafana dashboard는 없다. |
+| 활용 계층 | 부분 구현 | 로컬 Prometheus의 service 수준 recording rule 14개와 실패율 alert rule 6개, deterministic promtool test, 로컬 Alertmanager routing·signal별 inhibition·webhook firing/resolved 전달 검증이 구현되었다. production recording rule·alert rule·Alertmanager·receiver와 Grafana dashboard는 없다. |
 
 로컬 검증에서 PostgreSQL·AI Service·Backend는 internal application network를 사용하고,
-Backend·Prometheus는 별도 internal observability network를 사용한다. Prometheus만 host UI
-publish용 일반 bridge에도 연결하고 Backend port는 host에 publish하지 않는다. External Risk
+Backend·Prometheus·Alertmanager·local webhook receiver는 별도 internal observability
+network를 사용한다. Prometheus만 host UI publish용 일반 bridge에도 연결하고 Backend,
+Alertmanager와 receiver port는 host에 publish하지 않는다. External Risk
 fixture는 Backend network namespace를 공유하고 `127.0.0.1:8001`에만 bind하며 Backend도
 loopback으로 호출한다. 이는 기존 non-production plain HTTP 제한을 보존하지만 production
 인증·TLS를 대체하거나 production External Risk Provider 정책을 변경하지 않는다.
@@ -291,13 +292,36 @@ Rule Analysis 처리율은 분류형 rate를 `sum by (service)`로 합산해 `re
 아니다. equality는 inactive이고 최소 처리율 0.10/s는 guard를 통과한다. ratio 입력이
 missing이거나 분모가 0이라 series가 없으면 inactive이며 실제 ratio 0도 inactive다.
 warning과 critical은 독립 rule이라 동시에 firing할 수 있다. `keep_firing_for`는 사용하지
-않으며 Alertmanager inhibition·routing·receiver·notification은 구현하지 않는다.
+않는다. Prometheus는 로컬 Alertmanager v2 endpoint에 연결되며 Alertmanager 장애가 scrape,
+recording rule 또는 alert evaluation의 hard dependency가 되지 않는다.
 
 alert label은 recording 결과의 `service`, 고정 `severity`와 Prometheus가 생성하는
 `alertname`뿐이다. annotation은 고정 `summary`, service와 소수점 셋째 자리 ratio만 담는
 `description`, 정적 `runbook_url`만 사용한다. 업무 식별자, 개인정보, credential, request
 내용과 예외 원문은 label·annotation에 포함하지 않는다. idempotency conflict, completion
 gap, 장기 `IN_PROGRESS`와 deployment 파생 지표 alert는 구현하지 않는다.
+
+### 6.3 로컬 Alertmanager 전달 계약
+
+로컬 route는 `group_by: [alertname, service]`, `group_wait: 15s`, `group_interval: 30s`,
+`repeat_interval: 30m`를 사용한다. 공통 `local-webhook` receiver는 5초 timeout,
+`send_resolved: true`, notification당 최대 alert 16개로 internal receiver에 전달한다.
+Transaction terminal, External Risk, Rule Analysis 각각에 alertname을 명시한 inhibition rule을
+두고 `equal: [service]`로 같은 service의 critical이 같은 signal의 warning만 억제한다. 다른
+signal이나 service로 suppression이 전파되지 않는다.
+
+warning은 critical이 발생하기 전 `group_wait`를 지나 이미 전달될 수 있다. inhibition은 과거
+notification을 취소하지 않으며 critical이 해제되고 warning이 남으면 suppression이 제거된다.
+Alertmanager 전달은 exactly-once 또는 고정 retry 횟수를 보장하지 않는다. receiver 장애,
+restart와 ambiguous failure에서 duplicate 또는 loss가 가능하므로 event sequence는 관찰값이지
+업무 멱등성 계약이 아니다.
+
+local webhook fixture는 허용된 alert label·annotation만 strict 검증하고 request 원문이나
+credential·개인정보를 저장·logging하지 않는다. event는 메모리의 256개 bounded ring에만
+보관하며 reset 뒤에도 sequence는 단조 증가한다. request body는 최대 256 KiB, alert는 최대
+16개이고 Alertmanager v0.34의 `notification_reason`과 빈 `routeLabels`는 검증 후 저장하지
+않는다. 외부 호출·파일 저장은 없다. 이 fixture와 24시간 named volume은 local validation
+contract이며 production receiver·retention·SLA·SLO가 아니다.
 
 `spring.http.errors`는 `spring.http.requests`에서 계산할 수 있으면 별도 Counter를 만들지 않는 것을 권장한다. 문서상 논리 지표는 유지하되 하나의 HTTP 요청이 두 독립 계측 경로에서 서로 다른 값으로 집계되지 않도록 한다.
 
@@ -552,9 +576,10 @@ React 관리자 화면은 업무 영향과 조치 요약에 집중하고 Grafana
 관측 구현 상태는 3.1절과 같이 애플리케이션 내부 계측, 운영 수집·노출,
 활용 계층으로 구분한다. 첫 계층의 Issue #186 Meter 10개와 두 번째 계층의 runtime
 Prometheus registry·opt-in endpoint와 로컬 Compose scrape가 구현되었다. 활용 계층은
-로컬 service 수준 recording rule 14개와 실패율 alert rule 6개, deterministic test까지
-부분 구현되었다. production Prometheus 배포·scrape·recording rule·alert와 dashboard는
-미구현이다.
+로컬 service 수준 recording rule 14개와 실패율 alert rule 6개, deterministic test,
+Alertmanager grouping·routing·signal별 inhibition과 local webhook firing·resolved 전달까지
+부분 구현되었다. production Prometheus·Alertmanager·receiver·credential·외부 알림과
+dashboard는 미구현이다.
 
 | 항목 | 문서별 표현 | 메트릭 명세의 처리 |
 | --- | --- | --- |
@@ -624,6 +649,10 @@ Breaker가 없다. 따라서 이를 현재 구현 metric이나 성공 결과로 
 - [ ] 이미 통일한 계약을 다시 충돌로 기록하지 않고, 남은 문서 차이와 사용자 결정 사항만 미확정으로 유지하는가
 
 ## 19. 제외 범위
+
+로컬 Alertmanager·webhook 검증은 외부 Slack·email·SMS·PagerDuty, production receiver와
+credential, production Alertmanager·SLA·SLO, Grafana, 인증·TLS, Kubernetes·AWS,
+Alertmanager HA·장기 retention과 OpenTelemetry를 구현하지 않는다.
 
 - 신규 Java와 Python Meter 코드 구현
 - production Prometheus 설치·scrape와 production recording rule 설정
