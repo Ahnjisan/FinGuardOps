@@ -73,6 +73,8 @@ public class GlobalExceptionHandler {
     static final String CONCURRENT_MODIFICATION = "CONCURRENT_MODIFICATION";
     static final String ASSIGNEE_REQUIRED = "ASSIGNEE_REQUIRED";
     static final String INVALID_ASSIGNEE_REF = "INVALID_ASSIGNEE_REF";
+    static final String FINAL_DISPOSITION_REQUIRED =
+            "FINAL_DISPOSITION_REQUIRED";
     static final String INTERNAL_ERROR = "INTERNAL_ERROR";
 
     static final String VALIDATION_MESSAGE = "요청 필드를 확인해 주세요.";
@@ -114,6 +116,8 @@ public class GlobalExceptionHandler {
             "요청한 상태 변경에는 담당자가 필요합니다.";
     static final String INVALID_ASSIGNEE_REF_MESSAGE =
             "담당자 참조값 형식을 확인해 주세요.";
+    static final String FINAL_DISPOSITION_REQUIRED_MESSAGE =
+            "사건 종료에는 최종 판정이 필요합니다.";
     static final String NO_RESOURCE_FOUND_MESSAGE =
             "요청한 리소스를 찾을 수 없습니다.";
     static final String INTERNAL_ERROR_MESSAGE =
@@ -238,6 +242,16 @@ public class GlobalExceptionHandler {
                     request
             );
         }
+        if (status == HttpStatus.UNPROCESSABLE_ENTITY
+                && FINAL_DISPOSITION_REQUIRED.equals(exception.getCode())) {
+            return response(
+                    status,
+                    FINAL_DISPOSITION_REQUIRED,
+                    FINAL_DISPOSITION_REQUIRED_MESSAGE,
+                    List.of(toFieldError(exception)),
+                    request
+            );
+        }
         return validationResponse(
                 status,
                 List.of(toFieldError(exception)),
@@ -283,6 +297,13 @@ public class GlobalExceptionHandler {
                     HttpStatus.UNPROCESSABLE_ENTITY,
                     ASSIGNEE_REQUIRED,
                     ASSIGNEE_REQUIRED_MESSAGE,
+                    List.of(),
+                    request
+            );
+            case INCONSISTENT_CASE_DATA -> response(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    INTERNAL_ERROR,
+                    INTERNAL_ERROR_MESSAGE,
                     List.of(),
                     request
             );

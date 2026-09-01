@@ -16,6 +16,7 @@ import com.aifds.backend.fraudcase.service.FraudCaseWorkflowService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.RepeatedTest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -35,6 +36,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -303,6 +305,179 @@ class FraudCaseWorkflowConcurrencyIntegrationTest
         }
     }
 
+    @RepeatedTest(5)
+    void resolutionCompetitionSuiteHasOneWinnerAndOneConflict()
+            throws Exception {
+        assertResolveVersusResolve(false);
+        assertResolveVersusResolve(true);
+        assertResolveVersusStatus();
+        assertResolveVersusAssignee();
+    }
+
+    private void assertResolveVersusResolve(boolean differentDisposition)
+            throws Exception {
+        UUID caseId = insertCase(
+                FraudCaseStatus.IN_REVIEW,
+                FIRST_ASSIGNEE
+        );
+        String secondDisposition = differentDisposition
+                ? "FALSE_POSITIVE"
+                : "CONFIRMED_FRAUD";
+        RaceResult race = compete(
+                caseId,
+                () -> invokeResolution(resolutionCommand(
+                        caseId,
+                        "CONFIRMED_FRAUD"
+                )),
+                () -> invokeResolution(resolutionCommand(
+                        caseId,
+                        secondDisposition
+                ))
+        );
+
+        assertOneWinner(race.first(), race.second());
+        assertThat(caseVersion(caseId)).isEqualTo(1L);
+        assertThat(auditCount(caseId)).isEqualTo(1);
+        assertThat(caseState(caseId))
+                .containsEntry("case_status", "CLOSED")
+                .containsEntry("assignee_ref", FIRST_ASSIGNEE);
+        String expectedDisposition = race.first() == CommandResult.SUCCESS
+                ? "CONFIRMED_FRAUD"
+                : secondDisposition;
+        assertThat(caseState(caseId))
+                .containsEntry("final_disposition", expectedDisposition);
+        assertThat(auditActions(caseId)).containsExactly(
+                "CASE_RESOLVED:CASE_RESOLUTION_COMPLETED"
+        );
+        assertResolutionAudit(caseId, expectedDisposition, FIRST_ASSIGNEE);
+    }
+
+    private void assertResolveVersusStatus() throws Exception {
+        UUID caseId = insertCase(
+                FraudCaseStatus.IN_REVIEW,
+                FIRST_ASSIGNEE
+        );
+        RaceResult race = compete(
+                caseId,
+                () -> invokeResolution(resolutionCommand(
+                        caseId,
+                        "NORMAL"
+                )),
+                () -> invokeStatus(new FraudCaseWorkflowCommand.StatusChange(
+                        caseId,
+                        FraudCaseStatus.ADDITIONAL_INFORMATION_REQUIRED,
+                        false,
+                        null,
+                        AuditReasonCode
+                                .CASE_ADDITIONAL_INFORMATION_REQUESTED,
+                        0L
+                ))
+        );
+
+        assertOneWinner(race.first(), race.second());
+        assertThat(caseVersion(caseId)).isEqualTo(1L);
+        assertThat(auditCount(caseId)).isEqualTo(1);
+        if (race.first() == CommandResult.SUCCESS) {
+            assertThat(caseState(caseId))
+                    .containsEntry("case_status", "CLOSED")
+                    .containsEntry("final_disposition", "NORMAL")
+                    .containsEntry("assignee_ref", FIRST_ASSIGNEE);
+            assertThat(auditActions(caseId)).containsExactly(
+                    "CASE_RESOLVED:CASE_RESOLUTION_COMPLETED"
+            );
+            assertResolutionAudit(caseId, "NORMAL", FIRST_ASSIGNEE);
+        } else {
+            assertThat(caseState(caseId))
+                    .containsEntry(
+                            "case_status",
+                            "ADDITIONAL_INFORMATION_REQUIRED"
+                    )
+                    .containsEntry("final_disposition", null)
+                    .containsEntry("assignee_ref", FIRST_ASSIGNEE);
+            assertThat(auditActions(caseId)).containsExactly(
+                    "CASE_STATUS_CHANGED:"
+                            + "CASE_ADDITIONAL_INFORMATION_REQUESTED"
+            );
+        }
+    }
+
+    private void assertResolveVersusAssignee() throws Exception {
+        UUID caseId = insertCase(
+                FraudCaseStatus.IN_REVIEW,
+                FIRST_ASSIGNEE
+        );
+        RaceResult race = compete(
+                caseId,
+                () -> invokeResolution(resolutionCommand(
+                        caseId,
+                        "FALSE_POSITIVE"
+                )),
+                () -> invokeAssignee(
+                        new FraudCaseWorkflowCommand.AssigneeChange(
+                                caseId,
+                                SECOND_ASSIGNEE,
+                                AuditReasonCode.CASE_ASSIGNEE_CHANGED,
+                                0L
+                        )
+                )
+        );
+
+        assertOneWinner(race.first(), race.second());
+        assertThat(caseVersion(caseId)).isEqualTo(1L);
+        assertThat(auditCount(caseId)).isEqualTo(1);
+        if (race.first() == CommandResult.SUCCESS) {
+            assertThat(caseState(caseId))
+                    .containsEntry("case_status", "CLOSED")
+                    .containsEntry("final_disposition", "FALSE_POSITIVE")
+                    .containsEntry("assignee_ref", FIRST_ASSIGNEE);
+            assertThat(auditActions(caseId)).containsExactly(
+                    "CASE_RESOLVED:CASE_RESOLUTION_COMPLETED"
+            );
+            assertResolutionAudit(
+                    caseId,
+                    "FALSE_POSITIVE",
+                    FIRST_ASSIGNEE
+            );
+        } else {
+            assertThat(caseState(caseId))
+                    .containsEntry("case_status", "IN_REVIEW")
+                    .containsEntry("final_disposition", null)
+                    .containsEntry("assignee_ref", SECOND_ASSIGNEE);
+            assertThat(auditActions(caseId)).containsExactly(
+                    "CASE_ASSIGNEE_CHANGED:CASE_ASSIGNEE_CHANGED"
+            );
+        }
+    }
+
+    private RaceResult compete(
+            UUID caseId,
+            Callable<CommandResult> firstCommand,
+            Callable<CommandResult> secondCommand
+    ) throws Exception {
+        ReadBarrier barrier = installReadBarrier(caseId);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<CommandResult> first = executor.submit(firstCommand);
+            Future<CommandResult> second = executor.submit(secondCommand);
+            assertThat(barrier.loaded().await(20, TimeUnit.SECONDS)).isTrue();
+            assertThat(barrier.threadIds()).hasSize(2);
+            barrier.release().countDown();
+            return new RaceResult(
+                    first.get(30, TimeUnit.SECONDS),
+                    second.get(30, TimeUnit.SECONDS)
+            );
+        } finally {
+            barrier.release().countDown();
+            executor.shutdownNow();
+            boolean terminated = executor.awaitTermination(
+                    10,
+                    TimeUnit.SECONDS
+            );
+            restoreServiceRepository();
+            assertThat(terminated).isTrue();
+        }
+    }
+
     private Outcome invokeService(
             UUID caseId,
             String assignee,
@@ -364,6 +539,34 @@ class FraudCaseWorkflowConcurrencyIntegrationTest
             }
             throw exception;
         }
+    }
+
+    private CommandResult invokeResolution(
+            FraudCaseWorkflowCommand.Resolution command
+    ) {
+        try {
+            service.resolve(command, "trace_case_resolution_race_01");
+            return CommandResult.SUCCESS;
+        } catch (FraudCaseWorkflowException exception) {
+            if (exception.getReason()
+                    == FraudCaseWorkflowException.Reason
+                    .CONCURRENT_MODIFICATION) {
+                return CommandResult.CONCURRENT_MODIFICATION;
+            }
+            throw exception;
+        }
+    }
+
+    private FraudCaseWorkflowCommand.Resolution resolutionCommand(
+            UUID caseId,
+            String disposition
+    ) {
+        return new FraudCaseWorkflowCommand.Resolution(
+                caseId,
+                disposition,
+                "CASE_RESOLUTION_COMPLETED",
+                0L
+        );
     }
 
     private ReadBarrier installReadBarrier(UUID caseId) {
@@ -560,7 +763,8 @@ class FraudCaseWorkflowConcurrencyIntegrationTest
     private java.util.Map<String, Object> caseState(UUID caseId) {
         return jdbcTemplate.queryForMap(
                 """
-                        SELECT case_status, assignee_ref
+                        SELECT case_status, final_disposition, assignee_ref,
+                               closed_at
                         FROM fraud_case
                         WHERE case_id = ?
                         """,
@@ -579,6 +783,44 @@ class FraudCaseWorkflowConcurrencyIntegrationTest
                 String.class,
                 caseId
         );
+    }
+
+    private void assertResolutionAudit(
+            UUID caseId,
+            String disposition,
+            String assigneeRef
+    ) {
+        java.util.Map<String, Object> audit = jdbcTemplate.queryForMap(
+                """
+                        SELECT actor_type, actor_id, target_id,
+                               transaction_id, case_id,
+                               before_value_summary = jsonb_build_object(
+                                   'caseStatus', 'IN_REVIEW',
+                                   'assigneeRef', ?::text
+                               ) AS before_exact,
+                               after_value_summary = jsonb_build_object(
+                                   'caseStatus', 'CLOSED',
+                                   'finalDisposition', ?::text,
+                                   'assigneeRef', ?::text
+                               ) AS after_exact,
+                               metadata = '{}'::jsonb AS metadata_empty
+                        FROM audit_log
+                        WHERE case_id = ? AND action = 'CASE_RESOLVED'
+                        """,
+                assigneeRef,
+                disposition,
+                assigneeRef,
+                caseId
+        );
+        assertThat(audit)
+                .containsEntry("actor_type", "SYSTEM")
+                .containsEntry("actor_id", "finguardops-backend")
+                .containsEntry("target_id", caseId)
+                .containsEntry("transaction_id", null)
+                .containsEntry("case_id", caseId)
+                .containsEntry("before_exact", true)
+                .containsEntry("after_exact", true)
+                .containsEntry("metadata_empty", true);
     }
 
     private boolean hasCause(
@@ -620,6 +862,12 @@ class FraudCaseWorkflowConcurrencyIntegrationTest
             CountDownLatch loaded,
             CountDownLatch release,
             Set<Long> threadIds
+    ) {
+    }
+
+    private record RaceResult(
+            CommandResult first,
+            CommandResult second
     ) {
     }
 }

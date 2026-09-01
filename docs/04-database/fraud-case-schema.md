@@ -3,14 +3,14 @@
 ## 1. 범위
 
 이 문서는 Issue #154의 `FraudCase`·첫 거래 연결, Issue #207의 사건 조회 및
-Issue #209의 조사 상태·담당자 변경 경계를 정의한다. Flyway V6는 기존
+Issue #209의 조사 상태·담당자 변경 및 Issue #211의 사건 종료 경계를 정의한다. Flyway V6는 기존
 V1~V5를 수정하지 않고 `fraud_case`와 `case_transaction`을 추가하며, Flyway V10은
 기존 migration을 수정하지 않고 무필터 변경 시각 조회 인덱스를 추가한다.
 
 구현 범위는 사건 영속 모델, 거래 연결, 중복 연결 제약과 내부 persistence
 boundary이며, 위험 대응 최종화 경계가 이를 재사용해 신규 사건·첫 연결 또는 기존
 활성 사건을 거래 최종 상태·대응 결과·AuditLog와 같은 REQUIRED 트랜잭션에서
-확정한다. Issue #209의 상태·담당자 mutation은 포함하지만 사건 종료, 기존 사건에
+확정한다. Issue #209의 상태·담당자 mutation과 Issue #211의 사건 종료를 포함하지만 기존 사건에
 다른 거래 추가, 사건 병합·분리, 거래 접수 전체 연결과 Snapshot v2는 포함하지
 않는다. AuditLog 계약은
 [`audit-log-schema.md`](audit-log-schema.md)를 따른다.
@@ -81,6 +81,13 @@ FraudCase 1 ─ N CaseTransaction N ─ 1 FinancialTransaction
 사건 생성 시각, 변경 시각과 첫 연결 시각은 기존 UTC `Clock`의 한 값을
 PostgreSQL 마이크로초 정밀도로 정규화해 사용한다.
 
+resolution은 일반 조회로 사건을 가져와 `expectedVersion`을 먼저 비교하고
+`IN_REVIEW`·담당자·`review_started_at` 불변식을 검증한다. 하나의 resolution 시각을
+`closed_at`과 `last_changed_at`에 사용하고 `created_at`, `assignee_ref`,
+`review_started_at`은 유지한다. `FraudCase` flush로 실제 version 증가를 확정한 뒤
+같은 REQUIRED 트랜잭션에서 감사 append·flush를 수행한다. row lock과 자동 retry는
+사용하지 않으며 충돌·감사 실패는 종료 필드·version·감사를 모두 rollback한다.
+
 위험 대응 최종화는 이 Service에 참여하기 전에 거래를 먼저 잠근다. 이 Service의
 기존 동일 거래 재잠금은 같은 REQUIRED 트랜잭션에서 수행되며 잠금 순서를 바꾸지
 않는다. 사건 생성·연결, 거래 최종화, 감사 중 어느 단계라도 실패하면 모두
@@ -88,7 +95,6 @@ rollback한다.
 
 ## 7. 미구현 경계
 
-- 사건 종료와 최종 판정
 - 기존 사건에 추가 거래 연결
 - 사건 병합·분리
 - 인증·인가 기반 실제 USER actor
@@ -119,3 +125,8 @@ row lock과 자동 retry는 사용하지 않으며 optimistic conflict 또는 �
 
 신규 write API는 `assignee_ref`에 canonical lowercase UUID v4만 허용하지만 V6의
 DB-wide 1~128자 trimmed check는 기존 행과 조회 계약을 위해 변경하지 않는다.
+
+resolution도 같은 낙관적 잠금 경계를 사용한다. 종료는 `fraud_case` 한 행만
+변경하며 `financial_transaction`, 위험 필드와 `case_transaction`을 변경하지 않는다.
+V12는 AuditLog check만 확장하므로 `fraud_case` 테이블·컬럼·제약·인덱스에는 변경이
+없다.

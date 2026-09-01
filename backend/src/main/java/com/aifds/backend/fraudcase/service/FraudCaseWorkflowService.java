@@ -10,6 +10,7 @@ import com.aifds.backend.audit.service.AuditLogPersistenceService;
 import com.aifds.backend.fraudcase.command.FraudCaseWorkflowCommand;
 import com.aifds.backend.fraudcase.dto.FraudCaseMutationResponse;
 import com.aifds.backend.fraudcase.entity.FraudCase;
+import com.aifds.backend.fraudcase.entity.FraudCaseFinalDisposition;
 import com.aifds.backend.fraudcase.entity.FraudCaseStatus;
 import com.aifds.backend.fraudcase.exception.FraudCaseNotFoundException;
 import com.aifds.backend.fraudcase.exception.FraudCaseWorkflowException;
@@ -119,6 +120,59 @@ public class FraudCaseWorkflowService {
                     command.reasonCode(),
                     snapshot(status, beforeAssignee),
                     snapshot(status, fraudCase.getAssigneeRef()),
+                    traceId
+            );
+            return mapper.toResponse(fraudCase, traceId);
+        } catch (OptimisticLockingFailureException
+                | OptimisticLockException exception) {
+            throw workflow(
+                    FraudCaseWorkflowException.Reason.CONCURRENT_MODIFICATION,
+                    exception
+            );
+        } catch (DataAccessException exception) {
+            throw classifyDataAccess(exception);
+        }
+    }
+
+    @Transactional
+    public FraudCaseMutationResponse resolve(
+            FraudCaseWorkflowCommand.Resolution command,
+            String traceId
+    ) {
+        Objects.requireNonNull(command, "command must not be null");
+        try {
+            FraudCase fraudCase = findCase(command.caseId());
+            requireExpectedVersion(fraudCase, command.expectedVersion());
+            requireOpenForChange(fraudCase);
+            if (fraudCase.getCaseStatus() != FraudCaseStatus.IN_REVIEW) {
+                throw workflow(
+                        FraudCaseWorkflowException.Reason.CASE_STATUS_CONFLICT
+                );
+            }
+            if (fraudCase.getAssigneeRef() == null
+                    || fraudCase.getReviewStartedAt() == null) {
+                throw workflow(
+                        FraudCaseWorkflowException.Reason
+                                .INCONSISTENT_CASE_DATA
+                );
+            }
+
+            FraudCaseFinalDisposition disposition =
+                    validator.parseResolutionDisposition(
+                            command.finalDisposition()
+                    );
+            AuditReasonCode reasonCode = validator.parseResolutionReason(
+                    command.reasonCode()
+            );
+            String assigneeRef = fraudCase.getAssigneeRef();
+            fraudCase.resolve(disposition, workflowTime());
+            fraudCaseRepository.flush();
+            appendAudit(
+                    fraudCase,
+                    AuditAction.CASE_RESOLVED,
+                    reasonCode,
+                    snapshot(FraudCaseStatus.IN_REVIEW, assigneeRef),
+                    resolutionSnapshot(fraudCase),
                     traceId
             );
             return mapper.toResponse(fraudCase, traceId);
@@ -294,6 +348,16 @@ public class FraudCaseWorkflowService {
             snapshot.put("assigneeRef", assigneeRef);
         }
         return snapshot;
+    }
+
+    private ObjectNode resolutionSnapshot(FraudCase fraudCase) {
+        return objectMapper.createObjectNode()
+                .put("caseStatus", fraudCase.getCaseStatus().name())
+                .put(
+                        "finalDisposition",
+                        fraudCase.getFinalDisposition().name()
+                )
+                .put("assigneeRef", fraudCase.getAssigneeRef());
     }
 
     private Instant workflowTime() {

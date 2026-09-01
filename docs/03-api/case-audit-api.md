@@ -7,8 +7,9 @@
 이 계약은 이후 Spring Boot Controller, 요청·응답 DTO, Validation, Service, 테스트와 OpenAPI 구현의 기준이다. API 공통 표현, 시간, 금액, 페이지네이션, 오류 응답과 추적 원칙은 [`api-conventions.md`](./api-conventions.md)를 따른다.
 
 Issue #207에서 사건 목록·상세 조회를 구현했고 Issue #209에서 아래 두 mutation과
-PostgreSQL 낙관적 동시성·감사 원자성 경계를 구현했다. 조사 메모, 최종 판정,
-연관 거래 목록과 감사 조회 API 및 인증·인가는 구현되지 않았다. 사건 영속 계약은
+PostgreSQL 낙관적 동시성·감사 원자성 경계를 구현했다. Issue #211은 최종 판정·
+종료 API와 V12 감사를 구현했다. 조사 메모, 연관 거래 목록과 감사 조회 API 및
+인증·인가는 구현되지 않았다. 사건 영속 계약은
 [`../04-database/fraud-case-schema.md`](../04-database/fraud-case-schema.md)를 따른다.
 실제 `caseId`와 `auditId`는 UUID v4를 사용한다.
 Issue #207 범위 밖의 후속 API 절에 남아 있는 `case_demo_...` 값은 읽기 쉬운
@@ -164,12 +165,11 @@ sort
 `lastChangedAt,desc`이다. 같은 변경 시각에는 내부 `id`를 같은 방향의 보조
 정렬키로 사용하되 요청·응답에 내부 `id`를 노출하지 않는다.
 
-### 3.6 사건 종료·조사 메모 멱등성
+### 3.6 POST 멱등성 적용 범위
 
-다음 POST API는 필수 `Idempotency-Key` 헤더를 사용한다.
+사건 종료 API는 `Idempotency-Key`를 요구하거나 재생하지 않는다.
 
 ```text
-POST /api/v1/cases/{caseId}/resolution
 POST /api/v1/cases/{caseId}/notes
 ```
 
@@ -179,10 +179,10 @@ POST /api/v1/cases/{caseId}/notes
 - 같은 키와 같은 정규화 요청의 처리가 완료되었으면 새 상태 변경이나 CaseNote를 만들지 않고 `200 OK`로 기존 결과를 반환한다.
 - 같은 키와 같은 정규화 요청이 처리 중이면 새 처리를 시작하지 않고 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다.
 - 같은 키에 다른 요청 내용이 오면 변경을 적용하지 않고 `409 Conflict`와 `IDEMPOTENCY_KEY_CONFLICT`를 반환한다.
-- 응답 유실 후 같은 요청을 재전송해도 사건 종료, `concurrencyVersion` 변경, CaseNote와 AuditLog가 중복 생성되지 않아야 한다.
+- 응답 유실 후 같은 메모 요청을 재전송해도 CaseNote와 AuditLog가 중복 생성되지 않아야 한다.
 - 멱등성 확인은 완료된 동일 요청의 기존 결과를 식별할 수 있어야 하며, 단순한 현재 사건 상태 검사만으로 대체하지 않는다.
 - `Idempotency-Key`가 누락되거나 형식이 올바르지 않으면 업무 변경을 시작하지 않고 `400 Bad Request`와 `VALIDATION_ERROR`를 반환한다.
-- 구체적인 `IdempotencyRecord`, 정규화 방식, 요청 지문과 완료 응답 저장 구조는 후속 JPA 설계에서 확정한다.
+- 구체적인 `IdempotencyRecord`, 정규화 방식, 요청 지문과 완료 응답 저장 구조는 조사 메모 후속 JPA 설계에서 확정한다. 조사 메모는 현재 미구현이다.
 
 ## 4. API 목록
 
@@ -638,13 +638,12 @@ Content-Type: application/json
 ```http
 POST /api/v1/cases/{caseId}/resolution
 Content-Type: application/json
-Idempotency-Key: <required>
 ```
 
-| 필드 | 타입 후보 | 필수 후보 | 설명 |
+| 필드 | 타입 | 필수 | 설명 |
 | --- | --- | --- | --- |
 | `finalDisposition` | string | 필수 | `NORMAL`, `FALSE_POSITIVE`, `CONFIRMED_FRAUD` 중 하나 |
-| `reason` | string | 필수 | 최종 판정과 종료의 조사 근거 |
+| `reasonCode` | string | 필수 | `CASE_RESOLUTION_COMPLETED`만 허용 |
 | `expectedVersion` | integer | 필수 | 클라이언트가 조회한 사건의 `concurrencyVersion` |
 
 요청 예:
@@ -652,28 +651,29 @@ Idempotency-Key: <required>
 ```json
 {
   "finalDisposition": "CONFIRMED_FRAUD",
-  "reason": "거래 당사자가 요청을 부인했고 비식별 위험 신호와 연관 거래가 확인되었습니다.",
+  "reasonCode": "CASE_RESOLUTION_COMPLETED",
   "expectedVersion": 6
 }
 ```
 
 ### 10.2 처리 규칙
 
-- 필수 `Idempotency-Key`를 3.6절의 공통 규칙에 따라 확인한다.
-- 최초 요청은 현재 `caseStatus = IN_REVIEW`인 사건만 종료할 수 있다.
-- 같은 키와 같은 정규화 요청의 완료된 재전송은 현재 사건이 이미 `CLOSED`이고 요청의 `expectedVersion`이 과거 값이더라도 최초 종료 결과를 식별해 `200 OK`로 반환한다. 새 종료, `concurrencyVersion` 증가와 AuditLog를 만들지 않는다.
-- 완료된 동일 멱등 요청의 판별은 일반적인 현재 상태·동시성 검증보다 먼저 수행해 단순 `CASE_ALREADY_CLOSED` 또는 `CONCURRENT_MODIFICATION`으로 처리하지 않는다.
-- 같은 키와 같은 요청이 처리 중이면 새 종료를 시작하지 않고 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다.
-- 같은 키에 다른 요청이 오면 `409 Conflict`와 `IDEMPOTENCY_KEY_CONFLICT`를 반환한다.
-- 새로운 키의 요청이나 기존 완료 결과와 일치하지 않는 요청은 현재 상태와 `expectedVersion`을 정상 검증한다.
+- `Idempotency-Key`, `If-Match`, row lock, 자동 retry를 사용하지 않는다.
+- 현재 `caseStatus = IN_REVIEW`이고 담당자와 최초 조사 시작 시각이 모두 있는 사건만 종료할 수 있다.
+- `expectedVersion`을 현재 `concurrencyVersion`과 먼저 비교한다. stale 요청은 사건이 `CLOSED`인지와 판정이 같은지보다 먼저 `409 CONCURRENT_MODIFICATION`으로 거부한다.
 - `finalDisposition`은 필수이며 사건 상태 값과 혼합하지 않는다.
-- 최종 판정 설정, `caseStatus = CLOSED`, `closedAt`과 `lastChangedAt` 기록, `concurrencyVersion` 증가와 AuditLog 기록을 하나의 업무 트랜잭션으로 처리한다.
+- 자유 텍스트 `reason`은 허용하지 않으며 `reasonCode=CASE_RESOLUTION_COMPLETED`만 허용한다.
+- 최종 판정 설정, `caseStatus = CLOSED`, 하나의 마이크로초 정밀도 시각을 사용한 `closedAt = lastChangedAt`, 실제 JPA `concurrencyVersion` 증가와 AuditLog 기록을 하나의 REQUIRED 트랜잭션으로 처리한다.
 - 일부 값만 반영된 종료 결과를 허용하지 않는다.
+- 성공 응답 전에 FraudCase와 AuditLog를 명시적으로 flush하며 optimistic conflict 또는 감사 실패 시 사건·판정·시각·version·감사를 모두 rollback한다.
 - `OPEN` 또는 `ADDITIONAL_INFORMATION_REQUIRED`에서 직접 종료하려는 요청은 `409 Conflict`와 `CASE_STATUS_CONFLICT`를 반환한다.
-- 완료된 동일 멱등 요청이 아닌 상태에서 이미 종료된 사건에는 `409 Conflict`와 `CASE_ALREADY_CLOSED`를 반환한다.
+- 이미 `CLOSED`인 사건은 같은 판정과 다른 판정 모두 `409 Conflict`와 `CASE_ALREADY_CLOSED`를 반환한다.
 - `finalDisposition`이 누락되거나 null이면 `422 Unprocessable Entity`와 `FINAL_DISPOSITION_REQUIRED`를 반환한다.
 - 종료 사건 재개와 종료 후 최종 판정 변경은 초기 범위에서 제외한다.
-- 최종 판정은 FDS 분석 담당자의 서버 사용자 문맥을 기준으로 확정하며 FastAPI나 LLM이 설정하지 않는다.
+- 세 판정은 모두 사건만 종료하며 Transaction, RiskLevel, RiskResponseOutcome, CaseTransaction과 AI 처리를 변경하지 않는다.
+- 성공 종료만 `SYSTEM/finguardops-backend` actor의 `CASE_RESOLVED/CASE_RESOLUTION_COMPLETED` AuditLog를 정확히 1건 생성한다. RBAC, 실제 `USER` actor와 조사 메모는 미구현이다.
+
+오류 우선순위는 요청 구조·타입·path → 사건 없음 → stale version → 이미 종료 → 금지 상태 → 판정·사유 업무 오류 → flush optimistic conflict → DB timeout → DB unavailable → 기타 내부 오류 순이다.
 
 ### 10.3 성공 응답 예시
 
@@ -684,18 +684,19 @@ Content-Type: application/json
 
 ```json
 {
-  "caseId": "case_demo_20260724_0031",
+  "caseId": "1a000000-0000-4000-9000-000000000001",
   "caseStatus": "CLOSED",
   "finalDisposition": "CONFIRMED_FRAUD",
-  "assigneeRef": "analyst_ref_demo_12",
-  "closedAt": "2026-07-24T03:10:00Z",
-  "lastChangedAt": "2026-07-24T03:10:00Z",
+  "assigneeRef": "2a000000-0000-4000-9000-000000000002",
+  "reviewStartedAt": "2026-07-24T02:10:00.123456Z",
+  "closedAt": "2026-07-24T03:10:00.123456Z",
+  "lastChangedAt": "2026-07-24T03:10:00.123456Z",
   "concurrencyVersion": 7,
   "traceId": "trace_demo_case_resolution_01"
 }
 ```
 
-최초 종료와 완료된 동일 멱등 요청 재전송은 같은 응답 구조를 사용한다. 재전송 응답은 기존 확정 결과이며 새 업무 변경이 아니다.
+응답 `concurrencyVersion`은 실제 commit될 DB version과 일치한다. 같은 요청을 재전송해도 기존 응답을 replay하지 않으며 현재 version과 상태에 따라 충돌한다.
 
 ### 10.4 최종 판정 누락 오류 예시
 
@@ -712,8 +713,8 @@ Content-Type: application/json
   "fieldErrors": [
     {
       "field": "finalDisposition",
-      "code": "REQUIRED_FOR_CASE_RESOLUTION",
-      "reason": "지원되는 최종 판정을 입력해야 합니다."
+      "code": "FINAL_DISPOSITION_REQUIRED",
+      "reason": "finalDisposition is required"
     }
   ]
 }
@@ -723,11 +724,12 @@ Content-Type: application/json
 
 | 상태 코드 | 사용 기준 |
 | --- | --- |
-| `200 OK` | 최초 종료 성공 또는 완료된 동일 멱등 요청에 기존 결과 반환 |
-| `400 Bad Request` | JSON, 필수 `Idempotency-Key`, 식별자, Enum 또는 버전 형식 오류 |
+| `200 OK` | 사건 종료 성공 |
+| `400 Bad Request` | JSON 구조·타입, 식별자, `reasonCode`·`expectedVersion` 필수값 또는 버전 형식 오류 |
 | `404 Not Found` | 해당 사건이 없음 |
-| `409 Conflict` | 멱등성 키 지문 충돌, 동일 멱등 요청 처리 중, 종료할 수 없는 현재 상태, 이미 종료된 사건 또는 동시성 충돌 |
-| `422 Unprocessable Entity` | 최종 판정 또는 종료 사유 등 업무 종료 조건을 충족하지 못함 |
+| `409 Conflict` | stale/flush 동시성 충돌, 종료할 수 없는 현재 상태 또는 이미 종료된 사건 |
+| `422 Unprocessable Entity` | 최종 판정 누락·지원되지 않는 판정 또는 다른 감사 사유 코드 |
+| `503 Service Unavailable` | DB timeout 또는 일시적 가용성 장애 |
 | `500 Internal Server Error` | 공개할 수 없는 예기치 않은 서버 오류 |
 
 ## 11. 조사 메모 생성
@@ -1003,12 +1005,12 @@ Content-Type: application/json
 ```text
 PATCH /api/v1/cases/{caseId}/status
 PATCH /api/v1/cases/{caseId}/assignee
+POST  /api/v1/cases/{caseId}/resolution
 ```
 
 `expectedVersion`은 클라이언트가 사건을 조회했을 때 받은 `concurrencyVersion`이다. 업무 내용 버전, 탐지 결과 버전, Rule 버전과 혼합하지 않는다.
 
-두 API는 body의 `expectedVersion`을 사용하며 `If-Match`는 도입하지 않는다. 사건 종료와
-`finalDisposition`, resolution API는 Issue #209 구현 범위가 아니다.
+세 API는 body의 `expectedVersion`을 사용하며 `If-Match`는 도입하지 않는다.
 
 ### 14.2 충돌 처리
 
@@ -1043,14 +1045,14 @@ Content-Type: application/json
 
 ## 15. 감사 원칙
 
-Issue #209에서 성공한 다음 명령은 AuditLog를 정확히 1건 생성한다.
+Issue #209와 Issue #211에서 성공한 다음 명령은 AuditLog를 정확히 1건 생성한다.
 
 - 사건 상태 변경
 - 담당자 배정·변경·해제
+- 사건 최종 판정·종료
 
 stale version, 같은 상태·담당자, 금지 전이, 종료 사건 변경과 validation 실패는 현재
-감사 로그를 생성하지 않는다. 사건 종료·최종 판정, 조사 메모와 거부 요청 별도 감사는
-후속 범위이다.
+감사 로그를 생성하지 않는다. 조사 메모와 거부 요청 별도 감사는 후속 범위이다.
 
 감사 기록에는 다음 정보를 포함하는 방향을 사용한다.
 
@@ -1071,7 +1073,8 @@ actorType
 
 V7은 성공한 네 action만 저장하며 자유 텍스트 사유와 거부 감사는 허용하지 않는다.
 V11은 성공한 사건 상태·담당자 action과 승인 reasonCode 6개를 확장한다. 임시 actor는
-`SYSTEM / finguardops-backend`이며 실제 USER actor와 RBAC는 구현하지 않았다. 각
+`SYSTEM / finguardops-backend`이며 V12는 성공 종료 action과 reasonCode를 확장한다.
+실제 USER actor와 RBAC는 구현하지 않았다. 각
 action의 summary·metadata exact schema는
 [`audit-log-schema.md`](../04-database/audit-log-schema.md)를 따른다.
 
@@ -1080,6 +1083,8 @@ action의 summary·metadata exact schema는
 - 상태·담당자 변경에서는 FraudCase 현재값, `lastChangedAt`과 해당하는
   `reviewStartedAt`, `concurrencyVersion` 증가와 AuditLog 1건을 같은 REQUIRED
   트랜잭션으로 처리한다.
+- resolution에서는 최종 판정, `CLOSED`, `closedAt=lastChangedAt`, 실제 version과
+  AuditLog 1건을 같은 REQUIRED 트랜잭션에서 처리한다.
 - 적용 대상 중 일부만 저장되는 결과를 허용하지 않는다. AuditLog 저장에 실패한 성공 변경을 정상 완료로 확정하지 않는다.
 
 ### 15.2 거부된 요청의 감사 경계

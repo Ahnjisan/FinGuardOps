@@ -27,4 +27,12 @@ public final class FraudCaseWorkflowCommand {
             long expectedVersion
     ) {
     }
+
+    public record Resolution(
+            UUID caseId,
+            String finalDisposition,
+            String reasonCode,
+            long expectedVersion
+    ) {
+    }
 }

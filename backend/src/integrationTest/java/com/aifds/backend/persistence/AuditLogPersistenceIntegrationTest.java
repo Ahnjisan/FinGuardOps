@@ -24,6 +24,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -63,12 +64,12 @@ class AuditLogPersistenceIntegrationTest
     private Flyway flyway;
 
     @Test
-    void appliesFreshV1ThroughV11WithAuditSchemaAndAppendOnlyTrigger() {
-        assertThat(flyway.info().applied()).hasSize(11);
+    void appliesFreshV1ThroughV12WithAuditSchemaAndAppendOnlyTrigger() {
+        assertThat(flyway.info().applied()).hasSize(12);
         assertThat(flyway.info().current().getVersion().getVersion())
-                .isEqualTo("11");
+                .isEqualTo("12");
         assertThat(flyway.info().current().getDescription())
-                .isEqualTo("extend audit log for fraud case workflow");
+                .isEqualTo("extend audit log for fraud case resolution");
         assertThat(columns("audit_log")).containsExactlyInAnyOrder(
                 "id",
                 "audit_id",
@@ -375,6 +376,166 @@ class AuditLogPersistenceIntegrationTest
                 "IN_REVIEW",
                 "A0000000-0000-4000-9000-000000000001"
         )));
+    }
+
+    @Test
+    void insertsV12ResolutionSupersetAndRejectsInvalidSnapshots() {
+        UUID caseId = insertCase();
+        String assignee = UUID.randomUUID().toString();
+        for (String disposition : new String[]{
+                "NORMAL", "FALSE_POSITIVE", "CONFIRMED_FRAUD"
+        }) {
+            insertRawAudit(
+                    UUID.randomUUID(),
+                    "SYSTEM",
+                    "finguardops-backend",
+                    workflowContract(
+                            caseId,
+                            "CASE_RESOLVED",
+                            "CASE_RESOLUTION_COMPLETED",
+                            caseSnapshot("IN_REVIEW", assignee),
+                            resolutionSnapshot(disposition, assignee)
+                    ),
+                    "trace_audit_resolution_01"
+            );
+        }
+
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM audit_log "
+                        + "WHERE case_id = ? AND action = 'CASE_RESOLVED'",
+                Integer.class,
+                caseId
+        )).isEqualTo(3);
+
+        RawAuditContract valid = workflowContract(
+                caseId,
+                "CASE_RESOLVED",
+                "CASE_RESOLUTION_COMPLETED",
+                caseSnapshot("IN_REVIEW", assignee),
+                resolutionSnapshot("NORMAL", assignee)
+        );
+        assertRejected(valid.withReasonCode("CASE_REVIEW_STARTED"));
+        assertRejected(valid.withTransactionId(insertTransaction()));
+        assertRejected(valid.withMetadata(object("customerId", "forbidden")));
+        List<RawAuditContract> invalidContracts = List.of(
+                valid.withBefore(caseSnapshot("OPEN", assignee)),
+                valid.withBefore(replaceField(
+                        caseSnapshot("IN_REVIEW", assignee),
+                        "caseStatus",
+                        objectMapper.nullNode()
+                )),
+                valid.withBefore(removeField(
+                        caseSnapshot("IN_REVIEW", assignee),
+                        "caseStatus"
+                )),
+                valid.withBefore(replaceField(
+                        caseSnapshot("IN_REVIEW", assignee),
+                        "caseStatus",
+                        objectMapper.getNodeFactory().numberNode(1)
+                )),
+                valid.withBefore(replaceField(
+                        caseSnapshot("IN_REVIEW", assignee),
+                        "assigneeRef",
+                        objectMapper.nullNode()
+                )),
+                valid.withBefore(removeField(
+                        caseSnapshot("IN_REVIEW", assignee),
+                        "assigneeRef"
+                )),
+                valid.withBefore(replaceField(
+                        caseSnapshot("IN_REVIEW", assignee),
+                        "assigneeRef",
+                        objectMapper.getNodeFactory().numberNode(1)
+                )),
+                valid.withBefore(replaceField(
+                        caseSnapshot("IN_REVIEW", assignee),
+                        "assigneeRef",
+                        object("nested", "value")
+                )),
+                valid.withBefore(replaceField(
+                        caseSnapshot("IN_REVIEW", assignee),
+                        "assigneeRef",
+                        objectMapper.getNodeFactory().booleanNode(true)
+                )),
+                valid.withBefore(caseSnapshot("IN_REVIEW", "null")),
+                valid.withAfter(replaceField(
+                        resolutionSnapshot("NORMAL", assignee),
+                        "caseStatus",
+                        objectMapper.nullNode()
+                )),
+                valid.withAfter(removeField(
+                        resolutionSnapshot("NORMAL", assignee),
+                        "caseStatus"
+                )),
+                valid.withAfter(replaceField(
+                        resolutionSnapshot("NORMAL", assignee),
+                        "caseStatus",
+                        objectMapper.getNodeFactory().numberNode(1)
+                )),
+                valid.withAfter(replaceField(
+                        resolutionSnapshot("NORMAL", assignee),
+                        "finalDisposition",
+                        objectMapper.nullNode()
+                )),
+                valid.withAfter(removeField(
+                        resolutionSnapshot("NORMAL", assignee),
+                        "finalDisposition"
+                )),
+                valid.withAfter(replaceField(
+                        resolutionSnapshot("NORMAL", assignee),
+                        "finalDisposition",
+                        objectMapper.getNodeFactory().numberNode(1)
+                )),
+                valid.withAfter(replaceField(
+                        resolutionSnapshot("NORMAL", assignee),
+                        "finalDisposition",
+                        object("nested", "value")
+                )),
+                valid.withAfter(replaceField(
+                        resolutionSnapshot("NORMAL", assignee),
+                        "finalDisposition",
+                        objectMapper.getNodeFactory().booleanNode(true)
+                )),
+                valid.withAfter(resolutionSnapshot("null", assignee)),
+                valid.withAfter(resolutionSnapshot("UNKNOWN", assignee)),
+                valid.withAfter(replaceField(
+                        resolutionSnapshot("NORMAL", assignee),
+                        "assigneeRef",
+                        objectMapper.nullNode()
+                )),
+                valid.withAfter(removeField(
+                        resolutionSnapshot("NORMAL", assignee),
+                        "assigneeRef"
+                )),
+                valid.withAfter(replaceField(
+                        resolutionSnapshot("NORMAL", assignee),
+                        "assigneeRef",
+                        objectMapper.getNodeFactory().numberNode(1)
+                )),
+                valid.withAfter(replaceField(
+                        resolutionSnapshot("NORMAL", assignee),
+                        "assigneeRef",
+                        object("nested", "value")
+                )),
+                valid.withAfter(replaceField(
+                        resolutionSnapshot("NORMAL", assignee),
+                        "assigneeRef",
+                        objectMapper.getNodeFactory().booleanNode(true)
+                )),
+                valid.withAfter(resolutionSnapshot("NORMAL", "null")),
+                valid.withAfter(resolutionSnapshot(
+                        "NORMAL",
+                        UUID.randomUUID().toString()
+                )),
+                valid.withAfter(
+                        resolutionSnapshot("NORMAL", assignee)
+                                .put("reason", "raw")
+                )
+        );
+
+        for (RawAuditContract invalid : invalidContracts) {
+            assertResolutionCheckRejected(invalid, caseId, 3);
+        }
     }
 
     @ParameterizedTest
@@ -921,6 +1082,66 @@ class AuditLogPersistenceIntegrationTest
         return object("caseStatus", status).put("assigneeRef", assigneeRef);
     }
 
+    private ObjectNode resolutionSnapshot(
+            String disposition,
+            String assigneeRef
+    ) {
+        return object("caseStatus", "CLOSED")
+                .put("finalDisposition", disposition)
+                .put("assigneeRef", assigneeRef);
+    }
+
+    private ObjectNode replaceField(
+            ObjectNode snapshot,
+            String field,
+            JsonNode value
+    ) {
+        snapshot.set(field, value);
+        return snapshot;
+    }
+
+    private ObjectNode removeField(ObjectNode snapshot, String field) {
+        snapshot.remove(field);
+        return snapshot;
+    }
+
+    private void assertResolutionCheckRejected(
+            RawAuditContract contract,
+            UUID caseId,
+            int expectedCount
+    ) {
+        assertThatThrownBy(() -> insertRawAudit(
+                UUID.randomUUID(),
+                "SYSTEM",
+                "finguardops-backend",
+                contract,
+                "trace_audit_resolution_bad_01"
+        )).isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(exception -> {
+                    SQLException sqlException = findSqlException(exception);
+                    assertThat(sqlException.getSQLState()).isEqualTo("23514");
+                    assertThat(sqlException.getMessage())
+                            .contains("ck_audit_log_summary_contract");
+                });
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM audit_log "
+                        + "WHERE case_id = ? AND action = 'CASE_RESOLVED'",
+                Integer.class,
+                caseId
+        )).isEqualTo(expectedCount);
+    }
+
+    private SQLException findSqlException(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            if (current instanceof SQLException sqlException) {
+                return sqlException;
+            }
+            current = current.getCause();
+        }
+        throw new AssertionError("Expected SQLException cause", throwable);
+    }
+
     private void assertRejected(RawAuditContract contract) {
         assertThatThrownBy(() -> insertRawAudit(
                 UUID.randomUUID(),
@@ -1102,6 +1323,13 @@ class AuditLogPersistenceIntegrationTest
             return new RawAuditContract(
                     action, reasonCode, targetType, targetId, transactionId,
                     value, before, after, metadata
+            );
+        }
+
+        private RawAuditContract withBefore(JsonNode value) {
+            return new RawAuditContract(
+                    action, reasonCode, targetType, targetId, transactionId,
+                    caseId, value, after, metadata
             );
         }
 

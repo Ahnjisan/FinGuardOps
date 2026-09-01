@@ -275,6 +275,8 @@ public class AuditLog {
                         CASE_ASSIGNEE_RELEASED -> true;
                 default -> false;
             };
+            case CASE_RESOLVED ->
+                    reasonCode == AuditReasonCode.CASE_RESOLUTION_COMPLETED;
             case TRANSACTION_RISK_RESPONSE_APPLIED ->
                     reasonCode
                             == AuditReasonCode.RISK_RESPONSE_DECIDED_BY_POLICY;
@@ -297,7 +299,8 @@ public class AuditLog {
                             && caseId != null
                             && transactionId != null
                             && targetId.equals(caseId);
-            case CASE_STATUS_CHANGED, CASE_ASSIGNEE_CHANGED ->
+            case CASE_STATUS_CHANGED, CASE_ASSIGNEE_CHANGED,
+                    CASE_RESOLVED ->
                     targetType == AuditTargetType.FRAUD_CASE
                             && caseId != null
                             && transactionId == null

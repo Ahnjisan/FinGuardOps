@@ -152,6 +152,34 @@ public class FraudCase {
         validateInvariants();
     }
 
+    public void resolve(
+            FraudCaseFinalDisposition disposition,
+            Instant resolutionTime
+    ) {
+        requireNotClosed();
+        if (caseStatus != FraudCaseStatus.IN_REVIEW) {
+            throw new IllegalStateException(
+                    "Only in-review cases can be resolved"
+            );
+        }
+        if (assigneeRef == null || reviewStartedAt == null) {
+            throw new IllegalStateException(
+                    "In-review case resolution data is inconsistent"
+            );
+        }
+        FraudCaseFinalDisposition validatedDisposition =
+                Objects.requireNonNull(
+                disposition,
+                "finalDisposition must not be null"
+        );
+        Instant resolvedAt = requireWorkflowTime(resolutionTime);
+        finalDisposition = validatedDisposition;
+        caseStatus = FraudCaseStatus.CLOSED;
+        closedAt = resolvedAt;
+        lastChangedAt = resolvedAt;
+        validateInvariants();
+    }
+
     @PostLoad
     @PrePersist
     @PreUpdate

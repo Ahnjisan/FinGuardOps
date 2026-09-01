@@ -3,6 +3,7 @@ package com.aifds.backend.fraudcase.validation;
 import com.aifds.backend.audit.entity.AuditReasonCode;
 import com.aifds.backend.fraudcase.command.FraudCaseWorkflowCommand;
 import com.aifds.backend.fraudcase.dto.FraudCaseAssigneeChangeRequest;
+import com.aifds.backend.fraudcase.dto.FraudCaseResolutionRequest;
 import com.aifds.backend.fraudcase.dto.FraudCaseStatusChangeRequest;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -301,6 +302,121 @@ class FraudCaseWorkflowValidatorTest {
             assertThatThrownBy(() -> objectMapper.readValue(
                     json,
                     FraudCaseAssigneeChangeRequest.class
+            )).hasRootCauseInstanceOf(FraudCaseValidationException.class);
+        }
+    }
+
+    @Test
+    void validatesResolutionWithoutNormalizingBusinessValues() {
+        FraudCaseWorkflowCommand.Resolution command =
+                validator.validateResolution(
+                        CASE_ID,
+                        new FraudCaseResolutionRequest(
+                                "CONFIRMED_FRAUD",
+                                "CASE_RESOLUTION_COMPLETED",
+                                Long.MAX_VALUE
+                        )
+                );
+
+        assertThat(command.caseId().toString()).isEqualTo(CASE_ID);
+        assertThat(command.finalDisposition())
+                .isEqualTo("CONFIRMED_FRAUD");
+        assertThat(command.reasonCode())
+                .isEqualTo("CASE_RESOLUTION_COMPLETED");
+        assertThat(command.expectedVersion()).isEqualTo(Long.MAX_VALUE);
+    }
+
+    @Test
+    void resolutionRequiresDispositionAsDomainErrorAndOtherFieldsAsFormat() {
+        for (String json : new String[]{
+                "{\"reasonCode\":\"CASE_RESOLUTION_COMPLETED\","
+                        + "\"expectedVersion\":0}",
+                "{\"finalDisposition\":null,"
+                        + "\"reasonCode\":\"CASE_RESOLUTION_COMPLETED\","
+                        + "\"expectedVersion\":0}"
+        }) {
+            assertThatThrownBy(() -> validator.validateResolution(
+                    CASE_ID,
+                    objectMapper.readValue(
+                            json,
+                            FraudCaseResolutionRequest.class
+                    )
+            )).isInstanceOf(FraudCaseValidationException.class)
+                    .extracting(exception ->
+                            ((FraudCaseValidationException) exception).getCode()
+                    ).isEqualTo("FINAL_DISPOSITION_REQUIRED");
+        }
+        for (FraudCaseResolutionRequest request : new FraudCaseResolutionRequest[]{
+                new FraudCaseResolutionRequest("NORMAL", null, 0L),
+                new FraudCaseResolutionRequest(
+                        "NORMAL", "CASE_RESOLUTION_COMPLETED", null
+                ),
+                new FraudCaseResolutionRequest(
+                        "NORMAL", "CASE_RESOLUTION_COMPLETED", -1L
+                )
+        }) {
+            assertThatThrownBy(() ->
+                    validator.validateResolution(CASE_ID, request)
+            ).isInstanceOf(FraudCaseValidationException.class)
+                    .extracting(exception ->
+                            ((FraudCaseValidationException) exception).getType()
+                    ).isEqualTo(FraudCaseValidationType.FORMAT);
+        }
+    }
+
+    @Test
+    void resolutionBusinessEnumsAreExactAndSemantic() {
+        assertThat(validator.parseResolutionDisposition("NORMAL").name())
+                .isEqualTo("NORMAL");
+        assertThat(validator.parseResolutionDisposition("FALSE_POSITIVE").name())
+                .isEqualTo("FALSE_POSITIVE");
+        assertThat(validator.parseResolutionDisposition("CONFIRMED_FRAUD").name())
+                .isEqualTo("CONFIRMED_FRAUD");
+        for (String value : new String[]{
+                "normal", "Normal", "CONFIRMED_FRAUD ", "CLOSED", ""
+        }) {
+            assertThatThrownBy(() ->
+                    validator.parseResolutionDisposition(value)
+            ).isInstanceOf(FraudCaseValidationException.class)
+                    .extracting(exception ->
+                            ((FraudCaseValidationException) exception).getType()
+                    ).isEqualTo(FraudCaseValidationType.DOMAIN);
+        }
+        for (String value : new String[]{
+                "CASE_REVIEW_STARTED",
+                "CASE_ASSIGNEE_CHANGED",
+                "CASE_REQUIRED_BY_RISK_POLICY",
+                "case_resolution_completed"
+        }) {
+            assertThatThrownBy(() -> validator.parseResolutionReason(value))
+                    .isInstanceOf(FraudCaseValidationException.class)
+                    .extracting(exception ->
+                            ((FraudCaseValidationException) exception).getType()
+                    ).isEqualTo(FraudCaseValidationType.DOMAIN);
+        }
+    }
+
+    @Test
+    void resolutionDeserializerRejectsEveryStructuralAndCoercionForm() {
+        for (String json : new String[]{
+                "null",
+                "[]",
+                "1",
+                "\"value\"",
+                "{\"unknown\":1}",
+                "{\"finalDisposition\":\"NORMAL\","
+                        + "\"finalDisposition\":\"FALSE_POSITIVE\"}",
+                "{\"finalDisposition\":true}",
+                "{\"reasonCode\":1}",
+                "{\"expectedVersion\":\"1\"}",
+                "{\"expectedVersion\":1.0}",
+                "{\"expectedVersion\":true}",
+                "{\"expectedVersion\":9223372036854775808}",
+                "{\"finalDisposition\":\"NORMAL\"} {}"
+        }) {
+            assertThatThrownBy(() -> objectMapper.readValue(
+                    json,
+                    FraudCaseResolutionRequest.class
             )).hasRootCauseInstanceOf(FraudCaseValidationException.class);
         }
     }

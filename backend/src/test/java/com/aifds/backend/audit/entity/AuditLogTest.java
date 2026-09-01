@@ -218,7 +218,11 @@ class AuditLogTest {
     @ParameterizedTest
     @EnumSource(
             value = AuditAction.class,
-            names = {"CASE_STATUS_CHANGED", "CASE_ASSIGNEE_CHANGED"}
+            names = {
+                    "CASE_STATUS_CHANGED",
+                    "CASE_ASSIGNEE_CHANGED",
+                    "CASE_RESOLVED"
+            }
     )
     void rejectsTransactionContextForWorkflowActions(AuditAction action) {
         ActionContract contract = contract(action);
@@ -424,6 +428,21 @@ class AuditLogTest {
                                 "10000000-0000-4000-9000-000000000001"
                         );
             }
+            case CASE_RESOLVED -> {
+                before = objectMapper.createObjectNode()
+                        .put("caseStatus", "IN_REVIEW")
+                        .put(
+                                "assigneeRef",
+                                "10000000-0000-4000-9000-000000000001"
+                        );
+                after = objectMapper.createObjectNode()
+                        .put("caseStatus", "CLOSED")
+                        .put("finalDisposition", "CONFIRMED_FRAUD")
+                        .put(
+                                "assigneeRef",
+                                "10000000-0000-4000-9000-000000000001"
+                        );
+            }
             case TRANSACTION_RISK_RESPONSE_APPLIED -> after = objectMapper
                     .createObjectNode()
                     .put("riskResponseOutcome", "HELD");
@@ -497,6 +516,16 @@ class AuditLogTest {
                         "CASE_ASSIGNEE_CHANGED",
                         AuditReasonCode.CASE_ASSIGNEE_ASSIGNED,
                         "CASE_ASSIGNEE_ASSIGNED",
+                        AuditTargetType.FRAUD_CASE,
+                        "FRAUD_CASE",
+                        true,
+                        false
+                ),
+                new ActionContract(
+                        AuditAction.CASE_RESOLVED,
+                        "CASE_RESOLVED",
+                        AuditReasonCode.CASE_RESOLUTION_COMPLETED,
+                        "CASE_RESOLUTION_COMPLETED",
                         AuditTargetType.FRAUD_CASE,
                         "FRAUD_CASE",
                         true,

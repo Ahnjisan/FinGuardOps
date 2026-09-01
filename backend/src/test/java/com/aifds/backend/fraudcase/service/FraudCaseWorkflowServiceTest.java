@@ -333,6 +333,123 @@ class FraudCaseWorkflowServiceTest {
         );
     }
 
+    @ParameterizedTest
+    @MethodSource("resolutionDispositions")
+    void resolvesEveryDispositionWithExactVersionTimeAndAudit(
+            FraudCaseFinalDisposition disposition
+    ) {
+        FraudCase fraudCase = caseIn(FraudCaseStatus.IN_REVIEW, true);
+        Instant reviewStartedAt = fraudCase.getReviewStartedAt();
+        when(repository.findByCaseId(CASE_ID))
+                .thenReturn(Optional.of(fraudCase));
+
+        FraudCaseMutationResponse response = service.resolve(
+                resolution(disposition.name(), 0L),
+                "trace_case_resolution_service_01"
+        );
+
+        assertThat(response.caseStatus()).isEqualTo(FraudCaseStatus.CLOSED);
+        assertThat(response.finalDisposition()).isEqualTo(disposition);
+        assertThat(response.assigneeRef()).isEqualTo(FIRST_ASSIGNEE);
+        assertThat(response.reviewStartedAt()).isEqualTo(reviewStartedAt);
+        assertThat(response.closedAt()).isEqualTo(NOW);
+        assertThat(response.lastChangedAt()).isEqualTo(NOW);
+        assertThat(response.concurrencyVersion()).isEqualTo(1L);
+        verify(repository).flush();
+        var captor = forClass(AuditLogDraft.class);
+        verify(auditService).append(captor.capture());
+        AuditLogDraft audit = captor.getValue();
+        assertThat(audit.action()).isEqualTo(AuditAction.CASE_RESOLVED);
+        assertThat(audit.reasonCode())
+                .isEqualTo(AuditReasonCode.CASE_RESOLUTION_COMPLETED);
+        assertThat(audit.actorType().name()).isEqualTo("SYSTEM");
+        assertThat(audit.actorId()).isEqualTo("finguardops-backend");
+        assertThat(audit.targetId()).isEqualTo(CASE_ID);
+        assertThat(audit.caseId()).isEqualTo(CASE_ID);
+        assertThat(audit.transactionId()).isNull();
+        assertThat(audit.beforeValueSummary().toString()).isEqualTo(
+                "{\"caseStatus\":\"IN_REVIEW\","
+                        + "\"assigneeRef\":\"" + FIRST_ASSIGNEE + "\"}"
+        );
+        assertThat(audit.afterValueSummary().toString()).isEqualTo(
+                "{\"caseStatus\":\"CLOSED\","
+                        + "\"finalDisposition\":\"" + disposition.name()
+                        + "\",\"assigneeRef\":\"" + FIRST_ASSIGNEE + "\"}"
+        );
+        assertThat(audit.metadata()).isEmpty();
+    }
+
+    @Test
+    void resolutionAppliesRequiredErrorPriorityWithoutMutationOrAudit() {
+        when(repository.findByCaseId(CASE_ID)).thenReturn(Optional.empty());
+        assertThatThrownBy(() -> service.resolve(
+                resolution("INVALID", Long.MAX_VALUE),
+                "trace_case_resolution_priority_01"
+        )).isInstanceOf(FraudCaseNotFoundException.class);
+
+        FraudCase closed = caseIn(FraudCaseStatus.CLOSED, true);
+        ReflectionTestUtils.setField(closed, "concurrencyVersion", 6L);
+        when(repository.findByCaseId(CASE_ID)).thenReturn(Optional.of(closed));
+        assertConcurrent(() -> service.resolve(
+                resolution("NORMAL", 5L),
+                "trace_case_resolution_priority_01"
+        ));
+        for (String disposition : new String[]{"NORMAL", "CONFIRMED_FRAUD"}) {
+            assertWorkflowReason(
+                    () -> service.resolve(
+                            resolution(disposition, 6L),
+                            "trace_case_resolution_priority_01"
+                    ),
+                    FraudCaseWorkflowException.Reason.CASE_ALREADY_CLOSED
+            );
+        }
+
+        for (FraudCaseStatus status : new FraudCaseStatus[]{
+                FraudCaseStatus.OPEN,
+                FraudCaseStatus.ADDITIONAL_INFORMATION_REQUIRED
+        }) {
+            FraudCase active = caseIn(status, true);
+            when(repository.findByCaseId(CASE_ID))
+                    .thenReturn(Optional.of(active));
+            assertWorkflowReason(
+                    () -> service.resolve(
+                            resolution("INVALID", 0L),
+                            "trace_case_resolution_priority_01"
+                    ),
+                    FraudCaseWorkflowException.Reason.CASE_STATUS_CONFLICT
+            );
+        }
+
+        verify(repository, never()).flush();
+        verify(auditService, never()).append(
+                org.mockito.ArgumentMatchers.any()
+        );
+    }
+
+    @Test
+    void resolutionRejectsBusinessValuesAfterStateChecks() {
+        FraudCase inReview = caseIn(FraudCaseStatus.IN_REVIEW, true);
+        when(repository.findByCaseId(CASE_ID))
+                .thenReturn(Optional.of(inReview));
+        assertThatThrownBy(() -> service.resolve(
+                resolution("normal", 0L),
+                "trace_case_resolution_business_01"
+        )).isInstanceOf(FraudCaseValidationException.class);
+        assertThatThrownBy(() -> service.resolve(
+                new FraudCaseWorkflowCommand.Resolution(
+                        CASE_ID,
+                        "NORMAL",
+                        "CASE_REVIEW_STARTED",
+                        0L
+                ),
+                "trace_case_resolution_business_01"
+        )).isInstanceOf(FraudCaseValidationException.class);
+        verify(repository, never()).flush();
+        verify(auditService, never()).append(
+                org.mockito.ArgumentMatchers.any()
+        );
+    }
+
     private FraudCaseMutationResponse approvedStart() {
         return service.changeStatus(
                 new FraudCaseWorkflowCommand.StatusChange(
@@ -344,6 +461,18 @@ class FraudCaseWorkflowServiceTest {
                         0L
                 ),
                 "trace_case_service_07"
+        );
+    }
+
+    private FraudCaseWorkflowCommand.Resolution resolution(
+            String disposition,
+            long version
+    ) {
+        return new FraudCaseWorkflowCommand.Resolution(
+                CASE_ID,
+                disposition,
+                "CASE_RESOLUTION_COMPLETED",
+                version
         );
     }
 
@@ -504,5 +633,10 @@ class FraudCaseWorkflowServiceTest {
                         AuditReasonCode.CASE_ASSIGNEE_RELEASED
                 )
         );
+    }
+
+    private static Stream<FraudCaseFinalDisposition>
+    resolutionDispositions() {
+        return Stream.of(FraudCaseFinalDisposition.values());
     }
 }

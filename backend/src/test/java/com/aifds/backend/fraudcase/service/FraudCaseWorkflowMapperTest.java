@@ -2,6 +2,8 @@ package com.aifds.backend.fraudcase.service;
 
 import com.aifds.backend.fraudcase.dto.FraudCaseMutationResponse;
 import com.aifds.backend.fraudcase.entity.FraudCase;
+import com.aifds.backend.fraudcase.entity.FraudCaseFinalDisposition;
+import com.aifds.backend.fraudcase.entity.FraudCaseStatus;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -59,5 +61,41 @@ class FraudCaseWorkflowMapperTest {
         assertThatNullPointerException().isThrownBy(() ->
                 mapper.toResponse(null, "trace_case_mapper_01")
         ).withMessage("fraudCase must not be null");
+    }
+
+    @Test
+    void mapsEveryResolutionFieldFromTheCommittedVersionSnapshot() {
+        UUID caseId = UUID.randomUUID();
+        Instant createdAt = Instant.parse("2026-09-01T00:00:00Z");
+        Instant reviewStartedAt = createdAt.plusSeconds(1);
+        Instant resolutionTime = createdAt.plusSeconds(2);
+        FraudCase fraudCase = FraudCase.open(caseId, createdAt);
+        fraudCase.startReview(
+                "10000000-0000-4000-9000-000000000001",
+                reviewStartedAt
+        );
+        fraudCase.resolve(
+                FraudCaseFinalDisposition.CONFIRMED_FRAUD,
+                resolutionTime
+        );
+        ReflectionTestUtils.setField(fraudCase, "concurrencyVersion", 7L);
+
+        FraudCaseMutationResponse response = mapper.toResponse(
+                fraudCase,
+                "trace_case_resolution_mapper_01"
+        );
+
+        assertThat(response.caseId()).isEqualTo(caseId);
+        assertThat(response.caseStatus()).isEqualTo(FraudCaseStatus.CLOSED);
+        assertThat(response.finalDisposition())
+                .isEqualTo(FraudCaseFinalDisposition.CONFIRMED_FRAUD);
+        assertThat(response.assigneeRef())
+                .isEqualTo("10000000-0000-4000-9000-000000000001");
+        assertThat(response.reviewStartedAt()).isEqualTo(reviewStartedAt);
+        assertThat(response.closedAt()).isEqualTo(resolutionTime);
+        assertThat(response.lastChangedAt()).isEqualTo(resolutionTime);
+        assertThat(response.concurrencyVersion()).isEqualTo(7L);
+        assertThat(response.traceId())
+                .isEqualTo("trace_case_resolution_mapper_01");
     }
 }

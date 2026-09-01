@@ -4,11 +4,13 @@ import com.aifds.backend.common.trace.TraceIdFilter;
 import com.aifds.backend.fraudcase.command.FraudCaseWorkflowCommand;
 import com.aifds.backend.fraudcase.dto.FraudCaseAssigneeChangeRequest;
 import com.aifds.backend.fraudcase.dto.FraudCaseMutationResponse;
+import com.aifds.backend.fraudcase.dto.FraudCaseResolutionRequest;
 import com.aifds.backend.fraudcase.dto.FraudCaseStatusChangeRequest;
 import com.aifds.backend.fraudcase.service.FraudCaseWorkflowService;
 import com.aifds.backend.fraudcase.validation.FraudCaseWorkflowValidator;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PatchMapping;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestAttribute;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -52,5 +54,17 @@ public class FraudCaseWorkflowController {
         FraudCaseWorkflowCommand.AssigneeChange command =
                 validator.validateAssignee(caseId, request);
         return ResponseEntity.ok(service.changeAssignee(command, traceId));
+    }
+
+    @PostMapping("/{caseId}/resolution")
+    public ResponseEntity<FraudCaseMutationResponse> resolve(
+            @PathVariable String caseId,
+            @RequestBody FraudCaseResolutionRequest request,
+            @RequestAttribute(TraceIdFilter.TRACE_ID_REQUEST_ATTRIBUTE)
+            String traceId
+    ) {
+        FraudCaseWorkflowCommand.Resolution command =
+                validator.validateResolution(caseId, request);
+        return ResponseEntity.ok(service.resolve(command, traceId));
     }
 }

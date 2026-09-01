@@ -543,6 +543,14 @@ Issue #209 mutation은 body `expectedVersion`과 `concurrencyVersion`을 비교�
 Entity 업무 메서드, 사건 flush, 감사 append·flush를 같은 REQUIRED 트랜잭션에서
 수행한다. 상태와 담당자 endpoint는 분리하며 row lock·자동 retry는 사용하지 않는다.
 
+Issue #211 resolution은 담당자와 `reviewStartedAt`이 있는 `IN_REVIEW` 사건만
+`POST /api/v1/cases/{caseId}/resolution`으로 종료한다. `expectedVersion`을 상태보다
+먼저 비교하고 하나의 마이크로초 시각을 `closedAt`과 `lastChangedAt`에 사용하며
+`createdAt`, 담당자, 최초 조사 시각을 유지한다. `Idempotency-Key`, `If-Match`, 자유
+텍스트 reason, row lock과 retry를 사용하지 않는다. 성공 종료만
+`SYSTEM/finguardops-backend` 감사 1건을 기록하고 Transaction·Risk·CaseTransaction과
+AI 처리는 변경하지 않는다.
+
 `representativeRiskLevel`, 대표 거래와 대표 Reason Code는 선정 정책이 없어 V6에
 포함하지 않았다. 필요하면 후속 Issue와 additive Migration으로 도입한다.
 
@@ -620,7 +628,8 @@ Issue #154는 방안 A를 채택했다. `FinancialTransaction`을 먼저
 `AuditLog`는 업무 원본의 현재값을 대신하지 않고 주요 변경을 감사 가능하게
 남기는 append-only 기록이다. Issue #156과 Flyway V7에서 물리 모델과 INSERT
 전용 Persistence 경계를 구현했고 V11에서 사건 상태·담당자 action/reason 및
-제한 snapshot을 확장했다. 거부 감사와 조회 API는 아직 구현하지 않았다. 물리 계약은
+제한 snapshot을 확장했다. V12는 `CASE_RESOLVED/CASE_RESOLUTION_COMPLETED`와 exact
+before/after snapshot만 additive 확장한다. 거부 감사와 조회 API는 아직 구현하지 않았다. 물리 계약은
 [`../04-database/audit-log-schema.md`](../04-database/audit-log-schema.md)를
 따른다.
 
@@ -642,7 +651,7 @@ Issue #154는 방안 A를 채택했다. `FinancialTransaction`을 먼저
 개인정보 원문은 저장하지 않으며, 실제 `USER` actor 연결은 아직
 구현하지 않았다.
 
-V7의 최초 네 action과 V11의 두 사건 workflow action은 exact JSON key·scalar
+V7의 최초 네 action, V11의 두 사건 workflow action과 V12의 resolution action은 exact JSON key·scalar
 타입·형식을 Java와 PostgreSQL에서
 검증한다. 자유 텍스트 reason과 임의 metadata를 허용하지 않으며 세 JSON의 UTF-8
 `jsonb::text` 표현 크기 합계를 8192 byte로 제한한다. Java도 제한된
@@ -1764,8 +1773,9 @@ seed와 DetectionEvidence nullable RuleVersion FK를 additive하게 추가하며
 V1~V4를 수정하거나 기존 Evidence를 backfill하지 않는다.
 V6는 `fraud_case`·`case_transaction`과 승인된 FK·Unique·Check·Index를
 additive하게 구현한다. V7은 승인된 네 action의 append-only AuditLog 물리 기반을
-additive하게 구현한다. External Risk 비영속 v2 입력 계약은 V1~V7을 수정하거나
-신규 Migration을 요구하지 않는다. 사건 조사 메모와 AI 운영 DDL은 별도 승인
+additive하게 구현하고 V10은 사건 조회 인덱스, V11은 사건 workflow 감사, V12는
+사건 resolution 감사를 기존 migration 변경 없이 확장한다. External Risk 비영속 v2
+입력 계약은 신규 Migration을 요구하지 않는다. 사건 조사 메모와 AI 운영 DDL은 별도 승인
 작업이다.
 
 ### 20.4 트랜잭션·동시성 설계
@@ -1781,7 +1791,8 @@ additive하게 구현한다. External Risk 비영속 v2 입력 계약은 V1~V7�
 거래 상태 변경은 `financial_transaction.version` 낙관적 잠금을 사용한다. 사건
 생성·첫 연결 경계는 기본 `READ_COMMITTED`·`REQUIRED`에서
 `FinancialTransaction → FraudCase → CaseTransaction` 비관적 잠금 순서를
-사용한다. 조사 상태 변경의 세부 잠금 방식은 후속 범위이다.
+사용한다. 조사 상태·담당자·resolution은 일반 사건 조회와 body `expectedVersion`,
+JPA `@Version`, 명시적 flush를 사용하며 row lock과 자동 retry를 사용하지 않는다.
 
 ### 20.5 캐시·이벤트 후속 설계
 

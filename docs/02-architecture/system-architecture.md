@@ -39,6 +39,8 @@
   일괄 집계 경계 및 Flyway V10 조회 인덱스
 - 사건 상태·담당자 PATCH API, body `expectedVersion`, JPA 낙관적 잠금과 성공 감사
   1건의 REQUIRED 트랜잭션 경계 및 Flyway V11
+- `POST /api/v1/cases/{caseId}/resolution`, `IN_REVIEW` 전용 종료, 동일 시각
+  closure 필드, 실제 version·성공 감사 1건의 원자적 경계 및 Flyway V12
 - append-only `AuditLog` Entity, Flyway V7, INSERT 전용 Persistence 경계와
   PostgreSQL UPDATE·DELETE 차단 trigger
 - Issue 및 Pull Request 템플릿
@@ -124,10 +126,10 @@ FinGuardOps의 아키텍처 목표는 다음과 같다.
 
 거래, 탐지 결과, 위험 대응, 사건, 최종 판정과 감사 로그는 중복되거나 일부만 반영되어서는 안 된다. 상태 전이, 멱등성, 동시성 충돌과 실패 후 재시도는 Spring Boot가 중앙에서 검증한다.
 
-특히 HIGH·CRITICAL 거래의 상태 변경·사건 생성·연결·AuditLog와 사건 조사 상태·
-담당자 변경·AuditLog는 각 구현된 REQUIRED 트랜잭션에서 함께 commit하거나
-rollback한다. 사건 종료와 최종 판정, AI 리포트
-상태와 사용량·비용 저장의 정합성 경계는 후속 설계에서 결정한다.
+특히 HIGH·CRITICAL 거래의 상태 변경·사건 생성·연결·AuditLog, 사건 조사 상태·
+담당자 변경·AuditLog, 사건 최종 판정·종료·AuditLog는 각 구현된 REQUIRED
+트랜잭션에서 함께 commit하거나 rollback한다. AI 리포트 상태와 사용량·비용 저장의
+정합성 경계는 후속 설계에서 결정한다.
 
 ### 4.2 장애 격리
 
@@ -967,6 +969,13 @@ Grafana는 Prometheus·Backend·Alertmanager의 시작 또는 health dependency�
 - `PATCH /api/v1/cases/{caseId}/status`, `/assignee`와 Flyway V11. 사건 조회,
   expected version 우선 비교, Entity 불변식, 명시적 flush, 성공 AuditLog 1건을
   같은 REQUIRED 트랜잭션에서 처리하고 row lock·자동 retry는 사용하지 않음
+- `POST /api/v1/cases/{caseId}/resolution`과 Flyway V12. 담당자·최초 조사 시각이
+  있는 `IN_REVIEW`만 종료하고 `expectedVersion` 우선 비교, 하나의 마이크로초 시각,
+  FraudCase·AuditLog flush와 rollback을 같은 REQUIRED 트랜잭션에서 처리함.
+  `Idempotency-Key`, `If-Match`, 자유 텍스트 reason, row lock·retry는 사용하지 않음
+- resolution 성공은 `SYSTEM/finguardops-backend` 감사 1건만 추가하며 Transaction,
+  RiskLevel, RiskResponseOutcome, CaseTransaction과 AI 처리를 변경하지 않음. RBAC,
+  실제 USER actor와 조사 메모는 미구현
 - Backend와 AI Service 전용 GitHub Actions 테스트 Workflow
 - 로컬 Prometheus→Alertmanager 연결, grouping·routing·signal별 warning inhibition과
   bounded webhook firing·resolved·restart·장애 검증 경계
@@ -993,7 +1002,7 @@ Grafana는 Prometheus·Backend·Alertmanager의 시작 또는 health dependency�
 - 비트랜잭션 상위 거래 Service의 External Risk→Rule 분석→최종화 연결
 - RuleVersion publish·운영 준비
 - 최종 Snapshot v2 확정과 완료 간극 운영 복구
-- 감사 조회 API와 아직 미구현인 메모·종료 업무의 AuditLog 통합
+- 감사 조회 API와 아직 미구현인 조사 메모의 AuditLog 통합
 - External Risk public intake 연결과 실패 Snapshot 저장 호출. 성공 Snapshot DB 영속화는 별도 승인 시 검토
 - production container 배포 환경과 Compose 고도화
 
