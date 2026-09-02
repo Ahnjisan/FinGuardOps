@@ -47,7 +47,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @WebMvcTest(TransactionQueryController.class)
+@org.springframework.security.test.context.support.WithMockUser
 @Import({
+        com.aifds.backend.security.config.FinGuardOpsSecurityConfiguration.class,
         GlobalExceptionHandler.class,
         TraceIdFilter.class,
         TransactionQueryService.class,

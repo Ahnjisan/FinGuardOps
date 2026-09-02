@@ -14,13 +14,12 @@ Spring Boot의 `X-Trace-Id` 형식, 외부 값 수용과 서버 생성 규칙은
 
 ### Spring Boot 인증 경계
 
-- 현재: Spring Security가 없어 security layer 관점에서 무인증이다.
-- 목표: credential이 없으면 public health로 `200 OK`를 반환한다. 단, 명시적으로 전달한
+- 구현: credential이 없으면 public health로 `200 OK`를 반환한다. 단, 명시적으로 전달한
   Bearer token이나 Authorization header가 유효하지 않으면 `401 UNAUTHORIZED`다.
 - public은 인터넷 공개를 의미하지 않으며 배포 network 정책으로 추가 제한할 수 있다.
 - 응답에는 dependency·DB·build·환경 정보를 추가하지 않는다.
 
-목표 계약은 [`security-architecture.md`](../02-architecture/security-architecture.md)를
+구현 계약은 [`security-architecture.md`](../02-architecture/security-architecture.md)를
 따른다. FastAPI health는 별도 컴포넌트 보안 경계이며 Spring Backend RBAC의 직접 대상이
 아니다.
 

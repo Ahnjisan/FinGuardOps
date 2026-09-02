@@ -10,21 +10,21 @@ actor 목표 계약을 정의한다. Architecture Decision은
 
 ### 1.1 현재 상태
 
-- Spring Security·OAuth2 Resource Server dependency가 없다.
-- `SecurityFilterChain`, JWT decoder, 인증 Filter·Interceptor·ArgumentResolver가 없다.
-- `SecurityContext`, `Authentication`, `Principal`, `@PreAuthorize`, `@Secured`를 사용하지
-  않는다.
+- Spring Boot 관리 버전의 Spring Security·OAuth2 Resource Server dependency와 application
+  listener용 `SecurityFilterChain`, JWT decoder·validator가 구현되었다.
+- 정상 JWT를 immutable USER·SERVICE principal로 변환하고 JWT role의 `ROLE_` authority와
+  세부 authority를 생성한다.
+- 기존 업무 endpoint는 정상 인증을 요구하지만 endpoint별 세부 authority enforcement와
+  `@PreAuthorize`는 아직 구현하지 않았다.
 - login·signup·refresh·logout endpoint와 사용자·role·credential DB가 없다.
-- 명시적 `permitAll` 설정이 아니라 security layer 자체가 없으므로 현재 Spring 업무
-  API는 사실상 무인증이다.
 - 사건 workflow·resolution·note writer는 `SYSTEM/finguardops-backend`를 기록한다.
 - Issue #215 사건 감사 조회 응답은 `actorType`만 공개하고 `actorId`는 비노출한다.
 
 ### 1.2 목표와 비범위
 
-이 문서는 목표 계약이며 Spring Security, JWT, RBAC, USER actor, Frontend 로그인,
-Authorization Server, Compose 인증이 구현되었다는 뜻이 아니다. 이번 문서 작업은 source,
-test, dependency, 설정, migration과 runtime을 변경하지 않는다.
+Issue #219는 Resource Server 기반과 JWT·principal·공통 오류·listener 경계를 구현했다.
+endpoint별 RBAC, USER actor, Frontend 로그인, Authorization Server와 Compose 인증은 후속
+범위이며 구현 완료로 표현하지 않는다.
 
 ## 2. 신뢰 경계
 
@@ -34,7 +34,8 @@ Authorization Server
        ↓ Authorization: Bearer <JWT>
 Spring Boot Resource Server
   ├─ signature·issuer·audience·time·claim 검증
-  ├─ role → authority 변환과 deny-by-default
+  ├─ role → authority 변환과 인증 요구
+  ├─ endpoint별 authority enforcement는 후속 Issue
   ├─ 금융 업무 정합성·transaction 소유
   └─ 성공 사건 write의 USER Audit actor 기록
 
@@ -61,7 +62,7 @@ RBAC 직접 대상이 아니다.
 | algorithm | `RS256`만 허용 |
 | key 식별자 | JWT header의 `kid` 필수 |
 | key source | Backend 환경에 설정된 JWK URI만 사용 |
-| 무시 header | token의 `jku`, `x5u` |
+| 금지 header | token의 `jku`, `x5u` |
 | 금지 | unsigned JWT, `alg=none`, algorithm confusion, 임의 algorithm 확장 |
 
 Bearer scheme이 없거나 중복 Authorization header, 다른 scheme, 빈 token과 malformed
@@ -104,8 +105,10 @@ canonical lowercase UUID v4인지 검증한다. 외부 `authorities` claim은 �
 - `kid`는 재사용하지 않는다.
 - cache 안의 known key는 cache 유효 중 offline signature 검증에 사용할 수 있다.
 - unknown key refresh가 실패하면 다른 key나 algorithm으로 우회하지 않고 fail-closed한다.
-- 실제 upstream JWK 조회 장애로 식별 가능한 경우에만 안전한 503 후보로 분류한다.
-  구체적인 Spring Security 예외 분류와 응답 code는 후속 구현에서 검증한다.
+- 실제 upstream JWK cause chain이 timeout allowlist와 일치하면 503
+  `DEPENDENCY_TIMEOUT`, 연결·DNS·TLS·5xx allowlist와 일치하면 503
+  `DEPENDENCY_UNAVAILABLE`로 분류한다. 이외 예상 밖 decoder 오류는 안전한 500
+  `INTERNAL_ERROR`다.
 - malformed·서명 오류·만료·issuer·audience·time·claim 오류는 401이다.
 
 ## 4. Role → authority 계약
@@ -131,24 +134,25 @@ JWT role 문자열에는 `ROLE_` prefix가 없다. Backend가 role용 GrantedAut
 
 ## 5. 실제 Spring endpoint inventory와 목표 RBAC
 
-아래 13개는 현재 production Controller에 실제 존재한다. `현재 인증`의 `없음`은
-`permitAll`을 뜻하지 않고 security layer가 없다는 뜻이다.
+아래 13개는 현재 production Controller에 실제 존재한다. Issue #219에서는 public health를
+제외한 업무 endpoint에 정상 JWT를 요구하지만 표의 endpoint별 목표 authority는 아직
+강제하지 않는다.
 
 | Method·path | Controller·기능 | R/W | principal·허용 role | 목표 authority | Public | 현재 인증 | 성공 업무 AuditLog |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `GET /api/health` | `HealthController`, process health | R | 없음 | 없음 | 예 | 없음 | 없음 |
-| `POST /api/v1/transactions` | `TransactionIntakeController`, 거래 접수 | W | SERVICE · `TRANSACTION_INGESTOR` | `transaction:intake` | 아니오 | 없음 | 조건부 SYSTEM 거래·사건 감사 |
-| `GET /api/v1/transactions` | `TransactionQueryController`, 거래 목록 | R | USER · viewer authority 보유 role | `transaction:read` | 아니오 | 없음 | 없음 |
-| `GET /api/v1/transactions/{transactionId}` | `TransactionQueryController`, 거래 상세 | R | USER · viewer authority 보유 role | `transaction:read` | 아니오 | 없음 | 없음 |
-| `POST /api/v1/behavior-events` | `BehaviorEventIntakeController`, 행동 접수 | W | SERVICE · `BEHAVIOR_INGESTOR` | `behavior-event:intake` | 아니오 | 없음 | 없음 |
-| `GET /api/v1/cases` | `FraudCaseQueryController`, 사건 목록 | R | USER · viewer authority 보유 role | `case:read` | 아니오 | 없음 | 없음 |
-| `GET /api/v1/cases/{caseId}` | `FraudCaseQueryController`, 사건 상세 | R | USER · viewer authority 보유 role | `case:read` | 아니오 | 없음 | 없음 |
-| `PATCH /api/v1/cases/{caseId}/status` | `FraudCaseWorkflowController`, 상태 변경 | W | USER · `FDS_ANALYST` | `case:workflow:write` | 아니오 | 없음 | 현재 SYSTEM, 목표 USER |
-| `PATCH /api/v1/cases/{caseId}/assignee` | `FraudCaseWorkflowController`, 담당자 변경 | W | USER · `FDS_ANALYST` | `case:workflow:write` | 아니오 | 없음 | 현재 SYSTEM, 목표 USER |
-| `POST /api/v1/cases/{caseId}/resolution` | `FraudCaseWorkflowController`, 사건 종결 | W | USER · `FDS_APPROVER` | `case:resolution:write` | 아니오 | 없음 | 현재 SYSTEM, 목표 USER |
-| `POST /api/v1/cases/{caseId}/notes` | `InvestigationNoteController`, 메모 생성 | W | USER · `FDS_ANALYST` | `case-note:write` | 아니오 | 없음 | 현재 SYSTEM, 목표 USER |
-| `GET /api/v1/cases/{caseId}/notes` | `InvestigationNoteController`, 메모 조회 | R | USER · viewer authority 보유 role | `case-note:read` | 아니오 | 없음 | 없음 |
-| `GET /api/v1/cases/{caseId}/audit-logs` | `FraudCaseAuditLogController`, 감사 조회 | R | USER · viewer authority 보유 role | `case-audit:read` | 아니오 | 없음 | 없음 |
+| `GET /api/health` | `HealthController`, process health | R | 없음 | 없음 | 예 | public | 없음 |
+| `POST /api/v1/transactions` | `TransactionIntakeController`, 거래 접수 | W | SERVICE · `TRANSACTION_INGESTOR` | `transaction:intake` | 아니오 | 정상 JWT 필요 | 조건부 SYSTEM 거래·사건 감사 |
+| `GET /api/v1/transactions` | `TransactionQueryController`, 거래 목록 | R | USER · viewer authority 보유 role | `transaction:read` | 아니오 | 정상 JWT 필요 | 없음 |
+| `GET /api/v1/transactions/{transactionId}` | `TransactionQueryController`, 거래 상세 | R | USER · viewer authority 보유 role | `transaction:read` | 아니오 | 정상 JWT 필요 | 없음 |
+| `POST /api/v1/behavior-events` | `BehaviorEventIntakeController`, 행동 접수 | W | SERVICE · `BEHAVIOR_INGESTOR` | `behavior-event:intake` | 아니오 | 정상 JWT 필요 | 없음 |
+| `GET /api/v1/cases` | `FraudCaseQueryController`, 사건 목록 | R | USER · viewer authority 보유 role | `case:read` | 아니오 | 정상 JWT 필요 | 없음 |
+| `GET /api/v1/cases/{caseId}` | `FraudCaseQueryController`, 사건 상세 | R | USER · viewer authority 보유 role | `case:read` | 아니오 | 정상 JWT 필요 | 없음 |
+| `PATCH /api/v1/cases/{caseId}/status` | `FraudCaseWorkflowController`, 상태 변경 | W | USER · `FDS_ANALYST` | `case:workflow:write` | 아니오 | 정상 JWT 필요 | 현재 SYSTEM, 목표 USER |
+| `PATCH /api/v1/cases/{caseId}/assignee` | `FraudCaseWorkflowController`, 담당자 변경 | W | USER · `FDS_ANALYST` | `case:workflow:write` | 아니오 | 정상 JWT 필요 | 현재 SYSTEM, 목표 USER |
+| `POST /api/v1/cases/{caseId}/resolution` | `FraudCaseWorkflowController`, 사건 종결 | W | USER · `FDS_APPROVER` | `case:resolution:write` | 아니오 | 정상 JWT 필요 | 현재 SYSTEM, 목표 USER |
+| `POST /api/v1/cases/{caseId}/notes` | `InvestigationNoteController`, 메모 생성 | W | USER · `FDS_ANALYST` | `case-note:write` | 아니오 | 정상 JWT 필요 | 현재 SYSTEM, 목표 USER |
+| `GET /api/v1/cases/{caseId}/notes` | `InvestigationNoteController`, 메모 조회 | R | USER · viewer authority 보유 role | `case-note:read` | 아니오 | 정상 JWT 필요 | 없음 |
+| `GET /api/v1/cases/{caseId}/audit-logs` | `FraudCaseAuditLogController`, 감사 조회 | R | USER · viewer authority 보유 role | `case-audit:read` | 아니오 | 정상 JWT 필요 | 없음 |
 
 여기서 viewer authority 보유 role은 `FDS_VIEWER`, 그리고 그 전체 authority를 상속하는
 `FDS_ANALYST`·`FDS_APPROVER`다. 인증이 필요한 모든 행은 credential·claim 실패 시 401,
@@ -162,8 +166,7 @@ dependency·DB·build·환경 상세를 추가하지 않는다. 잘못된 Bearer
 
 ### 5.1 Profile·listener별 health·Actuator 목표 계약
 
-현재는 Spring Security가 없으며 아래 status는 기존 profile·listener 설정의 결과다. 목표
-Security 구현은 credential이 없는 요청에 대해 이 status matrix를 보존한다.
+Issue #219의 Security 구현은 credential이 없는 요청에 대해 아래 status matrix를 보존한다.
 
 | Profile/listener | Endpoint | Credential 없음 |
 | --- | --- | ---: |
@@ -220,20 +223,20 @@ profile·confirmation·non-web process 실행 경계이며 JWT endpoint로 표�
 
 ## 6. Authorization 정책
 
-- application listener의 목표 matcher·chain 책임 순서는 다음과 같다.
+- application listener의 구현 matcher·chain 책임 순서는 다음과 같다.
   1. `TraceIdFilter`가 현재 요청 traceId를 확정한다.
   2. Bearer credential이 있으면 authentication을 검증한다.
   3. 승인된 CORS preflight를 처리한다.
   4. exact public application path인 `/api/health`와 기본 profile에서 실제 노출된
      `/actuator/health`를 authority 없이 허용한다.
-  5. 업무 endpoint의 세부 authority를 검사한다.
-  6. 그 밖의 요청은 deny-by-default로 거부한다.
+  5. 업무 endpoint에는 정상 인증을 요구한다.
+  6. endpoint별 세부 authority 검사는 후속 Issue에서 적용한다.
 - management `8081`은 위 업무 JWT chain과 별도 경계다.
 - profile에 따라 mapping되지 않은 Actuator path는 Security가 먼저 401·403을 반환하지 않고
-  기존 404를 유지하도록 후속 구현에서 matcher 순서와 management context를 검증한다. invalid
+  기존 404를 유지하도록 matcher 순서와 management context를 검증한다. invalid
   Bearer의 authentication 401은 이 404 exposure 계약과 별도로 검증한다.
-- SERVICE ingestion endpoint에는 각 전용 authority만 허용한다.
-- USER 업무 endpoint에는 표의 세부 authority를 요구한다.
+- SERVICE ingestion endpoint의 전용 authority와 USER 업무 endpoint의 세부 authority는
+  후속 RBAC Issue에서 강제한다.
 - 사건 write·resolution 같은 고위험 Service에는 authority 기반 method security를 함께
   적용한다.
 - 인증 또는 claim 검증 실패는 401, valid principal의 authority 부족은 403이다.
@@ -253,8 +256,8 @@ TraceIdFilter
 → Service
 ```
 
-현재 `TraceIdFilter`는 `Ordered.HIGHEST_PRECEDENCE`이므로 일반 REQUEST에서 Security
-chain보다 먼저 실행할 수 있다. 목표 구현은 이 순서를 테스트로 고정한다. 401·403은
+`TraceIdFilter`는 `Ordered.HIGHEST_PRECEDENCE`로 Security chain보다 먼저 trace를
+확정한다. 이 순서는 통합 테스트로 고정한다. 401·403은
 DispatcherServlet 전에 발생하므로 `GlobalExceptionHandler`가 아니라 전용
 `AuthenticationEntryPoint`와 `AccessDeniedHandler`가 처리한다.
 
@@ -385,9 +388,9 @@ AuditLog는 같은 transaction·flush·rollback 경계를 사용한다.
 - test는 ephemeral asymmetric key 또는 test-only decoder를 사용하되 production과 같은
   claim validator를 실행한다.
 - MockMvc JWT fixture는 exact claim 타입, USER·SERVICE 구분과 role mapping을 재현한다.
-- local은 internal local issuer/JWK fixture 또는 승인된 local Authorization Server를
-  사용한다.
-- local HTTP issuer/JWK는 local profile·internal network에서만 허용한다.
+- local Compose issuer/JWK fixture는 아직 없고 후속 Issue에서 적용한다.
+- production과 기본 runtime issuer/JWK는 HTTPS만 허용한다. test의 in-process JWK server는
+  명시적인 loopback 전용 opt-in에서만 HTTP를 허용한다.
 - production issuer/JWK는 HTTPS가 아니면 fail-closed한다.
 - 실제 private key, JWT와 credential은 repository·문서·`.env.example`·로그에 저장하지
   않는다.
@@ -426,21 +429,23 @@ generator는 Authorization header가 없으므로 SERVICE token 적용 후속 Is
 다음 분리는 토큰 절약이 아니라 dependency, 권한 matrix, DB migration, Docker E2E와
 브라우저 검증의 기술 책임이 다르기 때문이다.
 
+OAuth2 Resource Server 기반과 401·403·trace 경계는 Issue #219에서 구현되었다. 아래 표는
+남은 후속 구현 네 개만 순서대로 표시한다.
+
 | 순서·제목 | 목표 | 주요 변경 영역 | Migration | 테스트 경계 | 선행 Issue | 장시간 검증·현재 상태 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1. `[Backend/Security] OAuth2 Resource Server 기반과 401/403·trace 경계 구현` | JWT 인증 기반과 안전 오류 | dependency, decoder, validator, filter chain, entrypoint, denied handler | 없음 | signature·claim·JWK·trace·profile | #217 | JWK 장애·rotation; 미구현 |
-| 2. `[Backend/Security] Endpoint RBAC와 USER·SERVICE principal matrix 적용` | deny-by-default와 endpoint 최소 권한 | request matcher, role converter, method security | 없음 | 13개 endpoint 200·401·403, role 혼용 | 1 | 전체 MockMvc matrix; 미구현 |
-| 3. `[Backend/Audit] 사건 write USER actor와 InvestigationNote author 연결` | 검증 principal을 성공 감사에 연결 | controller/service actor, note author, audit projection | 필요 | 성공·stale·rollback·기존 SYSTEM 호환 | 2 | 동시성·migration; 미구현 |
-| 4. `[Infra/Docs] Local Compose·runbook JWT fixture와 인증 E2E 적용` | local issuer와 SERVICE traffic | Compose, fixture, env example, runbook | 없음 | build·wait·traffic·scrape·alert·restart | 1·2 | Docker E2E; 미구현 |
-| 5. `[Frontend] OIDC 로그인·token·권한 UI 구현` | SPA 인증·권한 UX | PKCE, memory token, API client, 401·403 UI | 없음 | browser login·expiry·권한 UI | AS 제품, 1·2 | 브라우저/AS E2E; 미구현 |
+| 1. `[Backend/Security] Endpoint RBAC와 USER·SERVICE authority matrix 적용` | deny-by-default와 endpoint 최소 권한 | request matcher, role converter, method security | 없음 | 13개 endpoint 200·401·403, role 혼용 | #219 | 전체 MockMvc matrix; 미구현 |
+| 2. `[Backend/Audit] 사건 write USER actor와 InvestigationNote author 연결` | 검증 principal을 성공 감사에 연결 | controller/service actor, note author, audit projection | 필요 | 성공·stale·rollback·기존 SYSTEM 호환 | 1 | 동시성·migration; 미구현 |
+| 3. `[Infra/Docs] Local Compose·runbook JWT fixture와 인증 E2E 적용` | local issuer와 SERVICE traffic | Compose, fixture, env example, runbook | 없음 | build·wait·traffic·scrape·alert·restart | #219·1 | Docker E2E; 미구현 |
+| 4. `[Frontend] OIDC 로그인·token·권한 UI 구현` | SPA 인증·권한 UX | PKCE, memory token, API client, 401·403 UI | 없음 | browser login·expiry·권한 UI | AS 제품, #219·1 | 브라우저/AS E2E; 미구현 |
 
 ## 14. 구현 검증 계약
 
-후속 구현은 최소한 credential 없음, malformed·서명 오류·만료 token, issuer·audience,
-time·subject·principal_type·role claim 오류, USER·SERVICE role 혼용, 허용 authority 정상
-접근, 권한 부족 403, deny-by-default, 401·403 trace 일치, 민감정보 비노출, 성공 USER
-AuditLog, 실패 무감사, optimistic rollback, management listener 분리와 profile 간 보안
-회귀를 검증한다.
+Issue #219 테스트는 credential 없음, malformed·서명 오류·만료 token, issuer·audience,
+time·subject·principal_type·role claim 오류, USER·SERVICE role 혼용, role-derived authority,
+401·403·503·500 trace와 비노출, JWK cache·rotation·장애, management listener 분리와 profile
+간 보안 회귀를 검증한다. endpoint authority matrix, 성공 USER AuditLog, 실패 무감사와
+optimistic rollback은 후속 RBAC·Audit Issue에서 검증한다.
 
 ## 15. 공식 참고 문서
 

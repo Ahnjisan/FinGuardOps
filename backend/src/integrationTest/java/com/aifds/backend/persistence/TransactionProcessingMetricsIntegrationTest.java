@@ -81,6 +81,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         }
 )
 @AutoConfigureMockMvc
+@org.springframework.security.test.context.support.WithMockUser
 class TransactionProcessingMetricsIntegrationTest
         extends PostgresqlIntegrationTestSupport {
 

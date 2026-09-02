@@ -1,0 +1,266 @@
+package com.aifds.backend.security.jwt;
+
+import com.aifds.backend.security.config.FinGuardOpsSecurityConfiguration;
+import com.aifds.backend.security.config.FinGuardOpsSecurityProperties;
+import com.aifds.backend.security.support.EphemeralRsaJwtFixture;
+import com.aifds.backend.security.support.InProcessJwkSetServer;
+import com.nimbusds.jose.JWSAlgorithm;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.security.oauth2.jwt.JwtException;
+
+import java.net.URI;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+class FinGuardOpsJwtDecoderIntegrationTest {
+
+    private static final EphemeralRsaJwtFixture KEY_A =
+            EphemeralRsaJwtFixture.create("key-a");
+    private static final EphemeralRsaJwtFixture KEY_B =
+            EphemeralRsaJwtFixture.create("key-b");
+    private static final EphemeralRsaJwtFixture KEY_C =
+            EphemeralRsaJwtFixture.create("key-c");
+
+    private static InProcessJwkSetServer jwkServer;
+
+    @BeforeAll
+    static void startJwkServer() {
+        jwkServer = InProcessJwkSetServer.start();
+    }
+
+    @AfterAll
+    static void stopJwkServer() {
+        jwkServer.close();
+    }
+
+    @BeforeEach
+    void resetJwkServer() {
+        jwkServer.serveKeys(KEY_A.publicJwk());
+        jwkServer.resetRequestCount();
+    }
+
+    @Test
+    void validatesRealRs256SignatureAndStrictUserClaims() {
+        Jwt jwt = decoder().decode(KEY_A.validUserToken());
+
+        assertThat(jwt.getSubject()).isEqualTo(
+                EphemeralRsaJwtFixture.SUBJECT
+        );
+        assertThat(jwt.getAudience()).containsExactly(
+                FinGuardOpsSecurityProperties.AUDIENCE
+        );
+        assertThat(jwkServer.requestCount()).isEqualTo(1);
+    }
+
+    @Test
+    void acceptsServicePrincipalAndClockSkewBoundaries() {
+        Instant now = Instant.now();
+        Map<String, Object> claims = claims(
+                "SERVICE",
+                List.of("TRANSACTION_INGESTOR")
+        );
+        claims.put("iat", now.plusSeconds(59).getEpochSecond());
+        claims.put("nbf", now.plusSeconds(59).getEpochSecond());
+        claims.put("exp", now.plusSeconds(899).getEpochSecond());
+
+        assertThat(decoder().decode(KEY_A.sign(claims))).isNotNull();
+
+        Map<String, Object> recentlyExpired = claims(
+                "USER",
+                List.of("FDS_VIEWER")
+        );
+        recentlyExpired.put("iat", now.minusSeconds(120).getEpochSecond());
+        recentlyExpired.put("exp", now.minusSeconds(59).getEpochSecond());
+        assertThat(decoder().decode(KEY_A.sign(recentlyExpired))).isNotNull();
+
+        Map<String, Object> maximumLifetime = claims(
+                "USER",
+                List.of("FDS_VIEWER")
+        );
+        maximumLifetime.put("iat", now.minusSeconds(5).getEpochSecond());
+        maximumLifetime.put("exp", now.plusSeconds(895).getEpochSecond());
+        assertThat(decoder().decode(KEY_A.sign(maximumLifetime))).isNotNull();
+    }
+
+    @Test
+    void rejectsNonRs256MissingKidUntrustedKeyUrlsAndWrongSignature() {
+        assertRejected(KEY_A.sign(
+                JWSAlgorithm.RS512,
+                KEY_A.kid(),
+                Map.of(),
+                claims("USER", List.of("FDS_VIEWER"))
+        ));
+        assertRejected(KEY_A.sign(
+                JWSAlgorithm.RS256,
+                null,
+                Map.of(),
+                claims("USER", List.of("FDS_VIEWER"))
+        ));
+        assertRejected(KEY_A.sign(
+                JWSAlgorithm.RS256,
+                KEY_A.kid(),
+                Map.of("jku", "https://attacker.example.test/jwks"),
+                claims("USER", List.of("FDS_VIEWER"))
+        ));
+        assertRejected(KEY_A.sign(
+                JWSAlgorithm.RS256,
+                KEY_A.kid(),
+                Map.of("x5u", "https://attacker.example.test/cert"),
+                claims("USER", List.of("FDS_VIEWER"))
+        ));
+        assertRejected(KEY_B.validUserToken());
+        assertRejected("not-a-jwt");
+    }
+
+    @Test
+    void enforcesExactAudienceJsonArrayContract() {
+        rejectClaim("aud", "finguardops-backend-api");
+        rejectClaim("aud", List.of(
+                "finguardops-backend-api",
+                "another-api"
+        ));
+        rejectClaim("aud", List.of(
+                "finguardops-backend-api",
+                "finguardops-backend-api"
+        ));
+        rejectClaim("aud", List.of());
+        rejectMissingClaim("aud");
+    }
+
+    @Test
+    void rejectsInvalidIssuerAndSubjectMatrix() {
+        rejectClaim("iss", "https://other-issuer.test/finguardops");
+        rejectMissingClaim("iss");
+        rejectClaim("sub", "2F4C0A4E-8A9D-4C2F-9A1B-7D6E5F430001");
+        rejectClaim("sub", "2f4c0a4e-8a9d-3c2f-9a1b-7d6e5f430001");
+        rejectClaim("sub", "2f4c0a4e-8a9d-4c2f-7a1b-7d6e5f430001");
+        rejectClaim("sub", "not-a-uuid");
+        rejectMissingClaim("sub");
+    }
+
+    @Test
+    void rejectsPrincipalTypeAndRoleMatrix() {
+        rejectMissingClaim("principal_type");
+        rejectClaim("principal_type", "ADMIN");
+        rejectClaim("principal_type", 7);
+        rejectMissingClaim("roles");
+        rejectClaim("roles", "FDS_VIEWER");
+        rejectClaim("roles", List.of());
+        rejectClaim("roles", List.of("FDS_VIEWER", "FDS_VIEWER"));
+        rejectClaim("roles", List.of("UNKNOWN_ROLE"));
+        rejectClaim("roles", List.of("FDS_VIEWER", 7));
+
+        Map<String, Object> userWithServiceRole = claims(
+                "USER",
+                List.of("TRANSACTION_INGESTOR")
+        );
+        assertRejected(KEY_A.sign(userWithServiceRole));
+        Map<String, Object> serviceWithUserRole = claims(
+                "SERVICE",
+                List.of("FDS_VIEWER")
+        );
+        assertRejected(KEY_A.sign(serviceWithUserRole));
+    }
+
+    @Test
+    void rejectsMissingMalformedAndOutOfRangeTimeClaims() {
+        Instant now = Instant.now();
+        rejectMissingClaim("iat");
+        rejectMissingClaim("exp");
+        rejectClaim("iat", "not-a-numeric-date");
+        rejectClaim("exp", "not-a-numeric-date");
+        rejectClaim("nbf", "not-a-numeric-date");
+
+        Map<String, Object> futureIat = claims("USER", List.of("FDS_VIEWER"));
+        futureIat.put("iat", now.plusSeconds(65).getEpochSecond());
+        futureIat.put("exp", now.plusSeconds(300).getEpochSecond());
+        assertRejected(KEY_A.sign(futureIat));
+
+        Map<String, Object> futureNbf = claims("USER", List.of("FDS_VIEWER"));
+        futureNbf.put("nbf", now.plusSeconds(65).getEpochSecond());
+        assertRejected(KEY_A.sign(futureNbf));
+
+        Map<String, Object> expired = claims("USER", List.of("FDS_VIEWER"));
+        expired.put("iat", now.minusSeconds(300).getEpochSecond());
+        expired.put("exp", now.minusSeconds(65).getEpochSecond());
+        assertRejected(KEY_A.sign(expired));
+
+        Map<String, Object> excessiveLifetime = claims(
+                "USER",
+                List.of("FDS_VIEWER")
+        );
+        excessiveLifetime.put("iat", now.minusSeconds(5).getEpochSecond());
+        excessiveLifetime.put("exp", now.plusSeconds(896).getEpochSecond());
+        assertRejected(KEY_A.sign(excessiveLifetime));
+    }
+
+    @Test
+    void cachesKnownKeyRotatesToNewKidAndRejectsReachableUnknownKid() {
+        JwtDecoder decoder = decoder();
+        assertThat(decoder.decode(KEY_A.validUserToken())).isNotNull();
+        assertThat(jwkServer.requestCount()).isEqualTo(1);
+
+        jwkServer.serveFailure(500, "upstream failure sentinel");
+        assertThat(decoder.decode(KEY_A.validUserToken())).isNotNull();
+        assertThat(jwkServer.requestCount()).isEqualTo(1);
+
+        jwkServer.serveKeys(KEY_A.publicJwk(), KEY_B.publicJwk());
+        assertThat(decoder.decode(KEY_B.validUserToken())).isNotNull();
+        assertThat(jwkServer.requestCount()).isEqualTo(2);
+
+        assertThatThrownBy(() -> decoder.decode(KEY_C.validUserToken()))
+                .isInstanceOf(JwtException.class);
+        assertThat(jwkServer.requestCount()).isEqualTo(3);
+    }
+
+    private JwtDecoder decoder() {
+        return new FinGuardOpsSecurityConfiguration().jwtDecoder(
+                new FinGuardOpsSecurityProperties(
+                        URI.create(EphemeralRsaJwtFixture.ISSUER),
+                        jwkServer.uri(),
+                        List.of(),
+                        Duration.ofMillis(250),
+                        Duration.ofMillis(250),
+                        true
+                )
+        );
+    }
+
+    private Map<String, Object> claims(
+            String principalType,
+            List<?> roles
+    ) {
+        return new LinkedHashMap<>(KEY_A.validClaims(
+                principalType,
+                roles.stream().map(String::valueOf).toList()
+        ));
+    }
+
+    private void rejectClaim(String name, Object value) {
+        Map<String, Object> claims = claims("USER", List.of("FDS_VIEWER"));
+        claims.put(name, value);
+        assertRejected(KEY_A.sign(claims));
+    }
+
+    private void rejectMissingClaim(String name) {
+        Map<String, Object> claims = claims("USER", List.of("FDS_VIEWER"));
+        claims.remove(name);
+        assertRejected(KEY_A.sign(claims));
+    }
+
+    private void assertRejected(String token) {
+        assertThatThrownBy(() -> decoder().decode(token))
+                .isInstanceOf(JwtException.class);
+    }
+}

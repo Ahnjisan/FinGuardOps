@@ -1,5 +1,6 @@
 package com.aifds.backend.observability;
 
+import com.aifds.backend.common.trace.TraceIdFilter;
 import com.aifds.backend.detection.entity.RiskLevel;
 import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
 import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
@@ -122,7 +123,7 @@ class PrometheusActuatorEnabledIntegrationTest {
 
         ResponseEntity<String> health = getManagement("/actuator/health");
         assertThat(health.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(health.getBody()).contains("\"status\":\"UP\"");
+        assertThat(health.getBody()).isEqualTo("{\"status\":\"UP\"}");
 
         recordAllApprovedMeters();
         ResponseEntity<String> scrape = getManagement(
@@ -140,15 +141,40 @@ class PrometheusActuatorEnabledIntegrationTest {
                 ));
 
         ResponseEntity<String> discovery = getManagement("/actuator");
-        assertThat(discovery.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(discovery.getBody())
-                .contains("/actuator/health", "/actuator/prometheus");
+        assertThat(discovery.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
         UNEXPOSED_ENDPOINTS.forEach(endpoint -> {
             assertThat(getManagement("/actuator/" + endpoint).getStatusCode())
-                    .matches(status -> status.isError());
-            assertThat(discovery.getBody())
-                    .doesNotContain("/actuator/" + endpoint);
+                    .isEqualTo(HttpStatus.NOT_FOUND);
         });
+
+        assertThat(getApplication("/api/health").getStatusCode())
+                .isEqualTo(HttpStatus.OK);
+        assertThat(getApplication("/actuator/health").getStatusCode())
+                .isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(getApplication("/actuator/prometheus").getStatusCode())
+                .isEqualTo(HttpStatus.NOT_FOUND);
+
+        HttpHeaders invalidBearer = new HttpHeaders();
+        invalidBearer.setBearerAuth("not-a-jwt");
+        invalidBearer.set(TraceIdFilter.TRACE_ID_HEADER, "trace_prometheus_01");
+        ResponseEntity<String> invalidPublicHealth = restTemplate.exchange(
+                "http://127.0.0.1:" + serverPort + "/api/health",
+                org.springframework.http.HttpMethod.GET,
+                new org.springframework.http.HttpEntity<>(invalidBearer),
+                String.class
+        );
+        assertThat(invalidPublicHealth.getStatusCode())
+                .isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(invalidPublicHealth.getBody())
+                .contains("\"code\":\"UNAUTHORIZED\"");
+
+        ResponseEntity<String> managementWithBearer = restTemplate.exchange(
+                "http://127.0.0.1:" + managementPort + "/actuator/health",
+                org.springframework.http.HttpMethod.GET,
+                new org.springframework.http.HttpEntity<>(invalidBearer),
+                String.class
+        );
+        assertThat(managementWithBearer.getStatusCode()).isEqualTo(HttpStatus.OK);
     }
 
     private void recordAllApprovedMeters() {
@@ -192,6 +218,13 @@ class PrometheusActuatorEnabledIntegrationTest {
     private ResponseEntity<String> getManagement(String path) {
         return restTemplate.getForEntity(
                 "http://127.0.0.1:" + managementPort + path,
+                String.class
+        );
+    }
+
+    private ResponseEntity<String> getApplication(String path) {
+        return restTemplate.getForEntity(
+                "http://127.0.0.1:" + serverPort + path,
                 String.class
         );
     }

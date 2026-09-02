@@ -210,8 +210,9 @@ Provider·Rule·최종화를 다시 호출하지 않습니다.
 Runner·CLI가 구현되었습니다. 실행 절차는
 [`Idempotency 복구 one-shot runbook`](docs/09-deployment/idempotency-recovery-one-shot-runbook.md)을
 따릅니다. scheduler·batch, 자동 retry·fallback·cache, 운영 credential 실제 배포,
-USER 인증·인가, Issue #186 외 사건·AI·복구 상태 등의 추가 업무 metric은 아직
-구현되지 않았습니다. 로컬 Docker Compose의 Prometheus 서버·Backend scrape와 기존
+endpoint별 RBAC·USER Audit actor 전환, Issue #186 외 사건·AI·복구 상태 등의
+추가 업무 metric은 아직 구현되지 않았습니다. 로컬 Docker Compose의 Prometheus 서버·
+Backend scrape와 기존
 업무 Meter 기반 recording rule 14개와 실패율 alert rule 6개, 각각의 deterministic
 promtool test, raw·recorded query와 로컬 alert 상태 검증 경계가 구현되었습니다. 기존
 recording rule 14개와 target·alert 상태를 표시하는 로컬 Grafana dashboard도 file
@@ -226,14 +227,26 @@ RuleVersion 집합의 제한된 local/dev/test one-shot 발행 경계만 제공�
 API나 정상 시작 자동 발행은 제공하지 않습니다. `ANALYZED`는 위험 대응 전 중간
 상태이므로 최종 성공으로 반환하거나 성공 Snapshot으로 확정하지 않습니다.
 
-Spring Backend의 목표 인증 경계는 제품 중립 OAuth2 Resource Server, RS256 Bearer JWT,
-USER·SERVICE principal 분리, authority 기반 deny-by-default와 사건 write USER Audit actor로
-확정했습니다. 자세한 내용은
+Spring Backend에는 제품 중립적인 Spring Security·OAuth2 Resource Server 기반이
+구현되었습니다. RS256 Bearer JWT와 JWK를 사용하며 issuer·audience·kid·subject·
+`principal_type`·roles·시간 claim을 검증하고, USER·SERVICE principal을 분리해
+role-derived authority를 생성합니다. stateless session·CSRF·exact-origin CORS와
+401·403·JWK 장애 오류·trace 처리도 적용했습니다. 자세한 계약은
 [`보안 아키텍처`](docs/02-architecture/security-architecture.md)와
 [`ADR-008`](docs/07-decisions/ADR-008-oauth2-resource-server-rbac-user-audit-actor.md)을
-따릅니다. 이는 문서 계약이며 Spring Security·JWT·RBAC·USER actor, Authorization Server,
-Frontend OIDC와 Compose 인증은 아직 구현되지 않았습니다. 현재 모든 Spring 업무 API는
-security layer 관점에서 사실상 무인증입니다.
+따릅니다.
+
+`/api/health`와 profile별 승인된 health·Actuator 경계는 credential 없이 접근할 수 있지만
+invalid Bearer가 명시되면 401이다. 그 밖의 application listener 업무 API는 valid JWT가
+필요하다. endpoint별 authority enforcement와 `@PreAuthorize`는 아직 없으므로 인증된
+USER·SERVICE principal 사이의 업무 권한 세분화는 후속 구현이다. management 8081은 업무
+Resource Server chain과 분리한다.
+
+사건 write USER Audit actor와 InvestigationNote USER author migration, 실제 Authorization
+Server 선정·구축, Local Compose JWT issuer/JWK fixture, traffic generator SERVICE token,
+Frontend OIDC·Authorization Code + PKCE, production management mTLS·인증 proxy는 아직
+구현되지 않았다. 기존 JWT 없는 local traffic generator의 업무 요청은 현재 401이며 Local
+인증 E2E는 후속 Issue 전까지 미완성이다.
 
 ```text
 React·TypeScript
@@ -358,6 +371,10 @@ Kafka
 * 거래·사건·AI 리포트 상태 전이 정의
 * 시스템 아키텍처 명세 작성
 * OAuth2 Resource Server·JWT·RBAC·USER Audit actor 보안 아키텍처 계약 문서화
+* Spring Boot OAuth2 Resource Server 기반, RS256·strict JWT claim 검증,
+  USER·SERVICE principal과 role-derived authority 구현
+* 안전한 401·403·JWK 503·decoder 500·trace 응답, stateless·CSRF·exact-origin CORS와
+  application/management listener 분리 구현
 * 핵심 도메인 ERD 작성
 * API 공통 규칙 정의
 * 거래·행동·탐지 API 계약 작성
@@ -423,6 +440,12 @@ Kafka
   Runner 및 운영 runbook 구현
 * Backend와 AI Service 전용 GitHub Actions CI 구성
 
+Backend Security 설정은 `FINGUARDOPS_SECURITY_ISSUER`,
+`FINGUARDOPS_SECURITY_JWK_SET_URI`, `FINGUARDOPS_SECURITY_ALLOWED_ORIGINS`와 JWK
+connect/read timeout을 사용합니다. issuer·JWK 기본값은 접근 불가능한 HTTPS `.invalid`
+placeholder여서 설정 누락 시 인증을 끄지 않고 fail-closed하며, 기본 CORS origin 목록은
+비어 있습니다. 실제 key·JWT·credential은 저장소와 `.env.example`에 저장하지 않습니다.
+
 현재 PostgreSQL 연동은 애플리케이션 코드·Testcontainers와 로컬 Compose 검증 범위입니다. 운영 PostgreSQL과 production container, Kubernetes·AWS 배포 환경이 구현되었다는 의미는 아닙니다. Public 거래 접수의 신규 성공 응답은 최종 거래·탐지·위험 대응·필요한 사건 결과를 반영한 HTTP `201`이며, 최종 동기 분석 경계는 [`ADR-003`](docs/07-decisions/ADR-003-transaction-processing-boundary.md)을 따릅니다.
 
 ### Planned
@@ -433,24 +456,25 @@ Public 최종 동기 거래 접수와 실제 External Risk HTTP Provider, 공개
 * recovery scheduler·batch와 장기 `IN_PROGRESS` Gauge·completion gap alert·dashboard
 * 불확실 상태 재실행과 `FAILED` 재분석은 별도 operation scope·승인 계약 전까지 금지
 
-보안 후속 Issue는 다음 다섯 개를 순서대로 수행합니다.
+보안 기반 1단계인 OAuth2 Resource Server와 401·403·trace 경계는 Issue #219에서
+구현되었습니다. endpoint별 authority enforcement는 아직 적용하지 않았으며 후속 순서는
+다음과 같습니다.
 
-1. OAuth2 Resource Server 기반과 401·403·trace 경계 구현
-2. endpoint RBAC와 USER·SERVICE principal matrix 적용
-3. 사건 write USER actor와 InvestigationNote author 연결
-4. Local Compose·runbook JWT fixture와 인증 E2E
+1. endpoint RBAC와 USER·SERVICE authority matrix 적용
+2. 사건 write USER actor와 InvestigationNote author 연결
+3. Local Compose·runbook JWT fixture와 인증 E2E
    - Resource Server와 RBAC 적용 후 local issuer/JWK fixture 또는 승인된 local
      Authorization Server, SERVICE token bootstrap과 traffic generator `Authorization`
      header를 연결합니다.
    - private key·token을 저장하지 않고 기존 Prometheus·recording·alert·Alertmanager·
      Grafana E2E 회귀와 장시간 Compose 검증을 수행합니다.
-5. Frontend OIDC·token·권한 UI
+4. Frontend OIDC·token·권한 UI
    - Resource Server·RBAC와 Authorization Server 제품 결정 후 Authorization Code + PKCE,
      access token memory 보관, API `Authorization` header와 login·logout을 구현합니다.
    - expiry·401·403 UX와 role·authority 기반 UI를 브라우저 경계에서 검증합니다.
 
-4와 5는 서로 다른 Issue다. Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend
-OIDC도 Compose traffic fixture의 일부가 아니다. 이 다섯 단계는 토큰 절약을 위한 인위적
+3과 4는 서로 다른 Issue다. Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend
+OIDC도 Compose traffic fixture의 일부가 아니다. 이 네 단계는 토큰 절약을 위한 인위적
 분할이 아니라 기술 책임·선행 관계·실패 영향·검증 시간이 다르기 때문에 분리한다.
 
 * ML 추론

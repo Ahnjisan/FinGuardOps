@@ -407,9 +407,9 @@ JSON·필수 헤더·필드 형식 오류와 도메인 규칙 위반을 구분�
 
 서버의 예기치 않은 오류에는 `500 Internal Server Error`가 필요할 수 있다. 사용자가 지정한 주요 상태 코드 외 상태를 추가할 때는 API 계약 검토를 거친다.
 
-### 7.4 목표 401·403 계약
+### 7.4 구현된 Security 오류 계약
 
-현재는 security layer가 없어 아래 응답이 구현되지 않았다. 목표 구현에서는
+Issue #219 구현에서는
 `TraceIdFilter`가 Spring Security보다 먼저 요청 traceId를 확정하고, filter 단계의
 `AuthenticationEntryPoint`와 `AccessDeniedHandler`가 `GlobalExceptionHandler`에 의존하지
 않고 공통 body를 작성한다.
@@ -423,9 +423,18 @@ JSON·필수 헤더·필드 형식 오류와 도메인 규칙 위반을 구분�
 세 응답 모두 `fieldErrors`는 빈 배열이며 body `traceId`와 `X-Trace-Id`는 같은 현재 요청
 값이다. token·claim·Authorization Server Provider 예외·내부 security class·stack trace를
 응답이나 일반 로그에 포함하지 않는다. 401·403은 업무 AuditLog를 생성하지 않는다.
-malformed header/token, 서명·시간·issuer·audience·필수 claim·role 검증 실패는 401이다.
-실제 upstream JWK 가용성 장애의 안전한 503 code는 Spring Security 예외 분류를 검증하는
-후속 구현에서 확정하며 invalid token 401과 혼합하지 않는다.
+malformed header/token, 서명·시간·issuer·strict audience·필수 claim·role 검증 실패와
+reachable JWKS의 unknown `kid`는 401이다.
+
+| JWK·decoder 실패 | HTTP 상태·code | 공개 message | `WWW-Authenticate` |
+| --- | --- | --- | --- |
+| 명확한 timeout cause chain | `503 DEPENDENCY_TIMEOUT` | `인증 서비스를 제한 시간 안에 사용할 수 없습니다.` | 없음 |
+| 연결·DNS·TLS·upstream 5xx cause chain | `503 DEPENDENCY_UNAVAILABLE` | `인증 서비스를 일시적으로 사용할 수 없습니다.` | 없음 |
+| 예상 밖 내부 decoder 오류 | `500 INTERNAL_ERROR` | `요청을 처리하는 중 오류가 발생했습니다.` | 없음 |
+
+cached known key는 upstream 장애 중에도 검증할 수 있다. 503은 cause-chain allowlist에
+확실히 일치하는 경우만 사용한다. JWK URL·body와 내부 예외도 응답·일반 로그에 포함하지
+않으며 모든 Security 오류의 body `traceId`와 `X-Trace-Id`는 일치한다.
 
 ## 8. `traceId` 원칙
 

@@ -12,6 +12,7 @@ import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.ApplicationContext;
 import org.springframework.core.env.Environment;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 
@@ -97,19 +98,44 @@ class PrometheusActuatorDisabledIntegrationTest {
 
         ResponseEntity<String> actuatorHealth = get("/actuator/health");
         assertThat(actuatorHealth.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(actuatorHealth.getBody()).contains("\"status\":\"UP\"");
+        assertThat(objectMapper.readTree(actuatorHealth.getBody()).fieldNames())
+                .toIterable()
+                .containsExactly("status");
 
         ResponseEntity<String> apiHealth = get("/api/health");
         assertThat(apiHealth.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(apiHealth.getBody())
                 .contains("\"status\":\"UP\"", "\"service\":\"backend\"");
 
-        ResponseEntity<String> discovery = get("/actuator");
-        assertThat(discovery.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(discovery.getBody()).contains("/actuator/health");
-        Set.of("prometheus", "env", "beans", "metrics")
-                .forEach(endpoint -> assertThat(discovery.getBody())
-                        .doesNotContain("/actuator/" + endpoint));
+        assertThat(get("/actuator").getStatusCode())
+                .isEqualTo(HttpStatus.NOT_FOUND);
+
+        HttpHeaders invalidBearer = new HttpHeaders();
+        invalidBearer.setBearerAuth("not-a-jwt");
+        ResponseEntity<String> invalidHealth = restTemplate.exchange(
+                "http://127.0.0.1:" + serverPort + "/actuator/health",
+                org.springframework.http.HttpMethod.GET,
+                new org.springframework.http.HttpEntity<>(invalidBearer),
+                String.class
+        );
+        assertThat(invalidHealth.getStatusCode())
+                .isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(invalidHealth.getBody()).contains("\"code\":\"UNAUTHORIZED\"");
+
+        HttpHeaders preflight = new HttpHeaders();
+        preflight.setOrigin("https://unconfigured.example.test");
+        preflight.setAccessControlRequestMethod(
+                org.springframework.http.HttpMethod.GET
+        );
+        ResponseEntity<String> defaultCors = restTemplate.exchange(
+                "http://127.0.0.1:" + serverPort + "/api/health",
+                org.springframework.http.HttpMethod.OPTIONS,
+                new org.springframework.http.HttpEntity<>(preflight),
+                String.class
+        );
+        assertThat(defaultCors.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(defaultCors.getHeaders().getAccessControlAllowOrigin())
+                .isNull();
     }
 
     private ResponseEntity<String> get(String path) {

@@ -10,9 +10,22 @@ spring:
       ddl-auto: validate
     open-in-view: false
 
+finguardops:
+  security:
+    issuer: ${FINGUARDOPS_SECURITY_ISSUER:https://issuer.example.invalid/finguardops}
+    jwk-set-uri: ${FINGUARDOPS_SECURITY_JWK_SET_URI:https://issuer.example.invalid/.well-known/jwks.json}
+    allowed-origins: ${FINGUARDOPS_SECURITY_ALLOWED_ORIGINS:}
+    jwk-connect-timeout: ${FINGUARDOPS_SECURITY_JWK_CONNECT_TIMEOUT:2s}
+    jwk-read-timeout: ${FINGUARDOPS_SECURITY_JWK_READ_TIMEOUT:2s}
+
 management:
+  endpoint:
+    health:
+      show-details: never
   endpoints:
     web:
+      discovery:
+        enabled: false
       exposure:
         include: "health"
   prometheus:
