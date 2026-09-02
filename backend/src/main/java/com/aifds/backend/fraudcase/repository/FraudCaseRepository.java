@@ -18,6 +18,8 @@ public interface FraudCaseRepository
 
     Optional<FraudCase> findByCaseId(UUID caseId);
 
+    boolean existsByCaseId(UUID caseId);
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("""
             SELECT fraudCase

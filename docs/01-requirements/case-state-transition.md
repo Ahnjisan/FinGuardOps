@@ -335,8 +335,12 @@ CLOSED → IN_REVIEW
 사건·첫 연결 감사 통합은 구현되었다. 기존 활성 사건 재사용에는 사건 변경이 없으므로
 사건 감사를 중복 기록하지 않는다. 성공한 조사 상태·담당자 명령은 V11의 구조화
 action/reason으로 정확히 1건 기록하고 성공한 종료는 V12의
-`CASE_RESOLVED/CASE_RESOLUTION_COMPLETED`를 정확히 1건 기록한다. 실패·거부·stale 요청의 별도 감사, 감사 조회
-API, 보존 기간과 접근 범위는 후속 범위이다.
+`CASE_RESOLVED/CASE_RESOLUTION_COMPLETED`를 정확히 1건 기록한다. Issue #213의
+조사 메모 성공은 `CASE_NOTE_CREATED/CASE_INVESTIGATION_NOTE_ADDED`와 exact
+`noteId`만 기록한다. Issue #215의 사건 감사 조회는 사건 존재 확인 후 해당 사건의
+`FRAUD_CASE` 행만 결정적으로 page 조회하며, action별 승인 projection 외의 내부
+식별자·원본 JSON·과거 trace를 노출하지 않는다. 실패·거부·stale 요청의 별도 감사,
+보존 기간과 접근 범위는 후속 범위이다.
 
 ## 15. 사용자 결정 필요 항목
 

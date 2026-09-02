@@ -8,8 +8,9 @@
 
 Issue #207에서 사건 목록·상세 조회를 구현했고 Issue #209에서 아래 두 mutation과
 PostgreSQL 낙관적 동시성·감사 원자성 경계를 구현했다. Issue #211은 최종 판정·
-종료 API와 V12 감사를 구현했고 Issue #213에서 조사 메모 생성·목록과 V13 감사를 구현했다. 연관 거래 목록과 감사 조회 API 및
-인증·인가는 구현되지 않았다. 사건 영속 계약은
+종료 API와 V12 감사를 구현했고 Issue #213에서 조사 메모 생성·목록과 V13 감사를
+구현했다. Issue #215는 사건 감사 로그 조회 API와 명시적 비노출 projection을
+구현했다. 연관 거래 목록과 인증·인가는 구현되지 않았다. 사건 영속 계약은
 [`../04-database/fraud-case-schema.md`](../04-database/fraud-case-schema.md)를 따른다.
 실제 `caseId`와 `auditId`는 UUID v4를 사용한다.
 Issue #207 범위 밖의 후속 API 절에 남아 있는 `case_demo_...` 값은 읽기 쉬운
@@ -863,61 +864,55 @@ Content-Type: application/json
 GET /api/v1/cases/{caseId}/audit-logs
 ```
 
-### 13.2 필터와 페이지네이션 후보
+`caseId`는 canonical lowercase UUID v4와 RFC 4122 variant만 허용한다. trim,
+lowercase 변환이나 다른 형식의 coercion은 하지 않는다.
 
-| 쿼리 파라미터 | 설명 |
-| --- | --- |
-| `action` | 변경 작업 |
-| `actorType` | 변경 주체 유형 |
-| `actorId` | `SYSTEM`은 `finguardops-backend`, `USER`는 내부 사용자 UUID v4 |
-| `changedAtFrom` | 변경 시각 범위 시작, UTC ISO-8601 |
-| `changedAtTo` | 변경 시각 범위 끝, UTC ISO-8601 |
-| `transactionId` | 관련 거래 업무 식별자 |
-| `traceId` | 관련 요청 추적 식별자 |
-| `page` | 페이지 번호 |
-| `size` | 페이지 크기 |
-| `sort` | 정렬 조건 |
+### 13.2 페이지네이션
+
+| 쿼리 파라미터 | 기본값 | 설명 |
+| --- | --- | --- |
+| `page` | `0` | 0 이상의 페이지 번호 |
+| `size` | `20` | 1~100의 페이지 크기 |
+| `sort` | `changedAt,desc` | `changedAt,asc` 또는 `changedAt,desc` |
 
 요청 예:
 
 ```http
-GET /api/v1/cases/case_demo_20260724_0031/audit-logs?action=CASE_CREATED&page=0&size=20&sort=changedAt,desc
+GET /api/v1/cases/5c671624-8714-4bd7-871a-a9445e6f453e/audit-logs?page=0&size=20&sort=changedAt,desc
 ```
 
-V13까지 물리 모델의 승인된 `action` 값은 다음과 같다.
-
-```text
-CASE_CREATED
-CASE_TRANSACTION_LINKED
-TRANSACTION_RISK_RESPONSE_APPLIED
-TRANSACTION_STATUS_CHANGED
-CASE_STATUS_CHANGED
-CASE_ASSIGNEE_CHANGED
-CASE_RESOLVED
-CASE_NOTE_CREATED
-```
-
-거부 감사 action은 후속 범위이며 공개 감사 조회 API 자체도 아직 미구현이다.
+`page`, `size`, `sort` 이외의 query parameter와 모든 scalar 중복은 `400`이다.
+페이지·크기 숫자 형식 오류는 `400`, 음수 page와 size 범위 위반은 `422`다.
+동일 `changedAt`에서는 내부 `id`를 요청 방향과 같은 최종 정렬키로 사용하되
+응답에는 노출하지 않는다. 범위 밖 page는 `200`과 빈 `content`다.
 
 ### 13.3 응답 항목
 
 | 필드 | 설명 |
 | --- | --- |
-| `auditLogId` | 감사 로그 업무 식별자 |
+| `action` | 승인된 사건 감사 작업 |
+| `reasonCode` | action과 일치하는 구조화 사유 코드 |
 | `actorType` | `SYSTEM` 또는 `USER` |
-| `actorId` | `SYSTEM`이면 `finguardops-backend`, `USER`이면 canonical lowercase 내부 사용자 업무 UUID v4 |
 | `changedAt` | 변경 시각 |
-| `targetType` | 변경 대상 유형 |
-| `targetId` | 변경 대상 식별자 |
-| `action` | 변경 작업 |
-| `beforeValueSummary` | 변경 전 값의 제한된 요약 |
-| `afterValueSummary` | 변경 후 값의 제한된 요약 |
-| `reasonCode` | 승인된 구조화 사유 코드. 자유 텍스트 사유를 저장하지 않음 |
-| `transactionId` | 관련 거래 식별자. 없으면 null 가능 |
-| `caseId` | 관련 사건 식별자 |
-| `traceId` | 관련 처리 흐름 추적 식별자 |
+| `beforeSummary` | action별 승인된 변경 전 projection 또는 null |
+| `afterSummary` | action별 승인된 변경 후 projection 또는 null |
+| `metadata` | 빈 object 또는 `CASE_NOTE_CREATED`의 `{noteId}` |
 
-변경 전후 값은 감사에 필요한 필드만 포함하며 민감 원문 전체를 복제하지 않는다.
+action별 projection은 다음과 같다.
+
+| action | beforeSummary | afterSummary | metadata |
+| --- | --- | --- | --- |
+| `CASE_CREATED` | null | `{caseStatus}` | `{}` |
+| `CASE_TRANSACTION_LINKED` | null | `{linked}` | `{}` |
+| `CASE_STATUS_CHANGED` | `{caseStatus, assigneeRef}` | `{caseStatus, assigneeRef}` | `{}` |
+| `CASE_ASSIGNEE_CHANGED` | `{caseStatus, assigneeRef}` | `{caseStatus, assigneeRef}` | `{}` |
+| `CASE_RESOLVED` | `{caseStatus, assigneeRef}` | `{caseStatus, assigneeRef, finalDisposition}` | `{}` |
+| `CASE_NOTE_CREATED` | null | null | `{noteId}` |
+
+workflow summary의 `assigneeRef`는 미배정이면 명시적 JSON null이다. 저장된 detection
+metadata는 현재 DB 계약에 맞는지 검증하지만 응답에는 공개하지 않는다. 내부 `id`,
+`auditId`, `actorId`, 저장 당시 `traceId`, target·context 식별자, JSONB 원문,
+조사 메모·거래·Provider·AI payload는 반환하지 않는다.
 
 ### 13.4 성공 응답 예시
 
@@ -931,21 +926,15 @@ Content-Type: application/json
   "caseId": "5c671624-8714-4bd7-871a-a9445e6f453e",
   "content": [
     {
-      "auditLogId": "8bf3c9a2-7d0e-4a51-9b36-1c2d3e4f5a60",
-      "actorType": "SYSTEM",
-      "actorId": "finguardops-backend",
-      "changedAt": "2026-07-24T02:05:10Z",
-      "targetType": "FRAUD_CASE",
-      "targetId": "5c671624-8714-4bd7-871a-a9445e6f453e",
       "action": "CASE_CREATED",
-      "beforeValueSummary": null,
-      "afterValueSummary": {
+      "reasonCode": "CASE_REQUIRED_BY_RISK_POLICY",
+      "actorType": "SYSTEM",
+      "changedAt": "2026-07-24T02:05:10Z",
+      "beforeSummary": null,
+      "afterSummary": {
         "caseStatus": "OPEN"
       },
-      "reasonCode": "CASE_REQUIRED_BY_RISK_POLICY",
-      "transactionId": "91a2b3c4-d5e6-47f8-9a0b-1c2d3e4f5003",
-      "caseId": "5c671624-8714-4bd7-871a-a9445e6f453e",
-      "traceId": "trace_demo_case_created_00"
+      "metadata": {}
     }
   ],
   "page": {
@@ -960,13 +949,20 @@ Content-Type: application/json
 }
 ```
 
-응답 최상위 `traceId`는 현재 조회 요청을 추적하고, 각 감사 항목의 `traceId`는 과거 변경 요청을 추적한다.
+응답 최상위 `traceId`만 현재 조회 요청을 추적한다. 저장 당시 과거 `traceId`는
+반환하지 않는다.
 
 ### 13.5 읽기 전용 원칙
 
 - 감사 로그는 조회만 제공한다.
 - 감사 로그 수정·삭제 API를 제공하지 않는다.
 - 기존 감사 행을 덮어쓰지 않는다.
+- 먼저 외부 `caseId`로 사건 존재를 확인하고, 존재할 때만
+  `targetType=FRAUD_CASE AND targetId=:caseId` Page/count query를 실행한다.
+- 조회 Service transaction은 read-only이며 Entity relationship이나 사건 collection을
+  추가로 로딩하지 않는다.
+- 지원하지 않는 action·reason·context·JSON이 한 행이라도 있으면 skip 또는 raw
+  fallback 없이 해당 페이지 전체를 안전한 `500 INTERNAL_ERROR`로 처리한다.
 - 정정이 필요한 경우 기존 행을 변경하기보다 별도 정정 기록을 추가하는 방향을 후속 감사 정책에서 검토한다.
 - 감사 로그의 접근 범위와 보존 기간은 사용자 결정 사항이다.
 
@@ -975,9 +971,10 @@ Content-Type: application/json
 | 상태 코드 | 사용 기준 |
 | --- | --- |
 | `200 OK` | 조회 성공. 감사 이력이 없으면 빈 `content` 반환 |
-| `400 Bad Request` | 식별자, 필터, 시각, 페이지 또는 정렬 형식 오류 |
+| `400 Bad Request` | 식별자·페이지·크기·정렬 형식, unknown query 또는 scalar 중복 |
 | `404 Not Found` | 해당 사건이 없음 |
-| `422 Unprocessable Entity` | 의미상 처리할 수 없는 시각 범위 또는 조회 조건 |
+| `422 Unprocessable Entity` | 음수 page 또는 허용 범위 밖 size |
+| `503 Service Unavailable` | 명확한 DB timeout 또는 unavailable |
 | `500 Internal Server Error` | 공개할 수 없는 예기치 않은 서버 오류 |
 
 ## 14. 동시성 처리
