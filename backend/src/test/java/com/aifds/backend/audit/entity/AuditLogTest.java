@@ -72,6 +72,32 @@ class AuditLogTest {
     }
 
     @Test
+    void acceptsCaseNoteActionOnlyWithItsReasonAndCaseContext() {
+        UUID caseId = UUID.randomUUID();
+        ObjectNode metadata = objectMapper.createObjectNode()
+                .put("noteId", UUID.randomUUID().toString());
+
+        AuditLog log = AuditLog.create(
+                UUID.randomUUID(), AuditActorType.SYSTEM, AuditLog.SYSTEM_ACTOR_ID,
+                AuditAction.CASE_NOTE_CREATED,
+                AuditReasonCode.CASE_INVESTIGATION_NOTE_ADDED,
+                AuditTargetType.FRAUD_CASE, caseId, null, caseId,
+                "trace_case_note_01", null, null, metadata, CHANGED_AT
+        );
+
+        assertThat(log.getAction()).isEqualTo(AuditAction.CASE_NOTE_CREATED);
+        assertThat(log.getTransactionId()).isNull();
+        assertThat(log.getCaseId()).isEqualTo(caseId);
+        assertThatIllegalArgumentException().isThrownBy(() -> AuditLog.create(
+                UUID.randomUUID(), AuditActorType.SYSTEM, AuditLog.SYSTEM_ACTOR_ID,
+                AuditAction.CASE_NOTE_CREATED,
+                AuditReasonCode.CASE_RESOLUTION_COMPLETED,
+                AuditTargetType.FRAUD_CASE, caseId, null, caseId,
+                "trace_case_note_02", null, null, metadata, CHANGED_AT
+        ));
+    }
+
+    @Test
     void acceptsUserActorOnlyWithCanonicalUuidV4() {
         String userId = UUID.randomUUID().toString();
         UUID transactionId = UUID.randomUUID();

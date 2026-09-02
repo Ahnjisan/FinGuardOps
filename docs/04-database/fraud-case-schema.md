@@ -130,3 +130,20 @@ resolution도 같은 낙관적 잠금 경계를 사용한다. 종료는 `fraud_c
 변경하며 `financial_transaction`, 위험 필드와 `case_transaction`을 변경하지 않는다.
 V12는 AuditLog check만 확장하므로 `fraud_case` 테이블·컬럼·제약·인덱스에는 변경이
 없다.
+
+## 10. investigation_note
+
+Flyway V13은 내부 `BIGINT identity` PK와 외부 UUID v4 `note_id`, `fraud_case_id`
+FK(`ON DELETE RESTRICT`), `SYSTEM/finguardops-backend` 작성자, `TEXT content`,
+`TIMESTAMPTZ(6) created_at`을 추가한다. `content`는 DB `char_length` 1..4,000,
+Unicode whitespace-only 및 CR/LF 이외 제어문자 방어 CHECK를 적용한다.
+
+`ix_investigation_note_case_created(fraud_case_id, created_at, id)`는 asc·desc Page와
+같은 시각의 내부 tie-breaker를 지원한다. 내부 `id`는 API에 노출하지 않는다.
+`InvestigationNote`는 Hibernate `@Immutable`, lifecycle callback과 전용 table trigger로
+UPDATE·DELETE를 거부한다. `FraudCase`에는 note collection을 추가하지 않는다.
+
+생성은 부모 `FraudCase.last_changed_at`을 단일 `activityTime`으로 갱신하고 부모를
+먼저 flush한 뒤 note와 AuditLog를 flush한다. 감사 실패를 포함한 어느 단계의 실패도
+부모 version·시각·note·감사를 모두 rollback한다. API 계약은
+[`../03-api/case-audit-api.md#11-조사-메모-생성`](../03-api/case-audit-api.md#11-조사-메모-생성)을 따른다.

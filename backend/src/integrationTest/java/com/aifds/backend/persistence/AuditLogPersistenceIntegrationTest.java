@@ -64,12 +64,12 @@ class AuditLogPersistenceIntegrationTest
     private Flyway flyway;
 
     @Test
-    void appliesFreshV1ThroughV12WithAuditSchemaAndAppendOnlyTrigger() {
-        assertThat(flyway.info().applied()).hasSize(12);
+    void appliesFreshV1ThroughV13WithAuditSchemaAndAppendOnlyTrigger() {
+        assertThat(flyway.info().applied()).hasSize(13);
         assertThat(flyway.info().current().getVersion().getVersion())
-                .isEqualTo("12");
+                .isEqualTo("13");
         assertThat(flyway.info().current().getDescription())
-                .isEqualTo("extend audit log for fraud case resolution");
+                .isEqualTo("create investigation note and extend audit log");
         assertThat(columns("audit_log")).containsExactlyInAnyOrder(
                 "id",
                 "audit_id",
@@ -97,6 +97,8 @@ class AuditLogPersistenceIntegrationTest
                 "ck_audit_log_summary_contract",
                 "ck_audit_log_metadata_keys",
                 "ck_audit_log_metadata_values",
+                "ck_audit_log_case_note_metadata_value",
+                "ck_audit_log_case_note_actor",
                 "fk_audit_log_transaction",
                 "fk_audit_log_case"
         );

@@ -8,6 +8,9 @@ import com.aifds.backend.idempotency.exception.IdempotencyCompletionTransactionN
 import com.aifds.backend.idempotency.exception.IdempotencyRecordNotFoundException;
 import com.aifds.backend.idempotency.exception.IdempotencyStateTransitionNotAllowedException;
 import com.aifds.backend.fraudcase.exception.FraudCaseWorkflowException;
+import com.aifds.backend.fraudcase.exception.InvestigationNoteException;
+import com.aifds.backend.fraudcase.validation.InvestigationNoteValidationException;
+import com.aifds.backend.fraudcase.validation.InvestigationNoteValidationType;
 import com.aifds.backend.fraudcase.validation.FraudCaseValidationException;
 import com.aifds.backend.fraudcase.validation.FraudCaseValidationType;
 import com.aifds.backend.transaction.validation.TransactionValidationException;
@@ -109,6 +112,30 @@ class GlobalExceptionHandlerTest {
                 .isEqualTo(GlobalExceptionHandler.VALIDATION_ERROR);
         assertThat(formatResponse.getBody().traceId()).isEqualTo(TRACE_ID);
         assertThat(domainResponse.getBody().traceId()).isEqualTo(TRACE_ID);
+    }
+
+    @Test
+    void mapsNoteValidationStatusAndBusinessConflictsWithoutCauseDetails() {
+        ResponseEntity<ApiErrorResponse> validation =
+                handler.handleInvestigationNoteValidation(
+                        new InvestigationNoteValidationException(
+                                InvestigationNoteValidationType.DOMAIN,
+                                "content", "CONTENT_TOO_LONG", "content is invalid"
+                        ), requestWithTraceId()
+                );
+        ResponseEntity<ApiErrorResponse> conflict = handler.handleInvestigationNote(
+                new InvestigationNoteException(
+                        InvestigationNoteException.Reason.NOTE_NOT_ALLOWED,
+                        new IllegalStateException("secret content and investigation_note")
+                ), requestWithTraceId()
+        );
+
+        assertThat(validation.getStatusCode()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+        assertThat(conflict.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(conflict.getBody().code()).isEqualTo("NOTE_NOT_ALLOWED");
+        assertThat(conflict.getBody().toString())
+                .doesNotContain("secret", "investigation_note");
+        assertThat(conflict.getBody().traceId()).isEqualTo(TRACE_ID);
     }
 
     @Test

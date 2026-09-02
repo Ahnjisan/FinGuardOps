@@ -291,4 +291,25 @@ class FraudCaseTest {
         assertThat(fraudCase.getLastChangedAt())
                 .isEqualTo(CREATED_AT.plusSeconds(2));
     }
+
+    @Test
+    void noteActivityRequiresAllowedStateAndStrictlyLaterMicrosecondTime() {
+        FraudCase fraudCase = FraudCase.open(UUID.randomUUID(), CREATED_AT);
+        assertThatThrownBy(() -> fraudCase.recordInvestigationNoteActivity(
+                CREATED_AT.plusNanos(1_000)
+        )).isInstanceOf(IllegalStateException.class);
+
+        fraudCase.startReview(
+                "10000000-0000-4000-9000-000000000001",
+                CREATED_AT.plusSeconds(1)
+        );
+        assertThatThrownBy(() -> fraudCase.recordInvestigationNoteActivity(
+                CREATED_AT.plusSeconds(1)
+        )).isInstanceOf(IllegalArgumentException.class);
+
+        Instant activityTime = CREATED_AT.plusSeconds(1).plusNanos(1_000);
+        fraudCase.recordInvestigationNoteActivity(activityTime);
+        assertThat(fraudCase.getLastChangedAt()).isEqualTo(activityTime);
+        assertThat(fraudCase.getCaseStatus()).isEqualTo(FraudCaseStatus.IN_REVIEW);
+    }
 }

@@ -180,6 +180,19 @@ public class FraudCase {
         validateInvariants();
     }
 
+    public void recordInvestigationNoteActivity(Instant activityTime) {
+        if (caseStatus != FraudCaseStatus.IN_REVIEW
+                && caseStatus != FraudCaseStatus.ADDITIONAL_INFORMATION_REQUIRED) {
+            throw new IllegalStateException("Investigation note is not allowed");
+        }
+        Instant validated = requireMicrosecondInstant(activityTime, "activityTime");
+        if (!validated.isAfter(lastChangedAt)) {
+            throw new IllegalArgumentException("activityTime must be after lastChangedAt");
+        }
+        lastChangedAt = validated;
+        validateInvariants();
+    }
+
     @PostLoad
     @PrePersist
     @PreUpdate

@@ -9,6 +9,7 @@ import com.aifds.backend.idempotency.entity.IdempotencyProcessingStatus;
 import com.aifds.backend.idempotency.exception.IdempotencyCompletionTransactionNotFoundException;
 import com.aifds.backend.idempotency.exception.IdempotencyRecordNotFoundException;
 import com.aifds.backend.idempotency.exception.IdempotencyStateTransitionNotAllowedException;
+import com.aifds.backend.fraudcase.exception.InvestigationNoteException;
 import com.aifds.backend.transaction.dto.TransactionCreateRequest;
 import com.aifds.backend.transaction.exception.TransactionNotFoundException;
 import com.aifds.backend.transaction.exception.TransactionQueryUnavailableException;
@@ -111,6 +112,21 @@ class GlobalExceptionHandlerMockMvcTest {
                 .andExpect(jsonPath("$.fieldErrors").isArray())
                 .andExpect(jsonPath("$.fieldErrors").isEmpty());
         verifyNoInteractions(metricsRecorder);
+    }
+
+    @Test
+    void noteInternalFailureDoesNotExposeContentSqlSchemaOrCause() throws Exception {
+        String response = mockMvc.perform(get("/test/errors/note-internal")
+                        .header(TraceIdFilter.TRACE_ID_HEADER, INTERNAL_TRACE_ID))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.code").value("INTERNAL_ERROR"))
+                .andExpect(jsonPath("$.traceId").value(INTERNAL_TRACE_ID))
+                .andReturn().getResponse().getContentAsString();
+
+        assertThat(response).doesNotContain(
+                "SECRET_NOTE_CONTENT", "SELECT", "investigation_note",
+                "constraint", InvestigationNoteException.class.getName()
+        );
     }
 
     @Test
@@ -639,6 +655,16 @@ class GlobalExceptionHandlerMockMvcTest {
         void dependencyUnavailable() {
             throw new TransactionQueryUnavailableException(
                     new IllegalStateException("repository unavailable")
+            );
+        }
+
+        @GetMapping("/note-internal")
+        void noteInternal() {
+            throw new InvestigationNoteException(
+                    InvestigationNoteException.Reason.INTERNAL_FAILURE,
+                    new IllegalStateException(
+                            "SECRET_NOTE_CONTENT SELECT investigation_note constraint"
+                    )
             );
         }
 

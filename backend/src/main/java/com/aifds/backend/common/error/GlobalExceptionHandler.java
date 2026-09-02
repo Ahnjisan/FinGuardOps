@@ -12,6 +12,9 @@ import com.aifds.backend.fraudcase.exception.FraudCaseNotFoundException;
 import com.aifds.backend.fraudcase.exception.FraudCaseQueryTimeoutException;
 import com.aifds.backend.fraudcase.exception.FraudCaseQueryUnavailableException;
 import com.aifds.backend.fraudcase.exception.FraudCaseWorkflowException;
+import com.aifds.backend.fraudcase.exception.InvestigationNoteException;
+import com.aifds.backend.fraudcase.validation.InvestigationNoteValidationException;
+import com.aifds.backend.fraudcase.validation.InvestigationNoteValidationType;
 import com.aifds.backend.fraudcase.validation.FraudCaseValidationException;
 import com.aifds.backend.fraudcase.validation.FraudCaseValidationType;
 import com.aifds.backend.observability.TransactionIntakeMetricsFilter;
@@ -71,6 +74,7 @@ public class GlobalExceptionHandler {
     static final String CASE_ASSIGNEE_CONFLICT = "CASE_ASSIGNEE_CONFLICT";
     static final String CASE_ALREADY_CLOSED = "CASE_ALREADY_CLOSED";
     static final String CONCURRENT_MODIFICATION = "CONCURRENT_MODIFICATION";
+    static final String NOTE_NOT_ALLOWED = "NOTE_NOT_ALLOWED";
     static final String ASSIGNEE_REQUIRED = "ASSIGNEE_REQUIRED";
     static final String INVALID_ASSIGNEE_REF = "INVALID_ASSIGNEE_REF";
     static final String FINAL_DISPOSITION_REQUIRED =
@@ -159,7 +163,52 @@ public class GlobalExceptionHandler {
                     request
             );
         }
+        Optional<InvestigationNoteValidationException> noteValidation =
+                findCause(exception, InvestigationNoteValidationException.class);
+        if (noteValidation.isPresent()) {
+            return handleInvestigationNoteValidation(noteValidation.get(), request);
+        }
         return validationResponse(HttpStatus.BAD_REQUEST, List.of(), request);
+    }
+
+    @ExceptionHandler(InvestigationNoteValidationException.class)
+    ResponseEntity<ApiErrorResponse> handleInvestigationNoteValidation(
+            InvestigationNoteValidationException exception,
+            HttpServletRequest request
+    ) {
+        HttpStatus status = exception.getType() == InvestigationNoteValidationType.DOMAIN
+                ? HttpStatus.UNPROCESSABLE_ENTITY : HttpStatus.BAD_REQUEST;
+        return validationResponse(status, List.of(toFieldError(exception)), request);
+    }
+
+    @ExceptionHandler(InvestigationNoteException.class)
+    ResponseEntity<ApiErrorResponse> handleInvestigationNote(
+            InvestigationNoteException exception,
+            HttpServletRequest request
+    ) {
+        return switch (exception.getReason()) {
+            case NOTE_NOT_ALLOWED -> response(
+                    HttpStatus.CONFLICT, NOTE_NOT_ALLOWED,
+                    "Investigation notes are not allowed for the current case status",
+                    List.of(), request
+            );
+            case CONCURRENT_MODIFICATION -> response(
+                    HttpStatus.CONFLICT, CONCURRENT_MODIFICATION,
+                    CONCURRENT_MODIFICATION_MESSAGE, List.of(), request
+            );
+            case DEPENDENCY_TIMEOUT -> response(
+                    HttpStatus.SERVICE_UNAVAILABLE, DEPENDENCY_TIMEOUT,
+                    QUERY_DEPENDENCY_TIMEOUT_MESSAGE, List.of(), request
+            );
+            case DEPENDENCY_UNAVAILABLE -> response(
+                    HttpStatus.SERVICE_UNAVAILABLE, DEPENDENCY_UNAVAILABLE,
+                    DEPENDENCY_UNAVAILABLE_MESSAGE, List.of(), request
+            );
+            case INTERNAL_FAILURE -> response(
+                    HttpStatus.INTERNAL_SERVER_ERROR, INTERNAL_ERROR,
+                    INTERNAL_ERROR_MESSAGE, List.of(), request
+            );
+        };
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
@@ -742,6 +791,14 @@ public class GlobalExceptionHandler {
                 exception.getField(),
                 exception.getCode(),
                 exception.getReason()
+        );
+    }
+
+    private FieldErrorResponse toFieldError(
+            InvestigationNoteValidationException exception
+    ) {
+        return new FieldErrorResponse(
+                exception.getField(), exception.getCode(), exception.getReason()
         );
     }
 

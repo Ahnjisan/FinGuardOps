@@ -8,7 +8,7 @@
 
 Issue #207에서 사건 목록·상세 조회를 구현했고 Issue #209에서 아래 두 mutation과
 PostgreSQL 낙관적 동시성·감사 원자성 경계를 구현했다. Issue #211은 최종 판정·
-종료 API와 V12 감사를 구현했다. 조사 메모, 연관 거래 목록과 감사 조회 API 및
+종료 API와 V12 감사를 구현했고 Issue #213에서 조사 메모 생성·목록과 V13 감사를 구현했다. 연관 거래 목록과 감사 조회 API 및
 인증·인가는 구현되지 않았다. 사건 영속 계약은
 [`../04-database/fraud-case-schema.md`](../04-database/fraud-case-schema.md)를 따른다.
 실제 `caseId`와 `auditId`는 UUID v4를 사용한다.
@@ -165,24 +165,12 @@ sort
 `lastChangedAt,desc`이다. 같은 변경 시각에는 내부 `id`를 같은 방향의 보조
 정렬키로 사용하되 요청·응답에 내부 `id`를 노출하지 않는다.
 
-### 3.6 POST 멱등성 적용 범위
+### 3.6 사건 mutation 재요청 범위
 
-사건 종료 API는 `Idempotency-Key`를 요구하거나 재생하지 않는다.
-
-```text
-POST /api/v1/cases/{caseId}/notes
-```
-
-공통 처리 규칙은 다음과 같다.
-
-- 최초 요청은 각 API의 정상 처리 규칙에 따라 처리한다.
-- 같은 키와 같은 정규화 요청의 처리가 완료되었으면 새 상태 변경이나 CaseNote를 만들지 않고 `200 OK`로 기존 결과를 반환한다.
-- 같은 키와 같은 정규화 요청이 처리 중이면 새 처리를 시작하지 않고 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다.
-- 같은 키에 다른 요청 내용이 오면 변경을 적용하지 않고 `409 Conflict`와 `IDEMPOTENCY_KEY_CONFLICT`를 반환한다.
-- 응답 유실 후 같은 메모 요청을 재전송해도 CaseNote와 AuditLog가 중복 생성되지 않아야 한다.
-- 멱등성 확인은 완료된 동일 요청의 기존 결과를 식별할 수 있어야 하며, 단순한 현재 사건 상태 검사만으로 대체하지 않는다.
-- `Idempotency-Key`가 누락되거나 형식이 올바르지 않으면 업무 변경을 시작하지 않고 `400 Bad Request`와 `VALIDATION_ERROR`를 반환한다.
-- 구체적인 `IdempotencyRecord`, 정규화 방식, 요청 지문과 완료 응답 저장 구조는 조사 메모 후속 JPA 설계에서 확정한다. 조사 메모는 현재 미구현이다.
+사건 종료와 조사 메모 생성 API는 `Idempotency-Key`를 요구하거나 replay하지 않는다.
+두 API 모두 필수 `expectedVersion`과 JPA optimistic version을 사용한다. 성공 후 같은
+`expectedVersion`으로 메모 생성을 재요청하면 `409 CONCURRENT_MODIFICATION`이며 새
+`InvestigationNote`와 `AuditLog`를 생성하지 않는다.
 
 ## 4. API 목록
 
@@ -671,7 +659,7 @@ Content-Type: application/json
 - `finalDisposition`이 누락되거나 null이면 `422 Unprocessable Entity`와 `FINAL_DISPOSITION_REQUIRED`를 반환한다.
 - 종료 사건 재개와 종료 후 최종 판정 변경은 초기 범위에서 제외한다.
 - 세 판정은 모두 사건만 종료하며 Transaction, RiskLevel, RiskResponseOutcome, CaseTransaction과 AI 처리를 변경하지 않는다.
-- 성공 종료만 `SYSTEM/finguardops-backend` actor의 `CASE_RESOLVED/CASE_RESOLUTION_COMPLETED` AuditLog를 정확히 1건 생성한다. RBAC, 실제 `USER` actor와 조사 메모는 미구현이다.
+- 성공 종료만 `SYSTEM/finguardops-backend` actor의 `CASE_RESOLVED/CASE_RESOLUTION_COMPLETED` AuditLog를 정확히 1건 생성한다. RBAC와 실제 `USER` actor는 미구현이다.
 
 오류 우선순위는 요청 구조·타입·path → 사건 없음 → stale version → 이미 종료 → 금지 상태 → 판정·사유 업무 오류 → flush optimistic conflict → DB timeout → DB unavailable → 기타 내부 오류 순이다.
 
@@ -739,42 +727,39 @@ Content-Type: application/json
 ```http
 POST /api/v1/cases/{caseId}/notes
 Content-Type: application/json
-Idempotency-Key: <required>
 ```
 
-| 필드 | 타입 후보 | 필수 후보 | 설명 |
+| 필드 | 타입 | 필수 | 설명 |
 | --- | --- | --- | --- |
-| `content` | string | 필수 | 조사 메모 내용 |
-| `correctionOfNoteId` | string 또는 null | 선택 | 정정 대상 원 메모 식별자 |
+| `content` | string | 필수 | 원문 그대로 저장하는 plain text, Unicode code point 1..4,000 |
+| `expectedVersion` | integer | 필수 | 조회한 사건의 0 이상 `concurrencyVersion` |
 
 요청 예:
 
 ```json
 {
-  "content": "이전 메모의 확인 시각을 정정합니다. 추가 자료는 2026-07-24T02:40:00Z에 확인했습니다.",
-  "correctionOfNoteId": "note_demo_20260724_0201"
+  "content": "조사 메모 원문",
+  "expectedVersion": 6
 }
 ```
 
 ### 11.2 처리 규칙
 
-- 필수 `Idempotency-Key`를 3.6절의 공통 규칙에 따라 확인한다.
-- CaseNote는 append-only로 관리한다.
-- 최초 요청은 새 CaseNote를 생성하고 `201 Created`로 결과를 반환한다.
-- 같은 키와 같은 정규화 요청의 완료된 재전송은 새 메모를 만들지 않고 `200 OK`로 최초 생성된 CaseNote 결과를 반환한다.
-- 같은 키와 같은 요청이 처리 중이면 새 메모를 만들지 않고 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다.
-- 같은 키에 다른 요청이 오면 `409 Conflict`와 `IDEMPOTENCY_KEY_CONFLICT`를 반환한다.
-- 응답 유실 후 재전송되더라도 동일 메모, 정정 메모와 AuditLog를 중복 생성하지 않는다.
-- 기존 메모를 직접 수정하거나 물리 삭제하지 않는다.
-- 정정이 필요하면 새 메모를 추가하고 `correctionOfNoteId`로 원 메모를 참조한다.
-- `correctionOfNoteId`가 가리키는 메모는 존재해야 하며 같은 사건에 속해야 한다.
-- 존재하지 않거나 다른 사건의 메모를 참조하면 `422 Unprocessable Entity`와 `INVALID_CORRECTION_NOTE`를 반환하고 사건 현재값과 `concurrencyVersion`을 변경하지 않는다.
-- 작성자 `authorRef`는 클라이언트 요청 본문에서 받거나 임의로 신뢰하지 않고 서버 사용자 문맥에서 결정한다.
-- 인증·인가가 구현되지 않은 현재 단계에서는 작성자와 변경 주체를 local/test 환경의 서버 사용자 문맥에서 공급하며 구체 방식은 사용자 결정 사항이다.
-- 초기 권장 정책은 `CLOSED` 사건을 읽기 전용으로 유지하는 것이다. 종료 사건에 새 메모를 추가하려는 요청은 `409 Conflict`와 `NOTE_NOT_ALLOWED`를 반환한다.
-- 최초 메모 생성, `FraudCase.lastChangedAt` 변경, `concurrencyVersion` 증가와 AuditLog 기록은 하나의 업무 트랜잭션으로 처리하며 일부만 저장되는 결과를 허용하지 않는다.
-- 메모 생성과 정정 메모 생성은 AuditLog 기록 대상이다.
+- `IN_REVIEW`, `ADDITIONAL_INFORMATION_REQUIRED`만 작성할 수 있다. `OPEN`, `CLOSED`는 `409 NOTE_NOT_ALLOWED`이다.
+- 사건 조회 후 stale `expectedVersion`을 상태보다 먼저 검사한다.
+- 서버가 `authorType=SYSTEM`, `authorRef=finguardops-backend`를 설정한다. 요청의 `authorRef`, `actorType`, `actorId`와 모든 unknown·duplicate field는 `400`이다.
+- 앞뒤 공백, CR/LF, Unicode 조합과 HTML·Markdown·SQL·script 문자열은 정규화·trim·실행·렌더링하지 않고 plain text 원문으로 보존한다.
+- NUL과 CR/LF 이외 ISO 제어문자, 공백-only, 4,000 code point 초과는 `422`이다.
+- `content`는 신뢰할 수 없는 plain text다. 클라이언트는 화면 출력 시 HTML/text
+  escaping을 적용해야 하며 `innerHTML`, `dangerouslySetInnerHTML` 등으로 원문을 HTML로
+  렌더링하면 안 된다. 서버가 원문을 실행·해석하지 않는다는 사실만으로 클라이언트 출력의
+  안전이 보장되지는 않는다. 현재 Frontend와 인증·RBAC는 이 계약의 구현 범위가 아니다.
+- 사건 조회 → version → 상태 → content → 단일 `activityTime` → 부모 flush → 메모 insert·flush → 감사 append·flush 순서로 같은 REQUIRED 트랜잭션에서 처리한다.
+- `Clock` 시각이 기존 `lastChangedAt` 이하이면 정확히 1 microsecond 뒤를 사용한다. 성공 시 `createdAt == lastChangedAt`, version은 정확히 1 증가한다.
+- `InvestigationNote`는 append-only이며 수정·삭제 API가 없다. `Idempotency-Key` replay와 `correctionOfNoteId`도 구현하지 않는다.
 - 메모에 실제 고객번호, 실제 계좌번호, 비밀번호, OTP, 인증 토큰과 불필요한 개인정보를 입력하지 않는다.
+- `InvestigationNote` 물리 DB 계약은
+  [`fraud-case-schema.md`](../04-database/fraud-case-schema.md)에 통합되어 있다.
 
 ### 11.3 성공 응답 예시
 
@@ -785,12 +770,12 @@ Content-Type: application/json
 
 ```json
 {
-  "noteId": "note_demo_20260724_0202",
-  "caseId": "case_demo_20260724_0031",
-  "authorRef": "analyst_ref_demo_12",
-  "content": "이전 메모의 확인 시각을 정정합니다. 추가 자료는 2026-07-24T02:40:00Z에 확인했습니다.",
-  "correctionOfNoteId": "note_demo_20260724_0201",
-  "createdAt": "2026-07-24T02:45:00Z",
+  "noteId": "10000000-0000-4000-8000-000000000001",
+  "caseId": "20000000-0000-4000-8000-000000000002",
+  "authorType": "SYSTEM",
+  "authorRef": "finguardops-backend",
+  "content": "조사 메모 원문",
+  "createdAt": "2026-09-02T00:00:00.123456Z",
   "concurrencyVersion": 7,
   "traceId": "trace_demo_case_note_create_01"
 }
@@ -802,12 +787,12 @@ Content-Type: application/json
 
 | 상태 코드 | 사용 기준 |
 | --- | --- |
-| `201 Created` | 일반 메모 또는 정정 메모 최초 생성 성공 |
-| `200 OK` | 완료된 동일 멱등 요청에 최초 생성된 메모 결과 반환 |
-| `400 Bad Request` | JSON, 필수 `Idempotency-Key`, 식별자 또는 필드 형식 오류 |
+| `201 Created` | 메모 생성 성공 |
+| `400 Bad Request` | strict JSON, UUID, `expectedVersion` 또는 필드 형식 오류 |
 | `404 Not Found` | 해당 사건이 없음 |
-| `409 Conflict` | 멱등성 키 지문 충돌, 동일 멱등 요청 처리 중 또는 종료 사건 등 메모를 추가할 수 없는 현재 사건 상태 |
-| `422 Unprocessable Entity` | 빈 내용, 잘못된 정정 참조 등 메모 업무 규칙 위반 |
+| `409 Conflict` | stale/flush 충돌 또는 작성 불가 상태 |
+| `422 Unprocessable Entity` | content 업무 규칙 위반 |
+| `503 Service Unavailable` | DB timeout 또는 unavailable |
 | `500 Internal Server Error` | 공개할 수 없는 예기치 않은 서버 오류 |
 
 ## 12. 조사 메모 조회
@@ -821,7 +806,7 @@ GET /api/v1/cases/{caseId}/notes
 요청 예:
 
 ```http
-GET /api/v1/cases/case_demo_20260724_0031/notes?page=0&size=20&sort=createdAt,asc
+GET /api/v1/cases/20000000-0000-4000-8000-000000000002/notes?page=0&size=20&sort=createdAt,asc
 ```
 
 ### 12.2 성공 응답 예시
@@ -833,21 +818,14 @@ Content-Type: application/json
 
 ```json
 {
-  "caseId": "case_demo_20260724_0031",
-  "content": [
+  "items": [
     {
-      "noteId": "note_demo_20260724_0201",
-      "authorRef": "analyst_ref_demo_07",
+      "noteId": "10000000-0000-4000-8000-000000000001",
+      "caseId": "20000000-0000-4000-8000-000000000002",
+      "authorType": "SYSTEM",
+      "authorRef": "finguardops-backend",
       "content": "추가 확인 자료의 도착 여부를 검토했습니다.",
-      "correctionOfNoteId": null,
       "createdAt": "2026-07-24T02:20:00Z"
-    },
-    {
-      "noteId": "note_demo_20260724_0202",
-      "authorRef": "analyst_ref_demo_12",
-      "content": "이전 메모의 확인 시각을 정정합니다. 추가 자료는 2026-07-24T02:40:00Z에 확인했습니다.",
-      "correctionOfNoteId": "note_demo_20260724_0201",
-      "createdAt": "2026-07-24T02:45:00Z"
     }
   ],
   "page": {
@@ -862,16 +840,19 @@ Content-Type: application/json
 }
 ```
 
-메모는 생성 순서를 안정적으로 확인할 수 있어야 하며 정정 메모를 원 메모 대신 덮어써서 반환하지 않는다.
+기본값은 `page=0`, `size=20`, `sort=createdAt,asc`이고 최대 size는 100이다.
+정렬은 `createdAt,asc|desc`만 허용하며 내부 `id`를 같은 방향 tie-breaker로 사용하되
+응답에 노출하지 않는다. 사건 존재를 먼저 확인하므로 존재하는 사건의 빈 목록은 `200`이다.
 
 ### 12.3 상태 코드
 
 | 상태 코드 | 사용 기준 |
 | --- | --- |
-| `200 OK` | 조회 성공. 메모가 없으면 빈 `content` 반환 |
+| `200 OK` | 조회 성공. 메모가 없으면 빈 `items` 반환 |
 | `400 Bad Request` | 식별자, 페이지 또는 정렬 형식 오류 |
 | `404 Not Found` | 해당 사건이 없음 |
-| `422 Unprocessable Entity` | 의미상 처리할 수 없는 페이지 또는 정렬 조건 |
+| `422 Unprocessable Entity` | 음수 page 또는 허용 범위 밖 size |
+| `503 Service Unavailable` | DB timeout 또는 unavailable |
 | `500 Internal Server Error` | 공개할 수 없는 예기치 않은 서버 오류 |
 
 ## 13. 사건 감사 로그 조회
@@ -903,17 +884,20 @@ GET /api/v1/cases/{caseId}/audit-logs
 GET /api/v1/cases/case_demo_20260724_0031/audit-logs?action=CASE_CREATED&page=0&size=20&sort=changedAt,desc
 ```
 
-V7 물리 모델의 승인된 `action` 값은 다음 네 가지로 제한한다.
+V13까지 물리 모델의 승인된 `action` 값은 다음과 같다.
 
 ```text
 CASE_CREATED
 CASE_TRANSACTION_LINKED
 TRANSACTION_RISK_RESPONSE_APPLIED
 TRANSACTION_STATUS_CHANGED
+CASE_STATUS_CHANGED
+CASE_ASSIGNEE_CHANGED
+CASE_RESOLVED
+CASE_NOTE_CREATED
 ```
 
-사건 상태·담당자·판정·메모 변경과 거부 감사 action은 이 API 초안의 후속 후보일
-뿐 V7 Enum에 포함되지 않는다. 도입하려면 별도 승인과 additive Migration이 필요하다.
+거부 감사 action은 후속 범위이며 공개 감사 조회 API 자체도 아직 미구현이다.
 
 ### 13.3 응답 항목
 
@@ -1045,14 +1029,15 @@ Content-Type: application/json
 
 ## 15. 감사 원칙
 
-Issue #209와 Issue #211에서 성공한 다음 명령은 AuditLog를 정확히 1건 생성한다.
+Issue #209, #211, #213에서 성공한 다음 명령은 AuditLog를 정확히 1건 생성한다.
 
 - 사건 상태 변경
 - 담당자 배정·변경·해제
 - 사건 최종 판정·종료
+- 사건 조사 메모 생성
 
 stale version, 같은 상태·담당자, 금지 전이, 종료 사건 변경과 validation 실패는 현재
-감사 로그를 생성하지 않는다. 조사 메모와 거부 요청 별도 감사는 후속 범위이다.
+감사 로그를 생성하지 않는다. 거부 요청 별도 감사는 후속 범위이다.
 
 감사 기록에는 다음 정보를 포함하는 방향을 사용한다.
 
@@ -1204,7 +1189,8 @@ Content-Type: application/json
 
 작성자와 변경 주체는 테스트·로컬 환경의 서버 사용자 문맥으로 공급한다. 요청 본문의
 `authorRef`, `actorType`, `actorId`는 신뢰하지 않는다. 구체적인 요청 헤더명, Mock
-Actor Provider 구현과 인증 코드는 이번 문서에서 확정하지 않는다.
+Actor Provider 구현과 인증 코드는 이번 문서에서 확정하지 않는다. 조사 메모는 이
+사용자 문맥을 사용하지 않고 서버가 `SYSTEM/finguardops-backend`로 기록한다.
 
 ### 18.3 조회와 표시
 
@@ -1216,39 +1202,28 @@ Actor Provider 구현과 인증 코드는 이번 문서에서 확정하지 않�
 
 ### 18.4 조사 메모와 감사
 
-- `CLOSED` 사건 읽기 전용 초기 권장안을 최종 정책으로 승인할지
-- 메모 내용의 최대 길이와 허용 문자
-- 정정 메모가 다른 정정 메모를 다시 참조할 수 있는지
+- 향후 정정 메모를 도입할 경우 참조 깊이와 표시·감사 정책
 - 향후 `GET /api/v1/cases/{caseId}/notes/{noteId}` 승인 시 최초 생성 응답에 개별 리소스 `Location`을 제공할지
-- 감사 작업 `action` Enum과 거부 사유의 세분화 수준
 - 감사 로그 접근 범위, 정정 절차와 보존 기간
 
-### 18.5 멱등성·동시성과 오류
+### 18.5 동시성과 오류
 
-- `Idempotency-Key`의 형식, 작업별 범위와 보존 기간
-- 정규화 요청 지문과 완료 응답의 저장 범위
-- 처리 중 `409 IDEMPOTENCY_REQUEST_IN_PROGRESS` 응답의 작업별 오류 문맥
 - 충돌 응답에 현재 `concurrencyVersion` 또는 최신 사건 조회 경로를 포함할지
 - 충돌 후 사용자 입력 보존·재입력·병합 UX
 - `fieldErrors.code`의 최종 목록과 버전 관리 방식
 
 ## 19. 제외 범위
 
-- Spring Boot 코드
-- Controller, DTO, Validation과 Service 구현
-- 공개 사건 API용 JPA 조회·변경 Service
-- Issue #156 V7 이외의 사건 조사 PostgreSQL DDL
-- V8 이후 사건 조사·감사 Flyway Migration과 action 확장
 - OpenAPI YAML
-- 구현된 사건 자동 생성 내부 경계의 거래 최종화·AuditLog 연결
 - 사건 병합·분리 API
 - 종료 사건 재개 API
-- 조사 메모 수정·삭제 API
+- 조사 메모 개별 상세·수정·삭제 API
+- 조사 메모 `correctionOfNoteId`와 `Idempotency-Key` replay
 - 감사 로그 수정·삭제 API
 - AI 리포트 API
 - AI 사용량 API
 - 플랫폼 운영 API
-- 인증·인가 구현
+- 인증·인가·RBAC와 조사 메모 `USER` 작성자 구현
 - CORS와 외부 API 보안 구현
 - Kafka 이벤트 API
 - 실제 고객 제재, 거래 승인·인증·차단
