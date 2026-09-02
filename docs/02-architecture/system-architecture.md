@@ -866,7 +866,13 @@ React는 서비스 상태, 배포 버전, 업무 영향, AI 비용과 장애·�
 - 로그, 메트릭 레이블과 감사 이력에 민감정보 원문을 기록하지 않는다.
 - 프롬프트와 LLM 입출력 원문을 무분별하게 저장하지 않는다.
 - API Key, Token, Password와 DB 접속정보를 코드나 문서에 직접 작성하지 않는다.
-- 실제 인증·인가, CORS, Secret 관리와 외부 API 보안 방식은 사용자 승인 후 후속 설계에서 확정한다.
+- Spring Backend의 승인된 목표 인증·인가 계약은 제품 중립 OAuth2 Resource Server,
+  RS256 Bearer JWT, USER·SERVICE 분리, authority 기반 deny-by-default와 USER Audit actor를
+  사용한다. 세부 계약은 [`security-architecture.md`](security-architecture.md)와
+  [`ADR-008`](../07-decisions/ADR-008-oauth2-resource-server-rbac-user-audit-actor.md)을 따른다.
+- 현재 Spring Security dependency·filter chain·JWT·RBAC·USER actor·CORS는 구현되지
+  않았으며, 모든 Spring 업무 API는 security layer 관점에서 사실상 무인증이다.
+- Authorization Server 제품과 실제 issuer·JWK URI는 후속 구현 전에 결정한다.
 - 실제 금융거래, 본인인증, 거래 차단과 고객 제재는 Mock으로 한정한다.
 
 ## 17. Observability 경계
@@ -1002,6 +1008,8 @@ Grafana는 Prometheus·Backend·Alertmanager의 시작 또는 health dependency�
 - 거래·사건·AI 리포트 상태 전이
 - 제품 포지셔닝과 저장소명 변경 ADR
 - 본 시스템 아키텍처
+- 제품 중립 OAuth2 Resource Server, JWT exact claim, USER·SERVICE RBAC, 401·403·trace,
+  USER Audit actor와 public·management·local/test 보안 경계
 - Rule v1 탐지 계약과 초기 평가 정책
 - Rule Evidence 변환과 Rule 분석 결과 조합 계약
 - Spring Boot → FastAPI Rule v1 내부 분석 HTTP API 계약
@@ -1014,7 +1022,30 @@ Grafana는 Prometheus·Backend·Alertmanager의 시작 또는 health dependency�
 - 비트랜잭션 상위 거래 Service의 External Risk→Rule 분석→최종화 연결
 - RuleVersion publish·운영 준비
 - 최종 Snapshot v2 확정과 완료 간극 운영 복구
-- 감사 거부 이력·보존·접근 통제와 실제 USER actor 연결
+- 감사 보존·접근 통제와 실제 USER actor 연결. 401·403·validation·stale·업무 거부는
+  업무 AuditLog에서 제외
+
+보안 후속 Issue는 다음 다섯 개를 순서대로 수행한다.
+
+1. OAuth2 Resource Server 기반과 401·403·trace 경계
+2. endpoint RBAC와 USER·SERVICE principal matrix
+3. 사건 write USER actor와 InvestigationNote author 연결
+4. Local Compose·runbook JWT fixture와 인증 E2E
+   - Resource Server와 RBAC 적용 후 local issuer/JWK fixture 또는 승인된 local
+     Authorization Server, SERVICE token bootstrap과 traffic generator `Authorization`
+     header를 연결한다.
+   - private key·token을 저장하지 않고 기존 Prometheus·recording·alert·Alertmanager·
+     Grafana E2E 회귀와 장시간 Compose 검증을 수행한다.
+5. Frontend OIDC·token·권한 UI
+   - Resource Server·RBAC와 Authorization Server 제품 결정 후 Authorization Code + PKCE,
+     access token memory 보관, API `Authorization` header와 login·logout을 구현한다.
+   - expiry·401·403 UX와 role·authority 기반 UI를 브라우저 경계에서 검증한다.
+
+4와 5는 서로 다른 Issue다. Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend
+OIDC도 Compose traffic fixture의 일부가 아니다. 전체 후속 Issue는 계속 다섯 개이며 토큰
+절약을 위한 인위적 분할이 아니라 기술 책임·선행 관계·실패 영향·검증 시간이 다르기 때문에
+분리한다.
+
 - External Risk public intake 연결과 실패 Snapshot 저장 호출. 성공 Snapshot DB 영속화는 별도 승인 시 검토
 - production container 배포 환경과 Compose 고도화
 

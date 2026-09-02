@@ -83,6 +83,22 @@ External Risk fixture는 Backend network namespace를 공유하여 `127.0.0.1:80
 bind하고 Backend도 loopback으로 호출한다. 기존 non-production plain HTTP loopback 제한과
 production External Risk Provider 정책은 바뀌지 않으며 sidecar도 인증·TLS를 대체하지 않는다.
 
+### 4.1 인증·management 목표 운영 경계
+
+승인된 목표 계약은 [`security-architecture.md`](../02-architecture/security-architecture.md)와
+[`ADR-008`](../07-decisions/ADR-008-oauth2-resource-server-rbac-user-audit-actor.md)을 따른다.
+Spring Backend는 제품 중립 OAuth2 Resource Server로 동작하고 업무 API는 USER·SERVICE
+authority를 최소 권한으로 구분한다. management `8081` scrape에는 업무 사용자 JWT를
+요구하지 않는다. local은 internal observability network와 host 미publish, production은
+private network·방화벽/security group을 기본 경계로 하며 필요 시 mTLS 또는 인증 proxy를
+사용한다. management health·prometheus를 public endpoint로 취급하지 않는다.
+
+이는 목표 운영 계약이다. 현재 Spring Security·JWT·RBAC·management 인증·TLS는 구현되지
+않았고 network 격리와 loopback은 인증·TLS를 대신하지 않는다. production Security chain을
+profile로 비활성화하거나 설정 누락 시 무인증으로 fallback해서는 안 된다. 실제
+Authorization Server 제품·issuer·JWK URI와 production 보호 수단은 후속 구현·배포 Issue에서
+검증한다.
+
 ## 5. 공통 운영 식별자
 
 다음 식별자는 장애 분석과 거래 접수부터 탐지·사건·AI 리포트까지의 처리 흐름 추적에 사용한다.
@@ -636,7 +652,7 @@ React에서 Grafana와 동일한 기술 대시보드를 전부 다시 구현하�
 - production Grafana와 추가 사건·AI·복구 대시보드 구현
 - production Alertmanager·receiver·credential·Slack·email·SMS·PagerDuty
 - Alertmanager HA·장기 retention과 production SLA·SLO
-- 인증·TLS와 OpenTelemetry
+- 승인된 인증 아키텍처의 production 구현, management 인증·TLS와 OpenTelemetry
 - 운영 API 구현
 - Kafka·Kubernetes·AWS 구현
 - 자동 복구 구현

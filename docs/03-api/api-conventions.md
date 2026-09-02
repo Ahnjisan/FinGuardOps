@@ -4,7 +4,7 @@
 
 이 문서는 FinGuardOps의 Spring Boot REST API가 공통으로 따를 표현 형식, 식별자, 금액, 페이지네이션, 멱등성, 오류 응답과 추적 원칙을 정의한다.
 
-이 문서는 이후 Controller, 요청·응답 DTO, Validation, Service, 테스트와 OpenAPI 계약의 기준이다. Java 타입, DB 컬럼, OpenTelemetry 전파 헤더와 인증·인가 구현은 이 문서에서 확정하지 않는다.
+이 문서는 이후 Controller, 요청·응답 DTO, Validation, Service, 테스트와 OpenAPI 계약의 기준이다. Java 타입, DB 컬럼과 OpenTelemetry 전파 헤더는 이 문서에서 확정하지 않는다. 인증·인가의 목표 API 계약은 [`security-architecture.md`](../02-architecture/security-architecture.md)와 [`ADR-008`](../07-decisions/ADR-008-oauth2-resource-server-rbac-user-audit-actor.md)을 따른다. 현재 Spring Security·JWT·RBAC는 구현되지 않았다.
 
 ## 2. 기본 경로
 
@@ -398,12 +398,34 @@ JSON·필수 헤더·필드 형식 오류와 도메인 규칙 위반을 구분�
 | `201 Created` | 거래 또는 행동 이벤트가 처음 생성됨 |
 | `202 Accepted` | 명시적으로 비동기 접수 계약을 가진 API가 요청 또는 진행 중 리소스 상태를 반환함. 거래 생성의 동일 멱등 요청 처리 중 응답에는 사용하지 않음 |
 | `400 Bad Request` | 잘못된 JSON, 필수 헤더 누락, 필드·쿼리 형식 오류 등 요청을 해석·기본 검증할 수 없음 |
+| `401 Unauthorized` | credential이 없거나 Bearer JWT·필수 claim 검증에 실패함 |
+| `403 Forbidden` | 인증·claim 검증은 성공했지만 endpoint authority가 부족함 |
 | `404 Not Found` | 식별자로 요청한 업무 리소스가 없거나 요청 경로가 등록되지 않음 |
 | `409 Conflict` | 멱등성 키, 업무 식별자, 상태 또는 동시성 충돌 |
 | `422 Unprocessable Entity` | 형식은 올바르지만 거래 유형별 도메인 규칙 등 업무 의미상 처리할 수 없는 입력 |
 | `503 Service Unavailable` | 필수 의존성 Timeout 또는 일시적인 서비스 처리 불가 |
 
 서버의 예기치 않은 오류에는 `500 Internal Server Error`가 필요할 수 있다. 사용자가 지정한 주요 상태 코드 외 상태를 추가할 때는 API 계약 검토를 거친다.
+
+### 7.4 목표 401·403 계약
+
+현재는 security layer가 없어 아래 응답이 구현되지 않았다. 목표 구현에서는
+`TraceIdFilter`가 Spring Security보다 먼저 요청 traceId를 확정하고, filter 단계의
+`AuthenticationEntryPoint`와 `AccessDeniedHandler`가 `GlobalExceptionHandler`에 의존하지
+않고 공통 body를 작성한다.
+
+| 상태 | code | message | `WWW-Authenticate` |
+| --- | --- | --- | --- |
+| credential 없음 | `UNAUTHORIZED` | `인증이 필요하거나 인증 정보가 유효하지 않습니다.` | `Bearer realm="finguardops-backend"` |
+| invalid token·claim | `UNAUTHORIZED` | `인증이 필요하거나 인증 정보가 유효하지 않습니다.` | `Bearer realm="finguardops-backend", error="invalid_token"` |
+| authority 부족 | `ACCESS_DENIED` | `요청한 작업을 수행할 권한이 없습니다.` | `Bearer realm="finguardops-backend", error="insufficient_scope"` |
+
+세 응답 모두 `fieldErrors`는 빈 배열이며 body `traceId`와 `X-Trace-Id`는 같은 현재 요청
+값이다. token·claim·Authorization Server Provider 예외·내부 security class·stack trace를
+응답이나 일반 로그에 포함하지 않는다. 401·403은 업무 AuditLog를 생성하지 않는다.
+malformed header/token, 서명·시간·issuer·audience·필수 claim·role 검증 실패는 401이다.
+실제 upstream JWK 가용성 장애의 안전한 503 code는 Spring Security 예외 분류를 검증하는
+후속 구현에서 확정하며 invalid token 401과 혼합하지 않는다.
 
 ## 8. `traceId` 원칙
 
@@ -475,7 +497,7 @@ OpenTelemetry, W3C Trace Context의 `traceparent`, 외부 HTTP 호출, Kafka와 
 
 ## 10. 제외 범위
 
-- 인증·인가와 CORS 구현
+- 승인된 인증·인가·CORS 계약의 production 구현
 - Java Controller, DTO, Service와 Exception Handler
 - JPA Entity와 PostgreSQL DDL
 - OpenAPI YAML
