@@ -25,7 +25,7 @@
 - Java 17 Toolchain
 - Gradle Wrapper 8.14.5
 - Spring Boot 3.5.16 초기 설정
-- Spring Web, Validation, Actuator 의존성
+- Spring Web, Validation, Actuator와 OAuth2 Resource Server 의존성
 - Spring Boot 실행 진입점
 - 백엔드 Health Check Controller·Service·DTO
 - Health Controller 통합 테스트와 Health Service 단위 테스트
@@ -34,6 +34,10 @@
 - Flyway 기반 금융거래·거래 멱등성·행동 이벤트 PostgreSQL 스키마
 - 9개 유형의 행동 이벤트 접수, 거래 정합성 검증과 `eventId` 자연 멱등성
 - 공통 오류 응답과 `TraceIdFilter`
+- RS256 Bearer JWT의 issuer·strict audience·subject·principal type·role·time 검증,
+  USER·SERVICE principal과 role-derived authority, 안전한 401·403·JWK 장애 응답 경계
+- stateless·CSRF·exact-origin CORS, public health와 별도 management listener Security 분리,
+  Actuator discovery 404와 health 상세 비노출
 - `FraudCase`·`CaseTransaction` Entity, Flyway V6와 HIGH·CRITICAL 거래의 사건·첫 연결 내부 영속 경계
 - 사건 목록·상세 조회 API, read-only Service, 동적 필터와 현재 페이지의 연관 거래
   일괄 집계 경계 및 Flyway V10 조회 인덱스
@@ -110,6 +114,8 @@ AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 
 - 운영 PostgreSQL 배포 환경, Redis와 Kafka 연동
 - External Risk DB 영속화와 LLM Provider 연동
 - production Prometheus, Grafana, Loki와 분산 추적 구성
+- endpoint별 세부 RBAC와 `@PreAuthorize`, USER Audit actor 연결, production Authorization
+  Server와 local Compose JWT fixture, Frontend OIDC
 - Kubernetes와 AWS 배포 구성
 
 ## 3. 아키텍처 목표
@@ -866,13 +872,22 @@ React는 서비스 상태, 배포 버전, 업무 영향, AI 비용과 장애·�
 - 로그, 메트릭 레이블과 감사 이력에 민감정보 원문을 기록하지 않는다.
 - 프롬프트와 LLM 입출력 원문을 무분별하게 저장하지 않는다.
 - API Key, Token, Password와 DB 접속정보를 코드나 문서에 직접 작성하지 않는다.
-- Spring Backend의 승인된 목표 인증·인가 계약은 제품 중립 OAuth2 Resource Server,
-  RS256 Bearer JWT, USER·SERVICE 분리, authority 기반 deny-by-default와 USER Audit actor를
-  사용한다. 세부 계약은 [`security-architecture.md`](security-architecture.md)와
+- Spring Backend에는 제품 중립 OAuth2 Resource Server 인증 기반이 구현되었다. Spring
+  Security dependency와 application listener filter chain, RS256 JWT·JWK와 strict claim
+  검증, USER·SERVICE principal과 role-derived authority, stateless·Bearer-only CSRF·
+  exact-origin CORS, 401·403·JWK 장애·trace 경계를 적용한다. 세부 계약은
+  [`security-architecture.md`](security-architecture.md)와
   [`ADR-008`](../07-decisions/ADR-008-oauth2-resource-server-rbac-user-audit-actor.md)을 따른다.
-- 현재 Spring Security dependency·filter chain·JWT·RBAC·USER actor·CORS는 구현되지
-  않았으며, 모든 Spring 업무 API는 security layer 관점에서 사실상 무인증이다.
-- Authorization Server 제품과 실제 issuer·JWK URI는 후속 구현 전에 결정한다.
+- `/api/health`와 profile별 승인된 health 경계는 credential 없이 접근할 수 있지만 invalid
+  Bearer가 명시되면 401이다. 그 밖의 application listener 업무 API는 valid JWT가 필요하고
+  management `8081`은 업무 Resource Server chain과 분리한다.
+- 인증된 USER·SERVICE principal은 생성된 authority를 보유하지만 endpoint별 authority
+  enforcement와 `@PreAuthorize`, 사건 write USER Audit actor와 InvestigationNote USER author
+  migration은 아직 구현하지 않았다.
+- Authorization Server 제품·구축, Local Compose JWT issuer/JWK fixture와 traffic generator
+  SERVICE token, Frontend OIDC·Authorization Code + PKCE, production management mTLS·인증
+  proxy는 후속 구현이다. 기존 JWT 없는 local traffic generator 업무 요청은 현재 401이며
+  Local 인증 E2E는 후속 Issue 전까지 미완성이다.
 - 실제 금융거래, 본인인증, 거래 차단과 고객 제재는 Mock으로 한정한다.
 
 ## 17. Observability 경계
@@ -1025,24 +1040,24 @@ Grafana는 Prometheus·Backend·Alertmanager의 시작 또는 health dependency�
 - 감사 보존·접근 통제와 실제 USER actor 연결. 401·403·validation·stale·업무 거부는
   업무 AuditLog에서 제외
 
-보안 후속 Issue는 다음 다섯 개를 순서대로 수행한다.
+OAuth2 Resource Server 기반과 401·403·trace 경계는 Issue #219에서 구현되었다.
+남은 보안 후속 Issue는 다음 네 개를 순서대로 수행한다.
 
-1. OAuth2 Resource Server 기반과 401·403·trace 경계
-2. endpoint RBAC와 USER·SERVICE principal matrix
-3. 사건 write USER actor와 InvestigationNote author 연결
-4. Local Compose·runbook JWT fixture와 인증 E2E
+1. endpoint RBAC와 USER·SERVICE authority matrix
+2. 사건 write USER actor와 InvestigationNote author 연결
+3. Local Compose·runbook JWT fixture와 인증 E2E
    - Resource Server와 RBAC 적용 후 local issuer/JWK fixture 또는 승인된 local
      Authorization Server, SERVICE token bootstrap과 traffic generator `Authorization`
      header를 연결한다.
    - private key·token을 저장하지 않고 기존 Prometheus·recording·alert·Alertmanager·
      Grafana E2E 회귀와 장시간 Compose 검증을 수행한다.
-5. Frontend OIDC·token·권한 UI
+4. Frontend OIDC·token·권한 UI
    - Resource Server·RBAC와 Authorization Server 제품 결정 후 Authorization Code + PKCE,
      access token memory 보관, API `Authorization` header와 login·logout을 구현한다.
    - expiry·401·403 UX와 role·authority 기반 UI를 브라우저 경계에서 검증한다.
 
-4와 5는 서로 다른 Issue다. Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend
-OIDC도 Compose traffic fixture의 일부가 아니다. 전체 후속 Issue는 계속 다섯 개이며 토큰
+3과 4는 서로 다른 Issue다. Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend
+OIDC도 Compose traffic fixture의 일부가 아니다. 남은 후속 Issue는 네 개이며 토큰
 절약을 위한 인위적 분할이 아니라 기술 책임·선행 관계·실패 영향·검증 시간이 다르기 때문에
 분리한다.
 

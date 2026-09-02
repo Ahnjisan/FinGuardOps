@@ -30,6 +30,14 @@ abstract class PostgresqlIntegrationTestSupport {
                 "finguardops.ai-service.base-url",
                 () -> "http://127.0.0.1:65535"
         );
+        registry.add(
+                "finguardops.security.issuer",
+                () -> "https://issuer.integration.test/finguardops"
+        );
+        registry.add(
+                "finguardops.security.jwk-set-uri",
+                () -> "https://issuer.integration.test/jwks"
+        );
     }
 
     @AfterEach

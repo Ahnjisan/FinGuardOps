@@ -32,6 +32,9 @@ Spring Boot management endpoint 또는 금융거래 API가 아니다.
 
 `env`, `beans`, `configprops`, `mappings`, `metrics`, `loggers`, `heapdump`,
 `threaddump`를 포함한 그 밖의 Actuator endpoint는 web에 노출하지 않는다.
+Actuator discovery page도 `management.endpoints.web.discovery.enabled=false`로 비활성화해
+`/actuator` 요청은 모든 listener에서 404다. health는
+`management.endpoint.health.show-details=never`로 aggregate `status`만 공개한다.
 
 ## 3. port·address 환경 변수
 
@@ -69,8 +72,9 @@ curl --fail-with-body http://127.0.0.1:8081/actuator/prometheus
 
 ## 5. 보안과 네트워크 경계
 
-이번 구현에는 Spring Security, 인증·인가, credential과 인증 프록시가 없다. 따라서
-`prometheus` profile의 기본 address는 원격 접속이 불가능한 loopback
+Issue #219에서 application listener의 OAuth2 Resource Server 인증 기반을 구현했지만
+management listener에는 업무 Resource Server chain을 적용하지 않는다. `prometheus`
+profile의 기본 address는 원격 접속이 불가능한 loopback
 `127.0.0.1`이다. loopback 기본값은 인증을 대신하지 않는다.
 
 `MANAGEMENT_SERVER_ADDRESS`를 외부 인터페이스로 변경할 때는 배포 운영자가 다음을
@@ -95,8 +99,7 @@ curl --fail-with-body http://127.0.0.1:8081/actuator/prometheus
 - 기본 profile은 기존 application listener의 `/actuator/health`를 유지하되
   `/actuator/prometheus`는 계속 `404`다.
 
-현재는 Spring Security가 없으며 아래 status는 기존 profile·listener 설정의 결과다. 목표
-Security 구현은 credential이 없는 요청에 대해 이 status matrix를 보존한다.
+Issue #219 Security 구현은 credential이 없는 요청에 대해 아래 status matrix를 보존한다.
 
 | Profile/listener | Endpoint | Credential 없음 |
 | --- | --- | ---: |
@@ -130,10 +133,10 @@ private network와 방화벽/security group을 사용한다. mTLS 또는 authent
 시 적용할 후속 운영 결정이다. 이 listener는 public endpoint가 아니며 Prometheus에 업무
 USER·SERVICE JWT를 요구하지 않는다.
 
-application listener의 목표 처리 순서는 `TraceIdFilter`, 명시된 Bearer authentication,
+application listener의 구현 처리 순서는 `TraceIdFilter`, 명시된 Bearer authentication,
 승인된 CORS preflight, profile에서 실제 노출된 exact public path, 업무 endpoint authority,
-그 외 deny-by-default다. 후속 구현은 profile에 따라 mapping되지 않은 Actuator path의 404가
-Security의 401·403으로 바뀌지 않도록 matcher 순서와 management context를 검증해야 한다.
+그 외 인증 요구다. profile에 따라 mapping되지 않은 Actuator path의 404가 Security의
+401·403으로 바뀌지 않도록 matcher 순서와 management context를 테스트로 검증한다.
 
 이 목표는 [`security-architecture.md`](../02-architecture/security-architecture.md)와
 [`ADR-008`](../07-decisions/ADR-008-oauth2-resource-server-rbac-user-audit-actor.md)을
@@ -179,7 +182,7 @@ Docker의 network 분리와 host loopback은 접근면을 제한하지만 인증
 - production recording rule·alert rule·Alertmanager·receiver·credential과 외부 알림
 - Alertmanager HA와 장기 retention
 - production Grafana, TLS·SSO·RBAC·HA·장기 retention과 추가 dashboard
-- Spring Security·인증·credential
+- endpoint별 RBAC·USER Audit actor와 production Authorization Server·credential
 - production Docker·Kubernetes·AWS 배포 설정
 - OpenTelemetry
 - 신규 Meter·tag·SLA·SLO·임계값

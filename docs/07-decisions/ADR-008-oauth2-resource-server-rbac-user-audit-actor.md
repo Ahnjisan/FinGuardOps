@@ -135,8 +135,11 @@ TraceIdFilter
 - 두 응답 모두 `fieldErrors: []`이며 상세 token·claim·Provider 오류를 노출하지 않는다.
 
 JWK upstream 가용성 실패의 안전한 503 매핑은 실제 Spring Security 6.5 계열 예외 분류를
-검증하는 후속 구현에서 확정한다. malformed·서명 오류·만료·claim 오류는 401이며 upstream
-장애와 혼합하지 않는다는 원칙만 이번 ADR에서 확정한다.
+검증한 Issue #219에서 확정했다. cached known key는 upstream 장애 중에도 검증하고,
+reachable JWKS의 unknown `kid`와 malformed·서명·claim 오류는 401이다. 원격 JWK
+cause chain이 timeout allowlist와 일치하면 `DEPENDENCY_TIMEOUT`, 연결·DNS·TLS·5xx
+allowlist와 일치하면 `DEPENDENCY_UNAVAILABLE`로 503을 반환한다. 예상 밖 decoder 오류는
+안전한 `INTERNAL_ERROR` 500이며 503·500에는 `WWW-Authenticate`를 추가하지 않는다.
 
 ## 4. 검토한 대안
 
@@ -177,12 +180,19 @@ account lifecycle과 key 운영 책임이 금융 업무 Backend에 결합되고 
 
 ## 6. 현재 구현과 목표의 구분
 
-이 ADR의 Accepted 상태는 문서 계약이 승인되었다는 뜻이다. 다음은 아직 구현되지 않았다.
+Issue #219에서 다음 기반은 구현되었다.
 
-- Spring Security·OAuth2 Resource Server dependency와 `SecurityFilterChain`
-- JWT decoder·claim validator·JWK cache 설정
-- request/method RBAC와 deny-by-default
-- 401·403 전용 handler
+- Spring Boot 관리 버전의 OAuth2 Resource Server와 application listener
+  `SecurityFilterChain`
+- RS256·`kid`·issuer·strict audience·subject·principal type·role·time validator,
+  USER·SERVICE principal과 role-derived authority
+- Spring Security/Nimbus 기본 in-memory JWK cache, rotation과 안전한 장애 분류
+- stateless·CSRF·exact-origin CORS와 401·403·503·500 전용 응답 경계
+- 기본/prometheus application·management listener 분리와 Actuator 404·health 상세 비노출
+
+다음은 아직 구현되지 않았다.
+
+- endpoint별 세부 authority enforcement와 `@PreAuthorize`
 - 사건 write USER actor와 actorId 응답
 - local issuer/JWK fixture와 SERVICE token traffic generator
 - Frontend OIDC 로그인·token·권한 UI
@@ -190,14 +200,14 @@ account lifecycle과 key 운영 책임이 금융 업무 Backend에 결합되고 
 
 ## 7. 후속 작업
 
-다음 다섯 Issue는 토큰 절약이 아니라 기술 책임·migration·검증 경계를 분리하기 위해
+OAuth2 Resource Server 기반과 401·403·trace 경계는 Issue #219에서 구현되었다.
+남은 다음 네 Issue는 토큰 절약이 아니라 기술 책임·migration·검증 경계를 분리하기 위해
 순서대로 수행한다.
 
-1. `[Backend/Security] OAuth2 Resource Server 기반과 401/403·trace 경계 구현`
-2. `[Backend/Security] Endpoint RBAC와 USER·SERVICE principal matrix 적용`
-3. `[Backend/Audit] 사건 write USER actor와 InvestigationNote author 연결`
-4. `[Infra/Docs] Local Compose·runbook JWT fixture와 인증 E2E 적용`
-5. `[Frontend] OIDC 로그인·token·권한 UI 구현`
+1. `[Backend/Security] Endpoint RBAC와 USER·SERVICE authority matrix 적용`
+2. `[Backend/Audit] 사건 write USER actor와 InvestigationNote author 연결`
+3. `[Infra/Docs] Local Compose·runbook JWT fixture와 인증 E2E 적용`
+4. `[Frontend] OIDC 로그인·token·권한 UI 구현`
 
 Spring Security 개념과 JWT 검증 동작은 공식 문서를 참고하되 실제 dependency와 제품은 각
 구현 Issue에서 검증한다.

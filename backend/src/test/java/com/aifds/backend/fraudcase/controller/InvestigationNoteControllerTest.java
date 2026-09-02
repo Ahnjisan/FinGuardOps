@@ -29,7 +29,13 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 @WebMvcTest(InvestigationNoteController.class)
-@Import({GlobalExceptionHandler.class, TraceIdFilter.class, InvestigationNoteValidator.class})
+@org.springframework.security.test.context.support.WithMockUser
+@Import({
+        com.aifds.backend.security.config.FinGuardOpsSecurityConfiguration.class,
+        GlobalExceptionHandler.class,
+        TraceIdFilter.class,
+        InvestigationNoteValidator.class
+})
 class InvestigationNoteControllerTest {
 
     private static final String CASE_ID = "10000000-0000-4000-8000-000000000001";
