@@ -43,6 +43,9 @@
   closure 필드, 실제 version·성공 감사 1건의 원자적 경계 및 Flyway V12
 - append-only `AuditLog` Entity, Flyway V7, INSERT 전용 Persistence 경계와
   PostgreSQL UPDATE·DELETE 차단 trigger
+- `GET /api/v1/cases/{caseId}/audit-logs`, 사건 선확인, 기존 V7 target index 기반
+  read-only Page/count query와 action별 typed projection. 내부 식별자·저장 JSONB·과거
+  trace는 비노출하며 V14 migration은 추가하지 않음
 - Issue 및 Pull Request 템플릿
 - FastAPI AI Service의 Python 3.12·uv 프로젝트, 애플리케이션 진입점과 Health API
 - Backend와 AI Service 전용 GitHub Actions 테스트 Workflow
@@ -71,7 +74,7 @@ External Risk 연계에는 무잠금 `READ_COMMITTED` read 종료 뒤 Mock 또�
 실제 HTTP Adapter와 production Provider·Policy·coordinator Bean은 구현되었다. 직접
 재호출·멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수 있다. 다만
 public intake와 External Risk coordinator·Rule v2·위험 대응 최종화·멱등 실패
-저장·재생의 end-to-end 연결, Snapshot v2와 완료 간극 복구, 감사 조회와 AI 운영
+저장·재생의 end-to-end 연결, Snapshot v2와 완료 간극 복구 및 AI 운영
 도메인은 아직 구현되지 않았다. public `POST /api/v1/transactions` 자체는 구현되어
 현재 `RECEIVED`·성공 Snapshot v1을 반환한다. 위험 대응
 정책의 `FinancialTransaction` 적용, 필요한 사건·연결, 최종 거래 상태·대응 결과와
@@ -981,6 +984,10 @@ Grafana는 Prometheus·Backend·Alertmanager의 시작 또는 health dependency�
   사용한다. 생성은 부모 optimistic version flush 뒤 note와 exact metadata AuditLog를
   같은 REQUIRED 트랜잭션에서 flush하며 DB trigger로 UPDATE·DELETE를 거부한다.
 - 메모 경계는 외부 서비스·AI를 호출하거나 신규 관측 지표를 만들지 않는다.
+- `GET /api/v1/cases/{caseId}/audit-logs`는 사건 존재를 먼저 확인하고
+  `targetType=FRAUD_CASE,targetId=caseId`만 조회한다. `changedAt,id` 동일 방향 정렬,
+  별도 content/count query와 strict action projection을 사용해 N+1·Entity 직렬화·
+  detection metadata 및 내부 문맥 노출을 방지한다.
 - Backend와 AI Service 전용 GitHub Actions 테스트 Workflow
 - 로컬 Prometheus→Alertmanager 연결, grouping·routing·signal별 warning inhibition과
   bounded webhook firing·resolved·restart·장애 검증 경계
@@ -1007,7 +1014,7 @@ Grafana는 Prometheus·Backend·Alertmanager의 시작 또는 health dependency�
 - 비트랜잭션 상위 거래 Service의 External Risk→Rule 분석→최종화 연결
 - RuleVersion publish·운영 준비
 - 최종 Snapshot v2 확정과 완료 간극 운영 복구
-- 감사 조회 API와 아직 미구현인 조사 메모의 AuditLog 통합
+- 감사 거부 이력·보존·접근 통제와 실제 USER actor 연결
 - External Risk public intake 연결과 실패 Snapshot 저장 호출. 성공 Snapshot DB 영속화는 별도 승인 시 검토
 - production container 배포 환경과 Compose 고도화
 

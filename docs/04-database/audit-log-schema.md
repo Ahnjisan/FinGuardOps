@@ -2,13 +2,14 @@
 
 ## 1. 범위
 
-이 문서는 Issue #156의 append-only `AuditLog`, Issue #209의 사건 workflow 감사와 Issue #211의 resolution 감사
-확장을 정의한다. Flyway V7은 테이블·Index·UPDATE/DELETE 차단 trigger를 추가하고,
+이 문서는 Issue #156의 append-only `AuditLog`, Issue #209의 사건 workflow 감사,
+Issue #211의 resolution 감사, Issue #213의 조사 메모 감사와 Issue #215의 사건별
+조회 경계를 정의한다. Flyway V7은 테이블·Index·UPDATE/DELETE 차단 trigger를 추가하고,
 V11은 V1~V10을 수정하지 않고 workflow check를 확장하며 V12는 V1~V11을 수정하지 않고 resolution action·reason·snapshot check만 additive 확장한다.
 
-구현 범위는 typed 감사 INSERT, 내부 위험 대응 최종화 및 성공한 사건 조사
-상태·담당자·종료 명령의 실제 통합까지다. 공개 조회 API, 실제 인증 사용자 연결과 실패·
-거부 요청 별도 감사는 포함하지 않는다.
+구현 범위는 typed 감사 INSERT, 내부 위험 대응 최종화, 성공한 사건 조사
+상태·담당자·종료·메모 명령 통합과 사건별 공개 조회 projection까지다. 실제 인증
+사용자 연결과 실패·거부 요청 별도 감사는 포함하지 않는다.
 
 관련 논리·API 계약은 다음 문서를 함께 따른다.
 
@@ -65,6 +66,7 @@ UTC `Clock`을 한 번 호출하고 마이크로초로 정규화한다.
 | `CASE_STATUS_CHANGED` | `CASE_REVIEW_STARTED`, `CASE_ADDITIONAL_INFORMATION_REQUESTED`, `CASE_REVIEW_RESUMED` | `FRAUD_CASE` | `targetId=caseId`, `caseId`, `transactionId=null` |
 | `CASE_ASSIGNEE_CHANGED` | `CASE_ASSIGNEE_ASSIGNED`, `CASE_ASSIGNEE_CHANGED`, `CASE_ASSIGNEE_RELEASED` | `FRAUD_CASE` | `targetId=caseId`, `caseId`, `transactionId=null` |
 | `CASE_RESOLVED` | `CASE_RESOLUTION_COMPLETED` | `FRAUD_CASE` | `targetId=caseId`, `caseId`, `transactionId=null` |
+| `CASE_NOTE_CREATED` | `CASE_INVESTIGATION_NOTE_ADDED` | `FRAUD_CASE` | `targetId=caseId`, `caseId`, `transactionId=null` |
 
 `transaction_id`는 `financial_transaction(transaction_id)`, `case_id`는
 `fraud_case(case_id)`를 `ON DELETE RESTRICT`로 참조한다. 다형적인
@@ -94,6 +96,7 @@ copy한다. 저장 경계와 Draft·Entity accessor의 defensive copy 계약은 
 | `CASE_STATUS_CHANGED` | `caseStatus`, optional canonical UUID v4 `assigneeRef` | 동일 제한 필드 | 없음 (`{}`) |
 | `CASE_ASSIGNEE_CHANGED` | `caseStatus`, optional canonical UUID v4 `assigneeRef` | 동일 제한 필드 | 없음 (`{}`) |
 | `CASE_RESOLVED` | `caseStatus=IN_REVIEW`, canonical UUID v4 `assigneeRef` | `caseStatus=CLOSED`, 승인 `finalDisposition`, 동일 `assigneeRef` | 없음 (`{}`) |
+| `CASE_NOTE_CREATED` | null | null | exact canonical lowercase UUID v4 `noteId` |
 
 UUID는 canonical lowercase UUID v4, version은 양의 32-bit 정수, Enum은 현재 Java
 계약에 존재하는 값만 허용한다. 자유 텍스트 reason과 임의 metadata를 저장하지
@@ -173,6 +176,13 @@ deduplication key와 action 단독 Index는 추가하지 않는다. 후속 호�
 변경이 발생했을 때만 append해야 하며, 현재 업무 멱등성·상태·version·도메인
 제약을 사용한다.
 
+Issue #215 조회는 기존
+`ix_audit_log_target_changed(target_type, target_id, changed_at DESC, id DESC)`를
+그대로 사용한다. 사건 존재를 먼저 확인한 뒤 `target_type='FRAUD_CASE'`와
+`target_id=:caseId`로 content와 count를 별도 조회한다. content는 요청 방향에 따라
+`changed_at,id`를 모두 ASC 또는 모두 DESC로 정렬한다. 신규 migration이나 V14 index는
+추가하지 않는다.
+
 ## 9. 사건 조사 메모 감사
 
 V13은 `CASE_NOTE_CREATED/CASE_INVESTIGATION_NOTE_ADDED`를 additive 확장한다.
@@ -191,7 +201,6 @@ PostgreSQL CHECK는 key 존재, exact key set, JSON string type과 UUID 형식�
 ## 10. 미구현 경계
 
 - 거부 감사와 별도 commit 경계
-- 공개 AuditLog 조회 API
 - 인증·인가 기반 USER actor
 - 실패·거부·stale 사건 요청 별도 감사
 - deduplication key

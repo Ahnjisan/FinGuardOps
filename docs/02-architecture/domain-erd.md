@@ -18,17 +18,19 @@
 - 후속 JPA, API와 마이그레이션 설계에서 무엇을 결정해야 하는가
 
 이 문서는 전체 구현 완료 내역이 아니다. 현재 백엔드는 Health Check, 거래
-접수·조회, 거래 멱등성, 행동 이벤트 접수와 내부 Rule 평가용 제한 조회를
-구현했다. 거래·멱등·행동 이벤트, `DetectionResult`·`DetectionEvidence`와
-분리된 `FraudRule`·`RuleVersion`, `FraudCase`·`CaseTransaction`, append-only
-`AuditLog`는 PostgreSQL 애플리케이션 연동과 Flyway 스키마가 구현되어 있다.
+접수·조회, 거래 멱등성, 행동 이벤트 접수와 내부 Rule 평가용 제한 조회뿐 아니라
+사건 목록·상세 조회, 상태·담당자 workflow, 사건 종결, 조사 메모 생성·조회와
+사건 감사 이력 조회 API를 구현했다. 거래·멱등·행동 이벤트,
+`DetectionResult`·`DetectionEvidence`와 분리된 `FraudRule`·`RuleVersion`,
+`FraudCase`·`CaseTransaction`, append-only `AuditLog`는 PostgreSQL 애플리케이션
+연동과 Flyway 스키마가 구현되어 있다.
 FastAPI `POST /api/v1/rule-analysis`, R001~R004 실행·점수·RiskLevel·Evidence
 계산과 Spring Boot Rule 분석 HTTP Client·v1·v2 내부 오케스트레이션, 기본 Rule 집합
 발행 경계와 위험 대응·사건·AuditLog 원자적 최종화 경계도 구현되어 있다.
-실제 External Risk Provider·영속화·거래 접수 전체 연결,
-Snapshot v2와 운영 복구, 감사·최종화 API, USER 인증·인가,
-사건 추가 거래 연결·병합·분리, AI 운영 엔티티와 운영 PostgreSQL
-배포 환경은 아직 구현되지 않았다.
+실제 External Risk Provider·영속화·거래 접수 전체 연결, Snapshot v2와 운영
+복구, 인증·인가·RBAC와 실제 USER actor 연결, 사건 추가 거래 연결·병합·분리,
+감사 단건 상세·검색 filter·cursor pagination·CSV·파일 export·archive·보존 정책,
+Frontend, AI 운영 엔티티와 운영 PostgreSQL 배포 환경은 아직 구현되지 않았다.
 
 ## 2. 설계 범위와 제외 범위
 
@@ -631,7 +633,8 @@ Issue #213 구현 계약은 다음과 같다.
 전용 Persistence 경계를 구현했고 V11에서 사건 상태·담당자 action/reason 및
 제한 snapshot을 확장했다. V12는 `CASE_RESOLVED/CASE_RESOLUTION_COMPLETED`, V13은
 `CASE_NOTE_CREATED/CASE_INVESTIGATION_NOTE_ADDED`와 exact `noteId` metadata만
-additive 확장한다. 거부 감사와 조회 API는 아직 구현하지 않았다. 물리 계약은
+additive 확장한다. Issue #215는 사건별 read-only 조회와 action별 typed projection을
+구현했다. 거부 감사·보존·접근 통제는 아직 구현하지 않았다. 물리 계약은
 [`../04-database/audit-log-schema.md`](../04-database/audit-log-schema.md)를
 따른다.
 
@@ -1617,17 +1620,18 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 
 ### 17.6 감사 로그
 
-주요 조건은 다음과 같다.
+Issue #215의 사건 감사 조회는 다음 조건으로 구현한다.
 
-- 변경 시각
-- 변경 주체
-- 대상 유형과 대상 식별자
-- `transactionId`
-- `caseId`
-- 변경 작업
-- `traceId`
+- 사건 존재를 외부 `caseId`로 먼저 확인
+- `targetType=FRAUD_CASE AND targetId=:caseId`
+- `changedAt,id`를 요청 방향과 동일하게 정렬
+- content와 count를 별도 실행하고 기존
+  `ix_audit_log_target_changed(target_type, target_id, changed_at DESC, id DESC)` 사용
+- Entity relationship·`FraudCase` collection·전체 연관 데이터 로딩 없이 Page 조회
+- action/reason/context/JSON을 strict 재검증한 typed projection만 공개
 
-검색 식별자와 시각 범위를 함께 사용하는 조회를 기준으로 검증한다.
+내부 PK·업무 `auditId`·actorId·target/context 식별자·저장 traceId·JSONB 원문은
+정렬과 검증 경계 밖으로 공개하지 않는다. 신규 index와 V14 migration은 추가하지 않는다.
 
 ## 18. 삭제·보존 정책 후보
 
@@ -1746,8 +1750,8 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 확정한다. 거래 접수의 `FinancialTransaction`, 행동 이벤트의
 `BehaviorEvent`, 탐지 영속 모델의 `DetectionResult`·`DetectionEvidence`,
 Rule 물리 모델의 `FraudRule`·`RuleVersion`과 사건 영속 기반의
-`FraudCase`·`CaseTransaction`은 구현되었다. 공개 사건 조사·감사와 AI 운영
-클래스는 후속 구현 범위이다.
+`FraudCase`·`CaseTransaction`, 사건 workflow·resolution·note와 사건별 감사 조회는
+구현되었다. 연관 거래 공개 조회, 거부 감사와 AI 운영 클래스는 후속 구현 범위이다.
 
 ### 20.3 마이그레이션·DB 제약 설계
 
