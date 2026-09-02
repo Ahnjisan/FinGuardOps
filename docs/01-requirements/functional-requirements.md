@@ -62,7 +62,14 @@
   같은·다른 판정 재요청은 모두 거부해야 한다.
 - 종료는 Transaction·RiskLevel·RiskResponseOutcome·CaseTransaction과 AI 처리를
   변경하지 않아야 한다.
-- 인증·인가, RBAC, 실제 USER actor, 조사 메모와 거부 요청 별도 감사는 미구현이다.
+- 인증·인가, RBAC, 실제 USER actor와 거부 요청 별도 감사는 미구현이다.
+- 조사 메모는 `IN_REVIEW`, `ADDITIONAL_INFORMATION_REQUIRED` 사건에만 append-only로
+  생성하며 서버가 `SYSTEM/finguardops-backend` 작성자를 설정한다.
+- 조사 메모 원문은 Unicode code point 1..4,000의 plain text로만 보존하고
+  AuditLog·로그·오류에 원문·길이·hash·preview를 기록하지 않는다.
+- 조사 메모 생성은 필수 `expectedVersion`으로 부모 사건 version을 정확히 1 증가시키고
+  메모·`CASE_NOTE_CREATED` 감사와 함께 원자적으로 commit하거나 모두 rollback한다.
+- 메모 API는 `Idempotency-Key` replay, 정정 참조, 개별 조회·수정·삭제를 제공하지 않는다.
 - 구체적인 API와 오류 계약은
   [`../03-api/case-audit-api.md`](../03-api/case-audit-api.md), 상태 matrix는
   [`case-state-transition.md`](./case-state-transition.md)를 따른다.

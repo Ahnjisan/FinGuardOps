@@ -66,6 +66,12 @@ public final class AuditMetadataPolicy {
                     afterValueSummary,
                     metadata
             );
+            case CASE_NOTE_CREATED -> validateCaseNoteCreated(
+                    draft.reasonCode(),
+                    beforeValueSummary,
+                    afterValueSummary,
+                    metadata
+            );
             case TRANSACTION_RISK_RESPONSE_APPLIED ->
                     validateRiskResponseApplied(
                             beforeValueSummary,
@@ -79,6 +85,21 @@ public final class AuditMetadataPolicy {
                             metadata
                     );
         }
+    }
+
+    private void validateCaseNoteCreated(
+            AuditReasonCode reasonCode,
+            JsonNode before,
+            JsonNode after,
+            JsonNode metadata
+    ) {
+        if (reasonCode != AuditReasonCode.CASE_INVESTIGATION_NOTE_ADDED) {
+            throw new IllegalArgumentException("CASE_NOTE_CREATED reasonCode is invalid");
+        }
+        requireNull(before, "beforeValueSummary");
+        requireNull(after, "afterValueSummary");
+        requireExactFields(metadata, "metadata", Set.of("noteId"));
+        requireUuidV4(metadata, "noteId");
     }
 
     private void validateCaseCreated(

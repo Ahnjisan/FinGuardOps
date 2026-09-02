@@ -173,12 +173,26 @@ deduplication key와 action 단독 Index는 추가하지 않는다. 후속 호�
 변경이 발생했을 때만 append해야 하며, 현재 업무 멱등성·상태·version·도메인
 제약을 사용한다.
 
-## 9. 미구현 경계
+## 9. 사건 조사 메모 감사
+
+V13은 `CASE_NOTE_CREATED/CASE_INVESTIGATION_NOTE_ADDED`를 additive 확장한다.
+`targetType=FRAUD_CASE`, `targetId=caseId`, `transactionId=null`,
+`actorType=SYSTEM`, `actorId=finguardops-backend`, before/after summary는 SQL NULL이다.
+metadata는 exact `{ "noteId": "<canonical lowercase UUID v4>" }` 한 키만 허용한다.
+PostgreSQL CHECK는 key 존재, exact key set, JSON string type과 UUID 형식을 독립적으로
+검증해 JSON null의 CHECK UNKNOWN 통과를 막는다.
+
+메모 content, 길이, hash, preview, 고객·계좌·거래·credential 원문과 내부 note PK는
+감사에 저장하지 않는다. 성공 생성만 정확히 1건이며 validation·미존재·상태·동시성
+충돌은 0건이다. note 또는 감사 실패 시 부모 사건 version과 시각까지 rollback한다.
+관련 API는
+[`../03-api/case-audit-api.md#11-조사-메모-생성`](../03-api/case-audit-api.md#11-조사-메모-생성)을 따른다.
+
+## 10. 미구현 경계
 
 - 거부 감사와 별도 commit 경계
 - 공개 AuditLog 조회 API
 - 인증·인가 기반 USER actor
-- 사건 메모 감사
 - 실패·거부·stale 사건 요청 별도 감사
 - deduplication key
 - runtime DB role 분리

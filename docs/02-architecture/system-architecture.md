@@ -975,7 +975,12 @@ Grafana는 Prometheus·Backend·Alertmanager의 시작 또는 health dependency�
   `Idempotency-Key`, `If-Match`, 자유 텍스트 reason, row lock·retry는 사용하지 않음
 - resolution 성공은 `SYSTEM/finguardops-backend` 감사 1건만 추가하며 Transaction,
   RiskLevel, RiskResponseOutcome, CaseTransaction과 AI 처리를 변경하지 않음. RBAC,
-  실제 USER actor와 조사 메모는 미구현
+  실제 USER actor는 미구현
+- `POST/GET /api/v1/cases/{caseId}/notes`와 Flyway V13. `InvestigationNote`는 부모
+  컬렉션 없이 내부 사건 PK를 참조하고 `(fraud_case_id, created_at, id)` Page query를
+  사용한다. 생성은 부모 optimistic version flush 뒤 note와 exact metadata AuditLog를
+  같은 REQUIRED 트랜잭션에서 flush하며 DB trigger로 UPDATE·DELETE를 거부한다.
+- 메모 경계는 외부 서비스·AI를 호출하거나 신규 관측 지표를 만들지 않는다.
 - Backend와 AI Service 전용 GitHub Actions 테스트 Workflow
 - 로컬 Prometheus→Alertmanager 연결, grouping·routing·signal별 warning inhibition과
   bounded webhook firing·resolved·restart·장애 검증 경계

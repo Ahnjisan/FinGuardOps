@@ -276,12 +276,15 @@ CLOSED → IN_REVIEW
 - 먼저 저장된 상태·판정·메모를 나중 요청이 조용히 덮어쓰지 않아야 한다.
 - 충돌이 발생하면 사용자에게 사건이 변경되었음을 알리고 최신 값을 다시 확인할 수 있어야 한다.
 - 상태와 최종 판정을 함께 변경하는 요청은 일부만 반영되지 않도록 업무 정합성을 유지해야 한다.
-- 조사 메모와 상태 변경의 동시 저장 범위는 후속 설계에서 확정한다.
-- 충돌 후 자동 재시도, 사용자 병합 또는 재입력 중 어떤 정책을 사용할지는 `TBD`이다.
+- 조사 메모도 상태·담당자·판정과 같은 `FraudCase.concurrencyVersion` 경계를 사용한다.
+  동일 expected version의 note 대 note/resolution/status/assignee 경쟁은 정확히 하나만
+  성공하고 다른 하나는 `CONCURRENT_MODIFICATION`이며 row lock·자동 retry를 사용하지 않는다.
 - 사건 생성·첫 연결은 거래 → 사건 → 연결 순서의 비관적 잠금을 사용한다. 조사
   상태·담당자 변경은 body `expectedVersion`과 JPA `@Version` 낙관적 잠금을
   사용하고 row lock과 자동 retry는 추가하지 않는다.
 - 사건 resolution도 같은 `expectedVersion`·JPA `@Version` 경계를 사용한다.
+- 메모는 `IN_REVIEW`, `ADDITIONAL_INFORMATION_REQUIRED`에서만 허용한다. `OPEN`,
+  `CLOSED`는 `NOTE_NOT_ALLOWED`이고 stale version 판정이 상태 판정보다 우선한다.
 - 사건 조회와 version 비교 후 업무 규칙을 검증한다. 명시적 flush에서 version
   증가를 확정하고 같은 REQUIRED 트랜잭션에서 AuditLog를 append·flush한다.
 - 동일 version 동시 요청은 정확히 하나만 성공하며 충돌 또는 감사 실패는 사건과

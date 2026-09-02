@@ -14,6 +14,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.EnumSource.Mode;
 
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
@@ -95,6 +96,7 @@ class AuditMetadataPolicyTest {
                 resolutionSnapshot("CONFIRMED_FRAUD", ASSIGNEE_REF),
                 emptyObject()
         ));
+        policy.validate(noteDraft(object("noteId", UUID.randomUUID().toString())));
         policy.validate(draft(
                 AuditAction.TRANSACTION_RISK_RESPONSE_APPLIED,
                 AuditReasonCode.RISK_RESPONSE_DECIDED_BY_POLICY,
@@ -117,6 +119,29 @@ class AuditMetadataPolicyTest {
                 object("processingStatus", "HELD"),
                 transactionMetadata()
         ));
+    }
+
+    @Test
+    void enforcesExactCaseNoteMetadataContract() {
+        ObjectNode extra = object("noteId", UUID.randomUUID().toString());
+        extra.put("content", "forbidden");
+
+        assertThatIllegalArgumentException().isThrownBy(() ->
+                policy.validate(noteDraft(emptyObject())));
+        assertThatIllegalArgumentException().isThrownBy(() ->
+                policy.validate(noteDraft(JsonNodeFactory.instance.nullNode())));
+        ObjectNode wrongType = emptyObject();
+        wrongType.put("noteId", 1);
+        assertThatIllegalArgumentException().isThrownBy(() ->
+                policy.validate(noteDraft(wrongType)));
+        assertThatIllegalArgumentException().isThrownBy(() ->
+                policy.validate(noteDraft(extra)));
+        assertThatIllegalArgumentException().isThrownBy(() ->
+                policy.validate(noteDraft(object("noteId", "not-a-uuid"))));
+        assertThatIllegalArgumentException().isThrownBy(() ->
+                policy.validate(noteDraft(object(
+                        "noteId", "10000000-0000-1000-8000-000000000001"
+                ))));
     }
 
     @Test
@@ -351,7 +376,7 @@ class AuditMetadataPolicyTest {
     }
 
     @ParameterizedTest
-    @EnumSource(AuditAction.class)
+    @EnumSource(value = AuditAction.class, names = "CASE_NOTE_CREATED", mode = Mode.EXCLUDE)
     void rejectsUnexpectedKeyForEveryAction(AuditAction action) {
         AuditLogDraft valid = validDraft(action);
         ObjectNode after = (ObjectNode) valid.afterValueSummary();
@@ -364,7 +389,7 @@ class AuditMetadataPolicyTest {
     }
 
     @ParameterizedTest
-    @EnumSource(AuditAction.class)
+    @EnumSource(value = AuditAction.class, names = "CASE_NOTE_CREATED", mode = Mode.EXCLUDE)
     void rejectsInvalidValueForEveryAction(AuditAction action) {
         AuditLogDraft valid = validDraft(action);
 
@@ -379,7 +404,7 @@ class AuditMetadataPolicyTest {
     }
 
     @ParameterizedTest
-    @EnumSource(AuditAction.class)
+    @EnumSource(value = AuditAction.class, names = "CASE_NOTE_CREATED", mode = Mode.EXCLUDE)
     void rejectsNullNestedAndArrayValuesForEveryAction(AuditAction action) {
         AuditLogDraft valid = validDraft(action);
         ObjectNode nullValue = validAfter(action);
@@ -534,6 +559,9 @@ class AuditMetadataPolicyTest {
                     resolutionSnapshot("CONFIRMED_FRAUD", ASSIGNEE_REF),
                     emptyObject()
             );
+            case CASE_NOTE_CREATED -> noteDraft(
+                    object("noteId", UUID.randomUUID().toString())
+            );
             case TRANSACTION_RISK_RESPONSE_APPLIED -> draft(
                     action,
                     AuditReasonCode.RISK_RESPONSE_DECIDED_BY_POLICY,
@@ -597,6 +625,7 @@ class AuditMetadataPolicyTest {
                     "CONFIRMED_FRAUD",
                     ASSIGNEE_REF
             );
+            case CASE_NOTE_CREATED -> object("unused", "unused");
             case TRANSACTION_RISK_RESPONSE_APPLIED ->
                     object("riskResponseOutcome", "HELD");
             case TRANSACTION_STATUS_CHANGED ->
@@ -617,11 +646,27 @@ class AuditMetadataPolicyTest {
                     "UNKNOWN",
                     ASSIGNEE_REF
             );
+            case CASE_NOTE_CREATED -> object("unused", "invalid");
             case TRANSACTION_RISK_RESPONSE_APPLIED ->
                     object("riskResponseOutcome", "UNKNOWN");
             case TRANSACTION_STATUS_CHANGED ->
                     object("processingStatus", "UNKNOWN");
         };
+    }
+
+    private AuditLogDraft noteDraft(JsonNode metadata) {
+        UUID caseId = UUID.randomUUID();
+        return draft(
+                AuditAction.CASE_NOTE_CREATED,
+                AuditReasonCode.CASE_INVESTIGATION_NOTE_ADDED,
+                AuditTargetType.FRAUD_CASE,
+                caseId,
+                null,
+                caseId,
+                null,
+                null,
+                metadata
+        );
     }
 
     private AuditLogDraft structuralDraft(

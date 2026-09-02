@@ -14,6 +14,7 @@ import com.aifds.backend.externalrisk.port.ExternalRiskLookupPort;
 import com.aifds.backend.externalrisk.service.ExternalRiskRuleAnalysisCoordinator;
 import com.aifds.backend.fraudcase.entity.CaseTransaction;
 import com.aifds.backend.fraudcase.entity.FraudCase;
+import com.aifds.backend.fraudcase.entity.InvestigationNote;
 import com.aifds.backend.fraudcase.repository.CaseTransactionRepository;
 import com.aifds.backend.fraudcase.repository.FraudCaseRepository;
 import com.aifds.backend.fraudcase.service.FraudCasePersistenceService;
@@ -218,6 +219,7 @@ class IdempotencyRecoveryCommandIntegrationTest
                 DetectionResult.class,
                 CaseTransaction.class,
                 FraudCase.class,
+                InvestigationNote.class,
                 IdempotencyRecord.class,
                 IdempotencyRecoveryAuditLog.class,
                 FraudRule.class,
@@ -402,7 +404,7 @@ class IdempotencyRecoveryCommandIntegrationTest
     }
 
     @Test
-    void concurrentCommandsHaveOneWinnerAndMigrationsRemainV1ThroughV12()
+    void concurrentCommandsHaveOneWinnerAndMigrationsRemainV1ThroughV13()
             throws Exception {
         RecoveryFixture fixture = finalizedFixture(
                 RiskLevel.LOW,
@@ -437,7 +439,7 @@ class IdempotencyRecoveryCommandIntegrationTest
                 String.class
         )).containsExactly(
                 "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
-                "11", "12"
+                "11", "12", "13"
         );
     }
 

@@ -38,7 +38,7 @@ Snapshot v2와 운영 복구, 감사·최종화 API, USER 인증·인가,
 
 - 거래·행동: `Transaction`, `BehaviorEvent`
 - 탐지: `DetectionResult`, `DetectionEvidence`, `FraudRule`, `RuleVersion`
-- 사건: `FraudCase`, `CaseTransaction`, `CaseNote`, `AuditLog`
+- 사건: `FraudCase`, `CaseTransaction`, `InvestigationNote`, `AuditLog`
 - AI 운영: `AiReportRequest`, `AiReportExecution`, `ProviderCallAttempt`, `AiReport`
 
 `ExternalRiskSnapshot`은 ERD의 영속 Entity가 아니다. External Risk 성공 결과를
@@ -211,7 +211,7 @@ PostgreSQL에 저장하는 거래·탐지·사건·감사·AI 사용량은 업�
 | `FraudRule` 또는 `RuleVersion` | 실행 가능한 Rule의 정의·가중치·버전·활성 상태 보존 | 핵심 |
 | `FraudCase` | 연관 거래 조사의 현재 상태와 최종 판정 관리 | 핵심 |
 | `CaseTransaction` | 사건과 거래의 다대다 관계 및 연결 문맥 관리 | 핵심 |
-| `CaseNote` | 담당자의 조사 메모와 작성 정보 보존 | 핵심 |
+| `InvestigationNote` | 시스템 작성 조사 메모 원문과 작성 정보 보존 | 핵심 |
 | `AuditLog` | 주요 변경의 주체·시각·이전값·변경값·사유 보존 | 핵심 |
 | `AiReportRequest` | 외부 생성 요청, 멱등성, 요청자, 요청 시각과 실행·재사용 결과 연결 | 핵심 후보 |
 | `AiReportExecution` | 정확 일치 조건에 대한 실제 논리 실행과 최종 실행 상태 관리 | 핵심 후보 |
@@ -601,35 +601,37 @@ Issue #154는 방안 A를 채택했다. `FinancialTransaction`을 먼저
 잠금을 수행한다. V6에는 cross-table trigger, 중복 활성 상태 또는 별도 활성
 관계를 추가하지 않았다.
 
-### 7.9 CaseNote
+### 7.9 InvestigationNote
 
-`CaseNote`는 담당자가 사건 조사 과정에서 작성한 메모를 보존한다.
+`InvestigationNote`는 사건 조사 과정의 plain text 원문을 append-only로 보존한다.
 
 속성 후보는 다음과 같다.
 
 - `noteId`
 - `caseId`
+- `authorType=SYSTEM`
 - `authorRef`
 - `content`
 - `createdAt`
-- `correctionOfNoteId` 후보
 
-초기 구현은 append-only를 기본으로 하는 방향을 권장한다.
+Issue #213 구현 계약은 다음과 같다.
 
 - 기존 메모를 직접 수정하거나 물리 삭제하지 않는다.
-- 정정이 필요하면 `correctionOfNoteId`로 원 메모를 참조하는 새로운 정정 메모를 추가한다.
-- 수정 시각, 수정됨 상태와 삭제됨 상태는 향후 수정·논리 삭제 정책이 승인될 경우에만 추가하는 후보이며 초기 append-only 범위에는 포함하지 않는다.
-- 향후 수정 또는 논리 삭제 기능이 실제로 필요해지면 별도의 메모 이력 모델을 검토한다.
+- `FraudCase`에는 note collection을 추가하지 않고 note가 내부 `fraud_case_id` FK를 소유한다.
+- 작성자는 서버가 `SYSTEM/finguardops-backend`로 고정한다. 실제 USER/RBAC는 별도 migration Issue다.
+- `correctionOfNoteId`, 개별 상세·수정·삭제 endpoint와 `Idempotency-Key` replay는 구현하지 않는다.
+- `IN_REVIEW`, `ADDITIONAL_INFORMATION_REQUIRED`에서만 생성하고 부모 optimistic version과 같은 경쟁 경계를 사용한다.
 
-메모에는 불필요한 고객·계좌 원문이나 인증정보를 기록하지 않는다. append-only를 최종 정책으로 확정할지, 향후 정정 관계와 논리 삭제를 어떻게 표현할지는 감사 가능성을 고려해 사용자가 승인한다.
+메모에는 불필요한 고객·계좌 원문이나 인증정보를 기록하지 않는다. 원문·길이·hash·preview는 AuditLog·오류·로그에 복제하지 않는다.
 
 ### 7.10 AuditLog
 
 `AuditLog`는 업무 원본의 현재값을 대신하지 않고 주요 변경을 감사 가능하게
 남기는 append-only 기록이다. Issue #156과 Flyway V7에서 물리 모델과 INSERT
 전용 Persistence 경계를 구현했고 V11에서 사건 상태·담당자 action/reason 및
-제한 snapshot을 확장했다. V12는 `CASE_RESOLVED/CASE_RESOLUTION_COMPLETED`와 exact
-before/after snapshot만 additive 확장한다. 거부 감사와 조회 API는 아직 구현하지 않았다. 물리 계약은
+제한 snapshot을 확장했다. V12는 `CASE_RESOLVED/CASE_RESOLUTION_COMPLETED`, V13은
+`CASE_NOTE_CREATED/CASE_INVESTIGATION_NOTE_ADDED`와 exact `noteId` metadata만
+additive 확장한다. 거부 감사와 조회 API는 아직 구현하지 않았다. 물리 계약은
 [`../04-database/audit-log-schema.md`](../04-database/audit-log-schema.md)를
 따른다.
 
@@ -892,7 +894,7 @@ API에서 캐시 요청의 토큰 합계를 0으로 보여줄 수는 있지만 �
 | FraudRule/RuleVersion–DetectionEvidence | Rule 버전 1 : Evidence 0..N, Evidence 참조는 0..1 | RULE 유형 근거만 특정 Rule 버전을 참조 |
 | FraudCase–CaseTransaction | 1 : 1..N 후보 | 사건은 하나 이상의 거래를 조사하는 것을 기본으로 함 |
 | Transaction–CaseTransaction | 1 : 0..N | 한 거래가 사건에 연결되지 않거나 정책상 여러 사건에 연결될 수 있음 |
-| FraudCase–CaseNote | 1 : 0..N | 사건 조사 중 여러 메모 작성 가능 |
+| FraudCase–InvestigationNote | 1 : 0..N | 사건 조사 중 여러 append-only 메모 작성 가능 |
 | FraudCase–AiReportRequest | 1 : 0..N | 사건에 여러 외부 생성 요청 이력이 존재할 수 있음 |
 | FraudCase–AiReportExecution | 1 : 0..N | 사건에 버전 조건이 다른 여러 실행 이력이 존재할 수 있음 |
 | FraudCase–AiReport | 1 : 0..N | 사건의 모든 과거 정상·fallback 결과를 보존 |
@@ -985,11 +987,14 @@ erDiagram
         datetime linked_at
     }
 
-    CASE_NOTE {
-        string noteId PK
-        string caseRef FK
-        string authorRef
-        datetime createdAt
+    INVESTIGATION_NOTE {
+        bigint id PK
+        uuid note_id UK
+        bigint fraud_case_id FK
+        string author_type
+        string author_ref
+        text content
+        datetime created_at
     }
 
     AUDIT_LOG {
@@ -1098,7 +1103,7 @@ erDiagram
     FRAUD_RULE o|--o{ DETECTION_EVIDENCE : "RULE 근거 참조"
     FRAUD_CASE ||--|{ CASE_TRANSACTION : "거래 묶음"
     TRANSACTION ||--o{ CASE_TRANSACTION : "사건 연결"
-    FRAUD_CASE ||--o{ CASE_NOTE : "조사 메모"
+    FRAUD_CASE ||--o{ INVESTIGATION_NOTE : "조사 메모"
     FRAUD_CASE ||--o{ AI_REPORT_REQUEST : "외부 요청 이력"
     FRAUD_CASE ||--o{ AI_REPORT_EXECUTION : "논리 실행 이력"
     FRAUD_CASE ||--o{ AI_REPORT : "검증된 결과 이력"
@@ -1634,7 +1639,7 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 | DetectionResult·DetectionEvidence | 사건과 판정 근거가 남아 있는 동안 버전 보존 필요 |
 | FraudRule/RuleVersion | 과거 근거가 참조하는 버전은 물리 삭제 방지 |
 | FraudCase·CaseTransaction | 사건 이력과 병합·분리 정책을 고려해 보존 |
-| CaseNote | 수정·논리 삭제·정정 메모 정책과 감사 원문 보존 여부 결정 |
+| InvestigationNote | append-only 원문. 별도 승인 전 수정·삭제·정정 관계 없음 |
 | AuditLog | 임의 수정·삭제를 전제로 하지 않으며 별도 접근·보존 정책 필요 |
 | AiReportRequest | 요청자·멱등성·캐시 계보·감사 참조를 고려해 보존. 키 만료와 요청 이력 삭제를 같은 정책으로 가정하지 않음 |
 | AiReportExecution | 장애·재시도·결과 재현 기간과 연결 요청·결과 참조를 고려해 보존 |
@@ -1670,7 +1675,7 @@ AuditLog는 누가 요청·재생성·운영 행위를 수행했고 어떤 상�
 - 대표 거래와 대표 위험 등급 선정 규칙
 - 여러 과거 `CLOSED` 사건 이력을 조회·표시할 후속 UI 정책
 - 사건 병합·분리 및 동일 의심 흐름의 중복 방지 기준
-- CaseNote append-only 초기 권장안을 최종 정책으로 채택할지와 향후 정정 관계·논리 삭제·이력 모델
+- 향후 USER 작성자·RBAC 지원 시 별도 migration과 접근 통제 계약
 
 ### AI 리포트·비용
 
