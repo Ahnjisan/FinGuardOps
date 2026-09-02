@@ -226,6 +226,15 @@ RuleVersion 집합의 제한된 local/dev/test one-shot 발행 경계만 제공�
 API나 정상 시작 자동 발행은 제공하지 않습니다. `ANALYZED`는 위험 대응 전 중간
 상태이므로 최종 성공으로 반환하거나 성공 Snapshot으로 확정하지 않습니다.
 
+Spring Backend의 목표 인증 경계는 제품 중립 OAuth2 Resource Server, RS256 Bearer JWT,
+USER·SERVICE principal 분리, authority 기반 deny-by-default와 사건 write USER Audit actor로
+확정했습니다. 자세한 내용은
+[`보안 아키텍처`](docs/02-architecture/security-architecture.md)와
+[`ADR-008`](docs/07-decisions/ADR-008-oauth2-resource-server-rbac-user-audit-actor.md)을
+따릅니다. 이는 문서 계약이며 Spring Security·JWT·RBAC·USER actor, Authorization Server,
+Frontend OIDC와 Compose 인증은 아직 구현되지 않았습니다. 현재 모든 Spring 업무 API는
+security layer 관점에서 사실상 무인증입니다.
+
 ```text
 React·TypeScript
         │
@@ -348,6 +357,7 @@ Kafka
 * FDS 분석·플랫폼 운영 화면 와이어프레임 작성
 * 거래·사건·AI 리포트 상태 전이 정의
 * 시스템 아키텍처 명세 작성
+* OAuth2 Resource Server·JWT·RBAC·USER Audit actor 보안 아키텍처 계약 문서화
 * 핵심 도메인 ERD 작성
 * API 공통 규칙 정의
 * 거래·행동·탐지 API 계약 작성
@@ -422,7 +432,27 @@ Public 최종 동기 거래 접수와 실제 External Risk HTTP Provider, 공개
 
 * recovery scheduler·batch와 장기 `IN_PROGRESS` Gauge·completion gap alert·dashboard
 * 불확실 상태 재실행과 `FAILED` 재분석은 별도 operation scope·승인 계약 전까지 금지
-* 공개 사건 조회·상태 변경·조사 메모·AuditLog API와 USER 인증·인가
+
+보안 후속 Issue는 다음 다섯 개를 순서대로 수행합니다.
+
+1. OAuth2 Resource Server 기반과 401·403·trace 경계 구현
+2. endpoint RBAC와 USER·SERVICE principal matrix 적용
+3. 사건 write USER actor와 InvestigationNote author 연결
+4. Local Compose·runbook JWT fixture와 인증 E2E
+   - Resource Server와 RBAC 적용 후 local issuer/JWK fixture 또는 승인된 local
+     Authorization Server, SERVICE token bootstrap과 traffic generator `Authorization`
+     header를 연결합니다.
+   - private key·token을 저장하지 않고 기존 Prometheus·recording·alert·Alertmanager·
+     Grafana E2E 회귀와 장시간 Compose 검증을 수행합니다.
+5. Frontend OIDC·token·권한 UI
+   - Resource Server·RBAC와 Authorization Server 제품 결정 후 Authorization Code + PKCE,
+     access token memory 보관, API `Authorization` header와 login·logout을 구현합니다.
+   - expiry·401·403 UX와 role·authority 기반 UI를 브라우저 경계에서 검증합니다.
+
+4와 5는 서로 다른 Issue다. Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend
+OIDC도 Compose traffic fixture의 일부가 아니다. 이 다섯 단계는 토큰 절약을 위한 인위적
+분할이 아니라 기술 책임·선행 관계·실패 영향·검증 시간이 다르기 때문에 분리한다.
+
 * ML 추론
 * AI 사건 리포트
 * AI 사용량·토큰·비용 기록

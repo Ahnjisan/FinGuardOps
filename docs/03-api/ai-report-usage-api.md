@@ -135,9 +135,14 @@ AiReportRequest.resolvedReportRef
 
 ### 3.3 요청 사용자와 호출 주체
 
-- FDS 분석 담당자나 운영자의 식별은 요청 본문의 임의 `requestedBy`, `authorRef`,
-  `actorType` 또는 `actorId`를 신뢰하지 않고 서버 사용자 문맥에서 결정한다.
-- 인증·인가가 구현되지 않은 local/test 환경의 Mock Actor 공급 방식과 헤더명은 이 계약에서 확정하지 않는다.
+- 목표 계약에서 FDS 분석 담당자나 운영자의 식별은 검증된 USER principal에서 결정하고
+  요청 본문의 임의 `requestedBy`, `authorRef`, `actorType` 또는 `actorId`를 신뢰하지 않는다.
+- AI 리포트 생성은 `ai-report:create`, 사건 리포트 조회는 `ai-report:read`, AI 요청 운영
+  상세는 `ai-operations:read`, 사용량·비용은 `ai-usage:read`를 요구한다.
+- USER·SERVICE principal과 role mapping은
+  [`security-architecture.md`](../02-architecture/security-architecture.md)를 따른다.
+- 현재 이 문서의 AI endpoint와 Spring Security·JWT·RBAC는 모두 미구현이다. 임의 Mock
+  Actor header를 목표 계약으로 도입하지 않는다.
 - 감사 기록에는 제한된 요청자 참조값, `aiRequestId`, `caseId`, 요청 시각과 `traceId`를 연결한다.
 
 ### 3.4 시간 범위
@@ -526,7 +531,7 @@ Content-Type: application/json
 | `409 Conflict` | `CASE_STATUS_CONFLICT` | 현재 사건 상태에서 AI 리포트 생성을 허용하지 않음 |
 | `409 Conflict` | `STATE_TRANSITION_NOT_ALLOWED` | 완료된 동일 정확 일치 결과의 강제 재생성 요청 |
 | `422 Unprocessable Entity` | `VALIDATION_ERROR` | HIGH·CRITICAL이 아닌 사건 |
-| `403 Forbidden` | `FORBIDDEN` 후보 | 생성 권한 부족 |
+| `403 Forbidden` | `ACCESS_DENIED` | `ai-report:create` 권한 부족 |
 | `500 Internal Server Error` | `INTERNAL_ERROR` | 요청 접수·식별자 발급·상태 저장 중 예기치 않은 오류 |
 
 동일 조건의 처리 중 요청은 오류가 아니다. 같은 `Idempotency-Key`이면 기존 `aiRequestId`를 반환하고, 다른 키이면 새 `aiRequestId`를 같은 `executionId`에 연결해 `executionShared = true`로 반환한다.
@@ -703,7 +708,7 @@ GET /api/v1/cases/{caseId}/ai-reports/current
 | --- | --- | --- |
 | `400 Bad Request` | `VALIDATION_ERROR` | `caseId` 형식 오류 |
 | `404 Not Found` | `RESOURCE_NOT_FOUND` | 사건이 없음 |
-| `403 Forbidden` | `FORBIDDEN` 후보 | 사건 리포트 조회 권한 부족 |
+| `403 Forbidden` | `ACCESS_DENIED` | `ai-report:read` 권한 부족 |
 | `500 Internal Server Error` | `INTERNAL_ERROR` | 저장된 선택 상태를 일관되게 읽을 수 없음 |
 
 - 사용 주체: FDS 분석 담당자
@@ -1027,7 +1032,7 @@ LLM 생성 완료:
 | --- | --- | --- |
 | `400 Bad Request` | `VALIDATION_ERROR` | `aiRequestId` 형식 오류 |
 | `404 Not Found` | `RESOURCE_NOT_FOUND` | AI 요청을 찾을 수 없음 |
-| `403 Forbidden` | `FORBIDDEN` 후보 | 운영 상세 조회 권한 부족 |
+| `403 Forbidden` | `ACCESS_DENIED` | `ai-operations:read` 권한 부족 |
 | `500 Internal Server Error` | `INTERNAL_ERROR` | 요청·호출 사용량 관계가 일관되지 않음 |
 
 - 사용 주체: 플랫폼·클라우드 운영자 전용
@@ -1173,7 +1178,7 @@ GET /api/v1/ai-report-usage
 | --- | --- | --- |
 | `400 Bad Request` | `VALIDATION_ERROR` | 시각, Enum, boolean, 페이지 또는 정렬 형식 오류 |
 | `422 Unprocessable Entity` | `VALIDATION_ERROR` | `from >= to`, 과도한 기간 또는 허용하지 않은 정렬 |
-| `403 Forbidden` | `FORBIDDEN` 후보 | 운영 목록 조회 권한 부족 |
+| `403 Forbidden` | `ACCESS_DENIED` | `ai-usage:read` 권한 부족 |
 | `500 Internal Server Error` | `INTERNAL_ERROR` | 예기치 않은 조회 오류 |
 
 - 사용 주체: 플랫폼·클라우드 운영자
@@ -1293,7 +1298,7 @@ GET /api/v1/ai-report-usage/summary
 
 - `400 Bad Request`: 형식 오류
 - `422 Unprocessable Entity`: 의미상 잘못된 기간 또는 필터 조합
-- `403 Forbidden`: 운영 집계 권한 부족
+- `403 ACCESS_DENIED`: `ai-usage:read` 권한 부족
 - `500 Internal Server Error`: 예기치 않은 집계 오류
 - 사용 주체: 플랫폼·클라우드 운영자
 - 멱등성: GET이므로 별도 키를 사용하지 않음
@@ -1410,7 +1415,7 @@ FastAPI·LLM의 비동기 처리 실패를 생성 접수 API의 HTTP 오류로 �
 | `DEPENDENCY_TIMEOUT` | `503` | 현재 HTTP 처리를 위한 필수 의존성 Timeout |
 | `INTERNAL_ERROR` | `500` | 공개할 수 없는 예기치 않은 서버 오류 |
 
-### 13.3 사건 계약에서 재사용하는 코드와 권한 후보
+### 13.3 사건 계약에서 재사용하는 코드와 목표 권한 오류
 
 새 AI 전용 코드를 추가하지 않고 기존 공통·사건 계약 코드를 우선 사용한다.
 
@@ -1418,7 +1423,8 @@ FastAPI·LLM의 비동기 처리 실패를 생성 접수 API의 HTTP 오류로 �
 | --- | --- | --- |
 | `CASE_STATUS_CONFLICT` | `409` | 현재 사건 상태가 AI 리포트 생성 대상이 아님 |
 | `STATE_TRANSITION_NOT_ALLOWED` | `409` | 완료된 동일 정확 일치 결과의 강제 재생성을 허용하지 않음 |
-| `FORBIDDEN` 후보 | `403` | 역할 또는 리소스 접근 권한 부족. 인증·인가 계약 확정 전 후보 |
+| `UNAUTHORIZED` | `401` | credential 또는 Bearer JWT·필수 claim 검증 실패 |
+| `ACCESS_DENIED` | `403` | 인증된 USER principal의 endpoint authority 부족 |
 
 FastAPI Timeout, FastAPI 연결 실패, LLM 호출 실패와 출력 형식 검증 실패는 접수 이후의 AI 처리 결과이면 HTTP 오류 코드가 아니라 `failureCode`로 기록한다.
 
@@ -1442,7 +1448,8 @@ FastAPI Timeout, FastAPI 연결 실패, LLM 호출 실패와 출력 형식 검�
 | LLM 호출 실패 | fallback 성공 시 정상 종료, 모두 실패 시 `FAILED` |
 | LLM 출력 형식 검증 실패 | 원문 미노출, fallback 성공 시 정상 종료, 모두 실패 시 `FAILED` |
 | 비용 집계 기간·페이지 오류 | `400/422 VALIDATION_ERROR`; 기간은 `INVALID_TIME_RANGE` 필드 코드 |
-| 권한 부족 | `403 FORBIDDEN` 후보 |
+| credential·token·필수 claim 오류 | `401 UNAUTHORIZED` |
+| 권한 부족 | `403 ACCESS_DENIED` |
 | 내부 오류 | `500 INTERNAL_ERROR` |
 
 ## 14. 보안·개인정보·감사
@@ -1472,7 +1479,6 @@ FastAPI Timeout, FastAPI 연결 실패, LLM 호출 실패와 출력 형식 검�
 | AI 요청·실행·attempt·리포트 보존 기간 | A. 동일 기간 / B. 엔티티별 차등 기간 / C. 상세 단기 보존 후 비식별 집계만 장기 보존 | **C.** 감사·비용 검증과 개인정보 최소 보존의 균형이 좋음 | 목록 조회 가능 기간, 삭제·비식별화와 감사 참조에 영향 | 후속 결정 |
 | `caseAnalysisSnapshotVersion` 도입 시점 | A. 초기부터 네 요소에 추가 / B. 대표 DetectionResult 계약으로 시작 후 복수 거래 사건 입력이 확정될 때 도입 | **B.** 현재 확정된 네 요소를 유지하면서 실제 복수 거래 입력 모델을 먼저 검증할 수 있음 | 향후 요청 필드, 정확 일치 키와 캐시 무효화 버전 변경에 영향 | 후속 ADR·ERD 결정 |
 | Provider 가격표 버전 관리 | A. 가격표 버전 미보존 / B. Provider 가격표 참조·적용 시각 보존 / C. 가격 스냅샷 전체 보존 | **B.** 전체 가격표를 복제하지 않고도 `estimatedCost` 재현성을 확보하기 쉬움 | attempt 저장 속성, 비용 재계산·감사와 운영 화면에 영향 | 초기 계약은 차단하지 않음. 비용 검증 구현 전 결정 필요 |
-| 인증·인가와 Mock Actor 전달 | A. 임의 요청 헤더 / B. 서버 인증 Principal과 local/test 전용 Mock Actor / C. 요청 본문 actor 필드 | **B.** 요청 본문 위조를 피하고 운영·테스트 경계를 분리할 수 있음 | 역할별 엔드포인트 접근, `requestedByRef`, AuditLog와 테스트 설정에 영향 | 실제 API 구현 전 결정 필요 |
 | PostgreSQL 활성 실행 선점과 격리 | A. 애플리케이션 조회만 / B. 활성 정확 일치 부분 Unique와 충돌 후 재조회 / C. 명시적 잠금 중심 | **B.** 동시 요청의 중복 실행을 DB 제약으로 보조하면서 잠금 범위를 제한할 수 있음 | 마이그레이션, 트랜잭션 경계와 동시성 테스트에 영향 | 현재 API 계약은 차단하지 않음. DB 구현 전 결정 필요 |
 | `FraudCase.currentAiReportRef` 도입 | A. 초기부터 물리 참조 / B. 조회 시 계산 후 성능 측정 시 도입 | **B.** 중복 현재값의 정합성 비용을 실제 성능 근거 없이 먼저 만들지 않음 | 사건 조회 쿼리와 향후 스키마 최적화에 영향 | 후속 성능 결정 |
 

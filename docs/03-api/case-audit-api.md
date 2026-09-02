@@ -12,6 +12,10 @@ PostgreSQL 낙관적 동시성·감사 원자성 경계를 구현했다. Issue #
 구현했다. Issue #215는 사건 감사 로그 조회 API와 명시적 비노출 projection을
 구현했다. 연관 거래 목록과 인증·인가는 구현되지 않았다. 사건 영속 계약은
 [`../04-database/fraud-case-schema.md`](../04-database/fraud-case-schema.md)를 따른다.
+목표 인증·인가와 USER Audit actor 계약은
+[`security-architecture.md`](../02-architecture/security-architecture.md)와
+[`ADR-008`](../07-decisions/ADR-008-oauth2-resource-server-rbac-user-audit-actor.md)을
+따른다. 이 목표 계약은 현재 Spring Security·RBAC·USER writer가 구현되었다는 뜻이 아니다.
 실제 `caseId`와 `auditId`는 UUID v4를 사용한다.
 Issue #207 범위 밖의 후속 API 절에 남아 있는 `case_demo_...` 값은 읽기 쉬운
 미구현 예시일 뿐 실제 식별자 형식이 아니다.
@@ -914,6 +918,11 @@ metadata는 현재 DB 계약에 맞는지 검증하지만 응답에는 공개하
 `auditId`, `actorId`, 저장 당시 `traceId`, target·context 식별자, JSONB 원문,
 조사 메모·거래·Provider·AI payload는 반환하지 않는다.
 
+현재 Issue #215 응답은 위와 같이 `actorType`만 공개한다. 목표 상태에서는 USER actor
+연결과 감사 API 변경이 완료된 뒤 `case:audit:read` 권한 사용자에게 USER actor UUID만
+공개하고 email·display name은 공개하지 않는다. SYSTEM actorId 공개 여부는 후속 API
+변경에서 명시적으로 결정한다. 그때까지 현재 비노출 projection을 유지한다.
+
 ### 13.4 성공 응답 예시
 
 ```http
@@ -1033,8 +1042,9 @@ Issue #209, #211, #213에서 성공한 다음 명령은 AuditLog를 정확히 1�
 - 사건 최종 판정·종료
 - 사건 조사 메모 생성
 
-stale version, 같은 상태·담당자, 금지 전이, 종료 사건 변경과 validation 실패는 현재
-감사 로그를 생성하지 않는다. 거부 요청 별도 감사는 후속 범위이다.
+read-only, 401, 403, validation 실패, stale version, 같은 상태·담당자, 금지 전이,
+종료 사건 변경, 업무 상태 거부, DB 오류, optimistic conflict와 rollback loser는 업무
+AuditLog를 생성하지 않는다. 거부 요청 별도 감사는 현재 구현하지 않는다.
 
 감사 기록에는 다음 정보를 포함하는 방향을 사용한다.
 
@@ -1060,6 +1070,12 @@ V11은 성공한 사건 상태·담당자 action과 승인 reasonCode 6개를 �
 action의 summary·metadata exact schema는
 [`audit-log-schema.md`](../04-database/audit-log-schema.md)를 따른다.
 
+목표 상태에서 사건 상태·담당자·종결·조사 메모 성공 write는 검증된 USER principal의
+canonical lowercase UUID v4 `sub`를 USER `actorId`로 기록한다. 거래 처리·자동 위험 대응,
+사건 자동 생성·거래 연결, RuleVersion·복구 one-shot과 기타 자동 처리는 SYSTEM을
+유지한다. `investigation_note`와 `CASE_NOTE_CREATED`의 현재 DB CHECK는 SYSTEM 전용이므로
+조사 메모 USER 전환 후속 Issue에는 migration이 필요하며 기존 SYSTEM row는 유지한다.
+
 ### 15.1 성공한 업무 변경의 트랜잭션 경계
 
 - 상태·담당자 변경에서는 FraudCase 현재값, `lastChangedAt`과 해당하는
@@ -1068,6 +1084,7 @@ action의 summary·metadata exact schema는
 - resolution에서는 최종 판정, `CLOSED`, `closedAt=lastChangedAt`, 실제 version과
   AuditLog 1건을 같은 REQUIRED 트랜잭션에서 처리한다.
 - 적용 대상 중 일부만 저장되는 결과를 허용하지 않는다. AuditLog 저장에 실패한 성공 변경을 정상 완료로 확정하지 않는다.
+- 목표 USER actor도 사건 변경과 같은 transaction·flush·rollback 경계를 사용한다.
 
 ### 15.2 거부된 요청의 감사 경계
 
@@ -1157,16 +1174,16 @@ Content-Type: application/json
 - 실제 고객번호와 실제 계좌번호 원문을 요청·응답·오류 예시에 사용하지 않는다.
 - 사건 목록과 상세에는 조사에 필요한 최소 요약만 반환한다.
 - 연관 거래 응답에는 고객·계좌 원문을 반환하지 않는다.
-- 담당자와 작성자는 제한된 `assigneeRef`, `authorRef`로 표현하고, 감사 `USER`
-  `actorId`는 내부 사용자 업무 UUID v4로만 표현한다.
-- 외부 인증 Provider subject, 사용자명, 이메일, 사번, 전화번호 원문은
-  `actorId`로 저장하지 않는다. 향후 인증 계층이 외부 subject를 내부 UUID
-  v4로 매핑해 전달하며, 실제 `USER` 감사 연결은 현재 미구현이다.
+- 담당자와 작성자는 제한된 `assigneeRef`, `authorRef`로 표현한다. 목표 감사 `USER`
+  `actorId`는 검증된 JWT `sub`인 canonical lowercase UUID v4다.
+- email, display name, 내부 DB PK, 사용자명, 사번과 전화번호를 `actorId`로 저장하지
+  않는다. 별도 `user_id` claim으로 다시 매핑하지 않으며 실제 USER 감사 연결은 현재
+  미구현이다.
 - 참조값 자체에 개인정보, 인증정보 또는 업무상 불필요한 의미를 포함하지 않는다.
 - 메모와 변경 사유에 불필요한 고객·계좌 원문이나 인증정보를 기록하지 않는다.
 - 감사 로그의 변경 전후 요약은 허용된 필드와 마스킹·축약 값만 사용한다.
 - 오류 메시지와 `fieldErrors.reason`에 내부 예외나 민감정보를 포함하지 않는다.
-- 실제 인증·인가, 접근 제어, 마스킹, 암호화, 해시와 보존 기간은 사용자 승인 후 별도 보안 설계에서 확정한다.
+- 승인된 인증·인가·접근 제어 계약은 [`security-architecture.md`](../02-architecture/security-architecture.md)를 따른다. 마스킹, 암호화, 해시와 보존 기간의 구현은 후속 범위다.
 
 ## 18. 사용자 결정 필요 항목
 
@@ -1177,17 +1194,17 @@ Content-Type: application/json
 - 향후 사용자·담당자 디렉터리 도입 시 참조값 검증과 현재 계약을 연결하는 방식
 - `IN_REVIEW`가 아닌 사건에서 기존 담당자 값을 유지하거나 해제할 수 있는 후속 정책
 
-### 18.2 현재 인증·인가 미구현 단계
+### 18.2 승인된 인증 actor와 현재 구현
 
-- local/test 프로필에서만 허용되는 Mock Actor Provider
-- production 프로필에서 Mock Actor 사용을 금지하는 검증 방식
-- Mock Actor 참조값의 허용 목록과 테스트 격리 방식
-- 실제 인증·인가 도입 시 서버 사용자 문맥으로 교체하는 경계
+목표 구현에서는 인증 adapter가 검증된 JWT로 immutable authenticated principal과 actor를
+만들고 Controller는 그 actor만 Service로 전달한다. request body·query·임의 header의
+`authorRef`, `actorType`, `actorId`는 신뢰하지 않는다. production Security chain을
+profile로 끄지 않으며 test는 ephemeral asymmetric key 또는 test-only decoder와 실제 claim
+validator를 사용한다.
 
-작성자와 변경 주체는 테스트·로컬 환경의 서버 사용자 문맥으로 공급한다. 요청 본문의
-`authorRef`, `actorType`, `actorId`는 신뢰하지 않는다. 구체적인 요청 헤더명, Mock
-Actor Provider 구현과 인증 코드는 이번 문서에서 확정하지 않는다. 조사 메모는 이
-사용자 문맥을 사용하지 않고 서버가 `SYSTEM/finguardops-backend`로 기록한다.
+현재 조사 메모와 사건 write는 이 목표 actor를 사용하지 않고 서버가
+`SYSTEM/finguardops-backend`를 기록한다. local/test Mock Actor header를 별도 계약으로
+도입하지 않는다.
 
 ### 18.3 조회와 표시
 
@@ -1220,7 +1237,7 @@ Actor Provider 구현과 인증 코드는 이번 문서에서 확정하지 않�
 - AI 리포트 API
 - AI 사용량 API
 - 플랫폼 운영 API
-- 인증·인가·RBAC와 조사 메모 `USER` 작성자 구현
+- 승인된 인증·인가·RBAC와 사건 write·조사 메모 `USER` actor 구현
 - CORS와 외부 API 보안 구현
 - Kafka 이벤트 API
 - 실제 고객 제재, 거래 승인·인증·차단
