@@ -35,7 +35,14 @@ public final class FinGuardOpsJwtValidator
     private final Clock clock;
 
     public FinGuardOpsJwtValidator(FinGuardOpsSecurityProperties properties) {
-        this(properties.issuer(), Clock.systemUTC());
+        this(properties, Clock.systemUTC());
+    }
+
+    public FinGuardOpsJwtValidator(
+            FinGuardOpsSecurityProperties properties,
+            Clock clock
+    ) {
+        this(properties.issuer(), clock);
     }
 
     FinGuardOpsJwtValidator(URI issuer, Clock clock) {

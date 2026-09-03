@@ -22,6 +22,8 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataAccessException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.authentication.TestingAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
@@ -47,8 +49,18 @@ import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_NOTE_WRITE;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_RESOLUTION_WRITE;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_WORKFLOW_WRITE;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
+@org.springframework.security.test.context.support.WithMockUser(
+        authorities = {
+                "case:workflow:write",
+                "case:resolution:write",
+                "case-note:write"
+        }
+)
 class InvestigationNoteIntegrationTest extends PostgresqlIntegrationTestSupport {
 
     private static final Instant CREATED_AT = Instant.parse("2026-09-02T00:00:00Z");
@@ -392,6 +404,15 @@ class InvestigationNoteIntegrationTest extends PostgresqlIntegrationTestSupport 
             ServiceMethod method
     ) {
         return () -> {
+            assertThat(SecurityContextHolder.getContext().getAuthentication())
+                    .isNull();
+            var context = SecurityContextHolder.createEmptyContext();
+            context.setAuthentication(new TestingAuthenticationToken(
+                    "concurrency-contender",
+                    null,
+                    authorityFor(method)
+            ));
+            SecurityContextHolder.setContext(context);
             long threadId = Thread.currentThread().getId();
             activeServiceMethod.set(method);
             try {
@@ -458,7 +479,18 @@ class InvestigationNoteIntegrationTest extends PostgresqlIntegrationTestSupport 
                 );
             } finally {
                 activeServiceMethod.remove();
+                SecurityContextHolder.clearContext();
+                assertThat(SecurityContextHolder.getContext()
+                        .getAuthentication()).isNull();
             }
+        };
+    }
+
+    private String authorityFor(ServiceMethod method) {
+        return switch (method) {
+            case NOTE_CREATE -> CASE_NOTE_WRITE;
+            case RESOLUTION -> CASE_RESOLUTION_WRITE;
+            case STATUS_CHANGE, ASSIGNEE_CHANGE -> CASE_WORKFLOW_WRITE;
         };
     }
 

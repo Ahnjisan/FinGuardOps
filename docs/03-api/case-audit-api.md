@@ -10,12 +10,13 @@ Issue #207에서 사건 목록·상세 조회를 구현했고 Issue #209에서 �
 PostgreSQL 낙관적 동시성·감사 원자성 경계를 구현했다. Issue #211은 최종 판정·
 종료 API와 V12 감사를 구현했고 Issue #213에서 조사 메모 생성·목록과 V13 감사를
 구현했다. Issue #215는 사건 감사 로그 조회 API와 명시적 비노출 projection을
-구현했다. 연관 거래 목록과 인증·인가는 구현되지 않았다. 사건 영속 계약은
+구현했다. Issue #221은 아래 실제 사건·메모·감사 endpoint RBAC와 네 high-risk write
+method security를 구현했다. 연관 거래 목록은 구현되지 않았다. 사건 영속 계약은
 [`../04-database/fraud-case-schema.md`](../04-database/fraud-case-schema.md)를 따른다.
-목표 인증·인가와 USER Audit actor 계약은
+구현 인증·인가와 목표 USER Audit actor 계약은
 [`security-architecture.md`](../02-architecture/security-architecture.md)와
 [`ADR-008`](../07-decisions/ADR-008-oauth2-resource-server-rbac-user-audit-actor.md)을
-따른다. 이 목표 계약은 현재 Spring Security·RBAC·USER writer가 구현되었다는 뜻이 아니다.
+따른다. Spring Security·RBAC는 구현되었지만 USER writer는 아직 구현되지 않았다.
 실제 `caseId`와 `auditId`는 UUID v4를 사용한다.
 Issue #207 범위 밖의 후속 API 절에 남아 있는 `case_demo_...` 값은 읽기 쉬운
 미구현 예시일 뿐 실제 식별자 형식이 아니다.
@@ -193,6 +194,12 @@ GET   /api/v1/cases/{caseId}/notes
 
 GET   /api/v1/cases/{caseId}/audit-logs
 ```
+
+실제 구현 endpoint 중 사건 목록·상세는 `case:read`, 상태·담당자 변경은
+`case:workflow:write`, 종결은 `case:resolution:write`, 메모 생성·조회는 각각
+`case-note:write`·`case-note:read`, 감사 조회는 `case-audit:read`를 요구한다. 문서 후보인
+`GET /api/v1/cases/{caseId}/transactions`에는 matcher가 없다. write 네 개는 URL matcher와
+production Service proxy의 method security로 이중 보호한다.
 
 ## 5. 사건 목록 조회
 
@@ -664,7 +671,7 @@ Content-Type: application/json
 - `finalDisposition`이 누락되거나 null이면 `422 Unprocessable Entity`와 `FINAL_DISPOSITION_REQUIRED`를 반환한다.
 - 종료 사건 재개와 종료 후 최종 판정 변경은 초기 범위에서 제외한다.
 - 세 판정은 모두 사건만 종료하며 Transaction, RiskLevel, RiskResponseOutcome, CaseTransaction과 AI 처리를 변경하지 않는다.
-- 성공 종료만 `SYSTEM/finguardops-backend` actor의 `CASE_RESOLVED/CASE_RESOLUTION_COMPLETED` AuditLog를 정확히 1건 생성한다. RBAC와 실제 `USER` actor는 미구현이다.
+- 성공 종료만 `SYSTEM/finguardops-backend` actor의 `CASE_RESOLVED/CASE_RESOLUTION_COMPLETED` AuditLog를 정확히 1건 생성한다. RBAC는 구현되었고 실제 `USER` actor는 미구현이다.
 
 오류 우선순위는 요청 구조·타입·path → 사건 없음 → stale version → 이미 종료 → 금지 상태 → 판정·사유 업무 오류 → flush optimistic conflict → DB timeout → DB unavailable → 기타 내부 오류 순이다.
 
@@ -758,7 +765,7 @@ Content-Type: application/json
 - `content`는 신뢰할 수 없는 plain text다. 클라이언트는 화면 출력 시 HTML/text
   escaping을 적용해야 하며 `innerHTML`, `dangerouslySetInnerHTML` 등으로 원문을 HTML로
   렌더링하면 안 된다. 서버가 원문을 실행·해석하지 않는다는 사실만으로 클라이언트 출력의
-  안전이 보장되지는 않는다. 현재 Frontend와 인증·RBAC는 이 계약의 구현 범위가 아니다.
+  안전이 보장되지는 않는다. 인증·RBAC는 구현되었지만 Frontend OIDC·권한 UI는 미구현이다.
 - 사건 조회 → version → 상태 → content → 단일 `activityTime` → 부모 flush → 메모 insert·flush → 감사 append·flush 순서로 같은 REQUIRED 트랜잭션에서 처리한다.
 - `Clock` 시각이 기존 `lastChangedAt` 이하이면 정확히 1 microsecond 뒤를 사용한다. 성공 시 `createdAt == lastChangedAt`, version은 정확히 1 증가한다.
 - `InvestigationNote`는 append-only이며 수정·삭제 API가 없다. `Idempotency-Key` replay와 `correctionOfNoteId`도 구현하지 않는다.
@@ -1066,7 +1073,7 @@ actorType
 V7은 성공한 네 action만 저장하며 자유 텍스트 사유와 거부 감사는 허용하지 않는다.
 V11은 성공한 사건 상태·담당자 action과 승인 reasonCode 6개를 확장한다. 임시 actor는
 `SYSTEM / finguardops-backend`이며 V12는 성공 종료 action과 reasonCode를 확장한다.
-실제 USER actor와 RBAC는 구현하지 않았다. 각
+RBAC는 구현되었지만 실제 USER actor는 구현하지 않았다. 각
 action의 summary·metadata exact schema는
 [`audit-log-schema.md`](../04-database/audit-log-schema.md)를 따른다.
 
@@ -1237,7 +1244,7 @@ validator를 사용한다.
 - AI 리포트 API
 - AI 사용량 API
 - 플랫폼 운영 API
-- 승인된 인증·인가·RBAC와 사건 write·조사 메모 `USER` actor 구현
+- 사건 write·조사 메모 `USER` actor 구현
 - CORS와 외부 API 보안 구현
 - Kafka 이벤트 API
 - 실제 고객 제재, 거래 승인·인증·차단

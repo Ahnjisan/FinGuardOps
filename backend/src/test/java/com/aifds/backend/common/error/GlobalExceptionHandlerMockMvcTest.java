@@ -26,10 +26,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Bean;
 import org.springframework.http.MediaType;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
@@ -61,9 +65,31 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         GlobalExceptionHandler.class,
         TraceIdFilter.class,
         TransactionIntakeMetricsFilter.class,
-        GlobalExceptionHandlerMockMvcTest.TestController.class
+        GlobalExceptionHandlerMockMvcTest.TestController.class,
+        GlobalExceptionHandlerMockMvcTest.TestOnlySecurityConfiguration.class
 })
 class GlobalExceptionHandlerMockMvcTest {
+
+    @TestConfiguration(proxyBeanMethods = false)
+    static class TestOnlySecurityConfiguration {
+
+        @Bean
+        @org.springframework.core.annotation.Order(0)
+        SecurityFilterChain testOnlySecurityFilterChain(HttpSecurity http)
+                throws Exception {
+            http
+                    .securityMatcher(
+                            "/test/errors/**",
+                            "/api/v1/test-only-missing-resource",
+                            "/assets/test-only-missing-resource.js"
+                    )
+                    .csrf(csrf -> csrf.disable())
+                    .authorizeHttpRequests(authorize -> authorize
+                            .anyRequest().authenticated()
+                    );
+            return http.build();
+        }
+    }
 
     private static final String MALFORMED_TRACE_ID = "trace_malformed_01";
     private static final String BEAN_VALIDATION_TRACE_ID =

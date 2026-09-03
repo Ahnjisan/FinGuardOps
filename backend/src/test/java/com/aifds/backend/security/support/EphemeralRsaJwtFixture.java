@@ -70,7 +70,14 @@ public final class EphemeralRsaJwtFixture {
             String principalType,
             List<String> roles
     ) {
-        Instant now = Instant.now();
+        return validClaims(principalType, roles, Instant.now());
+    }
+
+    public Map<String, Object> validClaims(
+            String principalType,
+            List<String> roles,
+            Instant now
+    ) {
         LinkedHashMap<String, Object> claims = new LinkedHashMap<>();
         claims.put("iss", ISSUER);
         claims.put("aud", List.of("finguardops-backend-api"));
@@ -83,11 +90,15 @@ public final class EphemeralRsaJwtFixture {
     }
 
     public String validUserToken() {
+        return validUserToken(Instant.now());
+    }
+
+    public String validUserToken(Instant now) {
         return sign(
                 JWSAlgorithm.RS256,
                 kid,
                 Map.of(),
-                validClaims("USER", List.of("FDS_VIEWER"))
+                validClaims("USER", List.of("FDS_VIEWER"), now)
         );
     }
 

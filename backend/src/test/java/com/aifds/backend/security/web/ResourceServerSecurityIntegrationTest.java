@@ -40,6 +40,8 @@ import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtException;
 import org.springframework.security.oauth2.server.resource.InvalidBearerTokenException;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -57,7 +59,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 @Import({
         ResourceServerSecurityIntegrationTest.SecurityProbeController.class,
-        ResourceServerSecurityIntegrationTest.DeniedChainConfiguration.class
+        ResourceServerSecurityIntegrationTest.TestOnlyChainConfiguration.class
 })
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
@@ -347,6 +349,17 @@ class ResourceServerSecurityIntegrationTest {
                 .isEqualTo("https://console.example.test");
         assertThat(allowedPreflight.getHeaders()
                 .getAccessControlAllowCredentials()).isFalse();
+
+        ResponseEntity<String> deniedTestOnlyPath = exchange(
+                HttpMethod.OPTIONS,
+                DENIED_PATH,
+                preflightHeaders("GET", "Authorization"),
+                null
+        );
+        assertThat(deniedTestOnlyPath.getStatusCode())
+                .isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(deniedTestOnlyPath.getHeaders()
+                .getAccessControlAllowOrigin()).isNull();
 
         HttpHeaders allowedSimple = bearer(KEY_A.validUserToken());
         allowedSimple.setOrigin("https://console.example.test");
@@ -660,7 +673,7 @@ class ResourceServerSecurityIntegrationTest {
     }
 
     @TestConfiguration(proxyBeanMethods = false)
-    static class DeniedChainConfiguration {
+    static class TestOnlyChainConfiguration {
 
         @Bean
         @org.springframework.core.annotation.Order(0)
@@ -671,16 +684,40 @@ class ResourceServerSecurityIntegrationTest {
                 FinGuardOpsAuthenticationEntryPoint entryPoint,
                 FinGuardOpsAccessDeniedHandler deniedHandler
         ) throws Exception {
+            CorsConfiguration configuration = new CorsConfiguration();
+            configuration.setAllowedOrigins(List.of(
+                    "https://console.example.test"
+            ));
+            configuration.setAllowedMethods(List.of("GET", "POST"));
+            configuration.setAllowedHeaders(List.of(
+                    "Authorization",
+                    "Content-Type",
+                    TraceIdFilter.TRACE_ID_HEADER
+            ));
+            configuration.setAllowCredentials(false);
+
+            UrlBasedCorsConfigurationSource corsConfigurationSource =
+                    new UrlBasedCorsConfigurationSource();
+            corsConfigurationSource.registerCorsConfiguration(
+                    PROTECTED_PATH,
+                    configuration
+            );
+
             http
-                    .securityMatcher(DENIED_PATH)
+                    .securityMatcher("/test/security/**")
                     .csrf(csrf -> csrf.disable())
+                    .cors(cors -> cors.configurationSource(
+                            corsConfigurationSource
+                    ))
                     .sessionManagement(session ->
                             session.sessionCreationPolicy(
                                     SessionCreationPolicy.STATELESS
                             )
                     )
                     .authorizeHttpRequests(authorize -> authorize
-                            .anyRequest().hasAuthority("test:never")
+                            .requestMatchers(DENIED_PATH)
+                            .hasAuthority("test:never")
+                            .anyRequest().authenticated()
                     )
                     .exceptionHandling(exceptions -> exceptions
                             .authenticationEntryPoint(entryPoint)

@@ -24,6 +24,7 @@ import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.dao.QueryTimeoutException;
 import org.springframework.dao.TransientDataAccessResourceException;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -34,6 +35,9 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Objects;
 import java.util.Set;
+
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_RESOLUTION_WRITE;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_WORKFLOW_WRITE;
 
 @Service
 public class FraudCaseWorkflowService {
@@ -62,6 +66,7 @@ public class FraudCaseWorkflowService {
     }
 
     @Transactional
+    @PreAuthorize("hasAuthority('" + CASE_WORKFLOW_WRITE + "')")
     public FraudCaseMutationResponse changeStatus(
             FraudCaseWorkflowCommand.StatusChange command,
             String traceId
@@ -100,6 +105,7 @@ public class FraudCaseWorkflowService {
     }
 
     @Transactional
+    @PreAuthorize("hasAuthority('" + CASE_WORKFLOW_WRITE + "')")
     public FraudCaseMutationResponse changeAssignee(
             FraudCaseWorkflowCommand.AssigneeChange command,
             String traceId
@@ -135,6 +141,7 @@ public class FraudCaseWorkflowService {
     }
 
     @Transactional
+    @PreAuthorize("hasAuthority('" + CASE_RESOLUTION_WRITE + "')")
     public FraudCaseMutationResponse resolve(
             FraudCaseWorkflowCommand.Resolution command,
             String traceId

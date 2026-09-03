@@ -21,6 +21,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
+import org.springframework.security.authentication.TestingAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -43,8 +45,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_RESOLUTION_WRITE;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_WORKFLOW_WRITE;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 class FraudCaseWorkflowConcurrencyIntegrationTest
@@ -484,76 +489,103 @@ class FraudCaseWorkflowConcurrencyIntegrationTest
             CountDownLatch ready,
             CountDownLatch start
     ) {
-        ready.countDown();
-        await(start);
-        try {
-            service.changeStatus(
-                    new FraudCaseWorkflowCommand.StatusChange(
-                            caseId,
-                            FraudCaseStatus.IN_REVIEW,
-                            true,
-                            assignee,
-                            AuditReasonCode.CASE_REVIEW_STARTED,
-                            0L
-                    ),
-                    "trace_case_concurrency_01"
-            );
-            return Outcome.SUCCESS;
-        } catch (FraudCaseWorkflowException exception) {
-            if (exception.getReason()
-                    == FraudCaseWorkflowException.Reason
-                    .CONCURRENT_MODIFICATION) {
-                return Outcome.CONCURRENT_MODIFICATION;
+        return withAuthority(CASE_WORKFLOW_WRITE, () -> {
+            ready.countDown();
+            await(start);
+            try {
+                service.changeStatus(
+                        new FraudCaseWorkflowCommand.StatusChange(
+                                caseId,
+                                FraudCaseStatus.IN_REVIEW,
+                                true,
+                                assignee,
+                                AuditReasonCode.CASE_REVIEW_STARTED,
+                                0L
+                        ),
+                        "trace_case_concurrency_01"
+                );
+                return Outcome.SUCCESS;
+            } catch (FraudCaseWorkflowException exception) {
+                if (exception.getReason()
+                        == FraudCaseWorkflowException.Reason
+                        .CONCURRENT_MODIFICATION) {
+                    return Outcome.CONCURRENT_MODIFICATION;
+                }
+                throw exception;
             }
-            throw exception;
-        }
+        });
     }
 
     private CommandResult invokeStatus(
             FraudCaseWorkflowCommand.StatusChange command
     ) {
-        try {
-            service.changeStatus(command, "trace_case_cross_race_01");
-            return CommandResult.SUCCESS;
-        } catch (FraudCaseWorkflowException exception) {
-            if (exception.getReason()
-                    == FraudCaseWorkflowException.Reason
-                    .CONCURRENT_MODIFICATION) {
-                return CommandResult.CONCURRENT_MODIFICATION;
+        return withAuthority(CASE_WORKFLOW_WRITE, () -> {
+            try {
+                service.changeStatus(command, "trace_case_cross_race_01");
+                return CommandResult.SUCCESS;
+            } catch (FraudCaseWorkflowException exception) {
+                if (exception.getReason()
+                        == FraudCaseWorkflowException.Reason
+                        .CONCURRENT_MODIFICATION) {
+                    return CommandResult.CONCURRENT_MODIFICATION;
+                }
+                throw exception;
             }
-            throw exception;
-        }
+        });
     }
 
     private CommandResult invokeAssignee(
             FraudCaseWorkflowCommand.AssigneeChange command
     ) {
-        try {
-            service.changeAssignee(command, "trace_case_cross_race_01");
-            return CommandResult.SUCCESS;
-        } catch (FraudCaseWorkflowException exception) {
-            if (exception.getReason()
-                    == FraudCaseWorkflowException.Reason
-                    .CONCURRENT_MODIFICATION) {
-                return CommandResult.CONCURRENT_MODIFICATION;
+        return withAuthority(CASE_WORKFLOW_WRITE, () -> {
+            try {
+                service.changeAssignee(command, "trace_case_cross_race_01");
+                return CommandResult.SUCCESS;
+            } catch (FraudCaseWorkflowException exception) {
+                if (exception.getReason()
+                        == FraudCaseWorkflowException.Reason
+                        .CONCURRENT_MODIFICATION) {
+                    return CommandResult.CONCURRENT_MODIFICATION;
+                }
+                throw exception;
             }
-            throw exception;
-        }
+        });
     }
 
     private CommandResult invokeResolution(
             FraudCaseWorkflowCommand.Resolution command
     ) {
-        try {
-            service.resolve(command, "trace_case_resolution_race_01");
-            return CommandResult.SUCCESS;
-        } catch (FraudCaseWorkflowException exception) {
-            if (exception.getReason()
-                    == FraudCaseWorkflowException.Reason
-                    .CONCURRENT_MODIFICATION) {
-                return CommandResult.CONCURRENT_MODIFICATION;
+        return withAuthority(CASE_RESOLUTION_WRITE, () -> {
+            try {
+                service.resolve(command, "trace_case_resolution_race_01");
+                return CommandResult.SUCCESS;
+            } catch (FraudCaseWorkflowException exception) {
+                if (exception.getReason()
+                        == FraudCaseWorkflowException.Reason
+                        .CONCURRENT_MODIFICATION) {
+                    return CommandResult.CONCURRENT_MODIFICATION;
+                }
+                throw exception;
             }
-            throw exception;
+        });
+    }
+
+    private <T> T withAuthority(String authority, Supplier<T> action) {
+        assertThat(SecurityContextHolder.getContext().getAuthentication())
+                .isNull();
+        var context = SecurityContextHolder.createEmptyContext();
+        context.setAuthentication(new TestingAuthenticationToken(
+                "concurrency-contender",
+                null,
+                authority
+        ));
+        SecurityContextHolder.setContext(context);
+        try {
+            return action.get();
+        } finally {
+            SecurityContextHolder.clearContext();
+            assertThat(SecurityContextHolder.getContext().getAuthentication())
+                    .isNull();
         }
     }
 

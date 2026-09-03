@@ -24,6 +24,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
+@org.springframework.security.test.context.support.WithMockUser(
+        authorities = {
+                "case:workflow:write",
+                "case:resolution:write"
+        }
+)
 class FraudCaseWorkflowIntegrationTest
         extends PostgresqlIntegrationTestSupport {
 

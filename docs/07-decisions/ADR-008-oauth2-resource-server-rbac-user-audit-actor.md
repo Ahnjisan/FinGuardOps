@@ -180,7 +180,7 @@ account lifecycle과 key 운영 책임이 금융 업무 Backend에 결합되고 
 
 ## 6. 현재 구현과 목표의 구분
 
-Issue #219에서 다음 기반은 구현되었다.
+결정 이후 Issue #219와 Issue #221에서 다음 기반과 RBAC가 구현되었다.
 
 - Spring Boot 관리 버전의 OAuth2 Resource Server와 application listener
   `SecurityFilterChain`
@@ -189,10 +189,11 @@ Issue #219에서 다음 기반은 구현되었다.
 - Spring Security/Nimbus 기본 in-memory JWK cache, rotation과 안전한 장애 분류
 - stateless·CSRF·exact-origin CORS와 401·403·503·500 전용 응답 경계
 - 기본/prometheus application·management listener 분리와 Actuator 404·health 상세 비노출
+- 실제 13개 production endpoint의 USER·SERVICE authority matrix와 deny-by-default
+- 사건 workflow·resolution·조사 메모 생성 네 Service method의 `@PreAuthorize`
 
 다음은 아직 구현되지 않았다.
 
-- endpoint별 세부 authority enforcement와 `@PreAuthorize`
 - 사건 write USER actor와 actorId 응답
 - local issuer/JWK fixture와 SERVICE token traffic generator
 - Frontend OIDC 로그인·token·권한 UI
@@ -200,14 +201,13 @@ Issue #219에서 다음 기반은 구현되었다.
 
 ## 7. 후속 작업
 
-OAuth2 Resource Server 기반과 401·403·trace 경계는 Issue #219에서 구현되었다.
-남은 다음 네 Issue는 토큰 절약이 아니라 기술 책임·migration·검증 경계를 분리하기 위해
-순서대로 수행한다.
+OAuth2 Resource Server 기반과 401·403·trace 경계는 Issue #219에서, endpoint RBAC와
+method security는 Issue #221에서 구현되었다. 남은 세 Issue는 기술 책임·migration·검증
+경계를 분리하기 위해 순서대로 수행한다.
 
-1. `[Backend/Security] Endpoint RBAC와 USER·SERVICE authority matrix 적용`
-2. `[Backend/Audit] 사건 write USER actor와 InvestigationNote author 연결`
-3. `[Infra/Docs] Local Compose·runbook JWT fixture와 인증 E2E 적용`
-4. `[Frontend] OIDC 로그인·token·권한 UI 구현`
+1. `[Backend/Audit] 사건 write USER actor와 InvestigationNote author 연결`
+2. `[Infra/Docs] Local Compose·runbook JWT fixture와 인증 E2E 적용`
+3. `[Frontend] OIDC 로그인·token·권한 UI 구현`
 
 Spring Security 개념과 JWT 검증 동작은 공식 문서를 참고하되 실제 dependency와 제품은 각
 구현 Issue에서 검증한다.

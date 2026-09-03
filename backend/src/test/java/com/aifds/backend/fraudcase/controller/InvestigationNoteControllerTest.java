@@ -29,7 +29,9 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 @WebMvcTest(InvestigationNoteController.class)
-@org.springframework.security.test.context.support.WithMockUser
+@org.springframework.security.test.context.support.WithMockUser(
+        authorities = {"case-note:read", "case-note:write"}
+)
 @Import({
         com.aifds.backend.security.config.FinGuardOpsSecurityConfiguration.class,
         GlobalExceptionHandler.class,

@@ -27,6 +27,7 @@ import org.springframework.dao.QueryTimeoutException;
 import org.springframework.dao.TransientDataAccessResourceException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -37,6 +38,8 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Set;
 import java.util.UUID;
+
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_NOTE_WRITE;
 
 @Service
 public class InvestigationNoteService {
@@ -68,6 +71,7 @@ public class InvestigationNoteService {
     }
 
     @Transactional
+    @PreAuthorize("hasAuthority('" + CASE_NOTE_WRITE + "')")
     public InvestigationNoteCreateResponse create(
             FraudCaseNoteCommand.Create command,
             String traceId
