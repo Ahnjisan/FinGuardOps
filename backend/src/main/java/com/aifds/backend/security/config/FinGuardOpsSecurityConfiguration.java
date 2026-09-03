@@ -39,6 +39,7 @@ import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.CorsUtils;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
@@ -243,6 +244,13 @@ public class FinGuardOpsSecurityConfiguration {
 
     @Bean
     public JwtDecoder jwtDecoder(FinGuardOpsSecurityProperties properties) {
+        return jwtDecoder(properties, Clock.systemUTC());
+    }
+
+    public JwtDecoder jwtDecoder(
+            FinGuardOpsSecurityProperties properties,
+            Clock clock
+    ) {
         SimpleClientHttpRequestFactory requestFactory =
                 new SimpleClientHttpRequestFactory();
         requestFactory.setConnectTimeout(properties.jwkConnectTimeout());
@@ -254,7 +262,7 @@ public class FinGuardOpsSecurityConfiguration {
                 .restOperations(new RestTemplate(requestFactory))
                 .build();
         nimbus.setClaimSetConverter(strictClaimSetConverter());
-        nimbus.setJwtValidator(new FinGuardOpsJwtValidator(properties));
+        nimbus.setJwtValidator(new FinGuardOpsJwtValidator(properties, clock));
 
         return token -> {
             try {

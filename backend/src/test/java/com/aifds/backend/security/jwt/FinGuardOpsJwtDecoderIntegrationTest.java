@@ -14,8 +14,10 @@ import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtException;
 
 import java.net.URI;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -25,6 +27,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class FinGuardOpsJwtDecoderIntegrationTest {
 
+    private static final Instant VALIDATION_TIME =
+            Instant.parse("2026-09-03T00:00:00Z");
+    private static final Clock VALIDATION_CLOCK =
+            Clock.fixed(VALIDATION_TIME, ZoneOffset.UTC);
     private static final EphemeralRsaJwtFixture KEY_A =
             EphemeralRsaJwtFixture.create("key-a");
     private static final EphemeralRsaJwtFixture KEY_B =
@@ -52,7 +58,7 @@ class FinGuardOpsJwtDecoderIntegrationTest {
 
     @Test
     void validatesRealRs256SignatureAndStrictUserClaims() {
-        Jwt jwt = decoder().decode(KEY_A.validUserToken());
+        Jwt jwt = decoder().decode(KEY_A.validUserToken(VALIDATION_TIME));
 
         assertThat(jwt.getSubject()).isEqualTo(
                 EphemeralRsaJwtFixture.SUBJECT
@@ -65,14 +71,13 @@ class FinGuardOpsJwtDecoderIntegrationTest {
 
     @Test
     void acceptsServicePrincipalAndClockSkewBoundaries() {
-        Instant now = Instant.now();
         Map<String, Object> claims = claims(
                 "SERVICE",
                 List.of("TRANSACTION_INGESTOR")
         );
-        claims.put("iat", now.plusSeconds(59).getEpochSecond());
-        claims.put("nbf", now.plusSeconds(59).getEpochSecond());
-        claims.put("exp", now.plusSeconds(899).getEpochSecond());
+        claims.put("iat", VALIDATION_TIME.plusSeconds(60).getEpochSecond());
+        claims.put("nbf", VALIDATION_TIME.plusSeconds(60).getEpochSecond());
+        claims.put("exp", VALIDATION_TIME.plusSeconds(899).getEpochSecond());
 
         assertThat(decoder().decode(KEY_A.sign(claims))).isNotNull();
 
@@ -80,16 +85,28 @@ class FinGuardOpsJwtDecoderIntegrationTest {
                 "USER",
                 List.of("FDS_VIEWER")
         );
-        recentlyExpired.put("iat", now.minusSeconds(120).getEpochSecond());
-        recentlyExpired.put("exp", now.minusSeconds(59).getEpochSecond());
+        recentlyExpired.put(
+                "iat",
+                VALIDATION_TIME.minusSeconds(120).getEpochSecond()
+        );
+        recentlyExpired.put(
+                "exp",
+                VALIDATION_TIME.minusSeconds(60).getEpochSecond()
+        );
         assertThat(decoder().decode(KEY_A.sign(recentlyExpired))).isNotNull();
 
         Map<String, Object> maximumLifetime = claims(
                 "USER",
                 List.of("FDS_VIEWER")
         );
-        maximumLifetime.put("iat", now.minusSeconds(5).getEpochSecond());
-        maximumLifetime.put("exp", now.plusSeconds(895).getEpochSecond());
+        maximumLifetime.put(
+                "iat",
+                VALIDATION_TIME.minusSeconds(5).getEpochSecond()
+        );
+        maximumLifetime.put(
+                "exp",
+                VALIDATION_TIME.plusSeconds(895).getEpochSecond()
+        );
         assertThat(decoder().decode(KEY_A.sign(maximumLifetime))).isNotNull();
     }
 
@@ -119,7 +136,7 @@ class FinGuardOpsJwtDecoderIntegrationTest {
                 Map.of("x5u", "https://attacker.example.test/cert"),
                 claims("USER", List.of("FDS_VIEWER"))
         ));
-        assertRejected(KEY_B.validUserToken());
+        assertRejected(KEY_B.validUserToken(VALIDATION_TIME));
         assertRejected("not-a-jwt");
     }
 
@@ -175,7 +192,6 @@ class FinGuardOpsJwtDecoderIntegrationTest {
 
     @Test
     void rejectsMissingMalformedAndOutOfRangeTimeClaims() {
-        Instant now = Instant.now();
         rejectMissingClaim("iat");
         rejectMissingClaim("exp");
         rejectClaim("iat", "not-a-numeric-date");
@@ -183,43 +199,69 @@ class FinGuardOpsJwtDecoderIntegrationTest {
         rejectClaim("nbf", "not-a-numeric-date");
 
         Map<String, Object> futureIat = claims("USER", List.of("FDS_VIEWER"));
-        futureIat.put("iat", now.plusSeconds(65).getEpochSecond());
-        futureIat.put("exp", now.plusSeconds(300).getEpochSecond());
+        futureIat.put(
+                "iat",
+                VALIDATION_TIME.plusSeconds(61).getEpochSecond()
+        );
+        futureIat.put(
+                "exp",
+                VALIDATION_TIME.plusSeconds(300).getEpochSecond()
+        );
         assertRejected(KEY_A.sign(futureIat));
 
         Map<String, Object> futureNbf = claims("USER", List.of("FDS_VIEWER"));
-        futureNbf.put("nbf", now.plusSeconds(65).getEpochSecond());
+        futureNbf.put(
+                "nbf",
+                VALIDATION_TIME.plusSeconds(61).getEpochSecond()
+        );
         assertRejected(KEY_A.sign(futureNbf));
 
         Map<String, Object> expired = claims("USER", List.of("FDS_VIEWER"));
-        expired.put("iat", now.minusSeconds(300).getEpochSecond());
-        expired.put("exp", now.minusSeconds(65).getEpochSecond());
+        expired.put(
+                "iat",
+                VALIDATION_TIME.minusSeconds(300).getEpochSecond()
+        );
+        expired.put(
+                "exp",
+                VALIDATION_TIME.minusSeconds(61).getEpochSecond()
+        );
         assertRejected(KEY_A.sign(expired));
 
         Map<String, Object> excessiveLifetime = claims(
                 "USER",
                 List.of("FDS_VIEWER")
         );
-        excessiveLifetime.put("iat", now.minusSeconds(5).getEpochSecond());
-        excessiveLifetime.put("exp", now.plusSeconds(896).getEpochSecond());
+        excessiveLifetime.put(
+                "iat",
+                VALIDATION_TIME.minusSeconds(5).getEpochSecond()
+        );
+        excessiveLifetime.put(
+                "exp",
+                VALIDATION_TIME.plusSeconds(896).getEpochSecond()
+        );
         assertRejected(KEY_A.sign(excessiveLifetime));
     }
 
     @Test
     void cachesKnownKeyRotatesToNewKidAndRejectsReachableUnknownKid() {
         JwtDecoder decoder = decoder();
-        assertThat(decoder.decode(KEY_A.validUserToken())).isNotNull();
+        assertThat(decoder.decode(KEY_A.validUserToken(VALIDATION_TIME)))
+                .isNotNull();
         assertThat(jwkServer.requestCount()).isEqualTo(1);
 
         jwkServer.serveFailure(500, "upstream failure sentinel");
-        assertThat(decoder.decode(KEY_A.validUserToken())).isNotNull();
+        assertThat(decoder.decode(KEY_A.validUserToken(VALIDATION_TIME)))
+                .isNotNull();
         assertThat(jwkServer.requestCount()).isEqualTo(1);
 
         jwkServer.serveKeys(KEY_A.publicJwk(), KEY_B.publicJwk());
-        assertThat(decoder.decode(KEY_B.validUserToken())).isNotNull();
+        assertThat(decoder.decode(KEY_B.validUserToken(VALIDATION_TIME)))
+                .isNotNull();
         assertThat(jwkServer.requestCount()).isEqualTo(2);
 
-        assertThatThrownBy(() -> decoder.decode(KEY_C.validUserToken()))
+        assertThatThrownBy(() -> decoder.decode(
+                KEY_C.validUserToken(VALIDATION_TIME)
+        ))
                 .isInstanceOf(JwtException.class);
         assertThat(jwkServer.requestCount()).isEqualTo(3);
     }
@@ -233,7 +275,8 @@ class FinGuardOpsJwtDecoderIntegrationTest {
                         Duration.ofMillis(250),
                         Duration.ofMillis(250),
                         true
-                )
+                ),
+                VALIDATION_CLOCK
         );
     }
 
@@ -243,7 +286,8 @@ class FinGuardOpsJwtDecoderIntegrationTest {
     ) {
         return new LinkedHashMap<>(KEY_A.validClaims(
                 principalType,
-                roles.stream().map(String::valueOf).toList()
+                roles.stream().map(String::valueOf).toList(),
+                VALIDATION_TIME
         ));
     }
 
