@@ -312,6 +312,11 @@ Kafka
 
 * React
 * TypeScript
+* Vite
+* React Router
+* Vitest·Testing Library
+* React·TypeScript·Vite foundation과 Router, public health client 구현. OIDC, token, 권한 UI,
+  거래·사건·운영 업무 화면은 아직 구현되지 않음
 
 ### Backend
 
@@ -447,6 +452,9 @@ Kafka
 * strict 입력 검증과 제한된 non-web context를 사용하는 inspect·단건 recover one-shot
   Runner 및 운영 runbook 구현
 * Backend와 AI Service 전용 GitHub Actions CI 구성
+* React·TypeScript·Vite 기반 Frontend foundation, `createBrowserRouter` 기반 Router(`/`,
+  `/health`, `*`)와 App Shell, public Backend `GET /api/health` client와 loading·success·error
+  화면 상태 구현. OIDC, token, 권한 UI와 거래·사건·운영 업무 화면은 아직 구현되지 않음
 
 Backend Security 설정은 `FINGUARDOPS_SECURITY_ISSUER`,
 `FINGUARDOPS_SECURITY_JWK_SET_URI`, `FINGUARDOPS_SECURITY_ALLOWED_ORIGINS`와 JWK

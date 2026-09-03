@@ -56,6 +56,15 @@
 - FastAPI AI Service의 Python 3.12·uv 프로젝트, 애플리케이션 진입점과 Health API
 - Backend와 AI Service 전용 GitHub Actions 테스트 Workflow
 - 로컬 Grafana loopback UI, Prometheus datasource와 16-panel dashboard file provisioning·검증
+- Frontend React·TypeScript·Vite 기반, strict TypeScript project reference와 production 코드
+  전용 compile 경계(테스트·test-support는 별도 strict `tsconfig.test.json`으로 독립 typecheck),
+  ESLint, Vitest·Testing Library 검증 경계, `createBrowserRouter` 기반 Router(`/`, `/health`,
+  `*`)와 App Shell 구현. `src/main.tsx`의 `bootstrap()`이 React root 생성·render 전에
+  `VITE_API_BASE_URL`을 fail-fast로 1회 검증하고, public Backend `GET /api/health` client
+  (Authorization 미사용, 자동 retry 0회, fetch 시작부터 body·JSON parsing까지 단일 5초
+  deadline, 공식 정규식 전체 일치 기준 `X-Trace-Id` 처리)와 React StrictMode 아래에서도 논리적
+  최초 fetch가 1회만 실행되는 module-level in-flight 요청 공유(영구 캐시 없음, unmount 이후
+  미갱신)를 구현
 
 현재 백엔드는 Health Check, 거래 접수·조회, 행동 이벤트 접수와 내부 Rule
 평가용 조회를 구현한다. 거래·멱등·행동 이벤트,
@@ -106,7 +115,8 @@ AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 
   Pydantic 요청·응답 DTO와 분석 HTTP 경계까지 구현되었으며 ML·AI 리포트 없음
 - Spring Boot Rule v1 Client와 내부 분석 오케스트레이션·결과 채택은
   구현되었으나 거래 접수 Service와 최종 업무 흐름 연결은 없음
-- `frontend/`: 역할 규칙과 자리표시자만 있으며 React 구현 없음
+- `frontend/`: React·TypeScript·Vite foundation, Router와 public health client가 구현되었으며
+  OIDC·token·권한 UI와 거래·사건·운영 업무 화면은 구현되지 않음
 - `infra/`: Issue #196의 로컬 Compose Prometheus scrape·External Risk 검증 fixture,
   Issue #199의 service 수준 recording rule 14개와 Issue #201의 로컬 실패율 alert rule
   6개·deterministic test, Issue #203의 로컬 Alertmanager routing·signal별 inhibition·
