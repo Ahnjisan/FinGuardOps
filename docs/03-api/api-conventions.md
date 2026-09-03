@@ -433,6 +433,12 @@ Issue #219·#221 구현에서는
 malformed header/token, 서명·시간·issuer·strict audience·필수 claim·role 검증 실패와
 reachable JWKS의 unknown `kid`는 401이다.
 
+Issue #225 local/manual fixture의 issuer는
+`https://local-jwt.fixture.finguardops.invalid`, audience는 정확히
+`["finguardops-backend-api"]`이며 JWK transport만 Backend namespace의
+`http://127.0.0.1:8002/oauth2/jwks`를 사용한다. 이 값은 선택형 Compose overlay에만 있고
+production 기본값·API 요청/응답 계약을 바꾸지 않는다. token 발급 HTTP API는 없다.
+
 | JWK·decoder 실패 | HTTP 상태·code | 공개 message | `WWW-Authenticate` |
 | --- | --- | --- | --- |
 | 명확한 timeout cause chain | `503 DEPENDENCY_TIMEOUT` | `인증 서비스를 제한 시간 안에 사용할 수 없습니다.` | 없음 |

@@ -143,6 +143,11 @@ Security의 401·403으로 바뀌지 않도록 matcher 순서와 management cont
 따른다. 현재 network 격리·loopback bind는 접근면만 줄일 뿐 인증·TLS 구현이 아니다.
 Grafana·Alertmanager 자체 인증 계약은 이번 결정으로 변경하지 않는다.
 
+Issue #225 local JWT fixture가 중단·지연·malformed JWKS 상태여도 management `8081`의 health와
+Prometheus scrape는 업무 Resource Server와 독립적이어야 한다. fixture는 Backend loopback
+`127.0.0.1:8002`에만 있고 observability service는 해당 loopback을 공유하지 않는다. management
+요청에 fixture JWT를 추가하지 않는다.
+
 ## 6. 로컬 Docker Compose 경계
 
 [`Prometheus 로컬 scrape runbook`](../09-deployment/prometheus-local-scrape-runbook.md)은
