@@ -389,7 +389,9 @@ USER actor UUID, token, claim과 principal 원문은 응답·로그·metadata에
 - test는 ephemeral asymmetric key 또는 test-only decoder를 사용하되 production과 같은
   claim validator를 실행한다.
 - MockMvc JWT fixture는 exact claim 타입, USER·SERVICE 구분과 role mapping을 재현한다.
-- local Compose issuer/JWK fixture는 아직 없고 후속 Issue에서 적용한다.
+- Issue #225의 선택형 Compose overlay에는 production Authorization Server가 아닌 local/manual
+  fixture가 있다. 시작 시 ephemeral RSA key를 만들고 `127.0.0.1:8002`의 readiness·JWKS만
+  제공하며 발급·rotation·fault는 tmpfs의 private Unix socket과 container CLI로 제한한다.
 - production과 기본 runtime issuer/JWK는 HTTPS만 허용한다. test의 in-process JWK server는
   명시적인 loopback 전용 opt-in에서만 HTTP를 허용한다.
 - production issuer/JWK는 HTTPS가 아니면 fail-closed한다.
@@ -402,8 +404,9 @@ USER actor UUID, token, claim과 principal 원문은 응답·로그·metadata에
 현재 Compose의 Backend application `8080`과 management `8081`은 host에 publish되지
 않는다. Prometheus는 internal observability network에서 management `8081`을 scrape한다.
 Grafana·Alertmanager 계약은 이 문서 Issue에서 바꾸지 않는다. 기존 거래 traffic
-generator는 Authorization header가 없으므로 SERVICE token 적용 후속 Issue에서 변경해야
-한다. management scrape에는 업무 JWT를 추가하지 않는다.
+generator의 기존 무인증 예시는 base Compose에서 401이다. Issue #225 verifier는 machine
+mode에서 JWT를 캡처하고 stdin/memory로만 전달해 인증된 traffic을 별도 실행한다. management
+scrape에는 업무 JWT를 추가하지 않는다.
 
 ## 12. 위협과 통제
 
@@ -438,7 +441,7 @@ method security는 Issue #221에서 구현되었다. 아래 표는 구현 상태
 | --- | --- | --- | --- | --- | --- | --- |
 | 완료. `[Backend/Security] Endpoint RBAC와 USER·SERVICE authority matrix 적용` | deny-by-default와 endpoint 최소 권한 | request matcher, role converter, method security | 없음 | 13개 endpoint·401·403, role 혼용 | #219 | full-stack JWT·method security 검증; 구현 |
 | 완료. `[Backend/Audit] 사건 write USER actor와 InvestigationNote author 연결` | 검증 principal을 성공 감사에 연결 | provider/service actor, note author, V14 | 적용 | 성공·stale·rollback·기존 SYSTEM 호환 | #221 | 동시성·migration 검증; 구현 |
-| 1. `[Infra/Docs] Local Compose·runbook JWT fixture와 인증 E2E 적용` | local issuer와 SERVICE traffic | Compose, fixture, env example, runbook | 없음 | build·wait·traffic·scrape·alert·restart | #219·#221 | Docker E2E; 미구현 |
+| 완료. `[Infra/Docs] Local Compose·runbook JWT fixture와 인증 E2E 적용` | local issuer와 SERVICE traffic | 선택형 Compose overlay, fixture, verifier, runbook | 없음 | build·wait·traffic·scrape·alert·restart | #219·#221 | local/manual Docker E2E 경계 구현 |
 | 2. `[Frontend] OIDC 로그인·token·권한 UI 구현` | SPA 인증·권한 UX | PKCE, memory token, API client, 401·403 UI | 없음 | browser login·expiry·권한 UI | AS 제품, #219·#221 | 브라우저/AS E2E; 미구현 |
 
 ## 14. 구현 검증 계약

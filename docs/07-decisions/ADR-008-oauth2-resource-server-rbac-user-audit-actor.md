@@ -192,9 +192,13 @@ account lifecycle과 key 운영 책임이 금융 업무 Backend에 결합되고 
 - 사건 workflow·resolution·조사 메모 생성 네 Service method의 `@PreAuthorize`
 - `CurrentAuditActorProvider`, 네 USER writer와 V14 USER/SYSTEM actor·author CHECK
 
+Issue #225에서 선택형 local/manual Compose overlay의 ephemeral RS256 issuer/JWK fixture,
+private Unix socket CLI, 7개 고정 test identity와 인증 E2E verifier를 구현했다. fixture는
+production Authorization Server가 아니며 base/production 설정, dependency와 workflow를
+변경하지 않는다.
+
 다음은 아직 구현되지 않았다.
 
-- local issuer/JWK fixture와 SERVICE token traffic generator
 - Frontend OIDC 로그인·token·권한 UI
 - production Authorization Server·mTLS·authentication proxy
 
@@ -204,7 +208,7 @@ OAuth2 Resource Server 기반과 401·403·trace 경계는 Issue #219에서, end
 method security는 Issue #221에서, USER actor는 Issue #223에서 구현되었다. 남은 Issue는
 기술 책임과 검증 경계를 분리해 수행한다.
 
-1. `[Infra/Docs] Local Compose·runbook JWT fixture와 인증 E2E 적용`
+1. 완료. `[Infra/Docs] Local Compose·runbook JWT fixture와 인증 E2E 적용`
 2. `[Frontend] OIDC 로그인·token·권한 UI 구현`
 
 Spring Security 개념과 JWT 검증 동작은 공식 문서를 참고하되 실제 dependency와 제품은 각

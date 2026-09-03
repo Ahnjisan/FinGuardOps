@@ -2594,3 +2594,26 @@ trap - EXIT INT TERM
 Prometheus·Alertmanager, 외부 Slack·email·SMS·PagerDuty, Kubernetes·AWS·OpenTelemetry,
 production SLA·SLO·threshold를 구현하지 않는다. 추가 사건·AI·복구 metric, completion-gap
 alert와 장기 `IN_PROGRESS` Gauge도 계속 미구현이다.
+
+## 12. Issue #225 인증 overlay 회귀
+
+기존 8-service runbook의 `start_bounded_traffic`은 인증이 비활성인 base Compose 계약으로만
+유지한다. 실제 JWT 인증 traffic을 결합할 때는 해당 함수를 재사용하지 않고
+`infra/compose.local-jwt-e2e.yml`을 두 번째 Compose 파일로 추가한다. merged config는
+9 service·4 network·3 named volume이며 기존 Prometheus·Grafana host bind만 남아야 한다.
+fixture JWT는 machine CLI의 캡처 pipe에서 worker stdin과 process memory로만 전달하고 traffic
+log, argv, environment, 파일과 일반 stdout에 쓰지 않는다.
+
+인증 overlay에서 이 문서의 RuleVersion 발행·activation, External Risk·AI 장애/복구,
+raw Meter 10, recording rule 14, alert rule 6, Alertmanager firing/resolved, Grafana 중단 격리와
+one-shot 회귀를 반복한다. non-web recovery·rule publication에는 JWT를 추가하지 않고 자동
+처리 AuditLog actor는 계속 SYSTEM이다. 상세 실행·rotation·Backend namespace sidecar lifecycle과
+cleanup은 [`local-jwt-auth-e2e-runbook.md`](./local-jwt-auth-e2e-runbook.md)를 따른다. 특히
+인증 overlay alert에는 그 문서의
+[`인증 overlay 전용 alert traffic worker`](./local-jwt-auth-e2e-runbook.md#71-인증-overlay-전용-alert-traffic-worker)를
+명령 그대로 사용한다. worker 시작 직전 `service-transaction-ingestor` machine token을 새로
+발급하고 최대 600초로 제한한다. 시작 시 180초, 실행 중 120초 safety boundary를 검사하며
+경계 도달 시 기존 worker를 stop·wait한 다음 새 token으로 같은 phase를 재시작한다. `401`을
+failure `503` 또는 recovery `201`로 집계해서는 안 되며 token 발급·교체 실패는 즉시 전체
+시나리오 실패다. External Risk mock과 JWT fixture는 모두 Backend namespace를 공유하므로
+복구에는 `up -d --no-deps`와 namespace·health bounded polling을 사용한다.

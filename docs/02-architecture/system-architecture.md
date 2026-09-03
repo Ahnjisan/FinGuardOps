@@ -887,10 +887,11 @@ React는 서비스 상태, 배포 버전, 업무 영향, AI 비용과 장애·�
   application 요청은 deny-by-default로 거부한다. 사건 workflow·resolution·조사 메모 생성은
   같은 authority의 method security로 이중 보호한다. 네 사건 write는 검증된 USER
   principal을 AuditLog actor와 InvestigationNote author에 연결한다.
-- Authorization Server 제품·구축, Local Compose JWT issuer/JWK fixture와 traffic generator
-  SERVICE token, Frontend OIDC·Authorization Code + PKCE, production management mTLS·인증
-  proxy는 후속 구현이다. 기존 JWT 없는 local traffic generator 업무 요청은 현재 401이며
-  Local 인증 E2E는 후속 Issue 전까지 미완성이다.
+- Authorization Server 제품·구축, Frontend OIDC·Authorization Code + PKCE, production
+  management mTLS·인증 proxy는 후속 구현이다. Issue #225의 선택형 local/manual overlay는
+  Backend namespace에서만 접근할 수 있는 ephemeral RS256 JWKS fixture와 private socket CLI를
+  제공한다. 이는 production Authorization Server가 아니며 base Compose의 JWT 없는 업무
+  요청은 계속 401이다.
 - 실제 금융거래, 본인인증, 거래 차단과 고객 제재는 Mock으로 한정한다.
 
 ## 17. Observability 경계
@@ -1043,24 +1044,16 @@ Grafana는 Prometheus·Backend·Alertmanager의 시작 또는 health dependency�
   업무 AuditLog에서 제외
 
 OAuth2 Resource Server 기반과 401·403·trace 경계는 Issue #219에서, endpoint RBAC와
-method security는 Issue #221에서, USER 감사 주체는 Issue #223에서 구현되었다. 남은 보안
-후속 Issue는 다음 두 개다.
+method security는 Issue #221에서, USER 감사 주체는 Issue #223에서 구현되었다. Issue #225의
+local/manual JWT fixture와 인증 E2E도 구현되었다. 남은 보안 후속 Issue는 다음과 같다.
 
-1. Local Compose·runbook JWT fixture와 인증 E2E
-   - Resource Server와 RBAC 적용 후 local issuer/JWK fixture 또는 승인된 local
-     Authorization Server, SERVICE token bootstrap과 traffic generator `Authorization`
-     header를 연결한다.
-   - private key·token을 저장하지 않고 기존 Prometheus·recording·alert·Alertmanager·
-     Grafana E2E 회귀와 장시간 Compose 검증을 수행한다.
-2. Frontend OIDC·token·권한 UI
+1. Frontend OIDC·token·권한 UI
    - Resource Server·RBAC와 Authorization Server 제품 결정 후 Authorization Code + PKCE,
      access token memory 보관, API `Authorization` header와 login·logout을 구현한다.
    - expiry·401·403 UX와 role·authority 기반 UI를 브라우저 경계에서 검증한다.
 
-1과 2는 서로 다른 Issue다. Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend
-OIDC도 Compose traffic fixture의 일부가 아니다. 남은 후속 Issue는 두 개이며 토큰
-절약을 위한 인위적 분할이 아니라 기술 책임·선행 관계·실패 영향·검증 시간이 다르기 때문에
-분리한다.
+Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend OIDC도 Compose traffic fixture의
+일부가 아니다. 기술 책임·선행 관계·실패 영향·검증 시간이 다르므로 별도 Issue로 유지한다.
 
 - External Risk public intake 연결과 실패 Snapshot 저장 호출. 성공 Snapshot DB 영속화는 별도 승인 시 검토
 - production container 배포 환경과 Compose 고도화

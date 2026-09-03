@@ -465,22 +465,19 @@ Public 최종 동기 거래 접수와 실제 External Risk HTTP Provider, 공개
 * 불확실 상태 재실행과 `FAILED` 재분석은 별도 operation scope·승인 계약 전까지 금지
 
 보안 기반과 endpoint RBAC는 Issue #219와 Issue #221에서, 사건 USER 감사 주체 연결은
-Issue #223에서 구현되었습니다. 남은 보안 후속
-순서는 다음과 같습니다.
+Issue #223에서 구현되었습니다. Issue #225에서는 production Authorization Server가 아닌
+local/manual 전용 RS256 fixture와 Compose 인증 E2E를 추가했습니다. 실행·token 비노출·
+rotation·sidecar 재생성 절차는
+[`Local JWT 인증 E2E runbook`](docs/09-deployment/local-jwt-auth-e2e-runbook.md)을 따릅니다.
+남은 보안 후속 순서는 다음과 같습니다.
 
-1. Local Compose·runbook JWT fixture와 인증 E2E
-   - Resource Server와 RBAC 적용 후 local issuer/JWK fixture 또는 승인된 local
-     Authorization Server, SERVICE token bootstrap과 traffic generator `Authorization`
-     header를 연결합니다.
-   - private key·token을 저장하지 않고 기존 Prometheus·recording·alert·Alertmanager·
-     Grafana E2E 회귀와 장시간 Compose 검증을 수행합니다.
-2. Frontend OIDC·token·권한 UI
+1. Frontend OIDC·token·권한 UI
    - Resource Server·RBAC와 Authorization Server 제품 결정 후 Authorization Code + PKCE,
      access token memory 보관, API `Authorization` header와 login·logout을 구현합니다.
    - expiry·401·403 UX와 role·authority 기반 UI를 브라우저 경계에서 검증합니다.
 
-1과 2는 서로 다른 Issue다. Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend
-OIDC도 Compose traffic fixture의 일부가 아니다. 이 세 단계는 토큰 절약을 위한 인위적
+Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend OIDC도 Compose traffic fixture의
+일부가 아니다. 이 세 단계는 토큰 절약을 위한 인위적
 분할이 아니라 기술 책임·선행 관계·실패 영향·검증 시간이 다르기 때문에 분리한다.
 
 * ML 추론
@@ -571,6 +568,14 @@ PostgreSQL과 AI Service는 application network DNS를 사용하지만 External 
 Backend의 network namespace를 공유하며 `127.0.0.1:8001`에만 bind합니다. Backend도
 loopback으로 fixture를 호출하므로 non-production plain HTTP loopback 제한은 유지됩니다.
 이 sidecar 경계는 production External Risk Provider 정책이나 인증·TLS를 대체하지 않습니다.
+
+Issue #225의 선택형 `infra/compose.local-jwt-e2e.yml` overlay는 같은 Backend network
+namespace에 local JWT fixture를 하나 더 추가하고 JWKS를 `127.0.0.1:8002`에만 bind합니다.
+Backend의 issuer는 고정 HTTPS 식별자이고 plain HTTP JWK opt-in은 이 overlay에만 있습니다.
+발급·rotation·fault 제어는 private Unix socket과 container CLI로만 수행하며 HTTP token
+endpoint, host port, 추가 network·volume은 없습니다. Backend recreate 전 두 sidecar를
+제거하고 recreate 후 둘 다 새 namespace에 생성해야 합니다. base Compose와 production
+기본값은 변경하지 않으며 전체 인증 E2E는 local/manual입니다.
 
 로컬 recording rule은 5분 window와 30초 evaluation으로 service 수준의 rate·failure
 ratio·평균 duration만 계산합니다. 로컬 alert rule 6개는 거래 terminal, External Risk,
