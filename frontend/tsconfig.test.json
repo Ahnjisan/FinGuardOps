@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+
+    "types": ["node", "vitest/globals", "@testing-library/jest-dom"]
+  },
+  "include": [
+    "src/vite-env.d.ts",
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx",
+    "src/test/**/*.ts",
+    "src/test/**/*.tsx"
+  ]
+}
