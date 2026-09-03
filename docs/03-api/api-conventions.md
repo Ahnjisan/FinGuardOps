@@ -4,7 +4,7 @@
 
 이 문서는 FinGuardOps의 Spring Boot REST API가 공통으로 따를 표현 형식, 식별자, 금액, 페이지네이션, 멱등성, 오류 응답과 추적 원칙을 정의한다.
 
-이 문서는 이후 Controller, 요청·응답 DTO, Validation, Service, 테스트와 OpenAPI 계약의 기준이다. Java 타입, DB 컬럼과 OpenTelemetry 전파 헤더는 이 문서에서 확정하지 않는다. 인증·인가의 목표 API 계약은 [`security-architecture.md`](../02-architecture/security-architecture.md)와 [`ADR-008`](../07-decisions/ADR-008-oauth2-resource-server-rbac-user-audit-actor.md)을 따른다. 현재 Spring Security·JWT·RBAC는 구현되지 않았다.
+이 문서는 이후 Controller, 요청·응답 DTO, Validation, Service, 테스트와 OpenAPI 계약의 기준이다. Java 타입, DB 컬럼과 OpenTelemetry 전파 헤더는 이 문서에서 확정하지 않는다. 구현된 Spring Security·JWT·endpoint RBAC 계약은 [`security-architecture.md`](../02-architecture/security-architecture.md)와 [`ADR-008`](../07-decisions/ADR-008-oauth2-resource-server-rbac-user-audit-actor.md)을 따른다. USER Audit actor는 아직 구현되지 않았다.
 
 ## 2. 기본 경로
 
@@ -407,9 +407,16 @@ JSON·필수 헤더·필드 형식 오류와 도메인 규칙 위반을 구분�
 
 서버의 예기치 않은 오류에는 `500 Internal Server Error`가 필요할 수 있다. 사용자가 지정한 주요 상태 코드 외 상태를 추가할 때는 API 계약 검토를 거친다.
 
+승인된 12개 업무 method·path는 exact authority matcher를 통과해야 한다. credential이 없는
+미승인 path·method·trailing slash는 401, valid JWT이면 403이다. matcher를 통과한 뒤 실제
+업무 resource가 없으면 기존 404를 유지한다. 현재 embedded Tomcat 통합 테스트에서 encoded
+slash는 authorization 전에 400으로 거부되어 `X-Trace-Id`가 없고, encoded period·percent·
+semicolon은 승인 matcher와 불일치해 401과 `X-Trace-Id`를 반환한다. container·firewall의
+선거부를 억지로 같은 상태로 바꾸기 위해 Security 설정을 완화하지 않는다.
+
 ### 7.4 구현된 Security 오류 계약
 
-Issue #219 구현에서는
+Issue #219·#221 구현에서는
 `TraceIdFilter`가 Spring Security보다 먼저 요청 traceId를 확정하고, filter 단계의
 `AuthenticationEntryPoint`와 `AccessDeniedHandler`가 `GlobalExceptionHandler`에 의존하지
 않고 공통 body를 작성한다.
@@ -506,7 +513,7 @@ OpenTelemetry, W3C Trace Context의 `traceparent`, 외부 HTTP 호출, Kafka와 
 
 ## 10. 제외 범위
 
-- 승인된 인증·인가·CORS 계약의 production 구현
+- 사건 write·조사 메모의 USER Audit actor 구현
 - Java Controller, DTO, Service와 Exception Handler
 - JPA Entity와 PostgreSQL DDL
 - OpenAPI YAML

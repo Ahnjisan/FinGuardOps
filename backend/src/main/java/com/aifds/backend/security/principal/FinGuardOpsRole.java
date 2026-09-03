@@ -8,61 +8,61 @@ public enum FinGuardOpsRole {
 
     FDS_VIEWER(
             FinGuardOpsPrincipal.Type.USER,
-            "transaction:read",
-            "behavior-event:read",
-            "detection:read",
-            "case:read",
-            "case-note:read",
-            "case-audit:read",
-            "ai-report:read"
+            FinGuardOpsAuthority.TRANSACTION_READ,
+            FinGuardOpsAuthority.BEHAVIOR_EVENT_READ,
+            FinGuardOpsAuthority.DETECTION_READ,
+            FinGuardOpsAuthority.CASE_READ,
+            FinGuardOpsAuthority.CASE_NOTE_READ,
+            FinGuardOpsAuthority.CASE_AUDIT_READ,
+            FinGuardOpsAuthority.AI_REPORT_READ
     ),
     FDS_ANALYST(
             FinGuardOpsPrincipal.Type.USER,
-            "transaction:read",
-            "behavior-event:read",
-            "detection:read",
-            "case:read",
-            "case-note:read",
-            "case-audit:read",
-            "ai-report:read",
-            "case:workflow:write",
-            "case-note:write",
-            "ai-report:create"
+            FinGuardOpsAuthority.TRANSACTION_READ,
+            FinGuardOpsAuthority.BEHAVIOR_EVENT_READ,
+            FinGuardOpsAuthority.DETECTION_READ,
+            FinGuardOpsAuthority.CASE_READ,
+            FinGuardOpsAuthority.CASE_NOTE_READ,
+            FinGuardOpsAuthority.CASE_AUDIT_READ,
+            FinGuardOpsAuthority.AI_REPORT_READ,
+            FinGuardOpsAuthority.CASE_WORKFLOW_WRITE,
+            FinGuardOpsAuthority.CASE_NOTE_WRITE,
+            FinGuardOpsAuthority.AI_REPORT_CREATE
     ),
     FDS_APPROVER(
             FinGuardOpsPrincipal.Type.USER,
-            "transaction:read",
-            "behavior-event:read",
-            "detection:read",
-            "case:read",
-            "case-note:read",
-            "case-audit:read",
-            "ai-report:read",
-            "case:resolution:write"
+            FinGuardOpsAuthority.TRANSACTION_READ,
+            FinGuardOpsAuthority.BEHAVIOR_EVENT_READ,
+            FinGuardOpsAuthority.DETECTION_READ,
+            FinGuardOpsAuthority.CASE_READ,
+            FinGuardOpsAuthority.CASE_NOTE_READ,
+            FinGuardOpsAuthority.CASE_AUDIT_READ,
+            FinGuardOpsAuthority.AI_REPORT_READ,
+            FinGuardOpsAuthority.CASE_RESOLUTION_WRITE
     ),
     RULE_OPERATOR(
             FinGuardOpsPrincipal.Type.USER,
-            "rule-version:read",
-            "rule-version:publish"
+            FinGuardOpsAuthority.RULE_VERSION_READ,
+            FinGuardOpsAuthority.RULE_VERSION_PUBLISH
     ),
     RECOVERY_OPERATOR(
             FinGuardOpsPrincipal.Type.USER,
-            "recovery:inspect",
-            "recovery:execute"
+            FinGuardOpsAuthority.RECOVERY_INSPECT,
+            FinGuardOpsAuthority.RECOVERY_EXECUTE
     ),
     PLATFORM_ADMIN(
             FinGuardOpsPrincipal.Type.USER,
-            "platform:read",
-            "ai-operations:read",
-            "ai-usage:read"
+            FinGuardOpsAuthority.PLATFORM_READ,
+            FinGuardOpsAuthority.AI_OPERATIONS_READ,
+            FinGuardOpsAuthority.AI_USAGE_READ
     ),
     TRANSACTION_INGESTOR(
             FinGuardOpsPrincipal.Type.SERVICE,
-            "transaction:intake"
+            FinGuardOpsAuthority.TRANSACTION_INTAKE
     ),
     BEHAVIOR_INGESTOR(
             FinGuardOpsPrincipal.Type.SERVICE,
-            "behavior-event:intake"
+            FinGuardOpsAuthority.BEHAVIOR_EVENT_INTAKE
     );
 
     private final FinGuardOpsPrincipal.Type principalType;

@@ -17,6 +17,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.convert.converter.Converter;
 import org.springframework.core.env.Environment;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -30,20 +31,74 @@ import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.security.oauth2.server.resource.web.DefaultBearerTokenResolver;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.context.NullSecurityContextRepository;
+import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
+import org.springframework.security.web.util.matcher.RequestMatcher;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.CorsUtils;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Predicate;
+
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.BEHAVIOR_EVENT_INTAKE;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_AUDIT_READ;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_NOTE_READ;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_NOTE_WRITE;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_READ;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_RESOLUTION_WRITE;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_WORKFLOW_WRITE;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.TRANSACTION_INTAKE;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.TRANSACTION_READ;
 
 @Configuration(proxyBeanMethods = false)
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
 @EnableConfigurationProperties(FinGuardOpsSecurityProperties.class)
 public class FinGuardOpsSecurityConfiguration {
+
+    private static final List<CorsEndpoint> APPLICATION_CORS_ENDPOINTS = List.of(
+            new CorsEndpoint(HttpMethod.GET, "/api/health"),
+            new CorsEndpoint(HttpMethod.POST, "/api/v1/transactions"),
+            new CorsEndpoint(HttpMethod.GET, "/api/v1/transactions"),
+            new CorsEndpoint(
+                    HttpMethod.GET,
+                    "/api/v1/transactions/{transactionId}"
+            ),
+            new CorsEndpoint(HttpMethod.POST, "/api/v1/behavior-events"),
+            new CorsEndpoint(HttpMethod.GET, "/api/v1/cases"),
+            new CorsEndpoint(HttpMethod.GET, "/api/v1/cases/{caseId}"),
+            new CorsEndpoint(
+                    HttpMethod.PATCH,
+                    "/api/v1/cases/{caseId}/status"
+            ),
+            new CorsEndpoint(
+                    HttpMethod.PATCH,
+                    "/api/v1/cases/{caseId}/assignee"
+            ),
+            new CorsEndpoint(
+                    HttpMethod.POST,
+                    "/api/v1/cases/{caseId}/resolution"
+            ),
+            new CorsEndpoint(
+                    HttpMethod.POST,
+                    "/api/v1/cases/{caseId}/notes"
+            ),
+            new CorsEndpoint(
+                    HttpMethod.GET,
+                    "/api/v1/cases/{caseId}/notes"
+            ),
+            new CorsEndpoint(
+                    HttpMethod.GET,
+                    "/api/v1/cases/{caseId}/audit-logs"
+            )
+    );
+    private static final CorsEndpoint APPLICATION_ACTUATOR_HEALTH =
+            new CorsEndpoint(HttpMethod.GET, "/actuator/health");
 
     @Bean
     SecurityFilterChain applicationSecurityFilterChain(
@@ -59,6 +114,11 @@ public class FinGuardOpsSecurityConfiguration {
                 new DefaultBearerTokenResolver();
         bearerTokenResolver.setAllowFormEncodedBodyParameter(false);
         bearerTokenResolver.setAllowUriQueryParameter(false);
+        PathPatternRequestMatcher.Builder paths =
+                PathPatternRequestMatcher.withDefaults();
+        List<CorsEndpoint> corsEndpoints = applicationCorsEndpoints(
+                environment
+        );
 
         http
                 .securityMatcher(request -> isApplicationListenerRequest(
@@ -82,11 +142,63 @@ public class FinGuardOpsSecurityConfiguration {
                 .httpBasic(basic -> basic.disable())
                 .logout(logout -> logout.disable())
                 .authorizeHttpRequests(authorize -> authorize
-                        .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
-                        .requestMatchers(HttpMethod.GET, "/api/health")
+                        .requestMatchers(approvedPreflightMatcher(
+                                paths,
+                                corsEndpoints
+                        ))
+                        .permitAll()
+                        .requestMatchers(paths.matcher(
+                                HttpMethod.GET,
+                                "/api/health"
+                        ))
                         .permitAll()
                         .requestMatchers("/actuator/**").permitAll()
-                        .anyRequest().authenticated()
+                        .requestMatchers(paths.matcher(
+                                HttpMethod.POST,
+                                "/api/v1/transactions"
+                        )).hasAuthority(TRANSACTION_INTAKE)
+                        .requestMatchers(paths.matcher(
+                                HttpMethod.POST,
+                                "/api/v1/behavior-events"
+                        )).hasAuthority(BEHAVIOR_EVENT_INTAKE)
+                        .requestMatchers(paths.matcher(
+                                HttpMethod.GET,
+                                "/api/v1/transactions"
+                        ), paths.matcher(
+                                HttpMethod.GET,
+                                "/api/v1/transactions/{transactionId}"
+                        )).hasAuthority(TRANSACTION_READ)
+                        .requestMatchers(paths.matcher(
+                                HttpMethod.GET,
+                                "/api/v1/cases"
+                        ), paths.matcher(
+                                HttpMethod.GET,
+                                "/api/v1/cases/{caseId}"
+                        )).hasAuthority(CASE_READ)
+                        .requestMatchers(paths.matcher(
+                                HttpMethod.GET,
+                                "/api/v1/cases/{caseId}/notes"
+                        )).hasAuthority(CASE_NOTE_READ)
+                        .requestMatchers(paths.matcher(
+                                HttpMethod.GET,
+                                "/api/v1/cases/{caseId}/audit-logs"
+                        )).hasAuthority(CASE_AUDIT_READ)
+                        .requestMatchers(paths.matcher(
+                                HttpMethod.PATCH,
+                                "/api/v1/cases/{caseId}/status"
+                        ), paths.matcher(
+                                HttpMethod.PATCH,
+                                "/api/v1/cases/{caseId}/assignee"
+                        )).hasAuthority(CASE_WORKFLOW_WRITE)
+                        .requestMatchers(paths.matcher(
+                                HttpMethod.POST,
+                                "/api/v1/cases/{caseId}/resolution"
+                        )).hasAuthority(CASE_RESOLUTION_WRITE)
+                        .requestMatchers(paths.matcher(
+                                HttpMethod.POST,
+                                "/api/v1/cases/{caseId}/notes"
+                        )).hasAuthority(CASE_NOTE_WRITE)
+                        .anyRequest().denyAll()
                 )
                 .exceptionHandling(exceptions -> exceptions
                         .authenticationEntryPoint(authenticationEntryPoint)
@@ -198,11 +310,33 @@ public class FinGuardOpsSecurityConfiguration {
 
     @Bean
     CorsConfigurationSource corsConfigurationSource(
-            FinGuardOpsSecurityProperties properties
+            FinGuardOpsSecurityProperties properties,
+            Environment environment
+    ) {
+        UrlBasedCorsConfigurationSource source =
+                new UrlBasedCorsConfigurationSource();
+        Map<String, List<String>> methodsByPath = new LinkedHashMap<>();
+        for (CorsEndpoint endpoint : applicationCorsEndpoints(environment)) {
+            methodsByPath.computeIfAbsent(
+                    endpoint.path(),
+                    ignored -> new ArrayList<>()
+            ).add(endpoint.method().name());
+        }
+        methodsByPath.forEach((path, methods) -> source
+                .registerCorsConfiguration(
+                        path,
+                        corsConfiguration(properties, methods)
+                ));
+        return source;
+    }
+
+    private CorsConfiguration corsConfiguration(
+            FinGuardOpsSecurityProperties properties,
+            List<String> methods
     ) {
         CorsConfiguration configuration = new CorsConfiguration();
         configuration.setAllowedOrigins(properties.allowedOrigins());
-        configuration.setAllowedMethods(List.of("GET", "POST", "PATCH"));
+        configuration.setAllowedMethods(List.copyOf(methods));
         configuration.setAllowedHeaders(List.of(
                 "Authorization",
                 "Content-Type",
@@ -212,11 +346,58 @@ public class FinGuardOpsSecurityConfiguration {
         configuration.setExposedHeaders(List.of("X-Trace-Id"));
         configuration.setAllowCredentials(false);
         configuration.setMaxAge(600L);
+        return configuration;
+    }
 
-        UrlBasedCorsConfigurationSource source =
-                new UrlBasedCorsConfigurationSource();
-        source.registerCorsConfiguration("/**", configuration);
-        return source;
+    private List<CorsEndpoint> applicationCorsEndpoints(
+            Environment environment
+    ) {
+        if (ManagementPortType.get(environment) == ManagementPortType.DIFFERENT) {
+            return APPLICATION_CORS_ENDPOINTS;
+        }
+        List<CorsEndpoint> endpoints = new ArrayList<>(
+                APPLICATION_CORS_ENDPOINTS
+        );
+        endpoints.add(APPLICATION_ACTUATOR_HEALTH);
+        return List.copyOf(endpoints);
+    }
+
+    private RequestMatcher approvedPreflightMatcher(
+            PathPatternRequestMatcher.Builder paths,
+            List<CorsEndpoint> endpoints
+    ) {
+        List<CorsEndpointMatcher> endpointMatchers = endpoints.stream()
+                .map(endpoint -> new CorsEndpointMatcher(
+                        endpoint.method(),
+                        paths.matcher(endpoint.path())
+                ))
+                .toList();
+        return request -> {
+            if (!CorsUtils.isPreFlightRequest(request)) {
+                return false;
+            }
+            HttpMethod requestedMethod;
+            try {
+                requestedMethod = HttpMethod.valueOf(request.getHeader(
+                        HttpHeaders.ACCESS_CONTROL_REQUEST_METHOD
+                ));
+            } catch (IllegalArgumentException exception) {
+                return false;
+            }
+            return endpointMatchers.stream().anyMatch(endpoint ->
+                    endpoint.method() == requestedMethod
+                            && endpoint.pathMatcher().matches(request)
+            );
+        };
+    }
+
+    private record CorsEndpoint(HttpMethod method, String path) {
+    }
+
+    private record CorsEndpointMatcher(
+            HttpMethod method,
+            RequestMatcher pathMatcher
+    ) {
     }
 
     private Converter<Map<String, Object>, Map<String, Object>>

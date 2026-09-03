@@ -38,6 +38,8 @@
   USER·SERVICE principal과 role-derived authority, 안전한 401·403·JWK 장애 응답 경계
 - stateless·CSRF·exact-origin CORS, public health와 별도 management listener Security 분리,
   Actuator discovery 404와 health 상세 비노출
+- 실제 13개 production endpoint의 USER·SERVICE authority matrix, strict deny-by-default와
+  사건 workflow·resolution·조사 메모 생성 Service method security
 - `FraudCase`·`CaseTransaction` Entity, Flyway V6와 HIGH·CRITICAL 거래의 사건·첫 연결 내부 영속 경계
 - 사건 목록·상세 조회 API, read-only Service, 동적 필터와 현재 페이지의 연관 거래
   일괄 집계 경계 및 Flyway V10 조회 인덱스
@@ -114,8 +116,8 @@ AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 
 - 운영 PostgreSQL 배포 환경, Redis와 Kafka 연동
 - External Risk DB 영속화와 LLM Provider 연동
 - production Prometheus, Grafana, Loki와 분산 추적 구성
-- endpoint별 세부 RBAC와 `@PreAuthorize`, USER Audit actor 연결, production Authorization
-  Server와 local Compose JWT fixture, Frontend OIDC
+- USER Audit actor 연결, production Authorization Server와 local Compose JWT fixture,
+  Frontend OIDC
 - Kubernetes와 AWS 배포 구성
 
 ## 3. 아키텍처 목표
@@ -881,9 +883,10 @@ React는 서비스 상태, 배포 버전, 업무 영향, AI 비용과 장애·�
 - `/api/health`와 profile별 승인된 health 경계는 credential 없이 접근할 수 있지만 invalid
   Bearer가 명시되면 401이다. 그 밖의 application listener 업무 API는 valid JWT가 필요하고
   management `8081`은 업무 Resource Server chain과 분리한다.
-- 인증된 USER·SERVICE principal은 생성된 authority를 보유하지만 endpoint별 authority
-  enforcement와 `@PreAuthorize`, 사건 write USER Audit actor와 InvestigationNote USER author
-  migration은 아직 구현하지 않았다.
+- 인증된 USER·SERVICE principal의 authority를 실제 12개 업무 method·path에 강제하고 그 밖의
+  application 요청은 deny-by-default로 거부한다. 사건 workflow·resolution·조사 메모 생성은
+  같은 authority의 method security로 이중 보호한다. 사건 write USER Audit actor와
+  InvestigationNote USER author migration은 아직 구현하지 않았다.
 - Authorization Server 제품·구축, Local Compose JWT issuer/JWK fixture와 traffic generator
   SERVICE token, Frontend OIDC·Authorization Code + PKCE, production management mTLS·인증
   proxy는 후속 구현이다. 기존 JWT 없는 local traffic generator 업무 요청은 현재 401이며
@@ -1040,24 +1043,23 @@ Grafana는 Prometheus·Backend·Alertmanager의 시작 또는 health dependency�
 - 감사 보존·접근 통제와 실제 USER actor 연결. 401·403·validation·stale·업무 거부는
   업무 AuditLog에서 제외
 
-OAuth2 Resource Server 기반과 401·403·trace 경계는 Issue #219에서 구현되었다.
-남은 보안 후속 Issue는 다음 네 개를 순서대로 수행한다.
+OAuth2 Resource Server 기반과 401·403·trace 경계는 Issue #219에서, endpoint RBAC와
+method security는 Issue #221에서 구현되었다. 남은 보안 후속 Issue는 다음 세 개다.
 
-1. endpoint RBAC와 USER·SERVICE authority matrix
-2. 사건 write USER actor와 InvestigationNote author 연결
-3. Local Compose·runbook JWT fixture와 인증 E2E
+1. 사건 write USER actor와 InvestigationNote author 연결
+2. Local Compose·runbook JWT fixture와 인증 E2E
    - Resource Server와 RBAC 적용 후 local issuer/JWK fixture 또는 승인된 local
      Authorization Server, SERVICE token bootstrap과 traffic generator `Authorization`
      header를 연결한다.
    - private key·token을 저장하지 않고 기존 Prometheus·recording·alert·Alertmanager·
      Grafana E2E 회귀와 장시간 Compose 검증을 수행한다.
-4. Frontend OIDC·token·권한 UI
+3. Frontend OIDC·token·권한 UI
    - Resource Server·RBAC와 Authorization Server 제품 결정 후 Authorization Code + PKCE,
      access token memory 보관, API `Authorization` header와 login·logout을 구현한다.
    - expiry·401·403 UX와 role·authority 기반 UI를 브라우저 경계에서 검증한다.
 
-3과 4는 서로 다른 Issue다. Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend
-OIDC도 Compose traffic fixture의 일부가 아니다. 남은 후속 Issue는 네 개이며 토큰
+2와 3은 서로 다른 Issue다. Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend
+OIDC도 Compose traffic fixture의 일부가 아니다. 남은 후속 Issue는 세 개이며 토큰
 절약을 위한 인위적 분할이 아니라 기술 책임·선행 관계·실패 영향·검증 시간이 다르기 때문에
 분리한다.
 

@@ -6,11 +6,11 @@
 
 이 계약은 이후 Spring Boot Controller, 요청·응답 DTO, Validation, Service, 테스트와 OpenAPI 구현의 기준이다. API 공통 표현, 금액, 페이지네이션, 멱등성, 오류 응답과 추적 원칙은 [`api-conventions.md`](./api-conventions.md)를 따른다. 기존 멱등 Snapshot 전환은 [`ADR-004`](../07-decisions/ADR-004-idempotency-response-snapshot-transition.md), 최종 성공과 Snapshot v2·완료 간극 복구는 [`ADR-006`](../07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md), External Risk 선행 실패 저장·재생 결정은 [`ADR-007`](../07-decisions/ADR-007-external-risk-idempotent-failure-replay-contract.md)을 따른다.
 
-현재 이 문서의 실제 Spring endpoint에는 security layer가 없어 사실상 무인증이다. 목표
-계약에서는 거래 접수는 SERVICE `TRANSACTION_INGESTOR`의 `transaction:intake`, 행동 이벤트
+현재 이 문서의 실제 Spring endpoint에는 endpoint RBAC가 적용되어 있다. 거래 접수는
+SERVICE `TRANSACTION_INGESTOR`의 `transaction:intake`, 행동 이벤트
 접수는 SERVICE `BEHAVIOR_INGESTOR`의 `behavior-event:intake`, 거래 조회는 USER의
-`transaction:read`를 요구한다. 문서 후보인 행동 이벤트·탐지 조회는 각각
-`behavior-event:read`, `detection:read`를 예약한다. 상세 계약은
+`transaction:read`를 요구한다. 문서 후보인 행동 이벤트·탐지 조회의
+`behavior-event:read`, `detection:read`에는 production matcher를 추가하지 않았다. 상세 계약은
 [`security-architecture.md`](../02-architecture/security-architecture.md)를 따른다.
 
 ## 2. 범위와 책임 경계
@@ -237,9 +237,8 @@ Idempotency-Key: <required>
 
 `Idempotency-Key`는 필수이다. 길이는 8~128자이고 영문, 숫자, 마침표(`.`), 밑줄(`_`), 콜론(`:`), 하이픈(`-`)만 허용한다. 누락하거나 형식이 올바르지 않으면 Transaction과 멱등 기록을 생성하지 않고 `400 Bad Request`와 `VALIDATION_ERROR`를 반환한다. 작업 범위는 `POST:/api/v1/transactions`이다. 현재 DB는 `expiresAt`에 최초 선점의 24시간 후를 저장하지만 Service가 이를 판정하지 않고 정리 작업도 없으므로 실질적인 만료 정책은 시행되지 않는다.
 
-목표 인증 구현 후 이 endpoint는 `principal_type=SERVICE`, JWT role
-`TRANSACTION_INGESTOR`, authority `transaction:intake` 전용이다. 현재는 이 검사가
-구현되지 않았다.
+이 endpoint는 `principal_type=SERVICE`, JWT role `TRANSACTION_INGESTOR`, authority
+`transaction:intake` 전용이며 현재 URL matcher에서 강제한다.
 
 ### 5.2 요청 필드
 
@@ -740,8 +739,8 @@ Content-Type: application/json
 
 - 이 엔드포인트는 일반 사용자가 임의의 위험 판단을 제출하는 API가 아니다.
 - 신뢰된 Mock 금융·인증 시스템 또는 승인된 수집 어댑터가 관측 이벤트를 전달하는 수집 API이다.
-- 목표 인증 구현 후 `principal_type=SERVICE`, JWT role `BEHAVIOR_INGESTOR`, authority
-  `behavior-event:intake` 전용이다. 현재는 이 검사가 구현되지 않았다.
+- `principal_type=SERVICE`, JWT role `BEHAVIOR_INGESTOR`, authority
+  `behavior-event:intake` 전용이며 현재 URL matcher에서 강제한다.
 - 이번 접수 범위는 행동 이벤트 영속화와 선택적 거래 연결까지이다.
 - `locationRiskSummary`, `observedSignals`, 자유 형식 `eventDetails`, Rule·ML·위험·탐지·사건 필드는 받거나 반환하지 않는다.
 
@@ -1329,7 +1328,7 @@ end-to-end 연결도 구현되었다.
 - AI 사용량·비용 API
 - 플랫폼 운영 API
 - Kafka 이벤트 API
-- 승인된 인증·인가와 CORS 계약의 production 구현
+- Local Compose JWT fixture와 traffic generator SERVICE token
 - 구체적인 OpenTelemetry Header 구현
 - 실제 금융거래 승인·인증·차단과 고객 제재
 

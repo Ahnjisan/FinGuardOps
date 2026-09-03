@@ -87,7 +87,7 @@ profile의 기본 address는 원격 접속이 불가능한 loopback
 
 이 보호 경계가 준비되지 않은 상태에서 public address로 bind하면 안 된다.
 
-### 5.1 승인된 목표 계약
+### 5.1 승인된 구현 계약
 
 - management `8081` health·prometheus는 public endpoint가 아니다.
 - Prometheus scrape에 업무 USER·SERVICE JWT를 요구하지 않는다.
@@ -133,10 +133,10 @@ private network와 방화벽/security group을 사용한다. mTLS 또는 authent
 시 적용할 후속 운영 결정이다. 이 listener는 public endpoint가 아니며 Prometheus에 업무
 USER·SERVICE JWT를 요구하지 않는다.
 
-application listener의 구현 처리 순서는 `TraceIdFilter`, 명시된 Bearer authentication,
-승인된 CORS preflight, profile에서 실제 노출된 exact public path, 업무 endpoint authority,
-그 외 인증 요구다. profile에 따라 mapping되지 않은 Actuator path의 404가 Security의
-401·403으로 바뀌지 않도록 matcher 순서와 management context를 테스트로 검증한다.
+application listener는 `TraceIdFilter`와 명시된 Bearer authentication 뒤 실제 CORS
+preflight, exact health, `/actuator/**` exposure, 12개 업무 method·path authority,
+`denyAll` 순서로 처리한다. profile에 따라 mapping되지 않은 Actuator path의 404가
+Security의 401·403으로 바뀌지 않도록 matcher 순서와 management context를 테스트로 검증한다.
 
 이 목표는 [`security-architecture.md`](../02-architecture/security-architecture.md)와
 [`ADR-008`](../07-decisions/ADR-008-oauth2-resource-server-rbac-user-audit-actor.md)을
@@ -182,7 +182,7 @@ Docker의 network 분리와 host loopback은 접근면을 제한하지만 인증
 - production recording rule·alert rule·Alertmanager·receiver·credential과 외부 알림
 - Alertmanager HA와 장기 retention
 - production Grafana, TLS·SSO·RBAC·HA·장기 retention과 추가 dashboard
-- endpoint별 RBAC·USER Audit actor와 production Authorization Server·credential
+- USER Audit actor와 production Authorization Server·credential
 - production Docker·Kubernetes·AWS 배포 설정
 - OpenTelemetry
 - 신규 Meter·tag·SLA·SLO·임계값
