@@ -8,28 +8,30 @@ import com.aifds.backend.fraudcase.entity.FraudCaseStatus;
 import com.aifds.backend.fraudcase.exception.FraudCaseWorkflowException;
 import com.aifds.backend.fraudcase.service.FraudCaseWorkflowService;
 import com.aifds.backend.fraudcase.validation.FraudCaseValidationException;
+import com.aifds.backend.security.principal.FinGuardOpsAuthenticationToken;
+import com.aifds.backend.security.principal.FinGuardOpsPrincipal;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.context.SecurityContextHolder;
 
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Map;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
-@org.springframework.security.test.context.support.WithMockUser(
-        authorities = {
-                "case:workflow:write",
-                "case:resolution:write"
-        }
-)
 class FraudCaseWorkflowIntegrationTest
         extends PostgresqlIntegrationTestSupport {
 
@@ -38,12 +40,37 @@ class FraudCaseWorkflowIntegrationTest
     private static final String SECOND_ASSIGNEE =
             "20000000-0000-4000-9000-000000000002";
     private static final String TRACE_ID = "trace_case_workflow_it_01";
+    private static final UUID USER_SUBJECT = UUID.fromString(
+            "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001"
+    );
 
     @Autowired
     private FraudCaseWorkflowService service;
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
+
+    @BeforeEach
+    void authenticateUser() {
+        var context = SecurityContextHolder.createEmptyContext();
+        context.setAuthentication(new FinGuardOpsAuthenticationToken(
+                new FinGuardOpsPrincipal(
+                        USER_SUBJECT,
+                        FinGuardOpsPrincipal.Type.USER,
+                        Set.of()
+                ),
+                List.of(
+                        new SimpleGrantedAuthority("case:workflow:write"),
+                        new SimpleGrantedAuthority("case:resolution:write")
+                )
+        ));
+        SecurityContextHolder.setContext(context);
+    }
+
+    @AfterEach
+    void clearSecurityContext() {
+        SecurityContextHolder.clearContext();
+    }
 
     @Test
     void persistsAllStatusTransitionsWithRealVersionAndOneAuditEach() {
@@ -359,8 +386,8 @@ class FraudCaseWorkflowIntegrationTest
                             "reason_code",
                             "CASE_RESOLUTION_COMPLETED"
                     )
-                    .containsEntry("actor_type", "SYSTEM")
-                    .containsEntry("actor_id", "finguardops-backend")
+                    .containsEntry("actor_type", "USER")
+                    .containsEntry("actor_id", USER_SUBJECT.toString())
                     .containsEntry("target_id", caseId)
                     .containsEntry("case_id", caseId)
                     .containsEntry("transaction_id", null)

@@ -10,6 +10,8 @@ import com.aifds.backend.fraudcase.repository.FraudCaseRepository;
 import com.aifds.backend.fraudcase.repository.InvestigationNoteRepository;
 import com.aifds.backend.fraudcase.service.FraudCaseWorkflowService;
 import com.aifds.backend.fraudcase.service.InvestigationNoteService;
+import com.aifds.backend.security.principal.FinGuardOpsAuthenticationToken;
+import com.aifds.backend.security.principal.FinGuardOpsPrincipal;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -23,12 +25,15 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.authentication.AuthenticationCredentialsNotFoundException;
 import org.springframework.security.authentication.TestingAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.AbstractPlatformTransactionManager;
 import org.springframework.transaction.support.DefaultTransactionStatus;
 
 import java.util.Optional;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -60,6 +65,9 @@ class HighRiskWriteMethodSecurityIntegrationTest {
 
     private static final UUID CASE_ID = UUID.fromString(
             "10000000-0000-4000-8000-000000000001"
+    );
+    private static final UUID USER_SUBJECT = UUID.fromString(
+            "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001"
     );
 
     @Autowired
@@ -129,7 +137,7 @@ class HighRiskWriteMethodSecurityIntegrationTest {
     void exactAuthorityStartsTransactionAndReachesExistingServiceBody() {
         for (Method method : Method.values()) {
             resetState();
-            authenticate(method.authority());
+            authenticateUser(method.authority());
             when(fraudCaseRepository.findByCaseId(CASE_ID))
                     .thenReturn(Optional.empty());
 
@@ -140,6 +148,26 @@ class HighRiskWriteMethodSecurityIntegrationTest {
             assertThat(transactionManager.begins()).isEqualTo(1);
             verify(fraudCaseRepository).findByCaseId(CASE_ID);
             verifyNoInteractions(noteRepository, auditLogService);
+        }
+    }
+
+    @Test
+    void rejectsTestingAuthenticationTokenWithExactAuthorityInsideBoundary() {
+        for (Method method : Method.values()) {
+            resetState();
+            authenticate(method.authority());
+
+            assertThatThrownBy(() -> invoke(method))
+                    .as(method.name())
+                    .isInstanceOf(AccessDeniedException.class)
+                    .hasMessage("An authenticated USER principal is required");
+
+            assertThat(transactionManager.begins()).isEqualTo(1);
+            verifyNoInteractions(
+                    fraudCaseRepository,
+                    noteRepository,
+                    auditLogService
+            );
         }
     }
 
@@ -158,6 +186,19 @@ class HighRiskWriteMethodSecurityIntegrationTest {
                 "method-security-user",
                 null,
                 authority
+        ));
+        SecurityContextHolder.setContext(context);
+    }
+
+    private void authenticateUser(String authority) {
+        var context = SecurityContextHolder.createEmptyContext();
+        context.setAuthentication(new FinGuardOpsAuthenticationToken(
+                new FinGuardOpsPrincipal(
+                        USER_SUBJECT,
+                        FinGuardOpsPrincipal.Type.USER,
+                        Set.of()
+                ),
+                List.of(new SimpleGrantedAuthority(authority))
         ));
         SecurityContextHolder.setContext(context);
     }

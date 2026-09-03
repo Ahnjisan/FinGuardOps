@@ -210,7 +210,7 @@ Provider·Rule·최종화를 다시 호출하지 않습니다.
 Runner·CLI가 구현되었습니다. 실행 절차는
 [`Idempotency 복구 one-shot runbook`](docs/09-deployment/idempotency-recovery-one-shot-runbook.md)을
 따릅니다. scheduler·batch, 자동 retry·fallback·cache, 운영 credential 실제 배포,
-USER Audit actor 전환, Issue #186 외 사건·AI·복구 상태 등의
+Issue #186 외 사건·AI·복구 상태 등의
 추가 업무 metric은 아직 구현되지 않았습니다. 로컬 Docker Compose의 Prometheus 서버·
 Backend scrape와 기존
 업무 Meter 기반 recording rule 14개와 실패율 alert rule 6개, 각각의 deterministic
@@ -246,8 +246,10 @@ JWT는 401, valid JWT의 authority 부족과 USER·SERVICE 경계 위반은 403�
 업무 write·ingestion 권한을 자동 상속하지 않는다. management 8081은 업무 Resource Server
 chain과 분리한다.
 
-사건 write USER Audit actor와 InvestigationNote USER author migration, 실제 Authorization
-Server 선정·구축, Local Compose JWT issuer/JWK fixture, traffic generator SERVICE token,
+사건 상태·담당자·종결·조사 메모 write는 검증된 USER JWT의 canonical lowercase UUID v4
+`sub`를 AuditLog actor와 InvestigationNote author로 기록합니다. 자동 사건 생성·거래 처리·
+Rule/AI orchestration·복구·one-shot writer는 기존 `SYSTEM/finguardops-backend`를 유지합니다.
+실제 Authorization Server 선정·구축, Local Compose JWT issuer/JWK fixture, traffic generator SERVICE token,
 Frontend OIDC·Authorization Code + PKCE, production management mTLS·인증 proxy는 아직
 구현되지 않았다. 기존 JWT 없는 local traffic generator의 업무 요청은 현재 401이며 Local
 인증 E2E는 후속 Issue 전까지 미완성이다.
@@ -462,22 +464,22 @@ Public 최종 동기 거래 접수와 실제 External Risk HTTP Provider, 공개
 * recovery scheduler·batch와 장기 `IN_PROGRESS` Gauge·completion gap alert·dashboard
 * 불확실 상태 재실행과 `FAILED` 재분석은 별도 operation scope·승인 계약 전까지 금지
 
-보안 기반과 endpoint RBAC는 Issue #219와 Issue #221에서 구현되었습니다. 남은 보안 후속
+보안 기반과 endpoint RBAC는 Issue #219와 Issue #221에서, 사건 USER 감사 주체 연결은
+Issue #223에서 구현되었습니다. 남은 보안 후속
 순서는 다음과 같습니다.
 
-1. 사건 write USER actor와 InvestigationNote author 연결
-2. Local Compose·runbook JWT fixture와 인증 E2E
+1. Local Compose·runbook JWT fixture와 인증 E2E
    - Resource Server와 RBAC 적용 후 local issuer/JWK fixture 또는 승인된 local
      Authorization Server, SERVICE token bootstrap과 traffic generator `Authorization`
      header를 연결합니다.
    - private key·token을 저장하지 않고 기존 Prometheus·recording·alert·Alertmanager·
      Grafana E2E 회귀와 장시간 Compose 검증을 수행합니다.
-3. Frontend OIDC·token·권한 UI
+2. Frontend OIDC·token·권한 UI
    - Resource Server·RBAC와 Authorization Server 제품 결정 후 Authorization Code + PKCE,
      access token memory 보관, API `Authorization` header와 login·logout을 구현합니다.
    - expiry·401·403 UX와 role·authority 기반 UI를 브라우저 경계에서 검증합니다.
 
-2와 3은 서로 다른 Issue다. Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend
+1과 2는 서로 다른 Issue다. Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend
 OIDC도 Compose traffic fixture의 일부가 아니다. 이 세 단계는 토큰 절약을 위한 인위적
 분할이 아니라 기술 책임·선행 관계·실패 영향·검증 시간이 다르기 때문에 분리한다.
 

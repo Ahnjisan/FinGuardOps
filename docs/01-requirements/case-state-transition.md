@@ -14,13 +14,13 @@
 
 Issue #154에서 사건 영속 기반을 구현했고 Issue #209에서 조사 상태·담당자 변경
 API, 낙관적 동시성 및 V11 감사 확장을 구현했다. Issue #211은 `IN_REVIEW`
-사건의 최종 판정·종료와 V12 감사를 구현했다. 구체적인 물리 계약은
+사건의 최종 판정·종료와 V12 감사를 구현했고 Issue #223은 네 사용자 write의 USER
+감사 주체와 조사 메모 USER 작성자를 연결했다. 구체적인 물리 계약은
 [`fraud-case-schema.md`](../04-database/fraud-case-schema.md)를 따른다.
 
 다음 항목은 여전히 확정하거나 구현하지 않는다.
 
 - 담당자 자동 배정과 사용자·담당자 디렉터리 연동 방식
-- 인증·인가 기반 실제 USER actor
 - 감사 로그 보존 방식
 - 실제 금융기관의 고객 제재나 거래 차단 절차
 
@@ -337,7 +337,9 @@ CLOSED → IN_REVIEW
 action/reason으로 정확히 1건 기록하고 성공한 종료는 V12의
 `CASE_RESOLVED/CASE_RESOLUTION_COMPLETED`를 정확히 1건 기록한다. Issue #213의
 조사 메모 성공은 `CASE_NOTE_CREATED/CASE_INVESTIGATION_NOTE_ADDED`와 exact
-`noteId`만 기록한다. Issue #215의 사건 감사 조회는 사건 존재 확인 후 해당 사건의
+`noteId`만 기록한다. 네 사용자 write는 검증된 USER principal의 UUID v4 `sub`를 동일
+명령의 AuditLog actor와 메모 작성자에 사용하고, 자동 writer는 SYSTEM을 유지한다.
+Issue #215의 사건 감사 조회는 사건 존재 확인 후 해당 사건의
 `FRAUD_CASE` 행만 결정적으로 page 조회하며, action별 승인 projection 외의 내부
 식별자·원본 JSON·과거 trace를 노출하지 않는다. 실패·거부·stale 요청의 별도 감사,
 보존 기간과 접근 범위는 후속 범위이다.

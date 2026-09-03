@@ -15,6 +15,7 @@ import com.aifds.backend.fraudcase.exception.InvestigationNoteException;
 import com.aifds.backend.fraudcase.repository.FraudCaseRepository;
 import com.aifds.backend.fraudcase.repository.InvestigationNoteRepository;
 import com.aifds.backend.fraudcase.validation.InvestigationNoteValidator;
+import com.aifds.backend.security.principal.CurrentAuditActorProvider;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -40,18 +41,22 @@ class InvestigationNoteServiceTest {
     private final InvestigationNoteValidator validator = mock(InvestigationNoteValidator.class);
     private final InvestigationNoteMapper mapper = mock(InvestigationNoteMapper.class);
     private final AuditLogPersistenceService audits = mock(AuditLogPersistenceService.class);
+    private final CurrentAuditActorProvider actorProvider = mock(CurrentAuditActorProvider.class);
     private final FraudCase fraudCase = mock(FraudCase.class);
     private final Instant sameTime = Instant.parse("2026-09-02T00:00:00.123456Z");
     private InvestigationNoteService service;
     private UUID caseId;
+    private UUID userSubject;
 
     @BeforeEach
     void setUp() {
         caseId = UUID.randomUUID();
+        userSubject = UUID.fromString("2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001");
         service = new InvestigationNoteService(
                 cases, notes, validator, mapper, audits, new ObjectMapper(),
-                Clock.fixed(sameTime, ZoneOffset.UTC)
+                Clock.fixed(sameTime, ZoneOffset.UTC), actorProvider
         );
+        when(actorProvider.currentUserSubject()).thenReturn(userSubject);
         when(cases.findByCaseId(caseId)).thenReturn(Optional.of(fraudCase));
         when(fraudCase.getId()).thenReturn(5L);
         when(fraudCase.getCaseId()).thenReturn(caseId);
@@ -72,13 +77,16 @@ class InvestigationNoteServiceTest {
         verify(notes).saveAndFlush(note.capture());
         assertThat(note.getValue().getCreatedAt()).isEqualTo(sameTime.plusNanos(1_000));
         assertThat(note.getValue().getContent()).isEqualTo("  memo\r\n");
+        assertThat(note.getValue().getAuthorType().name()).isEqualTo("USER");
+        assertThat(note.getValue().getAuthorRef()).isEqualTo(userSubject.toString());
         ArgumentCaptor<AuditLogDraft> audit = ArgumentCaptor.forClass(AuditLogDraft.class);
         verify(audits).append(audit.capture());
         assertThat(audit.getValue().action()).isEqualTo(AuditAction.CASE_NOTE_CREATED);
         assertThat(audit.getValue().reasonCode())
                 .isEqualTo(AuditReasonCode.CASE_INVESTIGATION_NOTE_ADDED);
-        assertThat(audit.getValue().actorType()).isEqualTo(AuditActorType.SYSTEM);
-        assertThat(audit.getValue().actorId()).isEqualTo(AuditLog.SYSTEM_ACTOR_ID);
+        assertThat(audit.getValue().actorType()).isEqualTo(AuditActorType.USER);
+        assertThat(audit.getValue().actorId()).isEqualTo(userSubject.toString());
+        verify(actorProvider).currentUserSubject();
         assertThat(audit.getValue().targetType()).isEqualTo(AuditTargetType.FRAUD_CASE);
         assertThat(audit.getValue().targetId()).isEqualTo(caseId);
         assertThat(audit.getValue().caseId()).isEqualTo(caseId);

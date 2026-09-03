@@ -97,7 +97,6 @@ rollback한다.
 
 - 기존 사건에 추가 거래 연결
 - 사건 병합·분리
-- 인증·인가 기반 실제 USER actor
 - 거래 접수 전체 오케스트레이션과 Snapshot v2
 
 ## 8. 조회 경계
@@ -134,9 +133,11 @@ V12는 AuditLog check만 확장하므로 `fraud_case` 테이블·컬럼·제약�
 ## 10. investigation_note
 
 Flyway V13은 내부 `BIGINT identity` PK와 외부 UUID v4 `note_id`, `fraud_case_id`
-FK(`ON DELETE RESTRICT`), `SYSTEM/finguardops-backend` 작성자, `TEXT content`,
+FK(`ON DELETE RESTRICT`), `TEXT content`,
 `TIMESTAMPTZ(6) created_at`을 추가한다. `content`는 DB `char_length` 1..4,000,
 Unicode whitespace-only 및 CR/LF 이외 제어문자 방어 CHECK를 적용한다.
+V14는 `SYSTEM/finguardops-backend`와 `USER/canonical lowercase UUID v4` 작성자 조합만
+허용하며 SQL NULL·문자열 null·교차 조합·비정규 UUID를 거부한다. 기존 행은 재작성하지 않는다.
 
 `ix_investigation_note_case_created(fraud_case_id, created_at, id)`는 asc·desc Page와
 같은 시각의 내부 tie-breaker를 지원한다. 내부 `id`는 API에 노출하지 않는다.

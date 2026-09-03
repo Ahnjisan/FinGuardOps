@@ -13,6 +13,8 @@ import com.aifds.backend.fraudcase.entity.FraudCaseStatus;
 import com.aifds.backend.fraudcase.exception.FraudCaseWorkflowException;
 import com.aifds.backend.fraudcase.repository.FraudCaseRepository;
 import com.aifds.backend.fraudcase.service.FraudCaseWorkflowService;
+import com.aifds.backend.security.principal.FinGuardOpsAuthenticationToken;
+import com.aifds.backend.security.principal.FinGuardOpsPrincipal;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
@@ -21,7 +23,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
-import org.springframework.security.authentication.TestingAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -59,6 +61,12 @@ class FraudCaseWorkflowConcurrencyIntegrationTest
             "10000000-0000-4000-9000-000000000001";
     private static final String SECOND_ASSIGNEE =
             "20000000-0000-4000-9000-000000000002";
+    private static final UUID FIRST_USER = UUID.fromString(
+            "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001"
+    );
+    private static final UUID SECOND_USER = UUID.fromString(
+            "3f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430002"
+    );
 
     @Autowired
     private FraudCaseWorkflowService service;
@@ -88,12 +96,14 @@ class FraudCaseWorkflowConcurrencyIntegrationTest
             Future<Outcome> first = executor.submit(() -> invokeService(
                     caseId,
                     FIRST_ASSIGNEE,
+                    FIRST_USER,
                     ready,
                     start
             ));
             Future<Outcome> second = executor.submit(() -> invokeService(
                     caseId,
                     SECOND_ASSIGNEE,
+                    SECOND_USER,
                     ready,
                     start
             ));
@@ -114,6 +124,14 @@ class FraudCaseWorkflowConcurrencyIntegrationTest
 
         assertThat(caseVersion(caseId)).isEqualTo(1L);
         assertThat(auditCount(caseId)).isEqualTo(1);
+        String winningActor = FIRST_ASSIGNEE.equals(caseAssignee(caseId))
+                ? FIRST_USER.toString()
+                : SECOND_USER.toString();
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT actor_id FROM audit_log WHERE case_id = ?",
+                String.class,
+                caseId
+        )).isEqualTo(winningActor);
         assertThat(caseAssignee(caseId))
                 .isIn(FIRST_ASSIGNEE, SECOND_ASSIGNEE);
     }
@@ -486,10 +504,11 @@ class FraudCaseWorkflowConcurrencyIntegrationTest
     private Outcome invokeService(
             UUID caseId,
             String assignee,
+            UUID userSubject,
             CountDownLatch ready,
             CountDownLatch start
     ) {
-        return withAuthority(CASE_WORKFLOW_WRITE, () -> {
+        return withAuthority(CASE_WORKFLOW_WRITE, userSubject, () -> {
             ready.countDown();
             await(start);
             try {
@@ -519,7 +538,7 @@ class FraudCaseWorkflowConcurrencyIntegrationTest
     private CommandResult invokeStatus(
             FraudCaseWorkflowCommand.StatusChange command
     ) {
-        return withAuthority(CASE_WORKFLOW_WRITE, () -> {
+        return withAuthority(CASE_WORKFLOW_WRITE, UUID.randomUUID(), () -> {
             try {
                 service.changeStatus(command, "trace_case_cross_race_01");
                 return CommandResult.SUCCESS;
@@ -537,7 +556,7 @@ class FraudCaseWorkflowConcurrencyIntegrationTest
     private CommandResult invokeAssignee(
             FraudCaseWorkflowCommand.AssigneeChange command
     ) {
-        return withAuthority(CASE_WORKFLOW_WRITE, () -> {
+        return withAuthority(CASE_WORKFLOW_WRITE, UUID.randomUUID(), () -> {
             try {
                 service.changeAssignee(command, "trace_case_cross_race_01");
                 return CommandResult.SUCCESS;
@@ -555,7 +574,7 @@ class FraudCaseWorkflowConcurrencyIntegrationTest
     private CommandResult invokeResolution(
             FraudCaseWorkflowCommand.Resolution command
     ) {
-        return withAuthority(CASE_RESOLUTION_WRITE, () -> {
+        return withAuthority(CASE_RESOLUTION_WRITE, UUID.randomUUID(), () -> {
             try {
                 service.resolve(command, "trace_case_resolution_race_01");
                 return CommandResult.SUCCESS;
@@ -570,14 +589,21 @@ class FraudCaseWorkflowConcurrencyIntegrationTest
         });
     }
 
-    private <T> T withAuthority(String authority, Supplier<T> action) {
+    private <T> T withAuthority(
+            String authority,
+            UUID userSubject,
+            Supplier<T> action
+    ) {
         assertThat(SecurityContextHolder.getContext().getAuthentication())
                 .isNull();
         var context = SecurityContextHolder.createEmptyContext();
-        context.setAuthentication(new TestingAuthenticationToken(
-                "concurrency-contender",
-                null,
-                authority
+        context.setAuthentication(new FinGuardOpsAuthenticationToken(
+                new FinGuardOpsPrincipal(
+                        userSubject,
+                        FinGuardOpsPrincipal.Type.USER,
+                        Set.of()
+                ),
+                List.of(new SimpleGrantedAuthority(authority))
         ));
         SecurityContextHolder.setContext(context);
         try {
@@ -845,14 +871,16 @@ class FraudCaseWorkflowConcurrencyIntegrationTest
                 caseId
         );
         assertThat(audit)
-                .containsEntry("actor_type", "SYSTEM")
-                .containsEntry("actor_id", "finguardops-backend")
+                .containsEntry("actor_type", "USER")
                 .containsEntry("target_id", caseId)
                 .containsEntry("transaction_id", null)
                 .containsEntry("case_id", caseId)
                 .containsEntry("before_exact", true)
                 .containsEntry("after_exact", true)
                 .containsEntry("metadata_empty", true);
+        assertThat((String) audit.get("actor_id"))
+                .matches("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}"
+                        + "-[89ab][0-9a-f]{3}-[0-9a-f]{12}$");
     }
 
     private boolean hasCause(

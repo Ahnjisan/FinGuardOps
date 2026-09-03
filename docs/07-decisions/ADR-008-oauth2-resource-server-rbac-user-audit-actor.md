@@ -20,8 +20,8 @@ FinGuardOps Spring Boot Backend에는 거래·행동 이벤트 접수, 거래·�
 API는 security layer 관점에서 사실상 무인증이다.
 
 일반 `audit_log`의 Java·DB 계약은 `SYSTEM`과 canonical lowercase UUID v4의
-`USER` actor를 모두 허용하지만, 사건 상태·담당자·종결·조사 메모 writer는 현재
-`SYSTEM/finguardops-backend`를 기록한다. Issue #215의 사건 감사 조회 응답도
+`USER` actor를 모두 허용한다. Issue #223 이후 사건 상태·담당자·종결·조사 메모 writer는
+USER actor를 기록하고 자동 writer는 SYSTEM을 유지한다. Issue #215의 사건 감사 조회 응답은
 `actorType`만 공개하고 `actorId`는 공개하지 않는다.
 
 인증 구현보다 먼저 token 신뢰 경계, USER·SERVICE principal, role·authority,
@@ -78,16 +78,15 @@ endpoint 권한, 401·403·trace, Audit USER actor와 local/test/management 경�
 - USER principal의 `sub`만 `AuditActorType.USER`의 `actorId`로 사용한다.
 - SERVICE `sub`, email, display name, 내부 DB PK와 요청 body·query·임의 header 값은
   USER actorId로 사용하지 않는다.
-- 사건 상태·담당자·종결·조사 메모 성공 write는 목표 상태에서 USER actor를 기록한다.
+- 사건 상태·담당자·종결·조사 메모 성공 write는 USER actor를 기록한다.
 - 거래 처리, 자동 위험 대응, 사건 자동 생성·거래 연결과 RuleVersion·복구 one-shot은
   SYSTEM을 유지한다.
 - read-only, 401, 403, validation, stale, 업무 거부, DB 오류, optimistic conflict와
   rollback loser는 업무 AuditLog를 만들지 않는다.
 - 성공 사건 변경과 USER AuditLog는 같은 transaction·flush·rollback 경계를 사용한다.
 
-현재 `investigation_note`와 `CASE_NOTE_CREATED` DB CHECK는 SYSTEM 전용이므로 조사 메모
-USER 전환 후속 Issue에는 migration이 필요하다. 이 ADR은 migration이나 구현을 포함하지
-않는다.
+V14는 `investigation_note`와 `CASE_NOTE_CREATED` DB CHECK에 USER UUID v4를 추가하면서
+기존 SYSTEM 조합과 행을 유지한다.
 
 ### 2.5 Public·service·management 경계
 
@@ -180,7 +179,7 @@ account lifecycle과 key 운영 책임이 금융 업무 Backend에 결합되고 
 
 ## 6. 현재 구현과 목표의 구분
 
-결정 이후 Issue #219와 Issue #221에서 다음 기반과 RBAC가 구현되었다.
+결정 이후 Issue #219, Issue #221과 Issue #223에서 다음 기반·RBAC·USER actor가 구현되었다.
 
 - Spring Boot 관리 버전의 OAuth2 Resource Server와 application listener
   `SecurityFilterChain`
@@ -191,10 +190,10 @@ account lifecycle과 key 운영 책임이 금융 업무 Backend에 결합되고 
 - 기본/prometheus application·management listener 분리와 Actuator 404·health 상세 비노출
 - 실제 13개 production endpoint의 USER·SERVICE authority matrix와 deny-by-default
 - 사건 workflow·resolution·조사 메모 생성 네 Service method의 `@PreAuthorize`
+- `CurrentAuditActorProvider`, 네 USER writer와 V14 USER/SYSTEM actor·author CHECK
 
 다음은 아직 구현되지 않았다.
 
-- 사건 write USER actor와 actorId 응답
 - local issuer/JWK fixture와 SERVICE token traffic generator
 - Frontend OIDC 로그인·token·권한 UI
 - production Authorization Server·mTLS·authentication proxy
@@ -202,12 +201,11 @@ account lifecycle과 key 운영 책임이 금융 업무 Backend에 결합되고 
 ## 7. 후속 작업
 
 OAuth2 Resource Server 기반과 401·403·trace 경계는 Issue #219에서, endpoint RBAC와
-method security는 Issue #221에서 구현되었다. 남은 세 Issue는 기술 책임·migration·검증
-경계를 분리하기 위해 순서대로 수행한다.
+method security는 Issue #221에서, USER actor는 Issue #223에서 구현되었다. 남은 Issue는
+기술 책임과 검증 경계를 분리해 수행한다.
 
-1. `[Backend/Audit] 사건 write USER actor와 InvestigationNote author 연결`
-2. `[Infra/Docs] Local Compose·runbook JWT fixture와 인증 E2E 적용`
-3. `[Frontend] OIDC 로그인·token·권한 UI 구현`
+1. `[Infra/Docs] Local Compose·runbook JWT fixture와 인증 E2E 적용`
+2. `[Frontend] OIDC 로그인·token·권한 UI 구현`
 
 Spring Security 개념과 JWT 검증 동작은 공식 문서를 참고하되 실제 dependency와 제품은 각
 구현 Issue에서 검증한다.

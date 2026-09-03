@@ -12,17 +12,21 @@ import com.aifds.backend.fraudcase.exception.InvestigationNoteException;
 import com.aifds.backend.fraudcase.repository.FraudCaseRepository;
 import com.aifds.backend.fraudcase.service.FraudCaseWorkflowService;
 import com.aifds.backend.fraudcase.service.InvestigationNoteService;
+import com.aifds.backend.security.principal.FinGuardOpsAuthenticationToken;
+import com.aifds.backend.security.principal.FinGuardOpsPrincipal;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.OptimisticLockException;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataAccessException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.security.authentication.TestingAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -54,17 +58,13 @@ import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_RES
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_WORKFLOW_WRITE;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
-@org.springframework.security.test.context.support.WithMockUser(
-        authorities = {
-                "case:workflow:write",
-                "case:resolution:write",
-                "case-note:write"
-        }
-)
 class InvestigationNoteIntegrationTest extends PostgresqlIntegrationTestSupport {
 
     private static final Instant CREATED_AT = Instant.parse("2026-09-02T00:00:00Z");
     private static final String ASSIGNEE = "20000000-0000-4000-8000-000000000002";
+    private static final UUID USER_SUBJECT = UUID.fromString(
+            "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001"
+    );
 
     @Autowired InvestigationNoteService service;
     @Autowired FraudCaseWorkflowService workflowService;
@@ -76,10 +76,25 @@ class InvestigationNoteIntegrationTest extends PostgresqlIntegrationTestSupport 
     private final ThreadLocal<ServiceMethod> activeServiceMethod =
             new ThreadLocal<>();
 
+    @BeforeEach
+    void authenticateUser() {
+        setUserAuthentication(
+                USER_SUBJECT,
+                CASE_NOTE_WRITE,
+                CASE_RESOLUTION_WRITE,
+                CASE_WORKFLOW_WRITE
+        );
+    }
+
+    @AfterEach
+    void clearSecurityContext() {
+        SecurityContextHolder.clearContext();
+    }
+
     @Test
-    void freshV13CreatesExactAppendOnlySchemaAndDefendsUnicodeAndAuditJsonNull() {
-        assertThat(flyway.info().applied()).hasSize(13);
-        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("13");
+    void freshV14CreatesExactAppendOnlySchemaAndDefendsUnicodeAndAuditJsonNull() {
+        assertThat(flyway.info().applied()).hasSize(14);
+        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("14");
         assertThat(columns("investigation_note")).containsExactlyInAnyOrder(
                 "id", "note_id", "fraud_case_id", "author_type", "author_ref",
                 "content", "created_at"
@@ -127,6 +142,63 @@ class InvestigationNoteIntegrationTest extends PostgresqlIntegrationTestSupport 
     }
 
     @Test
+    void v14RejectsEveryNullCrossTypeAndNonCanonicalActorMutation() {
+        String caseNoteActorConstraint = jdbc.queryForObject("""
+                SELECT pg_get_constraintdef(oid)
+                FROM pg_constraint
+                WHERE conrelid = 'audit_log'::regclass
+                  AND conname = 'ck_audit_log_case_note_actor'
+                """, String.class);
+        assertThat(caseNoteActorConstraint)
+                .contains("CASE_NOTE_CREATED", "actor_type", "actor_id", "SYSTEM", "USER");
+
+        CaseFixture fixture = insertReviewCase(0);
+        String user = USER_SUBJECT.toString();
+        UUID userNote = insertNoteActor(
+                fixture.id(),
+                "USER",
+                user,
+                "user note",
+                CREATED_AT.plus(1, ChronoUnit.MICROS)
+        );
+        insertNoteAuditActor(fixture.caseId(), "USER", user, userNote);
+
+        assertThat(insertNote(
+                fixture.id(),
+                "system note",
+                CREATED_AT.plus(2, ChronoUnit.MICROS)
+        )).isNotNull();
+
+        List<String> invalidUserRefs = java.util.Arrays.asList(
+                null,
+                "null",
+                "",
+                user.toUpperCase(),
+                "2f4c0a4e-8a9d-1c2f-9a1b-7d6e5f430001",
+                "2f4c0a4e-8a9d-4c2f-7a1b-7d6e5f430001",
+                " " + user,
+                user + " ",
+                "prefix-" + user,
+                user + "-suffix"
+        );
+        for (String invalid : invalidUserRefs) {
+            assertRejectedNoteActor(fixture, "USER", invalid);
+            assertRejectedNoteAuditActor(fixture, "USER", invalid);
+        }
+
+        assertRejectedNoteActor(fixture, null, user);
+        assertRejectedNoteActor(fixture, "SYSTEM", user);
+        assertRejectedNoteActor(fixture, "USER", "finguardops-backend");
+        assertRejectedNoteAuditActor(fixture, null, user);
+        assertRejectedNoteAuditActor(fixture, "SYSTEM", user);
+        assertRejectedNoteAuditActor(
+                fixture,
+                "USER",
+                "finguardops-backend"
+        );
+    }
+
+    @Test
     void createsOncePreservesContentAdvancesVersionAndReturnsDeterministicPages() {
         CaseFixture fixture = insertReviewCase(6);
         String content = "  <script>alert(1)</script>\r\nSELECT * FROM account; 😀  ";
@@ -137,8 +209,8 @@ class InvestigationNoteIntegrationTest extends PostgresqlIntegrationTestSupport 
         );
 
         assertThat(response.content()).isEqualTo(content);
-        assertThat(response.authorType().name()).isEqualTo("SYSTEM");
-        assertThat(response.authorRef()).isEqualTo("finguardops-backend");
+        assertThat(response.authorType().name()).isEqualTo("USER");
+        assertThat(response.authorRef()).isEqualTo(USER_SUBJECT.toString());
         assertThat(response.concurrencyVersion()).isEqualTo(7);
         assertThat(jdbc.queryForObject(
                 "SELECT concurrency_version FROM fraud_case WHERE id = ?",
@@ -330,6 +402,24 @@ class InvestigationNoteIntegrationTest extends PostgresqlIntegrationTestSupport 
         );
         assertThat(audits).isEqualTo(notes);
         assertThat(notes).isBetween(0, 1);
+        CommandOutcome winner = noteResult.success() ? noteResult : otherResult;
+        List<String> persistedActors = jdbc.queryForList(
+                "SELECT actor_id FROM audit_log WHERE case_id = ? ORDER BY id",
+                String.class,
+                fixture.caseId()
+        );
+        assertThat(persistedActors).containsOnly(winner.actorSubject().toString());
+        List<String> persistedAuthors = jdbc.queryForList(
+                "SELECT author_ref FROM investigation_note WHERE fraud_case_id = ?",
+                String.class,
+                fixture.id()
+        );
+        if (winner.serviceMethod() == ServiceMethod.NOTE_CREATE) {
+            assertThat(persistedAuthors)
+                    .containsExactly(winner.actorSubject().toString());
+        } else {
+            assertThat(persistedAuthors).isEmpty();
+        }
         List<String> auditActions = jdbc.queryForList(
                 "SELECT action FROM audit_log WHERE case_id = ? ORDER BY id",
                 String.class, fixture.caseId()
@@ -406,13 +496,8 @@ class InvestigationNoteIntegrationTest extends PostgresqlIntegrationTestSupport 
         return () -> {
             assertThat(SecurityContextHolder.getContext().getAuthentication())
                     .isNull();
-            var context = SecurityContextHolder.createEmptyContext();
-            context.setAuthentication(new TestingAuthenticationToken(
-                    "concurrency-contender",
-                    null,
-                    authorityFor(method)
-            ));
-            SecurityContextHolder.setContext(context);
+            UUID actorSubject = UUID.randomUUID();
+            setUserAuthentication(actorSubject, authorityFor(method));
             long threadId = Thread.currentThread().getId();
             activeServiceMethod.set(method);
             try {
@@ -454,7 +539,7 @@ class InvestigationNoteIntegrationTest extends PostgresqlIntegrationTestSupport 
                             "trace_note_assignee_race_01"
                     );
                 }
-                return CommandOutcome.success(method, threadId);
+                return CommandOutcome.success(method, threadId, actorSubject);
             } catch (InvestigationNoteException exception) {
                 if (exception.getReason()
                         != InvestigationNoteException.Reason
@@ -464,7 +549,7 @@ class InvestigationNoteIntegrationTest extends PostgresqlIntegrationTestSupport 
                 return CommandOutcome.conflict(
                         method, threadId, exception.getClass(),
                         exception.getReason().name(),
-                        hasOptimisticCause(exception)
+                        hasOptimisticCause(exception), actorSubject
                 );
             } catch (FraudCaseWorkflowException exception) {
                 if (exception.getReason()
@@ -475,7 +560,7 @@ class InvestigationNoteIntegrationTest extends PostgresqlIntegrationTestSupport 
                 return CommandOutcome.conflict(
                         method, threadId, exception.getClass(),
                         exception.getReason().name(),
-                        hasOptimisticCause(exception)
+                        hasOptimisticCause(exception), actorSubject
                 );
             } finally {
                 activeServiceMethod.remove();
@@ -484,6 +569,24 @@ class InvestigationNoteIntegrationTest extends PostgresqlIntegrationTestSupport 
                         .getAuthentication()).isNull();
             }
         };
+    }
+
+    private void setUserAuthentication(
+            UUID subject,
+            String... authorities
+    ) {
+        var context = SecurityContextHolder.createEmptyContext();
+        context.setAuthentication(new FinGuardOpsAuthenticationToken(
+                new FinGuardOpsPrincipal(
+                        subject,
+                        FinGuardOpsPrincipal.Type.USER,
+                        Set.of()
+                ),
+                java.util.Arrays.stream(authorities)
+                        .map(SimpleGrantedAuthority::new)
+                        .toList()
+        ));
+        SecurityContextHolder.setContext(context);
     }
 
     private String authorityFor(ServiceMethod method) {
@@ -707,12 +810,29 @@ class InvestigationNoteIntegrationTest extends PostgresqlIntegrationTestSupport 
     }
 
     private UUID insertNote(long casePk, String content, Instant createdAt) {
+        return insertNoteActor(
+                casePk,
+                "SYSTEM",
+                "finguardops-backend",
+                content,
+                createdAt
+        );
+    }
+
+    private UUID insertNoteActor(
+            long casePk,
+            String authorType,
+            String authorRef,
+            String content,
+            Instant createdAt
+    ) {
         UUID noteId = UUID.randomUUID();
         jdbc.update("""
                 INSERT INTO investigation_note
                     (note_id, fraud_case_id, author_type, author_ref, content, created_at)
-                VALUES (?, ?, 'SYSTEM', 'finguardops-backend', ?, ?)
-                """, noteId, casePk, content, Timestamp.from(createdAt));
+                VALUES (?, ?, ?, ?, ?, ?)
+                """, noteId, casePk, authorType, authorRef, content,
+                Timestamp.from(createdAt));
         return noteId;
     }
 
@@ -726,6 +846,55 @@ class InvestigationNoteIntegrationTest extends PostgresqlIntegrationTestSupport 
                     'CASE_INVESTIGATION_NOTE_ADDED', 'FRAUD_CASE', ?, NULL, ?,
                     'trace_note_db_01', NULL, NULL, CAST(? AS jsonb), ?)
                 """, UUID.randomUUID(), caseId, caseId, metadata, Timestamp.from(CREATED_AT));
+    }
+
+    private void insertNoteAuditActor(
+            UUID caseId,
+            String actorType,
+            String actorId,
+            UUID noteId
+    ) {
+        jdbc.update("""
+                INSERT INTO audit_log
+                    (audit_id, actor_type, actor_id, action, reason_code,
+                     target_type, target_id, transaction_id, case_id, trace_id,
+                     before_value_summary, after_value_summary, metadata,
+                     changed_at)
+                VALUES (?, ?, ?, 'CASE_NOTE_CREATED',
+                    'CASE_INVESTIGATION_NOTE_ADDED', 'FRAUD_CASE', ?, NULL, ?,
+                    'trace_note_actor_db_01', NULL, NULL,
+                    jsonb_build_object('noteId', ?::text), ?)
+                """,
+                UUID.randomUUID(), actorType, actorId, caseId, caseId,
+                noteId, Timestamp.from(CREATED_AT)
+        );
+    }
+
+    private void assertRejectedNoteActor(
+            CaseFixture fixture,
+            String authorType,
+            String authorRef
+    ) {
+        assertThatThrownBy(() -> insertNoteActor(
+                fixture.id(),
+                authorType,
+                authorRef,
+                "rejected",
+                CREATED_AT.plus(3, ChronoUnit.MICROS)
+        )).isInstanceOf(DataAccessException.class);
+    }
+
+    private void assertRejectedNoteAuditActor(
+            CaseFixture fixture,
+            String actorType,
+            String actorId
+    ) {
+        assertThatThrownBy(() -> insertNoteAuditActor(
+                fixture.caseId(),
+                actorType,
+                actorId,
+                UUID.randomUUID()
+        )).isInstanceOf(DataAccessException.class);
     }
 
     private int noteCount(UUID caseId) {
@@ -800,14 +969,17 @@ class InvestigationNoteIntegrationTest extends PostgresqlIntegrationTestSupport 
             Class<? extends RuntimeException> exceptionType,
             String errorCode,
             boolean optimisticCause,
-            long threadId
+            long threadId,
+            UUID actorSubject
     ) {
         static CommandOutcome success(
                 ServiceMethod serviceMethod,
-                long threadId
+                long threadId,
+                UUID actorSubject
         ) {
             return new CommandOutcome(
-                    serviceMethod, true, null, null, false, threadId
+                    serviceMethod, true, null, null, false, threadId,
+                    actorSubject
             );
         }
 
@@ -816,11 +988,12 @@ class InvestigationNoteIntegrationTest extends PostgresqlIntegrationTestSupport 
                 long threadId,
                 Class<? extends RuntimeException> exceptionType,
                 String errorCode,
-                boolean optimisticCause
+                boolean optimisticCause,
+                UUID actorSubject
         ) {
             return new CommandOutcome(
                     serviceMethod, false, exceptionType, errorCode,
-                    optimisticCause, threadId
+                    optimisticCause, threadId, actorSubject
             );
         }
     }

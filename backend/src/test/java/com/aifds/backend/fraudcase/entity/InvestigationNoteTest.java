@@ -30,6 +30,24 @@ class InvestigationNoteTest {
     }
 
     @Test
+    void createsApprovedUserAuthoredNoteWithCanonicalUuidV4() {
+        UUID userSubject = UUID.fromString(
+                "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001"
+        );
+        InvestigationNote note = InvestigationNote.userAuthored(
+                UUID.randomUUID(),
+                1L,
+                userSubject,
+                "memo",
+                Instant.parse("2026-09-02T00:00:00Z")
+        );
+
+        assertThat(note.getAuthorType())
+                .isEqualTo(InvestigationNoteAuthorType.USER);
+        assertThat(note.getAuthorRef()).isEqualTo(userSubject.toString());
+    }
+
+    @Test
     void rejectsInvalidIdentityCaseAndTimestampBoundaries() {
         assertThatThrownBy(() -> InvestigationNote.systemAuthored(
                 UUID.fromString("10000000-0000-1000-8000-000000000001"),
@@ -40,6 +58,11 @@ class InvestigationNoteTest {
         )).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> InvestigationNote.systemAuthored(
                 UUID.randomUUID(), 1L, "memo", Instant.parse("2026-09-02T00:00:00.000000001Z")
+        )).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> InvestigationNote.userAuthored(
+                UUID.randomUUID(), 1L,
+                UUID.fromString("10000000-0000-1000-8000-000000000001"),
+                "memo", Instant.parse("2026-09-02T00:00:00Z")
         )).isInstanceOf(IllegalArgumentException.class);
     }
 

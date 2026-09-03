@@ -62,9 +62,11 @@
   같은·다른 판정 재요청은 모두 거부해야 한다.
 - 종료는 Transaction·RiskLevel·RiskResponseOutcome·CaseTransaction과 AI 처리를
   변경하지 않아야 한다.
-- 인증·인가, RBAC, 실제 USER actor와 거부 요청 별도 감사는 미구현이다.
+- 인증·인가, RBAC와 네 사건 write의 실제 USER actor는 구현되었다. 거부 요청 별도
+  감사는 미구현이다.
 - 조사 메모는 `IN_REVIEW`, `ADDITIONAL_INFORMATION_REQUIRED` 사건에만 append-only로
-  생성하며 서버가 `SYSTEM/finguardops-backend` 작성자를 설정한다.
+  생성하며 검증된 USER JWT `sub`를 `authorType=USER`, `authorRef=<UUID v4>`로 설정한다.
+  기존 SYSTEM 메모와 자동 writer는 계속 유효하다.
 - 조사 메모 원문은 Unicode code point 1..4,000의 plain text로만 보존하고
   AuditLog·로그·오류에 원문·길이·hash·preview를 기록하지 않는다.
 - 조사 메모 생성은 필수 `expectedVersion`으로 부모 사건 version을 정확히 1 증가시키고

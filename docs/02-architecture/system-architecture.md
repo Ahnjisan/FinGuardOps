@@ -51,7 +51,7 @@
   PostgreSQL UPDATE·DELETE 차단 trigger
 - `GET /api/v1/cases/{caseId}/audit-logs`, 사건 선확인, 기존 V7 target index 기반
   read-only Page/count query와 action별 typed projection. 내부 식별자·저장 JSONB·과거
-  trace는 비노출하며 V14 migration은 추가하지 않음
+  trace는 비노출하며 V14는 actor CHECK만 확장하고 신규 index는 추가하지 않음
 - Issue 및 Pull Request 템플릿
 - FastAPI AI Service의 Python 3.12·uv 프로젝트, 애플리케이션 진입점과 Health API
 - Backend와 AI Service 전용 GitHub Actions 테스트 Workflow
@@ -885,8 +885,8 @@ React는 서비스 상태, 배포 버전, 업무 영향, AI 비용과 장애·�
   management `8081`은 업무 Resource Server chain과 분리한다.
 - 인증된 USER·SERVICE principal의 authority를 실제 12개 업무 method·path에 강제하고 그 밖의
   application 요청은 deny-by-default로 거부한다. 사건 workflow·resolution·조사 메모 생성은
-  같은 authority의 method security로 이중 보호한다. 사건 write USER Audit actor와
-  InvestigationNote USER author migration은 아직 구현하지 않았다.
+  같은 authority의 method security로 이중 보호한다. 네 사건 write는 검증된 USER
+  principal을 AuditLog actor와 InvestigationNote author에 연결한다.
 - Authorization Server 제품·구축, Local Compose JWT issuer/JWK fixture와 traffic generator
   SERVICE token, Frontend OIDC·Authorization Code + PKCE, production management mTLS·인증
   proxy는 후속 구현이다. 기존 JWT 없는 local traffic generator 업무 요청은 현재 401이며
@@ -1000,9 +1000,8 @@ Grafana는 Prometheus·Backend·Alertmanager의 시작 또는 health dependency�
   있는 `IN_REVIEW`만 종료하고 `expectedVersion` 우선 비교, 하나의 마이크로초 시각,
   FraudCase·AuditLog flush와 rollback을 같은 REQUIRED 트랜잭션에서 처리함.
   `Idempotency-Key`, `If-Match`, 자유 텍스트 reason, row lock·retry는 사용하지 않음
-- resolution 성공은 `SYSTEM/finguardops-backend` 감사 1건만 추가하며 Transaction,
-  RiskLevel, RiskResponseOutcome, CaseTransaction과 AI 처리를 변경하지 않음. RBAC,
-  실제 USER actor는 미구현
+- resolution 성공은 명령 시작 시 캡처한 USER actor의 감사 1건만 추가하며 Transaction,
+  RiskLevel, RiskResponseOutcome, CaseTransaction과 AI 처리를 변경하지 않음
 - `POST/GET /api/v1/cases/{caseId}/notes`와 Flyway V13. `InvestigationNote`는 부모
   컬렉션 없이 내부 사건 PK를 참조하고 `(fraud_case_id, created_at, id)` Page query를
   사용한다. 생성은 부모 optimistic version flush 뒤 note와 exact metadata AuditLog를
@@ -1040,26 +1039,26 @@ Grafana는 Prometheus·Backend·Alertmanager의 시작 또는 health dependency�
 - 비트랜잭션 상위 거래 Service의 External Risk→Rule 분석→최종화 연결
 - RuleVersion publish·운영 준비
 - 최종 Snapshot v2 확정과 완료 간극 운영 복구
-- 감사 보존·접근 통제와 실제 USER actor 연결. 401·403·validation·stale·업무 거부는
+- 감사 보존·접근 통제. 401·403·validation·stale·업무 거부는
   업무 AuditLog에서 제외
 
 OAuth2 Resource Server 기반과 401·403·trace 경계는 Issue #219에서, endpoint RBAC와
-method security는 Issue #221에서 구현되었다. 남은 보안 후속 Issue는 다음 세 개다.
+method security는 Issue #221에서, USER 감사 주체는 Issue #223에서 구현되었다. 남은 보안
+후속 Issue는 다음 두 개다.
 
-1. 사건 write USER actor와 InvestigationNote author 연결
-2. Local Compose·runbook JWT fixture와 인증 E2E
+1. Local Compose·runbook JWT fixture와 인증 E2E
    - Resource Server와 RBAC 적용 후 local issuer/JWK fixture 또는 승인된 local
      Authorization Server, SERVICE token bootstrap과 traffic generator `Authorization`
      header를 연결한다.
    - private key·token을 저장하지 않고 기존 Prometheus·recording·alert·Alertmanager·
      Grafana E2E 회귀와 장시간 Compose 검증을 수행한다.
-3. Frontend OIDC·token·권한 UI
+2. Frontend OIDC·token·권한 UI
    - Resource Server·RBAC와 Authorization Server 제품 결정 후 Authorization Code + PKCE,
      access token memory 보관, API `Authorization` header와 login·logout을 구현한다.
    - expiry·401·403 UX와 role·authority 기반 UI를 브라우저 경계에서 검증한다.
 
-2와 3은 서로 다른 Issue다. Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend
-OIDC도 Compose traffic fixture의 일부가 아니다. 남은 후속 Issue는 세 개이며 토큰
+1과 2는 서로 다른 Issue다. Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend
+OIDC도 Compose traffic fixture의 일부가 아니다. 남은 후속 Issue는 두 개이며 토큰
 절약을 위한 인위적 분할이 아니라 기술 책임·선행 관계·실패 영향·검증 시간이 다르기 때문에
 분리한다.
 
