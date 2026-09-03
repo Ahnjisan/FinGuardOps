@@ -14,6 +14,7 @@ import com.aifds.backend.fraudcase.exception.FraudCaseWorkflowException;
 import com.aifds.backend.fraudcase.repository.FraudCaseRepository;
 import com.aifds.backend.fraudcase.validation.FraudCaseValidationException;
 import com.aifds.backend.fraudcase.validation.FraudCaseWorkflowValidator;
+import com.aifds.backend.security.principal.CurrentAuditActorProvider;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -57,6 +58,9 @@ class FraudCaseWorkflowServiceTest {
             Instant.parse("2026-09-01T00:00:00Z");
     private static final Instant NOW =
             Instant.parse("2026-09-01T00:10:00.123456Z");
+    private static final UUID USER_SUBJECT = UUID.fromString(
+            "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001"
+    );
 
     private final FraudCaseRepository repository =
             mock(FraudCaseRepository.class);
@@ -64,6 +68,8 @@ class FraudCaseWorkflowServiceTest {
             mock(AuditLogPersistenceService.class);
     private final FraudCaseWorkflowValidator validator =
             new FraudCaseWorkflowValidator();
+    private final CurrentAuditActorProvider actorProvider =
+            mock(CurrentAuditActorProvider.class);
     private final FraudCaseWorkflowService service =
             new FraudCaseWorkflowService(
                     repository,
@@ -71,12 +77,14 @@ class FraudCaseWorkflowServiceTest {
                     new FraudCaseWorkflowMapper(),
                     auditService,
                     new ObjectMapper(),
-                    Clock.fixed(NOW, ZoneOffset.UTC)
+                    Clock.fixed(NOW, ZoneOffset.UTC),
+                    actorProvider
             );
 
     @BeforeEach
     void resetMocks() {
-        reset(repository, auditService);
+        reset(repository, auditService, actorProvider);
+        when(actorProvider.currentUserSubject()).thenReturn(USER_SUBJECT);
         doAnswer(invocation -> {
             FraudCase fraudCase = repository.findByCaseId(CASE_ID).orElseThrow();
             ReflectionTestUtils.setField(
@@ -123,7 +131,12 @@ class FraudCaseWorkflowServiceTest {
             assertThat(response.reviewStartedAt()).isEqualTo(firstReviewTime);
         }
         verify(repository).flush();
-        verify(auditService).append(forClass(AuditLogDraft.class).capture());
+        var audit = forClass(AuditLogDraft.class);
+        verify(auditService).append(audit.capture());
+        assertThat(audit.getValue().actorType().name()).isEqualTo("USER");
+        assertThat(audit.getValue().actorId())
+                .isEqualTo(USER_SUBJECT.toString());
+        verify(actorProvider).currentUserSubject();
     }
 
     @ParameterizedTest
@@ -190,6 +203,10 @@ class FraudCaseWorkflowServiceTest {
         assertThat(captor.getValue().targetId()).isEqualTo(CASE_ID);
         assertThat(captor.getValue().caseId()).isEqualTo(CASE_ID);
         assertThat(captor.getValue().metadata()).isEmpty();
+        assertThat(captor.getValue().actorType().name()).isEqualTo("USER");
+        assertThat(captor.getValue().actorId())
+                .isEqualTo(USER_SUBJECT.toString());
+        verify(actorProvider).currentUserSubject();
     }
 
     @Test
@@ -362,8 +379,9 @@ class FraudCaseWorkflowServiceTest {
         assertThat(audit.action()).isEqualTo(AuditAction.CASE_RESOLVED);
         assertThat(audit.reasonCode())
                 .isEqualTo(AuditReasonCode.CASE_RESOLUTION_COMPLETED);
-        assertThat(audit.actorType().name()).isEqualTo("SYSTEM");
-        assertThat(audit.actorId()).isEqualTo("finguardops-backend");
+        assertThat(audit.actorType().name()).isEqualTo("USER");
+        assertThat(audit.actorId()).isEqualTo(USER_SUBJECT.toString());
+        verify(actorProvider).currentUserSubject();
         assertThat(audit.targetId()).isEqualTo(CASE_ID);
         assertThat(audit.caseId()).isEqualTo(CASE_ID);
         assertThat(audit.transactionId()).isNull();

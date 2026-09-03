@@ -5,11 +5,11 @@
 이 문서는 Issue #156의 append-only `AuditLog`, Issue #209의 사건 workflow 감사,
 Issue #211의 resolution 감사, Issue #213의 조사 메모 감사와 Issue #215의 사건별
 조회 경계를 정의한다. Flyway V7은 테이블·Index·UPDATE/DELETE 차단 trigger를 추가하고,
-V11은 V1~V10을 수정하지 않고 workflow check를 확장하며 V12는 V1~V11을 수정하지 않고 resolution action·reason·snapshot check만 additive 확장한다.
+V11은 V1~V10을 수정하지 않고 workflow check를 확장하며 V12는 V1~V11을 수정하지 않고 resolution action·reason·snapshot check만 additive 확장한다. V14는 기존 행을 재작성하지 않고 USER actor와 note author CHECK만 확장한다.
 
 구현 범위는 typed 감사 INSERT, 내부 위험 대응 최종화, 성공한 사건 조사
-상태·담당자·종료·메모 명령 통합과 사건별 공개 조회 projection까지다. 실제 인증
-사용자 연결과 실패·거부 요청 별도 감사는 포함하지 않는다.
+상태·담당자·종료·메모 명령 통합, 실제 인증 USER 연결과 사건별 공개 조회 projection까지다.
+실패·거부 요청 별도 감사는 포함하지 않는다.
 
 관련 논리·API 계약은 다음 문서를 함께 따른다.
 
@@ -25,10 +25,9 @@ V11은 V1~V10을 수정하지 않고 workflow check를 확장하며 V12는 V1~V1
 - `SYSTEM` actor의 `actor_id`는 `finguardops-backend`로 고정한다.
 - `USER` actor의 `actor_id`는 canonical lowercase 내부 사용자 업무 UUID v4만
   허용한다. Actor Directory FK는 추가하지 않았다.
-- 외부 인증 Provider subject는 향후 인증 계층이 내부 사용자 UUID v4로
-  매핑한 후 전달해야 한다. 사용자명, 이메일, 사번, 전화번호 원문은
+- 검증된 JWT subject는 인증 계층이 canonical lowercase UUID v4로 검증한 후 USER write에
+  전달한다. 사용자명, 이메일, 사번, 전화번호 원문은
   `actor_id`로 저장하지 않는다.
-- 실제 인증·인가 기반 `USER` actor 연결은 아직 구현하지 않았다.
 
 ## 3. audit_log
 
@@ -138,7 +137,7 @@ rollback한다.
 append하지 않는다.
 
 사건 workflow는 성공한 명령마다 정확히 1건만 append한다. resolution은 성공한
-종료에만 `SYSTEM/finguardops-backend` actor로 정확히 1건을 append한다. 사건 flush와 감사
+종료에만 명령 시작 시 캡처한 USER actor로 정확히 1건을 append한다. 사건 flush와 감사
 append·flush는 같은 기본 `REQUIRED` 트랜잭션에 참여하며 optimistic conflict 또는
 감사 저장 실패 시 모두 rollback한다. 상태·담당자 snapshot의 reasonCode 조합은
 Java 정책과 V11/V12 check에서 함께 제한한다. stale·CLOSED·금지 상태·validation
@@ -180,14 +179,14 @@ Issue #215 조회는 기존
 `ix_audit_log_target_changed(target_type, target_id, changed_at DESC, id DESC)`를
 그대로 사용한다. 사건 존재를 먼저 확인한 뒤 `target_type='FRAUD_CASE'`와
 `target_id=:caseId`로 content와 count를 별도 조회한다. content는 요청 방향에 따라
-`changed_at,id`를 모두 ASC 또는 모두 DESC로 정렬한다. 신규 migration이나 V14 index는
-추가하지 않는다.
+`changed_at,id`를 모두 ASC 또는 모두 DESC로 정렬한다. V14는 신규 index를 추가하지 않는다.
 
 ## 9. 사건 조사 메모 감사
 
 V13은 `CASE_NOTE_CREATED/CASE_INVESTIGATION_NOTE_ADDED`를 additive 확장한다.
 `targetType=FRAUD_CASE`, `targetId=caseId`, `transactionId=null`,
-`actorType=SYSTEM`, `actorId=finguardops-backend`, before/after summary는 SQL NULL이다.
+사용자 생성은 `actorType=USER`, `actorId=<canonical lowercase UUID v4>`이고 기존 SYSTEM
+writer와 행은 `SYSTEM/finguardops-backend`를 유지한다. before/after summary는 SQL NULL이다.
 metadata는 exact `{ "noteId": "<canonical lowercase UUID v4>" }` 한 키만 허용한다.
 PostgreSQL CHECK는 key 존재, exact key set, JSON string type과 UUID 형식을 독립적으로
 검증해 JSON null의 CHECK UNKNOWN 통과를 막는다.
@@ -201,7 +200,6 @@ PostgreSQL CHECK는 key 존재, exact key set, JSON string type과 UUID 형식�
 ## 10. 미구현 경계
 
 - 거부 감사와 별도 commit 경계
-- 인증·인가 기반 USER actor
 - 실패·거부·stale 사건 요청 별도 감사
 - deduplication key
 - runtime DB role 분리

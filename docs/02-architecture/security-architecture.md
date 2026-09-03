@@ -19,15 +19,15 @@ actor 목표 계약을 정의한다. Architecture Decision은
 - 사건 상태·담당자·종결과 조사 메모 생성 Service에는 동일 authority 상수 기반
   `@PreAuthorize`를 적용했다.
 - login·signup·refresh·logout endpoint와 사용자·role·credential DB가 없다.
-- 사건 workflow·resolution·note writer는 `SYSTEM/finguardops-backend`를 기록한다.
+- 사건 workflow·resolution·note writer는 provider가 검증한 USER UUID v4를 기록한다.
 - Issue #215 사건 감사 조회 응답은 `actorType`만 공개하고 `actorId`는 비노출한다.
 
 ### 1.2 목표와 비범위
 
 Issue #219는 Resource Server 기반과 JWT·principal·공통 오류·listener 경계를 구현했고,
-Issue #221은 endpoint RBAC와 high-risk write method security를 구현했다. USER actor,
-Frontend 로그인, Authorization Server와 Compose 인증은 후속 범위이며 구현 완료로 표현하지
-않는다.
+Issue #221은 endpoint RBAC와 high-risk write method security를 구현했고 Issue #223은
+USER actor와 조사 메모 USER author를 연결했다. Frontend 로그인, Authorization Server와
+Compose 인증은 후속 범위이며 구현 완료로 표현하지 않는다.
 
 ## 2. 신뢰 경계
 
@@ -149,10 +149,10 @@ method·path는 표의 authority를 강제한다. 문서 후보 endpoint에는 m
 | `POST /api/v1/behavior-events` | `BehaviorEventIntakeController`, 행동 접수 | W | SERVICE · `BEHAVIOR_INGESTOR` | `behavior-event:intake` | 아니오 | authority 강제 | 없음 |
 | `GET /api/v1/cases` | `FraudCaseQueryController`, 사건 목록 | R | USER · viewer authority 보유 role | `case:read` | 아니오 | authority 강제 | 없음 |
 | `GET /api/v1/cases/{caseId}` | `FraudCaseQueryController`, 사건 상세 | R | USER · viewer authority 보유 role | `case:read` | 아니오 | authority 강제 | 없음 |
-| `PATCH /api/v1/cases/{caseId}/status` | `FraudCaseWorkflowController`, 상태 변경 | W | USER · `FDS_ANALYST` | `case:workflow:write` | 아니오 | URL + method | 현재 SYSTEM, 목표 USER |
-| `PATCH /api/v1/cases/{caseId}/assignee` | `FraudCaseWorkflowController`, 담당자 변경 | W | USER · `FDS_ANALYST` | `case:workflow:write` | 아니오 | URL + method | 현재 SYSTEM, 목표 USER |
-| `POST /api/v1/cases/{caseId}/resolution` | `FraudCaseWorkflowController`, 사건 종결 | W | USER · `FDS_APPROVER` | `case:resolution:write` | 아니오 | URL + method | 현재 SYSTEM, 목표 USER |
-| `POST /api/v1/cases/{caseId}/notes` | `InvestigationNoteController`, 메모 생성 | W | USER · `FDS_ANALYST` | `case-note:write` | 아니오 | URL + method | 현재 SYSTEM, 목표 USER |
+| `PATCH /api/v1/cases/{caseId}/status` | `FraudCaseWorkflowController`, 상태 변경 | W | USER · `FDS_ANALYST` | `case:workflow:write` | 아니오 | URL + method | USER |
+| `PATCH /api/v1/cases/{caseId}/assignee` | `FraudCaseWorkflowController`, 담당자 변경 | W | USER · `FDS_ANALYST` | `case:workflow:write` | 아니오 | URL + method | USER |
+| `POST /api/v1/cases/{caseId}/resolution` | `FraudCaseWorkflowController`, 사건 종결 | W | USER · `FDS_APPROVER` | `case:resolution:write` | 아니오 | URL + method | USER |
+| `POST /api/v1/cases/{caseId}/notes` | `InvestigationNoteController`, 메모 생성 | W | USER · `FDS_ANALYST` | `case-note:write` | 아니오 | URL + method | USER |
 | `GET /api/v1/cases/{caseId}/notes` | `InvestigationNoteController`, 메모 조회 | R | USER · viewer authority 보유 role | `case-note:read` | 아니오 | authority 강제 | 없음 |
 | `GET /api/v1/cases/{caseId}/audit-logs` | `FraudCaseAuditLogController`, 감사 조회 | R | USER · viewer authority 보유 role | `case-audit:read` | 아니오 | authority 강제 | 없음 |
 
@@ -305,27 +305,28 @@ claim, Provider 오류, 내부 security class와 stack trace는 응답이나 일
 
 ## 8. USER Audit actor 계약
 
-### 8.1 현재 Java·DB 계약
+### 8.1 구현된 Java·DB 계약
 
 - `AuditActorType`은 `SYSTEM`, `USER`를 허용한다.
 - 일반 `audit_log`에서 SYSTEM actorId는 `finguardops-backend`, USER actorId는 canonical
   lowercase UUID v4다.
-- 사건 workflow·resolution·note writer는 현재 SYSTEM을 사용한다.
-- `investigation_note.author_type/author_ref`와 `CASE_NOTE_CREATED` DB CHECK는 현재
-  SYSTEM 전용이다.
+- 사건 workflow·resolution·note writer는 USER를 사용한다.
+- `investigation_note.author_type/author_ref`와 `CASE_NOTE_CREATED` DB CHECK는 기존
+  SYSTEM 조합과 신규 USER UUID v4 조합을 허용한다.
 - 사건 감사 조회 응답은 `actorType`만 공개하고 `actorId`는 비노출한다.
 
-### 8.2 목표 전달 경계
+### 8.2 전달 경계
 
 - 인증 adapter가 검증된 JWT로 immutable principal/actor를 만든다.
 - USER의 `sub`만 `AuditActorType.USER`의 `actorId`로 사용한다.
 - SERVICE의 `sub`는 USER actor로 저장하지 않는다.
 - email, display name, 내부 DB PK와 body·query·임의 header의 actor 값은 사용하지 않는다.
-- Controller는 인증 adapter가 만든 actor만 Service로 전달한다.
+- `CurrentAuditActorProvider` 하나만 SecurityContext를 읽고, Service는 명령 시작 시 USER
+  subject를 한 번 캡처한다. Controller·Entity·Repository는 SecurityContext를 읽지 않는다.
 
 ### 8.3 USER·SYSTEM 적용
 
-| 처리 | 목표 actor |
+| 처리 | actor |
 | --- | --- |
 | 사건 상태 변경 | USER |
 | 사건 담당자 변경 | USER |
@@ -339,18 +340,16 @@ read-only, 401, 403, validation, stale version, 업무 상태 거부, DB 오류,
 conflict와 rollback loser는 업무 AuditLog를 만들지 않는다. 성공 사건 변경과 USER
 AuditLog는 같은 transaction·flush·rollback 경계를 사용한다.
 
-조사 메모 USER 전환은 `investigation_note`와 `CASE_NOTE_CREATED`의 SYSTEM 전용 CHECK를
-변경하는 migration을 후속 Issue에서 함께 수행해야 한다. 기존 SYSTEM row는 유지한다.
+V14는 `investigation_note`와 `CASE_NOTE_CREATED`의 CHECK에 USER/canonical lowercase UUID
+v4 조합을 추가하고 기존 SYSTEM 조합·행·append-only trigger·index를 유지한다.
 
-### 8.4 actorId 응답의 현재와 목표
+### 8.4 actorId 응답
 
-- 현재: Issue #215 응답은 `actorType`만 공개하고 `actorId`는 비노출한다.
-- 목표: USER actor 구현과 감사 API 변경이 완료된 뒤 `case:audit:read` 권한 사용자에게
-  USER actor UUID만 공개한다.
+- Issue #215 응답은 USER 구현 후에도 `actorType`만 공개하고 `actorId`는 비노출한다.
 - email과 display name은 공개하지 않는다.
 - SYSTEM actorId 공개 여부는 후속 API 변경에서 별도로 결정한다.
 
-목표가 구현되기 전에는 현재 #215 projection 계약을 유지한다.
+USER actor UUID, token, claim과 principal 원문은 응답·로그·metadata에 공개하지 않는다.
 
 ## 9. Management 8081 경계
 
@@ -438,9 +437,9 @@ method security는 Issue #221에서 구현되었다. 아래 표는 구현 상태
 | 순서·제목 | 목표 | 주요 변경 영역 | Migration | 테스트 경계 | 선행 Issue | 장시간 검증·현재 상태 |
 | --- | --- | --- | --- | --- | --- | --- |
 | 완료. `[Backend/Security] Endpoint RBAC와 USER·SERVICE authority matrix 적용` | deny-by-default와 endpoint 최소 권한 | request matcher, role converter, method security | 없음 | 13개 endpoint·401·403, role 혼용 | #219 | full-stack JWT·method security 검증; 구현 |
-| 1. `[Backend/Audit] 사건 write USER actor와 InvestigationNote author 연결` | 검증 principal을 성공 감사에 연결 | controller/service actor, note author, audit projection | 필요 | 성공·stale·rollback·기존 SYSTEM 호환 | #221 | 동시성·migration; 미구현 |
-| 2. `[Infra/Docs] Local Compose·runbook JWT fixture와 인증 E2E 적용` | local issuer와 SERVICE traffic | Compose, fixture, env example, runbook | 없음 | build·wait·traffic·scrape·alert·restart | #219·#221 | Docker E2E; 미구현 |
-| 3. `[Frontend] OIDC 로그인·token·권한 UI 구현` | SPA 인증·권한 UX | PKCE, memory token, API client, 401·403 UI | 없음 | browser login·expiry·권한 UI | AS 제품, #219·#221 | 브라우저/AS E2E; 미구현 |
+| 완료. `[Backend/Audit] 사건 write USER actor와 InvestigationNote author 연결` | 검증 principal을 성공 감사에 연결 | provider/service actor, note author, V14 | 적용 | 성공·stale·rollback·기존 SYSTEM 호환 | #221 | 동시성·migration 검증; 구현 |
+| 1. `[Infra/Docs] Local Compose·runbook JWT fixture와 인증 E2E 적용` | local issuer와 SERVICE traffic | Compose, fixture, env example, runbook | 없음 | build·wait·traffic·scrape·alert·restart | #219·#221 | Docker E2E; 미구현 |
+| 2. `[Frontend] OIDC 로그인·token·권한 UI 구현` | SPA 인증·권한 UX | PKCE, memory token, API client, 401·403 UI | 없음 | browser login·expiry·권한 UI | AS 제품, #219·#221 | 브라우저/AS E2E; 미구현 |
 
 ## 14. 구현 검증 계약
 

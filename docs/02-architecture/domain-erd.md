@@ -28,7 +28,7 @@ FastAPI `POST /api/v1/rule-analysis`, R001~R004 실행·점수·RiskLevel·Evide
 계산과 Spring Boot Rule 분석 HTTP Client·v1·v2 내부 오케스트레이션, 기본 Rule 집합
 발행 경계와 위험 대응·사건·AuditLog 원자적 최종화 경계도 구현되어 있다.
 실제 External Risk Provider·영속화·거래 접수 전체 연결, Snapshot v2와 운영
-복구, 인증·인가·RBAC와 실제 USER actor 연결, 사건 추가 거래 연결·병합·분리,
+복구, 사건 추가 거래 연결·병합·분리,
 감사 단건 상세·검색 filter·cursor pagination·CSV·파일 export·archive·보존 정책,
 Frontend, AI 운영 엔티티와 운영 PostgreSQL 배포 환경은 아직 구현되지 않았다.
 
@@ -611,7 +611,7 @@ Issue #154는 방안 A를 채택했다. `FinancialTransaction`을 먼저
 
 - `noteId`
 - `caseId`
-- `authorType=SYSTEM`
+- `authorType=SYSTEM|USER`
 - `authorRef`
 - `content`
 - `createdAt`
@@ -620,7 +620,8 @@ Issue #213 구현 계약은 다음과 같다.
 
 - 기존 메모를 직접 수정하거나 물리 삭제하지 않는다.
 - `FraudCase`에는 note collection을 추가하지 않고 note가 내부 `fraud_case_id` FK를 소유한다.
-- 작성자는 서버가 `SYSTEM/finguardops-backend`로 고정한다. 실제 USER/RBAC는 별도 migration Issue다.
+- 사용자 write 작성자는 검증된 USER UUID v4 `sub`이고 기존 자동 작성자와 기존 행은
+  `SYSTEM/finguardops-backend`를 유지한다.
 - `correctionOfNoteId`, 개별 상세·수정·삭제 endpoint와 `Idempotency-Key` replay는 구현하지 않는다.
 - `IN_REVIEW`, `ADDITIONAL_INFORMATION_REQUIRED`에서만 생성하고 부모 optimistic version과 같은 경쟁 경계를 사용한다.
 
@@ -653,8 +654,8 @@ additive 확장한다. Issue #215는 사건별 read-only 조회와 action별 typ
 
 `SYSTEM actorId`는 `finguardops-backend`로 고정하고, `USER actorId`는 내부
 사용자 업무 UUID v4만 허용한다. 외부 인증 Provider subject와 표시용
-개인정보 원문은 저장하지 않으며, 실제 `USER` actor 연결은 아직
-구현하지 않았다.
+개인정보 원문은 저장하지 않는다. Issue #223의 네 사용자 write만 실제 `USER` actor를
+사용하고 자동 사건·거래·Rule/AI·복구 writer는 `SYSTEM`을 유지한다.
 
 V7의 최초 네 action, V11의 두 사건 workflow action과 V12의 resolution action은 exact JSON key·scalar
 타입·형식을 Java와 PostgreSQL에서
@@ -1631,7 +1632,8 @@ Issue #215의 사건 감사 조회는 다음 조건으로 구현한다.
 - action/reason/context/JSON을 strict 재검증한 typed projection만 공개
 
 내부 PK·업무 `auditId`·actorId·target/context 식별자·저장 traceId·JSONB 원문은
-정렬과 검증 경계 밖으로 공개하지 않는다. 신규 index와 V14 migration은 추가하지 않는다.
+정렬과 검증 경계 밖으로 공개하지 않는다. V14는 actor CHECK만 확장하며 신규 index는
+추가하지 않는다.
 
 ## 18. 삭제·보존 정책 후보
 

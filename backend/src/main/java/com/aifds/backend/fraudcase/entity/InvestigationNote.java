@@ -16,6 +16,7 @@ import org.hibernate.annotations.Immutable;
 import java.time.Instant;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 @Entity
 @Immutable
@@ -23,6 +24,10 @@ import java.util.UUID;
 public class InvestigationNote {
 
     public static final String SYSTEM_AUTHOR_REF = "finguardops-backend";
+    private static final Pattern USER_AUTHOR_REF_PATTERN = Pattern.compile(
+            "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}"
+                    + "-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    );
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -54,13 +59,15 @@ public class InvestigationNote {
     private InvestigationNote(
             UUID noteId,
             Long fraudCaseId,
+            InvestigationNoteAuthorType authorType,
+            String authorRef,
             String content,
             Instant createdAt
     ) {
         this.noteId = noteId;
         this.fraudCaseId = fraudCaseId;
-        this.authorType = InvestigationNoteAuthorType.SYSTEM;
-        this.authorRef = SYSTEM_AUTHOR_REF;
+        this.authorType = authorType;
+        this.authorRef = authorRef;
         this.content = content;
         this.createdAt = createdAt;
         validateInvariants();
@@ -72,7 +79,35 @@ public class InvestigationNote {
             String content,
             Instant createdAt
     ) {
-        return new InvestigationNote(noteId, fraudCaseId, content, createdAt);
+        return new InvestigationNote(
+                noteId,
+                fraudCaseId,
+                InvestigationNoteAuthorType.SYSTEM,
+                SYSTEM_AUTHOR_REF,
+                content,
+                createdAt
+        );
+    }
+
+    public static InvestigationNote userAuthored(
+            UUID noteId,
+            Long fraudCaseId,
+            UUID authorSubject,
+            String content,
+            Instant createdAt
+    ) {
+        UUID subject = Objects.requireNonNull(
+                authorSubject,
+                "authorSubject must not be null"
+        );
+        return new InvestigationNote(
+                noteId,
+                fraudCaseId,
+                InvestigationNoteAuthorType.USER,
+                subject.toString(),
+                content,
+                createdAt
+        );
     }
 
     @PrePersist
@@ -84,14 +119,34 @@ public class InvestigationNote {
         if (fraudCaseId == null || fraudCaseId < 1) {
             throw new IllegalArgumentException("fraudCaseId must be positive");
         }
-        if (authorType != InvestigationNoteAuthorType.SYSTEM
-                || !SYSTEM_AUTHOR_REF.equals(authorRef)) {
+        if (!isValidAuthor()) {
             throw new IllegalArgumentException("Investigation note actor is not supported");
         }
         Objects.requireNonNull(content, "content must not be null");
         Instant validatedTime = Objects.requireNonNull(createdAt, "createdAt must not be null");
         if (validatedTime.getNano() % 1_000 != 0) {
             throw new IllegalArgumentException("createdAt must have microsecond precision");
+        }
+    }
+
+    private boolean isValidAuthor() {
+        if (authorType == InvestigationNoteAuthorType.SYSTEM) {
+            return SYSTEM_AUTHOR_REF.equals(authorRef);
+        }
+        return authorType == InvestigationNoteAuthorType.USER
+                && authorRef != null
+                && USER_AUTHOR_REF_PATTERN.matcher(authorRef).matches()
+                && isUuidV4(authorRef);
+    }
+
+    private boolean isUuidV4(String value) {
+        try {
+            UUID uuid = UUID.fromString(value);
+            return uuid.version() == 4
+                    && uuid.variant() == 2
+                    && uuid.toString().equals(value);
+        } catch (IllegalArgumentException exception) {
+            return false;
         }
     }
 

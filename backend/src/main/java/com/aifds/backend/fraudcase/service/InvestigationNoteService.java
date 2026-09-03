@@ -2,7 +2,6 @@ package com.aifds.backend.fraudcase.service;
 
 import com.aifds.backend.audit.entity.AuditAction;
 import com.aifds.backend.audit.entity.AuditActorType;
-import com.aifds.backend.audit.entity.AuditLog;
 import com.aifds.backend.audit.entity.AuditReasonCode;
 import com.aifds.backend.audit.entity.AuditTargetType;
 import com.aifds.backend.audit.service.AuditLogDraft;
@@ -18,6 +17,7 @@ import com.aifds.backend.fraudcase.exception.InvestigationNoteException;
 import com.aifds.backend.fraudcase.repository.FraudCaseRepository;
 import com.aifds.backend.fraudcase.repository.InvestigationNoteRepository;
 import com.aifds.backend.fraudcase.validation.InvestigationNoteValidator;
+import com.aifds.backend.security.principal.CurrentAuditActorProvider;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.OptimisticLockException;
 import org.springframework.dao.DataAccessException;
@@ -36,6 +36,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Collections;
 import java.util.IdentityHashMap;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 
@@ -51,6 +52,7 @@ public class InvestigationNoteService {
     private final AuditLogPersistenceService auditService;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final CurrentAuditActorProvider currentAuditActorProvider;
 
     public InvestigationNoteService(
             FraudCaseRepository fraudCaseRepository,
@@ -59,7 +61,8 @@ public class InvestigationNoteService {
             InvestigationNoteMapper mapper,
             AuditLogPersistenceService auditService,
             ObjectMapper objectMapper,
-            Clock clock
+            Clock clock,
+            CurrentAuditActorProvider currentAuditActorProvider
     ) {
         this.fraudCaseRepository = fraudCaseRepository;
         this.noteRepository = noteRepository;
@@ -68,6 +71,7 @@ public class InvestigationNoteService {
         this.auditService = auditService;
         this.objectMapper = objectMapper;
         this.clock = clock;
+        this.currentAuditActorProvider = currentAuditActorProvider;
     }
 
     @Transactional
@@ -76,6 +80,9 @@ public class InvestigationNoteService {
             FraudCaseNoteCommand.Create command,
             String traceId
     ) {
+        Objects.requireNonNull(command, "command must not be null");
+        UUID actorSubject = currentAuditActorProvider.currentUserSubject();
+        String actorId = actorSubject.toString();
         try {
             FraudCase fraudCase = findCase(command.caseId());
             if (fraudCase.getConcurrencyVersion() != command.expectedVersion()) {
@@ -90,15 +97,16 @@ public class InvestigationNoteService {
             fraudCase.recordInvestigationNoteActivity(activityTime);
             fraudCaseRepository.flush();
 
-            InvestigationNote note = InvestigationNote.systemAuthored(
-                    UUID.randomUUID(), fraudCase.getId(), command.content(), activityTime
+            InvestigationNote note = InvestigationNote.userAuthored(
+                    UUID.randomUUID(), fraudCase.getId(), actorSubject,
+                    command.content(), activityTime
             );
             noteRepository.saveAndFlush(note);
             var metadata = objectMapper.createObjectNode();
             metadata.put("noteId", note.getNoteId().toString());
             auditService.append(new AuditLogDraft(
-                    AuditActorType.SYSTEM,
-                    AuditLog.SYSTEM_ACTOR_ID,
+                    AuditActorType.USER,
+                    actorId,
                     AuditAction.CASE_NOTE_CREATED,
                     AuditReasonCode.CASE_INVESTIGATION_NOTE_ADDED,
                     AuditTargetType.FRAUD_CASE,

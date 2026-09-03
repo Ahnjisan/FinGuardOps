@@ -4,7 +4,6 @@ import com.aifds.backend.audit.entity.AuditAction;
 import com.aifds.backend.audit.entity.AuditActorType;
 import com.aifds.backend.audit.entity.AuditReasonCode;
 import com.aifds.backend.audit.entity.AuditTargetType;
-import com.aifds.backend.audit.entity.AuditLog;
 import com.aifds.backend.audit.service.AuditLogDraft;
 import com.aifds.backend.audit.service.AuditLogPersistenceService;
 import com.aifds.backend.fraudcase.command.FraudCaseWorkflowCommand;
@@ -16,6 +15,7 @@ import com.aifds.backend.fraudcase.exception.FraudCaseNotFoundException;
 import com.aifds.backend.fraudcase.exception.FraudCaseWorkflowException;
 import com.aifds.backend.fraudcase.repository.FraudCaseRepository;
 import com.aifds.backend.fraudcase.validation.FraudCaseWorkflowValidator;
+import com.aifds.backend.security.principal.CurrentAuditActorProvider;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.persistence.OptimisticLockException;
@@ -48,6 +48,7 @@ public class FraudCaseWorkflowService {
     private final AuditLogPersistenceService auditLogService;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final CurrentAuditActorProvider currentAuditActorProvider;
 
     public FraudCaseWorkflowService(
             FraudCaseRepository fraudCaseRepository,
@@ -55,7 +56,8 @@ public class FraudCaseWorkflowService {
             FraudCaseWorkflowMapper mapper,
             AuditLogPersistenceService auditLogService,
             ObjectMapper objectMapper,
-            Clock clock
+            Clock clock,
+            CurrentAuditActorProvider currentAuditActorProvider
     ) {
         this.fraudCaseRepository = fraudCaseRepository;
         this.validator = validator;
@@ -63,6 +65,7 @@ public class FraudCaseWorkflowService {
         this.auditLogService = auditLogService;
         this.objectMapper = objectMapper;
         this.clock = clock;
+        this.currentAuditActorProvider = currentAuditActorProvider;
     }
 
     @Transactional
@@ -72,6 +75,8 @@ public class FraudCaseWorkflowService {
             String traceId
     ) {
         Objects.requireNonNull(command, "command must not be null");
+        String actorId = currentAuditActorProvider.currentUserSubject()
+                .toString();
         try {
             FraudCase fraudCase = findCase(command.caseId());
             requireExpectedVersion(fraudCase, command.expectedVersion());
@@ -90,7 +95,8 @@ public class FraudCaseWorkflowService {
                             fraudCase.getCaseStatus(),
                             fraudCase.getAssigneeRef()
                     ),
-                    traceId
+                    traceId,
+                    actorId
             );
             return mapper.toResponse(fraudCase, traceId);
         } catch (OptimisticLockingFailureException
@@ -111,6 +117,8 @@ public class FraudCaseWorkflowService {
             String traceId
     ) {
         Objects.requireNonNull(command, "command must not be null");
+        String actorId = currentAuditActorProvider.currentUserSubject()
+                .toString();
         try {
             FraudCase fraudCase = findCase(command.caseId());
             requireExpectedVersion(fraudCase, command.expectedVersion());
@@ -126,7 +134,8 @@ public class FraudCaseWorkflowService {
                     command.reasonCode(),
                     snapshot(status, beforeAssignee),
                     snapshot(status, fraudCase.getAssigneeRef()),
-                    traceId
+                    traceId,
+                    actorId
             );
             return mapper.toResponse(fraudCase, traceId);
         } catch (OptimisticLockingFailureException
@@ -147,6 +156,8 @@ public class FraudCaseWorkflowService {
             String traceId
     ) {
         Objects.requireNonNull(command, "command must not be null");
+        String actorId = currentAuditActorProvider.currentUserSubject()
+                .toString();
         try {
             FraudCase fraudCase = findCase(command.caseId());
             requireExpectedVersion(fraudCase, command.expectedVersion());
@@ -180,7 +191,8 @@ public class FraudCaseWorkflowService {
                     reasonCode,
                     snapshot(FraudCaseStatus.IN_REVIEW, assigneeRef),
                     resolutionSnapshot(fraudCase),
-                    traceId
+                    traceId,
+                    actorId
             );
             return mapper.toResponse(fraudCase, traceId);
         } catch (OptimisticLockingFailureException
@@ -327,11 +339,12 @@ public class FraudCaseWorkflowService {
             AuditReasonCode reasonCode,
             ObjectNode before,
             ObjectNode after,
-            String traceId
+            String traceId,
+            String actorId
     ) {
         auditLogService.append(new AuditLogDraft(
-                AuditActorType.SYSTEM,
-                AuditLog.SYSTEM_ACTOR_ID,
+                AuditActorType.USER,
+                actorId,
                 action,
                 reasonCode,
                 AuditTargetType.FRAUD_CASE,

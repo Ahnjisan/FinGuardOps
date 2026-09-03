@@ -189,6 +189,37 @@ class FraudCaseAuditLogQueryIntegrationTest
     }
 
     @Test
+    void exposesUserActorTypeButNeverActorId() throws Exception {
+        String userActorId =
+                "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001";
+        auditLogPersistenceService.append(new AuditLogDraft(
+                AuditActorType.USER,
+                userActorId,
+                AuditAction.CASE_NOTE_CREATED,
+                AuditReasonCode.CASE_INVESTIGATION_NOTE_ADDED,
+                AuditTargetType.FRAUD_CASE,
+                CASE_B,
+                null,
+                CASE_B,
+                "trace_user_actor_query_01",
+                null,
+                null,
+                object("noteId", NOTE_A.toString())
+        ));
+
+        String json = mockMvc.perform(get(
+                        "/api/v1/cases/{caseId}/audit-logs",
+                        CASE_B
+                ))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+
+        assertThat(json)
+                .contains("\"actorType\":\"USER\"")
+                .doesNotContain("actorId", userActorId);
+    }
+
+    @Test
     void paginatesAscAndDescWithoutDuplicatesOrGapsAndUsesIdTieBreaker()
             throws Exception {
         List<String> asc = signatures("changedAt,asc");
@@ -263,10 +294,10 @@ class FraudCaseAuditLogQueryIntegrationTest
     }
 
     @Test
-    void keepsFreshV1ThroughV13ExactIndexAndAppendOnlyRollbackContracts() {
-        assertThat(flyway.info().applied()).hasSize(13);
+    void keepsFreshV1ThroughV14ExactIndexAndAppendOnlyRollbackContracts() {
+        assertThat(flyway.info().applied()).hasSize(14);
         assertThat(flyway.info().current().getVersion().getVersion())
-                .isEqualTo("13");
+                .isEqualTo("14");
         String indexDefinition = jdbcTemplate.queryForObject("""
                 SELECT indexdef
                 FROM pg_indexes
