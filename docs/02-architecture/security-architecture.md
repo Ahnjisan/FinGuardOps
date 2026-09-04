@@ -378,8 +378,7 @@ USER actor UUID, token, claim과 principal 원문은 응답·로그·metadata에
 - SPA access token은 memory에만 보관하고 localStorage·sessionStorage·IndexedDB 저장을
   금지한다.
 - SPA 로그인은 Authorization Code + PKCE를 사용한다.
-- Backend 보호 API 호출용 `Authorization` header, refresh token과 권한 UI는 별도 Frontend
-  Issue다.
+- refresh token과 role·authority 기반 권한 UI는 별도 Frontend Issue다.
 
 Issue #229에서 Frontend는 `oidc-client-ts` 기반 Authorization Code + PKCE redirect 로그인,
 `/auth/callback` 처리와 local logout을 구현했다. access·ID token은 memory user store에만
@@ -399,8 +398,56 @@ getter가 `SecurityError`를 던져도 `/`와 `/health` public Outlet은 그대�
 자세한 근거는 [`ADR-009`](../07-decisions/ADR-009-frontend-oidc-pkce-memory-token-boundary.md)를
 따른다.
 
-Frontend에는 아직 Backend 보호 API client, `Authorization` header 전송, 401·403 UX와
-role·authority 기반 UI가 구현되지 않았다. `GET /api/health`는 계속 credential 없이 호출한다.
+Issue #231에서 Frontend는 인증 Backend API transport와 401·403 경계를 구현했다. 설계
+근거는 [`ADR-010`](../07-decisions/ADR-010-frontend-authenticated-backend-api-boundary.md)을
+따른다.
+
+`Authorization: Bearer`는 5장 matrix의 USER 행과 정확히 일치하는 아래 10개 method·path
+조합에만 전달한다. 호출자는 URL·method·query·header를 전달하지 않고 endpoint key와 path
+parameter만 전달하며, 등록되지 않은 key는 network 호출 이전에 거부한다.
+
+`GET /api/v1/transactions`, `GET /api/v1/transactions/{transactionId}`,
+`GET /api/v1/cases`, `GET /api/v1/cases/{caseId}`, `GET /api/v1/cases/{caseId}/notes`,
+`GET /api/v1/cases/{caseId}/audit-logs`, `PATCH /api/v1/cases/{caseId}/status`,
+`PATCH /api/v1/cases/{caseId}/assignee`, `POST /api/v1/cases/{caseId}/resolution`,
+`POST /api/v1/cases/{caseId}/notes`.
+
+`GET /api/health`는 계속 credential 없이 호출하며 public Health client는 endpoint registry와
+`AuthClient`에 의존하지 않는다. SERVICE 전용 `POST /api/v1/transactions`와
+`POST /api/v1/behavior-events`, `/actuator/**`, management listener 8081, FastAPI AI Service,
+External Risk Provider, Prometheus, Grafana, Alertmanager, 그 밖의 외부 origin과 문서 후보
+endpoint에는 endpoint key 자체가 존재하지 않는다.
+
+`caseId`와 `transactionId`는 canonical lowercase UUID v4/RFC variant만 허용하고, URL은 검증된
+base URL과 endpoint descriptor로 조립한 뒤 다시 파싱해 origin·userinfo·pathname·search·hash를
+exact 비교한다. `startsWith()`와 substring 판정은 사용하지 않으므로 trailing slash, encoded
+path, dot traversal, protocol-relative URL, userinfo, query·fragment 우회는 fetch 이전에
+거부된다. query parameter는 이번 범위에서 지원하지 않는다.
+
+raw access token은 `AuthClient` port 밖으로 나가지 않는다. port는 public 표면(`AuthClient`)과
+credential 표면(`CredentialAuthClient`)으로 나뉘며, 후자는 승인된 `Request`에 Authorization을
+부착한 새 `Request`와 session-bound invalidation callback을 돌려주는 `authorizeRequest()`만
+제공하고 token accessor를 제공하지 않는다. 이 capability는 token을 조회하기 전에 대상
+`Request`가 승인된 Backend USER endpoint인지 **스스로** 검증하므로, transport를 우회해 임의의
+`Request`를 직접 건네도 credential이 붙지 않는다. `AuthProvider`가 React tree에 게시하는 값은
+adapter가 아니라 명시적으로 구성한 public facade이며, runtime object에 `authorizeRequest`
+property가 존재하지 않는다. token은 memory user store에서만 조회하며 URL·body·query·오류·
+Web Storage에 나타나지 않는다. 요청은 `credentials: "omit"`과 `redirect: "error"`로 전송하고,
+credential은 RFC 6750 `b64token` 문법으로 재검증한다.
+
+401은 안전한 `X-Trace-Id`만 보관한 뒤, 그 요청을 승인한 session에만 적용되는 조건부
+invalidation을 호출한다. 같은 session의 동시 401은 기존 idempotent invalidation 경계로
+수렴하므로 subscriber 통보, `removeUser()`와 transaction cleanup이 각각 1회만 실행되고,
+교체·logout·expiry로 이미 끝난 session의 늦은 401은 현재 session에 아무 영향도 주지 않는다.
+403은 로그인 상태와 memory token을 유지하고 teardown·redirect를 하지 않는다. 두 경우 모두 response body, role, claim, token과
+`WWW-Authenticate` 원문을 노출하지 않으며 고정 메시지만 사용한다. 요청당 fetch는 정확히
+1회이고 자동 retry는 0회이며, `POST`와 `PATCH`를 자동 재실행하지 않는다. 인증 준비부터
+response validator까지 monotonic clock 위의 단일 5초 deadline을 적용한다. 동기 작업은 timer로
+중단할 수 없으므로 강제 중단을 주장하지 않고, deadline을 넘겨 반환된 결과를 성공으로 채택하지
+않는다.
+
+role·authority 기반 navigation·button·route guard UI, 거래·사건·메모·감사 업무 화면과 remote
+logout은 아직 구현되지 않았다.
 
 ## 11. Local·test·Compose 경계
 
@@ -462,7 +509,8 @@ method security는 Issue #221에서 구현되었다. 아래 표는 구현 상태
 | 완료. `[Backend/Audit] 사건 write USER actor와 InvestigationNote author 연결` | 검증 principal을 성공 감사에 연결 | provider/service actor, note author, V14 | 적용 | 성공·stale·rollback·기존 SYSTEM 호환 | #221 | 동시성·migration 검증; 구현 |
 | 완료. `[Infra/Docs] Local Compose·runbook JWT fixture와 인증 E2E 적용` | local issuer와 SERVICE traffic | 선택형 Compose overlay, fixture, verifier, runbook | 없음 | build·wait·traffic·scrape·alert·restart | #219·#221 | local/manual Docker E2E 경계 구현 |
 | 부분 구현. `[Frontend/Security] OIDC PKCE와 memory-only 인증 기반 구현` | SPA 인증 경계 | PKCE redirect, memory token, transaction store, `/auth/callback`, local logout | 없음 | 설정·settings·storage·lifecycle·callback·deadline | #219·#221 | jsdom 단위·컴포넌트 검증; 구현 (#229) |
-| 2. `[Frontend] 인증 API client와 권한 UI 구현` | 보호 API 호출과 권한 UX | `Authorization` header, 401·403 UI, role·authority UI, remote logout | 없음 | browser login·expiry·권한 UI | AS 제품, #229 | 브라우저/AS E2E; 미구현 |
+| 부분 구현. `[Frontend/Security] 인증 Backend API client와 401·403 경계 구현` | 승인 endpoint에만 credential 전달 | endpoint allowlist, `authorizeRequest()`, 401 invalidation, 403 유지, 단일 deadline | 없음 | allowlist·URL 우회·401·403·timeout·abort | #229 | jsdom 단위 검증; transport 구현 (#231) |
+| 2. `[Frontend] 업무 화면과 role·authority 권한 UI` | 보호 API 소비와 권한 UX | 업무 화면, typed API module, query pagination, role·authority UI, remote logout | 없음 | browser login·expiry·권한 UI | AS 제품, #231 | 브라우저/AS E2E; 미구현 |
 
 ## 14. 구현 검증 계약
 

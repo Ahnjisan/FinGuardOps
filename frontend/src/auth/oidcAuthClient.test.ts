@@ -32,10 +32,15 @@ interface FakeUserManager extends UserManagerLike {
     signinRedirect: Array<{ state: unknown }>;
     signinRedirectCallback: string[];
     removeUser: number;
+    getUser: number;
   };
   emitAccessTokenExpired(): void;
   expiredListenerCount(): number;
   setUser(user: OidcUserLike): void;
+  setStoredUser(user: OidcUserLike | null): void;
+  failGetUser(): void;
+  /** Makes the next getUser() hang until the returned release runs. */
+  deferGetUser(): () => void;
   failCallback(): void;
   failRemoveUser(): void;
   deferRemoveUser(): { resolve: () => void };
@@ -47,8 +52,12 @@ function createFakeUserManager(): FakeUserManager {
     signinRedirect: [] as Array<{ state: unknown }>,
     signinRedirectCallback: [] as string[],
     removeUser: 0,
+    getUser: 0,
   };
   let user: OidcUserLike = USER;
+  let storedUser: OidcUserLike | null = null;
+  let getUserShouldFail = false;
+  let getUserGate: Promise<void> | undefined;
   let callbackShouldFail = false;
   let removeUserShouldFail = false;
   let removeUserGate: Promise<void> | undefined;
@@ -65,6 +74,21 @@ function createFakeUserManager(): FakeUserManager {
     },
     setUser(next: OidcUserLike): void {
       user = next;
+    },
+    setStoredUser(next: OidcUserLike | null): void {
+      storedUser = next;
+    },
+    failGetUser(): void {
+      getUserShouldFail = true;
+    },
+    deferGetUser(): () => void {
+      let release!: () => void;
+      getUserGate = new Promise<void>((resolvePromise) => {
+        release = () => {
+          resolvePromise();
+        };
+      });
+      return release;
     },
     failCallback(): void {
       callbackShouldFail = true;
@@ -90,10 +114,23 @@ function createFakeUserManager(): FakeUserManager {
       if (callbackShouldFail) {
         throw new Error("state mismatch: expected nonce=abc, code=SECRET_CODE");
       }
+      // A real callback installs the user in the store the adapter later reads.
+      storedUser = user;
       return user;
+    },
+    async getUser(): Promise<OidcUserLike | null> {
+      calls.getUser += 1;
+      if (getUserGate !== undefined) {
+        await getUserGate;
+      }
+      if (getUserShouldFail) {
+        throw new Error("user store unavailable");
+      }
+      return storedUser;
     },
     async removeUser(): Promise<void> {
       calls.removeUser += 1;
+      storedUser = null;
       if (removeUserGate !== undefined) {
         await removeUserGate;
       }
@@ -1259,5 +1296,697 @@ describe("createOidcAuthClient storage boundary", () => {
     expect(window.sessionStorage.length).toBe(0);
     expect(indexedDbOpen).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
+  });
+});
+
+const API_BASE_URL = "http://localhost:8080";
+const TOKEN = "header.payload.signature";
+const CASE_ID = "20000000-0000-4000-9000-000000000003";
+const TRANSACTION_ID = "11111111-2222-4333-8444-555555555555";
+/** Contains hex letters, so case sensitivity is actually observable. */
+const LETTERED_CASE_ID = "6f1e0b6c-3a2b-4c8d-9e0f-1a2b3c4d5e6f";
+
+function tokenUser(overrides: Partial<OidcUserLike> = {}): OidcUserLike {
+  return { ...USER, access_token: TOKEN, ...overrides };
+}
+
+async function signedInClient(manager: FakeUserManager) {
+  manager.setUser(tokenUser());
+  const client = clientFor(manager);
+  await client.completeSignIn("http://localhost/auth/callback?code=a&state=b");
+  return client;
+}
+
+describe("createOidcAuthClient authorizeRequest — destination validation", () => {
+  beforeEach(() => {
+    vi.stubEnv("VITE_API_BASE_URL", API_BASE_URL);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  /**
+   * Every destination below is handed straight to the real adapter, bypassing
+   * the transport entirely. This capability holds the credential, so it has to
+   * refuse on its own rather than assume someone checked first. A refusal must
+   * happen before the user store is read: no token lookup, no header, no
+   * returned request.
+   */
+  const FORBIDDEN_DESTINATIONS: ReadonlyArray<{ url: string; method?: string }> = [
+    { url: "https://evil.example/collect" },
+    { url: "https://evil.example/api/v1/cases" },
+    { url: "http://localhost.evil.example:8080/api/v1/cases" },
+    { url: "http://evil.localhost:8080/api/v1/cases" },
+    { url: "http://localhost:9090/api/v1/cases" },
+    { url: "https://localhost:8080/api/v1/cases" },
+    // public health: credential-free by contract
+    { url: "http://localhost:8080/api/health" },
+    // SERVICE ingestion
+    { url: "http://localhost:8080/api/v1/transactions", method: "POST" },
+    { url: "http://localhost:8080/api/v1/behavior-events", method: "POST" },
+    // management listener and actuator
+    { url: "http://localhost:8081/actuator/health" },
+    { url: "http://localhost:8081/actuator/prometheus" },
+    { url: "http://localhost:8080/actuator/health" },
+    // AI service and observability
+    { url: "http://localhost:8000/api/v1/scoring", method: "POST" },
+    { url: "http://prometheus:9090/api/v1/query" },
+    { url: "http://grafana:3000/api/dashboards" },
+    { url: "http://alertmanager:9093/api/v2/alerts" },
+    { url: "https://risk-provider.example/score", method: "POST" },
+    // approved path, wrong shape
+    { url: `http://localhost:8080/api/v1/cases/${CASE_ID}/` },
+    { url: "http://localhost:8080/api/v1/cases/" },
+    { url: "http://localhost:8080/api/v1/cases?page=0" },
+    { url: "http://localhost:8080/api/v1/cases#top" },
+    // approved path, wrong method
+    { url: "http://localhost:8080/api/v1/cases", method: "POST" },
+    { url: "http://localhost:8080/api/v1/cases", method: "DELETE" },
+    { url: `http://localhost:8080/api/v1/cases/${CASE_ID}/status`, method: "POST" },
+    { url: `http://localhost:8080/api/v1/cases/${CASE_ID}/notes`, method: "PATCH" },
+    // encoded and traversal forms
+    { url: "http://localhost:8080/api/v1/cases/%2e%2e/actuator" },
+    { url: `http://localhost:8080/api/v1/cases/${CASE_ID}%2Fnotes` },
+    { url: `http://localhost:8080/api/v1/cases/${CASE_ID}%25` },
+    { url: `http://localhost:8080/api/v1/cases/${CASE_ID};jsessionid=abc` },
+    { url: `http://localhost:8080/api/v1/cases/${LETTERED_CASE_ID.toUpperCase()}` },
+    { url: "http://localhost:8080/api/v1/cases/not-a-uuid" },
+    { url: "http://localhost:8080/api/v1/unknown" },
+  ];
+
+  it("refuses every forbidden destination without reading the user store", async () => {
+    for (const destination of FORBIDDEN_DESTINATIONS) {
+      const manager = createFakeUserManager();
+      const client = await signedInClient(manager);
+      const getUserBefore = manager.calls.getUser;
+      const original = new Request(destination.url, { method: destination.method ?? "GET" });
+
+      const authorized = await client.authorizeRequest(original);
+
+      expect(authorized, `expected refusal for ${destination.method ?? "GET"} ${destination.url}`)
+        .toBeNull();
+      expect(manager.calls.getUser).toBe(getUserBefore);
+      expect(original.headers.get("Authorization")).toBeNull();
+    }
+  });
+
+  /**
+   * A URL carrying userinfo cannot even become a `Request`, so this capability
+   * never sees one. Recorded here so the absence of such a case from the list
+   * above is a platform guarantee rather than an oversight.
+   */
+  it("cannot be handed a request whose URL carries userinfo", () => {
+    for (const url of [
+      "http://user:pass@localhost:8080/api/v1/cases",
+      "http://localhost:8080@evil.example/api/v1/cases",
+    ]) {
+      expect(() => new Request(url)).toThrow(TypeError);
+    }
+  });
+
+  it("authorizes every approved USER endpoint and method", async () => {
+    const approved: ReadonlyArray<[string, string]> = [
+      ["GET", "/api/v1/transactions"],
+      ["GET", `/api/v1/transactions/${TRANSACTION_ID}`],
+      ["GET", "/api/v1/cases"],
+      ["GET", `/api/v1/cases/${CASE_ID}`],
+      ["GET", `/api/v1/cases/${CASE_ID}/notes`],
+      ["GET", `/api/v1/cases/${CASE_ID}/audit-logs`],
+      ["PATCH", `/api/v1/cases/${CASE_ID}/status`],
+      ["PATCH", `/api/v1/cases/${CASE_ID}/assignee`],
+      ["POST", `/api/v1/cases/${CASE_ID}/resolution`],
+      ["POST", `/api/v1/cases/${CASE_ID}/notes`],
+    ];
+
+    for (const [method, path] of approved) {
+      const manager = createFakeUserManager();
+      const client = await signedInClient(manager);
+      const request = new Request(`${API_BASE_URL}${path}`, {
+        method,
+        body: method === "GET" ? undefined : "{}",
+      });
+
+      const authorized = await client.authorizeRequest(request);
+
+      expect(authorized, `expected authorization for ${method} ${path}`).not.toBeNull();
+      expect(authorized?.request.headers.get("Authorization")).toBe(`Bearer ${TOKEN}`);
+    }
+  });
+
+  /**
+   * The Backend base URL is memoized on first read, so this needs a fresh
+   * module registry to observe an unusable configuration at all. Fail closed:
+   * without a base URL there is no destination to approve, so nothing is signed.
+   */
+  it("refuses everything when the Backend base URL cannot be resolved", async () => {
+    vi.resetModules();
+    vi.stubEnv("VITE_API_BASE_URL", "not a url");
+    const isolated = await import("./oidcAuthClient");
+
+    const manager = createFakeUserManager();
+    manager.setUser(tokenUser());
+    const client = isolated.createOidcAuthClient(
+      () => ({ userManager: manager, storage: window.sessionStorage }),
+      { isCallbackRoute: () => false },
+    );
+    await client.completeSignIn("http://localhost/auth/callback?code=a&state=b");
+    const getUserBefore = manager.calls.getUser;
+
+    await expect(
+      client.authorizeRequest(new Request(`${API_BASE_URL}/api/v1/cases`)),
+    ).resolves.toBeNull();
+    expect(manager.calls.getUser).toBe(getUserBefore);
+
+    vi.resetModules();
+  });
+});
+
+describe("createOidcAuthClient authorizeRequest — credential shape", () => {
+  const REQUEST_URL = `${API_BASE_URL}/api/v1/cases`;
+
+  beforeEach(() => {
+    vi.stubEnv("VITE_API_BASE_URL", API_BASE_URL);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("returns a new request carrying exactly one Bearer credential", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+    const original = new Request(REQUEST_URL);
+
+    const authorized = await client.authorizeRequest(original);
+
+    expect(authorized).not.toBeNull();
+    expect(authorized?.request).not.toBe(original);
+    expect(authorized?.request.headers.get("Authorization")).toBe(`Bearer ${TOKEN}`);
+    const credentials = [...(authorized?.request.headers ?? [])].filter(
+      ([name]) => name === "authorization",
+    );
+    expect(credentials).toHaveLength(1);
+  });
+
+  it("leaves the caller's request without a credential", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+    const original = new Request(REQUEST_URL, { headers: { Accept: "application/json" } });
+
+    await client.authorizeRequest(original);
+
+    expect(original.headers.get("Authorization")).toBeNull();
+    expect(original.headers.get("Accept")).toBe("application/json");
+  });
+
+  it("preserves the URL, method, body and transport options", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+    const writeUrl = `${API_BASE_URL}/api/v1/cases/${CASE_ID}/notes`;
+    const original = new Request(writeUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ content: "note" }),
+      credentials: "omit",
+      redirect: "error",
+    });
+
+    const authorized = await client.authorizeRequest(original);
+
+    expect(authorized?.request.url).toBe(writeUrl);
+    expect(authorized?.request.method).toBe("POST");
+    expect(authorized?.request.headers.get("Content-Type")).toBe("application/json");
+    expect(authorized?.request.credentials).toBe("omit");
+    expect(authorized?.request.redirect).toBe("error");
+    await expect(authorized?.request.text()).resolves.toBe(JSON.stringify({ content: "note" }));
+  });
+
+  it("replaces rather than merges a credential the caller already set", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+    const original = new Request(REQUEST_URL, {
+      headers: { Authorization: "Bearer attacker.supplied.value" },
+    });
+
+    const authorized = await client.authorizeRequest(original);
+
+    expect(authorized?.request.headers.get("Authorization")).toBe(`Bearer ${TOKEN}`);
+    expect(authorized?.request.headers.get("Authorization")).not.toContain("attacker");
+  });
+
+  it("puts the token nowhere but the header", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+
+    const authorized = await client.authorizeRequest(new Request(REQUEST_URL));
+
+    expect(authorized?.request.url).toBe(REQUEST_URL);
+    expect(authorized?.request.url).not.toContain(TOKEN);
+    expect(new URL(authorized?.request.url ?? REQUEST_URL).search).toBe("");
+    expect(window.localStorage.length).toBe(0);
+    expect(JSON.stringify(Object.keys(window.sessionStorage))).not.toContain(TOKEN);
+  });
+
+  it("returns null before sign-in and after logout", async () => {
+    const manager = createFakeUserManager();
+    manager.setUser(tokenUser());
+    const client = clientFor(manager);
+
+    await expect(client.authorizeRequest(new Request(REQUEST_URL))).resolves.toBeNull();
+
+    await client.completeSignIn("http://localhost/auth/callback?code=a&state=b");
+    await expect(client.authorizeRequest(new Request(REQUEST_URL))).resolves.not.toBeNull();
+
+    await client.signOut();
+    await expect(client.authorizeRequest(new Request(REQUEST_URL))).resolves.toBeNull();
+  });
+
+  it("returns null when the memory user store is empty", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+    manager.setStoredUser(null);
+
+    await expect(client.authorizeRequest(new Request(REQUEST_URL))).resolves.toBeNull();
+  });
+
+  it("returns null when the user store read throws, exposing no provider error", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+    manager.failGetUser();
+
+    await expect(client.authorizeRequest(new Request(REQUEST_URL))).resolves.toBeNull();
+  });
+
+  it("returns null for a missing or empty access token", async () => {
+    for (const token of [undefined, ""]) {
+      const manager = createFakeUserManager();
+      const client = await signedInClient(manager);
+      manager.setStoredUser({ ...USER, access_token: token });
+
+      await expect(client.authorizeRequest(new Request(REQUEST_URL))).resolves.toBeNull();
+    }
+  });
+
+  it("returns null for a token whose expiry has passed", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+    manager.setStoredUser(tokenUser({ expires_at: Math.floor(Date.now() / 1000) - 1 }));
+
+    await expect(client.authorizeRequest(new Request(REQUEST_URL))).resolves.toBeNull();
+  });
+
+  it("authorizes a token whose expiry is still ahead", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+    manager.setStoredUser(tokenUser({ expires_at: Math.floor(Date.now() / 1000) + 300 }));
+
+    await expect(client.authorizeRequest(new Request(REQUEST_URL))).resolves.not.toBeNull();
+  });
+
+  it("returns null when the memory user disagrees with the published session", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+    manager.setStoredUser({
+      profile: { sub: "99999999-9999-4999-8999-999999999999" },
+      access_token: TOKEN,
+    });
+
+    await expect(client.authorizeRequest(new Request(REQUEST_URL))).resolves.toBeNull();
+  });
+
+  it("returns null when the session ends while the store read is pending", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+
+    const pending = client.authorizeRequest(new Request(REQUEST_URL));
+    await client.signOut();
+
+    await expect(pending).resolves.toBeNull();
+  });
+
+  /**
+   * Case E: a whole new session is published while the store read is in
+   * flight. The credential must not be issued at all — not for A, whose
+   * session is gone, and not for B, which never asked for it.
+   */
+  it("returns null when a new session is published while the store read is pending", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+    const release = manager.deferGetUser();
+
+    const pending = client.authorizeRequest(new Request(REQUEST_URL));
+    await client.completeSignIn("http://localhost/auth/callback?code=b2&state=b2");
+    release();
+
+    await expect(pending).resolves.toBeNull();
+  });
+
+  it("exposes no token accessor on the port surface", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+
+    for (const forbidden of [
+      "getAccessToken",
+      "getToken",
+      "accessToken",
+      "token",
+      "getUser",
+      "invalidateSession",
+      "ownership",
+    ]) {
+      expect(Object.keys(client)).not.toContain(forbidden);
+      expect((client as unknown as Record<string, unknown>)[forbidden]).toBeUndefined();
+    }
+  });
+
+  it("hands out no session identity, only a callback", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+
+    const authorized = await client.authorizeRequest(new Request(REQUEST_URL));
+
+    expect(Object.keys(authorized ?? {}).sort()).toEqual(["invalidateIfCurrent", "request"]);
+    expect(JSON.stringify(Object.keys(authorized ?? {}))).not.toContain(TOKEN);
+  });
+});
+
+/**
+ * The token exactly as the Authorization Server issued it.
+ *
+ * Every case here starts from a real OIDC user in the store and runs the
+ * production adapter, because the defect this guards against is invisible once
+ * `Headers.set` has normalized the value: a padded token becomes a well-formed
+ * credential on the way into a header, so only the raw value can prove the
+ * grammar was actually applied.
+ */
+describe("createOidcAuthClient authorizeRequest — raw access token grammar", () => {
+  const REQUEST_URL = `${API_BASE_URL}/api/v1/cases`;
+
+  beforeEach(() => {
+    vi.stubEnv("VITE_API_BASE_URL", API_BASE_URL);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("authorizes every raw token the b64token grammar allows, verbatim", async () => {
+    for (const token of ["opaque.token", "abc", "abc.def", "abc-._~+/", "abc=", "abc=="]) {
+      const manager = createFakeUserManager();
+      const client = await signedInClient(manager);
+      manager.setStoredUser(tokenUser({ access_token: token }));
+
+      const authorized = await client.authorizeRequest(new Request(REQUEST_URL));
+
+      expect(authorized, `expected ${JSON.stringify(token)} to be authorized`).not.toBeNull();
+      expect(authorized?.request.headers.get("Authorization")).toBe(`Bearer ${token}`);
+    }
+  });
+
+  /**
+   * Whitespace in every position the platform would have hidden, plus a `=`
+   * outside the padding and the empty string. None of them may reach a header.
+   */
+  it("refuses every malformed raw token without building a header", async () => {
+    for (const token of [
+      "opaque.token ",
+      " opaque.token",
+      "opaque token",
+      "opaque.token\t",
+      "opaque.token\r",
+      "opaque.token\n",
+      "abc=def",
+      "=abc",
+      "",
+    ]) {
+      const label = JSON.stringify(token);
+      const manager = createFakeUserManager();
+      const client = await signedInClient(manager);
+      const invalidated = vi.fn();
+      client.onSessionInvalidated(invalidated);
+      manager.setStoredUser(tokenUser({ access_token: token }));
+      const removeUserBefore = manager.calls.removeUser;
+      const getUserBefore = manager.calls.getUser;
+
+      const original = new Request(REQUEST_URL, { headers: { Accept: "application/json" } });
+      const setHeader = vi.spyOn(Headers.prototype, "set");
+      const outcome = await client.authorizeRequest(original).then(
+        (value) => value,
+        (error: unknown) => error,
+      );
+      const credentialWrites = setHeader.mock.calls.filter(
+        ([name]) => String(name).toLowerCase() === "authorization",
+      );
+      setHeader.mockRestore();
+
+      // Refused, and refused by returning nothing rather than by throwing, so
+      // no message exists that could carry the token.
+      expect(outcome, `expected ${label} to be refused`).toBeNull();
+      expect(credentialWrites, `expected no header for ${label}`).toHaveLength(0);
+
+      // The caller's own request is untouched.
+      expect(original.headers.get("Authorization")).toBeNull();
+      expect(original.headers.get("Accept")).toBe("application/json");
+      expect(original.url).toBe(REQUEST_URL);
+      expect(original.method).toBe("GET");
+
+      // Not a 401: nothing is invalidated, nobody is notified, nothing is torn
+      // down, and the single store read is not repeated.
+      expect(invalidated).not.toHaveBeenCalled();
+      expect(manager.calls.removeUser).toBe(removeUserBefore);
+      expect(manager.calls.getUser).toBe(getUserBefore + 1);
+    }
+  });
+
+  it("keeps a malformed raw token out of every observable surface", async () => {
+    const MALFORMED = "unlikely.sentinel.value ";
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+    manager.setStoredUser(tokenUser({ access_token: MALFORMED }));
+    const consoleSpies = (["error", "warn", "log", "info", "debug"] as const).map((level) =>
+      vi.spyOn(console, level).mockImplementation(() => undefined),
+    );
+
+    const outcome = await client.authorizeRequest(new Request(REQUEST_URL)).then(
+      (value) => value,
+      (error: unknown) => error,
+    );
+
+    expect(outcome).toBeNull();
+    for (const spy of consoleSpies) {
+      expect(spy).not.toHaveBeenCalled();
+    }
+    const stored = [window.sessionStorage, window.localStorage]
+      .flatMap((store) => Object.entries({ ...store }))
+      .join("|");
+    expect(stored).not.toContain("unlikely.sentinel.value");
+    expect(document.body.innerHTML).not.toContain("unlikely.sentinel.value");
+  });
+
+  /**
+   * The premise of the whole grammar check, asserted rather than assumed: a
+   * padded token really does arrive at a header already trimmed, so a check
+   * that only ever sees the finished header cannot tell the two apart.
+   */
+  it("proves the platform would have hidden the padding", () => {
+    const headers = new Headers();
+    headers.set("Authorization", "Bearer opaque.token ");
+
+    expect(headers.get("Authorization")).toBe("Bearer opaque.token");
+  });
+
+  it("still refuses a malformed token that the session is otherwise ready for", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+    manager.setStoredUser(
+      tokenUser({ access_token: "opaque.token ", expires_at: Math.floor(Date.now() / 1000) + 300 }),
+    );
+
+    await expect(client.authorizeRequest(new Request(REQUEST_URL))).resolves.toBeNull();
+
+    // And the session is still live: the refusal was about this token only.
+    manager.setStoredUser(tokenUser());
+    await expect(client.authorizeRequest(new Request(REQUEST_URL))).resolves.not.toBeNull();
+  });
+});
+
+describe("createOidcAuthClient invalidateIfCurrent — session ownership", () => {
+  const REQUEST_URL = `${API_BASE_URL}/api/v1/cases`;
+
+  beforeEach(() => {
+    vi.stubEnv("VITE_API_BASE_URL", API_BASE_URL);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  async function authorizeOnce(client: Awaited<ReturnType<typeof signedInClient>>) {
+    const authorized = await client.authorizeRequest(new Request(REQUEST_URL));
+    if (authorized === null) {
+      throw new Error("expected an authorized request");
+    }
+    return authorized;
+  }
+
+  it("invalidates the issuing session once and notifies subscribers once", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+    const authorized = await authorizeOnce(client);
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+
+    authorized.invalidateIfCurrent();
+
+    expect(invalidated).toHaveBeenCalledTimes(1);
+  });
+
+  it("is idempotent when the same callback is invoked repeatedly", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+    const authorized = await authorizeOnce(client);
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+    const removeUserBefore = manager.calls.removeUser;
+
+    authorized.invalidateIfCurrent();
+    authorized.invalidateIfCurrent();
+    authorized.invalidateIfCurrent();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(invalidated).toHaveBeenCalledTimes(1);
+    expect(manager.calls.removeUser - removeUserBefore).toBe(1);
+  });
+
+  /** Case A at the port: three requests from one session, one teardown. */
+  it("collapses concurrent callbacks from one session into a single teardown", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+    const first = await authorizeOnce(client);
+    const second = await authorizeOnce(client);
+    const third = await authorizeOnce(client);
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+    const removeUserBefore = manager.calls.removeUser;
+
+    first.invalidateIfCurrent();
+    second.invalidateIfCurrent();
+    third.invalidateIfCurrent();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(invalidated).toHaveBeenCalledTimes(1);
+    expect(manager.calls.removeUser - removeUserBefore).toBe(1);
+  });
+
+  /** Case B at the port: session A's late verdict must not touch session B. */
+  it("does nothing when a newer session has since been published", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+    const staleAuthorization = await authorizeOnce(client);
+
+    await client.completeSignIn("http://localhost/auth/callback?code=b2&state=b2");
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+    const removeUserBefore = manager.calls.removeUser;
+
+    staleAuthorization.invalidateIfCurrent();
+    await Promise.resolve();
+
+    expect(invalidated).not.toHaveBeenCalled();
+    expect(manager.calls.removeUser).toBe(removeUserBefore);
+    // The new session is still usable.
+    await expect(client.authorizeRequest(new Request(REQUEST_URL))).resolves.not.toBeNull();
+  });
+
+  /** Case C at the port. */
+  it("does nothing after the user has already signed out", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+    const authorized = await authorizeOnce(client);
+    await client.signOut();
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+    const removeUserBefore = manager.calls.removeUser;
+
+    authorized.invalidateIfCurrent();
+    await Promise.resolve();
+
+    expect(invalidated).not.toHaveBeenCalled();
+    expect(manager.calls.removeUser).toBe(removeUserBefore);
+  });
+
+  /** Case D at the port: expiry already ended the session. */
+  it("does nothing after token expiry has already invalidated the session", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+    const authorized = await authorizeOnce(client);
+    manager.emitAccessTokenExpired();
+    await Promise.resolve();
+
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+    const removeUserBefore = manager.calls.removeUser;
+
+    authorized.invalidateIfCurrent();
+    await Promise.resolve();
+
+    expect(invalidated).not.toHaveBeenCalled();
+    expect(manager.calls.removeUser).toBe(removeUserBefore);
+  });
+
+  it("stops authorizing requests immediately, without waiting for teardown", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+    const authorized = await authorizeOnce(client);
+    manager.deferRemoveUser();
+
+    authorized.invalidateIfCurrent();
+
+    await expect(client.authorizeRequest(new Request(REQUEST_URL))).resolves.toBeNull();
+  });
+
+  it("shares one teardown with a logout that races it", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+    const authorized = await authorizeOnce(client);
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+    const removeUserBefore = manager.calls.removeUser;
+
+    authorized.invalidateIfCurrent();
+    await client.signOut();
+
+    expect(invalidated).toHaveBeenCalledTimes(1);
+    expect(manager.calls.removeUser - removeUserBefore).toBe(1);
+  });
+
+  /**
+   * Case F: the new sign-in must still wait for the previous teardown, so the
+   * transaction record and memory user it installs survive that sweep.
+   */
+  it("keeps a new sign-in ordered after the previous session's teardown", async () => {
+    const manager = createFakeUserManager();
+    const client = await signedInClient(manager);
+    const authorized = await authorizeOnce(client);
+    const gate = manager.deferRemoveUser();
+
+    authorized.invalidateIfCurrent();
+    const signingIn = client.signIn("/health");
+    let started = false;
+    void signingIn.then(() => {
+      started = true;
+    });
+    await Promise.resolve();
+    expect(started).toBe(false);
+    expect(manager.calls.signinRedirect).toHaveLength(0);
+
+    gate.resolve();
+    await signingIn;
+
+    expect(manager.calls.signinRedirect).toHaveLength(1);
   });
 });

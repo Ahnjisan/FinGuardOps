@@ -1,7 +1,8 @@
 # FinGuardOps Frontend
 
 React·TypeScript·Vite 기반의 FinGuardOps 프론트엔드다. 표준 OIDC Authorization Code + PKCE
-인증 경계는 구현되어 있으나, 업무 화면과 권한 UI는 아직 구현되지 않았다.
+인증 경계와, 승인된 Backend 업무 endpoint에만 credential을 전달하는 인증 API transport가
+구현되어 있다. 업무 화면과 role·authority 권한 UI는 아직 구현되지 않았다.
 
 ## 요구사항
 
@@ -66,7 +67,7 @@ render에 도달하지 않고, 애플리케이션은 원문 값을 화면이나 
 | --- | --- |
 | `src/app` | Router 구성과 최상위 App Shell (navigation, `Outlet`) |
 | `src/pages` | 화면 단위 컴포넌트 |
-| `src/api` | Backend HTTP client, 오류 분류, API 타입, 데이터 조회 hook |
+| `src/api` | Backend HTTP client, endpoint allowlist, 인증 transport, 오류 분류, API 타입, 데이터 조회 hook |
 | `src/auth` | 인증 상태 machine, `AuthClient` port, `oidc-client-ts` adapter, transaction storage, callback URL·복귀 경로 처리, React context와 hook |
 | `src/config` | 환경변수 검증 |
 | `src/shared` | 화면 전반에서 재사용하는 타입 (예: `AsyncState`) |
@@ -263,14 +264,227 @@ UI에는 `subject`, token, claim, Provider 원문을 렌더링하지 않으며 �
   아닐 때의 retry 호출은 fetch를 추가로 만들지 않는다.
 - FastAPI, management port(8081), Prometheus, Grafana, Alertmanager, External Risk를 직접
   호출하지 않는다. Backend 외 서비스를 프론트엔드에서 직접 호출하지 않는다.
+- `healthApi.ts`는 endpoint registry와 `AuthClient` 어느 쪽에도 의존하지 않는다.
+
+## 인증 Backend API 경계
+
+`src/api/authorizedClient.ts`는 로그인한 USER를 대신해 승인된 Backend 업무 endpoint를
+호출하는 **transport**다. 이번 범위는 transport뿐이며 화면·hook·Context·route는 포함하지
+않는다. 설계 근거는
+[`ADR-010`](../docs/07-decisions/ADR-010-frontend-authenticated-backend-api-boundary.md)을
+따른다.
+
+### Endpoint allowlist
+
+호출자는 URL·method·query·header를 전달하지 않는다. endpoint key가 method와 path를 함께
+결정하며, 등록되지 않은 key는 network 호출 이전에 거부된다.
+
+| Endpoint key | Method | Path |
+| --- | --- | --- |
+| `transaction-list` | GET | `/api/v1/transactions` |
+| `transaction-detail` | GET | `/api/v1/transactions/{transactionId}` |
+| `case-list` | GET | `/api/v1/cases` |
+| `case-detail` | GET | `/api/v1/cases/{caseId}` |
+| `case-note-list` | GET | `/api/v1/cases/{caseId}/notes` |
+| `case-audit-list` | GET | `/api/v1/cases/{caseId}/audit-logs` |
+| `case-status-change` | PATCH | `/api/v1/cases/{caseId}/status` |
+| `case-assignee-change` | PATCH | `/api/v1/cases/{caseId}/assignee` |
+| `case-resolution-create` | POST | `/api/v1/cases/{caseId}/resolution` |
+| `case-note-create` | POST | `/api/v1/cases/{caseId}/notes` |
+
+이 10개는 Backend production endpoint matrix의 USER principal 행과 정확히 일치한다. 필요한
+authority는 Backend가 강제하며 프론트엔드는 이를 판단하지 않는다.
+
+다음에는 endpoint key 자체가 없으므로 credential을 전달할 코드 경로가 존재하지 않는다.
+
+- `GET /api/health` (public Health client가 credential 없이 호출)
+- SERVICE 전용 `POST /api/v1/transactions`, `POST /api/v1/behavior-events`
+- `/actuator/**`와 management listener 8081
+- FastAPI AI Service, External Risk Provider, Prometheus, Grafana, Alertmanager
+- 그 밖의 모든 외부 origin과 문서에만 존재하는 후보 endpoint
+
+GET은 body를 허용하지 않고 PATCH·POST만 JSON body를 보낸다. `Authorization`과
+`Content-Type`을 호출자가 override할 수 없고 custom header 입력도 제공하지 않는다.
+
+### URL과 path parameter
+
+`caseId`와 `transactionId`는 canonical lowercase UUID v4/RFC variant
+(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)만 허용한다.
+대문자 UUID, 다른 version·variant, 공백, prefix·suffix, slash, backslash, `%2F`, `%2e%2e`,
+`%25`, semicolon parameter, dot traversal, protocol-relative URL, userinfo, query, fragment,
+trailing slash는 모두 fetch 이전에 거부한다.
+
+URL은 검증된 `VITE_API_BASE_URL`과 endpoint descriptor로만 조립한다. `VITE_API_BASE_URL`이
+path prefix를 가질 수 있으므로 base pathname과 endpoint pathname의 결합 결과 전체를 비교
+대상으로 삼고, 조립 결과를 다시 파싱해 protocol·origin·username·password·pathname·search·
+hash를 **exact** 비교한다. `startsWith()`나 substring 판정은 사용하지 않는다. 허용되지 않는
+URL이면 Authorization을 만들기 전에 실패하고 fetch는 0회다.
+
+이 검증은 세 계층에서 독립적으로 이루어진다.
+
+1. **URL helper** — 조립 결과를 재파싱해 near-miss URL을 거부한다.
+2. **transport** — 보유한 URL이 승인된 Backend USER 요청이며 호출자가 요청한 바로 그
+   endpoint인지 다시 확인한다. URL이 어떻게 만들어졌는지에 의존하지 않으므로, 다른 승인
+   endpoint에 도달하는 것도 거부한다.
+3. **credential capability** — 위의 "Token 경계와 port 분리" 참조.
+
+한 계층의 결함을 다른 계층이 가리지 않도록 각각 별도로 검증한다.
+
+query parameter는 이번 범위에서 지원하지 않는다. 완성 URL 입력 API도 `URLSearchParams`
+입력 API도 없으며 `?`와 `#`가 포함된 요청을 만들지 않는다. 목록 API는 Backend 기본
+pagination 동작까지만 사용할 수 있고, `page`·`size`·`sort`는 실제 업무 목록 화면의 typed
+API module과 함께 후속 Issue에서 구현한다.
+
+### Token 경계와 port 분리
+
+`AuthClient` port에는 token accessor가 없다. port는 두 개로 나뉜다.
+
+| Port | 표면 | 전달 대상 |
+| --- | --- | --- |
+| `AuthClient` | `initialize`, `signIn`, `completeSignIn`, `signOut`, `onSessionInvalidated` | React tree |
+| `CredentialAuthClient extends AuthClient` | 위 + `authorizeRequest` | 인증 transport만 |
+
+```ts
+authorizeRequest(request: Request): Promise<AuthorizedRequest | null>;
+
+interface AuthorizedRequest {
+  readonly request: Request;
+  readonly invalidateIfCurrent: () => void;
+}
+```
+
+- `request`는 `Authorization: Bearer`가 정확히 한 번 설정된 **새로운** `Request`다.
+- 호출자의 원본 `Request`에는 Authorization을 설정하지 않으며, 호출자가 이미 넣어 둔
+  Authorization header는 병합하지 않고 제거한 뒤 다시 설정한다.
+- raw token은 반환되지 않는다. 호출자는 "인증할 수 없다"(`null`)까지만 알 수 있다.
+- token은 기존 oidc-client-ts memory user store에서만 조회하고 cache·복제하지 않으며 직접
+  JWT decode도 하지 않는다.
+- token은 URL·body·query·오류 객체·console·Web Storage에 나타나지 않는다.
+
+**destination은 이 capability가 직접 검증한다.** token을 조회하기 전에, 대상 `Request`가
+승인된 Backend USER endpoint(exact origin·base pathname·endpoint pathname·method·UUID
+parameter, query·fragment·userinfo·trailing slash·encoded path 없음)인지 스스로 확인한다.
+transport의 선행 allowlist에 의존하지 않으므로, 이 capability에 임의의 `Request`를 직접
+건네도 credential이 붙지 않는다. 검증 실패 시 runtime·user store 조회 0회, token 조회 0회,
+Authorization 생성 0회, 반환 Request 없음, fetch 0회다.
+
+destination이 승인되더라도, session이 없거나, memory user store가 비었거나, store 읽기가
+실패했거나, token이 없거나 원문이 `b64token` 문법에 맞지 않거나, `expires_at`이
+지났거나, memory user의 `sub`가 게시된 session과 다르거나, store 읽기 중 session이
+교체·종료되면 `null`을 반환하고 호출자는 `AuthenticationRequiredError`로 끝낸다. 이때도
+fetch는 0회다.
+
+요청은 `credentials: "omit"`(Backend CORS는 `allowCredentials=false`)과
+`redirect: "error"`(승인된 endpoint 중 redirect하는 것이 없다)로 전송한다.
+
+**Bearer 문법은 두 지점에서 확인한다.** 어느 한쪽이 다른 쪽을 대신하지 않는다.
+
+1. **adapter 선검증** — credential capability는 memory user store에서 읽은 raw
+   `access_token`을, `Headers.set()`을 부르기 **전에** `b64token`
+   (`1*( ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" ) *"="`) 문법으로 원문 그대로
+   검사한다. 플랫폼 `Headers.set()`은 값의 앞뒤 whitespace를 스스로 제거하므로,
+   `"opaque.token "` 같은 token은 header가 되는 순간 `Bearer opaque.token`으로 정리되어
+   header만 보는 검사를 통과해 버린다. 그래서 header가 아니라 원문을 본다. 문법 검사
+   다음에 오는 session ownership 최종 검사도 header를 만들기 **전에** 끝나고, 그 뒤의
+   header 구성과 Request 반환에는 `await`가 없어 하나의 동기 구간이다.
+2. **transport 재검증** — transport는 port가 돌려준 요청의 Authorization header 전체를
+   같은 문법으로 다시 확인한다. `Bearer`, `Bearer `, `Bearer =`, `Bearer abc=def`,
+   `bearer abc`, `Bearer  abc`, 병합된 두 credential은 모두 거부한다.
+
+본문은 1자 이상이어야 하고 `=`는 뒤쪽 padding으로만 허용하므로 `abc=`·`abc==`는 통과하고
+빈 문자열, `=abc`, `abc=def`, 공백·tab·CR·LF·제어문자·비ASCII는 거부한다. JWT 3구간 형태로
+좁히지 않으므로 opaque token도 유효하다. **token을 trim·normalize·재작성하지 않는다.**
+정규화로 통과시키는 경로는 없고, scheme 대소문자나 여분 공백도 임의로 허용하지 않는다.
+
+원문 검증에 실패한 token은 `null`로 끝난다. 새 오류 type을 만들지 않고, Authorization
+header를 만들지 않으며, 호출자의 원본 `Request`도 그대로 둔다. fetch 0회이고, 401이 아니므로
+session invalidation·subscriber 통보·`removeUser`·teardown·retry도 0회다. token 값은 오류
+메시지·로그·DOM·React state 어디에도 남지 않는다.
+
+### Public AuthContext
+
+`AuthProvider`가 React tree에 게시하는 값은 adapter가 아니라 **명시적으로 구성한 public
+facade** object literal이다. 타입만 좁히는 방식은 사용하지 않는다. runtime에서 다음이
+성립한다.
+
+- Context value와 `context.client` 어디에도 `authorizeRequest` property가 없다.
+- raw token accessor가 없다.
+- object spread로 adapter를 복사하지 않는다.
+- facade의 prototype은 `Object.prototype`이므로 prototype chain으로 internal method에
+  도달할 수 없다.
+- facade는 adapter에 memoize되어 render마다 재생성되지 않으므로 consumer effect가 다시
+  실행되지 않는다.
+
+로그인·callback·logout·auth state·subscriber lifecycle 등 기존 public 동작은 그대로다.
+
+### 401과 403
+
+401에서는 안전한 `X-Trace-Id`만 추출한 뒤, **그 요청과 함께 발급된**
+`invalidateIfCurrent()`를 호출한다. 전역 invalidation은 사용하지 않는다.
+
+401은 그 요청에 실린 credential을 발급한 session에 대한 정보이지, 지금 로그인되어 있는
+사람에 대한 정보가 아니다. session이 게시될 때마다 새 opaque identity를 만들고, 요청을
+승인할 때 그 identity를 캡처해 두었다가 callback 시점에 현재 identity와 비교한다. 다르면
+완전한 no-op이다. 따라서 session A의 요청이 pending인 동안 session B가 게시되고 A의 401이
+도착해도 B는 그대로 유지된다. logout·expiry로 이미 끝난 session의 늦은 401도 마찬가지다.
+
+같은 session의 동시 401은 token expiry·15분 hard deadline·local logout과 동일한 idempotent
+invalidation 경계로 수렴하므로 subscriber 통보, `removeUser()`와 transaction 정리가 각각
+1회만 일어난다. 자동 redirect, 자동 재로그인, 실패 요청 replay는 없다.
+
+403에서는 로그인 상태와 memory token을 그대로 유지한다. invalidation을 호출하지 않고
+teardown·redirect·retry·replay를 하지 않는다.
+
+두 경우 모두 response body, role, claim, token, `WWW-Authenticate` 원문과 내부 예외를
+노출하지 않는다. 화면에는 고정된 안전 메시지만 표시하고, 공식 정규식
+`^[A-Za-z0-9][A-Za-z0-9._:-]{7,63}$`에 **전체 일치**하는 `X-Trace-Id`만 참고 정보로 보관한다.
+이 정규식은 public Health client와 공유하는 `src/api/traceId.ts`에 한 번만 정의한다.
+
+### 오류 모델
+
+| 오류 | 조건 |
+| --- | --- |
+| `AuthenticationRequiredError` | local 인증 부재. fetch 이전 |
+| `RequestNotAllowedError` | allowlist·URL·parameter·method·body 계약 위반. fetch 이전 |
+| `UnauthorizedError` | HTTP 401만 |
+| `ForbiddenError` | HTTP 403만 |
+| `HttpError` | 그 밖의 non-2xx |
+| `TimeoutError` | 자체 deadline 초과 |
+| `NetworkError` | fetch 실패 또는 외부 abort |
+| `InvalidResponseError` | malformed JSON 또는 response validator 실패 |
+
+non-2xx response body는 읽지 않으며 오류 객체나 메시지에 저장하지 않는다. 2xx 응답은
+호출자가 제공한 type guard를 통과해야 성공이며, 검증 없이 업무 타입으로 cast하지 않는다.
+
+### 요청 lifecycle
+
+인증 준비부터 response validator까지 **하나의 5초 deadline**을 적용한다. 포함 범위는 memory
+user 조회, request authorization, fetch, response header, status 처리, body read, JSON
+parse, response validator다. token 조회 5초 + fetch 5초처럼 단계별 timeout을 합산하는 구조가
+아니다.
+
+deadline은 monotonic clock(`performance.now()`) 위의 하나의 절대 시각으로 한 번만 계산하고,
+timer와 단계 사이의 명시적 경과시간 검사가 이를 공유한다. **동기 작업은 timer로 중단할 수
+없다.** 오래 도는 동기 validator는 timer callback 실행 자체를 막으므로, 이 구현은 동기 작업을
+강제 중단한다고 주장하지 않는다. 대신 deadline을 넘겨 반환된 결과를 성공으로 채택하지 않는다.
+4,999ms는 성공할 수 있고 정확히 5,000ms와 그 이상은 `TimeoutError`다.
+
+요청당 fetch는 정확히 1회이고 자동 retry는 0회이며, `POST`와 `PATCH`를 어떤 실패에서도 자동
+재실행하지 않는다. client는 실패한 요청이나 직렬화된 body를 보관하지 않으므로 replay할
+대상 자체가 남지 않는다.
+
+외부 `AbortSignal`은 같은 lifecycle에 결합한다. 자체 deadline은 `TimeoutError`, 외부 abort는
+`NetworkError`로 분류한다. 이미 취소된 요청은 credential을 요청하지도 전송하지도 않고,
+준비 중 취소된 요청도 전송하지 않는다. 모든 종료 경로에서 timer와 abort listener를
+제거하며 늦게 도착하는 resolve·reject는 unhandled rejection을 만들지 않는다.
 
 ## 미구현 범위
 
-- Backend 보호 API 호출과 `Authorization` header 전송, 401·403 UX
-- 역할·권한 기반 UI
+- 거래·사건·조사·판정 등 업무 화면과 업무 DTO·typed API module
+- 역할·권한 기반 navigation·button·route guard UI
+- `page`·`size`·`sort` query pagination
 - 실제 Authorization Server 제품 선정·배포
 - remote end-session(RP-initiated logout), silent renew, refresh token
-- 거래·사건·조사·판정 등 업무 화면
 - Local JWT fixture(Issue #225의 `infra/compose.local-jwt-e2e.yml`)는 로컬/수동 인증 E2E
   검증용 컴포넌트이며, 브라우저에서 사용하는 OIDC Provider가 아니다. 프론트엔드는 아직 이
   fixture나 다른 어떤 Authorization Server와도 연동하지 않는다. `VITE_OIDC_AUTHORITY`는
@@ -292,11 +506,50 @@ listener 등록·해제 균형, unmount 이후 미갱신, fake clock 기반 15�
 유지 / 900,000ms 무효화, 60분 token도 15분, 더 짧은 token은 그 시각), idempotent
 invalidation, local logout, public route에서 Authorization Server 요청 0회를 확인한다.
 
+credential capability는 외부 origin, 유사 host, public health, SERVICE ingestion 두 개,
+management 8081, FastAPI 후보 origin, Prometheus, Grafana, Alertmanager, 승인 path의 trailing
+slash·query·fragment·잘못된 method, encoded slash·period·percent·semicolon path를 실제 adapter에
+직접 전달해도 모두 거부하며 그때 token 조회와 credential 부착이 0임을 확인한다. public
+AuthContext는 실제 `AuthProvider`와 `useAuth()`로 렌더한 뒤 runtime property를 관찰해
+credential capability 부재, adapter 미게시, prototype chain 도달 불가, facade identity
+안정성과 기존 public 기능 유지를 확인한다. session ownership은 실제 adapter와 transport를
+연결해 동일 session 동시 401 단일화, session B 게시 후 A의 401에서 B 유지와 B 후속 요청 성공,
+logout·expiry 후 늦은 401의 no-op, authorization 중 session 교체 시 credential 반환 0,
+stale callback 반복 호출 no-op, 새 sign-in의 teardown sequencing을 확인한다. deadline은
+monotonic clock을 직접 제어해 4,999ms 성공, 정확히 5,000ms와 5,001ms·6,000ms timeout,
+timer callback 없이도 성립하는 post-check를 확인한다. Bearer 문법은 두 계층을 각각 검증한다.
+실제 adapter에 raw `access_token`을 심어 `opaque.token`·`abc`·`abc.def`·`abc-._~+/`·`abc=`·
+`abc==`는 통과하고 `"opaque.token "`, `" opaque.token"`, `"opaque token"`, tab·CR·LF 포함
+token, `abc=def`, `=abc`, 빈 문자열은 header 생성 0회로 거부되며 원본 `Request`가 그대로임을
+확인한다. 실제 adapter와 실제 transport를 연결한 상태에서도 앞뒤 공백·tab이 붙은 raw token은
+fetch 0회이고 platform 정규화로 정상 token이 되어 전송되지 않으며, 이것이 401로 오분류되지
+않고 invalidation·teardown·retry가 0회임을 확인한다. transport 단독으로는 허용·거부
+credential 형태를 각각 검증한다. production exact URL wiring은 URL builder를 near-miss
+결과로 대체해 transport 자체의 검사가 실패하는지 확인한다.
+
+인증 transport는 endpoint registry의 exact method·path matrix, 중복 key·method·template
+부재, GET body 거부와 PATCH·POST JSON body 허용, canonical UUID v4 허용과 잘못된 UUID·path
+traversal·encoded path 거부, query·fragment·trailing slash 생성 불가, base path prefix를
+포함한 URL exact 조립, external origin 생성 불가, unknown endpoint key의 fetch 0회를
+검증한다. 승인된 10개 endpoint에서만 Bearer가 전달되고 그 값이 정확히 하나이며, health·
+SERVICE ingestion·management·AI·관측·외부 origin에는 Authorization도 fetch도 0회이고,
+URL·body·query에 token이 없으며, 미인증·만료·부재 memory user에서 fetch가 0회임을 확인한다.
+raw token accessor가 없고 JWT decode가 없으며 Web Storage에 token이 저장되지 않는 것도
+함께 확인한다.
+
+lifecycle은 인증 준비 pending, fetch pending, body·JSON pending timeout이 각각 전체 5초로
+합산되는 것, 외부 abort와 이미 aborted signal, timeout 시 `AbortController` 호출,
+timer·listener 정리, late resolve·reject의 unhandled rejection 0을 검증한다. 401은 오류
+타입, 안전 traceId 유지와 unsafe traceId 폐기, body 원문 비노출, 즉시 무효화, 동시 401의
+단일 teardown, GET·POST·PATCH replay 0과 redirect 0을, 403은 오류 타입, session 유지,
+teardown 0, retry·replay·redirect 0과 role·claim·body·token 비노출을 확인한다.
+
 Web Storage에 token을 저장하는 코드는 없다. sessionStorage에는 transaction record만
 존재하며 JWT 형태 값이 남지 않는다. IndexedDB는 사용하지 않고, Backend `GET /api/health`
 요청에는 계속 `Authorization` header를 붙이지 않는다. Issue #225의 Local JWT fixture는
 사용하지도 수정하지도 않는다.
 
 설계 근거는
-[`ADR-009`](../docs/07-decisions/ADR-009-frontend-oidc-pkce-memory-token-boundary.md)를
+[`ADR-009`](../docs/07-decisions/ADR-009-frontend-oidc-pkce-memory-token-boundary.md)와
+[`ADR-010`](../docs/07-decisions/ADR-010-frontend-authenticated-backend-api-boundary.md)을
 따른다.

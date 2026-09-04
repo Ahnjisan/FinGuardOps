@@ -127,10 +127,36 @@ export function AuthProvider({ client, children }: AuthProviderProps) {
     dispatch({ type: "callback-failed" });
   }, []);
 
+  /**
+   * The value published to the React tree is built here, method by method,
+   * rather than being the adapter itself.
+   *
+   * The adapter also carries the credential capability that can sign a request,
+   * and a value handed to the tree is readable by everything in it. Spreading
+   * or forwarding the adapter would put that capability one property lookup
+   * away from any component, any third-party render prop and any devtools
+   * inspection. This object literal has only the public methods, and its
+   * prototype is plain `Object.prototype`, so there is nothing else to reach.
+   *
+   * Memoized on the adapter, which `useState` keeps stable for the lifetime of
+   * the provider, so the identity does not change between renders and the
+   * callback route's effect does not re-run.
+   */
+  const publicClient = useMemo<AuthClient>(
+    () => ({
+      initialize: () => authClient.initialize(),
+      signIn: (returnTo: string) => authClient.signIn(returnTo),
+      completeSignIn: (callbackUrl: string) => authClient.completeSignIn(callbackUrl),
+      signOut: () => authClient.signOut(),
+      onSessionInvalidated: (listener: () => void) => authClient.onSessionInvalidated(listener),
+    }),
+    [authClient],
+  );
+
   const value = useMemo<AuthContextValue>(
     () => ({
       state,
-      client: authClient,
+      client: publicClient,
       signIn,
       signOut,
       notifyCallbackStarted,
@@ -139,7 +165,7 @@ export function AuthProvider({ client, children }: AuthProviderProps) {
     }),
     [
       state,
-      authClient,
+      publicClient,
       signIn,
       signOut,
       notifyCallbackStarted,

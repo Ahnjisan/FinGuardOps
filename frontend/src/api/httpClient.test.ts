@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HttpError, InvalidResponseError, NetworkError, TimeoutError } from "./errors";
-import { httpGet } from "./httpClient";
+import { httpGet, httpRequest } from "./httpClient";
 import {
   jsonResponse,
   mockFetchAbortOnce,
@@ -429,5 +429,353 @@ describe("httpGet — external cancellation (signal option)", () => {
     });
 
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("httpRequest — preparation inside the same deadline", () => {
+  const okDispatch = () => Promise.resolve(jsonResponse({ ok: true }));
+
+  it("reaches the network in the caller's own turn when preparation is synchronous", async () => {
+    const dispatch = vi.fn(okDispatch);
+
+    const pending = httpRequest({ timeoutMs: TIMEOUT_MS, prepare: () => dispatch });
+
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    await pending;
+  });
+
+  it("propagates a preparation failure unchanged instead of calling it a network error", async () => {
+    class NoSessionError extends Error {}
+    const dispatch = vi.fn(okDispatch);
+
+    const failing = httpRequest({
+      timeoutMs: TIMEOUT_MS,
+      prepare: () => Promise.reject(new NoSessionError()),
+    });
+
+    await expect(failing).rejects.toBeInstanceOf(NoSessionError);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("times out while preparation is pending and never dispatches", async () => {
+    vi.useFakeTimers();
+    const dispatch = vi.fn(okDispatch);
+
+    const pending = httpRequest({
+      timeoutMs: TIMEOUT_MS,
+      prepare: () => new Promise<typeof dispatch>(() => {}),
+    });
+    const assertion = expect(pending).rejects.toBeInstanceOf(TimeoutError);
+    await vi.advanceTimersByTimeAsync(TIMEOUT_MS);
+    await assertion;
+
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("does not dispatch when preparation finishes after the deadline", async () => {
+    vi.useFakeTimers();
+    const dispatch = vi.fn(okDispatch);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const pending = httpRequest({
+      timeoutMs: TIMEOUT_MS,
+      prepare: async () => {
+        await gate;
+        return dispatch;
+      },
+    });
+    const assertion = expect(pending).rejects.toBeInstanceOf(TimeoutError);
+    await vi.advanceTimersByTimeAsync(TIMEOUT_MS);
+    await assertion;
+
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("bounds preparation plus body to one budget rather than one each", async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const controlled = mockFetchOkWithControlledJson();
+
+    const pending = httpRequest({
+      timeoutMs: TIMEOUT_MS,
+      prepare: async (signal: AbortSignal) => {
+        await gate;
+        return () => fetch("http://localhost:8080/api/v1/cases", { signal });
+      },
+    });
+    const assertion = expect(pending).rejects.toBeInstanceOf(TimeoutError);
+
+    await vi.advanceTimersByTimeAsync(TIMEOUT_MS - 200);
+    release();
+    await vi.advanceTimersByTimeAsync(201);
+    await assertion;
+
+    controlled.resolveJson({ ok: true });
+  });
+
+  it("asks for nothing and dispatches nothing when the signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const prepare = vi.fn(() => okDispatch);
+
+    await expect(
+      httpRequest({ timeoutMs: TIMEOUT_MS, signal: controller.signal, prepare }),
+    ).rejects.toBeInstanceOf(NetworkError);
+    expect(prepare).not.toHaveBeenCalled();
+  });
+
+  it("does not dispatch a request cancelled while preparation was pending", async () => {
+    const controller = new AbortController();
+    const dispatch = vi.fn(okDispatch);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const pending = httpRequest({
+      timeoutMs: TIMEOUT_MS,
+      signal: controller.signal,
+      prepare: async () => {
+        await gate;
+        return dispatch;
+      },
+    });
+    await Promise.resolve();
+    controller.abort();
+    release();
+
+    await expect(pending).rejects.toBeInstanceOf(NetworkError);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+});
+
+describe("httpRequest — status classification and validation hooks", () => {
+  it("uses the caller's classifier for a non-2xx status without reading the body", async () => {
+    class Denied extends Error {
+      constructor(readonly traceId: string | null) {
+        super("denied");
+      }
+    }
+    const jsonSpy = vi.fn(() => {
+      throw new Error("body must not be read");
+    });
+
+    const failing = httpRequest({
+      timeoutMs: TIMEOUT_MS,
+      prepare: () => () =>
+        Promise.resolve({
+          ok: false,
+          status: 403,
+          headers: new Headers({ "X-Trace-Id": "trace0123abcd" }),
+          json: jsonSpy,
+        } as unknown as Response),
+      classifyErrorStatus: (response: Response) => new Denied(response.headers.get("X-Trace-Id")),
+    });
+
+    const error = (await failing.catch((caught: unknown) => caught)) as Denied;
+    expect(error).toBeInstanceOf(Denied);
+    expect(error.traceId).toBe("trace0123abcd");
+    expect(jsonSpy).not.toHaveBeenCalled();
+  });
+
+  it("falls back to HttpError when no classifier is supplied", async () => {
+    mockFetchOnce(async () => jsonResponse({ error: "boom" }, { status: 500 }));
+
+    await expect(
+      httpRequest({
+        timeoutMs: TIMEOUT_MS,
+        prepare: (signal: AbortSignal) => () => fetch("http://localhost:8080/x", { signal }),
+      }),
+    ).rejects.toBeInstanceOf(HttpError);
+  });
+
+  it("turns a validator rejection into InvalidResponseError", async () => {
+    mockFetchOnce(async () => jsonResponse({ unexpected: true }));
+
+    await expect(
+      httpRequest({
+        timeoutMs: TIMEOUT_MS,
+        prepare: (signal: AbortSignal) => () => fetch("http://localhost:8080/x", { signal }),
+        validate: (body: unknown): body is { ok: true } =>
+          typeof body === "object" && body !== null && "ok" in body,
+      }),
+    ).rejects.toBeInstanceOf(InvalidResponseError);
+  });
+
+  it("returns the validated body when the validator accepts it", async () => {
+    mockFetchOnce(async () => jsonResponse({ ok: true }));
+
+    const result = await httpRequest({
+      timeoutMs: TIMEOUT_MS,
+      prepare: (signal: AbortSignal) => () => fetch("http://localhost:8080/x", { signal }),
+      validate: (body: unknown): body is { ok: true } =>
+        typeof body === "object" && body !== null && "ok" in body,
+    });
+
+    expect(result.body.ok).toBe(true);
+  });
+});
+
+/**
+ * Replaces the monotonic clock with one the test drives directly.
+ *
+ * These cases are about work that blocks the event loop, so the timer callback
+ * is exactly what cannot run. Fake timers would prove nothing here: the point
+ * is that the deadline still holds when no timer ever fires.
+ */
+function stubMonotonicClock(): { advanceTo: (ms: number) => void } {
+  let current = 0;
+  vi.spyOn(performance, "now").mockImplementation(() => current);
+  return {
+    advanceTo: (ms: number) => {
+      current = ms;
+    },
+  };
+}
+
+describe("httpRequest — deadline holds without a timer callback", () => {
+  const okFetch = () => {
+    mockFetchOnce(async () => jsonResponse({ ok: true }));
+  };
+
+  const isOk = (body: unknown): body is { ok: true } =>
+    typeof body === "object" && body !== null && "ok" in body;
+
+  function requestWithValidator(validate: (body: unknown) => body is { ok: true }) {
+    return httpRequest({
+      timeoutMs: TIMEOUT_MS,
+      prepare: (signal: AbortSignal) => () =>
+        fetch("http://localhost:8080/api/v1/cases", { signal }),
+      validate,
+    });
+  }
+
+  it("accepts a synchronous validator that finishes at 4,999ms", async () => {
+    const clock = stubMonotonicClock();
+    okFetch();
+
+    const result = await requestWithValidator((body): body is { ok: true } => {
+      clock.advanceTo(4999);
+      return isOk(body);
+    });
+
+    expect(result.body).toEqual({ ok: true });
+  });
+
+  it("rejects a synchronous validator that finishes at exactly 5,000ms", async () => {
+    const clock = stubMonotonicClock();
+    okFetch();
+
+    await expect(
+      requestWithValidator((body): body is { ok: true } => {
+        clock.advanceTo(5000);
+        return isOk(body);
+      }),
+    ).rejects.toBeInstanceOf(TimeoutError);
+  });
+
+  it("rejects a synchronous validator that finishes at 5,001ms", async () => {
+    const clock = stubMonotonicClock();
+    okFetch();
+
+    await expect(
+      requestWithValidator((body): body is { ok: true } => {
+        clock.advanceTo(5001);
+        return isOk(body);
+      }),
+    ).rejects.toBeInstanceOf(TimeoutError);
+  });
+
+  it("does not adopt a success returned by a validator that ran 6,000ms", async () => {
+    const clock = stubMonotonicClock();
+    okFetch();
+
+    await expect(
+      requestWithValidator((body): body is { ok: true } => {
+        clock.advanceTo(6000);
+        return isOk(body);
+      }),
+    ).rejects.toBeInstanceOf(TimeoutError);
+  });
+
+  /**
+   * A validator that both overran and rejected the body is a timeout, not a
+   * contract violation: reporting "malformed response" would be a claim the
+   * client is in no position to make.
+   */
+  it("reports a timeout, not an invalid response, when a late validator also rejects", async () => {
+    const clock = stubMonotonicClock();
+    okFetch();
+
+    const error = await requestWithValidator((body): body is { ok: true } => {
+      clock.advanceTo(6000);
+      void body;
+      return false;
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(TimeoutError);
+    expect(error).not.toBeInstanceOf(InvalidResponseError);
+  });
+
+  it("still reports an invalid response when the validator rejects in time", async () => {
+    const clock = stubMonotonicClock();
+    okFetch();
+
+    const error = await requestWithValidator((body): body is { ok: true } => {
+      clock.advanceTo(10);
+      void body;
+      return false;
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(InvalidResponseError);
+  });
+
+  it("times out when preparation overran, without ever dispatching", async () => {
+    const clock = stubMonotonicClock();
+    const dispatch = vi.fn(async () => jsonResponse({ ok: true }));
+
+    const pending = httpRequest({
+      timeoutMs: TIMEOUT_MS,
+      prepare: () => {
+        clock.advanceTo(5000);
+        return dispatch;
+      },
+    });
+
+    await expect(pending).rejects.toBeInstanceOf(TimeoutError);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("times out when the caller was already past the deadline on entry", async () => {
+    const clock = stubMonotonicClock();
+    const prepare = vi.fn(() => async () => jsonResponse({ ok: true }));
+    clock.advanceTo(0);
+
+    // timeoutMs of zero means the deadline is the very instant of entry.
+    await expect(httpRequest({ timeoutMs: 0, prepare })).rejects.toBeInstanceOf(TimeoutError);
+    expect(prepare).not.toHaveBeenCalled();
+  });
+
+  it("leaves no timer behind when the deadline is detected by an explicit check", async () => {
+    vi.useFakeTimers();
+    const clock = stubMonotonicClock();
+    mockFetchOnce(async () => jsonResponse({ ok: true }));
+
+    await requestWithValidator((body): body is { ok: true } => {
+      clock.advanceTo(6000);
+      return isOk(body);
+    }).catch(() => undefined);
+
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

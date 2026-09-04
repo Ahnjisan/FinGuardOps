@@ -251,9 +251,11 @@ chain과 분리한다.
 Rule/AI orchestration·복구·one-shot writer는 기존 `SYSTEM/finguardops-backend`를 유지합니다.
 실제 Authorization Server 선정·구축, Local Compose JWT issuer/JWK fixture, traffic generator SERVICE token,
 production management mTLS·인증 proxy는 아직 구현되지 않았다. Frontend는 Authorization
-Code + PKCE 로그인·callback·local logout과 memory-only token 경계를 구현했으나, 실제
-Authorization Server가 선정되지 않았고 Backend 보호 API 호출용 `Authorization` header와
-권한 UI는 아직 없다. 기존 JWT 없는 local traffic generator의 업무 요청은 현재 401이며 Local
+Code + PKCE 로그인·callback·local logout과 memory-only token 경계에 더해, 승인된 10개
+USER method·path에만 `Authorization: Bearer`를 전달하는 인증 API transport와 401·403 경계를
+구현했다. credential capability는 승인된 Backend USER endpoint가 아닌 destination을 스스로
+거부하며, React tree에 게시되는 값에는 이 capability가 존재하지 않는다. 실제 Authorization
+Server는 아직 선정되지 않았고, 업무 화면과 role·authority 권한 UI도 아직 없다. 기존 JWT 없는 local traffic generator의 업무 요청은 현재 401이며 Local
 인증 E2E는 후속 Issue 전까지 미완성이다.
 
 ```text
@@ -318,8 +320,8 @@ Kafka
 * React Router
 * Vitest·Testing Library
 * React·TypeScript·Vite foundation과 Router, public health client, OIDC Authorization
-  Code + PKCE 인증 경계(`oidc-client-ts`) 구현. Backend 보호 API 호출용 `Authorization`
-  header, 권한 UI, 거래·사건·운영 업무 화면은 아직 구현되지 않음
+  Code + PKCE 인증 경계(`oidc-client-ts`), 승인 endpoint 전용 인증 API transport와 401·403
+  경계 구현. 권한 UI와 거래·사건·운영 업무 화면은 아직 구현되지 않음
 
 ### Backend
 
@@ -461,9 +463,17 @@ Kafka
 * Frontend OIDC Authorization Code + PKCE 인증 경계 구현. `oidc-client-ts` 기반 redirect
   로그인·callback·local logout, memory-only access/ID token, sessionStorage에는 transient
   protocol transaction record만 보관, 최대 15분 hard session deadline, callback URL 조기 정리와
-  `/`·`/health` exact allowlist 복귀 경로. 실제 Authorization Server 제품은 미선정이며 Backend
-  보호 API 호출용 `Authorization` header, silent renew, refresh token, remote logout과 권한
-  UI는 구현하지 않음
+  `/`·`/health` exact allowlist 복귀 경로. 실제 Authorization Server 제품은 미선정이며 silent
+  renew, refresh token, remote logout과 권한 UI는 구현하지 않음
+* Frontend 인증 Backend API transport와 401·403 경계 구현. endpoint key가 method·path를
+  결정하는 승인 10개 USER endpoint allowlist, canonical UUID v4 path parameter 검증과 exact
+  origin·pathname 재검증, raw token을 반환하지 않고 승인 `Request`에 Authorization을 부착하는
+  `authorizeRequest()` 경계와 그 capability 자체의 destination 검증, credential capability를
+  노출하지 않는 public AuthContext facade, 요청을 승인한 session에만 적용되는 조건부 401
+  invalidation과 동시 401 단일 teardown, 403 session 유지, 자동 retry·write replay 0, RFC 6750
+  Bearer 문법 검증, 인증 준비부터 response validator까지 monotonic clock 기반 단일 5초 deadline.
+  public `GET /api/health`와 SERVICE ingestion·management·AI·관측·외부 origin에는 credential을
+  전달하지 않으며 query pagination과 업무 화면은 구현하지 않음
 
 Backend Security 설정은 `FINGUARDOPS_SECURITY_ISSUER`,
 `FINGUARDOPS_SECURITY_JWK_SET_URI`, `FINGUARDOPS_SECURITY_ALLOWED_ORIGINS`와 JWK
@@ -488,11 +498,13 @@ rotation·sidecar 재생성 절차는
 [`Local JWT 인증 E2E runbook`](docs/09-deployment/local-jwt-auth-e2e-runbook.md)을 따릅니다.
 남은 보안 후속 순서는 다음과 같습니다.
 
-1. Frontend 인증 API client와 권한 UI
+1. Frontend 업무 화면과 role·authority 권한 UI
    - Authorization Code + PKCE, memory-only token, login·callback·local logout은
      Issue #229에서 구현되었습니다([`ADR-009`](docs/07-decisions/ADR-009-frontend-oidc-pkce-memory-token-boundary.md)).
-   - 남은 범위는 Backend 보호 API 호출용 `Authorization` header, 401·403 UX,
-     role·authority 기반 UI와 remote logout이며 Authorization Server 제품 결정이 선행됩니다.
+   - 승인 endpoint 전용 인증 API transport, `Authorization` header 전달 경계와 401·403 처리는
+     Issue #231에서 구현되었습니다([`ADR-010`](docs/07-decisions/ADR-010-frontend-authenticated-backend-api-boundary.md)).
+   - 남은 범위는 거래·사건·메모·감사 업무 화면과 typed API module, query pagination,
+     role·authority 기반 UI, remote logout이며 Authorization Server 제품 결정이 선행됩니다.
 
 Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend OIDC도 Compose traffic fixture의
 일부가 아니다. 이 세 단계는 토큰 절약을 위한 인위적

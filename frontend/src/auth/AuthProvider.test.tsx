@@ -505,3 +505,176 @@ describe("useAuth", () => {
     suppressed.mockRestore();
   });
 });
+
+/**
+ * What reaches the React tree is asserted at run time, not by types.
+ *
+ * A narrowed context type would still hand components the adapter object, and
+ * anything in the tree can read a property off a value it was given. The
+ * injected fake below implements the *full* internal port — credential
+ * capability included — so these tests fail if the provider ever forwards it.
+ */
+describe("AuthProvider public context facade", () => {
+  const CREDENTIAL_SURFACE = [
+    "authorizeRequest",
+    "invalidateSession",
+    "invalidateIfCurrent",
+    "getAccessToken",
+    "getUser",
+    "accessToken",
+    "token",
+    "ownership",
+  ];
+
+  const seen: Array<ReturnType<typeof useAuth>> = [];
+
+  function CaptureProbe() {
+    const value = useAuth();
+    seen.push(value);
+    return <span data-testid="status">{value.state.status}</span>;
+  }
+
+  function renderCapture(client: FakeAuthClient, strict = true) {
+    const tree = (
+      <AuthProvider client={client}>
+        <CaptureProbe />
+      </AuthProvider>
+    );
+    return render(strict ? <StrictMode>{tree}</StrictMode> : tree);
+  }
+
+  beforeEach(() => {
+    seen.length = 0;
+  });
+
+  function contextValue() {
+    const latest = seen.at(-1);
+    if (latest === undefined) {
+      throw new Error("no context value was captured");
+    }
+    return latest;
+  }
+
+  it("publishes something other than the adapter it was given", async () => {
+    const client = createFakeAuthClient();
+    renderCapture(client);
+    await waitFor(() => {
+      expect(status()).toBe("unauthenticated");
+    });
+
+    expect(contextValue().client).not.toBe(client);
+  });
+
+  it("exposes no credential capability on the context value itself", async () => {
+    const client = createFakeAuthClient();
+    renderCapture(client);
+    await waitFor(() => {
+      expect(status()).toBe("unauthenticated");
+    });
+
+    const value = contextValue() as unknown as Record<string, unknown>;
+    for (const property of CREDENTIAL_SURFACE) {
+      expect(Object.keys(value)).not.toContain(property);
+      expect(property in value).toBe(false);
+      expect(value[property]).toBeUndefined();
+    }
+  });
+
+  it("exposes no credential capability on the published client", async () => {
+    const client = createFakeAuthClient();
+    renderCapture(client);
+    await waitFor(() => {
+      expect(status()).toBe("unauthenticated");
+    });
+
+    const published = contextValue().client as unknown as Record<string, unknown>;
+    for (const property of CREDENTIAL_SURFACE) {
+      expect(Object.keys(published)).not.toContain(property);
+      expect(property in published).toBe(false);
+      expect(published[property]).toBeUndefined();
+    }
+  });
+
+  it("cannot be walked back to the adapter through the prototype chain", async () => {
+    const client = createFakeAuthClient();
+    renderCapture(client);
+    await waitFor(() => {
+      expect(status()).toBe("unauthenticated");
+    });
+
+    const published = contextValue().client;
+    expect(Object.getPrototypeOf(published)).toBe(Object.prototype);
+    expect(Object.getPrototypeOf(Object.getPrototypeOf(published))).toBeNull();
+    // Nothing anywhere on the chain, own or inherited, leads to a credential.
+    for (const property of CREDENTIAL_SURFACE) {
+      expect(Reflect.get(published, property)).toBeUndefined();
+    }
+  });
+
+  it("publishes exactly the public port and nothing more", async () => {
+    const client = createFakeAuthClient();
+    renderCapture(client);
+    await waitFor(() => {
+      expect(status()).toBe("unauthenticated");
+    });
+
+    expect(Object.keys(contextValue().client).sort()).toEqual([
+      "completeSignIn",
+      "initialize",
+      "onSessionInvalidated",
+      "signIn",
+      "signOut",
+    ]);
+  });
+
+  it("keeps every published method working", async () => {
+    const client = createFakeAuthClient();
+    renderCapture(client);
+    await waitFor(() => {
+      expect(status()).toBe("unauthenticated");
+    });
+    const published = contextValue().client;
+
+    await expect(published.initialize()).resolves.toEqual({ session: null });
+    await published.signIn("/health");
+    await expect(published.completeSignIn("http://localhost/auth/callback?code=a")).resolves
+      .toMatchObject({ returnTo: "/" });
+    await published.signOut();
+    const unsubscribe = published.onSessionInvalidated(() => undefined);
+    const subscribedCount = client.listenerCount();
+    unsubscribe();
+
+    expect(client.calls.signIn).toContain("/health");
+    expect(client.calls.completeSignIn).toHaveLength(1);
+    expect(client.calls.signOut).toBeGreaterThanOrEqual(1);
+    expect(subscribedCount).toBeGreaterThan(client.listenerCount());
+  });
+
+  it("keeps a stable identity across renders, so consumer effects do not re-run", async () => {
+    const client = createFakeAuthClient();
+    renderCapture(client);
+    await waitFor(() => {
+      expect(status()).toBe("unauthenticated");
+    });
+
+    // The state transition alone produced more than one render.
+    expect(seen.length).toBeGreaterThan(1);
+    const clients = new Set(seen.map((value) => value.client));
+    expect(clients.size).toBe(1);
+  });
+
+  it("keeps that identity stable across an authentication state change", async () => {
+    const client = createFakeAuthClient();
+    renderCapture(client);
+    await waitFor(() => {
+      expect(status()).toBe("unauthenticated");
+    });
+    const before = contextValue().client;
+
+    act(() => {
+      client.emitSessionInvalidated();
+    });
+
+    expect(contextValue().client).toBe(before);
+  });
+});
