@@ -107,10 +107,12 @@ V14는 `investigation_note`와 `CASE_NOTE_CREATED` DB CHECK에 USER UUID v4를 �
 - Backend가 환경별 exact origin allowlist를 최종 강제하고
   `allowCredentials=false`를 사용한다.
 - 승인된 preflight만 무인증으로 허용한다.
-- SPA access token은 memory 보관을 우선하며 localStorage·sessionStorage 장기 저장을
+- SPA access token은 memory에만 보관하며 localStorage·sessionStorage·IndexedDB 저장을
   금지한다.
-- 향후 SPA 로그인은 Authorization Code + PKCE를 사용한다. refresh token과 cookie·session
+- SPA 로그인은 Authorization Code + PKCE를 사용한다. refresh token과 cookie·session
   도입은 이 결정 범위가 아니며 도입 전에 CSRF를 다시 결정한다.
+- 이 경계의 Frontend 구현과 memory-only token·transaction storage 결정은
+  [`ADR-009`](ADR-009-frontend-oidc-pkce-memory-token-boundary.md)를 따른다.
 
 ## 3. 오류와 요청 흐름
 
@@ -197,9 +199,12 @@ private Unix socket CLI, 7개 고정 test identity와 인증 E2E verifier를 구
 production Authorization Server가 아니며 base/production 설정, dependency와 workflow를
 변경하지 않는다.
 
+Issue #229에서 Frontend는 Authorization Code + PKCE redirect 로그인, `/auth/callback`,
+memory-only token과 local logout 경계를 구현했다.
+
 다음은 아직 구현되지 않았다.
 
-- Frontend OIDC 로그인·token·권한 UI
+- Frontend 인증 API client(`Authorization` header), 401·403 UX와 권한 UI
 - production Authorization Server·mTLS·authentication proxy
 
 ## 7. 후속 작업
@@ -209,7 +214,8 @@ method security는 Issue #221에서, USER actor는 Issue #223에서 구현되었
 기술 책임과 검증 경계를 분리해 수행한다.
 
 1. 완료. `[Infra/Docs] Local Compose·runbook JWT fixture와 인증 E2E 적용`
-2. `[Frontend] OIDC 로그인·token·권한 UI 구현`
+2. 완료. `[Frontend/Security] OIDC PKCE와 memory-only 인증 기반 구현` (#229, ADR-009)
+3. `[Frontend] 인증 API client와 권한 UI 구현`
 
 Spring Security 개념과 JWT 검증 동작은 공식 문서를 참고하되 실제 dependency와 제품은 각
 구현 Issue에서 검증한다.
