@@ -60,11 +60,14 @@
   전용 compile 경계(테스트·test-support는 별도 strict `tsconfig.test.json`으로 독립 typecheck),
   ESLint, Vitest·Testing Library 검증 경계, `createBrowserRouter` 기반 Router(`/`, `/health`,
   `*`)와 App Shell 구현. `src/main.tsx`의 `bootstrap()`이 React root 생성·render 전에
-  `VITE_API_BASE_URL`을 fail-fast로 1회 검증하고, public Backend `GET /api/health` client
+  `VITE_API_BASE_URL`, `VITE_OIDC_AUTHORITY`, `VITE_OIDC_CLIENT_ID`를 fail-fast로 1회 검증하고,
+  public Backend `GET /api/health` client
   (Authorization 미사용, 자동 retry 0회, fetch 시작부터 body·JSON parsing까지 단일 5초
   deadline, 공식 정규식 전체 일치 기준 `X-Trace-Id` 처리)와 React StrictMode 아래에서도 논리적
   최초 fetch가 1회만 실행되는 module-level in-flight 요청 공유(영구 캐시 없음, unmount 이후
-  미갱신)를 구현
+  미갱신)를 구현. `/auth/callback` route와 `oidc-client-ts` 기반 Authorization Code + PKCE
+  인증 경계(memory-only token, transient transaction record만 sessionStorage, 최대 15분 hard
+  session deadline, local logout)도 구현되었으며 Backend 보호 API 호출·권한 UI는 없음
 
 현재 백엔드는 Health Check, 거래 접수·조회, 행동 이벤트 접수와 내부 Rule
 평가용 조회를 구현한다. 거래·멱등·행동 이벤트,
@@ -115,8 +118,9 @@ AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 
   Pydantic 요청·응답 DTO와 분석 HTTP 경계까지 구현되었으며 ML·AI 리포트 없음
 - Spring Boot Rule v1 Client와 내부 분석 오케스트레이션·결과 채택은
   구현되었으나 거래 접수 Service와 최종 업무 흐름 연결은 없음
-- `frontend/`: React·TypeScript·Vite foundation, Router와 public health client가 구현되었으며
-  OIDC·token·권한 UI와 거래·사건·운영 업무 화면은 구현되지 않음
+- `frontend/`: React·TypeScript·Vite foundation, Router, public health client와 OIDC
+  Authorization Code + PKCE 인증 경계가 구현되었으며 Backend 보호 API 호출용 `Authorization`
+  header·권한 UI와 거래·사건·운영 업무 화면은 구현되지 않음
 - `infra/`: Issue #196의 로컬 Compose Prometheus scrape·External Risk 검증 fixture,
   Issue #199의 service 수준 recording rule 14개와 Issue #201의 로컬 실패율 alert rule
   6개·deterministic test, Issue #203의 로컬 Alertmanager routing·signal별 inhibition·
@@ -127,7 +131,7 @@ AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 
 - External Risk DB 영속화와 LLM Provider 연동
 - production Prometheus, Grafana, Loki와 분산 추적 구성
 - USER Audit actor 연결, production Authorization Server와 local Compose JWT fixture,
-  Frontend OIDC
+  Frontend 인증 API client와 권한 UI
 - Kubernetes와 AWS 배포 구성
 
 ## 3. 아키텍처 목표
@@ -897,8 +901,9 @@ React는 서비스 상태, 배포 버전, 업무 영향, AI 비용과 장애·�
   application 요청은 deny-by-default로 거부한다. 사건 workflow·resolution·조사 메모 생성은
   같은 authority의 method security로 이중 보호한다. 네 사건 write는 검증된 USER
   principal을 AuditLog actor와 InvestigationNote author에 연결한다.
-- Authorization Server 제품·구축, Frontend OIDC·Authorization Code + PKCE, production
-  management mTLS·인증 proxy는 후속 구현이다. Issue #225의 선택형 local/manual overlay는
+- Authorization Server 제품·구축, Frontend 인증 API client·권한 UI, production
+  management mTLS·인증 proxy는 후속 구현이다. Frontend Authorization Code + PKCE 경계 자체는
+  Issue #229에서 구현되었다. Issue #225의 선택형 local/manual overlay는
   Backend namespace에서만 접근할 수 있는 ephemeral RS256 JWKS fixture와 private socket CLI를
   제공한다. 이는 production Authorization Server가 아니며 base Compose의 JWT 없는 업무
   요청은 계속 401이다.
@@ -1057,10 +1062,11 @@ OAuth2 Resource Server 기반과 401·403·trace 경계는 Issue #219에서, end
 method security는 Issue #221에서, USER 감사 주체는 Issue #223에서 구현되었다. Issue #225의
 local/manual JWT fixture와 인증 E2E도 구현되었다. 남은 보안 후속 Issue는 다음과 같다.
 
-1. Frontend OIDC·token·권한 UI
-   - Resource Server·RBAC와 Authorization Server 제품 결정 후 Authorization Code + PKCE,
-     access token memory 보관, API `Authorization` header와 login·logout을 구현한다.
-   - expiry·401·403 UX와 role·authority 기반 UI를 브라우저 경계에서 검증한다.
+1. Frontend 인증 API client와 권한 UI
+   - Authorization Code + PKCE, memory-only token, login·callback·local logout은
+     Issue #229에서 구현되었다([`ADR-009`](../07-decisions/ADR-009-frontend-oidc-pkce-memory-token-boundary.md)).
+   - 남은 범위는 Backend 보호 API 호출용 `Authorization` header, 401·403 UX,
+     role·authority 기반 UI와 remote logout이며 Authorization Server 제품 결정이 선행된다.
 
 Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend OIDC도 Compose traffic fixture의
 일부가 아니다. 기술 책임·선행 관계·실패 영향·검증 시간이 다르므로 별도 Issue로 유지한다.

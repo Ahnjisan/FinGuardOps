@@ -375,13 +375,32 @@ USER actor UUID, token, claim과 principal 원문은 응답·로그·metadata에
 - 승인된 origin·method·header의 OPTIONS preflight만 credential 없이 허용한다.
 - 허용 header는 실제 endpoint가 필요한 `Authorization`, `Content-Type`,
   `Idempotency-Key`, `X-Trace-Id` 등으로 제한한다.
-- SPA access token은 memory 보관을 우선하고 localStorage·sessionStorage 장기 저장을
+- SPA access token은 memory에만 보관하고 localStorage·sessionStorage·IndexedDB 저장을
   금지한다.
-- 향후 SPA 로그인은 Authorization Code + PKCE를 사용한다.
-- refresh token, 로그인 화면, token 획득·갱신과 권한 UI는 별도 Frontend Issue다.
+- SPA 로그인은 Authorization Code + PKCE를 사용한다.
+- Backend 보호 API 호출용 `Authorization` header, refresh token과 권한 UI는 별도 Frontend
+  Issue다.
 
-현재 Frontend에는 API client, 로그인, token 저장·refresh와 인증 상태 관리가 구현되지
-않았다.
+Issue #229에서 Frontend는 `oidc-client-ts` 기반 Authorization Code + PKCE redirect 로그인,
+`/auth/callback` 처리와 local logout을 구현했다. access·ID token은 memory user store에만
+있고 reload 후 복원되지 않는다. sessionStorage에는 `finguardops.oidc.transaction.` prefix의
+transient protocol transaction record만 남으며, 로그인 시작 직전과 callback 성공·실패 후
+정리된다. `/auth/callback` 외 경로의 초기화는 중단된 redirect가 남긴 record를 정리하고,
+callback route에서는 검증 중인 transaction을 보존한다. silent renew, refresh token,
+`offline_access`, remote end-session은 사용하지 않고 세션은 token expiry와 로그인 완료 후
+15분 중 빠른 시점에 local invalidation된다. hard deadline·expiry·logout은 하나의 in-flight
+teardown을 공유하므로 동시에 발생해도 teardown과 통보가 각각 1회만 일어난다.
+
+`window.sessionStorage` property 획득은 실제 인증 operation 안에서 `try`/`catch`로 수행하며,
+getter가 `SecurityError`를 던져도 `/`와 `/health` public Outlet은 그대로 렌더되고 인증 영역만
+고정 오류가 된다. `/auth/callback`에서는 storage 접근보다 먼저 URL의 `code`·`state`·fragment를
+제거하며, `code`와 `error`가 동시에 있는 비정상 응답은 라이브러리에 넘기지 않고 안전하게
+실패한다. redirect 취소나 BFCache 복귀 시에는 명시적 재로그인이 가능한 상태로 돌아온다.
+자세한 근거는 [`ADR-009`](../07-decisions/ADR-009-frontend-oidc-pkce-memory-token-boundary.md)를
+따른다.
+
+Frontend에는 아직 Backend 보호 API client, `Authorization` header 전송, 401·403 UX와
+role·authority 기반 UI가 구현되지 않았다. `GET /api/health`는 계속 credential 없이 호출한다.
 
 ## 11. Local·test·Compose 경계
 
@@ -442,7 +461,8 @@ method security는 Issue #221에서 구현되었다. 아래 표는 구현 상태
 | 완료. `[Backend/Security] Endpoint RBAC와 USER·SERVICE authority matrix 적용` | deny-by-default와 endpoint 최소 권한 | request matcher, role converter, method security | 없음 | 13개 endpoint·401·403, role 혼용 | #219 | full-stack JWT·method security 검증; 구현 |
 | 완료. `[Backend/Audit] 사건 write USER actor와 InvestigationNote author 연결` | 검증 principal을 성공 감사에 연결 | provider/service actor, note author, V14 | 적용 | 성공·stale·rollback·기존 SYSTEM 호환 | #221 | 동시성·migration 검증; 구현 |
 | 완료. `[Infra/Docs] Local Compose·runbook JWT fixture와 인증 E2E 적용` | local issuer와 SERVICE traffic | 선택형 Compose overlay, fixture, verifier, runbook | 없음 | build·wait·traffic·scrape·alert·restart | #219·#221 | local/manual Docker E2E 경계 구현 |
-| 2. `[Frontend] OIDC 로그인·token·권한 UI 구현` | SPA 인증·권한 UX | PKCE, memory token, API client, 401·403 UI | 없음 | browser login·expiry·권한 UI | AS 제품, #219·#221 | 브라우저/AS E2E; 미구현 |
+| 부분 구현. `[Frontend/Security] OIDC PKCE와 memory-only 인증 기반 구현` | SPA 인증 경계 | PKCE redirect, memory token, transaction store, `/auth/callback`, local logout | 없음 | 설정·settings·storage·lifecycle·callback·deadline | #219·#221 | jsdom 단위·컴포넌트 검증; 구현 (#229) |
+| 2. `[Frontend] 인증 API client와 권한 UI 구현` | 보호 API 호출과 권한 UX | `Authorization` header, 401·403 UI, role·authority UI, remote logout | 없음 | browser login·expiry·권한 UI | AS 제품, #229 | 브라우저/AS E2E; 미구현 |
 
 ## 14. 구현 검증 계약
 
