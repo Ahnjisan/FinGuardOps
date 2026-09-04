@@ -603,3 +603,37 @@ dependency나 실제 구현이 추가되었다는 의미는 아니다.
 - [OAuth2 Bearer Token](https://docs.spring.io/spring-security/reference/6.5/servlet/oauth2/resource-server/bearer-tokens.html)
 - [Session Management](https://docs.spring.io/spring-security/reference/6.5/servlet/authentication/session-management.html)
 - [CSRF](https://docs.spring.io/spring-security/reference/6.5/servlet/exploits/csrf.html)
+
+## 16. Local Keycloak runtime 경계 (Issue #235)
+
+local/dev Keycloak issuer는 public HTTPS
+`https://localhost:8443/realms/finguardops-local`이다. Backend JWK 조회는 같은 container network
+namespace에서 loopback HTTP URI `127.0.0.1:8082`를 사용하고 insecure-loopback opt-in을 명시한다.
+management readiness도 host 비공개 loopback `127.0.0.1:9000`으로 분리한다. Backend health는
+Keycloak readiness에 의존하지 않는다.
+
+한 Backend는 Keycloak 또는 Local JWT fixture issuer/JWK 한 쌍만 신뢰한다. 공식 preflight는 두
+issuer service와 혼합 설정을 stack 생성 전에 거부하지만 임의 raw Compose 우회까지 보장하지
+않는다. Keycloak private key와 signing key는 `keycloak-data`, local TLS/admin/SERVICE credential은
+ignored `.local` file-backed secret 경계에만 있고 helper별 최소 mount를 적용한다.
+
+bootstrap admin secret은 argv와 정적 Compose environment에 없지만 start wrapper가 읽어 child
+Keycloak process environment에 전달한다. Docker 관리자는 PID 1 process environment와 host
+mount를 볼 수 있으므로 이는 local operator 신뢰 경계이며 production secret manager를 대체하지
+않는다. helper는 UID 10001, read-only root, 전용 noexec tmpfs, all-capability drop와
+no-new-privileges를 사용한다.
+
+구현된 runtime 검증 범위는 realm/client/scope/mapper reconcile, credential 없는 USER resource,
+두 SERVICE token, raw singleton string audience, UUID subject/account 일치와 Backend 400/403
+경계다. USER browser E2E, refresh-token fail-closed, role UI와 remote logout은 후속 범위다.
+
+Stock Keycloak은 HTTP와 HTTPS에 공통 listener host를 적용하므로 2026-09-05 OWNER 결정에 따라
+`KC_HTTP_HOST=0.0.0.0`을 사용한다. HTTPS 8443만 host `127.0.0.1`에 publish하고 HTTP 8082와
+management 9000은 publish하지 않는다. HTTP listener 자체는 공유 namespace에서
+`0.0.0.0:8082`에 listen하므로 다른 Docker participant의 접근 불가능을 주장하지 않는다. Backend와
+승인 helper는 실제 credential과 Admin token을 bridge 주소로 전송하지 않고 namespace loopback만
+사용한다. local/dev network participant는 operator 신뢰 경계이며 production에서는 별도 network
+segmentation, trusted TLS, secret manager와 production Authorization Server 계약이 필요하다.
+별도 proxy/service/image와 helper 공유 persistent volume은 없고 Keycloak용 `keycloak-data`만 추가한다.
+2026-09-05 correction에서 fresh/existing runtime, verifier 5회 연속 실행, host public HTTPS와
+8082·9000 비공개 검증이 모두 통과했다.

@@ -270,6 +270,31 @@ singleton audience나 UUID subject 조건을 맞추기 위해 Backend validator�
 이 refresh token fail-closed 정책과 위 E2E는 모두 후속 runtime Issue의 구현·검증 범위이며 현재
 구현 완료 상태가 아니다.
 
+## 2.15 Issue #235 구현 상태 후속 기록 (2026-09-04)
+
+Issue #235는 stock Keycloak 26.7.3 local/dev runtime, 별도 Compose overlay, realm import,
+idempotent Admin REST bootstrap, USER public client, 분리된 두 SERVICE client와 전용 client
+scope/mapper를 구현했다. SERVICE Client Credentials token, raw singleton string audience,
+canonical UUID v4 `sub`, exact role와 Backend 400/403 경계를 runtime verifier가 검사한다.
+
+이 기록은 위 역사적 array-only 문구를 다시 쓰지 않는다. raw audience 표현은 후속
+[`ADR-012`](ADR-012-jwt-singleton-audience-standard-representation.md)가 우선하며 exact string과
+exact singleton string array를 Backend가 허용한다. Issue #235 stock Keycloak의 실제 발급
+표현은 string이고 논리 audience는 계속 `finguardops-backend-api` 하나다.
+
+USER resource는 credential 0개로 provisioning하므로 browser login, Authorization Code callback,
+USER access/ID token `sub` 원문 비교, refresh-token fail-closed, role UI와 remote logout은 여전히
+후속 범위다.
+
+2026-09-05 OWNER 보정은 stock Keycloak이 HTTP와 HTTPS에 공통 listener host를 적용하는 제약을
+확인하고 `KC_HTTP_HOST=0.0.0.0`을 선택했다. HTTPS 8443만 host loopback에 publish하며 HTTP 8082와
+management 9000은 publish하지 않는다. Backend와 승인 helper의 JWK/Admin/management 요청은 공유
+namespace loopback을 사용한다. 같은 local/dev Docker network participant는 operator 신뢰 경계이고,
+production에서는 별도 network segmentation, trusted TLS, secret manager와 Authorization Server
+계약이 필요하다. 별도 proxy/service/image와 helper 공유 volume은 도입하지 않았다.
+2026-09-05 correction에서 fresh/existing runtime, verifier 5회 연속 실행, host TLS·hostname·issuer와
+8082·9000 비공개 검증이 통과했다.
+
 ## 3. 결과
 
 ### 3.1 장점

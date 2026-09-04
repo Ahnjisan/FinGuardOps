@@ -21,7 +21,9 @@ workflow에서는 실행하지 않는다.
 [`ADR-012`](../07-decisions/ADR-012-jwt-singleton-audience-standard-representation.md)에 따라 exact
 string과 exact singleton string array를 모두 같은 singleton audience 의미로 허용하고,
 additional·duplicate·malformed audience는 거부한다. fixture 발급 형태는 변경하지 않는다.
-Issue #235의 stock Keycloak 26.7.3 runtime은 아직 구현되지 않았다.
+ADR-012 결정 당시에는 Keycloak runtime이 미구현이었지만 이후 Issue #235에서 stock Keycloak
+26.7.3 local/dev runtime과 host public HTTPS 검증을 구현했다. 이 fixture의 목적과 발급 형태는
+그 후에도 변경하지 않으며 두 overlay는 계속 분리한다.
 
 HTTP는 readiness와 JWKS의 `GET`만 제공한다. token 발급·rotation·fault 제어는 fixture
 tmpfs의 Unix socket과 container CLI만 사용한다. private key와 socket은 4 MiB 전용
@@ -368,3 +370,15 @@ Phase A 보고에는 Issue·branch·HEAD, exact 13-file Scope, image digest, cry
 token 비노출, topology, matrix, JWK lifecycle, observability·one-shot, 테스트별 수치,
 mutation, 실패·재실행, `git diff --check`, staged·untracked·임시 자원과 Critical/Major/Minor를
 포함한다. 그 뒤 source/config/test/docs를 동결하고 Phase B는 별도 읽기 전용 리뷰로 진행한다.
+
+## 9. Keycloak overlay와의 분리
+
+이 fixture는 deterministic JWT/JWK rotation·장애 회귀용이며 production Authorization Server나
+browser OIDC provider가 아니다. stock Keycloak local/dev runtime은 별도
+`infra/compose.keycloak-local-e2e.yml`과
+[`Local Keycloak runbook`](local-keycloak-auth-e2e-runbook.md)을 사용한다.
+
+두 overlay를 한 Compose 실행에 결합하거나 한 Backend에 두 issuer/JWK를 동시에 신뢰시키지
+않는다. 저장소 공식 Keycloak preflight는 merged service set과 issuer/JWK 혼합을 application
+stack 생성 전에 거부한다. verifier를 우회한 임의 raw Compose 실행까지 문법만으로 차단한다고
+주장하지 않는다.

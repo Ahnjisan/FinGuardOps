@@ -76,3 +76,21 @@ custom Keycloak provider 또는 custom Keycloak image로 singleton array를 강�
 이 결정으로 Issue #235의 stock Keycloak 26.7.3 runtime 작업을 다시 진행할 수 있다. 다만 이
 ADR은 Keycloak runtime, Compose, realm, client, scope 또는 mapper를 구현하지 않는다. API, DB,
 Frontend와 dependency 변경도 없다.
+
+## 6. Issue #235 runtime 연결 (2026-09-04)
+
+Issue #235는 pinned stock Keycloak 26.7.3을 custom provider나 custom image 없이 연결했다. 실제
+두 SERVICE Client Credentials access token의 raw `aud`가 exact JSON string
+`finguardops-backend-api`이고 Backend 인증 경계를 통과하는지 runtime verifier가 검사한다.
+Backend의 raw exact string/exact singleton array 허용과 normalized exact singleton 검증은 그대로
+유지되며 additional·reversed additional·duplicate·empty·wrong·malformed audience는 허용하지
+않는다.
+
+2026-09-05 초기 container namespace 발급 검증에서는 stock Keycloak의 raw string 표현을 확인했지만
+당시 listener bind 구성으로 host public HTTPS issuer 접근이 실패했다. 이 실패는 ADR-012의 audience
+표현 결정을 변경하지 않았으며 그 시점에는 Issue #235 전체 runtime 완료로 간주하지 않았다.
+
+이후 Issue #235 OWNER correction에서 `KC_HTTP_HOST=0.0.0.0`, host `127.0.0.1:8443` 단일 publish와
+namespace loopback 내부 접근으로 보정했다. fresh/existing runtime, host public HTTPS, 8082·9000
+host 비공개와 SERVICE token·Backend 400/403 검증이 통과했다. USER browser E2E와 Frontend
+refresh-token fail-closed는 여전히 후속 범위이며 production Authorization Server는 미결정이다.

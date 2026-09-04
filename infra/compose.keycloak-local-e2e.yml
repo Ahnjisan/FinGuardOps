@@ -1,0 +1,162 @@
+services:
+  backend:
+    environment:
+      FINGUARDOPS_SECURITY_ISSUER: https://localhost:8443/realms/finguardops-local
+      FINGUARDOPS_SECURITY_JWK_SET_URI: http://127.0.0.1:8082/realms/finguardops-local/protocol/openid-connect/certs
+      FINGUARDOPS_SECURITY_INSECURE_LOOPBACK_JWK_ALLOWED: "true"
+      FINGUARDOPS_SECURITY_JWK_CONNECT_TIMEOUT: 2s
+      FINGUARDOPS_SECURITY_JWK_READ_TIMEOUT: 2s
+    ports:
+      - "127.0.0.1:8443:8443"
+    networks:
+      - prometheus-ui
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.3@sha256:ff4257d0d64efbe99ed1ddfaf07765cc3c36dc7518bf8324d41961327f441c54
+    entrypoint:
+      - bash
+      - /opt/finguardops/start-keycloak.sh
+    command: []
+    environment:
+      KC_HOSTNAME: https://localhost:8443
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_HOST: 0.0.0.0
+      KC_HTTP_PORT: "8082"
+      KC_HTTPS_PORT: "8443"
+      KC_HTTPS_CERTIFICATE_FILE: /run/secrets/keycloak_tls_certificate
+      KC_HTTPS_CERTIFICATE_KEY_FILE: /run/secrets/keycloak_tls_private_key
+      KC_HTTP_MANAGEMENT_HOST: 127.0.0.1
+      KC_HTTP_MANAGEMENT_PORT: "9000"
+      KC_HTTP_MANAGEMENT_SCHEME: http
+      KC_HEALTH_ENABLED: "true"
+      KC_DB: dev-file
+    volumes:
+      - keycloak-data:/opt/keycloak/data
+      - ./keycloak/realm/finguardops-local-realm.json:/opt/keycloak/data/import/finguardops-local-realm.json:ro
+      - ./keycloak/start-keycloak.sh:/opt/finguardops/start-keycloak.sh:ro
+    secrets:
+      - source: keycloak_bootstrap_admin_secret
+        target: keycloak_bootstrap_admin_secret
+        mode: 0400
+      - source: keycloak_tls_certificate
+        target: keycloak_tls_certificate
+        mode: 0444
+      - source: keycloak_tls_private_key
+        target: keycloak_tls_private_key
+        mode: 0400
+    network_mode: "service:backend"
+    depends_on:
+      backend:
+        condition: service_healthy
+        restart: true
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -ec
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000;
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3;
+          IFS= read -r status <&3;
+          [[ $$status == *' 200 '* ]];
+          response=$$(cat <&3);
+          [[ $$response == *'"status": "UP"'* || $$response == *'"status":"UP"'* ]]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  keycloak-bootstrap:
+    image: python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7
+    entrypoint:
+      - python
+      - -B
+      - /opt/finguardops/bootstrap.py
+    command:
+      - reconcile
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      KEYCLOAK_ADMIN_BASE_URL: http://127.0.0.1:8082
+    volumes:
+      - ./keycloak/bootstrap.py:/opt/finguardops/bootstrap.py:ro
+    secrets:
+      - source: keycloak_bootstrap_admin_secret
+        target: keycloak_bootstrap_admin_secret
+        mode: 0400
+      - source: transaction_service_client_secret
+        target: transaction_service_client_secret
+        mode: 0400
+      - source: behavior_service_client_secret
+        target: behavior_service_client_secret
+        mode: 0400
+    network_mode: "service:backend"
+    depends_on:
+      keycloak:
+        condition: service_healthy
+        restart: true
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=8m,mode=0700,uid=10001,gid=10001
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  keycloak-verify:
+    image: python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7
+    entrypoint:
+      - python
+      - -B
+      - /opt/finguardops/verify_e2e.py
+    command:
+      - runtime
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      KEYCLOAK_INTERNAL_BASE_URL: http://127.0.0.1:8082
+      KEYCLOAK_MANAGEMENT_BASE_URL: http://127.0.0.1:9000
+    volumes:
+      - ./keycloak/verify_e2e.py:/opt/finguardops/verify_e2e.py:ro
+    secrets:
+      - source: transaction_service_client_secret
+        target: transaction_service_client_secret
+        mode: 0400
+      - source: behavior_service_client_secret
+        target: behavior_service_client_secret
+        mode: 0400
+      - source: keycloak_tls_certificate
+        target: keycloak_tls_certificate
+        mode: 0444
+    network_mode: "service:backend"
+    depends_on:
+      keycloak-bootstrap:
+        condition: service_completed_successfully
+        restart: true
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=8m,mode=0700,uid=10001,gid=10001
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+secrets:
+  keycloak_bootstrap_admin_secret:
+    file: ./keycloak/.local/secrets/bootstrap-admin-client-secret
+  transaction_service_client_secret:
+    file: ./keycloak/.local/secrets/transaction-service-client-secret
+  behavior_service_client_secret:
+    file: ./keycloak/.local/secrets/behavior-service-client-secret
+  keycloak_tls_certificate:
+    file: ./keycloak/.local/tls/localhost.crt
+  keycloak_tls_private_key:
+    file: ./keycloak/.local/tls/localhost.key
+
+volumes:
+  keycloak-data:
