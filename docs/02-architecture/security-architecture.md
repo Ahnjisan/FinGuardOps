@@ -6,6 +6,8 @@
 JWT, USER·SERVICE principal, role·authority, endpoint RBAC, 401·403·trace와 USER Audit
 actor 목표 계약을 정의한다. Architecture Decision은
 [`ADR-008`](../07-decisions/ADR-008-oauth2-resource-server-rbac-user-audit-actor.md)을
+따른다. local/dev Authorization Server 제품과 claim 공급 계약은 후속 결정인
+[`ADR-011`](../07-decisions/ADR-011-keycloak-authorization-server-and-claim-contract.md)을
 따른다.
 
 ### 1.1 현재 상태
@@ -19,6 +21,8 @@ actor 목표 계약을 정의한다. Architecture Decision은
 - 사건 상태·담당자·종결과 조사 메모 생성 Service에는 동일 authority 상수 기반
   `@PreAuthorize`를 적용했다.
 - login·signup·refresh·logout endpoint와 사용자·role·credential DB가 없다.
+- local/dev Authorization Server로 Keycloak을 선정했지만 container·realm·client·mapper와
+  Frontend·Backend 연동 runtime은 아직 구현되지 않았다.
 - 사건 workflow·resolution·note writer는 provider가 검증한 USER UUID v4를 기록한다.
 - Issue #215 사건 감사 조회 응답은 `actorType`만 공개하고 `actorId`는 비노출한다.
 
@@ -26,8 +30,10 @@ actor 목표 계약을 정의한다. Architecture Decision은
 
 Issue #219는 Resource Server 기반과 JWT·principal·공통 오류·listener 경계를 구현했고,
 Issue #221은 endpoint RBAC와 high-risk write method security를 구현했고 Issue #223은
-USER actor와 조사 메모 USER author를 연결했다. Frontend 로그인, Authorization Server와
-Compose 인증은 후속 범위이며 구현 완료로 표현하지 않는다.
+USER actor와 조사 메모 USER author를 연결했다. Issue #229와 #231은 제품 중립 Frontend
+로그인 경계와 인증 API transport를 구현했다. Issue #233은 local/dev Authorization Server로
+Keycloak을 선정하고 claim 계약만 확정했다. Keycloak runtime과 실제 연동은 후속 범위이며
+구현 완료로 표현하지 않는다.
 
 ## 2. 신뢰 경계
 
@@ -46,9 +52,11 @@ Management 8081
   └─ 업무 JWT와 분리된 private network/scrape 경계
 ```
 
-Backend는 access token을 발급·갱신·폐기하지 않는다. 구체적인 Authorization Server
-제품과 실제 issuer·JWK URI는 후속 Issue에서 결정한다. trusted header와 고정 production
-token은 이 경계를 대체할 수 없다.
+Backend는 access token을 발급·갱신·폐기하지 않는다. 위 경계와 3장의 claim 계약은
+Authorization Server 제품과 무관한 목표 계약이다. local/dev 공급자는 Keycloak으로
+선정했지만 실제 issuer·JWK URI, 검증된 Keycloak 26.x exact image tag·digest와 runtime은
+후속 구현 Issue에서 고정한다. production AWS 제품과 배포 방식도 별도 결정이다. trusted
+header와 고정 production token은 이 경계를 대체할 수 없다.
 
 FastAPI의 `GET /api/health`, `POST /api/v1/rule-analysis`,
 `POST /api/v2/rule-analysis`는 별도 컴포넌트 보안 경계이며 이 문서의 Spring Backend
@@ -113,6 +121,38 @@ canonical lowercase UUID v4인지 검증한다. 외부 `authorities` claim은 �
   `DEPENDENCY_UNAVAILABLE`로 분류한다. 이외 예상 밖 decoder 오류는 안전한 500
   `INTERNAL_ERROR`다.
 - malformed·서명 오류·만료·issuer·audience·time·claim 오류는 401이다.
+
+### 3.5 Keycloak claim 공급과 token 용도
+
+local/dev Keycloak은 전용 client scope와 명시적인 protocol mapper로 3.2절의 exact claim을
+공급해야 한다. Backend validator를 Keycloak 기본 token 형태에 맞춰 완화하지 않는다.
+
+- Backend는 USER·SERVICE access token만 API credential로 받으며 ID token을 받지 않는다.
+- USER client와 분리된 두 SERVICE client의 Backend access token `aud`는 JSON string이 아니라
+  JSON array이고, 전체 배열이 정확히 `["finguardops-backend-api"]`여야 한다. 추가 audience는
+  하나도 허용하지 않는다. Audience mapper는 기존 값을 대체하지 않고 추가할 수 있으므로,
+  기본 `roles` client scope의 Audience Resolve mapper를 포함해 `account`와 기타 audience를
+  추가할 수 있는 모든 source를 제거, 비활성화하거나 명시적으로 통제한다.
+- USER access token에는 `principal_type=USER`와 허용된 USER role만 공급한다.
+- 서로 분리된 두 SERVICE client의 access token에는 `principal_type=SERVICE`와 각각
+  `TRANSACTION_INGESTOR` 또는 `BEHAVIOR_INGESTOR` 하나만 공급한다.
+- USER ID token에는 동일한 인증 session의 USER access token과 중복 없는 동일한 FinGuardOps
+  USER role 집합과 `principal_type=USER`를 UI 표시용으로 공급한다. 배열 원소 순서는 의미가
+  없고 집합 동등성으로 비교하며, unknown·duplicate role과 USER·SERVICE role 혼합은 금지한다.
+- 동일 USER session의 access token과 ID token `sub`는 원문 기준으로 완전히 동일하고 각각
+  canonical lowercase UUID v4여야 한다. trim·lowercase 변환·normalization·재직렬화로 불일치를
+  보정하지 않으며, provisioning 또는 E2E 실패로 처리한다. 이는 Frontend 표시 사용자와
+  Backend authorization·Audit actor가 동일한 subject임을 보장한다.
+- `offline_access`, `uma_authorization`, `default-roles-*`와 그 밖의 Keycloak 내부 role은
+  access token과 ID token의 FinGuardOps `roles`에서 제외한다. realm/client role 전체를
+  포괄적으로 복사하지 않고 FinGuardOps role allowlist만 투영한다.
+
+Frontend는 access token을 직접 decode하지 않고 OIDC client가 검증해 게시한 ID token 기반
+session profile의 `principal_type`과 `roles`만 표시·action 노출에 사용한다. 이 UI 판단은
+Backend authorization을 대체하지 않으며 access token을 독립적으로 검증한 Backend의
+401·403이 최종 결정이다. 상세 공급자 계약은
+[`ADR-011`](../07-decisions/ADR-011-keycloak-authorization-server-and-claim-contract.md)을
+따른다.
 
 ## 4. Role → authority 계약
 
@@ -379,6 +419,8 @@ USER actor UUID, token, claim과 principal 원문은 응답·로그·metadata에
   금지한다.
 - SPA 로그인은 Authorization Code + PKCE를 사용한다.
 - refresh token과 role·authority 기반 권한 UI는 별도 Frontend Issue다.
+- USER public client는 Authorization Code Flow + PKCE `S256`만 허용한다. implicit flow,
+  password grant, client secret과 wildcard redirect URI를 금지한다.
 
 Issue #229에서 Frontend는 `oidc-client-ts` 기반 Authorization Code + PKCE redirect 로그인,
 `/auth/callback` 처리와 local logout을 구현했다. access·ID token은 memory user store에만
@@ -446,6 +488,20 @@ response validator까지 monotonic clock 위의 단일 5초 deadline을 적용�
 중단할 수 없으므로 강제 중단을 주장하지 않고, deadline을 넘겨 반환된 결과를 성공으로 채택하지
 않는다.
 
+Issue #233에서 local/dev Authorization Server로 Keycloak을 선정했다. USER ID token에는
+`principal_type=USER`와 같은 session의 access token에 공급한 것과 중복 없는 동일한 FinGuardOps
+USER role 집합을 제공하며 배열 순서는 의미가 없다. 같은 두 token의 `sub` 원문은 완전히
+동일하고 각각 canonical lowercase UUID v4여야 한다. Frontend는 OIDC client가 검증한 session
+profile의 표시용 값만 UI 표시와 action 노출에 사용할 수 있고 access token을 직접 decode하지
+않는다. UI role은 보안 경계가 아니며 Backend access token 검증과 authority 기반 401·403을
+대체하지 않는다.
+
+`offline_access` 요청과 offline token 사용은 금지한다. 일반 온라인 refresh token은 offline
+token과 별개이며 `offline_access` 없이도 반환될 수 있다고 가정한다. 후속 runtime adapter는
+provider 설정뿐 아니라 실제 token response를 검사해야 한다. `refresh_token`이 반환되면 해당
+session을 게시하지 않고 OIDC user state를 제거하며, callback 이후 memory·user store·Web
+Storage에 원문이 남지 않게 fail-closed해야 한다. `automaticSilentRenew=false`, refresh token
+grant 0회와 silent renew 0회를 유지한다. 이 정책과 검증, Keycloak runtime·연동,
 role·authority 기반 navigation·button·route guard UI, 거래·사건·메모·감사 업무 화면과 remote
 logout은 아직 구현되지 않았다.
 
@@ -466,6 +522,9 @@ logout은 아직 구현되지 않았다.
 - `.env.example`에는 issuer·JWK URI·audience 같은 비밀이 아닌 placeholder만 허용한다.
 - CI key는 secret 또는 ephemeral generation으로 공급한다.
 - 설정 누락은 인증 비활성으로 fallback하지 않는다.
+- Keycloak local E2E와 기존 Local JWT fixture E2E는 실행 profile 또는 Compose overlay와
+  Backend issuer·JWK 설정을 분리한다. 하나의 Backend 실행에서 두 issuer를 동시에 신뢰하지
+  않으며 같은 issuer 설정으로 두 공급자를 함께 사용하지 않는다.
 
 현재 Compose의 Backend application `8080`과 management `8081`은 host에 publish되지
 않는다. Prometheus는 internal observability network에서 management `8081`을 scrape한다.
@@ -510,7 +569,13 @@ method security는 Issue #221에서 구현되었다. 아래 표는 구현 상태
 | 완료. `[Infra/Docs] Local Compose·runbook JWT fixture와 인증 E2E 적용` | local issuer와 SERVICE traffic | 선택형 Compose overlay, fixture, verifier, runbook | 없음 | build·wait·traffic·scrape·alert·restart | #219·#221 | local/manual Docker E2E 경계 구현 |
 | 부분 구현. `[Frontend/Security] OIDC PKCE와 memory-only 인증 기반 구현` | SPA 인증 경계 | PKCE redirect, memory token, transaction store, `/auth/callback`, local logout | 없음 | 설정·settings·storage·lifecycle·callback·deadline | #219·#221 | jsdom 단위·컴포넌트 검증; 구현 (#229) |
 | 부분 구현. `[Frontend/Security] 인증 Backend API client와 401·403 경계 구현` | 승인 endpoint에만 credential 전달 | endpoint allowlist, `authorizeRequest()`, 401 invalidation, 403 유지, 단일 deadline | 없음 | allowlist·URL 우회·401·403·timeout·abort | #229 | jsdom 단위 검증; transport 구현 (#231) |
-| 2. `[Frontend] 업무 화면과 role·authority 권한 UI` | 보호 API 소비와 권한 UX | 업무 화면, typed API module, query pagination, role·authority UI, remote logout | 없음 | browser login·expiry·권한 UI | AS 제품, #231 | 브라우저/AS E2E; 미구현 |
+| 완료. `[Security/Architecture] Keycloak Authorization Server와 권한 Claim 계약 확정` | local/dev 제품과 USER·SERVICE·token claim 계약 | ADR-011·보안 아키텍처·README | 없음 | 문서 claim·role·신뢰 경계 정합성 | #225·#229·#231 | 문서 계약만 확정 (#233); runtime 미구현 |
+| 1. `[Infra/Security] Keycloak local/dev runtime 구현` | 실제 local/dev issuer와 client·mapper | Compose, realm, client scope, protocol mapper | 없음 | tag·digest·realm·claim·singleton audience source·rotation | #233 | 미구현 |
+| 2. `[Security/E2E] USER 로그인과 Backend 연동` | browser OIDC와 Resource Server 연결 | Frontend·Backend·Keycloak E2E | 없음 | raw `aud`·access/ID `sub` 원문 동일성·role 집합·refresh fail-closed·401·403 | Keycloak runtime | 미구현 |
+| 3. `[Security/E2E] SERVICE Client Credentials 연동` | 거래·행동 접수 SERVICE 인증 | SERVICE client·Backend E2E | 없음 | client 분리·raw singleton `aud`·UUID `sub`·claim·교차 거부 | Keycloak runtime | 미구현 |
+| 4. `[Frontend/Security] role·authority 권한 UI` | 권한별 표시와 action 노출 | navigation, button, route guard UI | 없음 | browser login·expiry·권한 UI | USER E2E, #231 | 미구현 |
+| 5. `[Frontend] 업무 typed API와 query pagination` | 보호 API 소비 | 거래·사건·메모·감사 module, page·size·sort | 없음 | DTO·validator·query 조립 | #231 | 미구현 |
+| 6. `[Frontend] Keycloak remote logout` | RP-initiated logout | end-session·exact post-logout URI | 없음 | local invalidation·실패·redirect | USER E2E | 미구현 |
 
 ## 14. 구현 검증 계약
 

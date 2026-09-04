@@ -249,14 +249,18 @@ chain과 분리한다.
 사건 상태·담당자·종결·조사 메모 write는 검증된 USER JWT의 canonical lowercase UUID v4
 `sub`를 AuditLog actor와 InvestigationNote author로 기록합니다. 자동 사건 생성·거래 처리·
 Rule/AI orchestration·복구·one-shot writer는 기존 `SYSTEM/finguardops-backend`를 유지합니다.
-실제 Authorization Server 선정·구축, Local Compose JWT issuer/JWK fixture, traffic generator SERVICE token,
-production management mTLS·인증 proxy는 아직 구현되지 않았다. Frontend는 Authorization
+local/dev Authorization Server는 Keycloak으로 선정했지만 Keycloak container·realm·client·
+protocol mapper와 실제 Frontend·Backend 연동 runtime은 아직 구현되지 않았다. production
+Authorization Server와 management mTLS·인증 proxy도 별도 후속 범위다. Frontend는 Authorization
 Code + PKCE 로그인·callback·local logout과 memory-only token 경계에 더해, 승인된 10개
 USER method·path에만 `Authorization: Bearer`를 전달하는 인증 API transport와 401·403 경계를
 구현했다. credential capability는 승인된 Backend USER endpoint가 아닌 destination을 스스로
-거부하며, React tree에 게시되는 값에는 이 capability가 존재하지 않는다. 실제 Authorization
-Server는 아직 선정되지 않았고, 업무 화면과 role·authority 권한 UI도 아직 없다. 기존 JWT 없는 local traffic generator의 업무 요청은 현재 401이며 Local
-인증 E2E는 후속 Issue 전까지 미완성이다.
+거부하며, React tree에 게시되는 값에는 이 capability가 존재하지 않는다. 업무 화면과
+role·authority 권한 UI도 아직 없다. Issue #225의 Local JWT fixture는 production Authorization
+Server나 브라우저 OIDC Provider가 아닌 Backend 회귀·장애 검증용 local/manual E2E이며,
+Keycloak과 같은 Backend issuer 설정에서 동시에 사용하지 않는다. 상세 결정은
+[`ADR-011`](docs/07-decisions/ADR-011-keycloak-authorization-server-and-claim-contract.md)을
+따릅니다.
 
 ```text
 React·TypeScript
@@ -463,8 +467,9 @@ Kafka
 * Frontend OIDC Authorization Code + PKCE 인증 경계 구현. `oidc-client-ts` 기반 redirect
   로그인·callback·local logout, memory-only access/ID token, sessionStorage에는 transient
   protocol transaction record만 보관, 최대 15분 hard session deadline, callback URL 조기 정리와
-  `/`·`/health` exact allowlist 복귀 경로. 실제 Authorization Server 제품은 미선정이며 silent
-  renew, refresh token, remote logout과 권한 UI는 구현하지 않음
+  `/`·`/health` exact allowlist 복귀 경로. local/dev 제품은 Keycloak으로 선정했지만 runtime
+  연동은 미구현이며 silent renew, refresh token 사용·반환 시 fail-closed adapter, remote logout과
+  권한 UI도 구현하지 않음
 * Frontend 인증 Backend API transport와 401·403 경계 구현. endpoint key가 method·path를
   결정하는 승인 10개 USER endpoint allowlist, canonical UUID v4 path parameter 검증과 exact
   origin·pathname 재검증, raw token을 반환하지 않고 승인 `Request`에 Authorization을 부착하는
@@ -474,6 +479,11 @@ Kafka
   Bearer 문법 검증, 인증 준비부터 response validator까지 monotonic clock 기반 단일 5초 deadline.
   public `GET /api/health`와 SERVICE ingestion·management·AI·관측·외부 origin에는 credential을
   전달하지 않으며 query pagination과 업무 화면은 구현하지 않음
+* ADR-011에서 local/dev Authorization Server를 Keycloak으로 선정하고 USER public client의
+  Authorization Code + PKCE `S256`, 분리된 SERVICE confidential client의 Client Credentials,
+  Backend access token exact claim, USER access/ID token의 동일 subject·role 집합과 일반 refresh
+  token fail-closed 계약을 문서로 확정. Keycloak runtime·realm·client·mapper, 실제 연동과 role
+  UI 및 refresh token 검사 adapter는 구현하지 않음
 
 Backend Security 설정은 `FINGUARDOPS_SECURITY_ISSUER`,
 `FINGUARDOPS_SECURITY_JWK_SET_URI`, `FINGUARDOPS_SECURITY_ALLOWED_ORIGINS`와 JWK
@@ -498,13 +508,31 @@ rotation·sidecar 재생성 절차는
 [`Local JWT 인증 E2E runbook`](docs/09-deployment/local-jwt-auth-e2e-runbook.md)을 따릅니다.
 남은 보안 후속 순서는 다음과 같습니다.
 
-1. Frontend 업무 화면과 role·authority 권한 UI
-   - Authorization Code + PKCE, memory-only token, login·callback·local logout은
-     Issue #229에서 구현되었습니다([`ADR-009`](docs/07-decisions/ADR-009-frontend-oidc-pkce-memory-token-boundary.md)).
-   - 승인 endpoint 전용 인증 API transport, `Authorization` header 전달 경계와 401·403 처리는
-     Issue #231에서 구현되었습니다([`ADR-010`](docs/07-decisions/ADR-010-frontend-authenticated-backend-api-boundary.md)).
-   - 남은 범위는 거래·사건·메모·감사 업무 화면과 typed API module, query pagination,
-     role·authority 기반 UI, remote logout이며 Authorization Server 제품 결정이 선행됩니다.
+1. Keycloak local/dev Compose·realm·client·role·client scope·protocol mapper 구현
+2. Frontend OIDC와 Spring Backend를 연결한 USER 로그인 E2E
+3. SERVICE Client Credentials 기반 거래·행동 이벤트 접수 E2E
+4. Frontend role·authority UI 계약과 구현
+5. 거래·사건·메모·감사 typed API module과 query pagination
+6. Keycloak remote logout 계약과 구현
+
+제품과 claim 계약은 Issue #233의
+[`ADR-011`](docs/07-decisions/ADR-011-keycloak-authorization-server-and-claim-contract.md)에서
+확정되었습니다. USER client는 public client + Authorization Code Flow + PKCE `S256`, SERVICE
+ingestion은 분리된 confidential client + Client Credentials Flow를 사용합니다. Backend는 exact
+claim 계약을 만족하는 access token만 API credential로 받습니다. USER와 두 SERVICE client의
+raw JSON `aud`는 string이 아닌 정확한 singleton array `["finguardops-backend-api"]`여야 하며,
+기본 Audience Resolve를 포함한 모든 추가 audience source를 통제하고 실제 발급 token 전체
+배열을 E2E에서 검사합니다. 이를 위해 Backend validator를 완화하지 않습니다.
+
+동일 USER session의 access token과 ID token은 원문이 완전히 같은 canonical lowercase UUID v4
+`sub`와 중복 없는 동일한 FinGuardOps USER role 집합을 가져야 합니다. `roles` 배열 순서는
+의미가 없으며 후속 E2E는 정규화하지 않은 `sub` 원문과 순서 독립적인 role 집합을 비교합니다.
+ID token의 `principal_type=USER`와 `roles`는 Frontend UI 표시용이며 Backend 401·403을 대체하지
+않습니다. `offline_access`와 offline token은 금지하지만 일반 온라인 refresh token은 별도로
+반환될 수 있다고 가정합니다. 후속 runtime adapter는 실제 response에 `refresh_token`이 있으면
+session을 게시하지 않고 user state와 유지 credential을 제거하며 refresh grant·silent renew를
+0회로 유지해야 합니다. 검증된 Keycloak 26.x exact image tag·digest, 구체적인 mapper 설정,
+Frontend adapter와 E2E는 1~3번 후속 Issue에서 구현·확정합니다.
 
 Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend OIDC도 Compose traffic fixture의
 일부가 아니다. 이 세 단계는 토큰 절약을 위한 인위적

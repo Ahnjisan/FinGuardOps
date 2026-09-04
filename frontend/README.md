@@ -2,7 +2,8 @@
 
 React·TypeScript·Vite 기반의 FinGuardOps 프론트엔드다. 표준 OIDC Authorization Code + PKCE
 인증 경계와, 승인된 Backend 업무 endpoint에만 credential을 전달하는 인증 API transport가
-구현되어 있다. 업무 화면과 role·authority 권한 UI는 아직 구현되지 않았다.
+구현되어 있다. local/dev Authorization Server는 Keycloak으로 선정했지만 Keycloak runtime과
+실제 연동, 업무 화면과 role·authority 권한 UI는 아직 구현되지 않았다.
 
 ## 요구사항
 
@@ -120,8 +121,10 @@ HttpOnly cookie session을 사용하지 않는다. PKCE·state·nonce 생성과 
 
 ### Token과 transaction 저장
 
-- access token과 ID token은 in-memory user store에만 존재한다. refresh token은 발급을
-  요청하지 않는다.
+- access token과 ID token은 in-memory user store에만 존재한다. 현재 scope는
+  `offline_access`를 요청하지 않고 refresh grant·silent renew를 구현하지 않는다. 그러나 이는
+  향후 Keycloak의 일반 Authorization Code token response에 온라인 refresh token이 없음을
+  보장하지 않는다.
 - localStorage, sessionStorage, IndexedDB에 token을 저장하지 않으며 reload 후 복원하지
   않는다. 새로고침하면 다시 로그인해야 한다.
 - sessionStorage에는 Authorization Code + PKCE redirect 수행에 필요한 **transient protocol
@@ -188,7 +191,8 @@ protocol-relative(`//host`), backslash 변형, encoded slash/backslash, allowlis
 
 ### 세션 수명과 logout
 
-- silent renew, refresh token, `offline_access`, silent callback route가 없다.
+- silent renew, refresh token grant, `offline_access`, silent callback route가 현재 구현에 없다.
+  `automaticSilentRenew`는 `false`이며 refresh grant 호출과 silent renew는 각각 0회다.
 - 세션은 token expiry와 **로그인 완료 후 15분** 중 빠른 시점에 끝난다. `expires_at`이
   없거나 `NaN`·`Infinity`·비숫자면 15분 hard cap을 적용하고, 이미 지난 값이면 즉시
   무효화한다.
@@ -216,7 +220,7 @@ protocol-relative(`//host`), backslash 변형, encoded slash/backslash, allowlis
   가능한 고정 오류 상태로 전환한다. 자동 재로그인은 하지 않으며 사용자는 `Sign in`을 다시
   누를 수 있다. 임의의 timeout으로 pending을 해제하지는 않는다.
 - logout은 memory token과 transaction record를 제거하는 local logout이다. remote
-  end-session redirect와 logout callback route는 실제 Authorization Server 선정 후 결정한다.
+  end-session redirect와 logout callback route는 후속 Keycloak remote logout Issue에서 결정한다.
 
 ### 인증 상태
 
@@ -232,6 +236,40 @@ UI에는 `subject`, token, claim, Provider 원문을 렌더링하지 않으며 �
 보내지 않는다. 실제 Authorization Server 통신은 사용자가 `Sign in`을 눌렀을 때와
 `/auth/callback` 처리에서만 발생한다. 따라서 Authorization Server 장애는 로그인 실패로
 한정되고 `/`·`/health`와 기존 Health fetch 계약에는 영향을 주지 않는다.
+
+Issue #233에서 local/dev Authorization Server 제품으로 Keycloak을 선정했다. USER client는
+client secret이 없는 public client이며 Authorization Code Flow + PKCE `S256`만 허용한다.
+implicit flow와 password grant는 금지한다. redirect URI와 후속 post-logout redirect URI는
+환경별 exact allowlist를 사용하고 wildcard를 허용하지 않는다. 검증된 Keycloak 26.x exact
+image tag·digest, realm·client·client scope·protocol mapper와 Frontend 연동은 후속 구현
+범위이며 현재 실행 환경에는 구현되지 않았다.
+
+Keycloak USER ID token에는 `principal_type=USER`와 같은 session의 Backend access token에
+공급한 것과 중복 없는 동일한 FinGuardOps USER role 집합을 `roles` 배열로 제공한다. 배열 순서는
+의미가 없고 집합 동등성으로 비교한다. unknown·duplicate role과 USER·SERVICE role 혼합은
+계속 금지한다. 같은 두 token의 `sub`는 원문 기준으로 완전히 동일하고 각각 canonical lowercase
+UUID v4여야 한다. trim·lowercase 변환·normalization·재직렬화로 불일치를 보정하지 않으며,
+후속 provisioning 또는 E2E 실패로 처리한다. 같은 로그인에서 두 token payload의 `sub` 원문을
+직접 비교해 Frontend 표시 사용자와 Backend authorization·Audit actor가 동일한 subject임을
+검증해야 한다.
+
+Frontend는 access token을 직접 decode하지 않는다. OIDC client가 검증해 게시한 session
+profile의 `principal_type`과 `roles`만 navigation·button·action 노출에 사용할 수 있다. 이
+정보는 UI 표시를 위한 것이며 Backend authorization을 대체하지 않는다. Backend는 ID token이
+아니라 access token만 API credential로 검증하고 401·403을 최종 결정한다. role 기반 UI 자체는
+아직 구현되지 않았다.
+
+`offline_access` 요청과 offline token 사용은 금지한다. 일반 온라인 refresh token은 offline
+token과 별개의 credential이고 `offline_access` 없이도 반환될 수 있다고 가정한다. 후속
+Keycloak runtime의 Frontend adapter는 provider 설정만 신뢰하지 않고 실제 token response를
+검사해야 한다. `refresh_token`이 없으면 정상 callback을 성공시키고, 있으면 fail-closed로
+session을 게시하지 않은 채 OIDC user state를 제거한다. callback 이후 `User`, `AuthContext`,
+application state, OIDC user store, localStorage, sessionStorage 등 유지되는 저장 표면에 refresh
+token이 남아서는 안 된다. 검사 중 라이브러리 내부에 일시적으로 존재하는 값은 애플리케이션이
+보관하는 credential과 구분하되, 원문을 로그·오류·DOM·React state·관측 데이터에 노출하지 않고
+callback 종료 후 유지하지 않는다. 후속 E2E는 성공·거부 callback, 거부 후 유지 credential 0개,
+refresh grant 0회, silent renew 0회와 원문 노출 0회를 검증한다. 이 adapter와 E2E는 현재 구현이
+아니라 후속 runtime Issue 범위다.
 
 ## Health API 경계
 
@@ -483,12 +521,15 @@ timer와 단계 사이의 명시적 경과시간 검사가 이를 공유한다. 
 - 거래·사건·조사·판정 등 업무 화면과 업무 DTO·typed API module
 - 역할·권한 기반 navigation·button·route guard UI
 - `page`·`size`·`sort` query pagination
-- 실제 Authorization Server 제품 선정·배포
-- remote end-session(RP-initiated logout), silent renew, refresh token
+- 선정된 Keycloak의 container·realm·client·client scope·protocol mapper와 실제 연동
+- 검증된 Keycloak 26.x exact image tag·digest 고정과 runtime 배포
+- remote end-session(RP-initiated logout), silent renew, refresh token 사용과 일반 refresh token
+  반환 시 fail-closed callback adapter·E2E
 - Local JWT fixture(Issue #225의 `infra/compose.local-jwt-e2e.yml`)는 로컬/수동 인증 E2E
   검증용 컴포넌트이며, 브라우저에서 사용하는 OIDC Provider가 아니다. 프론트엔드는 아직 이
-  fixture나 다른 어떤 Authorization Server와도 연동하지 않는다. `VITE_OIDC_AUTHORITY`는
-  검증된 설정값일 뿐 실제 연동을 의미하지 않는다.
+  fixture나 Keycloak을 포함한 어떤 Authorization Server runtime과도 연동하지 않는다.
+  `VITE_OIDC_AUTHORITY`는 검증된 설정값일 뿐 실제 연동을 의미하지 않는다. Local JWT fixture와
+  Keycloak은 같은 Backend issuer 설정에서 동시에 사용하지 않는다.
 
 ## 테스트
 
@@ -551,5 +592,6 @@ Web Storage에 token을 저장하는 코드는 없다. sessionStorage에는 tran
 
 설계 근거는
 [`ADR-009`](../docs/07-decisions/ADR-009-frontend-oidc-pkce-memory-token-boundary.md)와
-[`ADR-010`](../docs/07-decisions/ADR-010-frontend-authenticated-backend-api-boundary.md)을
+[`ADR-010`](../docs/07-decisions/ADR-010-frontend-authenticated-backend-api-boundary.md),
+[`ADR-011`](../docs/07-decisions/ADR-011-keycloak-authorization-server-and-claim-contract.md)을
 따른다.
