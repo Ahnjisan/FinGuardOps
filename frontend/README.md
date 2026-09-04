@@ -595,3 +595,16 @@ Web Storage에 token을 저장하는 코드는 없다. sessionStorage에는 tran
 [`ADR-010`](../docs/07-decisions/ADR-010-frontend-authenticated-backend-api-boundary.md),
 [`ADR-011`](../docs/07-decisions/ADR-011-keycloak-authorization-server-and-claim-contract.md)을
 따른다.
+
+## Issue #235 Keycloak runtime 연동 상태
+
+local/dev stock Keycloak 26.7.3 runtime과 `finguardops-frontend` public client 구성은
+[`Local Keycloak runbook`](../docs/09-deployment/local-keycloak-auth-e2e-runbook.md)에 구현되었다.
+authority는 `https://localhost:8443/realms/finguardops-local`이고 Authorization Code Flow와 PKCE
+S256만 허용한다. Local JWT fixture issuer는 Frontend OIDC authority가 아니다.
+
+이번 구현은 USER credential을 만들지 않으므로 실제 browser login/callback과 USER access/ID
+token E2E는 완료 범위가 아니다. production adapter의 refresh-token 반환 fail-closed, role 기반
+UI와 remote logout도 아직 미구현이다. Frontend는 access token을 직접 decode하지 않으며,
+검증된 ID token role은 UI 표시 정보일 뿐이다. 최종 접근 결정은 계속 Backend의 독립적인
+access-token 검증과 401/403 응답이다.
