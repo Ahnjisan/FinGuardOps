@@ -6,6 +6,7 @@
 - 관련 Issue: `#229 [Frontend/Security] OIDC PKCE와 memory-only 인증 기반 구현`
 - 관련 문서:
   - [`ADR-008`](ADR-008-oauth2-resource-server-rbac-user-audit-actor.md)
+  - [`ADR-010`](ADR-010-frontend-authenticated-backend-api-boundary.md)
   - [`security-architecture.md`](../02-architecture/security-architecture.md)
   - [`system-architecture.md`](../02-architecture/system-architecture.md)
   - [`frontend/README.md`](../../frontend/README.md)
@@ -174,8 +175,24 @@ hard deadline은 ADR-008의 `exp - iat` 최대 15분 계약과 방향이 같으�
 
 ## 5. 후속 작업
 
+이 절의 첫 두 항목 중 `Authorization` header와 401·403 UX는 Issue #231에서 구현되었고,
+그 결정은 [`ADR-010`](ADR-010-frontend-authenticated-backend-api-boundary.md)에 있다.
+
+ADR-010은 이 문서의 token 저장·flow·transaction store 결정을 바꾸지 않는다. 2.2절의
+"token은 in-memory user store에만 존재하고 밖으로 노출하지 않는다"는 결정을 유지한 채,
+token을 반환하는 accessor 대신 승인된 `Request`에 Authorization을 부착해 돌려주는
+`authorizeRequest()` 경계를 추가한 것이다. raw token은 여전히 `AuthClient` port 밖으로
+나가지 않는다.
+
+그 과정에서 port는 public 표면(`AuthClient`)과 credential 표면(`CredentialAuthClient`)으로
+나뉜다. React tree에 게시되는 값은 credential capability가 없는 public facade이며, 이 문서가
+정한 memory-only token·15분 hard deadline·teardown sequencing 계약은 그대로 유지된다. 401에
+따른 invalidation은 요청을 승인한 session에만 적용되는 조건부 동작이므로, 이 문서의
+idempotent invalidation 경계를 재사용하면서도 교체된 session을 건드리지 않는다.
+
 - 실제 Authorization Server 제품 선정과 issuer·client 등록
 - Backend 보호 API 호출용 `Authorization` header와 401·403 UX
+  (Issue #231에서 구현, [`ADR-010`](ADR-010-frontend-authenticated-backend-api-boundary.md))
 - role·authority 기반 UI
 - remote end-session(RP-initiated logout)과 `post_logout_redirect_uri`
 - audience claim(`finguardops-backend-api`) 확보 방식 결정

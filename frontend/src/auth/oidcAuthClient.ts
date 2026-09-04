@@ -1,7 +1,14 @@
 import { InMemoryWebStorage, UserManager, WebStorageStateStore } from "oidc-client-ts";
 import type { UserManagerSettings } from "oidc-client-ts";
-import { getAuthEnv, type AuthEnv } from "../config/env";
-import type { AuthClient, AuthSession, CompleteSignInResult, InitializeResult } from "./authClient";
+import { findApprovedBackendRequest } from "../api/backendEndpoints";
+import { getAuthEnv, getEnv, type AuthEnv } from "../config/env";
+import type {
+  AuthorizedRequest,
+  AuthSession,
+  CompleteSignInResult,
+  CredentialAuthClient,
+  InitializeResult,
+} from "./authClient";
 import { AuthCallbackError, AuthSignInError } from "./authErrors";
 import { CALLBACK_PATH } from "./callbackUrl";
 import {
@@ -21,6 +28,7 @@ export const SESSION_HARD_DEADLINE_MS = 15 * 60 * 1000;
 /** Minimal structural view of the library, so tests can drive the adapter. */
 export interface OidcUserLike {
   readonly profile: { readonly sub: string; readonly name?: string };
+  readonly access_token?: string;
   readonly expires_at?: number;
   readonly state?: unknown;
 }
@@ -29,6 +37,12 @@ export interface UserManagerLike {
   signinRedirect(args: { state: unknown }): Promise<void>;
   signinRedirectCallback(url: string): Promise<OidcUserLike>;
   removeUser(): Promise<void>;
+  /**
+   * Reads the in-memory user store. This is the single point in the whole
+   * application where an access token is observed, and the value never leaves
+   * `authorizeRequest`.
+   */
+  getUser(): Promise<OidcUserLike | null>;
   readonly events: {
     addAccessTokenExpired(callback: () => void): () => void;
   };
@@ -111,6 +125,34 @@ export function createOidcSettings(
   };
 }
 
+/**
+ * RFC 6750 `b64token`, anchored over a whole raw access token.
+ *
+ * b64token = 1*( ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" ) *"="
+ *
+ * The transport re-checks the finished `Authorization` header, but a header
+ * value is not the raw token: `Headers.set` strips leading and trailing
+ * whitespace on the way in, so a stored token of `"opaque.token "` would reach
+ * that check already normalized and pass as a well-formed credential. Checking
+ * the value as it came out of the user store is what makes the grammar a
+ * statement about the token the Authorization Server actually issued.
+ *
+ * The empty string has no body to match, so it is refused by this rule rather
+ * than by a separate emptiness test.
+ */
+const RAW_ACCESS_TOKEN = /^[A-Za-z0-9\-._~+/]+=*$/;
+
+/**
+ * Whether a value read from the user store is usable exactly as issued.
+ *
+ * Nothing is trimmed, rewritten or normalized: leading, trailing or internal
+ * whitespace, a tab, a CR, an LF, or a `=` anywhere but the padding is refused
+ * as it stands. The value never leaves this function.
+ */
+function isUsableAccessToken(accessToken: unknown): accessToken is string {
+  return typeof accessToken === "string" && RAW_ACCESS_TOKEN.test(accessToken);
+}
+
 function toAuthSession(user: OidcUserLike): AuthSession {
   const displayName = typeof user.profile.name === "string" ? user.profile.name : undefined;
   return { subject: user.profile.sub, displayName };
@@ -142,13 +184,23 @@ export function createDefaultAuthRuntime(): AuthRuntime {
 export function createOidcAuthClient(
   createRuntime: AuthRuntimeFactory,
   options: OidcAuthClientOptions = {},
-): AuthClient {
+): CredentialAuthClient {
   const isCallbackRoute = options.isCallbackRoute ?? defaultIsCallbackRoute;
   const listeners = new Set<() => void>();
   let runtime: AuthRuntime | undefined;
   let inFlightInitialize: Promise<InitializeResult> | undefined;
   let inFlightTeardown: Promise<void> | undefined;
   let activeSession: AuthSession | null = null;
+  /**
+   * Opaque identity of the currently published session.
+   *
+   * A fresh frozen object per session, deliberately carrying nothing: not a
+   * counter, not the subject, and above all not the token. Comparison is by
+   * reference, so "is this still the same session?" cannot be satisfied by a
+   * value that merely looks equal, and holding one reveals nothing. It never
+   * reaches React state, context, the DOM or a log.
+   */
+  let sessionOwnership: object | null = null;
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
 
   function clearDeadlineTimer(): void {
@@ -171,6 +223,7 @@ export function createOidcAuthClient(
       return false;
     }
     activeSession = null;
+    sessionOwnership = null;
     for (const listener of [...listeners]) {
       listener();
     }
@@ -272,6 +325,9 @@ export function createOidcAuthClient(
     // A replacement session must not leave the previous deadline armed.
     clearDeadlineTimer();
     activeSession = session;
+    // A new identity for every published session, so a callback issued against
+    // the previous one can never be mistaken for a current one.
+    sessionOwnership = Object.freeze({});
     const now = Date.now();
     const deadline = resolveSessionDeadline(now, expiresAtSeconds);
     deadlineTimer = setTimeout(() => {
@@ -395,6 +451,118 @@ export function createOidcAuthClient(
       return discardRemoteState();
     },
 
+    /**
+     * The only place an access token is ever read.
+     *
+     * The destination is checked first, and on its own. This capability is what
+     * actually holds the credential, so it must be able to refuse a request
+     * that is not an approved Backend USER endpoint without relying on its
+     * caller having checked already. A request for an external origin, the
+     * public health path, a SERVICE ingestion endpoint, the management
+     * listener or an observability service is rejected here, before the
+     * runtime is touched and before the user store is read: no token lookup,
+     * no Authorization header, no returned request.
+     *
+     * After that, every remaining failure reason collapses into `null`: no
+     * published session, an unusable runtime, a missing token, a raw token
+     * outside the RFC 6750 grammar, a token past its expiry, or a memory user
+     * whose subject disagrees with the session the UI is showing. The caller
+     * learns "this request cannot be authorized" and nothing else - no token,
+     * no claim, no provider error, no URL.
+     *
+     * Session identity is captured before the store read and re-checked both
+     * after it and immediately before returning, because a hard deadline, a
+     * token-expiry event, a logout or a whole new sign-in can land while that
+     * await is pending. Without those checks a request could be signed by a
+     * session that ended mid-flight.
+     */
+    async authorizeRequest(request: Request): Promise<AuthorizedRequest | null> {
+      let apiBaseUrl: string;
+      try {
+        apiBaseUrl = getEnv().apiBaseUrl;
+      } catch {
+        return null;
+      }
+      if (findApprovedBackendRequest(apiBaseUrl, request.method, request.url) === undefined) {
+        return null;
+      }
+
+      const ownership = sessionOwnership;
+      if (ownership === null || activeSession === null) {
+        return null;
+      }
+      const startingSession = activeSession;
+
+      let current: AuthRuntime;
+      try {
+        current = getRuntime();
+      } catch {
+        return null;
+      }
+
+      let user: OidcUserLike | null;
+      try {
+        user = await current.userManager.getUser();
+      } catch {
+        return null;
+      }
+      if (user === null || user === undefined) {
+        return null;
+      }
+
+      if (sessionOwnership !== ownership) {
+        return null;
+      }
+      if (user.profile.sub !== startingSession.subject) {
+        return null;
+      }
+
+      // A missing or non-finite expires_at is not treated as "expired": the
+      // session's own hard deadline already bounds that case, and refusing here
+      // would lock out a provider that simply omits the field.
+      if (
+        typeof user.expires_at === "number" &&
+        Number.isFinite(user.expires_at) &&
+        user.expires_at * 1000 <= Date.now()
+      ) {
+        return null;
+      }
+
+      // The raw token, checked before it can become a header value, so a token
+      // the platform would have quietly trimmed into shape never gets the
+      // chance. Anything outside the grammar collapses into the same `null` as
+      // a missing one: no header is built, no request is returned and nothing
+      // is sent, so this is not a 401 and no session is invalidated.
+      const accessToken = user.access_token;
+      if (!isUsableAccessToken(accessToken)) {
+        return null;
+      }
+
+      // Last look before handing out a credential.
+      if (sessionOwnership !== ownership) {
+        return null;
+      }
+
+      // A copy: the caller's request keeps whatever headers it had, and
+      // anything it may have called "Authorization" is dropped rather than
+      // merged, so exactly one Authorization header exists and this port set it.
+      const headers = new Headers(request.headers);
+      headers.delete("Authorization");
+      headers.set("Authorization", `Bearer ${accessToken}`);
+
+      return {
+        request: new Request(request, { headers }),
+        invalidateIfCurrent: () => {
+          // Scoped to the session that signed the request. A 401 for a session
+          // that has since been replaced, signed out or expired is evidence
+          // about that session only, so it must not disturb the current one.
+          if (sessionOwnership === ownership) {
+            handleInvalidation();
+          }
+        },
+      };
+    },
+
     onSessionInvalidated(listener: () => void): () => void {
       listeners.add(listener);
       return () => {
@@ -404,7 +572,7 @@ export function createOidcAuthClient(
   };
 }
 
-let sharedAuthClient: AuthClient | undefined;
+let sharedAuthClient: CredentialAuthClient | undefined;
 
 /**
  * Lazily built singleton, so the deadline lives for the whole page load.
@@ -412,7 +580,7 @@ let sharedAuthClient: AuthClient | undefined;
  * Building the client touches no Web Storage: the runtime factory is only
  * stored here, and runs on the first real authentication operation.
  */
-export function getOidcAuthClient(): AuthClient {
+export function getOidcAuthClient(): CredentialAuthClient {
   if (sharedAuthClient === undefined) {
     sharedAuthClient = createOidcAuthClient(createDefaultAuthRuntime);
   }

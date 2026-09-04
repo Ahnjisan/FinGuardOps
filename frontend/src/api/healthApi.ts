@@ -1,28 +1,10 @@
 import { getEnv } from "../config/env";
 import { InvalidResponseError } from "./errors";
 import { httpGet } from "./httpClient";
+import { extractSafeTraceId } from "./traceId";
 import type { HealthResponse, HealthResult } from "./types";
 
 const HEALTH_REQUEST_TIMEOUT_MS = 5000;
-const TRACE_ID_HEADER = "X-Trace-Id";
-
-/**
- * Official X-Trace-Id contract: full match only, length 8-64, first char
- * alphanumeric, remaining chars alphanumeric plus . _ : -
- */
-const TRACE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,63}$/;
-
-function isSafeTraceId(value: string): boolean {
-  return TRACE_ID_PATTERN.test(value);
-}
-
-function extractSafeTraceId(headers: Headers): string | undefined {
-  const rawTraceId = headers.get(TRACE_ID_HEADER);
-  if (rawTraceId !== null && isSafeTraceId(rawTraceId)) {
-    return rawTraceId;
-  }
-  return undefined;
-}
 
 function isHealthResponse(value: unknown): value is HealthResponse {
   if (typeof value !== "object" || value === null) {
@@ -36,6 +18,12 @@ function isHealthResponse(value: unknown): value is HealthResponse {
   return record.status === "UP" && record.service === "backend";
 }
 
+/**
+ * The public Health path. It stays deliberately independent of the
+ * authenticated transport: no endpoint registry, no AuthClient, no
+ * Authorization header, no credentials. `/api/health` is credential-free on the
+ * Backend and must remain credential-free here.
+ */
 export async function fetchHealth(signal?: AbortSignal): Promise<HealthResult> {
   const { apiBaseUrl } = getEnv();
   const url = `${apiBaseUrl}/api/health`;

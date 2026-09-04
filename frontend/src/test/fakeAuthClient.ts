@@ -1,7 +1,8 @@
 import type {
-  AuthClient,
+  AuthorizedRequest,
   AuthSession,
   CompleteSignInResult,
+  CredentialAuthClient,
   InitializeResult,
 } from "../auth/authClient";
 
@@ -32,11 +33,20 @@ export interface FakeAuthClientCalls {
   signIn: string[];
   completeSignIn: string[];
   signOut: number;
+  authorizeRequest: number;
+  invalidateIfCurrent: number;
+  /** Subscriber notifications actually delivered. */
+  notified: number;
   listenerAdds: number;
   listenerRemoves: number;
 }
 
-export interface FakeAuthClient extends AuthClient {
+/**
+ * Implements the full internal port, credential capability included. That is
+ * deliberate: a provider test can inject this and then assert that what reaches
+ * the React tree still has no `authorizeRequest` on it.
+ */
+export interface FakeAuthClient extends CredentialAuthClient {
   readonly calls: FakeAuthClientCalls;
   /** Live subscriber count, for listener add/remove balance assertions. */
   listenerCount(): number;
@@ -52,6 +62,12 @@ export interface FakeAuthClient extends AuthClient {
 export interface FakeAuthClientOptions {
   readonly initialSession?: AuthSession | null;
   readonly completeSignInResult?: CompleteSignInResult;
+  /**
+   * Stands in for the adapter's in-memory user store. `null` means "signed in
+   * but nothing to authorize with", which is exactly the state that must
+   * produce a local failure rather than an unauthenticated network call.
+   */
+  readonly accessToken?: string | null;
 }
 
 export function createFakeAuthClient(options: FakeAuthClientOptions = {}): FakeAuthClient {
@@ -63,9 +79,19 @@ export function createFakeAuthClient(options: FakeAuthClientOptions = {}): FakeA
     signIn: [],
     completeSignIn: [],
     signOut: 0,
+    authorizeRequest: 0,
+    invalidateIfCurrent: 0,
+    notified: 0,
     listenerAdds: 0,
     listenerRemoves: 0,
   };
+
+  // Mirrors the adapter: a session that is already gone cannot be invalidated
+  // again, so repeated invalidation notifies subscribers exactly once, and each
+  // published session gets a fresh opaque identity.
+  let sessionLive = initialSession !== null;
+  let ownership: object | null = sessionLive ? Object.freeze({}) : null;
+  const accessToken = options.accessToken ?? "fake.access.token";
 
   let inFlightInitialize: Promise<InitializeResult> | undefined;
   let initializeDeferred: Deferred<InitializeResult> | undefined;
@@ -140,6 +166,8 @@ export function createFakeAuthClient(options: FakeAuthClientOptions = {}): FakeA
 
     completeSignIn(callbackUrl: string): Promise<CompleteSignInResult> {
       calls.completeSignIn.push(callbackUrl);
+      sessionLive = true;
+      ownership = Object.freeze({});
       if (completeSignInDeferred !== undefined) {
         const deferred = completeSignInDeferred;
         completeSignInDeferred = undefined;
@@ -150,7 +178,40 @@ export function createFakeAuthClient(options: FakeAuthClientOptions = {}): FakeA
 
     signOut(): Promise<void> {
       calls.signOut += 1;
+      sessionLive = false;
+      ownership = null;
       return Promise.resolve();
+    },
+
+    /**
+     * Returns a copy carrying the credential plus a callback scoped to the
+     * session that issued it; the caller's request is never given an
+     * Authorization header of its own and the token is never returned.
+     */
+    authorizeRequest(request: Request): Promise<AuthorizedRequest | null> {
+      calls.authorizeRequest += 1;
+      const issuedFor = ownership;
+      if (!sessionLive || issuedFor === null || accessToken === null || accessToken === "") {
+        return Promise.resolve(null);
+      }
+      const headers = new Headers(request.headers);
+      headers.delete("Authorization");
+      headers.set("Authorization", `Bearer ${accessToken}`);
+      return Promise.resolve({
+        request: new Request(request, { headers }),
+        invalidateIfCurrent: () => {
+          calls.invalidateIfCurrent += 1;
+          if (ownership !== issuedFor || !sessionLive) {
+            return;
+          }
+          sessionLive = false;
+          ownership = null;
+          for (const listener of [...listeners]) {
+            calls.notified += 1;
+            listener();
+          }
+        },
+      });
     },
 
     onSessionInvalidated(listener: () => void): () => void {

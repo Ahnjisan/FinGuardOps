@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HttpError, InvalidResponseError, NetworkError, TimeoutError } from "./errors";
 import { fetchHealth } from "./healthApi";
+import { BACKEND_ENDPOINT_KEYS, getBackendEndpoint } from "./backendEndpoints";
 import {
   jsonResponse,
   mockFetchAbortOnce,
@@ -287,5 +288,67 @@ describe("fetchHealth", () => {
     const error = await fetchHealth().catch((caught: unknown) => caught);
 
     expect((error as Error).message).not.toContain("do-not-leak");
+  });
+});
+
+/**
+ * Guards the separation the authenticated transport introduced. `fetchHealth`
+ * must keep reaching the Backend on its own, with no endpoint registry, no
+ * AuthClient and no credential of any kind.
+ */
+describe("fetchHealth — separation from the authenticated transport", () => {
+  it("has no endpoint key in the authenticated registry", () => {
+    for (const key of BACKEND_ENDPOINT_KEYS) {
+      expect(getBackendEndpoint(key)?.template).not.toBe("/api/health");
+    }
+    for (const guess of ["health", "api-health", "/api/health"]) {
+      expect(getBackendEndpoint(guess)).toBeUndefined();
+    }
+  });
+
+  it("sends a plain URL and init, never an authorized Request object", async () => {
+    mockFetchOnce(async () => jsonResponse({ status: "UP", service: "backend" }));
+
+    await fetchHealth();
+
+    const [input, init] = vi.mocked(fetch).mock.calls[0];
+    expect(typeof input).toBe("string");
+    expect(input).toBe("http://localhost:8080/api/health");
+    expect((init as RequestInit).method).toBe("GET");
+  });
+
+  it("carries no Authorization header in any header representation", async () => {
+    mockFetchOnce(async () => jsonResponse({ status: "UP", service: "backend" }));
+
+    await fetchHealth();
+
+    const init = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+    const headers = new Headers(init.headers);
+    expect(headers.has("Authorization")).toBe(false);
+    expect(headers.has("authorization")).toBe(false);
+    expect([...headers]).toEqual([]);
+    expect(JSON.stringify(init)).not.toContain("Bearer");
+  });
+
+  it("keeps the shared trace id contract, accepting only a full match", async () => {
+    mockFetchOnce(async () =>
+      jsonResponse({ status: "UP", service: "backend" }, { headers: { "X-Trace-Id": "short" } }),
+    );
+    await expect(fetchHealth()).resolves.toEqual({
+      data: { status: "UP", service: "backend" },
+      traceId: undefined,
+    });
+    vi.unstubAllGlobals();
+
+    mockFetchOnce(async () =>
+      jsonResponse(
+        { status: "UP", service: "backend" },
+        { headers: { "X-Trace-Id": "trace0123abcd" } },
+      ),
+    );
+    await expect(fetchHealth()).resolves.toEqual({
+      data: { status: "UP", service: "backend" },
+      traceId: "trace0123abcd",
+    });
   });
 });
