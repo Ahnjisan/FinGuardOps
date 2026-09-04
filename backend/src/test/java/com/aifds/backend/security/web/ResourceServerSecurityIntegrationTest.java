@@ -195,6 +195,34 @@ class ResourceServerSecurityIntegrationTest {
                 invalidClaimToken
         );
 
+        ResponseEntity<String> malformedAudience = assertAudienceRejected(
+                List.of("finguardops-backend-api", 7)
+        );
+        assertThat(malformedAudience.getBody()).doesNotContain(
+                "finguardops-backend-api",
+                "JWT claim type is invalid"
+        );
+        ResponseEntity<String> additionalAudience = assertAudienceRejected(
+                List.of(
+                        "finguardops-backend-api",
+                        "audience-additional-sentinel"
+                )
+        );
+        assertThat(additionalAudience.getBody()).doesNotContain(
+                "audience-additional-sentinel",
+                "finguardops-backend-api"
+        );
+        ResponseEntity<String> duplicateAudience = assertAudienceRejected(
+                List.of(
+                        "finguardops-backend-api",
+                        "finguardops-backend-api"
+                )
+        );
+        assertThat(duplicateAudience.getBody()).doesNotContain(
+                "finguardops-backend-api",
+                "MappedJwtClaimSetConverter"
+        );
+
         HttpHeaders wrongSignature = bearer(KEY_B.validUserToken());
         assertSecurityError(
                 exchange(HttpMethod.GET, PROTECTED_PATH, wrongSignature, null),
@@ -244,6 +272,29 @@ class ResourceServerSecurityIntegrationTest {
     @Order(2)
     void createsUserAndServicePrincipalsFromRealSignedTokens()
             throws Exception {
+        Map<String, Object> rawStringClaims = KEY_A.validClaims(
+                "USER",
+                List.of("FDS_VIEWER")
+        );
+        rawStringClaims.put("aud", "finguardops-backend-api");
+        ResponseEntity<String> rawStringUser = exchange(
+                HttpMethod.GET,
+                PROTECTED_PATH,
+                bearer(KEY_A.sign(rawStringClaims)),
+                null
+        );
+        assertThat(rawStringUser.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode rawStringUserBody = objectMapper.readTree(
+                rawStringUser.getBody()
+        );
+        assertThat(rawStringUserBody.get("type").asText()).isEqualTo("USER");
+        assertThat(rawStringUserBody.get("name").asText()).isEqualTo(
+                EphemeralRsaJwtFixture.SUBJECT
+        );
+        assertThat(rawStringUserBody.get("authorities").toString())
+                .contains("ROLE_FDS_VIEWER", "transaction:read")
+                .doesNotContain("transaction:intake");
+
         ResponseEntity<String> user = exchange(
                 HttpMethod.GET,
                 PROTECTED_PATH,
@@ -585,6 +636,38 @@ class ResourceServerSecurityIntegrationTest {
         HttpHeaders headers = headers();
         headers.setBearerAuth(token);
         return headers;
+    }
+
+    private ResponseEntity<String> assertAudienceRejected(Object audience)
+            throws Exception {
+        Map<String, Object> claims = KEY_A.validClaims(
+                "USER",
+                List.of("FDS_VIEWER")
+        );
+        claims.put("aud", audience);
+        String token = KEY_A.sign(claims);
+        ResponseEntity<String> response = exchange(
+                HttpMethod.GET,
+                PROTECTED_PATH,
+                bearer(token),
+                null
+        );
+        assertSecurityError(
+                response,
+                HttpStatus.UNAUTHORIZED,
+                "UNAUTHORIZED",
+                FinGuardOpsAuthenticationEntryPoint.UNAUTHORIZED_MESSAGE,
+                "Bearer realm=\"finguardops-backend\", error=\"invalid_token\""
+        );
+        assertThat(response.getBody()).doesNotContain(
+                token,
+                "Authorization",
+                "principal_type",
+                "FDS_VIEWER",
+                "BadJwtException",
+                "JwtException"
+        );
+        return response;
     }
 
     private HttpHeaders preflightHeaders(String method, String header) {

@@ -17,6 +17,12 @@ workflow에서는 실행하지 않는다.
 - control: `/run/local-jwt/control.sock`, mode `0600`, owner `10001:10001`
 - RS256, RSA 2048 bit 이상, exponent 65537, 최대 lifetime 15분
 
+이 fixture는 고유 발급 형태로 기존 singleton array를 계속 사용한다. Backend의 일반 계약은
+[`ADR-012`](../07-decisions/ADR-012-jwt-singleton-audience-standard-representation.md)에 따라 exact
+string과 exact singleton string array를 모두 같은 singleton audience 의미로 허용하고,
+additional·duplicate·malformed audience는 거부한다. fixture 발급 형태는 변경하지 않는다.
+Issue #235의 stock Keycloak 26.7.3 runtime은 아직 구현되지 않았다.
+
 HTTP는 readiness와 JWKS의 `GET`만 제공한다. token 발급·rotation·fault 제어는 fixture
 tmpfs의 Unix socket과 container CLI만 사용한다. private key와 socket은 4 MiB 전용
 `tmpfs` 밖에 저장하지 않으며 container 재생성 때 key와 `kid`가 바뀐다.
@@ -317,6 +323,9 @@ stop_authenticated_traffic() {
   return "$cleanup_status"
 }
 ```
+
+위 비교는 Local JWT fixture가 선택한 고정 array 발급 형태를 검증한다. Backend가 일반적으로
+허용하는 두 raw audience 표현 중 array 형태만 허용한다는 의미가 아니다.
 
 worker는 최대 600초이고 시작 시 잔여시간 180초 초과를 요구한다. 실행 중 잔여시간이
 120초 이하이면 `TOKEN_REFRESH_REQUIRED`와 non-zero로 종료한다. 이 경우 현재 worker를

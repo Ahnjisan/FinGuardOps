@@ -236,7 +236,8 @@ method security도 구현했습니다. stateless session·CSRF·exact-origin COR
 401·403·JWK 장애 오류·trace 처리도 적용했습니다. 자세한 계약은
 [`보안 아키텍처`](docs/02-architecture/security-architecture.md)와
 [`ADR-008`](docs/07-decisions/ADR-008-oauth2-resource-server-rbac-user-audit-actor.md)을
-따릅니다.
+따릅니다. singleton audience의 표준 표현 결정은
+[`ADR-012`](docs/07-decisions/ADR-012-jwt-singleton-audience-standard-representation.md)를 따릅니다.
 
 `/api/health`와 profile별 승인된 health·Actuator 경계는 credential 없이 접근할 수 있지만
 invalid Bearer가 명시되면 401이다. 12개 업무 method·path는 승인된 authority를 요구하며
@@ -520,9 +521,11 @@ rotation·sidecar 재생성 절차는
 확정되었습니다. USER client는 public client + Authorization Code Flow + PKCE `S256`, SERVICE
 ingestion은 분리된 confidential client + Client Credentials Flow를 사용합니다. Backend는 exact
 claim 계약을 만족하는 access token만 API credential로 받습니다. USER와 두 SERVICE client의
-raw JSON `aud`는 string이 아닌 정확한 singleton array `["finguardops-backend-api"]`여야 하며,
-기본 Audience Resolve를 포함한 모든 추가 audience source를 통제하고 실제 발급 token 전체
-배열을 E2E에서 검사합니다. 이를 위해 Backend validator를 완화하지 않습니다.
+raw JSON `aud`는 exact string `"finguardops-backend-api"` 또는 exact singleton array
+`["finguardops-backend-api"]`를 허용합니다. 두 표현의 논리적인 recipient는 계속 정확히 하나이며,
+additional·duplicate·malformed audience는 거부합니다. 기본 Audience Resolve를 포함한 모든 추가
+audience source를 통제하고 실제 발급 token의 raw 표현과 normalized singleton 의미를 E2E에서
+검사합니다. custom provider·image는 추가하지 않았고 Keycloak runtime은 아직 구현되지 않았습니다.
 
 동일 USER session의 access token과 ID token은 원문이 완전히 같은 canonical lowercase UUID v4
 `sub`와 중복 없는 동일한 FinGuardOps USER role 집합을 가져야 합니다. `roles` 배열 순서는

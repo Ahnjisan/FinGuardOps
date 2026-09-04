@@ -3,6 +3,7 @@
 - 상태: Accepted
 - 결정일: 2026-09-02
 - 결정자: Architecture Owner
+- 후속 결정: [`ADR-012`](ADR-012-jwt-singleton-audience-standard-representation.md)
 - 관련 Issue: `#217 [Architecture] 인증·인가·RBAC와 USER 감사 주체 계약 확정`
 - 관련 문서:
   - [`security-architecture.md`](../02-architecture/security-architecture.md)
@@ -46,6 +47,12 @@ endpoint 권한, 401·403·trace, Audit USER actor와 local/test/management 경�
 - RS256만 허용하고 `kid`를 필수로 검증한다.
 - production `issuer`와 JWK URI는 HTTPS이며 환경별 설정값과 exact match한다.
 - audience는 JSON array `["finguardops-backend-api"]`와 정확히 일치한다.
+
+> 이 시점의 array-only raw 표현 결정은 후속
+> [`ADR-012`](ADR-012-jwt-singleton-audience-standard-representation.md)에서 RFC 7519의
+> exact string 또는 exact singleton string array로 보정했다. 논리적인 audience는 계속 정확히
+> 하나이며 additional audience 금지와 나머지 Backend validator 계약은 변하지 않는다.
+
 - USER·SERVICE 모두 canonical lowercase UUID v4 `sub`를 사용한다.
 - `principal_type`은 정확히 `USER` 또는 `SERVICE`다.
 - `roles`는 중복 없는 JSON string array이며 unknown·duplicate·wrong type과

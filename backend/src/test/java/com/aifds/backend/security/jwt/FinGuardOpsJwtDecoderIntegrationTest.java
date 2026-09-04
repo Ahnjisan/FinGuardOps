@@ -57,14 +57,55 @@ class FinGuardOpsJwtDecoderIntegrationTest {
     }
 
     @Test
-    void validatesRealRs256SignatureAndStrictUserClaims() {
+    void acceptsRawSingletonArrayAudienceForUserToken() {
         Jwt jwt = decoder().decode(KEY_A.validUserToken(VALIDATION_TIME));
 
-        assertThat(jwt.getSubject()).isEqualTo(
-                EphemeralRsaJwtFixture.SUBJECT
+        assertValidAudienceClaims(jwt, "USER", List.of("FDS_VIEWER"));
+        assertThat(jwkServer.requestCount()).isEqualTo(1);
+    }
+
+    @Test
+    void acceptsRawStringAudienceForUserToken() {
+        Map<String, Object> claims = claims("USER", List.of("FDS_VIEWER"));
+        claims.put("aud", FinGuardOpsSecurityProperties.AUDIENCE);
+
+        Jwt jwt = decoder().decode(KEY_A.sign(claims));
+
+        assertValidAudienceClaims(jwt, "USER", List.of("FDS_VIEWER"));
+        assertThat(jwkServer.requestCount()).isEqualTo(1);
+    }
+
+    @Test
+    void acceptsRawSingletonArrayAudienceForServiceToken() {
+        Map<String, Object> claims = claims(
+                "SERVICE",
+                List.of("TRANSACTION_INGESTOR")
         );
-        assertThat(jwt.getAudience()).containsExactly(
-                FinGuardOpsSecurityProperties.AUDIENCE
+
+        Jwt jwt = decoder().decode(KEY_A.sign(claims));
+
+        assertValidAudienceClaims(
+                jwt,
+                "SERVICE",
+                List.of("TRANSACTION_INGESTOR")
+        );
+        assertThat(jwkServer.requestCount()).isEqualTo(1);
+    }
+
+    @Test
+    void acceptsRawStringAudienceForServiceToken() {
+        Map<String, Object> claims = claims(
+                "SERVICE",
+                List.of("TRANSACTION_INGESTOR")
+        );
+        claims.put("aud", FinGuardOpsSecurityProperties.AUDIENCE);
+
+        Jwt jwt = decoder().decode(KEY_A.sign(claims));
+
+        assertValidAudienceClaims(
+                jwt,
+                "SERVICE",
+                List.of("TRANSACTION_INGESTOR")
         );
         assertThat(jwkServer.requestCount()).isEqualTo(1);
     }
@@ -141,18 +182,49 @@ class FinGuardOpsJwtDecoderIntegrationTest {
     }
 
     @Test
-    void enforcesExactAudienceJsonArrayContract() {
-        rejectClaim("aud", "finguardops-backend-api");
+    void rejectsInvalidRawAudienceRepresentations() {
+        rejectMissingClaim("aud");
+        rejectClaim("aud", null);
+        rejectClaim("aud", "");
+        rejectClaim("aud", " ");
+        rejectClaim("aud", " finguardops-backend-api");
+        rejectClaim("aud", "finguardops-backend-api ");
+        rejectClaim("aud", "FINGUARDOPS-BACKEND-API");
+        rejectClaim("aud", "another-api");
+        rejectClaim("aud", List.of());
+        rejectClaim("aud", List.of("another-api"));
         rejectClaim("aud", List.of(
                 "finguardops-backend-api",
                 "another-api"
         ));
         rejectClaim("aud", List.of(
+                "another-api",
+                "finguardops-backend-api"
+        ));
+        rejectClaim("aud", List.of(
                 "finguardops-backend-api",
                 "finguardops-backend-api"
         ));
-        rejectClaim("aud", List.of());
-        rejectMissingClaim("aud");
+        rejectClaim("aud", List.of(7));
+        rejectClaim("aud", List.of("finguardops-backend-api", 7));
+        rejectClaim("aud", List.of(List.of("finguardops-backend-api")));
+        rejectClaim("aud", 7);
+        rejectClaim("aud", true);
+        rejectClaim("aud", Map.of());
+        rejectClaim("aud", Map.of(
+                "value",
+                "finguardops-backend-api"
+        ));
+    }
+
+    @Test
+    void rejectsMalformedRawAudienceBeforeJwkResolution() {
+        Map<String, Object> claims = claims("USER", List.of("FDS_VIEWER"));
+        claims.put("aud", List.of("finguardops-backend-api", 7));
+
+        assertRejected(KEY_A.sign(claims));
+
+        assertThat(jwkServer.requestCount()).isZero();
     }
 
     @Test
@@ -289,6 +361,23 @@ class FinGuardOpsJwtDecoderIntegrationTest {
                 roles.stream().map(String::valueOf).toList(),
                 VALIDATION_TIME
         ));
+    }
+
+    private void assertValidAudienceClaims(
+            Jwt jwt,
+            String principalType,
+            List<String> roles
+    ) {
+        assertThat(jwt.getAudience()).containsExactly(
+                FinGuardOpsSecurityProperties.AUDIENCE
+        );
+        assertThat(jwt.getSubject()).isEqualTo(
+                EphemeralRsaJwtFixture.SUBJECT
+        );
+        assertThat(jwt.getClaimAsString("principal_type"))
+                .isEqualTo(principalType);
+        assertThat(jwt.getClaimAsStringList("roles"))
+                .containsExactlyElementsOf(roles);
     }
 
     private void rejectClaim(String name, Object value) {

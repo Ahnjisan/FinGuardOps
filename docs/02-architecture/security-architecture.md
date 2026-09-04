@@ -8,7 +8,8 @@ actor 목표 계약을 정의한다. Architecture Decision은
 [`ADR-008`](../07-decisions/ADR-008-oauth2-resource-server-rbac-user-audit-actor.md)을
 따른다. local/dev Authorization Server 제품과 claim 공급 계약은 후속 결정인
 [`ADR-011`](../07-decisions/ADR-011-keycloak-authorization-server-and-claim-contract.md)을
-따른다.
+따른다. singleton audience의 표준 raw 표현 계약은
+[`ADR-012`](../07-decisions/ADR-012-jwt-singleton-audience-standard-representation.md)를 따른다.
 
 ### 1.1 현재 상태
 
@@ -85,7 +86,7 @@ token은 401이다. token 원문과 decoded claim 전체는 응답·일반 로�
 | Claim | 타입·필수 | exact 계약 |
 | --- | --- | --- |
 | `iss` | JSON string, 필수 | 환경별 승인된 issuer와 exact match. production은 HTTPS |
-| `aud` | JSON string array, 필수 | 정확히 `["finguardops-backend-api"]` |
+| `aud` | JSON string 또는 string array, 필수 | exact string 또는 exact singleton array이며 논리적으로 `finguardops-backend-api` 하나 |
 | `sub` | JSON string, 필수 | USER·SERVICE 모두 canonical lowercase UUID v4 |
 | `principal_type` | JSON string, 필수 | 정확히 `USER` 또는 `SERVICE` |
 | `roles` | JSON string array, 필수 | 중복 없는 알려진 role. string coercion·unknown·duplicate 금지 |
@@ -96,6 +97,11 @@ token은 401이다. token 원문과 decoded claim 전체는 응답·일반 로�
 UUID는 trim, lowercase 변환, 재직렬화 같은 정규화를 하지 않고 입력 문자열 자체가
 canonical lowercase UUID v4인지 검증한다. 외부 `authorities` claim은 존재해도 권한
 결정에 사용하지 않는다.
+
+`aud` raw JSON은 Nimbus/JWK 처리 전에 exact string 또는 exact singleton string array인지
+검증한다. Nimbus 변환 뒤에는 전체 audience List가 승인 값 하나와 정확히 같은지 다시 검증해
+additional·duplicate·malformed audience를 거부한다. trim, 대소문자 변환 또는 coercion은 하지
+않으며 다른 JWT 보안 계약은 변하지 않는다.
 
 ### 3.3 USER·SERVICE role 조합
 
@@ -128,9 +134,10 @@ local/dev Keycloak은 전용 client scope와 명시적인 protocol mapper로 3.2
 공급해야 한다. Backend validator를 Keycloak 기본 token 형태에 맞춰 완화하지 않는다.
 
 - Backend는 USER·SERVICE access token만 API credential로 받으며 ID token을 받지 않는다.
-- USER client와 분리된 두 SERVICE client의 Backend access token `aud`는 JSON string이 아니라
-  JSON array이고, 전체 배열이 정확히 `["finguardops-backend-api"]`여야 한다. 추가 audience는
-  하나도 허용하지 않는다. Audience mapper는 기존 값을 대체하지 않고 추가할 수 있으므로,
+- USER client와 분리된 두 SERVICE client의 Backend access token `aud`는 exact JSON string 또는
+  exact singleton JSON string array이고 논리적인 recipient는 `finguardops-backend-api` 하나여야
+  한다. 추가·duplicate audience는 하나도 허용하지 않는다. Audience mapper는 기존 값을 대체하지
+  않고 추가할 수 있으므로,
   기본 `roles` client scope의 Audience Resolve mapper를 포함해 `account`와 기타 audience를
   추가할 수 있는 모든 source를 제거, 비활성화하거나 명시적으로 통제한다.
 - USER access token에는 `principal_type=USER`와 허용된 USER role만 공급한다.
@@ -539,7 +546,7 @@ scrape에는 업무 JWT를 추가하지 않는다.
 | --- | --- |
 | forged trusted header | trusted header 방식 금지, JWT signature 검증 |
 | unsigned JWT·algorithm confusion | RS256 단일 allowlist, `kid` 필수, `alg=none` 거부 |
-| issuer·audience 생략 | 필수 exact validator |
+| issuer·audience 생략·audience 표현 우회 | raw exact 표현 검증과 normalized exact singleton validator |
 | expired·future token | `exp`·`iat`·선택 `nbf`, 60초 skew, 최대 15분 |
 | role escalation·unknown role | exact array, server-side mapping, unknown·duplicate 401 |
 | USER·SERVICE 혼용 | `principal_type`과 role category 검증 |
@@ -570,6 +577,7 @@ method security는 Issue #221에서 구현되었다. 아래 표는 구현 상태
 | 부분 구현. `[Frontend/Security] OIDC PKCE와 memory-only 인증 기반 구현` | SPA 인증 경계 | PKCE redirect, memory token, transaction store, `/auth/callback`, local logout | 없음 | 설정·settings·storage·lifecycle·callback·deadline | #219·#221 | jsdom 단위·컴포넌트 검증; 구현 (#229) |
 | 부분 구현. `[Frontend/Security] 인증 Backend API client와 401·403 경계 구현` | 승인 endpoint에만 credential 전달 | endpoint allowlist, `authorizeRequest()`, 401 invalidation, 403 유지, 단일 deadline | 없음 | allowlist·URL 우회·401·403·timeout·abort | #229 | jsdom 단위 검증; transport 구현 (#231) |
 | 완료. `[Security/Architecture] Keycloak Authorization Server와 권한 Claim 계약 확정` | local/dev 제품과 USER·SERVICE·token claim 계약 | ADR-011·보안 아키텍처·README | 없음 | 문서 claim·role·신뢰 경계 정합성 | #225·#229·#231 | 문서 계약만 확정 (#233); runtime 미구현 |
+| 완료. `[Backend/Security] JWT singleton audience 표준 표현 호환` | RFC 7519 singleton 표현과 stock Keycloak 호환 | Backend raw 검증·decoder/HTTP/validator 테스트·ADR-012 | 없음 | string·array 허용, additional·duplicate·malformed 거부, raw pre-JWK | #233·#235 | Backend 호환 구현 (#236); Keycloak runtime 미구현 |
 | 1. `[Infra/Security] Keycloak local/dev runtime 구현` | 실제 local/dev issuer와 client·mapper | Compose, realm, client scope, protocol mapper | 없음 | tag·digest·realm·claim·singleton audience source·rotation | #233 | 미구현 |
 | 2. `[Security/E2E] USER 로그인과 Backend 연동` | browser OIDC와 Resource Server 연결 | Frontend·Backend·Keycloak E2E | 없음 | raw `aud`·access/ID `sub` 원문 동일성·role 집합·refresh fail-closed·401·403 | Keycloak runtime | 미구현 |
 | 3. `[Security/E2E] SERVICE Client Credentials 연동` | 거래·행동 접수 SERVICE 인증 | SERVICE client·Backend E2E | 없음 | client 분리·raw singleton `aud`·UUID `sub`·claim·교차 거부 | Keycloak runtime | 미구현 |
