@@ -8,6 +8,7 @@
   - [`ADR-008`](ADR-008-oauth2-resource-server-rbac-user-audit-actor.md)
   - [`ADR-009`](ADR-009-frontend-oidc-pkce-memory-token-boundary.md)
   - [`ADR-010`](ADR-010-frontend-authenticated-backend-api-boundary.md)
+- 후속 결정: [`ADR-012`](ADR-012-jwt-singleton-audience-standard-representation.md)
 - 관련 문서:
   - [`security-architecture.md`](../02-architecture/security-architecture.md)
   - [`frontend/README.md`](../../frontend/README.md)
@@ -28,6 +29,12 @@ logout을 제공하는 Authorization Server가 아니다.
 Authorization Server 제품, USER와 SERVICE의 발급 flow, Backend access token claim과 Frontend
 표시용 ID token claim의 관계를 먼저 확정해야 한다. 이 결정은 선행 ADR의 역사적 결정문을
 바꾸지 않고 그 제품 중립 계약을 Keycloak이 어떻게 충족해야 하는지 정한다.
+
+> 후속 [`ADR-012`](ADR-012-jwt-singleton-audience-standard-representation.md)는 이 ADR의
+> array-only raw `aud` 표현만 exact JSON string 또는 exact singleton JSON string array로
+> 보정한다. 논리적인 audience는 여전히 정확히 하나이고 additional audience는 금지된다.
+> issuer·signature·subject·principal·role·time 계약은 변하지 않으며 Keycloak 26.7.3 runtime은
+> 아직 구현되지 않았다. 아래 array-only 문구는 당시 결정의 역사적 기록으로 유지한다.
 
 ## 2. 결정
 

@@ -442,6 +442,26 @@ public class FinGuardOpsSecurityConfiguration {
         }
     }
 
+    private void requireExactRawSingletonAudience(
+            Map<String, Object> claims
+    ) {
+        if (!claims.containsKey("aud")
+                || !isExactRawSingletonAudience(claims.get("aud"))) {
+            throw new BadJwtException("JWT claim type is invalid");
+        }
+    }
+
+    private boolean isExactRawSingletonAudience(Object value) {
+        if (value instanceof String audience) {
+            return FinGuardOpsSecurityProperties.AUDIENCE.equals(audience);
+        }
+        return value instanceof List<?> audiences
+                && audiences.size() == 1
+                && FinGuardOpsSecurityProperties.AUDIENCE.equals(
+                audiences.get(0)
+                );
+    }
+
     private void validateRawJwtShape(String token) {
         try {
             String[] segments = token.split("\\.", -1);
@@ -454,7 +474,7 @@ public class FinGuardOpsSecurityConfiguration {
             requireType(claims, "iss", String.class::isInstance);
             requireType(claims, "sub", String.class::isInstance);
             requireType(claims, "principal_type", String.class::isInstance);
-            requireType(claims, "aud", List.class::isInstance);
+            requireExactRawSingletonAudience(claims);
             requireType(claims, "roles", List.class::isInstance);
             requireType(claims, "iat", Number.class::isInstance);
             requireType(claims, "exp", Number.class::isInstance);
