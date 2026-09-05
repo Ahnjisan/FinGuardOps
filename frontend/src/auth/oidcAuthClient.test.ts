@@ -5,6 +5,7 @@ import { AuthCallbackError, AuthSignInError } from "./authErrors";
 import {
   createOidcAuthClient,
   createOidcSettings,
+  generateLoginNonce,
   resolveSessionDeadline,
   SESSION_HARD_DEADLINE_MS,
   type OidcAuthClientOptions,
@@ -29,11 +30,20 @@ const USER: OidcUserLike = {
 
 interface FakeUserManager extends UserManagerLike {
   readonly calls: {
-    signinRedirect: Array<{ state: unknown }>;
+    signinRedirect: Array<{ state: unknown; nonce: string }>;
     signinRedirectCallback: string[];
     removeUser: number;
     getUser: number;
+    /** Grants this client has no business running. Expected to stay at zero. */
+    signinSilent: number;
+    startSilentRenew: number;
+    useRefreshToken: number;
   };
+  /**
+   * Runs while signinRedirectCallback is still in flight, which is where
+   * oidc-client-ts raises user-loaded and user-unloaded.
+   */
+  onCallbackInFlight(hook: () => void): void;
   emitAccessTokenExpired(): void;
   expiredListenerCount(): number;
   setUser(user: OidcUserLike): void;
@@ -44,15 +54,25 @@ interface FakeUserManager extends UserManagerLike {
   failCallback(): void;
   failRemoveUser(): void;
   deferRemoveUser(): { resolve: () => void };
+  /**
+   * The refresh grant and silent renew, present only so that "never called" is
+   * an assertion about a real surface rather than about an absent one.
+   */
+  signinSilent(): Promise<OidcUserLike | null>;
+  startSilentRenew(): void;
+  useRefreshToken(): Promise<OidcUserLike | null>;
 }
 
 function createFakeUserManager(): FakeUserManager {
   const expiredListeners = new Set<() => void>();
   const calls = {
-    signinRedirect: [] as Array<{ state: unknown }>,
+    signinRedirect: [] as Array<{ state: unknown; nonce: string }>,
     signinRedirectCallback: [] as string[],
     removeUser: 0,
     getUser: 0,
+    signinSilent: 0,
+    startSilentRenew: 0,
+    useRefreshToken: 0,
   };
   let user: OidcUserLike = USER;
   let storedUser: OidcUserLike | null = null;
@@ -61,9 +81,13 @@ function createFakeUserManager(): FakeUserManager {
   let callbackShouldFail = false;
   let removeUserShouldFail = false;
   let removeUserGate: Promise<void> | undefined;
+  let callbackInFlightHook: (() => void) | undefined;
 
   return {
     calls,
+    onCallbackInFlight(hook: () => void): void {
+      callbackInFlightHook = hook;
+    },
     emitAccessTokenExpired(): void {
       for (const listener of [...expiredListeners]) {
         listener();
@@ -106,7 +130,7 @@ function createFakeUserManager(): FakeUserManager {
       return { resolve: release };
     },
 
-    async signinRedirect(args: { state: unknown }): Promise<void> {
+    async signinRedirect(args: { state: unknown; nonce: string }): Promise<void> {
       calls.signinRedirect.push(args);
     },
     async signinRedirectCallback(url: string): Promise<OidcUserLike> {
@@ -116,6 +140,9 @@ function createFakeUserManager(): FakeUserManager {
       }
       // A real callback installs the user in the store the adapter later reads.
       storedUser = user;
+      // user-loaded lands here: after the store write, before the promise the
+      // adapter is awaiting has resolved.
+      callbackInFlightHook?.();
       return user;
     },
     async getUser(): Promise<OidcUserLike | null> {
@@ -137,6 +164,17 @@ function createFakeUserManager(): FakeUserManager {
       if (removeUserShouldFail) {
         throw new DOMException("blocked", "SecurityError");
       }
+    },
+    async signinSilent(): Promise<OidcUserLike | null> {
+      calls.signinSilent += 1;
+      return null;
+    },
+    startSilentRenew(): void {
+      calls.startSilentRenew += 1;
+    },
+    async useRefreshToken(): Promise<OidcUserLike | null> {
+      calls.useRefreshToken += 1;
+      return null;
     },
     events: {
       addAccessTokenExpired(callback: () => void): () => void {
@@ -281,13 +319,15 @@ describe("createOidcSettings", () => {
     expect(backing).not.toBe(window.localStorage);
   });
 
-  it("keeps the transaction store in sessionStorage under its own prefix", () => {
+  it("keeps the nonce-validating transaction store in sessionStorage under its own prefix", async () => {
     const stateStore = settings().stateStore;
+    expect(stateStore).toBeDefined();
 
-    expect(stateStore).toBeInstanceOf(WebStorageStateStore);
-    const store = stateStore as unknown as { _store: unknown; _prefix: string };
-    expect(store._store).toBe(window.sessionStorage);
-    expect(store._prefix).toBe(OIDC_TRANSACTION_STORE_PREFIX);
+    await stateStore?.set("state", JSON.stringify({ nonce: "nonce-value" }));
+
+    expect(window.sessionStorage.getItem(`${OIDC_TRANSACTION_STORE_PREFIX}state`)).toBe(
+      JSON.stringify({ nonce: "nonce-value" }),
+    );
   });
 
   it("gives the memory user store a prefix distinct from the transaction store", () => {
@@ -304,6 +344,69 @@ describe("createOidcSettings", () => {
   it("declares no silent renew or logout callback URI", () => {
     expect(settings()).not.toHaveProperty("silent_redirect_uri");
     expect(settings()).not.toHaveProperty("post_logout_redirect_uri");
+  });
+
+  it("declares no extra query parameters", () => {
+    expect(settings()).not.toHaveProperty("extraQueryParams");
+  });
+
+  it.each(["set", "get", "remove"] as const)(
+    "rejects a stored transaction with a missing or blank nonce on %s",
+    async (operation) => {
+      const stateStore = settings().stateStore;
+      expect(stateStore).toBeDefined();
+      const key = "state";
+      const sentinel = "provider-nonce-sentinel";
+      const invalid = JSON.stringify({ nonce: "  ", provider_error: sentinel });
+      if (operation !== "set") {
+        window.sessionStorage.setItem(`${OIDC_TRANSACTION_STORE_PREFIX}${key}`, invalid);
+      }
+
+      const result =
+        operation === "set"
+          ? stateStore?.set(key, invalid)
+          : operation === "get"
+            ? stateStore?.get(key)
+            : stateStore?.remove(key);
+      const error = await result?.catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe("OIDC transaction state rejected.");
+      expect((error as Error).message).not.toContain(sentinel);
+      if (operation === "set") {
+        expect(window.sessionStorage.getItem(`${OIDC_TRANSACTION_STORE_PREFIX}${key}`)).toBeNull();
+      }
+    },
+  );
+
+  it("accepts a nonblank nonce on set, get, and one-time remove", async () => {
+    const stateStore = settings().stateStore;
+    const value = JSON.stringify({ nonce: "valid-nonce", code_verifier: "verifier" });
+
+    await stateStore?.set("state", value);
+    await expect(stateStore?.get("state")).resolves.toBe(value);
+    await expect(stateStore?.remove("state")).resolves.toBe(value);
+    await expect(stateStore?.get("state")).resolves.toBeNull();
+  });
+});
+
+describe("generateLoginNonce", () => {
+  it("uses at least 32 Web Crypto bytes and emits unpadded base64url", () => {
+    const getRandomValues = vi.fn((bytes: Uint8Array) => {
+      bytes.forEach((_value, index) => {
+        bytes[index] = index;
+      });
+      return bytes;
+    });
+    vi.stubGlobal("crypto", { getRandomValues });
+
+    const nonce = generateLoginNonce();
+
+    expect(getRandomValues).toHaveBeenCalledTimes(1);
+    expect(getRandomValues.mock.calls[0][0].byteLength).toBeGreaterThanOrEqual(32);
+    expect(nonce).toMatch(/^[A-Za-z0-9_-]{43,}$/);
+    expect(nonce).not.toContain("=");
+    vi.unstubAllGlobals();
   });
 });
 
@@ -476,15 +579,56 @@ describe("createOidcAuthClient sign-in", () => {
     expect(manager.calls.signinRedirect).toHaveLength(1);
   });
 
-  it("passes the return route as transaction state, never as url_state", async () => {
+  it("passes the return route and a fresh nonce directly, never as query overrides", async () => {
     const manager = createFakeUserManager();
     const client = clientFor(manager, window.sessionStorage);
 
     await client.signIn("/health");
 
     const args = manager.calls.signinRedirect[0];
-    expect(args).toEqual({ state: { returnTo: "/health" } });
+    expect(args.state).toEqual({ returnTo: "/health" });
+    expect(args.nonce).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(args).not.toHaveProperty("url_state");
+    expect(args).not.toHaveProperty("extraQueryParams");
+  });
+
+  it("generates a different nonce for every login", async () => {
+    let fill = 0;
+    vi.stubGlobal("crypto", {
+      getRandomValues(bytes: Uint8Array): Uint8Array {
+        fill += 1;
+        bytes.fill(fill);
+        return bytes;
+      },
+    });
+    const manager = createFakeUserManager();
+    const client = clientFor(manager, window.sessionStorage);
+
+    await client.signIn("/");
+    await client.signIn("/");
+
+    expect(manager.calls.signinRedirect).toHaveLength(2);
+    expect(manager.calls.signinRedirect[0].nonce).not.toBe(manager.calls.signinRedirect[1].nonce);
+    vi.unstubAllGlobals();
+  });
+
+  it("fails closed with zero redirects when nonce generation fails", async () => {
+    const sentinel = "nonce-provider-secret";
+    vi.stubGlobal("crypto", {
+      getRandomValues(): never {
+        throw new DOMException(sentinel, "OperationError");
+      },
+    });
+    const manager = createFakeUserManager();
+    const client = clientFor(manager, window.sessionStorage);
+
+    const error = await client.signIn("/").catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AuthSignInError);
+    expect((error as Error).message).not.toContain(sentinel);
+    expect(manager.calls.signinRedirect).toHaveLength(0);
+    expect(window.sessionStorage.length).toBe(0);
+    vi.unstubAllGlobals();
   });
 
   it("fails closed without redirecting when storage cannot be cleared", async () => {
@@ -1007,7 +1151,7 @@ describe("createOidcAuthClient teardown before a new transaction", () => {
    * key being deleted by the previous session's sweep.
    */
   function writingSignIn(manager: FakeUserManager): void {
-    manager.signinRedirect = async (args: { state: unknown }) => {
+    manager.signinRedirect = async (args: { state: unknown; nonce: string }) => {
       manager.calls.signinRedirect.push(args);
       window.sessionStorage.setItem(B_KEY, JSON.stringify({ id: "b" }));
     };
@@ -1988,5 +2132,366 @@ describe("createOidcAuthClient invalidateIfCurrent — session ownership", () =>
     await signingIn;
 
     expect(manager.calls.signinRedirect).toHaveLength(1);
+  });
+});
+
+/**
+ * The refresh-token fail-closed boundary in the callback.
+ *
+ * The frontend is a public browser client: it asks for no `offline_access`,
+ * runs no silent renew, and has nowhere to keep a long-lived credential. If a
+ * refresh token turns up in the callback anyway, the sign-in has to end before
+ * anything observes a session, because every later boundary - the session, the
+ * deadline, `authorizeRequest` - is built on the premise that no such
+ * credential exists. Every case below drives the production adapter through
+ * `completeSignIn`, since the check is only meaningful in its real position:
+ * after protocol validation, before publication.
+ */
+describe("createOidcAuthClient callback - refresh token fail-closed", () => {
+  const CALLBACK_URL = "http://localhost/auth/callback?code=a&state=b";
+  const TRANSACTION_KEY = `${OIDC_TRANSACTION_STORE_PREFIX}state`;
+  /** Distinctive enough that finding it anywhere is unambiguous. */
+  const SENTINEL_REFRESH_TOKEN = "unlikely.refresh.sentinel.value";
+
+  /**
+   * A client on the callback route, so `initialize()` answers "is a session
+   * published?" by reading the adapter's own state and touching no storage at
+   * all. That keeps the question answerable in the cases below where the
+   * storage under test is deliberately hostile.
+   */
+  function callbackClient(manager: FakeUserManager, storage: Storage = window.sessionStorage) {
+    return clientFor(manager, storage, { isCallbackRoute: () => true });
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  const ACCEPTED_USERS: ReadonlyArray<[string, OidcUserLike]> = [
+    ["no refresh_token property at all", USER],
+    ["an explicitly undefined refresh_token", { ...USER, refresh_token: undefined }],
+  ];
+
+  it.each(ACCEPTED_USERS)("completes the sign-in for a user with %s", async (_label, user) => {
+    const manager = createFakeUserManager();
+    manager.setUser(user);
+    const client = callbackClient(manager);
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+
+    const result = await client.completeSignIn(CALLBACK_URL);
+
+    expect(result.session).toEqual({
+      subject: "11111111-1111-4111-8111-111111111111",
+      displayName: "Test Analyst",
+    });
+    expect(result.returnTo).toBe("/health");
+    // The accepted path is untouched: nothing discarded, nobody notified.
+    expect(manager.calls.removeUser).toBe(0);
+    expect(invalidated).not.toHaveBeenCalled();
+    await expect(client.initialize()).resolves.toEqual({ session: result.session });
+  });
+
+  it("treats an absent property as absent rather than as a value", () => {
+    expect(Object.hasOwn(USER, "refresh_token")).toBe(false);
+  });
+
+  it.each([
+    ["a JWT", "header.payload.signature"],
+    ["an opaque token", "opaque.token"],
+  ])("still authorizes Backend requests with %s", async (_label, accessToken) => {
+    vi.stubEnv("VITE_API_BASE_URL", API_BASE_URL);
+    const manager = createFakeUserManager();
+    manager.setUser({ ...USER, access_token: accessToken });
+    const client = callbackClient(manager);
+
+    await client.completeSignIn(CALLBACK_URL);
+    const authorized = await client.authorizeRequest(new Request(`${API_BASE_URL}/api/v1/cases`));
+
+    expect(authorized?.request.headers.get("Authorization")).toBe(`Bearer ${accessToken}`);
+    expect(manager.calls.removeUser).toBe(0);
+  });
+
+  /**
+   * Only `undefined` is absence. Everything else - a real token, a blank
+   * string, `null`, and the runtime shapes the library's own `string` type
+   * says cannot happen - is a value, and a value is refused as it stands.
+   */
+  const REJECTED_REFRESH_TOKENS: ReadonlyArray<[string, unknown]> = [
+    ["a JWT refresh token", "eyJhbGciOiJIUzI1NiJ9.cmVmcmVzaA"],
+    ["an opaque refresh token", "8f14e45f-ceea-467a-9575-2c1d1d2e0d1c"],
+    ["the empty string", ""],
+    ["a single space", " "],
+    ["tabs and newlines only", "\t\r\n "],
+    ["a token with surrounding whitespace", "  refresh.token  "],
+    ["null", null],
+    ["zero", 0],
+    ["false", false],
+    ["an object", { token: "refresh" }],
+    ["an array", []],
+    ["a function", () => "refresh"],
+  ];
+
+  it.each(REJECTED_REFRESH_TOKENS)(
+    "refuses to publish a session when the callback returns %s",
+    async (_label, refreshToken) => {
+      const manager = createFakeUserManager();
+      manager.setUser({ ...USER, refresh_token: refreshToken });
+      const client = callbackClient(manager);
+      const invalidated = vi.fn();
+      client.onSessionInvalidated(invalidated);
+
+      const error = await client.completeSignIn(CALLBACK_URL).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(AuthCallbackError);
+      await expect(client.initialize()).resolves.toEqual({ session: null });
+      expect(invalidated).not.toHaveBeenCalled();
+      expect(manager.calls.removeUser).toBe(1);
+    },
+  );
+
+  it("refuses a user whose refresh_token getter throws", async () => {
+    const manager = createFakeUserManager();
+    manager.setUser({
+      profile: USER.profile,
+      state: USER.state,
+      get refresh_token(): unknown {
+        throw new DOMException("blocked at https://embed.example", "SecurityError");
+      },
+    });
+    const client = callbackClient(manager);
+
+    const error = await client.completeSignIn(CALLBACK_URL).catch((caught: unknown) => caught);
+
+    // "Cannot tell" is not "absent", and the DOM failure does not escape.
+    expect(error).toBeInstanceOf(AuthCallbackError);
+    expect((error as Error).message).not.toContain("embed.example");
+    expect((error as Error).name).not.toBe("SecurityError");
+    expect(manager.calls.removeUser).toBe(1);
+    await expect(client.initialize()).resolves.toEqual({ session: null });
+  });
+
+  it("publishes nothing, notifies nobody and calls no Backend endpoint", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    window.sessionStorage.setItem(TRANSACTION_KEY, "one-time record");
+    window.sessionStorage.setItem("theme", "dark");
+    const manager = createFakeUserManager();
+    manager.setUser({ ...USER, access_token: TOKEN, refresh_token: SENTINEL_REFRESH_TOKEN });
+    const client = callbackClient(manager);
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+
+    await expect(client.completeSignIn(CALLBACK_URL)).rejects.toBeInstanceOf(AuthCallbackError);
+
+    await expect(client.initialize()).resolves.toEqual({ session: null });
+    expect(invalidated).not.toHaveBeenCalled();
+    expect(manager.calls.removeUser).toBe(1);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // The one-time transaction record is gone; unrelated keys are untouched.
+    expect(window.sessionStorage.getItem(TRANSACTION_KEY)).toBeNull();
+    expect(window.sessionStorage.getItem("theme")).toBe("dark");
+    expect(window.localStorage.length).toBe(0);
+  });
+
+  it("issues no credential afterwards, so a rejection is not a half sign-in", async () => {
+    vi.stubEnv("VITE_API_BASE_URL", API_BASE_URL);
+    const manager = createFakeUserManager();
+    manager.setUser({ ...USER, access_token: TOKEN, refresh_token: SENTINEL_REFRESH_TOKEN });
+    const client = callbackClient(manager);
+
+    await client.completeSignIn(CALLBACK_URL).catch(() => undefined);
+
+    const getUserBefore = manager.calls.getUser;
+    await expect(
+      client.authorizeRequest(new Request(`${API_BASE_URL}/api/v1/cases`)),
+    ).resolves.toBeNull();
+    // Refused on the missing session, before the user store was even read.
+    expect(manager.calls.getUser).toBe(getUserBefore);
+  });
+
+  it("arms no session deadline for a rejected user", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
+    const manager = createFakeUserManager();
+    manager.setUser({ ...USER, refresh_token: SENTINEL_REFRESH_TOKEN });
+    const client = callbackClient(manager);
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+
+    await client.completeSignIn(CALLBACK_URL).catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(SESSION_HARD_DEADLINE_MS + 1000);
+
+    // A timer would only exist if startSession had run.
+    expect(invalidated).not.toHaveBeenCalled();
+    expect(manager.calls.removeUser).toBe(1);
+  });
+
+  it("still refuses the session when removeUser rejects", async () => {
+    window.sessionStorage.setItem(TRANSACTION_KEY, "one-time record");
+    const manager = createFakeUserManager();
+    manager.setUser({ ...USER, refresh_token: SENTINEL_REFRESH_TOKEN });
+    manager.failRemoveUser();
+    const client = callbackClient(manager);
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+
+    const error = await client.completeSignIn(CALLBACK_URL).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AuthCallbackError);
+    expect((error as Error).name).not.toBe("SecurityError");
+    expect((error as Error).message).not.toContain("blocked");
+    expect(manager.calls.removeUser).toBe(1);
+    // The failed removal did not skip the transaction sweep.
+    expect(window.sessionStorage.getItem(TRANSACTION_KEY)).toBeNull();
+    await expect(client.initialize()).resolves.toEqual({ session: null });
+    expect(invalidated).not.toHaveBeenCalled();
+  });
+
+  it("still refuses the session when the transaction sweep throws", async () => {
+    const manager = createFakeUserManager();
+    manager.setUser({ ...USER, refresh_token: SENTINEL_REFRESH_TOKEN });
+    const client = callbackClient(manager, hostileStorage("removeItem"));
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+
+    const error = await client.completeSignIn(CALLBACK_URL).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AuthCallbackError);
+    expect((error as Error).message).not.toContain("embed.example");
+    expect(manager.calls.removeUser).toBe(1);
+    await expect(client.initialize()).resolves.toEqual({ session: null });
+    expect(invalidated).not.toHaveBeenCalled();
+  });
+
+  it("still refuses the session when both cleanup steps fail", async () => {
+    const manager = createFakeUserManager();
+    manager.setUser({ ...USER, refresh_token: SENTINEL_REFRESH_TOKEN });
+    manager.failRemoveUser();
+    const client = callbackClient(manager, hostileStorage("removeItem"));
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+
+    const error = await client.completeSignIn(CALLBACK_URL).catch((caught: unknown) => caught);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    process.off("unhandledRejection", unhandled);
+
+    expect(error).toBeInstanceOf(AuthCallbackError);
+    expect((error as Error).message).toBe("Sign-in could not be completed.");
+    expect(manager.calls.removeUser).toBe(1);
+    await expect(client.initialize()).resolves.toEqual({ session: null });
+    expect(invalidated).not.toHaveBeenCalled();
+    expect(unhandled).not.toHaveBeenCalled();
+  });
+
+  it("never reaches the refresh check when the callback itself fails", async () => {
+    window.sessionStorage.setItem(TRANSACTION_KEY, "one-time record");
+    const manager = createFakeUserManager();
+    manager.setUser({ ...USER, refresh_token: SENTINEL_REFRESH_TOKEN });
+    manager.failCallback();
+    const client = callbackClient(manager);
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+
+    const error = await client.completeSignIn(CALLBACK_URL).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AuthCallbackError);
+    expect((error as Error).message).not.toContain("SECRET_CODE");
+    // No user was produced, so there was none to discard: the pre-existing
+    // failure path still owns this outcome on its own.
+    expect(manager.calls.removeUser).toBe(0);
+    expect(window.sessionStorage.getItem(TRANSACTION_KEY)).toBeNull();
+    expect(invalidated).not.toHaveBeenCalled();
+    await expect(client.initialize()).resolves.toEqual({ session: null });
+  });
+
+  it("keeps a rejected refresh token off every observable surface", async () => {
+    const consoleSpies = (["error", "warn", "log", "info", "debug"] as const).map((level) =>
+      vi.spyOn(console, level).mockImplementation(() => undefined),
+    );
+    const manager = createFakeUserManager();
+    manager.setUser({ ...USER, refresh_token: `  ${SENTINEL_REFRESH_TOKEN}  ` });
+    const client = callbackClient(manager);
+
+    const error = await client.completeSignIn(CALLBACK_URL).catch((caught: unknown) => caught);
+
+    // Refused with the one fixed error, which carries no payload at all.
+    expect(error).toBeInstanceOf(AuthCallbackError);
+    expect((error as Error).message).toBe("Sign-in could not be completed.");
+    const serialized = JSON.stringify(error, Object.getOwnPropertyNames(error));
+    expect(serialized).not.toContain(SENTINEL_REFRESH_TOKEN);
+    expect((error as Error).stack ?? "").not.toContain(SENTINEL_REFRESH_TOKEN);
+    for (const spy of consoleSpies) {
+      expect(spy).not.toHaveBeenCalled();
+    }
+    const stored = [window.sessionStorage, window.localStorage]
+      .flatMap((store) => Object.entries({ ...store }))
+      .join("|");
+    expect(stored).not.toContain(SENTINEL_REFRESH_TOKEN);
+    expect(document.documentElement.outerHTML).not.toContain(SENTINEL_REFRESH_TOKEN);
+  });
+
+  it("runs no refresh grant and no silent renew on either outcome", async () => {
+    for (const refreshToken of [undefined, SENTINEL_REFRESH_TOKEN]) {
+      const manager = createFakeUserManager();
+      manager.setUser({ ...USER, refresh_token: refreshToken });
+      const client = callbackClient(manager);
+
+      await client.completeSignIn(CALLBACK_URL).catch(() => undefined);
+
+      expect(manager.calls.signinSilent).toBe(0);
+      expect(manager.calls.startSilentRenew).toBe(0);
+      expect(manager.calls.useRefreshToken).toBe(0);
+    }
+    // Nothing could have armed one either: the setting is off by construction.
+    expect(createOidcSettings(ENV, window.sessionStorage).automaticSilentRenew).toBe(false);
+  });
+
+  /**
+   * oidc-client-ts raises user-loaded from inside signinRedirectCallback, so
+   * the library considers a user "loaded" while the adapter is still deciding.
+   * The application session must not exist at that instant, on either outcome.
+   */
+  it("publishes no session while user-loaded fires inside an accepted callback", async () => {
+    const manager = createFakeUserManager();
+    const client = callbackClient(manager);
+    const duringCallback: Array<ReturnType<typeof client.initialize>> = [];
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+    manager.onCallbackInFlight(() => {
+      duringCallback.push(client.initialize());
+    });
+
+    const result = await client.completeSignIn(CALLBACK_URL);
+
+    expect(duringCallback).toHaveLength(1);
+    await expect(duringCallback[0]).resolves.toEqual({ session: null });
+    expect(invalidated).not.toHaveBeenCalled();
+    // Publication happens only after completeSignIn has returned the session.
+    await expect(client.initialize()).resolves.toEqual({ session: result.session });
+  });
+
+  it("publishes no session when user-loaded fires for a user that is rejected", async () => {
+    const manager = createFakeUserManager();
+    manager.setUser({ ...USER, refresh_token: SENTINEL_REFRESH_TOKEN });
+    const client = callbackClient(manager);
+    const duringCallback: Array<ReturnType<typeof client.initialize>> = [];
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+    manager.onCallbackInFlight(() => {
+      duringCallback.push(client.initialize());
+    });
+
+    await expect(client.completeSignIn(CALLBACK_URL)).rejects.toBeInstanceOf(AuthCallbackError);
+
+    expect(duringCallback).toHaveLength(1);
+    await expect(duringCallback[0]).resolves.toEqual({ session: null });
+    await expect(client.initialize()).resolves.toEqual({ session: null });
+    expect(invalidated).not.toHaveBeenCalled();
+    expect(manager.calls.removeUser).toBe(1);
   });
 });

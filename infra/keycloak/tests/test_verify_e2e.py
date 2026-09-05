@@ -28,7 +28,10 @@ def service(image=None, *, secrets=()):
         "tmpfs": ["/tmp:rw,nosuid,nodev,noexec"],
         "cap_drop": ["ALL"],
         "security_opt": ["no-new-privileges:true"],
-        "secrets": [{"source": name, "target": name} for name in secrets],
+        "secrets": [
+            {"source": name, "target": name, "mode": verify_e2e.EXPECTED_SECRET_MODES[name]}
+            for name in secrets
+        ],
         "volumes": [],
     }
     return value
@@ -64,7 +67,10 @@ def valid_config():
             "KC_HEALTH_ENABLED": "true",
             "KC_DB": "dev-file",
         },
-        "secrets": [{"source": name, "target": name} for name in verify_e2e.EXPECTED_SECRETS["keycloak"]],
+        "secrets": [
+            {"source": name, "target": name, "mode": verify_e2e.EXPECTED_SECRET_MODES[name]}
+            for name in verify_e2e.EXPECTED_SECRETS["keycloak"]
+        ],
     }
     bootstrap = service(verify_e2e.HELPER_IMAGE, secrets=verify_e2e.EXPECTED_SECRETS["keycloak-bootstrap"])
     bootstrap["entrypoint"] = ["python", "-B", "/opt/finguardops/bootstrap.py"]
@@ -98,6 +104,10 @@ def valid_config():
         "services": services,
         "networks": {"application": {"internal": True}, "observability": {"internal": True}, "prometheus-ui": {}},
         "volumes": {name: {} for name in verify_e2e.EXPECTED_MERGED_NAMED_VOLUMES},
+        "secrets": {
+            name: {"file": path}
+            for name, path in verify_e2e.EXPECTED_SECRET_FILES.items()
+        },
     }
 
 
@@ -193,6 +203,138 @@ class VerifyTests(unittest.TestCase):
         realm["enabled"] = False
         with self.assertRaisesRegex(verify_e2e.VerificationError, "STATIC_REALM_CONTRACT"):
             verify_e2e.validate_static(valid_config(), realm)
+
+    def test_user_refresh_tokens_missing_or_true_rejected(self):
+        for action in ("missing", "true"):
+            realm = valid_realm()
+            frontend = next(client for client in realm["clients"] if client["clientId"] == "finguardops-frontend")
+            if action == "missing":
+                frontend["attributes"].pop("use.refresh.tokens")
+            else:
+                frontend["attributes"]["use.refresh.tokens"] = "true"
+            with self.subTest(action=action), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "STATIC_USER_CLIENT_CONTRACT"
+            ):
+                verify_e2e.validate_static(valid_config(), realm)
+
+    def test_user_client_secret_and_extra_attribute_rejected(self):
+        for key, value in (("secret", "not-a-real-secret"), ("unexpected.attribute", "true")):
+            realm = valid_realm()
+            frontend = next(client for client in realm["clients"] if client["clientId"] == "finguardops-frontend")
+            if key == "secret":
+                frontend[key] = value
+                expected = "STATIC_REALM_SECRET_PRESENT"
+            else:
+                frontend["attributes"][key] = value
+                expected = "STATIC_USER_CLIENT_CONTRACT"
+            with self.subTest(key=key), self.assertRaisesRegex(verify_e2e.VerificationError, expected):
+                verify_e2e.validate_static(valid_config(), realm)
+
+    def test_user_optional_scope_requires_exact_profile_and_rejects_default_or_extra_scope(self):
+        mutations = (
+            lambda client: client.update({"optionalClientScopes": []}),
+            lambda client: client.update({"optionalClientScopes": ["profile", "email"]}),
+            lambda client: client.update(
+                {
+                    "defaultClientScopes": client["defaultClientScopes"] + ["profile"],
+                    "optionalClientScopes": [],
+                }
+            ),
+            lambda client: client.update({"optionalClientScopes": ["openid"]}),
+        )
+        for mutate in mutations:
+            realm = valid_realm()
+            frontend = next(
+                client for client in realm["clients"] if client["clientId"] == "finguardops-frontend"
+            )
+            mutate(frontend)
+            with self.subTest(mutate=mutate), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "STATIC_USER_CLIENT_CONTRACT"
+            ):
+                verify_e2e.validate_static(valid_config(), realm)
+
+    def test_openid_or_profile_scope_object_is_rejected(self):
+        for name in ("openid", "profile"):
+            realm = valid_realm()
+            realm["clientScopes"].append({"name": name, "protocol": "openid-connect"})
+            with self.subTest(name=name), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "STATIC_CLIENT_SCOPE_OBJECTS"
+            ):
+                verify_e2e.validate_static(valid_config(), realm)
+
+    def test_stock_profile_scope_mapper_mutations_are_rejected(self):
+        mutations = (
+            lambda scope: scope["attributes"].update({"include.in.token.scope": "false"}),
+            lambda scope: scope["protocolMappers"].pop(),
+            lambda scope: next(
+                mapper for mapper in scope["protocolMappers"] if mapper["name"] == "username"
+            )["config"].update({"claim.name": "username"}),
+        )
+        for mutate in mutations:
+            realm = valid_realm()
+            profile = next(scope for scope in realm["clientScopes"] if scope["name"] == "profile")
+            mutate(profile)
+            with self.subTest(mutate=mutate), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "STATIC_STOCK_PROFILE_SCOPE"
+            ):
+                verify_e2e.validate_static(valid_config(), realm)
+
+    def test_user_subject_mapper_missing_or_changed_is_rejected(self):
+        mutations = (
+            lambda mappers: mappers.pop(0),
+            lambda mappers: mappers[0].update({"protocolMapper": "oidc-hardcoded-claim-mapper"}),
+            lambda mappers: mappers[0]["config"].update({"id.token.claim": "true"}),
+        )
+        for mutate in mutations:
+            realm = valid_realm()
+            scope = next(
+                item for item in realm["clientScopes"] if item["name"] == "finguardops-user-claims"
+            )
+            mutate(scope["protocolMappers"])
+            with self.subTest(mutate=mutate), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "STATIC_USER_SUBJECT_MAPPER"
+            ):
+                verify_e2e.validate_static(valid_config(), realm)
+
+    def test_service_scope_audience_role_and_refresh_contract_mutations_are_rejected(self):
+        mutations = (
+            lambda client: client.update({"defaultClientScopes": ["finguardops-backend-audience"]}),
+            lambda client: client.update({"optionalClientScopes": ["profile"]}),
+            lambda client: client["attributes"].update({"use.refresh.tokens": "false"}),
+        )
+        for client_id in verify_e2e.SERVICE_CLIENT_SCOPES:
+            for mutate in mutations:
+                realm = valid_realm()
+                client = next(item for item in realm["clients"] if item["clientId"] == client_id)
+                mutate(client)
+                with self.subTest(client_id=client_id, mutate=mutate), self.assertRaisesRegex(
+                    verify_e2e.VerificationError, "STATIC_SERVICE_CLIENT_CONTRACT"
+                ):
+                    verify_e2e.validate_static(valid_config(), realm)
+
+    def test_service_refresh_token_response_is_rejected(self):
+        with mock.patch.object(
+            verify_e2e,
+            "http_json",
+            return_value=(200, {"access_token": "header.payload.signature", "refresh_token": "sentinel"}),
+        ), self.assertRaisesRegex(verify_e2e.VerificationError, "SERVICE_REFRESH_TOKEN_PRESENT"):
+            verify_e2e.token_for("finguardops-transaction-ingestor", "x" * 32)
+
+    def test_user_uuid_role_and_import_credential_mutations_rejected(self):
+        mutations = (
+            lambda user: user.update({"id": "581f76f8-64bd-4bda-99fb-2c338e96d92a"}),
+            lambda user: user.update({"realmRoles": ["FDS_ANALYST", "FDS_VIEWER"]}),
+            lambda user: user.update({"credentials": [{"type": "password"}]}),
+            lambda user: user.update({"requiredActions": ["UPDATE_PASSWORD"]}),
+            lambda user: user.update({"email": "missing.invalid-profile"}),
+        )
+        for mutate in mutations:
+            realm = valid_realm()
+            mutate(realm["users"][0])
+            with self.subTest(mutate=mutate), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "STATIC_USER_CONTRACT"
+            ):
+                verify_e2e.validate_static(valid_config(), realm)
 
     def test_bootstrap_source_writable_rejected(self):
         self.assert_static_failure(lambda c: c["services"]["keycloak-bootstrap"]["volumes"][0].update({"read_only": False}), "STATIC_KEYCLOAK_BOOTSTRAP_MOUNT")
@@ -323,7 +465,40 @@ class VerifyTests(unittest.TestCase):
         self.assert_static_failure(lambda c: c["services"]["keycloak-verify"]["secrets"].pop(), "STATIC_SECRET_BOUNDARY")
 
     def test_excessive_secret_mount(self):
-        self.assert_static_failure(lambda c: c["services"]["keycloak-verify"]["secrets"].append({"source": "keycloak_bootstrap_admin_secret"}), "STATIC_SECRET_BOUNDARY")
+        self.assert_static_failure(
+            lambda c: c["services"]["keycloak-verify"]["secrets"].append(
+                {"source": "keycloak_bootstrap_admin_secret", "target": "keycloak_bootstrap_admin_secret", "mode": 256}
+            ),
+            "STATIC_SECRET_BOUNDARY",
+        )
+
+    def test_user_password_mount_is_bootstrap_only_and_read_only(self):
+        self.assert_static_failure(
+            lambda c: c["services"]["keycloak-bootstrap"]["secrets"].remove(
+                next(item for item in c["services"]["keycloak-bootstrap"]["secrets"] if item["source"] == "user_password")
+            ),
+            "STATIC_SECRET_BOUNDARY",
+        )
+        for service_name in ("keycloak", "keycloak-verify"):
+            self.assert_static_failure(
+                lambda c, service_name=service_name: c["services"][service_name]["secrets"].append(
+                    {"source": "user_password", "target": "user_password", "mode": 256}
+                ),
+                "STATIC_SECRET_BOUNDARY",
+            )
+        self.assert_static_failure(
+            lambda c: next(
+                item for item in c["services"]["keycloak-bootstrap"]["secrets"] if item["source"] == "user_password"
+            ).update({"mode": 292}),
+            "STATIC_SECRET_BOUNDARY",
+        )
+
+    def test_user_password_secret_definition_is_exact(self):
+        self.assert_static_failure(lambda c: c["secrets"].pop("user_password"), "STATIC_SECRET_DEFINITION")
+        self.assert_static_failure(
+            lambda c: c["secrets"]["user_password"].update({"file": "../outside/user-password"}),
+            "STATIC_SECRET_DEFINITION",
+        )
 
     def test_privilege_mutation(self):
         self.assert_static_failure(lambda c: c["services"]["keycloak-bootstrap"].update({"privileged": True}), "STATIC_HELPER_PRIVILEGED")

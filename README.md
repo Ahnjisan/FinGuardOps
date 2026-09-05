@@ -250,9 +250,9 @@ chain과 분리한다.
 사건 상태·담당자·종결·조사 메모 write는 검증된 USER JWT의 canonical lowercase UUID v4
 `sub`를 AuditLog actor와 InvestigationNote author로 기록합니다. 자동 사건 생성·거래 처리·
 Rule/AI orchestration·복구·one-shot writer는 기존 `SYSTEM/finguardops-backend`를 유지합니다.
-local/dev Authorization Server는 Keycloak으로 선정했고 Issue #235에서 Keycloak container·realm·
-client·protocol mapper와 SERVICE token·Backend 400/403 runtime을 구현했다. USER browser E2E와 production
-Authorization Server와 management mTLS·인증 proxy도 별도 후속 범위다. Frontend는 Authorization
+local/dev Authorization Server는 Keycloak으로 선정했고 Issue #239에서 Keycloak container·realm·
+client·protocol mapper, SERVICE token·Backend 경계와 USER Chromium E2E를 구현했다. production
+Authorization Server와 management mTLS·인증 proxy는 별도 후속 범위다. Frontend는 Authorization
 Code + PKCE 로그인·callback·local logout과 memory-only token 경계에 더해, 승인된 10개
 USER method·path에만 `Authorization: Bearer`를 전달하는 인증 API transport와 401·403 경계를
 구현했다. credential capability는 승인된 Backend USER endpoint가 아닌 destination을 스스로
@@ -468,9 +468,9 @@ Kafka
 * Frontend OIDC Authorization Code + PKCE 인증 경계 구현. `oidc-client-ts` 기반 redirect
   로그인·callback·local logout, memory-only access/ID token, sessionStorage에는 transient
   protocol transaction record만 보관, 최대 15분 hard session deadline, callback URL 조기 정리와
-  `/`·`/health` exact allowlist 복귀 경로. local/dev Keycloak runtime은 구현됐지만 USER browser
-  연동은 미구현이며 silent renew, refresh token 사용·반환 시 fail-closed adapter, remote logout과
-  권한 UI도 구현하지 않음
+  `/`·`/health` exact allowlist 복귀 경로. Issue #239에서 local/dev Keycloak USER browser 연동과
+  refresh token 반환 시 fail-closed E2E를 구현. silent renew와 refresh token 사용은 금지하며 remote
+  logout과 권한 UI는 구현하지 않음
 * Frontend 인증 Backend API transport와 401·403 경계 구현. endpoint key가 method·path를
   결정하는 승인 10개 USER endpoint allowlist, canonical UUID v4 path parameter 검증과 exact
   origin·pathname 재검증, raw token을 반환하지 않고 승인 `Request`에 Authorization을 부착하는
@@ -483,8 +483,8 @@ Kafka
 * ADR-011에서 local/dev Authorization Server를 Keycloak으로 선정하고 USER public client의
   Authorization Code + PKCE `S256`, 분리된 SERVICE confidential client의 Client Credentials,
   Backend access token exact claim, USER access/ID token의 동일 subject·role 집합과 일반 refresh
-  token fail-closed 계약을 문서로 확정. 이후 Issue #235에서 Keycloak runtime·realm·client·mapper와
-  SERVICE 연동을 구현했으며 USER browser 연동, role UI 및 refresh token 검사 adapter는 구현하지 않음
+  token fail-closed 계약을 문서로 확정. 이후 Issue #239에서 Keycloak runtime·realm·client·mapper,
+  SERVICE 연동, USER browser 연동과 refresh token 검사 adapter E2E를 구현. role UI는 구현하지 않음
 
 Backend Security 설정은 `FINGUARDOPS_SECURITY_ISSUER`,
 `FINGUARDOPS_SECURITY_JWK_SET_URI`, `FINGUARDOPS_SECURITY_ALLOWED_ORIGINS`와 JWK
@@ -509,11 +509,10 @@ rotation·sidecar 재생성 절차는
 [`Local JWT 인증 E2E runbook`](docs/09-deployment/local-jwt-auth-e2e-runbook.md)을 따릅니다.
 남은 보안 후속 순서는 다음과 같습니다.
 
-1. Frontend OIDC와 Spring Backend를 연결한 USER 로그인 E2E
-2. SERVICE Client Credentials 기반 실제 거래·행동 이벤트 접수 E2E
-3. Frontend role·authority UI 계약과 구현
-4. 거래·사건·메모·감사 typed API module과 query pagination
-5. Keycloak remote logout 계약과 구현
+1. SERVICE Client Credentials 기반 실제 거래·행동 이벤트 접수 E2E
+2. Frontend role·authority UI 계약과 구현
+3. 거래·사건·메모·감사 typed API module과 query pagination
+4. Keycloak remote logout 계약과 구현
 
 제품과 claim 계약은 Issue #233의
 [`ADR-011`](docs/07-decisions/ADR-011-keycloak-authorization-server-and-claim-contract.md)에서
@@ -528,13 +527,13 @@ audience source를 통제하고 실제 발급 token의 raw 표현과 normalized 
 
 동일 USER session의 access token과 ID token은 원문이 완전히 같은 canonical lowercase UUID v4
 `sub`와 중복 없는 동일한 FinGuardOps USER role 집합을 가져야 합니다. `roles` 배열 순서는
-의미가 없으며 후속 E2E는 정규화하지 않은 `sub` 원문과 순서 독립적인 role 집합을 비교합니다.
+의미가 없으며 Issue #239 E2E는 정규화하지 않은 `sub` 원문과 순서 독립적인 role 집합을 비교합니다.
 ID token의 `principal_type=USER`와 `roles`는 Frontend UI 표시용이며 Backend 401·403을 대체하지
 않습니다. `offline_access`와 offline token은 금지하지만 일반 온라인 refresh token은 별도로
-반환될 수 있다고 가정합니다. 후속 runtime adapter는 실제 response에 `refresh_token`이 있으면
+반환될 수 있다고 가정합니다. runtime adapter는 실제 response에 `refresh_token`이 있으면
 session을 게시하지 않고 user state와 유지 credential을 제거하며 refresh grant·silent renew를
-0회로 유지해야 합니다. Keycloak exact image tag·digest와 mapper 설정은 Issue #235에서 확정됐고,
-Frontend adapter와 USER E2E는 후속 Issue에서 구현·검증합니다.
+0회로 유지합니다. Keycloak exact image tag·digest와 mapper 설정, Frontend adapter와 USER E2E는
+Issue #239에서 구현·검증합니다.
 
 Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend OIDC도 Compose traffic fixture의
 일부가 아니다. 이 세 단계는 토큰 절약을 위한 인위적
@@ -731,8 +730,14 @@ Issue #235 OWNER 보정은 stock Keycloak이 HTTP와 HTTPS에 공통 listener ho
 `KC_HTTP_HOST=0.0.0.0`을 사용한다. Host에는 HTTPS 8443만 `127.0.0.1`로 publish하고 8082와 9000은
 publish하지 않는다. Backend와 승인 helper는 namespace loopback URI만 사용하지만, Backend가 참여한
 local/dev Docker network의 container는 operator 신뢰 경계에 포함된다. 별도 proxy/service/image는
-추가하지 않았고 persistent volume은 Keycloak용 `keycloak-data`만 추가했다. 실제 USER browser login,
-Frontend refresh-token fail-closed, role UI와 remote logout은 후속 범위다.
+추가하지 않았고 persistent volume은 Keycloak용 `keycloak-data`만 추가했다. 실제 USER browser login과
+Frontend refresh-token fail-closed는 Issue #239에서 구현했다. role UI와 remote logout은 후속 범위다.
 
 2026-09-05 correction 검증에서 fresh/existing-volume runtime, existing verifier 5회 연속 실행,
 host TLS·hostname·issuer·public JWKS discovery와 host 8082·9000 비공개 검사가 모두 통과했다.
+
+Issue #239 Phase 3은 `@playwright/test` 1.62.1과 Chromium-only runner를 추가했다. Windows runner는
+검증된 `CA:FALSE` localhost leaf를 현재 사용자 Root에만 한시적으로 신뢰시키고, 전용 Compose
+project와 임시 Playwright output, 자신이 추가한 exact certificate만 정리한다. 실제 password·code·
+token은 source·로그·DOM·storage·report·artifact에 기록하지 않는다. production Authorization Server,
+role UI와 remote logout은 여전히 미구현이다.

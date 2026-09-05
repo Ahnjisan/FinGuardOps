@@ -97,9 +97,11 @@ tsconfig.app.json` 결과에는 test 또는 test-support 파일이 포함되지 
 ## 인증 경계
 
 로그인은 표준 OIDC **Authorization Code + PKCE** top-level redirect다. popup, BFF,
-HttpOnly cookie session을 사용하지 않는다. PKCE·state·nonce 생성과 OIDC protocol 검증은
-직접 dependency인 `oidc-client-ts@3.5.0`이 담당하며, 애플리케이션은 token을 직접 decode하지
-않는다. public SPA client이므로 client secret이 없다.
+HttpOnly cookie session을 사용하지 않는다. PKCE·state 생성과 OIDC protocol 검증은 직접
+dependency인 `oidc-client-ts@3.5.0`이 담당한다. nonce는 애플리케이션이 매 로그인마다 Web
+Crypto로 32바이트를 생성해 padding 없는 base64url로 인코딩하고
+`signinRedirect({ state, nonce })`로 직접 전달한다. `extraQueryParams`는 사용하지 않으며,
+애플리케이션은 token을 직접 decode하지 않는다. public SPA client이므로 client secret이 없다.
 
 ### OIDC 설정
 
@@ -132,6 +134,10 @@ HttpOnly cookie session을 사용하지 않는다. PKCE·state·nonce 생성과 
   시각, authority, client ID, redirect URI, scope, request type 등 라이브러리가 요구하는
   비밀 token이 아닌 transaction 정보가 포함될 수 있다. 애플리케이션이 추가하는 데이터는
   `{ returnTo }` 하나뿐이며 `url_state`는 사용하지 않는다.
+- transaction `stateStore`는 `oidc-client-ts`의 `WebStorageStateStore`를 검증 wrapper로 감싼다.
+  wrapper는 `set`·`get`·`remove`에서 존재하는 transaction record의 nonce가 nonblank인지
+  검증하며, 누락·blank·파싱 불가 record는 고정 내부 오류로 거부한다. 존재하지 않는 record는
+  라이브러리가 unknown/replayed state로 거부하도록 그대로 전달한다.
 - transaction record는 로그인 시작 직전, callback 성공 직후, callback 실패 직후, 그리고
   라이브러리를 호출하지 않은 직접 진입 경로에서 정리한다. 정리는
   `finguardops.oidc.transaction.` prefix만 삭제하므로 다른 애플리케이션의 key와 memory user
@@ -240,9 +246,15 @@ UI에는 `subject`, token, claim, Provider 원문을 렌더링하지 않으며 �
 Issue #233에서 local/dev Authorization Server 제품으로 Keycloak을 선정했다. USER client는
 client secret이 없는 public client이며 Authorization Code Flow + PKCE `S256`만 허용한다.
 implicit flow와 password grant는 금지한다. redirect URI와 후속 post-logout redirect URI는
-환경별 exact allowlist를 사용하고 wildcard를 허용하지 않는다. 검증된 Keycloak 26.x exact
-image tag·digest, realm·client·client scope·protocol mapper와 Frontend 연동은 후속 구현
-범위이며 현재 실행 환경에는 구현되지 않았다.
+환경별 exact allowlist를 사용하고 wildcard를 허용하지 않는다. Issue #239에서 pinned stock
+Keycloak 26.7.3 realm·client·client scope·protocol mapper와 실제 Chromium 로그인을 연결했다.
+USER client의 default scope는 FinGuardOps audience·USER claim 두 개이고 optional scope는 stock
+`profile` 하나뿐이다. `profile`을 default로 옮기거나 다른 optional scope를 추가하지 않는다.
+realm import와 bootstrap은 pinned Keycloak 26.7.3의 stock `profile` scope 및 mapper 계약을
+재현한다. `openid`는 Frontend의 OIDC authorize 요청에만 포함하며 Keycloak client scope 객체로
+생성하거나 USER client에 연결하지 않는다.
+Local E2E USER에는 `.invalid` 합성 이메일과 이름을 desired state로 적용해 stock user-profile
+required action 없이 로그인하며, 실제 개인식별정보를 사용하지 않는다.
 
 Keycloak USER ID token에는 `principal_type=USER`와 같은 session의 Backend access token에
 공급한 것과 중복 없는 동일한 FinGuardOps USER role 집합을 `roles` 배열로 제공한다. 배열 순서는
@@ -260,16 +272,15 @@ profile의 `principal_type`과 `roles`만 navigation·button·action 노출에 �
 아직 구현되지 않았다.
 
 `offline_access` 요청과 offline token 사용은 금지한다. 일반 온라인 refresh token은 offline
-token과 별개의 credential이고 `offline_access` 없이도 반환될 수 있다고 가정한다. 후속
-Keycloak runtime의 Frontend adapter는 provider 설정만 신뢰하지 않고 실제 token response를
-검사해야 한다. `refresh_token`이 없으면 정상 callback을 성공시키고, 있으면 fail-closed로
+token과 별개의 credential이고 `offline_access` 없이도 반환될 수 있다고 가정한다. Frontend
+adapter는 provider 설정만 신뢰하지 않고 실제 token response를 검사한다. `refresh_token`이 없으면
+정상 callback을 성공시키고, 있으면 fail-closed로
 session을 게시하지 않은 채 OIDC user state를 제거한다. callback 이후 `User`, `AuthContext`,
 application state, OIDC user store, localStorage, sessionStorage 등 유지되는 저장 표면에 refresh
 token이 남아서는 안 된다. 검사 중 라이브러리 내부에 일시적으로 존재하는 값은 애플리케이션이
 보관하는 credential과 구분하되, 원문을 로그·오류·DOM·React state·관측 데이터에 노출하지 않고
-callback 종료 후 유지하지 않는다. 후속 E2E는 성공·거부 callback, 거부 후 유지 credential 0개,
-refresh grant 0회, silent renew 0회와 원문 노출 0회를 검증한다. 이 adapter와 E2E는 현재 구현이
-아니라 후속 runtime Issue 범위다.
+callback 종료 후 유지하지 않는다. Issue #239 Playwright E2E는 성공·거부 callback, 거부 후 session·
+Backend 요청 0회, refresh grant 0회, silent renew 0회와 원문 노출 0회를 검증한다.
 
 ## Health API 경계
 
@@ -521,14 +532,12 @@ timer와 단계 사이의 명시적 경과시간 검사가 이를 공유한다. 
 - 거래·사건·조사·판정 등 업무 화면과 업무 DTO·typed API module
 - 역할·권한 기반 navigation·button·route guard UI
 - `page`·`size`·`sort` query pagination
-- 선정된 Keycloak의 container·realm·client·client scope·protocol mapper와 실제 연동
-- 검증된 Keycloak 26.x exact image tag·digest 고정과 runtime 배포
-- remote end-session(RP-initiated logout), silent renew, refresh token 사용과 일반 refresh token
-  반환 시 fail-closed callback adapter·E2E
+- production Authorization Server와 production runtime 배포
+- remote end-session(RP-initiated logout), role·authority UI
+- silent renew와 refresh token 사용은 지원하지 않으며 도입하려면 별도 승인이 필요하다.
 - Local JWT fixture(Issue #225의 `infra/compose.local-jwt-e2e.yml`)는 로컬/수동 인증 E2E
-  검증용 컴포넌트이며, 브라우저에서 사용하는 OIDC Provider가 아니다. 프론트엔드는 아직 이
-  fixture나 Keycloak을 포함한 어떤 Authorization Server runtime과도 연동하지 않는다.
-  `VITE_OIDC_AUTHORITY`는 검증된 설정값일 뿐 실제 연동을 의미하지 않는다. Local JWT fixture와
+  검증용 컴포넌트이며, 브라우저에서 사용하는 OIDC Provider가 아니다. Frontend browser E2E는
+  stock Keycloak 26.7.3만 사용한다. Local JWT fixture와
   Keycloak은 같은 Backend issuer 설정에서 동시에 사용하지 않는다.
 
 ## 테스트
@@ -539,7 +548,7 @@ timer와 단계 사이의 명시적 경과시간 검사가 이를 공유한다. 
 remount의 신규 fetch·loading 중 중복 retry 방지, Router와 화면 상태(loading·success·error,
 명시적 재시도, 접근성 있는 role/name)를 검증한다.
 
-인증 경계는 실제 Authorization Server 없이 `AuthClient` port와 fake adapter로 검증한다.
+인증 경계 unit test는 실제 Authorization Server 없이 `AuthClient` port와 fake adapter로 검증한다.
 OIDC 설정 exact 값, memory user store와 prefix가 붙은 session transaction store, prefix 밖
 key 보존, transaction 정리 시점, callback URL 조기 정리와 fail-closed, exact key 기반
 callback parameter 판정, 복귀 경로 allowlist, StrictMode 아래 initialize·callback 1회 실행과
@@ -578,6 +587,15 @@ URL·body·query에 token이 없으며, 미인증·만료·부재 memory user에
 raw token accessor가 없고 JWT decode가 없으며 Web Storage에 token이 저장되지 않는 것도
 함께 확인한다.
 
+`npm run e2e:keycloak`은 Chromium 1 worker·retry 0·strict TLS로 실제 Keycloak 로그인과
+refresh-token, state, 저장 nonce 삭제·blank·불일치, ID token nonce 누락·불일치, PKCE,
+callback 재사용 반례를 각각 실행한다. 정상 경로는 authorize URL과 저장 transaction의 nonce가
+동일하고 256-bit base64url인지, authorize/transaction scope가 exact `openid profile`인지와 stock
+`profile`의 `preferred_username` claim이 실제 발급되는지도 확인한다. Windows에서는 repository root의
+`frontend/scripts/run-keycloak-e2e.ps1`이 검증된 localhost certificate의 현재 사용자 신뢰와
+전용 Compose project 수명주기를 함께 관리한다. trace·screenshot·video·HTML report는 만들지 않고
+임시 output은 종료 시 제거한다.
+
 lifecycle은 인증 준비 pending, fetch pending, body·JSON pending timeout이 각각 전체 5초로
 합산되는 것, 외부 abort와 이미 aborted signal, timeout 시 `AbortController` 호출,
 timer·listener 정리, late resolve·reject의 unhandled rejection 0을 검증한다. 401은 오류
@@ -603,8 +621,8 @@ local/dev stock Keycloak 26.7.3 runtime과 `finguardops-frontend` public client 
 authority는 `https://localhost:8443/realms/finguardops-local`이고 Authorization Code Flow와 PKCE
 S256만 허용한다. Local JWT fixture issuer는 Frontend OIDC authority가 아니다.
 
-이번 구현은 USER credential을 만들지 않으므로 실제 browser login/callback과 USER access/ID
-token E2E는 완료 범위가 아니다. production adapter의 refresh-token 반환 fail-closed, role 기반
-UI와 remote logout도 아직 미구현이다. Frontend는 access token을 직접 decode하지 않으며,
+Issue #239는 외부 USER password로 실제 browser login/callback과 USER access/ID token 계약,
+refresh-token 반환 fail-closed를 Chromium에서 검증한다. role 기반 UI와 remote logout은 아직
+미구현이다. Frontend production code는 access token을 직접 decode하지 않으며,
 검증된 ID token role은 UI 표시 정보일 뿐이다. 최종 접근 결정은 계속 Backend의 독립적인
 access-token 검증과 401/403 응답이다.

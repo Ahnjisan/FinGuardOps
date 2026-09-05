@@ -29,6 +29,39 @@ MANAGEMENT_BASE_URL = "http://127.0.0.1:9000"
 FIXTURE_ISSUER = "https://local-jwt.fixture.finguardops.invalid"
 FIXTURE_JWK = "http://127.0.0.1:8002/oauth2/jwks"
 AUDIENCE = "finguardops-backend-api"
+USER_DEFAULT_SCOPES = ["finguardops-backend-audience", "finguardops-user-claims"]
+USER_OPTIONAL_SCOPES = ["profile"]
+CUSTOM_CLIENT_SCOPES = {
+    "finguardops-backend-audience",
+    "finguardops-user-claims",
+    "finguardops-transaction-service-claims",
+    "finguardops-behavior-service-claims",
+}
+STOCK_PROFILE_MAPPER_CONTRACT = {
+    "family name": ("oidc-usermodel-property-mapper", "lastName", "family_name"),
+    "username": ("oidc-usermodel-property-mapper", "username", "preferred_username"),
+    "updated at": ("oidc-usermodel-attribute-mapper", "updatedAt", "updated_at"),
+    "given name": ("oidc-usermodel-property-mapper", "firstName", "given_name"),
+    "middle name": ("oidc-usermodel-attribute-mapper", "middleName", "middle_name"),
+    "gender": ("oidc-usermodel-attribute-mapper", "gender", "gender"),
+    "zoneinfo": ("oidc-usermodel-attribute-mapper", "zoneinfo", "zoneinfo"),
+    "nickname": ("oidc-usermodel-attribute-mapper", "nickname", "nickname"),
+    "profile": ("oidc-usermodel-attribute-mapper", "profile", "profile"),
+    "website": ("oidc-usermodel-attribute-mapper", "website", "website"),
+    "birthdate": ("oidc-usermodel-attribute-mapper", "birthdate", "birthdate"),
+    "picture": ("oidc-usermodel-attribute-mapper", "picture", "picture"),
+    "locale": ("oidc-usermodel-attribute-mapper", "locale", "locale"),
+}
+SERVICE_CLIENT_SCOPES = {
+    "finguardops-transaction-ingestor": [
+        "finguardops-backend-audience",
+        "finguardops-transaction-service-claims",
+    ],
+    "finguardops-behavior-ingestor": [
+        "finguardops-backend-audience",
+        "finguardops-behavior-service-claims",
+    ],
+}
 REALM = "finguardops-local"
 CERTIFICATE = Path("/run/secrets/keycloak_tls_certificate")
 TRANSACTION_SECRET = Path("/run/secrets/transaction_service_client_secret")
@@ -57,12 +90,25 @@ EXPECTED_SECRETS = {
         "keycloak_bootstrap_admin_secret",
         "transaction_service_client_secret",
         "behavior_service_client_secret",
+        "user_password",
     },
     "keycloak-verify": {
         "transaction_service_client_secret",
         "behavior_service_client_secret",
         "keycloak_tls_certificate",
     },
+}
+EXPECTED_SECRET_FILES = {
+    "keycloak_bootstrap_admin_secret": "infra/keycloak/.local/secrets/bootstrap-admin-client-secret",
+    "transaction_service_client_secret": "infra/keycloak/.local/secrets/transaction-service-client-secret",
+    "behavior_service_client_secret": "infra/keycloak/.local/secrets/behavior-service-client-secret",
+    "user_password": "infra/keycloak/.local/secrets/user-password",
+    "keycloak_tls_certificate": "infra/keycloak/.local/tls/localhost.crt",
+    "keycloak_tls_private_key": "infra/keycloak/.local/tls/localhost.key",
+}
+EXPECTED_SECRET_MODES = {
+    name: 292 if name == "keycloak_tls_certificate" else 256
+    for name in EXPECTED_SECRET_FILES
 }
 EXPECTED_KEYCLOAK_SERVICES = {
     "ai-service",
@@ -185,7 +231,8 @@ def validate_secret_mounts(service: dict[str, Any], expected: set[str]) -> None:
             fail("STATIC_SECRET_BOUNDARY")
         source = item.get("source")
         target = item.get("target")
-        if not isinstance(source, str) or target != source:
+        mode = item.get("mode")
+        if not isinstance(source, str) or target != source or mode != EXPECTED_SECRET_MODES.get(source):
             fail("STATIC_SECRET_BOUNDARY")
         found.append(source)
     if len(found) != len(set(found)) or set(found) != expected:
@@ -368,6 +415,91 @@ def validate_realm(realm: dict[str, Any]) -> None:
     role_names = [role.get("name") for role in realm.get("roles", {}).get("realm", [])]
     if len(role_names) != 8 or set(role_names) != ALL_ROLES:
         fail("STATIC_REALM_ROLES")
+    client_scopes = realm.get("clientScopes")
+    expected_client_scopes = CUSTOM_CLIENT_SCOPES | {"profile"}
+    if (
+        not isinstance(client_scopes, list)
+        or len(client_scopes) != len(expected_client_scopes)
+        or {scope.get("name") for scope in client_scopes if isinstance(scope, dict)}
+        != expected_client_scopes
+    ):
+        fail("STATIC_CLIENT_SCOPE_OBJECTS")
+    profile_scope = next(scope for scope in client_scopes if scope.get("name") == "profile")
+    if (
+        profile_scope.get("description") != "OpenID Connect built-in scope: profile"
+        or profile_scope.get("protocol") != "openid-connect"
+        or profile_scope.get("attributes")
+        != {
+            "include.in.token.scope": "true",
+            "display.on.consent.screen": "true",
+            "consent.screen.text": "${profileScopeConsentText}",
+        }
+    ):
+        fail("STATIC_STOCK_PROFILE_SCOPE")
+    profile_mappers = profile_scope.get("protocolMappers")
+    if not isinstance(profile_mappers, list) or len(profile_mappers) != 14:
+        fail("STATIC_STOCK_PROFILE_SCOPE")
+    mappers_by_name = {
+        mapper.get("name"): mapper for mapper in profile_mappers if isinstance(mapper, dict)
+    }
+    if set(mappers_by_name) != set(STOCK_PROFILE_MAPPER_CONTRACT) | {"full name"}:
+        fail("STATIC_STOCK_PROFILE_SCOPE")
+    full_name = mappers_by_name["full name"]
+    if (
+        full_name.get("protocol") != "openid-connect"
+        or full_name.get("protocolMapper") != "oidc-full-name-mapper"
+        or full_name.get("consentRequired") is not False
+        or full_name.get("config")
+        != {
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+        }
+    ):
+        fail("STATIC_STOCK_PROFILE_SCOPE")
+    for name, (mapper_type, user_attribute, claim_name) in STOCK_PROFILE_MAPPER_CONTRACT.items():
+        mapper = mappers_by_name[name]
+        if (
+            mapper.get("protocol") != "openid-connect"
+            or mapper.get("protocolMapper") != mapper_type
+            or mapper.get("consentRequired") is not False
+            or mapper.get("config")
+            != {
+                "userinfo.token.claim": "true",
+                "user.attribute": user_attribute,
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "claim.name": claim_name,
+                "jsonType.label": "String",
+            }
+        ):
+            fail("STATIC_STOCK_PROFILE_SCOPE")
+    user_claims_scope = next(
+        scope for scope in client_scopes if scope.get("name") == "finguardops-user-claims"
+    )
+    user_claim_mappers = user_claims_scope.get("protocolMappers")
+    if not isinstance(user_claim_mappers, list) or len(user_claim_mappers) != 3:
+        fail("STATIC_USER_SUBJECT_MAPPER")
+    user_claim_mappers_by_name = {
+        mapper.get("name"): mapper for mapper in user_claim_mappers if isinstance(mapper, dict)
+    }
+    if set(user_claim_mappers_by_name) != {
+        "finguardops-user-subject",
+        "finguardops-user-principal-type",
+        "finguardops-user-roles",
+    }:
+        fail("STATIC_USER_SUBJECT_MAPPER")
+    if user_claim_mappers_by_name["finguardops-user-subject"] != {
+        "name": "finguardops-user-subject",
+        "protocol": "openid-connect",
+        "protocolMapper": "oidc-sub-mapper",
+        "consentRequired": False,
+        "config": {
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+        },
+    }:
+        fail("STATIC_USER_SUBJECT_MAPPER")
     clients = {client.get("clientId"): client for client in realm.get("clients", [])}
     if set(clients) != {
         "finguardops-frontend",
@@ -376,6 +508,14 @@ def validate_realm(realm: dict[str, Any]) -> None:
     }:
         fail("STATIC_REALM_CLIENTS")
     frontend = clients["finguardops-frontend"]
+    frontend_attributes = frontend.get("attributes")
+    expected_frontend_attributes = {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:5173/",
+        "oauth2.device.authorization.grant.enabled": "false",
+        "oidc.ciba.grant.enabled": "false",
+        "use.refresh.tokens": "false",
+    }
     if (
         frontend.get("publicClient") is not True
         or frontend.get("standardFlowEnabled") is not True
@@ -385,10 +525,10 @@ def validate_realm(realm: dict[str, Any]) -> None:
         or frontend.get("fullScopeAllowed") is not False
         or frontend.get("redirectUris") != ["http://localhost:5173/auth/callback"]
         or frontend.get("webOrigins") != ["http://localhost:5173"]
-        or frontend.get("attributes", {}).get("pkce.code.challenge.method") != "S256"
-        or frontend.get("attributes", {}).get("post.logout.redirect.uris") != "http://localhost:5173/"
-        or frontend.get("attributes", {}).get("oauth2.device.authorization.grant.enabled") != "false"
-        or frontend.get("attributes", {}).get("oidc.ciba.grant.enabled") != "false"
+        or frontend.get("defaultClientScopes") != USER_DEFAULT_SCOPES
+        or frontend.get("optionalClientScopes") != USER_OPTIONAL_SCOPES
+        or frontend_attributes != expected_frontend_attributes
+        or "secret" in frontend
     ):
         fail("STATIC_USER_CLIENT_CONTRACT")
     for client_id in ("finguardops-transaction-ingestor", "finguardops-behavior-ingestor"):
@@ -400,14 +540,45 @@ def validate_realm(realm: dict[str, Any]) -> None:
             or client.get("implicitFlowEnabled") is not False
             or client.get("directAccessGrantsEnabled") is not False
             or client.get("fullScopeAllowed") is not False
+            or client.get("defaultClientScopes") != SERVICE_CLIENT_SCOPES[client_id]
+            or client.get("optionalClientScopes") != []
             or client.get("attributes", {}).get("oauth2.device.authorization.grant.enabled") != "false"
             or client.get("attributes", {}).get("oidc.ciba.grant.enabled") != "false"
+            or "use.refresh.tokens" in client.get("attributes", {})
         ):
             fail("STATIC_SERVICE_CLIENT_CONTRACT")
     for client in clients.values():
         scopes = client.get("defaultClientScopes", []) + client.get("optionalClientScopes", [])
         if "offline_access" in scopes or "offline" in scopes or "roles" in scopes:
             fail("STATIC_FORBIDDEN_SCOPE")
+    users = realm.get("users")
+    if not isinstance(users, list) or len(users) != 1:
+        fail("STATIC_USER_CONTRACT")
+    user = users[0]
+    if (
+        not isinstance(user, dict)
+        or user.get("id") != "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a"
+        or user.get("username") != "local-fds-analyst"
+        or user.get("firstName") != "Local"
+        or user.get("lastName") != "Analyst"
+        or user.get("email") != "local-fds-analyst@finguardops.invalid"
+        or user.get("enabled") is not True
+        or user.get("emailVerified") is not False
+        or user.get("requiredActions") != []
+        or user.get("credentials") != []
+        or user.get("realmRoles") != ["FDS_ANALYST"]
+    ):
+        fail("STATIC_USER_CONTRACT")
+
+
+def validate_secret_definitions(config: dict[str, Any]) -> None:
+    definitions = config.get("secrets")
+    if not isinstance(definitions, dict) or set(definitions) != set(EXPECTED_SECRET_FILES):
+        fail("STATIC_SECRET_DEFINITION")
+    for name, suffix in EXPECTED_SECRET_FILES.items():
+        definition = definitions[name]
+        if not isinstance(definition, dict) or not source_matches(definition.get("file"), suffix, "bind"):
+            fail("STATIC_SECRET_DEFINITION")
 
 
 def validate_static(config: dict[str, Any], realm: dict[str, Any] | None = None) -> None:
@@ -490,6 +661,7 @@ def validate_static(config: dict[str, Any], realm: dict[str, Any] | None = None)
         fail("STATIC_PUBLIC_NETWORK")
     if set(config.get("volumes", {})) != EXPECTED_MERGED_NAMED_VOLUMES:
         fail("STATIC_NAMED_VOLUME_SET")
+    validate_secret_definitions(config)
     if named_volume_sources(keycloak) != {"keycloak-data"}:
         fail("STATIC_KEYCLOAK_NAMED_VOLUME")
     bootstrap = services["keycloak-bootstrap"]
@@ -673,6 +845,8 @@ def token_for(client_id: str, secret: str) -> str:
         data=data,
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
+    if "refresh_token" in response:
+        fail("SERVICE_REFRESH_TOKEN_PRESENT")
     token = response.get("access_token")
     if not isinstance(token, str) or not token:
         fail("TOKEN_RESPONSE_INVALID")

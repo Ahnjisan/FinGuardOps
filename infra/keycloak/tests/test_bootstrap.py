@@ -147,6 +147,108 @@ class BootstrapTests(unittest.TestCase):
         self.assertIn("finguardops-behavior-service-claims", behavior["defaultClientScopes"])
         self.assertNotIn("finguardops-user-claims", behavior["defaultClientScopes"])
 
+    def test_user_client_has_exact_stock_profile_optional_scope_and_no_openid_scope(self):
+        frontend = bootstrap.client_representation("finguardops-frontend")
+        self.assertEqual(frontend["attributes"]["use.refresh.tokens"], "false")
+        self.assertTrue(frontend["publicClient"])
+        self.assertFalse(frontend["directAccessGrantsEnabled"])
+        self.assertFalse(frontend["implicitFlowEnabled"])
+        self.assertEqual(frontend["defaultClientScopes"], list(bootstrap.USER_DEFAULT_SCOPES))
+        self.assertEqual(frontend["optionalClientScopes"], ["profile"])
+        self.assertNotIn("profile", frontend["defaultClientScopes"])
+        self.assertNotIn("openid", frontend["defaultClientScopes"] + frontend["optionalClientScopes"])
+        self.assertEqual(bootstrap.SCOPES["profile"], bootstrap.stock_profile_mappers())
+        self.assertNotIn("openid", bootstrap.SCOPES)
+        self.assertNotIn("secret", frontend)
+
+        subject = bootstrap.user_subject_mapper()
+        self.assertEqual(subject["protocolMapper"], "oidc-sub-mapper")
+        self.assertEqual(
+            subject["config"],
+            {"access.token.claim": "true", "introspection.token.claim": "true"},
+        )
+        self.assertEqual(bootstrap.SCOPES["finguardops-user-claims"][0], subject)
+
+    def test_stock_profile_scope_has_the_pinned_keycloak_mapper_contract(self):
+        mappers = bootstrap.stock_profile_mappers()
+        self.assertEqual(len(mappers), 14)
+        self.assertEqual(
+            {mapper["name"] for mapper in mappers},
+            {
+                "family name",
+                "username",
+                "updated at",
+                "full name",
+                "given name",
+                "middle name",
+                "gender",
+                "zoneinfo",
+                "nickname",
+                "profile",
+                "website",
+                "birthdate",
+                "picture",
+                "locale",
+            },
+        )
+        username = next(mapper for mapper in mappers if mapper["name"] == "username")
+        self.assertEqual(username["protocolMapper"], "oidc-usermodel-property-mapper")
+        self.assertEqual(username["config"]["claim.name"], "preferred_username")
+        self.assertEqual(bootstrap.SCOPE_ROLES["profile"], ())
+
+    def test_stock_profile_scope_reconcile_uses_pinned_builtin_attributes(self):
+        existing = {"id": "profile-id", "name": "profile"}
+        mappers = bootstrap.stock_profile_mappers()
+        admin = RecordingAdmin(
+            [
+                [existing],
+                None,
+                [],
+                *([None] * len(mappers)),
+                [{"id": str(index), "name": mapper["name"]} for index, mapper in enumerate(mappers)],
+            ]
+        )
+
+        self.assertEqual(bootstrap.Reconciler(admin).reconcile_scope("profile", mappers), "profile-id")
+
+        update = admin.calls[1][2]
+        self.assertEqual(update["description"], "OpenID Connect built-in scope: profile")
+        self.assertEqual(
+            update["attributes"],
+            {
+                "include.in.token.scope": "true",
+                "display.on.consent.screen": "true",
+                "consent.screen.text": "${profileScopeConsentText}",
+            },
+        )
+
+    def test_service_client_scope_audience_role_and_refresh_contract_is_unchanged(self):
+        expected = {
+            "finguardops-transaction-ingestor": (
+                "finguardops-transaction-service-claims",
+                "TRANSACTION_INGESTOR",
+            ),
+            "finguardops-behavior-ingestor": (
+                "finguardops-behavior-service-claims",
+                "BEHAVIOR_INGESTOR",
+            ),
+        }
+        for client_id, (claim_scope, role) in expected.items():
+            with self.subTest(client_id=client_id):
+                client = bootstrap.client_representation(client_id, "x" * 32)
+                self.assertEqual(
+                    client["defaultClientScopes"],
+                    ["finguardops-backend-audience", claim_scope],
+                )
+                self.assertEqual(client["optionalClientScopes"], [])
+                self.assertEqual(bootstrap.SERVICE_CLIENTS[client_id]["role"], role)
+                self.assertEqual(bootstrap.SCOPE_ROLES[claim_scope], (role,))
+                self.assertEqual(
+                    bootstrap.SCOPES["finguardops-backend-audience"],
+                    [bootstrap.audience_mapper()],
+                )
+                self.assertNotIn("use.refresh.tokens", client["attributes"])
+
     def test_service_account_role_reconcile_removes_user_and_internal_roles(self):
         current = [
             {"id": "default-id", "name": "default-roles-finguardops-local"},
@@ -170,25 +272,100 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(create_payload["secret"], secret)
         self.assertEqual(update_payload["secret"], secret)
 
-    def test_user_reconcile_removes_all_credentials(self):
+    def test_user_reconcile_exactly_resets_one_non_temporary_password(self):
         user_id = "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a"
+        password = "User_Password-012345678901234567890123456789"
         admin = RecordingAdmin(
             [
                 [{"id": user_id, "username": bootstrap.USER_NAME}],
                 None,
-                [{"id": "credential-id"}],
+                [{"id": "old-password", "type": "password"}, {"id": "otp-id", "type": "otp"}],
                 None,
-                [],
+                None,
                 None,
                 [{"id": "role-id", "name": bootstrap.USER_ROLE}],
-                [],
+                [{"id": "role-id", "name": bootstrap.USER_ROLE}],
+                [{"id": "new-password", "type": "password"}],
             ]
         )
         reconciler = bootstrap.Reconciler(admin)
         with mock.patch.object(reconciler, "exact_roles", return_value={bootstrap.USER_ROLE: {"id": "role-id", "name": bootstrap.USER_ROLE}}):
-            self.assertEqual(reconciler.reconcile_user(), user_id)
+            self.assertEqual(reconciler.reconcile_user(password), user_id)
+        user_update = next(call for call in admin.calls if call[0] == "PUT" and call[1].endswith("/users/" + user_id))
+        self.assertEqual(user_update[2]["firstName"], "Local")
+        self.assertEqual(user_update[2]["lastName"], "Analyst")
+        self.assertEqual(user_update[2]["email"], "local-fds-analyst@finguardops.invalid")
+        self.assertEqual(user_update[2]["requiredActions"], [])
         delete_paths = [call[1] for call in admin.calls if call[0] == "DELETE"]
-        self.assertTrue(any(path.endswith("/credentials/credential-id") for path in delete_paths))
+        self.assertTrue(any(path.endswith("/credentials/old-password") for path in delete_paths))
+        self.assertTrue(any(path.endswith("/credentials/otp-id") for path in delete_paths))
+        reset = next(call for call in admin.calls if call[1].endswith("/reset-password"))
+        self.assertEqual(
+            reset[2],
+            {"type": "password", "value": password, "temporary": False},
+        )
+
+    def test_user_reconcile_rejects_non_exact_password_metadata(self):
+        user_id = "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a"
+        for metadata in (
+            [],
+            [{"id": "password-id", "type": "otp"}],
+            [{"id": "a", "type": "password"}, {"id": "b", "type": "password"}],
+        ):
+            admin = RecordingAdmin(
+                [
+                    [{"id": user_id, "username": bootstrap.USER_NAME}],
+                    None,
+                    [],
+                    None,
+                    [{"id": "role-id", "name": bootstrap.USER_ROLE}],
+                    [{"id": "role-id", "name": bootstrap.USER_ROLE}],
+                    metadata,
+                ]
+            )
+            reconciler = bootstrap.Reconciler(admin)
+            with self.subTest(metadata=metadata), mock.patch.object(
+                reconciler,
+                "exact_roles",
+                return_value={bootstrap.USER_ROLE: {"id": "role-id", "name": bootstrap.USER_ROLE}},
+            ), self.assertRaisesRegex(bootstrap.ReconcileError, "USER_PASSWORD_CREDENTIAL_INVALID"):
+                reconciler.reconcile_user("x" * 64)
+
+    def test_main_reads_user_password_once_and_does_not_report_credentials(self):
+        credentials = {
+            bootstrap.ADMIN_SECRET: "a" * 64,
+            bootstrap.SERVICE_CLIENTS["finguardops-transaction-ingestor"]["secret"]: "b" * 64,
+            bootstrap.SERVICE_CLIENTS["finguardops-behavior-ingestor"]["secret"]: "c" * 64,
+            bootstrap.USER_PASSWORD: "d" * 64,
+        }
+        admin = mock.Mock()
+        reconciler = mock.Mock()
+        captured = []
+        reconciler.run.side_effect = lambda secrets, password: captured.append((dict(secrets), password))
+        stdout = io.StringIO()
+        with mock.patch.dict(os.environ, {"KEYCLOAK_ADMIN_BASE_URL": bootstrap.BASE_URL}), mock.patch.object(
+            bootstrap, "read_secret", side_effect=lambda path: credentials[path]
+        ) as reader, mock.patch.object(bootstrap, "AdminClient", return_value=admin), mock.patch.object(
+            bootstrap, "Reconciler", return_value=reconciler
+        ), contextlib.redirect_stdout(stdout):
+            self.assertEqual(bootstrap.main(["reconcile"]), 0)
+        self.assertEqual(reader.call_count, 4)
+        admin.authenticate.assert_called_once_with("a" * 64)
+        self.assertEqual(
+            captured,
+            [
+                (
+                    {
+                        "finguardops-transaction-ingestor": "b" * 64,
+                        "finguardops-behavior-ingestor": "c" * 64,
+                    },
+                    "d" * 64,
+                )
+            ],
+        )
+        rendered = stdout.getvalue()
+        for value in credentials.values():
+            self.assertNotIn(value, rendered)
 
     def test_service_token_subject_matches_admin_service_account_id(self):
         subject = "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a"

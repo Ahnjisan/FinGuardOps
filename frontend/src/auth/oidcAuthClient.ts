@@ -1,5 +1,5 @@
 import { InMemoryWebStorage, UserManager, WebStorageStateStore } from "oidc-client-ts";
-import type { UserManagerSettings } from "oidc-client-ts";
+import type { StateStore, UserManagerSettings } from "oidc-client-ts";
 import { findApprovedBackendRequest } from "../api/backendEndpoints";
 import { getAuthEnv, getEnv, type AuthEnv } from "../config/env";
 import type {
@@ -24,17 +24,27 @@ import {
  * this is the whole session rather than a refresh interval.
  */
 export const SESSION_HARD_DEADLINE_MS = 15 * 60 * 1000;
+const LOGIN_NONCE_BYTES = 32;
+const TRANSACTION_STATE_REJECTED = "OIDC transaction state rejected.";
 
 /** Minimal structural view of the library, so tests can drive the adapter. */
 export interface OidcUserLike {
   readonly profile: { readonly sub: string; readonly name?: string };
   readonly access_token?: string;
+  /**
+   * Typed `unknown` rather than the library's `string`, because the only
+   * question this adapter is allowed to ask is whether anything is there at
+   * all. A provider that returns `null`, a number or an object must reach the
+   * same fail-closed answer as one that returns a token, and a `string` here
+   * would leave exactly those runtime shapes with no declared case to refuse.
+   */
+  readonly refresh_token?: unknown;
   readonly expires_at?: number;
   readonly state?: unknown;
 }
 
 export interface UserManagerLike {
-  signinRedirect(args: { state: unknown }): Promise<void>;
+  signinRedirect(args: { state: unknown; nonce: string }): Promise<void>;
   signinRedirectCallback(url: string): Promise<OidcUserLike>;
   removeUser(): Promise<void>;
   /**
@@ -46,6 +56,64 @@ export interface UserManagerLike {
   readonly events: {
     addAccessTokenExpired(callback: () => void): () => void;
   };
+}
+
+function isNonceBearingTransaction(value: string): boolean {
+  try {
+    const transaction: unknown = JSON.parse(value);
+    if (typeof transaction !== "object" || transaction === null || !("nonce" in transaction)) {
+      return false;
+    }
+    const nonce = (transaction as { nonce?: unknown }).nonce;
+    return typeof nonce === "string" && nonce.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function assertNonceBearingTransaction(value: string | null): void {
+  if (value !== null && !isNonceBearingTransaction(value)) {
+    throw new Error(TRANSACTION_STATE_REJECTED);
+  }
+}
+
+/**
+ * Enforces the nonce invariant at every oidc-client-ts transaction-store
+ * boundary. Missing records remain missing so the library can report an
+ * unknown/replayed state, but every record that exists must carry a nonblank
+ * nonce before it can be written, read, or returned from one-time removal.
+ */
+export function nonceValidatingStateStore(store: StateStore): StateStore {
+  return {
+    async set(key: string, value: string): Promise<void> {
+      assertNonceBearingTransaction(value);
+      await store.set(key, value);
+    },
+    async get(key: string): Promise<string | null> {
+      const value = await store.get(key);
+      assertNonceBearingTransaction(value);
+      return value;
+    },
+    async remove(key: string): Promise<string | null> {
+      const value = await store.remove(key);
+      assertNonceBearingTransaction(value);
+      return value;
+    },
+    getAllKeys(): Promise<string[]> {
+      return store.getAllKeys();
+    },
+  };
+}
+
+/** Generates a fresh 256-bit nonce without a fallback PRNG. */
+export function generateLoginNonce(): string {
+  const bytes = new Uint8Array(LOGIN_NONCE_BYTES);
+  globalThis.crypto.getRandomValues(bytes);
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
 }
 
 /**
@@ -118,10 +186,12 @@ export function createOidcSettings(
       prefix: OIDC_USER_STORE_PREFIX,
     }),
     // Only the transient protocol transaction record survives the redirect.
-    stateStore: new WebStorageStateStore({
-      store: transactionStorage,
-      prefix: OIDC_TRANSACTION_STORE_PREFIX,
-    }),
+    stateStore: nonceValidatingStateStore(
+      new WebStorageStateStore({
+        store: transactionStorage,
+        prefix: OIDC_TRANSACTION_STORE_PREFIX,
+      }),
+    ),
   };
 }
 
@@ -151,6 +221,54 @@ const RAW_ACCESS_TOKEN = /^[A-Za-z0-9\-._~+/]+=*$/;
  */
 function isUsableAccessToken(accessToken: unknown): accessToken is string {
   return typeof accessToken === "string" && RAW_ACCESS_TOKEN.test(accessToken);
+}
+
+/**
+ * Whether the user the protocol step produced carries a refresh token.
+ *
+ * This is a public browser client with nowhere to keep a long-lived
+ * credential: `scope` omits `offline_access` and `automaticSilentRenew` is off,
+ * so a conforming Authorization Server never issues one. One arriving anyway
+ * means the response is not the grant this frontend was built against, and the
+ * sign-in is abandoned rather than quietly completed on it.
+ *
+ * Absence is the only acceptable answer, and absence is spelled `undefined`.
+ * The empty string, a whitespace-only string, `null` and every runtime
+ * non-string are all "present". The value is never bound to a name, trimmed,
+ * normalized, matched against a pattern, interpolated or copied: the single
+ * `!== undefined` is the whole test, so no expression in this module ever
+ * holds the credential. A property whose getter throws is treated as present
+ * too, because "cannot tell" is not "absent".
+ */
+function carriesRefreshToken(user: OidcUserLike): boolean {
+  try {
+    return user.refresh_token !== undefined;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Drops a user that protocol validation accepted but this adapter refuses to
+ * publish.
+ *
+ * Both steps run exactly once and each owns its failure: a rejecting
+ * `removeUser()` must not skip the transaction sweep, and neither failure may
+ * become the caller's error or turn the refusal back into a sign-in. Nothing
+ * was published, so there is no session, deadline or subscriber to unwind -
+ * only the library's own local state to discard.
+ */
+async function discardRejectedUser(runtime: AuthRuntime): Promise<void> {
+  try {
+    await runtime.userManager.removeUser();
+  } catch {
+    // Nothing was published, so there is nothing further to surface.
+  }
+  try {
+    clearAuthTransactionState(runtime.storage);
+  } catch {
+    // Nothing was published, so there is nothing further to surface.
+  }
 }
 
 function toAuthSession(user: OidcUserLike): AuthSession {
@@ -391,7 +509,8 @@ export function createOidcAuthClient(
         throw new AuthSignInError();
       }
       try {
-        await current.userManager.signinRedirect({ state: { returnTo } });
+        const nonce = generateLoginNonce();
+        await current.userManager.signinRedirect({ state: { returnTo }, nonce });
       } catch {
         throw new AuthSignInError();
       }
@@ -425,9 +544,20 @@ export function createOidcAuthClient(
         throw new AuthCallbackError();
       }
 
-      // Protocol validation passed, but the session is published only once the
-      // one-time transaction record is actually gone. If it cannot be removed
-      // the sign-in is abandoned rather than completed on replayable state.
+      // Protocol validation passed; the credential shape has not been judged
+      // yet. This runs on the user as returned, before `toAuthSession`, before
+      // `startSession` and therefore before any subscriber, React state or
+      // Backend request can observe a session - a user-loaded event raised
+      // inside the call above changes nothing, because publication happens
+      // only at the end of this method.
+      if (carriesRefreshToken(user)) {
+        await discardRejectedUser(current);
+        throw new AuthCallbackError();
+      }
+
+      // The session is published only once the one-time transaction record is
+      // actually gone. If it cannot be removed the sign-in is abandoned rather
+      // than completed on replayable state.
       try {
         clearAuthTransactionState(current.storage);
       } catch {
