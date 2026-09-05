@@ -1,4 +1,12 @@
 services:
+  ai-service:
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --access-log
+
   backend:
     environment:
       FINGUARDOPS_SECURITY_ISSUER: https://localhost:8443/realms/finguardops-local
@@ -138,6 +146,9 @@ services:
     depends_on:
       keycloak-bootstrap:
         condition: service_completed_successfully
+        restart: true
+      external-risk-mock:
+        condition: service_healthy
         restart: true
     user: "10001:10001"
     read_only: true

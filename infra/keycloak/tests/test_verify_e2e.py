@@ -2,6 +2,7 @@ import base64
 import contextlib
 import copy
 import io
+import importlib.util
 import json
 import re
 import shutil
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 import urllib.error
 from pathlib import Path
@@ -82,7 +84,10 @@ def valid_config():
     verifier["entrypoint"] = ["python", "-B", "/opt/finguardops/verify_e2e.py"]
     verifier["command"] = ["runtime"]
     verifier["volumes"] = [{"type": "bind", "source": "infra/keycloak/verify_e2e.py", "target": "/opt/finguardops/verify_e2e.py", "read_only": True}]
-    verifier["depends_on"] = {"keycloak-bootstrap": {"condition": "service_completed_successfully"}}
+    verifier["depends_on"] = {
+        "keycloak-bootstrap": {"condition": "service_completed_successfully"},
+        "external-risk-mock": {"condition": "service_healthy"},
+    }
     verifier["environment"] = {
         "KEYCLOAK_INTERNAL_BASE_URL": verify_e2e.INTERNAL_BASE_URL,
         "KEYCLOAK_MANAGEMENT_BASE_URL": verify_e2e.MANAGEMENT_BASE_URL,
@@ -100,6 +105,9 @@ def valid_config():
     }
     for name in verify_e2e.EXPECTED_KEYCLOAK_SERVICES - set(services):
         services[name] = {}
+    services["ai-service"]["command"] = list(
+        verify_e2e.EXPECTED_AI_SERVICE_COMMAND
+    )
     return {
         "services": services,
         "networks": {"application": {"internal": True}, "observability": {"internal": True}, "prometheus-ui": {}},
@@ -135,6 +143,41 @@ def token(payload_overrides=None, header_overrides=None):
     return encode(header) + "." + encode(payload) + ".signature"
 
 
+def valid_plan():
+    return {
+        "transactionId": "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a",
+        "passwordEventId": "e54cbf7e-d857-4ca0-bff3-8d4321b7722a",
+        "transferLimitEventId": "9334da6a-1a03-44fd-a71d-f59a44a94225",
+        "idempotencyKey": "kc241-" + "a" * 32,
+        "duplicateIdempotencyKey": "kc241-" + "b" * 32,
+        "customerRef": "kc241-customer-123456789abc",
+        "senderRef": "kc241-sender-123456789abc",
+        "recipientRef": "kc241-recipient-123456789abc",
+        "passwordOccurredAt": "2026-09-05T01:00:03Z",
+        "transferLimitOccurredAt": "2026-09-05T01:01:03Z",
+        "transactionOccurredAt": "2026-09-05T01:02:03Z",
+    }
+
+
+def snapshot_fixture(rows_by_table=None):
+    rows_by_table = rows_by_table or {}
+    return {
+        table: verify_e2e.table_snapshot(table, tuple(rows_by_table.get(table, ())))
+        for table in verify_e2e.BUSINESS_TABLES
+    }
+
+
+def snapshot_output(rows_by_table=None):
+    rows_by_table = rows_by_table or {}
+    lines = []
+    for table in verify_e2e.BUSINESS_TABLES:
+        name = table.encode("ascii")
+        lines.append(verify_e2e.SNAPSHOT_BEGIN_PREFIX + name)
+        lines.extend(rows_by_table.get(table, ()))
+        lines.append(verify_e2e.SNAPSHOT_END_PREFIX + name)
+    return b"\n".join(lines) + b"\n"
+
+
 class VerifyTests(unittest.TestCase):
     def assert_static_failure(self, mutate, code):
         config = valid_config()
@@ -144,6 +187,27 @@ class VerifyTests(unittest.TestCase):
 
     def test_static_valid_configuration(self):
         verify_e2e.validate_static(valid_config(), valid_realm())
+
+    def test_rule_v2_access_log_must_be_explicitly_enabled(self):
+        for command in (
+            ["--host", "0.0.0.0", "--port", "8000"],
+            ["--host", "0.0.0.0", "--port", "8000", "--no-access-log"],
+            ["--access-log", "--host", "0.0.0.0", "--port", "8000"],
+        ):
+            with self.subTest(command=command):
+                self.assert_static_failure(
+                    lambda config, value=command: config["services"]["ai-service"].update(
+                        {"command": value}
+                    ),
+                    "STATIC_RULE_ACCESS_LOG",
+                )
+
+    def test_compose_json_octal_secret_modes_are_valid(self):
+        config = valid_config()
+        for service_name in verify_e2e.EXPECTED_SECRETS:
+            for secret in config["services"][service_name]["secrets"]:
+                secret["mode"] = "0" + format(secret["mode"], "o")
+        verify_e2e.validate_static(config, valid_realm())
 
     def test_fixture_and_keycloak_together_rejected(self):
         self.assert_static_failure(lambda c: c["services"].update({"local-jwt-fixture": {}}), "STATIC_MULTIPLE_ISSUERS")
@@ -197,6 +261,12 @@ class VerifyTests(unittest.TestCase):
 
     def test_backend_keycloak_dependency_rejected(self):
         self.assert_static_failure(lambda c: c["services"]["backend"].update({"depends_on": {"keycloak": {"condition": "service_healthy"}}}), "STATIC_BACKEND_DEPENDENCY")
+
+    def test_verifier_requires_external_risk_fixture(self):
+        self.assert_static_failure(
+            lambda c: c["services"]["keycloak-verify"]["depends_on"].pop("external-risk-mock"),
+            "STATIC_DEPENDENCY",
+        )
 
     def test_realm_disabled_rejected(self):
         realm = valid_realm()
@@ -560,6 +630,348 @@ class VerifyTests(unittest.TestCase):
                 verify_e2e.http_json("http://example.invalid", expected=(200,))
         self.assertNotIn("NeverPrintToken", str(raised.exception))
 
+    def test_ingestion_plan_allowlist_and_validation(self):
+        self.assertEqual(verify_e2e.validate_plan(valid_plan()), valid_plan())
+        mutations = (
+            lambda plan: plan.update({"extra": "value"}),
+            lambda plan: plan.update({"transactionId": str(__import__("uuid").uuid1())}),
+            lambda plan: plan.update({"idempotencyKey": "unsafe key"}),
+            lambda plan: plan.update({"customerRef": "actual-customer"}),
+            lambda plan: plan.update({"transactionOccurredAt": "not-an-instant"}),
+            lambda plan: plan.update(
+                {"transferLimitOccurredAt": plan["passwordOccurredAt"]}
+            ),
+        )
+        for mutate in mutations:
+            plan = valid_plan()
+            mutate(plan)
+            with self.subTest(mutate=mutate), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "INGESTION_PLAN_INVALID"
+            ):
+                verify_e2e.validate_plan(plan)
+
+    def test_metric_totals_sum_only_exact_counter_series(self):
+        scrape = """# HELP ignored ignored
+finguardops_external_risk_outcomes_total{result=\"matched\"} 1.0
+finguardops_external_risk_outcomes_total{result=\"unmatched\"} 2
+finguardops_rule_analysis_outcomes_total{result=\"completed\"} 1.0
+finguardops_rule_analysis_outcomes_created 99
+"""
+        with mock.patch.object(verify_e2e, "http_text", return_value=scrape):
+            self.assertEqual(verify_e2e.metric_totals(), (3.0, 1.0))
+
+    def test_dependency_hits_count_only_fixed_marker_and_exact_rule_v2_access_line(self):
+        external = "\n".join(
+            (
+                "FINGUARDOPS_EXTERNAL_RISK_LOOKUP_RECEIVED",
+                "prefix FINGUARDOPS_EXTERNAL_RISK_LOOKUP_RECEIVED",
+                "FINGUARDOPS_EXTERNAL_RISK_LOOKUP_RECEIVED suffix",
+            )
+        )
+        rule = "\n".join(
+            (
+                'INFO:     172.20.0.4:48100 - "POST /api/v2/rule-analysis HTTP/1.1" 200 OK',
+                'INFO:     172.20.0.4:48101 - "POST /api/v1/rules/analyze HTTP/1.1" 200 OK',
+                'INFO:     172.20.0.4:48102 - "POST /api/v2/rule-analysis HTTP/1.1" 422 Unprocessable Entity',
+                'prefix INFO:     172.20.0.4:48103 - "POST /api/v2/rule-analysis HTTP/1.1" 200 OK',
+            )
+        )
+        with mock.patch.object(
+            verify_e2e, "service_logs", side_effect=[external, rule]
+        ):
+            self.assertEqual(verify_e2e.dependency_hit_counts(object()), (1, 1))
+
+    def test_external_risk_marker_is_fixed_once_before_body_parsing(self):
+        fixture_path = Path(__file__).resolve().parents[2] / "external-risk-mock" / "app.py"
+        spec = importlib.util.spec_from_file_location("external_risk_mock_fixture", fixture_path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        fixture = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixture)
+        handler = object.__new__(fixture.Handler)
+        handler.path = fixture.LOOKUP_PATH
+        events = []
+        handler._request_json = mock.Mock(side_effect=lambda: events.append("parse") or None)
+        handler._json = mock.Mock()
+        with mock.patch(
+            "builtins.print",
+            side_effect=lambda *args, **kwargs: events.append((args, kwargs)),
+        ):
+            handler.do_POST()
+        self.assertEqual(events[0], ((fixture.LOOKUP_RECEIVED_MARKER,), {"flush": True}))
+        self.assertEqual(events[1], "parse")
+        self.assertEqual(events.count(((fixture.LOOKUP_RECEIVED_MARKER,), {"flush": True})), 1)
+        self.assertEqual(
+            fixture.LOOKUP_RECEIVED_MARKER,
+            "FINGUARDOPS_EXTERNAL_RISK_LOOKUP_RECEIVED",
+        )
+        self.assertNotRegex(
+            fixture.LOOKUP_RECEIVED_MARKER.lower(),
+            r"payload|token|trace|customer|account|transaction|reference",
+        )
+
+    def test_snapshot_queries_are_literal_canonical_and_primary_key_ordered(self):
+        self.assertEqual(tuple(verify_e2e.SNAPSHOT_QUERIES), verify_e2e.BUSINESS_TABLES)
+        for table, query in verify_e2e.SNAPSHOT_QUERIES.items():
+            self.assertEqual(
+                query,
+                "SELECT to_jsonb(snapshot_row)::text FROM public."
+                + table
+                + " AS snapshot_row ORDER BY snapshot_row.id ASC;",
+            )
+        script = verify_e2e.snapshot_sql().decode("ascii")
+        self.assertEqual(
+            script.count("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;"), 1
+        )
+        self.assertEqual(script.count("COMMIT;"), 1)
+        self.assertEqual(script.count("SET LOCAL TIME ZONE 'UTC';"), 1)
+        self.assertEqual(script.count("to_jsonb(snapshot_row)::text"), 12)
+        self.assertEqual(script.count("ORDER BY snapshot_row.id ASC"), 12)
+
+    def test_snapshot_is_deterministic_for_empty_and_canonical_typed_json(self):
+        canonical = (
+            b'{"at": "2026-09-05T01:02:03+00:00", "data": {"a": null, '
+            b'"nested": [1, 2]}, "id": 1, "numeric": 12000000.0000}'
+        )
+        first = verify_e2e.parse_database_snapshot(
+            snapshot_output({"financial_transaction": (canonical,)})
+        )
+        second = verify_e2e.parse_database_snapshot(
+            snapshot_output({"financial_transaction": (canonical,)})
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(first["financial_transaction"].count, 1)
+        self.assertEqual(first["investigation_note"].count, 0)
+        self.assertEqual(repr(first["financial_transaction"]), "TableSnapshot(count=1)")
+
+    def test_snapshot_parser_never_exposes_raw_rows_or_hashes(self):
+        raw = b'{"id":1,"external_customer_ref":"kc241-sensitive-ref"'
+        malformed = (
+            verify_e2e.SNAPSHOT_BEGIN_PREFIX + b"audit_log\n" + raw + b"\n"
+        )
+        with self.assertRaises(verify_e2e.VerificationError) as raised:
+            verify_e2e.parse_database_snapshot(malformed)
+        rendered = str(raised.exception)
+        self.assertEqual(rendered, "DATABASE_GLOBAL_SNAPSHOT_INVALID")
+        self.assertNotIn("kc241-sensitive-ref", rendered)
+        self.assertNotRegex(rendered, r"[0-9a-f]{64}")
+
+    def test_global_delta_allows_only_exact_ordered_appends(self):
+        before = snapshot_fixture()
+        after = snapshot_fixture(
+            {
+                "behavior_event": (
+                    b'{"id":1,"event_type":"PASSWORD_CHANGED"}',
+                    b'{"id":2,"event_type":"TRANSFER_LIMIT_CHANGED"}',
+                )
+            }
+        )
+        verify_e2e.assert_global_delta(before, after, {"behavior_event": 2})
+
+        unexpected = snapshot_fixture(
+            {
+                "behavior_event": (
+                    b'{"id":1,"event_type":"PASSWORD_CHANGED"}',
+                    b'{"id":2,"event_type":"TRANSFER_LIMIT_CHANGED"}',
+                ),
+                "investigation_note": (b'{"id":1,"content":"unexpected"}',),
+            }
+        )
+        with self.assertRaisesRegex(
+            verify_e2e.VerificationError, "DATABASE_GLOBAL_DELTA_INVALID"
+        ):
+            verify_e2e.assert_global_delta(before, unexpected, {"behavior_event": 2})
+
+    def test_count_preserving_updates_are_rejected_for_all_risk_tables(self):
+        tables = (
+            "detection_evidence",
+            "audit_log",
+            "behavior_event",
+            "investigation_note",
+            "fraud_rule",
+            "rule_version",
+        )
+        for table in tables:
+            before = snapshot_fixture({table: (b'{"id":1,"value":"before"}',)})
+            after = snapshot_fixture({table: (b'{"id":1,"value":"after"}',)})
+            with self.subTest(table=table), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "DATABASE_GLOBAL_DELTA_INVALID"
+            ):
+                verify_e2e.assert_global_delta(before, after, {})
+
+    def test_append_rejects_existing_row_replacement_or_deletion(self):
+        before = snapshot_fixture(
+            {
+                "idempotency_record": (
+                    b'{"id":1,"status":"COMPLETED"}',
+                    b'{"id":2,"status":"COMPLETED"}',
+                )
+            }
+        )
+        valid = snapshot_fixture(
+            {
+                "idempotency_record": (
+                    b'{"id":1,"status":"COMPLETED"}',
+                    b'{"id":2,"status":"COMPLETED"}',
+                    b'{"id":3,"status":"FAILED"}',
+                )
+            }
+        )
+        verify_e2e.assert_global_delta(before, valid, {"idempotency_record": 1})
+        invalid_rows = (
+            (
+                b'{"id":1,"status":"FAILED"}',
+                b'{"id":2,"status":"COMPLETED"}',
+                b'{"id":3,"status":"FAILED"}',
+            ),
+            (
+                b'{"id":2,"status":"COMPLETED"}',
+                b'{"id":3,"status":"FAILED"}',
+                b'{"id":4,"status":"FAILED"}',
+            ),
+        )
+        for rows in invalid_rows:
+            with self.subTest(rows=len(rows)), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "DATABASE_GLOBAL_DELTA_INVALID"
+            ):
+                verify_e2e.assert_global_delta(
+                    before,
+                    snapshot_fixture({"idempotency_record": rows}),
+                    {"idempotency_record": 1},
+                )
+
+    def test_snapshot_integrity_rejects_count_only_or_forged_fingerprint(self):
+        before = snapshot_fixture()
+        after = dict(before)
+        after["audit_log"] = verify_e2e.TableSnapshot(
+            count=0, row_hashes=(), fingerprint=b"\x00" * 32
+        )
+        with self.assertRaisesRegex(
+            verify_e2e.VerificationError, "DATABASE_GLOBAL_SNAPSHOT_INVALID"
+        ):
+            verify_e2e.assert_global_delta(before, after, {})
+
+    def test_transaction_cardinality_contract_includes_high_case_and_four_actions(self):
+        self.assertEqual(
+            verify_e2e.expected_transaction_cardinality(True, True, True),
+            (1, 1, 1, 1, 1, 1, 2, 1, 1, 4, 1, 1, 1, 1),
+        )
+
+    def test_step_rejects_dependency_hit_delta_independently_from_metrics(self):
+        before = snapshot_fixture()
+        ctx = mock.Mock()
+        ctx.execute.return_value = b"ingestion step completed: auth-denial\n"
+        with mock.patch.object(
+            verify_e2e, "database_snapshot", side_effect=[before, before]
+        ), mock.patch.object(
+            verify_e2e, "dependency_hit_counts", side_effect=[(0, 0), (1, 0)]
+        ), mock.patch.object(
+            verify_e2e, "backend_metric_totals", side_effect=[(0.0, 0.0), (0.0, 0.0)]
+        ), mock.patch.object(
+            verify_e2e, "transaction_cardinality", return_value=(0,) * 14
+        ), self.assertRaisesRegex(
+            verify_e2e.VerificationError, "DEPENDENCY_HIT_DELTA_INVALID"
+        ):
+            verify_e2e.run_ingestion_step(
+                ctx, valid_plan(), "auth-denial", {}, (0,) * 14, (0, 0), (0.0, 0.0)
+            )
+
+    def test_step_rejects_backend_metric_delta_independently_from_hits(self):
+        before = snapshot_fixture()
+        ctx = mock.Mock()
+        ctx.execute.return_value = b"ingestion step completed: auth-denial\n"
+        with mock.patch.object(
+            verify_e2e, "database_snapshot", side_effect=[before, before]
+        ), mock.patch.object(
+            verify_e2e, "dependency_hit_counts", side_effect=[(0, 0), (0, 0)]
+        ), mock.patch.object(
+            verify_e2e, "backend_metric_totals", side_effect=[(0.0, 0.0), (1.0, 0.0)]
+        ), mock.patch.object(
+            verify_e2e, "transaction_cardinality", return_value=(0,) * 14
+        ), self.assertRaisesRegex(
+            verify_e2e.VerificationError, "BACKEND_OUTCOME_METRIC_DELTA_INVALID"
+        ):
+            verify_e2e.run_ingestion_step(
+                ctx, valid_plan(), "auth-denial", {}, (0,) * 14, (0, 0), (0.0, 0.0)
+            )
+
+    def test_ingestion_runtime_exact_stage_status_matrix(self):
+        plan = valid_plan()
+        requests = []
+
+        def request(endpoint, payload, status, **kwargs):
+            requests.append(
+                (
+                    endpoint,
+                    payload.get("eventType"),
+                    status,
+                    kwargs.get("expected_code"),
+                    kwargs.get("idempotency_key"),
+                )
+            )
+            if endpoint.endswith("behavior-events") and status in (200, 201):
+                return {"eventId": payload["eventId"]}
+            if endpoint.endswith("transactions") and status == 201:
+                return {
+                    "transactionId": plan["transactionId"],
+                    "processingStatus": "ADDITIONAL_AUTH_REQUIRED",
+                    "riskLevel": "HIGH",
+                    "riskResponseOutcome": "ADDITIONAL_AUTH_REQUIRED",
+                    "adoptedDetectionResultId": "89101309-432c-451a-92e6-84ec0c3045e5",
+                    "caseId": "efecb97d-9f15-4072-8f71-e27f12b5ec2c",
+                    "createdAt": "2026-09-05T01:02:03Z",
+                    "traceId": "synthetic-trace",
+                }
+            return {"code": kwargs.get("expected_code")}
+
+        output = io.StringIO()
+        for step in verify_e2e.INGESTION_STEPS:
+            stdin = types.SimpleNamespace(
+                buffer=io.BytesIO(json.dumps(plan).encode("utf-8"))
+            )
+            with mock.patch.object(verify_e2e.sys, "stdin", stdin), mock.patch.object(
+                verify_e2e, "read_secret", side_effect=["a" * 32, "b" * 32]
+            ), mock.patch.object(
+                verify_e2e, "token_for", side_effect=["transaction-token", "behavior-token"]
+            ), mock.patch.object(
+                verify_e2e, "validate_actual_service_tokens"
+            ), mock.patch.object(
+                verify_e2e, "assert_cross_secret_rejected"
+            ), mock.patch.object(
+                verify_e2e, "request_backend", side_effect=request
+            ), contextlib.redirect_stdout(output):
+                verify_e2e.ingestion_runtime(step)
+        self.assertEqual(
+            [(endpoint, status) for endpoint, _, status, _, _ in requests],
+            [
+                ("/api/v1/transactions", 403),
+                ("/api/v1/behavior-events", 403),
+                ("/api/v1/transactions", 401),
+                ("/api/v1/behavior-events", 401),
+                ("/api/v1/transactions", 401),
+                ("/api/v1/behavior-events", 401),
+                ("/api/v1/behavior-events", 201),
+                ("/api/v1/behavior-events", 201),
+                ("/api/v1/behavior-events", 200),
+                ("/api/v1/behavior-events", 409),
+                ("/api/v1/transactions", 201),
+                ("/api/v1/transactions", 201),
+                ("/api/v1/transactions", 409),
+                ("/api/v1/transactions", 409),
+                ("/api/v1/transactions", 409),
+            ],
+        )
+        duplicate_requests = [
+            request for request in requests
+            if request[4] == plan["duplicateIdempotencyKey"]
+        ]
+        self.assertEqual(
+            [(request[2], request[3]) for request in duplicate_requests],
+            [(409, "DUPLICATE_TRANSACTION"), (409, "DUPLICATE_TRANSACTION")],
+        )
+        for step in verify_e2e.INGESTION_STEPS:
+            self.assertIn("ingestion step completed: " + step, output.getvalue())
+
     def test_main_redacts_unexpected_exception(self):
         stderr = io.StringIO()
         with mock.patch.object(verify_e2e, "runtime", side_effect=RuntimeError("NeverPrintSecret")):
@@ -567,6 +979,27 @@ class VerifyTests(unittest.TestCase):
                 result = verify_e2e.main(["runtime"])
         self.assertEqual(result, 1)
         self.assertNotIn("NeverPrintSecret", stderr.getvalue())
+
+    def test_subprocess_only_propagates_exact_safe_child_code(self):
+        completed = subprocess.CompletedProcess(
+            ["child"], 1, stdout=b"", stderr=b"compose prefix\nverification failed: METRIC_INVALID\ncompose suffix\n"
+        )
+        with mock.patch("subprocess.run", return_value=completed), self.assertRaisesRegex(
+            verify_e2e.VerificationError, "CHILD_METRIC_INVALID"
+        ):
+            verify_e2e.run_command(
+                ["child"], timeout=1, cwd=Path.cwd(), environment={}
+            )
+        leaked = subprocess.CompletedProcess(
+            ["child"], 1, stdout=b"", stderr=b"verification failed: TOKEN NeverPrintSecret\n"
+        )
+        with mock.patch("subprocess.run", return_value=leaked), self.assertRaisesRegex(
+            verify_e2e.VerificationError, "^SUBPROCESS_FAILED$"
+        ) as raised:
+            verify_e2e.run_command(
+                ["child"], timeout=1, cwd=Path.cwd(), environment={}
+            )
+        self.assertNotIn("NeverPrintSecret", str(raised.exception))
 
     def test_bounded_poll_stops_at_limit(self):
         attempts = []
@@ -585,6 +1018,41 @@ class VerifyTests(unittest.TestCase):
             with self.assertRaises(verify_e2e.VerificationError):
                 verify_e2e.validate_cleanup_target(value, "finguardops-kc235-fresh")
 
+    def test_cleanup_uses_exact_inventory_as_authoritative_postcondition(self):
+        ctx = types.SimpleNamespace(
+            compose=["docker", "compose"],
+            repo=Path.cwd(),
+            environment={},
+            project="finguardops-kc241-e2e-unit01",
+            cli_timeout=1,
+        )
+        empty = {kind: () for kind in verify_e2e.PROJECT_RESOURCE_KINDS}
+        with mock.patch.object(
+            verify_e2e, "run_command", side_effect=verify_e2e.VerificationError("SUBPROCESS_FAILED")
+        ), mock.patch.object(verify_e2e, "project_resources", return_value=empty):
+            verify_e2e.cleanup_project(ctx, None)
+
+    def test_project_cleanup_inventory_excludes_shared_images(self):
+        self.assertEqual(
+            verify_e2e.PROJECT_RESOURCE_KINDS,
+            ("container", "network", "volume"),
+        )
+        calls = []
+
+        def execute(argv, **kwargs):
+            calls.append(argv)
+            return b""
+
+        with mock.patch.object(verify_e2e, "run_command", side_effect=execute):
+            resources = verify_e2e.project_resources(
+                "finguardops-kc241-e2e-unit01",
+                timeout=1,
+                repo=Path.cwd(),
+                environment={},
+            )
+        verify_e2e.assert_resources_empty(resources)
+        self.assertFalse(any("image" in argv for argv in calls))
+
     def test_static_source_mutations_are_killed(self):
         verifier_source = Path(verify_e2e.__file__).read_text(encoding="utf-8")
         test_source = Path(__file__).read_text(encoding="utf-8")
@@ -600,6 +1068,15 @@ class VerifyTests(unittest.TestCase):
             ("realm-enabled", 'or realm.get("enabled") is not True', "or False", "test_realm_disabled_rejected"),
             ("bootstrap-source-read-only", 'or bool(mount.get("read_only", False)) is not read_only', "or False", "test_bootstrap_source_writable_rejected"),
             ("verifier-source-read-only", 'or bool(mount.get("read_only", False)) is not read_only', "or False", "test_verifier_source_writable_rejected"),
+            ("rule-access-log", 'if services["ai-service"].get("command") != EXPECTED_AI_SERVICE_COMMAND:', "if False:", "test_rule_v2_access_log_must_be_explicitly_enabled"),
+            ("snapshot-repeatable-read", '"BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;",', '"BEGIN;",', "test_snapshot_queries_are_literal_canonical_and_primary_key_ordered"),
+            ("snapshot-order", '"audit_log": "SELECT to_jsonb(snapshot_row)::text FROM public.audit_log AS snapshot_row ORDER BY snapshot_row.id ASC;",', '"audit_log": "SELECT to_jsonb(snapshot_row)::text FROM public.audit_log AS snapshot_row;",', "test_snapshot_queries_are_literal_canonical_and_primary_key_ordered"),
+            ("snapshot-to-jsonb", '"behavior_event": "SELECT to_jsonb(snapshot_row)::text FROM public.behavior_event AS snapshot_row ORDER BY snapshot_row.id ASC;",', '"behavior_event": "SELECT row(snapshot_row)::text FROM public.behavior_event AS snapshot_row ORDER BY snapshot_row.id ASC;",', "test_snapshot_queries_are_literal_canonical_and_primary_key_ordered"),
+            ("snapshot-row-hash", "tuple(hashlib.sha256(row).digest() for row in canonical_rows)", "tuple(hashlib.sha256(b'').digest() for row in canonical_rows)", "test_count_preserving_updates_are_rejected_for_all_risk_tables"),
+            ("snapshot-existing-prefix", "or after_table.row_hashes[:before_table.count] != before_table.row_hashes", "or False", "test_append_rejects_existing_row_replacement_or_deletion"),
+            ("snapshot-fingerprint", "or snapshot.fingerprint != aggregate_fingerprint(table, snapshot.row_hashes)", "or False", "test_snapshot_integrity_rejects_count_only_or_forged_fingerprint"),
+            ("dependency-hit-delta", ") != expected_dependency_delta:", ") != expected_dependency_delta and False:", "test_step_rejects_dependency_hit_delta_independently_from_metrics"),
+            ("backend-metric-delta", "if metric_delta != expected_metric_delta:", "if False:", "test_step_rejects_backend_metric_delta_independently_from_hits"),
         ]
         for label, old, new, test_name in mutations:
             with self.subTest(mutation=label), tempfile.TemporaryDirectory(prefix="finguardops-keycloak-mutation-") as directory:

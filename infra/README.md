@@ -40,6 +40,16 @@ artifact를 변경하지 않고 exact localhost leaf를 Windows 현재 사용자
 token claim과 Backend 200·401·403을 검증한 뒤 자신이 추가한 exact certificate와 전용 Docker resource,
 임시 Playwright output만 정리한다. pre-existing exact certificate와 `.local` artifact는 유지한다.
 
+Issue #241 SERVICE ingestion 검증은 별도 경계다. `python -B infra/keycloak/verify_e2e.py all`이
+실제 두 SERVICE token으로 거래·행동 신규/재생/충돌과 401·403을 호출하고, PostgreSQL row
+global delta·거래별 cardinality, External Risk 고정 marker와 Rule v2 exact Uvicorn access line이
+최초 거래에서만 각각 1회 증가하는지 검사한다. Backend outcome metric은 실제 hit와 분리해
+보조 검증한다. fresh와
+동일 `keycloak-data` existing-volume 재실행 후 전용 project의 container·network·volume을 모두
+정리한다. 이 명령은 USER password를 verifier·Backend·AI Service에 전달하지 않고 Windows 인증서
+저장소, Chromium, Playwright와 Frontend production 파일을 사용하지 않는다. 공용 local Docker
+image는 자동 삭제하거나 cleanup 실패 대상으로 분류하지 않는다.
+
 Keycloak wrapper는 외부 argument를 받지 않고 내부의 exact `kc.sh start --import-realm` 배열만
 `exec`한다. Static verifier는 merged long-syntax mount, entrypoint/command, 승인된 `KC_*`, privilege,
 capability, Docker socket과 Backend dependency를 exact 검사한다.

@@ -17,6 +17,7 @@ REQUEST_FIELDS = {
     "traceId",
 }
 MAX_REQUEST_BYTES = 65_536
+LOOKUP_RECEIVED_MARKER = "FINGUARDOPS_EXTERNAL_RISK_LOOKUP_RECEIVED"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -30,6 +31,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != LOOKUP_PATH:
             self._json(404, {"status": "NOT_FOUND"})
             return
+        print(LOOKUP_RECEIVED_MARKER, flush=True)
         request = self._request_json()
         if request is None:
             self._json(400, {"status": "INVALID_REQUEST"})

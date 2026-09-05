@@ -484,7 +484,9 @@ Kafka
   Authorization Code + PKCE `S256`, 분리된 SERVICE confidential client의 Client Credentials,
   Backend access token exact claim, USER access/ID token의 동일 subject·role 집합과 일반 refresh
   token fail-closed 계약을 문서로 확정. 이후 Issue #239에서 Keycloak runtime·realm·client·mapper,
-  SERVICE 연동, USER browser 연동과 refresh token 검사 adapter E2E를 구현. role UI는 구현하지 않음
+  USER browser 연동과 refresh token 검사 adapter E2E를 구현. Issue #241에서 실제 두 SERVICE
+  token의 거래·행동 신규/재생/충돌, 401·403, 단계별 PostgreSQL global delta·거래별 cardinality와
+  External Risk·Rule 실제 단일 hit를 fresh/existing-volume으로 검증. role UI는 구현하지 않음
 
 Backend Security 설정은 `FINGUARDOPS_SECURITY_ISSUER`,
 `FINGUARDOPS_SECURITY_JWK_SET_URI`, `FINGUARDOPS_SECURITY_ALLOWED_ORIGINS`와 JWK
@@ -509,10 +511,9 @@ rotation·sidecar 재생성 절차는
 [`Local JWT 인증 E2E runbook`](docs/09-deployment/local-jwt-auth-e2e-runbook.md)을 따릅니다.
 남은 보안 후속 순서는 다음과 같습니다.
 
-1. SERVICE Client Credentials 기반 실제 거래·행동 이벤트 접수 E2E
-2. Frontend role·authority UI 계약과 구현
-3. 거래·사건·메모·감사 typed API module과 query pagination
-4. Keycloak remote logout 계약과 구현
+1. Frontend role·authority UI 계약과 구현
+2. 거래·사건·메모·감사 typed API module과 query pagination
+3. Keycloak remote logout 계약과 구현
 
 제품과 claim 계약은 Issue #233의
 [`ADR-011`](docs/07-decisions/ADR-011-keycloak-authorization-server-and-claim-contract.md)에서
@@ -735,6 +736,14 @@ Frontend refresh-token fail-closed는 Issue #239에서 구현했다. role UI와 
 
 2026-09-05 correction 검증에서 fresh/existing-volume runtime, existing verifier 5회 연속 실행,
 host TLS·hostname·issuer·public JWKS discovery와 host 8082·9000 비공개 검사가 모두 통과했다.
+
+Issue #241은 같은 overlay와 bootstrap을 바꾸지 않고 실제 SERVICE Client Credentials ingestion을
+추가 검증한다. Transaction `201/201/409/409/409`, Behavior `201/201/200/409`, 반대 SERVICE `403`,
+credential 누락·손상 `401`을 확인하고 55/HIGH·ADDITIONAL_AUTH_REQUIRED, 사건·연결 각 1건,
+action별 AuditLog 4건과 External Risk marker·Rule v2 exact access hit 각 1회를 대조한다. Backend
+outcome metric은 별도 보조 검증이다. 공식 SERVICE 명령은 Docker namespace loopback만 사용하며
+USER password, Windows 인증서 저장소, Chromium과 Playwright를 사용하지 않는다. cleanup은 전용
+container·network·volume에 한정하고 공용 local image는 삭제·잔존 판정에서 제외한다.
 
 Issue #239 Phase 3은 `@playwright/test` 1.62.1과 Chromium-only runner를 추가했다. Windows runner는
 검증된 `CA:FALSE` localhost leaf를 현재 사용자 Root에만 한시적으로 신뢰시키고, 전용 Compose
