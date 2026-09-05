@@ -199,3 +199,16 @@ idempotent invalidation 경계를 재사용하면서도 교체된 session을 건
 - silent renew 또는 refresh token 도입 여부 재검토
 
 이 결정은 위 후속 작업에서 필요하면 새 ADR로 갱신한다.
+
+## 6. Issue #239 브라우저 E2E 연결 (2026-09-05)
+
+역사적 결정과 memory-only production 경계는 변경하지 않는다. Issue #239는 pinned local Keycloak과
+Chromium을 연결해 실제 Authorization Code Flow, nonblank state·nonce, exact redirect URI와 PKCE
+S256 verifier/challenge를 검증한다. callback은 code를 주소창에서 먼저 제거하고 정상 token response에
+refresh token이 없을 때만 session을 게시한다.
+
+Playwright가 token response에 process-memory synthetic `refresh_token`을 추가하는 반례에서는
+`AuthCallbackError`로 실패하고 OIDC user state를 제거하며 session 게시·subscriber·Backend 요청,
+refresh grant와 silent renew를 모두 0회로 유지한다. state·nonce·PKCE 변조도 각각 같은 fail-closed
+경계에서 거부한다. 실제 password·authorization code·token은 source·DOM·console·Web Storage·report·
+artifact에 기록하지 않는다. role·authority UI와 remote logout은 이 연결로 구현된 것이 아니다.

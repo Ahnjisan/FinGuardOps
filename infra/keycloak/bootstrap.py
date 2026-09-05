@@ -50,6 +50,9 @@ SERVICE_CLIENTS = {
     },
 }
 ADMIN_SECRET = Path("/run/secrets/keycloak_bootstrap_admin_secret")
+USER_PASSWORD = Path("/run/secrets/user_password")
+USER_DEFAULT_SCOPES = ("finguardops-backend-audience", "finguardops-user-claims")
+USER_OPTIONAL_SCOPES = ("profile",)
 
 
 class ReconcileError(RuntimeError):
@@ -232,9 +235,74 @@ def roles_mapper(name: str, id_token: bool) -> dict[str, Any]:
     }
 
 
+def user_subject_mapper() -> dict[str, Any]:
+    return {
+        "name": "finguardops-user-subject",
+        "protocol": "openid-connect",
+        "protocolMapper": "oidc-sub-mapper",
+        "consentRequired": False,
+        "config": {
+            "access.token.claim": "true",
+            "introspection.token.claim": "true",
+        },
+    }
+
+
+def stock_profile_attribute_mapper(
+    name: str, user_attribute: str, claim_name: str, *, property_mapper: bool = False
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "protocol": "openid-connect",
+        "protocolMapper": (
+            "oidc-usermodel-property-mapper" if property_mapper else "oidc-usermodel-attribute-mapper"
+        ),
+        "consentRequired": False,
+        "config": {
+            "userinfo.token.claim": "true",
+            "user.attribute": user_attribute,
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": claim_name,
+            "jsonType.label": "String",
+        },
+    }
+
+
+def stock_profile_mappers() -> list[dict[str, Any]]:
+    return [
+        stock_profile_attribute_mapper("family name", "lastName", "family_name", property_mapper=True),
+        stock_profile_attribute_mapper("username", "username", "preferred_username", property_mapper=True),
+        stock_profile_attribute_mapper("updated at", "updatedAt", "updated_at"),
+        {
+            "name": "full name",
+            "protocol": "openid-connect",
+            "protocolMapper": "oidc-full-name-mapper",
+            "consentRequired": False,
+            "config": {
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "userinfo.token.claim": "true",
+            },
+        },
+        stock_profile_attribute_mapper("given name", "firstName", "given_name", property_mapper=True),
+        stock_profile_attribute_mapper("middle name", "middleName", "middle_name"),
+        stock_profile_attribute_mapper("gender", "gender", "gender"),
+        stock_profile_attribute_mapper("zoneinfo", "zoneinfo", "zoneinfo"),
+        stock_profile_attribute_mapper("nickname", "nickname", "nickname"),
+        stock_profile_attribute_mapper("profile", "profile", "profile"),
+        stock_profile_attribute_mapper("website", "website", "website"),
+        stock_profile_attribute_mapper("birthdate", "birthdate", "birthdate"),
+        stock_profile_attribute_mapper("picture", "picture", "picture"),
+        stock_profile_attribute_mapper("locale", "locale", "locale"),
+    ]
+
+
 SCOPES = {
+    "profile": stock_profile_mappers(),
     "finguardops-backend-audience": [audience_mapper()],
     "finguardops-user-claims": [
+        user_subject_mapper(),
         principal_mapper("finguardops-user-principal-type", "USER", True),
         roles_mapper("finguardops-user-roles", True),
     ],
@@ -248,6 +316,7 @@ SCOPES = {
     ],
 }
 SCOPE_ROLES = {
+    "profile": (),
     "finguardops-backend-audience": (),
     "finguardops-user-claims": USER_ROLES,
     "finguardops-transaction-service-claims": ("TRANSACTION_INGESTOR",),
@@ -271,13 +340,14 @@ def client_representation(client_id: str, secret: str | None = None) -> dict[str
             "fullScopeAllowed": False,
             "redirectUris": ["http://localhost:5173/auth/callback"],
             "webOrigins": ["http://localhost:5173"],
-            "defaultClientScopes": ["finguardops-backend-audience", "finguardops-user-claims"],
-            "optionalClientScopes": [],
+            "defaultClientScopes": list(USER_DEFAULT_SCOPES),
+            "optionalClientScopes": list(USER_OPTIONAL_SCOPES),
             "attributes": {
                 "pkce.code.challenge.method": "S256",
                 "post.logout.redirect.uris": "http://localhost:5173/",
                 "oauth2.device.authorization.grant.enabled": "false",
                 "oidc.ciba.grant.enabled": "false",
+                "use.refresh.tokens": "false",
             },
         }
     scope = SERVICE_CLIENTS[client_id]["scope"]
@@ -363,11 +433,23 @@ class Reconciler:
 
     def reconcile_scope(self, name: str, mappers: list[dict[str, Any]]) -> str:
         current = exact_one(self.list_scopes(), "name", name, "SCOPE")
-        desired = {
-            "name": name,
-            "protocol": "openid-connect",
-            "attributes": {"include.in.token.scope": "false"},
-        }
+        if name == "profile":
+            desired = {
+                "name": name,
+                "description": "OpenID Connect built-in scope: profile",
+                "protocol": "openid-connect",
+                "attributes": {
+                    "include.in.token.scope": "true",
+                    "display.on.consent.screen": "true",
+                    "consent.screen.text": "${profileScopeConsentText}",
+                },
+            }
+        else:
+            desired = {
+                "name": name,
+                "protocol": "openid-connect",
+                "attributes": {"include.in.token.scope": "false"},
+            }
         if current is None:
             self.admin.request("POST", self.root + "/client-scopes", desired, expected=(201,))
             current = exact_one(self.list_scopes(), "name", name, "SCOPE")
@@ -433,9 +515,17 @@ class Reconciler:
     def list_users(self) -> list[dict[str, Any]]:
         return self.admin.request("GET", self.root + "/users?username=" + q(USER_NAME) + "&exact=true")
 
-    def reconcile_user(self) -> str:
+    def reconcile_user(self, password: str) -> str:
         current = exact_one(self.list_users(), "username", USER_NAME, "USER")
-        desired = {"username": USER_NAME, "enabled": True, "emailVerified": False}
+        desired = {
+            "username": USER_NAME,
+            "firstName": "Local",
+            "lastName": "Analyst",
+            "email": "local-fds-analyst@finguardops.invalid",
+            "enabled": True,
+            "emailVerified": False,
+            "requiredActions": [],
+        }
         if current is None:
             desired["id"] = str(uuid.uuid4())
             self.admin.request("POST", self.root + "/users", desired, expected=(201,))
@@ -448,7 +538,11 @@ class Reconciler:
         updated["id"] = user_id
         self.admin.request("PUT", self.root + "/users/" + q(user_id), updated, expected=(204,))
         credentials = self.admin.request("GET", self.root + "/users/" + q(user_id) + "/credentials")
+        if not isinstance(credentials, list):
+            fail("USER_CREDENTIAL_METADATA_INVALID")
         for credential in credentials:
+            if not isinstance(credential, dict):
+                fail("USER_CREDENTIAL_METADATA_INVALID")
             credential_id = credential.get("id")
             if not isinstance(credential_id, str) or not credential_id:
                 fail("USER_CREDENTIAL_ID_INVALID")
@@ -457,9 +551,25 @@ class Reconciler:
                 self.root + "/users/" + q(user_id) + "/credentials/" + q(credential_id),
                 expected=(204,),
             )
+        self.admin.request(
+            "PUT",
+            self.root + "/users/" + q(user_id) + "/reset-password",
+            {"type": "password", "value": password, "temporary": False},
+            expected=(204,),
+        )
         self.reconcile_user_roles(user_id, (USER_ROLE,))
-        if self.admin.request("GET", self.root + "/users/" + q(user_id) + "/credentials") != []:
-            fail("USER_CREDENTIAL_PRESENT")
+        credential_metadata = self.admin.request(
+            "GET", self.root + "/users/" + q(user_id) + "/credentials"
+        )
+        if (
+            not isinstance(credential_metadata, list)
+            or len(credential_metadata) != 1
+            or not isinstance(credential_metadata[0], dict)
+            or credential_metadata[0].get("type") != "password"
+            or not isinstance(credential_metadata[0].get("id"), str)
+            or not credential_metadata[0]["id"]
+        ):
+            fail("USER_PASSWORD_CREDENTIAL_INVALID")
         return user_id
 
     def reconcile_user_roles(self, user_id: str, desired_names: tuple[str, ...]) -> None:
@@ -502,7 +612,7 @@ class Reconciler:
         if token_subject(token) != expected_id:
             fail("SERVICE_TOKEN_SUBJECT_MISMATCH")
 
-    def run(self, secrets: dict[str, str]) -> None:
+    def run(self, secrets: dict[str, str], user_password: str) -> None:
         self.reconcile_realm()
         roles = self.reconcile_roles()
         scope_ids: dict[str, str] = {}
@@ -516,7 +626,7 @@ class Reconciler:
             client_uuid = self.reconcile_client(client_id, secrets[client_id])
             service_account_id = self.service_account_id(client_uuid, spec["role"])
             self.validate_service_token_subject(client_id, secrets[client_id], service_account_id)
-        self.reconcile_user()
+        self.reconcile_user(user_password)
 
         # Re-query exact names so a duplicate or incomplete result cannot produce a completion marker.
         self.reconcile_roles()
@@ -535,13 +645,15 @@ def main(argv: list[str]) -> int:
         service_secrets = {
             client_id: read_secret(spec["secret"]) for client_id, spec in SERVICE_CLIENTS.items()
         }
-        if len(set(service_secrets.values())) != len(service_secrets):
-            fail("SERVICE_SECRETS_NOT_DISTINCT")
+        user_password = read_secret(USER_PASSWORD)
+        if len({admin_secret, *service_secrets.values(), user_password}) != 4:
+            fail("LOCAL_CREDENTIALS_NOT_DISTINCT")
         admin = AdminClient()
         admin.authenticate(admin_secret)
         del admin_secret
-        Reconciler(admin).run(service_secrets)
+        Reconciler(admin).run(service_secrets, user_password)
         service_secrets.clear()
+        del user_password
         print("bootstrap completed: desired state reconciled")
         return 0
     except ReconcileError as error:

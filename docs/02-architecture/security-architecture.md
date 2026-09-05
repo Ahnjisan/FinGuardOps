@@ -504,11 +504,12 @@ profile의 표시용 값만 UI 표시와 action 노출에 사용할 수 있고 a
 대체하지 않는다.
 
 `offline_access` 요청과 offline token 사용은 금지한다. 일반 온라인 refresh token은 offline
-token과 별개이며 `offline_access` 없이도 반환될 수 있다고 가정한다. 후속 runtime adapter는
-provider 설정뿐 아니라 실제 token response를 검사해야 한다. `refresh_token`이 반환되면 해당
+token과 별개이며 `offline_access` 없이도 반환될 수 있다고 가정한다. Issue #239의 runtime adapter는
+provider 설정뿐 아니라 실제 token response를 검사한다. `refresh_token`이 반환되면 해당
 session을 게시하지 않고 OIDC user state를 제거하며, callback 이후 memory·user store·Web
-Storage에 원문이 남지 않게 fail-closed해야 한다. `automaticSilentRenew=false`, refresh token
-grant 0회와 silent renew 0회를 유지한다. 이 정책과 검증, Keycloak runtime·연동,
+Storage에 원문이 남지 않게 fail-closed한다. `automaticSilentRenew=false`, refresh token
+grant 0회와 silent renew 0회를 유지한다. 실제 Chromium E2E는 정상 token response의 refresh token
+부재와 합성 `refresh_token` 거부, state·nonce·PKCE 변조 거부를 각각 확인한다. 이 정책과 Keycloak runtime·연동,
 role·authority 기반 navigation·button·route guard UI, 거래·사건·메모·감사 업무 화면과 remote
 logout은 아직 구현되지 않았다.
 
@@ -576,10 +577,10 @@ method security는 Issue #221에서 구현되었다. 아래 표는 구현 상태
 | 완료. `[Infra/Docs] Local Compose·runbook JWT fixture와 인증 E2E 적용` | local issuer와 SERVICE traffic | 선택형 Compose overlay, fixture, verifier, runbook | 없음 | build·wait·traffic·scrape·alert·restart | #219·#221 | local/manual Docker E2E 경계 구현 |
 | 부분 구현. `[Frontend/Security] OIDC PKCE와 memory-only 인증 기반 구현` | SPA 인증 경계 | PKCE redirect, memory token, transaction store, `/auth/callback`, local logout | 없음 | 설정·settings·storage·lifecycle·callback·deadline | #219·#221 | jsdom 단위·컴포넌트 검증; 구현 (#229) |
 | 부분 구현. `[Frontend/Security] 인증 Backend API client와 401·403 경계 구현` | 승인 endpoint에만 credential 전달 | endpoint allowlist, `authorizeRequest()`, 401 invalidation, 403 유지, 단일 deadline | 없음 | allowlist·URL 우회·401·403·timeout·abort | #229 | jsdom 단위 검증; transport 구현 (#231) |
-| 완료. `[Security/Architecture] Keycloak Authorization Server와 권한 Claim 계약 확정` | local/dev 제품과 USER·SERVICE·token claim 계약 | ADR-011·보안 아키텍처·README | 없음 | 문서 claim·role·신뢰 경계 정합성 | #225·#229·#231 | 문서 계약만 확정 (#233); runtime 미구현 |
-| 완료. `[Backend/Security] JWT singleton audience 표준 표현 호환` | RFC 7519 singleton 표현과 stock Keycloak 호환 | Backend raw 검증·decoder/HTTP/validator 테스트·ADR-012 | 없음 | string·array 허용, additional·duplicate·malformed 거부, raw pre-JWK | #233·#235 | Backend 호환 구현 (#236); Keycloak runtime 미구현 |
-| 1. `[Infra/Security] Keycloak local/dev runtime 구현` | 실제 local/dev issuer와 client·mapper | Compose, realm, client scope, protocol mapper | 없음 | tag·digest·realm·claim·singleton audience source·rotation | #233 | 미구현 |
-| 2. `[Security/E2E] USER 로그인과 Backend 연동` | browser OIDC와 Resource Server 연결 | Frontend·Backend·Keycloak E2E | 없음 | raw `aud`·access/ID `sub` 원문 동일성·role 집합·refresh fail-closed·401·403 | Keycloak runtime | 미구현 |
+| 완료. `[Security/Architecture] Keycloak Authorization Server와 권한 Claim 계약 확정` | local/dev 제품과 USER·SERVICE·token claim 계약 | ADR-011·보안 아키텍처·README | 없음 | 문서 claim·role·신뢰 경계 정합성 | #225·#229·#231 | 문서 계약 확정 (#233), local runtime·USER E2E 연결 (#239) |
+| 완료. `[Backend/Security] JWT singleton audience 표준 표현 호환` | RFC 7519 singleton 표현과 stock Keycloak 호환 | Backend raw 검증·decoder/HTTP/validator 테스트·ADR-012 | 없음 | string·array 허용, additional·duplicate·malformed 거부, raw pre-JWK | #233·#235 | Backend 호환 구현 (#236), stock Keycloak 발급 검증 (#239) |
+| 완료. `[Infra/Security] Keycloak local/dev runtime 구현` | 실제 local/dev issuer와 client·mapper | Compose, realm, client scope, protocol mapper | 없음 | tag·digest·realm·claim·singleton audience source·rotation | #233 | Phase 1 fresh/existing runtime 완료 (#239) |
+| 완료. `[Security/E2E] USER 로그인과 Backend 연동` | browser OIDC와 Resource Server 연결 | Frontend·Backend·Keycloak E2E | `@playwright/test` | raw `aud`·access/ID `sub` 원문 동일성·role 집합·refresh fail-closed·401·403 | Keycloak runtime | Chromium·Windows CurrentUser trust runner 구현 (#239) |
 | 3. `[Security/E2E] SERVICE Client Credentials 연동` | 거래·행동 접수 SERVICE 인증 | SERVICE client·Backend E2E | 없음 | client 분리·raw singleton `aud`·UUID `sub`·claim·교차 거부 | Keycloak runtime | 미구현 |
 | 4. `[Frontend/Security] role·authority 권한 UI` | 권한별 표시와 action 노출 | navigation, button, route guard UI | 없음 | browser login·expiry·권한 UI | USER E2E, #231 | 미구현 |
 | 5. `[Frontend] 업무 typed API와 query pagination` | 보호 API 소비 | 거래·사건·메모·감사 module, page·size·sort | 없음 | DTO·validator·query 조립 | #231 | 미구현 |
@@ -625,7 +626,8 @@ no-new-privileges를 사용한다.
 
 구현된 runtime 검증 범위는 realm/client/scope/mapper reconcile, credential 없는 USER resource,
 두 SERVICE token, raw singleton string audience, UUID subject/account 일치와 Backend 400/403
-경계다. USER browser E2E, refresh-token fail-closed, role UI와 remote logout은 후속 범위다.
+경계다. USER browser E2E와 refresh-token fail-closed는 Issue #239에서 구현했다. role UI와 remote
+logout은 후속 범위다.
 
 Stock Keycloak은 HTTP와 HTTPS에 공통 listener host를 적용하므로 2026-09-05 OWNER 결정에 따라
 `KC_HTTP_HOST=0.0.0.0`을 사용한다. HTTPS 8443만 host `127.0.0.1`에 publish하고 HTTP 8082와

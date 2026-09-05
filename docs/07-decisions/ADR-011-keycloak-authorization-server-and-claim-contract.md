@@ -364,3 +364,18 @@ production 운영 요구가 확정되지 않았다. 향후 production 후보로�
 
 각 후속 Issue는 구현 당시 검증된 Keycloak 버전, exact URI·client 설정, secret 공급 경계와
 실행 증거를 별도로 확정한다.
+
+## 7. Issue #239 Phase 1·3 구현 상태 연결 (2026-09-05)
+
+이 절은 위 결정 당시의 미구현 목록을 소급 변경하지 않고 후속 상태만 연결한다. Phase 1은 외부
+USER password를 bootstrap에만 read-only mount해 `local-fds-analyst`의 non-temporary password
+credential 정확히 1개를 reconcile하고 USER client의 `use.refresh.tokens=false`를 realm JSON과
+bootstrap desired state 양쪽에 적용했다.
+
+Phase 3은 Windows 현재 사용자 Root에 검증된 exact localhost leaf만 실행 중 한시적으로 신뢰시키는
+runner와 Chromium E2E를 연결했다. 정상 로그인은 Authorization Code + PKCE S256, access/ID token의
+동일 canonical lowercase UUID v4 `sub`, `principal_type=USER`, 중복 없는 동일 `FDS_ANALYST` role
+집합과 access token exact singleton audience를 확인한다. 실제 response에 refresh token이 없음을
+확인하며 합성 refresh token, state·nonce·PKCE 변조는 session 게시 전에 거부한다. 실제 USER token의
+Backend case 조회 200, credential 없음·손상 token 401, analyst resolution 403과 session 유지를
+검증한다. production Authorization Server, role UI와 remote logout은 계속 미구현이다.

@@ -94,3 +94,12 @@ Backend의 raw exact string/exact singleton array 허용과 normalized exact sin
 namespace loopback 내부 접근으로 보정했다. fresh/existing runtime, host public HTTPS, 8082·9000
 host 비공개와 SERVICE token·Backend 400/403 검증이 통과했다. USER browser E2E와 Frontend
 refresh-token fail-closed는 여전히 후속 범위이며 production Authorization Server는 미결정이다.
+
+## 7. Issue #239 USER browser 후속 상태 (2026-09-05)
+
+위 문단은 Issue #235 완료 당시의 역사적 상태다. Issue #239 Phase 3은 실제 USER browser access
+token의 raw claim을 process memory에서만 검사해 논리 audience가 정확히
+`finguardops-backend-api` 하나인지 확인한다. 같은 로그인에서 access/ID token의 `sub` 원문과 USER
+role 집합도 비교하고, USER token의 Backend 200·403 및 credential 없음·손상 token 401 경계를
+검증한다. 이 후속 검증은 singleton string/string-array 호환 결정을 변경하지 않으며 production
+Authorization Server는 여전히 미결정이다.

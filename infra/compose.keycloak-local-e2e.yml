@@ -92,6 +92,9 @@ services:
       - source: behavior_service_client_secret
         target: behavior_service_client_secret
         mode: 0400
+      - source: user_password
+        target: user_password
+        mode: 0400
     network_mode: "service:backend"
     depends_on:
       keycloak:
@@ -153,6 +156,8 @@ secrets:
     file: ./keycloak/.local/secrets/transaction-service-client-secret
   behavior_service_client_secret:
     file: ./keycloak/.local/secrets/behavior-service-client-secret
+  user_password:
+    file: ./keycloak/.local/secrets/user-password
   keycloak_tls_certificate:
     file: ./keycloak/.local/tls/localhost.crt
   keycloak_tls_private_key:
