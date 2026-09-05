@@ -11,6 +11,7 @@ import type {
 } from "./authClient";
 import { AuthCallbackError, AuthSignInError } from "./authErrors";
 import { CALLBACK_PATH } from "./callbackUrl";
+import { resolveUserRoles, type NonEmptyUserRoles } from "./userRoles";
 import {
   acquireTransactionStorage,
   clearAuthTransactionState,
@@ -29,7 +30,20 @@ const TRANSACTION_STATE_REJECTED = "OIDC transaction state rejected.";
 
 /** Minimal structural view of the library, so tests can drive the adapter. */
 export interface OidcUserLike {
-  readonly profile: { readonly sub: string; readonly name?: string };
+  readonly profile: {
+    readonly sub: string;
+    readonly name?: string;
+    /**
+     * Both typed `unknown` for the same reason as `refresh_token` below: the
+     * only questions this adapter may ask are "is this exactly the string
+     * `USER`?" and "is this an array of known USER role names?". Declaring them
+     * as `string` and `string[]` would leave a provider that answers `null`, a
+     * number, an object or a bare string with no declared case to refuse, and
+     * the fail-closed path would be unreachable from the type.
+     */
+    readonly principal_type?: unknown;
+    readonly roles?: unknown;
+  };
   readonly access_token?: string;
   /**
    * Typed `unknown` rather than the library's `string`, because the only
@@ -271,9 +285,44 @@ async function discardRejectedUser(runtime: AuthRuntime): Promise<void> {
   }
 }
 
-function toAuthSession(user: OidcUserLike): AuthSession {
-  const displayName = typeof user.profile.name === "string" ? user.profile.name : undefined;
-  return { subject: user.profile.sub, displayName };
+/**
+ * Turns a user the OIDC client has already validated into the session the rest
+ * of the application is allowed to see, or refuses it.
+ *
+ * This is the single place where `principal_type` and `roles` are read, and the
+ * only values that survive it are the subject, an optional display name and a
+ * frozen list of known USER role names. The raw claim values are not copied,
+ * not re-exposed and not carried in the refusal, and no token is decoded here:
+ * `profile` is the ID token the library verified, which ADR-011 section 2.9
+ * makes the one permitted source for role display.
+ *
+ * `null` means "do not publish a session". Every claim-level defect converges
+ * on it: a `principal_type` that is not exactly `USER` (a SERVICE token, a
+ * missing claim, different casing), a `roles` claim that is not an array or is
+ * an empty one, an unknown or repeated role name, and a `profile` whose getters
+ * throw. The caller discards the library's user and fails the sign-in, so a
+ * rejected user never reaches a subscriber, React state or the DOM.
+ */
+function toAuthSession(user: OidcUserLike): AuthSession | null {
+  let subject: string;
+  let displayName: string | undefined;
+  let roles: NonEmptyUserRoles | null;
+  try {
+    const profile = user.profile;
+    if (typeof profile.sub !== "string" || profile.sub === "") {
+      return null;
+    }
+    subject = profile.sub;
+    displayName = typeof profile.name === "string" ? profile.name : undefined;
+    roles = resolveUserRoles(profile.principal_type, profile.roles);
+  } catch {
+    // A claim that cannot be read is not a claim that is absent.
+    return null;
+  }
+  if (roles === null) {
+    return null;
+  }
+  return { subject, displayName, roles };
 }
 
 function extractReturnTo(state: unknown): unknown {
@@ -555,6 +604,18 @@ export function createOidcAuthClient(
         throw new AuthCallbackError();
       }
 
+      // The claim contract, judged in the same place and the same way as the
+      // credential shape: before the transaction record is cleared, before
+      // `startSession`, and therefore before any subscriber, React state or
+      // Backend request can observe a session. A user whose `principal_type` is
+      // not exactly `USER`, or whose `roles` claim is malformed or empty, is
+      // discarded here rather than published with a salvaged or empty role set.
+      const session = toAuthSession(user);
+      if (session === null) {
+        await discardRejectedUser(current);
+        throw new AuthCallbackError();
+      }
+
       // The session is published only once the one-time transaction record is
       // actually gone. If it cannot be removed the sign-in is abandoned rather
       // than completed on replayable state.
@@ -569,7 +630,6 @@ export function createOidcAuthClient(
         throw new AuthCallbackError();
       }
 
-      const session = toAuthSession(user);
       startSession(session, user.expires_at);
       return { session, returnTo: extractReturnTo(user.state) };
     },

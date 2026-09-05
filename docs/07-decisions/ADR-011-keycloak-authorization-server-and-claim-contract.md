@@ -192,7 +192,9 @@ Frontend role은 표시와 action 노출을 위한 UX 정보이며 보안 경계
 - Frontend는 ID token을 Backend에 API credential로 보내지 않는다.
 - Backend는 access token만 검증하고 ID token이나 Frontend의 권한 판단을 신뢰하지 않는다.
 - 401은 ADR-010의 session-bound local invalidation을, 403은 session 유지 계약을 따른다.
-- role UI는 아직 구현되지 않았으며 후속 Issue 전에는 이 계약을 구현 완료로 표현하지 않는다.
+- Issue #243에서 이 계약의 Frontend 판정 계층과 route guard를 구현했다. 구현 상태와 exact
+  matrix는 아래 2.16을 따르며, 판정 계층이 있다는 사실을 보호 route·action이 존재한다는
+  뜻으로 표현하지 않는다.
 
 ### 2.10 Local JWT fixture와 Keycloak profile·issuer 분리
 
@@ -295,6 +297,69 @@ production에서는 별도 network segmentation, trusted TLS, secret manager와 
 2026-09-05 correction에서 fresh/existing runtime, verifier 5회 연속 실행, host TLS·hostname·issuer와
 8082·9000 비공개 검증이 통과했다.
 
+## 2.16 Issue #243 Frontend role·capability UI 구현 상태 (2026-09-05)
+
+2.9의 신뢰 경계를 유지한 채 Frontend 권한 판정 계층과 route guard를 구현했다. 이 절은 구현된
+범위만 기록하며 구현되지 않은 것을 구현된 것처럼 표현하지 않는다.
+
+### 2.16.1 claim 소비 경계
+
+- `principal_type`과 `roles`는 2.6이 정의한 USER ID token claim이며, OIDC client가 검증해 게시한
+  session profile에서만 읽는다. access token은 계속 직접 decode하지 않는다.
+- 이 claim을 읽는 코드는 adapter의 session 생성 지점 한 곳뿐이다. raw claim 값은 그 지점 밖으로
+  나가지 않으며 DOM·로그·오류·Web Storage에 새로 노출되지 않는다.
+- session에 저장되는 것은 검증을 통과한 USER role 이름의 동결된 배열뿐이다. provider가 준 순서를
+  유지하고 canonical order를 새로 정의하지 않는다(2.6과 일치).
+
+### 2.16.2 fail-closed 판정
+
+2.5·2.6·2.8이 금지한 형태는 부분 채택 없이 전체를 거부하며 session 자체를 게시하지 않는다.
+
+| 입력 | 결과 |
+| --- | --- |
+| `principal_type`이 정확히 `USER`이고 `roles`가 알려진 USER role을 하나 이상 담은 중복 없는 배열 | 채택 |
+| `principal_type`이 `USER`가 아님 | 전체 거부 |
+| `roles`가 배열이 아님 | 전체 거부 |
+| `roles`가 빈 배열 | 전체 거부 |
+| unknown·duplicate·SERVICE role, `ROLE_` prefix, Keycloak 내부 role, 대소문자·공백·개행 변형, non-string 원소 | 전체 거부 |
+
+trim·lowercase·deduplicate를 하지 않는다. Backend가 같은 token을 401로 거부하므로, 알아볼 수
+있는 이름만 살려 UI를 그리면 반드시 실패할 조작을 노출하게 된다.
+
+빈 `roles` 배열도 같은 근거로 거부한다. Backend는 authority를 role claim에서만 도출하므로
+(2.6·2.8) role이 없는 USER token은 모든 업무 endpoint에서 401이다. 이 session을 게시하면
+로그인만 성공하고 첫 요청에서 실패하는 상태가 되므로, Frontend session 타입에는 "로그인했으나
+role이 없는 상태"가 없다. `AuthSession.roles`는 required이며 비어 있을 수 없다.
+
+거부 시 OIDC user state와 transaction record를 제거하고 고정 오류로 끝내며 session 게시 0회,
+subscriber 통보 0회다.
+
+### 2.16.3 UI capability matrix
+
+4장 authority 전체를 복제하지 않고, Frontend가 실제로 호출할 수 있는 10개 USER endpoint에
+대응하는 5종만 정의한다.
+
+| USER role | UI capability |
+| --- | --- |
+| `FDS_VIEWER` | `transaction:view`, `case:view` |
+| `FDS_ANALYST` | `transaction:view`, `case:view`, `case:workflow`, `case:note-write` |
+| `FDS_APPROVER` | `transaction:view`, `case:view`, `case:resolve` |
+| `RULE_OPERATOR` | 없음 |
+| `RECOVERY_OPERATOR` | 없음 |
+| `PLATFORM_ADMIN` | 없음 |
+
+다중 role은 합집합이며 배열 순서에 의존하지 않는다. `PLATFORM_ADMIN`은 사건·거래 권한을
+상속하지 않는다. 뒤의 세 role은 대응 HTTP endpoint 또는 client endpoint key가 없어 capability가
+0개이며, 정상 로그인 상태에서 접근 거부 화면을 보는 것이 정의된 동작이다.
+
+### 2.16.4 이 Issue에서 구현하지 않은 것
+
+- capability로 보호되는 production route·navigation 항목·action은 0개다. guard는 구현했으나
+  적용 대상이 없고, 직접 URL 접근 동작은 test 전용 MemoryRouter route로 검증한다.
+- 업무 화면, typed API, pagination, remote logout과 Backend·Keycloak·Infra 변경은 수행하지 않았다.
+- Keycloak realm·mapper를 변경하지 않았다. local realm에 USER가 하나뿐이라 role별 브라우저 E2E는
+  수행하지 않았으며, role 조합 검증은 단위·컴포넌트 테스트가 담당한다.
+
 ## 3. 결과
 
 ### 3.1 장점
@@ -349,7 +414,8 @@ production 운영 요구가 확정되지 않았다. 향후 production 후보로�
 - Frontend 코드·설정 변경과 Keycloak 연동 E2E
 - Backend 코드·설정·validator 변경과 Keycloak 연동 E2E
 - Infra runtime, GitHub Actions, Kubernetes·AWS와 Cognito 구성
-- role·authority 기반 navigation·button·route guard UI와 업무 화면
+- capability로 보호되는 production route·navigation 항목·action과 업무 화면 (판정 계층과 route
+  guard 컴포넌트 자체는 Issue #243에서 구현했다. 2.16 참조)
 - remote logout, refresh token, silent renew, session monitoring과 offline session
 - API·DB·dependency 변경
 

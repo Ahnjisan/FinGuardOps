@@ -2,13 +2,19 @@ import { describe, expect, it } from "vitest";
 import type { AuthSession } from "./authClient";
 import { authReducer, initialAuthState, type AuthState } from "./authState";
 
+// The reducer moves sessions around without reading them, so the roles here
+// only have to be a real published set. They are named rather than empty
+// because `resolveUserRoles()` refuses an empty one, and a fixture no adapter
+// could produce would quietly stop being evidence about the reducer.
 const SESSION: AuthSession = {
   subject: "11111111-1111-4111-8111-111111111111",
   displayName: "Test Analyst",
+  roles: ["FDS_ANALYST"],
 };
 
 const OTHER_SESSION: AuthSession = {
   subject: "22222222-2222-4222-8222-222222222222",
+  roles: ["FDS_APPROVER"],
 };
 
 const UNAUTHENTICATED: AuthState = { status: "unauthenticated" };
@@ -162,12 +168,12 @@ describe("state shape", () => {
     expect(Object.keys(state).sort()).toEqual(["kind", "status"]);
   });
 
-  it("exposes only the subject and display name of a session", () => {
+  it("exposes only the subject, display name and roles of a session", () => {
     const state = authReducer(AUTHENTICATING, { type: "callback-succeeded", session: SESSION });
 
     expect(state.status).toBe("authenticated");
     if (state.status === "authenticated") {
-      expect(Object.keys(state.session).sort()).toEqual(["displayName", "subject"]);
+      expect(Object.keys(state.session).sort()).toEqual(["displayName", "roles", "subject"]);
     }
   });
 });

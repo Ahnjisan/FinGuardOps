@@ -30,6 +30,15 @@ function AuthProbe() {
   );
 }
 
+/**
+ * These tests are about the provider's lifecycle - initialization, StrictMode
+ * double invoke, subscription balance, late results - and never about which
+ * roles a session holds. The least privileged real role is stated so the
+ * fixtures stay sessions the adapter could actually publish: a decided role set
+ * is never empty, because a sign-in that decided none is refused outright.
+ */
+const PROBE_ROLES = ["FDS_VIEWER"] as const;
+
 function renderProbe(client: FakeAuthClient, strict = true) {
   const tree = (
     <AuthProvider client={client}>
@@ -90,7 +99,7 @@ describe("AuthProvider initialization", () => {
 
   it("keeps the surviving StrictMode effect subscribed to invalidation", async () => {
     const client = createFakeAuthClient({
-      initialSession: { subject: "sub-1" },
+      initialSession: { subject: "sub-1", roles: PROBE_ROLES },
     });
     renderProbe(client);
 
@@ -119,7 +128,7 @@ describe("AuthProvider initialization", () => {
   });
 
   it("ignores an invalidation event that arrives after unmount", async () => {
-    const client = createFakeAuthClient({ initialSession: { subject: "sub-1" } });
+    const client = createFakeAuthClient({ initialSession: { subject: "sub-1", roles: PROBE_ROLES } });
     const view = renderProbe(client);
 
     await waitFor(() => {
@@ -153,7 +162,7 @@ describe("AuthProvider initialization", () => {
 
     view.unmount();
     await act(async () => {
-      deferred.resolve({ session: { subject: "sub-1" } });
+      deferred.resolve({ session: { subject: "sub-1", roles: PROBE_ROLES } });
       await deferred.promise;
     });
 
@@ -173,7 +182,7 @@ describe("AuthProvider initialization", () => {
 
   it("restores an in-memory session found at initialization", async () => {
     const client = createFakeAuthClient({
-      initialSession: { subject: "sub-1", displayName: "Analyst" },
+      initialSession: { subject: "sub-1", displayName: "Analyst", roles: PROBE_ROLES },
     });
     renderProbe(client);
 
@@ -341,7 +350,7 @@ describe("AuthProvider redirect cancellation and BFCache restore", () => {
   });
 
   it("does not disturb an authenticated session on a persisted pageshow", async () => {
-    const client = createFakeAuthClient({ initialSession: { subject: "sub-1" } });
+    const client = createFakeAuthClient({ initialSession: { subject: "sub-1", roles: PROBE_ROLES } });
     renderProbe(client);
     await waitFor(() => {
       expect(status()).toBe("authenticated");
@@ -409,7 +418,7 @@ describe("AuthProvider redirect cancellation and BFCache restore", () => {
 describe("AuthProvider sign-out and expiry", () => {
   it("drops the local session immediately, before teardown settles", async () => {
     const user = userEvent.setup();
-    const client = createFakeAuthClient({ initialSession: { subject: "sub-1" } });
+    const client = createFakeAuthClient({ initialSession: { subject: "sub-1", roles: PROBE_ROLES } });
     let released!: () => void;
     client.signOut = () => {
       client.calls.signOut += 1;
@@ -431,7 +440,7 @@ describe("AuthProvider sign-out and expiry", () => {
 
   it("stays unauthenticated when teardown rejects", async () => {
     const user = userEvent.setup();
-    const client = createFakeAuthClient({ initialSession: { subject: "sub-1" } });
+    const client = createFakeAuthClient({ initialSession: { subject: "sub-1", roles: PROBE_ROLES } });
     client.signOut = () => {
       client.calls.signOut += 1;
       return Promise.reject(new DOMException("blocked", "SecurityError"));
@@ -451,7 +460,7 @@ describe("AuthProvider sign-out and expiry", () => {
   });
 
   it("moves to unauthenticated on session invalidation", async () => {
-    const client = createFakeAuthClient({ initialSession: { subject: "sub-1" } });
+    const client = createFakeAuthClient({ initialSession: { subject: "sub-1", roles: PROBE_ROLES } });
     renderProbe(client);
     await waitFor(() => {
       expect(status()).toBe("authenticated");
@@ -465,7 +474,7 @@ describe("AuthProvider sign-out and expiry", () => {
   });
 
   it("does not redirect or re-authenticate after invalidation", async () => {
-    const client = createFakeAuthClient({ initialSession: { subject: "sub-1" } });
+    const client = createFakeAuthClient({ initialSession: { subject: "sub-1", roles: PROBE_ROLES } });
     renderProbe(client);
     await waitFor(() => {
       expect(status()).toBe("authenticated");
@@ -481,7 +490,7 @@ describe("AuthProvider sign-out and expiry", () => {
   });
 
   it("ignores a repeated invalidation", async () => {
-    const client = createFakeAuthClient({ initialSession: { subject: "sub-1" } });
+    const client = createFakeAuthClient({ initialSession: { subject: "sub-1", roles: PROBE_ROLES } });
     renderProbe(client);
     await waitFor(() => {
       expect(status()).toBe("authenticated");
@@ -628,7 +637,12 @@ describe("AuthProvider public context facade", () => {
   });
 
   it("keeps every published method working", async () => {
-    const client = createFakeAuthClient();
+    const client = createFakeAuthClient({
+      completeSignInResult: {
+        session: { subject: "sub-1", roles: PROBE_ROLES },
+        returnTo: "/",
+      },
+    });
     renderCapture(client);
     await waitFor(() => {
       expect(status()).toBe("unauthenticated");

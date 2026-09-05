@@ -6,7 +6,11 @@ import { HealthPage } from "./HealthPage";
 import { HomePage } from "./HomePage";
 import { AuthCallbackError, safeAuthErrorMessage } from "../auth/authErrors";
 import { OIDC_TRANSACTION_STORE_PREFIX } from "../auth/transactionStorage";
-import { createFakeAuthClient, type FakeAuthClient } from "../test/fakeAuthClient";
+import {
+  createFakeAuthClient,
+  FakeCallbackNotConfiguredError,
+  type FakeAuthClient,
+} from "../test/fakeAuthClient";
 import { renderRoutesWithAuth } from "../test/renderWithAuth";
 import { jsonResponse, mockFetchOnce } from "../test/mockFetch";
 
@@ -24,6 +28,15 @@ let currentHref: string;
 function setCallbackHref(search: string, hash = ""): void {
   currentHref = `${CALLBACK_ORIGIN}/auth/callback${search}${hash}`;
 }
+
+/**
+ * A completed callback publishes a real session, so these fixtures name the
+ * role an ordinary analyst signs in with. The page itself never reads it: what
+ * the tests check is the return route, the address bar and the fixed error
+ * message. It is stated because a session carrying no decided role is a
+ * sign-in the adapter refuses rather than one this page would ever receive.
+ */
+const CALLBACK_ROLES = ["FDS_ANALYST"] as const;
 
 function renderCallback(client: FakeAuthClient, search = "?code=abc&state=xyz", hash = "") {
   setCallbackHref(search, hash);
@@ -79,13 +92,18 @@ describe("AuthCallbackPage URL handling", () => {
     expect(replaceStateSpy).toHaveBeenCalledWith(null, "", "/auth/callback");
 
     await act(async () => {
-      deferred.resolve({ session: { subject: "sub-1" }, returnTo: "/" });
+      deferred.resolve({ session: { subject: "sub-1", roles: CALLBACK_ROLES }, returnTo: "/" });
       await deferred.promise;
     });
   });
 
   it("passes the captured URL, not the cleaned one, to the provider", async () => {
-    const client = createFakeAuthClient();
+    const client = createFakeAuthClient({
+      completeSignInResult: {
+        session: { subject: "sub-1", roles: CALLBACK_ROLES },
+        returnTo: "/",
+      },
+    });
     renderCallback(client, "?code=abc&state=xyz");
 
     await waitFor(() => {
@@ -326,7 +344,7 @@ describe("AuthCallbackPage completion", () => {
   it("navigates to an allowlisted return route on success", async () => {
     mockFetchOnce(async () => jsonResponse({ status: "UP", service: "backend" }));
     const client = createFakeAuthClient({
-      completeSignInResult: { session: { subject: "sub-1" }, returnTo: "/health" },
+      completeSignInResult: { session: { subject: "sub-1", roles: CALLBACK_ROLES }, returnTo: "/health" },
     });
     renderCallback(client);
 
@@ -338,7 +356,7 @@ describe("AuthCallbackPage completion", () => {
   it("falls back to the root route for a hostile return value", async () => {
     const client = createFakeAuthClient({
       completeSignInResult: {
-        session: { subject: "sub-1" },
+        session: { subject: "sub-1", roles: CALLBACK_ROLES },
         returnTo: "https://evil.example/steal",
       },
     });
@@ -351,7 +369,12 @@ describe("AuthCallbackPage completion", () => {
   });
 
   it("processes the callback exactly once under StrictMode", async () => {
-    const client = createFakeAuthClient();
+    const client = createFakeAuthClient({
+      completeSignInResult: {
+        session: { subject: "sub-1", roles: CALLBACK_ROLES },
+        returnTo: "/",
+      },
+    });
     renderCallback(client);
 
     await waitFor(() => {
@@ -367,7 +390,7 @@ describe("AuthCallbackPage completion", () => {
 
     expect(client.calls.completeSignIn).toHaveLength(1);
     await act(async () => {
-      deferred.resolve({ session: { subject: "sub-1" }, returnTo: "/" });
+      deferred.resolve({ session: { subject: "sub-1", roles: CALLBACK_ROLES }, returnTo: "/" });
       await deferred.promise;
     });
 
@@ -437,7 +460,7 @@ describe("AuthCallbackPage completion", () => {
 
     view.unmount();
     await act(async () => {
-      deferred.resolve({ session: { subject: "sub-1" }, returnTo: "/health" });
+      deferred.resolve({ session: { subject: "sub-1", roles: CALLBACK_ROLES }, returnTo: "/health" });
       await deferred.promise;
     });
 
@@ -445,7 +468,12 @@ describe("AuthCallbackPage completion", () => {
   });
 
   it("releases the shared record so a genuine later callback runs again", async () => {
-    const client = createFakeAuthClient();
+    const client = createFakeAuthClient({
+      completeSignInResult: {
+        session: { subject: "sub-1", roles: CALLBACK_ROLES },
+        returnTo: "/",
+      },
+    });
     const first = renderCallback(client);
 
     await waitFor(() => {
@@ -461,13 +489,47 @@ describe("AuthCallbackPage completion", () => {
     second.unmount();
   });
 
+  /**
+   * The guarantee every success case above rests on.
+   *
+   * This double supplies no session of its own, so dropping the fixture from
+   * any of those tests makes it fail rather than quietly assert against a
+   * subject and a role set nobody wrote down. The refusal publishes nothing:
+   * no session becomes live, so there is none to restore and none to authorize
+   * a request with.
+   */
+  it("refuses a callback the fake was never told how to answer", async () => {
+    const client = createFakeAuthClient();
+
+    await expect(
+      client.completeSignIn(`${CALLBACK_ORIGIN}/auth/callback?code=abc&state=xyz`),
+    ).rejects.toBeInstanceOf(FakeCallbackNotConfiguredError);
+
+    expect(client.calls.completeSignIn).toHaveLength(1);
+    await expect(client.initialize()).resolves.toEqual({ session: null });
+    await expect(
+      client.authorizeRequest(new Request("http://localhost:8080/api/v1/cases")),
+    ).resolves.toBeNull();
+  });
+
+  it("shows the fixed callback failure when the fake has no result to give", async () => {
+    const client = createFakeAuthClient();
+    renderCallback(client);
+
+    await waitFor(() => {
+      expect(screen.getByRole("status")).toHaveTextContent(safeAuthErrorMessage("callback"));
+    });
+    expect(screen.queryByRole("heading", { name: /finguardops frontend/i })).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("createFakeAuthClient");
+  });
+
   it("completes a second genuine callback exactly once after the first settled", async () => {
     const client = createFakeAuthClient();
     const firstDeferred = client.deferCompleteSignIn();
     const first = renderCallback(client);
 
     await act(async () => {
-      firstDeferred.resolve({ session: { subject: "sub-1" }, returnTo: "/" });
+      firstDeferred.resolve({ session: { subject: "sub-1", roles: CALLBACK_ROLES }, returnTo: "/" });
       await firstDeferred.promise;
     });
     first.unmount();
@@ -477,7 +539,7 @@ describe("AuthCallbackPage completion", () => {
     expect(client.calls.completeSignIn).toHaveLength(2);
 
     await act(async () => {
-      secondDeferred.resolve({ session: { subject: "sub-2" }, returnTo: "/" });
+      secondDeferred.resolve({ session: { subject: "sub-2", roles: CALLBACK_ROLES }, returnTo: "/" });
       await secondDeferred.promise;
     });
 

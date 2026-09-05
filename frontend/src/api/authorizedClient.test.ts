@@ -1112,11 +1112,17 @@ describe("authorized transport — external cancellation", () => {
 describe("authorized transport — the session type is unchanged by this module", () => {
   it("never constructs or mutates an AuthSession", async () => {
     mockFetchOnce(async () => jsonResponse({ ok: true }));
-    const session: AuthSession = { subject: "11111111-1111-4111-8111-111111111111" };
+    const session: AuthSession = {
+      subject: "11111111-1111-4111-8111-111111111111",
+      roles: ["FDS_ANALYST"],
+    };
 
     await caseDetail(createLocalFakeAuthClient());
 
-    expect(session).toEqual({ subject: "11111111-1111-4111-8111-111111111111" });
+    expect(session).toEqual({
+      subject: "11111111-1111-4111-8111-111111111111",
+      roles: ["FDS_ANALYST"],
+    });
   });
 });
 
@@ -1294,7 +1300,7 @@ describe("authorized transport — raw access token against the real adapter", (
   function createManager(accessToken: string): RawTokenManager {
     const calls = { removeUser: 0, getUser: 0 };
     const user: OidcUserLike = {
-      profile: { sub: SUBJECT },
+      profile: { sub: SUBJECT, principal_type: "USER", roles: ["FDS_ANALYST"] },
       access_token: accessToken,
       state: { returnTo: "/" },
     };
@@ -1420,7 +1426,7 @@ describe("authorized transport — session ownership against the real adapter", 
     const expiredListeners = new Set<() => void>();
     const calls = { removeUser: 0 };
     let nextUser: OidcUserLike = {
-      profile: { sub: SUBJECT_A },
+      profile: { sub: SUBJECT_A, principal_type: "USER", roles: ["FDS_ANALYST"] },
       access_token: TOKEN_A,
       state: { returnTo: "/" },
     };
@@ -1538,7 +1544,11 @@ describe("authorized transport — session ownership against the real adapter", 
 
     // Session B is published while A is still in flight.
     manager.setNextUser({
-      profile: { sub: "22222222-2222-4222-8222-222222222222" },
+      profile: {
+        sub: "22222222-2222-4222-8222-222222222222",
+        principal_type: "USER",
+        roles: ["FDS_ANALYST"],
+      },
       access_token: "session.b.token",
       state: { returnTo: "/" },
     });
@@ -1638,7 +1648,11 @@ describe("authorized transport — session ownership against the real adapter", 
     const pending = caseDetail(client);
     await Promise.resolve();
     manager.setNextUser({
-      profile: { sub: "22222222-2222-4222-8222-222222222222" },
+      profile: {
+        sub: "22222222-2222-4222-8222-222222222222",
+        principal_type: "USER",
+        roles: ["FDS_ANALYST"],
+      },
       access_token: "session.b.token",
       state: { returnTo: "/" },
     });
