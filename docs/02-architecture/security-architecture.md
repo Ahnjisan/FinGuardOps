@@ -425,7 +425,8 @@ USER actor UUID, token, claim과 principal 원문은 응답·로그·metadata에
 - SPA access token은 memory에만 보관하고 localStorage·sessionStorage·IndexedDB 저장을
   금지한다.
 - SPA 로그인은 Authorization Code + PKCE를 사용한다.
-- refresh token과 role·authority 기반 권한 UI는 별도 Frontend Issue다.
+- refresh token은 별도 Frontend Issue다. role·authority 기반 권한 UI의 판정 계층과 route
+  guard는 Issue #243에서 구현했고, 이를 적용할 production 보호 route·action은 아직 없다.
 - USER public client는 Authorization Code Flow + PKCE `S256`만 허용한다. implicit flow,
   password grant, client secret과 wildcard redirect URI를 금지한다.
 
@@ -509,9 +510,37 @@ provider 설정뿐 아니라 실제 token response를 검사한다. `refresh_tok
 session을 게시하지 않고 OIDC user state를 제거하며, callback 이후 memory·user store·Web
 Storage에 원문이 남지 않게 fail-closed한다. `automaticSilentRenew=false`, refresh token
 grant 0회와 silent renew 0회를 유지한다. 실제 Chromium E2E는 정상 token response의 refresh token
-부재와 합성 `refresh_token` 거부, state·nonce·PKCE 변조 거부를 각각 확인한다. 이 정책과 Keycloak runtime·연동,
-role·authority 기반 navigation·button·route guard UI, 거래·사건·메모·감사 업무 화면과 remote
-logout은 아직 구현되지 않았다.
+부재와 합성 `refresh_token` 거부, state·nonce·PKCE 변조 거부를 각각 확인한다. 거래·사건·메모·
+감사 업무 화면과 remote logout은 아직 구현되지 않았다.
+
+Issue #243에서 Frontend는 검증된 session profile의 USER role로 UI capability를 결정하는 판정
+계층과 route guard 컴포넌트를 구현했다. `principal_type`과 `roles`는 OIDC client가 검증한 ID
+token claim이며 adapter의 session 생성 지점 한 곳에서만 읽는다. access token은 계속 decode하지
+않는다. `principal_type`이 정확히 `USER`가 아니거나, `roles`가 배열이 아니거나, 빈 배열이거나,
+unknown·duplicate·SERVICE role이나 대소문자·공백 변형·non-string 원소가 하나라도 있으면 부분
+채택 없이 전체를 거부하고 session 자체를 게시하지 않는다. 이는 Backend가 같은 token을 401로
+거부하는 것과 일치시키기 위한 것이다. 빈 `roles`도 예외가 아니다. 4장 authority는 모두 role
+claim에서 도출되므로 role이 없는 USER token은 어떤 업무 endpoint에서도 401이고, 이런 session을
+게시하면 로그인만 성공하고 첫 요청에서 실패하는 상태가 된다. 따라서 Frontend session에는
+"로그인했으나 role이 없는 상태"가 존재하지 않으며, session의 role 배열은 required이면서 비어
+있을 수 없다. 거부는 session 게시 0회, subscriber 통보 0회, OIDC user state·transaction record
+제거, 고정 callback 오류로 끝난다.
+
+UI capability는 4장 authority 전체를 복제하지 않고, Frontend가 실제로 호출할 수 있는 10개
+USER endpoint에 대응하는 `transaction:view`, `case:view`, `case:workflow`, `case:note-write`,
+`case:resolve` 5종만 정의한다. `FDS_VIEWER`는 앞의 두 개, `FDS_ANALYST`는 여기에
+`case:workflow`·`case:note-write`, `FDS_APPROVER`는 `case:resolve`를 더한다. 다중 role은
+합집합이며 배열 순서에 의존하지 않는다. `RULE_OPERATOR`·`RECOVERY_OPERATOR`·`PLATFORM_ADMIN`은
+대응 endpoint가 없으므로 capability가 0개이고, `PLATFORM_ADMIN`이 사건·거래 권한을 상속하지
+않는다는 4장 규칙이 UI에서도 유지된다.
+
+guard는 결정 이전(`initializing`·`authenticating`)을 거부로 확정하지 않고, 미인증과 인증 오류를
+로그인 안내로 수렴시키며, 권한 없는 action을 `disabled`가 아니라 DOM에서 제거한다. 거부·안내
+화면은 role·authority·claim·subject를 노출하지 않는 고정 문구만 사용한다. guard는 요청을
+가로채지 않으므로 401의 session-bound invalidation과 403의 session 유지 경계는 그대로다.
+이 UI는 표시 경계이며 endpoint·method authority 검증과 401·403 결정을 대체하지 않는다.
+capability로 보호되는 production route·navigation 항목·action은 아직 0개이며, guard의 직접 URL
+접근 동작은 test 전용 MemoryRouter route로 검증한다.
 
 ## 11. Local·test·Compose 경계
 
@@ -582,7 +611,7 @@ method security는 Issue #221에서 구현되었다. 아래 표는 구현 상태
 | 완료. `[Infra/Security] Keycloak local/dev runtime 구현` | 실제 local/dev issuer와 client·mapper | Compose, realm, client scope, protocol mapper | 없음 | tag·digest·realm·claim·singleton audience source·rotation | #233 | Phase 1 fresh/existing runtime 완료 (#239) |
 | 완료. `[Security/E2E] USER 로그인과 Backend 연동` | browser OIDC와 Resource Server 연결 | Frontend·Backend·Keycloak E2E | `@playwright/test` | raw `aud`·access/ID `sub` 원문 동일성·role 집합·refresh fail-closed·401·403 | Keycloak runtime | Chromium·Windows CurrentUser trust runner 구현 (#239) |
 | 완료. `[Security/E2E] SERVICE Client Credentials 연동` | 거래·행동 접수 SERVICE 인증 | Keycloak verifier·Compose·문서 | 없음 | 실제 신규·replay·conflict·401·403, PostgreSQL cardinality, External Risk·Rule 1회 | Keycloak runtime | fresh/existing-volume·전용 resource cleanup 구현 (#241) |
-| 4. `[Frontend/Security] role·authority 권한 UI` | 권한별 표시와 action 노출 | navigation, button, route guard UI | 없음 | browser login·expiry·권한 UI | USER E2E, #231 | 미구현 |
+| 부분 구현. `[Frontend/Security] role·authority 권한 UI` | 권한별 표시와 action 노출 | navigation, button, route guard UI | 없음 | browser login·expiry·권한 UI | USER E2E, #231 | 권한 판정 계층과 `RequireCapability` guard 구현 (#243); 이를 적용한 production 보호 route·navigation 항목·action 0개 |
 | 5. `[Frontend] 업무 typed API와 query pagination` | 보호 API 소비 | 거래·사건·메모·감사 module, page·size·sort | 없음 | DTO·validator·query 조립 | #231 | 미구현 |
 | 6. `[Frontend] Keycloak remote logout` | RP-initiated logout | end-session·exact post-logout URI | 없음 | local invalidation·실패·redirect | USER E2E | 미구현 |
 

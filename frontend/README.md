@@ -2,8 +2,10 @@
 
 React·TypeScript·Vite 기반의 FinGuardOps 프론트엔드다. 표준 OIDC Authorization Code + PKCE
 인증 경계와, 승인된 Backend 업무 endpoint에만 credential을 전달하는 인증 API transport가
-구현되어 있다. local/dev Authorization Server는 Keycloak으로 선정했지만 Keycloak runtime과
-실제 연동, 업무 화면과 role·authority 권한 UI는 아직 구현되지 않았다.
+구현되어 있다. local/dev Authorization Server는 Keycloak으로 선정했고 Issue #239에서 실제
+로그인을 연결했다. Issue #243에서는 검증된 session profile의 USER role로 UI capability를
+결정하는 판정 계층과 route guard 컴포넌트를 구현했다. 다만 이를 적용한 production 보호
+route·navigation 항목·action은 아직 0개이며, 업무 화면은 구현되지 않았다.
 
 ## 요구사항
 
@@ -66,10 +68,10 @@ render에 도달하지 않고, 애플리케이션은 원문 값을 화면이나 
 
 | 경로 | 책임 |
 | --- | --- |
-| `src/app` | Router 구성과 최상위 App Shell (navigation, `Outlet`) |
+| `src/app` | Router 구성, 최상위 App Shell (navigation, `Outlet`), capability route guard |
 | `src/pages` | 화면 단위 컴포넌트 |
 | `src/api` | Backend HTTP client, endpoint allowlist, 인증 transport, 오류 분류, API 타입, 데이터 조회 hook |
-| `src/auth` | 인증 상태 machine, `AuthClient` port, `oidc-client-ts` adapter, transaction storage, callback URL·복귀 경로 처리, React context와 hook |
+| `src/auth` | 인증 상태 machine, `AuthClient` port, `oidc-client-ts` adapter, transaction storage, callback URL·복귀 경로 처리, USER role·capability 판정, React context와 hook |
 | `src/config` | 환경변수 검증 |
 | `src/shared` | 화면 전반에서 재사용하는 타입 (예: `AsyncState`) |
 | `src/test` | 테스트 공용 설정과 helper (production build에 포함되지 않음) |
@@ -91,8 +93,13 @@ tsconfig.app.json` 결과에는 test 또는 test-support 파일이 포함되지 
 
 `/`와 `/health`는 public이며 인증 초기화 실패나 Authorization Server 장애와 무관하게 계속
 열려 있다. 보호 업무 route, 로그인 전용 route, silent renew callback, logout callback route는
-존재하지 않는다. 업무 화면(거래, 사건, 조사, 판정, 운영 대시보드)과 권한 UI도 이번 범위에
-포함되지 않는다.
+존재하지 않는다. 업무 화면(거래, 사건, 조사, 판정, 운영 대시보드)은 이번 범위에 포함되지
+않는다.
+
+`RequireCapability` guard는 구현되어 있지만 위 표의 어떤 route에도 적용되어 있지 않다.
+capability로 보호되는 production route가 아직 없기 때문이며, guard의 직접 URL 접근 동작은
+test 전용 `MemoryRouter` route에서 검증한다. 새 보호 route를 추가할 때는 `src/app/router.tsx`
+와 `src/auth/returnRoute.ts`의 exact allowlist를 함께 갱신해야 로그인 후 복귀가 성립한다.
 
 ## 인증 경계
 
@@ -268,8 +275,9 @@ UUID v4여야 한다. trim·lowercase 변환·normalization·재직렬화로 불
 Frontend는 access token을 직접 decode하지 않는다. OIDC client가 검증해 게시한 session
 profile의 `principal_type`과 `roles`만 navigation·button·action 노출에 사용할 수 있다. 이
 정보는 UI 표시를 위한 것이며 Backend authorization을 대체하지 않는다. Backend는 ID token이
-아니라 access token만 API credential로 검증하고 401·403을 최종 결정한다. role 기반 UI 자체는
-아직 구현되지 않았다.
+아니라 access token만 API credential로 검증하고 401·403을 최종 결정한다. 이 claim을 읽는
+코드는 adapter의 `toAuthSession()` 한 곳뿐이며, 자세한 판정 규칙은 아래 `권한 UI 경계`에
+있다.
 
 `offline_access` 요청과 offline token 사용은 금지한다. 일반 온라인 refresh token은 offline
 token과 별개의 credential이고 `offline_access` 없이도 반환될 수 있다고 가정한다. Frontend
@@ -281,6 +289,111 @@ token이 남아서는 안 된다. 검사 중 라이브러리 내부에 일시적
 보관하는 credential과 구분하되, 원문을 로그·오류·DOM·React state·관측 데이터에 노출하지 않고
 callback 종료 후 유지하지 않는다. Issue #239 Playwright E2E는 성공·거부 callback, 거부 후 session·
 Backend 요청 0회, refresh grant 0회, silent renew 0회와 원문 노출 0회를 검증한다.
+
+## 권한 UI 경계
+
+capability 판정 계층과 `RequireCapability` guard는 **표시 경계**다. Backend가 access token으로
+endpoint·method authority를 다시 판정해 401·403으로 최종 결정하며, 숨긴 버튼과 guard가 그
+판정을 대체하지 않는다.
+
+### session profile에서 USER role 판정
+
+`principal_type`과 `roles`는 OIDC client가 검증한 ID token claim이고,
+`src/auth/oidcAuthClient.ts`의 `toAuthSession()` 한 곳에서만 읽는다. 애플리케이션은 access
+token을 직접 decode하지 않는다. 판정은 `src/auth/userRoles.ts`의 `resolveUserRoles()`가 한다.
+
+| 입력 | 결과 |
+| --- | --- |
+| `principal_type`이 정확히 `USER`이고 `roles`가 알려진 USER role을 하나 이상 담은 중복 없는 배열 | 그대로 채택 |
+| `principal_type`이 `USER`가 아님(`SERVICE`, `user`, ` USER `, 누락, non-string) | 전체 거부 |
+| `roles`가 배열이 아님(문자열, `Set`, array-like object, 누락) | 전체 거부 |
+| `roles`가 빈 배열 | 전체 거부 |
+| unknown role, SERVICE role, `ROLE_` prefix, Keycloak 내부 role, duplicate, 대소문자·공백·개행 변형, non-string 원소 | 전체 거부 |
+| claim getter가 예외를 던짐 | 전체 거부 |
+
+trim·lowercase·deduplicate·부분 채택을 하지 않는다. Backend `FinGuardOpsJwtValidator`가 같은
+token을 401로 거부하므로, 알아볼 수 있는 이름만 살려 UI를 그리면 반드시 실패할 조작을
+노출하게 된다.
+
+빈 배열도 같은 이유로 거부하며, Backend와 판정을 일치시키기 위한 것이지 별도로 더 엄격한
+규칙이 아니다. Backend는 모든 authority를 role claim에서만 도출하므로 role이 하나도 없는 USER
+token은 어떤 업무 endpoint에서도 401이다. 이런 session을 게시하면 로그인은 성공한 것처럼
+보이지만 첫 요청에서 실패하는 상태가 된다. 따라서 "로그인했지만 아무 role도 없는 session"은
+존재하지 않으며, `AuthSession.roles`는 required이면서 비어 있을 수 없는 readonly USER role
+배열이다.
+
+전체 거부는 **session을 게시하지 않는 것**을 뜻한다. callback은 `discardRejectedUser()`로 OIDC
+user state와 transaction record를 제거하고 고정 `AuthCallbackError`로 끝난다. session 게시 0회,
+subscriber 통보 0회이며 이후 `initialize()`는 `{ session: null }`로 수렴한다. 거부된 claim
+원문은 오류·DOM·로그·Web Storage 어디에도 남지 않는다.
+
+채택된 role 배열은 `Object.freeze`로 동결해 `AuthSession.roles`에 저장하고, provider가 준
+순서를 그대로 유지한다(ADR-011은 canonical role order를 정의하지 않는다). claim 배열을 그대로
+참조하지 않고 복사한다.
+
+### role에서 capability 판정
+
+`src/auth/capabilities.ts`의 capability는 이 client가 실제로 호출할 수 있는 endpoint
+(`src/api/backendEndpoints.ts`의 10개 key)에만 대응한다.
+
+| capability | 대응 Backend endpoint |
+| --- | --- |
+| `transaction:view` | `GET /api/v1/transactions`, `GET /api/v1/transactions/{transactionId}` |
+| `case:view` | `GET /api/v1/cases`, `GET /api/v1/cases/{caseId}`, `GET /api/v1/cases/{caseId}/notes`, `GET /api/v1/cases/{caseId}/audit-logs` |
+| `case:workflow` | `PATCH /api/v1/cases/{caseId}/status`, `PATCH /api/v1/cases/{caseId}/assignee` |
+| `case:note-write` | `POST /api/v1/cases/{caseId}/notes` |
+| `case:resolve` | `POST /api/v1/cases/{caseId}/resolution` |
+
+| USER role | `transaction:view` | `case:view` | `case:workflow` | `case:note-write` | `case:resolve` |
+| --- | :-: | :-: | :-: | :-: | :-: |
+| `FDS_VIEWER` | O | O | | | |
+| `FDS_ANALYST` | O | O | O | O | |
+| `FDS_APPROVER` | O | O | | | O |
+| `RULE_OPERATOR` | | | | | |
+| `RECOVERY_OPERATOR` | | | | | |
+| `PLATFORM_ADMIN` | | | | | |
+
+다중 role은 각 role capability의 합집합이며 배열 순서에 의존하지 않는다. `PLATFORM_ADMIN`은
+사건·거래 권한을 자동 상속하지 않는다(보안 아키텍처 4장). `RULE_OPERATOR`·`RECOVERY_OPERATOR`·
+`PLATFORM_ADMIN`이 가진 `rule-version:*`, `recovery:*`, `platform:*`, `ai-operations:*`,
+`ai-usage:*`에는 이 client가 호출할 수 있는 endpoint가 없으므로 capability를 정의하지 않는다.
+`behavior-event:read`, `detection:read`, `ai-report:read`, `ai-report:create`도 같은 이유로
+제외한다. 따라서 이 세 role은 현재 도달 가능한 route·action이 0개이며, 정상 로그인 상태에서
+접근 거부 화면을 보는 것이 정의된 동작이다.
+
+`CapabilitySet`은 동결되어 있고 내부 `Set`을 밖으로 내보내지 않는다. `granted`는 동결된
+배열이며 canonical 순서로 정렬하므로 role 순서가 결과를 바꾸지 않는다.
+
+### guard 상태
+
+`RequireCapability`는 인증 상태를 4갈래로 명시 처리한다.
+
+| 인증 상태 | 렌더 |
+| --- | --- |
+| `initializing`, `authenticating` | `role="status"`의 `Checking access...` (거부로 확정하지 않음) |
+| `unauthenticated`, `error` | `Sign in required` 안내. 자동 redirect·자동 로그인 없음 |
+| `authenticated` + capability 보유 | children |
+| `authenticated` + capability 없음 | `AccessDeniedPage` |
+
+- 아직 결정되지 않은 상태를 거부로 표시하지 않는다. 권한 있는 사용자에게 거부 화면을 잠깐
+  보였다가 통과시키면 사용자가 새로고침으로 실제 거부를 넘기려 하게 된다.
+- `error`도 별도 문구 없이 `Sign in required`로 수렴한다. 실패 사유는 App Shell의 인증 status
+  영역이 이미 고정 메시지로 표시한다.
+- 권한 없는 action은 `disabled`가 아니라 DOM에서 제거한다. disabled 컨트롤은 접근성 트리에
+  남고 속성 하나로 되살아난다.
+- 접근 거부·로그인 필요·확인 중 화면은 role·authority·claim·subject를 출력하지 않는 고정
+  문구만 쓴다. 어떤 role이면 통과하는지도 알려주지 않는다.
+- guard는 API 호출 여부를 바꾸지 않는다. capability가 없다고 요청을 가로채지 않으며, 401은
+  기존 session-bound invalidation으로 권한 UI를 즉시 제거하고, 403은 session·memory token과
+  capability를 그대로 유지한다.
+- session 무효화·logout·session 교체는 `AuthSession`을 통째로 바꾸므로 capability가 다시
+  계산된다. 이전 session의 capability는 남지 않는다.
+- 정상 로그인 상태에서 capability가 0개인 경우는 도달 가능한 endpoint가 없는
+  `RULE_OPERATOR`·`RECOVERY_OPERATOR`·`PLATFORM_ADMIN`뿐이다. role이 하나도 없는 session은
+  게시되지 않으므로 존재하지 않는다.
+- 그럼에도 guard는 빈 `roles`와 `roles` 누락에서 거부로 수렴하는지 확인한다. 판정이 타입에만
+  기대면 안 되기 때문이다. 이 두 값은 port가 만들 수 없으므로 공용 fake를 느슨하게 만들지 않고
+  `src/app/RequireCapability.test.tsx` 안의 test 전용 unsafe helper 한 곳에서만 생성한다.
 
 ## Health API 경계
 
@@ -530,10 +643,11 @@ timer와 단계 사이의 명시적 경과시간 검사가 이를 공유한다. 
 ## 미구현 범위
 
 - 거래·사건·조사·판정 등 업무 화면과 업무 DTO·typed API module
-- 역할·권한 기반 navigation·button·route guard UI
+- capability로 보호되는 production route·navigation 항목·action (판정 계층과 guard는 구현했으나
+  적용 대상이 아직 0개다)
 - `page`·`size`·`sort` query pagination
 - production Authorization Server와 production runtime 배포
-- remote end-session(RP-initiated logout), role·authority UI
+- remote end-session(RP-initiated logout)
 - silent renew와 refresh token 사용은 지원하지 않으며 도입하려면 별도 승인이 필요하다.
 - Local JWT fixture(Issue #225의 `infra/compose.local-jwt-e2e.yml`)는 로컬/수동 인증 E2E
   검증용 컴포넌트이며, 브라우저에서 사용하는 OIDC Provider가 아니다. Frontend browser E2E는
@@ -603,6 +717,27 @@ timer·listener 정리, late resolve·reject의 unhandled rejection 0을 검증�
 단일 teardown, GET·POST·PATCH replay 0과 redirect 0을, 403은 오류 타입, session 유지,
 teardown 0, retry·replay·redirect 0과 role·claim·body·token 비노출을 확인한다.
 
+권한 UI는 반례 중심으로 검증한다. role 판정은 `principal_type`의 `SERVICE`·대소문자·공백·
+non-string 변형, `roles`의 unknown·SERVICE·`ROLE_` prefix·Keycloak 내부 role·duplicate·
+대소문자·공백·개행·prototype property 이름·non-string 원소·비배열, 그리고 claim getter 예외를
+각각 전체 거부로 확인하고, 정상 claim에서는 동결·복사·순서 보존을 확인한다. adapter는 거부 시
+session 게시 0회, subscriber 통보 0회, `removeUser()` 1회, transaction 정리, 이후 `initialize()`
+`{ session: null }`, `authorizeRequest()` `null`과 claim 원문 비노출을 확인한다.
+capability는 USER role 6종 각각의 exact 집합, 다중 role 합집합과 순서 무관성,
+`PLATFORM_ADMIN`의 사건·거래 미상속, 타입으로는 도달할 수 없는 빈 role·미정 role에서의 0개,
+`CapabilitySet` 동결과 mutable `Set` 비노출을 검증한다. 빈 `roles` claim은 session 게시 0회·
+subscriber 통보 0회·`removeUser()` 1회·transaction 정리·고정 `AuthCallbackError`로 끝나는 것을
+adapter 테스트가 따로 확인한다. guard는 test 전용 `MemoryRouter` route에서 initializing·authenticating·
+unauthenticated·error·허용·거부 6가지 결과, 직접 URL 진입, 권한 없는 action의 DOM 부재와
+`disabled`·`aria-disabled` 잔여 0개, session 무효화·logout·session 교체 시 즉시 제거와 재계산,
+StrictMode에서의 단일 결정, DOM에 role·`principal_type`·subject·token 문자열 비노출,
+`authorizeRequest` 호출 0회를 확인한다.
+
+test 공용 fake(`src/test/fakeAuthClient.ts`)는 session을 대신 만들어 주지 않는다. session 입력은
+port와 동일하게 role이 required이며 비어 있을 수 없고, callback 결과를 지정하지 않은 채
+`completeSignIn()`을 호출하면 고정된 test 전용 오류로 실패하며 session을 게시하지 않는다. 따라서
+callback 성공 테스트는 각자 session과 유효한 USER role을 명시한다.
+
 Web Storage에 token을 저장하는 코드는 없다. sessionStorage에는 transaction record만
 존재하며 JWT 형태 값이 남지 않는다. IndexedDB는 사용하지 않고, Backend `GET /api/health`
 요청에는 계속 `Authorization` header를 붙이지 않는다. Issue #225의 Local JWT fixture는
@@ -622,7 +757,16 @@ authority는 `https://localhost:8443/realms/finguardops-local`이고 Authorizati
 S256만 허용한다. Local JWT fixture issuer는 Frontend OIDC authority가 아니다.
 
 Issue #239는 외부 USER password로 실제 browser login/callback과 USER access/ID token 계약,
-refresh-token 반환 fail-closed를 Chromium에서 검증한다. role 기반 UI와 remote logout은 아직
-미구현이다. Frontend production code는 access token을 직접 decode하지 않으며,
-검증된 ID token role은 UI 표시 정보일 뿐이다. 최종 접근 결정은 계속 Backend의 독립적인
-access-token 검증과 401/403 응답이다.
+refresh-token 반환 fail-closed를 Chromium에서 검증한다.
+
+role 기반 UI는 두 부분으로 나누어 본다. Issue #243에서 검증된 session profile의 USER role로 UI
+capability를 결정하는 판정 계층(`src/auth/userRoles.ts`, `src/auth/capabilities.ts`,
+`src/auth/useCapabilities.ts`)과 `RequireCapability` guard 컴포넌트는 구현했다. 반면 이를 적용한
+production 보호 route·navigation 항목·action은 아직 0개이며, guard의 동작은 test 전용
+`MemoryRouter` route에서만 검증한다. 자세한 내용은 위 `권한 UI 경계`에 있다. remote logout은
+그대로 미구현이다.
+
+local realm에는 USER가 하나뿐이라 role 조합별 browser E2E는 수행하지 않았고, role·capability
+판정은 단위·컴포넌트 테스트가 담당한다. Frontend production code는 access token을 직접
+decode하지 않으며, 검증된 ID token role은 UI 표시 정보일 뿐이다. 최종 접근 결정은 계속
+Backend의 독립적인 access-token 검증과 401/403 응답이다.

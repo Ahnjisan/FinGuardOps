@@ -17,9 +17,30 @@
  * handed only to the authenticated Backend transport.
  */
 
+import type { NonEmptyUserRoles } from "./userRoles";
+
 export interface AuthSession {
   readonly subject: string;
   readonly displayName?: string;
+  /**
+   * The session's FinGuardOps USER roles, already validated against the
+   * allowlist and frozen by the adapter.
+   *
+   * These are display and affordance information, taken from claims an OIDC
+   * client validated, and they are not a permission. Backend re-decides
+   * authorization from the access token on every request.
+   *
+   * Required and non-empty, so that no session can exist without at least one
+   * decided role. A malformed `roles` claim and an empty one both make the
+   * adapter refuse the sign-in rather than publish a session that Backend would
+   * answer 401 to on its first request; there is no "signed in with nothing"
+   * state for this type to describe.
+   *
+   * Consumers still fail closed on a runtime value that contradicts this type
+   * rather than trusting it, because a permission decision must survive an
+   * input that should have been impossible.
+   */
+  readonly roles: NonEmptyUserRoles;
 }
 
 export interface InitializeResult {

@@ -21,6 +21,15 @@ const ROUTES: RouteObject[] = [
   },
 ];
 
+/**
+ * The shell renders nothing that depends on which roles a session holds, so
+ * these tests state the least privileged real role rather than a convenient
+ * one. Naming it is not decoration: `AuthSession.roles` is non-empty because a
+ * sign-in that decided no role is refused outright, and a fixture that skipped
+ * the field would be a session the adapter cannot publish.
+ */
+const SHELL_ROLES = ["FDS_VIEWER"] as const;
+
 function renderShell(client: FakeAuthClient, path = "/") {
   return renderRoutesWithAuth(ROUTES, { client, initialEntries: [path] });
 }
@@ -109,7 +118,7 @@ describe("AppShell authentication controls", () => {
 
   it("offers sign-out and a display name once authenticated", async () => {
     const client = createFakeAuthClient({
-      initialSession: { subject: "sub-1", displayName: "Test Analyst" },
+      initialSession: { subject: "sub-1", displayName: "Test Analyst", roles: SHELL_ROLES },
     });
     renderShell(client);
 
@@ -121,7 +130,7 @@ describe("AppShell authentication controls", () => {
   });
 
   it("says only that the user is signed in when there is no display name", async () => {
-    renderShell(createFakeAuthClient({ initialSession: { subject: "sub-1" } }));
+    renderShell(createFakeAuthClient({ initialSession: { subject: "sub-1", roles: SHELL_ROLES } }));
 
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
@@ -131,7 +140,7 @@ describe("AppShell authentication controls", () => {
 
   it("signs out on request and returns to the sign-in control", async () => {
     const user = userEvent.setup();
-    const client = createFakeAuthClient({ initialSession: { subject: "sub-1" } });
+    const client = createFakeAuthClient({ initialSession: { subject: "sub-1", roles: SHELL_ROLES } });
     renderShell(client);
 
     await waitFor(() => {
@@ -144,7 +153,7 @@ describe("AppShell authentication controls", () => {
   });
 
   it("returns to the sign-in control when the session is invalidated", async () => {
-    const client = createFakeAuthClient({ initialSession: { subject: "sub-1" } });
+    const client = createFakeAuthClient({ initialSession: { subject: "sub-1", roles: SHELL_ROLES } });
     renderShell(client);
 
     await waitFor(() => {
@@ -197,7 +206,11 @@ describe("AppShell public boundary", () => {
 
   it("never renders a subject, token or provider payload", async () => {
     const client = createFakeAuthClient({
-      initialSession: { subject: "11111111-1111-4111-8111-111111111111", displayName: "Analyst" },
+      initialSession: {
+        subject: "11111111-1111-4111-8111-111111111111",
+        displayName: "Analyst",
+        roles: SHELL_ROLES,
+      },
     });
     renderShell(client);
 

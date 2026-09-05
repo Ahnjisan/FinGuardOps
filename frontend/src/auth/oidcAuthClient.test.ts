@@ -23,10 +23,24 @@ const ENV: AuthEnv = {
   oidcClientId: "finguardops-frontend",
 };
 
+/**
+ * A user shaped like the one Keycloak's `finguardops-user-claims` scope
+ * actually produces: the FinGuardOps `principal_type` and `roles` claims travel
+ * in the ID token, which is what `profile` exposes once the library has
+ * validated it.
+ */
 const USER: OidcUserLike = {
-  profile: { sub: "11111111-1111-4111-8111-111111111111", name: "Test Analyst" },
+  profile: {
+    sub: "11111111-1111-4111-8111-111111111111",
+    name: "Test Analyst",
+    principal_type: "USER",
+    roles: ["FDS_ANALYST"],
+  },
   state: { returnTo: "/health" },
 };
+
+/** The claims a session must carry, for fixtures that vary something else. */
+const USER_CLAIMS = { principal_type: "USER", roles: ["FDS_ANALYST"] };
 
 interface FakeUserManager extends UserManagerLike {
   readonly calls: {
@@ -654,7 +668,7 @@ describe("createOidcAuthClient sign-in", () => {
 });
 
 describe("createOidcAuthClient callback", () => {
-  it("returns only the subject, display name and untrusted return route", async () => {
+  it("returns only the subject, display name, roles and untrusted return route", async () => {
     const client = clientFor(createFakeUserManager());
 
     const result = await client.completeSignIn("http://localhost/auth/callback?code=a&state=b");
@@ -662,6 +676,7 @@ describe("createOidcAuthClient callback", () => {
     expect(result.session).toEqual({
       subject: "11111111-1111-4111-8111-111111111111",
       displayName: "Test Analyst",
+      roles: ["FDS_ANALYST"],
     });
     expect(result.returnTo).toBe("/health");
     expect(JSON.stringify(result)).not.toMatch(/access_token|id_token|refresh_token/);
@@ -729,7 +744,7 @@ describe("createOidcAuthClient callback", () => {
 
   it("uses the display name only when the provider supplies a string", async () => {
     const manager = createFakeUserManager();
-    manager.setUser({ profile: { sub: "sub-1" } });
+    manager.setUser({ profile: { sub: "sub-1", ...USER_CLAIMS } });
     const client = clientFor(manager, window.sessionStorage);
 
     const result = await client.completeSignIn("http://localhost/auth/callback?code=a");
@@ -739,7 +754,7 @@ describe("createOidcAuthClient callback", () => {
 
   it("reports an absent return route rather than inventing one", async () => {
     const manager = createFakeUserManager();
-    manager.setUser({ profile: { sub: "sub-1" }, state: undefined });
+    manager.setUser({ profile: { sub: "sub-1", ...USER_CLAIMS }, state: undefined });
     const client = clientFor(manager, window.sessionStorage);
 
     const result = await client.completeSignIn("http://localhost/auth/callback?code=a");
@@ -2186,6 +2201,7 @@ describe("createOidcAuthClient callback - refresh token fail-closed", () => {
     expect(result.session).toEqual({
       subject: "11111111-1111-4111-8111-111111111111",
       displayName: "Test Analyst",
+      roles: ["FDS_ANALYST"],
     });
     expect(result.returnTo).toBe("/health");
     // The accepted path is untouched: nothing discarded, nobody notified.
@@ -2493,5 +2509,296 @@ describe("createOidcAuthClient callback - refresh token fail-closed", () => {
     await expect(client.initialize()).resolves.toEqual({ session: null });
     expect(invalidated).not.toHaveBeenCalled();
     expect(manager.calls.removeUser).toBe(1);
+  });
+});
+
+/**
+ * The claim contract, at the one boundary that decides it.
+ *
+ * `principal_type` and `roles` reach the application only through a `profile`
+ * the library has already validated, and the adapter is the only code allowed
+ * to read them. Every case below therefore drives the production adapter
+ * through `completeSignIn`, where the check sits in its real position: after
+ * protocol validation and the credential-shape check, before publication.
+ *
+ * The rule under test is that a defective claim set ends the sign-in rather
+ * than producing a session with fewer roles. A UI built on a salvaged subset
+ * would offer controls that Backend answers with 401, because
+ * `FinGuardOpsJwtValidator` refuses these same token shapes outright.
+ */
+describe("createOidcAuthClient callback - role claim fail-closed", () => {
+  const CALLBACK_URL = "http://localhost/auth/callback?code=a&state=b";
+  const TRANSACTION_KEY = `${OIDC_TRANSACTION_STORE_PREFIX}state`;
+  const ALL_USER_ROLES = [
+    "FDS_VIEWER",
+    "FDS_ANALYST",
+    "FDS_APPROVER",
+    "RULE_OPERATOR",
+    "RECOVERY_OPERATOR",
+    "PLATFORM_ADMIN",
+  ];
+
+  function callbackClient(manager: FakeUserManager, storage: Storage = window.sessionStorage) {
+    return clientFor(manager, storage, { isCallbackRoute: () => true });
+  }
+
+  function userWithClaims(principalType: unknown, roles: unknown): OidcUserLike {
+    return {
+      ...USER,
+      profile: {
+        sub: USER.profile.sub,
+        name: "Test Analyst",
+        principal_type: principalType,
+        roles,
+      },
+    };
+  }
+
+  const ACCEPTED: ReadonlyArray<[string, unknown, readonly string[]]> = [
+    ["a single role", ["FDS_ANALYST"], ["FDS_ANALYST"]],
+    ["two roles", ["FDS_ANALYST", "FDS_APPROVER"], ["FDS_ANALYST", "FDS_APPROVER"]],
+    ["every USER role at once", ALL_USER_ROLES, ALL_USER_ROLES],
+  ];
+
+  it.each(ACCEPTED)("publishes a session for %s", async (_label, roles, expected) => {
+    const manager = createFakeUserManager();
+    manager.setUser(userWithClaims("USER", roles));
+    const client = callbackClient(manager);
+
+    const result = await client.completeSignIn(CALLBACK_URL);
+
+    expect(result.session.roles).toEqual(expected);
+    expect(manager.calls.removeUser).toBe(0);
+  });
+
+  it("preserves the provider role order rather than sorting it", async () => {
+    const manager = createFakeUserManager();
+    manager.setUser(userWithClaims("USER", ["FDS_APPROVER", "FDS_VIEWER"]));
+    const client = callbackClient(manager);
+
+    const result = await client.completeSignIn(CALLBACK_URL);
+
+    expect(result.session.roles).toEqual(["FDS_APPROVER", "FDS_VIEWER"]);
+  });
+
+  it("freezes the published roles", async () => {
+    const manager = createFakeUserManager();
+    const client = callbackClient(manager);
+
+    const result = await client.completeSignIn(CALLBACK_URL);
+    const roles = result.session.roles;
+
+    expect(Object.isFrozen(roles)).toBe(true);
+    // Asserts the runtime guarantee rather than the type: the published tuple
+    // holds even for a caller that has cast its way out of the declaration.
+    expect(() => {
+      (roles as unknown as string[]).push("PLATFORM_ADMIN");
+    }).toThrow(TypeError);
+    expect(roles).toEqual(["FDS_ANALYST"]);
+  });
+
+  it("does not alias the claim array it was given", async () => {
+    const manager = createFakeUserManager();
+    const claimRoles = ["FDS_ANALYST"];
+    manager.setUser(userWithClaims("USER", claimRoles));
+    const client = callbackClient(manager);
+
+    const result = await client.completeSignIn(CALLBACK_URL);
+    claimRoles.push("PLATFORM_ADMIN");
+
+    expect(result.session.roles).toEqual(["FDS_ANALYST"]);
+  });
+
+  const REJECTED_PRINCIPAL_TYPES: ReadonlyArray<[string, unknown]> = [
+    ["a SERVICE principal", "SERVICE"],
+    ["an ingestion principal name", "TRANSACTION_INGESTOR"],
+    ["lowercase user", "user"],
+    ["a padded value", " USER "],
+    ["a missing claim", undefined],
+    ["null", null],
+    ["a number", 1],
+    ["an array", ["USER"]],
+    ["an object", { value: "USER" }],
+  ];
+
+  it.each(REJECTED_PRINCIPAL_TYPES)("refuses principal_type: %s", async (_label, principalType) => {
+    const manager = createFakeUserManager();
+    manager.setUser(userWithClaims(principalType, ["FDS_ANALYST"]));
+    const client = callbackClient(manager);
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+
+    await expect(client.completeSignIn(CALLBACK_URL)).rejects.toBeInstanceOf(AuthCallbackError);
+
+    await expect(client.initialize()).resolves.toEqual({ session: null });
+    expect(invalidated).not.toHaveBeenCalled();
+    expect(manager.calls.removeUser).toBe(1);
+  });
+
+  const REJECTED_ROLES: ReadonlyArray<[string, unknown]> = [
+    ["an unknown role beside a valid one", ["FDS_ANALYST", "SUPER_ADMIN"]],
+    ["a SERVICE role mixed in", ["FDS_ANALYST", "TRANSACTION_INGESTOR"]],
+    ["only a SERVICE role", ["BEHAVIOR_INGESTOR"]],
+    ["a duplicated role", ["FDS_ANALYST", "FDS_ANALYST"]],
+    ["a duplicated role among others", ["FDS_VIEWER", "FDS_ANALYST", "FDS_VIEWER"]],
+    ["a lowercase role", ["fds_analyst"]],
+    ["a padded role", [" FDS_ANALYST "]],
+    ["a role carrying a newline", ["FDS_ANALYST\n"]],
+    ["a prototype property name", ["__proto__"]],
+    ["another prototype property name", ["constructor"]],
+    ["a non-string element", ["FDS_ANALYST", 1]],
+    ["a null element", [null]],
+    ["a nested array", [["FDS_ANALYST"]]],
+    ["an empty array", []],
+    ["a bare string instead of an array", "FDS_ANALYST"],
+    ["a missing claim", undefined],
+    ["null", null],
+    ["an array-like object", { 0: "FDS_ANALYST", length: 1 }],
+  ];
+
+  it.each(REJECTED_ROLES)("refuses roles: %s", async (_label, roles) => {
+    const manager = createFakeUserManager();
+    manager.setUser(userWithClaims("USER", roles));
+    const client = callbackClient(manager);
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+
+    await expect(client.completeSignIn(CALLBACK_URL)).rejects.toBeInstanceOf(AuthCallbackError);
+
+    await expect(client.initialize()).resolves.toEqual({ session: null });
+    expect(invalidated).not.toHaveBeenCalled();
+    expect(manager.calls.removeUser).toBe(1);
+  });
+
+  /**
+   * The empty role array in full, rather than as one more row of the table
+   * above.
+   *
+   * It is the only refusal a reader might expect to be an acceptance - the
+   * claim is well formed, the principal is a real USER, and nothing about it is
+   * malformed - so what the refusal costs is spelled out here: no session is
+   * published, no subscriber hears anything, the library's user record and the
+   * one-time transaction record are both gone, and the caller gets the same
+   * fixed error as every other refused callback.
+   */
+  it("refuses an empty role array without publishing or notifying anything", async () => {
+    window.sessionStorage.setItem(TRANSACTION_KEY, "value");
+    window.sessionStorage.setItem("other-app.key", "keep");
+    const manager = createFakeUserManager();
+    manager.setUser(userWithClaims("USER", []));
+    const client = callbackClient(manager);
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+
+    const error = await client.completeSignIn(CALLBACK_URL).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AuthCallbackError);
+    expect((error as Error).message).toBe(new AuthCallbackError().message);
+    expect(invalidated).not.toHaveBeenCalled();
+    expect(manager.calls.removeUser).toBe(1);
+    expect(window.sessionStorage.getItem(TRANSACTION_KEY)).toBeNull();
+    expect(window.sessionStorage.getItem("other-app.key")).toBe("keep");
+    await expect(client.initialize()).resolves.toEqual({ session: null });
+  });
+
+  it("refuses an empty role array the same way on a SERVICE-shaped principal", async () => {
+    const manager = createFakeUserManager();
+    manager.setUser(userWithClaims("SERVICE", []));
+    const client = callbackClient(manager);
+
+    await expect(client.completeSignIn(CALLBACK_URL)).rejects.toBeInstanceOf(AuthCallbackError);
+    expect(manager.calls.removeUser).toBe(1);
+  });
+
+  it("refuses to authorize a Backend request after an empty role array", async () => {
+    vi.stubEnv("VITE_API_BASE_URL", API_BASE_URL);
+    const manager = createFakeUserManager();
+    manager.setUser(userWithClaims("USER", []));
+    const client = callbackClient(manager);
+
+    await expect(client.completeSignIn(CALLBACK_URL)).rejects.toBeInstanceOf(AuthCallbackError);
+
+    await expect(
+      client.authorizeRequest(new Request(`${API_BASE_URL}/api/v1/cases`)),
+    ).resolves.toBeNull();
+    vi.unstubAllEnvs();
+  });
+
+  it("refuses a profile whose claim getter throws", async () => {
+    const manager = createFakeUserManager();
+    manager.setUser({
+      ...USER,
+      profile: {
+        sub: USER.profile.sub,
+        get principal_type(): unknown {
+          throw new Error("claim unavailable");
+        },
+        roles: ["FDS_ANALYST"],
+      },
+    });
+    const client = callbackClient(manager);
+
+    await expect(client.completeSignIn(CALLBACK_URL)).rejects.toBeInstanceOf(AuthCallbackError);
+    await expect(client.initialize()).resolves.toEqual({ session: null });
+    expect(manager.calls.removeUser).toBe(1);
+  });
+
+  it("clears the transaction record for a refused claim set", async () => {
+    window.sessionStorage.setItem(TRANSACTION_KEY, "value");
+    window.sessionStorage.setItem("other-app.key", "keep");
+    const manager = createFakeUserManager();
+    manager.setUser(userWithClaims("SERVICE", ["FDS_ANALYST"]));
+    const client = callbackClient(manager);
+
+    await expect(client.completeSignIn(CALLBACK_URL)).rejects.toBeInstanceOf(AuthCallbackError);
+
+    expect(window.sessionStorage.getItem(TRANSACTION_KEY)).toBeNull();
+    expect(window.sessionStorage.getItem("other-app.key")).toBe("keep");
+  });
+
+  it("does not leak the refused claim values in the error", async () => {
+    const manager = createFakeUserManager();
+    manager.setUser(userWithClaims("SERVICE", ["SUPER_ADMIN"]));
+    const client = callbackClient(manager);
+
+    const error = await client.completeSignIn(CALLBACK_URL).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AuthCallbackError);
+    const text = `${(error as Error).message} ${(error as Error).stack ?? ""}`;
+    expect(text).not.toContain("SUPER_ADMIN");
+    expect(text).not.toContain("SERVICE");
+  });
+
+  /**
+   * The rejected user is gone before anything can ask for it, so a later
+   * initialize - the same call the provider makes on a StrictMode replay -
+   * converges on unauthenticated rather than on a session nobody validated.
+   */
+  it("leaves nothing for a later initialize to restore", async () => {
+    const manager = createFakeUserManager();
+    manager.setUser(userWithClaims("USER", ["SUPER_ADMIN"]));
+    const client = callbackClient(manager);
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+
+    await expect(client.completeSignIn(CALLBACK_URL)).rejects.toBeInstanceOf(AuthCallbackError);
+
+    await expect(client.initialize()).resolves.toEqual({ session: null });
+    await expect(client.initialize()).resolves.toEqual({ session: null });
+    expect(invalidated).not.toHaveBeenCalled();
+  });
+
+  it("refuses to authorize a Backend request after a refused claim set", async () => {
+    vi.stubEnv("VITE_API_BASE_URL", API_BASE_URL);
+    const manager = createFakeUserManager();
+    manager.setUser(userWithClaims("USER", ["SUPER_ADMIN"]));
+    const client = callbackClient(manager);
+
+    await expect(client.completeSignIn(CALLBACK_URL)).rejects.toBeInstanceOf(AuthCallbackError);
+
+    await expect(
+      client.authorizeRequest(new Request(`${API_BASE_URL}/api/v1/cases`)),
+    ).resolves.toBeNull();
+    vi.unstubAllEnvs();
   });
 });
