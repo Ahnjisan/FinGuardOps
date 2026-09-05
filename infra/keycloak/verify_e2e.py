@@ -5,17 +5,21 @@ from __future__ import annotations
 
 import argparse
 import base64
+import datetime as dt
+import hashlib
 import json
 import os
 import re
 import socket
 import ssl
+import subprocess
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -67,6 +71,77 @@ CERTIFICATE = Path("/run/secrets/keycloak_tls_certificate")
 TRANSACTION_SECRET = Path("/run/secrets/transaction_service_client_secret")
 BEHAVIOR_SECRET = Path("/run/secrets/behavior_service_client_secret")
 SECRET_PATTERN = re.compile(rb"[A-Za-z0-9_-]{32,128}\Z")
+PROJECT_PATTERN = re.compile(r"finguardops-kc241-e2e-[a-z0-9][a-z0-9-]{5,32}\Z")
+PLAN_KEY_PATTERN = re.compile(r"kc241-[a-f0-9]{32}\Z")
+PLAN_REF_PATTERN = re.compile(r"kc241-[a-z]+-[a-f0-9]{12}\Z")
+PROJECT_RESOURCE_KINDS = ("container", "network", "volume")
+RULE_VERSION_IDS = (
+    "20000000-0000-4000-8000-000000000001",
+    "20000000-0000-4000-8000-000000000002",
+    "20000000-0000-4000-8000-000000000003",
+    "20000000-0000-4000-8000-000000000004",
+)
+METRIC_NAMES = (
+    "finguardops_external_risk_outcomes_total",
+    "finguardops_rule_analysis_outcomes_total",
+)
+EXTERNAL_RISK_MARKER = "FINGUARDOPS_EXTERNAL_RISK_LOOKUP_RECEIVED"
+RULE_V2_ACCESS_PATTERN = re.compile(
+    r'^INFO:\s+[0-9a-fA-F:.]+:\d+ - "POST /api/v2/rule-analysis HTTP/1\.1" 200 OK$'
+)
+EXPECTED_AI_SERVICE_COMMAND = [
+    "--host",
+    "0.0.0.0",
+    "--port",
+    "8000",
+    "--access-log",
+]
+BUSINESS_TABLES = (
+    "audit_log",
+    "behavior_event",
+    "case_transaction",
+    "detection_evidence",
+    "detection_result",
+    "financial_transaction",
+    "fraud_case",
+    "fraud_rule",
+    "idempotency_record",
+    "idempotency_recovery_audit_log",
+    "investigation_note",
+    "rule_version",
+)
+SNAPSHOT_QUERIES = {
+    "audit_log": "SELECT to_jsonb(snapshot_row)::text FROM public.audit_log AS snapshot_row ORDER BY snapshot_row.id ASC;",
+    "behavior_event": "SELECT to_jsonb(snapshot_row)::text FROM public.behavior_event AS snapshot_row ORDER BY snapshot_row.id ASC;",
+    "case_transaction": "SELECT to_jsonb(snapshot_row)::text FROM public.case_transaction AS snapshot_row ORDER BY snapshot_row.id ASC;",
+    "detection_evidence": "SELECT to_jsonb(snapshot_row)::text FROM public.detection_evidence AS snapshot_row ORDER BY snapshot_row.id ASC;",
+    "detection_result": "SELECT to_jsonb(snapshot_row)::text FROM public.detection_result AS snapshot_row ORDER BY snapshot_row.id ASC;",
+    "financial_transaction": "SELECT to_jsonb(snapshot_row)::text FROM public.financial_transaction AS snapshot_row ORDER BY snapshot_row.id ASC;",
+    "fraud_case": "SELECT to_jsonb(snapshot_row)::text FROM public.fraud_case AS snapshot_row ORDER BY snapshot_row.id ASC;",
+    "fraud_rule": "SELECT to_jsonb(snapshot_row)::text FROM public.fraud_rule AS snapshot_row ORDER BY snapshot_row.id ASC;",
+    "idempotency_record": "SELECT to_jsonb(snapshot_row)::text FROM public.idempotency_record AS snapshot_row ORDER BY snapshot_row.id ASC;",
+    "idempotency_recovery_audit_log": "SELECT to_jsonb(snapshot_row)::text FROM public.idempotency_recovery_audit_log AS snapshot_row ORDER BY snapshot_row.id ASC;",
+    "investigation_note": "SELECT to_jsonb(snapshot_row)::text FROM public.investigation_note AS snapshot_row ORDER BY snapshot_row.id ASC;",
+    "rule_version": "SELECT to_jsonb(snapshot_row)::text FROM public.rule_version AS snapshot_row ORDER BY snapshot_row.id ASC;",
+}
+SNAPSHOT_BEGIN_PREFIX = b"FINGUARDOPS_SNAPSHOT_BEGIN:"
+SNAPSHOT_END_PREFIX = b"FINGUARDOPS_SNAPSHOT_END:"
+INGESTION_STEPS = (
+    "auth-denial",
+    "behavior-create",
+    "behavior-replay-conflict",
+    "transaction-create",
+    "transaction-replay-key-conflict",
+    "duplicate-first",
+    "duplicate-replay",
+)
+
+
+@dataclass(frozen=True)
+class TableSnapshot:
+    count: int
+    row_hashes: tuple[bytes, ...] = field(repr=False)
+    fingerprint: bytes = field(repr=False)
 UUID4_PATTERN = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
@@ -232,7 +307,9 @@ def validate_secret_mounts(service: dict[str, Any], expected: set[str]) -> None:
         source = item.get("source")
         target = item.get("target")
         mode = item.get("mode")
-        if not isinstance(source, str) or target != source or mode != EXPECTED_SECRET_MODES.get(source):
+        expected_mode = EXPECTED_SECRET_MODES.get(source)
+        accepted_modes = {expected_mode, "0" + format(expected_mode, "o")}
+        if not isinstance(source, str) or target != source or mode not in accepted_modes:
             fail("STATIC_SECRET_BOUNDARY")
         found.append(source)
     if len(found) != len(set(found)) or set(found) != expected:
@@ -600,6 +677,8 @@ def validate_static(config: dict[str, Any], realm: dict[str, Any] | None = None)
         fail("STATIC_SERVICE_SET")
     if set(services) != EXPECTED_KEYCLOAK_SERVICES:
         fail("STATIC_SERVICE_SET")
+    if services["ai-service"].get("command") != EXPECTED_AI_SERVICE_COMMAND:
+        fail("STATIC_RULE_ACCESS_LOG")
     if issuer != ISSUER or jwk != JWK_SET_URI:
         fail("STATIC_ISSUER_JWK_MIXED")
     if backend_env.get("FINGUARDOPS_SECURITY_INSECURE_LOOPBACK_JWK_ALLOWED") != "true":
@@ -684,6 +763,8 @@ def validate_static(config: dict[str, Any], realm: dict[str, Any] | None = None)
     if dependency_condition(services["keycloak-bootstrap"], "keycloak") != "service_healthy":
         fail("STATIC_DEPENDENCY")
     if dependency_condition(services["keycloak-verify"], "keycloak-bootstrap") != "service_completed_successfully":
+        fail("STATIC_DEPENDENCY")
+    if dependency_condition(services["keycloak-verify"], "external-risk-mock") != "service_healthy":
         fail("STATIC_DEPENDENCY")
     for service_name, expected in EXPECTED_SECRETS.items():
         validate_secret_mounts(services[service_name], expected)
@@ -866,6 +947,44 @@ def assert_cross_secret_rejected(client_id: str, wrong_secret: str) -> None:
     )
 
 
+def validate_actual_service_tokens(
+    transaction_token: str, behavior_token: str
+) -> None:
+    _, jwks = http_json(JWK_SET_URI)
+    keys = jwks.get("keys")
+    if not isinstance(keys, list) or not keys:
+        fail("JWKS_INVALID")
+    signing_keys = [
+        key
+        for key in keys
+        if isinstance(key, dict)
+        and key.get("kty") == "RSA"
+        and key.get("use") in (None, "sig")
+    ]
+    signing_kids = {
+        key.get("kid")
+        for key in signing_keys
+        if isinstance(key.get("kid"), str) and key.get("kid")
+    }
+    if (
+        not any(key.get("alg") == "RS256" for key in signing_keys)
+        or len(signing_kids) != len(signing_keys)
+    ):
+        fail("JWKS_SIGNING_KEY_INVALID")
+    validate_token(
+        transaction_token,
+        "TRANSACTION_INGESTOR",
+        signing_kids,
+        current_time=int(time.time()),
+    )
+    validate_token(
+        behavior_token,
+        "BEHAVIOR_INGESTOR",
+        signing_kids,
+        current_time=int(time.time()),
+    )
+
+
 def backend_boundary(token: str, endpoint: str, expected_status: int, expected_code: str) -> None:
     status, body = http_json(
         "http://127.0.0.1:8080" + endpoint,
@@ -882,12 +1001,916 @@ def backend_boundary(token: str, endpoint: str, expected_status: int, expected_c
         fail("BACKEND_BOUNDARY_CLASSIFICATION")
 
 
+def validate_plan(raw: Any) -> dict[str, str]:
+    expected = {
+        "transactionId",
+        "passwordEventId",
+        "transferLimitEventId",
+        "idempotencyKey",
+        "duplicateIdempotencyKey",
+        "customerRef",
+        "senderRef",
+        "recipientRef",
+        "passwordOccurredAt",
+        "transferLimitOccurredAt",
+        "transactionOccurredAt",
+    }
+    if not isinstance(raw, dict) or set(raw) != expected:
+        fail("INGESTION_PLAN_INVALID")
+    plan = {key: value for key, value in raw.items() if isinstance(value, str)}
+    if len(plan) != len(expected):
+        fail("INGESTION_PLAN_INVALID")
+    if not all(
+        is_canonical_uuid4(plan[key])
+        for key in ("transactionId", "passwordEventId", "transferLimitEventId")
+    ):
+        fail("INGESTION_PLAN_INVALID")
+    if not all(
+        PLAN_KEY_PATTERN.fullmatch(plan[key]) is not None
+        for key in ("idempotencyKey", "duplicateIdempotencyKey")
+    ) or plan["idempotencyKey"] == plan["duplicateIdempotencyKey"]:
+        fail("INGESTION_PLAN_INVALID")
+    if not all(
+        PLAN_REF_PATTERN.fullmatch(plan[key]) is not None
+        for key in ("customerRef", "senderRef", "recipientRef")
+    ):
+        fail("INGESTION_PLAN_INVALID")
+    instants = []
+    try:
+        for key in (
+            "passwordOccurredAt",
+            "transferLimitOccurredAt",
+            "transactionOccurredAt",
+        ):
+            instants.append(dt.datetime.fromisoformat(plan[key].replace("Z", "+00:00")))
+    except ValueError:
+        fail("INGESTION_PLAN_INVALID")
+    if any(value.tzinfo is None for value in instants) or not (
+        instants[0] < instants[1] < instants[2]
+    ):
+        fail("INGESTION_PLAN_INVALID")
+    return plan
+
+
+def ingestion_payloads(
+    plan: dict[str, str],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    transaction = {
+        "transactionId": plan["transactionId"],
+        "transactionType": "ACCOUNT_TRANSFER",
+        "amount": "12000000",
+        "currencyCode": "KRW",
+        "occurredAt": plan["transactionOccurredAt"],
+        "externalCustomerRef": plan["customerRef"],
+        "senderAccountRef": plan["senderRef"],
+        "recipientAccountRef": plan["recipientRef"],
+        "channel": "MOBILE_BANKING",
+    }
+    password_event = {
+        "eventId": plan["passwordEventId"],
+        "eventType": "PASSWORD_CHANGED",
+        "occurredAt": plan["passwordOccurredAt"],
+        "externalCustomerRef": plan["customerRef"],
+    }
+    transfer_limit_event = {
+        "eventId": plan["transferLimitEventId"],
+        "eventType": "TRANSFER_LIMIT_CHANGED",
+        "occurredAt": plan["transferLimitOccurredAt"],
+        "externalCustomerRef": plan["customerRef"],
+        "accountRef": plan["senderRef"],
+    }
+    return transaction, password_event, transfer_limit_event
+
+
+def request_backend(
+    endpoint: str,
+    payload: dict[str, Any],
+    expected_status: int,
+    *,
+    token: str | None = None,
+    idempotency_key: str | None = None,
+    expected_code: str | None = None,
+    failure_code: str = "INGESTION_HTTP_STATUS_INVALID",
+) -> dict[str, Any]:
+    headers = {"Content-Type": "application/json"}
+    if token is not None:
+        headers["Authorization"] = "Bearer " + token
+    if idempotency_key is not None:
+        headers["Idempotency-Key"] = idempotency_key
+    if re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", failure_code) is None:
+        fail("INGESTION_FAILURE_CODE_INVALID")
+    try:
+        status, body = http_json(
+            "http://127.0.0.1:8080" + endpoint,
+            method="POST",
+            data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            headers=headers,
+            expected=(200, 201, 400, 401, 403, 409, 422, 500, 503),
+        )
+    except VerificationError as error:
+        if str(error) == "HTTP_STATUS_UNEXPECTED":
+            fail(failure_code)
+        raise
+    if status != expected_status:
+        fail(failure_code + "_" + str(status))
+    if expected_code is not None and body.get("code") != expected_code:
+        fail("INGESTION_ERROR_CLASSIFICATION")
+    return body
+
+
+def http_text(url: str) -> str:
+    try:
+        with urllib.request.urlopen(url, timeout=5) as response:
+            if response.status != 200:
+                fail("METRIC_STATUS_INVALID")
+            body = response.read(1_048_577)
+    except (urllib.error.URLError, TimeoutError, OSError):
+        fail("METRIC_TRANSPORT_FAILED")
+    if len(body) > 1_048_576:
+        fail("METRIC_BODY_TOO_LARGE")
+    try:
+        return body.decode("utf-8")
+    except UnicodeDecodeError:
+        fail("METRIC_BODY_INVALID")
+
+
+def metric_totals() -> tuple[float, float]:
+    scrape = http_text("http://127.0.0.1:8081/actuator/prometheus")
+    totals: list[float] = []
+    for metric in METRIC_NAMES:
+        total = 0.0
+        matched = False
+        pattern = re.compile(
+            r"^" + re.escape(metric) + r"(?:\{[^\r\n]*\})?\s+"
+            r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)$"
+        )
+        for line in scrape.splitlines():
+            match = pattern.fullmatch(line)
+            if match is not None:
+                matched = True
+                total += float(match.group(1))
+        totals.append(total if matched else 0.0)
+    return totals[0], totals[1]
+
+
+def assert_metrics(actual: tuple[float, float], expected: tuple[float, float]) -> None:
+    if actual != expected:
+        fail("PROCESSING_COUNT_CHANGED")
+
+
+def ingestion_runtime(step: str) -> None:
+    if step not in INGESTION_STEPS:
+        fail("INGESTION_STEP_INVALID")
+    try:
+        raw = sys.stdin.buffer.read(8193)
+    except OSError:
+        fail("INGESTION_PLAN_INVALID")
+    if len(raw) > 8192:
+        fail("INGESTION_PLAN_INVALID")
+    try:
+        plan = validate_plan(json.loads(raw))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail("INGESTION_PLAN_INVALID")
+
+    transaction_secret = read_secret(TRANSACTION_SECRET)
+    behavior_secret = read_secret(BEHAVIOR_SECRET)
+    if transaction_secret == behavior_secret:
+        fail("SERVICE_SECRETS_NOT_DISTINCT")
+    transaction_token = token_for(
+        "finguardops-transaction-ingestor", transaction_secret
+    )
+    behavior_token = token_for("finguardops-behavior-ingestor", behavior_secret)
+    validate_actual_service_tokens(transaction_token, behavior_token)
+    assert_cross_secret_rejected(
+        "finguardops-transaction-ingestor", behavior_secret
+    )
+    assert_cross_secret_rejected(
+        "finguardops-behavior-ingestor", transaction_secret
+    )
+
+    transaction, password_event, transfer_limit_event = ingestion_payloads(plan)
+    if step == "auth-denial":
+        denial_cases = (
+            ("/api/v1/transactions", transaction, behavior_token, plan["idempotencyKey"], 403, "ACCESS_DENIED", "TX_OPPOSITE_SERVICE_STATUS"),
+            ("/api/v1/behavior-events", password_event, transaction_token, None, 403, "ACCESS_DENIED", "BEHAVIOR_OPPOSITE_SERVICE_STATUS"),
+            ("/api/v1/transactions", transaction, None, plan["idempotencyKey"], 401, "UNAUTHORIZED", "TX_MISSING_CREDENTIAL_STATUS"),
+            ("/api/v1/behavior-events", password_event, None, None, 401, "UNAUTHORIZED", "BEHAVIOR_MISSING_CREDENTIAL_STATUS"),
+            ("/api/v1/transactions", transaction, "damaged-token", plan["idempotencyKey"], 401, "UNAUTHORIZED", "TX_DAMAGED_CREDENTIAL_STATUS"),
+            ("/api/v1/behavior-events", password_event, "damaged-token", None, 401, "UNAUTHORIZED", "BEHAVIOR_DAMAGED_CREDENTIAL_STATUS"),
+        )
+        for endpoint, payload, credential, key, status, code, failure_code in denial_cases:
+            request_backend(
+                endpoint, payload, status, token=credential, idempotency_key=key,
+                expected_code=code, failure_code=failure_code,
+            )
+    elif step == "behavior-create":
+        for payload, identifier in (
+            (password_event, plan["passwordEventId"]),
+            (transfer_limit_event, plan["transferLimitEventId"]),
+        ):
+            response = request_backend(
+                "/api/v1/behavior-events", payload, 201, token=behavior_token,
+                failure_code="BEHAVIOR_CREATE_STATUS",
+            )
+            if response.get("eventId") != identifier:
+                fail("BEHAVIOR_RESPONSE_INVALID")
+    elif step == "behavior-replay-conflict":
+        replay = request_backend(
+            "/api/v1/behavior-events", password_event, 200, token=behavior_token,
+            failure_code="BEHAVIOR_REPLAY_STATUS",
+        )
+        if replay.get("eventId") != plan["passwordEventId"]:
+            fail("BEHAVIOR_RESPONSE_INVALID")
+        conflict = dict(password_event)
+        conflict["externalCustomerRef"] = plan["senderRef"]
+        request_backend(
+            "/api/v1/behavior-events", conflict, 409, token=behavior_token,
+            expected_code="DUPLICATE_EVENT", failure_code="BEHAVIOR_CONFLICT_STATUS",
+        )
+    elif step == "transaction-create":
+        response = request_backend(
+            "/api/v1/transactions", transaction, 201, token=transaction_token,
+            idempotency_key=plan["idempotencyKey"], failure_code="TX_CREATE_STATUS",
+        )
+        if (
+            set(response) != {
+                "transactionId", "processingStatus", "riskLevel",
+                "riskResponseOutcome", "adoptedDetectionResultId", "caseId",
+                "createdAt", "traceId",
+            }
+            or response.get("transactionId") != plan["transactionId"]
+            or response.get("processingStatus") != "ADDITIONAL_AUTH_REQUIRED"
+            or response.get("riskLevel") != "HIGH"
+            or response.get("riskResponseOutcome") != "ADDITIONAL_AUTH_REQUIRED"
+            or not is_canonical_uuid4(response.get("adoptedDetectionResultId"))
+            or not is_canonical_uuid4(response.get("caseId"))
+        ):
+            fail("TRANSACTION_RESPONSE_INVALID")
+    elif step == "transaction-replay-key-conflict":
+        replay = request_backend(
+            "/api/v1/transactions", transaction, 201, token=transaction_token,
+            idempotency_key=plan["idempotencyKey"], failure_code="TX_REPLAY_STATUS",
+        )
+        if (
+            replay.get("transactionId") != plan["transactionId"]
+            or replay.get("processingStatus") != "ADDITIONAL_AUTH_REQUIRED"
+            or replay.get("riskLevel") != "HIGH"
+            or replay.get("riskResponseOutcome") != "ADDITIONAL_AUTH_REQUIRED"
+        ):
+            fail("TRANSACTION_RESPONSE_INVALID")
+        conflict = dict(transaction)
+        conflict["amount"] = "12000001"
+        request_backend(
+            "/api/v1/transactions", conflict, 409, token=transaction_token,
+            idempotency_key=plan["idempotencyKey"],
+            expected_code="IDEMPOTENCY_KEY_CONFLICT",
+            failure_code="TX_KEY_CONFLICT_STATUS",
+        )
+    else:
+        request_backend(
+            "/api/v1/transactions", transaction, 409, token=transaction_token,
+            idempotency_key=plan["duplicateIdempotencyKey"],
+            expected_code="DUPLICATE_TRANSACTION",
+            failure_code=(
+                "TX_DUPLICATE_FIRST_STATUS" if step == "duplicate-first"
+                else "TX_DUPLICATE_REPLAY_STATUS"
+            ),
+        )
+    print("ingestion step completed: " + step)
+
+
 def validate_cleanup_target(project_name: str, expected_project_name: str) -> None:
     if (
         project_name != expected_project_name
         or re.fullmatch(r"[a-z0-9][a-z0-9_-]{2,62}", project_name) is None
     ):
         fail("CLEANUP_TARGET_INVALID")
+
+
+def run_command(
+    argv: list[str],
+    *,
+    timeout: float,
+    cwd: Path,
+    environment: dict[str, str],
+    input_bytes: bytes | None = None,
+) -> bytes:
+    if timeout <= 0:
+        fail("SUBPROCESS_TIMEOUT_INVALID")
+    merged = os.environ.copy()
+    merged.update(environment)
+    merged.update({"MSYS_NO_PATHCONV": "1", "MSYS2_ARG_CONV_EXCL": "*"})
+    try:
+        result = subprocess.run(
+            argv,
+            input=input_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=cwd,
+            env=merged,
+            shell=False,
+            check=False,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        fail("SUBPROCESS_FAILED")
+    if result.returncode != 0:
+        safe_child = re.search(
+            rb"(?:^|\n)verification failed: ([A-Z][A-Z0-9_]{0,63})(?:\r?\n|$)",
+            result.stderr,
+        )
+        if safe_child is not None:
+            fail("CHILD_" + safe_child.group(1).decode("ascii"))
+        fail("SUBPROCESS_FAILED")
+    return result.stdout
+
+
+class HostContext:
+    def __init__(
+        self,
+        repo: Path,
+        project: str,
+        cli_timeout: float,
+        deadline_seconds: float,
+    ) -> None:
+        self.repo = repo.resolve()
+        self.project = project
+        self.cli_timeout = cli_timeout
+        self.deadline = time.monotonic() + deadline_seconds
+        self.compose = [
+            "docker",
+            "compose",
+            "-p",
+            project,
+            "-f",
+            str(self.repo / "infra" / "compose.yml"),
+            "-f",
+            str(self.repo / "infra" / "compose.keycloak-local-e2e.yml"),
+        ]
+        self.environment = {
+            "POSTGRES_PASSWORD": "local-kc241-placeholder-not-production",
+            "GRAFANA_ADMIN_USER": "local-kc241-admin",
+            "GRAFANA_ADMIN_PASSWORD": "local-kc241-placeholder-not-production",
+        }
+
+    def remaining(self) -> float:
+        value = self.deadline - time.monotonic()
+        if value <= 0:
+            fail("OVERALL_DEADLINE_EXCEEDED")
+        return value
+
+    def execute(
+        self,
+        arguments: list[str],
+        *,
+        input_bytes: bytes | None = None,
+        timeout: float | None = None,
+    ) -> bytes:
+        limit = self.cli_timeout if timeout is None else timeout
+        return run_command(
+            self.compose + arguments,
+            timeout=min(limit, self.remaining()),
+            cwd=self.repo,
+            environment=self.environment,
+            input_bytes=input_bytes,
+        )
+
+
+def project_resources(
+    project: str,
+    *,
+    timeout: float,
+    repo: Path,
+    environment: dict[str, str],
+) -> dict[str, tuple[str, ...]]:
+    commands = {
+        "container": [
+            "docker", "ps", "-aq", "--filter",
+            "label=com.docker.compose.project=" + project,
+        ],
+        "network": [
+            "docker", "network", "ls", "-q", "--filter",
+            "label=com.docker.compose.project=" + project,
+        ],
+        "volume": [
+            "docker", "volume", "ls", "-q", "--filter",
+            "label=com.docker.compose.project=" + project,
+        ],
+    }
+    result: dict[str, tuple[str, ...]] = {}
+    for kind in PROJECT_RESOURCE_KINDS:
+        output = run_command(
+            commands[kind], timeout=timeout, cwd=repo, environment=environment
+        )
+        result[kind] = tuple(
+            line for line in output.decode("ascii", "strict").splitlines() if line
+        )
+    return result
+
+
+def assert_resources_empty(resources: dict[str, tuple[str, ...]]) -> None:
+    if set(resources) != set(PROJECT_RESOURCE_KINDS):
+        fail("RESOURCE_INVENTORY_INVALID")
+    if any(resources[kind] for kind in PROJECT_RESOURCE_KINDS):
+        fail("PROJECT_RESOURCE_REMAINS")
+
+
+def wait_container(ctx: HostContext, service: str, expected: str) -> None:
+    for _ in range(120):
+        container_id = ctx.execute(["ps", "-aq", service]).decode("ascii").strip()
+        if container_id:
+            template = (
+                "{{if .State.Health}}{{.State.Health.Status}}"
+                "{{else}}{{.State.Status}}{{end}}|{{.State.ExitCode}}"
+            )
+            state = run_command(
+                ["docker", "inspect", container_id, "--format", template],
+                timeout=min(ctx.cli_timeout, ctx.remaining()),
+                cwd=ctx.repo,
+                environment=ctx.environment,
+            ).decode("ascii").strip()
+            status, _, exit_code = state.partition("|")
+            if expected == "healthy" and status == "healthy":
+                return
+            if expected == "completed" and status == "exited" and exit_code == "0":
+                return
+            if status in {"dead", "exited"} and expected != "completed":
+                fail("CONTAINER_TERMINATED")
+            if status == "exited" and exit_code != "0":
+                fail("CONTAINER_TERMINATED")
+        time.sleep(1)
+    fail("CONTAINER_READINESS_TIMEOUT")
+
+
+def sql_scalar(ctx: HostContext, query: str) -> str:
+    output = ctx.execute(
+        [
+            "exec", "-T", "postgresql", "psql", "-X", "-v", "ON_ERROR_STOP=1",
+            "-U", "finguardops", "-d", "finguardops", "-tAc", query,
+        ]
+    )
+    return output.decode("utf-8", "strict").strip()
+
+
+def publish_rules(ctx: HostContext) -> None:
+    identifiers = ",".join("'%s'" % item for item in RULE_VERSION_IDS)
+    published_query = (
+        "select count(*) from rule_version where status='PUBLISHED' "
+        "and rule_version_id in (" + identifiers + ")"
+    )
+    active_query = published_query + " and effective_from <= current_timestamp"
+    published = sql_scalar(ctx, published_query)
+    active = sql_scalar(ctx, active_query)
+    if published == "4" and active == "4":
+        return
+    if published != "0":
+        fail("RULE_PUBLICATION_STATE_INVALID")
+    effective = (
+        dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=60)
+    ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    ctx.execute(
+        [
+            "run", "--rm", "--no-deps", "-T",
+            "-e", "SPRING_PROFILES_ACTIVE=local,rule-v1-default-publication",
+            "-e", "FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED=false",
+            "backend", "--spring.main.web-application-type=none",
+            "--finguardops.rule-v1-default-publication.enabled=true",
+            "--finguardops.rule-v1-default-publication.confirmation=PUBLISH_RULE_V1_DEFAULT_V1",
+            "--finguardops.rule-v1-default-publication.effective-from=" + effective,
+        ],
+        timeout=240,
+    )
+    for _ in range(90):
+        if sql_scalar(ctx, active_query) == "4":
+            return
+        time.sleep(1)
+    fail("RULE_ACTIVATION_TIMEOUT")
+
+
+def create_plan() -> dict[str, str]:
+    suffix = uuid.uuid4().hex[:12]
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    return {
+        "transactionId": str(uuid.uuid4()),
+        "passwordEventId": str(uuid.uuid4()),
+        "transferLimitEventId": str(uuid.uuid4()),
+        "idempotencyKey": "kc241-" + uuid.uuid4().hex,
+        "duplicateIdempotencyKey": "kc241-" + uuid.uuid4().hex,
+        "customerRef": "kc241-customer-" + suffix,
+        "senderRef": "kc241-sender-" + suffix,
+        "recipientRef": "kc241-recipient-" + suffix,
+        "passwordOccurredAt": (now - dt.timedelta(seconds=120)).isoformat().replace("+00:00", "Z"),
+        "transferLimitOccurredAt": (now - dt.timedelta(seconds=60)).isoformat().replace("+00:00", "Z"),
+        "transactionOccurredAt": now.isoformat().replace("+00:00", "Z"),
+    }
+
+
+def snapshot_sql() -> bytes:
+    if tuple(SNAPSHOT_QUERIES) != BUSINESS_TABLES:
+        fail("DATABASE_GLOBAL_SNAPSHOT_INVALID")
+    statements = [
+        "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;",
+        "SET LOCAL TIME ZONE 'UTC';",
+        "SET LOCAL DateStyle = 'ISO, YMD';",
+        "SET LOCAL extra_float_digits = 3;",
+        "SET LOCAL bytea_output = 'hex';",
+    ]
+    for table, query in SNAPSHOT_QUERIES.items():
+        statements.extend(
+            (
+                "SELECT 'FINGUARDOPS_SNAPSHOT_BEGIN:" + table + "';",
+                query,
+                "SELECT 'FINGUARDOPS_SNAPSHOT_END:" + table + "';",
+            )
+        )
+    statements.append("COMMIT;")
+    return ("\n".join(statements) + "\n").encode("ascii")
+
+
+def aggregate_fingerprint(table: str, row_hashes: tuple[bytes, ...]) -> bytes:
+    if table not in BUSINESS_TABLES or any(len(value) != 32 for value in row_hashes):
+        fail("DATABASE_GLOBAL_SNAPSHOT_INVALID")
+    name = table.encode("ascii")
+    digest = hashlib.sha256()
+    digest.update(b"FINGUARDOPS_TABLE_SNAPSHOT_V1\x00")
+    digest.update(len(name).to_bytes(2, "big"))
+    digest.update(name)
+    digest.update(len(row_hashes).to_bytes(8, "big"))
+    for row_hash in row_hashes:
+        digest.update(len(row_hash).to_bytes(2, "big"))
+        digest.update(row_hash)
+    return digest.digest()
+
+
+def table_snapshot(table: str, canonical_rows: tuple[bytes, ...]) -> TableSnapshot:
+    if table not in BUSINESS_TABLES:
+        fail("DATABASE_GLOBAL_SNAPSHOT_INVALID")
+    row_hashes = tuple(hashlib.sha256(row).digest() for row in canonical_rows)
+    return TableSnapshot(
+        count=len(row_hashes),
+        row_hashes=row_hashes,
+        fingerprint=aggregate_fingerprint(table, row_hashes),
+    )
+
+
+def parse_database_snapshot(output: bytes) -> dict[str, TableSnapshot]:
+    try:
+        lines = output.splitlines()
+        cursor = 0
+        snapshots: dict[str, TableSnapshot] = {}
+        for table in BUSINESS_TABLES:
+            name = table.encode("ascii")
+            if cursor >= len(lines) or lines[cursor] != SNAPSHOT_BEGIN_PREFIX + name:
+                fail("DATABASE_GLOBAL_SNAPSHOT_INVALID")
+            cursor += 1
+            rows: list[bytes] = []
+            end = SNAPSHOT_END_PREFIX + name
+            while cursor < len(lines) and lines[cursor] != end:
+                row = lines[cursor]
+                parsed = json.loads(row)
+                if not isinstance(parsed, dict) or not row.startswith(b"{") or not row.endswith(b"}"):
+                    fail("DATABASE_GLOBAL_SNAPSHOT_INVALID")
+                rows.append(row)
+                cursor += 1
+            if cursor >= len(lines):
+                fail("DATABASE_GLOBAL_SNAPSHOT_INVALID")
+            snapshots[table] = table_snapshot(table, tuple(rows))
+            cursor += 1
+        if cursor != len(lines):
+            fail("DATABASE_GLOBAL_SNAPSHOT_INVALID")
+        return snapshots
+    except (UnicodeDecodeError, json.JSONDecodeError, OverflowError):
+        fail("DATABASE_GLOBAL_SNAPSHOT_INVALID")
+
+
+def database_snapshot(ctx: HostContext) -> dict[str, TableSnapshot]:
+    output = ctx.execute(
+        [
+            "exec", "-T", "postgresql", "psql", "-X", "-qAt",
+            "-v", "ON_ERROR_STOP=1", "-U", "finguardops", "-d", "finguardops",
+            "-f", "-",
+        ],
+        input_bytes=snapshot_sql(),
+    )
+    return parse_database_snapshot(output)
+
+
+def transaction_cardinality(
+    ctx: HostContext, plan: dict[str, str]
+) -> tuple[int, ...]:
+    valid = validate_plan(plan)
+    transaction_id = valid["transactionId"]
+    password_event_id = valid["passwordEventId"]
+    transfer_limit_event_id = valid["transferLimitEventId"]
+    original_key = valid["idempotencyKey"]
+    duplicate_key = valid["duplicateIdempotencyKey"]
+    query = "select concat_ws('|'," + ",".join(
+        (
+            "(select count(*) from behavior_event where event_id='%s' and event_type='PASSWORD_CHANGED')" % password_event_id,
+            "(select count(*) from behavior_event where event_id='%s' and event_type='TRANSFER_LIMIT_CHANGED' and account_ref='%s')" % (transfer_limit_event_id, valid["senderRef"]),
+            "(select count(*) from financial_transaction where transaction_id='%s' and processing_status='ADDITIONAL_AUTH_REQUIRED' and risk_level='HIGH' and risk_response_outcome='ADDITIONAL_AUTH_REQUIRED')" % transaction_id,
+            "(select count(*) from idempotency_record i join financial_transaction f on f.id=i.financial_transaction_id where f.transaction_id='%s' and i.idempotency_key='%s' and i.processing_status='COMPLETED' and i.response_snapshot->>'httpStatus'='201')" % (transaction_id, original_key),
+            "(select count(*) from idempotency_record where idempotency_key='%s' and processing_status='FAILED' and failure_code='DUPLICATE_TRANSACTION' and financial_transaction_id is null)" % duplicate_key,
+            "(select count(*) from detection_result d join financial_transaction f on f.id=d.financial_transaction_id where f.transaction_id='%s' and d.analysis_status='COMPLETED' and d.risk_score=55 and d.risk_level='HIGH' and f.adopted_detection_result_id=d.id)" % transaction_id,
+            "(select count(*) from detection_evidence e join detection_result d on d.id=e.detection_result_id join financial_transaction f on f.id=d.financial_transaction_id where f.transaction_id='%s')" % transaction_id,
+            "(select count(distinct c.id) from fraud_case c join case_transaction ct on ct.fraud_case_id=c.id join financial_transaction f on f.id=ct.financial_transaction_id where f.transaction_id='%s' and c.case_status='OPEN')" % transaction_id,
+            "(select count(*) from case_transaction ct join financial_transaction f on f.id=ct.financial_transaction_id where f.transaction_id='%s')" % transaction_id,
+            "(select count(*) from audit_log where transaction_id='%s')" % transaction_id,
+            "(select count(*) from audit_log where transaction_id='%s' and action='CASE_CREATED')" % transaction_id,
+            "(select count(*) from audit_log where transaction_id='%s' and action='CASE_TRANSACTION_LINKED')" % transaction_id,
+            "(select count(*) from audit_log where transaction_id='%s' and action='TRANSACTION_RISK_RESPONSE_APPLIED')" % transaction_id,
+            "(select count(*) from audit_log where transaction_id='%s' and action='TRANSACTION_STATUS_CHANGED')" % transaction_id,
+        )
+    ) + ")"
+    raw = sql_scalar(ctx, query).split("|")
+    if len(raw) != 14 or any(re.fullmatch(r"\d+", value) is None for value in raw):
+        fail("DATABASE_TRANSACTION_SNAPSHOT_INVALID")
+    return tuple(int(value) for value in raw)
+
+
+def expected_transaction_cardinality(
+    behavior_created: bool, transaction_created: bool, duplicate_created: bool
+) -> tuple[int, ...]:
+    behavior = 1 if behavior_created else 0
+    transaction = 1 if transaction_created else 0
+    duplicate = 1 if duplicate_created else 0
+    return (
+        behavior,
+        behavior,
+        transaction,
+        transaction,
+        duplicate,
+        transaction,
+        2 * transaction,
+        transaction,
+        transaction,
+        4 * transaction,
+        transaction,
+        transaction,
+        transaction,
+        transaction,
+    )
+
+
+def service_logs(ctx: HostContext, service: str) -> str:
+    if service not in {"external-risk-mock", "ai-service"}:
+        fail("DEPENDENCY_SERVICE_INVALID")
+    return ctx.execute(
+        ["logs", "--no-color", "--no-log-prefix", service]
+    ).decode("utf-8", "strict")
+
+
+def dependency_hit_counts(ctx: HostContext) -> tuple[int, int]:
+    external_lines = service_logs(ctx, "external-risk-mock").splitlines()
+    rule_lines = service_logs(ctx, "ai-service").splitlines()
+    external = sum(line == EXTERNAL_RISK_MARKER for line in external_lines)
+    rule = sum(RULE_V2_ACCESS_PATTERN.fullmatch(line) is not None for line in rule_lines)
+    return external, rule
+
+
+def backend_metric_totals(ctx: HostContext) -> tuple[float, float]:
+    output = ctx.execute(
+        ["run", "--rm", "--no-deps", "-T", "keycloak-verify", "metric-runtime"],
+        timeout=60,
+    )
+    try:
+        parsed = json.loads(output)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail("BACKEND_METRIC_SNAPSHOT_INVALID")
+    if (
+        not isinstance(parsed, list)
+        or len(parsed) != 2
+        or any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in parsed)
+    ):
+        fail("BACKEND_METRIC_SNAPSHOT_INVALID")
+    return float(parsed[0]), float(parsed[1])
+
+
+def validate_table_snapshot(table: str, snapshot: TableSnapshot) -> None:
+    if (
+        table not in BUSINESS_TABLES
+        or isinstance(snapshot.count, bool)
+        or snapshot.count < 0
+        or snapshot.count != len(snapshot.row_hashes)
+        or snapshot.fingerprint != aggregate_fingerprint(table, snapshot.row_hashes)
+    ):
+        fail("DATABASE_GLOBAL_SNAPSHOT_INVALID")
+
+
+def assert_global_delta(
+    before: dict[str, TableSnapshot],
+    after: dict[str, TableSnapshot],
+    expected: dict[str, int],
+) -> None:
+    if (
+        tuple(before) != BUSINESS_TABLES
+        or tuple(after) != BUSINESS_TABLES
+        or set(expected) - set(BUSINESS_TABLES)
+        or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in expected.values()
+        )
+    ):
+        fail("DATABASE_GLOBAL_EXPECTATION_INVALID")
+    for table in BUSINESS_TABLES:
+        before_table = before[table]
+        after_table = after[table]
+        validate_table_snapshot(table, before_table)
+        validate_table_snapshot(table, after_table)
+        expected_delta = expected.get(table, 0)
+        if (
+            after_table.count != before_table.count + expected_delta
+            or after_table.row_hashes[:before_table.count] != before_table.row_hashes
+            or (expected_delta == 0 and after_table != before_table)
+        ):
+            fail("DATABASE_GLOBAL_DELTA_INVALID")
+
+
+def run_ingestion_step(
+    ctx: HostContext,
+    plan: dict[str, str],
+    step: str,
+    expected_global_delta: dict[str, int],
+    expected_cardinality: tuple[int, ...],
+    expected_dependency_delta: tuple[int, int],
+    expected_metric_delta: tuple[float, float],
+) -> None:
+    before_database = database_snapshot(ctx)
+    before_dependencies = dependency_hit_counts(ctx)
+    before_metrics = backend_metric_totals(ctx)
+    output = ctx.execute(
+        [
+            "run", "--rm", "--no-deps", "-T", "keycloak-verify",
+            "ingestion-runtime", "--step", step,
+        ],
+        input_bytes=json.dumps(plan, separators=(",", ":")).encode("utf-8"),
+        timeout=180,
+    ).decode("utf-8", "strict")
+    if output.strip() != "ingestion step completed: " + step:
+        fail("INGESTION_OUTPUT_INVALID")
+    after_database = database_snapshot(ctx)
+    after_dependencies = dependency_hit_counts(ctx)
+    after_metrics = backend_metric_totals(ctx)
+    assert_global_delta(before_database, after_database, expected_global_delta)
+    if tuple(
+        after_dependencies[index] - before_dependencies[index] for index in range(2)
+    ) != expected_dependency_delta:
+        fail("DEPENDENCY_HIT_DELTA_INVALID")
+    metric_delta = tuple(
+        after_metrics[index] - before_metrics[index] for index in range(2)
+    )
+    if metric_delta != expected_metric_delta:
+        fail("BACKEND_OUTCOME_METRIC_DELTA_INVALID")
+    if transaction_cardinality(ctx, plan) != expected_cardinality:
+        fail("DATABASE_TRANSACTION_CARDINALITY_INVALID")
+    print("stage: " + step + "-verified")
+
+
+def run_ingestion_phase(ctx: HostContext) -> dict[str, str]:
+    plan = create_plan()
+    empty = expected_transaction_cardinality(False, False, False)
+    if transaction_cardinality(ctx, plan) != empty:
+        fail("DATABASE_TRANSACTION_CARDINALITY_INVALID")
+    scenarios = (
+        ("auth-denial", {}, empty, (0, 0), (0.0, 0.0)),
+        (
+            "behavior-create",
+            {"behavior_event": 2},
+            expected_transaction_cardinality(True, False, False),
+            (0, 0),
+            (0.0, 0.0),
+        ),
+        (
+            "behavior-replay-conflict",
+            {},
+            expected_transaction_cardinality(True, False, False),
+            (0, 0),
+            (0.0, 0.0),
+        ),
+        (
+            "transaction-create",
+            {
+                "audit_log": 4,
+                "case_transaction": 1,
+                "detection_evidence": 2,
+                "detection_result": 1,
+                "financial_transaction": 1,
+                "fraud_case": 1,
+                "idempotency_record": 1,
+            },
+            expected_transaction_cardinality(True, True, False),
+            (1, 1),
+            (1.0, 1.0),
+        ),
+        (
+            "transaction-replay-key-conflict",
+            {},
+            expected_transaction_cardinality(True, True, False),
+            (0, 0),
+            (0.0, 0.0),
+        ),
+        (
+            "duplicate-first",
+            {"idempotency_record": 1},
+            expected_transaction_cardinality(True, True, True),
+            (0, 0),
+            (0.0, 0.0),
+        ),
+        (
+            "duplicate-replay",
+            {},
+            expected_transaction_cardinality(True, True, True),
+            (0, 0),
+            (0.0, 0.0),
+        ),
+    )
+    for step, global_delta, cardinality, dependency_delta, metric_delta in scenarios:
+        run_ingestion_step(
+            ctx, plan, step, global_delta, cardinality, dependency_delta, metric_delta
+        )
+    print(
+        "ingestion phase completed: risk=55/HIGH action=ADDITIONAL_AUTH_REQUIRED "
+        "case=1 link=1 audit=4 external-risk=1 rule-v2=1 metrics=1/1"
+    )
+    return plan
+
+
+def existing_volume_phase(ctx: HostContext) -> None:
+    print("stage: existing-volume-restart")
+    ctx.execute(["up", "-d", "--no-deps", "--force-recreate", "keycloak"], timeout=240)
+    wait_container(ctx, "keycloak", "healthy")
+    ctx.execute(
+        ["run", "--rm", "--no-deps", "-T", "keycloak-bootstrap", "reconcile"],
+        timeout=120,
+    )
+    host_runtime(ctx.repo / "infra" / "keycloak" / ".local" / "tls" / "localhost.crt")
+    publish_rules(ctx)
+    run_ingestion_phase(ctx)
+    print("stage: existing-volume-ingestion-complete")
+
+
+def cleanup_project(ctx: HostContext, original: BaseException | None) -> None:
+    cleanup_error: BaseException | None = None
+    try:
+        run_command(
+            ctx.compose + ["down", "--volumes", "--remove-orphans", "--timeout", "20"],
+            timeout=240,
+            cwd=ctx.repo,
+            environment=ctx.environment,
+        )
+    except BaseException:
+        # A Docker CLI timeout/non-zero result is not residual state evidence.
+        # The exact postcondition inventory below remains authoritative.
+        pass
+    try:
+        resources = project_resources(
+            ctx.project,
+            timeout=max(10, ctx.cli_timeout),
+            repo=ctx.repo,
+            environment=ctx.environment,
+        )
+        assert_resources_empty(resources)
+    except BaseException as error:
+        cleanup_error = error
+    if original is not None:
+        if cleanup_error is not None and hasattr(original, "add_note"):
+            original.add_note("dedicated resource cleanup also failed")
+        raise original
+    if cleanup_error is not None:
+        raise cleanup_error
+
+
+def all_runtime(ctx: HostContext) -> None:
+    resources = project_resources(
+        ctx.project,
+        timeout=ctx.cli_timeout,
+        repo=ctx.repo,
+        environment=ctx.environment,
+    )
+    assert_resources_empty(resources)
+    config = json.loads(ctx.execute(["config", "--format", "json"]))
+    realm_path = ctx.repo / "infra" / "keycloak" / "realm" / "finguardops-local-realm.json"
+    validate_static(config, json.loads(realm_path.read_text(encoding="utf-8")))
+    print("stage: static-complete")
+    original: BaseException | None = None
+    try:
+        ctx.execute(
+            ["up", "-d", "--build", "external-risk-mock", "keycloak-bootstrap"],
+            timeout=900,
+        )
+        wait_container(ctx, "external-risk-mock", "healthy")
+        wait_container(ctx, "keycloak-bootstrap", "completed")
+        print("stage: fresh-runtime-ready")
+        host_runtime(ctx.repo / "infra" / "keycloak" / ".local" / "tls" / "localhost.crt")
+        publish_rules(ctx)
+        print("stage: rules-active")
+        run_ingestion_phase(ctx)
+        print("stage: fresh-ingestion-complete")
+        existing_volume_phase(ctx)
+    except BaseException as error:
+        original = error
+    cleanup_project(ctx, original)
+    print("all verification completed: fresh=passed existing-volume=passed cleanup=complete")
 
 
 class RejectRedirect(urllib.request.HTTPRedirectHandler):
@@ -1009,8 +2032,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     static_parser.add_argument("--config", required=True, type=Path)
     static_parser.add_argument("--realm", required=True, type=Path)
     subparsers.add_parser("runtime")
+    ingestion_parser = subparsers.add_parser("ingestion-runtime")
+    ingestion_parser.add_argument("--step", required=True, choices=INGESTION_STEPS)
+    subparsers.add_parser("metric-runtime")
     host_parser = subparsers.add_parser("host")
     host_parser.add_argument("--certificate", required=True, type=Path)
+    all_parser = subparsers.add_parser("all")
+    all_parser.add_argument(
+        "--repo-root", default=str(Path(__file__).resolve().parents[2]), type=Path
+    )
+    all_parser.add_argument(
+        "--project", default="finguardops-kc241-e2e-manual"
+    )
+    all_parser.add_argument("--cli-timeout", default=30.0, type=float)
+    all_parser.add_argument("--deadline-seconds", default=1800.0, type=float)
     return parser.parse_args(argv)
 
 
@@ -1024,8 +2059,31 @@ def main(argv: list[str]) -> int:
             print("static verification completed: Compose and realm contracts passed")
         elif args.mode == "runtime":
             runtime()
-        else:
+        elif args.mode == "ingestion-runtime":
+            ingestion_runtime(args.step)
+        elif args.mode == "metric-runtime":
+            print(json.dumps(metric_totals(), separators=(",", ":")))
+        elif args.mode == "host":
             host_runtime(args.certificate)
+        else:
+            repo = args.repo_root.resolve()
+            if (
+                not repo.is_absolute()
+                or not (repo / ".git").exists()
+                or PROJECT_PATTERN.fullmatch(args.project) is None
+                or args.cli_timeout <= 0
+                or args.deadline_seconds <= 0
+            ):
+                fail("HOST_ARGUMENT_INVALID")
+            validate_cleanup_target(args.project, args.project)
+            all_runtime(
+                HostContext(
+                    repo,
+                    args.project,
+                    args.cli_timeout,
+                    args.deadline_seconds,
+                )
+            )
         return 0
     except VerificationError as error:
         print("verification failed: " + str(error), file=sys.stderr)

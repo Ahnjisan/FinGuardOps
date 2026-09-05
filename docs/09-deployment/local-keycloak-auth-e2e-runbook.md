@@ -289,3 +289,69 @@ private key를 terminal에 출력하지 말고 Keycloak과 helper를 재생성�
   Authorization Server 계약이 필요하다.
 - 별도 proxy/service/image와 helper 공유 volume은 없다. Overlay가 추가하는 persistent named
   volume은 `keycloak-data` 하나뿐이다.
+
+## 10. SERVICE ingestion E2E (#241)
+
+이 절은 위 #239 USER 브라우저 E2E를 대체하지 않는다. 같은 Keycloak·realm·bootstrap 계약을
+유지하면서 두 SERVICE Client Credentials가 실제 Backend ingestion과 PostgreSQL 영속 경계까지
+도달하는지를 별도 검증한다. `finguardops-transaction-ingestor`는 `transaction:intake`,
+`finguardops-behavior-ingestor`는 `behavior-event:intake` authority만 가진다.
+
+### 10.1 추가 경계와 사전조건
+
+- `user_password`는 기존대로 `keycloak-bootstrap`에만 read-only mount한다. verifier, Backend,
+  AI Service에는 전달하지 않는다.
+- verifier에 PostgreSQL credential이나 Docker socket을 전달하지 않는다. DB 검사는 host
+  orchestrator가 전용 Compose PostgreSQL container의 기존 환경 안에서 `psql`을 실행해 수행한다.
+- 신규 service, proxy, dependency, shared volume을 추가하지 않는다.
+- Chromium, Playwright, Windows 인증서 저장소를 사용하지 않는다. TLS host 검증은 생성한
+  `CA:FALSE` certificate를 Python SSL context에 직접 지정한다.
+- External Risk marker는 exact lookup POST 수신 직후 body parsing 전에
+  `FINGUARDOPS_EXTERNAL_RISK_LOOKUP_RECEIVED` 한 줄만 출력한다. payload, token, trace ID,
+  거래·고객·계좌 reference는 포함하지 않는다.
+- Rule v2 실제 호출은 Uvicorn의 exact
+  `POST /api/v2/rule-analysis HTTP/1.1` `200 OK` access line만 계산한다. Overlay는
+  `--access-log`를 명시하며 누락, `--no-access-log`, 순서 변이를 static 단계에서 거부한다.
+
+### 10.2 공식 fresh/existing-volume 명령
+
+위 2절의 local secret·TLS artifact를 준비한 뒤 repository root에서 실행한다. project 이름은
+이번 실행 전용이어야 하며 아래 명령 하나가 static, fresh, existing-volume restart, host TLS,
+단계별 ingestion과 cleanup을 수행한다.
+
+```bash
+python -B infra/keycloak/verify_e2e.py all \
+  --repo-root . \
+  --project finguardops-kc241-e2e-manual
+```
+
+검사는 다음 단계 사이마다 DB global snapshot, transaction-specific cardinality, 두 dependency
+실제 hit 수와 Backend outcome metric을 각각 비교한다.
+
+1. 인증 거부: 반대 SERVICE `403` 2건, credential 누락·손상 `401` 4건
+2. Behavior 생성: `PASSWORD_CHANGED`, `TRANSFER_LIMIT_CHANGED` 각각 `201`
+3. Behavior replay·conflict: 동일 event `200`, payload conflict `409 DUPLICATE_EVENT`
+4. Transaction 최초 성공: 12,000,000 KRW로 R001(15)+R003(40)을 유도해 `201`, score 55,
+   `HIGH`, `ADDITIONAL_AUTH_REQUIRED`를 검증
+5. 동일 key replay `201`과 동일 key payload conflict `409 IDEMPOTENCY_KEY_CONFLICT`
+6. 다른 key의 동일 transaction 최초 요청 `409 DUPLICATE_TRANSACTION`
+7. 같은 duplicate key replay `409 DUPLICATE_TRANSACTION`
+
+최종 transaction-specific 결과는 FinancialTransaction·완료 IdempotencyRecord·완료
+DetectionResult·FraudCase·CaseTransaction이 각각 1건, DetectionEvidence 2건, action별
+`CASE_CREATED`, `CASE_TRANSACTION_LINKED`, `TRANSACTION_RISK_RESPONSE_APPLIED`,
+`TRANSACTION_STATUS_CHANGED` AuditLog가 각각 1건이다. duplicate key의 연결되지 않은
+`FAILED/DUPLICATE_TRANSACTION` IdempotencyRecord는 최초와 replay 뒤 모두 1건이다.
+
+External Risk와 Rule v2 실제 hit는 Transaction 최초 성공에서만 각각 1 증가해야 한다.
+`finguardops_external_risk_outcomes_total`과 `finguardops_rule_analysis_outcomes_total` delta도
+각각 1이어야 하지만 이는 실제 dependency log count와 분리된 보조 검증이다. replay, conflict,
+401, 403에서는 모든 업무 row와 두 실제 hit, 두 metric이 증가하지 않아야 한다.
+
+### 10.3 SERVICE cleanup과 판정
+
+정상·실패 종료 모두 exact Compose project label을 가진 전용 container, network, volume만
+`down --volumes --remove-orphans` 대상으로 삼고 세 종류의 잔존이 0인지 확인한다. 공용 local
+Docker image는 자동 삭제하지 않으며 잔존 여부를 cleanup 실패로 분류하지 않는다. ignored
+credential·TLS artifact는 자동 삭제하지 않는다. 필요하면 위 7·8절의 OWNER 확인 절차로만
+별도 정리한다.

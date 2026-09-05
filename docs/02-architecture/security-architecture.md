@@ -581,7 +581,7 @@ method security는 Issue #221에서 구현되었다. 아래 표는 구현 상태
 | 완료. `[Backend/Security] JWT singleton audience 표준 표현 호환` | RFC 7519 singleton 표현과 stock Keycloak 호환 | Backend raw 검증·decoder/HTTP/validator 테스트·ADR-012 | 없음 | string·array 허용, additional·duplicate·malformed 거부, raw pre-JWK | #233·#235 | Backend 호환 구현 (#236), stock Keycloak 발급 검증 (#239) |
 | 완료. `[Infra/Security] Keycloak local/dev runtime 구현` | 실제 local/dev issuer와 client·mapper | Compose, realm, client scope, protocol mapper | 없음 | tag·digest·realm·claim·singleton audience source·rotation | #233 | Phase 1 fresh/existing runtime 완료 (#239) |
 | 완료. `[Security/E2E] USER 로그인과 Backend 연동` | browser OIDC와 Resource Server 연결 | Frontend·Backend·Keycloak E2E | `@playwright/test` | raw `aud`·access/ID `sub` 원문 동일성·role 집합·refresh fail-closed·401·403 | Keycloak runtime | Chromium·Windows CurrentUser trust runner 구현 (#239) |
-| 3. `[Security/E2E] SERVICE Client Credentials 연동` | 거래·행동 접수 SERVICE 인증 | SERVICE client·Backend E2E | 없음 | client 분리·raw singleton `aud`·UUID `sub`·claim·교차 거부 | Keycloak runtime | 미구현 |
+| 완료. `[Security/E2E] SERVICE Client Credentials 연동` | 거래·행동 접수 SERVICE 인증 | Keycloak verifier·Compose·문서 | 없음 | 실제 신규·replay·conflict·401·403, PostgreSQL cardinality, External Risk·Rule 1회 | Keycloak runtime | fresh/existing-volume·전용 resource cleanup 구현 (#241) |
 | 4. `[Frontend/Security] role·authority 권한 UI` | 권한별 표시와 action 노출 | navigation, button, route guard UI | 없음 | browser login·expiry·권한 UI | USER E2E, #231 | 미구현 |
 | 5. `[Frontend] 업무 typed API와 query pagination` | 보호 API 소비 | 거래·사건·메모·감사 module, page·size·sort | 없음 | DTO·validator·query 조립 | #231 | 미구현 |
 | 6. `[Frontend] Keycloak remote logout` | RP-initiated logout | end-session·exact post-logout URI | 없음 | local invalidation·실패·redirect | USER E2E | 미구현 |
@@ -624,10 +624,15 @@ mount를 볼 수 있으므로 이는 local operator 신뢰 경계이며 producti
 않는다. helper는 UID 10001, read-only root, 전용 noexec tmpfs, all-capability drop와
 no-new-privileges를 사용한다.
 
-구현된 runtime 검증 범위는 realm/client/scope/mapper reconcile, credential 없는 USER resource,
-두 SERVICE token, raw singleton string audience, UUID subject/account 일치와 Backend 400/403
-경계다. USER browser E2E와 refresh-token fail-closed는 Issue #239에서 구현했다. role UI와 remote
-logout은 후속 범위다.
+구현된 runtime 검증 범위는 realm/client/scope/mapper reconcile, 두 SERVICE token, raw singleton
+string audience, UUID subject/account 일치, 실제 거래·행동 접수의 신규·replay·conflict와
+401·403이다. PostgreSQL은 단계별 전체 업무 테이블 delta와 거래별 cardinality를 함께 검사하고,
+55/HIGH·ADDITIONAL_AUTH_REQUIRED, FraudCase·CaseTransaction 각 1건과 action별 AuditLog 4건을
+확인한다. External Risk 고정 marker와 Rule v2 exact Uvicorn access line은 최초 거래에서만 각각
+1 증가해야 하며 Backend outcome metric은 이 실제 hit와 분리된 보조 검증이다. 다른 key의 같은
+transactionId 충돌은 연결되지 않은 `FAILED/DUPLICATE_TRANSACTION` 멱등 제어 기록만 남긴다.
+USER browser E2E와 refresh-token fail-closed는 Issue #239에서 구현했다. role UI와 remote logout은
+후속 범위다.
 
 Stock Keycloak은 HTTP와 HTTPS에 공통 listener host를 적용하므로 2026-09-05 OWNER 결정에 따라
 `KC_HTTP_HOST=0.0.0.0`을 사용한다. HTTPS 8443만 host `127.0.0.1`에 publish하고 HTTP 8082와
@@ -637,5 +642,9 @@ management 9000은 publish하지 않는다. HTTP listener 자체는 공유 names
 사용한다. local/dev network participant는 operator 신뢰 경계이며 production에서는 별도 network
 segmentation, trusted TLS, secret manager와 production Authorization Server 계약이 필요하다.
 별도 proxy/service/image와 helper 공유 persistent volume은 없고 Keycloak용 `keycloak-data`만 추가한다.
-2026-09-05 correction에서 fresh/existing runtime, verifier 5회 연속 실행, host public HTTPS와
-8082·9000 비공개 검증이 모두 통과했다.
+Issue #241의 SERVICE 검증은 `user_password`를 bootstrap에만 read-only mount하고 verifier·Backend·
+AI Service에는 제공하지 않는다. USER 회귀는 #239 USER runbook과 Frontend 인증 targeted test를
+그대로 유지하고 production 파일·realm·bootstrap을 변경하지 않는 방식으로 확인한다. headless USER 로그인, direct grant,
+Chromium, Playwright와 Windows 인증서 저장소는 이 검증 경계 밖이다. fresh/existing runtime은 같은
+전용 project 안에서 수행하고 종료 시 해당 label의 container·network·volume이 0이어야 한다. 공용
+local Docker image는 삭제·잔존 판정 대상이 아니다.
