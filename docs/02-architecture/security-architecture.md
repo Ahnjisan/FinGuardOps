@@ -472,7 +472,39 @@ endpoint에는 endpoint key 자체가 존재하지 않는다.
 base URL과 endpoint descriptor로 조립한 뒤 다시 파싱해 origin·userinfo·pathname·search·hash를
 exact 비교한다. `startsWith()`와 substring 판정은 사용하지 않으므로 trailing slash, encoded
 path, dot traversal, protocol-relative URL, userinfo, query·fragment 우회는 fetch 이전에
-거부된다. query parameter는 이번 범위에서 지원하지 않는다.
+거부된다. Issue #245에서 목록 endpoint의 query를 추가했으며, 호출자는 여전히 raw query
+string이나 `URL`·`URLSearchParams`를 전달하지 않고 endpoint별 typed plain object만
+전달한다. 값은 registry가 선언한 순서대로 `URLSearchParams.set()`으로만 조립하므로 한
+이름에 값이 정확히 하나이고, opaque 참조값 안의 `&`·`=`·`#`·`%`는 percent-encoding되어
+query 구조가 되지 못한다.
+
+값 규칙의 소유자는 endpoint descriptor다. registry는 이름 목록이 아니라 이름과 값
+validator의 쌍, 그리고 query 전체의 교차 의미 계약을 함께 선언하고, typed builder와
+완성 URL 재검증이 같은 선언을 실행한다. 개별 값만으로는 판정할 수 없는 계약이 있기
+때문이다. `occurredAtFrom`은 그 자체로는 정상 instant이고 `occurredAtTo`와 나란히 놓일
+때만 422가 되므로, 범위는 개별 parameter가 아니라 endpoint에 속한다. 현재 선언된 범위는
+`transaction-list`의 `occurredAtFrom <= occurredAtTo`, `case-list`의
+`createdAtFrom <= createdAtTo`와 `lastChangedAtFrom <= lastChangedAtTo` 세 개이며, 한쪽
+bound만 있으면 허용하고 비교는 나노초까지 정확하다.
+
+완성된 URL은 endpoint registry, transport, credential capability 세 계층에서 각각 query를
+재파싱하고, 각 값을 그 endpoint의 규칙에 통과시키고, endpoint의 범위 계약까지 확인한 뒤,
+같은 canonical builder로 재조립해 byte-for-byte 일치할 때만 승인한다. 따라서 중복 이름,
+unknown 이름, 값이 같아도 canonical form이 아닌 encoding, 그리고 typed 경로를 우회해 손으로
+만든 `page=-1`·`size=101`·`sort=createdAt,asc`·비정규 UUID·offset 시각·소문자 enum과
+역전된 시간 범위는 token 조회와 Authorization 부착과 fetch 이전에 모두 거부된다. 거부는
+고정 오류만 반환하며 query 값이나 원문을 오류·로그에 반사하지 않는다. query를 선언하지
+않은 detail·write endpoint는 query가 붙은 URL뿐 아니라 호출자가 query 인자를 전달했다는
+사실 자체를 거부하며 빈 객체도 예외가 아니다.
+
+reference filter는 Backend validator별로 분리한다. 거래의 `externalCustomerRef`·
+`accountRef`는 `TransactionQueryValidator`와 동일하게 Java `String.isBlank()` 하나만
+적용하므로 trim·정규화 없이 원문 그대로 검색하고 `" acct "` 같은 nonblank padded 값을
+허용하며 길이 제한을 전혀 두지 않는다. 공통 structural validator에도 길이 상한이 없고,
+길이는 rule별 계약(`page`·`size`의 자릿수, `instant`·`uuid`의 문법, `assigneeRef`의 128자)
+으로만 제한한다. 사건의 `assigneeRef`는 `FraudCaseQueryValidator`의
+계약대로 nonblank·128자 이하·Java `trim()` 동일을 유지한다. 두 규칙을 하나로 합치면
+거래 쪽에 Backend에 없는 제약이 생기므로 분리를 회귀 테스트로 고정한다.
 
 raw access token은 `AuthClient` port 밖으로 나가지 않는다. port는 public 표면(`AuthClient`)과
 credential 표면(`CredentialAuthClient`)으로 나뉘며, 후자는 승인된 `Request`에 Authorization을
@@ -541,6 +573,56 @@ guard는 결정 이전(`initializing`·`authenticating`)을 거부로 확정하�
 이 UI는 표시 경계이며 endpoint·method authority 검증과 401·403 결정을 대체하지 않는다.
 capability로 보호되는 production route·navigation 항목·action은 아직 0개이며, guard의 직접 URL
 접근 동작은 test 전용 MemoryRouter route로 검증한다.
+
+Issue #245에서 Frontend는 위 10개 endpoint를 typed API module로 구현했다. 화면·route·
+navigation·button·hook·상태관리는 포함하지 않는다. 거래·사건 filter와 거래·사건·메모·감사
+pagination을 지원하며, `page`·`size`·`sort`와 각 filter는 Backend validator와 같은 범위로
+제한한다. `page`는 0 이상 Java `int` 범위의 정수, `size`는 1~100, `sort`는 endpoint별 단일
+필드의 `asc`·`desc`만 허용하고, 음수·소수·`Number.isSafeInteger` 초과·대소문자 변형·다중
+정렬·unknown 이름은 요청 조립 이전에 거부한다. UTC ISO-8601 `Z` 이외의 시각 표기와
+`from > to` 범위도 요청 이전에 거부하며, 범위 비교는 밀리초에서 잘리는
+`Date.getTime()`이 아니라 `(epoch second, nanosecond)` 기준이다. 조사 메모 공백 판정은
+Java `Character.isWhitespace || Character.isSpaceChar`와 동일한 명시적 predicate를 사용해
+NBSP 계열은 공백으로 보고 U+FEFF는 Backend와 동일하게 공백으로 보지 않는다.
+
+write 요청 body는 caller의 object를 그대로 보내지 않는다. 계약 field 집합을 runtime에
+exact 검증한 뒤 새 plain object로 재구성하므로, unknown field, inherited field, symbol key와
+`authorRef`·`actorType`·`actorId` 같은 서버 결정 값은 전송 경로가 없다. `expectedVersion`은
+0 이상의 safe integer만 허용하고 누락 시 기본값을 만들지 않는다. 응답은 모든 중첩 object의
+exact own-key와 타입을 검증하며, 배열 항목이 하나라도 계약과 다르면 부분 채택 없이 응답
+전체를 거부한다. Java `long`은 `Number.isSafeInteger` 범위만 허용하고, 금액은 `number`로
+변환하지 않고 계약상 10진 정수 문자열로 최대 15자리까지 유지하며, `currencyCode`는 `KRW`
+하나만, UUID는 canonical lowercase UUID v4만 허용한다. page metadata는
+`totalPages`·`first`·`last`와 항목 수가 `number`·`size`·`totalElements`와 모순되지
+않는지까지 검증한다.
+
+감사 항목은 `action`과 `reasonCode`의 조합을 discriminated union으로 검증하고, Backend
+`AuditMetadataPolicy`를 그대로 옮겨 값 사이의 관계까지 확인한다. `CASE_CREATED`의 `OPEN`,
+`CASE_TRANSACTION_LINKED`의 `linked=true`, 세 상태 전이 reason별 정확한 상태·담당자 변화,
+`CASE_ASSIGNEE_RELEASED` 이후 `null` 담당자, `CASE_RESOLVED`의 `IN_REVIEW → CLOSED`와
+담당자 유지가 그것이다. 넓은 공용 summary 형태를 여러 reason에 재사용해 승인하지 않으므로
+action과 항목 수만 맞고 의미가 조작된 응답도 거부된다. 감사 `changedAt`에는 mapper와 같은
+microsecond 정밀도 조건을 적용해 나노초 값을 거부하며(`...000001Z` 허용,
+`...000000001Z` 거부), 형식만 정상이고 정밀도만 잘못된 항목이 하나 있어도 페이지 전체를
+거부한다. 이 조건은 감사 `changedAt`에만 적용하고 다른 DTO 시각은 공통 UTC validator를
+그대로 사용한다.
+
+두 workflow write는 `reasonCode`를 discriminant로 하는 discriminated union이며 runtime
+validator가 같은 표를 강제한다. `CASE_REVIEW_STARTED`는 `IN_REVIEW`와 담당자 UUID를
+요구하고, `CASE_ADDITIONAL_INFORMATION_REQUESTED`와 `CASE_REVIEW_RESUMED`는 `assigneeRef`
+key 자체를 금지하며, 담당자 변경은 `null`을 `CASE_ASSIGNEE_RELEASED`에만, UUID를
+`CASE_ASSIGNEE_ASSIGNED`·`CASE_ASSIGNEE_CHANGED`에만 허용한다. 성공할 수 없는 조합은
+credential 조회 이전에 거부하고, 누락과 명시적 null의 차이는 계속 보존한다.
+
+성공 status는 endpoint별로 정확히 비교한다. 조사 메모 생성만 `201`이고 나머지 아홉 개는
+`200`이며, 다른 2xx는 body를 읽지 않고 거부한다. 성공 응답의 `X-Trace-Id`는 부재와
+malformed를 구분한다. 부재는 허용하고, 존재하지만 trace 계약을 만족하지 못하면
+`InvalidResponseError`이며, 유효하면 body `traceId`와 정확히 일치해야 한다. non-2xx는
+반대로 malformed header를 폐기해 오류가 오류로 남는다.
+`400`·`401`·`403`·`404`·`409`·`422`·`500`·
+`503` body는 계속 읽지 않으며 기존 status-only 경계를 유지한다. 단일 5초 deadline,
+`credentials:"omit"`, `redirect:"error"`, 요청당 fetch 1회, 자동 retry·request replay
+0회, access token decode 0회, Web Storage credential 저장 0회도 그대로다.
 
 ## 11. Local·test·Compose 경계
 
@@ -612,7 +694,7 @@ method security는 Issue #221에서 구현되었다. 아래 표는 구현 상태
 | 완료. `[Security/E2E] USER 로그인과 Backend 연동` | browser OIDC와 Resource Server 연결 | Frontend·Backend·Keycloak E2E | `@playwright/test` | raw `aud`·access/ID `sub` 원문 동일성·role 집합·refresh fail-closed·401·403 | Keycloak runtime | Chromium·Windows CurrentUser trust runner 구현 (#239) |
 | 완료. `[Security/E2E] SERVICE Client Credentials 연동` | 거래·행동 접수 SERVICE 인증 | Keycloak verifier·Compose·문서 | 없음 | 실제 신규·replay·conflict·401·403, PostgreSQL cardinality, External Risk·Rule 1회 | Keycloak runtime | fresh/existing-volume·전용 resource cleanup 구현 (#241) |
 | 부분 구현. `[Frontend/Security] role·authority 권한 UI` | 권한별 표시와 action 노출 | navigation, button, route guard UI | 없음 | browser login·expiry·권한 UI | USER E2E, #231 | 권한 판정 계층과 `RequireCapability` guard 구현 (#243); 이를 적용한 production 보호 route·navigation 항목·action 0개 |
-| 5. `[Frontend] 업무 typed API와 query pagination` | 보호 API 소비 | 거래·사건·메모·감사 module, page·size·sort | 없음 | DTO·validator·query 조립 | #231 | 미구현 |
+| 부분 구현. `[Frontend] 업무 typed API와 query pagination` | 보호 API 소비 | 거래·사건·메모·감사 module, page·size·sort | 없음 | DTO·validator·query 조립·3중 URL 재검증 | #231 | typed API 10개, request·response validator, query pagination 기반 구현 (#245); Backend·API·DB 계약 무변경, 이를 소비하는 production 화면·route·navigation·hook 0개 |
 | 6. `[Frontend] Keycloak remote logout` | RP-initiated logout | end-session·exact post-logout URI | 없음 | local invalidation·실패·redirect | USER E2E | 미구현 |
 
 ## 14. 구현 검증 계약

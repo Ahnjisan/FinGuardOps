@@ -70,7 +70,7 @@ render에 도달하지 않고, 애플리케이션은 원문 값을 화면이나 
 | --- | --- |
 | `src/app` | Router 구성, 최상위 App Shell (navigation, `Outlet`), capability route guard |
 | `src/pages` | 화면 단위 컴포넌트 |
-| `src/api` | Backend HTTP client, endpoint allowlist, 인증 transport, 오류 분류, API 타입, 데이터 조회 hook |
+| `src/api` | Backend HTTP client, endpoint allowlist, 인증 transport, query·pagination 계약, 응답 검증 primitive, 업무 typed API module, 오류 분류, API 타입, 데이터 조회 hook |
 | `src/auth` | 인증 상태 machine, `AuthClient` port, `oidc-client-ts` adapter, transaction storage, callback URL·복귀 경로 처리, USER role·capability 판정, React context와 hook |
 | `src/config` | 환경변수 검증 |
 | `src/shared` | 화면 전반에서 재사용하는 타입 (예: `AsyncState`) |
@@ -431,7 +431,8 @@ subscriber 통보 0회이며 이후 `initialize()`는 `{ session: null }`로 수
 ## 인증 Backend API 경계
 
 `src/api/authorizedClient.ts`는 로그인한 USER를 대신해 승인된 Backend 업무 endpoint를
-호출하는 **transport**다. 이번 범위는 transport뿐이며 화면·hook·Context·route는 포함하지
+호출하는 **transport**다. Issue #245에서 이 transport 위에 업무 typed API module과 query·
+pagination 계약을 얹었고, 화면·route·navigation·button·hook·상태관리는 여전히 포함하지
 않는다. 설계 근거는
 [`ADR-010`](../docs/07-decisions/ADR-010-frontend-authenticated-backend-api-boundary.md)을
 따른다.
@@ -492,10 +493,96 @@ URL이면 Authorization을 만들기 전에 실패하고 fetch는 0회다.
 
 한 계층의 결함을 다른 계층이 가리지 않도록 각각 별도로 검증한다.
 
-query parameter는 이번 범위에서 지원하지 않는다. 완성 URL 입력 API도 `URLSearchParams`
-입력 API도 없으며 `?`와 `#`가 포함된 요청을 만들지 않는다. 목록 API는 Backend 기본
-pagination 동작까지만 사용할 수 있고, `page`·`size`·`sort`는 실제 업무 목록 화면의 typed
-API module과 함께 후속 Issue에서 구현한다.
+### query parameter
+
+호출자는 raw query string도, 완성된 URL도, `URL`·`URLSearchParams` 객체도 전달하지 않는다.
+endpoint별 typed plain object만 전달하며, registry가 선언한 순서대로
+`URLSearchParams.set()`으로만 조립한다. `set()`이므로 한 이름에 값이 정확히 하나이고,
+값 안의 `&`·`=`·`#`·`%`·공백은 percent-encoding되어 query 구조가 되지 못한다. opaque
+참조값에 구분자가 들어 있어도 그것은 데이터이지 두 번째 parameter가 아니다.
+
+query를 선언하는 endpoint는 목록 네 개뿐이다.
+
+| Endpoint key | 허용 query |
+| --- | --- |
+| `transaction-list` | `occurredAtFrom`, `occurredAtTo`, `transactionType`, `processingStatus`, `externalCustomerRef`, `accountRef`, `page`, `size`, `sort` |
+| `case-list` | `caseStatus`, `finalDisposition`, `assigneeRef`, `createdAtFrom`, `createdAtTo`, `lastChangedAtFrom`, `lastChangedAtTo`, `transactionId`, `page`, `size`, `sort` |
+| `case-note-list` | `page`, `size`, `sort` |
+| `case-audit-list` | `page`, `size`, `sort` |
+
+나머지 여섯 개(detail 둘, write 넷)는 query를 선언하지 않는다. 이 endpoint들은 query가
+붙은 URL뿐 아니라 **호출자가 query 인자를 전달했다는 사실 자체**를 거부하며, 빈 객체
+`{}`도 예외가 아니다. `{}`를 넘겼다는 것은 호출자가 이 endpoint에 filter가 있다고 믿고
+있다는 뜻이고, 그 오해는 조용히 무시하기보다 드러내는 편이 낫다.
+
+값 규칙은 Backend validator와 같다. `page`는 0 이상 Java `int` 범위의 정수, `size`는
+1~100, `sort`는 endpoint별 단일 필드의 `asc`·`desc`다. reference filter는 Backend
+validator별로 **분리**한다. 거래의 `externalCustomerRef`·`accountRef`는
+`TransactionQueryValidator`와 같이 Java `String.isBlank()` 하나만 적용하므로 trim·정규화
+없이 원문 그대로 검색하고, `" acct "` 같은 nonblank padded 값을 허용해 그대로
+percent-encoding하며(`accountRef=+acct+`), **길이 제한을 전혀 두지 않는다**. 257자든
+4,096자든 non-blank이면 그대로 보낸다. 공통 structural validator에도 길이 상한이 없다.
+길이는 구조가 아니라 endpoint 계약이고 두 endpoint의 계약이 다르므로, 공유 상한을 두면
+Backend가 받아들일 거래 filter를 클라이언트가 먼저 거부하게 된다. `page`·`size`는 자릿수로,
+`instant`·`uuid`는 문법으로, `assigneeRef`는 Backend의 128자로 각자 자기 상한을 갖는다.
+사건의 `assigneeRef`는
+`FraudCaseQueryValidator`의 계약대로 nonblank·128자 이하·Java `trim()` 동일을 유지한다.
+두 규칙을 하나로 합치면 거래 쪽에 Backend에 없는 제약이 생기므로, 분리는 회귀 테스트로
+고정되어 있다. 음수, 소수,
+`Number.isSafeInteger` 초과, `NaN`·`Infinity`, 숫자처럼 보이는 문자열, 대소문자·공백 변형,
+다중 정렬, unknown·inherited·symbol key는 모두 URL이 만들어지기 전에 거부한다. 시각은
+trim·보정 없이 UTC ISO-8601 `Z`(fractional second 1~9자리)만 허용하고, `from > to` 범위는
+Backend의 422를 기다리지 않고 요청 이전에 거부한다.
+
+범위 비교는 **나노초 해상도**다. `Date.getTime()`은 밀리초에서 잘리므로
+`2026-07-23T00:00:00.000000002Z` → `2026-07-23T00:00:00.000000001Z` 같은 역전을 같은 값으로
+보고 통과시킨다. Backend는 두 값을 `Instant`로 다루므로 클라이언트도
+`(epoch second, nanosecond)`로 비교하며, 이 비교는 API module이 아니라 registry의 범위
+계약에 있으므로 typed builder·canonical builder·URL 재검증 세 곳이 모두 실행한다.
+
+값 규칙의 **소유자는 endpoint descriptor**다. registry는 이름 목록이 아니라 이름과
+값 validator의 쌍, 그리고 query 전체의 **교차 의미 계약**을 함께 선언하고, typed
+builder와 완성 URL 재검증이 **같은 선언**을 실행한다. 그래서 typed 경로를 거치지 않고
+손으로 만든 URL도 동일하게 판정된다.
+
+개별 값만으로는 판정할 수 없는 계약이 있기 때문에 교차 계약이 필요하다.
+`occurredAtFrom`은 그 자체로는 정상 instant이고, 자기보다 이른 `occurredAtTo`와 나란히
+놓일 때만 422가 된다. 그래서 범위는 개별 parameter가 아니라 endpoint에 속한다.
+
+| Endpoint | 범위 계약 |
+| --- | --- |
+| `transaction-list` | `occurredAtFrom <= occurredAtTo` |
+| `case-list` | `createdAtFrom <= createdAtTo` |
+| `case-list` | `lastChangedAtFrom <= lastChangedAtTo` |
+
+한쪽 bound만 있으면 허용하고, 같은 값은 빈 범위로 허용하며, 두 범위는 서로 독립이다.
+비교는 나노초까지 정확하다.
+
+완성된 URL은 세 계층에서 **독립적으로** 재검증한다.
+
+1. **endpoint registry** — `findApprovedBackendRequest`가 URL에서 query를 다시 파싱해
+   이름당 값이 하나인지 확인하고, 각 값을 그 endpoint의 규칙에, query 전체를 그
+   endpoint의 범위 계약에 통과시킨 뒤, 같은 canonical builder로 재조립한 결과와
+   **byte-for-byte** 일치를 요구한다.
+2. **transport** — 보유한 URL이 호출자가 요청한 바로 그 endpoint의 승인된 요청인지
+   스스로 다시 확인한다. URL이 어떻게 만들어졌는지에 의존하지 않는다.
+3. **credential capability** — token을 조회하기 전에 같은 검증을 다시 수행한다.
+
+그래서 다음은 모두 credential 조회와 fetch **이전에** 거부된다.
+
+- 중복 이름 `?page=0&page=1`, unknown 이름 `?unknown=1`
+- 빈 query `?`, 빈 값 `?page=`, 이름 없는 값 `?=0`
+- canonical form이 아닌 encoding — `%20` 대 `+`, `%70age`, `page=%30`
+- 규칙을 어긴 값 — `page=-1`, `page=2147483648`, `page=00`, `size=0`, `size=101`,
+  `sort=createdAt,asc`, `caseStatus=in_review`, `transactionId=not-a-uuid`,
+  `createdAtFrom=2026-07-23`
+- 역전된 시간 범위 — `occurredAtFrom=2026-07-24T00:00:00Z&occurredAtTo=2026-07-23T00:00:00Z`,
+  그리고 밀리초 아래에서만 역전되는 `...00.000000002Z` → `...00.000000001Z`
+- query를 선언하지 않은 detail·write endpoint의 모든 query
+
+거부는 고정 오류만 반환하며 query 값이나 원문을 오류·로그에 반사하지 않는다.
+
+transport 또는 credential capability의 재검증을 하나라도 제거하면 테스트가 실패한다.
 
 ### Token 경계와 port 분리
 
@@ -618,6 +705,115 @@ teardown·redirect·retry·replay를 하지 않는다.
 non-2xx response body는 읽지 않으며 오류 객체나 메시지에 저장하지 않는다. 2xx 응답은
 호출자가 제공한 type guard를 통과해야 성공이며, 검증 없이 업무 타입으로 cast하지 않는다.
 
+### Typed API module
+
+`src/api`의 네 module이 위 10개 endpoint를 도메인 함수로 노출한다. 화면·route·navigation·
+button·hook·상태관리는 포함하지 않는다.
+
+| Module | 함수 | Endpoint | 성공 status |
+| --- | --- | --- | --- |
+| `transactionApi.ts` | `fetchTransactionList` | GET `/api/v1/transactions` | 200 |
+| `transactionApi.ts` | `fetchTransactionDetail` | GET `/api/v1/transactions/{transactionId}` | 200 |
+| `caseApi.ts` | `fetchCaseList` | GET `/api/v1/cases` | 200 |
+| `caseApi.ts` | `fetchCaseDetail` | GET `/api/v1/cases/{caseId}` | 200 |
+| `caseApi.ts` | `changeCaseStatus` | PATCH `/api/v1/cases/{caseId}/status` | 200 |
+| `caseApi.ts` | `changeCaseAssignee` | PATCH `/api/v1/cases/{caseId}/assignee` | 200 |
+| `caseApi.ts` | `createCaseResolution` | POST `/api/v1/cases/{caseId}/resolution` | 200 |
+| `investigationNoteApi.ts` | `fetchInvestigationNoteList` | GET `/api/v1/cases/{caseId}/notes` | 200 |
+| `investigationNoteApi.ts` | `createInvestigationNote` | POST `/api/v1/cases/{caseId}/notes` | 201 |
+| `caseAuditApi.ts` | `fetchCaseAuditList` | GET `/api/v1/cases/{caseId}/audit-logs` | 200 |
+
+성공 status는 endpoint별로 **정확히** 비교한다. `response.ok`는 200~299 구간이므로 그것만
+믿으면 `202`나 `204`가 계약된 응답으로 통과한다. 조사 메모 생성만 `201`이고 나머지 아홉
+개는 `200`이며, 다른 2xx는 body를 읽지 않고 `InvalidResponseError`로 거부한다.
+
+#### 요청 body
+
+write 요청은 호출자의 object를 그대로 보내지 않는다. 계약 field 집합을 runtime에 exact
+검증한 뒤 **새 plain object로 재구성**해 직렬화한다. unknown field, inherited field,
+non-enumerable own field, symbol key, 그리고 서버가 검증된 JWT로 결정하는
+`authorRef`·`actorType`·`actorId`는 전송 경로 자체가 없다. `expectedVersion`은 0 이상의
+safe integer만 허용하며 누락 시 기본값을 만들지 않는다. 낙관적 잠금 토큰을 client가
+지어내면 stale write가 조용한 덮어쓰기가 되기 때문이다.
+
+`assigneeRef`의 **존재 여부 자체가 명령**인 두 endpoint에서는 key 유무를 보존한다. 상태
+변경에서 key를 생략한 요청과 명시적 `null`을 보낸 요청은 서로 다른 요청이며, 담당자
+변경에서는 `null`이 해제 명령이고 key 생략은 400이다. 어느 쪽도 다른 쪽으로 바꾸지 않는다.
+
+두 workflow write는 `reasonCode`를 discriminant로 하는 discriminated union이고, runtime
+validator가 같은 표를 다시 강제한다. `FraudCaseWorkflowService`가 전이마다 정확히 하나의
+reason만 받고, 담당자를 실을 수 없는 두 전이에서는 `assigneeRef` **key 자체**를 거부하기
+때문이다.
+
+| `reasonCode` | `targetStatus` | `assigneeRef` |
+| --- | --- | --- |
+| `CASE_REVIEW_STARTED` | `IN_REVIEW` | 필수, canonical UUID v4 |
+| `CASE_ADDITIONAL_INFORMATION_REQUESTED` | `ADDITIONAL_INFORMATION_REQUIRED` | key 금지 |
+| `CASE_REVIEW_RESUMED` | `IN_REVIEW` | key 금지 |
+
+| `reasonCode` | `assigneeRef` |
+| --- | --- |
+| `CASE_ASSIGNEE_ASSIGNED`·`CASE_ASSIGNEE_CHANGED` | canonical UUID v4 |
+| `CASE_ASSIGNEE_RELEASED` | 명시적 `null`만 |
+
+`assigneeRef: null` + `CASE_ASSIGNEE_ASSIGNED`, `assigneeRef: <uuid>` +
+`CASE_ASSIGNEE_RELEASED`, `CASE_REVIEW_RESUMED` + `assigneeRef` key처럼 성공할 수 없는
+조합은 credential 조회 이전에 거부한다. `assigneeRef?: never` 덕분에 두 전이의 key는
+타입 단계에서도 쓸 수 없다.
+
+#### 응답 검증
+
+응답은 `unknown`으로 받아 모든 중첩 object의 **exact own-key**와 타입을 검증한다. key가
+하나라도 없거나, 계약에 없는 key가 하나라도 더 있으면 거부한다. 배열은 항목이 하나라도
+계약과 다르면 부분 채택 없이 응답 전체를 거부한다. 파싱하지 못한 행만 조용히 빠진 사건
+대기열이나 감사 이력은 정상 화면처럼 보이기 때문이다.
+
+- Java `long`(`concurrencyVersion`, `relatedTransactionCount`, `totalElements`)은
+  `Number.isSafeInteger` 범위만 허용한다. 그 밖의 값은 `JSON.parse` 시점에 이미 정밀도를
+  잃었으므로 복구하지 않고 fail-closed한다.
+- 금액은 `number`로 변환하지 않고 계약상 10진 정수 문자열로 유지한다. 부호, 선행 0,
+  소수부, 지수 표기는 거부하며 길이는 **최대 15자리**다. `amount`는 `numeric(19,4)`이므로
+  15자리가 정수부의 전 범위이고, `999999999999999`는 허용하되 16자리 이상은 거부한다.
+- `currencyCode`는 계약이 정의한 `KRW` **정확히 하나**만 허용한다. `USD`·`JPY`처럼
+  저장될 수 없는 값을 일반 ISO 4217 형태 검사로 통과시키지 않는다.
+- UUID는 canonical lowercase UUID v4만, 시각은 UTC ISO-8601 `Z`만 허용하며 달력상
+  존재하지 않는 날짜(`2026-02-30T00:00:00Z`)는 형식이 맞아도 거부한다.
+- page metadata는 형태뿐 아니라 산술도 검증한다. `totalPages`가 `totalElements`/`size`의
+  올림인지, `first`·`last`가 `number`와 모순되지 않는지, 항목 수가 해당 페이지 위치와
+  일치하는지까지 확인한다.
+- 감사 항목은 discriminated union이며, 판정 기준은 `action`만이 아니라 `action`과
+  `reasonCode`의 조합이다. Backend `AuditMetadataPolicy`를 그대로 옮겨 **값 사이의 관계**
+  까지 검증한다. `CASE_CREATED`는 `OPEN`으로만 생성되고, `CASE_TRANSACTION_LINKED`의
+  `linked`는 `true`여야 하며, `CASE_REVIEW_STARTED`는 `OPEN`·미배정에서 `IN_REVIEW`·배정
+  으로만 가고, `CASE_ADDITIONAL_INFORMATION_REQUESTED`와 `CASE_REVIEW_RESUMED`는 담당자를
+  유지해야 하며, `CASE_ASSIGNEE_RELEASED` 이후 담당자는 `null`이어야 하고,
+  `CASE_RESOLVED`는 `IN_REVIEW → CLOSED`이면서 담당자가 바뀌지 않아야 한다. 넓은 공용
+  summary 형태를 여러 reason에 재사용해 승인하지 않으므로, action과 항목 수는 맞고
+  의미만 조작된 응답도 거부된다.
+- 감사 `changedAt`은 mapper와 같은 **microsecond 정밀도**를 요구한다. 감사 column이
+  microsecond 해상도이고 Backend가 더 정밀한 값을 만나면 페이지 전체를 500으로 처리하기
+  때문이다. `...000001Z`는 허용하고 `...000000001Z`는 거부하며, 형식만 정상이고 정밀도만
+  잘못된 항목이 하나 있어도 페이지 전체를 거부한다. 이 조건은 감사 `changedAt`에만
+  적용하고 다른 DTO 시각은 공통 UTC validator를 그대로 쓴다.
+- 성공 응답의 `X-Trace-Id`는 **부재와 malformed를 구분**한다. 부재는 허용한다(proxy가
+  제거할 수 있고, 참조가 없다고 응답이 틀린 것은 아니다). 존재하지만 trace 계약을
+  만족하지 못하면 `InvalidResponseError`다. `TraceIdFilter`는 모든 응답에 이 header를
+  설정하므로, 계약 밖 값을 가진 2xx는 그 filter의 결과가 온전히 도착한 것이 아니다.
+  유효하면 body `traceId`와 정확히 일치해야 한다. 서로 다른 요청을 가리키는 추적
+  참조는 없느니만 못하다.
+- non-2xx는 반대 규칙을 유지한다. 그쪽에서는 malformed header를 폐기한다. 오류는 오류로
+  남아야 하고, header 하나 때문에 재분류되어서는 안 된다.
+
+조사 메모 `content`는 신뢰할 수 없는 plain text다. 원문 그대로 보존하며 trim·정규화·해석을
+하지 않는다. 표시하는 쪽이 escaping 책임을 지며 `innerHTML`·`dangerouslySetInnerHTML`에
+넘기면 안 된다.
+
+공백 판정은 Java `Character.isWhitespace(cp) || Character.isSpaceChar(cp)`와 동일한 명시적
+predicate로 구현하며 JavaScript `\s`에 의존하지 않는다. 두 집합이 다르기 때문이다. NBSP
+(U+00A0), FIGURE SPACE(U+2007), NARROW NO-BREAK SPACE(U+202F)는 Java가 공백으로 보므로
+이들만으로 이루어진 메모는 거부하고, U+FEFF는 Java가 format 문자로 분류하므로 Backend와
+동일하게 공백으로 오인하지 않는다. 길이는 계속 Unicode code point 기준 1~4,000이다.
+
 ### 요청 lifecycle
 
 인증 준비부터 response validator까지 **하나의 5초 deadline**을 적용한다. 포함 범위는 memory
@@ -642,10 +838,12 @@ timer와 단계 사이의 명시적 경과시간 검사가 이를 공유한다. 
 
 ## 미구현 범위
 
-- 거래·사건·조사·판정 등 업무 화면과 업무 DTO·typed API module
+- 거래·사건·조사·판정 등 업무 **화면** (typed API module과 query pagination은 Issue #245에서
+  구현했고, 이를 호출하는 route·navigation·button·hook·상태관리는 아직 없다)
 - capability로 보호되는 production route·navigation 항목·action (판정 계층과 guard는 구현했으나
   적용 대상이 아직 0개다)
-- `page`·`size`·`sort` query pagination
+- 문서에만 존재하는 후보 endpoint (`GET /api/v1/cases/{caseId}/transactions` 등)
+- 오류 응답 body 모델(`code`·`message`·`fieldErrors`)
 - production Authorization Server와 production runtime 배포
 - remote end-session(RP-initiated logout)
 - silent renew와 refresh token 사용은 지원하지 않으며 도입하려면 별도 승인이 필요하다.
@@ -700,6 +898,52 @@ SERVICE ingestion·management·AI·관측·외부 origin에는 Authorization도 
 URL·body·query에 token이 없으며, 미인증·만료·부재 memory user에서 fetch가 0회임을 확인한다.
 raw token accessor가 없고 JWT decode가 없으며 Web Storage에 token이 저장되지 않는 것도
 함께 확인한다.
+
+query·pagination과 typed API module은 반례 중심으로 검증한다. query는 `page`·`size`·
+`sort`·filter의 음수·소수·unsafe integer·Java `int` 초과·`NaN`·숫자 문자열·unknown·
+대소문자·공백 변형, UUID의 version·variant·대문자·공백 오류, offset·local·달력상 불가능한
+시각과 `from > to`를 각각 요청 조립 이전 거부로 확인하고, 그때 credential 조회 0회·fetch
+0회임을 함께 확인한다. `from > to`는 세 범위 각각에 대해, 밀리초 아래에서만 역전되는
+반례(`...00.000000002Z` → `...00.000000001Z`)까지 포함해 확인하고, 두 사건 범위가 서로
+독립임도 확인한다. 거래 reference와 사건 assignee가 같은 값(`" acct "`, 129자)에서 서로
+다르게 판정되는지도 확인해 두 규칙이 다시 합쳐지는 퇴행을 잡는다.
+
+3중 검증은 **손으로 만든 URL**을 각 계층에 직접 주입해 확인한다. registry에는
+`findApprovedBackendRequest`로, transport에는 URL builder를 교체해, credential capability
+에는 실제 adapter에 `Request`를 그대로 건네서 각각 `page=-1`·`size=101`·
+`sort=createdAt,asc`·`transactionId=not-a-uuid`·`caseStatus=in_review`·**역전된 시간
+범위**·중복·unknown·비정규 encoding·빈 query를 거부하고 그때 token 조회 0회·
+Authorization 0회·fetch 0회임을 확인한다. transport 또는 credential capability의 재검증을 제거하면 해당 테스트가
+실패한다. opaque 참조값 안의 `&`·`=`·`#`·`%`가 query 구조가 되지 못하는 것, detail·write
+endpoint가 `{}`를 포함한 query 인자 자체를 거부하는 것, inherited·non-enumerable·symbol
+key와 `URLSearchParams`·class instance 같은 non-plain container가 거부되는 것도 확인한다.
+
+응답 검증은 endpoint별로 missing key, unknown key, enum·UUID·시각·금액·safe integer 오류,
+그리고 page metadata의 산술·`first`/`last`·항목 수 불일치를 각각 거부로 확인한다. 금액은
+15자리 허용·16자리 거부를, `currencyCode`는 `KRW` 외 `USD`·`JPY` 거부를 확인한다. 배열
+항목 하나만 malformed여도 응답 전체가 거부된다.
+
+감사 `changedAt`은 microsecond 허용·nanosecond 거부를 여섯 action 모두에서 확인하고,
+정밀도만 잘못된 항목 하나가 페이지 전체를 거부시키는지도 확인한다.
+
+감사 항목은 값 관계까지 mutation으로 확인한다. action·reasonCode·key 집합·항목 수를 모두
+그대로 두고 값 하나만 바꾼 반례 — `CASE_CREATED`인데 `CLOSED`, `CASE_TRANSACTION_LINKED`
+인데 `linked=false`, `CASE_REVIEW_STARTED`·`CASE_REVIEW_RESUMED`·
+`CASE_ADDITIONAL_INFORMATION_REQUESTED`의 잘못된 상태·담당자 변화, `CASE_ASSIGNEE_RELEASED`
+이후 담당자가 남아 있는 행, `IN_REVIEW → CLOSED`와 담당자 유지를 어긴 `CASE_RESOLVED` —
+이 각각을 거부하는지 확인하고, 요청한 `caseId`와 다른 감사 페이지도 거부되는지 확인한다.
+
+write 조합은 표 전체를 검증한다. reason과 `targetStatus`의 불일치, `CASE_REVIEW_STARTED`의
+담당자 누락·`null`·비정규 UUID, 담당자를 실을 수 없는 두 전이의 `assigneeRef` key(값이
+`null`이든 UUID든), `CASE_ASSIGNEE_RELEASED`+UUID와 `CASE_ASSIGNEE_ASSIGNED`+`null`을
+각각 credential 조회 0회·fetch 0회 거부로 확인한다.
+
+status는 조사 메모 생성의 `201`과 나머지 아홉 개의 `200`을 각각 정확히 요구하고 다른 2xx
+에서 body를 읽지 않음을 확인한다. trace는 header가 없으면 body 값을 쓰고, header가 있지만
+계약을 만족하지 못하면 `InvalidResponseError`이며, 유효하지만 body와 다르면 거부하고,
+non-2xx에서는 계속 malformed header를 폐기해 오류가 오류로 남는지 확인한다. write 실패
+(`400`·`401`·`403`·`404`·`409`·`422`·`500`·`503`·network)에서 fetch 1회·retry 0회·replay
+0회와 401 invalidation·403 session 유지·5초 deadline·raw body 비노출 회귀도 함께 확인한다.
 
 `npm run e2e:keycloak`은 Chromium 1 worker·retry 0·strict TLS로 실제 Keycloak 로그인과
 refresh-token, state, 저장 nonce 삭제·blank·불일치, ID token nonce 누락·불일치, PKCE,

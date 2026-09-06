@@ -779,3 +779,109 @@ describe("httpRequest — deadline holds without a timer callback", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+/**
+ * `response.ok` is a range, and a contract is not. An endpoint that promises
+ * 200 answering 202, or one that promises 201 answering 200, is not the
+ * response the caller asked for, so it is refused before the body is read.
+ */
+describe("httpRequest — exact success status", () => {
+  function requestWithExpectedStatus(expectedStatus: number, responseStatus: number) {
+    return httpRequest({
+      timeoutMs: 1000,
+      expectedStatus,
+      prepare: () => () =>
+        Promise.resolve(
+          responseStatus === 204
+            ? new Response(null, { status: 204 })
+            : new Response(JSON.stringify({ ok: true }), {
+                status: responseStatus,
+                headers: { "Content-Type": "application/json" },
+              }),
+        ),
+    });
+  }
+
+  it("accepts the exact expected status", async () => {
+    await expect(requestWithExpectedStatus(200, 200)).resolves.toMatchObject({ status: 200 });
+    await expect(requestWithExpectedStatus(201, 201)).resolves.toMatchObject({ status: 201 });
+  });
+
+  it("refuses any other 2xx", async () => {
+    for (const [expected, actual] of [
+      [200, 201],
+      [200, 202],
+      [200, 204],
+      [200, 206],
+      [201, 200],
+      [201, 202],
+    ] as ReadonlyArray<[number, number]>) {
+      await expect(requestWithExpectedStatus(expected, actual)).rejects.toBeInstanceOf(
+        InvalidResponseError,
+      );
+    }
+  });
+
+  it("does not read the body of an unexpected 2xx", async () => {
+    let jsonReads = 0;
+    await expect(
+      httpRequest({
+        timeoutMs: 1000,
+        expectedStatus: 200,
+        prepare: () => () =>
+          Promise.resolve({
+            ok: true,
+            status: 202,
+            headers: new Headers(),
+            json: () => {
+              jsonReads += 1;
+              return Promise.resolve({ ok: true });
+            },
+          } as unknown as Response),
+      }),
+    ).rejects.toBeInstanceOf(InvalidResponseError);
+    expect(jsonReads).toBe(0);
+  });
+
+  it("still classifies a non-2xx by status rather than as an unexpected success", async () => {
+    await expect(
+      httpRequest({
+        timeoutMs: 1000,
+        expectedStatus: 200,
+        prepare: () => () => Promise.resolve(new Response("{}", { status: 404 })),
+      }),
+    ).rejects.toBeInstanceOf(HttpError);
+  });
+
+  it("performs exactly one fetch for an unexpected 2xx", async () => {
+    let dispatches = 0;
+    await expect(
+      httpRequest({
+        timeoutMs: 1000,
+        expectedStatus: 200,
+        prepare: () => () => {
+          dispatches += 1;
+          return Promise.resolve(new Response("{}", { status: 202 }));
+        },
+      }),
+    ).rejects.toBeInstanceOf(InvalidResponseError);
+    expect(dispatches).toBe(1);
+  });
+
+  it("leaves every status alone when no expectation is declared", async () => {
+    for (const status of [200, 201, 202, 206]) {
+      await expect(
+        httpRequest({
+          timeoutMs: 1000,
+          prepare: () => () =>
+            Promise.resolve(
+              new Response(JSON.stringify({ ok: true }), {
+                status,
+                headers: { "Content-Type": "application/json" },
+              }),
+            ),
+        }),
+      ).resolves.toMatchObject({ status });
+    }
+  });
+});
