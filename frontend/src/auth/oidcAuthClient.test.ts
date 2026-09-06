@@ -1517,7 +1517,58 @@ describe("createOidcAuthClient authorizeRequest — destination validation", () 
     // approved path, wrong shape
     { url: `http://localhost:8080/api/v1/cases/${CASE_ID}/` },
     { url: "http://localhost:8080/api/v1/cases/" },
-    { url: "http://localhost:8080/api/v1/cases?page=0" },
+    // query that is not the one canonical form for an approved endpoint
+    { url: "http://localhost:8080/api/v1/cases?page=0&page=1" },
+    { url: "http://localhost:8080/api/v1/cases?unknown=1" },
+    { url: "http://localhost:8080/api/v1/cases?page=0&unknown=1" },
+    { url: "http://localhost:8080/api/v1/cases?" },
+    { url: "http://localhost:8080/api/v1/cases?page=" },
+    { url: "http://localhost:8080/api/v1/cases?page=%30" },
+    { url: "http://localhost:8080/api/v1/cases?assigneeRef=a%20b" },
+    { url: "http://localhost:8080/api/v1/cases?occurredAtFrom=2026-07-23T00%3A00%3A00Z" },
+    // query on an endpoint that declares none
+    { url: `http://localhost:8080/api/v1/cases/${CASE_ID}?page=0` },
+    { url: `http://localhost:8080/api/v1/transactions/${TRANSACTION_ID}?page=0` },
+    { url: `http://localhost:8080/api/v1/cases/${CASE_ID}/status?page=0`, method: "PATCH" },
+    { url: `http://localhost:8080/api/v1/cases/${CASE_ID}/assignee?page=0`, method: "PATCH" },
+    {
+      url: `http://localhost:8080/api/v1/cases/${CASE_ID}/resolution?page=0`,
+      method: "POST",
+    },
+    { url: `http://localhost:8080/api/v1/cases/${CASE_ID}/notes?page=0`, method: "POST" },
+    // approved names, values the endpoint rule refuses: only the credential
+    // capability's own re-verification can catch these, since it is handed a
+    // finished URL and never sees the typed builder
+    { url: "http://localhost:8080/api/v1/cases?page=-1" },
+    { url: "http://localhost:8080/api/v1/cases?page=2147483648" },
+    { url: "http://localhost:8080/api/v1/cases?page=00" },
+    { url: "http://localhost:8080/api/v1/cases?size=0" },
+    { url: "http://localhost:8080/api/v1/cases?size=101" },
+    { url: "http://localhost:8080/api/v1/cases?sort=createdAt%2Casc" },
+    { url: "http://localhost:8080/api/v1/cases?sort=lastChangedAt%2CDESC" },
+    { url: "http://localhost:8080/api/v1/cases?caseStatus=in_review" },
+    { url: "http://localhost:8080/api/v1/cases?finalDisposition=normal" },
+    { url: "http://localhost:8080/api/v1/cases?transactionId=not-a-uuid" },
+    { url: `http://localhost:8080/api/v1/cases?transactionId=${LETTERED_CASE_ID.toUpperCase()}` },
+    { url: "http://localhost:8080/api/v1/cases?createdAtFrom=2026-07-23" },
+    { url: "http://localhost:8080/api/v1/cases?assigneeRef=+padded" },
+    { url: "http://localhost:8080/api/v1/transactions?transactionType=account_transfer" },
+    { url: "http://localhost:8080/api/v1/transactions?sort=lastChangedAt%2Cdesc" },
+    { url: `http://localhost:8080/api/v1/cases/${CASE_ID}/notes?sort=changedAt%2Casc` },
+    { url: `http://localhost:8080/api/v1/cases/${CASE_ID}/audit-logs?size=101` },
+    // inverted instant ranges: both bounds are individually valid, so only the
+    // endpoint's query-set contract refuses them - and this capability has to
+    // reach that verdict on its own, before it reads the token store
+    { url: "http://localhost:8080/api/v1/transactions?occurredAtFrom=2026-07-24T00%3A00%3A00Z&occurredAtTo=2026-07-23T00%3A00%3A00Z" },
+    { url: "http://localhost:8080/api/v1/cases?createdAtFrom=2026-07-24T00%3A00%3A00Z&createdAtTo=2026-07-23T00%3A00%3A00Z" },
+    { url: "http://localhost:8080/api/v1/cases?lastChangedAtFrom=2026-07-24T00%3A00%3A00Z&lastChangedAtTo=2026-07-23T00%3A00%3A00Z" },
+    { url: "http://localhost:8080/api/v1/transactions?occurredAtFrom=2026-07-23T00%3A00%3A00.000000002Z&occurredAtTo=2026-07-23T00%3A00%3A00.000000001Z" },
+    // a padded reference is a legitimate transaction filter but not a case assignee
+    { url: "http://localhost:8080/api/v1/cases?assigneeRef=+acct+" },
+    // approved query, wrong method
+    { url: "http://localhost:8080/api/v1/cases?page=0", method: "POST" },
+    // approved query plus a fragment
+    { url: "http://localhost:8080/api/v1/cases?page=0#top" },
     { url: "http://localhost:8080/api/v1/cases#top" },
     // approved path, wrong method
     { url: "http://localhost:8080/api/v1/cases", method: "POST" },
@@ -1576,6 +1627,14 @@ describe("createOidcAuthClient authorizeRequest — destination validation", () 
       ["PATCH", `/api/v1/cases/${CASE_ID}/assignee`],
       ["POST", `/api/v1/cases/${CASE_ID}/resolution`],
       ["POST", `/api/v1/cases/${CASE_ID}/notes`],
+      // the canonical query form of every list endpoint that declares one
+      ["GET", "/api/v1/transactions?transactionType=ACCOUNT_TRANSFER&page=0&size=20"],
+      ["GET", "/api/v1/cases?caseStatus=IN_REVIEW&page=0&size=20&sort=lastChangedAt%2Cdesc"],
+      ["GET", "/api/v1/transactions?occurredAtFrom=2026-07-23T00%3A00%3A00Z&occurredAtTo=2026-07-24T00%3A00%3A00Z"],
+      ["GET", "/api/v1/transactions?accountRef=+acct+"],
+      ["GET", "/api/v1/cases?createdAtFrom=2026-07-23T00%3A00%3A00Z&createdAtTo=2026-07-23T00%3A00%3A00Z"],
+      ["GET", `/api/v1/cases/${CASE_ID}/notes?page=0&size=20&sort=createdAt%2Casc`],
+      ["GET", `/api/v1/cases/${CASE_ID}/audit-logs?page=0&size=20&sort=changedAt%2Cdesc`],
     ];
 
     for (const [method, path] of approved) {

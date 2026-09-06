@@ -17,8 +17,9 @@ vi.mock("./backendEndpoints", async (importOriginal) => {
       baseUrl: string,
       key: string,
       params?: Readonly<Record<string, string>>,
+      query?: Readonly<Record<string, string>>,
     ) => {
-      const built = actual.buildBackendRequestUrl(baseUrl, key, params);
+      const built = actual.buildBackendRequestUrl(baseUrl, key, params, query);
       return builderOverride.url === undefined ? built : { ...built, url: builderOverride.url };
     },
   };
@@ -244,6 +245,7 @@ function caseDetail(client: CredentialAuthClient, signal?: AbortSignal) {
   return sendAuthorizedBackendRequest(client, {
     endpoint: "case-detail",
     params: { caseId: CASE_ID },
+    expectedStatus: 200,
     validate: isRecord,
     signal,
   });
@@ -254,6 +256,7 @@ function noteCreate(client: CredentialAuthClient) {
     endpoint: "case-note-create",
     params: { caseId: CASE_ID },
     body: { content: "investigation note" },
+    expectedStatus: 201,
     validate: isRecord,
   });
 }
@@ -263,6 +266,7 @@ function statusChange(client: CredentialAuthClient) {
     endpoint: "case-status-change",
     params: { caseId: CASE_ID },
     body: { status: "IN_REVIEW" },
+    expectedStatus: 200,
     validate: isRecord,
   });
 }
@@ -314,6 +318,7 @@ describe("authorized transport — Authorization on approved endpoints only", ()
         endpoint: key,
         params,
         body: descriptor.acceptsJsonBody ? { field: "value" } : undefined,
+        expectedStatus: 200,
         validate: isRecord,
       });
 
@@ -369,7 +374,7 @@ describe("authorized transport — Authorization on approved endpoints only", ()
   });
 
   it("sends the token only in the Authorization header — never in URL, query or body", async () => {
-    mockFetchOnce(async () => jsonResponse({ ok: true }));
+    mockFetchOnce(async () => jsonResponse({ ok: true }, { status: 201 }));
 
     await noteCreate(createLocalFakeAuthClient());
 
@@ -417,7 +422,7 @@ describe("authorized transport — endpoints that must never receive a token", (
 
     for (const endpoint of ["health", "api-health", "/api/health"]) {
       await expect(
-        sendAuthorizedBackendRequest(client, { endpoint, validate: isRecord }),
+        sendAuthorizedBackendRequest(client, { endpoint, expectedStatus: 200, validate: isRecord }),
       ).rejects.toBeInstanceOf(RequestNotAllowedError);
     }
     expect(fetch).not.toHaveBeenCalled();
@@ -439,6 +444,7 @@ describe("authorized transport — endpoints that must never receive a token", (
         sendAuthorizedBackendRequest(client, {
           endpoint,
           body: { any: "payload" },
+          expectedStatus: 200,
           validate: isRecord,
         }),
       ).rejects.toBeInstanceOf(RequestNotAllowedError);
@@ -465,7 +471,7 @@ describe("authorized transport — endpoints that must never receive a token", (
       "//evil.example",
     ]) {
       await expect(
-        sendAuthorizedBackendRequest(client, { endpoint, validate: isRecord }),
+        sendAuthorizedBackendRequest(client, { endpoint, expectedStatus: 200, validate: isRecord }),
       ).rejects.toBeInstanceOf(RequestNotAllowedError);
     }
     expect(fetch).not.toHaveBeenCalled();
@@ -481,6 +487,7 @@ describe("authorized transport — endpoints that must never receive a token", (
         sendAuthorizedBackendRequest(client, {
           endpoint: "case-detail",
           params: { caseId },
+          expectedStatus: 200,
           validate: isRecord,
         }),
       ).rejects.toBeInstanceOf(RequestNotAllowedError);
@@ -498,6 +505,7 @@ describe("authorized transport — endpoints that must never receive a token", (
         endpoint: "case-detail",
         params: { caseId: CASE_ID },
         body: { unexpected: true },
+        expectedStatus: 200,
         validate: isRecord,
       }),
     ).rejects.toBeInstanceOf(RequestNotAllowedError);
@@ -506,6 +514,7 @@ describe("authorized transport — endpoints that must never receive a token", (
       sendAuthorizedBackendRequest(client, {
         endpoint: "case-note-create",
         params: { caseId: CASE_ID },
+        expectedStatus: 200,
         validate: isRecord,
       }),
     ).rejects.toBeInstanceOf(RequestNotAllowedError);
@@ -523,6 +532,7 @@ describe("authorized transport — endpoints that must never receive a token", (
         endpoint: "case-note-create",
         params: { caseId: CASE_ID },
         body: circular,
+        expectedStatus: 200,
         validate: isRecord,
       }),
     ).rejects.toBeInstanceOf(RequestNotAllowedError);
@@ -670,10 +680,12 @@ describe("authorized transport — 401", () => {
       sendAuthorizedBackendRequest(client, {
         endpoint: "case-note-list",
         params: { caseId: CASE_ID },
+        expectedStatus: 200,
         validate: isRecord,
       }),
       sendAuthorizedBackendRequest(client, {
         endpoint: "transaction-list",
+        expectedStatus: 200,
         validate: isRecord,
       }),
     ]);
@@ -858,6 +870,7 @@ describe("authorized transport — other outcomes", () => {
       sendAuthorizedBackendRequest(createLocalFakeAuthClient(), {
         endpoint: "case-detail",
         params: { caseId: CASE_ID },
+        expectedStatus: 200,
         validate: (body: unknown): body is { caseId: string } =>
           isRecord(body) && typeof body.caseId === "string",
       }),
@@ -872,6 +885,7 @@ describe("authorized transport — other outcomes", () => {
     const result = await sendAuthorizedBackendRequest(createLocalFakeAuthClient(), {
       endpoint: "case-detail",
       params: { caseId: CASE_ID },
+      expectedStatus: 200,
       validate: (body: unknown): body is { caseId: string } =>
         isRecord(body) && typeof body.caseId === "string",
     });
@@ -880,12 +894,50 @@ describe("authorized transport — other outcomes", () => {
     expect(result.traceId).toBe(SAFE_TRACE_ID);
   });
 
-  it("drops an unsafe trace id on success", async () => {
-    mockFetchOnce(async () => jsonResponse({ ok: true }, { headers: { "X-Trace-Id": "no" } }));
+  it("refuses a success whose trace header is present but malformed", async () => {
+    // On a success the client is about to trust the body, so a header it
+    // cannot explain is a refusal rather than something to discard quietly.
+    for (const traceId of ["no", "short", "a".repeat(65), "_leading", "has space", "trace/id"]) {
+      mockFetchOnce(async () =>
+        jsonResponse({ ok: true }, { headers: { "X-Trace-Id": traceId } }),
+      );
+      await expect(caseDetail(createLocalFakeAuthClient())).rejects.toBeInstanceOf(
+        InvalidResponseError,
+      );
+      vi.unstubAllGlobals();
+    }
+  });
 
-    const result = await caseDetail(createLocalFakeAuthClient());
+  it("accepts a success with no trace header, and one with a valid header", async () => {
+    mockFetchOnce(async () => jsonResponse({ ok: true }));
+    await expect(caseDetail(createLocalFakeAuthClient())).resolves.toMatchObject({
+      traceId: undefined,
+    });
+    vi.unstubAllGlobals();
 
-    expect(result.traceId).toBeUndefined();
+    mockFetchOnce(async () =>
+      jsonResponse({ ok: true }, { headers: { "X-Trace-Id": SAFE_TRACE_ID } }),
+    );
+    await expect(caseDetail(createLocalFakeAuthClient())).resolves.toMatchObject({
+      traceId: SAFE_TRACE_ID,
+    });
+  });
+
+  it("keeps discarding a malformed trace header on a non-2xx, which must stay an error", async () => {
+    statusOnce(401, "no");
+    const unauthorized = await caseDetail(createLocalFakeAuthClient()).catch(
+      (error: unknown) => error,
+    );
+    expect(unauthorized).toBeInstanceOf(UnauthorizedError);
+    expect((unauthorized as UnauthorizedError).traceId).toBeUndefined();
+    vi.unstubAllGlobals();
+
+    statusOnce(403, "no");
+    const forbidden = await caseDetail(createLocalFakeAuthClient()).catch(
+      (error: unknown) => error,
+    );
+    expect(forbidden).toBeInstanceOf(ForbiddenError);
+    expect((forbidden as ForbiddenError).traceId).toBeUndefined();
   });
 });
 
@@ -1507,9 +1559,10 @@ describe("authorized transport — session ownership against the real adapter", 
       sendAuthorizedBackendRequest(client, {
         endpoint: "case-note-list",
         params: { caseId: CASE_ID },
+        expectedStatus: 200,
         validate: isRecord,
       }),
-      sendAuthorizedBackendRequest(client, { endpoint: "transaction-list", validate: isRecord }),
+      sendAuthorizedBackendRequest(client, { endpoint: "transaction-list", expectedStatus: 200, validate: isRecord }),
     ]);
     await Promise.resolve();
     await Promise.resolve();
@@ -1682,5 +1735,338 @@ describe("authorized transport — session ownership against the real adapter", 
 
     expect(invalidated).not.toHaveBeenCalled();
     expect(manager.calls.removeUser).toBe(0);
+  });
+});
+
+/**
+ * The query half of the transport. Everything here is decided before the auth
+ * port is asked for anything, so a refused query costs zero credential lookups
+ * and zero fetches — which is the whole reason these assertions count calls
+ * rather than only checking the thrown error.
+ */
+describe("authorized transport — query", () => {
+  it("sends the canonical query and nothing else", async () => {
+    mockFetchOnce(async () => jsonResponse({ ok: true }));
+    const client = createLocalFakeAuthClient();
+
+    await sendAuthorizedBackendRequest(client, {
+      endpoint: "transaction-list",
+      query: { page: "0", size: "20", sort: "occurredAt,desc" },
+      expectedStatus: 200,
+      validate: isRecord,
+    });
+
+    const [request] = sentRequests();
+    expect(request.url).toBe(
+      `${BASE}/api/v1/transactions?page=0&size=20&sort=occurredAt%2Cdesc`,
+    );
+    expect(request.headers.get("Authorization")).toBe(`Bearer ${TOKEN}`);
+    expect(new URL(request.url).hash).toBe("");
+  });
+
+  it("sends no question mark when the query is absent or empty", async () => {
+    for (const query of [undefined, {}]) {
+      mockFetchOnce(async () => jsonResponse({ ok: true }));
+      await sendAuthorizedBackendRequest(createLocalFakeAuthClient(), {
+        endpoint: "case-list",
+        query,
+        expectedStatus: 200,
+        validate: isRecord,
+      });
+      expect(sentRequests()[0].url).toBe(`${BASE}/api/v1/cases`);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("refuses an unknown query name with zero credential lookups and zero fetches", async () => {
+    mockFetchOnce(async () => jsonResponse({ ok: true }));
+    const client = createLocalFakeAuthClient();
+
+    await expect(
+      sendAuthorizedBackendRequest(client, {
+        endpoint: "case-list",
+        query: { unknownFilter: "1" },
+        expectedStatus: 200,
+        validate: isRecord,
+      }),
+    ).rejects.toBeInstanceOf(RequestNotAllowedError);
+
+    expect(client.calls.authorizeRequest).toBe(0);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  it("refuses a query on a detail or write endpoint before any credential exists", async () => {
+    for (const [endpoint, body] of [
+      ["case-detail", undefined],
+      ["transaction-detail", undefined],
+      ["case-status-change", { targetStatus: "IN_REVIEW" }],
+      ["case-note-create", { content: "note" }],
+    ] as ReadonlyArray<[string, Record<string, unknown> | undefined]>) {
+      mockFetchOnce(async () => jsonResponse({ ok: true }));
+      const client = createLocalFakeAuthClient();
+      const params: Record<string, string> =
+        endpoint === "transaction-detail"
+          ? { transactionId: TRANSACTION_ID }
+          : { caseId: CASE_ID };
+
+      await expect(
+        sendAuthorizedBackendRequest(client, {
+          endpoint,
+          params,
+          query: { page: "0" },
+          body,
+          expectedStatus: 200,
+          validate: isRecord,
+        }),
+      ).rejects.toBeInstanceOf(RequestNotAllowedError);
+
+      expect(client.calls.authorizeRequest).toBe(0);
+      expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps a separator inside an opaque reference out of the query structure", async () => {
+    mockFetchOnce(async () => jsonResponse({ ok: true }));
+
+    await sendAuthorizedBackendRequest(createLocalFakeAuthClient(), {
+      endpoint: "transaction-list",
+      query: { accountRef: "acct&page=99&size=1", page: "0" },
+      expectedStatus: 200,
+      validate: isRecord,
+    });
+
+    const parsed = new URL(sentRequests()[0].url);
+    expect([...parsed.searchParams.keys()].sort()).toEqual(["accountRef", "page"]);
+    expect(parsed.searchParams.get("page")).toBe("0");
+    expect(parsed.searchParams.get("accountRef")).toBe("acct&page=99&size=1");
+  });
+});
+
+/**
+ * Success status is part of the contract, not a range. `response.ok` spans
+ * 200-299, so without an exact check a 204 or a 202 would be read as the
+ * response the caller asked for.
+ */
+describe("authorized transport — exact success status", () => {
+  it("accepts only 200 for every endpoint but investigation note creation", async () => {
+    mockFetchOnce(async () => jsonResponse({ ok: true }, { status: 200 }));
+    await expect(caseDetail(createLocalFakeAuthClient())).resolves.toBeDefined();
+    vi.unstubAllGlobals();
+
+    for (const status of [201, 202, 204, 206]) {
+      mockFetchOnce(async () =>
+        status === 204
+          ? new Response(null, { status })
+          : jsonResponse({ ok: true }, { status }),
+      );
+      await expect(caseDetail(createLocalFakeAuthClient())).rejects.toBeInstanceOf(
+        InvalidResponseError,
+      );
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("accepts only 201 for investigation note creation", async () => {
+    mockFetchOnce(async () => jsonResponse({ ok: true }, { status: 201 }));
+    await expect(noteCreate(createLocalFakeAuthClient())).resolves.toBeDefined();
+    vi.unstubAllGlobals();
+
+    for (const status of [200, 202, 204]) {
+      mockFetchOnce(async () =>
+        status === 204
+          ? new Response(null, { status })
+          : jsonResponse({ ok: true }, { status }),
+      );
+      await expect(noteCreate(createLocalFakeAuthClient())).rejects.toBeInstanceOf(
+        InvalidResponseError,
+      );
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not read the body of an unexpected 2xx", async () => {
+    let jsonReads = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() =>
+        Promise.resolve({
+          ok: true,
+          status: 202,
+          headers: new Headers(),
+          json: () => {
+            jsonReads += 1;
+            return Promise.resolve({ ok: true });
+          },
+        } as unknown as Response),
+      ),
+    );
+
+    await expect(caseDetail(createLocalFakeAuthClient())).rejects.toBeInstanceOf(
+      InvalidResponseError,
+    );
+    expect(jsonReads).toBe(0);
+  });
+});
+
+/**
+ * A write that fails must stay failed. A replayed PATCH or POST would duplicate
+ * a case decision or an investigation note, and neither has an idempotency key
+ * to collapse it.
+ */
+describe("authorized transport — no replay of a failed write", () => {
+  const WRITES: ReadonlyArray<[string, Record<string, unknown>, number]> = [
+    ["case-status-change", { targetStatus: "IN_REVIEW" }, 200],
+    ["case-assignee-change", { assigneeRef: null }, 200],
+    ["case-resolution-create", { finalDisposition: "NORMAL" }, 200],
+    ["case-note-create", { content: "note" }, 201],
+  ];
+
+  function write(
+    client: CredentialAuthClient,
+    endpoint: string,
+    body: Record<string, unknown>,
+    expectedStatus: number,
+  ) {
+    return sendAuthorizedBackendRequest(client, {
+      endpoint,
+      params: { caseId: CASE_ID },
+      body,
+      expectedStatus,
+      validate: isRecord,
+    });
+  }
+
+  it("performs exactly one fetch per write, whatever the failure", async () => {
+    for (const [endpoint, body, expectedStatus] of WRITES) {
+      for (const status of [400, 401, 403, 404, 409, 422, 500, 503]) {
+        statusOnce(status);
+        await expect(
+          write(createLocalFakeAuthClient(), endpoint, body, expectedStatus),
+        ).rejects.toBeInstanceOf(Error);
+        expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+        vi.unstubAllGlobals();
+      }
+    }
+  });
+
+  it("performs exactly one fetch when the network itself fails", async () => {
+    for (const [endpoint, body, expectedStatus] of WRITES) {
+      mockFetchRejectOnce(new TypeError("connection refused"));
+      await expect(
+        write(createLocalFakeAuthClient(), endpoint, body, expectedStatus),
+      ).rejects.toBeInstanceOf(NetworkError);
+      expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("performs exactly one fetch for a failing GET as well", async () => {
+    for (const status of [400, 401, 403, 404, 409, 422, 500, 503]) {
+      statusOnce(status);
+      await expect(caseDetail(createLocalFakeAuthClient())).rejects.toBeInstanceOf(Error);
+      expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("asks the auth port for a credential exactly once per call", async () => {
+    for (const [endpoint, body, expectedStatus] of WRITES) {
+      statusOnce(409);
+      const client = createLocalFakeAuthClient();
+      await expect(write(client, endpoint, body, expectedStatus)).rejects.toBeInstanceOf(
+        HttpError,
+      );
+      expect(client.calls.authorizeRequest).toBe(1);
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+/**
+ * The transport holds a URL, not an endpoint key, so it re-verifies the whole
+ * thing itself. These tests bypass the typed builder entirely — the URL builder
+ * is replaced with one that emits a hand-made URL — which is the only way to
+ * see whether the transport is really checking or merely trusting its caller.
+ *
+ * Removing the transport's own `findApprovedBackendRequest` call makes every
+ * case below fail.
+ */
+describe("authorized transport — hand-crafted query re-verification", () => {
+  const REFUSED: readonly string[] = [
+    // values that break their endpoint's rule
+    `${BASE}/api/v1/cases?page=-1`,
+    `${BASE}/api/v1/cases?page=2147483648`,
+    `${BASE}/api/v1/cases?size=0`,
+    `${BASE}/api/v1/cases?size=101`,
+    `${BASE}/api/v1/cases?sort=createdAt%2Casc`,
+    `${BASE}/api/v1/cases?caseStatus=in_review`,
+    `${BASE}/api/v1/cases?transactionId=not-a-uuid`,
+    `${BASE}/api/v1/cases?createdAtFrom=2026-07-23`,
+    // structure the canonical builder would never produce
+    `${BASE}/api/v1/cases?page=0&page=1`,
+    `${BASE}/api/v1/cases?unknown=1`,
+    `${BASE}/api/v1/cases?`,
+    `${BASE}/api/v1/cases?page=`,
+    `${BASE}/api/v1/cases?assigneeRef=a%20b`,
+    // ranges both of whose bounds are individually valid, but inverted: only
+    // the endpoint's query-set contract can refuse these
+    `${BASE}/api/v1/cases?createdAtFrom=2026-07-24T00%3A00%3A00Z&createdAtTo=2026-07-23T00%3A00%3A00Z`,
+    `${BASE}/api/v1/cases?lastChangedAtFrom=2026-07-24T00%3A00%3A00Z&lastChangedAtTo=2026-07-23T00%3A00%3A00Z`,
+    `${BASE}/api/v1/cases?createdAtFrom=2026-07-23T00%3A00%3A00.000000002Z&createdAtTo=2026-07-23T00%3A00%3A00.000000001Z`,
+    // a padded reference is fine on a transaction but not on a case assignee
+    `${BASE}/api/v1/cases?assigneeRef=+acct+`,
+    // a different approved endpoint than the one that was asked for
+    `${BASE}/api/v1/transactions?page=0`,
+  ];
+
+  afterEach(() => {
+    builderOverride.url = undefined;
+  });
+
+  it("refuses every hand-crafted URL with zero credential lookups and zero fetches", async () => {
+    for (const url of REFUSED) {
+      builderOverride.url = url;
+      mockFetchOnce(async () => jsonResponse({ ok: true }));
+      const client = createLocalFakeAuthClient();
+
+      await expect(
+        sendAuthorizedBackendRequest(client, {
+          endpoint: "case-list",
+          expectedStatus: 200,
+          validate: isRecord,
+        }),
+        `expected refusal for ${url}`,
+      ).rejects.toBeInstanceOf(RequestNotAllowedError);
+
+      expect(client.calls.authorizeRequest, url).toBe(0);
+      expect(vi.mocked(fetch), url).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("accepts the canonical form of the same URL, so the refusals are about the query", async () => {
+    for (const url of [
+      `${BASE}/api/v1/cases?page=0`,
+      `${BASE}/api/v1/cases?size=100`,
+      `${BASE}/api/v1/cases?sort=lastChangedAt%2Casc`,
+      `${BASE}/api/v1/cases?caseStatus=IN_REVIEW`,
+      `${BASE}/api/v1/cases?createdAtFrom=2026-07-23T00%3A00%3A00Z`,
+    ]) {
+      builderOverride.url = url;
+      mockFetchOnce(async () => jsonResponse({ ok: true }));
+
+      await expect(
+        sendAuthorizedBackendRequest(createLocalFakeAuthClient(), {
+          endpoint: "case-list",
+          expectedStatus: 200,
+          validate: isRecord,
+        }),
+        `expected approval for ${url}`,
+      ).resolves.toBeDefined();
+
+      expect(sentRequests()[0].url).toBe(url);
+      vi.unstubAllGlobals();
+    }
   });
 });
