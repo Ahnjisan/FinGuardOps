@@ -1,14 +1,31 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, screen, waitFor, within } from "@testing-library/react";
-import { routes } from "./router";
+import userEvent from "@testing-library/user-event";
 import { safeAuthErrorMessage } from "../auth/authErrors";
+import type { AuthSession } from "../auth/authClient";
+import type { UserRole } from "../auth/userRoles";
 import { createFakeAuthClient, type FakeAuthClient } from "../test/fakeAuthClient";
 import { renderRoutesWithAuth } from "../test/renderWithAuth";
 import { jsonResponse, mockFetchOnce } from "../test/mockFetch";
 
+/**
+ * The transaction screen reaches for the OIDC adapter at its own credential
+ * boundary. Standing in here keeps these route tests about routing, and keeps
+ * them from building a real `UserManager` for a route they only want to see
+ * rendered or refused.
+ */
+const adapter = vi.hoisted(() => ({ client: null as unknown }));
+
+vi.mock("../auth/oidcAuthClient", () => ({
+  getOidcAuthClient: () => adapter.client,
+}));
+
+const { routes } = await import("./router");
+
 beforeEach(() => {
   vi.stubEnv("VITE_API_BASE_URL", "http://localhost:8080");
   vi.spyOn(window.history, "replaceState").mockImplementation(() => undefined);
+  adapter.client = null;
 });
 
 afterEach(() => {
@@ -205,5 +222,165 @@ describe("public route boundary", () => {
     expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /finguardops frontend/i })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Health" })).toBeInTheDocument();
+  });
+});
+
+const ANALYST_SUBJECT = "6f1e0b6c-3a2b-4c8d-9e0f-1a2b3c4d5e6f";
+
+const TRANSACTION_ROLES: readonly UserRole[] = ["FDS_VIEWER", "FDS_ANALYST", "FDS_APPROVER"];
+const NON_TRANSACTION_ROLES: readonly UserRole[] = [
+  "RULE_OPERATOR",
+  "RECOVERY_OPERATOR",
+  "PLATFORM_ADMIN",
+];
+
+/** Renders the production routes at a path, with a session already in place. */
+function renderSignedInAt(path: string, roles: readonly UserRole[]) {
+  const session: AuthSession = {
+    subject: ANALYST_SUBJECT,
+    displayName: "Local Analyst",
+    roles: roles as AuthSession["roles"],
+  };
+  const client = createFakeAuthClient({ initialSession: session });
+  adapter.client = client;
+  const view = renderRoutesWithAuth(routes, { client, initialEntries: [path] });
+  return { client, view };
+}
+
+describe("the /transactions production route", () => {
+  it.each(TRANSACTION_ROLES)("renders the screen on direct entry for %s", async (role) => {
+    const fetchSpy = vi.fn().mockImplementation(() => new Promise<Response>(() => {}));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    renderSignedInAt("/transactions", [role]);
+
+    expect(
+      await screen.findByRole("heading", { name: "Transactions", level: 2 }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Apply filters" })).toBeInTheDocument();
+  });
+
+  it.each(NON_TRANSACTION_ROLES)("refuses direct entry for %s, sending nothing", async (role) => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const { client } = renderSignedInAt("/transactions", [role]);
+
+    expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Transactions", level: 2 }),
+    ).not.toBeInTheDocument();
+    // The refusal costs the Backend nothing at all, and takes no credential.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(client.calls.authorizeRequest).toBe(0);
+    // It also says nothing about which role would have worked.
+    const rendered = document.body.textContent ?? "";
+    expect(rendered).not.toContain(role);
+    expect(rendered).not.toContain("transaction:view");
+  });
+
+  it("asks an unauthenticated visitor to sign in, and sends nothing", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const client = createFakeAuthClient({ initialSession: null });
+    adapter.client = client;
+
+    renderRoutesWithAuth(routes, { client, initialEntries: ["/transactions"] });
+
+    expect(await screen.findByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(client.calls.signIn).toHaveLength(0);
+    expect(client.calls.authorizeRequest).toBe(0);
+  });
+
+  it("shows neither the screen nor a refusal while authentication is undecided", () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const client = createFakeAuthClient({ initialSession: null });
+    adapter.client = client;
+    client.deferInitialize();
+
+    renderRoutesWithAuth(routes, { client, initialEntries: ["/transactions"] });
+
+    expect(authStatus()).toHaveTextContent(PREPARING);
+    expect(screen.getByText("Checking access...")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Access denied" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Transactions", level: 2 }),
+    ).not.toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("removes the screen the moment the session is invalidated", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() => new Promise<Response>(() => {})),
+    );
+    const { client } = renderSignedInAt("/transactions", ["FDS_ANALYST"]);
+    await screen.findByRole("heading", { name: "Transactions", level: 2 });
+
+    act(() => {
+      client.emitSessionInvalidated();
+    });
+
+    expect(screen.getByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Apply filters" })).not.toBeInTheDocument();
+  });
+
+  it("returns to exactly /transactions after signing in from it", async () => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const client = createFakeAuthClient({ initialSession: null });
+    adapter.client = client;
+
+    renderRoutesWithAuth(routes, { client, initialEntries: ["/transactions"] });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(client.calls.signIn).toEqual(["/transactions"]);
+  });
+
+  it("does not treat a path under /transactions as the transactions route", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    renderSignedInAt("/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001", ["FDS_ANALYST"]);
+
+    // There is no detail route in this scope, so the nested path is a 404
+    // rather than a screen that half exists.
+    expect(await screen.findByRole("heading", { name: "Page not found" })).toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not treat a sibling path sharing the prefix as the transactions route", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+
+    renderSignedInAt("/transactionsx", ["FDS_ANALYST"]);
+
+    expect(await screen.findByRole("heading", { name: "Page not found" })).toBeInTheDocument();
+  });
+
+  it("offers the destination in the rail and reaches it by keyboard", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() => new Promise<Response>(() => {})),
+    );
+    renderSignedInAt("/", ["FDS_VIEWER"]);
+
+    const link = await screen.findByRole("link", { name: "Transactions" });
+    link.focus();
+    await user.keyboard("{Enter}");
+
+    expect(
+      await screen.findByRole("heading", { name: "Transactions", level: 2 }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Transactions" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
   });
 });

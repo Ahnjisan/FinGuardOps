@@ -9,6 +9,7 @@ import { safeAuthErrorMessage } from "../auth/authErrors";
 import { createFakeAuthClient, type FakeAuthClient } from "../test/fakeAuthClient";
 import { renderRoutesWithAuth } from "../test/renderWithAuth";
 import { jsonResponse, mockFetchOnce } from "../test/mockFetch";
+import type { UserRole } from "../auth/userRoles";
 
 const ROUTES: RouteObject[] = [
   {
@@ -48,6 +49,20 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/**
+ * The three roles that hold `transaction:view`, and the three that do not.
+ *
+ * Taken from the capability table rather than restated here, so a role gaining
+ * or losing transaction authority shows up as a failure in this file rather
+ * than as a menu item nobody noticed.
+ */
+const TRANSACTION_ROLES: readonly UserRole[] = ["FDS_VIEWER", "FDS_ANALYST", "FDS_APPROVER"];
+const NON_TRANSACTION_ROLES: readonly UserRole[] = [
+  "RULE_OPERATOR",
+  "RECOVERY_OPERATOR",
+  "PLATFORM_ADMIN",
+];
+
 describe("AppShell navigation", () => {
   it("keeps the primary navigation landmark", async () => {
     renderShell(createFakeAuthClient());
@@ -66,6 +81,147 @@ describe("AppShell navigation", () => {
     });
     expect(screen.getByRole("link", { name: "Home" })).toHaveAttribute("href", "/");
     expect(screen.getByRole("link", { name: "Health" })).toHaveAttribute("href", "/health");
+  });
+
+  it("opens with a skip link that reaches the main landmark", async () => {
+    const user = userEvent.setup();
+    renderShell(createFakeAuthClient());
+
+    const skipLink = screen.getByRole("link", { name: "Skip to main content" });
+    expect(skipLink).toHaveAttribute("href", "#main-content");
+    expect(screen.getByRole("main")).toHaveAttribute("id", "main-content");
+
+    // The very first Tab from the top of the document lands on it, before any
+    // navigation item, which is the only thing that makes it useful.
+    await user.tab();
+    expect(skipLink).toHaveFocus();
+  });
+
+  it("marks the current destination with aria-current", async () => {
+    renderShell(createFakeAuthClient(), "/health");
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    });
+    expect(screen.getByRole("link", { name: "Health" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(screen.getByRole("link", { name: "Home" })).not.toHaveAttribute("aria-current");
+  });
+});
+
+describe("AppShell capability navigation", () => {
+  it.each(TRANSACTION_ROLES)("offers the transactions destination to %s", async (role) => {
+    renderShell(createFakeAuthClient({ initialSession: { subject: "sub-1", roles: [role] } }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+    });
+    expect(screen.getByRole("link", { name: "Transactions" })).toHaveAttribute(
+      "href",
+      "/transactions",
+    );
+  });
+
+  it.each(NON_TRANSACTION_ROLES)("leaves no trace of it in the DOM for %s", async (role) => {
+    const { container } = renderShell(
+      createFakeAuthClient({ initialSession: { subject: "sub-1", roles: [role] } }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+    });
+    // Not hidden, not disabled, not `aria-hidden`: absent. A control that is
+    // only styled away is still in the accessibility tree and returns with one
+    // attribute change.
+    expect(screen.queryByRole("link", { name: "Transactions" })).not.toBeInTheDocument();
+    expect(container.querySelector('a[href="/transactions"]')).toBeNull();
+    expect(container.innerHTML).not.toContain("/transactions");
+  });
+
+  it("offers it once to a session holding several roles", async () => {
+    renderShell(
+      createFakeAuthClient({
+        initialSession: { subject: "sub-1", roles: ["PLATFORM_ADMIN", "FDS_VIEWER"] },
+      }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+    });
+    expect(screen.getAllByRole("link", { name: "Transactions" })).toHaveLength(1);
+  });
+
+  it("does not offer it while authentication is still initializing", () => {
+    const client = createFakeAuthClient({ initialSession: { subject: "sub-1", roles: SHELL_ROLES } });
+    client.deferInitialize();
+    renderShell(client);
+
+    expect(authStatus()).toHaveTextContent("Preparing sign-in...");
+    expect(screen.queryByRole("link", { name: "Transactions" })).not.toBeInTheDocument();
+  });
+
+  it("does not offer it while unauthenticated", async () => {
+    renderShell(createFakeAuthClient());
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("link", { name: "Transactions" })).not.toBeInTheDocument();
+  });
+
+  it("withdraws it the moment sign-out starts", async () => {
+    const user = userEvent.setup();
+    const client = createFakeAuthClient({ initialSession: { subject: "sub-1", roles: SHELL_ROLES } });
+    client.deferSignOut();
+    renderShell(client);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Transactions" })).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+
+    expect(screen.queryByRole("link", { name: "Transactions" })).not.toBeInTheDocument();
+  });
+
+  it("withdraws it when the session is invalidated", async () => {
+    const client = createFakeAuthClient({ initialSession: { subject: "sub-1", roles: SHELL_ROLES } });
+    renderShell(client);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Transactions" })).toBeInTheDocument();
+    });
+    act(() => {
+      client.emitSessionInvalidated();
+    });
+
+    expect(screen.queryByRole("link", { name: "Transactions" })).not.toBeInTheDocument();
+  });
+
+  it("does not offer it after an authentication error", async () => {
+    const client = createFakeAuthClient();
+    client.failInitialize();
+    renderShell(client);
+
+    await waitFor(() => {
+      expect(authStatus()).toHaveTextContent(safeAuthErrorMessage("configuration"));
+    });
+    expect(screen.queryByRole("link", { name: "Transactions" })).not.toBeInTheDocument();
+  });
+
+  it("never names a role or an authority in the navigation", async () => {
+    renderShell(
+      createFakeAuthClient({ initialSession: { subject: "sub-1", roles: ["FDS_APPROVER"] } }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Transactions" })).toBeInTheDocument();
+    });
+    const rendered = document.body.textContent ?? "";
+    expect(rendered).not.toContain("FDS_APPROVER");
+    expect(rendered).not.toContain("transaction:view");
+    expect(rendered).not.toContain("transaction:read");
   });
 });
 

@@ -426,7 +426,10 @@ USER actor UUID, token, claim과 principal 원문은 응답·로그·metadata에
   금지한다.
 - SPA 로그인은 Authorization Code + PKCE를 사용한다.
 - refresh token은 별도 Frontend Issue다. role·authority 기반 권한 UI의 판정 계층과 route
-  guard는 Issue #243에서 구현했고, 이를 적용할 production 보호 route·action은 아직 없다.
+  guard는 Issue #243에서 구현했고, Issue #249에서 첫 production 보호 route `/transactions`에
+  적용했다.
+- Frontend UI capability 이름(`transaction:view`)과 Backend authority 이름(`transaction:read`)은
+  서로 다른 계층의 이름이므로 혼용하지 않는다. 최종 판정은 Backend authority에만 있다.
 - USER public client는 Authorization Code Flow + PKCE `S256`만 허용한다. implicit flow,
   password grant, client secret과 wildcard redirect URI를 금지한다.
 
@@ -781,7 +784,18 @@ string audience, UUID subject/account 일치, 실제 거래·행동 접수의 �
 1 증가해야 하며 Backend outcome metric은 이 실제 hit와 분리된 보조 검증이다. 다른 key의 같은
 transactionId 충돌은 연결되지 않은 `FAILED/DUPLICATE_TRANSACTION` 멱등 제어 기록만 남긴다.
 USER browser E2E와 refresh-token fail-closed는 Issue #239에서 구현했다. remote logout은 Issue
-#247에서 구현했다. role UI를 적용한 production 보호 route·action은 후속 범위다.
+#247에서 구현했다.
+
+Issue #249는 role UI를 첫 production 보호 route에 적용했다. `/transactions`는
+`RequireCapability("transaction:view")`로 보호하며, guard가 navigation이 아니라 route element에
+있으므로 직접 URL 진입도 같은 판정을 받는다. `transaction:view`를 갖지 않는 USER
+(`RULE_OPERATOR`, `RECOVERY_OPERATOR`, `PLATFORM_ADMIN`)에게는 거래 navigation 항목이 DOM에서
+제거되고 route는 `AccessDeniedPage`로 수렴하며, 두 경우 모두 Backend 요청은 0회다. 로그인 후
+복귀 allowlist에는 exact `/transactions` 하나만 추가했고 `/transactions/` 이하 prefix는 허용하지
+않는다. Frontend guard는 표시 경계이며 Backend는 계속 access token으로 endpoint authority를 다시
+판정해 401·403으로 최종 결정한다. browser E2E는 실제 Keycloak USER 로그인으로 navigation 노출,
+`/transactions` 진입, 실제 Backend `GET /api/v1/transactions` 1회 200, 자동 retry 0회와 credential
+비노출을 확인한다.
 
 Stock Keycloak은 HTTP와 HTTPS에 공통 listener host를 적용하므로 2026-09-05 OWNER 결정에 따라
 `KC_HTTP_HOST=0.0.0.0`을 사용한다. HTTPS 8443만 host `127.0.0.1`에 publish하고 HTTP 8082와
