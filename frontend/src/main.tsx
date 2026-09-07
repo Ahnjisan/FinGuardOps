@@ -4,6 +4,7 @@ import { RouterProvider } from "react-router-dom";
 import { getAuthEnv, getEnv } from "./config/env";
 import { router } from "./app/router";
 import { AuthProvider } from "./auth/AuthProvider";
+import "./styles/app.css";
 
 export function bootstrap(): void {
   // Fail fast: validate configuration once, before touching the DOM or

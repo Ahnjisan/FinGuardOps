@@ -118,9 +118,10 @@ AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 
   Pydantic 요청·응답 DTO와 분석 HTTP 경계까지 구현되었으며 ML·AI 리포트 없음
 - Spring Boot Rule v1 Client와 내부 분석 오케스트레이션·결과 채택은
   구현되었으나 거래 접수 Service와 최종 업무 흐름 연결은 없음
-- `frontend/`: React·TypeScript·Vite foundation, Router, public health client와 OIDC
-  Authorization Code + PKCE 인증 경계가 구현되었으며 Backend 보호 API 호출용 `Authorization`
-  header·권한 UI와 거래·사건·운영 업무 화면은 구현되지 않음
+- `frontend/`: React·TypeScript·Vite foundation, Router, public health client, OIDC
+  Authorization Code + PKCE 인증 경계, 인증 API transport와 권한 UI, capability로 보호되는 첫
+  production 업무 화면인 거래 목록(`/transactions`)과 FDS operations console 디자인 기반이
+  구현되었으며 거래 상세, 사건·조사·판정 화면과 운영 대시보드는 구현되지 않음
 - `infra/`: Issue #196의 로컬 Compose Prometheus scrape·External Risk 검증 fixture,
   Issue #199의 service 수준 recording rule 14개와 Issue #201의 로컬 실패율 alert rule
   6개·deterministic test, Issue #203의 로컬 Alertmanager routing·signal별 inhibition·
@@ -130,8 +131,8 @@ AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 
 - 운영 PostgreSQL 배포 환경, Redis와 Kafka 연동
 - External Risk DB 영속화와 LLM Provider 연동
 - production Prometheus, Grafana, Loki와 분산 추적 구성
-- USER Audit actor 연결, production Authorization Server와 local Compose JWT fixture,
-  Frontend 인증 API client와 권한 UI
+- production Authorization Server (local/dev Keycloak, Frontend 인증 API client와 권한 UI는
+  구현됨)
 - Kubernetes와 AWS 배포 구성
 
 ## 3. 아키텍처 목표
@@ -289,6 +290,15 @@ React가 업무 요청의 진입점을 제공하더라도 금융 업무 상태�
 - 사용자 입력과 일시적인 화면 상태 관리
 
 React는 API 계약을 임의로 만들거나 금융 업무 상태를 자체 확정하지 않는다.
+
+#### 현재 구현된 업무 화면
+
+거래 목록(`/transactions`) 하나다. UI capability `transaction:view`로 보호하며 filter·sort·
+pagination과 loading·empty·error·data 상태를 갖는다. 응답에 실제로 존재하는 필드만 표시하고
+위험도 열은 만들지 않는다. 시각은 Backend UTC 원문을 유지한 채 화면에서만 고정 +09:00 offset으로
+Asia/Seoul(KST)로 표시하며, 금액은 문자열·`BigInt` 경로를 유지해 `Number` 변환으로 정밀도를 잃지
+않는다. 디자인 기반(색·간격·타이포그래피·radius·shadow token, status badge, filter·table·feedback
+표현)은 `frontend/src/styles/app.css` 한 곳에 있고 이후 업무 화면이 재사용한다.
 
 ### 7.2 Spring Boot Modular Monolith
 

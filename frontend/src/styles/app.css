@@ -1,0 +1,920 @@
+/*
+ * FinGuardOps operations console.
+ *
+ * One stylesheet, no external asset of any kind: no font file, no icon set, no
+ * image. Every mark on screen is drawn with CSS from the fonts the operating
+ * system already has, because this console has to render identically on a
+ * locked-down analyst workstation with no outbound network route.
+ *
+ * The design is a ledger, not a dashboard. A navy rail carries identity,
+ * navigation and session; the working area is a warm stone canvas holding two
+ * white surfaces - the filter panel and the transaction sheet - and nothing
+ * else. Surfaces are never nested inside surfaces, there is one shadow token
+ * and it is spent on the rail edge alone, and the only motion is a 120ms colour
+ * change that answers a pointer or a key.
+ */
+
+:root {
+  /* Warm stone working ground. Low chroma on purpose: the badges and the
+     amount column are the only saturated things on the page. */
+  --canvas: #edebe4;
+  --surface: #ffffff;
+  --surface-muted: #f7f6f2;
+  --surface-sunken: #e5e2d9;
+
+  /* Navy ink, from the same family as the rail, so type and chrome agree. */
+  --text: #16202e;
+  --text-strong: #0d1725;
+  --muted: #5a6270;
+
+  --border: #d8d5cb;
+  --border-strong: #c3bfb2;
+  --rule: #e6e3da;
+
+  /* Institutional blue: the primary action, links, and the sort affordance. */
+  --primary: #1f5fa8;
+  --primary-strong: #17497f;
+  --primary-wash: #e8f0f9;
+
+  --focus: #1f5fa8;
+
+  --success: #1e6b4f;
+  --success-wash: #e3f0e9;
+  --info: #1f5fa8;
+  --info-wash: #e8f0f9;
+  --warning: #8a5a00;
+  --warning-wash: #f7eddb;
+  --danger: #a32b23;
+  --danger-wash: #f7e6e4;
+  --neutral: #4c5462;
+  --neutral-wash: #eceae4;
+
+  --rail: #12203a;
+  --rail-raised: #1b2c4a;
+  --rail-line: #263a5c;
+  --rail-text: #e7ecf4;
+  --rail-muted: #9fb0c9;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  --radius-sm: 3px;
+  --radius: 5px;
+  --radius-lg: 8px;
+
+  --shadow: 1px 0 0 rgb(18 32 58 / 18%);
+
+  --font-sans: "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", ui-sans-serif,
+    system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "Cascadia Mono", "Segoe UI Mono",
+    "Roboto Mono", Menlo, Consolas, monospace;
+
+  --rail-width: 0px;
+  --content-max: 1360px;
+
+  color-scheme: light;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--canvas);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  min-height: 100%;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  color: var(--text-strong);
+  font-weight: 620;
+  letter-spacing: -0.011em;
+  line-height: 1.25;
+}
+
+p {
+  margin: 0;
+  max-width: 68ch;
+}
+
+a {
+  color: var(--primary);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+a:hover {
+  color: var(--primary-strong);
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* Shell
+   ------------------------------------------------------------------------- */
+
+.app {
+  display: grid;
+  grid-template-columns: var(--rail-width) minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.skip-link {
+  position: absolute;
+  left: var(--space-4);
+  top: 0;
+  z-index: 20;
+  transform: translateY(-140%);
+  padding: var(--space-2) var(--space-4);
+  border-radius: 0 0 var(--radius) var(--radius);
+  background: var(--rail);
+  color: var(--rail-text);
+  font-weight: 600;
+  text-decoration: none;
+  transition: transform 120ms ease-out;
+}
+
+.skip-link:focus-visible {
+  transform: translateY(0);
+  color: var(--rail-text);
+}
+
+.rail {
+  --focus: #9cc6f0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  padding: var(--space-5) var(--space-4);
+  background: var(--rail);
+  color: var(--rail-text);
+  box-shadow: var(--shadow);
+}
+
+.rail__identity {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rail__wordmark {
+  color: #ffffff;
+  font-size: 17px;
+  font-weight: 640;
+  letter-spacing: -0.015em;
+}
+
+.rail__tagline {
+  color: var(--rail-muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.rail__nav {
+  flex: 1 1 auto;
+}
+
+.rail__list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rail__link {
+  display: block;
+  padding: 7px var(--space-3);
+  border-left: 2px solid transparent;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  color: var(--rail-muted);
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: none;
+  transition: background-color 120ms ease-out, color 120ms ease-out;
+}
+
+.rail__link:hover {
+  background: var(--rail-raised);
+  color: var(--rail-text);
+}
+
+.rail__link[aria-current="page"] {
+  border-left-color: #6fa8e0;
+  background: var(--rail-raised);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.rail__session {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--rail-line);
+}
+
+.rail__status {
+  color: var(--rail-muted);
+  font-size: 12.5px;
+  line-height: 1.4;
+  min-height: 1.4em;
+}
+
+.rail__status:empty {
+  min-height: 0;
+}
+
+.main {
+  min-width: 0;
+  padding: var(--space-6) var(--space-6) var(--space-7);
+}
+
+.main > * {
+  max-width: var(--content-max);
+}
+
+/* Controls
+   ------------------------------------------------------------------------- */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 7px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: background-color 120ms ease-out, border-color 120ms ease-out;
+}
+
+.button:hover {
+  background: var(--surface-muted);
+}
+
+.button--primary {
+  border-color: var(--primary-strong);
+  background: var(--primary);
+  color: #ffffff;
+}
+
+.button--primary:hover {
+  background: var(--primary-strong);
+}
+
+.button--rail {
+  border-color: var(--rail-line);
+  background: var(--rail-raised);
+  color: var(--rail-text);
+  width: 100%;
+}
+
+.button--rail:hover {
+  background: #24395e;
+}
+
+.button--quiet {
+  border-color: transparent;
+  background: transparent;
+  color: var(--primary);
+  padding-inline: var(--space-2);
+}
+
+.button--quiet:hover {
+  background: var(--primary-wash);
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* The transaction console page owns its own width and stacking, so it must not
+   fall through to the prose-width fallback below. */
+.transactions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+/* Unclassed controls and sections on the pages this stylesheet does not own
+   still have to look like they belong to the console rather than to the
+   browser. The `:not([class])` here is what keeps this a fallback: any screen
+   that states its own class, as `.transactions` does, is laid out by its own
+   rules and never squeezed to prose width. */
+main button:not([class]) {
+  padding: 7px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+main section:not([class]) {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  align-items: flex-start;
+  max-width: 68ch;
+}
+
+main section:not([class]) h2 {
+  font-size: 22px;
+}
+
+/* Page head
+   ------------------------------------------------------------------------- */
+
+.page-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-5);
+}
+
+.page-head h2 {
+  font-size: 26px;
+}
+
+.page-head p {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+/* Filter panel
+   ------------------------------------------------------------------------- */
+
+.filters {
+  margin: 0 0 var(--space-4);
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.filters__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-4) var(--space-5);
+  align-items: start;
+}
+
+.field-group {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.field-group__legend {
+  padding: 0 0 var(--space-2);
+  color: var(--text-strong);
+  font-size: 12.5px;
+  font-weight: 620;
+}
+
+.field-group__fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.field__label {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 550;
+}
+
+.field__control {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.field__control:hover {
+  border-color: #a9a496;
+}
+
+.field__hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.filters__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+  margin-top: var(--space-5);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--rule);
+}
+
+.filters__note {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+/* Feedback
+   ------------------------------------------------------------------------- */
+
+.notice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  align-items: flex-start;
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--neutral);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.notice--error {
+  border-color: #e6c8c4;
+  border-left-color: var(--danger);
+  background: var(--danger-wash);
+}
+
+.notice--empty {
+  border-left-color: var(--primary);
+}
+
+.notice__title {
+  font-size: 15px;
+  font-weight: 620;
+}
+
+.notice__body {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.notice--error .notice__body {
+  color: #6f2b25;
+}
+
+/* The filter refusal lists one reason per line, so the same element is
+   sometimes a list. */
+ul.notice__body {
+  margin: 0;
+  padding-left: 1.15em;
+}
+
+ul.notice__body li + li {
+  margin-top: 3px;
+}
+
+.result-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  align-items: baseline;
+  margin-bottom: var(--space-3);
+  min-height: 1.4em;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.result-line__count {
+  color: var(--text-strong);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Transaction sheet
+   ------------------------------------------------------------------------- */
+
+.sheet {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.sheet__scroll {
+  overflow-x: auto;
+}
+
+.sheet table {
+  width: 100%;
+  /* Wide enough that an ordinary reference sits on one line and a UUID wraps
+     once. Below this the sheet scrolls sideways rather than shredding every
+     identifier into four lines. */
+  min-width: 1128px;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+.sheet thead th {
+  position: sticky;
+  top: 0;
+  padding: 0;
+  background: #22334f;
+  color: #ffffff;
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.sheet thead th.is-numeric {
+  text-align: right;
+}
+
+.sheet__heading {
+  display: block;
+  padding: 10px var(--space-4);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.sheet__sort {
+  --focus: #9cc6f0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 10px var(--space-4);
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms ease-out;
+}
+
+.sheet__sort:hover {
+  background: #2b4166;
+}
+
+.sheet__sort-mark {
+  color: #a8c6e8;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.sheet tbody td {
+  padding: 9px var(--space-4);
+  border-top: 1px solid var(--rule);
+  vertical-align: top;
+}
+
+.sheet tbody tr:hover td {
+  background: var(--surface-muted);
+}
+
+.cell-time {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.cell-time small {
+  display: block;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.cell-amount {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.cell-amount b {
+  font-family: var(--font-mono);
+  font-size: 14.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.cell-amount span {
+  margin-left: 5px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.cell-ref {
+  /* A floor as well as a ceiling: without the floor the table steals width from
+     these columns and breaks an eighteen-character account reference across two
+     lines for no reason. */
+  min-width: 15ch;
+  max-width: 22ch;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.cell-ref--id {
+  min-width: 19ch;
+  max-width: 19ch;
+}
+
+.cell-ref--long {
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.cell-ref__absent {
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  font-style: italic;
+}
+
+/* Status badge: shape, word and colour - never colour alone
+   ------------------------------------------------------------------------- */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px 2px 7px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.badge__mark {
+  flex: none;
+  width: 8px;
+  height: 8px;
+}
+
+.badge--neutral {
+  color: var(--neutral);
+  background: var(--neutral-wash);
+}
+
+.badge--neutral .badge__mark {
+  height: 2px;
+  background: currentColor;
+}
+
+.badge--info {
+  color: var(--info);
+  background: var(--info-wash);
+}
+
+.badge--info .badge__mark {
+  border: 2px solid currentColor;
+  border-radius: 50%;
+}
+
+.badge--success {
+  color: var(--success);
+  background: var(--success-wash);
+}
+
+.badge--success .badge__mark {
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.badge--attention {
+  color: var(--warning);
+  background: var(--warning-wash);
+}
+
+.badge--attention .badge__mark {
+  border: 2px solid currentColor;
+  transform: rotate(45deg);
+}
+
+.badge--danger {
+  color: var(--danger);
+  background: var(--danger-wash);
+}
+
+.badge--danger .badge__mark {
+  background: currentColor;
+  transform: rotate(45deg);
+}
+
+/* Pagination
+   ------------------------------------------------------------------------- */
+
+.pager {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-4);
+  align-items: center;
+  margin-top: var(--space-4);
+}
+
+.pager__position {
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pager__size {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.pager__size select {
+  padding: 5px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Loading: a plain, honest line of text rather than a shimmering placeholder
+   that pretends to be data.
+   ------------------------------------------------------------------------- */
+
+.loading-panel {
+  padding: var(--space-6) var(--space-5);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Responsive: the rail and the filter grid step together
+   ------------------------------------------------------------------------- */
+
+@media (min-width: 1024px) {
+  :root {
+    --rail-width: 180px;
+  }
+
+  .filters__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  /* The time range holds two controls, so it is given two of the grid's
+     columns and sets them side by side. Below this width it collapses to one
+     column with the rest. */
+  .field-group--wide {
+    grid-column: span 2;
+  }
+
+  .field-group__fields--pair {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-3) var(--space-4);
+  }
+}
+
+@media (min-width: 1280px) {
+  :root {
+    --rail-width: 208px;
+  }
+
+  .filters__grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1440px) {
+  :root {
+    --rail-width: 240px;
+  }
+
+  .filters__grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+/* Below the console design width the rail becomes a top bar rather than
+   disappearing: every destination stays reachable, and nothing is hidden
+   behind a control that would need JavaScript to open. */
+@media (max-width: 1023px) {
+  .app {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rail {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: var(--space-4);
+    align-items: center;
+    padding: var(--space-3) var(--space-4);
+    box-shadow: 0 1px 0 rgb(18 32 58 / 18%);
+  }
+
+  .rail__nav {
+    flex: 1 1 auto;
+  }
+
+  .rail__list {
+    flex-direction: row;
+    gap: var(--space-1);
+  }
+
+  .rail__link {
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: var(--radius-sm);
+  }
+
+  .rail__link[aria-current="page"] {
+    border-bottom-color: #6fa8e0;
+  }
+
+  .rail__session {
+    flex-direction: row;
+    gap: var(--space-3);
+    align-items: center;
+    padding-top: 0;
+    border-top: 0;
+  }
+
+  .button--rail {
+    width: auto;
+  }
+
+  .main {
+    padding: var(--space-5) var(--space-4) var(--space-6);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}

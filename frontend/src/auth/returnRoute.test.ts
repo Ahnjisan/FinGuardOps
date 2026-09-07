@@ -10,6 +10,10 @@ describe("resolveReturnRoute", () => {
     expect(resolveReturnRoute("/health")).toBe("/health");
   });
 
+  it("allows the transactions route", () => {
+    expect(resolveReturnRoute("/transactions")).toBe("/transactions");
+  });
+
   const rejected: Array<[string, unknown]> = [
     ["trailing whitespace", "/health "],
     ["leading whitespace", " /health"],
@@ -33,6 +37,18 @@ describe("resolveReturnRoute", () => {
     ["the callback route itself", "/auth/callback"],
     ["an unknown internal route", "/admin"],
     ["a nested internal route", "/health/details"],
+    ["the transactions route with a trailing slash", "/transactions/"],
+    ["a transaction detail route that does not exist", "/transactions/1"],
+    ["a nested transactions route", "/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001"],
+    ["a sibling route sharing the transactions prefix", "/transactionsx"],
+    ["a route that merely contains the transactions path", "/x/transactions"],
+    ["the transactions route with a query string", "/transactions?page=1"],
+    ["the transactions route with a fragment", "/transactions#row"],
+    ["the transactions route in different casing", "/Transactions"],
+    ["the transactions route with whitespace", " /transactions"],
+    ["an encoded transactions route", "%2ftransactions"],
+    ["a protocol-relative host named transactions", "//transactions"],
+    ["an absolute URL ending in the transactions path", "https://evil.example/transactions"],
     ["empty string", ""],
     ["undefined", undefined],
     ["null", null],
@@ -55,10 +71,28 @@ describe("resolveReturnRoute", () => {
     expect(resolved).not.toContain("hunter2");
   });
 
-  it("only ever returns one of the two allowlisted routes", () => {
-    const inputs: unknown[] = ["/", "/health", "/admin", "//evil", undefined, 0];
+  it("only ever returns one of the three allowlisted routes", () => {
+    const inputs: unknown[] = [
+      "/",
+      "/health",
+      "/transactions",
+      "/transactions/",
+      "/admin",
+      "//evil",
+      undefined,
+      0,
+    ];
     for (const input of inputs) {
-      expect(["/", "/health"]).toContain(resolveReturnRoute(input));
+      expect(["/", "/health", "/transactions"]).toContain(resolveReturnRoute(input));
+    }
+  });
+
+  it("treats the transactions route as a literal and never as a prefix", () => {
+    // Every one of these shares the prefix and none of them is a route this
+    // application has, so a prefix match here would be a redirect to nowhere at
+    // best and an open redirect at worst.
+    for (const suffix of ["/", "/1", "/../health", "//evil.example", "\\evil.example"]) {
+      expect(resolveReturnRoute(`/transactions${suffix}`)).toBe("/");
     }
   });
 });

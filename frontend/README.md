@@ -4,8 +4,11 @@ React·TypeScript·Vite 기반의 FinGuardOps 프론트엔드다. 표준 OIDC Au
 인증 경계와, 승인된 Backend 업무 endpoint에만 credential을 전달하는 인증 API transport가
 구현되어 있다. local/dev Authorization Server는 Keycloak으로 선정했고 Issue #239에서 실제
 로그인을 연결했다. Issue #243에서는 검증된 session profile의 USER role로 UI capability를
-결정하는 판정 계층과 route guard 컴포넌트를 구현했다. 다만 이를 적용한 production 보호
-route·navigation 항목·action은 아직 0개이며, 업무 화면은 구현되지 않았다.
+결정하는 판정 계층과 route guard 컴포넌트를 구현했다.
+
+Issue #249에서 첫 production 업무 화면인 거래 목록(`/transactions`)과, 이후 업무 화면이 재사용할
+FDS operations console 디자인 기반(`src/styles/app.css`)을 구현했다. 이 route가 capability로
+보호되는 첫 production route이며, 사건·조사·판정·운영 대시보드 화면은 아직 없다.
 
 ## 요구사항
 
@@ -72,6 +75,8 @@ render에 도달하지 않고, 애플리케이션은 원문 값을 화면이나 
 | `src/pages` | 화면 단위 컴포넌트 |
 | `src/api` | Backend HTTP client, endpoint allowlist, 인증 transport, query·pagination 계약, 응답 검증 primitive, 업무 typed API module, 오류 분류, API 타입, 데이터 조회 hook |
 | `src/auth` | 인증 상태 machine, `AuthClient` port, `oidc-client-ts` adapter, transaction storage, callback URL·복귀 경로 처리, USER role·capability 판정, React context와 hook |
+| `src/pages/transactions` | 거래 목록 화면의 filter·table·pagination 컴포넌트와 표시 규칙 |
+| `src/styles` | 전역 디자인 token과 console 스타일 (`app.css`, `src/main.tsx`에서 1회 import) |
 | `src/config` | 환경변수 검증 |
 | `src/shared` | 화면 전반에서 재사용하는 타입 (예: `AsyncState`) |
 | `src/test` | 테스트 공용 설정과 helper (production build에 포함되지 않음) |
@@ -87,19 +92,24 @@ tsconfig.app.json` 결과에는 test 또는 test-support 파일이 포함되지 
 | Path | 화면 | 설명 |
 | --- | --- | --- |
 | `/` | `HomePage` | 진입 화면 (public) |
+| `/transactions` | `TransactionListPage` | 거래 목록 (보호, `RequireCapability("transaction:view")`) |
 | `/health` | `HealthPage` | Backend `/api/health` 상태 조회 (public) |
 | `/auth/callback` | `AuthCallbackPage` | OIDC redirect callback 처리 |
 | 그 외 모든 경로 | `NotFoundPage` | 404 |
 
 `/`와 `/health`는 public이며 인증 초기화 실패나 Authorization Server 장애와 무관하게 계속
-열려 있다. 보호 업무 route, 로그인 전용 route, silent renew callback, logout callback route는
-존재하지 않는다. 업무 화면(거래, 사건, 조사, 판정, 운영 대시보드)은 이번 범위에 포함되지
-않는다.
+열려 있다. 로그인 전용 route, silent renew callback, logout callback route는 존재하지 않는다.
+사건·조사·판정·운영 대시보드 화면과 거래 상세 route는 이번 범위에 포함되지 않는다.
 
-`RequireCapability` guard는 구현되어 있지만 위 표의 어떤 route에도 적용되어 있지 않다.
-capability로 보호되는 production route가 아직 없기 때문이며, guard의 직접 URL 접근 동작은
-test 전용 `MemoryRouter` route에서 검증한다. 새 보호 route를 추가할 때는 `src/app/router.tsx`
-와 `src/auth/returnRoute.ts`의 exact allowlist를 함께 갱신해야 로그인 후 복귀가 성립한다.
+`/transactions`가 `RequireCapability`를 적용한 첫 production route다. guard는 navigation이 아니라
+route element에 있으므로 rail 클릭과 직접 URL 진입이 같은 판정을 받는다. capability가 없는 USER는
+`AccessDeniedPage`를, session이 없는 방문자는 `Sign in required`를 보고, 두 경우 모두 Backend 요청은
+0회다. `/transactions/...`는 이 route가 아니라 `NotFoundPage`이며 거래 상세 route는 존재하지 않는다.
+
+새 보호 route를 추가할 때는 `src/app/router.tsx`와 `src/auth/returnRoute.ts`의 exact allowlist를
+함께 갱신해야 로그인 후 복귀가 성립한다. allowlist는 `/`, `/health`, `/transactions` 세 literal
+뿐이며 prefix 매칭이 아니다. `/transactions/`, `/transactions/{id}`, `/transactionsx`,
+`/Transactions`, `/transactions?x=1`, `%2ftransactions`는 모두 기본 route `/`로 떨어진다.
 
 ## 인증 경계
 
@@ -450,6 +460,21 @@ subscriber 통보 0회이며 이후 `initialize()`는 `{ session: null }`로 수
 - 그럼에도 guard는 빈 `roles`와 `roles` 누락에서 거부로 수렴하는지 확인한다. 판정이 타입에만
   기대면 안 되기 때문이다. 이 두 값은 port가 만들 수 없으므로 공용 fake를 느슨하게 만들지 않고
   `src/app/RequireCapability.test.tsx` 안의 test 전용 unsafe helper 한 곳에서만 생성한다.
+
+### capability 이름 경계
+
+Frontend capability는 `transaction:view`이고 Backend authority는 `transaction:read`다. 서로 다른
+계층의 이름이므로 코드·문서·테스트에서 혼용하지 않는다. Frontend capability는 "이 client가 실제로
+도달할 수 있는 화면과 endpoint 묶음"을, Backend authority는 "access token이 실제로 통과하는
+endpoint 권한"을 뜻한다. 두 이름 중 최종 결정권은 Backend authority에만 있다.
+
+### navigation 적용
+
+`AppShell`의 거래 navigation 항목은 `useCapabilities()`가 `transaction:view`를 포함할 때만
+렌더한다. `disabled`나 `hidden`이 아니라 DOM에서 아예 제거하므로 `RULE_OPERATOR`,
+`RECOVERY_OPERATOR`, `PLATFORM_ADMIN` session에는 `/transactions` 문자열 자체가 남지 않는다.
+`initializing`, `authenticating`, `unauthenticated`, `signing-out`, `error`에서도 같다. 현재 위치는
+`aria-current="page"`로 표시한다.
 
 ## Health API 경계
 
@@ -893,12 +918,140 @@ timer와 단계 사이의 명시적 경과시간 검사가 이를 공유한다. 
 준비 중 취소된 요청도 전송하지 않는다. 모든 종료 경로에서 timer와 abort listener를
 제거하며 늦게 도착하는 resolve·reject는 unhandled rejection을 만들지 않는다.
 
+## 거래 목록 화면
+
+Issue #249에서 구현한 첫 production 업무 화면이다. Backend·API·DB·Infra 변경은 없고, 신규
+dependency와 외부 폰트·아이콘·이미지도 없다.
+
+### 디자인 기반
+
+`src/styles/app.css` 한 파일이 전역 token과 console 스타일을 모두 담고, `src/main.tsx`에서 한 번
+import한다. `:root`에 canvas, surface, text, muted, border, primary, focus, success, warning,
+danger, spacing, radius, shadow, font stack, content max width token을 정의한다.
+
+- 화면 구조는 깊은 navy navigation rail + 따뜻한 light-neutral canvas + 흰색 surface다.
+- surface를 surface 안에 중첩하지 않는다. 작업 영역의 흰 면은 filter panel과 거래 sheet 둘뿐이다.
+- glassmorphism, 보라색 gradient, 장식용 hero, 마케팅 UI를 쓰지 않는다.
+- shadow token은 하나이고 rail 경계에만 쓴다. transition은 120ms 색 변화뿐이며
+  `prefers-reduced-motion: reduce`에서 사실상 제거된다.
+- 숫자와 시각은 `font-variant-numeric: tabular-nums`, reference와 UUID는 monospace stack이다.
+- 외부 asset을 전혀 불러오지 않는다. font stack은 OS에 이미 있는 이름만 나열하며(`Pretendard`,
+  `Apple SD Gothic Neo`, `Malgun Gothic` 등) 네트워크 요청을 만들지 않는다.
+- badge는 색 + 서로 다른 도형 marker + 문자열 label을 함께 쓴다. 색만으로 상태를 구분하지 않는다.
+
+### Responsive 기준
+
+| viewport | navigation rail | filter grid |
+| --- | --- | --- |
+| 1440px 이상 | 240px | 4 column |
+| 1280px 이상 | 208px | 3 column |
+| 1024px 이상 | 180px | 2 column |
+| 1024px 미만 | 상단 bar로 전환 | 1 column |
+
+좁은 화면에서 거래 sheet는 `overflow-x: auto` 컨테이너 안에서 가로 스크롤한다. column을 숨기지
+않으며, 스크롤 컨테이너는 `role="region"`과 `tabIndex=0`으로 키보드에서도 스크롤할 수 있다.
+
+### query 계약
+
+초기 query는 `page=0`, `size=20`, `sort=occurredAt,desc`다. 요청은 Issue #245의
+`fetchTransactionList()`만 사용하며 raw `fetch`, DTO 재정의, validator 우회를 하지 않는다.
+
+draft filter와 committed filter를 분리한다.
+
+- 입력 중에는 요청하지 않는다. `Apply filters`(또는 field 안에서 Enter)만 draft를 commit한다.
+- commit 시 page를 0으로 되돌린다. 새 filter의 4페이지는 이전 filter의 4페이지가 아니다.
+- `Reset filters`는 draft·committed·page·size·sort를 모두 초기값으로 되돌린다.
+- sort·page·page size 변경은 즉시 새 query가 된다. sort와 page size 변경도 page를 0으로 되돌린다.
+- retry는 사용자가 `Try again`을 누를 때만 실행한다. 자동 retry·replay·polling은 0회다.
+
+### 시간 (Asia/Seoul, KST)
+
+모든 시각은 KST로 명시해 표시하고, 브라우저·OS timezone 설정에 의존하지 않는다.
+
+- 표시는 `<time datetime="원본 UTC 값">2026-07-23 10:15:30 KST</time>` 형태다. `datetime`에는
+  Backend가 보낸 UTC instant 원문이 그대로 들어간다.
+- 변환은 `src/pages/transactions/transactionPresentation.ts`가 고정 +09:00 offset으로 수행한다.
+  `Date.UTC`로 epoch를 만들고 `getUTC*`로 되읽으므로 host timezone이 개입할 지점이 없다.
+- filter 입력도 KST임을 label(`From (KST)`, `To (KST)`)과 hint로 명시하고, commit 시점에
+  `YYYY-MM-DDTHH:MM:SSZ` UTC로 명시 변환한다.
+- `2026-02-30`처럼 존재하지 않는 날짜는 `Date.UTC` round-trip 비교로 거부한다.
+- 역전된 시간 범위는 요청을 보내지 않고 화면에서 거부한다. 반열림 범위와 동일 경계는 허용한다.
+
+### 표시 필드
+
+현재 Transaction List API 응답에 실제로 있는 필드만 표시한다.
+
+| column | 필드 |
+| --- | --- |
+| Occurred (KST) | `occurredAt`, 보조행에 `createdAt` |
+| Type | `transactionType` |
+| Amount | `amount`, `currencyCode` |
+| Processing status | `processingStatus` |
+| Transaction ID | `transactionId` |
+| Customer | `externalCustomerRef` |
+| From account | `senderAccountRef` |
+| To account | `recipientAccountRef` (null이면 `None recorded`) |
+
+**위험도 열은 없다.** 현재 응답에 risk score·risk level이 없으므로 만들지 않으며,
+`processingStatus`를 위험도처럼 표시하거나 명명하지 않는다. status label은 처리 단계 이름이고,
+badge tone은 처리 진행 상태를 뜻할 뿐 위험 판정이 아니다.
+
+금액은 문자열 상태를 유지하며 `Number`로 변환하지 않는다. `BigInt`와 `Intl.NumberFormat`으로
+그룹핑하므로 계약 최대치인 15자리 정수 문자열이 정확히 보존된다. KRW 표기이고 tabular numeral을
+적용한다.
+
+긴 UUID와 reference는 자르지 않고 cell 안에서 줄바꿈해 layout을 지킨다(`overflow-wrap: anywhere`).
+`title`이나 `data-` 속성으로 값을 다시 노출하지 않으므로 DOM에 같은 값이 두 번 남지 않는다.
+reference는 trim·대소문자 변환 없이 저장된 그대로 표시하고 그대로 전송한다.
+
+`externalCustomerRef`와 `accountRef` filter는 컴포넌트 메모리에만 있다. URL query·history·
+Web Storage에 넣지 않고, 로그와 오류 메시지에 원문을 반사하지 않는다.
+
+### API hook 계약
+
+`src/api/useTransactionList.ts`가 화면 상태를 소유한다. 인증 client는 이 hook 내부의 effect에서
+`getOidcAuthClient()`로만 얻고 closure 밖으로 내보내지 않는다. hook이 반환하는 값은 `state`와
+`retry` 둘뿐이며, credential capability는 React context·props·state·DOM·Web Storage 어디에도
+게시되지 않는다.
+
+- session과 query를 **identity**로 추적한다. 최신 요청만 state를 게시하고, 이전 filter·page·
+  session에 속한 늦은 성공·실패는 무시된다.
+- 이전 요청은 `AbortController`로 취소한다. StrictMode의 setup→cleanup→setup 재생은
+  microtask로 지연된 해제와 subscriber 카운트로 흡수하므로 network 호출은 1회다.
+- session 교체·logout·401 invalidation은 render 단계에서 즉시 데이터를 제거한다. effect를
+  기다리지 않으므로 이전 session의 행이 한 프레임도 남지 않는다.
+- 403은 session을 유지하고 고정 `Access denied` 상태를 보여준다. 통보도 invalidation도 없다.
+- 오류는 `timeout`, `network`, `invalid-response`, `access-denied`, `session-lost`,
+  `request-rejected`, `unknown`으로 분류하며 값에는 raw response·trace id·token·reference가
+  들어가지 않는다.
+- 요청당 `fetch`는 최대 1회, 자동 retry는 0회다.
+
+### 화면 상태
+
+초기 loading, filter 적용 loading, data, empty, safe error, timeout, network failure,
+401/session loss, 403/access denied, invalid response, explicit retry를 각각 명시적으로
+구현하고 테스트한다. malformed response는 한 항목만 잘못돼도 전체를 거부하고 부분 표시하지
+않는다. empty 상태에는 filter 초기화 동작을 제공한다.
+
+### 접근성
+
+- 문서 첫 focusable 요소가 skip link이며 `main` landmark(`#main-content`)로 이동한다.
+- `header`/`nav`/`main` landmark를 사용하고 현재 위치에 `aria-current="page"`를 붙인다.
+- 모든 filter에 visible label이 있고 관련 filter는 `fieldset`/`legend`로 묶는다.
+- 정렬 가능한 column header에 `aria-sort="ascending" | "descending"`을 붙인다.
+- loading·result count·오류에 live region(`role="status"` / `role="alert"`)을 사용한다.
+- 새 거부가 나타나면 오류 요약으로 focus를 옮긴다. 같은 거부에서 반복 이동하지 않는다.
+- focus ring은 2px이며 navy rail 안에서는 밝은 색으로 대비를 유지한다.
+- keyboard만으로 filter·Apply·Reset·정렬·페이지 이동을 모두 수행할 수 있다.
+- `prefers-reduced-motion: reduce`를 존중한다.
+
 ## 미구현 범위
 
-- 거래·사건·조사·판정 등 업무 **화면** (typed API module과 query pagination은 Issue #245에서
-  구현했고, 이를 호출하는 route·navigation·button·hook·상태관리는 아직 없다)
-- capability로 보호되는 production route·navigation 항목·action (판정 계층과 guard는 구현했으나
-  적용 대상이 아직 0개다)
+- 사건·조사·판정·운영 대시보드 **화면** (typed API module과 query pagination은 Issue #245에서
+  구현했고, 이를 호출하는 route·navigation·button·hook은 거래 목록에만 존재한다)
+- 거래 상세 route와 행 클릭 navigation, 상세 drawer·modal
+- 거래 화면의 production 업무 action button (상태 변경·판정·메모는 이번 범위 밖이다)
+- 위험도(risk score·risk level) 열 (현재 Transaction List API 응답에 해당 필드가 없다)
 - 문서에만 존재하는 후보 endpoint (`GET /api/v1/cases/{caseId}/transactions` 등)
 - 오류 응답 body 모델(`code`·`message`·`fieldErrors`)
 - production Authorization Server와 production runtime 배포
@@ -915,6 +1068,19 @@ timer와 단계 사이의 명시적 경과시간 검사가 이를 공유한다. 
 정규식 경계, React StrictMode 아래에서의 최초 fetch 단일 실행·unmount 이후 state 미갱신·genuine
 remount의 신규 fetch·loading 중 중복 retry 방지, Router와 화면 상태(loading·success·error,
 명시적 재시도, 접근성 있는 role/name)를 검증한다.
+
+거래 목록 test는 표시 규칙·hook·화면·route를 나누어 검증한다. 표시 규칙은 KST 변환(자정·연말·
+윤년 경계, 존재하지 않는 날짜 거부, host timezone 비의존), KST↔UTC 왕복, 역전 범위 판정,
+15자리 금액과 2^53+1 정밀도, reference 무변형 표시와 줄바꿈 판정, nullable recipient,
+status label이 risk·score를 뜻하지 않음을 확인한다. hook은 session 없을 때 요청 0회,
+StrictMode에서 fetch 1회, 최신 요청만 게시, 이전 요청의 늦은 성공·실패 무시, 이전 요청 abort,
+session 교체·logout·401에서 즉시 data 제거, stale 401이 새 session을 제거하지 않음, 403에서
+session 유지, timeout·network·invalid response 구분, 자동 retry 0회, 게시 값에 credential·
+trace id 부재를 확인한다. 화면은 초기 query 계약, draft/committed 분리, apply·reset·sort·page·
+page size, 역전 범위와 공백 reference 거부(요청 0회), empty·error·retry, reference의 URL·Web
+Storage 비노출, `aria-sort`·live region·focus 이동·keyboard 순회를 확인한다. route는 세 허용
+role의 직접 진입, 세 비허용 role의 거부와 Backend 요청 0회, unauthenticated 진입, 복귀 경로
+exact `/transactions`, `/transactions/...`와 `/transactionsx`의 404를 확인한다.
 
 인증 경계 unit test는 실제 Authorization Server 없이 `AuthClient` port와 fake adapter로 검증한다.
 OIDC 설정 exact 값, memory user store와 prefix가 붙은 session transaction store, prefix 밖
@@ -1134,10 +1300,17 @@ refresh-token 반환 fail-closed를 Chromium에서 검증한다.
 
 role 기반 UI는 두 부분으로 나누어 본다. Issue #243에서 검증된 session profile의 USER role로 UI
 capability를 결정하는 판정 계층(`src/auth/userRoles.ts`, `src/auth/capabilities.ts`,
-`src/auth/useCapabilities.ts`)과 `RequireCapability` guard 컴포넌트는 구현했다. 반면 이를 적용한
-production 보호 route·navigation 항목·action은 아직 0개이며, guard의 동작은 test 전용
-`MemoryRouter` route에서만 검증한다. 자세한 내용은 위 `권한 UI 경계`에 있다. Keycloak
-remote logout은 Issue #247에서 구현했다. 자세한 내용은 위 `Remote logout (RP-initiated)`에 있다.
+`src/auth/useCapabilities.ts`)과 `RequireCapability` guard 컴포넌트를 구현했고, Issue #249에서
+이를 `/transactions` production route와 rail navigation 항목에 적용했다. 자세한 내용은 위
+`권한 UI 경계`와 `거래 목록 화면`에 있다. Keycloak remote logout은 Issue #247에서 구현했다.
+자세한 내용은 위 `Remote logout (RP-initiated)`에 있다.
+
+Issue #249의 browser E2E는 실제 Keycloak USER(`FDS_ANALYST`)로 로그인해 거래 navigation 표시,
+`/transactions` 진입, 실제 Backend `GET /api/v1/transactions` 1회 200 응답, 1440/1280/1024
+viewport의 rail 폭·filter column 수·가로 overflow 부재, skip link가 첫 tab stop임, filter 적용이
+정확히 요청 1회임, 자동 retry 0회, credential 비노출을 확인한다. 이 relay는 status만이 아니라
+Backend가 실제로 보낸 body를 그대로 브라우저에 전달하므로, 화면이 보는 것은 실제 응답이다.
+API mock과 test 전용 auth bypass는 사용하지 않고 strict TLS를 유지한다.
 
 local realm에는 USER가 하나뿐이라 role 조합별 browser E2E는 수행하지 않았고, role·capability
 판정은 단위·컴포넌트 테스트가 담당한다. Frontend production code는 access token을 직접
