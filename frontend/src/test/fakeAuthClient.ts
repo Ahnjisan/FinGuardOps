@@ -4,6 +4,7 @@ import type {
   CompleteSignInResult,
   CredentialAuthClient,
   InitializeResult,
+  SignOutCallbackClient,
 } from "../auth/authClient";
 
 export interface Deferred<T> {
@@ -33,6 +34,7 @@ export interface FakeAuthClientCalls {
   signIn: string[];
   completeSignIn: string[];
   signOut: number;
+  completeSignOut: string[];
   authorizeRequest: number;
   invalidateIfCurrent: number;
   /** Subscriber notifications actually delivered. */
@@ -46,7 +48,7 @@ export interface FakeAuthClientCalls {
  * deliberate: a provider test can inject this and then assert that what reaches
  * the React tree still has no `authorizeRequest` on it.
  */
-export interface FakeAuthClient extends CredentialAuthClient {
+export interface FakeAuthClient extends CredentialAuthClient, SignOutCallbackClient {
   readonly calls: FakeAuthClientCalls;
   /** Live subscriber count, for listener add/remove balance assertions. */
   listenerCount(): number;
@@ -55,8 +57,15 @@ export interface FakeAuthClient extends CredentialAuthClient {
   deferInitialize(): Deferred<TestInitializeResult>;
   /** Makes the next completeSignIn() hang until the deferred settles. */
   deferCompleteSignIn(): Deferred<TestCompleteSignInResult>;
+  /**
+   * Makes signOut() hang, as the real adapter does once the browser is on its
+   * way to the end-session endpoint and the promise never settles.
+   */
+  deferSignOut(): Deferred<void>;
   failInitialize(): void;
   failSignIn(): void;
+  failSignOut(): void;
+  failCompleteSignOut(): void;
 }
 
 /**
@@ -163,6 +172,7 @@ export function createFakeAuthClient(options: FakeAuthClientOptions = {}): FakeA
     signIn: [],
     completeSignIn: [],
     signOut: 0,
+    completeSignOut: [],
     authorizeRequest: 0,
     invalidateIfCurrent: 0,
     notified: 0,
@@ -182,6 +192,13 @@ export function createFakeAuthClient(options: FakeAuthClientOptions = {}): FakeA
   let completeSignInDeferred: Deferred<TestCompleteSignInResult> | undefined;
   let initializeShouldFail = false;
   let signInShouldFail = false;
+  let signOutShouldFail = false;
+  let completeSignOutShouldFail = false;
+  let signOutDeferred: Deferred<void> | undefined;
+  let signOutFlight: { generation: number; promise: Promise<void> } | undefined;
+  // Mirrors the adapter: monotonic, and readable after the session it counts
+  // has already ended.
+  let sessionGeneration = initialSession === null ? 0 : 1;
 
   const publishedSession = initialSession === null ? null : toPublishedSession(initialSession);
 
@@ -217,12 +234,26 @@ export function createFakeAuthClient(options: FakeAuthClientOptions = {}): FakeA
       return deferred;
     },
 
+    deferSignOut(): Deferred<void> {
+      const deferred = createDeferred<void>();
+      signOutDeferred = deferred;
+      return deferred;
+    },
+
     failInitialize(): void {
       initializeShouldFail = true;
     },
 
     failSignIn(): void {
       signInShouldFail = true;
+    },
+
+    failSignOut(): void {
+      signOutShouldFail = true;
+    },
+
+    failCompleteSignOut(): void {
+      completeSignOutShouldFail = true;
     },
 
     initialize(): Promise<InitializeResult> {
@@ -259,6 +290,7 @@ export function createFakeAuthClient(options: FakeAuthClientOptions = {}): FakeA
         completeSignInDeferred = undefined;
         sessionLive = true;
         ownership = Object.freeze({});
+        sessionGeneration += 1;
         return deferred.promise.then(toCompleteSignInResult);
       }
       // Nothing to publish, so nothing is published: the call is recorded and
@@ -269,14 +301,58 @@ export function createFakeAuthClient(options: FakeAuthClientOptions = {}): FakeA
       }
       sessionLive = true;
       ownership = Object.freeze({});
+      sessionGeneration += 1;
       return Promise.resolve(configuredCompleteResult);
     },
 
+    /**
+     * Mirrors the adapter's flight lifetime exactly: concurrent callers on the
+     * same session share one flight and one notification, the local session is
+     * dropped before the promise is built, the entry is released on settle, and
+     * a flight belonging to an earlier session is never handed to a later one.
+     */
     signOut(): Promise<void> {
+      if (signOutFlight !== undefined && signOutFlight.generation === sessionGeneration) {
+        return signOutFlight.promise;
+      }
       calls.signOut += 1;
-      sessionLive = false;
-      ownership = null;
-      return Promise.resolve();
+      if (sessionLive) {
+        sessionLive = false;
+        ownership = null;
+        for (const listener of [...listeners]) {
+          calls.notified += 1;
+          listener();
+        }
+      }
+      const generation = sessionGeneration;
+      const deferred = signOutDeferred;
+      signOutDeferred = undefined;
+      const run =
+        deferred !== undefined
+          ? deferred.promise
+          : signOutShouldFail
+            ? Promise.reject(new Error("sign-out failed"))
+            : Promise.resolve();
+      const promise = run.finally(() => {
+        if (signOutFlight?.promise === promise) {
+          signOutFlight = undefined;
+        }
+      });
+      // A test that never settles the deferred, or that ignores the rejection
+      // on a path where production would not observe it, must not surface as an
+      // unhandled rejection.
+      promise.catch(() => undefined);
+      signOutFlight = { generation, promise };
+      return promise;
+    },
+
+    completeSignOut(callbackUrl: string): Promise<void> {
+      calls.completeSignOut.push(callbackUrl);
+      // Mirrors the adapter: the callback consumes the logout transaction and
+      // nothing else. No session is ended, no subscriber is told.
+      return completeSignOutShouldFail
+        ? Promise.reject(new Error("sign-out callback failed"))
+        : Promise.resolve();
     },
 
     /**

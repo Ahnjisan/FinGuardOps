@@ -39,13 +39,22 @@ function AuthProbe() {
  */
 const PROBE_ROLES = ["FDS_VIEWER"] as const;
 
-function renderProbe(client: FakeAuthClient, strict = true) {
+function renderProbe(
+  client: FakeAuthClient,
+  strict = true,
+  completeSignOut?: (callbackUrl: string) => Promise<void>,
+) {
   const tree = (
-    <AuthProvider client={client}>
+    <AuthProvider client={client} completeSignOut={completeSignOut}>
       <AuthProbe />
     </AuthProvider>
   );
   return render(strict ? <StrictMode>{tree}</StrictMode> : tree);
+}
+
+/** Puts a root end-session response in the address bar for one test. */
+function enterAt(url: string): void {
+  window.history.replaceState(null, "", url);
 }
 
 function status(): string {
@@ -60,6 +69,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  window.history.replaceState(null, "", "/");
 });
 
 describe("AuthProvider initialization", () => {
@@ -416,16 +426,15 @@ describe("AuthProvider redirect cancellation and BFCache restore", () => {
 });
 
 describe("AuthProvider sign-out and expiry", () => {
-  it("drops the local session immediately, before teardown settles", async () => {
-    const user = userEvent.setup();
+  async function signedInProbe(): Promise<FakeAuthClient> {
     const client = createFakeAuthClient({ initialSession: { subject: "sub-1", roles: PROBE_ROLES } });
-    let released!: () => void;
-    client.signOut = () => {
-      client.calls.signOut += 1;
-      return new Promise<void>((resolve) => {
-        released = resolve;
-      });
-    };
+    return client;
+  }
+
+  it("leaves the authenticated state immediately, before the redirect settles", async () => {
+    const user = userEvent.setup();
+    const client = await signedInProbe();
+    const deferred = client.deferSignOut();
     renderProbe(client);
     await waitFor(() => {
       expect(status()).toBe("authenticated");
@@ -433,30 +442,137 @@ describe("AuthProvider sign-out and expiry", () => {
 
     await user.click(screen.getByRole("button", { name: "Sign out" }));
 
-    expect(status()).toBe("unauthenticated");
+    expect(status()).toBe("signing-out");
+    expect(screen.getByTestId("subject").textContent).toBe("");
     expect(client.calls.signOut).toBe(1);
-    released();
+    deferred.resolve();
   });
 
-  it("stays unauthenticated when teardown rejects", async () => {
+  it("notifies subscribers exactly once for one sign-out", async () => {
     const user = userEvent.setup();
-    const client = createFakeAuthClient({ initialSession: { subject: "sub-1", roles: PROBE_ROLES } });
-    client.signOut = () => {
-      client.calls.signOut += 1;
-      return Promise.reject(new DOMException("blocked", "SecurityError"));
-    };
+    const client = await signedInProbe();
+    client.deferSignOut();
     renderProbe(client);
     await waitFor(() => {
       expect(status()).toBe("authenticated");
     });
 
     await user.click(screen.getByRole("button", { name: "Sign out" }));
+
+    expect(client.calls.notified).toBe(1);
+    expect(status()).toBe("signing-out");
+  });
+
+  it("starts exactly one sign-out however many times it is asked", async () => {
+    const user = userEvent.setup();
+    const client = await signedInProbe();
+    client.deferSignOut();
+    renderProbe(client);
+    await waitFor(() => {
+      expect(status()).toBe("authenticated");
+    });
+
+    const button = screen.getByRole("button", { name: "Sign out" });
+    await user.click(button);
+    await user.click(button);
+    await user.click(button);
+
+    expect(client.calls.signOut).toBe(1);
+    expect(client.calls.notified).toBe(1);
+  });
+
+  it("refuses to start a sign-in while the sign-out redirect is in flight", async () => {
+    const user = userEvent.setup();
+    const client = await signedInProbe();
+    client.deferSignOut();
+    renderProbe(client);
+    await waitFor(() => {
+      expect(status()).toBe("authenticated");
+    });
+
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(client.calls.signIn).toHaveLength(0);
+    expect(status()).toBe("signing-out");
+  });
+
+  it("shows only a fixed sign-out error and never restores the session", async () => {
+    const user = userEvent.setup();
+    const client = await signedInProbe();
+    client.failSignOut();
+    renderProbe(client);
+    await waitFor(() => {
+      expect(status()).toBe("authenticated");
+    });
+
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await waitFor(() => {
+      expect(status()).toBe("error");
+    });
+
+    expect(screen.getByTestId("kind").textContent).toBe("sign-out");
+    expect(screen.getByTestId("subject").textContent).toBe("");
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it("lets the user sign in again after a failed sign-out", async () => {
+    const user = userEvent.setup();
+    const client = await signedInProbe();
+    client.failSignOut();
+    renderProbe(client);
+    await waitFor(() => {
+      expect(status()).toBe("authenticated");
+    });
+
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await waitFor(() => {
+      expect(status()).toBe("error");
+    });
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(client.calls.signIn).toEqual(["/health"]);
+  });
+
+  it("keeps the local sign-out after a cancelled redirect or a BFCache return", async () => {
+    const user = userEvent.setup();
+    const client = await signedInProbe();
+    client.deferSignOut();
+    renderProbe(client);
+    await waitFor(() => {
+      expect(status()).toBe("authenticated");
+    });
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+
+    act(() => {
+      window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+    });
     await act(async () => {
       await Promise.resolve();
     });
 
     expect(status()).toBe("unauthenticated");
-    expect(consoleErrorSpy).not.toHaveBeenCalled();
+    // Nothing retried the redirect and nothing signed anyone back in.
+    expect(client.calls.signOut).toBe(1);
+    expect(client.calls.signIn).toHaveLength(0);
+    expect(client.calls.completeSignIn).toHaveLength(0);
+  });
+
+  it("leaves a live sign-out alone on an ordinary non-persisted pageshow", async () => {
+    const user = userEvent.setup();
+    const client = await signedInProbe();
+    client.deferSignOut();
+    renderProbe(client);
+    await waitFor(() => {
+      expect(status()).toBe("authenticated");
+    });
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+
+    act(() => {
+      window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: false }));
+    });
+
+    expect(status()).toBe("signing-out");
   });
 
   it("moves to unauthenticated on session invalidation", async () => {
@@ -634,6 +750,9 @@ describe("AuthProvider public context facade", () => {
       "signIn",
       "signOut",
     ]);
+    // Consuming the one-time logout transaction is the provider's own work and
+    // is deliberately not reachable from the tree.
+    expect("completeSignOut" in contextValue().client).toBe(false);
   });
 
   it("keeps every published method working", async () => {
@@ -690,5 +809,196 @@ describe("AuthProvider public context facade", () => {
     });
 
     expect(contextValue().client).toBe(before);
+  });
+});
+
+/**
+ * The root end-session response, which reaches the provider before anything
+ * else this page load does. The address bar is the only input, so each case
+ * sets it and lets the provider classify it exactly as the browser would.
+ */
+describe("AuthProvider root logout callback", () => {
+  const STATE = "9f6d2b1a-1c2d-4e3f-8a9b-0c1d2e3f4a5b";
+
+  it("consumes an exact root response and ends unauthenticated", async () => {
+    const completeSignOut = vi.fn().mockResolvedValue(undefined);
+    const client = createFakeAuthClient();
+    enterAt(`/?state=${STATE}`);
+
+    renderProbe(client, true, completeSignOut);
+
+    await waitFor(() => {
+      expect(status()).toBe("unauthenticated");
+    });
+    expect(completeSignOut).toHaveBeenCalledTimes(1);
+    expect(completeSignOut.mock.calls[0][0]).toContain(`state=${STATE}`);
+  });
+
+  it("clears the address bar before the library is ever called", async () => {
+    let hrefWhenCalled = "";
+    const completeSignOut = vi.fn().mockImplementation(() => {
+      hrefWhenCalled = window.location.href;
+      return Promise.resolve();
+    });
+    enterAt(`/?state=${STATE}`);
+
+    renderProbe(createFakeAuthClient(), true, completeSignOut);
+
+    await waitFor(() => {
+      expect(status()).toBe("unauthenticated");
+    });
+    expect(hrefWhenCalled).toBe(`${window.location.origin}/`);
+    expect(window.location.search).toBe("");
+    expect(window.location.hash).toBe("");
+    expect(window.location.href).not.toContain(STATE);
+  });
+
+  it("shares one callback promise across the StrictMode double invoke", async () => {
+    const completeSignOut = vi.fn().mockResolvedValue(undefined);
+    enterAt(`/?state=${STATE}`);
+
+    renderProbe(createFakeAuthClient(), true, completeSignOut);
+
+    await waitFor(() => {
+      expect(status()).toBe("unauthenticated");
+    });
+    expect(completeSignOut).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not initialize until the callback has settled", async () => {
+    const order: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const completeSignOut = vi.fn().mockImplementation(async () => {
+      order.push("callback");
+      await gate;
+    });
+    const client = createFakeAuthClient();
+    const initialize = client.initialize.bind(client);
+    client.initialize = () => {
+      order.push("initialize");
+      return initialize();
+    };
+    enterAt(`/?state=${STATE}`);
+
+    renderProbe(client, true, completeSignOut);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(order).toEqual(["callback"]);
+    expect(status()).toBe("signing-out");
+
+    release();
+    await waitFor(() => {
+      expect(status()).toBe("unauthenticated");
+    });
+    expect(order).toEqual(["callback", "initialize"]);
+  });
+
+  it("ends in the fixed sign-out error, with no session, when the callback fails", async () => {
+    const completeSignOut = vi.fn().mockRejectedValue(new Error("state=SECRET_STATE"));
+    enterAt(`/?state=${STATE}`);
+
+    renderProbe(createFakeAuthClient(), true, completeSignOut);
+
+    await waitFor(() => {
+      expect(status()).toBe("error");
+    });
+    expect(screen.getByTestId("kind").textContent).toBe("sign-out");
+    expect(screen.getByTestId("subject").textContent).toBe("");
+    expect(document.body.textContent ?? "").not.toContain("SECRET_STATE");
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it("never lets a late initialization result overwrite the callback outcome", async () => {
+    const completeSignOut = vi.fn().mockRejectedValue(new Error("refused"));
+    const client = createFakeAuthClient({
+      initialSession: { subject: "sub-1", roles: PROBE_ROLES },
+    });
+    enterAt(`/?state=${STATE}`);
+
+    renderProbe(client, true, completeSignOut);
+
+    await waitFor(() => {
+      expect(status()).toBe("error");
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(status()).toBe("error");
+    expect(screen.getByTestId("subject").textContent).toBe("");
+  });
+
+  it.each([
+    ["a bare root visit", "/"],
+    ["an unrelated parameter", "/?utm_source=mail"],
+    ["a different path", "/health?state=9f6d2b1a"],
+  ])("does nothing for %s", async (_label, url) => {
+    const completeSignOut = vi.fn().mockResolvedValue(undefined);
+    enterAt(url);
+
+    renderProbe(createFakeAuthClient(), true, completeSignOut);
+
+    await waitFor(() => {
+      expect(status()).toBe("unauthenticated");
+    });
+    expect(completeSignOut).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a provider error response", `/?state=9f6d2b1a-1c2d-4e3f-8a9b-0c1d2e3f4a5b&error=access_denied`],
+    ["a blank state", "/?state="],
+    ["a duplicated state", "/?state=9f6d2b1a&state=other"],
+    ["an unknown parameter", "/?state=9f6d2b1a&code=abc"],
+  ])("refuses %s without calling the library at all", async (_label, url) => {
+    const completeSignOut = vi.fn().mockResolvedValue(undefined);
+    enterAt(url);
+
+    renderProbe(createFakeAuthClient(), true, completeSignOut);
+
+    await waitFor(() => {
+      expect(status()).toBe("error");
+    });
+    expect(screen.getByTestId("kind").textContent).toBe("sign-out");
+    expect(completeSignOut).not.toHaveBeenCalled();
+    expect(window.location.search).toBe("");
+  });
+
+  it("removes nothing and notifies nobody while handling the callback", async () => {
+    const completeSignOut = vi.fn().mockResolvedValue(undefined);
+    const client = createFakeAuthClient();
+    enterAt(`/?state=${STATE}`);
+
+    renderProbe(client, true, completeSignOut);
+
+    await waitFor(() => {
+      expect(status()).toBe("unauthenticated");
+    });
+    expect(client.calls.signOut).toBe(0);
+    expect(client.calls.notified).toBe(0);
+    expect(client.calls.signIn).toHaveLength(0);
+    expect(client.calls.completeSignIn).toHaveLength(0);
+  });
+
+  it("leaves a session this page load restored completely alone", async () => {
+    const completeSignOut = vi.fn().mockRejectedValue(new Error("stale"));
+    const client = createFakeAuthClient({
+      initialSession: { subject: "sub-b", roles: PROBE_ROLES },
+    });
+    enterAt(`/?state=${STATE}`);
+
+    renderProbe(client, true, completeSignOut);
+
+    await waitFor(() => {
+      expect(status()).toBe("error");
+    });
+    // The stale response ended in the fixed sign-out error and nothing else:
+    // it removed no user, ended no session and told no subscriber.
+    expect(client.calls.signOut).toBe(0);
+    expect(client.calls.notified).toBe(0);
+    expect(client.listenerCount()).toBe(1);
   });
 });

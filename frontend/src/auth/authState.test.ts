@@ -21,6 +21,8 @@ const UNAUTHENTICATED: AuthState = { status: "unauthenticated" };
 const AUTHENTICATING: AuthState = { status: "authenticating" };
 const AUTHENTICATED: AuthState = { status: "authenticated", session: SESSION };
 const ERROR: AuthState = { status: "error", kind: "callback" };
+const SIGNING_OUT: AuthState = { status: "signing-out" };
+const SIGN_OUT_ERROR: AuthState = { status: "error", kind: "sign-out" };
 
 describe("initial auth state", () => {
   it("starts as initializing", () => {
@@ -136,20 +138,128 @@ describe("callback transitions", () => {
   });
 });
 
-describe("teardown transitions", () => {
-  it("signs out from any state", () => {
-    const states: AuthState[] = [
-      initialAuthState,
-      UNAUTHENTICATED,
-      AUTHENTICATING,
-      AUTHENTICATED,
-      ERROR,
-    ];
-    for (const state of states) {
-      expect(authReducer(state, { type: "signed-out" })).toEqual(UNAUTHENTICATED);
+describe("sign-out transitions", () => {
+  it("leaves the authenticated state immediately, carrying no session", () => {
+    const state = authReducer(AUTHENTICATED, { type: "sign-out-started" });
+
+    expect(state).toEqual(SIGNING_OUT);
+    expect(Object.keys(state)).toEqual(["status"]);
+  });
+
+  it("starts only from an authenticated session", () => {
+    for (const state of [initialAuthState, UNAUTHENTICATED, AUTHENTICATING, ERROR]) {
+      expect(authReducer(state, { type: "sign-out-started" })).toBe(state);
     }
   });
 
+  it("ignores a duplicate sign-out while the redirect is in flight", () => {
+    expect(authReducer(SIGNING_OUT, { type: "sign-out-started" })).toBe(SIGNING_OUT);
+  });
+
+  it("refuses to start a sign-in while signing out", () => {
+    expect(authReducer(SIGNING_OUT, { type: "sign-in-started" })).toBe(SIGNING_OUT);
+  });
+
+  it("refuses to start a sign-in callback while signing out", () => {
+    expect(authReducer(SIGNING_OUT, { type: "callback-started" })).toBe(SIGNING_OUT);
+  });
+
+  it("reports a fixed sign-out error kind when the redirect cannot start", () => {
+    expect(authReducer(SIGNING_OUT, { type: "sign-out-failed" })).toEqual(SIGN_OUT_ERROR);
+  });
+
+  it("never restores a session on a sign-out failure", () => {
+    const state = authReducer(SIGNING_OUT, { type: "sign-out-failed" });
+
+    expect(state.status).not.toBe("authenticated");
+    expect(Object.keys(state).sort()).toEqual(["kind", "status"]);
+  });
+
+  it("ignores a sign-out failure that arrives outside signing-out", () => {
+    for (const state of [initialAuthState, UNAUTHENTICATED, AUTHENTICATING, AUTHENTICATED, ERROR]) {
+      expect(authReducer(state, { type: "sign-out-failed" })).toBe(state);
+    }
+  });
+
+  it("stays signed out when the redirect is cancelled or the page is restored", () => {
+    expect(authReducer(SIGNING_OUT, { type: "sign-out-cancelled" })).toEqual(UNAUTHENTICATED);
+  });
+
+  it("cannot resurrect a session through a cancellation", () => {
+    expect(authReducer(AUTHENTICATED, { type: "sign-out-cancelled" })).toBe(AUTHENTICATED);
+    expect(authReducer(UNAUTHENTICATED, { type: "sign-out-cancelled" })).toBe(UNAUTHENTICATED);
+  });
+
+  it("leaves a signing-out state alone on invalidation", () => {
+    expect(authReducer(SIGNING_OUT, { type: "session-invalidated" })).toBe(SIGNING_OUT);
+  });
+});
+
+describe("logout callback transitions", () => {
+  it("classifies the root response before anything else has run", () => {
+    expect(authReducer(initialAuthState, { type: "logout-callback-started" })).toEqual(SIGNING_OUT);
+  });
+
+  it("never starts from a page load that already has a session", () => {
+    for (const state of [UNAUTHENTICATED, AUTHENTICATING, AUTHENTICATED, ERROR]) {
+      expect(authReducer(state, { type: "logout-callback-started" })).toBe(state);
+    }
+  });
+
+  it("ends unauthenticated on success", () => {
+    expect(authReducer(SIGNING_OUT, { type: "logout-callback-succeeded" })).toEqual(
+      UNAUTHENTICATED,
+    );
+  });
+
+  it("ends in the fixed sign-out error, with no credential, on failure", () => {
+    const state = authReducer(SIGNING_OUT, { type: "logout-callback-failed" });
+
+    expect(state).toEqual(SIGN_OUT_ERROR);
+    expect(Object.keys(state).sort()).toEqual(["kind", "status"]);
+  });
+
+  it("cannot demote a session a later page load already published", () => {
+    expect(authReducer(AUTHENTICATED, { type: "logout-callback-succeeded" })).toBe(AUTHENTICATED);
+    expect(authReducer(AUTHENTICATED, { type: "logout-callback-failed" })).toBe(AUTHENTICATED);
+  });
+
+  it("ignores a duplicate outcome from a shared StrictMode promise", () => {
+    const first = authReducer(SIGNING_OUT, { type: "logout-callback-succeeded" });
+    expect(authReducer(first, { type: "logout-callback-succeeded" })).toBe(first);
+
+    const failed = authReducer(SIGNING_OUT, { type: "logout-callback-failed" });
+    expect(authReducer(failed, { type: "logout-callback-failed" })).toBe(failed);
+  });
+
+  it("lets a completed logout callback survive a late initialization result", () => {
+    const afterCallback = authReducer(SIGNING_OUT, { type: "logout-callback-succeeded" });
+
+    expect(authReducer(afterCallback, { type: "init-completed" })).toBe(afterCallback);
+    expect(authReducer(afterCallback, { type: "init-failed" })).toBe(afterCallback);
+    expect(authReducer(afterCallback, { type: "init-restored", session: SESSION })).toBe(
+      afterCallback,
+    );
+  });
+
+  it("lets a failed logout callback survive a late initialization result", () => {
+    const afterCallback = authReducer(SIGNING_OUT, { type: "logout-callback-failed" });
+
+    expect(authReducer(afterCallback, { type: "init-completed" })).toBe(afterCallback);
+    expect(authReducer(afterCallback, { type: "init-failed" })).toBe(afterCallback);
+  });
+
+  it("offers an explicit sign-in again after either outcome", () => {
+    for (const state of [
+      authReducer(SIGNING_OUT, { type: "logout-callback-succeeded" }),
+      authReducer(SIGNING_OUT, { type: "logout-callback-failed" }),
+    ]) {
+      expect(authReducer(state, { type: "sign-in-started" })).toEqual(AUTHENTICATING);
+    }
+  });
+});
+
+describe("teardown transitions", () => {
   it("invalidates an authenticated session", () => {
     expect(authReducer(AUTHENTICATED, { type: "session-invalidated" })).toEqual(UNAUTHENTICATED);
   });

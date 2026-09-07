@@ -442,7 +442,11 @@ describe("RequireCapability - the session ending", () => {
     renderGuard(client, "/test-only/resolution");
 
     expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    // Invalidation rather than sign-out: a logout redirect ends the document,
+    // so a replacement session only ever follows an invalidated one.
+    act(() => {
+      client.emitSessionInvalidated();
+    });
     await user.click(screen.getByRole("button", { name: "Replace session" }));
 
     expect(authStatus()).toBe("authenticated");
@@ -458,7 +462,9 @@ describe("RequireCapability - the session ending", () => {
     renderGuard(client);
 
     expect(await screen.findByRole("button", { name: "Change case status" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    act(() => {
+      client.emitSessionInvalidated();
+    });
     await user.click(screen.getByRole("button", { name: "Replace session" }));
 
     expect(await screen.findByText(CASE_CONTENT)).toBeInTheDocument();

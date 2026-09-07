@@ -138,9 +138,10 @@ describe("AppShell authentication controls", () => {
     expect(authStatus()).toHaveTextContent("Signed in.");
   });
 
-  it("signs out on request and returns to the sign-in control", async () => {
+  it("announces the signing-out state and withdraws both controls", async () => {
     const user = userEvent.setup();
     const client = createFakeAuthClient({ initialSession: { subject: "sub-1", roles: SHELL_ROLES } });
+    client.deferSignOut();
     renderShell(client);
 
     await waitFor(() => {
@@ -149,7 +150,81 @@ describe("AppShell authentication controls", () => {
     await user.click(screen.getByRole("button", { name: "Sign out" }));
 
     expect(client.calls.signOut).toBe(1);
+    expect(authStatus()).toHaveTextContent("Signing out...");
+    // Neither affordance is offered while the end-session redirect is in
+    // flight, so neither can be clicked a second time.
+    expect(screen.queryByRole("button", { name: "Sign out" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sign in" })).not.toBeInTheDocument();
+  });
+
+  it("shows no signed-in name once sign-out has started", async () => {
+    const user = userEvent.setup();
+    const client = createFakeAuthClient({
+      initialSession: { subject: "sub-1", displayName: "Test Analyst", roles: SHELL_ROLES },
+    });
+    client.deferSignOut();
+    renderShell(client);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+
+    expect(authStatus()).not.toHaveTextContent("Test Analyst");
+    expect(document.body.textContent ?? "").not.toContain("Test Analyst");
+  });
+
+  it("starts exactly one sign-out however many times the control is clicked", async () => {
+    const user = userEvent.setup();
+    const client = createFakeAuthClient({ initialSession: { subject: "sub-1", roles: SHELL_ROLES } });
+    client.deferSignOut();
+    renderShell(client);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+    });
+    const button = screen.getByRole("button", { name: "Sign out" });
+    await user.click(button);
+    await user.click(button);
+    await user.click(button);
+
+    expect(client.calls.signOut).toBe(1);
+  });
+
+  it("shows the fixed sign-out message and offers an explicit retry on failure", async () => {
+    const user = userEvent.setup();
+    const client = createFakeAuthClient({ initialSession: { subject: "sub-1", roles: SHELL_ROLES } });
+    client.failSignOut();
+    renderShell(client);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+
+    await waitFor(() => {
+      expect(authStatus()).toHaveTextContent(safeAuthErrorMessage("sign-out"));
+    });
+    // The local logout is not undone: there is no session to sign out of, and
+    // the only thing offered is starting a new sign-in.
+    expect(screen.queryByRole("button", { name: "Sign out" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    expect(client.calls.signIn).toHaveLength(0);
+  });
+
+  it("keeps the public outlet reachable while signing out", async () => {
+    const user = userEvent.setup();
+    const client = createFakeAuthClient({ initialSession: { subject: "sub-1", roles: SHELL_ROLES } });
+    client.deferSignOut();
+    renderShell(client);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+
+    expect(screen.getByRole("heading", { name: /finguardops frontend/i })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Home" })).toBeInTheDocument();
   });
 
   it("returns to the sign-in control when the session is invalidated", async () => {
@@ -202,6 +277,29 @@ describe("AppShell public boundary", () => {
     expect(main.getByRole("heading", { name: /backend health/i })).toBeInTheDocument();
     // The page keeps its own status region, distinct from the auth one.
     expect(main.getByRole("status")).toBeInTheDocument();
+  });
+
+  it("renders no credential or provider payload while signing out", async () => {
+    const user = userEvent.setup();
+    const client = createFakeAuthClient({
+      initialSession: {
+        subject: "11111111-1111-4111-8111-111111111111",
+        displayName: "Analyst",
+        roles: SHELL_ROLES,
+      },
+    });
+    client.deferSignOut();
+    renderShell(client);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+
+    const rendered = document.body.textContent ?? "";
+    expect(rendered).not.toContain("11111111-1111-4111-8111-111111111111");
+    expect(rendered).not.toMatch(/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{10,}/);
+    expect(document.body.innerHTML).not.toMatch(/bearer|access_token|id_token|state=/i);
   });
 
   it("never renders a subject, token or provider payload", async () => {

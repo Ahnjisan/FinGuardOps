@@ -1,19 +1,28 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { InMemoryWebStorage, WebStorageStateStore } from "oidc-client-ts";
+import { InMemoryWebStorage, UserManager, WebStorageStateStore } from "oidc-client-ts";
+import type { StateStore } from "oidc-client-ts";
 import type { AuthEnv } from "../config/env";
-import { AuthCallbackError, AuthSignInError } from "./authErrors";
+import { EnvConfigError } from "../config/env";
+import { AuthCallbackError, AuthSignInError, AuthSignOutError } from "./authErrors";
 import {
   createOidcAuthClient,
   createOidcSettings,
   generateLoginNonce,
+  resolveEndSessionEndpoint,
+  resolvePostLogoutRedirectUri,
   resolveSessionDeadline,
   SESSION_HARD_DEADLINE_MS,
+  validatingStateStore,
   type OidcAuthClientOptions,
   type OidcUserLike,
   type UserManagerLike,
 } from "./oidcAuthClient";
 import {
   AuthStorageUnavailableError,
+  isApprovedTransactionRecord,
+  LOGOUT_TRANSACTION_DATA,
+  OIDC_LOGIN_REQUEST_TYPE,
+  OIDC_LOGOUT_REQUEST_TYPE,
   OIDC_TRANSACTION_STORE_PREFIX,
   OIDC_USER_STORE_PREFIX,
 } from "./transactionStorage";
@@ -29,6 +38,12 @@ const ENV: AuthEnv = {
  * in the ID token, which is what `profile` exposes once the library has
  * validated it.
  */
+/**
+ * A compact JWT, in the shape the library keeps after it has verified the ID
+ * token during the sign-in callback. Only presence and shape are ever read.
+ */
+const ID_TOKEN = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMTExIn0.c2lnbmF0dXJl";
+
 const USER: OidcUserLike = {
   profile: {
     sub: "11111111-1111-4111-8111-111111111111",
@@ -36,6 +51,7 @@ const USER: OidcUserLike = {
     principal_type: "USER",
     roles: ["FDS_ANALYST"],
   },
+  id_token: ID_TOKEN,
   state: { returnTo: "/health" },
 };
 
@@ -46,6 +62,8 @@ interface FakeUserManager extends UserManagerLike {
   readonly calls: {
     signinRedirect: Array<{ state: unknown; nonce: string }>;
     signinRedirectCallback: string[];
+    signoutRedirect: Array<{ state: unknown; redirectMethod: unknown }>;
+    signoutRedirectCallback: string[];
     removeUser: number;
     getUser: number;
     /** Grants this client has no business running. Expected to stay at zero. */
@@ -68,6 +86,12 @@ interface FakeUserManager extends UserManagerLike {
   failCallback(): void;
   failRemoveUser(): void;
   deferRemoveUser(): { resolve: () => void };
+  /** Makes the end-session redirect refuse, the way a prepare failure does. */
+  failSignoutRedirect(): void;
+  /** Makes the end-session redirect hang until the returned release runs. */
+  deferSignoutRedirect(): { resolve: () => void };
+  /** Makes the end-session response refuse, as an unknown state does. */
+  failSignoutCallback(): void;
   /**
    * The refresh grant and silent renew, present only so that "never called" is
    * an assertion about a real surface rather than about an absent one.
@@ -82,6 +106,8 @@ function createFakeUserManager(): FakeUserManager {
   const calls = {
     signinRedirect: [] as Array<{ state: unknown; nonce: string }>,
     signinRedirectCallback: [] as string[],
+    signoutRedirect: [] as Array<{ state: unknown; redirectMethod: unknown }>,
+    signoutRedirectCallback: [] as string[],
     removeUser: 0,
     getUser: 0,
     signinSilent: 0,
@@ -95,7 +121,26 @@ function createFakeUserManager(): FakeUserManager {
   let callbackShouldFail = false;
   let removeUserShouldFail = false;
   let removeUserGate: Promise<void> | undefined;
+  let signoutRedirectShouldFail = false;
+  let signoutRedirectGate: Promise<void> | undefined;
+  let signoutCallbackShouldFail = false;
   let callbackInFlightHook: (() => void) | undefined;
+
+  /**
+   * Shared by the explicit call and by the end-session redirect, because
+   * oidc-client-ts removes the user as part of starting that redirect. A
+   * failing or gated removal therefore reaches both, exactly as in the library.
+   */
+  async function removeUserInternal(): Promise<void> {
+    calls.removeUser += 1;
+    storedUser = null;
+    if (removeUserGate !== undefined) {
+      await removeUserGate;
+    }
+    if (removeUserShouldFail) {
+      throw new DOMException("blocked", "SecurityError");
+    }
+  }
 
   return {
     calls,
@@ -134,6 +179,21 @@ function createFakeUserManager(): FakeUserManager {
     failRemoveUser(): void {
       removeUserShouldFail = true;
     },
+    failSignoutRedirect(): void {
+      signoutRedirectShouldFail = true;
+    },
+    deferSignoutRedirect(): { resolve: () => void } {
+      let release!: () => void;
+      signoutRedirectGate = new Promise<void>((resolvePromise) => {
+        release = () => {
+          resolvePromise();
+        };
+      });
+      return { resolve: release };
+    },
+    failSignoutCallback(): void {
+      signoutCallbackShouldFail = true;
+    },
     deferRemoveUser(): { resolve: () => void } {
       let release!: () => void;
       removeUserGate = new Promise<void>((resolvePromise) => {
@@ -169,15 +229,33 @@ function createFakeUserManager(): FakeUserManager {
       }
       return storedUser;
     },
-    async removeUser(): Promise<void> {
-      calls.removeUser += 1;
-      storedUser = null;
-      if (removeUserGate !== undefined) {
-        await removeUserGate;
+    removeUser: removeUserInternal,
+    /**
+     * Mirrors `_signoutStart`: the ID token is read from the store as the
+     * `id_token_hint`, the user is removed, the one-time logout transaction is
+     * written and the browser navigates. The adapter never passes a hint, so
+     * the argument list here is exactly what production sends.
+     */
+    async signoutRedirect(args: { state: unknown; redirectMethod: unknown }): Promise<void> {
+      calls.signoutRedirect.push(args);
+      // One-shot, like the other deferrals here: arming a gate holds exactly
+      // the next redirect, so a later session's logout is not held by it.
+      const gate = signoutRedirectGate;
+      signoutRedirectGate = undefined;
+      if (gate !== undefined) {
+        await gate;
       }
-      if (removeUserShouldFail) {
-        throw new DOMException("blocked", "SecurityError");
+      await removeUserInternal();
+      if (signoutRedirectShouldFail) {
+        throw new Error("end-session refused: id_token_hint=SECRET_HINT&state=SECRET_STATE");
       }
+    },
+    async signoutRedirectCallback(url: string): Promise<unknown> {
+      calls.signoutRedirectCallback.push(url);
+      if (signoutCallbackShouldFail) {
+        throw new Error("No matching state found in storage: state=SECRET_STATE");
+      }
+      return { state: undefined };
     },
     async signinSilent(): Promise<OidcUserLike | null> {
       calls.signinSilent += 1;
@@ -272,6 +350,39 @@ function countingStorage(): { storage: Storage; sweeps: () => number } {
   return { storage, sweeps: () => sweeps };
 }
 
+/**
+ * The records oidc-client-ts 3.5.0 actually writes, so the state store is
+ * exercised against the serialized shape rather than a convenient stand-in.
+ * An override set to `undefined` drops the field, which is what
+ * `JSON.stringify` does for an absent one.
+ */
+function storedLoginRecord(id: string, overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    id,
+    data: { returnTo: "/health" },
+    created: 1_770_000_000,
+    request_type: OIDC_LOGIN_REQUEST_TYPE,
+    code_verifier: "yE3Vk1s0Q7yq7yQ0v0kZ8fXyH2mZ0Q9d4o1bQe2wUvA",
+    authority: ENV.oidcAuthority,
+    client_id: ENV.oidcClientId,
+    redirect_uri: "http://localhost:5173/auth/callback",
+    scope: "openid profile",
+    extraTokenParams: {},
+    nonce: "Jz1nQyF6iJ8H3lPq2oXw0aZbC4dE5fG6hI7jK8lM9nO",
+    ...overrides,
+  });
+}
+
+function storedLogoutRecord(id: string, overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    id,
+    data: { ...LOGOUT_TRANSACTION_DATA },
+    created: 1_770_000_000,
+    request_type: OIDC_LOGOUT_REQUEST_TYPE,
+    ...overrides,
+  });
+}
+
 beforeEach(() => {
   window.sessionStorage.clear();
   window.localStorage.clear();
@@ -333,15 +444,14 @@ describe("createOidcSettings", () => {
     expect(backing).not.toBe(window.localStorage);
   });
 
-  it("keeps the nonce-validating transaction store in sessionStorage under its own prefix", async () => {
+  it("keeps the validating transaction store in sessionStorage under its own prefix", async () => {
     const stateStore = settings().stateStore;
     expect(stateStore).toBeDefined();
+    const record = storedLoginRecord("state");
 
-    await stateStore?.set("state", JSON.stringify({ nonce: "nonce-value" }));
+    await stateStore?.set("state", record);
 
-    expect(window.sessionStorage.getItem(`${OIDC_TRANSACTION_STORE_PREFIX}state`)).toBe(
-      JSON.stringify({ nonce: "nonce-value" }),
-    );
+    expect(window.sessionStorage.getItem(`${OIDC_TRANSACTION_STORE_PREFIX}state`)).toBe(record);
   });
 
   it("gives the memory user store a prefix distinct from the transaction store", () => {
@@ -355,9 +465,32 @@ describe("createOidcSettings", () => {
     expect(settings()).not.toHaveProperty("client_secret");
   });
 
-  it("declares no silent renew or logout callback URI", () => {
+  it("declares no silent renew callback URI", () => {
     expect(settings()).not.toHaveProperty("silent_redirect_uri");
-    expect(settings()).not.toHaveProperty("post_logout_redirect_uri");
+    expect(settings()).not.toHaveProperty("popup_post_logout_redirect_uri");
+  });
+
+  it("declares the exact allowlisted post-logout redirect URI", () => {
+    expect(settings().post_logout_redirect_uri).toBe("http://localhost:5173/");
+  });
+
+  it("defaults the post-logout redirect URI to the real window origin", () => {
+    expect(createOidcSettings(ENV, window.sessionStorage).post_logout_redirect_uri).toBe(
+      `${window.location.origin}/`,
+    );
+  });
+
+  it("pins the end-session endpoint to the configured issuer", () => {
+    expect(settings().metadataSeed).toEqual({
+      end_session_endpoint:
+        "https://as.example/realms/finguardops/protocol/openid-connect/logout",
+    });
+  });
+
+  it("seeds nothing else, so discovery still decides every other endpoint", () => {
+    expect(Object.keys(settings().metadataSeed ?? {})).toEqual(["end_session_endpoint"]);
+    expect(settings()).not.toHaveProperty("metadata");
+    expect(settings()).not.toHaveProperty("metadataUrl");
   });
 
   it("declares no extra query parameters", () => {
@@ -393,14 +526,83 @@ describe("createOidcSettings", () => {
     },
   );
 
-  it("accepts a nonblank nonce on set, get, and one-time remove", async () => {
+  it("accepts a whole sign-in record on set, get, and one-time remove", async () => {
     const stateStore = settings().stateStore;
-    const value = JSON.stringify({ nonce: "valid-nonce", code_verifier: "verifier" });
+    const value = storedLoginRecord("state");
 
     await stateStore?.set("state", value);
     await expect(stateStore?.get("state")).resolves.toBe(value);
     await expect(stateStore?.remove("state")).resolves.toBe(value);
     await expect(stateStore?.get("state")).resolves.toBeNull();
+  });
+
+  it("accepts a whole logout record on set, get, and one-time remove", async () => {
+    const stateStore = settings().stateStore;
+    const value = storedLogoutRecord("state");
+
+    await stateStore?.set("state", value);
+    await expect(stateStore?.get("state")).resolves.toBe(value);
+    await expect(stateStore?.remove("state")).resolves.toBe(value);
+    await expect(stateStore?.get("state")).resolves.toBeNull();
+  });
+
+  it.each(["set", "get", "remove"] as const)(
+    "refuses a logout record carrying an injected nonce on %s",
+    async (operation) => {
+      const stateStore = settings().stateStore;
+      const invalid = storedLogoutRecord("state", { nonce: "injected-nonce" });
+      if (operation !== "set") {
+        window.sessionStorage.setItem(`${OIDC_TRANSACTION_STORE_PREFIX}state`, invalid);
+      }
+
+      const result =
+        operation === "set"
+          ? stateStore?.set("state", invalid)
+          : operation === "get"
+            ? stateStore?.get("state")
+            : stateStore?.remove("state");
+
+      await expect(result).rejects.toThrow("OIDC transaction state rejected.");
+    },
+  );
+
+  it.each(["set", "get", "remove"] as const)(
+    "refuses a sign-in record whose nonce was removed on %s",
+    async (operation) => {
+      const stateStore = settings().stateStore;
+      const invalid = storedLoginRecord("state", { nonce: undefined });
+      if (operation !== "set") {
+        window.sessionStorage.setItem(`${OIDC_TRANSACTION_STORE_PREFIX}state`, invalid);
+      }
+
+      const result =
+        operation === "set"
+          ? stateStore?.set("state", invalid)
+          : operation === "get"
+            ? stateStore?.get("state")
+            : stateStore?.remove("state");
+
+      await expect(result).rejects.toThrow("OIDC transaction state rejected.");
+    },
+  );
+
+  it.each(["si:s", "si:p", "so:p", "unknown"] as const)(
+    "refuses a record for the %s request type this client never runs",
+    async (requestType) => {
+      const stateStore = settings().stateStore;
+
+      await expect(
+        stateStore?.set("state", storedLoginRecord("state", { request_type: requestType })),
+      ).rejects.toThrow("OIDC transaction state rejected.");
+    },
+  );
+
+  it("refuses a record stored under a key that is not its own id", async () => {
+    const stateStore = settings().stateStore;
+
+    await expect(stateStore?.set("other", storedLoginRecord("state"))).rejects.toThrow(
+      "OIDC transaction state rejected.",
+    );
   });
 });
 
@@ -990,12 +1192,15 @@ describe("createOidcAuthClient invalidation boundary", () => {
     client.onSessionInvalidated(invalidated);
     await client.completeSignIn("http://localhost/auth/callback?code=a");
 
-    await client.signOut();
+    // The library removes the user as part of starting the redirect, so a
+    // rejecting removal is a rejecting logout - and the local session is still
+    // gone, notified exactly once.
+    await expect(client.signOut()).rejects.toBeInstanceOf(AuthSignOutError);
 
     expect(invalidated).toHaveBeenCalledTimes(1);
-    // A second logout finds nothing left to invalidate.
+    // A second logout joins the same terminal flight and invalidates nothing.
     invalidated.mockClear();
-    await client.signOut();
+    await expect(client.signOut()).rejects.toBeInstanceOf(AuthSignOutError);
     expect(invalidated).not.toHaveBeenCalled();
   });
 
@@ -1012,14 +1217,17 @@ describe("createOidcAuthClient invalidation boundary", () => {
     expect(invalidated).not.toHaveBeenCalled();
   });
 
-  it("removes the local user and transaction records on logout", async () => {
+  it("falls back to a local teardown when there is no ID token to log out with", async () => {
     window.sessionStorage.setItem(`${OIDC_TRANSACTION_STORE_PREFIX}state`, "value");
     window.sessionStorage.setItem("theme", "dark");
     const manager = createFakeUserManager();
     const client = clientFor(manager, window.sessionStorage);
 
-    await client.signOut();
+    // Nothing was ever signed in, so the user store is empty: no redirect is
+    // started, and the only work left is the owned local cleanup.
+    await expect(client.signOut()).rejects.toBeInstanceOf(AuthSignOutError);
 
+    expect(manager.calls.signoutRedirect).toHaveLength(0);
     expect(manager.calls.removeUser).toBe(1);
     expect(window.sessionStorage.getItem(`${OIDC_TRANSACTION_STORE_PREFIX}state`)).toBeNull();
     expect(window.sessionStorage.getItem("theme")).toBe("dark");
@@ -1036,28 +1244,30 @@ describe("createOidcAuthClient shared invalidation teardown", () => {
     return { manager, client, invalidated };
   }
 
-  it("shares one teardown when logout races a pending expiry teardown", async () => {
+  it("starts no second teardown when logout races a pending expiry teardown", async () => {
     const { manager, client, invalidated } = await signedIn();
     const gate = manager.deferRemoveUser();
     window.sessionStorage.setItem(`${OIDC_TRANSACTION_STORE_PREFIX}state`, "value");
 
-    // Expiry starts teardown; removeUser is now pending.
+    // Expiry starts teardown; removeUser is now pending, and the user record it
+    // took with it is the ID token a logout would have needed.
     manager.emitAccessTokenExpired();
     expect(manager.calls.removeUser).toBe(1);
 
     // Logout arrives while that teardown is still in flight.
     const loggedOut = client.signOut();
     gate.resolve();
-    await loggedOut;
+    await expect(loggedOut).rejects.toBeInstanceOf(AuthSignOutError);
 
+    expect(manager.calls.signoutRedirect).toHaveLength(0);
     expect(manager.calls.removeUser).toBe(1);
     expect(invalidated).toHaveBeenCalledTimes(1);
     expect(window.sessionStorage.getItem(`${OIDC_TRANSACTION_STORE_PREFIX}state`)).toBeNull();
   });
 
-  it("hands concurrent callers the very same teardown promise", async () => {
+  it("hands concurrent logout callers the very same flight", async () => {
     const { manager, client } = await signedIn();
-    const gate = manager.deferRemoveUser();
+    const gate = manager.deferSignoutRedirect();
 
     const first = client.signOut();
     const second = client.signOut();
@@ -1065,6 +1275,7 @@ describe("createOidcAuthClient shared invalidation teardown", () => {
     await Promise.all([first, second]);
 
     expect(first).toBe(second);
+    expect(manager.calls.signoutRedirect).toHaveLength(1);
     expect(manager.calls.removeUser).toBe(1);
   });
 
@@ -1107,7 +1318,10 @@ describe("createOidcAuthClient shared invalidation teardown", () => {
     const loggedOut = client.signOut();
     gate.resolve();
 
-    await expect(loggedOut).resolves.toBeUndefined();
+    const error = await loggedOut.catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AuthSignOutError);
+    expect((error as Error).message).not.toContain("blocked");
+    expect((error as Error).message).not.toContain("SecurityError");
     expect(manager.calls.removeUser).toBe(1);
     expect(invalidated).toHaveBeenCalledTimes(1);
     // The failure did not restore the session.
@@ -1116,12 +1330,14 @@ describe("createOidcAuthClient shared invalidation teardown", () => {
     expect(invalidated).not.toHaveBeenCalled();
   });
 
-  it("releases the entry so a later session tears down again", async () => {
+  it("releases the teardown entry so a later session tears down again", async () => {
     const { manager, client } = await signedIn();
 
-    await client.signOut();
+    manager.emitAccessTokenExpired();
+    await Promise.resolve();
     await client.completeSignIn("http://localhost/auth/callback?code=b&state=c");
-    await client.signOut();
+    manager.emitAccessTokenExpired();
+    await Promise.resolve();
 
     expect(manager.calls.removeUser).toBe(2);
   });
@@ -1153,7 +1369,10 @@ describe("createOidcAuthClient shared invalidation teardown", () => {
       { isCallbackRoute: () => false },
     );
 
-    await expect(client.signOut()).resolves.toBeUndefined();
+    const error = await client.signOut().catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AuthSignOutError);
+    expect((error as Error).message).not.toContain("Session storage");
   });
 });
 
@@ -2167,19 +2386,21 @@ describe("createOidcAuthClient invalidateIfCurrent — session ownership", () =>
     await expect(client.authorizeRequest(new Request(REQUEST_URL))).resolves.toBeNull();
   });
 
-  it("shares one teardown with a logout that races it", async () => {
+  it("leaves nothing for a logout that races the 401 it lost to", async () => {
     const manager = createFakeUserManager();
     const client = await signedInClient(manager);
     const authorized = await authorizeOnce(client);
     const invalidated = vi.fn();
     client.onSessionInvalidated(invalidated);
-    const removeUserBefore = manager.calls.removeUser;
 
+    // The 401 invalidates first and takes the user record with it, so the
+    // logout has no ID token left to end the provider session with.
     authorized.invalidateIfCurrent();
-    await client.signOut();
+    await expect(client.signOut()).rejects.toBeInstanceOf(AuthSignOutError);
 
+    // Exactly one notification for the whole race, from the 401.
     expect(invalidated).toHaveBeenCalledTimes(1);
-    expect(manager.calls.removeUser - removeUserBefore).toBe(1);
+    expect(manager.calls.signoutRedirect).toHaveLength(0);
   });
 
   /**
@@ -2859,5 +3080,950 @@ describe("createOidcAuthClient callback - role claim fail-closed", () => {
       client.authorizeRequest(new Request(`${API_BASE_URL}/api/v1/cases`)),
     ).resolves.toBeNull();
     vi.unstubAllEnvs();
+  });
+});
+
+const END_SESSION = "https://as.example/realms/finguardops/protocol/openid-connect/logout";
+const LOGOUT_REQUEST_URL = `${API_BASE_URL}/api/v1/cases`;
+
+/**
+ * Ordinary storage until it is poisoned, so a login can complete normally and
+ * only the teardown that follows has to survive a failing removal.
+ */
+function poisonableStorage(): { storage: Storage; poison: () => void } {
+  const backing = window.sessionStorage;
+  let poisoned = false;
+  const storage = {
+    get length(): number {
+      return backing.length;
+    },
+    key: (index: number) => backing.key(index),
+    getItem: (key: string) => backing.getItem(key),
+    setItem: (key: string, value: string) => {
+      backing.setItem(key, value);
+    },
+    removeItem: (key: string) => {
+      if (poisoned) {
+        throw new DOMException("blocked at https://embed.example", "SecurityError");
+      }
+      backing.removeItem(key);
+    },
+    clear: () => {
+      backing.clear();
+    },
+  } as unknown as Storage;
+  return {
+    storage,
+    poison: () => {
+      poisoned = true;
+    },
+  };
+}
+
+describe("resolveEndSessionEndpoint", () => {
+  it("appends exactly the Keycloak end-session path to the configured issuer", () => {
+    expect(resolveEndSessionEndpoint("https://as.example/realms/finguardops")).toBe(END_SESSION);
+  });
+
+  it("does not double the separator when the issuer ends in a slash", () => {
+    expect(resolveEndSessionEndpoint("https://as.example/realms/finguardops/")).toBe(END_SESSION);
+  });
+
+  it("keeps the issuer exactly as the operator wrote it", () => {
+    expect(resolveEndSessionEndpoint("https://localhost:8443/realms/finguardops-local")).toBe(
+      "https://localhost:8443/realms/finguardops-local/protocol/openid-connect/logout",
+    );
+    // No case or default-port normalization: a difference the operator wrote
+    // stays a difference rather than something this function rewrites away.
+    expect(resolveEndSessionEndpoint("HTTPS://AS.EXAMPLE/realms/x")).toBe(
+      "HTTPS://AS.EXAMPLE/realms/x/protocol/openid-connect/logout",
+    );
+    expect(resolveEndSessionEndpoint("https://as.example:443/realms/x")).toBe(
+      "https://as.example:443/realms/x/protocol/openid-connect/logout",
+    );
+  });
+
+  it("accepts the loopback http issuer the local environment uses", () => {
+    expect(resolveEndSessionEndpoint("http://localhost:8080/realms/x")).toBe(
+      "http://localhost:8080/realms/x/protocol/openid-connect/logout",
+    );
+  });
+
+  it.each([
+    ["an unparseable issuer", "not a url"],
+    ["an empty issuer", ""],
+    ["a non-http scheme", "ftp://as.example/realms/x"],
+    ["a javascript scheme", "javascript:alert(1)"],
+    ["a data scheme", "data:text/html,x"],
+    ["a query string", "https://as.example/realms/x?prompt=none"],
+    ["a fragment", "https://as.example/realms/x#f"],
+    ["userinfo", "https://user:secret@as.example/realms/x"],
+  ])("refuses %s", (_label, authority) => {
+    expect(() => resolveEndSessionEndpoint(authority)).toThrow(EnvConfigError);
+  });
+
+  it("refuses an issuer whose message could carry the raw value", () => {
+    const error = (() => {
+      try {
+        resolveEndSessionEndpoint("https://user:SECRET_PASSWORD@as.example/realms/x");
+        return null;
+      } catch (caught) {
+        return caught as Error;
+      }
+    })();
+
+    expect(error).toBeInstanceOf(EnvConfigError);
+    expect(error?.message).not.toContain("SECRET_PASSWORD");
+  });
+});
+
+describe("resolvePostLogoutRedirectUri", () => {
+  it("is the current origin followed by exactly the root path", () => {
+    expect(resolvePostLogoutRedirectUri("http://localhost:5173")).toBe("http://localhost:5173/");
+  });
+
+  it.each([
+    ["a trailing slash", "http://localhost:5173/"],
+    ["a path", "http://localhost:5173/app"],
+    ["a query string", "http://localhost:5173?next=x"],
+    ["a fragment", "http://localhost:5173#f"],
+    ["userinfo", "http://user:secret@localhost:5173"],
+    ["a bare user", "http://user@localhost:5173"],
+    ["an opaque scheme", "javascript:alert(1)"],
+    ["an empty origin", ""],
+  ])("refuses an origin carrying %s", (_label, origin) => {
+    expect(() => resolvePostLogoutRedirectUri(origin)).toThrow(EnvConfigError);
+  });
+
+  it("carries no origin payload in the refusal", () => {
+    const error = (() => {
+      try {
+        resolvePostLogoutRedirectUri("http://user:SECRET_PASSWORD@localhost:5173");
+        return null;
+      } catch (caught) {
+        return caught as Error;
+      }
+    })();
+
+    expect(error).toBeInstanceOf(EnvConfigError);
+    expect(error?.message).not.toContain("SECRET_PASSWORD");
+  });
+});
+
+/**
+ * The library resolves metadata as `Object.assign({}, discovered, metadataSeed)`,
+ * so the seed is the last word. These cases reproduce that expression against
+ * hostile discovery documents rather than asserting it in prose.
+ */
+describe("createOidcSettings — the discovery document cannot move the logout destination", () => {
+  function resolved(discovered: Record<string, unknown>): Record<string, unknown> {
+    const seed = createOidcSettings(ENV, window.sessionStorage, "http://localhost:5173")
+      .metadataSeed;
+    return Object.assign({}, discovered, seed);
+  }
+
+  it.each([
+    ["a different issuer", "https://evil.example/realms/finguardops/protocol/openid-connect/logout"],
+    ["a different scheme", "http://as.example/realms/finguardops/protocol/openid-connect/logout"],
+    ["a different host", "https://as.evil.example/realms/finguardops/protocol/openid-connect/logout"],
+    ["a different port", "https://as.example:8443/realms/finguardops/protocol/openid-connect/logout"],
+    ["a different path", "https://as.example/realms/finguardops/protocol/openid-connect/collect"],
+    ["an added query", `${END_SESSION}?redirect=https://evil.example`],
+    ["an added fragment", `${END_SESSION}#evil`],
+    ["userinfo", "https://user:secret@as.example/realms/finguardops/protocol/openid-connect/logout"],
+    ["a javascript scheme", "javascript:fetch('https://evil.example')"],
+  ])("overrides %s advertised by discovery", (_label, endSessionEndpoint) => {
+    expect(resolved({ end_session_endpoint: endSessionEndpoint }).end_session_endpoint).toBe(
+      END_SESSION,
+    );
+  });
+
+  it("supplies the endpoint even when discovery omits it entirely", () => {
+    expect(resolved({ issuer: ENV.oidcAuthority }).end_session_endpoint).toBe(END_SESSION);
+  });
+
+  it("leaves every other discovered endpoint alone", () => {
+    const discovered = {
+      issuer: ENV.oidcAuthority,
+      authorization_endpoint: "https://as.example/realms/finguardops/protocol/openid-connect/auth",
+      token_endpoint: "https://as.example/realms/finguardops/protocol/openid-connect/token",
+      jwks_uri: "https://as.example/realms/finguardops/protocol/openid-connect/certs",
+    };
+
+    expect(resolved(discovered)).toEqual({ ...discovered, end_session_endpoint: END_SESSION });
+  });
+});
+
+describe("createOidcAuthClient remote logout", () => {
+  beforeEach(() => {
+    vi.stubEnv("VITE_API_BASE_URL", API_BASE_URL);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  async function signedIn() {
+    const manager = createFakeUserManager();
+    manager.setUser(tokenUser());
+    const client = clientFor(manager, window.sessionStorage);
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+    await client.completeSignIn("http://localhost/auth/callback?code=a&state=b");
+    return { manager, client, invalidated };
+  }
+
+  it("ends the session, the credential, the timer and the subscription in one turn", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
+    const { manager, client, invalidated } = await signedIn();
+
+    await client.signOut();
+
+    expect(invalidated).toHaveBeenCalledTimes(1);
+    expect(manager.calls.signoutRedirect).toHaveLength(1);
+    expect(manager.calls.removeUser).toBe(1);
+    await expect(client.authorizeRequest(new Request(LOGOUT_REQUEST_URL))).resolves.toBeNull();
+    await expect(client.initialize()).resolves.toEqual({ session: null });
+
+    invalidated.mockClear();
+    await vi.advanceTimersByTimeAsync(SESSION_HARD_DEADLINE_MS + 1000);
+    expect(invalidated).not.toHaveBeenCalled();
+  });
+
+  it("drops the local session before it does any remote work", async () => {
+    const { manager, client, invalidated } = await signedIn();
+    const gate = manager.deferSignoutRedirect();
+
+    const loggingOut = client.signOut();
+
+    // Nothing has been awaited yet, and the session is already gone.
+    expect(invalidated).toHaveBeenCalledTimes(1);
+    await expect(client.authorizeRequest(new Request(LOGOUT_REQUEST_URL))).resolves.toBeNull();
+
+    gate.resolve();
+    await loggingOut;
+  });
+
+  it("keeps the library's user until it has read the hint", async () => {
+    const { manager, client } = await signedIn();
+    const gate = manager.deferSignoutRedirect();
+
+    const loggingOut = client.signOut();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The redirect is in flight and the user record is still there: nothing
+    // removed it ahead of the library's own read.
+    expect(manager.calls.signoutRedirect).toHaveLength(1);
+    expect(manager.calls.removeUser).toBe(0);
+    await expect(manager.getUser()).resolves.not.toBeNull();
+
+    gate.resolve();
+    await loggingOut;
+    expect(manager.calls.removeUser).toBe(1);
+  });
+
+  it("sweeps no transaction record before starting the redirect", async () => {
+    const manager = createFakeUserManager();
+    manager.setUser(tokenUser());
+    const { storage, sweeps } = countingStorage();
+    const client = clientFor(manager, storage);
+    await client.completeSignIn("http://localhost/auth/callback?code=a&state=b");
+    const sweepsBefore = sweeps();
+
+    await client.signOut();
+
+    expect(sweeps()).toBe(sweepsBefore);
+  });
+
+  it("passes only the fixed logout marker, and never a hint", async () => {
+    const { manager, client } = await signedIn();
+
+    await client.signOut();
+
+    expect(manager.calls.signoutRedirect).toEqual([
+      { state: LOGOUT_TRANSACTION_DATA, redirectMethod: "replace" },
+    ]);
+    const [args] = manager.calls.signoutRedirect;
+    expect(Object.keys(args).sort()).toEqual(["redirectMethod", "state"]);
+    expect(JSON.stringify(args)).not.toContain(ID_TOKEN);
+    expect(JSON.stringify(args)).not.toContain(TOKEN);
+  });
+
+  it("navigates by replacing the entry, never by assigning a new one", async () => {
+    const { manager, client } = await signedIn();
+
+    await client.signOut();
+
+    // The end-session URL carries the ID token hint and the logout state, so it
+    // must not be left in session history for Back to re-issue. A regression to
+    // the library's default `assign` — or to omitting the choice — fails here.
+    expect(manager.calls.signoutRedirect).toHaveLength(1);
+    expect(manager.calls.signoutRedirect[0].redirectMethod).toBe("replace");
+    expect(manager.calls.signoutRedirect[0].redirectMethod).not.toBe("assign");
+    expect(manager.calls.signoutRedirect[0].redirectMethod).toBeDefined();
+  });
+
+  it("redirects, tears down and notifies at most once for concurrent callers", async () => {
+    const { manager, client, invalidated } = await signedIn();
+    const gate = manager.deferSignoutRedirect();
+
+    const flights = [client.signOut(), client.signOut(), client.signOut()];
+    gate.resolve();
+    await Promise.all(flights);
+
+    expect(new Set(flights).size).toBe(1);
+    expect(manager.calls.signoutRedirect).toHaveLength(1);
+    expect(manager.calls.removeUser).toBe(1);
+    expect(invalidated).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases the flight once it settles, rather than replaying its answer", async () => {
+    const { manager, client } = await signedIn();
+
+    const first = client.signOut();
+    await first;
+    const second = client.signOut();
+
+    // A settled flight is not a cached answer: the second call is a fresh
+    // attempt, which now fails closed because the library already removed the
+    // user as part of the first redirect.
+    expect(second).not.toBe(first);
+    await expect(second).rejects.toBeInstanceOf(AuthSignOutError);
+    expect(manager.calls.signoutRedirect).toHaveLength(1);
+  });
+
+  it("shares a flight only while it is still running", async () => {
+    const { manager, client, invalidated } = await signedIn();
+    const gate = manager.deferSignoutRedirect();
+
+    const pendingA = client.signOut();
+    const pendingB = client.signOut();
+    expect(pendingB).toBe(pendingA);
+
+    gate.resolve();
+    await pendingA;
+
+    expect(manager.calls.signoutRedirect).toHaveLength(1);
+    expect(invalidated).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let a pending sign-out of one session answer for the next", async () => {
+    const { manager, client, invalidated } = await signedIn();
+    const gate = manager.deferSignoutRedirect();
+
+    // Session A's logout is parked inside the redirect.
+    const sessionALogout = client.signOut();
+    expect(invalidated).toHaveBeenCalledTimes(1);
+
+    // The user signs in again while it is still in flight.
+    manager.setUser(tokenUser());
+    await client.completeSignIn("http://localhost/auth/callback?code=b&state=c");
+    await expect(client.authorizeRequest(new Request(LOGOUT_REQUEST_URL))).resolves.not.toBeNull();
+
+    // Session B's logout is its own: its own local invalidation, its own
+    // redirect, and a promise that is not session A's.
+    const sessionBLogout = client.signOut();
+    expect(sessionBLogout).not.toBe(sessionALogout);
+    await sessionBLogout;
+
+    expect(invalidated).toHaveBeenCalledTimes(2);
+    expect(manager.calls.signoutRedirect).toHaveLength(2);
+    await expect(client.authorizeRequest(new Request(LOGOUT_REQUEST_URL))).resolves.toBeNull();
+
+    gate.resolve();
+    await sessionALogout.catch(() => undefined);
+  });
+
+  it("does not let a failed sign-out of one session block the next", async () => {
+    const { manager, client, invalidated } = await signedIn();
+
+    // Session A has nothing to log out with, so its attempt fails closed.
+    manager.setStoredUser(null);
+    const sessionALogout = client.signOut();
+    await expect(sessionALogout).rejects.toBeInstanceOf(AuthSignOutError);
+    expect(manager.calls.signoutRedirect).toHaveLength(0);
+
+    // The user signs in again and signs out again; the earlier rejection is
+    // neither replayed nor allowed to stand in for the new attempt.
+    manager.setUser(tokenUser());
+    await client.completeSignIn("http://localhost/auth/callback?code=b&state=c");
+    const sessionBLogout = client.signOut();
+    expect(sessionBLogout).not.toBe(sessionALogout);
+    await expect(sessionBLogout).resolves.toBeUndefined();
+
+    expect(invalidated).toHaveBeenCalledTimes(2);
+    expect(manager.calls.signoutRedirect).toHaveLength(1);
+  });
+
+  it("drops the new session before the new attempt awaits anything", async () => {
+    const { manager, client, invalidated } = await signedIn();
+    manager.setStoredUser(null);
+    await expect(client.signOut()).rejects.toBeInstanceOf(AuthSignOutError);
+
+    manager.setUser(tokenUser());
+    await client.completeSignIn("http://localhost/auth/callback?code=b&state=c");
+    const gate = manager.deferSignoutRedirect();
+
+    const logout = client.signOut();
+
+    // Nothing has been awaited yet and session B is already gone.
+    expect(invalidated).toHaveBeenCalledTimes(2);
+    await expect(client.authorizeRequest(new Request(LOGOUT_REQUEST_URL))).resolves.toBeNull();
+
+    gate.resolve();
+    await logout;
+  });
+
+  it("notifies nobody again when expiry already ended the session", async () => {
+    const { manager, client, invalidated } = await signedIn();
+
+    manager.emitAccessTokenExpired();
+    await Promise.resolve();
+    expect(invalidated).toHaveBeenCalledTimes(1);
+
+    await expect(client.signOut()).rejects.toBeInstanceOf(AuthSignOutError);
+
+    expect(invalidated).toHaveBeenCalledTimes(1);
+    expect(manager.calls.signoutRedirect).toHaveLength(0);
+  });
+
+  it("attempts no refresh grant, silent renew or Backend call", async () => {
+    const { manager, client } = await signedIn();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await client.signOut();
+
+    expect(manager.calls.signinSilent).toBe(0);
+    expect(manager.calls.startSilentRenew).toBe(0);
+    expect(manager.calls.useRefreshToken).toBe(0);
+    expect(manager.calls.signinRedirect).toHaveLength(0);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("createOidcAuthClient remote logout — ID token fail-closed", () => {
+  beforeEach(() => {
+    vi.stubEnv("VITE_API_BASE_URL", API_BASE_URL);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  async function signedInWith(user: OidcUserLike) {
+    const manager = createFakeUserManager();
+    manager.setUser(user);
+    const client = clientFor(manager, window.sessionStorage);
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+    await client.completeSignIn("http://localhost/auth/callback?code=a&state=b");
+    return { manager, client, invalidated };
+  }
+
+  it("refuses to redirect when the store holds no user at all", async () => {
+    const { manager, client } = await signedInWith(tokenUser());
+    manager.setStoredUser(null);
+
+    await expect(client.signOut()).rejects.toBeInstanceOf(AuthSignOutError);
+
+    expect(manager.calls.signoutRedirect).toHaveLength(0);
+  });
+
+  it.each([
+    ["a missing ID token", undefined],
+    ["an empty ID token", ""],
+    ["a whitespace-only ID token", "   "],
+    ["a padded compact JWT", " header.payload.signature "],
+    ["a two-segment token", "header.payload"],
+    ["a four-segment token", "header.payload.signature.extra"],
+    ["a token with an empty segment", "header..signature"],
+    ["a token carrying a non-base64url character", "header.pay/load.signature"],
+    ["a token carrying a newline", "header.payload.sig\nnature"],
+    ["a numeric ID token", 12345],
+    ["a null ID token", null],
+    ["an object ID token", { value: "header.payload.signature" }],
+    ["an array ID token", ["header.payload.signature"]],
+  ])("refuses to redirect on %s", async (_label, idToken) => {
+    const { manager, client, invalidated } = await signedInWith(
+      tokenUser({ id_token: idToken }),
+    );
+
+    await expect(client.signOut()).rejects.toBeInstanceOf(AuthSignOutError);
+
+    expect(manager.calls.signoutRedirect).toHaveLength(0);
+    // The local logout still happened, exactly once, and is never undone.
+    expect(invalidated).toHaveBeenCalledTimes(1);
+    await expect(client.authorizeRequest(new Request(LOGOUT_REQUEST_URL))).resolves.toBeNull();
+    // Best-effort local cleanup ran instead of the redirect.
+    expect(manager.calls.removeUser).toBe(1);
+  });
+
+  it("treats an ID token getter that throws as absent", async () => {
+    const throwing = {
+      profile: { ...USER.profile },
+      access_token: TOKEN,
+      get id_token(): string {
+        throw new DOMException("blocked at https://embed.example", "SecurityError");
+      },
+      state: { returnTo: "/" },
+    } as unknown as OidcUserLike;
+    const { manager, client } = await signedInWith(throwing);
+
+    const error = await client.signOut().catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AuthSignOutError);
+    expect((error as Error).message).not.toContain("embed.example");
+    expect(manager.calls.signoutRedirect).toHaveLength(0);
+  });
+
+  it("treats a user-store read that throws as a refusal", async () => {
+    const { manager, client, invalidated } = await signedInWith(tokenUser());
+    manager.failGetUser();
+
+    await expect(client.signOut()).rejects.toBeInstanceOf(AuthSignOutError);
+
+    expect(manager.calls.signoutRedirect).toHaveLength(0);
+    expect(invalidated).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("createOidcAuthClient remote logout — redirect failure", () => {
+  beforeEach(() => {
+    vi.stubEnv("VITE_API_BASE_URL", API_BASE_URL);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  async function signedIn() {
+    const manager = createFakeUserManager();
+    manager.setUser(tokenUser());
+    const client = clientFor(manager, window.sessionStorage);
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+    await client.completeSignIn("http://localhost/auth/callback?code=a&state=b");
+    return { manager, client, invalidated };
+  }
+
+  it("keeps the local logout when the redirect refuses", async () => {
+    const { manager, client, invalidated } = await signedIn();
+    manager.failSignoutRedirect();
+
+    await expect(client.signOut()).rejects.toBeInstanceOf(AuthSignOutError);
+
+    expect(invalidated).toHaveBeenCalledTimes(1);
+    await expect(client.authorizeRequest(new Request(LOGOUT_REQUEST_URL))).resolves.toBeNull();
+    await expect(client.initialize()).resolves.toEqual({ session: null });
+  });
+
+  it("carries no provider message, hint or state out of a redirect failure", async () => {
+    const { manager, client } = await signedIn();
+    manager.failSignoutRedirect();
+
+    const error = await client.signOut().catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AuthSignOutError);
+    expect((error as Error).message).not.toContain("SECRET_HINT");
+    expect((error as Error).message).not.toContain("SECRET_STATE");
+    expect((error as Error).message).not.toContain("id_token_hint");
+    expect((error as Error).stack ?? "").not.toContain("SECRET_HINT");
+    expect((error as { cause?: unknown }).cause).toBeUndefined();
+  });
+
+  it("removes the owned transaction records after a redirect failure", async () => {
+    const { manager, client } = await signedIn();
+    manager.failSignoutRedirect();
+    window.sessionStorage.setItem(`${OIDC_TRANSACTION_STORE_PREFIX}state`, "value");
+    window.sessionStorage.setItem("theme", "dark");
+
+    await expect(client.signOut()).rejects.toBeInstanceOf(AuthSignOutError);
+
+    expect(window.sessionStorage.getItem(`${OIDC_TRANSACTION_STORE_PREFIX}state`)).toBeNull();
+    expect(window.sessionStorage.getItem("theme")).toBe("dark");
+  });
+
+  it("stays failed rather than retrying the redirect on its own", async () => {
+    const { manager, client } = await signedIn();
+    manager.failSignoutRedirect();
+
+    await expect(client.signOut()).rejects.toBeInstanceOf(AuthSignOutError);
+    await expect(client.signOut()).rejects.toBeInstanceOf(AuthSignOutError);
+
+    expect(manager.calls.signoutRedirect).toHaveLength(1);
+    expect(manager.calls.signinRedirect).toHaveLength(0);
+  });
+
+  it("survives a storage sweep that also fails, without leaking it", async () => {
+    const manager = createFakeUserManager();
+    manager.setUser(tokenUser());
+    manager.failSignoutRedirect();
+    const { storage, poison } = poisonableStorage();
+    const client = clientFor(manager, storage);
+    await client.completeSignIn("http://localhost/auth/callback?code=a&state=b");
+    window.sessionStorage.setItem(`${OIDC_TRANSACTION_STORE_PREFIX}state`, "value");
+    poison();
+
+    const error = await client.signOut().catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AuthSignOutError);
+    expect((error as Error).message).not.toContain("embed.example");
+    expect((error as Error).message).not.toContain("SecurityError");
+  });
+});
+
+describe("createOidcAuthClient logout callback", () => {
+  beforeEach(() => {
+    vi.stubEnv("VITE_API_BASE_URL", API_BASE_URL);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  const CALLBACK_URL = "http://localhost:5173/?state=9f6d2b1a-1c2d-4e3f-8a9b-0c1d2e3f4a5b";
+
+  async function signedIn() {
+    const manager = createFakeUserManager();
+    manager.setUser(tokenUser());
+    const client = clientFor(manager, window.sessionStorage);
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+    await client.completeSignIn("http://localhost/auth/callback?code=a&state=b");
+    return { manager, client, invalidated };
+  }
+
+  it("hands the captured URL to the library verbatim, once", async () => {
+    const manager = createFakeUserManager();
+    const client = clientFor(manager, window.sessionStorage);
+
+    await client.completeSignOut(CALLBACK_URL);
+
+    expect(manager.calls.signoutRedirectCallback).toEqual([CALLBACK_URL]);
+  });
+
+  it("removes no user, invalidates nothing and notifies nobody", async () => {
+    const manager = createFakeUserManager();
+    const client = clientFor(manager, window.sessionStorage);
+    const invalidated = vi.fn();
+    client.onSessionInvalidated(invalidated);
+
+    await client.completeSignOut(CALLBACK_URL);
+
+    expect(manager.calls.removeUser).toBe(0);
+    expect(manager.calls.signoutRedirect).toHaveLength(0);
+    expect(invalidated).not.toHaveBeenCalled();
+  });
+
+  it("leaves a session this page load already published completely alone", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-04T00:00:00.000Z"));
+    const { manager, client, invalidated } = await signedIn();
+    const removeUserBefore = manager.calls.removeUser;
+
+    // A stale response, belonging to session A, arriving while session B lives.
+    await client.completeSignOut(CALLBACK_URL);
+
+    expect(invalidated).not.toHaveBeenCalled();
+    expect(manager.calls.removeUser).toBe(removeUserBefore);
+    await expect(client.authorizeRequest(new Request(LOGOUT_REQUEST_URL))).resolves.not.toBeNull();
+    // Session B's own deadline is still the one that is armed.
+    await vi.advanceTimersByTimeAsync(SESSION_HARD_DEADLINE_MS);
+    expect(invalidated).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves a live session alone when the response is refused", async () => {
+    const { manager, client, invalidated } = await signedIn();
+    manager.failSignoutCallback();
+    const removeUserBefore = manager.calls.removeUser;
+
+    await expect(client.completeSignOut(CALLBACK_URL)).rejects.toBeInstanceOf(AuthSignOutError);
+
+    expect(invalidated).not.toHaveBeenCalled();
+    expect(manager.calls.removeUser).toBe(removeUserBefore);
+    await expect(client.authorizeRequest(new Request(LOGOUT_REQUEST_URL))).resolves.not.toBeNull();
+  });
+
+  it("carries no provider state or message out of a refusal", async () => {
+    const manager = createFakeUserManager();
+    manager.failSignoutCallback();
+    const client = clientFor(manager, window.sessionStorage);
+
+    const error = await client.completeSignOut(CALLBACK_URL).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AuthSignOutError);
+    expect((error as Error).message).not.toContain("SECRET_STATE");
+    expect((error as Error).message).not.toContain("No matching state");
+    expect((error as Error).stack ?? "").not.toContain("SECRET_STATE");
+  });
+
+  it("fails closed when the runtime cannot be acquired", async () => {
+    const client = createOidcAuthClient(
+      () => {
+        throw new AuthStorageUnavailableError();
+      },
+      { isCallbackRoute: () => false },
+    );
+
+    const error = await client.completeSignOut(CALLBACK_URL).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AuthSignOutError);
+    expect((error as Error).message).not.toContain("Session storage");
+  });
+
+  it("keeps initialization from sweeping the transaction it is about to consume", async () => {
+    const manager = createFakeUserManager();
+    const { storage, sweeps } = countingStorage();
+    const client = clientFor(manager, storage);
+    window.sessionStorage.setItem(
+      `${OIDC_TRANSACTION_STORE_PREFIX}9f6d2b1a-1c2d-4e3f-8a9b-0c1d2e3f4a5b`,
+      "logout record",
+    );
+
+    // Both started before either resolves, in the order the provider uses.
+    const consuming = client.completeSignOut(CALLBACK_URL);
+    const initializing = client.initialize();
+    await Promise.all([consuming, initializing]);
+
+    expect(sweeps()).toBe(0);
+    expect(manager.calls.signoutRedirectCallback).toHaveLength(1);
+  });
+
+  it("sweeps again on the next page-load initialization", async () => {
+    const manager = createFakeUserManager();
+    const { storage, sweeps } = countingStorage();
+    const client = clientFor(manager, storage);
+
+    await client.completeSignOut(CALLBACK_URL);
+    await client.initialize();
+    expect(sweeps()).toBe(0);
+
+    await client.initialize();
+    expect(sweeps()).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * A state store that counts what actually reaches the underlying storage, so
+ * "the malformed record was refused" can be told apart from "the malformed
+ * record was consumed and then refused".
+ */
+function recordingStateStore(): {
+  readonly store: StateStore;
+  readonly calls: { get: string[]; set: string[]; remove: string[] };
+  readonly items: Map<string, string>;
+} {
+  const items = new Map<string, string>();
+  const calls = { get: [] as string[], set: [] as string[], remove: [] as string[] };
+  const store: StateStore = {
+    async set(key: string, value: string): Promise<void> {
+      calls.set.push(key);
+      items.set(key, value);
+    },
+    async get(key: string): Promise<string | null> {
+      calls.get.push(key);
+      return items.get(key) ?? null;
+    },
+    async remove(key: string): Promise<string | null> {
+      calls.remove.push(key);
+      const value = items.get(key) ?? null;
+      items.delete(key);
+      return value;
+    },
+    async getAllKeys(): Promise<string[]> {
+      return [...items.keys()];
+    },
+  };
+  return { store, calls, items };
+}
+
+describe("validatingStateStore — one-time removal validates before it consumes", () => {
+  it.each([
+    ["a sign-in record", storedLoginRecord],
+    ["a logout record", storedLogoutRecord],
+  ])("returns and consumes %s that passes the schema", async (_label, build) => {
+    const backing = recordingStateStore();
+    const store = validatingStateStore(backing.store);
+    const value = build("state");
+    backing.items.set("state", value);
+
+    await expect(store.remove("state")).resolves.toBe(value);
+
+    expect(backing.calls.remove).toEqual(["state"]);
+    expect(backing.items.has("state")).toBe(false);
+  });
+
+  it.each([
+    ["a sign-in record whose nonce was removed", storedLoginRecord("state", { nonce: undefined })],
+    ["a sign-in record with an injected token parameter", storedLoginRecord("state", { extraTokenParams: { code_verifier: "attacker" } })],
+    ["a sign-in record stamped as a logout", storedLoginRecord("state", { request_type: "so:r" })],
+    ["a logout record carrying a nonce", storedLogoutRecord("state", { nonce: "injected" })],
+    ["a logout record carrying a verifier", storedLogoutRecord("state", { code_verifier: "injected" })],
+    ["a record for a silent request", storedLoginRecord("state", { request_type: "si:s" })],
+    ["a record whose id disagrees with its key", storedLoginRecord("other")],
+    ["an unparseable record", "{"],
+  ])("refuses %s without consuming it", async (_label, stored) => {
+    const backing = recordingStateStore();
+    const store = validatingStateStore(backing.store);
+    backing.items.set("state", stored);
+
+    await expect(store.remove("state")).rejects.toThrow("OIDC transaction state rejected.");
+
+    // The refusal is not destructive: nothing reached the underlying removal,
+    // and the record a legitimate flow might still need is untouched.
+    expect(backing.calls.remove).toEqual([]);
+    expect(backing.items.get("state")).toBe(stored);
+  });
+
+  it("refuses when the record changes between the preview and the removal", async () => {
+    const backing = recordingStateStore();
+    const valid = storedLoginRecord("state");
+    backing.items.set("state", valid);
+    const racing: StateStore = {
+      ...backing.store,
+      async remove(key: string): Promise<string | null> {
+        // Something rewrote the record after it was validated.
+        return `${await backing.store.remove(key)} `;
+      },
+    };
+    const store = validatingStateStore(racing);
+
+    await expect(store.remove("state")).rejects.toThrow("OIDC transaction state rejected.");
+  });
+
+  it("reports a missing record as missing, and removes nothing", async () => {
+    const backing = recordingStateStore();
+    const store = validatingStateStore(backing.store);
+
+    await expect(store.remove("state")).resolves.toBeNull();
+
+    expect(backing.calls.remove).toEqual([]);
+  });
+
+  it("still refuses a malformed record on set and on get", async () => {
+    const backing = recordingStateStore();
+    const store = validatingStateStore(backing.store);
+    const invalid = storedLogoutRecord("state", { nonce: "injected" });
+
+    await expect(store.set("state", invalid)).rejects.toThrow("OIDC transaction state rejected.");
+    expect(backing.calls.set).toEqual([]);
+
+    backing.items.set("state", invalid);
+    await expect(store.get("state")).rejects.toThrow("OIDC transaction state rejected.");
+    expect(backing.items.get("state")).toBe(invalid);
+  });
+
+  it("carries no stored value out through the refusal", async () => {
+    const backing = recordingStateStore();
+    const store = validatingStateStore(backing.store);
+    backing.items.set(
+      "state",
+      storedLoginRecord("state", { nonce: undefined, code_verifier: "SECRET_VERIFIER" }),
+    );
+
+    const error = await store.remove("state").catch((caught: unknown) => caught);
+
+    expect((error as Error).message).toBe("OIDC transaction state rejected.");
+    expect((error as Error).message).not.toContain("SECRET_VERIFIER");
+    expect((error as Error).stack ?? "").not.toContain("SECRET_VERIFIER");
+  });
+});
+
+/**
+ * The sign-in schema, checked against the record oidc-client-ts 3.5.0 actually
+ * writes rather than against a fixture that only looks like one.
+ *
+ * A real `UserManager` is driven through a real `signinRedirect`, with only the
+ * discovery document and the navigation replaced. `extraTokenParams` is on the
+ * required list because of what this test observes, not because of what the
+ * library's source appears to do.
+ */
+describe("createOidcSettings — the real library's login record satisfies the schema", () => {
+  const ORIGIN = "http://localhost:5173";
+
+  async function captureRealLoginRecord(): Promise<{ key: string; value: string }> {
+    const captured: Array<{ key: string; value: string }> = [];
+    const settings = createOidcSettings(ENV, window.sessionStorage, ORIGIN);
+    const realStore = new WebStorageStateStore({
+      store: new InMemoryWebStorage(),
+      prefix: OIDC_TRANSACTION_STORE_PREFIX,
+    });
+    const manager = new UserManager({
+      ...settings,
+      // Only the two things a jsdom test cannot perform for real.
+      metadata: {
+        issuer: ENV.oidcAuthority,
+        authorization_endpoint: `${ENV.oidcAuthority}/protocol/openid-connect/auth`,
+        token_endpoint: `${ENV.oidcAuthority}/protocol/openid-connect/token`,
+        jwks_uri: `${ENV.oidcAuthority}/protocol/openid-connect/certs`,
+      },
+      stateStore: {
+        set: async (key: string, value: string) => {
+          captured.push({ key, value });
+          await realStore.set(key, value);
+        },
+        get: (key: string) => realStore.get(key),
+        remove: (key: string) => realStore.remove(key),
+        getAllKeys: () => realStore.getAllKeys(),
+      },
+      redirectNavigator: {
+        prepare: async () => ({
+          navigate: async () => new Promise<never>(() => undefined),
+          close: () => undefined,
+        }),
+        callback: async () => undefined,
+      },
+    } as unknown as ConstructorParameters<typeof UserManager>[0]);
+
+    void manager.signinRedirect({ state: { returnTo: "/health" }, nonce: generateLoginNonce() });
+    await vi.waitFor(() => {
+      expect(captured).toHaveLength(1);
+    });
+    return captured[0];
+  }
+
+  it("writes a record this application's schema accepts", async () => {
+    const { key, value } = await captureRealLoginRecord();
+
+    expect(isApprovedTransactionRecord(key, value)).toBe(true);
+  });
+
+  it("writes exactly the fields the pinned schema lists", async () => {
+    const { value } = await captureRealLoginRecord();
+
+    expect(Object.keys(JSON.parse(value) as Record<string, unknown>).sort()).toEqual([
+      "authority",
+      "client_id",
+      "code_verifier",
+      "created",
+      "data",
+      "extraTokenParams",
+      "id",
+      "nonce",
+      "redirect_uri",
+      "request_type",
+      "scope",
+    ]);
+  });
+
+  it("writes extraTokenParams as an own property holding an empty object", async () => {
+    const { value } = await captureRealLoginRecord();
+    const record = JSON.parse(value) as Record<string, unknown>;
+
+    expect(Object.prototype.hasOwnProperty.call(record, "extraTokenParams")).toBe(true);
+    expect(record.extraTokenParams).toEqual({});
+    expect(Object.keys(record.extraTokenParams as object)).toHaveLength(0);
+  });
+
+  it("stamps the redirect sign-in request type and the key it is stored under", async () => {
+    const { key, value } = await captureRealLoginRecord();
+    const record = JSON.parse(value) as Record<string, unknown>;
+
+    expect(record.request_type).toBe(OIDC_LOGIN_REQUEST_TYPE);
+    expect(record.id).toBe(key);
   });
 });

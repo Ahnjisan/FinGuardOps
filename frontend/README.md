@@ -232,16 +232,72 @@ protocol-relative(`//host`), backslash 변형, encoded slash/backslash, allowlis
   (`pageshow`의 `event.persisted`), 아직 `authenticating`이면 pending을 해제하고 재시도
   가능한 고정 오류 상태로 전환한다. 자동 재로그인은 하지 않으며 사용자는 `Sign in`을 다시
   누를 수 있다. 임의의 timeout으로 pending을 해제하지는 않는다.
-- logout은 memory token과 transaction record를 제거하는 local logout이다. remote
-  end-session redirect와 logout callback route는 후속 Keycloak remote logout Issue에서 결정한다.
+### Remote logout (RP-initiated)
+
+Issue #247에서 local logout을 Keycloak RP-initiated logout으로 확장했다. realm, bootstrap,
+verifier와 production router는 변경하지 않았다.
+
+- `Sign out`은 먼저 **동기적으로** application session, session ownership, 15분 deadline
+  timer를 제거하고 subscriber에게 정확히 1회 통보한다. 그다음에야 remote 작업을 시작하므로
+  redirect를 준비하는 동안 UI가 인증된 상태로 남는 구간이 없다.
+- OIDC user record는 library가 hint를 읽을 때까지 유지한다. adapter는 `signoutRedirect()`
+  이전에 `removeUser()`나 transaction 정리를 실행하지 않는다.
+- ID token은 로그인 callback에서 library가 검증해 memory user store에 보관한 값을 library가
+  내부적으로 `id_token_hint`로 사용한다. application은 ID token을 state·React·DOM에 복사하지
+  않고 logout 인자로 전달하지도 않는다. adapter는 존재 여부와 compact JWT 형태만 fail-closed로
+  확인하며 원문을 이름에 바인딩하거나 복사·출력하지 않는다. 별도 JWK 재검증은 하지 않고
+  로그인 callback에서 검증된 provenance를 신뢰한다(ADR-011 2.9).
+- ID token이 없거나 runtime 형태가 잘못되었거나 getter가 throw하면 redirect하지 않고 local
+  cleanup 후 고정 `AuthSignOutError`로 끝난다.
+- 목적지는 discovery가 아니라 설정된 issuer에서 고정한다. `metadataSeed.end_session_endpoint`가
+  issuer + exact `/protocol/openid-connect/logout`이며, library는 discovery 문서 위에 seed를
+  덮어쓰므로 변조된 discovery 응답이 목적지를 옮길 수 없다.
+- `post_logout_redirect_uri`는 현재 origin + exact `/`뿐이다. query·fragment·userinfo·경로가
+  섞인 origin은 URL 재파싱으로 거부한다. Keycloak client의 exact allowlist와 동일한 문자열이다.
+- 동시 logout은 같은 session generation에서 pending인 동안만 하나의 flight를 공유한다. 그 attempt의
+  redirect, logical teardown, subscriber 통보는 각각 1회이며, flight는 settlement 후 해제된다.
+  같은 page에서 재로그인한 새 session generation의 logout은 이전 flight를 재사용하지 않고 새 remote
+  logout을 수행한다. 실패한 logout은 종료 상태로 남고 자동 retry하지 않는다.
+- 실패 시 OIDC user와 이 애플리케이션이 소유한 transaction record를 best-effort로 제거하고
+  고정 `AuthSignOutError`만 노출한다. provider 원문, token, state, end-session URL은 message,
+  stack, cause 어디에도 담지 않는다. redirect가 실패해도 local logout은 복원하지 않는다.
+
+#### Logout callback
+
+- logout callback route는 exact `/`다. 로그인 callback `/auth/callback`과 분리되어 있고
+  production router와 HomePage는 변경하지 않았다.
+- `AuthProvider`가 최초 `initialize()` **이전에** 주소창을 분류한다. 응답이면 library 호출
+  전에 `history.replaceState()`로 bare `/`로 정리하므로 state와 provider error description이
+  주소창이나 `document.referrer`에 남지 않는다.
+- 분류는 fail-closed다: exact origin, exact `/`, fragment 없음, userinfo 없음, `state` 정확히
+  1개이며 nonblank, 허용 parameter는 `state`·`error`·`error_description`·`error_uri`뿐,
+  중복·unknown parameter 거부, `error` 없는 `error_description` 거부, `;`(library의 url-state
+  구분자)나 공백이 섞인 state 거부.
+- callback은 logout transaction만 정확히 1회 consume한다. `removeUser()`, session
+  invalidation, subscriber 통보를 실행하지 않으므로 session B가 살아 있는 상태에서 session A의
+  stale callback이 도착해도 B의 session·memory user·deadline timer가 그대로 유지된다.
+- `initialize()`는 logout callback이 claim된 동안 transaction prefix를 sweep하지 않는다.
+  provider도 callback이 settle한 뒤에 `initialize()`를 호출하므로 sweep이 consume 대상 record를
+  먼저 지우는 순서가 존재하지 않는다.
+- 성공은 unauthenticated, 실패는 credential 없는 고정 logout 오류로 끝난다. 성공·실패 모두
+  최종 주소는 exact `/`다.
 
 ### 인증 상태
 
 인증 상태는 boolean 조합이 아니라 discriminated union이다: `initializing`,
-`unauthenticated`, `authenticating`, `authenticated`, `error`. 모든 전이는 출발 상태로
-보호되므로 중복 로그인 시작, 중복 callback 처리, 늦게 도착한 결과가 상태를 되돌리지 못한다.
-UI에는 `subject`, token, claim, Provider 원문을 렌더링하지 않으며 오류는
-`configuration`·`sign-in`·`callback` 세 가지 고정 메시지로만 표시한다.
+`unauthenticated`, `authenticating`, `authenticated`, `signing-out`, `error`. 모든 전이는
+출발 상태로 보호되므로 중복 로그인 시작, 중복 logout 시작, 중복 callback 처리, 늦게 도착한
+결과가 상태를 되돌리지 못한다. UI에는 `subject`, token, claim, Provider 원문을 렌더링하지
+않으며 오류는 `configuration`·`sign-in`·`callback`·`sign-out` 네 가지 고정 메시지로만 표시한다.
+
+`signing-out`은 credential도 session도 담지 않는다. `Sign out` 직후 authenticated session과
+capability는 즉시 화면에서 사라지고, end-session redirect가 진행되는 동안 `Sign in`과
+`Sign out` 버튼은 모두 제거되므로 중복 실행이 삼켜지는 죽은 버튼이 생기지 않는다.
+`RequireCapability`는 `signing-out`을 `unauthenticated`와 같은 "session 없음" 분기로 처리한다.
+
+redirect가 취소되거나 back/forward cache에서 이 문서로 돌아오면(`pageshow`의
+`event.persisted`) `signing-out`은 `unauthenticated`로 풀린다. local logout은 절대 되돌리지
+않으며 자동 retry도 자동 재로그인도 하지 않는다.
 
 ### Authorization Server 경계
 
@@ -591,6 +647,7 @@ transport 또는 credential capability의 재검증을 하나라도 제거하면
 | Port | 표면 | 전달 대상 |
 | --- | --- | --- |
 | `AuthClient` | `initialize`, `signIn`, `completeSignIn`, `signOut`, `onSessionInvalidated` | React tree |
+| `SignOutCallbackClient` | `completeSignOut` | `AuthProvider`만 (React tree 비공개) |
 | `CredentialAuthClient extends AuthClient` | 위 + `authorizeRequest` | 인증 transport만 |
 
 ```ts
@@ -845,7 +902,6 @@ timer와 단계 사이의 명시적 경과시간 검사가 이를 공유한다. 
 - 문서에만 존재하는 후보 endpoint (`GET /api/v1/cases/{caseId}/transactions` 등)
 - 오류 응답 body 모델(`code`·`message`·`fieldErrors`)
 - production Authorization Server와 production runtime 배포
-- remote end-session(RP-initiated logout)
 - silent renew와 refresh token 사용은 지원하지 않으며 도입하려면 별도 승인이 필요하다.
 - Local JWT fixture(Issue #225의 `infra/compose.local-jwt-e2e.yml`)는 로컬/수동 인증 E2E
   검증용 컴포넌트이며, 브라우저에서 사용하는 OIDC Provider가 아니다. Frontend browser E2E는
@@ -867,6 +923,29 @@ callback parameter 판정, 복귀 경로 allowlist, StrictMode 아래 initialize
 listener 등록·해제 균형, unmount 이후 미갱신, fake clock 기반 15분 hard deadline(899,999ms
 유지 / 900,000ms 무효화, 60분 token도 15분, 더 짧은 token은 그 시각), idempotent
 invalidation, local logout, public route에서 Authorization Server 요청 0회를 확인한다.
+
+remote logout unit test는 정상 logout에서 session·credential·timer가 모두 0이 되고 subscriber
+통보·`removeUser()`·`signoutRedirect()`가 각각 정확히 1회임을, `signoutRedirect()` 인자가 고정
+logout marker 하나뿐이며 ID token도 access token도 담기지 않음을, redirect 시작 전에 transaction
+sweep이 0회이고 memory user가 그대로 남아 있음을 확인한다. 동시 logout 3회는 하나의 flight를
+공유하고 settle 이후 재호출도 redirect를 늘리지 않는다. expiry·401이 먼저 session을 끝낸 경우
+logout은 redirect 없이 고정 오류로 끝나고 통보는 총 1회다. ID token 누락·빈 문자열·공백·2/4
+segment·빈 segment·비 base64url 문자·개행·숫자·null·object·array와 getter 예외, user store 읽기
+예외는 모두 redirect 0회로 거부하고 local logout은 1회로 유지한다. `metadataSeed`는 issuer·
+scheme·host·port·path·query·fragment·userinfo·`javascript:`로 변조된 discovery
+`end_session_endpoint`를 모두 덮어쓰며 다른 endpoint는 건드리지 않는다.
+`post_logout_redirect_uri`는 trailing slash·경로·query·fragment·userinfo·opaque scheme·빈 origin을
+거부한다. transaction record는 `si:r`/`so:r` 두 schema로 분리해 malformed JSON, key/id 불일치,
+unknown·missing field, login nonce 삭제, logout nonce·PKCE verifier 삽입, popup·silent·unknown
+request type, schema 교차를 set·get·remove 모두에서 거부한다. logout callback은 captured URL을
+그대로 1회만 넘기고 `removeUser()`·invalidation·통보를 0회 수행하며, session B가 살아 있는 상태
+에서 성공·실패 어느 쪽으로 끝나도 B의 session·credential·deadline을 그대로 둔다. root callback
+분류는 bare 진입·무관 parameter·다른 경로·다른 origin·다른 port·다른 scheme을 `none`으로,
+fragment·userinfo·중복 state·blank state·unknown parameter·`error` 없는 `error_description`·
+`;` 포함 state를 거부로 판정하고, 거부 시 library 호출 0회와 주소창 정리를 확인한다. React 계층은
+`signing-out`에서 session·displayName·양쪽 버튼이 사라지는 것, 반복 클릭에도 logout 1회, 진행 중
+`Sign in` 0회, 실패 시 고정 문자열과 재로그인 가능, persisted `pageshow`에서 unauthenticated 유지와
+자동 retry·자동 login 0회를 확인한다.
 
 credential capability는 외부 origin, 유사 host, public health, SERVICE ingestion 두 개,
 management 8081, FastAPI 후보 origin, Prometheus, Grafana, Alertmanager, 승인 path의 trailing
@@ -945,14 +1024,64 @@ non-2xx에서는 계속 malformed header를 폐기해 오류가 오류로 남는
 (`400`·`401`·`403`·`404`·`409`·`422`·`500`·`503`·network)에서 fetch 1회·retry 0회·replay
 0회와 401 invalidation·403 session 유지·5초 deadline·raw body 비노출 회귀도 함께 확인한다.
 
-`npm run e2e:keycloak`은 Chromium 1 worker·retry 0·strict TLS로 실제 Keycloak 로그인과
+Keycloak browser E2E는 Chromium 1 worker·retry 0·strict TLS로 실제 Keycloak 로그인과
 refresh-token, state, 저장 nonce 삭제·blank·불일치, ID token nonce 누락·불일치, PKCE,
 callback 재사용 반례를 각각 실행한다. 정상 경로는 authorize URL과 저장 transaction의 nonce가
 동일하고 256-bit base64url인지, authorize/transaction scope가 exact `openid profile`인지와 stock
-`profile`의 `preferred_username` claim이 실제 발급되는지도 확인한다. Windows에서는 repository root의
-`frontend/scripts/run-keycloak-e2e.ps1`이 검증된 localhost certificate의 현재 사용자 신뢰와
-전용 Compose project 수명주기를 함께 관리한다. trace·screenshot·video·HTML report는 만들지 않고
-임시 output은 종료 시 제거한다.
+`profile`의 `preferred_username` claim이 실제 발급되는지도 확인한다. repository root의
+`frontend/scripts/run-keycloak-e2e.ps1`이 격리 Chromium container와 전용 Compose project 수명주기를
+함께 관리한다.
+
+브라우저는 host 브라우저가 아니다. Chromium은 `@playwright/test` 버전과 정확히 일치하고 immutable
+digest로 고정한 공식 Playwright Linux image에서 `frontend/Dockerfile.playwright-e2e`로 빌드한 전용
+image 안에서 실행되고, 실행별 NSS database에 검증된 `localhost` leaf만 `certutil -t "P,,"`로
+등록한다. runner는 Windows `CurrentUser`·`LocalMachine` 인증서 저장소를 열지 않고
+`ignoreHTTPSErrors`·`--ignore-certificate-errors`·SPKI allowlist·hostname 우회도 쓰지 않으므로
+strict TLS와 `localhost` 이름 검증이 그대로 성립한다.
+
+준비와 실행은 분리되어 있다. `-Mode Prepare`만 registry와 package archive에 접근해 Compose image를
+pull·build하고 browser image를 빌드하며, `apt`도 그 image build 안에서만 exact version으로 실행되고
+같은 layer에서 cache가 제거된다. 공식 `-Mode Run`은 필요한 모든 image가 local에 있는지 먼저 확인하고,
+어긋나면 registry에 접근하지 않고 고정 오류로 끝난다.
+
+browser image 판정은 label에 두지 않는다. label은 누구나 복제할 수 있으므로 Run은 label을 조기 중단
+용도로만 읽고, local 검사만으로 고정 digest base가 local에 있는지, base와 준비 image가 모두
+linux/amd64인지, base의 RootFS layer 목록이 준비 image RootFS의 exact ordered prefix인지, Dockerfile
+구조대로 layer가 정확히 하나만 추가되었는지, `Config.User`가 exact `pwuser`인지를 확인한다. 이어서
+`--network none --read-only --cap-drop ALL --security-opt no-new-privileges` container를 한 번
+실행해 `libnss3-tools`·`libnss3` exact version, `certutil` 위치·소속 package와 실제 NSS database
+생성·조회, exact Node version, mount된 `playwright-core`의 exact version과 그 `browsers.json`이
+요구하는 browser revision 집합, Chromium·headless shell 실행 파일의 존재·실행 가능·exact build,
+실제 UID·GID·계정 이름을 확인하고, 같은 container가 `NoNewPrivs`·capability 0·read-only root·
+loopback 단독 interface까지 확인한다. 실패는 관측값을 반사하지 않는 고정 문장이다.
+
+mount가 사용자 지정인지는 container 안에서는 판정할 수 없다. `--tmpfs /dev/shm/x`는 daemon이
+직접 mount하는 `/dev/shm`과, `/proc` 아래의 bind는 runc가 만드는 kernel 가상 mount와 구분되지
+않기 때문이다. 따라서 이 runner가 만드는 모든 container는 `docker create`로 멈춰서 만들고,
+`docker container inspect`로 daemon의 기록을 다시 읽어 승인된 구성과 exact하게 비교한 뒤,
+검사한 바로 그 exact container ID만 `docker start`한다. 비교 대상은 network mode와 attach된 network,
+`ReadonlyRootfs`, `Privileged`, `CapAdd`·`CapDrop`, `SecurityOpt`, device·device request·`VolumesFrom`,
+`Binds`와 `Mounts`의 physical source·destination·type·read-only·propagation, `Tmpfs`의 target과
+option, 그리고 published port 전체다. 승인 목록에 없는 것은 이름되지 않았다는 이유로 거부되므로
+Docker socket·repository working tree·credential·private key mount는 target을 어디로 잡아도 container가
+시작되기 전에 끝난다. bind source는 repository 안의 link 없는 physical 경로로 먼저 해석하므로
+junction이나 prefix만 같은 경로도 다른 값으로 거부된다.
+
+Compose는 `--no-build --pull never`, browser는 `--pull never`로 시작하며 대상은 tag가
+아니라 시작 전에 확인한 exact image ID이고, 시작 직후 container가 그 image로 돌고 있는지 한 번 더
+확인한다. 종료 경로의 `finally`는 이번 실행이 만든 exact container ID만 제거한다. Run 경로에는 npm과 npx 실행이 없다. runner는 설치된 `node_modules/@playwright/test/cli.js`를
+현재 Node executable에 argument vector로 넘겨 직접 실행하고, web server는 `frontend`를 cwd로 삼아
+`node node_modules/vite/bin/vite.js`를 실행한다. 둘 다 package 이름이 아니라 설치된 파일 경로라서
+registry fallback 자체가 없고, entry point가 없거나 package version이 다르면 container를 하나도 만들기
+전에 고정 오류로 끝난다. Run 단계의 build·pull·`apt`·npm/npx 다운로드는 0회다.
+
+container loopback의 5173·8443만 host loopback으로 TCP 중계하며 TLS를 종료하지 않는다. 중계 목록은
+code에 고정되어 있고 relay는 인자를 받지 않으므로 CLI argument·환경 변수·임의 host/port로 넓힐 수
+없다. privileged mode, 추가 capability, Docker socket mount는 사용하지 않고 dependency와 lockfile도
+변경하지 않는다. trace·screenshot·video·HTML report는 만들지 않고 임시 output·NSS·profile은 종료 시
+제거한다.
+자세한 내용은 [`Local Keycloak runbook`](../docs/09-deployment/local-keycloak-auth-e2e-runbook.md)
+3.1에 있다.
 
 lifecycle은 인증 준비 pending, fetch pending, body·JSON pending timeout이 각각 전체 5초로
 합산되는 것, 외부 abort와 이미 aborted signal, timeout 시 `AbortController` 호출,
@@ -1007,8 +1136,8 @@ role 기반 UI는 두 부분으로 나누어 본다. Issue #243에서 검증된 
 capability를 결정하는 판정 계층(`src/auth/userRoles.ts`, `src/auth/capabilities.ts`,
 `src/auth/useCapabilities.ts`)과 `RequireCapability` guard 컴포넌트는 구현했다. 반면 이를 적용한
 production 보호 route·navigation 항목·action은 아직 0개이며, guard의 동작은 test 전용
-`MemoryRouter` route에서만 검증한다. 자세한 내용은 위 `권한 UI 경계`에 있다. remote logout은
-그대로 미구현이다.
+`MemoryRouter` route에서만 검증한다. 자세한 내용은 위 `권한 UI 경계`에 있다. Keycloak
+remote logout은 Issue #247에서 구현했다. 자세한 내용은 위 `Remote logout (RP-initiated)`에 있다.
 
 local realm에는 USER가 하나뿐이라 role 조합별 browser E2E는 수행하지 않았고, role·capability
 판정은 단위·컴포넌트 테스트가 담당한다. Frontend production code는 access token을 직접

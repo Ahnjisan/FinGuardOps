@@ -12,6 +12,10 @@ const CALLBACK_URL = `${APP_ORIGIN}/auth/callback`;
 const AUTHORITY = "https://localhost:8443/realms/finguardops-local";
 const AUTHORIZE_URL = `${AUTHORITY}/protocol/openid-connect/auth`;
 const TOKEN_URL = `${AUTHORITY}/protocol/openid-connect/token`;
+const END_SESSION_URL = `${AUTHORITY}/protocol/openid-connect/logout`;
+const POST_LOGOUT_REDIRECT_URI = `${APP_ORIGIN}/`;
+const SIGN_OUT_FAILURE_MESSAGE =
+  "Sign-out could not be completed. You are signed out of this browser.";
 const TRANSACTION_PREFIX = "finguardops.oidc.transaction.";
 const USER_PREFIX = "finguardops.oidc.user.";
 const USERNAME = "local-fds-analyst";
@@ -252,7 +256,12 @@ async function beginLogin(
   await page.goto("/");
   await page.getByRole("button", { name: "Sign in" }).click();
   const capture = await observer.capture;
-  await expect(page.locator("#username")).toBeVisible();
+  // Keycloak compiles its login theme on the first request that asks for it,
+  // and the first navigation of the suite is that request. The default
+  // expectation timeout is about the application being wrong, not about an
+  // Authorization Server that has been up for seconds rather than minutes, so
+  // this one wait is given room for that first render.
+  await expect(page.locator("#username")).toBeVisible({ timeout: 30_000 });
   await page.locator("#username").fill(USERNAME);
   await page.locator("#password").fill(password);
   return capture;
@@ -374,6 +383,10 @@ function relayToBackend(request: PlaywrightRequest): number {
       cwd: REPO_ROOT,
       encoding: "utf8",
       input: `${request.method()}\n${url.pathname}\n${credential}\n${body}\n`,
+      // A Backend answer relayed inside an already running container. This is
+      // the bound the run holds Compose exec to; exceeding it is a failure of
+      // this relay, reported as the same fixed sentence as any other, and never
+      // widened to absorb a slow Backend.
       timeout: 15_000,
       windowsHide: true,
     },
@@ -606,7 +619,12 @@ test("real USER login enforces PKCE, token claims, and Backend boundaries", asyn
       return error instanceof Error ? error.name : "unknown";
     }
   });
-  requireCondition(caseListResult === "ok", "The authenticated case-list request failed.");
+  requireCondition(
+    caseListResult === "ok",
+    // The observed value is an error *name* and nothing else, so naming it here
+    // says why the request failed without carrying a body, claim or credential.
+    `The authenticated case-list request failed: ${caseListResult}`,
+  );
 
   const unauthenticatedStatus = await page.evaluate(async () => {
     const response = await fetch("http://localhost:8080/api/v1/cases", {
@@ -802,4 +820,186 @@ test("a consumed callback cannot be reused", async ({ page }) => {
   requireCondition((await publicationCount(page)) === 0, "A reused callback published a session.");
   requireCondition(backendRequests.length === 0, "A reused callback reached the Backend.");
   requireCondition(!(await hasOwnedStorage(page)), "A reused callback restored transaction state.");
+});
+
+async function expectSignOutFailure(page: Page): Promise<void> {
+  await expect(page.getByRole("status", { name: "Authentication status" })).toHaveText(
+    SIGN_OUT_FAILURE_MESSAGE,
+  );
+}
+
+/**
+ * The real RP-initiated logout, end to end: a real USER session, the real
+ * Keycloak end-session endpoint, the real post-logout redirect back to the
+ * application root, and the one-time logout transaction that lands with it.
+ */
+test("real USER sign-out ends the Keycloak session and cannot be replayed", async ({ page }) => {
+  const password = readUserPassword();
+  const consoleMessages: string[] = [];
+  const tokenGrantTypes: string[] = [];
+  const backendRequests: string[] = [];
+  const endSessionRequests: string[] = [];
+  const postLogoutCallbacks: string[] = [];
+  page.on("console", (message) => consoleMessages.push(message.text()));
+  page.on("request", (request) => {
+    const url = request.url();
+    if (url === END_SESSION_URL || url.startsWith(`${END_SESSION_URL}?`)) {
+      endSessionRequests.push(url);
+    }
+    if (url.startsWith(`${APP_ORIGIN}/?`) && request.method() === "GET") {
+      postLogoutCallbacks.push(url);
+    }
+    if (url === TOKEN_URL && request.method() === "POST") {
+      tokenGrantTypes.push(new URLSearchParams(request.postData() ?? "").get("grant_type") ?? "");
+    }
+    if (url.startsWith("http://localhost:8080/")) {
+      backendRequests.push(request.method());
+    }
+  });
+
+  await beginLogin(page, password);
+  const tokenResponsePromise = page.waitForResponse(
+    (response) => response.url() === TOKEN_URL && response.request().method() === "POST",
+  );
+  await submitLogin(page);
+  const tokens = parseTokenResponse(await (await tokenResponsePromise).json());
+  await expect(page.getByLabel("Authentication status")).toContainText("Signed in as");
+  requireCondition((await publicationCount(page)) === 1, "The session was not published once.");
+
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await page.waitForURL(POST_LOGOUT_REDIRECT_URI);
+
+  // Exactly one end-session request, to the exact endpoint of the configured
+  // issuer, carrying exactly the three parameters this client sends.
+  requireCondition(endSessionRequests.length === 1, "The end-session endpoint request count differed.");
+  const endSession = new URL(endSessionRequests[0]);
+  requireCondition(
+    `${endSession.origin}${endSession.pathname}` === END_SESSION_URL,
+    "The end-session destination differed.",
+  );
+  requireCondition(endSession.hash === "", "The end-session request carried a fragment.");
+  requireCondition(endSession.username === "" && endSession.password === "", "The end-session request carried userinfo.");
+  const endSessionKeys = [...endSession.searchParams.keys()].sort();
+  requireCondition(
+    endSessionKeys.length === 3 &&
+      endSessionKeys[0] === "id_token_hint" &&
+      endSessionKeys[1] === "post_logout_redirect_uri" &&
+      endSessionKeys[2] === "state",
+    "The end-session parameter set differed.",
+  );
+  requireCondition(
+    endSession.searchParams.get("post_logout_redirect_uri") === POST_LOGOUT_REDIRECT_URI,
+    "The post-logout redirect URI was not the exact allowlisted root.",
+  );
+  requireCondition(
+    endSession.searchParams.get("id_token_hint") === tokens.idToken,
+    "The end-session hint was not the ID token the library validated.",
+  );
+  const logoutState = endSession.searchParams.get("state") ?? "";
+  requireNonBlankString(logoutState, "The logout state was blank.");
+  requireCondition(/^[A-Za-z0-9._~-]{1,256}$/.test(logoutState), "The logout state shape was invalid.");
+
+  // The response landed on the exact application root, carrying only that state.
+  requireCondition(postLogoutCallbacks.length === 1, "The post-logout callback count differed.");
+  const postLogoutCallbackUrl = postLogoutCallbacks[0];
+  const callback = new URL(postLogoutCallbackUrl);
+  requireCondition(callback.origin === APP_ORIGIN && callback.pathname === "/", "The post-logout callback address differed.");
+  requireCondition([...callback.searchParams.keys()].join(",") === "state", "The post-logout callback parameter set differed.");
+  requireCondition(callback.searchParams.get("state") === logoutState, "The post-logout callback state differed.");
+
+  // The address bar was cleaned, the local session is gone and the one-time
+  // logout transaction was consumed.
+  requireCondition(page.url() === POST_LOGOUT_REDIRECT_URI, "The browser did not settle on the exact application root.");
+  await expect(page.getByRole("button", { name: "Sign in" })).toBeVisible();
+  await expect(page.getByLabel("Authentication status")).not.toContainText("Signed in");
+  requireCondition(!(await hasOwnedStorage(page)), "Sign-out retained OIDC transaction or user state.");
+  requireCondition((await publicationCount(page)) === 0, "The signed-out page published a session.");
+  requireCondition(backendRequests.length === 0, "Sign-out reached the Backend.");
+  requireCondition(
+    tokenGrantTypes.length === 1 && tokenGrantTypes[0] === "authorization_code",
+    "Sign-out attempted a refresh grant or a silent renewal.",
+  );
+
+  const sensitive = [password, tokens.accessToken, tokens.idToken, logoutState];
+  requireCondition(!(await browserContainsAny(page, sensitive)), "A credential or state survived sign-out.");
+  requireCondition(
+    !consoleMessages.some((message) => sensitive.some((value) => value !== "" && message.includes(value))),
+    "A credential or state reached the browser console.",
+  );
+
+  // Replaying the consumed response is refused, and changes nothing.
+  await page.goto(postLogoutCallbackUrl);
+  await expectSignOutFailure(page);
+  requireCondition(page.url() === POST_LOGOUT_REDIRECT_URI, "The replayed callback left the address bar dirty.");
+  requireCondition((await publicationCount(page)) === 0, "A replayed logout callback published a session.");
+  requireCondition(!(await hasOwnedStorage(page)), "A replayed logout callback restored OIDC storage.");
+  requireCondition(endSessionRequests.length === 1, "A replayed logout callback started another end-session request.");
+  requireCondition(tokenGrantTypes.length === 1, "A replayed logout callback exchanged a grant.");
+  requireCondition(backendRequests.length === 0, "A replayed logout callback reached the Backend.");
+  requireCondition(!(await browserContainsAny(page, sensitive)), "A replayed logout callback exposed a credential or state.");
+  const bodyText = await page.evaluate(() => document.documentElement.textContent ?? "");
+  requireCondition(!bodyText.includes("error"), "A provider error surfaced in the sign-out message.");
+
+  // The Keycloak SSO session really ended: signing in again asks for credentials
+  // instead of silently reusing the session that was just closed.
+  await page.goto("/");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.locator("#username")).toBeVisible();
+  requireCondition(
+    new URL(page.url()).origin === new URL(AUTHORITY).origin,
+    "The second sign-in did not reach the Authorization Server.",
+  );
+  requireCondition(
+    !consoleMessages.some((message) => sensitive.some((value) => value !== "" && message.includes(value))),
+    "A credential or state reached the console during the second sign-in.",
+  );
+});
+
+/**
+ * A logout response that is not exactly the one shape this application accepts
+ * never reaches the library, never consumes anything and never signs anyone in.
+ */
+test("a tampered root logout response is refused without touching the library", async ({ page }) => {
+  const password = readUserPassword();
+  const tokenGrantTypes: string[] = [];
+  const endSessionRequests: string[] = [];
+  page.on("request", (request) => {
+    const url = request.url();
+    if (url === END_SESSION_URL || url.startsWith(`${END_SESSION_URL}?`)) {
+      endSessionRequests.push(url);
+    }
+    if (url === TOKEN_URL && request.method() === "POST") {
+      tokenGrantTypes.push(new URLSearchParams(request.postData() ?? "").get("grant_type") ?? "");
+    }
+  });
+
+  await beginLogin(page, password);
+  await submitLogin(page);
+  await expect(page.getByLabel("Authentication status")).toContainText("Signed in as");
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await page.waitForURL(POST_LOGOUT_REDIRECT_URI);
+  requireCondition(endSessionRequests.length === 1, "The end-session endpoint request count differed.");
+  const state = new URL(endSessionRequests[0]).searchParams.get("state") ?? "";
+  requireNonBlankString(state, "The logout state was blank.");
+
+  const grantsBefore = tokenGrantTypes.length;
+  for (const search of [
+    `?state=${state}&error=access_denied&error_description=provider-detail`,
+    `?state=${state}&code=injected-code`,
+    `?state=${state}&state=${state}`,
+    "?state=",
+    `?state=${state}%3Bhttps%3A%2F%2Fevil.example`,
+  ]) {
+    await page.goto(`${APP_ORIGIN}/${search}`);
+    await expectSignOutFailure(page);
+    requireCondition(page.url() === POST_LOGOUT_REDIRECT_URI, "A refused response left the address bar dirty.");
+    requireCondition((await publicationCount(page)) === 0, "A refused response published a session.");
+    requireCondition(!(await hasOwnedStorage(page)), "A refused response wrote OIDC storage.");
+    requireCondition(
+      !(await browserContainsAny(page, [state, "provider-detail", "access_denied", "injected-code"])),
+      "A refused response exposed provider payload.",
+    );
+  }
+  requireCondition(tokenGrantTypes.length === grantsBefore, "A refused response exchanged a grant.");
+  requireCondition(endSessionRequests.length === 1, "A refused response started another end-session request.");
 });
