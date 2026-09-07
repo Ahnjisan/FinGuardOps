@@ -1,0 +1,52 @@
+# The browser image for the Keycloak browser E2E: prepared once, then only run.
+#
+# The E2E run itself must reach no registry and install nothing. Everything the
+# isolated Chromium needs at run time therefore has to exist in an image built
+# ahead of time, which is what this file is: the official Playwright Linux
+# image pinned by immutable digest, plus the one package the run needs and does
+# not have.
+#
+# `certutil` comes from `libnss3-tools`, and it is what tells Chromium on Linux
+# about the local `localhost` leaf the way that platform actually expresses
+# trust. Installing it here rather than in the running container keeps `apt` out
+# of the E2E entirely, and pinning the exact package version keeps two prepared
+# machines from disagreeing about what "the image" contains.
+#
+# Nothing about TLS is relaxed. This image adds a tool, not a trust decision:
+# the certificate is still validated and added to a per-run NSS database inside
+# a container started with --rm, and no certificate is baked in here.
+FROM mcr.microsoft.com/playwright@sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e
+
+# Both are required and both are asserted below, so a build that forgets one
+# fails here rather than producing an image whose labels promise more than it
+# holds. The runner refuses to start a browser whose labels disagree with the
+# Playwright version this repository has installed.
+ARG PLAYWRIGHT_VERSION
+ARG LIBNSS3_TOOLS_VERSION
+
+# `apt` runs exactly here and nowhere else. The lists and the downloaded
+# archives are removed in the same layer, so the finished image carries the
+# package but no package-manager cache to go stale or to be refreshed later.
+RUN set -eux; \
+    test -n "$PLAYWRIGHT_VERSION"; \
+    test -n "$LIBNSS3_TOOLS_VERSION"; \
+    export DEBIAN_FRONTEND=noninteractive; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends "libnss3-tools=${LIBNSS3_TOOLS_VERSION}"; \
+    test "$(dpkg-query -W -f='${Version}' libnss3-tools)" = "$LIBNSS3_TOOLS_VERSION"; \
+    command -v certutil > /dev/null; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /var/cache/debconf/*-old
+
+LABEL org.opencontainers.image.title="finguardops-playwright-e2e" \
+      org.opencontainers.image.description="Isolated Chromium host for the FinGuardOps Keycloak browser E2E." \
+      org.opencontainers.image.base.name="mcr.microsoft.com/playwright" \
+      org.opencontainers.image.base.digest="sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e" \
+      com.finguardops.e2e.playwright.version="${PLAYWRIGHT_VERSION}" \
+      com.finguardops.e2e.certutil.package="libnss3-tools" \
+      com.finguardops.e2e.certutil.version="${LIBNSS3_TOOLS_VERSION}"
+
+# The browsers, the per-run NSS database and the browser profile all belong to
+# the unprivileged account the official image already provides. Nothing this
+# image is asked to do needs root, and the run-time mounts are read-only.
+USER pwuser

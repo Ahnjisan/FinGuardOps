@@ -35,8 +35,15 @@ export function RequireCapability({ capability, children }: RequireCapabilityPro
   // No session at all. `error` joins this branch rather than getting a message
   // of its own: the reason authentication is unavailable belongs to the shell's
   // status region, which already reports it, and repeating a fixed error here
-  // would say nothing more.
-  if (state.status === "unauthenticated" || state.status === "error") {
+  // would say nothing more. `signing-out` joins it too: the local session, its
+  // ownership and its capabilities are already gone by the time that state
+  // exists, so the guarded content must go with them rather than linger until
+  // the end-session redirect lands.
+  if (
+    state.status === "unauthenticated" ||
+    state.status === "signing-out" ||
+    state.status === "error"
+  ) {
     return (
       <section aria-labelledby="sign-in-required-heading">
         <h2 id="sign-in-required-heading">Sign in required</h2>

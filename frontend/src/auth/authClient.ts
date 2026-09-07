@@ -76,7 +76,27 @@ export interface AuthClient {
   /** Completes a redirect callback from the captured URL string. */
   completeSignIn(callbackUrl: string): Promise<CompleteSignInResult>;
 
-  /** Local logout: drops the in-memory session immediately. */
+  /**
+   * RP-initiated logout.
+   *
+   * The local session, its ownership and its deadline are dropped
+   * synchronously, and subscribers are told exactly once, before any remote
+   * work begins. Only then does the browser leave for the Authorization
+   * Server's end-session endpoint, so there is no window in which the UI still
+   * shows someone as signed in while a redirect is being prepared.
+   *
+   * Concurrent calls share one flight, and that sharing is scoped to the
+   * session generation the attempt belongs to. While an attempt is pending,
+   * every caller on that session joins it and gets its one redirect, one
+   * logical teardown and one notification. The flight is released as soon as
+   * it settles, so a later sign-in on the same page starts a new session
+   * generation, and signing that one out performs its own remote logout rather
+   * than replaying the previous session's answer.
+   *
+   * Rejects with the fixed `AuthSignOutError` when the redirect cannot be
+   * started. That never restores the local session — a failed remote logout is
+   * still a completed local one.
+   */
   signOut(): Promise<void>;
 
   /**
@@ -136,4 +156,29 @@ export interface CredentialAuthClient extends AuthClient {
    * sends nothing.
    */
   authorizeRequest(request: Request): Promise<AuthorizedRequest | null>;
+}
+
+/**
+ * Completion of the end-session response the Authorization Server redirects
+ * back to the application root.
+ *
+ * Deliberately not part of `AuthClient`. `AuthClient` is what `AuthProvider`
+ * publishes to the React tree, and consuming a one-time logout transaction is
+ * a page-load concern the provider owns before it initializes anything; no
+ * component has any business reaching it.
+ */
+export interface SignOutCallbackClient {
+  /**
+   * Consumes the logout transaction the captured URL names, exactly once.
+   *
+   * It has no authority over the session in place now: it removes no user,
+   * invalidates nothing and notifies nobody. A stale response belonging to an
+   * earlier page load, and a response the Authorization Server reports an error
+   * for, therefore leave a live session, its credential and its deadline
+   * untouched.
+   *
+   * Rejects with the fixed `AuthSignOutError` for every refusal, carrying no
+   * provider error, description or state.
+   */
+  completeSignOut(callbackUrl: string): Promise<void>;
 }

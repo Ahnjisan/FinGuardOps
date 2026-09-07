@@ -1365,6 +1365,11 @@ describe("authorized transport — raw access token against the real adapter", (
         stored = user;
         return user;
       },
+      // Present so the port is complete; these cases never sign out.
+      async signoutRedirect(): Promise<void> {},
+      async signoutRedirectCallback(): Promise<unknown> {
+        return undefined;
+      },
       async getUser(): Promise<OidcUserLike | null> {
         calls.getUser += 1;
         return stored;
@@ -1509,6 +1514,11 @@ describe("authorized transport — session ownership against the real adapter", 
         stored = nextUser;
         return nextUser;
       },
+      // Present so the port is complete; these cases never sign out.
+      async signoutRedirect(): Promise<void> {},
+      async signoutRedirectCallback(): Promise<unknown> {
+        return undefined;
+      },
       async getUser(): Promise<OidcUserLike | null> {
         if (getUserGate !== undefined) {
           await getUserGate;
@@ -1646,7 +1656,9 @@ describe("authorized transport — session ownership against the real adapter", 
     await Promise.resolve();
     await Promise.resolve();
 
-    await client.signOut();
+    // Remote logout: the local session ends synchronously, and the redirect
+    // itself is not what this case is about.
+    await client.signOut().catch(() => undefined);
     const invalidated = vi.fn();
     client.onSessionInvalidated(invalidated);
     const removeUserAfterLogout = manager.calls.removeUser;

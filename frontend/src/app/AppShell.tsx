@@ -16,6 +16,8 @@ export function AppShell() {
     statusMessage = "Preparing sign-in...";
   } else if (state.status === "authenticating") {
     statusMessage = "Signing in...";
+  } else if (state.status === "signing-out") {
+    statusMessage = "Signing out...";
   } else if (state.status === "error") {
     statusMessage = safeAuthErrorMessage(state.kind);
   } else if (state.status === "authenticated") {
@@ -42,6 +44,12 @@ export function AppShell() {
           <div role="status" aria-label="Authentication status">
             {statusMessage}
           </div>
+          {/*
+            Neither control is offered while a redirect is in flight. In
+            `authenticating` and `signing-out` there is nothing to sign out of
+            and nothing to start, so the affordance is withdrawn rather than
+            disabled: a second click cannot be swallowed if there is no button.
+          */}
           {(state.status === "unauthenticated" || state.status === "error") && (
             <button
               type="button"

@@ -236,16 +236,35 @@ private signing key, 실제 사용자 password, access·ID·refresh token은 코
 `.env.example`, 로그와 Git에 저장하지 않는다. 비밀이 아닌 변수명과 placeholder만 예시로
 문서화할 수 있다. 실제 credential의 생성·주입·rotation·폐기는 후속 배포 계약에서 정한다.
 
-### 2.13 Logout 후속 경계
+### 2.13 Logout 경계
 
-현재 Frontend는 memory token과 transient transaction record를 제거하는 local logout을
-유지한다. Keycloak remote end-session(RP-initiated logout), post-logout callback과 server-side
-session 종료 연동은 후속 범위다. 구현 시 post-logout redirect URI는 환경별 exact allowlist를
-사용하며 wildcard를 허용하지 않는다.
+이 절은 결정 당시 후속 범위였고, Issue #247에서 구현되었다. 아래 계약은 그 구현이 지키는
+내용이며 원래 조건을 완화하지 않는다.
+
+Frontend는 memory token과 transient transaction record를 제거하는 local logout을 유지하면서,
+그 위에 Keycloak remote end-session(RP-initiated logout)과 post-logout callback을 연결한다.
+post-logout redirect URI는 환경별 exact allowlist를 사용하며 wildcard를 허용하지 않는다.
+local/dev 환경의 값은 `http://localhost:5173/` 하나이고, Frontend가 보내는 값은 현재 origin +
+exact `/`로 고정된다.
+
+- local application session, session ownership과 hard deadline timer는 remote 작업 이전에
+  동기적으로 제거하고 subscriber에게 정확히 1회 통보한다. OIDC user record는 library가
+  `id_token_hint`를 읽을 때까지만 유지한다.
+- `id_token_hint`는 로그인 callback에서 OIDC client가 검증해 memory user store에 보관한 ID
+  token을 library가 내부적으로 사용한다. application은 ID token을 state·React·DOM에 복사하지
+  않고 logout 인자로도 전달하지 않으며, 존재 여부와 compact JWT 형태만 fail-closed로 확인한다.
+  별도 JWK 재검증은 하지 않고 2.9의 검증된 provenance를 신뢰한다. ID token이 없거나 runtime
+  형태가 잘못되면 redirect하지 않고 local cleanup 후 고정 오류로 끝난다.
+- end-session endpoint는 설정된 issuer + exact `/protocol/openid-connect/logout`으로 고정하며
+  discovery 문서가 목적지를 바꾸지 못한다.
+- post-logout callback은 exact `/`이고 로그인 callback `/auth/callback`과 분리된다. callback은
+  logout transaction만 정확히 1회 consume하며 현재 session을 종료할 권한이 없다. stale
+  callback과 callback 오류는 새 session·credential·timer에 영향을 주지 않는다.
+- server-side session 종료는 Keycloak end-session endpoint가 수행하며 Backend는 관여하지 않는다.
 
 remote logout 실패는 local UI 무효화를 되돌리거나 Backend write retry·API replay를 발생시키지
 않는다. refresh token, silent renew, session monitoring과 offline session은 별도 승인 없이
-remote logout 구현에 함께 도입하지 않는다.
+remote logout 구현에 함께 도입하지 않으며, Issue #247도 도입하지 않았다.
 
 ### 2.14 후속 runtime 인증 E2E 검증 계약
 
@@ -285,8 +304,9 @@ exact singleton string array를 Backend가 허용한다. Issue #235 stock Keyclo
 표현은 string이고 논리 audience는 계속 `finguardops-backend-api` 하나다.
 
 USER resource는 credential 0개로 provisioning하므로 browser login, Authorization Code callback,
-USER access/ID token `sub` 원문 비교, refresh-token fail-closed, role UI와 remote logout은 여전히
-후속 범위다.
+USER access/ID token `sub` 원문 비교, refresh-token fail-closed, role UI와 remote logout은 이
+기록 시점에는 후속 범위였다. browser login과 refresh-token fail-closed는 Issue #239, remote
+logout은 Issue #247에서 구현했다.
 
 2026-09-05 OWNER 보정은 stock Keycloak이 HTTP와 HTTPS에 공통 listener host를 적용하는 제약을
 확인하고 `KC_HTTP_HOST=0.0.0.0`을 선택했다. HTTPS 8443만 host loopback에 publish하며 HTTP 8082와
@@ -357,6 +377,7 @@ subscriber 통보 0회다.
 - capability로 보호되는 production route·navigation 항목·action은 0개다. guard는 구현했으나
   적용 대상이 없고, 직접 URL 접근 동작은 test 전용 MemoryRouter route로 검증한다.
 - 업무 화면, typed API, pagination, remote logout과 Backend·Keycloak·Infra 변경은 수행하지 않았다.
+  (typed API와 pagination은 Issue #245, remote logout은 Issue #247에서 구현했다.)
 - Keycloak realm·mapper를 변경하지 않았다. local realm에 USER가 하나뿐이라 role별 브라우저 E2E는
   수행하지 않았으며, role 조합 검증은 단위·컴포넌트 테스트가 담당한다.
 
@@ -379,7 +400,8 @@ subscriber 통보 0회다.
   mapper를 구성하고 검증해야 한다.
 - Frontend 표시용 role과 Backend access token role의 일관성을 token별로 검증해야 한다.
 - production AWS 제품과 운영 모델은 여전히 별도 결정이 필요하다.
-- remote logout과 장기 browser session은 아직 제공하지 않는다.
+- 장기 browser session은 아직 제공하지 않는다. remote logout은 Issue #247에서 2.13 계약대로
+  구현했다.
 
 ## 4. 검토한 대안
 
@@ -417,6 +439,7 @@ production 운영 요구가 확정되지 않았다. 향후 production 후보로�
 - capability로 보호되는 production route·navigation 항목·action과 업무 화면 (판정 계층과 route
   guard 컴포넌트 자체는 Issue #243에서 구현했다. 2.16 참조)
 - remote logout, refresh token, silent renew, session monitoring과 offline session
+  (remote logout은 이후 Issue #247에서 2.13 계약대로 구현했고, 나머지 넷은 여전히 도입하지 않는다.)
 - API·DB·dependency 변경
 
 ## 6. 후속 Issue 순서
@@ -438,10 +461,42 @@ USER password를 bootstrap에만 read-only mount해 `local-fds-analyst`의 non-t
 credential 정확히 1개를 reconcile하고 USER client의 `use.refresh.tokens=false`를 realm JSON과
 bootstrap desired state 양쪽에 적용했다.
 
-Phase 3은 Windows 현재 사용자 Root에 검증된 exact localhost leaf만 실행 중 한시적으로 신뢰시키는
-runner와 Chromium E2E를 연결했다. 정상 로그인은 Authorization Code + PKCE S256, access/ID token의
+Phase 3은 검증된 exact localhost leaf만 실행 중 한시적으로 신뢰시키는 runner와 Chromium E2E를
+연결했다. 당시 신뢰 지점은 Windows 현재 사용자 Root였고, Issue #247에서 host 인증서 저장소를 전혀
+쓰지 않는 격리 Linux Chromium NSS database로 옮겼다(8절). 정상 로그인은 Authorization Code + PKCE S256, access/ID token의
 동일 canonical lowercase UUID v4 `sub`, `principal_type=USER`, 중복 없는 동일 `FDS_ANALYST` role
 집합과 access token exact singleton audience를 확인한다. 실제 response에 refresh token이 없음을
 확인하며 합성 refresh token, state·nonce·PKCE 변조는 session 게시 전에 거부한다. 실제 USER token의
 Backend case 조회 200, credential 없음·손상 token 401, analyst resolution 403과 session 유지를
-검증한다. production Authorization Server, role UI와 remote logout은 계속 미구현이다.
+검증한다. production Authorization Server는 계속 미구현이다.
+
+## 8. Issue #247 remote logout 구현 상태 연결 (2026-09-06)
+
+이 절은 위 결정과 미구현 목록을 소급 변경하지 않고 2.13 계약의 구현 상태만 연결한다. realm,
+bootstrap, verifier, Backend와 API·DB 계약은 변경하지 않았다. `finguardops-frontend` client의
+`post.logout.redirect.uris`는 이미 exact `http://localhost:5173/` 하나이며 그대로 사용한다.
+
+Frontend는 `Sign out`에서 application session, session ownership과 15분 deadline timer를 remote
+작업 이전에 동기적으로 제거하고 subscriber에게 1회 통보한 뒤, memory user store의 검증된 ID
+token을 library가 `id_token_hint`로 사용해 end-session endpoint로 redirect한다. 목적지는
+`metadataSeed.end_session_endpoint`로 issuer + exact `/protocol/openid-connect/logout`에 고정되어
+discovery 응답이 바꿀 수 없고, `post_logout_redirect_uri`는 현재 origin + exact `/`뿐이다.
+동시 logout은 같은 session generation에서 pending인 동안만 하나의 flight를 공유하며, 그 attempt의
+redirect·logical teardown·subscriber 통보는 각각 1회다. flight는 settlement 후 해제되고, 같은
+page에서 재로그인한 새 session generation은 새 remote logout을 수행한다. redirect 실패, 취소,
+BFCache 복귀 어느 경우에도 local logout은 복원하지 않고 고정 오류만 표시하며 자동 retry와 자동
+재로그인은 없다.
+
+root callback은 exact origin·exact `/`·fragment 부재·단일 nonblank `state`·허용 parameter 집합을
+fail-closed로 검증하고, library 호출 전에 주소창을 bare `/`로 정리한다. callback은 logout
+transaction만 1회 consume하며 `removeUser()`·session invalidation·subscriber 통보를 하지 않으므로
+새 session이 있는 상태의 stale callback이 그 session을 제거하지 않는다. sessionStorage transaction
+record는 `si:r`과 `so:r` 두 schema로 분리 검증하여 logout record의 nonce·PKCE verifier 삽입,
+login record의 nonce 삭제, popup·silent·unknown request type과 key/id 불일치를 set·get·remove 모두
+에서 거부한다.
+
+실제 Chromium E2E는 real USER 로그인 후 `Sign out`에서 exact end-session endpoint와 정확히
+`id_token_hint`·`post_logout_redirect_uri`·`state` 세 parameter, exact root callback, logout state
+1회 consume, local session·credential 0, consumed callback 재사용 반례, 변조된 root 응답 5종 거부,
+재로그인 시 이전 SSO session이 재사용되지 않고 Keycloak 로그인 화면이 나타나는 것과
+token·password·state 원문 비노출을 확인한다.

@@ -1,20 +1,24 @@
 import { InMemoryWebStorage, UserManager, WebStorageStateStore } from "oidc-client-ts";
 import type { StateStore, UserManagerSettings } from "oidc-client-ts";
 import { findApprovedBackendRequest } from "../api/backendEndpoints";
-import { getAuthEnv, getEnv, type AuthEnv } from "../config/env";
+import { EnvConfigError, getAuthEnv, getEnv, type AuthEnv } from "../config/env";
 import type {
   AuthorizedRequest,
   AuthSession,
   CompleteSignInResult,
   CredentialAuthClient,
   InitializeResult,
+  SignOutCallbackClient,
 } from "./authClient";
-import { AuthCallbackError, AuthSignInError } from "./authErrors";
+import { AuthCallbackError, AuthSignInError, AuthSignOutError } from "./authErrors";
 import { CALLBACK_PATH } from "./callbackUrl";
+import { LOGOUT_CALLBACK_PATH } from "./logoutCallbackUrl";
 import { resolveUserRoles, type NonEmptyUserRoles } from "./userRoles";
 import {
   acquireTransactionStorage,
   clearAuthTransactionState,
+  isApprovedTransactionRecord,
+  LOGOUT_TRANSACTION_DATA,
   OIDC_TRANSACTION_STORE_PREFIX,
   OIDC_USER_STORE_PREFIX,
 } from "./transactionStorage";
@@ -27,6 +31,28 @@ import {
 export const SESSION_HARD_DEADLINE_MS = 15 * 60 * 1000;
 const LOGIN_NONCE_BYTES = 32;
 const TRANSACTION_STATE_REJECTED = "OIDC transaction state rejected.";
+
+/**
+ * The end-session path this deployment's Authorization Server publishes, stated
+ * here rather than taken from discovery.
+ *
+ * The destination of a logout redirect is the one thing a tampered or swapped
+ * discovery document could otherwise move, and the browser would follow it
+ * carrying an `id_token_hint`. Seeding the endpoint from the configured issuer
+ * makes the discovery document unable to decide where the user is sent.
+ */
+const END_SESSION_PATH = "/protocol/openid-connect/logout";
+
+/**
+ * RFC 7519 compact serialization, anchored over a whole ID token.
+ *
+ * This is a shape check and nothing more. The token's signature, issuer,
+ * audience and nonce were verified by the OIDC client during the sign-in
+ * callback, and ADR-011 makes that validated provenance the single source of
+ * truth; re-fetching a JWK set to check it a second time here would add a
+ * network round trip and a second, divergent verifier without adding a decision.
+ */
+const COMPACT_JWT = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
 
 /** Minimal structural view of the library, so tests can drive the adapter. */
 export interface OidcUserLike {
@@ -53,6 +79,17 @@ export interface OidcUserLike {
    * would leave exactly those runtime shapes with no declared case to refuse.
    */
   readonly refresh_token?: unknown;
+  /**
+   * Typed `unknown` for the same reason as `refresh_token`: the only questions
+   * this adapter may ask are whether anything is there at all and whether it
+   * has the compact JWT shape. A `string` here would leave a provider that
+   * answers `null`, a number or an object with no declared case to refuse.
+   *
+   * The value is never read out of this property into a name, a copy, a log or
+   * a logout argument. The library that verified it during the sign-in callback
+   * is the only thing that ever puts it on the wire, as `id_token_hint`.
+   */
+  readonly id_token?: unknown;
   readonly expires_at?: number;
   readonly state?: unknown;
 }
@@ -60,6 +97,20 @@ export interface OidcUserLike {
 export interface UserManagerLike {
   signinRedirect(args: { state: unknown; nonce: string }): Promise<void>;
   signinRedirectCallback(url: string): Promise<OidcUserLike>;
+  /**
+   * Starts the end-session redirect.
+   *
+   * There is deliberately no `id_token_hint` in the argument type. The library
+   * reads the ID token it validated straight out of the memory user store,
+   * which is what keeps the raw value out of this application entirely — no
+   * expression here binds it, and nothing can pass a different one.
+   *
+   * `redirectMethod` is required rather than defaulted, so a regression to the
+   * library's `assign` fails to compile as well as failing its test.
+   */
+  signoutRedirect(args: { state: unknown; redirectMethod: "replace" }): Promise<void>;
+  /** Consumes the end-session response, and the logout transaction it names. */
+  signoutRedirectCallback(url: string): Promise<unknown>;
   removeUser(): Promise<void>;
   /**
    * Reads the in-memory user store. This is the single point in the whole
@@ -72,51 +123,132 @@ export interface UserManagerLike {
   };
 }
 
-function isNonceBearingTransaction(value: string): boolean {
-  try {
-    const transaction: unknown = JSON.parse(value);
-    if (typeof transaction !== "object" || transaction === null || !("nonce" in transaction)) {
-      return false;
-    }
-    const nonce = (transaction as { nonce?: unknown }).nonce;
-    return typeof nonce === "string" && nonce.trim().length > 0;
-  } catch {
-    return false;
-  }
-}
-
-function assertNonceBearingTransaction(value: string | null): void {
-  if (value !== null && !isNonceBearingTransaction(value)) {
+function assertApprovedTransaction(key: string, value: string | null): void {
+  if (value !== null && !isApprovedTransactionRecord(key, value)) {
     throw new Error(TRANSACTION_STATE_REJECTED);
   }
 }
 
 /**
- * Enforces the nonce invariant at every oidc-client-ts transaction-store
- * boundary. Missing records remain missing so the library can report an
- * unknown/replayed state, but every record that exists must carry a nonblank
- * nonce before it can be written, read, or returned from one-time removal.
+ * Enforces the transaction-record schema at every oidc-client-ts state-store
+ * boundary.
+ *
+ * Sign-in and logout are validated as two separate schemas rather than as one
+ * relaxed rule that both happen to satisfy. A sign-in record keeps the nonce
+ * and PKCE contract it has always had; a logout record has no nonce and no
+ * verifier and is refused if one is injected, and neither can pass as the
+ * other. A record for a popup, silent or unknown request type is refused
+ * outright, because this client runs none of those flows.
+ *
+ * Missing records stay missing, so the library can still report an unknown or
+ * replayed state; every record that does exist must match its schema and its
+ * own key before it can be written, read, or returned.
+ *
+ * Removal reads and validates before it consumes. A one-time removal is
+ * destructive, so a record that fails the schema must not be destroyed on the
+ * way to being refused: removing first would let a single malformed or injected
+ * record delete the transaction a legitimate flow still needs, and would leave
+ * nothing to inspect afterwards. The record is therefore previewed with `get`,
+ * validated whole, and only then removed — and the removed value has to be
+ * byte-identical to the previewed one, or something rewrote the record between
+ * the two reads and the consume fails closed.
+ *
+ * The rejection carries the same fixed message in every case, so no stored
+ * value reaches a caller through an error.
  */
-export function nonceValidatingStateStore(store: StateStore): StateStore {
+export function validatingStateStore(store: StateStore): StateStore {
   return {
     async set(key: string, value: string): Promise<void> {
-      assertNonceBearingTransaction(value);
+      assertApprovedTransaction(key, value);
       await store.set(key, value);
     },
     async get(key: string): Promise<string | null> {
       const value = await store.get(key);
-      assertNonceBearingTransaction(value);
+      assertApprovedTransaction(key, value);
       return value;
     },
     async remove(key: string): Promise<string | null> {
-      const value = await store.remove(key);
-      assertNonceBearingTransaction(value);
-      return value;
+      const previewed = await store.get(key);
+      if (previewed === null) {
+        // Nothing to consume, and nothing to destroy. The library reports this
+        // as an unknown or already-replayed state.
+        return null;
+      }
+      assertApprovedTransaction(key, previewed);
+      const removed = await store.remove(key);
+      if (removed !== previewed) {
+        throw new Error(TRANSACTION_STATE_REJECTED);
+      }
+      return removed;
     },
     getAllKeys(): Promise<string[]> {
       return store.getAllKeys();
     },
   };
+}
+
+/**
+ * Pins the end-session destination to the configured issuer.
+ *
+ * The operator's issuer string is used exactly as written — no normalization
+ * beyond dropping a single trailing slash before the fixed path is appended, so
+ * a default port, a case difference or a trailing-slash difference stays the
+ * operator's decision rather than something this function rewrites. The result
+ * is then parsed back and refused unless it is still an http(s) URL with no
+ * query, no fragment and no userinfo, and with the exact end-session path.
+ */
+export function resolveEndSessionEndpoint(authority: string): string {
+  const base = authority.endsWith("/") ? authority.slice(0, -1) : authority;
+  const endpoint = `${base}${END_SESSION_PATH}`;
+  let parsed: URL;
+  try {
+    parsed = new URL(endpoint);
+  } catch {
+    throw new EnvConfigError();
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new EnvConfigError();
+  }
+  if (
+    parsed.search !== "" ||
+    parsed.hash !== "" ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    !parsed.pathname.endsWith(END_SESSION_PATH)
+  ) {
+    throw new EnvConfigError();
+  }
+  return endpoint;
+}
+
+/**
+ * The exact address the Authorization Server may return the browser to.
+ *
+ * It is this document's origin followed by `/` and nothing else. The Keycloak
+ * client allowlists that string verbatim, so anything the origin could smuggle
+ * in — a query, a fragment, userinfo, a path — is refused here rather than sent
+ * to the end-session endpoint.
+ */
+export function resolvePostLogoutRedirectUri(origin: string): string {
+  const candidate = `${origin}${LOGOUT_CALLBACK_PATH}`;
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    throw new EnvConfigError();
+  }
+  if (
+    parsed.href !== candidate ||
+    parsed.origin !== origin ||
+    parsed.pathname !== LOGOUT_CALLBACK_PATH ||
+    parsed.search !== "" ||
+    parsed.hash !== "" ||
+    parsed.username !== "" ||
+    parsed.password !== ""
+  ) {
+    throw new EnvConfigError();
+  }
+  return candidate;
 }
 
 /** Generates a fresh 256-bit nonce without a fallback PRNG. */
@@ -188,6 +320,10 @@ export function createOidcSettings(
     authority: env.oidcAuthority,
     client_id: env.oidcClientId,
     redirect_uri: `${origin}${CALLBACK_PATH}`,
+    post_logout_redirect_uri: resolvePostLogoutRedirectUri(origin),
+    // Merged over the discovery document rather than under it, so no
+    // Authorization Server response can move the logout destination.
+    metadataSeed: { end_session_endpoint: resolveEndSessionEndpoint(env.oidcAuthority) },
     response_type: "code",
     scope: "openid profile",
     automaticSilentRenew: false,
@@ -200,7 +336,7 @@ export function createOidcSettings(
       prefix: OIDC_USER_STORE_PREFIX,
     }),
     // Only the transient protocol transaction record survives the redirect.
-    stateStore: nonceValidatingStateStore(
+    stateStore: validatingStateStore(
       new WebStorageStateStore({
         store: transactionStorage,
         prefix: OIDC_TRANSACTION_STORE_PREFIX,
@@ -259,6 +395,29 @@ function carriesRefreshToken(user: OidcUserLike): boolean {
     return user.refresh_token !== undefined;
   } catch {
     return true;
+  }
+}
+
+/**
+ * Whether the memory user store still holds an ID token the library can use as
+ * an `id_token_hint`.
+ *
+ * Presence and compact JWT shape are the whole test, and both are asked of the
+ * property in place: the value is never bound to a name, sliced, decoded,
+ * trimmed, interpolated, logged or returned, so no expression in this module
+ * ever holds it. A property whose getter throws is "cannot tell", which is not
+ * "present", so it fails closed like an absent one.
+ *
+ * A `false` answer means no redirect is attempted at all. An end-session
+ * request without a hint would either be refused or turn into an interactive
+ * confirmation page, and neither is a logout this application can claim to have
+ * performed.
+ */
+function carriesUsableIdToken(user: OidcUserLike): boolean {
+  try {
+    return typeof user.id_token === "string" && COMPACT_JWT.test(user.id_token);
+  } catch {
+    return false;
   }
 }
 
@@ -351,12 +510,48 @@ export function createDefaultAuthRuntime(): AuthRuntime {
 export function createOidcAuthClient(
   createRuntime: AuthRuntimeFactory,
   options: OidcAuthClientOptions = {},
-): CredentialAuthClient {
+): CredentialAuthClient & SignOutCallbackClient {
   const isCallbackRoute = options.isCallbackRoute ?? defaultIsCallbackRoute;
   const listeners = new Set<() => void>();
   let runtime: AuthRuntime | undefined;
   let inFlightInitialize: Promise<InitializeResult> | undefined;
   let inFlightTeardown: Promise<void> | undefined;
+  /**
+   * The logout attempt currently in flight, and the session generation it
+   * belongs to.
+   *
+   * Sharing is scoped to both facts, not just to "a logout happened". Two
+   * clicks on the same session join one flight, so there is one redirect, one
+   * teardown and one notification for that session. But the entry is released
+   * the moment the attempt settles, and a flight belonging to an earlier
+   * generation is never handed to a later one: after a sign-out fails and the
+   * user signs in again, the new session's logout is a new local invalidation
+   * and a new `signoutRedirect()`, not the previous session's answer replayed.
+   */
+  interface SignOutFlight {
+    readonly generation: number;
+    readonly promise: Promise<void>;
+  }
+  let signOutFlight: SignOutFlight | undefined;
+  /**
+   * Monotonic count of sessions published on this client.
+   *
+   * Deliberately separate from `sessionOwnership`, which invalidation clears:
+   * this has to stay readable *after* a session ends, because that is exactly
+   * when a logout flight needs to say which session it belonged to.
+   */
+  let sessionGeneration = 0;
+  /**
+   * Set the moment a root end-session response is claimed, and cleared by the
+   * first initialization that sees it.
+   *
+   * On the logout callback the record in storage is the one-time transaction
+   * the response in the address bar is about to be validated against, exactly
+   * as on the sign-in callback route. An initialization that swept it first
+   * would destroy the value the callback needs, so it does not sweep — even if
+   * a caller were to start it while the callback is still in flight.
+   */
+  let signOutCallbackClaimed = false;
   let activeSession: AuthSession | null = null;
   /**
    * Opaque identity of the currently published session.
@@ -491,6 +686,7 @@ export function createOidcAuthClient(
   function startSession(session: AuthSession, expiresAtSeconds?: number): void {
     // A replacement session must not leave the previous deadline armed.
     clearDeadlineTimer();
+    sessionGeneration += 1;
     activeSession = session;
     // A new identity for every published session, so a callback issued against
     // the previous one can never be mistaken for a current one.
@@ -508,7 +704,9 @@ export function createOidcAuthClient(
     // verifier that the response now in the address bar is about to be
     // validated against. Nothing is swept, and storage is not even read: the
     // adapter takes over cleanup once the protocol step has run.
-    if (!isCallbackRoute()) {
+    const claimedSignOutCallback = signOutCallbackClaimed;
+    signOutCallbackClaimed = false;
+    if (!isCallbackRoute() && !claimedSignOutCallback) {
       // Anywhere else, a record left behind by an abandoned redirect is removed
       // here. The sweep is synchronous and owns its own failure rather than
       // delegating to a library helper that does not await its internal
@@ -518,6 +716,64 @@ export function createOidcAuthClient(
       clearAuthTransactionState(storage);
     }
     return { session: activeSession };
+  }
+
+  /**
+   * The remote half of one logout attempt.
+   *
+   * Everything local is already gone by the time this starts. What remains is
+   * to hand the browser to the Authorization Server's end-session endpoint, and
+   * the only way to do that honestly is with the ID token the library validated
+   * during the sign-in callback. So the store is consulted first, and the whole
+   * thing fails closed if there is no usable one: an ID token that is missing,
+   * of the wrong runtime type, not in compact JWT form, or unreadable because
+   * its getter throws, all end here rather than in a redirect that would leave
+   * the Authorization Server session standing.
+   *
+   * Every failure ends the same way: a best-effort removal of the library's
+   * user record and of the transaction records this application owns, then the
+   * fixed `AuthSignOutError`. No provider message, no state, no URL and no
+   * token travels with it, and nothing puts the local session back.
+   */
+  async function runSignOut(): Promise<void> {
+    let current: AuthRuntime;
+    try {
+      current = getRuntime();
+    } catch {
+      // Storage was never usable, so nothing was ever written to tear down.
+      throw new AuthSignOutError();
+    }
+
+    let user: OidcUserLike | null;
+    try {
+      user = await current.userManager.getUser();
+    } catch {
+      await discardRemoteState();
+      throw new AuthSignOutError();
+    }
+    if (user === null || user === undefined || !carriesUsableIdToken(user)) {
+      await discardRemoteState();
+      throw new AuthSignOutError();
+    }
+
+    try {
+      // No `id_token_hint` is passed. The library takes the token it verified
+      // from the memory user store itself, removes the user, writes the
+      // one-time logout transaction and navigates to the seeded end-session
+      // endpoint with the exact allowlisted post-logout redirect URI.
+      //
+      // `replace` rather than the library's default `assign`: the end-session
+      // URL carries the ID token hint and the logout state, and an `assign`
+      // would leave that address in session history where Back could re-issue
+      // it. Replacing drops the signed-in page from history in the same step.
+      await current.userManager.signoutRedirect({
+        state: LOGOUT_TRANSACTION_DATA,
+        redirectMethod: "replace",
+      });
+    } catch {
+      await discardRemoteState();
+      throw new AuthSignOutError();
+    }
   }
 
   return {
@@ -635,10 +891,51 @@ export function createOidcAuthClient(
     },
 
     signOut(): Promise<void> {
+      // Only a flight that is still running, and only one belonging to the
+      // session in place now, answers for this call.
+      if (signOutFlight !== undefined && signOutFlight.generation === sessionGeneration) {
+        return signOutFlight.promise;
+      }
+      // Synchronous and first, on every call that starts an attempt: the
+      // session reference, its ownership, its deadline timer and the one
+      // subscriber notification are all gone before any await, so nothing can
+      // observe an authenticated session while the redirect is being prepared.
+      // The library's copy of the user stays put until it has read the ID token
+      // it needs for the hint.
       invalidateLocally();
-      // Returned directly rather than awaited inside an async wrapper, so a
-      // caller racing an in-flight expiry teardown observably shares that work.
-      return discardRemoteState();
+      const generation = sessionGeneration;
+      // Released on settle, identity-checked so a late continuation of an
+      // earlier attempt cannot clear the entry a newer one installed.
+      const promise = runSignOut().finally(() => {
+        if (signOutFlight?.promise === promise) {
+          signOutFlight = undefined;
+        }
+      });
+      signOutFlight = { generation, promise };
+      return promise;
+    },
+
+    async completeSignOut(callbackUrl: string): Promise<void> {
+      // Synchronous, before the first await: an initialization racing this call
+      // must not sweep the transaction the response is about to consume.
+      signOutCallbackClaimed = true;
+      let current: AuthRuntime;
+      try {
+        current = getRuntime();
+      } catch {
+        throw new AuthSignOutError();
+      }
+      try {
+        // The library removes the one transaction record the response names and
+        // validates the response against it, which is what makes the state a
+        // one-time value. Nothing else happens here: no user is removed, no
+        // session is invalidated and no subscriber is told, so a response
+        // belonging to an earlier page load cannot disturb the session in place
+        // now. A replayed or unknown state finds no record and lands below.
+        await current.userManager.signoutRedirectCallback(callbackUrl);
+      } catch {
+        throw new AuthSignOutError();
+      }
     },
 
     /**
@@ -762,7 +1059,7 @@ export function createOidcAuthClient(
   };
 }
 
-let sharedAuthClient: CredentialAuthClient | undefined;
+let sharedAuthClient: (CredentialAuthClient & SignOutCallbackClient) | undefined;
 
 /**
  * Lazily built singleton, so the deadline lives for the whole page load.
@@ -770,7 +1067,7 @@ let sharedAuthClient: CredentialAuthClient | undefined;
  * Building the client touches no Web Storage: the runtime factory is only
  * stored here, and runs on the first real authentication operation.
  */
-export function getOidcAuthClient(): CredentialAuthClient {
+export function getOidcAuthClient(): CredentialAuthClient & SignOutCallbackClient {
   if (sharedAuthClient === undefined) {
     sharedAuthClient = createOidcAuthClient(createDefaultAuthRuntime);
   }

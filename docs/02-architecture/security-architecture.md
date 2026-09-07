@@ -435,10 +435,43 @@ Issue #229에서 Frontend는 `oidc-client-ts` 기반 Authorization Code + PKCE r
 있고 reload 후 복원되지 않는다. sessionStorage에는 `finguardops.oidc.transaction.` prefix의
 transient protocol transaction record만 남으며, 로그인 시작 직전과 callback 성공·실패 후
 정리된다. `/auth/callback` 외 경로의 초기화는 중단된 redirect가 남긴 record를 정리하고,
-callback route에서는 검증 중인 transaction을 보존한다. silent renew, refresh token,
-`offline_access`, remote end-session은 사용하지 않고 세션은 token expiry와 로그인 완료 후
-15분 중 빠른 시점에 local invalidation된다. hard deadline·expiry·logout은 하나의 in-flight
-teardown을 공유하므로 동시에 발생해도 teardown과 통보가 각각 1회만 일어난다.
+callback route에서는 검증 중인 transaction을 보존한다. silent renew, refresh token과
+`offline_access`는 사용하지 않고 세션은 token expiry와 로그인 완료 후 15분 중 빠른 시점에
+local invalidation된다. hard deadline·expiry·logout은 하나의 in-flight teardown을 공유하므로
+동시에 발생해도 teardown과 통보가 각각 1회만 일어난다.
+
+Issue #247에서 이 경계를 Keycloak RP-initiated logout으로 확장했다. realm, bootstrap,
+verifier와 Backend는 변경하지 않았다. `Sign out`은 application session, session ownership과
+15분 deadline timer를 remote 작업 이전에 동기적으로 제거하고 subscriber에게 정확히 1회
+통보한다. OIDC user record는 library가 `id_token_hint`를 읽을 때까지 유지하므로, adapter는
+`signoutRedirect()` 이전에 `removeUser()`나 transaction 정리를 실행하지 않는다. ID token은
+로그인 callback에서 검증되어 memory user store에 있는 값을 library가 내부적으로 사용하며,
+application은 이를 state·React·DOM에 복사하거나 logout 인자로 전달하지 않는다. adapter는 존재
+여부와 compact JWT 형태만 fail-closed로 확인하고 별도 JWK 재검증은 하지 않는다(ADR-011 2.9).
+ID token이 없거나 runtime 형태가 잘못되면 redirect하지 않고 local cleanup 후 고정
+`AuthSignOutError`로 끝난다.
+
+end-session 목적지는 discovery가 아니라 설정된 issuer에서 고정한다.
+`metadataSeed.end_session_endpoint`가 issuer + exact `/protocol/openid-connect/logout`이고
+oidc-client-ts는 discovery 문서 위에 seed를 덮어쓰므로, 변조된 discovery 응답이 목적지를 옮길
+수 없다. `post_logout_redirect_uri`는 현재 origin + exact `/`뿐이며 query·fragment·userinfo·
+경로가 섞인 origin은 URL 재파싱으로 거부한다. 동시 logout은 같은 session generation에서 pending인
+동안만 하나의 flight를 공유하므로 그 attempt의 redirect, logical teardown, subscriber 통보가 각각
+1회다. flight는 settlement 후 해제되며, 같은 page에서 재로그인한 새 session generation의 logout은
+이전 flight를 재사용하지 않고 새 remote logout을 수행한다. redirect가 실패하거나 취소되어도
+local logout은 복원하지 않고, 자동 retry와 자동 재로그인도 하지 않는다.
+
+logout callback route는 exact `/`이며 로그인 callback `/auth/callback`과 분리되어 있다.
+`AuthProvider`가 최초 초기화 이전에 주소창을 분류하고, library 호출 전에
+`history.replaceState()`로 bare `/`로 정리한다. 분류는 exact origin, exact `/`, fragment·userinfo
+부재, `state` 정확히 1개이며 nonblank, 허용 parameter 4종 외 unknown·중복 parameter 거부,
+`error` 없는 `error_description` 거부로 fail-closed다. callback은 logout transaction만 정확히
+1회 consume하고 `removeUser()`·session invalidation·subscriber 통보를 실행하지 않으므로, 새
+session이 살아 있는 상태에서 이전 session의 stale callback이 도착해도 현재 session·memory
+user·deadline timer가 유지된다. 성공은 unauthenticated, 실패는 credential 없는 고정 logout
+오류이며 성공·실패 모두 최종 주소는 exact `/`다. sessionStorage transaction record는 `si:r`과
+`so:r` 두 schema로 분리해 검증하며, logout record에 nonce나 PKCE verifier가 삽입되거나
+popup·silent·unknown request type이 나타나면 set·get·remove 어디에서도 거부한다.
 
 `window.sessionStorage` property 획득은 실제 인증 operation 안에서 `try`/`catch`로 수행하며,
 getter가 `SecurityError`를 던져도 `/`와 `/health` public Outlet은 그대로 렌더되고 인증 영역만
@@ -543,7 +576,12 @@ session을 게시하지 않고 OIDC user state를 제거하며, callback 이후 
 Storage에 원문이 남지 않게 fail-closed한다. `automaticSilentRenew=false`, refresh token
 grant 0회와 silent renew 0회를 유지한다. 실제 Chromium E2E는 정상 token response의 refresh token
 부재와 합성 `refresh_token` 거부, state·nonce·PKCE 변조 거부를 각각 확인한다. 거래·사건·메모·
-감사 업무 화면과 remote logout은 아직 구현되지 않았다.
+감사 업무 화면은 아직 구현되지 않았다. remote logout은 Issue #247에서 구현했고 실제 Chromium
+E2E가 exact end-session endpoint·parameter 집합, exact root callback, logout state 1회 consume,
+local session·credential 0, 재로그인 시 로그인 화면 재노출, consumed callback 재사용 반례와
+token·password·state 원문 비노출을 확인한다. 같은 Issue에서 browser 신뢰 경계를 host Windows
+인증서 저장소에서 격리 Linux Chromium container의 실행별 NSS database로 옮겨, host trust store
+접근 0회와 strict TLS를 동시에 만족시킨다.
 
 Issue #243에서 Frontend는 검증된 session profile의 USER role로 UI capability를 결정하는 판정
 계층과 route guard 컴포넌트를 구현했다. `principal_type`과 `roles`는 OIDC client가 검증한 ID
@@ -691,11 +729,11 @@ method security는 Issue #221에서 구현되었다. 아래 표는 구현 상태
 | 완료. `[Security/Architecture] Keycloak Authorization Server와 권한 Claim 계약 확정` | local/dev 제품과 USER·SERVICE·token claim 계약 | ADR-011·보안 아키텍처·README | 없음 | 문서 claim·role·신뢰 경계 정합성 | #225·#229·#231 | 문서 계약 확정 (#233), local runtime·USER E2E 연결 (#239) |
 | 완료. `[Backend/Security] JWT singleton audience 표준 표현 호환` | RFC 7519 singleton 표현과 stock Keycloak 호환 | Backend raw 검증·decoder/HTTP/validator 테스트·ADR-012 | 없음 | string·array 허용, additional·duplicate·malformed 거부, raw pre-JWK | #233·#235 | Backend 호환 구현 (#236), stock Keycloak 발급 검증 (#239) |
 | 완료. `[Infra/Security] Keycloak local/dev runtime 구현` | 실제 local/dev issuer와 client·mapper | Compose, realm, client scope, protocol mapper | 없음 | tag·digest·realm·claim·singleton audience source·rotation | #233 | Phase 1 fresh/existing runtime 완료 (#239) |
-| 완료. `[Security/E2E] USER 로그인과 Backend 연동` | browser OIDC와 Resource Server 연결 | Frontend·Backend·Keycloak E2E | `@playwright/test` | raw `aud`·access/ID `sub` 원문 동일성·role 집합·refresh fail-closed·401·403 | Keycloak runtime | Chromium·Windows CurrentUser trust runner 구현 (#239) |
+| 완료. `[Security/E2E] USER 로그인과 Backend 연동` | browser OIDC와 Resource Server 연결 | Frontend·Backend·Keycloak E2E | `@playwright/test` | raw `aud`·access/ID `sub` 원문 동일성·role 집합·refresh fail-closed·401·403 | Keycloak runtime | Chromium runner 구현 (#239), 격리 Linux Chromium·NSS 신뢰로 전환 (#247) |
 | 완료. `[Security/E2E] SERVICE Client Credentials 연동` | 거래·행동 접수 SERVICE 인증 | Keycloak verifier·Compose·문서 | 없음 | 실제 신규·replay·conflict·401·403, PostgreSQL cardinality, External Risk·Rule 1회 | Keycloak runtime | fresh/existing-volume·전용 resource cleanup 구현 (#241) |
 | 부분 구현. `[Frontend/Security] role·authority 권한 UI` | 권한별 표시와 action 노출 | navigation, button, route guard UI | 없음 | browser login·expiry·권한 UI | USER E2E, #231 | 권한 판정 계층과 `RequireCapability` guard 구현 (#243); 이를 적용한 production 보호 route·navigation 항목·action 0개 |
 | 부분 구현. `[Frontend] 업무 typed API와 query pagination` | 보호 API 소비 | 거래·사건·메모·감사 module, page·size·sort | 없음 | DTO·validator·query 조립·3중 URL 재검증 | #231 | typed API 10개, request·response validator, query pagination 기반 구현 (#245); Backend·API·DB 계약 무변경, 이를 소비하는 production 화면·route·navigation·hook 0개 |
-| 6. `[Frontend] Keycloak remote logout` | RP-initiated logout | end-session·exact post-logout URI | 없음 | local invalidation·실패·redirect | USER E2E | 미구현 |
+| 완료. `[Frontend] Keycloak remote logout` | RP-initiated logout | end-session seed·exact post-logout URI·root callback·transaction schema 분리 | 없음 | 동기 local invalidation·ID token fail-closed·목적지 고정·state 1회 consume·stale callback·실패 | USER E2E | Chromium USER logout·재로그인·callback 재사용 반례 구현 (#247) |
 
 ## 14. 구현 검증 계약
 
@@ -742,8 +780,8 @@ string audience, UUID subject/account 일치, 실제 거래·행동 접수의 �
 확인한다. External Risk 고정 marker와 Rule v2 exact Uvicorn access line은 최초 거래에서만 각각
 1 증가해야 하며 Backend outcome metric은 이 실제 hit와 분리된 보조 검증이다. 다른 key의 같은
 transactionId 충돌은 연결되지 않은 `FAILED/DUPLICATE_TRANSACTION` 멱등 제어 기록만 남긴다.
-USER browser E2E와 refresh-token fail-closed는 Issue #239에서 구현했다. role UI와 remote logout은
-후속 범위다.
+USER browser E2E와 refresh-token fail-closed는 Issue #239에서 구현했다. remote logout은 Issue
+#247에서 구현했다. role UI를 적용한 production 보호 route·action은 후속 범위다.
 
 Stock Keycloak은 HTTP와 HTTPS에 공통 listener host를 적용하므로 2026-09-05 OWNER 결정에 따라
 `KC_HTTP_HOST=0.0.0.0`을 사용한다. HTTPS 8443만 host `127.0.0.1`에 publish하고 HTTP 8082와
@@ -756,6 +794,17 @@ segmentation, trusted TLS, secret manager와 production Authorization Server 계
 Issue #241의 SERVICE 검증은 `user_password`를 bootstrap에만 read-only mount하고 verifier·Backend·
 AI Service에는 제공하지 않는다. USER 회귀는 #239 USER runbook과 Frontend 인증 targeted test를
 그대로 유지하고 production 파일·realm·bootstrap을 변경하지 않는 방식으로 확인한다. headless USER 로그인, direct grant,
-Chromium, Playwright와 Windows 인증서 저장소는 이 검증 경계 밖이다. fresh/existing runtime은 같은
+Chromium과 Playwright는 이 검증 경계 밖이다. Issue #247 이후 브라우저 신뢰는 Windows 인증서
+저장소를 전혀 사용하지 않고, 실행별 NSS database를 가진 격리 Linux Chromium container 안에만
+존재한다. 그 container image는 별도 준비 단계에서 고정 digest의 Playwright image 위에 exact version
+`libnss3-tools`만 더해 빌드하며, 공식 E2E Run은 registry에 접근하지 않고 이미 local에 있는 image만
+`--no-build --pull never`와 exact image ID로 실행한다. image 신뢰는 label에 두지 않는다. Run은
+고정 digest base가 local에 있는지, base와 준비 image가 모두 linux/amd64인지, base의 RootFS layer
+목록이 준비 image RootFS의 exact ordered prefix인지, Dockerfile 구조대로 layer가 정확히 하나만
+추가되었는지, `Config.User`가 exact `pwuser`인지를 먼저 검사하고, 이어서 network 없는 read-only·
+capability 0 container 안에서 package version, `certutil` 실행, Node·Playwright core·browser
+revision과 실제 UID, mount 집합을 확인한다. 실패는 관측값을 반사하지 않는 고정 오류다. Run 경로에는
+npm과 npx가 없고 Playwright와 Vite는 설치된 local entry point를 Node로 직접 실행한다.
+fresh/existing runtime은 같은
 전용 project 안에서 수행하고 종료 시 해당 label의 container·network·volume이 0이어야 한다. 공용
 local Docker image는 삭제·잔존 판정 대상이 아니다.
