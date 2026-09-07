@@ -5,6 +5,7 @@ import { AuthCallbackPage } from "../pages/AuthCallbackPage";
 import { HealthPage } from "../pages/HealthPage";
 import { HomePage } from "../pages/HomePage";
 import { NotFoundPage } from "../pages/NotFoundPage";
+import { TransactionDetailPage } from "../pages/TransactionDetailPage";
 import { TransactionListPage } from "../pages/TransactionListPage";
 
 export const routes: RouteObject[] = [
@@ -23,6 +24,24 @@ export const routes: RouteObject[] = [
         element: (
           <RequireCapability capability="transaction:view">
             <TransactionListPage />
+          </RequireCapability>
+        ),
+      },
+      {
+        // The detail screen, behind the same capability as the list. The
+        // parameter is a route *slot*, not a contract: `TransactionDetailPage`
+        // decides from the location the browser's URL parser handed over - its
+        // pathname, search and hash - whether this address names a canonical
+        // transaction at all, and refuses it before any credential is looked up
+        // when it does not. That parsed location is the application's input
+        // boundary; a representation the browser resolved away before any of
+        // this ran is neither recovered nor told apart here. Anything that is
+        // not one segment under `/transactions/` never reaches here - it falls
+        // through to the catch-all below.
+        path: "transactions/:transactionId",
+        element: (
+          <RequireCapability capability="transaction:view">
+            <TransactionDetailPage />
           </RequireCapability>
         ),
       },

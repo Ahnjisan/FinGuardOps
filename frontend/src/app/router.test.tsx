@@ -343,14 +343,16 @@ describe("the /transactions production route", () => {
     expect(client.calls.signIn).toEqual(["/transactions"]);
   });
 
-  it("does not treat a path under /transactions as the transactions route", async () => {
+  it("does not treat a deeper path under /transactions as a transactions route", async () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
 
-    renderSignedInAt("/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001", ["FDS_ANALYST"]);
+    renderSignedInAt("/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001/evidence", [
+      "FDS_ANALYST",
+    ]);
 
-    // There is no detail route in this scope, so the nested path is a 404
-    // rather than a screen that half exists.
+    // Two segments under `/transactions` is no route this application has, so
+    // it is a 404 rather than a screen that half exists.
     expect(await screen.findByRole("heading", { name: "Page not found" })).toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
@@ -382,5 +384,345 @@ describe("the /transactions production route", () => {
       "aria-current",
       "page",
     );
+  });
+});
+
+const CANONICAL_TRANSACTION_ID = "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001";
+const CANONICAL_DETAIL_ROUTE = `/transactions/${CANONICAL_TRANSACTION_ID}`;
+
+/** The fixed refusal a malformed transaction address produces. */
+const INVALID_ADDRESS_HEADING = "This is not a transaction address";
+
+/** Any origin: what is being modelled is the path, not where it points. */
+const PARSER_ORIGIN = "https://console.example";
+
+/**
+ * What a standard URL parser leaves of an address - the same algorithm the
+ * address bar, an `<a href>` and a redirect all go through before a single line
+ * of this application runs.
+ *
+ * A `MemoryRouter` performs no such step: it publishes the string it is handed.
+ * That makes it the right tool for asking what the screen does with a given
+ * location, and the wrong tool for claiming a browser would ever produce one.
+ * This function is how the tests below tell those two things apart.
+ */
+function parsedLocation(address: string): string {
+  const url = new URL(address, PARSER_ORIGIN);
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
+/**
+ * The boundary in front of this application, stated as what it is.
+ *
+ * These assertions are about the browser, not about FinGuardOps. A dot segment,
+ * a raw backslash and a removable control character are resolved away by the
+ * URL parser, so the location React Router publishes is already the canonical
+ * one and the original text never existed as far as this application is
+ * concerned. It cannot recover it, cannot tell it apart from a click on a real
+ * link, and nothing here claims it refused it: what it is left holding is the
+ * canonical detail route, answered like any other under the same capability
+ * guard and the same Backend authorization.
+ *
+ * Distinguishing a pre-parse request target is a hosting concern - a reverse
+ * proxy or a web server in front of the SPA - and not something a React
+ * application can implement.
+ */
+describe("the browser URL parser boundary", () => {
+  it.each([
+    ["a dot segment", `/x/../transactions/${CANONICAL_TRANSACTION_ID}`],
+    [
+      "an encoded dot segment",
+      `/transactions/%2e%2e/transactions/${CANONICAL_TRANSACTION_ID}`,
+    ],
+    ["a raw backslash separator", `/transactions\\${CANONICAL_TRANSACTION_ID}`],
+    ["a trailing carriage return", `/transactions/${CANONICAL_TRANSACTION_ID}\r`],
+    ["a trailing tab", `/transactions/${CANONICAL_TRANSACTION_ID}\t`],
+    ["a trailing space", `/transactions/${CANONICAL_TRANSACTION_ID} `],
+  ])("resolves %s to the canonical route before the application runs", (_label, address) => {
+    const url = new URL(address, PARSER_ORIGIN);
+
+    expect(url.pathname).toBe(CANONICAL_DETAIL_ROUTE);
+    expect(url.search).toBe("");
+    expect(url.hash).toBe("");
+    // So this is not evidence the application inspected the original text: the
+    // location it receives is indistinguishable from a canonical one.
+    expect(parsedLocation(address)).toBe(CANONICAL_DETAIL_ROUTE);
+  });
+
+  it("keeps the capability guard on the canonical location it is left holding", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const normalized = parsedLocation(`/x/../transactions/${CANONICAL_TRANSACTION_ID}`);
+
+    const { client } = renderSignedInAt(normalized, ["PLATFORM_ADMIN"]);
+
+    expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(client.calls.authorizeRequest).toBe(0);
+  });
+
+  it("still asks an unauthenticated visitor to sign in there, and sends nothing", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const normalized = parsedLocation(`/transactions\\${CANONICAL_TRANSACTION_ID}`);
+    const client = createFakeAuthClient({ initialSession: null });
+    adapter.client = client;
+
+    renderRoutesWithAuth(routes, { client, initialEntries: [normalized] });
+
+    expect(await screen.findByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(client.calls.authorizeRequest).toBe(0);
+  });
+});
+
+describe("the /transactions/:transactionId production route", () => {
+  it.each(TRANSACTION_ROLES)("renders the screen on direct entry for %s", async (role) => {
+    const fetchSpy = vi.fn().mockImplementation(() => new Promise<Response>(() => {}));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    renderSignedInAt(CANONICAL_DETAIL_ROUTE, [role]);
+
+    expect(
+      await screen.findByRole("heading", { name: `Transaction ${CANONICAL_TRANSACTION_ID}` }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Loading transaction...")).toBeInTheDocument();
+    // The direct URL entry really did reach the Backend, for this transaction
+    // and no other.
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+    const sent = fetchSpy.mock.calls[0][0] as Request;
+    expect(new URL(sent.url).pathname).toBe(`/api/v1/transactions/${CANONICAL_TRANSACTION_ID}`);
+  });
+
+  it.each(NON_TRANSACTION_ROLES)("refuses direct entry for %s, sending nothing", async (role) => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const { client } = renderSignedInAt(CANONICAL_DETAIL_ROUTE, [role]);
+
+    expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^Transaction / })).not.toBeInTheDocument();
+    // The refusal costs the Backend nothing at all, and takes no credential.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(client.calls.authorizeRequest).toBe(0);
+    // It also says nothing about which role would have worked, and repeats no
+    // part of the address it refused.
+    const rendered = document.body.textContent ?? "";
+    expect(rendered).not.toContain(role);
+    expect(rendered).not.toContain("transaction:view");
+    expect(rendered).not.toContain(CANONICAL_TRANSACTION_ID);
+  });
+
+  it("asks an unauthenticated visitor to sign in, and sends nothing", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const client = createFakeAuthClient({ initialSession: null });
+    adapter.client = client;
+
+    renderRoutesWithAuth(routes, { client, initialEntries: [CANONICAL_DETAIL_ROUTE] });
+
+    expect(await screen.findByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(client.calls.signIn).toHaveLength(0);
+    expect(client.calls.authorizeRequest).toBe(0);
+  });
+
+  it("shows neither the screen nor a refusal while authentication is undecided", () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const client = createFakeAuthClient({ initialSession: null });
+    adapter.client = client;
+    client.deferInitialize();
+
+    renderRoutesWithAuth(routes, { client, initialEntries: [CANONICAL_DETAIL_ROUTE] });
+
+    expect(authStatus()).toHaveTextContent(PREPARING);
+    expect(screen.getByText("Checking access...")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Access denied" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^Transaction / })).not.toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("sends nothing when authentication itself failed", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const client = createFakeAuthClient({ initialSession: null });
+    adapter.client = client;
+
+    await renderAt(CANONICAL_DETAIL_ROUTE, {
+      client,
+      initialize: "reject",
+      settled: { status: safeAuthErrorMessage("configuration") },
+    });
+
+    expect(screen.getByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(client.calls.authorizeRequest).toBe(0);
+  });
+
+  it("removes the screen the moment the session is invalidated", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() => new Promise<Response>(() => {})),
+    );
+    const { client } = renderSignedInAt(CANONICAL_DETAIL_ROUTE, ["FDS_ANALYST"]);
+    await screen.findByRole("heading", { name: `Transaction ${CANONICAL_TRANSACTION_ID}` });
+
+    act(() => {
+      client.emitSessionInvalidated();
+    });
+
+    expect(screen.getByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^Transaction / })).not.toBeInTheDocument();
+  });
+
+  it("returns to exactly the detail route after signing in from it", async () => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const client = createFakeAuthClient({ initialSession: null });
+    adapter.client = client;
+
+    renderRoutesWithAuth(routes, { client, initialEntries: [CANONICAL_DETAIL_ROUTE] });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(client.calls.signIn).toEqual([CANONICAL_DETAIL_ROUTE]);
+  });
+
+  /**
+   * A detail address carrying a query or a fragment is not a route this
+   * application has, so it is not a place to be sent back to. The return target
+   * falls back to `/` whole, rather than being repaired into the canonical
+   * detail route by dropping the part that made it unknown.
+   */
+  it.each([
+    ["a query string", `${CANONICAL_DETAIL_ROUTE}?tab=raw`, "tab=raw"],
+    ["a fragment", `${CANONICAL_DETAIL_ROUTE}#raw`, "#raw"],
+    ["a query string and a fragment", `${CANONICAL_DETAIL_ROUTE}?tab=raw#raw`, "tab=raw"],
+  ])("returns to the default route after signing in from %s", async (_label, path, smuggled) => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const client = createFakeAuthClient({ initialSession: null });
+    adapter.client = client;
+
+    renderRoutesWithAuth(routes, { client, initialEntries: [path] });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(client.calls.signIn).toEqual(["/"]);
+    // Nothing of the address it refused is carried into the sign-in, and
+    // nothing was asked of the Backend on the way.
+    expect(client.calls.signIn[0]).not.toContain(smuggled);
+    expect(document.body.innerHTML).not.toContain(smuggled);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(client.calls.authorizeRequest).toBe(0);
+  });
+
+  /**
+   * Locations a browser really can hand this application, none of which is a
+   * transaction address.
+   *
+   * Each one survives a standard URL parser unchanged - the test below asserts
+   * that first, so the list cannot quietly fill up with representations no
+   * browser would ever deliver - and each matches the route pattern: one
+   * segment under `/transactions/`. The screen therefore renders, refuses, and
+   * sends nothing.
+   *
+   * The percent-encoded entries are the ones that matter most. React Router
+   * hands a route parameter over already decoded, so `%32f4c0a4e-...` arrives
+   * at `useParams()` as a perfectly canonical UUID. The screen reads the path
+   * segment as the browser preserved it instead, which still carries its `%32`.
+   */
+  const malformedAddresses: Array<[string, string]> = [
+    ["an uppercase UUID", "/transactions/2F4C0A4E-8A9D-4C2F-9A1B-7D6E5F430001"],
+    ["a version 1 UUID", "/transactions/2f4c0a4e-8a9d-1c2f-9a1b-7d6e5f430001"],
+    ["a version 3 UUID", "/transactions/2f4c0a4e-8a9d-3c2f-9a1b-7d6e5f430001"],
+    ["a version 5 UUID", "/transactions/2f4c0a4e-8a9d-5c2f-9a1b-7d6e5f430001"],
+    ["an invalid RFC variant", "/transactions/2f4c0a4e-8a9d-4c2f-1a1b-7d6e5f430001"],
+    ["a numeric identifier", "/transactions/1"],
+    ["a UUID with no hyphens", "/transactions/2f4c0a4e8a9d4c2f9a1b7d6e5f430001"],
+    ["a percent-encoded first digit", "/transactions/%32f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001"],
+    ["an encoded slash", "/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001%2fedit"],
+    ["an encoded backslash", "/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001%5cedit"],
+    ["a double-encoded slash", `${CANONICAL_DETAIL_ROUTE}%252Fedit`],
+    ["a malformed percent sequence", `${CANONICAL_DETAIL_ROUTE}%2`],
+    ["an encoded space", "/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001%20"],
+    ["an encoded control character", `${CANONICAL_DETAIL_ROUTE}%0d`],
+    ["a matrix parameter", `${CANONICAL_DETAIL_ROUTE};v=1`],
+    ["a trailing slash", `${CANONICAL_DETAIL_ROUTE}/`],
+    ["a query string", `${CANONICAL_DETAIL_ROUTE}?tab=raw`],
+    ["a fragment", `${CANONICAL_DETAIL_ROUTE}#amount`],
+  ];
+
+  it.each(malformedAddresses)("refuses %s before any request", async (_label, path) => {
+    // A browser would deliver this location as written rather than resolving it
+    // away, so it is one the application really has to answer for.
+    expect(parsedLocation(path)).toBe(path);
+
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const { client } = renderSignedInAt(path, ["FDS_ANALYST"]);
+
+    const refusal = await screen.findByRole("alert");
+    expect(refusal).toHaveTextContent(INVALID_ADDRESS_HEADING);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(client.calls.authorizeRequest).toBe(0);
+    expect(screen.queryByText("Loading transaction...")).not.toBeInTheDocument();
+  });
+
+  /**
+   * Defence in depth, and labelled as such.
+   *
+   * A browser resolves `%2e%2e` away as a double-dot path segment before this
+   * application runs, so this location arrives only through a `MemoryRouter`.
+   * The refusal is real and worth keeping, but it is not a boundary a browser
+   * ever asks this application to hold, and it is not evidence that the screen
+   * inspected anything the browser had already rewritten.
+   */
+  it("still refuses an encoded dot segment that reaches it directly", async () => {
+    const address = "/transactions/%2e%2e";
+    expect(parsedLocation(address)).not.toBe(address);
+
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const { client } = renderSignedInAt(address, ["FDS_ANALYST"]);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(INVALID_ADDRESS_HEADING);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(client.calls.authorizeRequest).toBe(0);
+  });
+
+  it("prints no part of a malformed address anywhere on the page", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+    const smuggled = "%32f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001";
+
+    renderSignedInAt(`/transactions/${smuggled}`, ["FDS_ANALYST"]);
+    await screen.findByRole("alert");
+
+    expect(document.body.textContent ?? "").not.toContain("2f4c0a4e");
+    expect(document.body.innerHTML).not.toContain("2f4c0a4e");
+  });
+
+  it("offers a way back to the list and keeps the rail destination", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() => new Promise<Response>(() => {})),
+    );
+
+    renderSignedInAt(CANONICAL_DETAIL_ROUTE, ["FDS_VIEWER"]);
+
+    const back = await screen.findByRole("link", { name: "Back to transactions" });
+    expect(back).toHaveAttribute("href", "/transactions");
+    expect(screen.getByRole("link", { name: "Transactions" })).toBeInTheDocument();
   });
 });

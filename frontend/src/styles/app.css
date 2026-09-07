@@ -664,6 +664,14 @@ ul.notice__body li + li {
   max-width: 19ch;
 }
 
+/* The one way from the sheet into a record. An anchor, styled as the
+   identifier it prints, wrapping in its cell exactly as the plain text did. */
+.cell-ref__link {
+  font: inherit;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .cell-ref--long {
   font-size: 11.5px;
   line-height: 1.4;
@@ -747,6 +755,109 @@ ul.notice__body li + li {
   transform: rotate(45deg);
 }
 
+/* Transaction detail
+   -------------------------------------------------------------------------
+   The same ledger vocabulary as the sheet, in the one layout a single record
+   actually wants: named values in a definition list. No card grid, no repeated
+   surfaces inside surfaces, no hero and no chart - three plain panels, each one
+   a heading and its facts. */
+
+.detail {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.detail__back {
+  font-size: 13px;
+}
+
+/* The identifier reads as the machine value it is, and is allowed to wrap on a
+   narrow viewport rather than pushing the document sideways. */
+.detail__id {
+  font-family: var(--font-mono);
+  font-size: 0.72em;
+  font-weight: 550;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.detail__record {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.panel {
+  min-width: 0;
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.panel h3 {
+  margin-bottom: var(--space-3);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--rule);
+  font-size: 14px;
+  font-weight: 620;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  margin: 0;
+}
+
+.facts dt {
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 550;
+}
+
+.facts dd {
+  margin: 0 0 var(--space-3);
+  min-width: 0;
+  font-size: 14px;
+}
+
+.facts dd:last-child {
+  margin-bottom: 0;
+}
+
+/* An opaque key, printed whole. It wraps inside its own column so that a long
+   reference never widens the document. */
+.facts__ref {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.facts__amount b {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.facts__amount span {
+  margin-left: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.facts__absent {
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  font-style: italic;
+}
+
 /* Pagination
    ------------------------------------------------------------------------- */
 
@@ -819,6 +930,19 @@ ul.notice__body li + li {
 
   .filters__grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  /* From the console design width the name sits beside its value. Below it the
+     pair stacks, which is what keeps a forty-character reference inside the
+     viewport instead of forcing the whole document to scroll sideways. */
+  .facts {
+    grid-template-columns: 15ch minmax(0, 1fr);
+    column-gap: var(--space-5);
+    row-gap: var(--space-3);
+  }
+
+  .facts dd {
+    margin-bottom: 0;
   }
 
   /* The time range holds two controls, so it is given two of the grid's

@@ -11,6 +11,18 @@ import { renderRoutesWithAuth } from "../test/renderWithAuth";
 import { jsonResponse, mockFetchOnce } from "../test/mockFetch";
 import type { UserRole } from "../auth/userRoles";
 
+const CANONICAL_TRANSACTION_ID = "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001";
+const CANONICAL_DETAIL_ROUTE = `/transactions/${CANONICAL_TRANSACTION_ID}`;
+
+/**
+ * The shell, with stand-ins where the business screens sit.
+ *
+ * The transaction destinations are here so the shell can be rendered *at* them
+ * and asked what it would do about signing in from there. What those screens
+ * themselves send, refuse or display is decided by their own tests; a stand-in
+ * that fetches nothing is what makes "no request was made" a statement about
+ * the shell rather than about a page that happened not to have loaded yet.
+ */
 const ROUTES: RouteObject[] = [
   {
     path: "/",
@@ -18,6 +30,11 @@ const ROUTES: RouteObject[] = [
     children: [
       { index: true, element: <HomePage /> },
       { path: "health", element: <HealthPage /> },
+      { path: "transactions", element: <p>Transaction list stands in here.</p> },
+      {
+        path: "transactions/:transactionId",
+        element: <p>Transaction detail stands in here.</p>,
+      },
     ],
   },
 ];
@@ -257,6 +274,72 @@ describe("AppShell authentication controls", () => {
 
     expect(client.calls.signIn).toEqual(["/health"]);
   });
+
+  /**
+   * What the shell offers to return to is decided from the whole location -
+   * path, query and fragment - and not from the path alone.
+   *
+   * The distinction is the point of these cases. `/transactions/{uuid}?tab=raw`
+   * is not a route this application has; checking only its pathname would
+   * silently turn it into one, and send someone after login to an address they
+   * never asked for. So the query and the fragment travel into the allowlist
+   * with the path, an address carrying either fails it whole, and the fallback
+   * is the default route rather than a repaired version of the input.
+   */
+  const returnRouteCases: Array<[string, string, string | null]> = [
+    ["the canonical detail route", CANONICAL_DETAIL_ROUTE, null],
+    ["a detail route carrying a query", `${CANONICAL_DETAIL_ROUTE}?tab=raw`, "tab=raw"],
+    ["a detail route carrying a fragment", `${CANONICAL_DETAIL_ROUTE}#raw`, "#raw"],
+    [
+      "a detail route carrying both",
+      `${CANONICAL_DETAIL_ROUTE}?tab=raw#raw`,
+      "tab=raw",
+    ],
+    ["the transaction list", "/transactions", null],
+    ["the root route", "/", null],
+  ];
+
+  it.each(returnRouteCases)(
+    "resolves the return target for %s",
+    async (_label, path, smuggled) => {
+      const fetchSpy = vi.fn();
+      vi.stubGlobal("fetch", fetchSpy);
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const consoleLog = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const user = userEvent.setup();
+      const client = createFakeAuthClient();
+      renderShell(client, path);
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+      });
+      await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+      // An address the allowlist knows returns to itself, exactly; one it does
+      // not know returns to the default route, whole.
+      const expected = smuggled === null ? path : "/";
+      expect(client.calls.signIn).toEqual([expected]);
+
+      if (smuggled !== null) {
+        // The part that made the address unknown is not carried anywhere: not
+        // into the sign-in, not into the document, not into the console.
+        expect(client.calls.signIn[0]).not.toContain(smuggled);
+        expect(document.body.innerHTML).not.toContain(smuggled);
+        for (const spy of [consoleError, consoleWarn, consoleLog]) {
+          for (const call of spy.mock.calls) {
+            expect(JSON.stringify(call)).not.toContain(smuggled);
+          }
+        }
+      }
+      // The shell asks the Backend for nothing on the way to a sign-in.
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  // `/health` is the sixth case, and it is the test above this block: it needs
+  // a fetch of its own, so it cannot join a table whose whole point is that the
+  // shell sends nothing.
 
   it("announces the authenticating state and withdraws the sign-in button", async () => {
     const user = userEvent.setup();

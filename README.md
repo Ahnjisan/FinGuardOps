@@ -258,7 +258,12 @@ USER method·path에만 `Authorization: Bearer`를 전달하는 인증 API trans
 구현했다. credential capability는 승인된 Backend USER endpoint가 아닌 destination을 스스로
 거부하며, React tree에 게시되는 값에는 이 capability가 존재하지 않는다. role·authority 권한 UI는
 Issue #243에서, 이를 적용한 첫 production 보호 화면인 거래 목록 `/transactions`와 FDS operations
-console 디자인 기반은 Issue #249에서 구현했다. 사건·조사·판정·운영 대시보드 화면은 아직 없다. Issue #225의 Local JWT fixture는 production Authorization
+console 디자인 기반은 Issue #249에서 구현했다. Issue #251에서는 조회 전용 거래 상세
+`/transactions/{transactionId}`와 목록→상세 탐색을 같은 디자인 기반 위에 구현했다. 두 화면 모두
+Frontend capability `transaction:view`로 보호되며, 최종 판정은 Backend authority
+`transaction:read`와 401·403 응답이 내린다. 상세 화면은 canonical lowercase UUID v4 route만
+받아들이고, API에 없는 위험도·탐지 결과·사건 정보는 표시하지 않는다. 사건·조사·판정·운영 대시보드
+화면은 아직 없고, 콘솔 전체의 최종 시각적 리뉴얼은 후속 작업으로 남아 있다. Issue #225의 Local JWT fixture는 production Authorization
 Server나 브라우저 OIDC Provider가 아닌 Backend 회귀·장애 검증용 local/manual E2E이며,
 Keycloak과 같은 Backend issuer 설정에서 동시에 사용하지 않는다. 상세 결정은
 [`ADR-011`](docs/07-decisions/ADR-011-keycloak-authorization-server-and-claim-contract.md)을
@@ -328,8 +333,9 @@ Kafka
 * React·TypeScript·Vite foundation과 Router, public health client, OIDC Authorization
   Code + PKCE 인증 경계(`oidc-client-ts`), 승인 endpoint 전용 인증 API transport와 401·403
   경계, role·capability 권한 UI, capability로 보호되는 거래 목록 화면(`/transactions`)과
-  FDS operations console 디자인 기반 구현. UI dependency는 추가하지 않았고 CSS와 React만
-  사용한다. 거래 상세, 사건·조사·판정 화면과 운영 대시보드는 아직 구현되지 않음
+  조회 전용 거래 상세 화면(`/transactions/{transactionId}`), FDS operations console 디자인 기반
+  구현. UI dependency는 추가하지 않았고 CSS와 React만 사용한다. 사건·조사·판정 화면과 운영
+  대시보드, 콘솔 전체의 최종 시각적 리뉴얼은 아직 구현되지 않음
 
 ### Backend
 

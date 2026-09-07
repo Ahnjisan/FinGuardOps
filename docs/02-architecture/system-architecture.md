@@ -119,9 +119,10 @@ AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 
 - Spring Boot Rule v1 Client와 내부 분석 오케스트레이션·결과 채택은
   구현되었으나 거래 접수 Service와 최종 업무 흐름 연결은 없음
 - `frontend/`: React·TypeScript·Vite foundation, Router, public health client, OIDC
-  Authorization Code + PKCE 인증 경계, 인증 API transport와 권한 UI, capability로 보호되는 첫
-  production 업무 화면인 거래 목록(`/transactions`)과 FDS operations console 디자인 기반이
-  구현되었으며 거래 상세, 사건·조사·판정 화면과 운영 대시보드는 구현되지 않음
+  Authorization Code + PKCE 인증 경계, 인증 API transport와 권한 UI, capability로 보호되는
+  production 업무 화면인 거래 목록(`/transactions`)과 조회 전용 거래 상세
+  (`/transactions/{transactionId}`), FDS operations console 디자인 기반이 구현되었으며
+  사건·조사·판정 화면, 운영 대시보드와 콘솔 전체의 최종 시각적 리뉴얼은 구현되지 않음
 - `infra/`: Issue #196의 로컬 Compose Prometheus scrape·External Risk 검증 fixture,
   Issue #199의 service 수준 recording rule 14개와 Issue #201의 로컬 실패율 alert rule
   6개·deterministic test, Issue #203의 로컬 Alertmanager routing·signal별 inhibition·
@@ -293,12 +294,35 @@ React는 API 계약을 임의로 만들거나 금융 업무 상태를 자체 확
 
 #### 현재 구현된 업무 화면
 
-거래 목록(`/transactions`) 하나다. UI capability `transaction:view`로 보호하며 filter·sort·
-pagination과 loading·empty·error·data 상태를 갖는다. 응답에 실제로 존재하는 필드만 표시하고
-위험도 열은 만들지 않는다. 시각은 Backend UTC 원문을 유지한 채 화면에서만 고정 +09:00 offset으로
-Asia/Seoul(KST)로 표시하며, 금액은 문자열·`BigInt` 경로를 유지해 `Number` 변환으로 정밀도를 잃지
-않는다. 디자인 기반(색·간격·타이포그래피·radius·shadow token, status badge, filter·table·feedback
-표현)은 `frontend/src/styles/app.css` 한 곳에 있고 이후 업무 화면이 재사용한다.
+거래 목록(`/transactions`, Issue #249)과 거래 상세(`/transactions/{transactionId}`,
+Issue #251) 둘이다. 두 화면 모두 Frontend UI capability `transaction:view`로 보호하며, 최종 판정은
+Backend authority `transaction:read`와 401·403 응답이 내린다. 두 이름은 서로 다른 계층에 속하므로
+혼용하지 않는다.
+
+목록은 filter·sort·pagination과 loading·empty·error·data 상태를 갖는다. 상세는 조회 전용이며
+loading, data, transaction not found(404), access denied(403), authentication required(401),
+timeout, network failure, invalid response, generic error, explicit retry, 그리고 malformed
+주소에 대한 고정 invalid-route 상태를 갖는다. 목록에서 상세로 가는 경로는 행 전체 클릭이 아니라
+거래 ID cell의 명시적 anchor 하나이며, 고객·계좌·device reference와 금액은 URL·history state·Web
+Storage에 복제되지 않는다. 상세 route는 canonical lowercase UUID v4만 받아들이고, SPA에 보존된
+채 도달한 그 밖의 주소는 credential 조회와 Backend 요청 0회로 거부된다. Frontend의 입력 경계는
+브라우저 URL parser가 제공한 최종 location이므로, 브라우저가 SPA 실행 전에 canonical URL로
+정규화해 버린 이전 표현은 SPA에서 복구하거나 판별하지 않는다. 그런 location도 authentication,
+`transaction:view` capability, Backend `transaction:read` authorization을 모두 거친다. 로그인 후
+복귀 경로는 pathname뿐 아니라 query와 fragment까지 함께 판정하므로 query·fragment가 붙은 상세
+주소는 `/`로 fail-closed된다. SPA 이전 raw request-target 검사는 reverse proxy·web server 같은
+production hosting 경계의 책임이며 이번 범위가 아니다.
+
+두 화면 모두 응답에 실제로 존재하는 필드만 표시한다. 위험도(risk score·risk level), 탐지 결과
+(`DetectionResult`·`DetectionEvidence`)와 사건(`FraudCase`) 연결은 현재 Transaction API 응답에
+없으므로 만들지 않으며, `processingStatus`를 위험도로 표현하지 않는다. 거래 수정·재처리·사건
+생성 같은 업무 action도 아직 없다. 시각은 Backend UTC 원문을 유지한 채 화면에서만 고정 +09:00
+offset으로 Asia/Seoul(KST)로 표시하며, 금액은 문자열·`BigInt` 경로를 유지해 `Number` 변환으로
+정밀도를 잃지 않는다. 디자인 기반(색·간격·타이포그래피·radius·shadow token, status badge,
+filter·table·definition list·feedback 표현)은 `frontend/src/styles/app.css` 한 곳에 있고 이후
+업무 화면이 재사용한다. 콘솔 전체의 최종 시각적 리뉴얼은 후속 작업이다.
+
+Issue #251에서 Backend, AI Service, Infra, Keycloak, DB와 API 계약 변경은 없다.
 
 ### 7.2 Spring Boot Modular Monolith
 

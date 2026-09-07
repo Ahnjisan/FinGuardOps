@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ABSENT_REFERENCE_LABEL,
   describeReference,
   describeResultWindow,
   EMPTY_FILTER_DRAFT,
@@ -13,10 +14,12 @@ import {
   PROCESSING_STATUS_LABELS,
   processingStatusTone,
   toKstParts,
+  TRANSACTION_CHANNEL_LABELS,
   TRANSACTION_TYPE_LABELS,
   WRAPPING_REFERENCE_LENGTH,
 } from "./transactionPresentation";
 import {
+  TRANSACTION_CHANNELS,
   TRANSACTION_PROCESSING_STATUSES,
   TRANSACTION_TYPES,
 } from "../../api/transactionApi";
@@ -306,5 +309,44 @@ describe("filter defaults", () => {
       expect(size).toBeLessThanOrEqual(100);
     }
     expect(PAGE_SIZE_OPTIONS).toContain(20);
+  });
+});
+
+describe("channel labels", () => {
+  it("names every channel the detail contract defines, and only those", () => {
+    for (const channel of TRANSACTION_CHANNELS) {
+      expect(TRANSACTION_CHANNEL_LABELS[channel]).toBeTruthy();
+    }
+    expect(Object.keys(TRANSACTION_CHANNEL_LABELS).sort()).toEqual(
+      [...TRANSACTION_CHANNELS].sort(),
+    );
+    expect(Object.isFrozen(TRANSACTION_CHANNEL_LABELS)).toBe(true);
+  });
+
+  it("says nothing about risk", () => {
+    // A channel is where a transaction came in, not how dangerous it is. ATM
+    // and open banking are transport, and labelling either as risky would put a
+    // judgement on screen that no system made.
+    for (const label of Object.values(TRANSACTION_CHANNEL_LABELS)) {
+      expect(label.toLowerCase()).not.toContain("risk");
+      expect(label.toLowerCase()).not.toContain("suspicious");
+    }
+  });
+});
+
+describe("absent reference label", () => {
+  it("is one fixed word shared by every screen", () => {
+    expect(ABSENT_REFERENCE_LABEL).toBe("None recorded");
+    // A missing reference reads as an absence rather than as a blank a reader
+    // could mistake for a rendering fault.
+    expect(ABSENT_REFERENCE_LABEL.trim()).not.toBe("");
+  });
+
+  it("is what an absent reference resolves to", () => {
+    const absent = describeReference(null);
+    expect(absent.absent).toBe(true);
+    // The label lives beside the value, never inside it: the display carries no
+    // text of its own for a value that does not exist.
+    expect(absent.text).toBe("");
   });
 });

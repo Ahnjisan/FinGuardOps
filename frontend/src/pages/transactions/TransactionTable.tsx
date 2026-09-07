@@ -1,8 +1,10 @@
+import { Link } from "react-router-dom";
 import type {
   TransactionListItem,
   TransactionListSort,
 } from "../../api/transactionApi";
 import {
+  ABSENT_REFERENCE_LABEL,
   describeReference,
   formatAmountDigits,
   formatKstDateTime,
@@ -21,9 +23,18 @@ export interface TransactionTableProps {
 /**
  * The transaction sheet.
  *
- * Rows are records, not links. There is no detail route in this scope, so a row
- * is not clickable, carries no hidden identifier and offers no business action:
- * everything the analyst can read is visible text in a cell.
+ * A row is a record, not a control. It has no click handler, no `role`, no
+ * `tabindex` and no hidden identifier: the one way into the detail screen is
+ * the anchor in the Transaction ID cell. That is deliberate. A clickable row
+ * swallows text selection, cannot be reached from the keyboard without being
+ * given a button role it should not have, and has no href for a middle click or
+ * a Ctrl-click to open - so the sheet offers a real link instead and lets the
+ * browser do what it already does well.
+ *
+ * The link carries the transaction id and nothing else. No amount, no customer,
+ * no account and no device reference reaches the destination through router
+ * state, a query string or a `data-` attribute, so the address bar and the
+ * history entry hold an opaque identifier and no financial value.
  *
  * Every reference is printed in full. Truncating a financial reference to fit a
  * column would make two different accounts look identical, so long values wrap
@@ -135,7 +146,19 @@ function TransactionRow({ item }: { readonly item: TransactionListItem }) {
           {PROCESSING_STATUS_LABELS[item.processingStatus]}
         </span>
       </td>
-      <td className="cell-ref cell-ref--id">{item.transactionId}</td>
+      <td className="cell-ref cell-ref--id">
+        {/*
+          An ordinary anchor produced by `Link`: no `state`, no `onClick` of our
+          own, and no `preventDefault`, so Ctrl-click, middle click, Shift-click
+          and "Open in new tab" all behave exactly as the browser intends. The
+          visually hidden prefix is what a screen reader announces before the
+          identifier; it repeats no value, so the id is still in the DOM once.
+        */}
+        <Link className="cell-ref__link" to={`/transactions/${item.transactionId}`}>
+          <span className="visually-hidden">View details for transaction</span>{" "}
+          {item.transactionId}
+        </Link>
+      </td>
       <ReferenceCell value={item.externalCustomerRef} />
       <ReferenceCell value={item.senderAccountRef} />
       <ReferenceCell value={item.recipientAccountRef} />
@@ -150,7 +173,7 @@ function ReferenceCell({ value }: { readonly value: string | null }) {
     // instead of as a transaction that genuinely has no counterparty account.
     return (
       <td className="cell-ref">
-        <span className="cell-ref__absent">None recorded</span>
+        <span className="cell-ref__absent">{ABSENT_REFERENCE_LABEL}</span>
       </td>
     );
   }
