@@ -39,7 +39,6 @@ describe("resolveReturnRoute", () => {
     ["a nested internal route", "/health/details"],
     ["the transactions route with a trailing slash", "/transactions/"],
     ["a transaction detail route that does not exist", "/transactions/1"],
-    ["a nested transactions route", "/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001"],
     ["a sibling route sharing the transactions prefix", "/transactionsx"],
     ["a route that merely contains the transactions path", "/x/transactions"],
     ["the transactions route with a query string", "/transactions?page=1"],
@@ -71,7 +70,7 @@ describe("resolveReturnRoute", () => {
     expect(resolved).not.toContain("hunter2");
   });
 
-  it("only ever returns one of the three allowlisted routes", () => {
+  it("only ever returns an allowlisted route", () => {
     const inputs: unknown[] = [
       "/",
       "/health",
@@ -93,6 +92,113 @@ describe("resolveReturnRoute", () => {
     // best and an open redirect at worst.
     for (const suffix of ["/", "/1", "/../health", "//evil.example", "\\evil.example"]) {
       expect(resolveReturnRoute(`/transactions${suffix}`)).toBe("/");
+    }
+  });
+});
+
+/**
+ * The one parameterized destination.
+ *
+ * `/transactions` stays a literal; what is added here is a *shape* - one path
+ * segment that is already a canonical lowercase UUID v4 - and nothing that
+ * shares a prefix with it. Each rejected value below is a real attempt at the
+ * usual ways an allowlist built on `startsWith`, `includes`, a permissive
+ * pattern, a decode or a trim is walked past.
+ */
+describe("resolveReturnRoute for the transaction detail route", () => {
+  const CANONICAL = "/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001";
+
+  it("allows a canonical transaction detail route", () => {
+    expect(resolveReturnRoute(CANONICAL)).toBe(CANONICAL);
+  });
+
+  it("allows every canonical variant character the format admits", () => {
+    for (const id of [
+      "00000000-0000-4000-8000-000000000000",
+      "ffffffff-ffff-4fff-bfff-ffffffffffff",
+      "3a1b2c3d-4e5f-4a6b-9c7d-9e0f1a2b3c4d",
+      "3a1b2c3d-4e5f-4a6b-ac7d-9e0f1a2b3c4d",
+    ]) {
+      expect(resolveReturnRoute(`/transactions/${id}`)).toBe(`/transactions/${id}`);
+    }
+  });
+
+  const rejectedDetail: Array<[string, unknown]> = [
+    ["an uppercase UUID", "/transactions/2F4C0A4E-8A9D-4C2F-9A1B-7D6E5F430001"],
+    ["a mixed-case UUID", "/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7D6E5F430001"],
+    ["a version 1 UUID", "/transactions/2f4c0a4e-8a9d-1c2f-9a1b-7d6e5f430001"],
+    ["a version 3 UUID", "/transactions/2f4c0a4e-8a9d-3c2f-9a1b-7d6e5f430001"],
+    ["a version 5 UUID", "/transactions/2f4c0a4e-8a9d-5c2f-9a1b-7d6e5f430001"],
+    ["an invalid RFC variant nibble", "/transactions/2f4c0a4e-8a9d-4c2f-1a1b-7d6e5f430001"],
+    ["a variant nibble of c", "/transactions/2f4c0a4e-8a9d-4c2f-ca1b-7d6e5f430001"],
+    ["a UUID with no hyphens", "/transactions/2f4c0a4e8a9d4c2f9a1b7d6e5f430001"],
+    ["a UUID one digit short", "/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f43000"],
+    ["a UUID one digit long", "/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f4300011"],
+    ["a trailing slash", `${CANONICAL}/`],
+    ["a deeper path", `${CANONICAL}/evidence`],
+    ["a query string", `${CANONICAL}?tab=raw`],
+    ["a fragment", `${CANONICAL}#amount`],
+    ["a semicolon parameter", `${CANONICAL};jsessionid=1`],
+    ["a leading space", ` ${CANONICAL}`],
+    ["a trailing space", `${CANONICAL} `],
+    ["an inner space", "/transactions/2f4c0a4e-8a9d-4c2f-9a1b 7d6e5f430001"],
+    ["a tab character", `${CANONICAL}\t`],
+    ["a newline", `${CANONICAL}\n`],
+    ["a carriage return", `${CANONICAL}\r`],
+    ["a null character", `${CANONICAL}\u0000`],
+    ["an encoded slash", "/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001%2fedit"],
+    ["an encoded backslash", "/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001%5cedit"],
+    ["a percent-encoded first digit", "/transactions/%32f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001"],
+    ["a double-encoded slash", "/transactions/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001%252f"],
+    ["an encoded dot segment", "/transactions/%2e%2e/health"],
+    ["a raw dot segment", "/transactions/../admin"],
+    ["a duplicate separator", `/transactions//${"2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001"}`],
+    ["a leading duplicate separator", `/${CANONICAL}`],
+    ["a backslash separator", "\\transactions\\2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001"],
+    ["an absolute https URL", `https://evil.example${CANONICAL}`],
+    ["an absolute http URL", `http://localhost:5173${CANONICAL}`],
+    ["a protocol-relative URL", `//evil.example${CANONICAL}`],
+    ["userinfo in an absolute URL", `https://user:pass@evil.example${CANONICAL}`],
+    ["a different port on the same host", `http://localhost:8080${CANONICAL}`],
+    ["a javascript scheme", `javascript:${CANONICAL}`],
+    ["a prefix sibling", `/transactionsx/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001`],
+    ["a path merely containing the route", `/x${CANONICAL}`],
+    ["a different resource with the same shape", "/cases/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001"],
+    ["a String object wrapping a canonical route", new String(CANONICAL)],
+    ["an array wrapping a canonical route", [CANONICAL]],
+    ["an object stringifying to a canonical route", { toString: () => CANONICAL }],
+  ];
+
+  it.each(rejectedDetail)("falls back to the default for %s", (_label, value) => {
+    expect(resolveReturnRoute(value)).toBe(DEFAULT_RETURN_ROUTE);
+  });
+
+  it("never returns a value that is not rebuilt from a validated identifier", () => {
+    // The returned string is assembled here from the thirty-six validated
+    // characters, so a value that merely contains a canonical route cannot
+    // carry anything of its own through.
+    const hostile = `https://evil.example${CANONICAL}?token=hunter2#x`;
+    const resolved: string = resolveReturnRoute(hostile);
+
+    expect(resolved).toBe("/");
+    expect(resolved).not.toContain("evil.example");
+    expect(resolved).not.toContain("hunter2");
+  });
+
+  it("does not admit a route on the strength of decoding or trimming it", () => {
+    // Each of these becomes the canonical route once it is decoded, trimmed or
+    // both - which is exactly why neither is done. The value is judged as
+    // written, so all three are refused even though the "repaired" form of each
+    // one is a route this allowlist does admit.
+    const repairable = [
+      ` ${CANONICAL} `,
+      "/transactions/%32f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
+      " /transactions/%32f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001 ",
+    ];
+    for (const value of repairable) {
+      expect(resolveReturnRoute(value)).toBe("/");
+      // The repair really would have produced an admitted route.
+      expect(resolveReturnRoute(decodeURIComponent(value.trim()))).toBe(CANONICAL);
     }
   });
 });

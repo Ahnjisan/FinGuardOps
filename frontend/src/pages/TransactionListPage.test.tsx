@@ -1,7 +1,7 @@
 import { act, fireEvent, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { RouteObject } from "react-router-dom";
+import { useLocation, type RouteObject } from "react-router-dom";
 import type { AuthSession } from "../auth/authClient";
 import { createFakeAuthClient, type FakeAuthClient } from "../test/fakeAuthClient";
 import { jsonResponse } from "../test/mockFetch";
@@ -26,7 +26,29 @@ const SESSION: AuthSession = {
   roles: ["FDS_ANALYST"],
 };
 
-const ROUTES: RouteObject[] = [{ path: "/transactions", element: <TransactionListPage /> }];
+/**
+ * What the sheet's detail link actually navigates to, as a probe.
+ *
+ * The real detail screen is not rendered here - it has its own tests. What this
+ * stands in for is the destination's *location*, so the address, the query and
+ * the router state a click produced can be asserted rather than assumed.
+ */
+function DetailProbe() {
+  const location = useLocation();
+  return (
+    <div>
+      <p>Detail probe</p>
+      <p data-testid="probe-path">{location.pathname}</p>
+      <p data-testid="probe-search">{location.search}</p>
+      <p data-testid="probe-state">{JSON.stringify(location.state)}</p>
+    </div>
+  );
+}
+
+const ROUTES: RouteObject[] = [
+  { path: "/transactions", element: <TransactionListPage /> },
+  { path: "/transactions/:transactionId", element: <DetailProbe /> },
+];
 
 function listItem(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -914,4 +936,166 @@ describe("TransactionListPage validation refusal focus", () => {
     expect(JSON.stringify({ ...window.sessionStorage })).not.toContain(LONG_CUSTOMER_REF);
     expect(spy).toHaveBeenCalledTimes(1);
   }, 20_000);
+});
+
+/**
+ * The one way from the sheet into a record.
+ *
+ * Everything here is about what the row is *not*: not clickable as a whole, not
+ * given a control role, and not a carrier for financial values. The link is an
+ * ordinary anchor, so the assertions are about its href and about what the
+ * destination's location does and does not hold.
+ */
+describe("TransactionListPage detail navigation", () => {
+  const detailLinkName = `View details for transaction ${TRANSACTION_ID}`;
+
+  async function showRows(
+    content: readonly Record<string, unknown>[] = [listItem()],
+  ): Promise<void> {
+    const { calls } = controlledFetch();
+    renderPage(signedIn());
+    await settle();
+    await answerWith(calls[0], listBody(content));
+    await screen.findByRole("table");
+  }
+
+  it("gives every row an accessible link to exactly that transaction", async () => {
+    await showRows([
+      listItem(),
+      listItem({ transactionId: SECOND_TRANSACTION_ID, processingStatus: "HELD" }),
+    ]);
+
+    const links = screen.getAllByRole("link");
+    expect(links).toHaveLength(2);
+    expect(links[0]).toHaveAccessibleName(detailLinkName);
+    expect(links[0]).toHaveAttribute("href", `/transactions/${TRANSACTION_ID}`);
+    expect(links[1]).toHaveAccessibleName(
+      `View details for transaction ${SECOND_TRANSACTION_ID}`,
+    );
+    expect(links[1]).toHaveAttribute("href", `/transactions/${SECOND_TRANSACTION_ID}`);
+  });
+
+  it("puts the identifier in the href and nothing else anywhere on the anchor", async () => {
+    await showRows();
+
+    const link = screen.getByRole("link", { name: detailLinkName });
+    // Exactly the canonical route: no query, no fragment, no trailing slash.
+    expect(link.getAttribute("href")).toBe(`/transactions/${TRANSACTION_ID}`);
+    // No amount, customer, account or device value smuggled onto the element.
+    // The router's own `data-discover` marker is the only data attribute, and
+    // it carries a fixed boolean rather than anything from the row.
+    const dataAttributes = Array.from(link.attributes)
+      .filter((attribute) => attribute.name.startsWith("data-"))
+      .map((attribute) => `${attribute.name}=${attribute.value}`);
+    expect(dataAttributes).toEqual(["data-discover=true"]);
+    for (const attribute of Array.from(link.attributes)) {
+      for (const value of [
+        "1250000",
+        "1,250,000",
+        "cust_ref_demo_a7f2",
+        "acct_ref_demo_s91c",
+        "acct_ref_demo_r44d",
+      ]) {
+        expect(attribute.value).not.toContain(value);
+      }
+    }
+    expect(link.getAttribute("title")).toBeNull();
+    expect(link.getAttribute("aria-label")).toBeNull();
+  });
+
+  it("keeps the identifier in the sheet exactly once", async () => {
+    await showRows();
+
+    // The link prints the identifier; nothing repeats it into a second cell, a
+    // hidden element or an attribute.
+    const sheet = screen.getByRole("table");
+    expect(sheet.innerHTML.split(TRANSACTION_ID).length - 1).toBe(2);
+    const idCell = within(screen.getByRole("row", { name: /account transfer/i })).getAllByRole(
+      "cell",
+    )[4];
+    expect(idCell.className).toContain("cell-ref--id");
+    expect(within(idCell).getByRole("link")).toHaveAttribute(
+      "href",
+      `/transactions/${TRANSACTION_ID}`,
+    );
+  });
+
+  it("navigates to the transaction with no router state and no query", async () => {
+    const user = userEvent.setup();
+    await showRows();
+
+    await user.click(screen.getByRole("link", { name: detailLinkName }));
+
+    expect(await screen.findByText("Detail probe")).toBeInTheDocument();
+    expect(screen.getByTestId("probe-path")).toHaveTextContent(
+      `/transactions/${TRANSACTION_ID}`,
+    );
+    expect(screen.getByTestId("probe-search")).toBeEmptyDOMElement();
+    // `null`, not an object holding a row: no reference, no amount and no
+    // customer identifier travels with the navigation.
+    expect(screen.getByTestId("probe-state")).toHaveTextContent("null");
+  });
+
+  it("reaches the transaction from the keyboard alone", async () => {
+    const user = userEvent.setup();
+    await showRows();
+
+    screen.getByRole("link", { name: detailLinkName }).focus();
+    expect(screen.getByRole("link", { name: detailLinkName })).toHaveFocus();
+    await user.keyboard("{Enter}");
+
+    expect(await screen.findByText("Detail probe")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["Ctrl", { ctrlKey: true }],
+    ["Meta", { metaKey: true }],
+    ["Shift", { shiftKey: true }],
+    ["a middle click", { button: 1 }],
+  ])("leaves %s-clicking to the browser", async (_label, modifier) => {
+    await showRows();
+
+    const link = screen.getByRole("link", { name: detailLinkName });
+    fireEvent.click(link, modifier);
+
+    // No client-side navigation happened, and nothing was cancelled on the
+    // anchor's behalf: the browser is left to open its new tab or window.
+    expect(screen.queryByText("Detail probe")).not.toBeInTheDocument();
+    expect(screen.getByRole("table")).toBeInTheDocument();
+  });
+
+  it("keeps the row a record rather than a control", async () => {
+    await showRows();
+
+    const row = screen.getByRole("row", { name: /account transfer/i });
+    expect(row.tagName).toBe("TR");
+    expect(row.getAttribute("role")).toBeNull();
+    expect(row.getAttribute("tabindex")).toBeNull();
+    expect(row.onclick).toBeNull();
+    expect(row.getAttribute("onclick")).toBeNull();
+    for (const cell of within(row).getAllByRole("cell")) {
+      expect(cell.onclick).toBeNull();
+      expect(cell.getAttribute("role")).toBeNull();
+    }
+  });
+
+  it("does not navigate when the row itself is clicked", async () => {
+    const user = userEvent.setup();
+    await showRows();
+
+    const row = screen.getByRole("row", { name: /account transfer/i });
+    await user.click(within(row).getAllByRole("cell")[1]);
+
+    expect(screen.queryByText("Detail probe")).not.toBeInTheDocument();
+    expect(screen.getByRole("table")).toBeInTheDocument();
+  });
+
+  it("does not put the identifier in the address until the link is used", async () => {
+    await showRows();
+
+    // Reading the list is not navigation: the sheet is on `/transactions` and
+    // no row has touched the address bar.
+    expect(screen.queryByText("Detail probe")).not.toBeInTheDocument();
+    expect(screen.getByRole("table")).toBeInTheDocument();
+  });
 });

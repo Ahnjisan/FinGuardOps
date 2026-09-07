@@ -7,8 +7,10 @@ React·TypeScript·Vite 기반의 FinGuardOps 프론트엔드다. 표준 OIDC Au
 결정하는 판정 계층과 route guard 컴포넌트를 구현했다.
 
 Issue #249에서 첫 production 업무 화면인 거래 목록(`/transactions`)과, 이후 업무 화면이 재사용할
-FDS operations console 디자인 기반(`src/styles/app.css`)을 구현했다. 이 route가 capability로
-보호되는 첫 production route이며, 사건·조사·판정·운영 대시보드 화면은 아직 없다.
+FDS operations console 디자인 기반(`src/styles/app.css`)을 구현했다. Issue #251에서는 같은 디자인
+기반 위에 거래 상세(`/transactions/{transactionId}`)와 목록→상세 탐색을 구현했다. 두 route 모두
+`transaction:view` capability로 보호되며, 상세 화면은 조회 전용이다. 사건·조사·판정·운영 대시보드
+화면은 아직 없고, 콘솔 전체의 최종 시각적 리뉴얼은 후속 Issue로 남아 있다.
 
 ## 요구사항
 
@@ -75,7 +77,7 @@ render에 도달하지 않고, 애플리케이션은 원문 값을 화면이나 
 | `src/pages` | 화면 단위 컴포넌트 |
 | `src/api` | Backend HTTP client, endpoint allowlist, 인증 transport, query·pagination 계약, 응답 검증 primitive, 업무 typed API module, 오류 분류, API 타입, 데이터 조회 hook |
 | `src/auth` | 인증 상태 machine, `AuthClient` port, `oidc-client-ts` adapter, transaction storage, callback URL·복귀 경로 처리, USER role·capability 판정, React context와 hook |
-| `src/pages/transactions` | 거래 목록 화면의 filter·table·pagination 컴포넌트와 표시 규칙 |
+| `src/pages/transactions` | 거래 목록 화면의 filter·table·pagination 컴포넌트와, 목록·상세가 함께 쓰는 표시 규칙 |
 | `src/styles` | 전역 디자인 token과 console 스타일 (`app.css`, `src/main.tsx`에서 1회 import) |
 | `src/config` | 환경변수 검증 |
 | `src/shared` | 화면 전반에서 재사용하는 타입 (예: `AsyncState`) |
@@ -93,23 +95,82 @@ tsconfig.app.json` 결과에는 test 또는 test-support 파일이 포함되지 
 | --- | --- | --- |
 | `/` | `HomePage` | 진입 화면 (public) |
 | `/transactions` | `TransactionListPage` | 거래 목록 (보호, `RequireCapability("transaction:view")`) |
+| `/transactions/{transactionId}` | `TransactionDetailPage` | 거래 상세, 조회 전용 (보호, `RequireCapability("transaction:view")`) |
 | `/health` | `HealthPage` | Backend `/api/health` 상태 조회 (public) |
 | `/auth/callback` | `AuthCallbackPage` | OIDC redirect callback 처리 |
 | 그 외 모든 경로 | `NotFoundPage` | 404 |
 
 `/`와 `/health`는 public이며 인증 초기화 실패나 Authorization Server 장애와 무관하게 계속
 열려 있다. 로그인 전용 route, silent renew callback, logout callback route는 존재하지 않는다.
-사건·조사·판정·운영 대시보드 화면과 거래 상세 route는 이번 범위에 포함되지 않는다.
+사건·조사·판정·운영 대시보드 화면은 이번 범위에 포함되지 않는다.
 
-`/transactions`가 `RequireCapability`를 적용한 첫 production route다. guard는 navigation이 아니라
-route element에 있으므로 rail 클릭과 직접 URL 진입이 같은 판정을 받는다. capability가 없는 USER는
-`AccessDeniedPage`를, session이 없는 방문자는 `Sign in required`를 보고, 두 경우 모두 Backend 요청은
-0회다. `/transactions/...`는 이 route가 아니라 `NotFoundPage`이며 거래 상세 route는 존재하지 않는다.
+거래 목록과 거래 상세가 `RequireCapability`를 적용한 production route다. guard는 navigation이
+아니라 route element에 있으므로 rail 클릭, 목록의 상세 link, 직접 URL 진입이 모두 같은 판정을
+받는다. capability가 없는 USER는 `AccessDeniedPage`를, session이 없는 방문자는 `Sign in required`를
+보고, 두 경우 모두 Backend 요청은 0회다. `/transactions/{id}/...`처럼 segment가 더 깊은 경로는 어느
+route도 아니므로 `NotFoundPage`다.
 
-새 보호 route를 추가할 때는 `src/app/router.tsx`와 `src/auth/returnRoute.ts`의 exact allowlist를
-함께 갱신해야 로그인 후 복귀가 성립한다. allowlist는 `/`, `/health`, `/transactions` 세 literal
-뿐이며 prefix 매칭이 아니다. `/transactions/`, `/transactions/{id}`, `/transactionsx`,
-`/Transactions`, `/transactions?x=1`, `%2ftransactions`는 모두 기본 route `/`로 떨어진다.
+### SPA 입력 경계와 canonical transaction ID
+
+Frontend의 입력 경계는 **브라우저 URL parser가 제공한 최종 location**이다. 주소창 입력, link
+click, redirect는 React와 SPA가 실행되기 전에 모두 브라우저 URL parser를 거치고, dot segment,
+raw backslash, 제거 가능한 control character 같은 표현은 그 단계에서 canonical URL로 정규화된다.
+
+- `/x/../transactions/{uuid}`, `/transactions/%2e%2e/transactions/{uuid}`,
+  `/transactions\{uuid}`, 제거 가능한 trailing control character가 붙은 주소는 브라우저에서
+  모두 `/transactions/{uuid}`로 수렴한다.
+- SPA는 이 정규화 이전의 표현을 복구하거나 판별할 수 없고, 그렇게 주장하지도 않는다. SPA가
+  받은 location은 정상 link click과 구분되지 않으므로 canonical 상세 route로 처리된다.
+- 이 경우에도 authentication, `RequireCapability("transaction:view")`, Backend authority
+  `transaction:read` 판정은 그대로 적용된다.
+- SPA 이전의 raw request-target을 구분하려면 reverse proxy·web server 같은 navigation 경계가
+  필요하다. 이는 production hosting의 관심사이며 SPA가 구현할 수 있는 계층이 아니므로 이번
+  범위에 포함하지 않는다. service worker, dev server middleware, navigation monkey patch,
+  inline bootstrap script, `document.referrer`·history 추정, encoded URL 복원 로직으로 이를
+  흉내내지 않는다.
+
+SPA에 **보존된 채 도달한** location에 대해서는 strict하게 판정한다. 상세 route의
+`transactionId`는 canonical lowercase UUID v4만 유효하며, 판정은 `useParams()`가 아니라
+`useLocation()`의 `pathname`·`search`·`hash`에 대해 수행한다. React Router는 route parameter를
+percent-decode해서 넘겨주므로 `/transactions/%32f4c0a4e-...`의 parameter는 정상 UUID처럼 보이지만,
+브라우저가 넘긴 path segment는 `%32`를 그대로 가지고 있어 거부된다.
+
+브라우저가 정규화하지 않고 location에 남긴 다음 표현은 모두 거부된다.
+
+uppercase UUID, UUID v1/v3/v5, 잘못된 RFC variant, trailing slash, 추가 segment, 중복 slash,
+semicolon(matrix parameter), query, fragment, percent-encoded UUID 문자(`%32`), `%2F`·`%5C`,
+double encoding(`%252F`), malformed percent(`%2`), 살아남은 whitespace·control character
+(`%20`·`%0d`), 그리고 canonical pathname과 다른 모든 representation.
+
+absolute URL, protocol-relative URL, userinfo, 다른 origin·scheme·port는 브라우저가 만든
+location의 pathname에 그대로 남을 수 있는 형태가 아니다. 이 문자열들에 대한 거부는 아래 로그인
+후 복귀 경로 allowlist가 담당한다.
+
+거부되는 주소는 고정된 `This is not a transaction address` 상태로 fail-closed된다. 이 경로에서
+credential 조회 0회, `fetch` 0회이며, 입력값의 어떤 부분도 화면·오류 문구·`console`·DOM 속성에
+출력되지 않는다. 브라우저가 이미 정규화해 버린 표현은 저장·복원·로그하지 않는다.
+
+### 로그인 후 복귀 경로
+
+새 보호 route를 추가할 때는 `src/app/router.tsx`와 `src/auth/returnRoute.ts`의 allowlist를 함께
+갱신해야 로그인 후 복귀가 성립한다. allowlist는 `/`, `/health`, `/transactions` 세 literal과,
+`/transactions/{canonical lowercase UUID v4}` 한 가지 형태뿐이다.
+
+- 판정 대상은 `location.pathname` 하나가 아니라 현재 location의 `pathname + search + hash`를
+  그대로 이어붙인 값이다. AppShell이 query나 fragment를 떼고 넘기면
+  `/transactions/{uuid}?tab=raw`가 canonical 상세 route로 되살아나므로, 이 결합에는 trim,
+  decode, normalization을 적용하지 않는다. query나 fragment가 있으면 주소 전체가 allowlist를
+  통과하지 못해 기본 route `/`로 fail-closed되며, 제거 후 재허용은 하지 않는다.
+- literal 세 개는 `===` 문자열 비교다. prefix 매칭이 아니다.
+- 상세 경로는 `startsWith("/transactions/")`나 `includes("/transactions")`로 판정하지 않는다.
+  정확히 한 segment를 떼어내 `isCanonicalUuidV4`로 검사하고, 통과한 36자로 경로를 **다시 조립해**
+  반환한다. 따라서 입력 문자열의 어떤 바이트도 그대로 반환되지 않는다.
+- decode·trim·slash 치환·URL normalization 후 재허용은 하지 않는다. `/transactions/`,
+  `/transactions/1`, `/transactions/2F4C...`, `/transactions/{uuid}/`, `/transactions/{uuid}?x=1`,
+  `/transactions/{uuid}#a`, `/transactions/%32f4c...`, `/transactions//{uuid}`, `/transactionsx/{uuid}`,
+  `//evil.example/transactions/{uuid}`, `https://user:pass@evil.example/transactions/{uuid}`,
+  `%2ftransactions`는 모두 기본 route `/`로 떨어진다.
+- 거부된 값은 오류·로그·DOM 어디에도 반사되지 않는다.
 
 ## 인증 경계
 
@@ -1045,13 +1106,103 @@ Web Storage에 넣지 않고, 로그와 오류 메시지에 원문을 반사하�
 - keyboard만으로 filter·Apply·Reset·정렬·페이지 이동을 모두 수행할 수 있다.
 - `prefers-reduced-motion: reduce`를 존중한다.
 
+## 거래 상세 화면
+
+Issue #251에서 구현했다. Backend·API·DB·Infra 변경은 없고, 신규 dependency도 없다. Issue #249의
+AppShell과 `app.css` token을 그대로 재사용하며, 상세 화면에 필요한 최소 class
+(`.detail`, `.panel`, `.facts`)만 추가했다. 전체 UI 최종 리뉴얼은 이번 범위가 아니다.
+
+### 목록 → 상세 탐색
+
+거래 sheet의 `Transaction ID` cell이 상세로 가는 유일한 진입점이다.
+
+- 행 전체에 click handler를 걸지 않는다. `<tr>`에 `role`도 `tabindex`도 붙이지 않는다.
+- 실제 `<a>` anchor이므로 keyboard, Ctrl/Cmd/Shift 클릭, 가운데 클릭, `새 탭에서 열기`가 모두
+  브라우저 기본 동작대로 작동한다. `preventDefault`를 직접 호출하는 handler는 없다.
+- `href`는 정확히 `/transactions/{canonical transactionId}`다. query도 fragment도 붙지 않는다.
+- navigation state를 사용하지 않는다. 금액·고객·계좌·device reference는 history state,
+  URL query, Web Storage, hidden field, `data-` 속성 어디에도 복제되지 않는다.
+- accessible name은 `View details for transaction {id}`이며, 화면에 보이는 값은 식별자 하나뿐이다.
+
+목록으로 돌아갈 때 filter를 복원하지 않는다. reference filter는 컴포넌트 메모리 전용이라는
+계약을 유지하기 위해서이며, 목록은 기본 query로 다시 시작한다.
+
+### API hook 계약
+
+`src/api/useTransactionDetail.ts`가 화면 상태를 소유하고, 요청은 Issue #245의
+`fetchTransactionDetail()`만 사용한다. raw `fetch`, DTO 재정의, endpoint registry·validator 우회는
+없다. 인증 client는 hook 내부 effect의 `getOidcAuthClient()`로만 얻고 closure 밖으로 내보내지
+않는다. 반환값은 `state`와 `retry` 둘뿐이며, token·traceId·raw error·authClient·raw response는
+포함되지 않는다. 200 응답의 envelope에서도 `transaction`만 게시하고 `traceId`는 hook 경계에서
+버린다.
+
+- transactionId·session·retry attempt를 identity로 추적한다. 최신 요청만 state를 게시한다.
+- route가 A에서 B로 바뀌면 render 단계에서 즉시 A의 데이터를 제거한다. effect cleanup을 기다리지
+  않으므로 이전 거래의 값이 새 ID 아래에 한 프레임도 남지 않는다.
+- A의 늦은 성공과 늦은 실패는 모두 무시한다. abort를 쓰더라도 generation 검증을 유지한다.
+- session 교체·logout·current-session 401은 즉시 상세 데이터를 제거한다. stale 401은 새 session과
+  그 데이터를 제거하지 않는다.
+- 403과 404는 session을 유지한다.
+- 오류는 `timeout`, `network`, `invalid-response`, `not-found`, `access-denied`, `session-lost`,
+  `request-rejected`, `unknown`으로 구분한다.
+- 요청당 `fetch`는 정확히 1회, 자동 retry·replay·polling은 0회다. 명시적 `Try again` 1회당
+  `fetch` 1회다. StrictMode에서도 중복 요청이 생기지 않는다.
+
+### 화면 상태
+
+initial loading, transaction ID 변경 loading, data, transaction not found(404),
+access denied(403), authentication required(401/local session 없음), timeout, network failure,
+invalid response, generic safe error, explicit retry, 그리고 malformed 주소에 대한 고정
+invalid-route 상태를 각각 명시적으로 구현하고 테스트한다. `Try again`은 timeout·network·
+invalid-response·unknown에만 제공한다. 404와 403에는 retry 버튼을 두지 않는다.
+
+### 표시 필드
+
+현재 Transaction Detail API 응답에 실제로 있는 13개 필드만 표시한다.
+
+| section | 항목 |
+| --- | --- |
+| Transaction | `transactionId`, `transactionType`, `channel`, `processingStatus`, `amount`+`currencyCode`, `occurredAt` |
+| Customer, accounts and device | `externalCustomerRef`, `senderAccountRef`, `recipientAccountRef`, `deviceRef` |
+| Ledger record | `createdAt`, `updatedAt` |
+
+**위험도·탐지 결과·사건 정보는 표시하지 않는다.** risk score, risk level, fraud probability,
+`DetectionResult`, `DetectionEvidence`, `FraudCase`는 이 응답에 없으므로 만들지 않으며,
+`processingStatus`를 위험도로 표현하지도 않는다. 거래 수정·재처리·사건 생성 같은 업무 action과
+copy-to-clipboard도 없다. 이 화면에는 누를 것이 없다(오류 시의 `Try again` 제외).
+
+표시 규칙은 거래 목록과 같은 helper(`transactionPresentation.ts`)를 재사용한다. 금액은 문자열과
+`BigInt`로 처리해 15자리 정수 precision을 보존하고 `Number`로 변환하지 않는다. 시각은
+`<time datetime="원본 UTC">... KST</time>` 형태이며 고정 +09:00 offset으로 변환한다. nullable인
+`recipientAccountRef`와 `deviceRef`는 공통 상수 `ABSENT_REFERENCE_LABEL`(`None recorded`)로
+표시한다. 긴 UUID·reference는 자르지 않고 자기 열 안에서 줄바꿈하므로 1024px에서도 document
+전체가 가로로 스크롤되지 않으며, `title`·`aria-label`·hidden text·`data-` 속성에 값을 다시
+복제하지 않는다.
+
+### 접근성
+
+- `Transaction {id}` page heading과 `Back to transactions` anchor를 제공한다.
+- `main` > `section` > `h3` > `dl`/`dt`/`dd` semantic markup을 사용하고, 모든
+  `aria-labelledby`가 실재하는 단일 id를 가리킨다.
+- loading과 결과는 `role="status" aria-live="polite"` live region이, 오류는 `role="alert"`
+  요약이 알린다. 새 오류가 나타나면 요약으로 focus를 옮기고, 같은 오류에서 반복 이동하지 않는다.
+- processing status는 색 + 도형 marker + 문자열 label을 함께 쓴다.
+- keyboard만으로 목록 복귀와 재시도를 수행할 수 있고, focus ring은 2px로 보인다.
+- `prefers-reduced-motion: reduce`를 존중한다.
+
 ## 미구현 범위
 
 - 사건·조사·판정·운영 대시보드 **화면** (typed API module과 query pagination은 Issue #245에서
-  구현했고, 이를 호출하는 route·navigation·button·hook은 거래 목록에만 존재한다)
-- 거래 상세 route와 행 클릭 navigation, 상세 drawer·modal
-- 거래 화면의 production 업무 action button (상태 변경·판정·메모는 이번 범위 밖이다)
-- 위험도(risk score·risk level) 열 (현재 Transaction List API 응답에 해당 필드가 없다)
+  구현했고, 이를 호출하는 route·navigation·button·hook은 거래 목록과 거래 상세에만 존재한다)
+- 행 전체 클릭 navigation과 상세 drawer·modal (상세는 별도 route이며 행은 계속 기록이다)
+- 목록으로 돌아갈 때의 filter 복원
+- 거래 화면의 production 업무 action button (상태 변경·판정·메모·재처리·사건 생성은 범위 밖이다)
+- 상세 화면의 copy-to-clipboard
+- 위험도(risk score·risk level)와 탐지 결과·사건 연결 표시 (현재 Transaction API 응답에 해당
+  필드가 없다)
+- 콘솔 전체의 최종 시각적 리뉴얼 (HomePage 문구 정리를 포함해 후속 Issue로 남아 있다)
+- SPA 이전 raw request-target 검사 (reverse proxy·web server 등 production hosting 경계의
+  책임이며 SPA에서 구현하지 않는다)
 - 문서에만 존재하는 후보 endpoint (`GET /api/v1/cases/{caseId}/transactions` 등)
 - 오류 응답 body 모델(`code`·`message`·`fieldErrors`)
 - production Authorization Server와 production runtime 배포
@@ -1080,7 +1231,35 @@ trace id 부재를 확인한다. 화면은 초기 query 계약, draft/committed 
 page size, 역전 범위와 공백 reference 거부(요청 0회), empty·error·retry, reference의 URL·Web
 Storage 비노출, `aria-sort`·live region·focus 이동·keyboard 순회를 확인한다. route는 세 허용
 role의 직접 진입, 세 비허용 role의 거부와 Backend 요청 0회, unauthenticated 진입, 복귀 경로
-exact `/transactions`, `/transactions/...`와 `/transactionsx`의 404를 확인한다.
+exact `/transactions`, `/transactionsx`와 더 깊은 경로의 404를 확인한다.
+
+거래 상세 test도 같은 방식으로 나눈다. hook은 malformed transactionId에서 credential 조회 0회·
+fetch 0회, StrictMode fetch 1회, 200·404·403·401·stale 401·timeout·network·invalid response·
+generic error, latest-wins와 이전 요청의 늦은 성공·실패 무시, route A→B 교체 시 즉시 데이터 제거,
+session 교체·logout·invalidation에서 데이터 제거, 403·404에서 session 유지, explicit retry 1회당
+fetch 1회, 자동 retry 0회, unmount 이후 게시 0회, 반환값에 raw error·trace id·token·envelope
+부재를 확인한다. 화면은 13개 필드 표시와 그 외 필드 부재, 15자리 금액, KST 표시와 UTC `datetime`,
+nullable reference, 긴 reference의 단일 노출, 모든 enum label, 위험도·탐지·사건·업무 action DOM
+부재, 404·403·503·network·timeout·invalid-response 문구, `Try again` 1회당 요청 1회, 오류 요약
+focus, malformed 주소의 요청 0회와 원문 비노출을 확인한다. 목록의 상세 link는 accessible name,
+exact `href`, 행 click handler·role 부재, navigation state 부재, 금융 값이 href·state·`data-`
+속성에 없음, keyboard 진입, modifier click과 가운데 click의 기본 동작 보존을 확인한다. 복귀 경로는
+canonical 상세 path 허용과 uppercase·non-v4·잘못된 variant·trailing slash·하위 path·query·
+fragment·encoded slash·backslash·중복 slash·prefix sibling·absolute·protocol-relative·userinfo·
+다른 scheme·host·port·공백·제어문자의 거부, 그리고 입력값 비노출을 확인한다. AppShell 통합
+test는 실제 shell과 fake `AuthClient`로 canonical 상세 주소·`/transactions`·`/`·`/health`의
+정확한 복귀와, query·fragment·둘 다가 붙은 상세 주소의 `/` fail-closed, 그 원문이 `signIn`
+인자·DOM·`console`에 없음, Backend 요청 0회를 확인한다. `pathname`만 넘기는 구현으로 되돌리면
+query·fragment 반례가 실패한다.
+
+router test는 두 계층을 분리해 기술한다. `browser URL parser boundary` 블록은 표준 URL parser가
+dot segment·encoded dot segment·raw backslash·trailing control character·trailing space를
+canonical 상세 route로 정규화한다는 **브라우저의 성질**을 기록하며, 이는 Frontend가 raw 입력을
+검사했다는 증거가 아니다. 같은 블록에서 정규화 결과 location에도 capability guard와 미인증 거부가
+그대로 적용되고 Backend 요청이 0회임을 확인한다. malformed 주소 목록은 표준 URL parser를 통과해도
+표현이 그대로 남는 입력만 담고, 각 case가 실제로 그렇다는 것을 먼저 단언한다. `%2e%2e`처럼
+브라우저가 정규화해 없애는 입력의 거부는 `MemoryRouter`에서만 도달 가능한 defence in depth로
+따로 표시한다.
 
 인증 경계 unit test는 실제 Authorization Server 없이 `AuthClient` port와 fake adapter로 검증한다.
 OIDC 설정 exact 값, memory user store와 prefix가 붙은 session transaction store, prefix 밖
@@ -1311,6 +1490,26 @@ viewport의 rail 폭·filter column 수·가로 overflow 부재, skip link가 �
 정확히 요청 1회임, 자동 retry 0회, credential 비노출을 확인한다. 이 relay는 status만이 아니라
 Backend가 실제로 보낸 body를 그대로 브라우저에 전달하므로, 화면이 보는 것은 실제 응답이다.
 API mock과 test 전용 auth bypass는 사용하지 않고 strict TLS를 유지한다.
+
+Issue #251은 여기에 거래 상세 404 경계 1개를 더한다(총 14개). 로그아웃 상태에서 canonical 상세
+주소로 직접 진입해 Backend 요청 0회를 확인하고, 그 주소에서 실제 Keycloak 로그인을 수행해 복귀
+경로가 정확히 같은 canonical 상세 주소임을 확인한 뒤, 실제 Backend
+`GET /api/v1/transactions/{transactionId}`가 1회 404로 답하는 것과 `Transaction not found` 화면,
+session 유지, retry 버튼 부재, 1초 후에도 요청 수 불변(자동 retry 0회), 주소창에 query·fragment
+부재, credential 비노출, 세 viewport에서 가로 overflow 부재를 확인한다.
+
+같은 test는 relay가 받은 **실제 Backend 404 body**를 E2E process memory에서만 파싱해 `code`,
+`message`, `traceId`를 추출하고, 그 값 각각이 rendered text, markup, 모든 attribute, `title`,
+주소창, `history.state`, `localStorage`·`sessionStorage`, `console`에 존재하지 않음을 확인한다.
+body를 mock하거나 sentinel을 주입하지 않고, 브라우저로 전달하는 기존 relay 경계도 바꾸지 않는다.
+parse 실패, JSON object 아님, 세 필드의 타입 불일치나 blank는 모두 고정 문구로 fail-closed되고,
+추출한 값과 body 원문은 실패 메시지·reporter·stdout·stderr·파일 어디에도 출력하지 않는다.
+고정 UI 문구가 Backend 값을 포함하면 exact-value 비교로 provenance를 구분할 수 없으므로, 그
+경우에도 통과시키지 않고 고정 문구로 실패한다.
+
+이 runtime에는 seed된 거래 row가 없으므로 상세 **200** 화면은 E2E에서 만들지 않는다. 상세 200
+상태는 typed API fixture를 쓰는 component/hook test의 책임이며, API mock을 실제 Backend E2E 성공
+증거로 표현하지 않는다.
 
 local realm에는 USER가 하나뿐이라 role 조합별 browser E2E는 수행하지 않았고, role·capability
 판정은 단위·컴포넌트 테스트가 담당한다. Frontend production code는 access token을 직접

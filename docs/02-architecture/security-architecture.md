@@ -426,8 +426,8 @@ USER actor UUID, token, claim과 principal 원문은 응답·로그·metadata에
   금지한다.
 - SPA 로그인은 Authorization Code + PKCE를 사용한다.
 - refresh token은 별도 Frontend Issue다. role·authority 기반 권한 UI의 판정 계층과 route
-  guard는 Issue #243에서 구현했고, Issue #249에서 첫 production 보호 route `/transactions`에
-  적용했다.
+  guard는 Issue #243에서 구현했고, Issue #249에서 첫 production 보호 route `/transactions`에,
+  Issue #251에서 조회 전용 거래 상세 route `/transactions/{transactionId}`에 적용했다.
 - Frontend UI capability 이름(`transaction:view`)과 Backend authority 이름(`transaction:read`)은
   서로 다른 계층의 이름이므로 혼용하지 않는다. 최종 판정은 Backend authority에만 있다.
 - USER public client는 Authorization Code Flow + PKCE `S256`만 허용한다. implicit flow,
@@ -790,12 +790,61 @@ Issue #249는 role UI를 첫 production 보호 route에 적용했다. `/transact
 `RequireCapability("transaction:view")`로 보호하며, guard가 navigation이 아니라 route element에
 있으므로 직접 URL 진입도 같은 판정을 받는다. `transaction:view`를 갖지 않는 USER
 (`RULE_OPERATOR`, `RECOVERY_OPERATOR`, `PLATFORM_ADMIN`)에게는 거래 navigation 항목이 DOM에서
-제거되고 route는 `AccessDeniedPage`로 수렴하며, 두 경우 모두 Backend 요청은 0회다. 로그인 후
-복귀 allowlist에는 exact `/transactions` 하나만 추가했고 `/transactions/` 이하 prefix는 허용하지
-않는다. Frontend guard는 표시 경계이며 Backend는 계속 access token으로 endpoint authority를 다시
-판정해 401·403으로 최종 결정한다. browser E2E는 실제 Keycloak USER 로그인으로 navigation 노출,
-`/transactions` 진입, 실제 Backend `GET /api/v1/transactions` 1회 200, 자동 retry 0회와 credential
-비노출을 확인한다.
+제거되고 route는 `AccessDeniedPage`로 수렴하며, 두 경우 모두 Backend 요청은 0회다. Frontend
+guard는 표시 경계이며 Backend는 계속 access token으로 endpoint authority를 다시 판정해 401·403으로
+최종 결정한다. browser E2E는 실제 Keycloak USER 로그인으로 navigation 노출, `/transactions` 진입,
+실제 Backend `GET /api/v1/transactions` 1회 200, 자동 retry 0회와 credential 비노출을 확인한다.
+
+Issue #251은 같은 capability 경계를 조회 전용 거래 상세 route
+`/transactions/{transactionId}`로 확장했다. Frontend capability는 `transaction:view` 하나이며,
+Backend authority `transaction:read`와 혼용하지 않는다. 이 화면은 조회 전용이고 거래 수정·재처리·
+사건 생성 같은 업무 action이 없으며, API 응답에 없는 위험도·탐지 결과·사건 정보를 표시하지 않는다.
+
+- Frontend의 입력 경계는 브라우저 URL parser가 제공한 최종 location이다. 주소창 입력, link
+  click, redirect는 SPA 실행 전에 모두 브라우저 URL parser를 거치므로 dot segment, raw
+  backslash, 제거 가능한 control character는 그 단계에서 canonical URL로 정규화된다.
+  `/x/../transactions/{uuid}`, `/transactions/%2e%2e/transactions/{uuid}`,
+  `/transactions\{uuid}`, 제거 가능한 trailing control character가 붙은 주소는 브라우저에서
+  `/transactions/{uuid}`로 수렴한다. SPA는 정규화 이전의 표현을 복구하거나 판별하지 않으며,
+  그렇게 주장하지 않는다. 이 경우에도 authentication, `transaction:view` capability, Backend
+  `transaction:read` authorization은 모두 그대로 적용된다. SPA 이전 raw request-target 검사는
+  reverse proxy·web server 같은 production hosting 경계의 책임이며 이번 Issue 범위가 아니다.
+- SPA에 보존된 채 도달한 location에 대해서는 strict하게 판정한다. route parameter는 canonical
+  lowercase UUID v4만 받고, 판정은 React Router가 이미 percent-decode한 parameter가 아니라
+  브라우저가 넘긴 `location.pathname`·`search`·`hash`에 대해 수행하므로
+  `/transactions/%32f4c0a4e-...`처럼 decode 후에만 정상 UUID가 되는 주소는 허용되지 않는다.
+  uppercase, non-v4, 잘못된 RFC variant, trailing slash, 추가 segment, 중복 slash, semicolon,
+  query, fragment, percent-encoded UUID 문자, `%2F`·`%5C`, double encoding, malformed percent,
+  살아남은 whitespace·control character는 모두 고정 invalid-route 상태로 fail-closed되며
+  credential 조회와 Backend 요청은 0회다. absolute·protocol-relative URL, userinfo, 다른
+  origin·scheme·port는 브라우저 location의 pathname에 남을 수 있는 형태가 아니며, 이 문자열들에
+  대한 거부는 아래 복귀 경로 allowlist가 담당한다. 거부된 입력은 화면·오류·`console`·DOM 어디에도 반사되지 않고, 브라우저가 이미
+  정규화한 이전 표현은 저장·복원·로그하지 않는다.
+- 로그인 후 복귀 allowlist는 `/`, `/health`, `/transactions` 세 literal과
+  `/transactions/{canonical lowercase UUID v4}` 한 형태뿐이다. 판정 대상은 pathname 하나가
+  아니라 현재 location의 `pathname + search + hash` 전체이므로 query나 fragment가 붙은 상세
+  주소는 기본 route `/`로 fail-closed되며, query·fragment를 제거한 뒤 canonical 상세 route로
+  재허용하지 않는다. prefix 판정, 문자열 포함 판정, decode·trim 후 재허용, URL normalization
+  결과에 대한 신뢰는 사용하지 않으며, 허용된 값도 검증된 36자로 경로를 다시 조립해 반환하므로
+  입력 문자열 자체는 반환되지 않는다.
+- 401은 요청을 서명한 session만 무효화하고 상세 데이터를 즉시 제거한다. 이미 교체된 session의
+  stale 401은 no-op이며 새 session과 그 데이터를 제거하지 않는다. 403과 404는 session을 유지하고
+  각각 고정 `Access denied`, `Transaction not found` 화면으로 수렴한다. 어떤 상태 코드에서도
+  응답 body·trace id·token·role claim은 화면에 노출되지 않는다.
+- 요청당 `fetch`는 최대 1회이고 자동 retry·replay·polling은 0회다. 고객·계좌·device reference와
+  금액은 URL query, history state, Web Storage, hidden field, `data-` 속성에 복제되지 않으며
+  거래 UUID만 route와 history에 남는다.
+- browser E2E는 로그아웃 상태의 상세 주소 직접 진입에서 Backend 요청 0회, 그 주소에서의 실제
+  Keycloak 로그인과 canonical 복귀, 실제 Backend `GET /api/v1/transactions/{transactionId}` 1회
+  404, `Transaction not found` 화면, session 유지, 자동 retry 0회, credential 비노출을 확인한다.
+  또한 실제 404 body의 `code`·`message`·`traceId`를 E2E process memory에서만 파싱해 각 값이
+  rendered text, markup, attribute, `title`, 주소창, `history.state`, Web Storage, `console`에
+  존재하지 않음을 확인한다. body mock과 sentinel 주입은 없고, 추출한 값과 body 원문은 실패
+  메시지·reporter·출력·파일 어디에도 남기지 않으며, parse·타입·blank 실패는 고정 문구로
+  fail-closed된다. 이 runtime에는 seed된 거래 row가 없으므로 상세 200 화면은 typed API fixture를
+  쓰는 component·hook test가 담당하며, API mock을 실제 Backend E2E 증거로 표현하지 않는다.
+
+Backend, AI Service, Infra, Keycloak, DB와 API 계약은 Issue #251에서 변경하지 않았다.
 
 Stock Keycloak은 HTTP와 HTTPS에 공통 listener host를 적용하므로 2026-09-05 OWNER 결정에 따라
 `KC_HTTP_HOST=0.0.0.0`을 사용한다. HTTPS 8443만 host `127.0.0.1`에 publish하고 HTTP 8082와

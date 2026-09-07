@@ -9,9 +9,18 @@ export function AppShell() {
   const capabilities = useCapabilities();
   const location = useLocation();
 
-  // Only the allowlisted routes are valid return targets, so an unexpected
-  // pathname simply falls back to the default rather than being carried along.
-  const returnTo = resolveReturnRoute(location.pathname);
+  // The whole location the router holds - path, query and fragment - rather
+  // than the path alone. `/transactions/{uuid}?tab=raw` and
+  // `/transactions/{uuid}#raw` are not routes this application has, and
+  // dropping the query or the fragment before the check would readmit them as
+  // the canonical detail route and send someone somewhere they never asked to
+  // go. The three parts are joined exactly as React Router reports them - each
+  // already empty when absent, and nothing trimmed, decoded or normalized on
+  // the way in - so a location carrying either one fails the allowlist and
+  // falls back to the default rather than being carried along.
+  const returnTo = resolveReturnRoute(
+    `${location.pathname}${location.search}${location.hash}`,
+  );
 
   let statusMessage: string | null = null;
   if (state.status === "initializing") {

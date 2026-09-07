@@ -25,6 +25,18 @@ const BACKEND_ORIGIN = "http://localhost:8080";
 const TRANSACTION_LIST_PATH = "/api/v1/transactions";
 
 /**
+ * A canonical lowercase UUID v4 that names no transaction.
+ *
+ * Synthetic on purpose. This runtime holds no seeded ledger row, so the detail
+ * screen's real-Backend evidence is the 404 boundary rather than a record: the
+ * request is authorized, reaches Spring Boot, and is answered with "no such
+ * transaction". The 200 state is proved in the component and hook tests against
+ * the typed API contract, and is deliberately not simulated here - an API mock
+ * would not be evidence of anything this suite exists to show.
+ */
+const SYNTHETIC_TRANSACTION_ID = "e2e00000-0000-4000-8000-000000000e2e";
+
+/**
  * The query names each relayable endpoint may carry, from
  * `TransactionQueryValidator` by way of the endpoint registry.
  *
@@ -112,6 +124,17 @@ interface BackendObservation {
    */
   readonly target: string;
   readonly status: number;
+  /**
+   * What the Backend answered with, kept only for the one endpoint a test asked
+   * for it and only in this process.
+   *
+   * A relayed body is already carried through here on its way to the browser;
+   * what this field adds is the ability to read the same bytes afterwards, so a
+   * test can ask whether the values Spring Boot actually returned reached the
+   * screen. It is opt-in per run, never written to a file, a report or a
+   * stream, and no assertion ever prints it.
+   */
+  readonly body?: string;
 }
 
 type TransactionMutation = "none" | "state" | "nonce-removed" | "nonce-blank" | "nonce-mismatch" | "pkce";
@@ -570,7 +593,22 @@ function relayToBackend(request: PlaywrightRequest): RelayedResponse {
   return { ...parseRelayedResponse(result.stdout), target };
 }
 
-async function installBackendRelay(page: Page): Promise<BackendObservation[]> {
+interface RelayOptions {
+  /**
+   * The single endpoint path whose response body is retained in memory.
+   *
+   * Opt-in, and one path rather than all of them: a body is only kept where a
+   * test has a reason to read it back, so a run that does not ask keeps nothing
+   * at all. Nothing about the relay's behaviour towards the browser changes -
+   * the same bytes are forwarded either way.
+   */
+  readonly captureBodyOf?: string;
+}
+
+async function installBackendRelay(
+  page: Page,
+  options: RelayOptions = {},
+): Promise<BackendObservation[]> {
   const observations: BackendObservation[] = [];
   await page.route("http://localhost:8080/**", async (route: Route) => {
     const request = route.request();
@@ -588,11 +626,13 @@ async function installBackendRelay(page: Page): Promise<BackendObservation[]> {
     const relayed = relayToBackend(request);
     // Recorded from the relay's own target, so what this suite observes and
     // what the Backend was asked for cannot drift into two different things.
+    const pathname = relayed.target.split("?")[0];
     observations.push({
       method: request.method(),
-      pathname: relayed.target.split("?")[0],
+      pathname,
       target: relayed.target,
       status: relayed.status,
+      ...(pathname === options.captureBodyOf ? { body: relayed.body } : {}),
     });
     await route.fulfill({
       status: relayed.status,
@@ -620,6 +660,133 @@ async function browserContainsAny(page: Page, values: readonly string[]): Promis
     }
     return needles.some((needle) => needle !== "" && haystacks.some((value) => value.includes(needle)));
   }, values);
+}
+
+/**
+ * The three fields a FinGuardOps error response carries that a console must
+ * never put on screen.
+ *
+ * `code` names the failure to another system, `message` is Backend copy written
+ * for an operator, and `traceId` correlates one request across the platform's
+ * logs. None of them is for a browser, and a screen that reflects any of them
+ * has handed the reader a piece of the Backend's own vocabulary.
+ */
+interface BackendErrorFields {
+  readonly code: string;
+  readonly message: string;
+  readonly traceId: string;
+}
+
+/**
+ * The fixed console copy this screen shows for a transaction that is not there.
+ *
+ * Read here so a collision cannot go unnoticed. If a Backend value ever turned
+ * out to be part of one of these sentences, then finding that value in the
+ * document would prove nothing - the string on screen would be the console's
+ * own - and the run says so rather than passing on an ambiguity it cannot
+ * resolve without changing production copy or the response.
+ */
+const NOT_FOUND_SCREEN_COPY: readonly string[] = [
+  "Transaction not found",
+  "No transaction with this identifier is available. Return to the transaction list.",
+  "No record shown.",
+];
+
+/**
+ * JSON, or nothing. The caller's fixed refusal owns the failure, so the text
+ * that would not parse is not named, quoted or re-thrown from here.
+ */
+function parseJsonOrNull(raw: string): unknown {
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+/** A relayed body as a JSON object, or a fixed failure. Nothing in between. */
+function parseJsonObject(raw: string | undefined, missing: string, invalid: string): Record<string, unknown> {
+  requireCondition(typeof raw === "string" && raw !== "", missing);
+  const parsed = parseJsonOrNull(raw);
+  requireCondition(typeof parsed === "object" && parsed !== null && !Array.isArray(parsed), invalid);
+  return parsed as Record<string, unknown>;
+}
+
+/**
+ * The `code`, `message` and `traceId` the Backend really answered with, read in
+ * this process and nowhere else.
+ *
+ * Fail-closed at every step: a body that is absent, is not JSON, is not an
+ * object, or carries any of the three fields with the wrong type or as blank
+ * stops the run. It stops with a fixed sentence, because the whole point of the
+ * values being read here is that they must not be printed - and a failure
+ * message that quoted the body to explain itself would be the very disclosure
+ * the assertions below exist to rule out.
+ */
+function readBackendErrorFields(raw: string | undefined): BackendErrorFields {
+  const body = parseJsonObject(
+    raw,
+    "The Backend error response body was not observed.",
+    "The Backend error response body was not a JSON object.",
+  );
+  const fields: Record<string, string> = {};
+  for (const [name, refusal] of [
+    ["code", "The Backend error response carried no usable code."],
+    ["message", "The Backend error response carried no usable message."],
+    ["traceId", "The Backend error response carried no usable trace identifier."],
+  ] as const) {
+    const value = body[name];
+    requireCondition(typeof value === "string", refusal);
+    // Blank is a contract failure rather than a value to search for: an empty
+    // or whitespace-only field would make every non-reflection check below
+    // vacuously true.
+    requireCondition(value.trim() !== "", refusal);
+    fields[name] = value;
+  }
+  return { code: fields.code, message: fields.message, traceId: fields.traceId };
+}
+
+/**
+ * Whether one exact string is anywhere in the page a reader or a script could
+ * reach it: rendered text, markup, any attribute, the title, the address bar,
+ * `history.state`, and both Web Storages.
+ *
+ * Returns a boolean and only a boolean. What is being searched for is a real
+ * Backend error value, so nothing about where it was found - or what was around
+ * it - comes back out of the browser.
+ */
+async function documentExposes(page: Page, value: string): Promise<boolean> {
+  return page.evaluate((needle) => {
+    if (needle === "") {
+      return false;
+    }
+    const haystacks: string[] = [
+      document.documentElement.outerHTML,
+      document.documentElement.textContent ?? "",
+      document.body.innerText,
+      document.title,
+      window.location.href,
+    ];
+    try {
+      haystacks.push(JSON.stringify(window.history.state ?? null));
+    } catch {
+      haystacks.push("");
+    }
+    for (const element of Array.from(document.querySelectorAll("*"))) {
+      for (const attribute of Array.from(element.attributes)) {
+        haystacks.push(attribute.name, attribute.value);
+      }
+    }
+    for (const storage of [window.localStorage, window.sessionStorage]) {
+      for (let index = 0; index < storage.length; index += 1) {
+        const key = storage.key(index);
+        if (key !== null) {
+          haystacks.push(key, storage.getItem(key) ?? "");
+        }
+      }
+    }
+    return haystacks.some((haystack) => haystack.includes(needle));
+  }, value);
 }
 
 async function hasOwnedStorage(page: Page): Promise<boolean> {
@@ -1521,4 +1688,159 @@ test("a real USER reaches the transaction console over the real Backend", async 
     backend.filter((entry) => entry.method !== "GET").length === 0,
     "The transaction screen sent a business mutation.",
   );
+});
+
+test("a real USER opens a transaction detail address and meets the real Backend 404", async ({
+  page,
+}) => {
+  const password = readUserPassword();
+  const consoleMessages: string[] = [];
+  page.on("console", (message) => consoleMessages.push(message.text()));
+
+  requireCondition(
+    CANONICAL_UUID_V4.test(SYNTHETIC_TRANSACTION_ID),
+    "The synthetic transaction identifier is not a canonical UUID v4.",
+  );
+  const detailRoute = `/transactions/${SYNTHETIC_TRANSACTION_ID}`;
+  const detailPath = `${TRANSACTION_LIST_PATH}/${SYNTHETIC_TRANSACTION_ID}`;
+  // The detail endpoint's answer is kept in this process so the assertions at
+  // the end can ask whether what Spring Boot actually said reached the screen.
+  // Nothing else about the relay changes: the same bytes reach the browser
+  // either way, and no sentinel is injected into them.
+  const backend = await installBackendRelay(page, { captureBodyOf: detailPath });
+  const detailRequests = () =>
+    backend.filter((entry) => entry.method === "GET" && entry.pathname === detailPath);
+
+  // A direct visit to the detail address while signed out. The guard removes
+  // the screen, and nothing is asked of the Backend: no credential lookup, no
+  // request, no probe.
+  await page.goto(`${APP_ORIGIN}${detailRoute}`);
+  await expect(page.getByRole("heading", { name: "Sign in required" })).toBeVisible();
+  requireCondition(backend.length === 0, "An unauthenticated detail address reached the Backend.");
+  requireCondition((await publicationCount(page)) === 0, "A session existed before sign-in.");
+
+  // Signing in from that address, against the real Keycloak.
+  const tokenResponsePromise = page.waitForResponse(
+    (response) => response.url() === TOKEN_URL && response.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.locator("#username")).toBeVisible({ timeout: 30_000 });
+  await page.locator("#username").fill(USERNAME);
+  await page.locator("#password").fill(password);
+  await submitLogin(page);
+  const tokens = parseTokenResponse(await (await tokenResponsePromise).json());
+  requireTokenClaims(tokens);
+
+  // The return route, decided by the literal allowlist: back to exactly the
+  // canonical detail address, with no query and no fragment added to it.
+  await page.waitForFunction(
+    (expected) => window.location.href === expected,
+    `${APP_ORIGIN}${detailRoute}`,
+  );
+  await expect(page.getByLabel("Authentication status")).toContainText("Signed in as");
+  await expect(
+    page.getByRole("heading", { name: `Transaction ${SYNTHETIC_TRANSACTION_ID}`, level: 2 }),
+  ).toBeVisible();
+
+  // One authorized request to the real detail endpoint, answered by Spring Boot.
+  await expect(page.getByRole("alert")).toBeVisible({ timeout: 15_000 });
+  const requested = detailRequests();
+  requireCondition(requested.length === 1, "The transaction detail was not requested exactly once.");
+  requireCondition(requested[0].target === detailPath, "The detail request carried a query string.");
+  requireCondition(requested[0].status === 404, "The real transaction detail request did not return 404.");
+
+  // The fixed not-found screen, and not one field of a record.
+  await expect(page.getByRole("alert")).toContainText("Transaction not found");
+  await expect(page.getByRole("main").getByRole("status")).toContainText("No record shown.");
+  requireCondition(
+    (await page.getByRole("main").locator("dd").count()) === 0,
+    "A transaction that does not exist still rendered record fields.",
+  );
+  // Nothing the Backend answered with is on screen, and nothing invented is
+  // either: no status code, no trace id, no risk or detection language.
+  const screenText = (await page.getByRole("main").textContent()) ?? "";
+  for (const forbidden of ["404", "risk", "Risk", "score", "Detection", "Evidence", "traceId"]) {
+    requireCondition(!screenText.includes(forbidden), "The not-found screen disclosed more than it should.");
+  }
+
+  // A 404 is not a session verdict: the analyst is still signed in and can
+  // still leave the way they came.
+  await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Back to transactions" })).toBeVisible();
+  requireCondition((await publicationCount(page)) === 1, "The 404 changed the published session.");
+
+  // Nothing retries on its own: the count is unchanged after the screen has
+  // been sitting there, and no Retry control was offered for a 404.
+  requireCondition(
+    (await page.getByRole("button", { name: "Try again" }).count()) === 0,
+    "A transaction that does not exist offered a retry.",
+  );
+  await page.waitForTimeout(1_000);
+  requireCondition(detailRequests().length === 1, "The detail screen retried or polled on its own.");
+
+  // The address bar holds the transaction identifier and nothing else, and the
+  // credentials reached neither the document, the URL, Web Storage nor the
+  // console.
+  const addressBar = new URL(page.url());
+  requireCondition(
+    addressBar.origin === APP_ORIGIN &&
+      addressBar.pathname === detailRoute &&
+      addressBar.search === "" &&
+      addressBar.hash === "",
+    "The detail address carried more than the canonical route.",
+  );
+  const sensitive = [password, tokens.accessToken, tokens.idToken];
+  requireCondition(!(await browserContainsAny(page, sensitive)), "A credential reached DOM, URL, or Web Storage.");
+  requireCondition(
+    !consoleMessages.some((message) => sensitive.some((value) => value !== "" && message.includes(value))),
+    "A credential reached the browser console.",
+  );
+  requireCondition(
+    backend.filter((entry) => entry.method !== "GET").length === 0,
+    "The transaction detail screen sent a business mutation.",
+  );
+
+  // What the Backend actually answered, read from the relayed body rather than
+  // assumed. Every one of these values exists; none of them is for a reader.
+  const backendError = readBackendErrorFields(requested[0].body);
+  for (const value of [backendError.code, backendError.message, backendError.traceId]) {
+    requireCondition(
+      !NOT_FOUND_SCREEN_COPY.some((copy) => copy.includes(value)),
+      "A fixed console phrase contains a Backend error value, so non-reflection cannot be proven.",
+    );
+  }
+  // Each field, checked on its own so the refusal can name which boundary broke
+  // without ever naming the value that crossed it.
+  requireCondition(!(await documentExposes(page, backendError.code)), "Backend error code was exposed.");
+  requireCondition(
+    !(await documentExposes(page, backendError.message)),
+    "Backend error message was exposed.",
+  );
+  requireCondition(
+    !(await documentExposes(page, backendError.traceId)),
+    "Backend trace identifier was exposed.",
+  );
+  requireCondition(
+    !consoleMessages.some((entry) => entry.includes(backendError.code)),
+    "Backend error code was exposed.",
+  );
+  requireCondition(
+    !consoleMessages.some((entry) => entry.includes(backendError.message)),
+    "Backend error message was exposed.",
+  );
+  requireCondition(
+    !consoleMessages.some((entry) => entry.includes(backendError.traceId)),
+    "Backend trace identifier was exposed.",
+  );
+
+  // The design widths, on the live not-found screen.
+  for (const viewport of CONSOLE_VIEWPORTS) {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await expect(page.locator("header.rail")).toBeVisible();
+    requireCondition(
+      !(await documentOverflowsHorizontally(page)),
+      `The detail page scrolled horizontally at ${String(viewport.width)}px.`,
+    );
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
 });

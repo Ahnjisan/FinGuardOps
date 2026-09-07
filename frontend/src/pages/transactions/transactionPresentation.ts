@@ -1,4 +1,5 @@
 import type {
+  TransactionChannel,
   TransactionProcessingStatus,
   TransactionType,
 } from "../../api/transactionApi";
@@ -244,6 +245,15 @@ export interface ReferenceDisplay {
 /** Beyond this many characters a reference is wrapped inside its cell. */
 export const WRAPPING_REFERENCE_LENGTH = 20;
 
+/**
+ * The one word a missing reference is shown as, on every screen.
+ *
+ * Fixed and shared rather than written per component: the list sheet and the
+ * detail screen have to say the same thing about the same absence, and a word
+ * that drifts between them would read as two different states of the record.
+ */
+export const ABSENT_REFERENCE_LABEL = "None recorded";
+
 export function describeReference(value: string | null): ReferenceDisplay {
   if (value === null) {
     return { text: "", wrap: false, absent: true };
@@ -262,6 +272,22 @@ export const TRANSACTION_TYPE_LABELS: Readonly<Record<TransactionType, string>> 
     OPEN_BANKING_TRANSFER: "Open banking transfer",
     ATM_WITHDRAWAL: "ATM withdrawal",
     LOAN_DISBURSED: "Loan disbursed",
+  });
+
+/**
+ * Plain-language names for the Backend channels.
+ *
+ * Only the detail contract carries this field, and only these four members
+ * exist. A channel outside the enum never reaches here - the response validator
+ * refuses the whole response first - so there is no fallback branch inventing a
+ * name for a value the contract does not define.
+ */
+export const TRANSACTION_CHANNEL_LABELS: Readonly<Record<TransactionChannel, string>> =
+  Object.freeze({
+    MOBILE_BANKING: "Mobile banking",
+    OPEN_BANKING: "Open banking",
+    ATM: "ATM",
+    CORE_BANKING: "Core banking",
   });
 
 /**
