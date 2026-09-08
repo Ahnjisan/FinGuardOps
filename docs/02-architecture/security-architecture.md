@@ -427,9 +427,11 @@ USER actor UUID, token, claim과 principal 원문은 응답·로그·metadata에
 - SPA 로그인은 Authorization Code + PKCE를 사용한다.
 - refresh token은 별도 Frontend Issue다. role·authority 기반 권한 UI의 판정 계층과 route
   guard는 Issue #243에서 구현했고, Issue #249에서 첫 production 보호 route `/transactions`에,
-  Issue #251에서 조회 전용 거래 상세 route `/transactions/{transactionId}`에 적용했다.
-- Frontend UI capability 이름(`transaction:view`)과 Backend authority 이름(`transaction:read`)은
-  서로 다른 계층의 이름이므로 혼용하지 않는다. 최종 판정은 Backend authority에만 있다.
+  Issue #251에서 조회 전용 거래 상세 route `/transactions/{transactionId}`에, Issue #253에서
+  조회 전용 사건 목록 route `/cases`에 적용했다.
+- Frontend UI capability 이름(`transaction:view`, `case:view`)과 Backend authority 이름
+  (`transaction:read`, `case:read`)은 서로 다른 계층의 이름이므로 혼용하지 않는다. 최종 판정은
+  Backend authority에만 있다.
 - USER public client는 Authorization Code Flow + PKCE `S256`만 허용한다. implicit flow,
   password grant, client secret과 wildcard redirect URI를 금지한다.
 
@@ -845,6 +847,43 @@ Backend authority `transaction:read`와 혼용하지 않는다. 이 화면은 �
   쓰는 component·hook test가 담당하며, API mock을 실제 Backend E2E 증거로 표현하지 않는다.
 
 Backend, AI Service, Infra, Keycloak, DB와 API 계약은 Issue #251에서 변경하지 않았다.
+
+Issue #253은 같은 경계를 두 번째 Frontend capability로 확장했다. 조회 전용 사건 목록 route
+`/cases`는 `RequireCapability("case:view")`로 보호하며, guard는 navigation이 아니라 route
+element에 있으므로 rail 클릭과 직접 URL 진입이 같은 판정을 받는다. Frontend capability는
+`case:view`이고 Backend authority는 `case:read`다. 두 이름은 서로 다른 계층에 속하므로
+혼용하지 않으며, 최종 판정은 Backend의 독립적인 access token 검증과 401·403 응답이 내린다.
+
+- 접근 허용 role은 4장 capability matrix 그대로 `FDS_VIEWER`, `FDS_ANALYST`, `FDS_APPROVER`다.
+  `RULE_OPERATOR`, `RECOVERY_OPERATOR`, `PLATFORM_ADMIN` session의 DOM에는 사건 navigation
+  항목도 `/cases` 문자열도 남지 않고, route는 `AccessDeniedPage`로 수렴한다. 미인증·인증 오류·
+  signing-out에서는 보호 내용이 제거된다. 이 모든 경로에서 credential 조회와 Backend 요청은
+  0회다.
+- 로그인 후 복귀 allowlist에는 exact `/cases` 하나만 추가했다. 판정 대상은 pathname이 아니라
+  현재 location의 `pathname + search + hash` 전체이므로 `/cases/`, `/cases/{caseId}`,
+  `/casesx`, query·fragment가 붙은 주소, encoded slash·backslash, 중복 separator, absolute·
+  protocol-relative URL, userinfo, 다른 origin·scheme·port는 모두 기본 route `/`로
+  fail-closed된다. query·fragment를 제거한 뒤 `/cases`로 재허용하지 않으며, 거부된 입력은
+  화면·오류·`console`·DOM 어디에도 반사되지 않는다. 사건 상세 route가 없으므로 `/cases` 아래에
+  parameterized 복귀 형태도 없다.
+- 401은 요청을 서명한 session만 무효화하고 사건 데이터를 즉시 제거한다. 이미 교체된 session의
+  stale 401은 no-op이며 새 session과 그 데이터를 제거하지 않는다. 403은 session과 capability를
+  유지한 채 고정 `Access denied` 상태로 수렴하고 retry를 제공하지 않는다. 어떤 상태 코드에서도
+  응답 body·status·trace id·token·role claim은 화면에 노출되지 않으며, malformed 응답은 일부
+  사건만 표시하지 않고 전체를 거부한다.
+- 요청당 `fetch`는 최대 1회이고 자동 retry·replay·polling은 0회다. assignee reference와 관련
+  거래 UUID filter는 컴포넌트 메모리에만 있으며 URL query, history state, Web Storage,
+  hidden field, `data-` 속성에 복제되지 않는다. 시간 범위 역전, malformed UUID, Backend 계약을
+  벗어난 assignee reference는 credential 조회와 `fetch` 이전에 거부된다.
+- browser E2E는 실제 Keycloak `FDS_ANALYST` 로그인으로 사건 navigation 노출, `/cases` 진입,
+  실제 Backend `GET /api/v1/cases` 1회 200, canonical initial query와 filter 적용 query가
+  socket에 실제로 쓰인 request target과 일치함, 자동 retry 0회, reference의 URL·history·Web
+  Storage·console 비노출, 세 viewport에서 가로 overflow 부재, business mutation 0회를 확인한다.
+  이 runtime에는 seed된 사건 row가 없으므로 deterministic empty 상태도 통과 조건으로 인정하며,
+  Backend·DB·Infra에 test data 생성 경로를 추가하지 않는다.
+
+Issue #253에서도 Backend, AI Service, Infra, Keycloak, DB와 API 계약 변경은 없다. 사건 상세,
+상태 변경, 담당자 변경, 최종 판정, 조사 메모와 감사 이력 화면은 아직 구현되지 않았다.
 
 Stock Keycloak은 HTTP와 HTTPS에 공통 listener host를 적용하므로 2026-09-05 OWNER 결정에 따라
 `KC_HTTP_HOST=0.0.0.0`을 사용한다. HTTPS 8443만 host `127.0.0.1`에 publish하고 HTTP 8082와

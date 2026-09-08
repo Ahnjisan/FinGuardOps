@@ -35,9 +35,18 @@ const ROUTES: RouteObject[] = [
         path: "transactions/:transactionId",
         element: <p>Transaction detail stands in here.</p>,
       },
+      { path: "cases", element: <p>Case list stands in here.</p> },
+      // The production router's catch-all, mirrored here rather than omitted.
+      // A 404 renders *inside* the shell, so the navigation is on screen at
+      // `/cases/{id}`, `/casesx` and every other unrouted address - which is
+      // precisely where a prefix-matched "current page" marker would lie.
+      { path: "*", element: <p>Not found stands in here.</p> },
     ],
   },
 ];
+
+/** A canonical lowercase UUID v4 that names no case. */
+const CANONICAL_CASE_ID = "5c2d1e0f-7a8b-4c9d-9e0f-1a2b3c4d5e60";
 
 /**
  * The shell renders nothing that depends on which roles a session holds, so
@@ -75,6 +84,22 @@ afterEach(() => {
  */
 const TRANSACTION_ROLES: readonly UserRole[] = ["FDS_VIEWER", "FDS_ANALYST", "FDS_APPROVER"];
 const NON_TRANSACTION_ROLES: readonly UserRole[] = [
+  "RULE_OPERATOR",
+  "RECOVERY_OPERATOR",
+  "PLATFORM_ADMIN",
+];
+
+/**
+ * The three roles that hold `case:view`, and the three that do not.
+ *
+ * Written out separately from the transaction lists rather than aliased to
+ * them. The two capabilities happen to be granted by the same three roles
+ * today, and an alias would quietly turn "the case destination follows the case
+ * capability" into "it follows whatever the ledger does" - which is exactly the
+ * regression this file has to catch if the two tables ever diverge.
+ */
+const CASE_ROLES: readonly UserRole[] = ["FDS_VIEWER", "FDS_ANALYST", "FDS_APPROVER"];
+const NON_CASE_ROLES: readonly UserRole[] = [
   "RULE_OPERATOR",
   "RECOVERY_OPERATOR",
   "PLATFORM_ADMIN",
@@ -227,6 +252,199 @@ describe("AppShell capability navigation", () => {
     expect(screen.queryByRole("link", { name: "Transactions" })).not.toBeInTheDocument();
   });
 
+  it.each(CASE_ROLES)("offers the cases destination to %s", async (role) => {
+    renderShell(createFakeAuthClient({ initialSession: { subject: "sub-1", roles: [role] } }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+    });
+    expect(screen.getByRole("link", { name: "Cases" })).toHaveAttribute("href", "/cases");
+  });
+
+  it.each(NON_CASE_ROLES)("leaves no trace of the cases destination for %s", async (role) => {
+    const { container } = renderShell(
+      createFakeAuthClient({ initialSession: { subject: "sub-1", roles: [role] } }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+    });
+    // Not hidden, not disabled, not `aria-hidden`: absent, and the address
+    // itself is nowhere in the markup either.
+    expect(screen.queryByRole("link", { name: "Cases" })).not.toBeInTheDocument();
+    expect(container.querySelector('a[href="/cases"]')).toBeNull();
+    expect(container.innerHTML).not.toContain("/cases");
+  });
+
+  it("offers the cases destination once to a session holding several roles", async () => {
+    renderShell(
+      createFakeAuthClient({
+        initialSession: { subject: "sub-1", roles: ["PLATFORM_ADMIN", "FDS_VIEWER"] },
+      }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+    });
+    expect(screen.getAllByRole("link", { name: "Cases" })).toHaveLength(1);
+  });
+
+  it("does not offer the cases destination while unauthenticated", async () => {
+    const { container } = renderShell(createFakeAuthClient());
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("link", { name: "Cases" })).not.toBeInTheDocument();
+    expect(container.innerHTML).not.toContain("/cases");
+  });
+
+  it("does not offer the cases destination while authentication is undecided", () => {
+    const client = createFakeAuthClient({
+      initialSession: { subject: "sub-1", roles: SHELL_ROLES },
+    });
+    client.deferInitialize();
+    const { container } = renderShell(client);
+
+    expect(authStatus()).toHaveTextContent("Preparing sign-in...");
+    expect(screen.queryByRole("link", { name: "Cases" })).not.toBeInTheDocument();
+    expect(container.innerHTML).not.toContain("/cases");
+  });
+
+  it("withdraws the cases destination the moment sign-out starts", async () => {
+    const user = userEvent.setup();
+    const client = createFakeAuthClient({
+      initialSession: { subject: "sub-1", roles: SHELL_ROLES },
+    });
+    client.deferSignOut();
+    const { container } = renderShell(client);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Cases" })).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+
+    expect(screen.queryByRole("link", { name: "Cases" })).not.toBeInTheDocument();
+    expect(container.innerHTML).not.toContain("/cases");
+  });
+
+  it("withdraws the cases destination when the session is invalidated", async () => {
+    const client = createFakeAuthClient({
+      initialSession: { subject: "sub-1", roles: SHELL_ROLES },
+    });
+    const { container } = renderShell(client);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Cases" })).toBeInTheDocument();
+    });
+    act(() => {
+      client.emitSessionInvalidated();
+    });
+
+    expect(screen.queryByRole("link", { name: "Cases" })).not.toBeInTheDocument();
+    expect(container.innerHTML).not.toContain("/cases");
+  });
+
+  it("does not offer the cases destination after an authentication error", async () => {
+    const client = createFakeAuthClient();
+    client.failInitialize();
+    const { container } = renderShell(client);
+
+    await waitFor(() => {
+      expect(authStatus()).toHaveTextContent(safeAuthErrorMessage("configuration"));
+    });
+    expect(screen.queryByRole("link", { name: "Cases" })).not.toBeInTheDocument();
+    expect(container.innerHTML).not.toContain("/cases");
+  });
+
+  it("marks the cases destination current only while it is the location", async () => {
+    renderShell(
+      createFakeAuthClient({ initialSession: { subject: "sub-1", roles: SHELL_ROLES } }),
+      "/cases",
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Cases" })).toBeInTheDocument();
+    });
+    const casesLink = screen.getByRole("link", { name: "Cases" });
+    expect(casesLink).toHaveAttribute("aria-current", "page");
+    // Exactly one `aria-current` in the markup, and its value is the token -
+    // never the string "false", which is an attribute that is present.
+    expect(casesLink.getAttributeNames().filter((name) => name === "aria-current")).toHaveLength(
+      1,
+    );
+    expect(document.querySelectorAll("[aria-current]")).toHaveLength(1);
+    expect(document.querySelectorAll('[aria-current="false"]')).toHaveLength(0);
+    expect(screen.getByRole("link", { name: "Transactions" })).not.toHaveAttribute(
+      "aria-current",
+    );
+    expect(screen.getByRole("link", { name: "Home" })).not.toHaveAttribute("aria-current");
+  });
+
+  /**
+   * Every address that is *not* the case list, including the ones a prefix
+   * match would claim.
+   *
+   * `aria-current="page"` tells a screen-reader user "this link is where you
+   * are". React Router decides that by prefix, so a `NavLink` to `/cases` calls
+   * itself current at `/cases/{id}` and at every unrouted address beneath it,
+   * and `end` narrows that only to the pathname - `/cases?caseStatus=OPEN` and
+   * `/cases#content` would still claim it. None of these is the case list, and
+   * the last three are not addresses this application routes at all: announcing
+   * a 404 as the case list would send someone looking for a table that is not
+   * on the page.
+   *
+   * This is a statement about the marker, not about routing. What each address
+   * renders is decided by the router's own tests; what the shell may claim
+   * about it is decided here.
+   */
+  const nonCurrentCaseAddresses: readonly [string, string][] = [
+    ["the case list with a trailing slash", "/cases/"],
+    ["a case detail address", `/cases/${CANONICAL_CASE_ID}`],
+    ["an address that merely starts with the same characters", "/casesx"],
+    ["the case list carrying a query", "/cases?caseStatus=OPEN"],
+    ["the case list carrying a fragment", "/cases#content"],
+    ["an unrelated address that is not routed at all", "/nowhere/at/all"],
+  ];
+
+  it.each(nonCurrentCaseAddresses)(
+    "does not mark the cases destination current at %s",
+    async (_description, path) => {
+      renderShell(
+        createFakeAuthClient({ initialSession: { subject: "sub-1", roles: SHELL_ROLES } }),
+        path,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByRole("link", { name: "Cases" })).toBeInTheDocument();
+      });
+      const casesLink = screen.getByRole("link", { name: "Cases" });
+      // The destination is still offered, and still points at the exact list
+      // address: this is about what the shell claims, not about withdrawing a
+      // link the session is entitled to.
+      expect(casesLink).toHaveAttribute("href", "/cases");
+      // Absent, not "false": the attribute itself is not in the markup.
+      expect(casesLink).not.toHaveAttribute("aria-current");
+      expect(casesLink.getAttributeNames()).not.toContain("aria-current");
+      expect(document.querySelectorAll('[aria-current="false"]')).toHaveLength(0);
+    },
+  );
+
+  it("leaves no navigation item claiming to be the current page on a 404", async () => {
+    renderShell(
+      createFakeAuthClient({ initialSession: { subject: "sub-1", roles: SHELL_ROLES } }),
+      `/cases/${CANONICAL_CASE_ID}`,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Cases" })).toBeInTheDocument();
+    });
+    // Not the case list, not the ledger, not Home, not Health. An address the
+    // application does not route is announced as none of its destinations.
+    expect(document.querySelectorAll("[aria-current]")).toHaveLength(0);
+    expect(screen.getByText("Not found stands in here.")).toBeInTheDocument();
+  });
+
   it("never names a role or an authority in the navigation", async () => {
     renderShell(
       createFakeAuthClient({ initialSession: { subject: "sub-1", roles: ["FDS_APPROVER"] } }),
@@ -239,6 +457,8 @@ describe("AppShell capability navigation", () => {
     expect(rendered).not.toContain("FDS_APPROVER");
     expect(rendered).not.toContain("transaction:view");
     expect(rendered).not.toContain("transaction:read");
+    expect(rendered).not.toContain("case:view");
+    expect(rendered).not.toContain("case:read");
   });
 });
 
@@ -296,6 +516,10 @@ describe("AppShell authentication controls", () => {
       "tab=raw",
     ],
     ["the transaction list", "/transactions", null],
+    ["the case list", "/cases", null],
+    ["a case list carrying a query", "/cases?status=OPEN", "status=OPEN"],
+    ["a case list carrying a fragment", "/cases#content", "#content"],
+    ["a case list carrying both", "/cases?status=OPEN#content", "status=OPEN"],
     ["the root route", "/", null],
   ];
 

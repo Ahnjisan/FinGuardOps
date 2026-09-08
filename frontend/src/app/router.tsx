@@ -2,6 +2,7 @@ import { createBrowserRouter, type RouteObject } from "react-router-dom";
 import { AppShell } from "./AppShell";
 import { RequireCapability } from "./RequireCapability";
 import { AuthCallbackPage } from "../pages/AuthCallbackPage";
+import { CaseListPage } from "../pages/CaseListPage";
 import { HealthPage } from "../pages/HealthPage";
 import { HomePage } from "../pages/HomePage";
 import { NotFoundPage } from "../pages/NotFoundPage";
@@ -42,6 +43,25 @@ export const routes: RouteObject[] = [
         element: (
           <RequireCapability capability="transaction:view">
             <TransactionDetailPage />
+          </RequireCapability>
+        ),
+      },
+      {
+        // The case list, behind its own capability. `case:view`, not
+        // `transaction:view`: the two are separate UI capabilities backed by
+        // separate Backend authorities, and a role that may read the ledger is
+        // not thereby a role that may read investigations.
+        //
+        // Exact `/cases` and no more. There is no case detail route yet, so
+        // `/cases/{caseId}` is not a route slot standing empty - it is simply
+        // not a route, and falls through to the catch-all below. The guard sits
+        // on the element, so a direct URL entry is decided exactly as a click on
+        // the rail is. It remains a convenience boundary: Backend re-decides
+        // authorization from the access token on every request.
+        path: "cases",
+        element: (
+          <RequireCapability capability="case:view">
+            <CaseListPage />
           </RequireCapability>
         ),
       },

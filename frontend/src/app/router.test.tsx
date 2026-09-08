@@ -387,6 +387,179 @@ describe("the /transactions production route", () => {
   });
 });
 
+/**
+ * The three roles that hold `case:view`, and the three that do not.
+ *
+ * Spelled out rather than aliased to the transaction lists: the two
+ * capabilities are granted by the same three roles today, and reusing one
+ * constant would make this file assert that the case route follows the *ledger*
+ * capability. If the capability table ever grants one and not the other, these
+ * tests have to be the thing that notices.
+ */
+const CASE_ROLES: readonly UserRole[] = ["FDS_VIEWER", "FDS_ANALYST", "FDS_APPROVER"];
+const NON_CASE_ROLES: readonly UserRole[] = [
+  "RULE_OPERATOR",
+  "RECOVERY_OPERATOR",
+  "PLATFORM_ADMIN",
+];
+
+describe("the /cases production route", () => {
+  it.each(CASE_ROLES)("renders the case screen on direct entry for %s", async (role) => {
+    const fetchSpy = vi.fn().mockImplementation(() => new Promise<Response>(() => {}));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    renderSignedInAt("/cases", [role]);
+
+    expect(await screen.findByRole("heading", { name: "Cases", level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Apply filters" })).toBeInTheDocument();
+    // The direct URL entry really did reach the case endpoint, and only it.
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+    const sent = fetchSpy.mock.calls[0][0] as Request;
+    expect(new URL(sent.url).pathname).toBe("/api/v1/cases");
+  });
+
+  it.each(NON_CASE_ROLES)("refuses direct entry for %s, sending nothing", async (role) => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const { client } = renderSignedInAt("/cases", [role]);
+
+    expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Cases", level: 2 })).not.toBeInTheDocument();
+    // The refusal costs the Backend nothing at all, and takes no credential.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(client.calls.authorizeRequest).toBe(0);
+    // It also says nothing about which role or capability would have worked.
+    const rendered = document.body.textContent ?? "";
+    expect(rendered).not.toContain(role);
+    expect(rendered).not.toContain("case:view");
+    expect(rendered).not.toContain("case:read");
+  });
+
+  it("asks an unauthenticated visitor to sign in, and sends nothing", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const client = createFakeAuthClient({ initialSession: null });
+    adapter.client = client;
+
+    renderRoutesWithAuth(routes, { client, initialEntries: ["/cases"] });
+
+    expect(await screen.findByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(client.calls.signIn).toHaveLength(0);
+    expect(client.calls.authorizeRequest).toBe(0);
+  });
+
+  it("shows neither the screen nor a refusal while authentication is undecided", () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const client = createFakeAuthClient({ initialSession: null });
+    adapter.client = client;
+    client.deferInitialize();
+
+    renderRoutesWithAuth(routes, { client, initialEntries: ["/cases"] });
+
+    expect(authStatus()).toHaveTextContent(PREPARING);
+    expect(screen.getByText("Checking access...")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Access denied" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Cases", level: 2 })).not.toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("sends nothing when authentication itself failed", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const client = createFakeAuthClient({ initialSession: null });
+    adapter.client = client;
+
+    await renderAt("/cases", {
+      client,
+      initialize: "reject",
+      settled: { status: safeAuthErrorMessage("configuration") },
+    });
+
+    expect(screen.getByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(client.calls.authorizeRequest).toBe(0);
+  });
+
+  it("removes the screen the moment the session is invalidated", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() => new Promise<Response>(() => {})),
+    );
+    const { client } = renderSignedInAt("/cases", ["FDS_ANALYST"]);
+    await screen.findByRole("heading", { name: "Cases", level: 2 });
+
+    act(() => {
+      client.emitSessionInvalidated();
+    });
+
+    expect(screen.getByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Apply filters" })).not.toBeInTheDocument();
+  });
+
+  it("returns to exactly /cases after signing in from it", async () => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const client = createFakeAuthClient({ initialSession: null });
+    adapter.client = client;
+
+    renderRoutesWithAuth(routes, { client, initialEntries: ["/cases"] });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(client.calls.signIn).toEqual(["/cases"]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("has no case detail route, so an identifier under /cases is a 404", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    renderSignedInAt("/cases/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001", ["FDS_ANALYST"]);
+
+    // Not a guarded route that happens to be empty: no route at all. This is
+    // the assertion that fails if a detail route is added without its own
+    // guard, its own screen and its own tests.
+    expect(await screen.findByRole("heading", { name: "Page not found" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Cases", level: 2 })).not.toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not treat a sibling path sharing the prefix as the cases route", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+
+    renderSignedInAt("/casesx", ["FDS_ANALYST"]);
+
+    expect(await screen.findByRole("heading", { name: "Page not found" })).toBeInTheDocument();
+  });
+
+  it("offers the destination in the rail and reaches it by keyboard", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() => new Promise<Response>(() => {})),
+    );
+    renderSignedInAt("/", ["FDS_VIEWER"]);
+
+    const link = await screen.findByRole("link", { name: "Cases" });
+    link.focus();
+    await user.keyboard("{Enter}");
+
+    expect(await screen.findByRole("heading", { name: "Cases", level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Cases" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "Transactions" })).not.toHaveAttribute(
+      "aria-current",
+    );
+  });
+});
+
 const CANONICAL_TRANSACTION_ID = "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001";
 const CANONICAL_DETAIL_ROUTE = `/transactions/${CANONICAL_TRANSACTION_ID}`;
 

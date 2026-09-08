@@ -1,4 +1,4 @@
-import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import { safeAuthErrorMessage } from "../auth/authErrors";
 import { resolveReturnRoute } from "../auth/returnRoute";
 import { useAuth } from "../auth/useAuth";
@@ -21,6 +21,25 @@ export function AppShell() {
   const returnTo = resolveReturnRoute(
     `${location.pathname}${location.search}${location.hash}`,
   );
+
+  /**
+   * Whether the browser is on the case list itself.
+   *
+   * Decided from the whole location rather than from a path prefix. React
+   * Router's `NavLink` marks itself current for everything *under* its `to`,
+   * so `/cases/{id}` and a future `/cases/anything` would all be announced as
+   * "the case list, current page" - and `end` only narrows that to the path,
+   * leaving `/cases?caseStatus=OPEN` and `/cases#content` still claiming to be
+   * the page the analyst is on. Neither is an address this application
+   * navigates to, and `aria-current` is a statement to a screen reader about
+   * where the user *is*, so all three parts have to agree exactly.
+   *
+   * `search` and `hash` are read as React Router reports them - already empty
+   * when absent, and nothing trimmed, decoded or normalized on the way in - so
+   * a location carrying either one is simply not the current page.
+   */
+  const onCaseList =
+    location.pathname === "/cases" && location.search === "" && location.hash === "";
 
   let statusMessage: string | null = null;
   if (state.status === "initializing") {
@@ -76,6 +95,33 @@ export function AppShell() {
                 <NavLink className="rail__link" to="/transactions">
                   Transactions
                 </NavLink>
+              </li>
+            )}
+            {/*
+              The same treatment for the case list, decided by its own
+              capability. `case:view` and `transaction:view` are granted
+              together by today's three FDS roles, but they are asked for
+              separately here: the capability table is what decides, and a
+              future role holding one and not the other must see exactly one
+              destination rather than both.
+            */}
+            {capabilities.has("case:view") && (
+              <li>
+                {/*
+                  A plain `Link` carrying the attribute this application decides,
+                  rather than a `NavLink` carrying one React Router derives. The
+                  two cannot both write `aria-current`, so there is exactly one
+                  of it in the markup and it is either `page` or absent - never
+                  the string `"false"`, which assistive technology reads as an
+                  attribute that is present.
+                */}
+                <Link
+                  className="rail__link"
+                  to="/cases"
+                  aria-current={onCaseList ? "page" : undefined}
+                >
+                  Cases
+                </Link>
               </li>
             )}
             <li>

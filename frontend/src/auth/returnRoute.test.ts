@@ -14,6 +14,10 @@ describe("resolveReturnRoute", () => {
     expect(resolveReturnRoute("/transactions")).toBe("/transactions");
   });
 
+  it("allows the cases route", () => {
+    expect(resolveReturnRoute("/cases")).toBe("/cases");
+  });
+
   const rejected: Array<[string, unknown]> = [
     ["trailing whitespace", "/health "],
     ["leading whitespace", " /health"],
@@ -48,6 +52,31 @@ describe("resolveReturnRoute", () => {
     ["an encoded transactions route", "%2ftransactions"],
     ["a protocol-relative host named transactions", "//transactions"],
     ["an absolute URL ending in the transactions path", "https://evil.example/transactions"],
+    ["the cases route with a trailing slash", "/cases/"],
+    ["a case detail route that does not exist", "/cases/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001"],
+    ["a numeric case identifier", "/cases/1"],
+    ["a sibling route sharing the cases prefix", "/casesx"],
+    ["a route that merely contains the cases path", "/x/cases"],
+    ["the cases route with a query string", "/cases?status=OPEN"],
+    ["the cases route with a fragment", "/cases#content"],
+    ["the cases route with a query string and a fragment", "/cases?status=OPEN#content"],
+    ["the cases route in different casing", "/Cases"],
+    ["the cases route with leading whitespace", " /cases"],
+    ["the cases route with trailing whitespace", "/cases "],
+    ["an encoded cases route", "%2fcases"],
+    ["an encoded slash inside the cases route", "/cases%2f"],
+    ["an encoded backslash after the cases route", "/cases%5c"],
+    ["a double-encoded cases route", "%252fcases"],
+    ["a backslash separator before cases", "\\cases"],
+    ["a backslash after the leading slash", "/\\cases"],
+    ["a duplicate separator before cases", "//cases"],
+    ["a duplicate separator inside the cases path", "/cases//"],
+    ["a protocol-relative host named cases", "//cases"],
+    ["an absolute https URL ending in the cases path", "https://evil.example/cases"],
+    ["an absolute http URL ending in the cases path", "http://localhost:5173/cases"],
+    ["userinfo in an absolute cases URL", "https://user:pass@evil.example/cases"],
+    ["a different port on the same host for cases", "http://localhost:8080/cases"],
+    ["a javascript scheme carrying the cases path", "javascript:/cases"],
     ["empty string", ""],
     ["undefined", undefined],
     ["null", null],
@@ -76,14 +105,54 @@ describe("resolveReturnRoute", () => {
       "/health",
       "/transactions",
       "/transactions/",
+      "/cases",
+      "/cases/",
       "/admin",
       "//evil",
       undefined,
       0,
     ];
     for (const input of inputs) {
-      expect(["/", "/health", "/transactions"]).toContain(resolveReturnRoute(input));
+      expect(["/", "/health", "/transactions", "/cases"]).toContain(resolveReturnRoute(input));
     }
+  });
+
+  it("treats the cases route as a literal and never as a prefix", () => {
+    // Every one of these shares the prefix and none of them is a route this
+    // application has. There is no case detail route at all, so admitting a
+    // segment under `/cases/` would be a redirect to a 404 at best.
+    for (const suffix of [
+      "/",
+      "/1",
+      "/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
+      "/../health",
+      "//evil.example",
+      "\\evil.example",
+      "x",
+      "?status=OPEN",
+      "#content",
+    ]) {
+      expect(resolveReturnRoute(`/cases${suffix}`)).toBe("/");
+    }
+  });
+
+  it("does not readmit a cases address by stripping its query or fragment", () => {
+    // The whole location is judged, so an address that would become `/cases`
+    // after a repair is refused as written - and the repair really would have
+    // produced an admitted route.
+    for (const value of ["/cases?status=OPEN", "/cases#content", "/cases?status=OPEN#content"]) {
+      expect(resolveReturnRoute(value)).toBe("/");
+      expect(resolveReturnRoute(value.split(/[?#]/)[0])).toBe("/cases");
+    }
+  });
+
+  it("returns the cases literal itself rather than a value built from the input", () => {
+    const hostile = "https://evil.example/cases?token=hunter2#x";
+    const resolved: string = resolveReturnRoute(hostile);
+
+    expect(resolved).toBe("/");
+    expect(resolved).not.toContain("evil.example");
+    expect(resolved).not.toContain("hunter2");
   });
 
   it("treats the transactions route as a literal and never as a prefix", () => {

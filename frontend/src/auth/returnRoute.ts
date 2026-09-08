@@ -8,8 +8,11 @@ import { isCanonicalUuidV4 } from "../api/responseValidation";
  *
  * There are two kinds of allowed value, and only two.
  *
- * The three literal routes below are compared with `===` against a string
- * literal, so `/transactions` is listed as itself and only as itself.
+ * The four literal routes below are compared with `===` against a string
+ * literal, so `/transactions` is listed as itself and only as itself, and
+ * `/cases` likewise. `/cases` is a literal and nothing more: this application
+ * has no case detail route, so there is no parameterized case form here, and
+ * `/cases/{caseId}` falls to the default alongside `/cases/` and `/casesx`.
  *
  * The transaction detail route is the one parameterized destination, and it is
  * not admitted by a prefix test. `startsWith("/transactions/")`,
@@ -24,7 +27,7 @@ import { isCanonicalUuidV4 } from "../api/responseValidation";
  * either a literal written in this file or a route assembled here from
  * thirty-six characters of `[0-9a-f-]`.
  */
-export const ALLOWED_RETURN_ROUTES = ["/", "/health", "/transactions"] as const;
+export const ALLOWED_RETURN_ROUTES = ["/", "/health", "/transactions", "/cases"] as const;
 
 export type LiteralReturnRoute = (typeof ALLOWED_RETURN_ROUTES)[number];
 
@@ -57,6 +60,12 @@ export function resolveReturnRoute(value: unknown): AllowedReturnRoute {
   }
   if (value === "/transactions") {
     return "/transactions";
+  }
+  // A literal, with no parameterized sibling. The case list is the only case
+  // route this application has, so nothing under `/cases/` is admitted and no
+  // query or fragment is stripped in the hope of readmitting one.
+  if (value === "/cases") {
+    return "/cases";
   }
   // `typeof` rather than `instanceof String`: a `String` object wrapping an
   // allowed route is not an allowed route, and neither is anything else that

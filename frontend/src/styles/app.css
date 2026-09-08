@@ -320,9 +320,12 @@ a:hover {
   opacity: 0.55;
 }
 
-/* The transaction console page owns its own width and stacking, so it must not
-   fall through to the prose-width fallback below. */
-.transactions {
+/* The console work screens own their own width and stacking, so they must not
+   fall through to the prose-width fallback below. Both list screens share the
+   one rule: they are the same layout holding different records, and giving the
+   case sheet a stylesheet of its own would be a second console. */
+.transactions,
+.cases {
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -627,6 +630,14 @@ ul.notice__body li + li {
   font-size: 11.5px;
 }
 
+/* Seven columns rather than eight, and none of them an amount, so the case
+   sheet needs less width before a reference has to wrap. Below this it scrolls
+   sideways inside its own container exactly as the ledger sheet does; the
+   document itself never scrolls. */
+.sheet--cases table {
+  min-width: 980px;
+}
+
 .cell-amount {
   text-align: right;
   white-space: nowrap;
@@ -644,6 +655,15 @@ ul.notice__body li + li {
   margin-left: 5px;
   color: var(--muted);
   font-size: 11.5px;
+}
+
+/* A count, right-aligned under a right-aligned heading and set in tabular
+   figures so a column of them lines up. It is a number Backend counted, not a
+   score this console derived, so it gets no colour and no emphasis. */
+.cell-count {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .cell-ref {
