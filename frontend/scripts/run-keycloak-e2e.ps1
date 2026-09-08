@@ -90,6 +90,73 @@ $ComposeArguments = @(
     '-f', 'infra/compose.keycloak-local-e2e.yml'
 )
 
+# The one lock that decides who owns the dedicated Compose project.
+#
+# The project name below is fixed, so two runs started at the same time would
+# both find the project empty, both create containers, networks and volumes
+# under it, and then the first one to finish would take the other one's
+# resources down with its own `compose down`. Ownership therefore has to be
+# established before the emptiness check rather than inferred from it.
+#
+# A Windows system-wide named mutex is what says so. It is named after the
+# fixed project and nothing else - no path, no user, no credential - so every
+# execution that shares this Compose project shares this lock, including the
+# cleanup mode, which removes exactly the resources a run owns. Whoever holds it
+# holds it from before the first `docker ps` that looks for existing resources
+# until after the last step of cleanup has finished; nobody else can be inside
+# that window, so there is no moment at which one run can observe or remove
+# another run's resources.
+#
+# Failing to take it is a fixed, non-sensitive error and stops the run. It is
+# never a reason to proceed, and no Docker resource is removed on the way out of
+# a run that never held it.
+$RunLockName = "Global\$ProjectName"
+$RunLockTimeoutMilliseconds = 15000
+# `[Console]::OutputEncoding` is process-global, so the window in which it is
+# UTF-8 has to be one caller wide. This lock is named after this process, which
+# is what "one caller at a time inside this process" means: parallel runspaces
+# of the same process contend for it, a nested call on the same thread re-enters
+# it, and no other process is affected by or waits on it.
+$ConsoleEncodingLockName = "Local\finguardops-keycloak-e2e-console-encoding-$PID"
+$ConsoleEncodingLockTimeoutMilliseconds = 15000
+
+# Takes the run lock, or fails without having taken anything.
+#
+# Returns the held mutex, and returns it only when it is held: a caller that
+# receives an object from here owns the lock, and a caller that does not receive
+# one has nothing to release. Nothing here touches Docker.
+function New-RunLock {
+    $lock = $null
+    try {
+        $lock = New-Object System.Threading.Mutex($false, $RunLockName)
+    }
+    catch {
+        throw 'The dedicated E2E run lock could not be created.'
+    }
+    $owned = $false
+    try {
+        $owned = $lock.WaitOne($RunLockTimeoutMilliseconds)
+    }
+    catch [System.Threading.AbandonedMutexException] {
+        # .NET reports that the previous holder died without releasing, and in
+        # the same breath hands the mutex to this wait: the lock *is* held now.
+        # What that run may have left behind in Docker is a separate question
+        # and is deliberately not answered here - the existing-resource checks
+        # still run, unchanged, and still refuse to start on top of anything
+        # they find. Nothing is removed on the strength of an abandoned lock.
+        $owned = $true
+    }
+    catch {
+        $lock.Dispose()
+        throw 'The dedicated E2E run lock could not be acquired.'
+    }
+    if (-not $owned) {
+        $lock.Dispose()
+        throw 'The dedicated E2E run lock is held by another run.'
+    }
+    return $lock
+}
+
 function Assert-Success([string]$Operation) {
     if ($LASTEXITCODE -ne 0) {
         throw "$Operation failed."
@@ -104,14 +171,137 @@ function Assert-Success([string]$Operation) {
 # Docker writes ordinary progress lines, and its `No such image` answer, to
 # stderr; whether an image is present locally is a question this script asks on
 # purpose. The exit code, which every caller checks, stays the only verdict.
+#
+# The output is also decoded as what Docker actually wrote, which is UTF-8.
+# Windows PowerShell decodes a native command's standard output with
+# `[Console]::OutputEncoding`, and that is the console code page - 949 on this
+# Korean Windows, 437 or 850 elsewhere - not UTF-8. Every byte above 0x7F in a
+# path therefore came back as a different character than the daemon recorded,
+# so a repository under a directory named in Hangul, or under any other
+# non-ASCII name, produced an observed bind source that could not equal the
+# approved one no matter how the container had been created.
+#
+# The correction belongs here, at the decoder, and nowhere near the comparison.
+# Nothing below is relaxed by it, and every way it can go wrong stops the run
+# rather than changing what a comparison is given to read:
+#
+#   * the code page is process-global, so the window in which it is UTF-8 is
+#     held under `$ConsoleEncodingLockName` for exactly one caller at a time.
+#     A lock this call cannot take means the command is not run at all;
+#   * whether the previous encoding was read at all is tracked separately from
+#     what was read, because a value that was never read is not a value to
+#     restore;
+#   * a console that refuses UTF-8 fails here, before the command runs. A run
+#     that continued would be decoding paths with a code page that cannot spell
+#     them, which is the defect this exists to remove;
+#   * the previous code page is restored on every path, success or failure, and
+#     the restoration is read back and compared rather than assumed. A console
+#     that will not go back is a failure of this run.
+#
+# Cleanup runs to completion before any of that is reported: the encoding, the
+# lock and the mutex object are each dealt with first, and only then is a
+# failure raised. Every message is a fixed sentence. Nothing a native command
+# wrote, and no path, identifier or credential, is reflected into one.
 function Invoke-NativeStdout([scriptblock]$Command) {
     $previous = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
+    $lock = $null
+    $lockOwned = $false
+    $previousEncoding = $null
+    $readEncoding = $false
+    $changedEncoding = $false
     try {
+        try {
+            $lock = New-Object System.Threading.Mutex($false, $ConsoleEncodingLockName)
+        }
+        catch {
+            throw 'The console encoding lock could not be created.'
+        }
+        try {
+            $lockOwned = $lock.WaitOne($ConsoleEncodingLockTimeoutMilliseconds)
+        }
+        catch [System.Threading.AbandonedMutexException] {
+            # Held by this call now. The encoding is read and compared below
+            # regardless, so nothing is assumed about what the abandoning caller
+            # left the console in.
+            $lockOwned = $true
+        }
+        catch {
+            throw 'The console encoding lock could not be acquired.'
+        }
+        if (-not $lockOwned) {
+            throw 'The console encoding lock could not be acquired.'
+        }
+
+        try {
+            $previousEncoding = [Console]::OutputEncoding
+            $readEncoding = $true
+        }
+        catch {
+            throw 'The console output encoding could not be read.'
+        }
+
+        if ($previousEncoding.CodePage -ne 65001) {
+            try {
+                # Marked as changed before the assignment, so a setter that
+                # fails half way is still put back by the cleanup below.
+                $changedEncoding = $true
+                # Without a preamble: a BOM would be written into this console's
+                # own output, not just used to decode Docker's.
+                [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+            }
+            catch {
+                throw 'The console output encoding could not be set to UTF-8.'
+            }
+            if ([Console]::OutputEncoding.CodePage -ne 65001) {
+                throw 'The console output encoding could not be set to UTF-8.'
+            }
+        }
+
+        $ErrorActionPreference = 'Continue'
         return (& $Command | Out-String)
     }
     finally {
         $ErrorActionPreference = $previous
+        $restoreFailed = $false
+        if ($changedEncoding -and $readEncoding) {
+            try {
+                if ([Console]::OutputEncoding.CodePage -ne $previousEncoding.CodePage) {
+                    [Console]::OutputEncoding = $previousEncoding
+                }
+            }
+            catch {
+                $restoreFailed = $true
+            }
+            if (-not $restoreFailed) {
+                try {
+                    if ([Console]::OutputEncoding.CodePage -ne $previousEncoding.CodePage) {
+                        $restoreFailed = $true
+                    }
+                }
+                catch {
+                    $restoreFailed = $true
+                }
+            }
+        }
+        try {
+            if ($lockOwned) {
+                $lockOwned = $false
+                $lock.ReleaseMutex()
+            }
+        }
+        finally {
+            if ($null -ne $lock) {
+                $lock.Dispose()
+            }
+            if ($restoreFailed) {
+                # Raised last, once the encoding, the lock and the mutex object
+                # have all been dealt with. It replaces whatever this call was
+                # already failing with on purpose: a native command's own error
+                # text is not something this script reflects, and a console left
+                # on the wrong code page is the more serious of the two.
+                throw 'The console output encoding could not be restored.'
+            }
+        }
     }
 }
 
@@ -688,16 +878,87 @@ function Assert-ExactMap($Value, $Expected, [string]$Message) {
     }
 }
 
+# The spellings of a Windows path this comparison is willing to canonicalize.
+#
+# `GetFullPath` will happily turn `C:\review\sibling\..\approved` into
+# `C:\review\approved`, which would make a bind of a *different* directory
+# compare equal to the approved one. So the spelling is decided before
+# `GetFullPath` is allowed to touch it, and only three differences survive that
+# decision - each of them a difference Windows itself treats as no difference:
+# which separator was written, the letter case, and a single trailing separator.
+#
+# Everything else is refused as a spelling rather than repaired into one: a `.`
+# or `..` segment, a repeated separator, an empty segment, a drive-relative
+# path (`C:approved`), a UNC path, and a colon anywhere but after the drive
+# letter.
+#
+# The segments are split on the separators and examined one at a time rather
+# than searched for as substrings. `..` is a segment, not a sequence of
+# characters: a directory honestly named `notes..archive` is not a traversal and
+# is not rejected for containing two dots.
+function Test-CanonicalWindowsPath([string]$Path) {
+    # A drive letter, a colon, and the root separator that must follow it. This
+    # is what refuses a UNC path, a drive-relative path and a malformed colon
+    # before anything else is looked at.
+    if ($Path -notmatch '^[A-Za-z]:[\\/]') {
+        return $false
+    }
+    $rest = $Path.Substring(3)
+    if ($rest.Length -gt 0) {
+        # Exactly one trailing separator is a spelling of the same directory. A
+        # second one is an empty segment and is caught below.
+        $last = $rest[$rest.Length - 1]
+        if ($last -eq '\' -or $last -eq '/') {
+            $rest = $rest.Substring(0, $rest.Length - 1)
+        }
+    }
+    if ($rest.Length -eq 0) {
+        # The root itself. Its separator is structural rather than trailing.
+        return $true
+    }
+    foreach ($segment in $rest.Split([char[]]('\', '/'))) {
+        if ($segment.Length -eq 0) {
+            return $false
+        }
+        if ($segment -eq '.' -or $segment -eq '..') {
+            return $false
+        }
+        if ($segment.Contains(':')) {
+            return $false
+        }
+    }
+    return $true
+}
+
 # Windows path equality, on the physical path.
 #
 # Both sides have already been resolved to a link-free location under this
 # repository, so this is a comparison of one full path against another: a path
 # that merely shares a prefix, a junction that happens to lead to the same
 # directory, or a path on a different drive is a different string and is
-# rejected. The comparison ignores case because that is what "the same path"
-# means on this platform, and nothing else about it is relaxed.
+# rejected.
+#
+# Exactly three spellings are canonicalized away, and each of them is a spelling
+# Windows itself treats as the same path:
+#
+#   * the separator, because `C:/a/b` and `C:\a\b` name one directory - the
+#     daemon records a bind source verbatim, so which one comes back is decided
+#     by how the argument happened to be written;
+#   * a single trailing separator, for the same reason;
+#   * letter case, because that is what "the same path" means on this platform.
+#
+# `Test-CanonicalWindowsPath` decides that the observed path is written in one
+# of those spellings and nothing else; `GetFullPath` then settles the first two
+# and `OrdinalIgnoreCase` the third, and the result is still one whole string
+# compared against another whole string. Nothing else is relaxed: this is never
+# a prefix, suffix or substring test, and a path that resolves through a link is
+# not resolved for the comparison, so a junction or other reparse point cannot
+# be spelled to look like the approved source.
 function Test-SamePhysicalPath($Observed, [string]$Expected) {
     if ($Observed -isnot [string] -or [string]::IsNullOrWhiteSpace($Observed)) {
+        return $false
+    }
+    if (-not (Test-CanonicalWindowsPath $Observed)) {
         return $false
     }
     $normalized = $null
@@ -717,6 +978,12 @@ function Test-SamePhysicalPath($Observed, [string]$Expected) {
 # host path, the container path and the mode are three compared values rather
 # than one string in which a difference could hide. An entry that is not shaped
 # like an approved bind at all is rejected without being parsed further.
+#
+# The host path may be written with either separator after the drive letter,
+# because the daemon stores what it was given rather than a canonical form. That
+# is a question about how the entry is *parsed*; what the parsed source is then
+# compared against is unchanged, and `Test-SamePhysicalPath` decides it on the
+# full canonical path.
 function Assert-ExactBinds($Value, $Expected, [string]$Message) {
     $observed = @()
     if ($null -ne $Value) {
@@ -728,7 +995,7 @@ function Assert-ExactBinds($Value, $Expected, [string]$Message) {
     $matched = @{}
     foreach ($entry in $observed) {
         if ($entry -isnot [string] -or
-            $entry -notmatch '^(?<source>[A-Za-z]:\\[^:]*):(?<destination>/[^:]+):(?<mode>[a-z,]+)$') {
+            $entry -notmatch '^(?<source>[A-Za-z]:[\\/][^:]*):(?<destination>/[^:]+):(?<mode>[a-z,]+)$') {
             throw $Message
         }
         $source = $Matches['source']
@@ -792,7 +1059,14 @@ function Assert-ExactMounts($Value, $Expected, [string]$Message) {
         if (-not [string]::Equals((Get-JsonMember $mount 'Mode'), 'ro', [System.StringComparison]::Ordinal)) {
             throw $Message
         }
-        if (Test-JsonFlag (Get-JsonMember $mount 'RW')) {
+        # Read-only, as a boolean the daemon actually wrote. `Test-JsonFlag`
+        # answers "is this a true flag", which reads an absent member, a JSON
+        # null, the string "false" and the number 0 alike as "not writable" -
+        # every one of which is a document this script failed to understand
+        # rather than a mount it has confirmed is read-only. The type is
+        # required here as well as the value.
+        $readWrite = Get-JsonMember $mount 'RW'
+        if ($readWrite -isnot [bool] -or $readWrite) {
             throw $Message
         }
         if (-not [string]::Equals((Get-JsonMember $mount 'Propagation'), 'rprivate', [System.StringComparison]::Ordinal)) {
@@ -1342,12 +1616,30 @@ function Invoke-Prepare {
     Write-Output 'Preparation completed. The E2E itself runs with -Mode Run and pulls and builds nothing.'
 }
 
+# Cleanup removes exactly the resources a run owns, so it takes the same lock
+# for the same reason: a cleanup that ran while a run was in flight would be
+# taking that run's containers, network and volumes down underneath it.
 if ($Mode -eq 'Cleanup') {
+    $cleanupLock = New-RunLock
+    $cleanupLockOwned = $true
     try {
-        Remove-BrowserContainer
+        try {
+            Remove-BrowserContainer
+        }
+        finally {
+            Invoke-ComposeDown
+        }
     }
     finally {
-        Invoke-ComposeDown
+        try {
+            if ($cleanupLockOwned) {
+                $cleanupLockOwned = $false
+                $cleanupLock.ReleaseMutex()
+            }
+        }
+        finally {
+            $cleanupLock.Dispose()
+        }
     }
     Write-Output 'Dedicated Keycloak browser E2E cleanup completed.'
     exit 0
@@ -1374,122 +1666,155 @@ $composeStarted = $false
 # The identifier of the one browser container this run creates, and the only
 # container the cleanup below is allowed to remove.
 $browserContainer = $null
+# The run lock, and whether this run actually holds it. The two are tracked
+# separately on purpose: a mutex object that exists is not a mutex that was
+# acquired, and only an acquired one may be released.
+$runLock = $null
+$runLockOwned = $false
 $previousOutput = [System.Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_OUTPUT_DIR', 'Process')
 $previousProject = [System.Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_COMPOSE_PROJECT', 'Process')
 $previousBrowser = [System.Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_BROWSER_WS', 'Process')
 
+# The lock is taken before the first question this run asks Docker about
+# existing resources, and released only after the last step of cleanup below
+# has finished. Between those two points this run is the only one that can be
+# looking at, creating or removing anything under the fixed Compose project.
 try {
-    # Everything this run needs must already exist locally, and must be what
-    # this checkout expects, before a single container starts. The image checks
-    # read the local image store only; the runtime check that follows them runs
-    # one throwaway container with no network at all.
-    $playwrightVersion = Get-PlaywrightVersion
-    $nodeExecutable = Get-NodeExecutable
-    $playwrightCli = Assert-LocalNodeEntrypoint $PlaywrightTestPath 'cli.js' $ExpectedPlaywrightVersion `
-        'The installed @playwright/test carries no CLI entry point. Run npm ci in frontend first.' `
-        ("@playwright/test {0} is not installed. Run npm ci in frontend first." -f $ExpectedPlaywrightVersion)
-    # Resolved here rather than only inside the Playwright configuration, so a
-    # missing or mismatched Vite is a fixed error before any container starts
-    # instead of a web server failure five minutes into the run.
-    Assert-LocalNodeEntrypoint $VitePath 'bin/vite.js' $ExpectedViteVersion `
-        'The installed vite carries no CLI entry point. Run npm ci in frontend first.' `
-        ("vite {0} is not installed. Run npm ci in frontend first." -f $ExpectedViteVersion) | Out-Null
+    # Nothing before this point has asked Docker anything. A failure to take
+    # the lock therefore leaves nothing to undo, and the cleanup below finds
+    # no lock to release and no resource to remove.
+    $runLock = New-RunLock
+    $runLockOwned = $true
 
-    $browserImageId = Assert-BrowserImage $playwrightVersion
-    Assert-BrowserRuntime $browserImageId $playwrightVersion
-    Assert-ComposeImagesPresent
-
-    $certificate = Assert-SafeCertificate $CertificatePath
-    Assert-CertificateKeyPair $browserImageId
-
-    $existingContainers = @(& docker ps -a --filter "label=com.docker.compose.project=$ProjectName" --format '{{.ID}}')
-    Assert-Success 'Dedicated Compose ownership check'
-    $existingVolumes = @(& docker volume ls --filter "label=com.docker.compose.project=$ProjectName" --format '{{.Name}}')
-    Assert-Success 'Dedicated Compose volume ownership check'
-    $existingNetworks = @(& docker network ls --filter "label=com.docker.compose.project=$ProjectName" --format '{{.Name}}')
-    Assert-Success 'Dedicated Compose network ownership check'
-    $existingBrowser = @(& docker ps -a --filter "name=^/$BrowserContainerName$" --format '{{.ID}}')
-    Assert-Success 'Dedicated browser container ownership check'
-    if ($existingContainers.Count -ne 0 -or $existingVolumes.Count -ne 0 -or
-        $existingNetworks.Count -ne 0 -or $existingBrowser.Count -ne 0) {
-        throw 'The dedicated E2E project already has resources. Run cleanup mode first.'
-    }
-
-    [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_OUTPUT_DIR', $OutputDirectory, 'Process')
-    [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_COMPOSE_PROJECT', $ProjectName, 'Process')
-    [System.Environment]::SetEnvironmentVariable(
-        'FINGUARDOPS_E2E_BROWSER_WS',
-        "ws://127.0.0.1:$BrowserHostPort/",
-        'Process'
-    )
-
-    Push-Location $RepositoryRoot
     try {
-        $composeStarted = $true
-        # Every image was proven present above, so there is nothing left for
-        # Compose to fetch or build. Were one missing after all, Compose fails
-        # here rather than asking a registry for metadata or authentication.
-        Invoke-Native { & docker @ComposeArguments up -d --no-build --pull never keycloak-verify }
-        Assert-Success 'Dedicated Compose startup'
-        Invoke-Native { & docker @ComposeArguments wait keycloak-verify }
-        Assert-Success 'Keycloak bootstrap and verifier'
-    }
-    finally {
-        Pop-Location
-    }
+        # Everything this run needs must already exist locally, and must be what
+        # this checkout expects, before a single container starts. The image checks
+        # read the local image store only; the runtime check that follows them runs
+        # one throwaway container with no network at all.
+        $playwrightVersion = Get-PlaywrightVersion
+        $nodeExecutable = Get-NodeExecutable
+        $playwrightCli = Assert-LocalNodeEntrypoint $PlaywrightTestPath 'cli.js' $ExpectedPlaywrightVersion `
+            'The installed @playwright/test carries no CLI entry point. Run npm ci in frontend first.' `
+            ("@playwright/test {0} is not installed. Run npm ci in frontend first." -f $ExpectedPlaywrightVersion)
+        # Resolved here rather than only inside the Playwright configuration, so a
+        # missing or mismatched Vite is a fixed error before any container starts
+        # instead of a web server failure five minutes into the run.
+        Assert-LocalNodeEntrypoint $VitePath 'bin/vite.js' $ExpectedViteVersion `
+            'The installed vite carries no CLI entry point. Run npm ci in frontend first.' `
+            ("vite {0} is not installed. Run npm ci in frontend first." -f $ExpectedViteVersion) | Out-Null
 
-    # Created stopped, approved against the exact configuration this file
-    # names, and only then started - by the identifier that was approved.
-    $browserPlan = Get-BrowserServerPlan $browserImageId $playwrightVersion
-    $browserContainer = New-CreatedContainer $browserPlan.Arguments
-    Start-BrowserContainer $browserContainer $browserImageId $browserPlan.Expectation
-    Wait-BrowserServer $browserContainer
+        $browserImageId = Assert-BrowserImage $playwrightVersion
+        Assert-BrowserRuntime $browserImageId $playwrightVersion
+        Assert-ComposeImagesPresent
 
-    Push-Location $FrontendRoot
-    try {
-        # The installed Playwright CLI, handed to this session's Node
-        # executable. Not `npm run`, not `npx`: an npm script is a command line
-        # a shell parses, npm runs lifecycle hooks around it, and npx resolves a
-        # missing binary by fetching it. None of those belong in a run whose
-        # contract is that it reaches no registry. Both paths below are absolute
-        # and both are separate elements of the argument vector, so a directory
-        # name containing a space or a non-ASCII character stays a directory
-        # name.
-        Invoke-Native { & $nodeExecutable $playwrightCli test --config playwright.config.ts }
-        Assert-Success 'Playwright Keycloak E2E'
-    }
-    finally {
-        Pop-Location
-    }
+        $certificate = Assert-SafeCertificate $CertificatePath
+        Assert-CertificateKeyPair $browserImageId
 
-    Write-Output 'Keycloak browser E2E completed.'
-}
-finally {
-    [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_OUTPUT_DIR', $previousOutput, 'Process')
-    [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_COMPOSE_PROJECT', $previousProject, 'Process')
-    [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_BROWSER_WS', $previousBrowser, 'Process')
-    try {
-        if ($null -ne $browserContainer) {
-            # Takes the per-run NSS database, the browser profile and the
-            # artifacts directory with it: all of them live only inside here.
-            # Named by the identifier this run created, so nothing else can be
-            # removed even if the name were moved onto another container.
-            Remove-OwnedContainer $browserContainer
+        $existingContainers = @(& docker ps -a --filter "label=com.docker.compose.project=$ProjectName" --format '{{.ID}}')
+        Assert-Success 'Dedicated Compose ownership check'
+        $existingVolumes = @(& docker volume ls --filter "label=com.docker.compose.project=$ProjectName" --format '{{.Name}}')
+        Assert-Success 'Dedicated Compose volume ownership check'
+        $existingNetworks = @(& docker network ls --filter "label=com.docker.compose.project=$ProjectName" --format '{{.Name}}')
+        Assert-Success 'Dedicated Compose network ownership check'
+        $existingBrowser = @(& docker ps -a --filter "name=^/$BrowserContainerName$" --format '{{.ID}}')
+        Assert-Success 'Dedicated browser container ownership check'
+        if ($existingContainers.Count -ne 0 -or $existingVolumes.Count -ne 0 -or
+            $existingNetworks.Count -ne 0 -or $existingBrowser.Count -ne 0) {
+            throw 'The dedicated E2E project already has resources. Run cleanup mode first.'
         }
+
+        [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_OUTPUT_DIR', $OutputDirectory, 'Process')
+        [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_COMPOSE_PROJECT', $ProjectName, 'Process')
+        [System.Environment]::SetEnvironmentVariable(
+            'FINGUARDOPS_E2E_BROWSER_WS',
+            "ws://127.0.0.1:$BrowserHostPort/",
+            'Process'
+        )
+
+        Push-Location $RepositoryRoot
+        try {
+            $composeStarted = $true
+            # Every image was proven present above, so there is nothing left for
+            # Compose to fetch or build. Were one missing after all, Compose fails
+            # here rather than asking a registry for metadata or authentication.
+            Invoke-Native { & docker @ComposeArguments up -d --no-build --pull never keycloak-verify }
+            Assert-Success 'Dedicated Compose startup'
+            Invoke-Native { & docker @ComposeArguments wait keycloak-verify }
+            Assert-Success 'Keycloak bootstrap and verifier'
+        }
+        finally {
+            Pop-Location
+        }
+
+        # Created stopped, approved against the exact configuration this file
+        # names, and only then started - by the identifier that was approved.
+        $browserPlan = Get-BrowserServerPlan $browserImageId $playwrightVersion
+        $browserContainer = New-CreatedContainer $browserPlan.Arguments
+        Start-BrowserContainer $browserContainer $browserImageId $browserPlan.Expectation
+        Wait-BrowserServer $browserContainer
+
+        Push-Location $FrontendRoot
+        try {
+            # The installed Playwright CLI, handed to this session's Node
+            # executable. Not `npm run`, not `npx`: an npm script is a command line
+            # a shell parses, npm runs lifecycle hooks around it, and npx resolves a
+            # missing binary by fetching it. None of those belong in a run whose
+            # contract is that it reaches no registry. Both paths below are absolute
+            # and both are separate elements of the argument vector, so a directory
+            # name containing a space or a non-ASCII character stays a directory
+            # name.
+            Invoke-Native { & $nodeExecutable $playwrightCli test --config playwright.config.ts }
+            Assert-Success 'Playwright Keycloak E2E'
+        }
+        finally {
+            Pop-Location
+        }
+
+        Write-Output 'Keycloak browser E2E completed.'
     }
     finally {
+        [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_OUTPUT_DIR', $previousOutput, 'Process')
+        [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_COMPOSE_PROJECT', $previousProject, 'Process')
+        [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_BROWSER_WS', $previousBrowser, 'Process')
         try {
-            if ($composeStarted) {
-                Invoke-ComposeDown
+            if ($null -ne $browserContainer) {
+                # Takes the per-run NSS database, the browser profile and the
+                # artifacts directory with it: all of them live only inside here.
+                # Named by the identifier this run created, so nothing else can be
+                # removed even if the name were moved onto another container.
+                Remove-OwnedContainer $browserContainer
             }
         }
         finally {
-            if ([System.IO.Directory]::Exists($OutputDirectory)) {
-                [System.IO.Directory]::Delete($OutputDirectory, $true)
+            try {
+                if ($composeStarted) {
+                    Invoke-ComposeDown
+                }
             }
-            if ($null -ne $certificate) {
-                $certificate.Dispose()
+            finally {
+                if ([System.IO.Directory]::Exists($OutputDirectory)) {
+                    [System.IO.Directory]::Delete($OutputDirectory, $true)
+                }
+                if ($null -ne $certificate) {
+                    $certificate.Dispose()
+                }
             }
+        }
+    }
+}
+finally {
+    # Released exactly once, and only by a run that took it. The flag is
+    # cleared before the call, so a failure here cannot turn into a second
+    # release, and the mutex object is disposed either way.
+    try {
+        if ($runLockOwned) {
+            $runLockOwned = $false
+            $runLock.ReleaseMutex()
+        }
+    }
+    finally {
+        if ($null -ne $runLock) {
+            $runLock.Dispose()
         }
     }
 }

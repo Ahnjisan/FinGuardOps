@@ -20,9 +20,20 @@ const TRANSACTION_PREFIX = "finguardops.oidc.transaction.";
 const USER_PREFIX = "finguardops.oidc.user.";
 const USERNAME = "local-fds-analyst";
 const BACKEND_AUDIENCE = "finguardops-backend-api";
-const CANONICAL_UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+/**
+ * The canonical lowercase UUID v4 this suite recognises, as a pattern fragment.
+ *
+ * One source for the identifier shape, so the value checks below and the
+ * relay's address descriptors cannot drift apart. An uppercase identifier, a
+ * version other than 4, an RFC variant outside `[89ab]` and an unhyphenated
+ * string are each a different string, and each is refused in both places.
+ */
+const CANONICAL_UUID_V4_PATTERN =
+  "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
+const CANONICAL_UUID_V4 = new RegExp(`^${CANONICAL_UUID_V4_PATTERN}$`);
 const BACKEND_ORIGIN = "http://localhost:8080";
 const TRANSACTION_LIST_PATH = "/api/v1/transactions";
+const CASE_LIST_PATH = "/api/v1/cases";
 
 /**
  * A canonical lowercase UUID v4 that names no transaction.
@@ -37,19 +48,70 @@ const TRANSACTION_LIST_PATH = "/api/v1/transactions";
 const SYNTHETIC_TRANSACTION_ID = "e2e00000-0000-4000-8000-000000000e2e";
 
 /**
- * The query names each relayable endpoint may carry, from
- * `TransactionQueryValidator` by way of the endpoint registry.
+ * Every Backend address this suite is willing to write onto the socket.
  *
- * A path absent from this map accepts no query at all, and a name absent from
- * its list is refused before anything is written to the Backend. The list is
- * membership only - order and encoding are decided by the canonical builder in
- * the application and asserted against the exact targets below, not re-derived
- * here.
+ * A closed list of exact endpoints, and deliberately not a path syntax. That
+ * `/api/v1/...` is well-formed says nothing about whether this suite may read
+ * it: the console's screens reach exactly three read addresses and one
+ * authorization probe. Everything else under `/api/v1/**` - a case detail, its
+ * notes, its audit log, a case status or assignee write, a note create, an
+ * endpoint that does not exist yet - is refused here rather than relayed. The
+ * list grows when a screen's E2E really needs an address and not before: an
+ * endpoint admitted ahead of the test that needs it is an address this suite
+ * can reach for no stated reason.
+ *
+ * Each descriptor carries the one method its address may be reached by, the
+ * exact address it recognises, and the query names that address may carry -
+ * `null` meaning it may carry none at all. Nothing is shared between
+ * descriptors, so a case filter cannot be relayed to the ledger endpoint or the
+ * other way round, and a method allowed on one address is not allowed on
+ * another.
  */
-const RELAYABLE_QUERY_NAMES: ReadonlyMap<string, readonly string[]> = new Map([
-  [
-    TRANSACTION_LIST_PATH,
-    [
+interface RelayableEndpoint {
+  /** Reads as a label in the list; never printed into a failure. */
+  readonly name: string;
+  /** The one HTTP method this address may be reached by. */
+  readonly method: string;
+  /** Whether an exact request path names this endpoint. */
+  readonly matches: (pathname: string) => boolean;
+  /**
+   * The query names this endpoint declares, from `TransactionQueryValidator`
+   * and `FraudCaseQueryValidator` by way of the endpoint registry, or `null`
+   * when the endpoint takes no query at all.
+   *
+   * Membership only - order and encoding are decided by the canonical builder
+   * in the application and asserted against the exact targets below, never
+   * re-derived here.
+   */
+  readonly queryNames: readonly string[] | null;
+}
+
+/** `/api/v1/transactions/{canonical lowercase UUID v4}`, and nothing after it. */
+const TRANSACTION_DETAIL_PATH = new RegExp(
+  `^${TRANSACTION_LIST_PATH}/${CANONICAL_UUID_V4_PATTERN}$`,
+);
+
+/** `/api/v1/cases/{canonical lowercase UUID v4}/resolution`, and nothing else. */
+const CASE_RESOLUTION_PROBE_PATH = new RegExp(
+  `^${CASE_LIST_PATH}/${CANONICAL_UUID_V4_PATTERN}/resolution$`,
+);
+
+/**
+ * The three read addresses this suite relays, and only these three.
+ *
+ * A `GET` carrying no query is not a lesser request. It opens the same socket
+ * and reaches the same Spring Boot handler as one carrying a query, so it
+ * passes the same exact-address check: `GET /api/v1/cases/{caseId}`, its
+ * `/notes` and its `/audit-logs` are well-formed, lowercase and absent from
+ * this list, and being absent from this list is the whole of why they are
+ * refused.
+ */
+const RELAYABLE_READ_PATHS: readonly RelayableEndpoint[] = [
+  {
+    name: "transaction-list",
+    method: "GET",
+    matches: (pathname) => pathname === TRANSACTION_LIST_PATH,
+    queryNames: [
       "occurredAtFrom",
       "occurredAtTo",
       "transactionType",
@@ -59,9 +121,59 @@ const RELAYABLE_QUERY_NAMES: ReadonlyMap<string, readonly string[]> = new Map([
       "page",
       "size",
       "sort",
-    ] as readonly string[],
-  ],
-]);
+    ],
+  },
+  {
+    // One canonical lowercase UUID v4 segment and nothing after it. The detail
+    // endpoint declares no query, so it may carry none.
+    name: "transaction-detail",
+    method: "GET",
+    matches: (pathname) => TRANSACTION_DETAIL_PATH.test(pathname),
+    queryNames: null,
+  },
+  {
+    name: "case-list",
+    method: "GET",
+    matches: (pathname) => pathname === CASE_LIST_PATH,
+    queryNames: [
+      "caseStatus",
+      "finalDisposition",
+      "assigneeRef",
+      "createdAtFrom",
+      "createdAtTo",
+      "lastChangedAtFrom",
+      "lastChangedAtTo",
+      "transactionId",
+      "page",
+      "size",
+      "sort",
+    ],
+  },
+];
+
+/**
+ * The only non-`GET` request this suite will write onto the Backend socket.
+ *
+ * A single authorization-boundary probe: an `FDS_ANALYST` session attempting a
+ * case resolution, which Spring Boot refuses with 403. It is declared as one
+ * exact method at one exact address carrying no query - rather than as a
+ * general permission to relay writes - so it can neither be reached by another
+ * method, nor stretched to another suffix under the same case identifier, nor
+ * given a query.
+ *
+ * Everything else is a read. `POST /api/v1/cases`, `PATCH /api/v1/cases`,
+ * `POST /api/v1/transactions`, and every status, assignee or note write on a
+ * case are refused here, with or without a query, before a process is spawned
+ * or a socket is opened.
+ */
+const RELAYABLE_WRITE_PROBES: readonly RelayableEndpoint[] = [
+  {
+    name: "case-resolution-probe",
+    method: "POST",
+    matches: (pathname) => CASE_RESOLUTION_PROBE_PATH.test(pathname),
+    queryNames: null,
+  },
+];
 
 /**
  * The synthetic customer reference this suite types into the filter.
@@ -85,6 +197,31 @@ const INITIAL_TRANSACTION_TARGET = `${TRANSACTION_LIST_PATH}?page=0&size=20&sort
 const APPLIED_TRANSACTION_TARGET =
   `${TRANSACTION_LIST_PATH}?processingStatus=HELD&externalCustomerRef=+E2E-Reference-01+` +
   "&page=0&size=20&sort=occurredAt%2Cdesc";
+
+/**
+ * The synthetic assignee reference this suite types into the case filter.
+ *
+ * Fixed, so the expected request target is a constant rather than something
+ * rebuilt from the value at assertion time. It carries inner spaces and mixed
+ * case but no surrounding whitespace, which is exactly what
+ * `FraudCaseQueryValidator` accepts: a case reference must equal its own Java
+ * `trim()`. A case fold or an inner-space collapse anywhere between the field
+ * and the Backend changes the target and fails. It is never interpolated into a
+ * message: every assertion below reports a fixed sentence.
+ */
+const E2E_ASSIGNEE_REF = "E2E Assignee 01";
+
+/** `page`, `size` and `sort`, in the order and encoding the builder emits. */
+const INITIAL_CASE_TARGET = `${CASE_LIST_PATH}?page=0&size=20&sort=lastChangedAt%2Cdesc`;
+
+/**
+ * The same three, plus the two filters the analyst applies, in the registry's
+ * declared order. The reference travels as `+`-encoded inner spaces around the
+ * exact characters typed.
+ */
+const APPLIED_CASE_TARGET =
+  `${CASE_LIST_PATH}?caseStatus=OPEN&assigneeRef=E2E+Assignee+01` +
+  "&page=0&size=20&sort=lastChangedAt%2Cdesc";
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PASSWORD_PATH = resolve(REPO_ROOT, "infra", "keycloak", ".local", "secrets", "user-password");
 const TLS_CERTIFICATE_PATH = resolve(REPO_ROOT, "infra", "keycloak", ".local", "tls", "localhost.crt");
@@ -480,37 +617,135 @@ function parseRelayedResponse(raw: Buffer): Omit<RelayedResponse, "target"> {
  * Relaying the path alone would make every query assertion vacuous: the screen
  * could stop sending `page`, `size`, `sort` or a filter entirely and the
  * Backend would still answer its default list with a 200. So the query travels
- * too - and because it travels, it is bounded here rather than trusted:
+ * too - and because it travels, it is bounded here rather than trusted.
  *
- * - the destination is the one Backend origin, carrying no userinfo and no
- *   fragment, and the path is one this suite recognises;
- * - a query is accepted only on a `GET` to an endpoint declared to take one,
- *   and only with that endpoint's own parameter names, each appearing once;
- * - re-serialising the parsed pairs has to reproduce the received bytes, so a
- *   non-canonical, double or partial encoding is refused rather than relayed;
- * - what is left is printable ASCII with no whitespace, which is what makes it
- *   safe as the target of a request line.
+ * The order below is the contract, and each step answers a different question:
  *
- * Every refusal is a fixed sentence. No part of a query, and no credential,
- * appears in one.
+ * 1. is this address the Backend at all - the one origin, no userinfo, no
+ *    empty query delimiter, no fragment - and is the path even written in a
+ *    shape this suite parses? This is syntax, and syntax is not approval. A
+ *    path can be perfectly well-formed and still be an endpoint this suite has
+ *    no business reaching;
+ * 2. is this method at this exact address one of the four endpoints declared
+ *    above? Method and address are decided together, so `POST` to a read
+ *    address and `GET` to the write probe are both refused here;
+ * 3. the declared write probe carries no query, which is checked rather than
+ *    assumed;
+ * 4. a read address is matched against `RELAYABLE_READ_PATHS` whether or not it
+ *    carries a query. A `GET` carrying no query at all reaches the same socket
+ *    as one with a filter on it, so it passes the same check: there is no path
+ *    by which an unapproved endpoint is relayed on the accident of carrying no
+ *    query. "No query" here means no `?`; a `?` with nothing behind it was
+ *    already refused at step 1 rather than treated as one;
+ * 5. only then is a query looked at, against the parameter names that one
+ *    endpoint declares - never a shared list;
+ * 6. each name appears once and carries a value, and re-serialising the parsed
+ *    pairs has to reproduce the received bytes, so a non-canonical, double or
+ *    partial encoding is refused rather than relayed;
+ * 7. what is left is printable ASCII with no whitespace, which is what makes it
+ *    safe as the target of a request line, and it is returned unchanged.
+ *
+ * Every refusal is a fixed sentence. No part of an address, a query or a
+ * credential appears in one.
  */
+/**
+ * Whether a request target carries a query delimiter with nothing behind it.
+ *
+ * `?` with an empty query is not "no query": it is a request target this suite
+ * never writes and has no rule for. WHATWG parsing does not say so - it records
+ * an empty query, and `URL.search` then reads back as `""`, exactly as it does
+ * for an address that carries no `?` at all. Left alone, `GET /api/v1/cases?`
+ * would take the no-query branch and be forwarded as `/api/v1/cases`: a target
+ * silently rewritten into a different one, which is not something a relay whose
+ * whole claim is "it forwards what the application wrote" may do.
+ *
+ * So the delimiter is looked for structurally, in the request target itself,
+ * rather than inferred from what the parser made of it. The fragment is cut off
+ * first, because `?#content` is the same empty query with something after it,
+ * and `href.endsWith("?")` would miss exactly that combination. The check is
+ * then applied to the address as received *and* to its parsed serialization, so
+ * neither a form the parser normalises away nor one it introduces can slip past.
+ */
+function hasEmptyQueryMarker(address: string): boolean {
+  const fragment = address.indexOf("#");
+  const beforeFragment = fragment === -1 ? address : address.slice(0, fragment);
+  const query = beforeFragment.indexOf("?");
+  return query !== -1 && query === beforeFragment.length - 1;
+}
+
 function resolveRelayTarget(request: PlaywrightRequest): string {
-  const url = new URL(request.url());
+  const address = request.url();
+  const url = new URL(address);
+  const method = request.method();
   requireCondition(url.origin === BACKEND_ORIGIN, "An unexpected Backend origin was requested.");
   requireCondition(url.username === "" && url.password === "", "A Backend request carried userinfo.");
+  // Before the fragment rule rather than after it, so the one combination a
+  // post-parse test would miss - an empty query followed by a fragment - is
+  // refused for the reason it is actually wrong.
+  requireCondition(
+    !hasEmptyQueryMarker(address) && !hasEmptyQueryMarker(url.href),
+    "A Backend request target carried an empty query.",
+  );
   requireCondition(url.hash === "", "A Backend request carried a fragment.");
-  requireCondition(/^[A-Z]+$/.test(request.method()), "An invalid Backend method was requested.");
+  requireCondition(/^[A-Z]+$/.test(method), "An invalid Backend method was requested.");
+  // Syntax, and only syntax. An uppercase segment, a percent-encoded slash or
+  // backslash and a percent-encoded identifier character are all refused here
+  // because they are not written the way this suite reads a path - not because
+  // the endpoint behind them was considered and approved. That decision is the
+  // next two steps, and a lowercase path reaches them with nothing decided.
   requireCondition(/^\/api\/v1\/[a-z0-9\-/]+$/.test(url.pathname), "An invalid Backend path was requested.");
+
+  // Method and address together, before the query is looked at. A write is
+  // refused for being a write, not for the shape of a query it happens to
+  // carry: moving this below a query branch would let `POST /api/v1/cases`
+  // through on the accident of carrying none, and the negative tests below say
+  // so.
+  if (method !== "GET") {
+    const probe = RELAYABLE_WRITE_PROBES.find(
+      (candidate) => candidate.method === method && candidate.matches(url.pathname),
+    );
+    requireCondition(
+      probe !== undefined,
+      "A Backend request used a method this relay will not write.",
+    );
+    // A declared write probe is a fixed request to a fixed address. It declares
+    // `queryNames: null`, and that it carries none is checked rather than
+    // assumed - there is no query allowlist to consult here and none to bypass.
+    requireCondition(
+      probe.queryNames === null && url.search === "",
+      "A Backend write probe carried a query.",
+    );
+    return url.pathname;
+  }
+
+  // The exact read address, checked for every `GET` - including one with no
+  // query at all. `GET /api/v1/cases/{caseId}`, `.../notes`, `.../audit-logs`
+  // and every other well-formed lowercase address absent from the list stops
+  // here, before a process is spawned or a socket is opened.
+  const endpoint = RELAYABLE_READ_PATHS.find(
+    (candidate) => candidate.method === method && candidate.matches(url.pathname),
+  );
+  requireCondition(
+    endpoint !== undefined,
+    "A Backend request named an endpoint this relay does not read.",
+  );
   if (url.search === "") {
     return url.pathname;
   }
 
-  requireCondition(request.method() === "GET", "A Backend query was requested on a non-GET method.");
-  const approved = RELAYABLE_QUERY_NAMES.get(url.pathname);
-  requireCondition(approved !== undefined, "A Backend query was requested on an endpoint that takes none.");
+  const approved = endpoint.queryNames;
+  requireCondition(approved !== null, "A Backend query was requested on an endpoint that takes none.");
   const parsed = new URLSearchParams(url.search);
   const names = [...parsed.keys()];
   requireCondition(new Set(names).size === names.length, "A Backend query repeated a parameter name.");
+  // An empty name or an empty value is not something the application's query
+  // builder can produce - an unset filter is omitted, not sent blank - so it is
+  // refused rather than forwarded as a parameter Backend would have to decide
+  // about.
+  requireCondition(
+    [...parsed.entries()].every(([name, value]) => name !== "" && value !== ""),
+    "A Backend query carried an empty name or value.",
+  );
   requireCondition(
     names.every((name) => approved.includes(name)),
     "A Backend query carried a parameter this endpoint does not declare.",
@@ -525,6 +760,19 @@ function resolveRelayTarget(request: PlaywrightRequest): string {
   );
   return target;
 }
+
+/**
+ * How many times this suite has written a request onto the Backend socket, and
+ * how many Backend answers it has recorded.
+ *
+ * Counters rather than assertions about a mock, because there is no mock: the
+ * relay really does spawn `docker compose exec` and really does open
+ * `/dev/tcp`. "A refused request reached neither" is only a claim worth making
+ * if it is measured at the two places where it would stop being true, so both
+ * are incremented at the exact statement that performs the act.
+ */
+let relaySpawnCount = 0;
+let relayObservationCount = 0;
 
 function relayToBackend(request: PlaywrightRequest): RelayedResponse {
   requireNonBlankString(COMPOSE_PROJECT, "The dedicated Compose project was not configured.");
@@ -556,6 +804,7 @@ function relayToBackend(request: PlaywrightRequest): RelayedResponse {
     "cat <&3",
   ].join("\n");
 
+  relaySpawnCount += 1;
   const result = spawnSync(
     "docker",
     [
@@ -627,6 +876,7 @@ async function installBackendRelay(
     // Recorded from the relay's own target, so what this suite observes and
     // what the Backend was asked for cannot drift into two different things.
     const pathname = relayed.target.split("?")[0];
+    relayObservationCount += 1;
     observations.push({
       method: request.method(),
       pathname,
@@ -897,6 +1147,620 @@ async function fetchTokenResponse(route: Route): Promise<{
 
 test.beforeEach(async ({ page }) => {
   await installSessionPublicationProbe(page);
+});
+
+/**
+ * A request the relay is asked about, with nothing behind it.
+ *
+ * The relay only ever reads a method, a URL, the authorization header and the
+ * post body off a request, so these four are the whole of what a negative case
+ * needs. Nothing here reaches a browser: the point of these tests is that the
+ * refusal happens in `resolveRelayTarget`, before a process, a socket or an
+ * observation exists.
+ */
+function relayCandidate(method: string, url: string): PlaywrightRequest {
+  return {
+    method: () => method,
+    url: () => url,
+    headers: () => ({}),
+    postData: () => null,
+  } as unknown as PlaywrightRequest;
+}
+
+/** Every fixed sentence `resolveRelayTarget` and `relayToBackend` may fail with. */
+const RELAY_REFUSALS: readonly string[] = [
+  "An unexpected Backend origin was requested.",
+  "A Backend request carried userinfo.",
+  "A Backend request target carried an empty query.",
+  "A Backend request carried a fragment.",
+  "An invalid Backend method was requested.",
+  "An invalid Backend path was requested.",
+  "A Backend request used a method this relay will not write.",
+  "A Backend write probe carried a query.",
+  "A Backend request named an endpoint this relay does not read.",
+  "A Backend query was requested on an endpoint that takes none.",
+  "A Backend query repeated a parameter name.",
+  "A Backend query carried an empty name or value.",
+  "A Backend query carried a parameter this endpoint does not declare.",
+  "A Backend query was not canonically encoded.",
+  "A Backend request target carried a character this relay will not write.",
+];
+
+/** A canonical lowercase UUID v4 that names no case. */
+const SYNTHETIC_CASE_ID = "e2e00000-0000-4000-8000-00000000ca5e";
+const CASE_RESOLUTION_PATH = `/api/v1/cases/${SYNTHETIC_CASE_ID}/resolution`;
+
+/**
+ * Every request this relay must refuse, and why it is on the list.
+ *
+ * The first three are the finding this block exists for: a write with no query
+ * at all. While the method was only checked inside the query branch, each of
+ * them was relayed - `POST /api/v1/cases` reached Spring Boot on the accident
+ * of carrying nothing after the `?`.
+ *
+ * The middle group is the other half of the same boundary: the two list
+ * endpoints declare their filters separately, so a case filter on the ledger
+ * endpoint and a ledger filter on the case endpoint are both refusals. Merging
+ * the two lists into one shared allowlist would relay all five.
+ *
+ * The rest are the encoding and address rules, stated as cases rather than as
+ * prose.
+ */
+const REFUSED_RELAY_REQUESTS: readonly {
+  readonly why: string;
+  readonly method: string;
+  readonly url: string;
+}[] = [
+  // A write, refused for being a write, with no query to hide behind.
+  { why: "a write to the case list", method: "POST", url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}` },
+  { why: "a patch of the case list", method: "PATCH", url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}` },
+  {
+    why: "a write to the ledger list",
+    method: "POST",
+    url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}`,
+  },
+  // The same write, now carrying a query this endpoint really does declare. The
+  // method decides it, so a declared name changes nothing.
+  {
+    why: "a write to the case list carrying a declared case filter",
+    method: "POST",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}?caseStatus=OPEN`,
+  },
+  // The one declared write probe, reached by the wrong method, and reached
+  // correctly but carrying a query it may not have.
+  {
+    why: "the resolution probe reached by the wrong method",
+    method: "PUT",
+    url: `${BACKEND_ORIGIN}${CASE_RESOLUTION_PATH}`,
+  },
+  {
+    why: "the resolution probe carrying a query",
+    method: "POST",
+    url: `${BACKEND_ORIGIN}${CASE_RESOLUTION_PATH}?page=0`,
+  },
+  // Cross-endpoint contamination, both directions. One case per filter that
+  // belongs to exactly one of the two lists.
+  {
+    why: "a ledger-only processing status on the case endpoint",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}?processingStatus=HELD`,
+  },
+  {
+    why: "a ledger-only customer reference on the case endpoint",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}?externalCustomerRef=E2E`,
+  },
+  {
+    why: "a case-only status on the ledger endpoint",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}?caseStatus=OPEN`,
+  },
+  {
+    why: "a case-only disposition on the ledger endpoint",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}?finalDisposition=NORMAL`,
+  },
+  {
+    why: "a case-only assignee reference on the ledger endpoint",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}?assigneeRef=E2E+Assignee+01`,
+  },
+  // Names, duplicates and encodings.
+  {
+    why: "a name neither endpoint declares",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}?unknownFilter=1`,
+  },
+  {
+    why: "a declared name sent twice",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}?page=0&page=1`,
+  },
+  {
+    why: "a page number written non-canonically",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}?page=%30`,
+  },
+  {
+    why: "a sort whose comma is not the canonical encoding",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}?sort=lastChangedAt,desc`,
+  },
+  {
+    why: "an empty query name",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}?=0`,
+  },
+  {
+    why: "an empty query value",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}?caseStatus=`,
+  },
+  // A query delimiter with nothing behind it, on every address this suite is
+  // otherwise allowed to reach - the two collections, the identified read and
+  // the one write probe. Each of them is admitted when it carries no `?` at
+  // all, so each of them is the case where an empty query could have been
+  // quietly rewritten into the approved target instead of refused. The last is
+  // the combination a post-parse `endsWith("?")` test would miss.
+  {
+    why: "an empty query on the ledger list",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}?`,
+  },
+  {
+    why: "an empty query on the case list",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}?`,
+  },
+  {
+    why: "an empty query on the transaction detail address",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}/${SYNTHETIC_TRANSACTION_ID}?`,
+  },
+  {
+    why: "an empty query on the resolution probe",
+    method: "POST",
+    url: `${BACKEND_ORIGIN}${CASE_RESOLUTION_PATH}?`,
+  },
+  {
+    why: "an empty query followed by a fragment",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}?#content`,
+  },
+  // The address rules.
+  { why: "a fragment", method: "GET", url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}#content` },
+  {
+    why: "userinfo",
+    method: "GET",
+    url: `http://relay-negative-user:relay-negative-userinfo@localhost:8080${CASE_LIST_PATH}`,
+  },
+  {
+    why: "a path this suite does not recognise",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}/api/v1/ADMIN/cases`,
+  },
+  {
+    why: "an origin that is not the Backend",
+    method: "GET",
+    url: `http://localhost:9999${CASE_LIST_PATH}`,
+  },
+];
+
+/**
+ * The relay boundary, stated as refusals rather than as a comment.
+ *
+ * No browser, no Keycloak and no Backend: `relayToBackend` is called directly,
+ * which is the only way to observe that a refused request is refused *before*
+ * `docker compose exec` is spawned and before `/dev/tcp` is opened. The two
+ * counters are the evidence; a refusal that happened one statement later would
+ * leave them moved.
+ *
+ * The messages are checked too. Every one of them is a fixed sentence from a
+ * closed list: no address, no query name, no query value and no credential is
+ * reflected back into a failure, so a run's output cannot become the place a
+ * filter value is finally written down.
+ */
+test("the Backend relay refuses a write, a foreign filter and a non-canonical query", () => {
+  const spawnsBefore = relaySpawnCount;
+  const observationsBefore = relayObservationCount;
+
+  for (const refused of REFUSED_RELAY_REQUESTS) {
+    let message: string | null = null;
+    try {
+      relayToBackend(relayCandidate(refused.method, refused.url));
+    } catch (error: unknown) {
+      message = error instanceof Error ? error.message : "unknown";
+    }
+    requireCondition(message !== null, `The relay accepted ${refused.why}.`);
+    requireCondition(
+      RELAY_REFUSALS.includes(message),
+      `The relay refused ${refused.why} with a message that is not a fixed sentence.`,
+    );
+    // The refusal names the rule and nothing else. Neither the address nor any
+    // part of the query it carried appears in what a run would print.
+    const url = new URL(refused.url);
+    const reflected = [
+      url.href,
+      url.host,
+      url.pathname,
+      url.search,
+      url.username,
+      url.password,
+      ...[...new URLSearchParams(url.search).entries()].flat(),
+    ].filter((value) => value !== "");
+    requireCondition(
+      !reflected.some((value) => message.includes(value)),
+      `The relay reflected part of ${refused.why} into its failure.`,
+    );
+  }
+
+  // Nothing was written to the Backend, and nothing was recorded as having
+  // been.
+  requireCondition(
+    relaySpawnCount === spawnsBefore,
+    "A refused Backend request spawned a relay process.",
+  );
+  requireCondition(
+    relayObservationCount === observationsBefore,
+    "A refused Backend request was recorded as a Backend observation.",
+  );
+});
+
+/**
+ * Identifiers that are *almost* the canonical lowercase UUID v4 the two
+ * identified addresses declare, and are therefore a different address.
+ *
+ * Each is one deviation from `SYNTHETIC_TRANSACTION_ID` or `SYNTHETIC_CASE_ID`:
+ * a case fold, a version digit, an RFC variant nibble, the hyphens, or a
+ * percent-encoded character. None of them is repaired on its way through this
+ * relay - a relay that case-folded or decoded an identifier would be writing an
+ * address the application never asked for.
+ */
+const UPPERCASE_TRANSACTION_ID = "E2E00000-0000-4000-8000-000000000E2E";
+const VERSION_1_TRANSACTION_ID = "e2e00000-0000-1000-8000-000000000e2e";
+const INVALID_VARIANT_TRANSACTION_ID = "e2e00000-0000-4000-c000-000000000e2e";
+const UNHYPHENATED_TRANSACTION_ID = "e2e0000000004000800000000000e2e";
+/** The same identifier with its last character written as `%65`. */
+const PERCENT_ENCODED_TRANSACTION_ID = "e2e00000-0000-4000-8000-000000000e2%65";
+
+const UPPERCASE_CASE_ID = "E2E00000-0000-4000-8000-00000000CA5E";
+const VERSION_1_CASE_ID = "e2e00000-0000-1000-8000-00000000ca5e";
+const INVALID_VARIANT_CASE_ID = "e2e00000-0000-4000-c000-00000000ca5e";
+
+/**
+ * Every address this relay must refuse for being one it was never approved to
+ * reach, stated as literals rather than as a rule.
+ *
+ * This is the finding this block exists for. While a `GET` carrying no query
+ * returned its own path before any address list was consulted, the only thing
+ * standing between this suite and the whole of `/api/v1/**` was the path
+ * *syntax* check - so `GET /api/v1/cases/{caseId}`, its `/notes`, its
+ * `/audit-logs` and an endpoint that does not exist at all would have been
+ * written onto the Backend socket on the strength of being lowercase. A
+ * well-formed path is not an approved endpoint, and these cases are what says
+ * so.
+ *
+ * Three groups:
+ *
+ * - reads this suite has no screen for. Every one is a valid lowercase
+ *   `/api/v1/...` path carrying no query at all, and every one is refused.
+ *   They are also the endpoints a later Issue is most likely to want, which is
+ *   exactly why they stay refused until the test that needs them exists;
+ * - the transaction detail address written non-canonically. A case fold, a
+ *   version, an RFC variant, the hyphens, a trailing slash, an extra segment,
+ *   an encoded slash, an encoded backslash and a percent-encoded character are
+ *   each a different address, and none is repaired into the approved one;
+ * - the write probe, reached by another suffix, by another method, on another
+ *   identifier shape, or carrying a query. The probe is one method at one
+ *   address with nothing after the `?`, so the case status, assignee, note and
+ *   audit-log writes below are refused before a process is spawned.
+ */
+const REFUSED_UNAPPROVED_ENDPOINTS: readonly {
+  readonly why: string;
+  readonly method: string;
+  readonly url: string;
+}[] = [
+  // Valid, lowercase, query-free reads this suite is not approved to make.
+  {
+    why: "a case detail read",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${SYNTHETIC_CASE_ID}`,
+  },
+  {
+    why: "a case note read",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${SYNTHETIC_CASE_ID}/notes`,
+  },
+  {
+    why: "a case audit-log read",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${SYNTHETIC_CASE_ID}/audit-logs`,
+  },
+  {
+    why: "a case status read",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${SYNTHETIC_CASE_ID}/status`,
+  },
+  {
+    why: "a case assignee read",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${SYNTHETIC_CASE_ID}/assignee`,
+  },
+  {
+    why: "a case resolution read",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_RESOLUTION_PATH}`,
+  },
+  {
+    why: "an unnamed suffix under a case",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${SYNTHETIC_CASE_ID}/anything`,
+  },
+  {
+    why: "a behaviour-event read",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}/api/v1/behavior-events`,
+  },
+  {
+    why: "an endpoint that does not exist",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}/api/v1/unknown`,
+  },
+  {
+    why: "an unnamed suffix under a transaction",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}/${SYNTHETIC_TRANSACTION_ID}/anything`,
+  },
+  // The transaction detail address, written non-canonically.
+  {
+    why: "an uppercase transaction identifier",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}/${UPPERCASE_TRANSACTION_ID}`,
+  },
+  {
+    why: "a version 1 transaction identifier",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}/${VERSION_1_TRANSACTION_ID}`,
+  },
+  {
+    why: "a transaction identifier with an invalid RFC variant",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}/${INVALID_VARIANT_TRANSACTION_ID}`,
+  },
+  {
+    why: "an unhyphenated transaction identifier",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}/${UNHYPHENATED_TRANSACTION_ID}`,
+  },
+  {
+    why: "a transaction detail address with a trailing slash",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}/${SYNTHETIC_TRANSACTION_ID}/`,
+  },
+  {
+    why: "a transaction detail address with an extra segment",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}/${SYNTHETIC_TRANSACTION_ID}/notes`,
+  },
+  {
+    why: "a transaction identifier followed by an encoded slash",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}/${SYNTHETIC_TRANSACTION_ID}%2Fnotes`,
+  },
+  {
+    why: "a transaction identifier followed by an encoded backslash",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}/${SYNTHETIC_TRANSACTION_ID}%5Cnotes`,
+  },
+  {
+    why: "a percent-encoded character inside a transaction identifier",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}/${PERCENT_ENCODED_TRANSACTION_ID}`,
+  },
+  // The write probe, which is one method at one address and nothing else.
+  {
+    why: "a case status write",
+    method: "POST",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${SYNTHETIC_CASE_ID}/status`,
+  },
+  {
+    why: "a case assignee write",
+    method: "POST",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${SYNTHETIC_CASE_ID}/assignee`,
+  },
+  {
+    why: "a case note create",
+    method: "POST",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${SYNTHETIC_CASE_ID}/notes`,
+  },
+  {
+    why: "a case audit-log write",
+    method: "POST",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${SYNTHETIC_CASE_ID}/audit-logs`,
+  },
+  {
+    why: "an unnamed write suffix under a case",
+    method: "POST",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${SYNTHETIC_CASE_ID}/anything`,
+  },
+  {
+    why: "the resolution probe patched",
+    method: "PATCH",
+    url: `${BACKEND_ORIGIN}${CASE_RESOLUTION_PATH}`,
+  },
+  {
+    why: "the resolution probe put",
+    method: "PUT",
+    url: `${BACKEND_ORIGIN}${CASE_RESOLUTION_PATH}`,
+  },
+  {
+    why: "the resolution probe deleted",
+    method: "DELETE",
+    url: `${BACKEND_ORIGIN}${CASE_RESOLUTION_PATH}`,
+  },
+  {
+    why: "the resolution probe carrying a declared case filter",
+    method: "POST",
+    url: `${BACKEND_ORIGIN}${CASE_RESOLUTION_PATH}?caseStatus=OPEN`,
+  },
+  {
+    why: "the resolution probe on an uppercase case identifier",
+    method: "POST",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${UPPERCASE_CASE_ID}/resolution`,
+  },
+  {
+    why: "the resolution probe on a version 1 case identifier",
+    method: "POST",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${VERSION_1_CASE_ID}/resolution`,
+  },
+  {
+    why: "the resolution probe on an invalid RFC variant case identifier",
+    method: "POST",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${INVALID_VARIANT_CASE_ID}/resolution`,
+  },
+  {
+    why: "the resolution probe with a trailing slash",
+    method: "POST",
+    url: `${BACKEND_ORIGIN}${CASE_RESOLUTION_PATH}/`,
+  },
+  {
+    why: "the resolution probe with an extra segment",
+    method: "POST",
+    url: `${BACKEND_ORIGIN}${CASE_RESOLUTION_PATH}/confirm`,
+  },
+];
+
+/**
+ * The closed endpoint allowlist, stated as the addresses it closes.
+ *
+ * Separate from the query test above because it is a separate claim. That one
+ * says a relayed query is bounded; this one says a relayed *address* is, with a
+ * query or without one. Both are asserted through `relayToBackend` rather than
+ * through the resolver alone, because "refused" here has to mean refused before
+ * `docker compose exec` is spawned and before `/dev/tcp` is opened, and the two
+ * counters are the only way to observe that difference.
+ */
+test("the Backend relay refuses every endpoint it was not approved to reach", () => {
+  const spawnsBefore = relaySpawnCount;
+  const observationsBefore = relayObservationCount;
+
+  for (const refused of REFUSED_UNAPPROVED_ENDPOINTS) {
+    let message: string | null = null;
+    try {
+      relayToBackend(relayCandidate(refused.method, refused.url));
+    } catch (error: unknown) {
+      message = error instanceof Error ? error.message : "unknown";
+    }
+    requireCondition(message !== null, `The relay accepted ${refused.why}.`);
+    requireCondition(
+      RELAY_REFUSALS.includes(message),
+      `The relay refused ${refused.why} with a message that is not a fixed sentence.`,
+    );
+    // The refusal names the rule and nothing else. Neither the address, nor any
+    // identifier inside it, nor any query it carried appears in what a run
+    // would print.
+    const url = new URL(refused.url);
+    const reflected = [
+      url.href,
+      url.host,
+      url.pathname,
+      url.search,
+      url.username,
+      url.password,
+      ...url.pathname.split("/").filter((segment) => segment !== ""),
+      ...[...new URLSearchParams(url.search).entries()].flat(),
+    ].filter((value) => value !== "");
+    requireCondition(
+      !reflected.some((value) => message.includes(value)),
+      `The relay reflected part of ${refused.why} into its failure.`,
+    );
+  }
+
+  // Nothing was written to the Backend, and nothing was recorded as having
+  // been.
+  requireCondition(
+    relaySpawnCount === spawnsBefore,
+    "An unapproved Backend endpoint spawned a relay process.",
+  );
+  requireCondition(
+    relayObservationCount === observationsBefore,
+    "An unapproved Backend endpoint was recorded as a Backend observation.",
+  );
+});
+
+/**
+ * The requests the relay must keep admitting, in the exact form the application
+ * sends them.
+ *
+ * A closed endpoint allowlist is only worth having if it did not also close the
+ * door on the reads and the one authorization probe this suite depends on: the
+ * two collection addresses with and without their real queries, the transaction
+ * detail address, and the case resolution probe. These are resolved rather than
+ * relayed - the target is compared, no socket is opened - so the assertion is
+ * about the boundary and not about the Backend.
+ *
+ * Each target is also compared against the address it was asked for, byte for
+ * byte. The relay forwards what the application wrote; it does not normalise,
+ * re-encode or reorder it on the way.
+ */
+test("the Backend relay still admits the real reads and the one declared write probe", () => {
+  const spawnsBefore = relaySpawnCount;
+  const admitted: readonly {
+    readonly method: string;
+    readonly url: string;
+    readonly target: string;
+  }[] = [
+    {
+      method: "GET",
+      url: `${BACKEND_ORIGIN}${INITIAL_TRANSACTION_TARGET}`,
+      target: INITIAL_TRANSACTION_TARGET,
+    },
+    {
+      method: "GET",
+      url: `${BACKEND_ORIGIN}${APPLIED_TRANSACTION_TARGET}`,
+      target: APPLIED_TRANSACTION_TARGET,
+    },
+    {
+      // The bare collection address. A read with no query is admitted by the
+      // same exact-address rule as one with a query, not by skipping it.
+      method: "GET",
+      url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}`,
+      target: TRANSACTION_LIST_PATH,
+    },
+    { method: "GET", url: `${BACKEND_ORIGIN}${INITIAL_CASE_TARGET}`, target: INITIAL_CASE_TARGET },
+    { method: "GET", url: `${BACKEND_ORIGIN}${APPLIED_CASE_TARGET}`, target: APPLIED_CASE_TARGET },
+    { method: "GET", url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}`, target: CASE_LIST_PATH },
+    {
+      method: "GET",
+      url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}/${SYNTHETIC_TRANSACTION_ID}`,
+      target: `${TRANSACTION_LIST_PATH}/${SYNTHETIC_TRANSACTION_ID}`,
+    },
+    {
+      method: "POST",
+      url: `${BACKEND_ORIGIN}${CASE_RESOLUTION_PATH}`,
+      target: CASE_RESOLUTION_PATH,
+    },
+  ];
+
+  for (const candidate of admitted) {
+    const resolved = resolveRelayTarget(relayCandidate(candidate.method, candidate.url));
+    requireCondition(
+      resolved === candidate.target,
+      "The relay changed or refused a request the application really sends.",
+    );
+    // Byte for byte what was asked for. The resolver returns a target rather
+    // than rebuilding one, so a re-encoded comma, a case fold or a dropped
+    // parameter would show up here as a different string.
+    const asked = new URL(candidate.url);
+    requireCondition(
+      resolved === `${asked.pathname}${asked.search}`,
+      "The relay rewrote a request the application really sends.",
+    );
+  }
+  requireCondition(
+    relaySpawnCount === spawnsBefore,
+    "Resolving a relay target spawned a relay process.",
+  );
 });
 
 test("real USER login enforces PKCE, token claims, and Backend boundaries", async ({ page }) => {
@@ -1843,4 +2707,420 @@ test("a real USER opens a transaction detail address and meets the real Backend 
     );
   }
   await page.setViewportSize({ width: 1440, height: 900 });
+});
+
+/**
+ * The case list, over the same real Keycloak session and the same real Spring
+ * Boot as the ledger screens.
+ *
+ * Deliberately a second screen rather than a second assertion on the first one:
+ * `/cases` is guarded by its own capability, served by its own Backend endpoint
+ * and filtered by its own query validator, and none of those is exercised by
+ * the transaction test above. Nothing is mocked here either - no API body, no
+ * auth bypass - so what the screen shows is what Spring Boot answered.
+ *
+ * This runtime holds no seeded case rows, so the screen is allowed to settle on
+ * a deterministic empty state. That is a real 200 from a real endpoint, and it
+ * is the honest evidence available here; the populated table is proved by the
+ * component and hook tests against the typed API contract, and no fixture is
+ * injected to manufacture one.
+ */
+test("a real USER reaches the case console over the real Backend", async ({ page }) => {
+  const password = readUserPassword();
+  const consoleMessages: string[] = [];
+  page.on("console", (message) => consoleMessages.push(message.text()));
+  const backend = await installBackendRelay(page);
+
+  const tokenResponsePromise = page.waitForResponse(
+    (response) => response.url() === TOKEN_URL && response.request().method() === "POST",
+  );
+  await beginLogin(page, password);
+  await submitLogin(page);
+  const tokens = parseTokenResponse(await (await tokenResponsePromise).json());
+  requireTokenClaims(tokens);
+  await expect(page.getByLabel("Authentication status")).toContainText("Signed in as");
+
+  // The case navigation, decided from the real role claim of a real Keycloak
+  // session rather than from a fixture.
+  const casesLink = page.getByRole("link", { name: "Cases" });
+  await expect(casesLink).toBeVisible();
+  await casesLink.click();
+  await page.waitForFunction((expected) => window.location.href === expected, `${APP_ORIGIN}/cases`);
+  await expect(page.getByRole("heading", { name: "Cases", level: 2 })).toBeVisible();
+  await expect(casesLink).toHaveAttribute("aria-current", "page");
+
+  // The opening query, answered by the real Spring Boot endpoint.
+  const results = page.getByRole("main").getByRole("status");
+  await expect(results).not.toContainText("Loading cases", { timeout: 15_000 });
+  await expect(page.getByRole("alert")).toHaveCount(0);
+
+  const caseRequests = backend.filter(
+    (entry) => entry.method === "GET" && entry.pathname === CASE_LIST_PATH,
+  );
+  requireCondition(caseRequests.length === 1, "The case list was not requested exactly once.");
+  requireCondition(caseRequests[0].status === 200, "The real case list request did not return 200.");
+  // The request target the Backend was actually asked for, not the one the
+  // browser built: page 0, twenty rows, most recently changed first, no filter,
+  // one value per name and nothing else, in the canonical order and encoding
+  // the query builder emits. Compared as one fixed string, so a failure names
+  // the contract rather than printing the query.
+  requireCondition(
+    caseRequests[0].target === INITIAL_CASE_TARGET,
+    "The opening case query that reached the Backend was not the exact default query.",
+  );
+
+  // Whatever this runtime holds, the screen converges on one of exactly two
+  // states and never on a partial or error one.
+  const summary = (await results.textContent()) ?? "";
+  const showingRows = /^Showing \d+-\d+ of \d+ cases\.$/.test(summary.trim());
+  const emptyResult = summary.trim() === "No cases found.";
+  requireCondition(
+    showingRows || emptyResult,
+    `The case screen did not settle on a result state: ${summary.trim()}`,
+  );
+  if (showingRows) {
+    await expect(page.getByRole("table")).toBeVisible();
+    // Every displayed instant states its zone and carries the untouched UTC
+    // value the Backend sent.
+    const firstTime = page.locator("tbody time").first();
+    await expect(firstTime).toContainText("KST");
+    const machineReadable = await firstTime.getAttribute("datetime");
+    requireCondition(
+      machineReadable !== null && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/.test(machineReadable),
+      "A rendered case time carried no UTC machine-readable value.",
+    );
+    // No detail affordance in this Issue: the identifier is text, not a link.
+    requireCondition(
+      (await page.locator("tbody a").count()) === 0,
+      "The case sheet offered a link this Issue does not implement.",
+    );
+  } else {
+    await expect(page.getByText("There are no cases to show yet.")).toBeVisible();
+  }
+
+  // Nothing retries on its own: the count is unchanged after the screen has
+  // been sitting there.
+  await page.waitForTimeout(1_000);
+  requireCondition(
+    backend.filter((entry) => entry.method === "GET" && entry.pathname === CASE_LIST_PATH)
+      .length === 1,
+    "The case screen retried or polled on its own.",
+  );
+
+  // The design widths, on the live screen.
+  for (const viewport of CONSOLE_VIEWPORTS) {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await expect(page.locator("header.rail")).toBeVisible();
+    await expect(casesLink).toBeVisible();
+    const railWidth = await measuredRailWidth(page);
+    requireCondition(
+      railWidth === viewport.railWidth,
+      `The navigation rail was ${String(railWidth)}px at ${String(viewport.width)}px.`,
+    );
+    const columns = await filterGridColumnCount(page);
+    requireCondition(
+      columns === viewport.filterColumns,
+      `The case filter grid had ${String(columns)} columns at ${String(viewport.width)}px.`,
+    );
+    requireCondition(
+      !(await documentOverflowsHorizontally(page)),
+      `The case page scrolled horizontally at ${String(viewport.width)}px.`,
+    );
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  // Applying a filter is one more real request, carrying the filters, and
+  // nothing else.
+  const navigationBeforeApply = await navigationState(page);
+  await page.getByLabel("Case status").selectOption("OPEN");
+  await page.getByLabel("Assignee reference").fill(E2E_ASSIGNEE_REF);
+  await page.getByRole("button", { name: "Apply filters" }).click();
+  await expect(results).not.toContainText("Applying filters", { timeout: 15_000 });
+  const filtered = backend.filter(
+    (entry) => entry.method === "GET" && entry.pathname === CASE_LIST_PATH,
+  );
+  requireCondition(filtered.length === 2, "Applying a case filter did not send exactly one request.");
+  requireCondition(filtered[1].status === 200, "The filtered case request did not return 200.");
+  // Both filters, the page reset to 0, the unchanged size and sort, each name
+  // once and nothing extra - and the reference exactly as typed, its inner
+  // spaces and its capitalisation intact. A trim, a case fold or a dropped
+  // filter anywhere between the field and the socket changes this string.
+  requireCondition(
+    filtered[1].target === APPLIED_CASE_TARGET,
+    "The applied case query that reached the Backend was not the exact filtered query.",
+  );
+  await expect(page.getByRole("alert")).toHaveCount(0);
+
+  // And still nothing retries: applying a filter sent one request, not one and
+  // a repeat of it.
+  await page.waitForTimeout(1_000);
+  requireCondition(
+    backend.filter((entry) => entry.method === "GET" && entry.pathname === CASE_LIST_PATH)
+      .length === 2,
+    "The case screen retried the filtered query on its own.",
+  );
+
+  // No filter value and no credential reaches the address bar, Web Storage or
+  // the console.
+  const addressBar = new URL(page.url());
+  requireCondition(
+    addressBar.origin === APP_ORIGIN &&
+      addressBar.pathname === "/cases" &&
+      addressBar.search === "" &&
+      addressBar.hash === "",
+    "A case filter reached the address bar.",
+  );
+  // Applying a filter is not navigation: the address, the history depth and the
+  // history state are the ones from before Apply, so the filter is held in
+  // component memory and nowhere a reload or a Back would reach it.
+  requireCondition(
+    (await navigationState(page)) === navigationBeforeApply,
+    "Applying a case filter changed the browser location or history.",
+  );
+  // The reference belongs in the field the analyst typed it into and in the
+  // Backend query asserted above. Everywhere else it is a leak. The sites are
+  // named; the value is not.
+  const leaks = await referenceLeakSites(page, E2E_ASSIGNEE_REF, "case-filter-assignee-ref");
+  requireCondition(
+    leaks.length === 0,
+    `A case reference filter was recorded outside the field it was typed into: ${leaks.join(", ")}`,
+  );
+  requireCondition(
+    !consoleMessages.some((message) => message.includes(E2E_ASSIGNEE_REF)),
+    "A case reference filter reached the browser console.",
+  );
+  const sensitive = [password, tokens.accessToken, tokens.idToken];
+  requireCondition(!(await browserContainsAny(page, sensitive)), "A credential reached DOM, URL, or Web Storage.");
+  requireCondition(
+    !consoleMessages.some((message) => sensitive.some((value) => value !== "" && message.includes(value))),
+    "A credential reached the browser console.",
+  );
+  // A read-only screen: no status change, no reassignment, no resolution.
+  requireCondition(
+    backend.filter((entry) => entry.method !== "GET").length === 0,
+    "The case screen sent a business mutation.",
+  );
+});
+
+/**
+ * The address of the test-only geometry fixture, served by the same Vite dev
+ * server that serves the application.
+ *
+ * A real origin and a real module graph: the page imports the production
+ * `CaseTable` and the production `app.css`, and Vite transforms and serves both
+ * exactly as it does for the console itself. What it does not have is a
+ * transport - the fixture makes no request, so there is no API to mock, no
+ * route to intercept and no session to bypass.
+ */
+const CASE_TABLE_GEOMETRY_URL = `${APP_ORIGIN}/e2e/case-table-geometry.html`;
+
+/** The 128-character assignee reference the fixture renders. Backend's bound. */
+const GEOMETRY_ASSIGNEE_REF =
+  "e2e-geometry-assignee-reference-" +
+  "e2e-geometry-assignee-reference-" +
+  "e2e-geometry-assignee-reference-" +
+  "e2e-geometry-assignee-reference-";
+
+/** The canonical identifier of the fixture's first row. */
+const GEOMETRY_CASE_ID = "0a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d";
+
+interface CaseSheetGeometry {
+  readonly documentScrollWidth: number;
+  readonly documentClientWidth: number;
+  readonly bodyScrollWidth: number;
+  readonly containerClientWidth: number;
+  readonly containerLeft: number;
+  readonly containerRight: number;
+  readonly mainLeft: number;
+  readonly mainRight: number;
+  readonly viewportWidth: number;
+  readonly tableScrollWidth: number;
+  readonly tableWidth: number;
+  readonly tableMinWidth: string;
+  readonly overflowX: string;
+  readonly headerCells: number;
+  readonly firstRowCells: number;
+  readonly hiddenCells: number;
+  readonly rows: number;
+}
+
+async function measureCaseSheet(page: Page): Promise<CaseSheetGeometry> {
+  const measured = await page.evaluate(() => {
+    const container = document.querySelector(".sheet--cases .sheet__scroll");
+    const main = document.querySelector("main.main");
+    const table = container?.querySelector("table") ?? null;
+    if (container === null || main === null || table === null) {
+      return null;
+    }
+    const containerBox = container.getBoundingClientRect();
+    const mainBox = main.getBoundingClientRect();
+    const hiddenCells = [...document.querySelectorAll("thead th, tbody td")].filter((cell) => {
+      const style = window.getComputedStyle(cell);
+      return style.display === "none" || style.visibility === "hidden";
+    }).length;
+    return {
+      documentScrollWidth: document.documentElement.scrollWidth,
+      documentClientWidth: document.documentElement.clientWidth,
+      bodyScrollWidth: document.body.scrollWidth,
+      containerClientWidth: container.clientWidth,
+      containerLeft: containerBox.left,
+      containerRight: containerBox.right,
+      mainLeft: mainBox.left,
+      mainRight: mainBox.right,
+      viewportWidth: window.innerWidth,
+      tableScrollWidth: table.scrollWidth,
+      tableWidth: table.getBoundingClientRect().width,
+      tableMinWidth: window.getComputedStyle(table).minWidth,
+      overflowX: window.getComputedStyle(container).overflowX,
+      headerCells: document.querySelectorAll("thead th").length,
+      firstRowCells: document.querySelectorAll("tbody tr:first-child td").length,
+      hiddenCells,
+      rows: document.querySelectorAll("tbody tr").length,
+    };
+  });
+  requireCondition(measured !== null, "The case sheet, its scroll container or its table was absent.");
+  return measured;
+}
+
+/**
+ * The populated case sheet, measured in a real browser.
+ *
+ * This is deliberately *not* a Backend test and must never be reported as one.
+ * The runtime seeds no fraud cases, so the real-Backend case test above meets a
+ * genuine empty 200 and an empty `tbody`, which cannot overflow anything. The
+ * two honest options are to invent a response body - which would make the
+ * real-Backend test a test of the invention - or to render the production
+ * component itself with rows in it and measure that. This is the second: the
+ * fixture imports the production `CaseTable` and the production `app.css`,
+ * mounts them with `createRoot`, and issues no request at all.
+ *
+ * What it proves is the claim the stylesheet makes and the README repeats: at
+ * every console width the sheet keeps all seven columns, scrolls sideways
+ * inside its own container when it must, and never pushes the document. Along
+ * the way it also renders every branch of the final-disposition column - the
+ * three verdicts and the unresolved `null` - so the words an analyst reads
+ * under each are observed rather than assumed.
+ */
+test("the populated case sheet scrolls inside its container and never the document", async ({
+  page,
+}) => {
+  // Nothing may leave this page. Recorded rather than asserted at the end
+  // alone, so a request would name itself.
+  const offPageRequests: string[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.origin !== APP_ORIGIN) {
+      offPageRequests.push(url.origin);
+    }
+  });
+  const spawnsBefore = relaySpawnCount;
+  const observationsBefore = relayObservationCount;
+
+  await page.goto(CASE_TABLE_GEOMETRY_URL);
+
+  // A real table, with real rows in it, rendered by the production component.
+  const table = page.getByRole("table");
+  await expect(table).toBeVisible();
+  const rows = page.locator("tbody tr");
+  await expect(rows).toHaveCount(5);
+
+  // Every final-disposition branch the column can take, actually rendered, and
+  // each one in the row that carries it. The expected words are written out
+  // here rather than read back from `CASE_FINAL_DISPOSITION_LABELS`: reusing
+  // the production map as the expectation would make this assertion agree with
+  // any renaming, including one that showed a resolved-normal case as a
+  // confirmed fraud. The third column is "Final disposition".
+  const dispositions: readonly string[] = [
+    "Not resolved",
+    "Confirmed fraud",
+    "Not resolved",
+    "False positive",
+    "Normal",
+  ];
+  for (const [index, expected] of dispositions.entries()) {
+    await expect(rows.nth(index).locator("td").nth(2)).toHaveText(expected);
+  }
+
+  // The two values that decide the width of the two widest columns are in
+  // actual cells, in full.
+  await expect(page.locator("td.cell-ref--id").first()).toHaveText(GEOMETRY_CASE_ID);
+  const longReference = page.locator("td.cell-ref--long").first();
+  await expect(longReference).toHaveText(GEOMETRY_ASSIGNEE_REF);
+  requireCondition(
+    ((await longReference.textContent()) ?? "").length === 128,
+    "The fixture did not render an assignee reference at Backend's 128-character bound.",
+  );
+
+  for (const viewport of CONSOLE_VIEWPORTS) {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    const geometry = await measureCaseSheet(page);
+    const at = `${String(viewport.width)}px`;
+
+    // Seven columns, every one of them rendered. Not hidden at a narrow width,
+    // not collapsed away: an analyst is never shown a partial record.
+    requireCondition(geometry.headerCells === 7, `The case sheet did not render seven headings at ${at}.`);
+    requireCondition(geometry.firstRowCells === 7, `A case row did not render seven cells at ${at}.`);
+    requireCondition(geometry.hiddenCells === 0, `A case sheet cell was hidden at ${at}.`);
+    requireCondition(geometry.rows === 5, `The case sheet lost a row at ${at}.`);
+
+    // The document does not scroll sideways, whatever the sheet is doing.
+    requireCondition(
+      geometry.documentScrollWidth <= geometry.documentClientWidth + 1,
+      `The document scrolled horizontally at ${at}.`,
+    );
+    requireCondition(
+      geometry.bodyScrollWidth <= geometry.documentClientWidth + 1,
+      `The document body scrolled horizontally at ${at}.`,
+    );
+
+    // The scroll container stays inside the working area and inside the
+    // viewport. A container that had escaped either would be scrolling the page
+    // rather than itself.
+    requireCondition(
+      geometry.containerLeft >= geometry.mainLeft - 1 &&
+        geometry.containerRight <= geometry.mainRight + 1,
+      `The case sheet escaped the main region at ${at}.`,
+    );
+    requireCondition(
+      geometry.containerLeft >= -1 && geometry.containerRight <= geometry.viewportWidth + 1,
+      `The case sheet escaped the viewport at ${at}.`,
+    );
+
+    // The floor the stylesheet sets on the case table, actually in force.
+    requireCondition(
+      geometry.tableMinWidth === "980px",
+      `The case table min-width was not applied at ${at}.`,
+    );
+    requireCondition(
+      geometry.tableWidth >= 980,
+      `The case table was narrower than its own minimum at ${at}.`,
+    );
+
+    if (viewport.width === 1024) {
+      // The width the sheet is designed to outgrow. Here, and only here, the
+      // container must actually be scrollable and must actually have content
+      // wider than itself - which is what makes the two document assertions
+      // above a statement about a real overflow rather than about a table that
+      // happened to fit.
+      requireCondition(
+        geometry.tableScrollWidth > geometry.containerClientWidth,
+        "The case table did not exceed its container at 1024px, so nothing was being contained.",
+      );
+      requireCondition(
+        geometry.overflowX === "auto" || geometry.overflowX === "scroll",
+        "The case sheet container was not scrollable at 1024px.",
+      );
+    }
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  // No transport, and nothing that could be mistaken for one.
+  requireCondition(
+    offPageRequests.length === 0,
+    "The geometry fixture requested something outside the application origin.",
+  );
+  requireCondition(
+    relaySpawnCount === spawnsBefore && relayObservationCount === observationsBefore,
+    "The geometry fixture reached the Backend relay.",
+  );
 });
