@@ -264,9 +264,15 @@ Frontend capability `transaction:view`로 보호되며, 최종 판정은 Backend
 `transaction:read`와 401·403 응답이 내린다. 상세 화면은 canonical lowercase UUID v4 route만
 받아들이고, API에 없는 위험도·탐지 결과·사건 정보는 표시하지 않는다. Issue #253에서는 같은 디자인
 기반 위에 조회 전용 사건 목록 `/cases`를 구현했다. 이 화면의 Frontend capability는 `case:view`이고
-최종 판정은 Backend authority `case:read`와 401·403 응답이 내린다. 사건 화면은 목록 조회까지만
-구현했고 사건 상세·workflow·최종 판정·조사 메모·감사 이력 UI와 운영 대시보드는 아직 없으며,
-콘솔 전체의 최종 시각적 리뉴얼은 후속 작업으로 남아 있다. Issue #225의 Local JWT fixture는 production Authorization
+최종 판정은 Backend authority `case:read`와 401·403 응답이 내린다. Issue #255에서는 같은
+capability로 보호되는 조회 전용 사건 상세 `/cases/{caseId}`와 목록의 Case ID → 상세 탐색을
+구현했다. 사건 상세 화면은 `GET /api/v1/cases/{caseId}` 응답의 10개 필드(`caseId`, `caseStatus`,
+`finalDisposition`, `assigneeRef`, `relatedTransactionCount`, `createdAt`, `reviewStartedAt`,
+`closedAt`, `lastChangedAt`, `concurrencyVersion`)만 읽기 전용으로 표시하고, `concurrencyVersion`은
+mutation에 쓰지 않는 Record metadata다. 사건 화면은 목록·상세 조회까지만 구현했고 사건
+workflow·담당자 변경·최종 판정·조사 메모·감사 이력·연관 거래·Detection·Rule Evidence·AI 사건
+리포트 UI와 mutation UI, 운영 대시보드는 아직 없으며, 콘솔 전체의 최종 시각적 리뉴얼은 후속
+작업으로 남아 있다. Issue #225의 Local JWT fixture는 production Authorization
 Server나 브라우저 OIDC Provider가 아닌 Backend 회귀·장애 검증용 local/manual E2E이며,
 Keycloak과 같은 Backend issuer 설정에서 동시에 사용하지 않는다. 상세 결정은
 [`ADR-011`](docs/07-decisions/ADR-011-keycloak-authorization-server-and-claim-contract.md)을
@@ -336,10 +342,11 @@ Kafka
 * React·TypeScript·Vite foundation과 Router, public health client, OIDC Authorization
   Code + PKCE 인증 경계(`oidc-client-ts`), 승인 endpoint 전용 인증 API transport와 401·403
   경계, role·capability 권한 UI, capability로 보호되는 거래 목록 화면(`/transactions`),
-  조회 전용 거래 상세 화면(`/transactions/{transactionId}`)과 조회 전용 사건 목록 화면
-  (`/cases`), FDS operations console 디자인 기반 구현. UI dependency는 추가하지 않았고 CSS와
-  React만 사용한다. 사건 상세·workflow·최종 판정·조사 메모·감사 이력 화면과 운영 대시보드,
-  콘솔 전체의 최종 시각적 리뉴얼은 아직 구현되지 않음
+  조회 전용 거래 상세 화면(`/transactions/{transactionId}`), 조회 전용 사건 목록 화면
+  (`/cases`)과 조회 전용 사건 상세 화면(`/cases/{caseId}`), FDS operations console 디자인 기반
+  구현. UI dependency는 추가하지 않았고 CSS와 React만 사용한다. 사건 workflow·담당자 변경·최종
+  판정·조사 메모·감사 이력·연관 거래·Detection·Rule Evidence·AI 사건 리포트 화면과 mutation UI,
+  운영 대시보드, 콘솔 전체의 최종 시각적 리뉴얼은 아직 구현되지 않음
 
 ### Backend
 

@@ -34,6 +34,7 @@
  */
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { MemoryRouter } from "react-router-dom";
 import type { CaseListItem } from "../src/api/caseApi";
 import { CaseTable } from "../src/pages/cases/CaseTable";
 import "../src/styles/app.css";
@@ -127,32 +128,42 @@ if (!rootElement) {
 createRoot(rootElement).render(
   <StrictMode>
     {/*
-      The console's own layout classes, and only the ones the measurement
-      depends on. `.app` is the grid whose first track is `--rail-width`, so the
-      empty `.rail` below is a spacer that gives `.main` the width it really has
-      at 1440, 1280 and 1024 - not a copy of the navigation, which has nothing
-      to do with table geometry. Everything from `.cases` down is the markup
-      `CaseListPage` itself renders; the table is the production component,
-      never a copy of it.
+      A router, because the sheet's identifier column is an anchor to the case
+      detail route and `Link` needs one to compute an `href`. `MemoryRouter` and
+      not `BrowserRouter`: its history lives in this page's memory, so the
+      fixture still navigates nowhere, touches no address bar and makes no
+      request. Nothing here is routed - there is no `Routes` and no route
+      element - so the anchors render, are measured, and lead nowhere.
     */}
-    <div className="app">
-      <div className="rail" />
-      <main className="main" id="main-content">
-        <section className="cases" aria-labelledby="cases-heading">
-          <div className="page-head">
-            <h2 id="cases-heading">Case table geometry fixture (test only)</h2>
-            <p>
-              Browser geometry measurement of the production case table. No request is
-              made and no Backend is involved.
-            </p>
-          </div>
-          <CaseTable
-            items={GEOMETRY_CASES}
-            sort="lastChangedAt,desc"
-            onSortChange={() => undefined}
-          />
-        </section>
-      </main>
-    </div>
+    <MemoryRouter>
+      {/*
+        The console's own layout classes, and only the ones the measurement
+        depends on. `.app` is the grid whose first track is `--rail-width`, so
+        the empty `.rail` below is a spacer that gives `.main` the width it
+        really has at 1440, 1280 and 1024 - not a copy of the navigation, which
+        has nothing to do with table geometry. Everything from `.cases` down is
+        the markup `CaseListPage` itself renders; the table is the production
+        component, never a copy of it.
+      */}
+      <div className="app">
+        <div className="rail" />
+        <main className="main" id="main-content">
+          <section className="cases" aria-labelledby="cases-heading">
+            <div className="page-head">
+              <h2 id="cases-heading">Case table geometry fixture (test only)</h2>
+              <p>
+                Browser geometry measurement of the production case table. No request is
+                made and no Backend is involved.
+              </p>
+            </div>
+            <CaseTable
+              items={GEOMETRY_CASES}
+              sort="lastChangedAt,desc"
+              onSortChange={() => undefined}
+            />
+          </section>
+        </main>
+      </div>
+    </MemoryRouter>
   </StrictMode>,
 );

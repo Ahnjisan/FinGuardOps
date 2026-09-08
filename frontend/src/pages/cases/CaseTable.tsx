@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import type { CaseListItem, CaseListSort } from "../../api/caseApi";
 import {
   CASE_FINAL_DISPOSITION_LABELS,
@@ -19,12 +20,12 @@ export interface CaseTableProps {
 /**
  * The case sheet.
  *
- * A row is a record, and in this screen it is *only* a record. There is no
- * detail route yet, so there is no anchor, no click handler, no `role`, no
- * `tabindex` and no drawer: the case identifier is printed as text. That is the
- * deliberate shape of a list-only screen. A row wired to open something that
- * does not exist, or a whole row made clickable so that a future screen has
- * somewhere to hang, would be an affordance this Issue cannot honour.
+ * A row is a record with exactly one way out of it: the case identifier is an
+ * anchor to that case's detail address, and nothing else in the row is
+ * actionable. The row itself carries no click handler, no `role` and no
+ * `tabindex` - a whole row made clickable is an affordance a keyboard cannot
+ * reach and a screen reader cannot name, and it would put the only navigation
+ * on the sheet somewhere a reader has no way to find it.
  *
  * Nothing here is derived. The seven columns are the seven fields
  * `CaseListItem` carries: no risk score, no priority, no SLA countdown, no
@@ -34,8 +35,9 @@ export interface CaseTableProps {
  *
  * Every identifier and reference is printed in full. Truncating one would make
  * two different cases look identical, so long values wrap inside their cell
- * instead - and they are not repeated into a `title`, a `data-` attribute or
- * any other place a value could be read out of the DOM twice.
+ * instead - and apart from the `aria-label` that names the case identifier's
+ * link, they are not repeated into a `title`, a `data-` attribute or any other
+ * place a value could be read out of the DOM twice.
  */
 export function CaseTable({ items, sort, onSortChange }: CaseTableProps) {
   const descending = sort === "lastChangedAt,desc";
@@ -158,7 +160,38 @@ function CaseRow({ item }: { readonly item: CaseListItem }) {
         */}
         <time dateTime={item.createdAt}>{opened} KST</time>
       </td>
-      <td className="cell-ref cell-ref--id">{item.caseId}</td>
+      <td className="cell-ref cell-ref--id">
+        {/*
+          An ordinary anchor produced by `Link`: no `state`, no `onClick` of our
+          own, and no `preventDefault`, so Ctrl-click, middle click,
+          Shift-click and "Open in new tab" all behave exactly as the browser
+          intends. The target is the canonical detail route built from the
+          identifier the response validator already admitted as a canonical
+          lowercase UUID v4 - no query, no fragment, no trailing slash, and
+          never a transaction identifier.
+
+          The identifier is the whole of the link's visible text; what the link
+          is for is supplied by its `aria-label`, so a reader hears "View case
+          details for <identifier>" rather than a bare UUID with no stated
+          purpose. That name lives on the attribute rather than in a visually
+          hidden prefix inside the anchor: `.visually-hidden` is absolutely
+          positioned, and neither `.sheet` nor `.sheet__scroll` is a positioned
+          element, so such a prefix would not be clipped by the scroll container
+          it appears to sit in - at the console's narrowest width this sheet
+          really does scroll sideways, the last column's static position is past
+          the viewport, and the escaped box would widen the document instead of
+          the sheet. The `aria-label` is the only place besides the text and the
+          `href` that carries the identifier: no `title`, no `data-` attribute
+          and no hidden mirror adds a fourth.
+        */}
+        <Link
+          className="cell-ref__link"
+          to={`/cases/${item.caseId}`}
+          aria-label={`View case details for ${item.caseId}`}
+        >
+          {item.caseId}
+        </Link>
+      </td>
     </tr>
   );
 }

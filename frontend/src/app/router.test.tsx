@@ -518,18 +518,46 @@ describe("the /cases production route", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("has no case detail route, so an identifier under /cases is a 404", async () => {
+  it.each([
+    ["an extra segment below a case", "/cases/5c2d1e0f-7a8b-4c9d-9e0f-1a2b3c4d5e60/notes"],
+    ["an audit-log path", "/cases/5c2d1e0f-7a8b-4c9d-9e0f-1a2b3c4d5e60/audit-logs"],
+    ["a resolution path", "/cases/5c2d1e0f-7a8b-4c9d-9e0f-1a2b3c4d5e60/resolution"],
+  ])("does not reach any case screen through %s", async (_label, path) => {
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
 
-    renderSignedInAt("/cases/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001", ["FDS_ANALYST"]);
+    renderSignedInAt(path, ["FDS_ANALYST"]);
 
-    // Not a guarded route that happens to be empty: no route at all. This is
-    // the assertion that fails if a detail route is added without its own
-    // guard, its own screen and its own tests.
+    // The list route is exact and the detail route is one segment. Neither
+    // widens to cover these, so they are not guarded routes that happen to be
+    // empty - they are no route at all, and they cost the Backend nothing.
+    // These are also real Backend endpoints with no screen in this console, so
+    // a route that reached them would be one no test asked for.
     expect(await screen.findByRole("heading", { name: "Page not found" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Cases", level: 2 })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^Case / })).not.toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("resolves a trailing slash to the list itself rather than to the detail screen", async () => {
+    const fetchSpy = vi.fn().mockImplementation(() => new Promise<Response>(() => {}));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    renderSignedInAt("/cases/", ["FDS_ANALYST"]);
+
+    // React Router matches `/cases/` to the exact `cases` route before any of
+    // this application's own code runs, so what renders is the list. The point
+    // asserted here is the one this Issue owns: it is not the detail screen,
+    // and no case detail request is made for an empty identifier.
+    expect(await screen.findByRole("heading", { name: "Cases", level: 2 })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: /^Case [0-9a-f-]+$/, level: 2 }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Loading case...")).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+    expect(new URL((fetchSpy.mock.calls[0][0] as Request).url).pathname).toBe("/api/v1/cases");
   });
 
   it("does not treat a sibling path sharing the prefix as the cases route", async () => {
@@ -897,5 +925,307 @@ describe("the /transactions/:transactionId production route", () => {
     const back = await screen.findByRole("link", { name: "Back to transactions" });
     expect(back).toHaveAttribute("href", "/transactions");
     expect(screen.getByRole("link", { name: "Transactions" })).toBeInTheDocument();
+  });
+});
+
+const CANONICAL_CASE_ID = "5c2d1e0f-7a8b-4c9d-9e0f-1a2b3c4d5e60";
+const CANONICAL_CASE_ROUTE = `/cases/${CANONICAL_CASE_ID}`;
+
+/** The fixed refusal a malformed case address produces. */
+const INVALID_CASE_ADDRESS_HEADING = "This is not a case address";
+
+describe("the /cases/:caseId production route", () => {
+  it.each(CASE_ROLES)("renders the screen on direct entry for %s", async (role) => {
+    const fetchSpy = vi.fn().mockImplementation(() => new Promise<Response>(() => {}));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    renderSignedInAt(CANONICAL_CASE_ROUTE, [role]);
+
+    expect(
+      await screen.findByRole("heading", { name: `Case ${CANONICAL_CASE_ID}` }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Loading case...")).toBeInTheDocument();
+    // The direct URL entry really did reach the Backend, for this case and no
+    // other, and with no query on it.
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+    const sent = fetchSpy.mock.calls[0][0] as Request;
+    expect(new URL(sent.url).pathname).toBe(`/api/v1/cases/${CANONICAL_CASE_ID}`);
+    expect(new URL(sent.url).search).toBe("");
+    expect(sent.method).toBe("GET");
+  });
+
+  it.each(NON_CASE_ROLES)("refuses direct entry for %s, sending nothing", async (role) => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const { client } = renderSignedInAt(CANONICAL_CASE_ROUTE, [role]);
+
+    expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^Case / })).not.toBeInTheDocument();
+    // The refusal costs the Backend nothing at all, and takes no credential.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(client.calls.authorizeRequest).toBe(0);
+    // It also says nothing about which role or capability would have worked,
+    // and repeats no part of the address it refused.
+    const rendered = document.body.textContent ?? "";
+    expect(rendered).not.toContain(role);
+    expect(rendered).not.toContain("case:view");
+    expect(rendered).not.toContain("case:read");
+    expect(rendered).not.toContain(CANONICAL_CASE_ID);
+  });
+
+  it("asks an unauthenticated visitor to sign in, and sends nothing", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const client = createFakeAuthClient({ initialSession: null });
+    adapter.client = client;
+
+    renderRoutesWithAuth(routes, { client, initialEntries: [CANONICAL_CASE_ROUTE] });
+
+    expect(await screen.findByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(client.calls.signIn).toHaveLength(0);
+    expect(client.calls.authorizeRequest).toBe(0);
+  });
+
+  it("shows neither the screen nor a refusal while authentication is undecided", () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const client = createFakeAuthClient({ initialSession: null });
+    adapter.client = client;
+    client.deferInitialize();
+
+    renderRoutesWithAuth(routes, { client, initialEntries: [CANONICAL_CASE_ROUTE] });
+
+    expect(authStatus()).toHaveTextContent(PREPARING);
+    expect(screen.getByText("Checking access...")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Access denied" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^Case / })).not.toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("sends nothing when authentication itself failed", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const client = createFakeAuthClient({ initialSession: null });
+    adapter.client = client;
+
+    await renderAt(CANONICAL_CASE_ROUTE, {
+      client,
+      initialize: "reject",
+      settled: { status: safeAuthErrorMessage("configuration") },
+    });
+
+    expect(screen.getByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(client.calls.authorizeRequest).toBe(0);
+  });
+
+  it("removes the screen the moment the session is invalidated", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() => new Promise<Response>(() => {})),
+    );
+    const { client } = renderSignedInAt(CANONICAL_CASE_ROUTE, ["FDS_ANALYST"]);
+    await screen.findByRole("heading", { name: `Case ${CANONICAL_CASE_ID}` });
+
+    act(() => {
+      client.emitSessionInvalidated();
+    });
+
+    expect(screen.getByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^Case / })).not.toBeInTheDocument();
+  });
+
+  it("returns to exactly the case detail route after signing in from it", async () => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const client = createFakeAuthClient({ initialSession: null });
+    adapter.client = client;
+
+    renderRoutesWithAuth(routes, { client, initialEntries: [CANONICAL_CASE_ROUTE] });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(client.calls.signIn).toEqual([CANONICAL_CASE_ROUTE]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A case address carrying a query or a fragment is not a route this
+   * application has, so it is not a place to be sent back to. The return target
+   * falls back to `/` whole, rather than being repaired into the canonical
+   * detail route by dropping the part that made it unknown.
+   */
+  it.each([
+    ["a query string", `${CANONICAL_CASE_ROUTE}?tab=raw`, "tab=raw"],
+    ["a fragment", `${CANONICAL_CASE_ROUTE}#assignee`, "#assignee"],
+    ["a query string and a fragment", `${CANONICAL_CASE_ROUTE}?tab=raw#assignee`, "tab=raw"],
+  ])("returns to the default route after signing in from %s", async (_label, path, smuggled) => {
+    const user = userEvent.setup();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const client = createFakeAuthClient({ initialSession: null });
+    adapter.client = client;
+
+    renderRoutesWithAuth(routes, { client, initialEntries: [path] });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(client.calls.signIn).toEqual(["/"]);
+    // Nothing of the address it refused is carried into the sign-in, and
+    // nothing was asked of the Backend on the way.
+    expect(client.calls.signIn[0]).not.toContain(smuggled);
+    expect(document.body.innerHTML).not.toContain(smuggled);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(client.calls.authorizeRequest).toBe(0);
+  });
+
+  /**
+   * Locations a browser really can hand this application, none of which is a
+   * case address.
+   *
+   * Each one survives a standard URL parser unchanged - the test below asserts
+   * that first, so the list cannot quietly fill up with representations no
+   * browser would ever deliver - and each matches the route pattern: one
+   * segment under `/cases/`. The screen therefore renders, refuses, and sends
+   * nothing.
+   *
+   * The percent-encoded entries are the ones that matter most. React Router
+   * hands a route parameter over already decoded, so `%355c2d1e0f-...` arrives
+   * at `useParams()` as a perfectly canonical UUID. The screen reads the path
+   * segment as the browser preserved it instead, which still carries its `%35`.
+   */
+  const malformedCaseAddresses: Array<[string, string]> = [
+    ["an uppercase UUID", "/cases/5C2D1E0F-7A8B-4C9D-9E0F-1A2B3C4D5E60"],
+    ["a version 1 UUID", "/cases/5c2d1e0f-7a8b-1c9d-9e0f-1a2b3c4d5e60"],
+    ["a version 3 UUID", "/cases/5c2d1e0f-7a8b-3c9d-9e0f-1a2b3c4d5e60"],
+    ["a version 5 UUID", "/cases/5c2d1e0f-7a8b-5c9d-9e0f-1a2b3c4d5e60"],
+    ["an invalid RFC variant", "/cases/5c2d1e0f-7a8b-4c9d-1e0f-1a2b3c4d5e60"],
+    ["a numeric identifier", "/cases/1"],
+    ["a UUID with no hyphens", "/cases/5c2d1e0f7a8b4c9d9e0f1a2b3c4d5e60"],
+    ["a percent-encoded first digit", "/cases/%35c2d1e0f-7a8b-4c9d-9e0f-1a2b3c4d5e60"],
+    ["an encoded slash", `${CANONICAL_CASE_ROUTE}%2fnotes`],
+    ["an encoded backslash", `${CANONICAL_CASE_ROUTE}%5cnotes`],
+    ["a double-encoded slash", `${CANONICAL_CASE_ROUTE}%252Fnotes`],
+    ["a malformed percent sequence", `${CANONICAL_CASE_ROUTE}%2`],
+    ["an encoded space", `${CANONICAL_CASE_ROUTE}%20`],
+    ["an encoded control character", `${CANONICAL_CASE_ROUTE}%0d`],
+    ["a matrix parameter", `${CANONICAL_CASE_ROUTE};v=1`],
+    ["a query string", `${CANONICAL_CASE_ROUTE}?tab=raw`],
+    ["a fragment", `${CANONICAL_CASE_ROUTE}#assignee`],
+  ];
+
+  it.each(malformedCaseAddresses)("refuses %s before any request", async (_label, path) => {
+    // A browser would deliver this location as written rather than resolving it
+    // away, so it is one the application really has to answer for.
+    expect(parsedLocation(path)).toBe(path);
+
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const { client } = renderSignedInAt(path, ["FDS_ANALYST"]);
+
+    const refusal = await screen.findByRole("alert");
+    expect(refusal).toHaveTextContent(INVALID_CASE_ADDRESS_HEADING);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(client.calls.authorizeRequest).toBe(0);
+    expect(screen.queryByText("Loading case...")).not.toBeInTheDocument();
+  });
+
+  it("prints no part of a malformed case address anywhere on the page", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+    const smuggled = "%35c2d1e0f-7a8b-4c9d-9e0f-1a2b3c4d5e60";
+
+    renderSignedInAt(`/cases/${smuggled}`, ["FDS_ANALYST"]);
+    await screen.findByRole("alert");
+
+    expect(document.body.textContent ?? "").not.toContain("5c2d1e0f");
+    expect(document.body.innerHTML).not.toContain("5c2d1e0f");
+  });
+
+  it("offers a way back to the list and keeps the rail destination", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() => new Promise<Response>(() => {})),
+    );
+
+    renderSignedInAt(CANONICAL_CASE_ROUTE, ["FDS_VIEWER"]);
+
+    const back = await screen.findByRole("link", { name: "Back to cases" });
+    expect(back).toHaveAttribute("href", "/cases");
+    const rail = screen.getByRole("link", { name: "Cases" });
+    expect(rail).toHaveAttribute("href", "/cases");
+    // The rail announces the case section as the current one here, and says
+    // nothing about the ledger.
+    expect(rail).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "Transactions" })).not.toHaveAttribute(
+      "aria-current",
+    );
+  });
+
+  it("reaches a case from the list by its identifier link alone", async () => {
+    const user = userEvent.setup();
+    const listBody = {
+      content: [
+        {
+          caseId: CANONICAL_CASE_ID,
+          caseStatus: "IN_REVIEW",
+          finalDisposition: null,
+          assigneeRef: "analyst_ref_demo_a7f2",
+          relatedTransactionCount: 3,
+          createdAt: "2026-07-24T01:15:30Z",
+          lastChangedAt: "2026-07-24T02:20:40Z",
+        },
+      ],
+      page: { number: 0, size: 20, totalElements: 1, totalPages: 1, first: true, last: true },
+      traceId: "trace_demo_case_list_router",
+    };
+    const fetchSpy = vi.fn().mockImplementation((request: Request) => {
+      const { pathname } = new URL(request.url);
+      if (pathname === "/api/v1/cases") {
+        return Promise.resolve(
+          new Response(JSON.stringify(listBody), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      return new Promise<Response>(() => {});
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    renderSignedInAt("/cases", ["FDS_ANALYST"]);
+    const link = await screen.findByRole("link", {
+      name: `View case details for ${CANONICAL_CASE_ID}`,
+    });
+    expect(link).toHaveAttribute("href", CANONICAL_CASE_ROUTE);
+
+    await user.click(link);
+
+    // The detail screen, on the exact canonical address, asking the detail
+    // endpoint for exactly that case.
+    expect(
+      await screen.findByRole("heading", { name: `Case ${CANONICAL_CASE_ID}` }),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        fetchSpy.mock.calls.some(
+          (call) =>
+            new URL((call[0] as Request).url).pathname ===
+            `/api/v1/cases/${CANONICAL_CASE_ID}`,
+        ),
+      ).toBe(true);
+    });
+    for (const call of fetchSpy.mock.calls) {
+      expect((call[0] as Request).method).toBe("GET");
+    }
   });
 });

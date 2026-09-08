@@ -10,22 +10,22 @@ import { isCanonicalUuidV4 } from "../api/responseValidation";
  *
  * The four literal routes below are compared with `===` against a string
  * literal, so `/transactions` is listed as itself and only as itself, and
- * `/cases` likewise. `/cases` is a literal and nothing more: this application
- * has no case detail route, so there is no parameterized case form here, and
- * `/cases/{caseId}` falls to the default alongside `/cases/` and `/casesx`.
+ * `/cases` likewise. A literal admits itself and nothing beneath it:
+ * `/cases/`, `/casesx` and `/cases?status=OPEN` are none of them the literal,
+ * and none of them is repaired into it.
  *
- * The transaction detail route is the one parameterized destination, and it is
- * not admitted by a prefix test. `startsWith("/transactions/")`,
- * `includes("/transactions")` and a permissive pattern are all absent on
- * purpose: each of them accepts `/transactions/../admin`,
- * `/transactions/%2f%2fevil.example` and `/transactions/x` as readily as a real
- * transaction. What is admitted instead is a single path segment that is
- * already a canonical lowercase UUID v4 - the same rule the API layer applies
- * to a path parameter - and the returned value is *rebuilt* from that validated
- * segment rather than being the caller's string. So no byte of the input
- * reaches a navigation, an error, the DOM or the console: what comes back is
- * either a literal written in this file or a route assembled here from
- * thirty-six characters of `[0-9a-f-]`.
+ * The two detail routes are the parameterized destinations, and neither is
+ * admitted by a prefix test. `startsWith("/transactions/")`,
+ * `includes("/cases")` and a permissive pattern are all absent on purpose:
+ * each of them accepts `/transactions/../admin`,
+ * `/cases/%2f%2fevil.example` and `/cases/x` as readily as a real record. What
+ * is admitted instead is a single path segment that is already a canonical
+ * lowercase UUID v4 - the same rule the API layer applies to a path
+ * parameter - and the returned value is *rebuilt* from that validated segment
+ * rather than being the caller's string. So no byte of the input reaches a
+ * navigation, an error, the DOM or the console: what comes back is either a
+ * literal written in this file or a route assembled here from thirty-six
+ * characters of `[0-9a-f-]`.
  */
 export const ALLOWED_RETURN_ROUTES = ["/", "/health", "/transactions", "/cases"] as const;
 
@@ -34,7 +34,13 @@ export type LiteralReturnRoute = (typeof ALLOWED_RETURN_ROUTES)[number];
 /** `/transactions/{canonical lowercase UUID v4}`, built only by this module. */
 export type TransactionDetailReturnRoute = `/transactions/${string}`;
 
-export type AllowedReturnRoute = LiteralReturnRoute | TransactionDetailReturnRoute;
+/** `/cases/{canonical lowercase UUID v4}`, built only by this module. */
+export type CaseDetailReturnRoute = `/cases/${string}`;
+
+export type AllowedReturnRoute =
+  | LiteralReturnRoute
+  | TransactionDetailReturnRoute
+  | CaseDetailReturnRoute;
 
 export const DEFAULT_RETURN_ROUTE: LiteralReturnRoute = "/";
 
@@ -51,6 +57,21 @@ export const DEFAULT_RETURN_ROUTE: LiteralReturnRoute = "/";
  */
 const TRANSACTION_DETAIL_SEGMENT = /^\/transactions\/([^/]+)$/;
 
+/**
+ * One path segment under `/cases/`, and nothing else.
+ *
+ * The same rule as its ledger twin, written out separately rather than shared
+ * through a factory: these are two allowlist entries for two different routes,
+ * and a single generated pattern would make "the case route is admitted"
+ * depend on a parameter rather than on a line in this file. A `%2f`, an encoded
+ * backslash, whitespace, a dot segment, an uppercase digit, a non-v4 version
+ * nibble and an invalid RFC variant nibble all fail `isCanonicalUuidV4` below,
+ * as do a trailing slash, a deeper path, a duplicate separator, a query and a
+ * fragment - none of which can be part of a single `[^/]+` segment that
+ * consists only of `[0-9a-f-]`.
+ */
+const CASE_DETAIL_SEGMENT = /^\/cases\/([^/]+)$/;
+
 export function resolveReturnRoute(value: unknown): AllowedReturnRoute {
   if (value === "/") {
     return "/";
@@ -61,9 +82,9 @@ export function resolveReturnRoute(value: unknown): AllowedReturnRoute {
   if (value === "/transactions") {
     return "/transactions";
   }
-  // A literal, with no parameterized sibling. The case list is the only case
-  // route this application has, so nothing under `/cases/` is admitted and no
-  // query or fragment is stripped in the hope of readmitting one.
+  // The list itself, exactly. Its parameterized sibling is decided below and
+  // separately: no query or fragment is stripped here in the hope of
+  // readmitting an address as this literal.
   if (value === "/cases") {
     return "/cases";
   }
@@ -71,9 +92,17 @@ export function resolveReturnRoute(value: unknown): AllowedReturnRoute {
   // allowed route is not an allowed route, and neither is anything else that
   // merely stringifies into one.
   if (typeof value === "string") {
-    const match = TRANSACTION_DETAIL_SEGMENT.exec(value);
-    if (match !== null && isCanonicalUuidV4(match[1])) {
-      return `/transactions/${match[1]}`;
+    const transaction = TRANSACTION_DETAIL_SEGMENT.exec(value);
+    if (transaction !== null && isCanonicalUuidV4(transaction[1])) {
+      return `/transactions/${transaction[1]}`;
+    }
+    // Rebuilt from the validated segment, never returned as the caller wrote
+    // it. `/cases/` plus thirty-six characters of `[0-9a-f-]` is the whole of
+    // what can come back from here, so an address that merely contained a
+    // canonical case route carries nothing of its own through.
+    const detail = CASE_DETAIL_SEGMENT.exec(value);
+    if (detail !== null && isCanonicalUuidV4(detail[1])) {
+      return `/cases/${detail[1]}`;
     }
   }
   return DEFAULT_RETURN_ROUTE;
