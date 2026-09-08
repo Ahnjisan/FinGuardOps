@@ -1,7 +1,7 @@
 import { act, fireEvent, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { RouteObject } from "react-router-dom";
+import { useLocation, type RouteObject } from "react-router-dom";
 import type { AuthSession } from "../auth/authClient";
 import { createFakeAuthClient, type FakeAuthClient } from "../test/fakeAuthClient";
 import { jsonResponse } from "../test/mockFetch";
@@ -22,13 +22,48 @@ const TRANSACTION_ID = "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001";
 const ASSIGNEE_REF = "analyst_ref_demo_a7f2";
 const LONG_ASSIGNEE_REF = "assignee_ref_2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001_desk_0091";
 
+/**
+ * The exact accessible name the case identifier's detail link must carry.
+ *
+ * Written out here as a whole string rather than matched with a pattern: a
+ * regular expression loose enough to be convenient would also admit a bare
+ * identifier, a differently worded purpose, or a name that named the wrong
+ * case, which are precisely the three things these tests exist to refuse.
+ */
+function caseLinkName(caseId: string): string {
+  return `View case details for ${caseId}`;
+}
+
 const SESSION: AuthSession = {
   subject: "6f1e0b6c-3a2b-4c8d-9e0f-1a2b3c4d5e6f",
   displayName: "Local Analyst",
   roles: ["FDS_ANALYST"],
 };
 
-const ROUTES: RouteObject[] = [{ path: "/cases", element: <CaseListPage /> }];
+/**
+ * A stand-in for the case detail address.
+ *
+ * The real detail screen is not rendered here - it has its own tests. What this
+ * stands in for is the destination's *location*, so the address, the query and
+ * the router state a click produced can be asserted rather than assumed.
+ */
+function DetailProbe() {
+  const location = useLocation();
+  return (
+    <div>
+      <p>Detail probe</p>
+      <p data-testid="probe-path">{location.pathname}</p>
+      <p data-testid="probe-search">{location.search}</p>
+      <p data-testid="probe-hash">{location.hash}</p>
+      <p data-testid="probe-state">{JSON.stringify(location.state)}</p>
+    </div>
+  );
+}
+
+const ROUTES: RouteObject[] = [
+  { path: "/cases", element: <CaseListPage /> },
+  { path: "/cases/:caseId", element: <DetailProbe /> },
+];
 
 function listItem(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -329,22 +364,182 @@ describe("CaseListPage data", () => {
     expect(container.innerHTML.split(LONG_ASSIGNEE_REF)).toHaveLength(2);
   });
 
-  it("prints the case identifier exactly once, as text and not as a link", async () => {
+  it("prints the case identifier exactly once, inside its detail link", async () => {
     const { calls } = controlledFetch();
     renderPage(signedIn());
     await settle();
     await answerWith(calls[0], listBody());
 
     const table = await screen.findByRole("table");
-    // Once in the sheet and nowhere else - no anchor, no hidden mirror, no
-    // `data-` attribute.
-    expect(table.innerHTML.split(CASE_ID).length - 1).toBe(1);
-    expect(within(table).queryByRole("link")).not.toBeInTheDocument();
+    // Three places, all of them the anchor's: its text, its `href` and the
+    // `aria-label` that states what following it does. Nowhere else - no hidden
+    // mirror, no `title`, no `data-` attribute.
+    expect(table.innerHTML.split(CASE_ID).length - 1).toBe(3);
     const idCell = within(screen.getByRole("row", { name: /in review/i })).getAllByRole(
       "cell",
     )[6];
     expect(idCell.className).toContain("cell-ref--id");
-    expect(idCell).toHaveTextContent(CASE_ID);
+    // The visible text of the cell is the identifier and nothing else: no
+    // visually hidden prefix sits inside the anchor or beside it.
+    expect((idCell.textContent ?? "").trim()).toBe(CASE_ID);
+    expect(idCell.querySelector(".visually-hidden")).toBeNull();
+    const link = within(idCell).getByRole("link");
+    expect(link).toHaveAttribute("href", `/cases/${CASE_ID}`);
+    expect(link.textContent).toBe(CASE_ID);
+    expect(link).toHaveAccessibleName(caseLinkName(CASE_ID));
+  });
+
+  it("gives every row an accessible link to exactly that case", async () => {
+    const { calls } = controlledFetch();
+    renderPage(signedIn());
+    await settle();
+    await answerWith(
+      calls[0],
+      listBody([listItem(), listItem({ caseId: SECOND_CASE_ID, caseStatus: "OPEN" })]),
+    );
+    await screen.findByRole("table");
+
+    const links = screen.getAllByRole("link");
+    expect(links).toHaveLength(2);
+    // The name says what the link does and which case it does it to; the text
+    // stays the identifier alone, so the column reads as a column of records.
+    expect(links[0]).toHaveAccessibleName(caseLinkName(CASE_ID));
+    expect(links[0].textContent).toBe(CASE_ID);
+    expect(links[0]).toHaveAttribute("href", `/cases/${CASE_ID}`);
+    expect(links[1]).toHaveAccessibleName(caseLinkName(SECOND_CASE_ID));
+    expect(links[1].textContent).toBe(SECOND_CASE_ID);
+    expect(links[1]).toHaveAttribute("href", `/cases/${SECOND_CASE_ID}`);
+    // Each name belongs to exactly one case: neither link answers to the
+    // other's name, and no link answers to a bare identifier.
+    expect(screen.queryByRole("link", { name: CASE_ID })).toBeNull();
+    expect(screen.queryByRole("link", { name: SECOND_CASE_ID })).toBeNull();
+    expect(screen.getAllByRole("link", { name: caseLinkName(CASE_ID) })).toHaveLength(1);
+  });
+
+  it("names the case link by its purpose and prints only the identifier", async () => {
+    const { calls } = controlledFetch();
+    renderPage(signedIn());
+    await settle();
+    await answerWith(calls[0], listBody());
+    await screen.findByRole("table");
+
+    // The whole contract of the one way out of a row, asserted as exact values.
+    const link = screen.getByRole("link", { name: caseLinkName(CASE_ID) });
+    expect(link.tagName).toBe("A");
+    expect(link).toHaveAccessibleName(`View case details for ${CASE_ID}`);
+    expect(link.textContent).toBe(CASE_ID);
+    expect(link.getAttribute("href")).toBe(`/cases/${CASE_ID}`);
+    expect(link.getAttribute("target")).toBeNull();
+    // No inline handler of our own. React installs a `noop` `onclick` property
+    // on any element it gives an `onClick` prop to, so the DOM property is not
+    // the thing to assert here - what the anchor does with a click is asserted
+    // by the modifier-click and router-state tests below.
+    expect(link.getAttribute("onclick")).toBeNull();
+    // The purpose is carried by `aria-label`, not by a positioned element that
+    // the sheet's sideways scroll could push past the edge of the document.
+    expect(link.querySelector(".visually-hidden")).toBeNull();
+    expect(link.getAttribute("aria-label")).toBe(`View case details for ${CASE_ID}`);
+
+    // The row around it is still a record: the anchor is the only link in it.
+    const row = screen.getByRole("row", { name: /in review/i });
+    expect(row.tagName).toBe("TR");
+    expect(row.getAttribute("role")).toBeNull();
+    expect(row.querySelectorAll("a")).toHaveLength(1);
+    expect(row.querySelectorAll(".visually-hidden")).toHaveLength(0);
+  });
+
+  it("puts the identifier in the href and nothing else anywhere on the anchor", async () => {
+    const { calls } = controlledFetch();
+    renderPage(signedIn());
+    await settle();
+    await answerWith(calls[0], listBody());
+    await screen.findByRole("table");
+
+    const link = screen.getByRole("link", { name: caseLinkName(CASE_ID) });
+    // Exactly the canonical route: no query, no fragment, no trailing slash,
+    // and never a transaction identifier in a case address.
+    expect(link.getAttribute("href")).toBe(`/cases/${CASE_ID}`);
+    expect(link.getAttribute("href")).not.toContain("?");
+    expect(link.getAttribute("href")).not.toContain("#");
+    expect(link.getAttribute("href")).not.toContain(TRANSACTION_ID);
+    // The router's own `data-discover` marker is the only data attribute, and
+    // it carries a fixed boolean rather than anything from the row.
+    const dataAttributes = Array.from(link.attributes)
+      .filter((attribute) => attribute.name.startsWith("data-"))
+      .map((attribute) => `${attribute.name}=${attribute.value}`);
+    expect(dataAttributes).toEqual(["data-discover=true"]);
+    for (const attribute of Array.from(link.attributes)) {
+      for (const value of [ASSIGNEE_REF, "2026-07-24T02:20:40Z", TRANSACTION_ID]) {
+        expect(attribute.value).not.toContain(value);
+      }
+    }
+    expect(link.getAttribute("title")).toBeNull();
+    // `aria-label` is the one attribute besides `href` allowed to hold the
+    // identifier, and it holds it inside the link's stated purpose.
+    expect(link.getAttribute("aria-label")).toBe(caseLinkName(CASE_ID));
+    const carryingTheIdentifier = Array.from(link.attributes)
+      .filter((attribute) => attribute.value.includes(CASE_ID))
+      .map((attribute) => attribute.name)
+      .sort();
+    expect(carryingTheIdentifier).toEqual(["aria-label", "href"]);
+  });
+
+  it("navigates to the case with no router state, no query and no fragment", async () => {
+    const { calls } = controlledFetch();
+    const user = userEvent.setup();
+    renderPage(signedIn());
+    await settle();
+    await answerWith(calls[0], listBody());
+    await screen.findByRole("table");
+
+    await user.click(screen.getByRole("link", { name: caseLinkName(CASE_ID) }));
+
+    expect(await screen.findByText("Detail probe")).toBeInTheDocument();
+    expect(screen.getByTestId("probe-path")).toHaveTextContent(`/cases/${CASE_ID}`);
+    expect(screen.getByTestId("probe-search")).toBeEmptyDOMElement();
+    expect(screen.getByTestId("probe-hash")).toBeEmptyDOMElement();
+    // `null`, not an object holding a row: no assignee reference, no status and
+    // no instant travels with the navigation.
+    expect(screen.getByTestId("probe-state")).toHaveTextContent("null");
+  });
+
+  it("reaches the case from the keyboard alone", async () => {
+    const { calls } = controlledFetch();
+    const user = userEvent.setup();
+    renderPage(signedIn());
+    await settle();
+    await answerWith(calls[0], listBody());
+    await screen.findByRole("table");
+
+    const name = caseLinkName(CASE_ID);
+    screen.getByRole("link", { name }).focus();
+    expect(screen.getByRole("link", { name })).toHaveFocus();
+    await user.keyboard("{Enter}");
+
+    expect(await screen.findByText("Detail probe")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["Ctrl", { ctrlKey: true }],
+    ["Meta", { metaKey: true }],
+    ["Shift", { shiftKey: true }],
+    ["a middle click", { button: 1 }],
+  ])("leaves %s-clicking to the browser", async (_label, modifier) => {
+    const { calls } = controlledFetch();
+    renderPage(signedIn());
+    await settle();
+    await answerWith(calls[0], listBody());
+    await screen.findByRole("table");
+
+    fireEvent.click(
+      screen.getByRole("link", { name: caseLinkName(CASE_ID) }),
+      modifier,
+    );
+
+    // No client-side navigation happened, and nothing was cancelled on the
+    // anchor's behalf: the browser is left to open its new tab or window.
+    expect(screen.queryByText("Detail probe")).not.toBeInTheDocument();
+    expect(screen.getByRole("table")).toBeInTheDocument();
   });
 
   it("keeps the row a record rather than a control", async () => {

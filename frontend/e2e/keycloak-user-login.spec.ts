@@ -52,9 +52,14 @@ const SYNTHETIC_TRANSACTION_ID = "e2e00000-0000-4000-8000-000000000e2e";
  *
  * A closed list of exact endpoints, and deliberately not a path syntax. That
  * `/api/v1/...` is well-formed says nothing about whether this suite may read
- * it: the console's screens reach exactly three read addresses and one
- * authorization probe. Everything else under `/api/v1/**` - a case detail, its
- * notes, its audit log, a case status or assignee write, a note create, an
+ * it: the console's screens reach exactly four read addresses and one
+ * authorization probe. The four are the two collections, `/api/v1/transactions`
+ * and `/api/v1/cases`, and the two identified reads under them - a transaction
+ * detail and a case detail, each at one canonical lowercase UUID v4 segment,
+ * each a `GET`, and each carrying no query at all. Everything else under
+ * `/api/v1/**` - a case's notes, its audit log, its status, its assignee, its
+ * related transactions, its current AI report, a `GET` of its resolution, any
+ * other unapproved suffix, a case status or assignee write, a note create, an
  * endpoint that does not exist yet - is refused here rather than relayed. The
  * list grows when a screen's E2E really needs an address and not before: an
  * endpoint admitted ahead of the test that needs it is an address this suite
@@ -91,20 +96,25 @@ const TRANSACTION_DETAIL_PATH = new RegExp(
   `^${TRANSACTION_LIST_PATH}/${CANONICAL_UUID_V4_PATTERN}$`,
 );
 
+/** `/api/v1/cases/{canonical lowercase UUID v4}`, and nothing after it. */
+const CASE_DETAIL_PATH = new RegExp(`^${CASE_LIST_PATH}/${CANONICAL_UUID_V4_PATTERN}$`);
+
 /** `/api/v1/cases/{canonical lowercase UUID v4}/resolution`, and nothing else. */
 const CASE_RESOLUTION_PROBE_PATH = new RegExp(
   `^${CASE_LIST_PATH}/${CANONICAL_UUID_V4_PATTERN}/resolution$`,
 );
 
 /**
- * The three read addresses this suite relays, and only these three.
+ * The four read addresses this suite relays, and only these four.
  *
  * A `GET` carrying no query is not a lesser request. It opens the same socket
  * and reaches the same Spring Boot handler as one carrying a query, so it
- * passes the same exact-address check: `GET /api/v1/cases/{caseId}`, its
- * `/notes` and its `/audit-logs` are well-formed, lowercase and absent from
- * this list, and being absent from this list is the whole of why they are
- * refused.
+ * passes the same exact-address check. The case detail address was added here
+ * for the screen that now sends it, and adding it admitted exactly one more
+ * address: `/notes`, `/audit-logs`, `/status`, `/assignee`, `/transactions` and
+ * `/ai-reports/current` under the same identifier are well-formed, lowercase
+ * and still absent from this list, and being absent from this list is the whole
+ * of why they are refused.
  */
 const RELAYABLE_READ_PATHS: readonly RelayableEndpoint[] = [
   {
@@ -148,6 +158,15 @@ const RELAYABLE_READ_PATHS: readonly RelayableEndpoint[] = [
       "size",
       "sort",
     ],
+  },
+  {
+    // One canonical lowercase UUID v4 segment under `/cases/` and nothing after
+    // it. The detail endpoint declares no query, so it may carry none - not
+    // `?page=0`, not a case filter it shares a prefix with, and not a bare `?`.
+    name: "case-detail",
+    method: "GET",
+    matches: (pathname) => CASE_DETAIL_PATH.test(pathname),
+    queryNames: null,
   },
 ];
 
@@ -626,9 +645,10 @@ function parseRelayedResponse(raw: Buffer): Omit<RelayedResponse, "target"> {
  *    shape this suite parses? This is syntax, and syntax is not approval. A
  *    path can be perfectly well-formed and still be an endpoint this suite has
  *    no business reaching;
- * 2. is this method at this exact address one of the four endpoints declared
- *    above? Method and address are decided together, so `POST` to a read
- *    address and `GET` to the write probe are both refused here;
+ * 2. is this method at this exact address one of the five endpoints declared
+ *    above - the four reads, or the one write probe? Method and address are
+ *    decided together, so `POST` to a read address and `GET` to the write probe
+ *    are both refused here;
  * 3. the declared write probe carries no query, which is checked rather than
  *    assumed;
  * 4. a read address is matched against `RELAYABLE_READ_PATHS` whether or not it
@@ -943,6 +963,17 @@ const NOT_FOUND_SCREEN_COPY: readonly string[] = [
 ];
 
 /**
+ * The same, for the case detail screen. Its own list rather than a shared one:
+ * the two screens carry different sentences, and a collision check is only
+ * meaningful against the copy actually on the page under test.
+ */
+const CASE_NOT_FOUND_SCREEN_COPY: readonly string[] = [
+  "Case not found",
+  "No case with this identifier is available. Return to the case list.",
+  "No record shown.",
+];
+
+/**
  * JSON, or nothing. The caller's fixed refusal owns the failure, so the text
  * that would not parse is not named, quoted or re-thrown from here.
  */
@@ -1189,6 +1220,8 @@ const RELAY_REFUSALS: readonly string[] = [
 /** A canonical lowercase UUID v4 that names no case. */
 const SYNTHETIC_CASE_ID = "e2e00000-0000-4000-8000-00000000ca5e";
 const CASE_RESOLUTION_PATH = `/api/v1/cases/${SYNTHETIC_CASE_ID}/resolution`;
+/** `/api/v1/cases/{SYNTHETIC_CASE_ID}`, the one identified case address. */
+const CASE_DETAIL_TARGET = `${CASE_LIST_PATH}/${SYNTHETIC_CASE_ID}`;
 
 /**
  * Every request this relay must refuse, and why it is on the list.
@@ -1297,8 +1330,8 @@ const REFUSED_RELAY_REQUESTS: readonly {
     url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}?caseStatus=`,
   },
   // A query delimiter with nothing behind it, on every address this suite is
-  // otherwise allowed to reach - the two collections, the identified read and
-  // the one write probe. Each of them is admitted when it carries no `?` at
+  // otherwise allowed to reach - the two collections, the two identified reads
+  // and the one write probe. Each of them is admitted when it carries no `?` at
   // all, so each of them is the case where an empty query could have been
   // quietly rewritten into the approved target instead of refused. The last is
   // the combination a post-parse `endsWith("?")` test would miss.
@@ -1318,6 +1351,11 @@ const REFUSED_RELAY_REQUESTS: readonly {
     url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}/${SYNTHETIC_TRANSACTION_ID}?`,
   },
   {
+    why: "an empty query on the case detail address",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_DETAIL_TARGET}?`,
+  },
+  {
     why: "an empty query on the resolution probe",
     method: "POST",
     url: `${BACKEND_ORIGIN}${CASE_RESOLUTION_PATH}?`,
@@ -1326,6 +1364,30 @@ const REFUSED_RELAY_REQUESTS: readonly {
     why: "an empty query followed by a fragment",
     method: "GET",
     url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}?#content`,
+  },
+  // The identified case address takes no query at all, so every one of these
+  // is refused on an address the same `GET` reaches when it carries nothing
+  // after the path. `page` is a name the *list* endpoint really declares, which
+  // is precisely why it must not be honoured one segment deeper.
+  {
+    why: "a page number on the case detail address",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_DETAIL_TARGET}?page=0`,
+  },
+  {
+    why: "a declared case filter on the case detail address",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_DETAIL_TARGET}?caseStatus=OPEN`,
+  },
+  {
+    why: "an arbitrary query on the case detail address",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_DETAIL_TARGET}?include=notes`,
+  },
+  {
+    why: "a fragment on the case detail address",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_DETAIL_TARGET}#assignee`,
   },
   // The address rules.
   { why: "a fragment", method: "GET", url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}#content` },
@@ -1426,6 +1488,10 @@ const PERCENT_ENCODED_TRANSACTION_ID = "e2e00000-0000-4000-8000-000000000e2%65";
 const UPPERCASE_CASE_ID = "E2E00000-0000-4000-8000-00000000CA5E";
 const VERSION_1_CASE_ID = "e2e00000-0000-1000-8000-00000000ca5e";
 const INVALID_VARIANT_CASE_ID = "e2e00000-0000-4000-c000-00000000ca5e";
+/** The same identifier with its hyphens removed, and with its last character as `%65`. */
+const UNHYPHENATED_CASE_ID = SYNTHETIC_CASE_ID.replaceAll("-", "");
+const PERCENT_ENCODED_CASE_ID = "e2e00000-0000-4000-8000-00000000ca5%65";
+
 
 /**
  * Every address this relay must refuse for being one it was never approved to
@@ -1440,7 +1506,7 @@ const INVALID_VARIANT_CASE_ID = "e2e00000-0000-4000-c000-00000000ca5e";
  * well-formed path is not an approved endpoint, and these cases are what says
  * so.
  *
- * Three groups:
+ * Five groups:
  *
  * - reads this suite has no screen for. Every one is a valid lowercase
  *   `/api/v1/...` path carrying no query at all, and every one is refused.
@@ -1450,6 +1516,11 @@ const INVALID_VARIANT_CASE_ID = "e2e00000-0000-4000-c000-00000000ca5e";
  *   version, an RFC variant, the hyphens, a trailing slash, an extra segment,
  *   an encoded slash, an encoded backslash and a percent-encoded character are
  *   each a different address, and none is repaired into the approved one;
+ * - the case detail address written the same non-canonical ways. It is the read
+ *   this Issue admitted, so each deviation from its canonical lowercase UUID v4
+ *   is asserted against an address that really is allowed now;
+ * - the case detail address reached by a write method. It is admitted as a
+ *   `GET` and only a `GET`, so admitting the read admitted no write;
  * - the write probe, reached by another suffix, by another method, on another
  *   identifier shape, or carrying a query. The probe is one method at one
  *   address with nothing after the `?`, so the case status, assignee, note and
@@ -1461,11 +1532,9 @@ const REFUSED_UNAPPROVED_ENDPOINTS: readonly {
   readonly url: string;
 }[] = [
   // Valid, lowercase, query-free reads this suite is not approved to make.
-  {
-    why: "a case detail read",
-    method: "GET",
-    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${SYNTHETIC_CASE_ID}`,
-  },
+  // The case *detail* address is no longer among them - it is the one read this
+  // Issue admitted - so every one of these is a sibling of an address that is
+  // now allowed, which is exactly what makes their refusal worth asserting.
   {
     why: "a case note read",
     method: "GET",
@@ -1490,6 +1559,16 @@ const REFUSED_UNAPPROVED_ENDPOINTS: readonly {
     why: "a case resolution read",
     method: "GET",
     url: `${BACKEND_ORIGIN}${CASE_RESOLUTION_PATH}`,
+  },
+  {
+    why: "a case related-transactions read",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${SYNTHETIC_CASE_ID}/transactions`,
+  },
+  {
+    why: "a current AI case report read",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${SYNTHETIC_CASE_ID}/ai-reports/current`,
   },
   {
     why: "an unnamed suffix under a case",
@@ -1556,6 +1635,78 @@ const REFUSED_UNAPPROVED_ENDPOINTS: readonly {
     why: "a percent-encoded character inside a transaction identifier",
     method: "GET",
     url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}/${PERCENT_ENCODED_TRANSACTION_ID}`,
+  },
+  // The case detail address, written non-canonically. Each of these is one
+  // deviation from the address the relay now admits, and none is repaired into
+  // it: a relay that case-folded, re-hyphenated or decoded an identifier would
+  // be writing an address the application never asked for.
+  {
+    why: "an uppercase case identifier",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${UPPERCASE_CASE_ID}`,
+  },
+  {
+    why: "a version 1 case identifier",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${VERSION_1_CASE_ID}`,
+  },
+  {
+    why: "a case identifier with an invalid RFC variant",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${INVALID_VARIANT_CASE_ID}`,
+  },
+  {
+    why: "an unhyphenated case identifier",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${UNHYPHENATED_CASE_ID}`,
+  },
+  {
+    why: "a percent-encoded character inside a case identifier",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${PERCENT_ENCODED_CASE_ID}`,
+  },
+  {
+    why: "a case detail address with a trailing slash",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_DETAIL_TARGET}/`,
+  },
+  {
+    why: "a case detail address with an extra segment",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_DETAIL_TARGET}/notes`,
+  },
+  {
+    why: "a case identifier followed by an encoded slash",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_DETAIL_TARGET}%2Fnotes`,
+  },
+  {
+    why: "a case identifier followed by an encoded backslash",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_DETAIL_TARGET}%5Cnotes`,
+  },
+  // Method confusion on the one address the relay now reads. It is a `GET` and
+  // only a `GET`: the same address reached by any write method is refused
+  // before a process is spawned, so admitting the read admitted no write.
+  {
+    why: "the case detail address posted to",
+    method: "POST",
+    url: `${BACKEND_ORIGIN}${CASE_DETAIL_TARGET}`,
+  },
+  {
+    why: "the case detail address patched",
+    method: "PATCH",
+    url: `${BACKEND_ORIGIN}${CASE_DETAIL_TARGET}`,
+  },
+  {
+    why: "the case detail address put",
+    method: "PUT",
+    url: `${BACKEND_ORIGIN}${CASE_DETAIL_TARGET}`,
+  },
+  {
+    why: "the case detail address deleted",
+    method: "DELETE",
+    url: `${BACKEND_ORIGIN}${CASE_DETAIL_TARGET}`,
   },
   // The write probe, which is one method at one address and nothing else.
   {
@@ -1694,10 +1845,10 @@ test("the Backend relay refuses every endpoint it was not approved to reach", ()
  *
  * A closed endpoint allowlist is only worth having if it did not also close the
  * door on the reads and the one authorization probe this suite depends on: the
- * two collection addresses with and without their real queries, the transaction
- * detail address, and the case resolution probe. These are resolved rather than
- * relayed - the target is compared, no socket is opened - so the assertion is
- * about the boundary and not about the Backend.
+ * two collection addresses with and without their real queries, the two
+ * identified detail addresses, and the case resolution probe. These are
+ * resolved rather than relayed - the target is compared, no socket is opened -
+ * so the assertion is about the boundary and not about the Backend.
  *
  * Each target is also compared against the address it was asked for, byte for
  * byte. The relay forwards what the application wrote; it does not normalise,
@@ -1734,6 +1885,15 @@ test("the Backend relay still admits the real reads and the one declared write p
       method: "GET",
       url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}/${SYNTHETIC_TRANSACTION_ID}`,
       target: `${TRANSACTION_LIST_PATH}/${SYNTHETIC_TRANSACTION_ID}`,
+    },
+    {
+      // The identified case address, in exactly the form the detail screen
+      // sends it: one canonical lowercase UUID v4 segment, no query, no
+      // fragment and no trailing slash. This is the one address this Issue
+      // added, and it is admitted by the same exact-address rule as the rest.
+      method: "GET",
+      url: `${BACKEND_ORIGIN}${CASE_DETAIL_TARGET}`,
+      target: CASE_DETAIL_TARGET,
     },
     {
       method: "POST",
@@ -2903,6 +3063,220 @@ test("a real USER reaches the case console over the real Backend", async ({ page
 });
 
 /**
+ * One case, over the real Keycloak session and the real Spring Boot.
+ *
+ * The twin of the transaction detail test, for the second identified read this
+ * console makes. The identifier is synthetic and canonical, so Spring Boot
+ * really answers 404: nothing is seeded, no fixture is inserted and no response
+ * is invented, which is what makes the not-found screen evidence about the
+ * application rather than about a mock. The populated 200 screen is proved by
+ * the component and hook tests against the typed API contract, and an API mock
+ * is never presented here as real-Backend evidence.
+ */
+test("a real USER opens a case detail address and meets the real Backend 404", async ({
+  page,
+}) => {
+  const password = readUserPassword();
+  const consoleMessages: string[] = [];
+  page.on("console", (message) => consoleMessages.push(message.text()));
+
+  requireCondition(
+    CANONICAL_UUID_V4.test(SYNTHETIC_CASE_ID),
+    "The synthetic case identifier is not a canonical UUID v4.",
+  );
+  const detailRoute = `/cases/${SYNTHETIC_CASE_ID}`;
+  // The detail endpoint's answer is kept in this process so the assertions at
+  // the end can ask whether what Spring Boot actually said reached the screen.
+  // Nothing else about the relay changes: the same bytes reach the browser
+  // either way, and no sentinel is injected into them.
+  const backend = await installBackendRelay(page, { captureBodyOf: CASE_DETAIL_TARGET });
+  const detailRequests = () =>
+    backend.filter((entry) => entry.method === "GET" && entry.pathname === CASE_DETAIL_TARGET);
+
+  // A direct visit to the detail address while signed out. The guard removes
+  // the screen, and nothing is asked of the Backend: no credential lookup, no
+  // request, no probe.
+  await page.goto(`${APP_ORIGIN}${detailRoute}`);
+  await expect(page.getByRole("heading", { name: "Sign in required" })).toBeVisible();
+  requireCondition(backend.length === 0, "An unauthenticated case address reached the Backend.");
+  requireCondition((await publicationCount(page)) === 0, "A session existed before sign-in.");
+
+  // Signing in from that address, against the real Keycloak.
+  const tokenResponsePromise = page.waitForResponse(
+    (response) => response.url() === TOKEN_URL && response.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.locator("#username")).toBeVisible({ timeout: 30_000 });
+  await page.locator("#username").fill(USERNAME);
+  await page.locator("#password").fill(password);
+  await submitLogin(page);
+  const tokens = parseTokenResponse(await (await tokenResponsePromise).json());
+  requireTokenClaims(tokens);
+
+  // The return route, decided by the allowlist from the validated identifier:
+  // back to exactly the canonical detail address, with no query and no fragment
+  // added to it.
+  await page.waitForFunction(
+    (expected) => window.location.href === expected,
+    `${APP_ORIGIN}${detailRoute}`,
+  );
+  await expect(page.getByLabel("Authentication status")).toContainText("Signed in as");
+  await expect(
+    page.getByRole("heading", { name: `Case ${SYNTHETIC_CASE_ID}`, level: 2 }),
+  ).toBeVisible();
+
+  // One authorized request to the real case detail endpoint, answered by
+  // Spring Boot.
+  await expect(page.getByRole("alert")).toBeVisible({ timeout: 15_000 });
+  const requested = detailRequests();
+  requireCondition(requested.length === 1, "The case detail was not requested exactly once.");
+  requireCondition(
+    requested[0].target === CASE_DETAIL_TARGET,
+    "The case detail request carried a query string.",
+  );
+  requireCondition(requested[0].status === 404, "The real case detail request did not return 404.");
+
+  // The fixed not-found screen, and not one field of a record.
+  await expect(page.getByRole("alert")).toContainText("Case not found");
+  await expect(page.getByRole("main").getByRole("status")).toContainText("No record shown.");
+  requireCondition(
+    (await page.getByRole("main").locator("dd").count()) === 0,
+    "A case that does not exist still rendered record fields.",
+  );
+  // Nothing the Backend answered with is on screen, and nothing invented is
+  // either: no status code, no trace id, and none of the case vocabulary this
+  // Issue does not implement.
+  const screenText = (await page.getByRole("main").textContent()) ?? "";
+  for (const forbidden of [
+    "404",
+    "risk",
+    "Risk",
+    "score",
+    "Detection",
+    "Evidence",
+    "traceId",
+    "concurrencyVersion",
+    "Audit",
+    "AI report",
+  ]) {
+    requireCondition(!screenText.includes(forbidden), "The not-found screen disclosed more than it should.");
+  }
+
+  // A 404 is not a session verdict: the analyst is still signed in and can
+  // still leave the way they came.
+  await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Back to cases" })).toBeVisible();
+  requireCondition((await publicationCount(page)) === 1, "The 404 changed the published session.");
+
+  // The rail announces the case section as the current one at a canonical
+  // detail address, and says nothing about the ledger.
+  const railCases = page.getByRole("link", { name: "Cases", exact: true });
+  await expect(railCases).toHaveAttribute("href", "/cases");
+  await expect(railCases).toHaveAttribute("aria-current", "page");
+  requireCondition(
+    (await page.locator('[aria-current="page"]').count()) === 1,
+    "More than one navigation item claimed to be the current page.",
+  );
+  requireCondition(
+    (await page.locator('[aria-current="false"]').count()) === 0,
+    "A navigation item carried aria-current as the string false.",
+  );
+
+  // Nothing retries on its own: the count is unchanged after the screen has
+  // been sitting there, and no Retry control was offered for a 404.
+  requireCondition(
+    (await page.getByRole("button", { name: "Try again" }).count()) === 0,
+    "A case that does not exist offered a retry.",
+  );
+  await page.waitForTimeout(1_000);
+  requireCondition(detailRequests().length === 1, "The case screen retried or polled on its own.");
+
+  // The address bar holds the case identifier and nothing else, and the
+  // credentials reached neither the document, the URL, Web Storage nor the
+  // console.
+  const addressBar = new URL(page.url());
+  requireCondition(
+    addressBar.origin === APP_ORIGIN &&
+      addressBar.pathname === detailRoute &&
+      addressBar.search === "" &&
+      addressBar.hash === "",
+    "The case detail address carried more than the canonical route.",
+  );
+  const sensitive = [password, tokens.accessToken, tokens.idToken];
+  requireCondition(!(await browserContainsAny(page, sensitive)), "A credential reached DOM, URL, or Web Storage.");
+  requireCondition(
+    !consoleMessages.some((message) => sensitive.some((value) => value !== "" && message.includes(value))),
+    "A credential reached the browser console.",
+  );
+  // A read-only screen: no status change, no reassignment, no resolution, and
+  // no request to any case sub-resource either.
+  requireCondition(
+    backend.filter((entry) => entry.method !== "GET").length === 0,
+    "The case detail screen sent a business mutation.",
+  );
+  requireCondition(
+    backend.every(
+      (entry) => entry.pathname === CASE_DETAIL_TARGET || entry.pathname === CASE_LIST_PATH,
+    ),
+    "The case detail screen reached an endpoint outside the case read contract.",
+  );
+
+  // What the Backend actually answered, read from the relayed body rather than
+  // assumed. Every one of these values exists; none of them is for a reader.
+  const backendError = readBackendErrorFields(requested[0].body);
+  for (const value of [backendError.code, backendError.message, backendError.traceId]) {
+    requireCondition(
+      !CASE_NOT_FOUND_SCREEN_COPY.some((copy) => copy.includes(value)),
+      "A fixed console phrase contains a Backend error value, so non-reflection cannot be proven.",
+    );
+  }
+  // Each field, checked on its own so the refusal can name which boundary broke
+  // without ever naming the value that crossed it.
+  requireCondition(!(await documentExposes(page, backendError.code)), "Backend error code was exposed.");
+  requireCondition(
+    !(await documentExposes(page, backendError.message)),
+    "Backend error message was exposed.",
+  );
+  requireCondition(
+    !(await documentExposes(page, backendError.traceId)),
+    "Backend trace identifier was exposed.",
+  );
+  requireCondition(
+    !consoleMessages.some((entry) => entry.includes(backendError.code)),
+    "Backend error code was exposed.",
+  );
+  requireCondition(
+    !consoleMessages.some((entry) => entry.includes(backendError.message)),
+    "Backend error message was exposed.",
+  );
+  requireCondition(
+    !consoleMessages.some((entry) => entry.includes(backendError.traceId)),
+    "Backend trace identifier was exposed.",
+  );
+
+  // The design widths, on the live not-found screen.
+  for (const viewport of CONSOLE_VIEWPORTS) {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await expect(page.locator("header.rail")).toBeVisible();
+    requireCondition(
+      !(await documentOverflowsHorizontally(page)),
+      `The case detail page scrolled horizontally at ${String(viewport.width)}px.`,
+    );
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  // The way back really is the list, reached by the link the screen offers.
+  await page.getByRole("link", { name: "Back to cases" }).click();
+  await page.waitForFunction((expected) => window.location.href === expected, `${APP_ORIGIN}/cases`);
+  await expect(page.getByRole("heading", { name: "Cases", level: 2 })).toBeVisible();
+  requireCondition(
+    !(await documentOverflowsHorizontally(page)),
+    "The case list scrolled horizontally after returning from the detail screen.",
+  );
+  requireCondition((await publicationCount(page)) === 1, "Returning to the list changed the session.");
+});
+
+/**
  * The address of the test-only geometry fixture, served by the same Vite dev
  * server that serves the application.
  *
@@ -3042,8 +3416,32 @@ test("the populated case sheet scrolls inside its container and never the docume
   }
 
   // The two values that decide the width of the two widest columns are in
-  // actual cells, in full.
-  await expect(page.locator("td.cell-ref--id").first()).toHaveText(GEOMETRY_CASE_ID);
+  // actual cells, in full. The identifier is inside its detail anchor, whose
+  // accessible name states the anchor's purpose and names the case, and whose
+  // `href` is the canonical case route - no query, no fragment, no trailing
+  // slash.
+  const identifierCell = page.locator("td.cell-ref--id").first();
+  const identifierLink = identifierCell.locator("a");
+  await expect(identifierLink).toHaveAttribute("href", `/cases/${GEOMETRY_CASE_ID}`);
+  await expect(identifierLink).toHaveAccessibleName(
+    `View case details for ${GEOMETRY_CASE_ID}`,
+  );
+  // The identifier is in the cell once and only once, and the cell's text is
+  // the identifier alone: the anchor's purpose is carried by `aria-label`, not
+  // by a `.visually-hidden` prefix that would be laid out - absolutely
+  // positioned, in an unpositioned scroll container - past the edge of the
+  // document at the narrowest console width. What must not happen is the
+  // identifier itself appearing twice in the text, which is what a `title`, a
+  // hidden mirror or a duplicated cell would look like.
+  const identifierCellText = (await identifierCell.textContent()) ?? "";
+  requireCondition(
+    identifierCellText.split(GEOMETRY_CASE_ID).length - 1 === 1,
+    "The case identifier cell did not print the identifier exactly once.",
+  );
+  requireCondition(
+    identifierCellText.trim() === GEOMETRY_CASE_ID,
+    "The case identifier cell carried text beyond the identifier itself.",
+  );
   const longReference = page.locator("td.cell-ref--long").first();
   await expect(longReference).toHaveText(GEOMETRY_ASSIGNEE_REF);
   requireCondition(

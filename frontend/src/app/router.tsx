@@ -2,6 +2,7 @@ import { createBrowserRouter, type RouteObject } from "react-router-dom";
 import { AppShell } from "./AppShell";
 import { RequireCapability } from "./RequireCapability";
 import { AuthCallbackPage } from "../pages/AuthCallbackPage";
+import { CaseDetailPage } from "../pages/CaseDetailPage";
 import { CaseListPage } from "../pages/CaseListPage";
 import { HealthPage } from "../pages/HealthPage";
 import { HomePage } from "../pages/HomePage";
@@ -52,16 +53,38 @@ export const routes: RouteObject[] = [
         // separate Backend authorities, and a role that may read the ledger is
         // not thereby a role that may read investigations.
         //
-        // Exact `/cases` and no more. There is no case detail route yet, so
-        // `/cases/{caseId}` is not a route slot standing empty - it is simply
-        // not a route, and falls through to the catch-all below. The guard sits
-        // on the element, so a direct URL entry is decided exactly as a click on
-        // the rail is. It remains a convenience boundary: Backend re-decides
-        // authorization from the access token on every request.
+        // Exact `/cases` and no more. The detail route below is a separate
+        // route with its own path, not a widening of this one, so `/casesx` and
+        // every deeper path under `/cases/{caseId}` still fall through to the
+        // catch-all. `/cases/` is the exception React Router itself decides: it
+        // matches this exact route before any of this application's code runs,
+        // so a trailing slash renders the list rather than reaching the detail
+        // screen with an empty identifier. The guard sits on the element, so a direct
+        // URL entry is decided exactly as a click on the rail is. It remains a
+        // convenience boundary: Backend re-decides authorization from the
+        // access token on every request.
         path: "cases",
         element: (
           <RequireCapability capability="case:view">
             <CaseListPage />
+          </RequireCapability>
+        ),
+      },
+      {
+        // The case detail screen, behind the same capability as the case list -
+        // `case:view`, backed by Backend authority `case:read`. The parameter
+        // is a route *slot*, not a contract: `CaseDetailPage` decides from the
+        // location the browser's URL parser handed over - its pathname, search
+        // and hash - whether this address names a canonical case at all, and
+        // refuses it before any credential is looked up when it does not. That
+        // parsed location is the application's input boundary; a representation
+        // the browser resolved away before any of this ran is neither recovered
+        // nor told apart here. Anything that is not one segment under `/cases/`
+        // never reaches here - it falls through to the catch-all below.
+        path: "cases/:caseId",
+        element: (
+          <RequireCapability capability="case:view">
+            <CaseDetailPage />
           </RequireCapability>
         ),
       },

@@ -36,9 +36,10 @@ const ROUTES: RouteObject[] = [
         element: <p>Transaction detail stands in here.</p>,
       },
       { path: "cases", element: <p>Case list stands in here.</p> },
+      { path: "cases/:caseId", element: <p>Case detail stands in here.</p> },
       // The production router's catch-all, mirrored here rather than omitted.
       // A 404 renders *inside* the shell, so the navigation is on screen at
-      // `/cases/{id}`, `/casesx` and every other unrouted address - which is
+      // `/cases/`, `/casesx` and every other unrouted address - which is
       // precisely where a prefix-matched "current page" marker would lie.
       { path: "*", element: <p>Not found stands in here.</p> },
     ],
@@ -357,10 +358,15 @@ describe("AppShell capability navigation", () => {
     expect(container.innerHTML).not.toContain("/cases");
   });
 
-  it("marks the cases destination current only while it is the location", async () => {
+  it.each([
+    ["the case list", "/cases"],
+    ["a canonical case detail address", `/cases/${CANONICAL_CASE_ID}`],
+    ["a case detail address with the lowest canonical identifier", "/cases/00000000-0000-4000-8000-000000000000"],
+    ["a case detail address with the highest canonical identifier", "/cases/ffffffff-ffff-4fff-bfff-ffffffffffff"],
+  ])("marks the cases destination current at %s", async (_description, path) => {
     renderShell(
       createFakeAuthClient({ initialSession: { subject: "sub-1", roles: SHELL_ROLES } }),
-      "/cases",
+      path,
     );
 
     await waitFor(() => {
@@ -368,6 +374,9 @@ describe("AppShell capability navigation", () => {
     });
     const casesLink = screen.getByRole("link", { name: "Cases" });
     expect(casesLink).toHaveAttribute("aria-current", "page");
+    // The destination still points at the list itself. Being *inside* the case
+    // section is what the marker announces; it is not a second link.
+    expect(casesLink).toHaveAttribute("href", "/cases");
     // Exactly one `aria-current` in the markup, and its value is the token -
     // never the string "false", which is an attribute that is present.
     expect(casesLink.getAttributeNames().filter((name) => name === "aria-current")).toHaveLength(
@@ -382,17 +391,21 @@ describe("AppShell capability navigation", () => {
   });
 
   /**
-   * Every address that is *not* the case list, including the ones a prefix
-   * match would claim.
+   * Every address that is *not* in the case section, including the ones a
+   * prefix match would claim.
    *
    * `aria-current="page"` tells a screen-reader user "this link is where you
    * are". React Router decides that by prefix, so a `NavLink` to `/cases` calls
-   * itself current at `/cases/{id}` and at every unrouted address beneath it,
-   * and `end` narrows that only to the pathname - `/cases?caseStatus=OPEN` and
-   * `/cases#content` would still claim it. None of these is the case list, and
-   * the last three are not addresses this application routes at all: announcing
-   * a 404 as the case list would send someone looking for a table that is not
-   * on the page.
+   * itself current at every unrouted address beneath it, and `end` narrows that
+   * only to the pathname - `/cases?caseStatus=OPEN` and `/cases#content` would
+   * still claim it. The section is exactly two addresses: the list, and one
+   * case's detail named by a canonical lowercase UUID v4.
+   *
+   * The near-miss identifiers are the interesting half. An uppercase UUID, a
+   * UUID v1 and an invalid RFC variant each match the *route pattern* - one
+   * segment under `/cases/` - and are each a 404, because the screen behind
+   * that pattern refuses them. Announcing one as the current page would send
+   * someone looking for a record that is not on the page.
    *
    * This is a statement about the marker, not about routing. What each address
    * renders is decided by the router's own tests; what the shell may claim
@@ -400,10 +413,17 @@ describe("AppShell capability navigation", () => {
    */
   const nonCurrentCaseAddresses: readonly [string, string][] = [
     ["the case list with a trailing slash", "/cases/"],
-    ["a case detail address", `/cases/${CANONICAL_CASE_ID}`],
     ["an address that merely starts with the same characters", "/casesx"],
     ["the case list carrying a query", "/cases?caseStatus=OPEN"],
     ["the case list carrying a fragment", "/cases#content"],
+    ["a case detail address carrying a query", `/cases/${CANONICAL_CASE_ID}?tab=raw`],
+    ["a case detail address carrying a fragment", `/cases/${CANONICAL_CASE_ID}#assignee`],
+    ["a case detail address with a trailing slash", `/cases/${CANONICAL_CASE_ID}/`],
+    ["an uppercase case identifier", "/cases/5C2D1E0F-7A8B-4C9D-9E0F-1A2B3C4D5E60"],
+    ["a version 1 case identifier", "/cases/5c2d1e0f-7a8b-1c9d-9e0f-1a2b3c4d5e60"],
+    ["a case identifier with an invalid RFC variant", "/cases/5c2d1e0f-7a8b-4c9d-1e0f-1a2b3c4d5e60"],
+    ["a malformed case identifier", "/cases/not-a-uuid"],
+    ["a path below a case", `/cases/${CANONICAL_CASE_ID}/notes`],
     ["an unrelated address that is not routed at all", "/nowhere/at/all"],
   ];
 
@@ -431,9 +451,12 @@ describe("AppShell capability navigation", () => {
   );
 
   it("leaves no navigation item claiming to be the current page on a 404", async () => {
+    // An address under `/cases/` that the detail route does not match: two
+    // segments, so it falls to the catch-all. The rail is on screen there, and
+    // none of its destinations may claim it.
     renderShell(
       createFakeAuthClient({ initialSession: { subject: "sub-1", roles: SHELL_ROLES } }),
-      `/cases/${CANONICAL_CASE_ID}`,
+      `/cases/${CANONICAL_CASE_ID}/notes`,
     );
 
     await waitFor(() => {
@@ -520,6 +543,17 @@ describe("AppShell authentication controls", () => {
     ["a case list carrying a query", "/cases?status=OPEN", "status=OPEN"],
     ["a case list carrying a fragment", "/cases#content", "#content"],
     ["a case list carrying both", "/cases?status=OPEN#content", "status=OPEN"],
+    ["the canonical case detail route", `/cases/${CANONICAL_CASE_ID}`, null],
+    [
+      "a case detail route carrying a query",
+      `/cases/${CANONICAL_CASE_ID}?tab=raw`,
+      "tab=raw",
+    ],
+    [
+      "a case detail route carrying a fragment",
+      `/cases/${CANONICAL_CASE_ID}#assignee`,
+      "#assignee",
+    ],
     ["the root route", "/", null],
   ];
 
@@ -557,6 +591,41 @@ describe("AppShell authentication controls", () => {
         }
       }
       // The shell asks the Backend for nothing on the way to a sign-in.
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  /**
+   * Case addresses that are *almost* the canonical detail route.
+   *
+   * Each matches the route pattern - one segment under `/cases/` - and none is
+   * an address this application can open, so the return target is the default
+   * route rather than a repaired version of the input. Sending someone back to
+   * one of these after signing in would land them on a 404 with a case
+   * identifier in the address bar.
+   */
+  it.each([
+    ["a trailing slash", `/cases/${CANONICAL_CASE_ID}/`],
+    ["an uppercase identifier", "/cases/5C2D1E0F-7A8B-4C9D-9E0F-1A2B3C4D5E60"],
+    ["a version 1 identifier", "/cases/5c2d1e0f-7a8b-1c9d-9e0f-1a2b3c4d5e60"],
+    ["an invalid RFC variant", "/cases/5c2d1e0f-7a8b-4c9d-1e0f-1a2b3c4d5e60"],
+    ["a malformed identifier", "/cases/not-a-uuid"],
+    ["a path below a case", `/cases/${CANONICAL_CASE_ID}/notes`],
+  ])(
+    "returns to the default route after signing in from a case address with %s",
+    async (_label, path) => {
+      const fetchSpy = vi.fn();
+      vi.stubGlobal("fetch", fetchSpy);
+      const user = userEvent.setup();
+      const client = createFakeAuthClient();
+      renderShell(client, path);
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+      });
+      await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+      expect(client.calls.signIn).toEqual(["/"]);
       expect(fetchSpy).not.toHaveBeenCalled();
     },
   );

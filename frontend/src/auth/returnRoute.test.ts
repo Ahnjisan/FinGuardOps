@@ -53,7 +53,6 @@ describe("resolveReturnRoute", () => {
     ["a protocol-relative host named transactions", "//transactions"],
     ["an absolute URL ending in the transactions path", "https://evil.example/transactions"],
     ["the cases route with a trailing slash", "/cases/"],
-    ["a case detail route that does not exist", "/cases/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001"],
     ["a numeric case identifier", "/cases/1"],
     ["a sibling route sharing the cases prefix", "/casesx"],
     ["a route that merely contains the cases path", "/x/cases"],
@@ -117,14 +116,14 @@ describe("resolveReturnRoute", () => {
     }
   });
 
-  it("treats the cases route as a literal and never as a prefix", () => {
-    // Every one of these shares the prefix and none of them is a route this
-    // application has. There is no case detail route at all, so admitting a
-    // segment under `/cases/` would be a redirect to a 404 at best.
+  it("treats the cases literal as a literal and never as a prefix", () => {
+    // Every one of these shares the prefix and none of them is the case list.
+    // The one thing admitted under `/cases/` is a canonical identifier segment,
+    // decided separately below; a prefix match here would admit all of these
+    // too, and each is a redirect to a 404 at best.
     for (const suffix of [
       "/",
       "/1",
-      "/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
       "/../health",
       "//evil.example",
       "\\evil.example",
@@ -232,7 +231,136 @@ describe("resolveReturnRoute for the transaction detail route", () => {
     ["a javascript scheme", `javascript:${CANONICAL}`],
     ["a prefix sibling", `/transactionsx/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001`],
     ["a path merely containing the route", `/x${CANONICAL}`],
-    ["a different resource with the same shape", "/cases/2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001"],
+    ["a String object wrapping a canonical route", new String(CANONICAL)],
+    ["an array wrapping a canonical route", [CANONICAL]],
+    ["an object stringifying to a canonical route", { toString: () => CANONICAL }],
+  ];
+
+  it.each(rejectedDetail)("falls back to the default for %s", (_label, value) => {
+    expect(resolveReturnRoute(value)).toBe(DEFAULT_RETURN_ROUTE);
+  });
+
+  it("does not confuse the two identified routes", () => {
+    const id = "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001";
+    // The same identifier shape under two different collections. Each is
+    // admitted as itself and neither is rewritten into the other: a ledger
+    // address never becomes a case address, and a case address never becomes a
+    // ledger one.
+    expect(resolveReturnRoute(`/transactions/${id}`)).toBe(`/transactions/${id}`);
+    expect(resolveReturnRoute(`/cases/${id}`)).toBe(`/cases/${id}`);
+  });
+
+  it("never returns a value that is not rebuilt from a validated identifier", () => {
+    // The returned string is assembled here from the thirty-six validated
+    // characters, so a value that merely contains a canonical route cannot
+    // carry anything of its own through.
+    const hostile = `https://evil.example${CANONICAL}?token=hunter2#x`;
+    const resolved: string = resolveReturnRoute(hostile);
+
+    expect(resolved).toBe("/");
+    expect(resolved).not.toContain("evil.example");
+    expect(resolved).not.toContain("hunter2");
+  });
+
+  it("does not admit a route on the strength of decoding or trimming it", () => {
+    // Each of these becomes the canonical route once it is decoded, trimmed or
+    // both - which is exactly why neither is done. The value is judged as
+    // written, so all three are refused even though the "repaired" form of each
+    // one is a route this allowlist does admit.
+    const repairable = [
+      ` ${CANONICAL} `,
+      "/transactions/%32f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
+      " /transactions/%32f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001 ",
+    ];
+    for (const value of repairable) {
+      expect(resolveReturnRoute(value)).toBe("/");
+      // The repair really would have produced an admitted route.
+      expect(resolveReturnRoute(decodeURIComponent(value.trim()))).toBe(CANONICAL);
+    }
+  });
+});
+
+/**
+ * The second parameterized destination.
+ *
+ * `/cases` stays a literal; what is added here is the same *shape* the ledger
+ * detail route uses - one path segment that is already a canonical lowercase
+ * UUID v4 - applied under `/cases/`, and nothing that merely shares a prefix
+ * with it. Each rejected value below is a real attempt at the usual ways an
+ * allowlist built on `startsWith`, `includes`, a permissive pattern, a decode
+ * or a trim is walked past, and every one of them is an address a signed-out
+ * analyst could arrive at before being sent to the Authorization Server.
+ *
+ * The case sub-resources are on the list on purpose. `/notes`, `/audit-logs`
+ * and `/resolution` are real Backend endpoints with no screen in this console,
+ * so a prefix match would send someone back to a 404 with a case identifier in
+ * the address bar.
+ */
+describe("resolveReturnRoute for the case detail route", () => {
+  const CASE_ID = "5c2d1e0f-7a8b-4c9d-9e0f-1a2b3c4d5e60";
+  const CANONICAL = `/cases/${CASE_ID}`;
+
+  it("allows a canonical case detail route", () => {
+    expect(resolveReturnRoute(CANONICAL)).toBe(CANONICAL);
+  });
+
+  it("allows every canonical variant character the format admits", () => {
+    // Both ends of the hex range and all four RFC 4122 variant nibbles. A
+    // variant this application refused would be a case Backend can mint and
+    // this console could never return to.
+    for (const id of [
+      "00000000-0000-4000-8000-000000000000",
+      "ffffffff-ffff-4fff-bfff-ffffffffffff",
+      "5c2d1e0f-7a8b-4c9d-9c9d-1a2b3c4d5e60",
+      "5c2d1e0f-7a8b-4c9d-ac9d-1a2b3c4d5e60",
+    ]) {
+      expect(resolveReturnRoute(`/cases/${id}`)).toBe(`/cases/${id}`);
+    }
+  });
+
+  const rejectedDetail: Array<[string, unknown]> = [
+    ["an uppercase UUID", "/cases/5C2D1E0F-7A8B-4C9D-9E0F-1A2B3C4D5E60"],
+    ["a mixed-case UUID", "/cases/5c2d1e0f-7a8b-4c9d-9e0f-1A2B3C4D5E60"],
+    ["a version 1 UUID", "/cases/5c2d1e0f-7a8b-1c9d-9e0f-1a2b3c4d5e60"],
+    ["a version 3 UUID", "/cases/5c2d1e0f-7a8b-3c9d-9e0f-1a2b3c4d5e60"],
+    ["a version 5 UUID", "/cases/5c2d1e0f-7a8b-5c9d-9e0f-1a2b3c4d5e60"],
+    ["an invalid RFC variant nibble", "/cases/5c2d1e0f-7a8b-4c9d-1e0f-1a2b3c4d5e60"],
+    ["a variant nibble of c", "/cases/5c2d1e0f-7a8b-4c9d-ce0f-1a2b3c4d5e60"],
+    ["a UUID with no hyphens", "/cases/5c2d1e0f7a8b4c9d9e0f1a2b3c4d5e60"],
+    ["a UUID one digit short", "/cases/5c2d1e0f-7a8b-4c9d-9e0f-1a2b3c4d5e6"],
+    ["a UUID one digit long", "/cases/5c2d1e0f-7a8b-4c9d-9e0f-1a2b3c4d5e600"],
+    ["a trailing slash", `${CANONICAL}/`],
+    ["a notes sub-resource", `${CANONICAL}/notes`],
+    ["an audit-log sub-resource", `${CANONICAL}/audit-logs`],
+    ["a resolution sub-resource", `${CANONICAL}/resolution`],
+    ["a related-transactions sub-resource", `${CANONICAL}/transactions`],
+    ["a query string", `${CANONICAL}?tab=raw`],
+    ["a fragment", `${CANONICAL}#assignee`],
+    ["a semicolon parameter", `${CANONICAL};jsessionid=1`],
+    ["a leading space", ` ${CANONICAL}`],
+    ["a trailing space", `${CANONICAL} `],
+    ["an inner space", "/cases/5c2d1e0f-7a8b-4c9d-9e0f 1a2b3c4d5e60"],
+    ["a tab character", `${CANONICAL}\t`],
+    ["a newline", `${CANONICAL}\n`],
+    ["a carriage return", `${CANONICAL}\r`],
+    ["a null character", `${CANONICAL}\u0000`],
+    ["an encoded slash", `${CANONICAL}%2fnotes`],
+    ["an encoded backslash", `${CANONICAL}%5cnotes`],
+    ["a percent-encoded first digit", "/cases/%35c2d1e0f-7a8b-4c9d-9e0f-1a2b3c4d5e60"],
+    ["a double-encoded slash", `${CANONICAL}%252f`],
+    ["an encoded dot segment", "/cases/%2e%2e/health"],
+    ["a raw dot segment", "/cases/../admin"],
+    ["a duplicate separator", `/cases//${CASE_ID}`],
+    ["a leading duplicate separator", `/${CANONICAL}`],
+    ["a backslash separator", `\\cases\\${CASE_ID}`],
+    ["an absolute https URL", `https://evil.example${CANONICAL}`],
+    ["an absolute http URL", `http://localhost:5173${CANONICAL}`],
+    ["a protocol-relative URL", `//evil.example${CANONICAL}`],
+    ["userinfo in an absolute URL", `https://user:pass@evil.example${CANONICAL}`],
+    ["a different port on the same host", `http://localhost:8080${CANONICAL}`],
+    ["a javascript scheme", `javascript:${CANONICAL}`],
+    ["a prefix sibling", `/casesx/${CASE_ID}`],
+    ["a path merely containing the route", `/x${CANONICAL}`],
     ["a String object wrapping a canonical route", new String(CANONICAL)],
     ["an array wrapping a canonical route", [CANONICAL]],
     ["an object stringifying to a canonical route", { toString: () => CANONICAL }],
@@ -261,8 +389,8 @@ describe("resolveReturnRoute for the transaction detail route", () => {
     // one is a route this allowlist does admit.
     const repairable = [
       ` ${CANONICAL} `,
-      "/transactions/%32f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001",
-      " /transactions/%32f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001 ",
+      "/cases/%35c2d1e0f-7a8b-4c9d-9e0f-1a2b3c4d5e60",
+      " /cases/%35c2d1e0f-7a8b-4c9d-9e0f-1a2b3c4d5e60 ",
     ];
     for (const value of repairable) {
       expect(resolveReturnRoute(value)).toBe("/");

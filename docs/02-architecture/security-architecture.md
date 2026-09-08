@@ -428,7 +428,8 @@ USER actor UUID, token, claim과 principal 원문은 응답·로그·metadata에
 - refresh token은 별도 Frontend Issue다. role·authority 기반 권한 UI의 판정 계층과 route
   guard는 Issue #243에서 구현했고, Issue #249에서 첫 production 보호 route `/transactions`에,
   Issue #251에서 조회 전용 거래 상세 route `/transactions/{transactionId}`에, Issue #253에서
-  조회 전용 사건 목록 route `/cases`에 적용했다.
+  조회 전용 사건 목록 route `/cases`에, Issue #255에서 조회 전용 사건 상세 route
+  `/cases/{caseId}`에 적용했다.
 - Frontend UI capability 이름(`transaction:view`, `case:view`)과 Backend authority 이름
   (`transaction:read`, `case:read`)은 서로 다른 계층의 이름이므로 혼용하지 않는다. 최종 판정은
   Backend authority에만 있다.
@@ -864,8 +865,8 @@ element에 있으므로 rail 클릭과 직접 URL 진입이 같은 판정을 받
   `/casesx`, query·fragment가 붙은 주소, encoded slash·backslash, 중복 separator, absolute·
   protocol-relative URL, userinfo, 다른 origin·scheme·port는 모두 기본 route `/`로
   fail-closed된다. query·fragment를 제거한 뒤 `/cases`로 재허용하지 않으며, 거부된 입력은
-  화면·오류·`console`·DOM 어디에도 반사되지 않는다. 사건 상세 route가 없으므로 `/cases` 아래에
-  parameterized 복귀 형태도 없다.
+  화면·오류·`console`·DOM 어디에도 반사되지 않는다. `/cases/{caseId}`는 Issue #253 시점에는
+  복귀 형태가 아니었고, Issue #255에서 canonical 형태 하나만 아래와 같이 추가했다.
 - 401은 요청을 서명한 session만 무효화하고 사건 데이터를 즉시 제거한다. 이미 교체된 session의
   stale 401은 no-op이며 새 session과 그 데이터를 제거하지 않는다. 403은 session과 capability를
   유지한 채 고정 `Access denied` 상태로 수렴하고 retry를 제공하지 않는다. 어떤 상태 코드에서도
@@ -882,8 +883,60 @@ element에 있으므로 rail 클릭과 직접 URL 진입이 같은 판정을 받
   이 runtime에는 seed된 사건 row가 없으므로 deterministic empty 상태도 통과 조건으로 인정하며,
   Backend·DB·Infra에 test data 생성 경로를 추가하지 않는다.
 
-Issue #253에서도 Backend, AI Service, Infra, Keycloak, DB와 API 계약 변경은 없다. 사건 상세,
-상태 변경, 담당자 변경, 최종 판정, 조사 메모와 감사 이력 화면은 아직 구현되지 않았다.
+Issue #253에서도 Backend, AI Service, Infra, Keycloak, DB와 API 계약 변경은 없다.
+
+Issue #255는 같은 capability를 조회 전용 사건 상세 route `/cases/{caseId}`로 확장했다. Frontend
+capability는 계속 `case:view`, Backend authority는 계속 `case:read`이며, 새 capability·새
+authority·새 endpoint는 추가하지 않았다. guard는 route element에 있으므로 목록의 Case ID link
+클릭과 직접 URL 진입이 같은 판정을 받는다.
+
+- 접근 허용 role은 4장 capability matrix 그대로 `FDS_VIEWER`, `FDS_ANALYST`, `FDS_APPROVER`다.
+  `RULE_OPERATOR`, `RECOVERY_OPERATOR`, `PLATFORM_ADMIN` session은 `AccessDeniedPage`로
+  수렴하며, 그 화면에는 role 이름도 capability 이름도 요청한 사건 식별자도 남지 않는다.
+  미인증·인증 오류·session invalidation에서도 보호 내용이 제거되고, 이 모든 경로에서 credential
+  조회와 Backend 요청은 0회다.
+- route는 canonical lowercase UUID v4 한 segment만 받아들인다. 판정 대상은 `useParams()`가
+  percent-decode해 넘긴 값이 아니라 `useLocation()`의 `pathname`·`search`·`hash`이므로,
+  `%35...`처럼 decode하면 canonical이 되는 주소도 거부된다. uppercase, UUID v1/v3/v5, 잘못된 RFC
+  variant, hyphen 없는 형태, trailing slash, 추가 segment, matrix parameter, query, fragment,
+  `%2F`·`%5C`, double encoding, malformed percent, 살아남은 whitespace·control character는 모두
+  고정 `This is not a case address` 상태로 fail-closed되며, 이 경로에서 credential 조회와
+  `fetch`는 0회이고 입력값의 어떤 부분도 화면·오류·`console`·DOM 속성에 반사되지 않는다.
+- 로그인 후 복귀 allowlist에는 canonical `/cases/{caseId}` 한 형태만 추가했다. prefix 매칭이
+  아니라 한 segment를 떼어 `isCanonicalUuidV4`로 검사하고 통과한 36자로 경로를 다시 조립하므로
+  입력 문자열 자체는 반환되지 않으며, `/cases/{caseId}/notes`·`/audit-logs`·`/resolution`·
+  `/transactions`, query·fragment가 붙은 주소, non-canonical 식별자는 모두 기본 route `/`로
+  fail-closed된다.
+- 401은 요청을 서명한 session만 무효화하고 사건 데이터를 즉시 제거한다. 이미 교체된 session의
+  stale 401은 no-op이다. 403과 404는 session을 유지하고 각각 고정 `Access denied`,
+  `Case not found` 화면으로 수렴하며 retry를 제공하지 않는다. 어떤 상태 코드에서도 Backend
+  `code`·`message`·`traceId`·raw body·token·role claim은 화면에도 `console`에도 나오지 않으며,
+  malformed 응답은 일부 필드만 표시하지 않고 전체를 거부한다.
+- hook이 게시하는 성공 값은 응답 10개 필드를 field 단위로 복사한 새 객체 하나뿐이다. envelope,
+  parse된 `case` 객체, `traceId`, raw error body, credential, token, request header는 React state
+  경계 앞에서 폐기되므로 state 직렬화·DevTools·error reporter 어디에서도 도달할 수 없다.
+- 요청당 `fetch`는 최대 1회이고 자동 retry·replay·polling은 0회다. 화면에는 mutation form·
+  button·요청이 하나도 없으며, `concurrencyVersion`은 읽기 전용 표시로만 쓰이고 어떤 요청에도
+  `expectedVersion`으로 실리지 않는다.
+- E2E relay allowlist에는 `GET /api/v1/cases/{canonical lowercase UUID v4}` 한 종류만 추가했다.
+  query를 실을 수 없고, 같은 주소의 `POST`·`PATCH`·`PUT`·`DELETE`와 non-canonical 식별자,
+  trailing slash, 추가 segment, encoded slash·backslash, `/notes`·`/audit-logs`·`/status`·
+  `/assignee`·`/resolution` `GET`·`/transactions`·`/ai-reports/current`는 계속 거부된다. 기존
+  resolution `POST` authorization probe 한 종류도 그대로다.
+- browser E2E는 로그아웃 상태의 canonical 사건 상세 주소 직접 진입에서 Backend 요청 0회, 그
+  주소에서의 실제 Keycloak 로그인과 exact route 복귀, 실제 Backend
+  `GET /api/v1/cases/{caseId}` 1회 404, 고정 `Case not found` 화면과 상세 field 0개, session
+  유지, 자동 retry 0회, mutation 0회, `Back to cases` 복귀, Cases navigation `aria-current`,
+  세 viewport에서 가로 overflow 부재, credential 비노출을 확인한다. 거래 상세와 같은 방식으로
+  실제 404 body의 `code`·`message`·`traceId`를 E2E process memory에서만 파싱해 각 값이 rendered
+  text, markup, attribute, `title`, 주소창, `history.state`, Web Storage, `console`에 존재하지
+  않음을 확인하며, body mock과 sentinel 주입은 없다. 이 runtime에는 seed된 사건 row가 없으므로
+  상세 200 화면은 typed API fixture를 쓰는 component·hook test가 담당하고, Backend·DB에 fixture나
+  seed를 추가하지 않는다.
+
+Issue #255에서도 Backend, AI Service, Infra, Keycloak, DB와 API 계약 변경은 없다. 사건 상태 변경,
+담당자 변경, 최종 판정, 조사 메모, 감사 이력, 연관 거래, Detection·Rule Evidence와 AI 사건 리포트
+화면, 그리고 mutation UI는 아직 구현되지 않았다.
 
 Stock Keycloak은 HTTP와 HTTPS에 공통 listener host를 적용하므로 2026-09-05 OWNER 결정에 따라
 `KC_HTTP_HOST=0.0.0.0`을 사용한다. HTTPS 8443만 host `127.0.0.1`에 publish하고 HTTP 8082와

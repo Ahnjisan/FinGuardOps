@@ -121,9 +121,10 @@ AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 
 - `frontend/`: React·TypeScript·Vite foundation, Router, public health client, OIDC
   Authorization Code + PKCE 인증 경계, 인증 API transport와 권한 UI, capability로 보호되는
   production 업무 화면인 거래 목록(`/transactions`), 조회 전용 거래 상세
-  (`/transactions/{transactionId}`)와 조회 전용 사건 목록(`/cases`), FDS operations console
-  디자인 기반이 구현되었으며 사건 상세·workflow·최종 판정·조사 메모·감사 이력 화면,
-  운영 대시보드와 콘솔 전체의 최종 시각적 리뉴얼은 구현되지 않음
+  (`/transactions/{transactionId}`), 조회 전용 사건 목록(`/cases`)과 조회 전용 사건 상세
+  (`/cases/{caseId}`), FDS operations console 디자인 기반이 구현되었으며 사건 workflow·담당자
+  변경·최종 판정·조사 메모·감사 이력·연관 거래·Detection·Rule Evidence·AI 사건 리포트 화면과
+  mutation UI, 운영 대시보드, 콘솔 전체의 최종 시각적 리뉴얼은 구현되지 않음
 - `infra/`: Issue #196의 로컬 Compose Prometheus scrape·External Risk 검증 fixture,
   Issue #199의 service 수준 recording rule 14개와 Issue #201의 로컬 실패율 alert rule
   6개·deterministic test, Issue #203의 로컬 Alertmanager routing·signal별 inhibition·
@@ -295,10 +296,10 @@ React는 API 계약을 임의로 만들거나 금융 업무 상태를 자체 확
 
 #### 현재 구현된 업무 화면
 
-거래 목록(`/transactions`, Issue #249), 거래 상세(`/transactions/{transactionId}`, Issue #251)와
-사건 목록(`/cases`, Issue #253) 셋이다. 앞의 둘은 Frontend UI capability `transaction:view`로,
-사건 목록은 `case:view`로 보호하며, 최종 판정은 각각 Backend authority `transaction:read`,
-`case:read`와 401·403 응답이 내린다. Frontend capability와 Backend authority는 서로 다른 계층에
+거래 목록(`/transactions`, Issue #249), 거래 상세(`/transactions/{transactionId}`, Issue #251),
+사건 목록(`/cases`, Issue #253)과 사건 상세(`/cases/{caseId}`, Issue #255) 넷이다. 앞의 둘은
+Frontend UI capability `transaction:view`로, 뒤의 둘은 `case:view`로 보호하며, 최종 판정은 각각
+Backend authority `transaction:read`, `case:read`와 401·403 응답이 내린다. Frontend capability와 Backend authority는 서로 다른 계층에
 속하므로 혼용하지 않는다.
 
 목록은 filter·sort·pagination과 loading·empty·error·data 상태를 갖는다. 상세는 조회 전용이며
@@ -324,8 +325,10 @@ offset으로 Asia/Seoul(KST)로 표시하며, 금액은 문자열·`BigInt` 경�
 filter·table·definition list·feedback 표현)은 `frontend/src/styles/app.css` 한 곳에 있고 이후
 업무 화면이 재사용한다. 콘솔 전체의 최종 시각적 리뉴얼은 후속 작업이다.
 
-사건 목록은 조회 전용이며 이번 범위에서 사건 상세 route와 사건 ID link를 만들지 않는다. 행 전체를
-클릭 가능하게 만들지 않고, 상태 변경·담당자 변경·최종 판정·사건 생성 action도 없다. 표시하는 값은
+사건 목록은 조회 전용이다. 목록에서 상세로 가는 경로는 행 전체 클릭이 아니라 Case ID cell의
+명시적 anchor 하나이며, 그 `href`는 검증된 canonical lowercase UUID v4로 조립한 exact
+`/cases/{caseId}`로 query·fragment를 붙이지 않는다. 상태 변경·담당자 변경·최종 판정·사건 생성
+action은 없다. 표시하는 값은
 `FraudCase` 목록 응답이 실제로 담는 `caseId`, `caseStatus`, `finalDisposition`, `assigneeRef`,
 `relatedTransactionCount`, `createdAt`, `lastChangedAt` 일곱 개뿐이다. 위험도·우선순위·SLA·
 `DetectionResult`·`DetectionEvidence`와 거래 상세 정보는 응답에 없으므로 추정하거나 만들지 않으며,
@@ -334,9 +337,25 @@ filter·table·definition list·feedback 표현)은 `frontend/src/styles/app.css
 `FraudCaseQueryValidator` 계약 안에서만 동작하고, 생성 시간 범위와 최종 변경 시간 범위는 서로
 독립적으로 검증한다.
 
-Issue #251과 Issue #253 모두에서 Backend, AI Service, Infra, Keycloak, DB와 API 계약 변경은 없다.
-사건 상세·workflow·resolution·조사 메모·감사 이력 화면은 후속 Issue이며, 콘솔 전체의 최종 시각적
-리뉴얼도 후속 작업으로 남아 있다.
+사건 상세는 조회 전용이며 `GET /api/v1/cases/{caseId}` 응답의 10개 필드만 읽기 전용 `<dl>`로
+표시한다. `caseId`, `caseStatus`, `finalDisposition`, `assigneeRef`, `relatedTransactionCount`,
+`createdAt`, `reviewStartedAt`, `closedAt`, `lastChangedAt`, `concurrencyVersion`이 전부이며,
+`concurrencyVersion`은 optimistic locking token으로 사용하지 않는 읽기 전용 Record metadata다.
+계약에 없는 `updatedAt`·위험도·탐지 결과·Rule Evidence·연관 거래·조사 메모·감사 이력·AI 리포트는
+만들지 않고, 변경 시각은 계약 그대로 `lastChangedAt`으로 표시한다. nullable 네 필드는 값을
+추정하지 않고 presentation 단계에서만 고정 문구(`Not decided`·`Unassigned`·`Not started`·
+`Not closed`)로 바꾼다. 상세 route는 거래 상세와 같은 규칙으로 canonical lowercase UUID v4만
+받아들이며, query·fragment·trailing slash·추가 segment가 붙은 주소는 credential 조회와 Backend
+요청 0회로 거부된다. 화면에는 mutation form·button·요청이 하나도 없고, 상태는 loading, data,
+case not found(404), access denied(403), authentication required(401), timeout, network failure,
+invalid response, generic error, explicit retry, 고정 invalid-route로 나뉘며 404와 403에는 retry를
+제공하지 않는다. Backend `code`·`message`·`traceId`와 raw body는 DOM에도 `console`에도 나오지
+않는다.
+
+Issue #251, Issue #253과 Issue #255 모두에서 Backend, AI Service, Infra, Keycloak, DB와 API 계약
+변경은 없다. 사건 workflow·담당자 변경·resolution·조사 메모·감사 이력·연관 거래·Detection·
+Rule Evidence·AI 사건 리포트 화면과 mutation UI는 후속 Issue이며, 콘솔 전체의 최종 시각적 리뉴얼도
+후속 작업으로 남아 있다.
 
 ### 7.2 Spring Boot Modular Monolith
 
