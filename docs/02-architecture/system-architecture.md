@@ -67,7 +67,7 @@
   최초 fetch가 1회만 실행되는 module-level in-flight 요청 공유(영구 캐시 없음, unmount 이후
   미갱신)를 구현. `/auth/callback` route와 `oidc-client-ts` 기반 Authorization Code + PKCE
   인증 경계(memory-only token, transient transaction record만 sessionStorage, 최대 15분 hard
-  session deadline, local logout)도 구현되었으며 Backend 보호 API 호출·권한 UI는 없음
+  session deadline, local logout), Backend 보호 API 호출과 capability 기반 권한 UI가 구현됨
 
 현재 백엔드는 Health Check, 거래 접수·조회, 행동 이벤트 접수와 내부 Rule
 평가용 조회를 구현한다. 거래·멱등·행동 이벤트,
@@ -122,8 +122,8 @@ AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 
   Authorization Code + PKCE 인증 경계, 인증 API transport와 권한 UI, capability로 보호되는
   production 업무 화면인 거래 목록(`/transactions`), 조회 전용 거래 상세
   (`/transactions/{transactionId}`), 조회 전용 사건 목록(`/cases`)과 조회 전용 사건 상세
-  (`/cases/{caseId}`), 그 상세 하단의 읽기 전용 감사 이력 section, FDS operations console 디자인
-  기반이 구현되었으며 사건 workflow·담당자 변경·최종 판정·조사 메모·연관 거래·Detection·Rule Evidence·AI 사건 리포트 화면과
+  (`/cases/{caseId}`), 그 상세의 읽기 전용 Investigation notes·Audit history section, FDS operations console 디자인
+  기반이 구현되었으며 사건 workflow·담당자 변경·최종 판정·조사 메모 mutation·별도 notes route·연관 거래·Detection·Rule Evidence·AI 사건 리포트 화면과
   mutation UI, 운영 대시보드, 콘솔 전체의 최종 시각적 리뉴얼은 구현되지 않음
 - `infra/`: Issue #196의 로컬 Compose Prometheus scrape·External Risk 검증 fixture,
   Issue #199의 service 수준 recording rule 14개와 Issue #201의 로컬 실패율 alert rule
@@ -342,7 +342,7 @@ action은 없다. 표시하는 값은
 표시한다. `caseId`, `caseStatus`, `finalDisposition`, `assigneeRef`, `relatedTransactionCount`,
 `createdAt`, `reviewStartedAt`, `closedAt`, `lastChangedAt`, `concurrencyVersion`이 전부이며,
 `concurrencyVersion`은 optimistic locking token으로 사용하지 않는 읽기 전용 Record metadata다.
-계약에 없는 `updatedAt`·위험도·탐지 결과·Rule Evidence·연관 거래·조사 메모·AI 리포트는
+Case record 계약에 없는 `updatedAt`·위험도·탐지 결과·Rule Evidence·연관 거래·조사 메모·AI 리포트 field는
 만들지 않고, 변경 시각은 계약 그대로 `lastChangedAt`으로 표시한다. nullable 네 필드는 값을
 추정하지 않고 presentation 단계에서만 고정 문구(`Not decided`·`Unassigned`·`Not started`·
 `Not closed`)로 바꾼다. 상세 route는 거래 상세와 같은 규칙으로 canonical lowercase UUID v4만
@@ -362,8 +362,31 @@ action·reasonCode·actorType과 summary enum은 raw code로 표시한다. null 
 null assignee는 `Unassigned`, noteId는 링크 없는 텍스트다. pagination은 section local state이며
 `page=0`, `size=20`, `sort=changedAt,desc`로 시작하고 size는 20·50·100만 제공한다.
 
-Issue #251, Issue #253, Issue #255와 Issue #257 모두에서 Backend, AI Service, Infra, Keycloak,
-DB와 API 계약 변경은 없다. 사건 workflow·담당자 변경·resolution·조사 메모·연관 거래·Detection·
+Issue #259는 같은 상세 화면에서 Case record와 Audit history 사이에 read-only
+`Investigation notes` section을 추가한다. detail·notes·audit는 같은 commit에서 독립적으로 병렬
+시작하며 detail 403/404만 두 하위 section을 함께 unmount한다. notes 자체의 403·404·transport·계약
+오류는 notes section 안에만 격리된다. 기존 `fetchInvestigationNoteList`, endpoint registry,
+authorized transport, DTO validator, pagination·KST helper를 재사용하며 API·DB 계약은 바꾸지 않는다.
+GET 성공은 응답의 모든 `item.caseId`가 requested caseId와 byte-exact equality이고 page metadata의
+`number`·`size`가 실제 요청값(생략 시 0·20)과 exact numeric equality일 때만 허용하고,
+하나라도 다르면 전체 page를 `invalid-response`로 폐기한다. 결합 확인이 끝난 `caseId`와 envelope의
+`traceId`는 공개 state에 게시하지 않는다.
+
+notes hook의 request identity는 session identity·caseId·page·size·고정 `createdAt,asc`·수동 retry
+attempt다. StrictMode replay는 grace-window flight 하나를 공유하고 zero-listener settle은 same-key
+subscriber에 replay할 terminal outcome만 보존한다. released 또는 duplicate settle은 lazy terminal
+factory를 실행하지 않는다. raw response와 stored outcome, 각 subscriber delivery는 item array·item·
+page 객체를 매번 field 단위로 재투영해 nested mutation을 전파하지 않는다. pagination은 section
+local state로 page 0·size 20에서 시작하고 20·50·100만 제공하며 size 변경은 page 0으로 돌아간다.
+자동 retry·polling·last-page correction은 없다.
+
+content는 React text node로 전체 렌더하며 `white-space: pre-wrap`과 wrapping만 적용한다. 따라서
+CR/LF·연속 공백을 보존하면서 HTML·Markdown·URL을 해석하거나 링크로 만들지 않고, 4,000 code point
+및 긴 unbroken text도 truncation 없이 viewport 안에서 줄바꿈한다. noteId는 링크 없는 metadata이고
+authorType·authorRef는 화면에서 Backend raw value 이상의 사람·이메일·역할 의미를 추정하지 않는다.
+
+Issue #251, Issue #253, Issue #255, Issue #257과 Issue #259 모두에서 Backend, AI Service, Infra, Keycloak,
+DB와 API 계약 변경은 없다. 사건 workflow·담당자 변경·resolution·조사 메모 작성·수정·삭제·연관 거래·Detection·
 Rule Evidence·AI 사건 리포트 화면과 mutation UI는 후속 Issue이며, 콘솔 전체의 최종 시각적 리뉴얼도
 후속 작업으로 남아 있다.
 

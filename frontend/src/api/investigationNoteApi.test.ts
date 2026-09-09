@@ -22,6 +22,7 @@ import {
 
 const BASE = "http://localhost:8080";
 const CASE_ID = "5c671624-8714-4bd7-871a-a9445e6f453e";
+const OTHER_CASE_ID = "6d782735-9825-4ce8-982b-ba556f70546f";
 /** Carries hex letters, so case sensitivity is actually observable. */
 const NOTE_ID = "10a0b0c0-0d0e-4f00-8a00-0b0c0d0e0f01";
 const USER_REF = "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001";
@@ -152,6 +153,52 @@ describe("fetchInvestigationNoteList", () => {
     expect(result.data.items).toEqual([]);
   });
 
+  it.each([
+    ["the default request", undefined, { number: 0, size: 20 }],
+    ["an explicit opening page", { page: 0, size: 20 }, { number: 0, size: 20 }],
+    [
+      "an explicit later page",
+      { page: 1, size: 50 },
+      {
+        number: 1,
+        size: 50,
+        totalElements: 51,
+        totalPages: 2,
+        first: false,
+        last: true,
+      },
+    ],
+  ] as const)("binds response page metadata to %s", async (_label, query, metadata) => {
+    const items = metadata.number === 0 ? [] : [note()];
+    mockFetchOnce(async () => jsonResponse(listBody(items, metadata)));
+
+    const result = await fetchInvestigationNoteList(signedIn(), CASE_ID, query);
+
+    expect(result.data.page.number).toBe(metadata.number);
+    expect(result.data.page.size).toBe(metadata.size);
+    expect(result.data.items).toHaveLength(items.length);
+  });
+
+  it.each([
+    ["a later response page", { page: 1, size: 20 }, { number: 3, size: 20, totalElements: 0, totalPages: 0, first: false, last: true }],
+    ["the opening response page", { page: 1, size: 20 }, { number: 0, size: 20 }],
+    ["a different response size", { page: 0, size: 20 }, { number: 0, size: 50 }],
+    ["both response coordinates", { page: 1, size: 20 }, { number: 0, size: 50 }],
+    ["default response coordinates", undefined, { number: 1, size: 50, totalElements: 0, totalPages: 0, first: false, last: true }],
+  ] as const)("rejects %s when it differs from the request", async (_label, query, metadata) => {
+    const body = listBody([], metadata);
+    mockFetchOnce(async () => jsonResponse(body));
+
+    const rejection = await fetchInvestigationNoteList(signedIn(), CASE_ID, query).catch(
+      (error: unknown) => error,
+    );
+
+    expect(rejection).toBeInstanceOf(InvalidResponseError);
+    expect(String(rejection)).not.toContain(String(metadata.number));
+    expect(String(rejection)).not.toContain(String(metadata.size));
+    expect(String(rejection)).not.toContain(TRACE_ID);
+    expect(String(rejection)).not.toContain(JSON.stringify(body));
+  });
   it("rejects the whole page when one note is malformed", async () => {
     const body = listBody([note(), note({ authorType: "ADMIN" })], { totalElements: 2 });
     expect(isInvestigationNotePage(body)).toBe(false);
@@ -160,6 +207,34 @@ describe("fetchInvestigationNoteList", () => {
     await expect(fetchInvestigationNoteList(signedIn(), CASE_ID)).rejects.toBeInstanceOf(
       InvalidResponseError,
     );
+  });
+
+  it.each([
+    ["a lone wrong canonical case id", [note({ caseId: OTHER_CASE_ID })], "binding"],
+    [
+      "mixed correct and wrong canonical case ids",
+      [note(), note({ noteId: USER_REF, caseId: OTHER_CASE_ID })],
+      "binding",
+    ],
+    ["an uppercase UUID", [note({ caseId: CASE_ID.toUpperCase() })], "validator"],
+    ["an unhyphenated UUID", [note({ caseId: CASE_ID.replaceAll("-", "") })], "validator"],
+    ["leading whitespace", [note({ caseId: ` ${CASE_ID}` })], "validator"],
+    ["trailing whitespace", [note({ caseId: `${CASE_ID} ` })], "validator"],
+  ] as const)("rejects the whole page for %s at the %s boundary", async (_label, items, boundary) => {
+    const body = listBody(items, { totalElements: items.length });
+    expect(isInvestigationNotePage(body)).toBe(boundary === "binding");
+    mockFetchOnce(async () => jsonResponse(body));
+
+    const rejection = await fetchInvestigationNoteList(signedIn(), CASE_ID).catch(
+      (error: unknown) => error,
+    );
+
+    expect(rejection).toBeInstanceOf(InvalidResponseError);
+    const reflected = String(rejection);
+    expect(reflected).not.toContain(CASE_ID);
+    expect(reflected).not.toContain(OTHER_CASE_ID);
+    expect(reflected).not.toContain(TRACE_ID);
+    expect(reflected).not.toContain(JSON.stringify(body));
   });
 
   it("refuses page metadata that does not add up", async () => {

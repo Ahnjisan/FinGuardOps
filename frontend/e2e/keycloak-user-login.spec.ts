@@ -52,12 +52,12 @@ const SYNTHETIC_TRANSACTION_ID = "e2e00000-0000-4000-8000-000000000e2e";
  *
  * A closed list of exact endpoints, and deliberately not a path syntax. That
  * `/api/v1/...` is well-formed says nothing about whether this suite may read
- * it: the console's screens reach exactly five read addresses and one
- * authorization probe. The five are the two collections, `/api/v1/transactions`
+ * it: the console's screens reach exactly six read addresses and one
+ * authorization probe. The six are the two collections, `/api/v1/transactions`
  * and `/api/v1/cases`; transaction and case detail at one canonical lowercase
- * UUID v4 segment; and that case's audit log. The two detail reads carry no
- * query. The audit read carries only its closed page/size/sort contract.
- * Everything else under `/api/v1/**` - a case's notes, its status, its assignee, its
+ * UUID v4 segment; and that case's notes and audit log. The two detail reads
+ * carry no query. Notes and audit each carry their own closed page/size/sort
+ * contract. Everything else under `/api/v1/**` - a case's status, its assignee, its
  * related transactions, its current AI report, a `GET` of its resolution, any
  * other unapproved suffix, a case status or assignee write, a note create, an
  * endpoint that does not exist yet - is refused here rather than relayed. The
@@ -106,6 +106,11 @@ const CASE_AUDIT_PATH = new RegExp(
   `^${CASE_LIST_PATH}/${CANONICAL_UUID_V4_PATTERN}/audit-logs$`,
 );
 
+/** `/api/v1/cases/{canonical lowercase UUID v4}/notes`, exactly. */
+const CASE_NOTES_PATH = new RegExp(
+  `^${CASE_LIST_PATH}/${CANONICAL_UUID_V4_PATTERN}/notes$`,
+);
+
 function acceptsAuditQuery(query: URLSearchParams): boolean {
   const page = query.get("page");
   const size = query.get("size");
@@ -118,22 +123,33 @@ function acceptsAuditQuery(query: URLSearchParams): boolean {
   return pageOk && sizeOk && sortOk;
 }
 
+function acceptsNotesQuery(query: URLSearchParams): boolean {
+  const page = query.get("page");
+  const size = query.get("size");
+  const sort = query.get("sort");
+  const pageOk =
+    page === null ||
+    (/^(?:0|[1-9][0-9]*)$/.test(page) && BigInt(page) <= 2_147_483_647n);
+  const sizeOk = size === null || /^(?:[1-9]|[1-9][0-9]|100)$/.test(size);
+  const sortOk = sort === null || sort === "createdAt,asc" || sort === "createdAt,desc";
+  return pageOk && sizeOk && sortOk;
+}
+
 /** `/api/v1/cases/{canonical lowercase UUID v4}/resolution`, and nothing else. */
 const CASE_RESOLUTION_PROBE_PATH = new RegExp(
   `^${CASE_LIST_PATH}/${CANONICAL_UUID_V4_PATTERN}/resolution$`,
 );
 
 /**
- * The five read addresses this suite relays, and only these five.
+ * The six read addresses this suite relays, and only these six.
  *
  * A `GET` carrying no query is not a lesser request. It opens the same socket
  * and reaches the same Spring Boot handler as one carrying a query, so it
- * passes the same exact-address check. The case detail address was added here
- * for the screen that now sends it, and adding it admitted exactly one more
- * address: `/notes`, `/status`, `/assignee`, `/transactions` and
- * `/ai-reports/current` under the same identifier are well-formed, lowercase
- * and still absent from this list, and being absent from this list is the whole
- * of why they are refused.
+ * passes the same exact-address check. Canonical case detail, investigation
+ * notes and audit-history `GET` addresses are all approved reads. Notes alone
+ * declare page, size and `createdAt` sort; their POST/PATCH/PUT/DELETE forms,
+ * trailing or extra paths, non-canonical identifiers, and mixed endpoint query
+ * names remain absent from this list and are refused.
  */
 const RELAYABLE_READ_PATHS: readonly RelayableEndpoint[] = [
   {
@@ -186,6 +202,13 @@ const RELAYABLE_READ_PATHS: readonly RelayableEndpoint[] = [
     method: "GET",
     matches: (pathname) => CASE_DETAIL_PATH.test(pathname),
     queryNames: null,
+  },
+  {
+    name: "case-note-list",
+    method: "GET",
+    matches: (pathname) => CASE_NOTES_PATH.test(pathname),
+    queryNames: ["page", "size", "sort"],
+    acceptsQuery: acceptsNotesQuery,
   },
   {
     name: "case-audit-list",
@@ -298,6 +321,8 @@ interface TokenMaterial {
 interface BackendObservation {
   readonly method: string;
   readonly pathname: string;
+  /** Request-body octets observed at the relay boundary. */
+  readonly requestBodyByteLength: number;
   /**
    * The request target written onto the Backend socket, byte for byte: the
    * path and, where there is one, the query. Recorded from what the relay
@@ -672,7 +697,7 @@ function parseRelayedResponse(raw: Buffer): Omit<RelayedResponse, "target"> {
  *    path can be perfectly well-formed and still be an endpoint this suite has
  *    no business reaching;
  * 2. is this method at this exact address one of the six approved endpoint
- *    kinds declared above - five reads plus one write probe? Method and address are
+ *    kinds declared above - six reads plus one write probe? Method and address are
  *    decided together, so `POST` to a read address and `GET` to the write probe
  *    are both refused here;
  * 3. the declared write probe carries no query, which is checked rather than
@@ -765,10 +790,11 @@ function resolveRelayTarget(request: PlaywrightRequest): string {
   }
 
   // The exact read address, checked for every `GET` - including one with no
-  // query at all. `.../notes`, `.../status`, `.../assignee` and every other
-  // well-formed lowercase address absent from the list stops here, before a
-  // process is spawned or a socket is opened. Case detail and case audit are
-  // present only in their exact declared forms above.
+  // query at all. Canonical case detail, investigation notes and audit-history
+  // reads are present only in their exact declared forms above. A notes write,
+  // an extra or trailing path, a non-canonical identifier, `.../status`,
+  // `.../assignee`, or any other absent address stops here before a process is
+  // spawned or a socket is opened.
   const endpoint = RELAYABLE_READ_PATHS.find(
     (candidate) => candidate.method === method && candidate.matches(url.pathname),
   );
@@ -903,18 +929,622 @@ interface RelayOptions {
    * the same bytes are forwarded either way.
    */
   readonly captureBodyOf?: string | readonly string[];
+  /** Holds only these approved reads until every target has reached the relay. */
+  readonly parallelStartBarrier?: ParallelStartBarrier;
+}
+
+type ParallelStartBarrierState = "pending" | "released" | "failed" | "disposed";
+
+interface ParallelStartTarget {
+  readonly method: string;
+  readonly target: string;
+}
+
+interface ParallelStartScheduler {
+  schedule(callback: () => void, delayMs: number): unknown;
+  cancel(handle: unknown): void;
+}
+
+interface ParallelStartBarrierSnapshot {
+  readonly state: ParallelStartBarrierState;
+  readonly expectedTargetCount: number;
+  readonly arrivedTargetCount: number;
+  readonly pendingWaiterCount: number;
+  readonly activeTimerCount: number;
+  readonly activeCallbackCount: number;
+  readonly completionResolveCount: number;
+  readonly completionRejectCount: number;
+  readonly timeoutCallbackCount: number;
+}
+
+const PARALLEL_START_TIMEOUT_MS = 15_000;
+const PARALLEL_START_TIMEOUT_MESSAGE = "The parallel-start barrier timed out.";
+const PARALLEL_START_DUPLICATE_MESSAGE =
+  "The parallel-start barrier received a duplicate target.";
+const PARALLEL_START_DISPOSED_MESSAGE = "The parallel-start barrier is unavailable.";
+
+class ParallelStartBarrierError extends Error {}
+
+const realParallelStartScheduler: ParallelStartScheduler = {
+  schedule(callback, delayMs) {
+    return setTimeout(callback, delayMs);
+  },
+  cancel(handle) {
+    clearTimeout(handle as ReturnType<typeof setTimeout>);
+  },
+};
+
+function parallelStartTargetKey(method: string, target: string): string {
+  return `${method}\u0000${target}`;
+}
+
+function rejectedParallelStartWait(message: string): Promise<void> {
+  const rejected = Promise.reject<void>(new ParallelStartBarrierError(message));
+  void rejected.catch(() => undefined);
+  return rejected;
+}
+
+/**
+ * A bounded, one-shot rendezvous for the three reads made by the case screen.
+ *
+ * It owns its timer and waiter callbacks, never includes a target in an error,
+ * and keeps release, failure and disposal as distinct states. The relay only
+ * forwards a target after `wait` resolves; an unexpected target is not enrolled
+ * and remains the closed allowlist's responsibility.
+ */
+class ParallelStartBarrier {
+  readonly completion: Promise<void>;
+
+  private state: ParallelStartBarrierState = "pending";
+  private readonly scheduler: ParallelStartScheduler;
+  private readonly timeoutMs: number;
+  private readonly configuredTargetKeys: ReadonlySet<string>;
+  private readonly targetKeys: Set<string>;
+  private readonly arrivedTargetKeys = new Set<string>();
+  private readonly waiters = new Set<{
+    readonly resolve: () => void;
+    readonly reject: (error: ParallelStartBarrierError) => void;
+  }>();
+  private timerHandle: unknown | null = null;
+  private resolveCompletion!: () => void;
+  private rejectCompletion!: (error: ParallelStartBarrierError) => void;
+  private completionResolveCount = 0;
+  private completionRejectCount = 0;
+  private timeoutCallbackCount = 0;
+
+  constructor(
+    targets: readonly ParallelStartTarget[],
+    timeoutMs: number,
+    scheduler: ParallelStartScheduler = realParallelStartScheduler,
+  ) {
+    const targetKeys = targets.map(({ method, target }) => parallelStartTargetKey(method, target));
+    requireCondition(
+      targets.length === 3 && new Set(targetKeys).size === 3,
+      "The parallel-start barrier requires three distinct targets.",
+    );
+    requireCondition(
+      Number.isSafeInteger(timeoutMs) && timeoutMs > 0,
+      "The parallel-start barrier requires a bounded timeout.",
+    );
+    this.scheduler = scheduler;
+    this.timeoutMs = timeoutMs;
+    this.configuredTargetKeys = new Set(targetKeys);
+    this.targetKeys = new Set(targetKeys);
+    this.completion = new Promise<void>((resolve, reject) => {
+      this.resolveCompletion = resolve;
+      this.rejectCompletion = reject;
+    });
+    // A barrier may have no external completion observer (for example while a
+    // page is closing). Keep its rejection handled without changing what an
+    // explicit observer receives from the original promise.
+    void this.completion.catch(() => undefined);
+  }
+
+  start(): void {
+    if (this.state !== "pending" || this.timerHandle !== null) {
+      return;
+    }
+    this.timerHandle = this.scheduler.schedule(() => {
+      if (this.state !== "pending") {
+        return;
+      }
+      this.timeoutCallbackCount += 1;
+      this.fail(PARALLEL_START_TIMEOUT_MESSAGE);
+    }, this.timeoutMs);
+  }
+
+  wait(method: string, target: string): Promise<void> | null {
+    const key = parallelStartTargetKey(method, target);
+    if (!this.configuredTargetKeys.has(key)) {
+      return null;
+    }
+    // The barrier only coordinates the first three requests. Once terminal,
+    // even a configured target belongs to the relay's normal allowlist and
+    // request-count checks rather than to this completed rendezvous.
+    if (this.state !== "pending") {
+      return null;
+    }
+    // A matching request that wins the race with the explicit arm still gets
+    // the same bounded lifetime rather than waiting without a timer.
+    this.start();
+    if (this.arrivedTargetKeys.has(key)) {
+      this.fail(PARALLEL_START_DUPLICATE_MESSAGE);
+      return rejectedParallelStartWait(PARALLEL_START_DUPLICATE_MESSAGE);
+    }
+
+    this.arrivedTargetKeys.add(key);
+    const wait = new Promise<void>((resolve, reject) => {
+      this.waiters.add({ resolve, reject });
+    });
+    void wait.catch(() => undefined);
+
+    if (this.arrivedTargetKeys.size === this.targetKeys.size) {
+      this.release();
+    }
+    return wait;
+  }
+
+  dispose(): void {
+    if (this.state === "disposed") {
+      return;
+    }
+    if (this.state === "pending") {
+      this.rejectOnce(new ParallelStartBarrierError(PARALLEL_START_DISPOSED_MESSAGE));
+    }
+    this.clearTimer();
+    const error = new ParallelStartBarrierError(PARALLEL_START_DISPOSED_MESSAGE);
+    for (const waiter of this.waiters) {
+      waiter.reject(error);
+    }
+    this.waiters.clear();
+    this.arrivedTargetKeys.clear();
+    this.targetKeys.clear();
+    this.state = "disposed";
+  }
+
+  snapshot(): ParallelStartBarrierSnapshot {
+    const activeTimerCount = this.timerHandle === null ? 0 : 1;
+    return {
+      state: this.state,
+      expectedTargetCount: this.targetKeys.size,
+      arrivedTargetCount: this.arrivedTargetKeys.size,
+      pendingWaiterCount: this.waiters.size,
+      activeTimerCount,
+      activeCallbackCount: this.waiters.size + activeTimerCount,
+      completionResolveCount: this.completionResolveCount,
+      completionRejectCount: this.completionRejectCount,
+      timeoutCallbackCount: this.timeoutCallbackCount,
+    };
+  }
+
+  private release(): void {
+    if (this.state !== "pending") {
+      return;
+    }
+    this.clearTimer();
+    this.state = "released";
+    this.completionResolveCount += 1;
+    this.resolveCompletion();
+    for (const waiter of this.waiters) {
+      waiter.resolve();
+    }
+    this.waiters.clear();
+  }
+
+  private fail(message: string): void {
+    if (this.state !== "pending") {
+      return;
+    }
+    this.clearTimer();
+    this.state = "failed";
+    const error = new ParallelStartBarrierError(message);
+    this.rejectOnce(error);
+    for (const waiter of this.waiters) {
+      waiter.reject(error);
+    }
+    this.waiters.clear();
+    this.arrivedTargetKeys.clear();
+    this.targetKeys.clear();
+  }
+
+  private rejectOnce(error: ParallelStartBarrierError): void {
+    this.completionRejectCount += 1;
+    this.rejectCompletion(error);
+  }
+
+  private clearTimer(): void {
+    if (this.timerHandle === null) {
+      return;
+    }
+    this.scheduler.cancel(this.timerHandle);
+    this.timerHandle = null;
+  }
+}
+
+interface ControllableParallelStartScheduler extends ParallelStartScheduler {
+  readonly pendingCount: () => number;
+  readonly runAll: () => number;
+}
+
+function createControllableParallelStartScheduler(): ControllableParallelStartScheduler {
+  const callbacks = new Map<object, () => void>();
+  return {
+    schedule(callback) {
+      const handle = {};
+      callbacks.set(handle, callback);
+      return handle;
+    },
+    cancel(handle) {
+      callbacks.delete(handle as object);
+    },
+    pendingCount: () => callbacks.size,
+    runAll: () => {
+      const pending = [...callbacks.values()];
+      callbacks.clear();
+      for (const callback of pending) {
+        callback();
+      }
+      return pending.length;
+    },
+  };
+}
+
+type ObservedParallelStartOutcome =
+  | { readonly status: "fulfilled" }
+  | { readonly status: "rejected"; readonly error: unknown };
+
+function observeParallelStart(promise: Promise<void>): Promise<ObservedParallelStartOutcome> {
+  return promise.then<ObservedParallelStartOutcome>(
+    () => ({ status: "fulfilled" }),
+    (error: unknown) => ({ status: "rejected", error }),
+  );
+}
+
+function requireParallelStartWait(wait: Promise<void> | null): Promise<void> {
+  requireCondition(wait !== null, "An exact parallel-start target was not enrolled.");
+  return wait;
+}
+
+function requireFixedParallelStartFailure(
+  outcome: ObservedParallelStartOutcome,
+  expectedMessage: string,
+  forbiddenValues: readonly string[],
+): void {
+  requireCondition(outcome.status === "rejected", "A parallel-start failure resolved instead.");
+  if (outcome.status !== "rejected") {
+    return;
+  }
+  requireCondition(
+    outcome.error instanceof ParallelStartBarrierError &&
+      outcome.error.message === expectedMessage,
+    "A parallel-start failure did not use its fixed error.",
+  );
+  const message = outcome.error instanceof Error ? outcome.error.message : "";
+  requireCondition(
+    forbiddenValues.every((value) => value !== "" && !message.includes(value)),
+    "A parallel-start failure reflected request or credential data.",
+  );
+}
+
+function requireNoParallelStartResources(
+  barrier: ParallelStartBarrier,
+  scheduler: ControllableParallelStartScheduler,
+): void {
+  const snapshot = barrier.snapshot();
+  requireCondition(snapshot.pendingWaiterCount === 0, "A parallel-start waiter remained pending.");
+  requireCondition(snapshot.activeTimerCount === 0, "A parallel-start timer remained active.");
+  requireCondition(snapshot.activeCallbackCount === 0, "A parallel-start callback remained active.");
+  requireCondition(scheduler.pendingCount() === 0, "The parallel-start scheduler retained a callback.");
+}
+
+function requireUnchangedParallelStartSnapshot(
+  barrier: ParallelStartBarrier,
+  before: ParallelStartBarrierSnapshot,
+  message: string,
+): void {
+  requireCondition(JSON.stringify(barrier.snapshot()) === JSON.stringify(before), message);
+}
+
+function verifyTerminalBarrierRelayPassThrough(
+  barrier: ParallelStartBarrier,
+  label: string,
+): void {
+  const before = barrier.snapshot();
+  const approvedTarget = "/api/v1/cases?page=0&size=20&sort=lastChangedAt%2Cdesc";
+  const rejectedTarget = "/api/v1/cases/0badcafe-0000-4000-8000-000000000259/unapproved";
+  requireCondition(
+    barrier.wait("GET", approvedTarget) === null && barrier.wait("GET", rejectedTarget) === null,
+    `A ${label} barrier intercepted an unrelated relay target.`,
+  );
+  requireUnchangedParallelStartSnapshot(
+    barrier,
+    before,
+    `An unrelated relay target changed the ${label} barrier.`,
+  );
+
+  requireCondition(
+    resolveRelayTarget(relayCandidate("GET", `${BACKEND_ORIGIN}${approvedTarget}`)) ===
+      approvedTarget,
+    `The relay rejected an approved read after the barrier was ${label}.`,
+  );
+  const spawnsBefore = relaySpawnCount;
+  const observationsBefore = relayObservationCount;
+  let refusal: string | null = null;
+  try {
+    relayToBackend(relayCandidate("GET", `${BACKEND_ORIGIN}${rejectedTarget}`));
+  } catch (error: unknown) {
+    refusal = error instanceof Error ? error.message : "unknown";
+  }
+  requireCondition(
+    refusal !== null && RELAY_REFUSALS.includes(refusal),
+    `The relay did not independently refuse an unapproved read after the barrier was ${label}.`,
+  );
+  requireCondition(
+    relaySpawnCount === spawnsBefore && relayObservationCount === observationsBefore,
+    `An unapproved read crossed the relay after the barrier was ${label}.`,
+  );
+}
+
+/** Deterministic lifecycle matrix for the spec-local barrier helper. */
+async function verifyParallelStartBarrierLifecycle(): Promise<void> {
+  const barrierCaseId = "0badcafe-0000-4000-8000-000000000259";
+  const targets: readonly ParallelStartTarget[] = [
+    { method: "GET", target: `/parallel/${barrierCaseId}` },
+    {
+      method: "GET",
+      target: `/parallel/${barrierCaseId}/notes?page=0&size=20&sort=createdAt%2Casc`,
+    },
+    {
+      method: "GET",
+      target: `/parallel/${barrierCaseId}/audit?page=0&size=20&sort=changedAt%2Cdesc`,
+    },
+  ];
+  const forbiddenValues = [
+    ...targets.map(({ target }) => target),
+    ...targets.map(({ target }) => `http://localhost:8080${target}`),
+    barrierCaseId,
+    "parallel-secret-credential",
+    "Bearer parallel-secret-token",
+    "parallel-secret-cookie",
+    "page=0",
+    "createdAt%2Casc",
+  ];
+  const createBarrier = () => {
+    const scheduler = createControllableParallelStartScheduler();
+    const barrier = new ParallelStartBarrier(targets, 1, scheduler);
+    barrier.start();
+    return { barrier, scheduler };
+  };
+
+  // A: three distinct exact targets release exactly once and cancel the timer.
+  {
+    const { barrier, scheduler } = createBarrier();
+    const completion = observeParallelStart(barrier.completion);
+    const waits = targets.map(({ method, target }) =>
+      observeParallelStart(requireParallelStartWait(barrier.wait(method, target))),
+    );
+    const outcomes = await Promise.all([completion, ...waits]);
+    requireCondition(
+      outcomes.every(({ status }) => status === "fulfilled"),
+      "A complete parallel-start barrier did not release every observer.",
+    );
+    const released = barrier.snapshot();
+    requireCondition(
+      released.state === "released" &&
+        released.expectedTargetCount === 3 &&
+        released.arrivedTargetCount === 3 &&
+        released.completionResolveCount === 1 &&
+        released.completionRejectCount === 0 &&
+        released.timeoutCallbackCount === 0,
+      "A complete parallel-start barrier recorded the wrong terminal state.",
+    );
+    requireNoParallelStartResources(barrier, scheduler);
+    requireCondition(scheduler.runAll() === 0, "A released barrier still ran a timeout callback.");
+    const beforeReleasedPassThrough = barrier.snapshot();
+    requireCondition(
+      barrier.wait("GET", "/parallel/unexpected") === null &&
+        barrier.wait(targets[0].method, targets[0].target) === null,
+      "A released barrier intercepted a later request.",
+    );
+    requireUnchangedParallelStartSnapshot(
+      barrier,
+      beforeReleasedPassThrough,
+      "A later request changed a released barrier.",
+    );
+    verifyTerminalBarrierRelayPassThrough(barrier, "released");
+    barrier.dispose();
+    barrier.dispose();
+    requireNoParallelStartResources(barrier, scheduler);
+    requireCondition(scheduler.runAll() === 0, "A disposed released barrier ran a callback.");
+    const beforeDisposedPassThrough = barrier.snapshot();
+    requireCondition(
+      barrier.wait("GET", "/parallel/unexpected") === null &&
+        barrier.wait(targets[0].method, targets[0].target) === null,
+      "A disposed barrier intercepted a later request.",
+    );
+    requireUnchangedParallelStartSnapshot(
+      barrier,
+      beforeDisposedPassThrough,
+      "A later request changed a disposed barrier.",
+    );
+    verifyTerminalBarrierRelayPassThrough(barrier, "disposed");
+  }
+
+  const verifyMissingTargets = async (arrivalCount: 0 | 1 | 2): Promise<void> => {
+    const { barrier, scheduler } = createBarrier();
+    const completion = observeParallelStart(barrier.completion);
+    const waits = targets.slice(0, arrivalCount).map(({ method, target }) =>
+      observeParallelStart(requireParallelStartWait(barrier.wait(method, target))),
+    );
+    requireCondition(scheduler.runAll() === 1, "A pending barrier did not run its timeout once.");
+    const outcomes = await Promise.all([completion, ...waits]);
+    for (const outcome of outcomes) {
+      requireFixedParallelStartFailure(outcome, PARALLEL_START_TIMEOUT_MESSAGE, forbiddenValues);
+    }
+    const failed = barrier.snapshot();
+    requireCondition(
+      failed.state === "failed" &&
+        failed.expectedTargetCount === 0 &&
+        failed.arrivedTargetCount === 0 &&
+        failed.completionResolveCount === 0 &&
+        failed.completionRejectCount === 1 &&
+        failed.timeoutCallbackCount === 1,
+      "A timed-out parallel-start barrier retained targets or settled incorrectly.",
+    );
+    requireNoParallelStartResources(barrier, scheduler);
+    const beforeFailedPassThrough = barrier.snapshot();
+    requireCondition(
+      barrier.wait("GET", "/parallel/unexpected") === null &&
+        barrier.wait(targets[0].method, targets[0].target) === null,
+      "A failed barrier intercepted a later request.",
+    );
+    requireUnchangedParallelStartSnapshot(
+      barrier,
+      beforeFailedPassThrough,
+      "A later request changed a failed barrier.",
+    );
+    verifyTerminalBarrierRelayPassThrough(barrier, "failed");
+    barrier.dispose();
+    requireNoParallelStartResources(barrier, scheduler);
+  };
+
+  // B-D: one, two, or all three missing targets fail without real-time waits.
+  await verifyMissingTargets(2);
+  await verifyMissingTargets(1);
+  await verifyMissingTargets(0);
+
+  // E: a duplicate cannot impersonate the third distinct target.
+  {
+    const { barrier, scheduler } = createBarrier();
+    const completion = observeParallelStart(barrier.completion);
+    const first = observeParallelStart(
+      requireParallelStartWait(barrier.wait(targets[0].method, targets[0].target)),
+    );
+    const duplicate = observeParallelStart(
+      requireParallelStartWait(barrier.wait(targets[0].method, targets[0].target)),
+    );
+    for (const outcome of await Promise.all([completion, first, duplicate])) {
+      requireFixedParallelStartFailure(
+        outcome,
+        PARALLEL_START_DUPLICATE_MESSAGE,
+        forbiddenValues,
+      );
+    }
+    const failed = barrier.snapshot();
+    requireCondition(
+      failed.state === "failed" &&
+        failed.completionResolveCount === 0 &&
+        failed.completionRejectCount === 1,
+      "A duplicate parallel-start target completed the barrier.",
+    );
+    requireNoParallelStartResources(barrier, scheduler);
+    requireCondition(scheduler.runAll() === 0, "A duplicate failure left a timeout callback.");
+    barrier.dispose();
+  }
+
+  // F: an unexpected target neither completes nor allocates a waiter.
+  {
+    const { barrier, scheduler } = createBarrier();
+    const completion = observeParallelStart(barrier.completion);
+    const beforeUnexpected = barrier.snapshot();
+    requireCondition(
+      barrier.wait("GET", "/parallel/unexpected") === null,
+      "An unexpected parallel-start target enrolled a waiter.",
+    );
+    requireUnchangedParallelStartSnapshot(
+      barrier,
+      beforeUnexpected,
+      "An unexpected target changed a pending barrier.",
+    );
+    const pending = barrier.snapshot();
+    requireCondition(
+      pending.state === "pending" &&
+        pending.arrivedTargetCount === 0 &&
+        pending.pendingWaiterCount === 0 &&
+        pending.activeTimerCount === 1,
+      "An unexpected parallel-start target changed barrier progress.",
+    );
+    barrier.dispose();
+    requireFixedParallelStartFailure(
+      await completion,
+      PARALLEL_START_DISPOSED_MESSAGE,
+      forbiddenValues,
+    );
+    requireNoParallelStartResources(barrier, scheduler);
+    requireCondition(scheduler.runAll() === 0, "A disposed barrier ran a callback.");
+  }
+
+  // G: disposal immediately before release and timeout is one-shot and empty.
+  {
+    const { barrier, scheduler } = createBarrier();
+    const completion = observeParallelStart(barrier.completion);
+    const waits = targets.slice(0, 2).map(({ method, target }) =>
+      observeParallelStart(requireParallelStartWait(barrier.wait(method, target))),
+    );
+    barrier.dispose();
+    const beforeLateArrival = barrier.snapshot();
+    requireCondition(
+      barrier.wait(targets[2].method, targets[2].target) === null,
+      "A disposed barrier intercepted a late configured target.",
+    );
+    requireUnchangedParallelStartSnapshot(
+      barrier,
+      beforeLateArrival,
+      "A late configured target changed a disposed barrier.",
+    );
+    const outcomes = await Promise.all([completion, ...waits]);
+    for (const outcome of outcomes) {
+      requireFixedParallelStartFailure(
+        outcome,
+        PARALLEL_START_DISPOSED_MESSAGE,
+        forbiddenValues,
+      );
+    }
+    const disposed = barrier.snapshot();
+    requireCondition(
+      disposed.state === "disposed" &&
+        disposed.completionResolveCount === 0 &&
+        disposed.completionRejectCount === 1 &&
+        disposed.timeoutCallbackCount === 0,
+      "Dispose immediately before release settled the barrier more than once.",
+    );
+    requireNoParallelStartResources(barrier, scheduler);
+    requireCondition(scheduler.runAll() === 0, "Dispose immediately before timeout ran a callback.");
+  }
+}
+
+interface BackendRelay extends Array<BackendObservation> {
+  readonly dispose: () => Promise<void>;
+  readonly pendingHandlerCount: () => number;
+  readonly listenerCount: () => number;
+  readonly isDisposed: () => boolean;
+  readonly barrierArrivalCountAtFirstForwarding: () => number | null;
+  readonly barrierAbortCount: () => number;
 }
 
 async function installBackendRelay(
   page: Page,
   options: RelayOptions = {},
-): Promise<BackendObservation[]> {
-  const observations: BackendObservation[] = [];
+): Promise<BackendRelay> {
+  const observations = [] as unknown as BackendRelay;
   const capturedPaths =
     typeof options.captureBodyOf === "string"
       ? [options.captureBodyOf]
       : (options.captureBodyOf ?? []);
-  await page.route("http://localhost:8080/**", async (route: Route) => {
+  const relayPattern = "http://localhost:8080/**";
+  const activeHandlers = new Set<Promise<void>>();
+  let disposed = false;
+  let closeListenerActive = true;
+  let barrierArrivalCountAtFirstForwarding: number | null = null;
+  let barrierAbortCount = 0;
+
+  const processRoute = async (route: Route): Promise<void> => {
+    if (disposed) {
+      if (!page.isClosed()) {
+        await route.abort("failed");
+      }
+      return;
+    }
     const request = route.request();
     if (request.method() === "OPTIONS") {
       await route.fulfill({
@@ -927,6 +1557,30 @@ async function installBackendRelay(
       });
       return;
     }
+    const requestedUrl = new URL(request.url());
+    const requestedTarget = `${requestedUrl.pathname}${requestedUrl.search}`;
+    const barrier = options.parallelStartBarrier;
+    const barrierWait = barrier?.wait(request.method(), requestedTarget) ?? null;
+    if (barrierWait !== null) {
+      try {
+        await barrierWait;
+      } catch (error: unknown) {
+        if (error instanceof ParallelStartBarrierError) {
+          if (!page.isClosed()) {
+            barrierAbortCount += 1;
+            await route.abort("failed");
+          }
+          return;
+        }
+        throw error;
+      }
+      const snapshot = barrier.snapshot();
+      requireCondition(
+        snapshot.state === "released" && snapshot.arrivedTargetCount === 3,
+        "A parallel-start target was forwarded before all three reads arrived.",
+      );
+      barrierArrivalCountAtFirstForwarding ??= snapshot.arrivedTargetCount;
+    }
     const relayed = relayToBackend(request);
     // Recorded from the relay's own target, so what this suite observes and
     // what the Backend was asked for cannot drift into two different things.
@@ -937,6 +1591,7 @@ async function installBackendRelay(
       pathname,
       target: relayed.target,
       status: relayed.status,
+      requestBodyByteLength: Buffer.byteLength(request.postData() ?? ""),
       ...(capturedPaths.includes(pathname) ? { body: relayed.body } : {}),
     });
     await route.fulfill({
@@ -948,6 +1603,48 @@ async function installBackendRelay(
       // this suite would then be measuring instead of the application.
       body: relayed.body === "" ? "{}" : relayed.body,
     });
+  };
+
+  const routeHandler = (route: Route): Promise<void> => {
+    const handler = processRoute(route);
+    activeHandlers.add(handler);
+    void handler.then(
+      () => activeHandlers.delete(handler),
+      () => activeHandlers.delete(handler),
+    );
+    return handler;
+  };
+  const pageCloseListener = (): void => {
+    page.off("close", pageCloseListener);
+    closeListenerActive = false;
+    disposed = true;
+    options.parallelStartBarrier?.dispose();
+  };
+  page.on("close", pageCloseListener);
+  await page.route(relayPattern, routeHandler);
+
+  const dispose = async (): Promise<void> => {
+    const cleanupAlreadyStarted = disposed;
+    disposed = true;
+    options.parallelStartBarrier?.dispose();
+    if (closeListenerActive) {
+      page.off("close", pageCloseListener);
+      closeListenerActive = false;
+    }
+    if (!cleanupAlreadyStarted && !page.isClosed()) {
+      await page.unroute(relayPattern, routeHandler);
+    }
+    await Promise.allSettled([...activeHandlers]);
+  };
+  Object.defineProperties(observations, {
+    dispose: { value: dispose },
+    pendingHandlerCount: { value: () => activeHandlers.size },
+    listenerCount: { value: () => (closeListenerActive ? 1 : 0) },
+    isDisposed: { value: () => disposed },
+    barrierArrivalCountAtFirstForwarding: {
+      value: () => barrierArrivalCountAtFirstForwarding,
+    },
+    barrierAbortCount: { value: () => barrierAbortCount },
   });
   return observations;
 }
@@ -1258,6 +1955,9 @@ const SYNTHETIC_CASE_ID = "e2e00000-0000-4000-8000-00000000ca5e";
 const CASE_RESOLUTION_PATH = `/api/v1/cases/${SYNTHETIC_CASE_ID}/resolution`;
 /** `/api/v1/cases/{SYNTHETIC_CASE_ID}`, the one identified case address. */
 const CASE_DETAIL_TARGET = `${CASE_LIST_PATH}/${SYNTHETIC_CASE_ID}`;
+const CASE_NOTES_TARGET = `${CASE_DETAIL_TARGET}/notes`;
+const INITIAL_CASE_NOTES_TARGET =
+  `${CASE_NOTES_TARGET}?page=0&size=20&sort=createdAt%2Casc`;
 const CASE_AUDIT_TARGET = `${CASE_DETAIL_TARGET}/audit-logs`;
 const INITIAL_CASE_AUDIT_TARGET =
   `${CASE_AUDIT_TARGET}?page=0&size=20&sort=changedAt%2Cdesc`;
@@ -1431,8 +2131,8 @@ const REFUSED_RELAY_REQUESTS: readonly {
   },
   // Audit page/size/sort grammar and meaning, including cross-endpoint query
   // contamination. These seventeen are the exact delta from the Issue #255
-  // query boundary: 31 existing refusals plus 17 audit-specific refusals makes
-  // 48.
+  // query boundary. The notes-specific matrix below brings the complete current
+  // query/method refusal set to 64.
   {
     why: "a duplicate audit query name",
     method: "GET",
@@ -1518,6 +2218,89 @@ const REFUSED_RELAY_REQUESTS: readonly {
     method: "GET",
     url: `${BACKEND_ORIGIN}${CASE_AUDIT_TARGET}?caseStatus=OPEN`,
   },
+  // Investigation-note query grammar. Kept separate from audit even though
+  // page and size have the same bounds: the sort fields are endpoint-owned and
+  // must never leak across the two descriptors.
+  {
+    why: "a duplicate notes query name",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}?page=0&page=1`,
+  },
+  {
+    why: "an empty notes query name",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}?=0`,
+  },
+  {
+    why: "an empty notes query value",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}?page=`,
+  },
+  {
+    why: "an unknown notes query name",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}?unknown=1`,
+  },
+  {
+    why: "a bare notes query marker",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}?`,
+  },
+  {
+    why: "a non-canonical notes sort comma",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}?sort=createdAt,asc`,
+  },
+  {
+    why: "a negative notes page",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}?page=-1`,
+  },
+  {
+    why: "a notes page with a leading zero",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}?page=01`,
+  },
+  {
+    why: "a notes page beyond int32",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}?page=2147483648`,
+  },
+  {
+    why: "a zero notes page size",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}?size=0`,
+  },
+  {
+    why: "a notes page size above one hundred",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}?size=101`,
+  },
+  {
+    why: "an audit sort on the notes endpoint",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}?sort=changedAt%2Cdesc`,
+  },
+  {
+    why: "a notes sort with another field",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}?sort=noteId%2Casc`,
+  },
+  {
+    why: "a notes sort with another direction",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}?sort=createdAt%2Csideways`,
+  },
+  {
+    why: "a transaction-list filter on the notes endpoint",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}?processingStatus=HELD`,
+  },
+  {
+    why: "a case-list filter on the notes endpoint",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}?caseStatus=OPEN`,
+  },
   // The address rules.
   { why: "a fragment", method: "GET", url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}#content` },
   {
@@ -1537,6 +2320,22 @@ const REFUSED_RELAY_REQUESTS: readonly {
   },
 ];
 
+function requireUniqueRelayDeclarations(
+  entries: readonly { readonly why: string; readonly method: string; readonly url: string }[],
+  label: string,
+): void {
+  const requestKeys = entries.map((entry) => `${entry.method}\u0000${entry.url}`);
+  const reasons = entries.map((entry) => entry.why);
+  requireCondition(
+    new Set(requestKeys).size === entries.length,
+    `The ${label} matrix contains a duplicate method and URL.`,
+  );
+  requireCondition(
+    reasons.every((reason) => reason.trim() !== "") && new Set(reasons).size === entries.length,
+    `The ${label} matrix contains an empty or duplicate reason.`,
+  );
+}
+
 /**
  * The relay boundary, stated as refusals rather than as a comment.
  *
@@ -1551,7 +2350,10 @@ const REFUSED_RELAY_REQUESTS: readonly {
  * reflected back into a failure, so a run's output cannot become the place a
  * filter value is finally written down.
  */
-test("the Backend relay refuses a write, a foreign filter and a non-canonical query", () => {
+test("the Backend relay refuses a write, a foreign filter and a non-canonical query", async () => {
+  await verifyParallelStartBarrierLifecycle();
+  requireCondition(REFUSED_RELAY_REQUESTS.length === 64, "The relay query-refusal matrix drifted.");
+  requireUniqueRelayDeclarations(REFUSED_RELAY_REQUESTS, "relay query-refusal");
   const spawnsBefore = relaySpawnCount;
   const observationsBefore = relayObservationCount;
 
@@ -1635,7 +2437,7 @@ const PERCENT_ENCODED_CASE_ID = "e2e00000-0000-4000-8000-00000000ca5%65";
  * well-formed path is not an approved endpoint, and these cases are what says
  * so.
  *
- * Seven current coverage groups, containing 59 refused endpoints in total:
+ * The current coverage groups contain 70 refused endpoints in total:
  *
  * - reads this suite has no screen for. Every one is a valid lowercase
  *   `/api/v1/...` path carrying no query at all, and every one is refused.
@@ -1668,11 +2470,6 @@ const REFUSED_UNAPPROVED_ENDPOINTS: readonly {
   // The case *detail* address is no longer among them - it is the one read this
   // Issue admitted - so every one of these is a sibling of an address that is
   // now allowed, which is exactly what makes their refusal worth asserting.
-  {
-    why: "a case note read",
-    method: "GET",
-    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${SYNTHETIC_CASE_ID}/notes`,
-  },
   {
     why: "a case status read",
     method: "GET",
@@ -1799,11 +2596,6 @@ const REFUSED_UNAPPROVED_ENDPOINTS: readonly {
     url: `${BACKEND_ORIGIN}${CASE_DETAIL_TARGET}/`,
   },
   {
-    why: "a case detail address with an extra segment",
-    method: "GET",
-    url: `${BACKEND_ORIGIN}${CASE_DETAIL_TARGET}/notes`,
-  },
-  {
     why: "a case identifier followed by an encoded slash",
     method: "GET",
     url: `${BACKEND_ORIGIN}${CASE_DETAIL_TARGET}%2Fnotes`,
@@ -1812,6 +2604,57 @@ const REFUSED_UNAPPROVED_ENDPOINTS: readonly {
     why: "a case identifier followed by an encoded backslash",
     method: "GET",
     url: `${BACKEND_ORIGIN}${CASE_DETAIL_TARGET}%5Cnotes`,
+  },
+  // The notes endpoint is an approved read only at its exact case identity.
+  {
+    why: "an uppercase case identifier on the notes endpoint",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${UPPERCASE_CASE_ID}/notes`,
+  },
+  {
+    why: "a version 1 case identifier on the notes endpoint",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${VERSION_1_CASE_ID}/notes`,
+  },
+  {
+    why: "an invalid RFC variant case identifier on the notes endpoint",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${INVALID_VARIANT_CASE_ID}/notes`,
+  },
+  {
+    why: "an unhyphenated case identifier on the notes endpoint",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${UNHYPHENATED_CASE_ID}/notes`,
+  },
+  {
+    why: "a percent-encoded case identifier on the notes endpoint",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${PERCENT_ENCODED_CASE_ID}/notes`,
+  },
+  {
+    why: "a notes endpoint with a trailing slash",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}/`,
+  },
+  {
+    why: "a notes endpoint with an extra segment",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}/extra`,
+  },
+  {
+    why: "an approved notes endpoint followed by an encoded slash and extra segment",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}%2Fextra`,
+  },
+  {
+    why: "an approved notes endpoint followed by an encoded backslash and extra segment",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}%5Cextra`,
+  },
+  {
+    why: "a fragment on the notes endpoint",
+    method: "GET",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}#content`,
   },
   // The audit endpoint is now an approved read, so its own path identity is
   // fixed independently of the case detail path above.
@@ -1903,6 +2746,21 @@ const REFUSED_UNAPPROVED_ENDPOINTS: readonly {
     method: "DELETE",
     url: `${BACKEND_ORIGIN}${CASE_AUDIT_TARGET}`,
   },
+  {
+    why: "the notes endpoint patched",
+    method: "PATCH",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}`,
+  },
+  {
+    why: "the notes endpoint put",
+    method: "PUT",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}`,
+  },
+  {
+    why: "the notes endpoint deleted",
+    method: "DELETE",
+    url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}`,
+  },
   // The write probe, which is one method at one address and nothing else.
   {
     why: "a case status write",
@@ -1987,6 +2845,11 @@ const REFUSED_UNAPPROVED_ENDPOINTS: readonly {
  * counters are the only way to observe that difference.
  */
 test("the Backend relay refuses every endpoint it was not approved to reach", () => {
+  requireCondition(
+    REFUSED_UNAPPROVED_ENDPOINTS.length === 70,
+    "The relay endpoint-refusal matrix drifted.",
+  );
+  requireUniqueRelayDeclarations(REFUSED_UNAPPROVED_ENDPOINTS, "relay endpoint-refusal");
   const spawnsBefore = relaySpawnCount;
   const observationsBefore = relayObservationCount;
 
@@ -2040,9 +2903,9 @@ test("the Backend relay refuses every endpoint it was not approved to reach", ()
  *
  * A closed endpoint allowlist is only worth having if it did not also close the
  * door on the reads and the one authorization probe this suite depends on. The
- * ten reads are the two collection addresses with and without their real
+ * twelve reads are the two collection addresses with and without their real
  * queries, the two identified detail addresses, and the bare and canonical
- * page/size/sort audit reads; the one write is the case resolution probe. These are
+ * page/size/sort notes and audit reads; the one write is the case resolution probe. These are
  * resolved rather than relayed - the target is compared, no socket is opened -
  * so the assertion is about the boundary and not about the Backend.
  *
@@ -2098,6 +2961,16 @@ test("the Backend relay still admits the real reads and the one declared write p
     },
     {
       method: "GET",
+      url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}`,
+      target: CASE_NOTES_TARGET,
+    },
+    {
+      method: "GET",
+      url: `${BACKEND_ORIGIN}${INITIAL_CASE_NOTES_TARGET}`,
+      target: INITIAL_CASE_NOTES_TARGET,
+    },
+    {
+      method: "GET",
       url: `${BACKEND_ORIGIN}${INITIAL_CASE_AUDIT_TARGET}`,
       target: INITIAL_CASE_AUDIT_TARGET,
     },
@@ -2107,6 +2980,16 @@ test("the Backend relay still admits the real reads and the one declared write p
       target: CASE_RESOLUTION_PATH,
     },
   ];
+
+  requireCondition(admitted.length === 13, "The relay positive admission matrix drifted.");
+  requireCondition(
+    new Set(admitted.map((entry) => `${entry.method}\u0000${entry.url}`)).size === admitted.length,
+    "The relay positive admission matrix contains a duplicate method and URL.",
+  );
+  requireCondition(
+    new Set(admitted.map((entry) => entry.target)).size === admitted.length,
+    "The relay positive admission matrix contains a duplicate target.",
+  );
 
   for (const candidate of admitted) {
     const resolved = resolveRelayTarget(relayCandidate(candidate.method, candidate.url));
@@ -3295,13 +4178,25 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
   // the end can ask whether what Spring Boot actually said reached the screen.
   // Nothing else about the relay changes: the same bytes reach the browser
   // either way, and no sentinel is injected into them.
+  const parallelStartBarrier = new ParallelStartBarrier(
+    [
+      { method: "GET", target: CASE_DETAIL_TARGET },
+      { method: "GET", target: INITIAL_CASE_NOTES_TARGET },
+      { method: "GET", target: INITIAL_CASE_AUDIT_TARGET },
+    ],
+    PARALLEL_START_TIMEOUT_MS,
+  );
   const backend = await installBackendRelay(page, {
-    captureBodyOf: [CASE_DETAIL_TARGET, CASE_AUDIT_TARGET],
+    captureBodyOf: [CASE_DETAIL_TARGET, CASE_NOTES_TARGET, CASE_AUDIT_TARGET],
+    parallelStartBarrier,
   });
+  try {
   const detailRequests = () =>
     backend.filter((entry) => entry.method === "GET" && entry.pathname === CASE_DETAIL_TARGET);
   const auditRequests = () =>
     backend.filter((entry) => entry.method === "GET" && entry.pathname === CASE_AUDIT_TARGET);
+  const noteRequests = () =>
+    backend.filter((entry) => entry.method === "GET" && entry.pathname === CASE_NOTES_TARGET);
 
   // A direct visit to the detail address while signed out. The guard removes
   // the screen, and nothing is asked of the Backend: no credential lookup, no
@@ -3319,6 +4214,7 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
   await expect(page.locator("#username")).toBeVisible({ timeout: 30_000 });
   await page.locator("#username").fill(USERNAME);
   await page.locator("#password").fill(password);
+  parallelStartBarrier.start();
   await submitLogin(page);
   const tokens = parseTokenResponse(await (await tokenResponsePromise).json());
   requireTokenClaims(tokens);
@@ -3337,7 +4233,28 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
 
   // One authorized request to the real case detail endpoint, answered by
   // Spring Boot.
+  await parallelStartBarrier.completion;
   await expect(page.getByRole("alert")).toBeVisible({ timeout: 15_000 });
+  const releasedBarrier = parallelStartBarrier.snapshot();
+  requireCondition(
+    releasedBarrier.state === "released" &&
+      releasedBarrier.expectedTargetCount === 3 &&
+      releasedBarrier.arrivedTargetCount === 3,
+    "The detail, notes and audit reads did not all reach the relay before forwarding.",
+  );
+  requireCondition(
+    releasedBarrier.completionResolveCount === 1 &&
+      releasedBarrier.completionRejectCount === 0 &&
+      releasedBarrier.timeoutCallbackCount === 0 &&
+      releasedBarrier.pendingWaiterCount === 0 &&
+      releasedBarrier.activeTimerCount === 0 &&
+      releasedBarrier.activeCallbackCount === 0,
+    "The released parallel-start barrier retained work or settled more than once.",
+  );
+  requireCondition(
+    backend.barrierArrivalCountAtFirstForwarding() === 3,
+    "A case read reached Backend forwarding before all three exact targets arrived.",
+  );
   const requested = detailRequests();
   requireCondition(requested.length === 1, "The case detail was not requested exactly once.");
   requireCondition(
@@ -3345,6 +4262,17 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
     "The case detail request carried a query string.",
   );
   requireCondition(requested[0].status === 404, "The real case detail request did not return 404.");
+  await expect.poll(() => noteRequests().length).toBe(1);
+  const notesRequested = noteRequests();
+  requireCondition(notesRequested.length === 1, "The case notes were not requested exactly once.");
+  requireCondition(
+    notesRequested[0].target === INITIAL_CASE_NOTES_TARGET,
+    "The notes request target was not the exact initial page query.",
+  );
+  requireCondition(
+    notesRequested[0].status === 404,
+    "The real case notes request did not return 404.",
+  );
   await expect.poll(() => auditRequests().length).toBe(1);
   const auditRequested = auditRequests();
   requireCondition(auditRequested.length === 1, "The case audit history was not requested exactly once.");
@@ -3360,6 +4288,7 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
   // The fixed not-found screen, and not one field of a record.
   await expect(page.getByRole("alert")).toContainText("Case not found");
   await expect(page.getByRole("main").getByRole("status")).toContainText("No record shown.");
+  await expect(page.getByRole("heading", { name: "Investigation notes" })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Audit history" })).toHaveCount(0);
   requireCondition(
     (await page.getByRole("main").locator("dd").count()) === 0,
@@ -3412,6 +4341,7 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
   );
   await page.waitForTimeout(1_000);
   requireCondition(detailRequests().length === 1, "The case screen retried or polled on its own.");
+  requireCondition(noteRequests().length === 1, "The notes section retried or polled on its own.");
   requireCondition(auditRequests().length === 1, "The audit section retried or polled on its own.");
 
   // The address bar holds the case identifier and nothing else, and the
@@ -3445,6 +4375,7 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
     backend.every(
       (entry) =>
         entry.pathname === CASE_DETAIL_TARGET ||
+        entry.pathname === CASE_NOTES_TARGET ||
         entry.pathname === CASE_AUDIT_TARGET ||
         entry.pathname === CASE_LIST_PATH,
     ),
@@ -3455,6 +4386,7 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
   // assumed. Every one of these values exists; none of them is for a reader.
   const backendErrors = [
     readBackendErrorFields(requested[0].body),
+    readBackendErrorFields(notesRequested[0].body),
     readBackendErrorFields(auditRequested[0].body),
   ];
   for (const backendError of backendErrors) {
@@ -3482,15 +4414,80 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
   }
   await page.setViewportSize({ width: 1440, height: 900 });
 
-  // The way back really is the list, reached by the link the screen offers.
+  // The way back really is the list. This request happens after barrier
+  // release, so it must pass through the normal relay rather than being
+  // enrolled or aborted by the completed three-read rendezvous.
+  const observationsBeforeReturn = backend.length;
+  const caseListRequestsBeforeReturn = backend.filter(
+    (entry) => entry.method === "GET" && entry.pathname === CASE_LIST_PATH,
+  ).length;
+  const barrierBeforeReturn = parallelStartBarrier.snapshot();
+  const barrierAbortsBeforeReturn = backend.barrierAbortCount();
   await page.getByRole("link", { name: "Back to cases" }).click();
   await page.waitForFunction((expected) => window.location.href === expected, `${APP_ORIGIN}/cases`);
+  await expect
+    .poll(
+      () =>
+        backend.filter(
+          (entry) => entry.method === "GET" && entry.pathname === CASE_LIST_PATH,
+        ).length,
+    )
+    .toBe(caseListRequestsBeforeReturn + 1);
+  requireCondition(
+    backend.length === observationsBeforeReturn + 1,
+    "Returning to cases did not add exactly one Backend observation.",
+  );
+  const returnedCaseListRequest = backend[observationsBeforeReturn];
+  requireCondition(
+    returnedCaseListRequest.method === "GET" &&
+      returnedCaseListRequest.pathname === CASE_LIST_PATH &&
+      returnedCaseListRequest.target === INITIAL_CASE_TARGET &&
+      returnedCaseListRequest.requestBodyByteLength === 0 &&
+      returnedCaseListRequest.status === 200,
+    "Returning to cases did not forward the exact bodyless initial list read.",
+  );
+  requireUnchangedParallelStartSnapshot(
+    parallelStartBarrier,
+    barrierBeforeReturn,
+    "The case-list request changed the released parallel-start barrier.",
+  );
+  requireCondition(
+    barrierAbortsBeforeReturn === 0 && backend.barrierAbortCount() === 0,
+    "The parallel-start barrier aborted a request after release.",
+  );
+  requireCondition(
+    backend.filter((entry) => entry.method !== "GET").length === 0,
+    "Returning to cases sent a business mutation.",
+  );
   await expect(page.getByRole("heading", { name: "Cases", level: 2 })).toBeVisible();
   requireCondition(
     !(await documentOverflowsHorizontally(page)),
     "The case list scrolled horizontally after returning from the detail screen.",
   );
   requireCondition((await publicationCount(page)) === 1, "Returning to the list changed the session.");
+  for (const value of sensitive) {
+    requireCondition(!(await documentExposes(page, value)), "A credential reached the returned list.");
+    requireCondition(
+      !consoleMessages.some((message) => message.includes(value)),
+      "A credential reached the browser console after returning to cases.",
+    );
+  }
+  } finally {
+    await backend.dispose();
+    const disposedBarrier = parallelStartBarrier.snapshot();
+    requireCondition(
+      backend.isDisposed() &&
+        backend.pendingHandlerCount() === 0 &&
+        backend.listenerCount() === 0 &&
+        disposedBarrier.state === "disposed" &&
+        disposedBarrier.expectedTargetCount === 0 &&
+        disposedBarrier.arrivedTargetCount === 0 &&
+        disposedBarrier.pendingWaiterCount === 0 &&
+        disposedBarrier.activeTimerCount === 0 &&
+        disposedBarrier.activeCallbackCount === 0,
+      "The case relay or parallel-start barrier retained cleanup work.",
+    );
+  }
 });
 
 /**
@@ -3505,6 +4502,8 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
  */
 const CASE_TABLE_GEOMETRY_URL = `${APP_ORIGIN}/e2e/case-table-geometry.html`;
 const CASE_AUDIT_GEOMETRY_URL = `${APP_ORIGIN}/e2e/case-audit-geometry.html`;
+const CASE_NOTES_GEOMETRY_URL =
+  `${APP_ORIGIN}/e2e/case-investigation-notes-geometry.html`;
 
 /** The 128-character assignee reference the fixture renders. Backend's bound. */
 const GEOMETRY_ASSIGNEE_REF =
@@ -3802,5 +4801,76 @@ test("the populated case audit history wraps inside the document at every design
   requireCondition(
     relaySpawnCount === spawnsBefore && relayObservationCount === observationsBefore,
     "The audit geometry fixture reached the Backend relay.",
+  );
+});
+
+test("populated investigation notes preserve plain text and wrap at every design width", async ({
+  page,
+}) => {
+  const offPageRequests: string[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.origin !== APP_ORIGIN) {
+      offPageRequests.push(url.origin);
+    }
+  });
+  const spawnsBefore = relaySpawnCount;
+  const observationsBefore = relayObservationCount;
+
+  await page.goto(CASE_NOTES_GEOMETRY_URL);
+  await expect(page.getByRole("heading", { name: "Investigation notes", level: 3 })).toBeVisible();
+  const articles = page.getByRole("article");
+  await expect(articles).toHaveCount(3);
+  await expect(page.getByText("SYSTEM", { exact: true })).toBeVisible();
+  await expect(page.getByText("USER", { exact: true })).toHaveCount(2);
+  await expect(page.getByRole("navigation", { name: "Investigation notes pages" })).toBeVisible();
+
+  const longNoteId = "note-id-unbroken-".padEnd(128, "n");
+  const longAuthorRef = "author-reference-unbroken-".padEnd(128, "a");
+  await expect(page.getByText(longNoteId, { exact: true })).toBeVisible();
+  await expect(page.getByText(longAuthorRef, { exact: true })).toBeVisible();
+  requireCondition(
+    (await page.getByText(longNoteId, { exact: true }).evaluate((element) => element.closest("a"))) ===
+      null,
+    "A note identifier became a link.",
+  );
+
+  const content = page.locator(".investigation-notes__content");
+  await expect(content).toHaveCount(3);
+  const maximum = content.nth(1);
+  requireCondition(
+    (await maximum.evaluate((element) => Array.from(element.textContent ?? "").length)) === 4000,
+    "The maximum note content was not displayed in full.",
+  );
+  requireCondition(
+    (await maximum.locator("script, a").count()) === 0,
+    "HTML-like or URL-like note content became markup.",
+  );
+  const contentStyle = await maximum.evaluate((element) => {
+    const style = window.getComputedStyle(element);
+    return { whiteSpace: style.whiteSpace, maxHeight: style.maxHeight, overflowY: style.overflowY };
+  });
+  requireCondition(contentStyle.whiteSpace === "pre-wrap", "Note whitespace was not preserved.");
+  requireCondition(
+    contentStyle.maxHeight === "none" && contentStyle.overflowY === "visible",
+    "Note content was truncated or put behind an internal scroller.",
+  );
+
+  for (const viewport of CONSOLE_VIEWPORTS) {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    requireCondition(
+      !(await documentOverflowsHorizontally(page)),
+      `The populated investigation notes scrolled the document at ${String(viewport.width)}px.`,
+    );
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  requireCondition(
+    offPageRequests.length === 0,
+    "The notes geometry fixture requested something outside the application origin.",
+  );
+  requireCondition(
+    relaySpawnCount === spawnsBefore && relayObservationCount === observationsBefore,
+    "The notes geometry fixture reached the Backend relay.",
   );
 });
