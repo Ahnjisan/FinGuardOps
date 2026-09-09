@@ -18,15 +18,15 @@
 - 거래 대응 정책과 거래 상태의 최종 변경은 백엔드가 담당하고, 최종 정상·오탐·이상거래 판정은 FDS 담당자가 수행한다.
 - 외부 금융기관 연동, 실제 본인인증, 실제 거래 차단과 실제 대출 실행은 목표
   시나리오의 Mock 후보다. External Risk는 현재 독립 Port·Policy Service,
-  local/dev/test 결정적 Mock과 성공 Snapshot을 Rule v2에 전달하는 내부
-  per-invocation coordinator까지 구현되어 있다.
+  local/dev/test 결정적 Mock과 실제 HTTP Provider, 성공 Snapshot을 Rule v2에 전달하는
+  coordinator 및 public 거래 접수 상위 흐름 연결까지 구현되어 있다.
 - 아래의 위험등급은 시나리오별 탐지 신호를 설명하기 위한 예상 범위이다. 실제 등급은 승인된 점수 통합 정책과 검증 결과에 따라 결정한다.
 - Rule v1은 거래 접수 시 현재 거래의 `occurredAt`을 기준으로 평가하며, 행동 이벤트 접수만으로 자동 재평가하지 않는다.
-- Rule v1 계약, DetectionResult·Evidence 물리 모델, 현재
-  `POST /api/v1/rule-analysis`와 내부 결과 생성·검증·채택은 구현되었다. 거래
-  접수 연결은 미구현이지만 External Risk를 필수 입력으로 검증하는 FastAPI
-  `POST /api/v2/rule-analysis` wire와 이를 exact wire로 호출하는 Backend Java v2
-  DTO·mapper·Client·내부 오케스트레이션 경계는 구현되었다.
+- Rule v1 계약, DetectionResult·Evidence 물리 모델, FastAPI
+  `POST /api/v1/rule-analysis`·`POST /api/v2/rule-analysis`와 Spring Boot의 결과 생성·
+  검증·채택이 구현되었다. public 거래 접수는 External Risk 성공 Snapshot을 Java v2
+  DTO·mapper·Client로 Rule v2에 전달하고 위험 대응·사건·AuditLog·Snapshot v2까지
+  최종 동기 처리한다.
 
 ### 외부 위험정보 서비스 장애 처리 정책
 
@@ -34,24 +34,25 @@
 - timeout·unavailable·invalid response는 분석을 계속하지 않고 typed exception으로
   전파한다. 실패를 위험정보 없음, 정상 결과 또는 `UNMATCHED`로 변환하지 않는다.
 - 현재 자동 retry, cache, stale data, fallback과 Circuit Breaker는 없다.
-- 목표 거래 접수 연결에서는 External Risk 실패 시 거래가 `RECEIVED`를 유지하고
+- 현재 거래 접수 연결에서는 External Risk 실패 시 거래가 `RECEIVED`를 유지하고
   DetectionResult를 생성하지 않으며 FastAPI와 위험 대응 최종화를 호출하지 않는다.
   멱등 실패 재생은 Provider를 다시 호출하지 않는다. timeout은 `DEPENDENCY_TIMEOUT`, unavailable은
   `DEPENDENCY_UNAVAILABLE`, 그 밖의 계약·검증·변환 오류는 `INTERNAL_ERROR`에
-  매핑한다. 거래 연결과 공개 HTTP 오류 매핑은 아직 구현되지 않았다.
+  매핑한다. 이 공개 HTTP 오류 mapping과 Failure Snapshot 저장·같은 key의 terminal replay가
+  구현되었으며 replay는 Provider·FastAPI·최종화를 다시 호출하지 않는다.
 - cache·Circuit Breaker·fallback은 향후 별도 Issue·ADR 승인이 필요한 운영
   고도화 후보이며 현재 운영 경계에 적용되지 않는다.
 
-현재 External Risk Mock은 송신 계좌, 수신 계좌와 기기 scenario만 지원한다.
+현재 External Risk 계약은 송신 계좌, 수신 계좌와 기기 scenario만 지원한다.
 IP reference와 IP 조회는 현재 거래 모델에 없고 피싱 정책도 미구현이다. 아래의
 위험 IP·피싱·외부 위험 점수·등급·대응 표현은 최종 사용자 시나리오 또는 향후
 확장 후보이며 현재 구현 동작을 의미하지 않는다. FastAPI v2
 `RuleAnalysisRequestV2`와 검증 Endpoint, Backend Java v2 DTO·mapper·직접 Client·
-내부 오케스트레이션 경계와 Mock 성공 Snapshot을 전달하는 coordinator는 구현됐지만
-실제 외부 HTTP Provider와 public 거래 접수 상위 오케스트레이션은 아직 구현되지
-않았다. coordinator 직접 재호출·멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수
-있으며 자동 retry·fallback·cache와 멱등 실패 재생은 없다.
-`ExternalRiskSnapshot` 영속화는 이번 목표가 아니며 별도 승인 대상이다.
+내부 오케스트레이션 경계, Mock 또는 실제 HTTP Provider의 성공 Snapshot을 전달하는
+coordinator와 public 거래 접수 상위 오케스트레이션은 구현되었다. 멱등 단일 승자의 최초
+호출만 Provider를 실행하고 확정된 성공·실패 replay는 다시 호출하지 않는다. coordinator
+직접 재호출·멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수 있으며 자동 retry·fallback·
+cache는 없다. 성공 `ExternalRiskSnapshot`의 DB 영속화는 미구현이며 별도 승인 대상이다.
 
 ### AI 리포트 생성 실패 처리 정책
 
@@ -348,9 +349,9 @@ Rule v1에서 이 시나리오와 직접 연결되는 Baseline은 R001, R003과 
 
 수취 계좌가 외부 위험정보 Mock 서비스의 의심 계좌와 일치하는 송금을 탐지하고, 외부 조회 결과와 내부 거래 근거를 함께 관리한다.
 
-이 절은 거래 접수–External Risk–Rule 분석–위험 대응의 최종 목표 시나리오다.
-현재는 수신 계좌 match를 재현하는 독립 Mock 경계까지만 구현되었다. 승인된 목표
-v2는 이 결과를 분석 Snapshot에 포함하지만 R001~R004·점수·등급·Evidence에는
+이 절의 거래 접수–External Risk–Rule 분석–위험 대응 흐름은 repository production source에
+구현되었고 local integration에서 실제 HTTP Provider 경계까지 검증되었다. v2는 성공 결과를
+분석 Snapshot에 포함하지만 R001~R004·점수·등급·Evidence에는
 반영하지 않는다. 외부 위험정보를 점수·거래 대응에 사용하는 것은 별도 정책이다.
 
 ### 주요 행위자
@@ -363,7 +364,7 @@ v2는 이 결과를 분석 Snapshot에 포함하지만 R001~R004·점수·등급
 ### 사전 조건
 
 - 송금 전에 수취 계좌를 식별할 수 있다.
-- 외부 위험정보 Mock 서비스가 계좌의 위험 여부, 근거, 기준 시각과 조회 상태를 반환할 수 있다.
+- External Risk Provider가 계좌의 위험 여부, 근거, 기준 시각과 조회 상태를 반환할 수 있다.
 - 조회 timeout·unavailable·invalid response를 typed failure로 분류할 수 있다.
   retry·cache·Circuit Breaker·fallback은 현재 적용하지 않는다.
 
@@ -465,8 +466,9 @@ v2는 이 결과를 분석 Snapshot에 포함하지만 R001~R004·점수·등급
 ### 외부 위험정보 서비스 장애 처리
 
 - 공통 fail-closed 장애 처리 정책을 적용해 Rule 분석을 시작하지 않는다.
-- 자동 재조회나 fallback은 없다. 서비스 복구 후 재조회·근거 정정은 향후 별도
-  승인된 실행 경로에서 감사 이력과 함께 다룬다.
+- 자동 재조회나 fallback은 없다. 확정된 Failure Snapshot의 같은 key replay는 저장된 공개
+  오류만 재생하고 Provider를 재조회하지 않는다. 서비스 복구 후 새 operation scope의 재조회·
+  근거 정정은 향후 별도 승인된 실행 경로에서 감사 이력과 함께 다룬다.
 ### 아직 추가 결정이 필요한 사항
 
 - 위험계좌 정보의 식별·정규화와 일치 기준

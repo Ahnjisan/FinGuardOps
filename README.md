@@ -230,8 +230,8 @@ API나 정상 시작 자동 발행은 제공하지 않습니다. `ANALYZED`는 �
 Spring Backend에는 제품 중립적인 Spring Security·OAuth2 Resource Server 기반이
 구현되었습니다. RS256 Bearer JWT와 JWK를 사용하며 issuer·audience·kid·subject·
 `principal_type`·roles·시간 claim을 검증하고, USER·SERVICE principal을 분리해
-role-derived authority를 생성합니다. 실제 13개 production endpoint의 USER·SERVICE
-authority matrix, strict deny-by-default URL matcher와 네 high-risk write Service의
+role-derived authority를 생성합니다. public health와 구분되는 실제 12개 보호 업무
+method·path의 USER·SERVICE authority matrix, strict deny-by-default URL matcher와 네 high-risk write Service의
 method security도 구현했습니다. stateless session·CSRF·exact-origin CORS와
 401·403·JWK 장애 오류·trace 처리도 적용했습니다. 자세한 계약은
 [`보안 아키텍처`](docs/02-architecture/security-architecture.md)와
@@ -240,12 +240,27 @@ method security도 구현했습니다. stateless session·CSRF·exact-origin COR
 [`ADR-012`](docs/07-decisions/ADR-012-jwt-singleton-audience-standard-representation.md)를 따릅니다.
 
 `/api/health`와 profile별 승인된 health·Actuator 경계는 credential 없이 접근할 수 있지만
-invalid Bearer가 명시되면 401이다. 13개 업무 method·path는 승인된 authority를 요구하며
+invalid Bearer가 명시되면 401이다. 다음 12개 보호 업무 method·path는 승인된 authority를 요구하며
 그 밖의 application path·method·trailing slash는 deny-by-default다. credential 없음·invalid
 JWT는 401, valid JWT의 authority 부족과 USER·SERVICE 경계 위반은 403이다. 권한을 통과한
 실제 resource 없음과 미노출 Actuator는 기존 404를 유지한다. `PLATFORM_ADMIN`은 viewer·
 업무 write·ingestion 권한을 자동 상속하지 않는다. management 8081은 업무 Resource Server
 chain과 분리한다.
+
+| Method | Path |
+| --- | --- |
+| `POST` | `/api/v1/transactions` |
+| `GET` | `/api/v1/transactions` |
+| `GET` | `/api/v1/transactions/{transactionId}` |
+| `POST` | `/api/v1/behavior-events` |
+| `GET` | `/api/v1/cases` |
+| `GET` | `/api/v1/cases/{caseId}` |
+| `PATCH` | `/api/v1/cases/{caseId}/status` |
+| `PATCH` | `/api/v1/cases/{caseId}/assignee` |
+| `POST` | `/api/v1/cases/{caseId}/resolution` |
+| `POST` | `/api/v1/cases/{caseId}/notes` |
+| `GET` | `/api/v1/cases/{caseId}/notes` |
+| `GET` | `/api/v1/cases/{caseId}/audit-logs` |
 
 사건 상태·담당자·종결·조사 메모 write는 검증된 USER JWT의 canonical lowercase UUID v4
 `sub`를 AuditLog actor와 InvestigationNote author로 기록합니다. 자동 사건 생성·거래 처리·
@@ -253,7 +268,7 @@ Rule/AI orchestration·복구·one-shot writer는 기존 `SYSTEM/finguardops-bac
 local/dev Authorization Server는 Keycloak으로 선정했고 Issue #239에서 Keycloak container·realm·
 client·protocol mapper, SERVICE token·Backend 경계와 USER Chromium E2E를 구현했다. production
 Authorization Server와 management mTLS·인증 proxy는 별도 후속 범위다. Frontend는 Authorization
-Code + PKCE 로그인·callback·local logout과 memory-only token 경계에 더해, 승인된 10개
+Code + PKCE 로그인·callback·local logout·Keycloak remote logout과 memory-only token 경계에 더해, 승인된 10개
 USER method·path에만 `Authorization: Bearer`를 전달하는 인증 API transport와 401·403 경계를
 구현했다. credential capability는 승인된 Backend USER endpoint가 아닌 destination을 스스로
 거부하며, React tree에 게시되는 값에는 이 capability가 존재하지 않는다. role·authority 권한 UI는
@@ -398,6 +413,10 @@ Kafka
 
 ## 현재 구현 상태
 
+이 절의 `구현`은 저장소의 production source에 반영된 상태를 뜻하며, local integration과
+strict-TLS E2E 검증 여부는 별도로 적는다. local Keycloak·Docker 검증은 실제 production/cloud
+배포·운영 완료를 의미하지 않는다.
+
 ### Completed
 
 * 저장소와 기본 디렉터리 구조 구성
@@ -423,7 +442,7 @@ Kafka
   USER·SERVICE principal과 role-derived authority 구현
 * 안전한 401·403·JWK 503·decoder 500·trace 응답, stateless·CSRF·exact-origin CORS와
   application/management listener 분리 구현
-* 13개 production endpoint의 USER·SERVICE authority matrix, strict deny-by-default URL
+* public health를 제외한 12개 보호 업무 method·path의 USER·SERVICE authority matrix, strict deny-by-default URL
   matcher와 사건 workflow·resolution·조사 메모 생성 Service method security 구현
 * 핵심 도메인 ERD 작성
 * API 공통 규칙 정의
@@ -493,14 +512,20 @@ Kafka
   Runner 및 운영 runbook 구현
 * Backend와 AI Service 전용 GitHub Actions CI 구성
 * React·TypeScript·Vite 기반 Frontend foundation, `createBrowserRouter` 기반 Router(`/`,
-  `/health`, `/auth/callback`, `*`)와 App Shell, public Backend `GET /api/health` client와
+  `/health`, `/auth/callback`, `/transactions`, `/transactions/:transactionId`, `/cases`,
+  `/cases/:caseId`, `*`)와 App Shell, public Backend `GET /api/health` client와
   loading·success·error 화면 상태 구현
 * Frontend OIDC Authorization Code + PKCE 인증 경계 구현. `oidc-client-ts` 기반 redirect
   로그인·callback·local logout, memory-only access/ID token, sessionStorage에는 transient
   protocol transaction record만 보관, 최대 15분 hard session deadline, callback URL 조기 정리와
-  `/`·`/health` exact allowlist 복귀 경로. Issue #239에서 local/dev Keycloak USER browser 연동과
-  refresh token 반환 시 fail-closed E2E를 구현. silent renew와 refresh token 사용은 금지하며 remote
-  logout은 구현하지 않음. role·capability 권한 UI는 후속 Issue #243에서 구현
+  exact allowlist 복귀 경로를 구현했다. 허용값은 literal `/`·`/health`·`/transactions`·`/cases`와
+  canonical lowercase RFC 4122 UUID v4 한 segment만 갖는 `/transactions/{transactionId}`·
+  `/cases/{caseId}`다. 임의 하위 path·query·fragment·trailing slash·uppercase/noncanonical ID·
+  absolute URL(다른 origin·userinfo 포함)은 허용하지 않는다. Issue #229 당시에는 local logout까지만 구현되었고 remote
+  logout과 role·capability UI는 후속 범위였다. 이후 Issue #239에서 local/dev Keycloak USER browser
+  연동과 refresh token 반환 시 fail-closed E2E를, Issue #243에서 role·capability 판정 계층을,
+  Issue #247에서 Keycloak RP-initiated remote logout과 root callback을 구현했다. silent renew와
+  refresh token 사용은 계속 금지한다.
 * Frontend 인증 Backend API transport와 401·403 경계 구현. endpoint key가 method·path를
   결정하는 승인 10개 USER endpoint allowlist, canonical UUID v4 path parameter 검증과 exact
   origin·pathname 재검증, raw token을 반환하지 않고 승인 `Request`에 Authorization을 부착하는
@@ -521,7 +546,8 @@ Kafka
   token fail-closed 계약을 문서로 확정. 이후 Issue #239에서 Keycloak runtime·realm·client·mapper,
   USER browser 연동과 refresh token 검사 adapter E2E를 구현. Issue #241에서 실제 두 SERVICE
   token의 거래·행동 신규/재생/충돌, 401·403, 단계별 PostgreSQL global delta·거래별 cardinality와
-  External Risk·Rule 실제 단일 hit를 fresh/existing-volume으로 검증. role UI는 구현하지 않음
+  External Risk·Rule 실제 단일 hit를 fresh/existing-volume으로 검증. Issue #241 당시 role UI는
+  검증 범위가 아니었고, 현재 role·capability UI와 보호 업무 화면 적용은 후속 Issue #243·#249~#261에서 구현됨
 
 Backend Security 설정은 `FINGUARDOPS_SECURITY_ISSUER`,
 `FINGUARDOPS_SECURITY_JWK_SET_URI`, `FINGUARDOPS_SECURITY_ALLOWED_ORIGINS`와 JWK
@@ -544,11 +570,11 @@ Issue #223에서 구현되었습니다. Issue #225에서는 production Authoriza
 local/manual 전용 RS256 fixture와 Compose 인증 E2E를 추가했습니다. 실행·token 비노출·
 rotation·sidecar 재생성 절차는
 [`Local JWT 인증 E2E runbook`](docs/09-deployment/local-jwt-auth-e2e-runbook.md)을 따릅니다.
-남은 보안 후속 순서는 다음과 같습니다.
+남은 보안·업무 UI 후속 순서는 다음과 같습니다.
 
 1. 사건 workflow·담당자 변경·최종 판정 UI
 2. 조사 메모 개별 상세·수정·삭제와 별도 notes route는 별도 승인 시 검토
-3. Keycloak remote logout 계약과 구현
+3. production Authorization Server·credential/secret manager·trusted certificate·HA 배포와 운영
 
 제품과 claim 계약은 Issue #233의
 [`ADR-011`](docs/07-decisions/ADR-011-keycloak-authorization-server-and-claim-contract.md)에서
@@ -582,7 +608,6 @@ Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend OIDC도 Comp
 * 자동 retry·fallback·cache는 별도 Issue와 계약 승인 전까지 도입하지 않음
 * Redis 연동
 * Kafka 비동기 처리
-* 프론트엔드 최종 응답·사건 조회 연동과 React 관리자 화면
 * 이미지 빌드·배포를 포함한 GitHub Actions CI/CD 확장
 * Kubernetes·AWS 배포와 실제 배포 환경 E2E
 * production Prometheus·Alertmanager·Grafana, 보안·TLS·SSO·RBAC·HA·장기 보존을
@@ -767,7 +792,8 @@ Issue #235 OWNER 보정은 stock Keycloak이 HTTP와 HTTPS에 공통 listener ho
 publish하지 않는다. Backend와 승인 helper는 namespace loopback URI만 사용하지만, Backend가 참여한
 local/dev Docker network의 container는 operator 신뢰 경계에 포함된다. 별도 proxy/service/image는
 추가하지 않았고 persistent volume은 Keycloak용 `keycloak-data`만 추가했다. 실제 USER browser login과
-Frontend refresh-token fail-closed는 Issue #239에서 구현했다. role UI와 remote logout은 후속 범위다.
+Frontend refresh-token fail-closed는 Issue #239에서 구현했다. 이후 role·capability UI는 Issue #243에서,
+remote logout은 Issue #247에서 구현했고 거래·사건 보호 화면에 적용했다.
 
 2026-09-05 correction 검증에서 fresh/existing-volume runtime, existing verifier 5회 연속 실행,
 host TLS·hostname·issuer·public JWKS discovery와 host 8082·9000 비공개 검사가 모두 통과했다.
@@ -775,13 +801,16 @@ host TLS·hostname·issuer·public JWKS discovery와 host 8082·9000 비공개 �
 Issue #241은 같은 overlay와 bootstrap을 바꾸지 않고 실제 SERVICE Client Credentials ingestion을
 추가 검증한다. Transaction `201/201/409/409/409`, Behavior `201/201/200/409`, 반대 SERVICE `403`,
 credential 누락·손상 `401`을 확인하고 55/HIGH·ADDITIONAL_AUTH_REQUIRED, 사건·연결 각 1건,
-action별 AuditLog 4건과 External Risk marker·Rule v2 exact access hit 각 1회를 대조한다. Backend
+action별 AuditLog 4건과 External Risk marker·`/api/v2/rule-analysis` exact access hit 각 1회를 대조한다. Backend
 outcome metric은 별도 보조 검증이다. 공식 SERVICE 명령은 Docker namespace loopback만 사용하며
 USER password, Windows 인증서 저장소, Chromium과 Playwright를 사용하지 않는다. cleanup은 전용
 container·network·volume에 한정하고 공용 local image는 삭제·잔존 판정에서 제외한다.
 
-Issue #239 Phase 3은 `@playwright/test` 1.62.1과 Chromium-only runner를 추가했다. Windows runner는
-검증된 `CA:FALSE` localhost leaf를 현재 사용자 Root에만 한시적으로 신뢰시키고, 전용 Compose
-project와 임시 Playwright output, 자신이 추가한 exact certificate만 정리한다. 실제 password·code·
-token은 source·로그·DOM·storage·report·artifact에 기록하지 않는다. production Authorization Server,
-role UI와 remote logout은 여전히 미구현이다.
+Issue #239 Phase 3 당시 `@playwright/test` 1.62.1과 Chromium-only runner를 추가했고 Windows 사용자
+Root에 localhost leaf를 한시적으로 신뢰시키는 방식이었다. Issue #247 이후 현재 runner는 Windows
+인증서 저장소를 읽거나 수정하지 않고, 고정 digest의 Playwright Linux image에 exact `libnss3-tools`
+layer만 추가한 격리 Chromium container의 실행별 NSS DB에서만 localhost leaf를 신뢰한다. 공식 Run은
+`--no-build --pull never`와 exact image 검증을 사용하며 TLS 오류 무시 없이 strict TLS를 확인하고,
+종료 시 전용 Compose resource와 임시 browser profile·artifact를 정리한다. 실제 password·code·token은
+source·로그·DOM·storage·report·artifact에 기록하지 않는다. 이는 local strict-TLS E2E 구현이며
+production Authorization Server·trusted certificate·secret manager·HA 배포 완료를 의미하지 않는다.
