@@ -939,21 +939,64 @@ describe("the /cases/:caseId production route", () => {
     const fetchSpy = vi.fn().mockImplementation(() => new Promise<Response>(() => {}));
     vi.stubGlobal("fetch", fetchSpy);
 
-    renderSignedInAt(CANONICAL_CASE_ROUTE, [role]);
+    const { client } = renderSignedInAt(CANONICAL_CASE_ROUTE, [role]);
 
     expect(
       await screen.findByRole("heading", { name: `Case ${CANONICAL_CASE_ID}` }),
     ).toBeInTheDocument();
     expect(screen.getByText("Loading case...")).toBeInTheDocument();
-    // The direct URL entry really did reach the Backend, for this case and no
-    // other, and with no query on it.
+    // The record and its audit history start together. Classify the requests by
+    // their complete target rather than by call index: effect scheduling may
+    // choose either order, while a missing, duplicated or third endpoint still
+    // has to fail this exact multiset.
     await waitFor(() => {
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
     });
-    const sent = fetchSpy.mock.calls[0][0] as Request;
-    expect(new URL(sent.url).pathname).toBe(`/api/v1/cases/${CANONICAL_CASE_ID}`);
-    expect(new URL(sent.url).search).toBe("");
-    expect(sent.method).toBe("GET");
+    const requests = fetchSpy.mock.calls.map((call) => call[0] as Request);
+    const targets = requests.map((request) => {
+      const url = new URL(request.url);
+      return `${request.method} ${url.pathname}${url.search}${url.hash}`;
+    });
+    expect([...targets].sort()).toEqual(
+      [
+        `GET /api/v1/cases/${CANONICAL_CASE_ID}`,
+        `GET /api/v1/cases/${CANONICAL_CASE_ID}/audit-logs?page=0&size=20&sort=changedAt%2Cdesc`,
+      ].sort(),
+    );
+
+    const detailRequests = requests.filter(
+      (request) => new URL(request.url).pathname === `/api/v1/cases/${CANONICAL_CASE_ID}`,
+    );
+    const auditRequests = requests.filter(
+      (request) =>
+        new URL(request.url).pathname === `/api/v1/cases/${CANONICAL_CASE_ID}/audit-logs`,
+    );
+    expect(detailRequests).toHaveLength(1);
+    expect(auditRequests).toHaveLength(1);
+
+    const detailUrl = new URL(detailRequests[0].url);
+    expect(detailUrl.search).toBe("");
+    expect(detailUrl.hash).toBe("");
+
+    const auditUrl = new URL(auditRequests[0].url);
+    expect([...auditUrl.searchParams.entries()]).toEqual([
+      ["page", "0"],
+      ["size", "20"],
+      ["sort", "changedAt,desc"],
+    ]);
+    expect(`${auditUrl.pathname}${auditUrl.search}`).toBe(
+      `/api/v1/cases/${CANONICAL_CASE_ID}/audit-logs?page=0&size=20&sort=changedAt%2Cdesc`,
+    );
+    expect(auditUrl.hash).toBe("");
+
+    for (const request of requests) {
+      expect(request.method).toBe("GET");
+      expect(request.body).toBeNull();
+      expect(request.headers.get("Content-Type")).toBeNull();
+      expect(request.headers.get("Authorization")).toBe("Bearer fake.access.token");
+      expect(request.credentials).toBe("omit");
+    }
+    expect(client.calls.authorizeRequest).toBe(2);
   });
 
   it.each(NON_CASE_ROLES)("refuses direct entry for %s, sending nothing", async (role) => {

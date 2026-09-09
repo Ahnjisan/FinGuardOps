@@ -71,11 +71,13 @@ interface PendingCall {
   fail: (error: unknown) => void;
 }
 
-function controlledFetch(): {
+function controlledFetch(auditStatus = 200): {
   readonly calls: PendingCall[];
   readonly spy: ReturnType<typeof vi.fn>;
+  readonly auditRequests: Request[];
 } {
   const calls: PendingCall[] = [];
+  const auditRequests: Request[] = [];
   const spy = vi.fn().mockImplementation((request: Request) => {
     let settle!: (response: Response) => void;
     let fail!: (error: unknown) => void;
@@ -87,8 +89,37 @@ function controlledFetch(): {
     calls.push({ promise, request, settle, fail });
     return promise;
   });
-  vi.stubGlobal("fetch", spy);
-  return { calls, spy };
+  const transport = vi.fn().mockImplementation((request: Request) => {
+    const url = new URL(request.url);
+    if (url.pathname.endsWith("/audit-logs")) {
+      auditRequests.push(request);
+      const caseId = url.pathname.split("/").at(-2) ?? "";
+      const body =
+        auditStatus === 200
+          ? {
+              caseId,
+              content: [],
+              page: {
+                number: 0,
+                size: 20,
+                totalElements: 0,
+                totalPages: 0,
+                first: true,
+                last: true,
+              },
+              traceId: "trace_demo_case_audit_01",
+            }
+          : {
+              code: "AUDIT_BACKEND_PRIVATE_CODE",
+              message: "audit backend private message",
+              traceId: "trace_demo_case_audit_private",
+            };
+      return Promise.resolve(jsonResponse(body, { status: auditStatus }));
+    }
+    return spy(request);
+  });
+  vi.stubGlobal("fetch", transport);
+  return { calls, spy, auditRequests };
 }
 
 function renderPage(client: FakeAuthClient, path: string = DETAIL_ROUTE) {
@@ -176,8 +207,13 @@ describe("CaseDetailPage request", () => {
       "/cases",
     );
     expect(screen.getByText("Loading case...")).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("Loading case");
-    expect(screen.getByRole("status")).toHaveAttribute("aria-live", "polite");
+    expect(screen.getByRole("status", { name: "Case record status" })).toHaveTextContent(
+      "Loading case",
+    );
+    expect(screen.getByRole("status", { name: "Case record status" })).toHaveAttribute(
+      "aria-live",
+      "polite",
+    );
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
@@ -363,7 +399,7 @@ describe("CaseDetailPage record", () => {
     expect(valueOf("Concurrency version")).toHaveTextContent("0");
   });
 
-  it("shows no risk, detection, evidence, note, audit or AI report anywhere", async () => {
+  it("adds only audit history to the record and still invents no unsupported case data", async () => {
     await showRecord();
 
     const rendered = (document.body.textContent ?? "").toLowerCase();
@@ -373,8 +409,6 @@ describe("CaseDetailPage record", () => {
       "probability",
       "detection",
       "evidence",
-      "note",
-      "audit",
       "ai report",
       "transaction id",
       "escalat",
@@ -388,10 +422,13 @@ describe("CaseDetailPage record", () => {
 
     // A read-only screen: nothing to press, no form to submit, no field to
     // type in and no state, assignee or resolution to choose.
-    expect(screen.queryAllByRole("button")).toHaveLength(0);
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual([
+      "Previous",
+      "Next",
+    ]);
     expect(document.querySelectorAll("form")).toHaveLength(0);
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
-    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Entries per page" })).toBeInTheDocument();
     expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
     // One link, and it goes to the list.
     const links = screen.getAllByRole("link");
@@ -399,8 +436,8 @@ describe("CaseDetailPage record", () => {
     expect(links[0]).toHaveAttribute("href", "/cases");
   });
 
-  it("sends nothing beyond the one read, whatever the record says", async () => {
-    const { calls, spy } = controlledFetch();
+  it("starts only the detail and audit reads, whatever the record says", async () => {
+    const { calls, spy, auditRequests } = controlledFetch();
     renderPage(signedIn());
     await settle();
     await answerWith(calls[0], caseBody());
@@ -410,15 +447,39 @@ describe("CaseDetailPage record", () => {
     await settle();
 
     expect(spy).toHaveBeenCalledTimes(1);
+    expect(auditRequests).toHaveLength(1);
+    expect(new URL(auditRequests[0].url).pathname).toBe(`${DETAIL_ROUTE.replace("/cases", "/api/v1/cases")}/audit-logs`);
+    expect(new URL(auditRequests[0].url).search).toBe(
+      "?page=0&size=20&sort=changedAt%2Cdesc",
+    );
     for (const call of calls) {
       expect(call.request.method).toBe("GET");
     }
+    expect(auditRequests[0].method).toBe("GET");
+  });
+
+  it("keeps the case record when the independent audit read fails", async () => {
+    const { calls } = controlledFetch(503);
+    renderPage(signedIn());
+    await settle();
+    await answerWith(calls[0], caseBody());
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Case", level: 3 })).toBeInTheDocument();
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "The audit history could not be loaded",
+      );
+    });
+    expect(valueOf("Case ID")).toHaveTextContent(CASE_ID);
+    expect(document.body.textContent ?? "").not.toContain("AUDIT_BACKEND_PRIVATE_CODE");
+    expect(document.body.textContent ?? "").not.toContain("audit backend private message");
+    expect(document.body.innerHTML).not.toContain("trace_demo_case_audit_private");
   });
 
   it("announces the result in the live region and raises no alert", async () => {
     await showRecord();
 
-    const summary = screen.getByRole("status");
+    const summary = screen.getByRole("status", { name: "Case record status" });
     expect(summary).toHaveTextContent("Showing the full case record.");
     expect(summary).toHaveAttribute("aria-live", "polite");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
@@ -428,7 +489,7 @@ describe("CaseDetailPage record", () => {
     await showRecord();
 
     const sections = screen.getAllByRole("heading", { level: 3 }).map((h) => h.textContent);
-    expect(sections).toEqual(["Case", "Investigation timeline", "Record metadata"]);
+    expect(sections).toEqual(["Case", "Investigation timeline", "Record metadata", "Audit history"]);
     expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(1);
     // Every labelled section really points at a heading that exists once.
     for (const section of Array.from(document.querySelectorAll("[aria-labelledby]"))) {
@@ -464,12 +525,18 @@ describe("CaseDetailPage failures", () => {
     expect(alert).toHaveTextContent("Case not found");
     expect(within(alert).queryByRole("button")).not.toBeInTheDocument();
     expect(screen.queryByText("Loading case...")).not.toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("No record shown.");
+    expect(screen.getByRole("status", { name: "Case record status" })).toHaveTextContent(
+      "No record shown.",
+    );
     // Not one field of a case that does not exist.
     expect(document.querySelectorAll("dd")).toHaveLength(0);
     expect(document.body.innerHTML).not.toContain(TRACE_ID);
     expect(alert.textContent ?? "").not.toContain("404");
     expect(alert.textContent ?? "").not.toContain("CASE_NOT_FOUND");
+    expect(screen.queryByRole("heading", { name: "Audit history" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("navigation", { name: "Audit history pages" }),
+    ).not.toBeInTheDocument();
   });
 
   it("reports a 403 as a fixed refusal, and offers no retry", async () => {
@@ -481,6 +548,7 @@ describe("CaseDetailPage failures", () => {
     expect(alert.textContent ?? "").not.toContain("case:read");
     expect(alert.textContent ?? "").not.toContain("ACCESS_DENIED");
     expect(document.querySelectorAll("dd")).toHaveLength(0);
+    expect(screen.queryByRole("heading", { name: "Audit history" })).not.toBeInTheDocument();
   });
 
   it("reports an unmapped Backend status without naming it", async () => {
@@ -522,7 +590,11 @@ describe("CaseDetailPage failures", () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
 
-    expect(screen.getByRole("alert")).toHaveTextContent("The case took too long to load");
+    expect(
+      screen
+        .getAllByRole("alert")
+        .some((alert) => alert.textContent?.includes("The case took too long to load")),
+    ).toBe(true);
     vi.useRealTimers();
   });
 
@@ -678,7 +750,9 @@ describe("CaseDetailPage malformed address", () => {
       "href",
       "/cases",
     );
-    expect(screen.getByRole("status")).toHaveTextContent("This is not a case address.");
+    expect(screen.getByRole("status", { name: "Case record status" })).toHaveTextContent(
+      "This is not a case address.",
+    );
   });
 });
 

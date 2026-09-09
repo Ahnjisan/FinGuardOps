@@ -122,8 +122,8 @@ AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 
   Authorization Code + PKCE 인증 경계, 인증 API transport와 권한 UI, capability로 보호되는
   production 업무 화면인 거래 목록(`/transactions`), 조회 전용 거래 상세
   (`/transactions/{transactionId}`), 조회 전용 사건 목록(`/cases`)과 조회 전용 사건 상세
-  (`/cases/{caseId}`), FDS operations console 디자인 기반이 구현되었으며 사건 workflow·담당자
-  변경·최종 판정·조사 메모·감사 이력·연관 거래·Detection·Rule Evidence·AI 사건 리포트 화면과
+  (`/cases/{caseId}`), 그 상세 하단의 읽기 전용 감사 이력 section, FDS operations console 디자인
+  기반이 구현되었으며 사건 workflow·담당자 변경·최종 판정·조사 메모·연관 거래·Detection·Rule Evidence·AI 사건 리포트 화면과
   mutation UI, 운영 대시보드, 콘솔 전체의 최종 시각적 리뉴얼은 구현되지 않음
 - `infra/`: Issue #196의 로컬 Compose Prometheus scrape·External Risk 검증 fixture,
   Issue #199의 service 수준 recording rule 14개와 Issue #201의 로컬 실패율 alert rule
@@ -297,7 +297,8 @@ React는 API 계약을 임의로 만들거나 금융 업무 상태를 자체 확
 #### 현재 구현된 업무 화면
 
 거래 목록(`/transactions`, Issue #249), 거래 상세(`/transactions/{transactionId}`, Issue #251),
-사건 목록(`/cases`, Issue #253)과 사건 상세(`/cases/{caseId}`, Issue #255) 넷이다. 앞의 둘은
+사건 목록(`/cases`, Issue #253)과 사건 상세(`/cases/{caseId}`, Issue #255, 감사 이력 section은
+Issue #257) 넷이다. 앞의 둘은
 Frontend UI capability `transaction:view`로, 뒤의 둘은 `case:view`로 보호하며, 최종 판정은 각각
 Backend authority `transaction:read`, `case:read`와 401·403 응답이 내린다. Frontend capability와 Backend authority는 서로 다른 계층에
 속하므로 혼용하지 않는다.
@@ -341,7 +342,7 @@ action은 없다. 표시하는 값은
 표시한다. `caseId`, `caseStatus`, `finalDisposition`, `assigneeRef`, `relatedTransactionCount`,
 `createdAt`, `reviewStartedAt`, `closedAt`, `lastChangedAt`, `concurrencyVersion`이 전부이며,
 `concurrencyVersion`은 optimistic locking token으로 사용하지 않는 읽기 전용 Record metadata다.
-계약에 없는 `updatedAt`·위험도·탐지 결과·Rule Evidence·연관 거래·조사 메모·감사 이력·AI 리포트는
+계약에 없는 `updatedAt`·위험도·탐지 결과·Rule Evidence·연관 거래·조사 메모·AI 리포트는
 만들지 않고, 변경 시각은 계약 그대로 `lastChangedAt`으로 표시한다. nullable 네 필드는 값을
 추정하지 않고 presentation 단계에서만 고정 문구(`Not decided`·`Unassigned`·`Not started`·
 `Not closed`)로 바꾼다. 상세 route는 거래 상세와 같은 규칙으로 canonical lowercase UUID v4만
@@ -352,8 +353,17 @@ invalid response, generic error, explicit retry, 고정 invalid-route로 나뉘�
 제공하지 않는다. Backend `code`·`message`·`traceId`와 raw body는 DOM에도 `console`에도 나오지
 않는다.
 
-Issue #251, Issue #253과 Issue #255 모두에서 Backend, AI Service, Infra, Keycloak, DB와 API 계약
-변경은 없다. 사건 workflow·담당자 변경·resolution·조사 메모·감사 이력·연관 거래·Detection·
+Issue #257은 같은 `/cases/{caseId}` 화면 하단에서 기존
+`GET /api/v1/cases/{caseId}/audit-logs` typed client와 exact validator를 사용하는 독립 section을
+추가한다. 상세와 감사 요청은 병렬이며 loading·success/empty·403·404·401·timeout·network·invalid
+response·generic error가 서로 격리된다. 상세 403/404가 확정되면 감사 section을 unmount해 상태와
+pending request를 폐기한다. 감사 항목은 Backend 순서를 유지하는 `<ol>`의 `<li><article>`이고,
+action·reasonCode·actorType과 summary enum은 raw code로 표시한다. null summary는 `Not applicable`,
+null assignee는 `Unassigned`, noteId는 링크 없는 텍스트다. pagination은 section local state이며
+`page=0`, `size=20`, `sort=changedAt,desc`로 시작하고 size는 20·50·100만 제공한다.
+
+Issue #251, Issue #253, Issue #255와 Issue #257 모두에서 Backend, AI Service, Infra, Keycloak,
+DB와 API 계약 변경은 없다. 사건 workflow·담당자 변경·resolution·조사 메모·연관 거래·Detection·
 Rule Evidence·AI 사건 리포트 화면과 mutation UI는 후속 Issue이며, 콘솔 전체의 최종 시각적 리뉴얼도
 후속 작업으로 남아 있다.
 

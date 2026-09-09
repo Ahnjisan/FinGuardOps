@@ -429,7 +429,8 @@ USER actor UUID, token, claim과 principal 원문은 응답·로그·metadata에
   guard는 Issue #243에서 구현했고, Issue #249에서 첫 production 보호 route `/transactions`에,
   Issue #251에서 조회 전용 거래 상세 route `/transactions/{transactionId}`에, Issue #253에서
   조회 전용 사건 목록 route `/cases`에, Issue #255에서 조회 전용 사건 상세 route
-  `/cases/{caseId}`에 적용했다.
+  `/cases/{caseId}`에 적용했다. Issue #257의 상세 하단 감사 이력도 별도 route나 capability 없이
+  같은 `case:view` guard 안에 둔다.
 - Frontend UI capability 이름(`transaction:view`, `case:view`)과 Backend authority 이름
   (`transaction:read`, `case:read`)은 서로 다른 계층의 이름이므로 혼용하지 않는다. 최종 판정은
   Backend authority에만 있다.
@@ -582,7 +583,7 @@ session을 게시하지 않고 OIDC user state를 제거하며, callback 이후 
 Storage에 원문이 남지 않게 fail-closed한다. `automaticSilentRenew=false`, refresh token
 grant 0회와 silent renew 0회를 유지한다. 실제 Chromium E2E는 정상 token response의 refresh token
 부재와 합성 `refresh_token` 거부, state·nonce·PKCE 변조 거부를 각각 확인한다. 거래·사건·메모·
-감사 업무 화면은 아직 구현되지 않았다. remote logout은 Issue #247에서 구현했고 실제 Chromium
+이 시점에는 거래·사건·메모·감사 업무 화면이 아직 구현되지 않았다. remote logout은 Issue #247에서 구현했고 실제 Chromium
 E2E가 exact end-session endpoint·parameter 집합, exact root callback, logout state 1회 consume,
 local session·credential 0, 재로그인 시 로그인 화면 재노출, consumed callback 재사용 반례와
 token·password·state 원문 비노출을 확인한다. 같은 Issue에서 browser 신뢰 경계를 host Windows
@@ -935,8 +936,25 @@ authority·새 endpoint는 추가하지 않았다. guard는 route element에 있
   seed를 추가하지 않는다.
 
 Issue #255에서도 Backend, AI Service, Infra, Keycloak, DB와 API 계약 변경은 없다. 사건 상태 변경,
-담당자 변경, 최종 판정, 조사 메모, 감사 이력, 연관 거래, Detection·Rule Evidence와 AI 사건 리포트
+담당자 변경, 최종 판정, 조사 메모, 연관 거래, Detection·Rule Evidence와 AI 사건 리포트
 화면, 그리고 mutation UI는 아직 구현되지 않았다.
+
+Issue #257은 기존 상세 guard 안에서 `GET /api/v1/cases/{caseId}/audit-logs`만 병렬 호출한다.
+Frontend capability는 `case:view`, Backend 최종 권한은 기존 `case-audit:read`이며 role mapping은
+변경하지 않는다. audit state에는 `content`와 page metadata만 field 단위로 fresh projection하고
+response `caseId`·`traceId`, raw envelope/error, credential과 transport 객체를 보존하지 않는다.
+현재 credential의 401만 authorized client의 conditional invalidation을 실행하며 stale 401은 새
+session에 영향을 주지 않고 403·404는 session을 유지한다. 상세 403·404가 확정되면 audit section을
+unmount해 pending request와 stored outcome을 폐기하므로 audit 오류 UI를 중복 표시하지 않는다.
+
+E2E relay는 audit read를 canonical lowercase UUID v4의 exact `/audit-logs` suffix에서만 허용한다.
+query 이름은 `page`·`size`·`sort`이고, canonical decimal 범위(`page` 0..2147483647, `size` 1..100)와
+sort `changedAt,asc|desc`, duplicate·empty·unknown·non-canonical encoding을 credential 조회와 relay
+spawn 전에 fail-closed 검증한다. 승인 target은 query 순서와 encoding을 바꾸지 않고 byte 단위로
+전달하며 audit 주소의 POST·PATCH·PUT·DELETE와 notes/status/assignee/resolution/transactions/AI report
+suffix는 계속 거부한다. 실제 Backend E2E는 detail/audit 각 1회의 실제 404와 session 유지·자동 retry
+0회를, production component geometry fixture는 populated 6-action UI의 세 viewport document overflow
+0을 맡는다.
 
 Stock Keycloak은 HTTP와 HTTPS에 공통 listener host를 적용하므로 2026-09-05 OWNER 결정에 따라
 `KC_HTTP_HOST=0.0.0.0`을 사용한다. HTTPS 8443만 host `127.0.0.1`에 publish하고 HTTP 8082와
