@@ -4,7 +4,7 @@
 
 이 문서는 FinGuardOps의 Spring Boot REST API가 공통으로 따를 표현 형식, 식별자, 금액, 페이지네이션, 멱등성, 오류 응답과 추적 원칙을 정의한다.
 
-이 문서는 이후 Controller, 요청·응답 DTO, Validation, Service, 테스트와 OpenAPI 계약의 기준이다. Java 타입, DB 컬럼과 OpenTelemetry 전파 헤더는 이 문서에서 확정하지 않는다. 구현된 Spring Security·JWT·endpoint RBAC 계약은 [`security-architecture.md`](../02-architecture/security-architecture.md)와 [`ADR-008`](../07-decisions/ADR-008-oauth2-resource-server-rbac-user-audit-actor.md)을 따른다. USER Audit actor는 아직 구현되지 않았다.
+이 문서는 이후 Controller, 요청·응답 DTO, Validation, Service, 테스트와 OpenAPI 계약의 기준이다. Java 타입, DB 컬럼과 OpenTelemetry 전파 헤더는 이 문서에서 확정하지 않는다. 구현된 Spring Security·JWT·endpoint RBAC 계약은 [`security-architecture.md`](../02-architecture/security-architecture.md)와 [`ADR-008`](../07-decisions/ADR-008-oauth2-resource-server-rbac-user-audit-actor.md)을 따른다. 구현된 USER Audit actor와 사건·조사 메모·감사 API의 상세 계약은 [`case-audit-api.md`](./case-audit-api.md)를 따른다.
 
 ## 2. 기본 경로
 
@@ -519,11 +519,10 @@ OpenTelemetry, W3C Trace Context의 `traceparent`, 외부 HTTP 호출, Kafka와 
 
 ## 10. 제외 범위
 
-- 사건 write·조사 메모의 USER Audit actor 구현
 - Java Controller, DTO, Service와 Exception Handler
 - JPA Entity와 PostgreSQL DDL
 - OpenAPI YAML
 - 구체적인 OpenTelemetry Header 구현
 - Kafka 이벤트 계약
-- 사건 상태 변경, 조사 메모와 AI 리포트 API
+- AI 리포트 API
 - AI 사용량과 플랫폼 운영 API

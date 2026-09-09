@@ -202,7 +202,10 @@ payload에는 비식별 참조값, 승인된 Reason Code, 버전, 안전한 실�
 - 외부 요청 접수와 실제 실행 생성을 구분한다.
 - 이벤트는 업무 트랜잭션이 성공적으로 확정된 뒤에만 발생한 것으로 본다.
 - 동일 트랜잭션에서 여러 사실이 함께 확정되면 서로 다른 이벤트로 표현할 수 있으나 같은 업무 정합성 경계를 공유했다는 점을 causation·correlation 관계로 추적한다.
-- 거부된 요청과 검증 실패는 업무 상태 변화가 없으면 성공 이벤트를 만들지 않는다. 필요한 감사 기록이나 실패 관측은 별도 계약으로 처리한다.
+- 거부된 요청과 검증 실패는 업무 상태 변화가 없으면 성공 이벤트나 현재 append-only
+  업무 AuditLog를 만들지 않는다. 보안 로그·오류 로그·저카디널리티 metric의 운영 관측은
+  업무 감사와 분리하고, 거부·충돌을 별도 business audit transaction으로 보존하는 방식은
+  후속 계약 후보로만 검토한다.
 - FastAPI 계산 완료 자체가 Spring Boot 업무 결과 확정을 의미하지 않는다. Spring Boot가 결과를 검증·저장한 후 탐지 완료 이벤트를 생산한다.
 
 ## 6. 거래·행동·탐지·사건 이벤트
@@ -320,7 +323,9 @@ HIGH는 `ADDITIONAL_AUTH_REQUIRED`, CRITICAL은 `HELD`의 Mock 처리와 사건 
 | 원거래 판단 영향 | 거래 위험 판단과 상태를 변경하지 않음 |
 | 처리 범위 | 현재 동기 업무 트랜잭션. 후속 조회·알림은 비동기 가능 |
 
-허용되지 않은 전이와 동시성 충돌은 이 성공 이벤트를 만들지 않는다. 기존 사건 API에 따라 거부 감사 기록 대상이 될 수 있다.
+허용되지 않은 전이와 동시성 충돌은 이 성공 이벤트나 현재 업무 AuditLog를 만들지 않는다.
+실패 사실은 보안·오류 로그와 metric으로 관측할 수 있으며 별도 commit 거부 감사는 후속
+설계 후보다.
 
 사건 상태 변경과 담당자 변경은 항상 같은 업무 변화가 아니다. `assigneeRef`는 상태 전이와 함께 담당자가 실제 변경된 경우에만 포함한다.
 
@@ -334,7 +339,7 @@ HIGH는 `ADDITIONAL_AUTH_REQUIRED`, CRITICAL은 `HELD`의 Mock 처리와 사건 
 | Aggregate | `FraudCase` / `caseId` |
 | 필수 식별자 | `caseId`, `traceId`, 변경 전·후 `concurrencyVersion` |
 | 최소 payload | `finalDisposition`, `previousStatus`, `caseStatus=CLOSED`, `closedAt`, `reasonCode` 또는 안전한 사유 요약, `concurrencyVersion` |
-| 중복 처리 | `Idempotency-Key`+fingerprint와 `expectedVersion`으로 같은 종료·판정·AuditLog 중복 방지 |
+| 중복 처리 | 필수 `expectedVersion`과 현재 상태를 검증해 같은 종료·판정·AuditLog 중복 방지. `Idempotency-Key` replay는 사용하지 않음 |
 | 원거래 판단 영향 | 담당자 조사 결과이며 과거 거래 위험 판단을 자동 변경하지 않음 |
 | 처리 범위 | 현재 동기 업무 트랜잭션. 후속 통계는 비동기 가능 |
 
@@ -814,7 +819,7 @@ HTTP 중복
 | 상황 | 요청·실행 식별자 변화 | 이벤트와 업무 처리 |
 | --- | --- | --- |
 | 요청 검증 실패 | 기본 검증 전이면 새 업무 엔티티 없음 | 성공 이벤트 없음. `400/422 VALIDATION_ERROR` |
-| 상태 전이 불가 | 기존 Aggregate 유지 | 성공 변경 이벤트 없음. 거부 감사 기록 후보 |
+| 상태 전이 불가 | 기존 Aggregate 유지 | 성공 변경 이벤트와 현재 업무 AuditLog 없음. 운영 로그·metric 관측, 별도 거부 감사는 후속 후보 |
 | 중복 요청·이벤트 | 기존 결과 사용 | 새 업무 결과 이벤트 없음. 중복 처리 관측·감사 후보 |
 | Spring Boot→FastAPI Timeout·연결 실패 | 접수된 AI 요청의 `aiRequestId`와 `executionId` 유지 | 같은 실행 안에서 승인된 재시도 또는 fallback/실패 |
 | Provider Timeout·연결 실패 | 같은 `executionId`, 실제 호출마다 새 attempt | 자동 재시도 최대 1회, 최초 포함 최대 2 attempts |
@@ -862,14 +867,21 @@ HTTP 중복
 | 탐지 결과 저장·채택 | 사용한 DetectionResult 버전, 위험 점수·등급 확정과 채택 기록 |
 | 위험 대응 결정 | 이전·이후 상태와 대응 결과 기록 |
 | 사건 생성·기존 사건 연결 | 원인 거래·탐지 결과와 생성·연결 결과 기록 |
-| 사건 상태 변경 | 성공한 변경과 허용되지 않은 전이 기록 |
+| 사건 상태 변경 | 성공한 변경만 기록. 허용되지 않은 전이와 stale·optimistic conflict는 업무 AuditLog 0건 |
 | 사건 최종 판정·종료 | 이전·이후 상태, 판정, 주체와 사유 기록 |
-| 동시성 충돌 | 업무 현재값을 바꾸지 않고 거부 결과를 별도 커밋 가능한 감사 경계에 기록 |
+| 사건 조사 메모 생성 | 성공 시 `CASE_NOTE_CREATED/CASE_INVESTIGATION_NOTE_ADDED` 1건. USER actor, `targetType=FRAUD_CASE`, `targetId=caseId`, `caseId`, `transactionId=null`, before/after null, metadata exact `{noteId}`이며 note content는 포함하지 않음 |
+| 동시성 충돌 | 업무 현재값을 바꾸지 않고 현재 업무 AuditLog도 만들지 않음. 별도 commit 거부 감사는 후속 후보 |
 | AI 요청 접수·중복·캐시 | 요청자, 요청·결과 식별자와 처리 경로 기록 |
 | AI 실행 상태·재시도·fallback·실패 | 안전한 상태·실패 분류와 실행 식별자 기록 |
 | Provider 실제 호출 | 원본은 `ProviderCallAttempt`; AuditLog에 전체 attempt 필드를 복제하지 않음 |
 
-감사 로그에는 Prompt 원문, Provider 응답 원문, 인증정보, 고객·계좌 원문과 내부 예외 원문을 기록하지 않는다.
+현재 append-only 업무 AuditLog는 성공해 commit된 업무 변화만 기록한다. `401`, `403`,
+malformed·validation 실패, 리소스 미존재, stale·금지 상태, optimistic conflict와
+persistence·commit 실패는 committed 업무 AuditLog row를 만들지 않는다. 보안 로그·오류 로그·
+metric은 운영 관측이며 업무 AuditLog와 동일한 저장 계약이 아니다.
+
+감사 로그에는 Prompt 원문, Provider 응답 원문, 인증정보, 고객·계좌 원문, 조사 메모
+content와 내부 예외 원문을 기록하지 않는다.
 
 ## 12. 현재 처리와 향후 Kafka 경계
 
