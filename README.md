@@ -240,7 +240,7 @@ method security도 구현했습니다. stateless session·CSRF·exact-origin COR
 [`ADR-012`](docs/07-decisions/ADR-012-jwt-singleton-audience-standard-representation.md)를 따릅니다.
 
 `/api/health`와 profile별 승인된 health·Actuator 경계는 credential 없이 접근할 수 있지만
-invalid Bearer가 명시되면 401이다. 12개 업무 method·path는 승인된 authority를 요구하며
+invalid Bearer가 명시되면 401이다. 13개 업무 method·path는 승인된 authority를 요구하며
 그 밖의 application path·method·trailing slash는 deny-by-default다. credential 없음·invalid
 JWT는 401, valid JWT의 authority 부족과 USER·SERVICE 경계 위반은 403이다. 권한을 통과한
 실제 resource 없음과 미노출 Actuator는 기존 404를 유지한다. `PLATFORM_ADMIN`은 viewer·
@@ -266,13 +266,18 @@ Frontend capability `transaction:view`로 보호되며, 최종 판정은 Backend
 기반 위에 조회 전용 사건 목록 `/cases`를 구현했다. 이 화면의 Frontend capability는 `case:view`이고
 최종 판정은 Backend authority `case:read`와 401·403 응답이 내린다. Issue #255에서는 같은
 capability로 보호되는 조회 전용 사건 상세 `/cases/{caseId}`와 목록의 Case ID → 상세 탐색을
-구현했다. 사건 상세 화면은 `GET /api/v1/cases/{caseId}` 응답의 10개 필드(`caseId`, `caseStatus`,
+구현했다. 사건 상세의 Case record는 read-only이고 workflow mutation UI는 없으며
+`GET /api/v1/cases/{caseId}` 응답의 10개 필드(`caseId`, `caseStatus`,
 `finalDisposition`, `assigneeRef`, `relatedTransactionCount`, `createdAt`, `reviewStartedAt`,
-`closedAt`, `lastChangedAt`, `concurrencyVersion`)만 읽기 전용으로 표시하고, `concurrencyVersion`은
-mutation에 쓰지 않는 Record metadata다. 사건 화면은 목록·상세 조회까지만 구현했고 사건
-workflow·담당자 변경·최종 판정·조사 메모·감사 이력·연관 거래·Detection·Rule Evidence·AI 사건
-리포트 UI와 mutation UI, 운영 대시보드는 아직 없으며, 콘솔 전체의 최종 시각적 리뉴얼은 후속
-작업으로 남아 있다. Issue #225의 Local JWT fixture는 production Authorization
+`closedAt`, `lastChangedAt`, `concurrencyVersion`)만 읽기 전용으로 표시한다. 같은 route에는
+Investigation notes 조회·inline 작성과 read-only Audit history 조회가 구현되어 있다. note 작성은
+사건 상세의 예외적인 mutation으로, 조회한 `concurrencyVersion`을 exact
+`{content, expectedVersion}` POST body에 사용하고 성공 후 notes·detail·audit을 다시 조회한다.
+별도 notes route와 메모 개별 상세·수정·삭제, 사건 workflow·담당자 변경·최종 판정·연관 거래·
+Detection·Rule Evidence·AI 사건 리포트 UI 및 그 밖의 mutation UI는 아직 구현되지 않았다.
+Frontend component·API tests는 note POST 계약을 검증하지만 실제 인증 browser E2E로 note POST를
+검증했다고 주장하지 않는다. 콘솔 전체의 최종 시각적 리뉴얼도 후속 작업으로 남아 있다.
+Issue #225의 Local JWT fixture는 production Authorization
 Server나 브라우저 OIDC Provider가 아닌 Backend 회귀·장애 검증용 local/manual E2E이며,
 Keycloak과 같은 Backend issuer 설정에서 동시에 사용하지 않는다. 상세 결정은
 [`ADR-011`](docs/07-decisions/ADR-011-keycloak-authorization-server-and-claim-contract.md)을
@@ -322,8 +327,8 @@ Kafka
 ### Data
 
 * PostgreSQL: 현재 거래·멱등·행동 이벤트·탐지 결과·RuleVersion, 사건·첫 거래
-  연결과 append-only AuditLog 애플리케이션 연동 구현. AuditLog 조회·보존·파기와
-  AI 사용량·비용은 목표 범위
+  연결, 조사 메모와 append-only AuditLog 애플리케이션 연동 및 사건별 AuditLog 조회 구현.
+  AuditLog 보존·파기와 AI 사용량·비용은 목표 범위
 * Redis: 정확 일치 리포트 캐시와 집계 데이터 후보. External Risk cache는 별도
   Issue와 계약 승인 전에는 현재 기능으로 간주하지 않음
 * Kafka: 사건·리포트·통계 비동기 처리
@@ -343,10 +348,12 @@ Kafka
   Code + PKCE 인증 경계(`oidc-client-ts`), 승인 endpoint 전용 인증 API transport와 401·403
   경계, role·capability 권한 UI, capability로 보호되는 거래 목록 화면(`/transactions`),
   조회 전용 거래 상세 화면(`/transactions/{transactionId}`), 조회 전용 사건 목록 화면
-  (`/cases`)과 조회 전용 사건 상세 화면(`/cases/{caseId}`), FDS operations console 디자인 기반
-  구현. UI dependency는 추가하지 않았고 CSS와 React만 사용한다. 사건 workflow·담당자 변경·최종
-  판정·조사 메모·감사 이력·연관 거래·Detection·Rule Evidence·AI 사건 리포트 화면과 mutation UI,
-  운영 대시보드, 콘솔 전체의 최종 시각적 리뉴얼은 아직 구현되지 않음
+  (`/cases`)과 사건 상세 화면(`/cases/{caseId}`), 그 상세의 Investigation notes 조회·inline 작성과
+  read-only Audit history 조회, FDS operations console 디자인 기반 구현. UI dependency는 추가하지
+  않았고 CSS와 React만 사용한다. Case record는 read-only이고 workflow mutation UI는 없으며 별도 notes route, 조사 메모
+  개별 상세·수정·삭제, 사건 workflow·담당자 변경·최종 판정·연관 거래·Detection·Rule Evidence·
+  AI 사건 리포트 화면과 그 밖의 mutation UI, 운영 대시보드, 콘솔 전체의 최종 시각적 리뉴얼은
+  아직 구현되지 않음
 
 ### Backend
 
@@ -471,6 +478,9 @@ Kafka
   멱등 반환하는 내부 persistence boundary 구현
 * append-only AuditLog V7과 `ANALYZED` 거래의 decision·필요한 사건·최종 상태·
   `RiskResponseOutcome`·AuditLog를 함께 commit하거나 rollback하는 내부 최종화 경계 구현
+* 사건 조사 메모 생성·조회와 Flyway V13·V14 구현. 성공한 USER note 생성은 부모 사건
+  optimistic version·`lastChangedAt`, append-only note와 `CASE_NOTE_CREATED` 감사 1건을 같은
+  transaction에서 확정하고, 사건별 Audit history 조회는 내부 `actorId`와 note content를 노출하지 않음
 * 위험 대응·필요한 사건·AuditLog 최종화와 별도 completion transaction의 성공
   Snapshot v2·Idempotency `COMPLETED`·신규 HTTP `201` 연결 구현
 * 최종 성공 Snapshot v2 모델·codec·저장·재생과 strict legacy·Snapshot v1·Snapshot v2
@@ -490,7 +500,7 @@ Kafka
   protocol transaction record만 보관, 최대 15분 hard session deadline, callback URL 조기 정리와
   `/`·`/health` exact allowlist 복귀 경로. Issue #239에서 local/dev Keycloak USER browser 연동과
   refresh token 반환 시 fail-closed E2E를 구현. silent renew와 refresh token 사용은 금지하며 remote
-  logout과 권한 UI는 구현하지 않음
+  logout은 구현하지 않음. role·capability 권한 UI는 후속 Issue #243에서 구현
 * Frontend 인증 Backend API transport와 401·403 경계 구현. endpoint key가 method·path를
   결정하는 승인 10개 USER endpoint allowlist, canonical UUID v4 path parameter 검증과 exact
   origin·pathname 재검증, raw token을 반환하지 않고 승인 `Request`에 Authorization을 부착하는
@@ -499,7 +509,12 @@ Kafka
   invalidation과 동시 401 단일 teardown, 403 session 유지, 자동 retry·write replay 0, RFC 6750
   Bearer 문법 검증, 인증 준비부터 response validator까지 monotonic clock 기반 단일 5초 deadline.
   public `GET /api/health`와 SERVICE ingestion·management·AI·관측·외부 origin에는 credential을
-  전달하지 않으며 query pagination과 업무 화면은 구현하지 않음
+  전달하지 않음. 이 transport Issue 자체에는 query pagination과 업무 화면을 포함하지 않았고,
+  후속 Issue에서 현재 업무 화면을 구현
+* 사건 상세에 독립적인 Investigation notes와 Audit history 조회 section 구현. notes는
+  `createdAt,asc`, audit은 `changedAt,desc`의 독립 pagination·오류 경계를 사용하고, 승인된
+  `case:note-write` capability에서는 exact `{content, expectedVersion}` inline note composer를 제공.
+  note 수정·삭제·별도 route는 없으며 실제 note POST browser E2E 완료를 주장하지 않음
 * ADR-011에서 local/dev Authorization Server를 Keycloak으로 선정하고 USER public client의
   Authorization Code + PKCE `S256`, 분리된 SERVICE confidential client의 Client Credentials,
   Backend access token exact claim, USER access/ID token의 동일 subject·role 집합과 일반 refresh
@@ -531,8 +546,8 @@ rotation·sidecar 재생성 절차는
 [`Local JWT 인증 E2E runbook`](docs/09-deployment/local-jwt-auth-e2e-runbook.md)을 따릅니다.
 남은 보안 후속 순서는 다음과 같습니다.
 
-1. Frontend role·authority UI 계약과 구현
-2. 거래·사건·메모·감사 typed API module과 query pagination
+1. 사건 workflow·담당자 변경·최종 판정 UI
+2. 조사 메모 개별 상세·수정·삭제와 별도 notes route는 별도 승인 시 검토
 3. Keycloak remote logout 계약과 구현
 
 제품과 claim 계약은 Issue #233의

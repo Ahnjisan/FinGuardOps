@@ -44,7 +44,8 @@ FDS 분석 담당자
 - 사건 종료와 최종 판정 설정을 하나의 업무 정합성 경계에서 처리한다.
 - 사건, 조사 메모와 감사 기록을 PostgreSQL에 영속화한다.
 - 작성자와 변경 주체는 신뢰할 수 있는 서버 사용자 문맥에서 결정한다.
-- 주요 변경, 거부된 상태 전이와 동시성 충돌을 감사 가능하게 기록한다.
+- 성공한 주요 변경만 append-only 업무 AuditLog에 기록한다. 거부·충돌·오류는
+  업무 AuditLog와 분리된 보안 로그·오류 로그·저카디널리티 metric으로 관측할 수 있다.
 
 ### 2.3 FastAPI와 LLM 책임 경계
 
@@ -174,10 +175,11 @@ sort
 
 ### 3.6 사건 mutation 재요청 범위
 
-사건 종료와 조사 메모 생성 API는 `Idempotency-Key`를 요구하거나 replay하지 않는다.
-두 API 모두 필수 `expectedVersion`과 JPA optimistic version을 사용한다. 성공 후 같은
-`expectedVersion`으로 메모 생성을 재요청하면 `409 CONCURRENT_MODIFICATION`이며 새
-`InvestigationNote`와 `AuditLog`를 생성하지 않는다.
+사건 상태·담당자 변경, 사건 종료와 조사 메모 생성 API 네 개는 필수
+`expectedVersion`과 JPA optimistic version을 사용한다. 사건 종료와 조사 메모 생성은
+`Idempotency-Key`를 요구하거나 replay하지 않는다. 성공 후 같은 `expectedVersion`으로
+메모 생성을 재요청하면 `409 CONCURRENT_MODIFICATION`이며 새 `InvestigationNote`와
+업무 `AuditLog`를 생성하지 않는다.
 
 ## 4. API 목록
 
@@ -592,7 +594,8 @@ Content-Type: application/json
 - `assigneeRef`는 실제 사용자 프로필이나 인증정보가 아닌 제한된 참조값을 사용한다.
 - `assigneeRef` 누락은 `400 VALIDATION_ERROR`이며 명시적 null과 구분한다.
 - `assigneeRef` 형식 또는 승인된 허용 목록 검증에 실패하면 `422 Unprocessable Entity`와 `INVALID_ASSIGNEE_REF`를 반환한다.
-- 사용자·담당자 디렉터리와 인증 시스템이 아직 없으므로 잘못된 `assigneeRef`를 담당자 리소스 없음으로 해석해 `404 Not Found`로 확정하지 않는다.
+- 사용자·담당자 디렉터리 기반의 담당자 리소스 조회는 구현되지 않았으므로 잘못된
+  `assigneeRef`를 담당자 리소스 없음으로 해석해 `404 Not Found`로 확정하지 않는다.
 - 현재 담당자, 새 담당자, 변경 사유와 변경 주체를 AuditLog에 기록한다.
 - 같은 담당자 재요청은 `409 CASE_ASSIGNEE_CONFLICT`이며 무변경·무감사다.
 - stale version이면서 같은 값이면 `409 CONCURRENT_MODIFICATION`을 우선한다.
@@ -747,6 +750,8 @@ Content-Type: application/json
 | `content` | string | 필수 | 원문 그대로 저장하는 plain text, Unicode code point 1..4,000 |
 | `expectedVersion` | integer | 필수 | 조회한 사건의 0 이상 `concurrencyVersion` |
 
+요청 body는 정확히 `{content, expectedVersion}` 두 필드만 허용한다.
+
 요청 예:
 
 ```json
@@ -766,13 +771,40 @@ Content-Type: application/json
 - `content`는 신뢰할 수 없는 plain text다. 클라이언트는 화면 출력 시 HTML/text
   escaping을 적용해야 하며 `innerHTML`, `dangerouslySetInnerHTML` 등으로 원문을 HTML로
   렌더링하면 안 된다. 서버가 원문을 실행·해석하지 않는다는 사실만으로 클라이언트 출력의
-  안전이 보장되지는 않는다. 인증·RBAC는 구현되었지만 Frontend OIDC·권한 UI는 미구현이다.
-- 사건 조회 → version → 상태 → content → 단일 `activityTime` → 부모 flush → 메모 insert·flush → 감사 append·flush 순서로 같은 REQUIRED 트랜잭션에서 처리한다.
+  안전이 보장되지는 않는다. 현재 Frontend의 사건 상세 메모 section은 React text node로
+  원문을 표시하고 승인 capability가 있을 때만 inline composer를 제공한다.
 - `Clock` 시각이 기존 `lastChangedAt` 이하이면 정확히 1 microsecond 뒤를 사용한다. 성공 시 `createdAt == lastChangedAt`, version은 정확히 1 증가한다.
 - `InvestigationNote`는 append-only이며 수정·삭제 API가 없다. `Idempotency-Key` replay와 `correctionOfNoteId`도 구현하지 않는다.
 - 메모에 실제 고객번호, 실제 계좌번호, 비밀번호, OTP, 인증 토큰과 불필요한 개인정보를 입력하지 않는다.
 - `InvestigationNote` 물리 DB 계약은
   [`fraud-case-schema.md`](../04-database/fraud-case-schema.md)에 통합되어 있다.
+
+Production `InvestigationNoteService`는 같은 기본 `REQUIRED` 트랜잭션에서 다음 순서를
+사용한다.
+
+1. 인증된 USER principal의 canonical UUID subject 확보
+2. 사건 조회
+3. `expectedVersion` 검사
+4. 사건 상태 검사
+5. `content` validation
+6. 단일 `activityTime` 계산
+7. 부모 사건 `lastChangedAt` 갱신
+8. 부모 사건 flush와 optimistic `concurrencyVersion` 1 증가 확정
+9. 조사 메모 insert·flush
+10. `CASE_NOTE_CREATED` 업무 감사 append·flush
+11. 성공 응답 mapping
+
+row lock과 자동 retry는 사용하지 않는다. persistence 또는 transaction commit이 실패하면
+조사 메모, 부모 사건 `concurrencyVersion`, `lastChangedAt`과 업무 AuditLog를 모두 rollback한다.
+
+성공한 생성의 메모는 `authorType=USER`이고 공개 note 응답의 `authorRef`는 인증된 USER
+principal의 canonical UUID subject다. 같은 성공의 내부 감사에는 `actorType=USER`, 내부
+`actorId=<동일 USER subject>`, `action=CASE_NOTE_CREATED`,
+`reasonCode=CASE_INVESTIGATION_NOTE_ADDED`, `targetType=FRAUD_CASE`,
+`targetId=caseId`, `caseId=caseId`, `transactionId=null`, before/after summary `null`,
+metadata exact `{noteId}` 한 키만 저장한다. `authorRef`와 내부 `actorId`는 서로 다른
+계층의 필드이며 공개 감사 조회 응답은 `actorId`를 반환하지 않는다. 메모 `content`는 감사
+metadata와 before/after summary에 포함하지 않는다.
 
 ### 11.3 성공 응답 예시
 
@@ -1003,11 +1035,12 @@ Content-Type: application/json
 PATCH /api/v1/cases/{caseId}/status
 PATCH /api/v1/cases/{caseId}/assignee
 POST  /api/v1/cases/{caseId}/resolution
+POST  /api/v1/cases/{caseId}/notes
 ```
 
 `expectedVersion`은 클라이언트가 사건을 조회했을 때 받은 `concurrencyVersion`이다. 업무 내용 버전, 탐지 결과 버전, Rule 버전과 혼합하지 않는다.
 
-세 API는 body의 `expectedVersion`을 사용하며 `If-Match`는 도입하지 않는다.
+네 API는 body의 `expectedVersion`을 사용하며 `If-Match`는 도입하지 않는다.
 
 ### 14.2 충돌 처리
 
@@ -1042,7 +1075,7 @@ Content-Type: application/json
 
 ## 15. 감사 원칙
 
-Issue #209, #211, #213에서 성공한 다음 명령은 AuditLog를 정확히 1건 생성한다.
+Issue #209, #211, #213에서 성공한 다음 명령만 업무 AuditLog를 정확히 1건 생성한다.
 
 - 사건 상태 변경
 - 담당자 배정·변경·해제
@@ -1094,16 +1127,22 @@ UUID를 거부한다.
 
 ### 15.2 거부된 요청의 감사 경계
 
-다음 거부 요청은 FraudCase 현재값과 `concurrencyVersion`을 변경하지 않고 AuditLog도
-생성하지 않는다.
+다음 실패는 committed 업무 AuditLog row를 생성하지 않는다.
 
-- 허용되지 않은 상태 전이와 같은 상태 요청
-- 동시성 충돌
-- 종료 사건 변경 시도
-- 잘못된 정정 메모
-- 담당자 없는 `IN_REVIEW` 전이
+- `401` authentication 실패
+- `403` authorization 실패
+- `400` malformed request
+- `422` content 또는 다른 domain validation 실패
+- `404` 사건 미존재
+- `409` stale `expectedVersion`
+- `409` 허용되지 않은 사건 상태·전이·동일 값 요청
+- optimistic locking conflict
+- persistence 또는 transaction commit 실패
 
-거부 요청을 보존하는 별도 commit 감사 경계는 현재 구현하지 않으며 후속 승인 범위다.
+HTTP 오류 응답은 실패 사실을 호출자에게 전달하고, 보안 로그·오류 로그·저카디널리티
+metric은 운영 관측을 담당한다. 이들은 성공한 업무 변화를 보존하는 append-only 업무
+AuditLog와 다른 책임이다. 거부·충돌을 별도 business audit transaction에 저장하는 기능은
+후속 설계 후보일 뿐 현재 구현이 아니다.
 감사 로그에는 실제 고객번호, 실제 계좌번호, 비밀번호, OTP, 인증 토큰, 원문 IP,
 전체 프롬프트와 LLM 원문 입출력을 기록하지 않는다.
 
@@ -1157,7 +1196,10 @@ IN_REVIEW에 필요한 담당자가 없음
 → 422 ASSIGNEE_REQUIRED
 ```
 
-사용자·담당자 디렉터리와 인증 시스템이 아직 없으므로 잘못된 담당자 참조를 무조건 `404 Not Found`로 확정하지 않는다. 사건 상태 전이에는 공통 `STATE_TRANSITION_NOT_ALLOWED` 대신 사건 API의 안정적인 코드인 `CASE_STATUS_CONFLICT`를 사용한다.
+사용자·담당자 디렉터리 기반의 담당자 리소스 조회는 구현되지 않았으므로 잘못된 담당자
+참조를 무조건 `404 Not Found`로 확정하지 않는다. 사건 상태 전이에는 공통
+`STATE_TRANSITION_NOT_ALLOWED` 대신 사건 API의 안정적인 코드인
+`CASE_STATUS_CONFLICT`를 사용한다.
 
 ### 16.3 리소스 없음 예시
 
@@ -1180,8 +1222,10 @@ Content-Type: application/json
 - 실제 고객번호와 실제 계좌번호 원문을 요청·응답·오류 예시에 사용하지 않는다.
 - 사건 목록과 상세에는 조사에 필요한 최소 요약만 반환한다.
 - 연관 거래 응답에는 고객·계좌 원문을 반환하지 않는다.
-- 담당자와 작성자는 제한된 `assigneeRef`, `authorRef`로 표현한다. 감사 `USER`
-  `actorId`는 검증된 JWT `sub`인 canonical lowercase UUID v4다.
+- 담당자와 메모 작성자는 note·case API의 공개 `assigneeRef`, `authorRef`로 표현한다.
+  성공한 메모의 `authorRef`와 내부 감사 `USER actorId`는 모두 검증된 JWT `sub`인
+  canonical lowercase UUID v4에서 파생되지만 같은 공개 필드가 아니다. 사건 감사 조회는
+  `actorType`만 반환하고 내부 `actorId`는 반환하지 않는다.
 - email, display name, 내부 DB PK, 사용자명, 사번과 전화번호를 `actorId`로 저장하지
   않는다. 별도 `user_id` claim으로 다시 매핑하지 않는다.
 - 참조값 자체에 개인정보, 인증정보 또는 업무상 불필요한 의미를 포함하지 않는다.
@@ -1241,7 +1285,6 @@ validator를 사용한다.
 - AI 리포트 API
 - AI 사용량 API
 - 플랫폼 운영 API
-- 사건 write·조사 메모 `USER` actor 구현
 - CORS와 외부 API 보안 구현
 - Kafka 이벤트 API
 - 실제 고객 제재, 거래 승인·인증·차단

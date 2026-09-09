@@ -47,6 +47,9 @@
   1건의 REQUIRED 트랜잭션 경계 및 Flyway V11
 - `POST /api/v1/cases/{caseId}/resolution`, `IN_REVIEW` 전용 종료, 동일 시각
   closure 필드, 실제 version·성공 감사 1건의 원자적 경계 및 Flyway V12
+- `POST/GET /api/v1/cases/{caseId}/notes`, USER 작성자, body `expectedVersion`, 부모
+  사건 version·`lastChangedAt`·note·성공 감사 1건의 원자적 생성 경계와 append-only
+  조회 모델 및 Flyway V13·V14
 - append-only `AuditLog` Entity, Flyway V7, INSERT 전용 Persistence 경계와
   PostgreSQL UPDATE·DELETE 차단 trigger
 - `GET /api/v1/cases/{caseId}/audit-logs`, 사건 선확인, 기존 V7 target index 기반
@@ -297,8 +300,9 @@ React는 API 계약을 임의로 만들거나 금융 업무 상태를 자체 확
 #### 현재 구현된 업무 화면
 
 거래 목록(`/transactions`, Issue #249), 거래 상세(`/transactions/{transactionId}`, Issue #251),
-사건 목록(`/cases`, Issue #253)과 사건 상세(`/cases/{caseId}`, Issue #255, 감사 이력 section은
-Issue #257) 넷이다. 앞의 둘은
+사건 목록(`/cases`, Issue #253)과 사건 상세(`/cases/{caseId}`, Issue #255) 넷이다. 사건 상세에는
+Issue #257의 Audit history, Issue #259의 Investigation notes 조회와 Issue #261의 inline note
+composer가 통합되어 있다. 앞의 둘은
 Frontend UI capability `transaction:view`로, 뒤의 둘은 `case:view`로 보호하며, 최종 판정은 각각
 Backend authority `transaction:read`, `case:read`와 401·403 응답이 내린다. Frontend capability와 Backend authority는 서로 다른 계층에
 속하므로 혼용하지 않는다.
@@ -338,10 +342,12 @@ action은 없다. 표시하는 값은
 `FraudCaseQueryValidator` 계약 안에서만 동작하고, 생성 시간 범위와 최종 변경 시간 범위는 서로
 독립적으로 검증한다.
 
-사건 상세는 조회 전용이며 `GET /api/v1/cases/{caseId}` 응답의 10개 필드만 읽기 전용 `<dl>`로
-표시한다. `caseId`, `caseStatus`, `finalDisposition`, `assigneeRef`, `relatedTransactionCount`,
-`createdAt`, `reviewStartedAt`, `closedAt`, `lastChangedAt`, `concurrencyVersion`이 전부이며,
-`concurrencyVersion`은 optimistic locking token으로 사용하지 않는 읽기 전용 Record metadata다.
+사건 상세의 Case record는 조회 전용이고 사건 workflow mutation UI는 없다. record는
+`GET /api/v1/cases/{caseId}` 응답의 10개 필드만 읽기 전용 `<dl>`로 표시한다. `caseId`,
+`caseStatus`, `finalDisposition`, `assigneeRef`, `relatedTransactionCount`, `createdAt`,
+`reviewStartedAt`, `closedAt`, `lastChangedAt`, `concurrencyVersion`이 전부다. 다만 같은 화면의
+inline 조사 메모 composer는 예외적인 생성 mutation이며, 조회한 `concurrencyVersion`을
+`POST /api/v1/cases/{caseId}/notes` body의 `expectedVersion`으로 사용한다.
 Case record 계약에 없는 `updatedAt`·위험도·탐지 결과·Rule Evidence·연관 거래·조사 메모·AI 리포트 field는
 만들지 않고, 변경 시각은 계약 그대로 `lastChangedAt`으로 표시한다. nullable 네 필드는 값을
 추정하지 않고 presentation 단계에서만 고정 문구(`Not decided`·`Unassigned`·`Not started`·
@@ -385,7 +391,8 @@ CR/LF·연속 공백을 보존하면서 HTML·Markdown·URL을 해석하거나 �
 및 긴 unbroken text도 truncation 없이 viewport 안에서 줄바꿈한다. noteId는 링크 없는 metadata이고
 authorType·authorRef는 화면에서 Backend raw value 이상의 사람·이메일·역할 의미를 추정하지 않는다.
 
-Issue #261은 기존 Investigation notes section 상단에 inline composer를 추가한다. UI는
+Issue #261은 기존 Investigation notes section 상단에 사건 상세의 유일한 mutation인 inline
+composer를 추가한다. UI는
 `case:note-write` capability를 가진 session에서만 존재하고, `IN_REVIEW`와
 `ADDITIONAL_INFORMATION_REQUIRED`에서만 form을, `OPEN`과 `CLOSED`에서는 고정 상태 안내를 표시한다.
 content는 Unicode code point 1~4,000과 Backend-compatible whitespace/control 규칙으로 검사하되 trim이나
@@ -397,9 +404,9 @@ audit은 page 0으로 이동한다. 각 background refresh는 현재 content를 
 결과를 바꾸지 않는다.
 
 Issue #251, Issue #253, Issue #255, Issue #257, Issue #259와 Issue #261 모두에서 Backend, AI Service, Infra, Keycloak,
-DB와 API 계약 변경은 없다. 사건 workflow·담당자 변경·resolution·조사 메모 수정·삭제·연관 거래·Detection·
-Rule Evidence·AI 사건 리포트 화면과 mutation UI는 후속 Issue이며, 콘솔 전체의 최종 시각적 리뉴얼도
-후속 작업으로 남아 있다.
+DB와 API 계약 변경은 없다. 사건 workflow·담당자 변경·resolution, 조사 메모 수정·삭제와 별도 notes
+route, 연관 거래·Detection·Rule Evidence·AI 사건 리포트 화면 및 그 밖의 mutation UI는 후속
+Issue이며, 콘솔 전체의 최종 시각적 리뉴얼도 후속 작업으로 남아 있다.
 
 ### 7.2 Spring Boot Modular Monolith
 
@@ -1129,10 +1136,16 @@ Grafana는 Prometheus·Backend·Alertmanager의 시작 또는 health dependency�
   `Idempotency-Key`, `If-Match`, 자유 텍스트 reason, row lock·retry는 사용하지 않음
 - resolution 성공은 명령 시작 시 캡처한 USER actor의 감사 1건만 추가하며 Transaction,
   RiskLevel, RiskResponseOutcome, CaseTransaction과 AI 처리를 변경하지 않음
-- `POST/GET /api/v1/cases/{caseId}/notes`와 Flyway V13. `InvestigationNote`는 부모
+- `POST/GET /api/v1/cases/{caseId}/notes`와 Flyway V13·V14. `InvestigationNote`는 부모
   컬렉션 없이 내부 사건 PK를 참조하고 `(fraud_case_id, created_at, id)` Page query를
-  사용한다. 생성은 부모 optimistic version flush 뒤 note와 exact metadata AuditLog를
-  같은 REQUIRED 트랜잭션에서 flush하며 DB trigger로 UPDATE·DELETE를 거부한다.
+  사용한다. 생성은 USER subject 확보 → 사건 조회 → `expectedVersion` → 상태 → content
+  validation → activity time 계산 → `lastChangedAt` 갱신 → 부모 optimistic version flush →
+  USER note insert·flush → `CASE_NOTE_CREATED` exact metadata AuditLog append·flush → 응답
+  mapping 순서다. 같은 REQUIRED 트랜잭션의 persistence·commit 실패는 부모 version·시각,
+  note와 감사를 모두 rollback하며 row lock을 사용하지 않는다. 공개 note `authorRef`와 내부
+  감사 `actorId`는 같은 USER subject에서 파생되지만 서로 다른 필드이고 공개 감사 응답에는
+  `actorId`가 없으며, note content는 감사 metadata·summary에 포함하지 않는다. DB trigger는
+  note UPDATE·DELETE를 거부한다.
 - 메모 경계는 외부 서비스·AI를 호출하거나 신규 관측 지표를 만들지 않는다.
 - `GET /api/v1/cases/{caseId}/audit-logs`는 사건 존재를 먼저 확인하고
   `targetType=FRAUD_CASE,targetId=caseId`만 조회한다. `changedAt,id` 동일 방향 정렬,
