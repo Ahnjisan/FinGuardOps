@@ -494,6 +494,7 @@ main section:not([class]) h2 {
 }
 
 .notice__title {
+  margin: 0;
   font-size: 15px;
   font-weight: 620;
 }
@@ -876,6 +877,127 @@ ul.notice__body li + li {
   font-family: var(--font-sans);
   font-size: 12.5px;
   font-style: italic;
+}
+
+/* Audit history
+   -------------------------------------------------------------------------
+   One more panel under the record, holding a list of changes rather than a
+   single set of facts. Nothing new is introduced for it: the surface, the
+   heading rule, the definition-list pairs, the absent-value phrasing and the
+   pager are the ones the rest of the console already uses. What is added here
+   is the list itself and the two things an audit entry has that a record does
+   not - a Backend enum code shown as the machine value it is, and a
+   before/after pair that has to stay readable side by side without either half
+   widening the document. */
+
+.audit {
+  margin-top: var(--space-4);
+}
+
+.audit__note {
+  margin-bottom: var(--space-4);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.audit .result-line {
+  margin-bottom: var(--space-4);
+}
+
+.audit__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  /* The order carries meaning - newest change first - so the list is ordered
+     markup. The numbers themselves would be a second, competing position
+     indicator next to the pager, so they are not drawn. */
+  list-style: none;
+}
+
+.audit__item {
+  min-width: 0;
+}
+
+/* An entry sits on the sunken ground rather than on a second white surface:
+   surfaces are never nested inside surfaces in this console. */
+.audit__entry {
+  min-width: 0;
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--surface-muted);
+}
+
+/* The Backend action code, read as the machine value it is. Long audit action
+   and reason codes and references wrap on narrow viewports rather than
+   widening the document; truncating a code would name a different value. */
+.audit__action {
+  margin-bottom: var(--space-3);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--rule);
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* Reason and actor are enum codes too, and are set like the identifier column
+   in the sheet so a reader can tell a quoted code from a written word. */
+.audit__code {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* One side of a change. A list rather than a run-together sentence, because the
+   fields differ per action and a reader compares the two sides line by line. */
+.audit__summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.audit__summary-field {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+  align-items: baseline;
+}
+
+.audit__summary-name {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* The value: an enum code, or an opaque reference. It wraps inside its own line
+   for the same reason `.facts__ref` does, and is measured against the same
+   128-character bound the case record holds an `assigneeRef` to - a long opaque
+   key must never be what decides the width of the document. */
+.audit__summary-value {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* The pager belongs to the panel it pages, so it is separated from the last
+   entry rather than from the edge of the working area. */
+.audit .pager {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--rule);
 }
 
 /* Pagination

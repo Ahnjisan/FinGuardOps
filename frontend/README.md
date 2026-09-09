@@ -13,7 +13,8 @@ FDS operations console 디자인 기반(`src/styles/app.css`)을 구현했다. I
 기반 위에 조회 전용 사건 목록(`/cases`)을 구현했고, 이 route는 `case:view` capability로 보호된다.
 Issue #255에서는 같은 capability로 보호되는 조회 전용 사건 상세(`/cases/{caseId}`)와 목록의 Case ID
 → 상세 탐색을 구현했다. 사건 상세 화면은 Backend 사건 상세 응답의 10개 필드만 읽기 전용으로
-표시하며 mutation UI가 없다. 사건 workflow·담당자 변경·최종 판정·조사 메모·감사 이력·연관 거래·
+표시하며 mutation UI가 없다. Issue #257에서는 같은 상세 화면 하단에 별도 route 없는 read-only
+Audit history section을 구현했다. 사건 workflow·담당자 변경·최종 판정·조사 메모·연관 거래·
 Detection·Rule Evidence·AI 사건 리포트 화면과 운영 대시보드는 아직 없고, 콘솔 전체의 최종 시각적
 리뉴얼은 후속 Issue로 남아 있다.
 
@@ -110,7 +111,7 @@ tsconfig.app.json` 결과에는 test 또는 test-support 파일이 포함되지 
 
 `/`와 `/health`는 public이며 인증 초기화 실패나 Authorization Server 장애와 무관하게 계속
 열려 있다. 로그인 전용 route, silent renew callback, logout callback route는 존재하지 않는다.
-사건 workflow·담당자 변경·최종 판정·조사 메모·감사 이력·연관 거래·Detection·Rule Evidence·
+사건 workflow·담당자 변경·최종 판정·조사 메모·연관 거래·Detection·Rule Evidence·
 AI 사건 리포트 화면과 운영 대시보드는 이번 범위에 포함되지 않는다.
 
 거래 목록, 거래 상세, 사건 목록과 사건 상세가 `RequireCapability`를 적용한 production route다.
@@ -1387,19 +1388,21 @@ required, timeout, network failure, invalid response, generic safe error, explic
 
 ## 사건 상세 화면
 
-`/cases/{caseId}` 사건 상세는 Issue #255에서 구현했다. Backend·API·DB·Infra 변경은 없고, 신규
-dependency·UI framework·font·icon·상태관리 library도 없다. `app.css`는 변경하지 않았고 거래 상세가
-쓰는 `.detail`·`.panel`·`.facts` class를 그대로 재사용한다.
+`/cases/{caseId}` 사건 상세는 Issue #255에서 구현했고 Issue #257에서 하단 감사 이력 section을
+추가했다. Backend·API·DB·Infra 변경은 없고 신규 dependency·UI framework·font·icon·상태관리
+library도 없다. 거래 상세의 `.detail`·`.panel`·`.facts`를 유지하고 audit list wrapping만
+`app.css`에 최소 추가한다.
 
-이 화면은 **조회 전용**이다. mutation form·button·요청이 0개이며, `concurrencyVersion`은 읽기 전용
+이 화면은 **조회 전용**이다. mutation form·button·요청은 0개이며, `concurrencyVersion`은 읽기 전용
 Record metadata로만 표시하고 `expectedVersion`으로 어디에도 보내지 않는다.
 
 ### 요청 계약
 
-`GET /api/v1/cases/{caseId}` 하나뿐이다. Issue #245의 `fetchCaseDetail()`만 사용하며 raw `fetch`,
-DTO 재정의, endpoint registry·response validator 우회를 하지 않는다. query parameter와 request
-body는 없다. Frontend capability는 `case:view`, Backend authority는 `case:read`이며 최종 판정은
-Backend의 401·403 응답이 내린다.
+`GET /api/v1/cases/{caseId}`와
+`GET /api/v1/cases/{caseId}/audit-logs?page=0&size=20&sort=changedAt%2Cdesc`가 병렬로 시작한다.
+Issue #245의 `fetchCaseDetail()`과 `fetchCaseAuditList()`만 사용하며 raw `fetch`, DTO 재정의,
+endpoint registry·response validator 우회를 하지 않는다. 두 요청 모두 body가 없다. Frontend
+capability는 `case:view` 그대로이고 Backend의 기존 `case:read`·`case-audit:read`가 최종 판정한다.
 
 ### 주소 판정
 
@@ -1446,7 +1449,7 @@ Backend 사건 상세 응답의 **10개 필드만** 세 panel로 나눠 읽기 �
   `title`·`aria-label`·hidden text·`data-` 속성으로 복제하지 않는다.
 
 **표시하지 않는 것**: risk score, risk level, priority, SLA, `DetectionResult`,
-`DetectionEvidence`, Rule Evidence, External Risk, 연관 거래 목록, 조사 메모, 감사 이력,
+`DetectionEvidence`, Rule Evidence, External Risk, 연관 거래 목록, 조사 메모,
 AI 사건 리포트, `traceId`, Backend `code`·`message`·raw body, 업무 action, copy button.
 
 ### API hook 계약
@@ -1482,16 +1485,40 @@ raw status·raw body·trace id는 화면에 나오지 않는다. 404와 403에�
 
 ### 접근성
 
-- `section` > `h2`(`#case-detail-heading`) > `role="status"` 결과 줄 > 세 개의 `h3` panel 구조이며,
+- `section` > `h2`(`#case-detail-heading`) > `role="status"` 결과 줄 > 세 record `h3` panel과 audit
+  `h3` section 구조이며,
   모든 `aria-labelledby`가 실재하는 단일 id를 가리킨다.
 - loading·결과 요약은 `role="status" aria-live="polite"`, 실패와 무효 주소는 `role="alert"`이
   알린다. 새 오류 1회마다 요약으로 focus가 이동하고, 같은 종류가 반복되면 다시 가져가지 않는다.
 - `Back to cases`는 exact `/cases`로 가는 link 하나뿐이며 성공·실패·무효 주소 어디서나 제공된다.
 - 1440/1280/1024 폭 모두에서 document는 가로로 스크롤되지 않는다.
 
+### 감사 이력 section
+
+Audit history는 별도 route 없이 record 아래 독립 `<section aria-labelledby="case-audit-heading">`으로
+렌더한다. `<ol>` 안의 각 `<li><article>`은 raw action code와 KST changed time을 접근 가능한 제목으로
+가지며, `reasonCode`·`actorType`과 summary enum도 번역하지 않는다. Before와 After를 항상 구분하고
+summary 전체 null은 `Not applicable`, `assigneeRef` null은 `Unassigned`로 표시한다.
+`CASE_NOTE_CREATED.metadata.noteId`는 링크 없는 `Note ID` 텍스트이며 caseId·actorId·traceId·raw
+Backend error는 항목이나 state에 남지 않는다.
+
+`useCaseAuditLog`는 `idle`, `loading`, `success`, `empty`, `forbidden`, `not-found`,
+`authentication-required`, `timeout`, `network-error`, `invalid-response`, `generic-error`를 직접
+구분한다. request identity는 session identity·caseId·page·size·고정 sort·retry attempt 전부이며,
+StrictMode flight 공유, latest-wins, identity 변경/unmount abort, zero-listener settle replay와 마지막
+subscriber cleanup 뒤 outcome 폐기를 적용한다. 성공/empty state는 `content`와 `page`만 보유하고
+envelope·content array·item·summary·metadata·stored outcome·subscriber delivery를 field 단위 fresh
+projection해 subscriber mutation이 replay에 전파되지 않는다.
+
+pagination은 URL/history가 아닌 section local state다. 초기 page/size는 0/20, size 선택지는
+20·50·100, sort는 `changedAt,desc` 고정이다. page/size 전환 즉시 이전 content를 제거하고 size·caseId·
+session 변경 시 page 0으로 돌아간다. out-of-range empty page를 자동 보정 재요청하지 않는다. pager의
+accessible name은 `Audit history pages`다. 상세 성공 뒤 audit 실패는 record를 유지하고 audit 내부
+alert만 표시하지만, 상세 403/404는 section을 unmount해 pending/stored audit state를 폐기한다.
+
 ## 미구현 범위
 
-- 사건 workflow·담당자 변경·최종 판정·조사 메모·감사 이력·연관 거래·Detection·Rule Evidence·
+- 사건 workflow·담당자 변경·최종 판정·조사 메모·연관 거래·Detection·Rule Evidence·
   AI 사건 리포트 **화면**과 운영 대시보드 (typed API module과 query pagination은 Issue #245에서
   구현했고, 이를 호출하는 route·navigation·button·hook은 거래 목록, 거래 상세, 사건 목록과 사건
   상세에만 존재한다)
@@ -1916,8 +1943,18 @@ rendered text, markup, 모든 attribute, `title`, 주소창, `history.state`, We
 상태는 typed API fixture를 쓰는 component/hook test의 책임이며, Backend·DB에 fixture나 seed를
 추가하지 않는다.
 
+Issue #257은 같은 사건 상세 시나리오에서 detail과 audit 요청이 병렬로 시작되고 audit가 exact
+`/api/v1/cases/{caseId}/audit-logs?page=0&size=20&sort=changedAt%2Cdesc`로 정확히 1회 나가는지를
+추가로 검증한다. 두 요청 모두 실제 Backend 404이며 session은 유지된다. 상세 404가 확정된 뒤에는 audit
+heading·alert·pager가 렌더되지 않고, 1초 후에도 두 endpoint의 요청 수가 각각 1회라 자동
+retry·replay·polling은 0회다. 실제 404의 `code`·`message`·`traceId`와 credential·JWT·cookie는
+rendered text, DOM·attribute, URL·history, Web Storage와 console에 남지 않는다. 실제 통합 test 수는
+계속 **16개**이고 populated audit history는 별도 production-component geometry fixture가 맡는다.
+최종 분해는 실제 Keycloak·Backend 통합 **16개** + relay 경계 **3개** + geometry **2개** =
+**총 21개**, worker 1·retries 0·strict TLS다.
+
 relay가 socket에 쓰는 주소는 **exact endpoint closed allowlist**로 결정한다. 승인된 read path는
-정확히 4종이다.
+정확히 5종이다.
 
 | endpoint | method | path | query |
 | --- | --- | --- | --- |
@@ -1925,11 +1962,12 @@ relay가 socket에 쓰는 주소는 **exact endpoint closed allowlist**로 결�
 | 거래 상세 | `GET` | `/api/v1/transactions/{canonical lowercase UUID v4}` | 없음 |
 | 사건 목록 | `GET` | exact `/api/v1/cases` | 승인된 이름 11개 |
 | 사건 상세 | `GET` | `/api/v1/cases/{canonical lowercase UUID v4}` | 없음 |
+| 사건 감사 이력 | `GET` | `/api/v1/cases/{canonical lowercase UUID v4}/audit-logs` | `page`·`size`·`sort`와 endpoint별 의미값 검증 |
 
-Issue #255가 넓힌 것은 이 표의 마지막 한 줄뿐이다. 승인된 write probe는 계속 정확히 1종,
+Issue #257이 넓힌 것은 이 표의 마지막 한 줄뿐이다. 승인된 write probe는 계속 정확히 1종,
 `POST /api/v1/cases/{canonical lowercase UUID v4}/resolution`이며 query를 실을 수 없다. 사건 상세
-주소는 `GET`으로만 도달할 수 있고, 같은 주소의 `POST`·`PATCH`·`PUT`·`DELETE`는 거부된다.
-`/notes`, `/audit-logs`, `/status`, `/assignee`, `/resolution` `GET`, `/transactions`,
+주소와 audit 주소는 `GET`으로만 도달할 수 있고, 같은 주소의 `POST`·`PATCH`·`PUT`·`DELETE`는 거부된다.
+`/notes`, `/status`, `/assignee`, `/resolution` `GET`, `/transactions`,
 `/ai-reports/current`, 사건 status·assignee write, note create를 포함해 그 밖의 모든 `/api/v1/**`
 주소는 계속 허용하지 않는다. 화면 E2E가 실제로 필요로 할 때만 allowlist를 넓히며, 미사용 endpoint를
 미리 허용하지 않는다.
@@ -1945,7 +1983,7 @@ path allowlist 검사 **전에** 반환했으므로, 문법 검사만 통과하�
 이어서 query가 없는지를 확인하고 path를 반환한다. `GET`은 read 분기로 가서 method와 exact endpoint
 조합이 승인된 read path인지 먼저 확인하고, query가 없으면 그대로 path를 반환한다. query가 있을 때만
 그 endpoint가 query를 받도록 선언됐는지(`queryNames !== null`)를 확인한 뒤 duplicate query 이름 →
-빈 query 이름/값 → endpoint별 query allowlist → canonical encoding → target의 쓰기 가능한 문자
+빈 query 이름/값 → endpoint별 query allowlist → endpoint별 의미값 → canonical encoding → target의 쓰기 가능한 문자
 구성을 차례로 검증하고 target을 반환한다.
 
 endpoint별로 query 목록을 따로 두므로 사건 filter가 거래 endpoint로, 또는 그 반대로 relay될 수 없다.
@@ -1959,29 +1997,37 @@ process spawn과 socket 전달 이전에 거부된다.
 
 이 경계는 relay test 3개가 고정한다.
 
-- 첫 번째 negative test는 31개 거부 반례(query 없는 write 3종, 선언된 filter를 실은 write, write
+- 첫 번째 negative test는 기존 31개에 audit query 반례 17개를 더한 **48개** 거부 반례를 실행한다.
+  기존 반례는 query 없는 write 3종, 선언된 filter를 실은 write, write
   probe의 잘못된 method와 query, endpoint 간 query 오염 5종, 미승인 이름, 중복 이름, `page=%30`,
   non-canonical sort comma, 빈 이름/값, bare `?` 6종(거래 목록·사건 목록·거래 상세·**사건 상세**·
   resolution probe·fragment 결합), 사건 상세 주소의 query 3종(`page=0`, 선언된 사건 filter
   `caseStatus=OPEN`, 임의 `include=notes`)과 fragment, fragment, userinfo, 미승인 path, 다른
   origin)를 실행한다. `page`와 `caseStatus`는 사건 **목록**이 실제로 선언하는 이름이므로, 한 segment
   아래에서도 그대로 허용되지 않는다는 것이 여기서 고정된다.
-- 두 번째 negative test는 47개 미승인 endpoint 반례를 실행한다. query가 없는 valid lowercase 미승인
-  `GET` 11종(사건 notes·audit-logs·status·assignee·resolution·related transactions·
+  추가 17개는 duplicate·empty name·empty value·unknown·bare `?`, raw comma와 `%30`, page 음수·
+  leading zero·소수·int32 overflow, size 0·101, 잘못된 sort field·direction, transaction-list filter와
+  case-list filter 혼합이다.
+- 두 번째 negative test는 기존 47개에서 이제 승인된 audit `GET` 1개를 빼고, audit endpoint의
+  non-canonical path 9개·fragment 1개·추가 method confusion 3개를 더한 **59개** 미승인 endpoint
+  반례를 실행한다. query가 없는 valid lowercase 미승인 `GET`은 사건 notes·status·assignee·resolution·related transactions·
   `ai-reports/current`·임의 suffix, `behavior-events`, 존재하지 않는 endpoint, 거래 상세 뒤 임의
   suffix), 거래 상세 주소의 non-canonical 표기 9종(uppercase, UUID v1, invalid RFC variant, hyphen
   없는 UUID, trailing slash, 추가 segment, encoded slash, encoded backslash, percent-encoded 문자),
   **사건 상세 주소의 non-canonical 표기 9종**(uppercase, UUID v1, invalid RFC variant, hyphen 없는
   UUID, percent-encoded 문자, trailing slash, 추가 segment, encoded slash, encoded backslash),
-  **사건 상세 주소의 method confusion 4종**(`POST`·`PATCH`·`PUT`·`DELETE`), write probe 확장 반례
+  audit endpoint의 non-canonical 표기 9종과 fragment, **사건 상세 주소의 method confusion 4종**
+  (`POST`·`PATCH`·`PUT`·`DELETE`), audit endpoint의 method confusion 4종(기존 write 반례의 `POST`와
+  이번에 추가한 `PATCH`·`PUT`·`DELETE`), write probe 확장 반례
   14종(사건 status·assignee·notes·audit-logs·임의 suffix `POST`, resolution의 `PATCH`·`PUT`·
   `DELETE`, query를 실은 resolution `POST`, uppercase·UUID v1·invalid variant 식별자, trailing
   slash, 추가 segment)이다. 사건 상세 `GET`은 이 목록에서 빠지고 아래 positive test로 옮겼다.
 - 두 negative test 모두 각 반례가 고정 문장으로 실패하고, URL·path·path segment·UUID·query·userinfo
   원문을 반사하지 않으며, relay process spawn 0회와 Backend observation 0회임을 확인한다.
-- positive test는 실제로 보내는 read 8종(`GET /api/v1/transactions`, 승인된 query를 실은 거래 목록
+- positive test는 실제로 보내는 read **10종**(`GET /api/v1/transactions`, 승인된 query를 실은 거래 목록
   2종, canonical UUID 거래 상세, `GET /api/v1/cases`, 승인된 query를 실은 사건 목록 2종, canonical
-  UUID **사건 상세**)과 선언된 write probe 1종이 그대로 통과하고, 각 target이 입력 주소와 byte
+  UUID **사건 상세**, bare audit path, canonical page/size/sort audit path)과 선언된 write probe 1종이
+  그대로 통과하고, 각 target이 입력 주소와 byte
   단위로 동일하게 반환됨을 확인한다.
 
 이 runtime에는 seed된 사건 row도 없으므로 사건 목록 E2E는 deterministic empty 상태도 통과 조건으로
@@ -2021,6 +2067,15 @@ clientWidth`, `body.scrollWidth <= clientWidth`, scroll container의 bounding bo
 `scrollWidth > container clientWidth`와 container의 computed `overflow-x`가 `auto` 또는 `scroll`임을
 확인하므로, 긴 reference가 document를 밀어내지 않는다는 주장이 "우연히 다 들어맞았다"가 아니라 실제
 overflow가 컨테이너에 담긴 결과임이 드러난다.
+
+Issue #257의 두 번째 fixture `case-audit-geometry.html`과 `case-audit-geometry.tsx`는 production
+`CaseAuditPanel`과 같은 production CSS를 직접 사용한다. Backend·auth·router를 우회하거나 mock하지
+않고 API 요청도 만들지 않는다. 고정 synthetic content 6개는 여섯 action, 모든 summary shape,
+null before/after, null assignee, 128자 assignee reference, 긴 reason code와 canonical note UUID를
+포함하며 실제 credential·금융정보는 포함하지 않는다. Playwright는 여섯 ordered-list article,
+action과 changed time을 함께 가진 accessible heading, `Not applicable`·`Unassigned`, link가 아닌 Note ID를
+확인하고 1440×900·1280×800·1024×768에서 document-level horizontal overflow가 없음을 측정한다.
+production router·`index.html`·build entry에서는 이 fixture를 참조하지 않는다.
 
 local realm에는 USER가 하나뿐이라 role 조합별 browser E2E는 수행하지 않았고, role·capability
 판정은 단위·컴포넌트 테스트가 담당한다. Frontend production code는 access token을 직접

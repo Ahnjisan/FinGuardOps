@@ -1,0 +1,35 @@
+<!doctype html>
+<!--
+  TEST-ONLY BROWSER GEOMETRY FIXTURE. NOT PART OF THE APPLICATION.
+
+  This page exists so a Chromium test can measure the production audit history
+  panel, styled by the production `app.css`, with entries actually in it. The
+  E2E runtime seeds no fraud cases, so the real-Backend case audit request meets
+  a genuine 404 and cannot measure a populated panel; rather than mock an API
+  response to manufacture one - which would be evidence of nothing - the
+  production component is rendered directly against typed, fixed, synthetic
+  entries.
+
+  What this page is NOT:
+
+  - not evidence of Backend integration. It makes no request of any kind.
+  - not an API mock, a route interception or an authentication bypass. There is
+    no network call here to intercept and no session to bypass.
+  - not reachable from the application. It is not referenced by `index.html`,
+    it is not a route in the production router, and `vite build` builds only
+    `index.html`, so nothing here ships in `dist`.
+
+  It loads exactly one module and nothing else: no external script, no font, no
+  icon, no image, no stylesheet from anywhere but the application's own.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Case audit geometry fixture (test only)</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/e2e/case-audit-geometry.tsx"></script>
+  </body>
+</html>
