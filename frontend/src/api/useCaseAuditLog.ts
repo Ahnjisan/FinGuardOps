@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { AuthSession } from "../auth/authClient";
 import { getOidcAuthClient } from "../auth/oidcAuthClient";
 import { useAuth } from "../auth/useAuth";
@@ -156,6 +156,9 @@ export interface UseCaseAuditLogResult {
    * is only ever reached from a control the user operates. One call, one fetch.
    */
   readonly retry: () => void;
+  /** Re-reads page zero while retaining the currently visible trail. */
+  readonly refresh: () => void;
+  readonly refreshState: "idle" | "refreshing" | "failed";
 }
 
 /**
@@ -545,6 +548,25 @@ interface Snapshot {
   readonly page: number;
   readonly size: number;
   readonly state: CaseAuditState;
+  readonly refreshState: "idle" | "refreshing" | "failed";
+}
+
+interface RefreshFlight {
+  readonly session: AuthSession;
+  readonly caseId: string;
+  readonly page: number;
+  readonly size: number;
+  readonly generation: number;
+  readonly paginationIntent: number;
+  readonly controller: AbortController;
+  phase: "pending" | "settled" | "released";
+}
+
+interface AuthoritativeRefreshPage {
+  readonly session: AuthSession;
+  readonly caseId: string;
+  readonly page: number;
+  readonly size: number;
 }
 
 /**
@@ -581,8 +603,20 @@ export function useCaseAuditLog(caseId: string | null): UseCaseAuditLogResult {
     page: INITIAL_POSITION.page,
     size: INITIAL_POSITION.size,
     state: { status: "idle" },
+    refreshState: "idle",
   }));
   const flightRef = useRef<RequestFlight | null>(null);
+  const refreshFlightRef = useRef<RefreshFlight | null>(null);
+  const refreshGenerationRef = useRef(0);
+  const paginationIntentRef = useRef(0);
+  const authoritativeRefreshRef = useRef<AuthoritativeRefreshPage | null>(null);
+  const currentIdentityRef = useRef({
+    session,
+    caseId: requestedId,
+    page: INITIAL_POSITION.page,
+    size: INITIAL_POSITION.size,
+    paginationIntent: 0,
+  });
 
   // Both adjustments below are made during render on purpose. Case A's trail
   // must not appear under case B's heading for even one frame, page 1 must not
@@ -597,6 +631,28 @@ export function useCaseAuditLog(caseId: string | null): UseCaseAuditLogResult {
   }
   const page = currentCursor.position.page;
   const size = currentCursor.position.size;
+  useLayoutEffect(() => {
+    if (
+      currentIdentityRef.current.session !== session ||
+      currentIdentityRef.current.caseId !== requestedId
+    ) {
+      paginationIntentRef.current += 1;
+      const refreshFlight = refreshFlightRef.current;
+      if (refreshFlight !== null && refreshFlight.phase === "pending") {
+        refreshFlight.phase = "released";
+        refreshFlight.controller.abort();
+        refreshFlightRef.current = null;
+      }
+      authoritativeRefreshRef.current = null;
+    }
+    currentIdentityRef.current = {
+      session,
+      caseId: requestedId,
+      page,
+      size,
+      paginationIntent: paginationIntentRef.current,
+    };
+  }, [session, requestedId, page, size]);
 
   let published = snapshot;
   if (snapshot.session !== session || snapshot.caseId !== requestedId || snapshot.page !== page || snapshot.size !== size) {
@@ -607,6 +663,7 @@ export function useCaseAuditLog(caseId: string | null): UseCaseAuditLogResult {
       size,
       state:
         session === null || requestedId === null ? { status: "idle" } : { status: "loading" },
+      refreshState: "idle",
     };
     setSnapshot(published);
   }
@@ -616,6 +673,18 @@ export function useCaseAuditLog(caseId: string | null): UseCaseAuditLogResult {
     // visit and a malformed address both cost zero Backend calls and zero
     // credential lookups: there is nothing here to send.
     if (session === null || requestedId === null) {
+      return;
+    }
+
+    const authoritative = authoritativeRefreshRef.current;
+    if (
+      authoritative !== null &&
+      authoritative.session === session &&
+      authoritative.caseId === requestedId &&
+      authoritative.page === page &&
+      authoritative.size === size
+    ) {
+      authoritativeRefreshRef.current = null;
       return;
     }
 
@@ -718,6 +787,7 @@ export function useCaseAuditLog(caseId: string | null): UseCaseAuditLogResult {
           page,
           size,
           state: deliverTerminalState(stored),
+          refreshState: "idle",
         });
       },
     };
@@ -768,7 +838,29 @@ export function useCaseAuditLog(caseId: string | null): UseCaseAuditLogResult {
     };
   }, [session, requestedId, page, size, attempt]);
 
+  useEffect(() => {
+    return () => {
+      const flight = refreshFlightRef.current;
+      if (flight !== null && flight.phase === "pending") {
+        flight.phase = "released";
+        flight.controller.abort();
+      }
+      if (refreshFlightRef.current === flight) {
+        refreshFlightRef.current = null;
+      }
+      authoritativeRefreshRef.current = null;
+    };
+  }, [session, requestedId]);
+
   const setPage = useCallback((pageNumber: number) => {
+    paginationIntentRef.current += 1;
+    const refreshFlight = refreshFlightRef.current;
+    if (refreshFlight !== null && refreshFlight.phase === "pending") {
+      refreshFlight.phase = "released";
+      refreshFlight.controller.abort();
+      refreshFlightRef.current = null;
+    }
+    authoritativeRefreshRef.current = null;
     setCursor((current) => ({
       session: current.session,
       caseId: current.caseId,
@@ -777,6 +869,14 @@ export function useCaseAuditLog(caseId: string | null): UseCaseAuditLogResult {
   }, []);
 
   const setSize = useCallback((nextSize: number) => {
+    paginationIntentRef.current += 1;
+    const refreshFlight = refreshFlightRef.current;
+    if (refreshFlight !== null && refreshFlight.phase === "pending") {
+      refreshFlight.phase = "released";
+      refreshFlight.controller.abort();
+      refreshFlightRef.current = null;
+    }
+    authoritativeRefreshRef.current = null;
     setCursor((current) => ({
       session: current.session,
       caseId: current.caseId,
@@ -795,11 +895,125 @@ export function useCaseAuditLog(caseId: string | null): UseCaseAuditLogResult {
       page: published.page,
       size: published.size,
       state: { status: "loading" },
+      refreshState: "idle",
     });
     setAttempt((current) => current + 1);
   }, [published]);
 
-  return { state: published.state, page, size, setPage, setSize, retry };
+  const refresh = useCallback(() => {
+    if (
+      published.session === null ||
+      published.caseId === null ||
+      refreshFlightRef.current?.phase === "pending"
+    ) {
+      return;
+    }
+    const ordinary = flightRef.current;
+    if (ordinary !== null && ordinary.phase.kind === "pending") {
+      ordinary.phase = { kind: "released" };
+      ordinary.listeners.clear();
+      ordinary.controller.abort();
+      flightRef.current = null;
+    }
+    refreshGenerationRef.current += 1;
+    const flight: RefreshFlight = {
+      session: published.session,
+      caseId: published.caseId,
+      page: published.page,
+      size: published.size,
+      generation: refreshGenerationRef.current,
+      paginationIntent: paginationIntentRef.current,
+      controller: new AbortController(),
+      phase: "pending",
+    };
+    refreshFlightRef.current = flight;
+    setSnapshot({ ...published, refreshState: "refreshing" });
+
+    fetchCaseAuditList(
+      getOidcAuthClient(),
+      flight.caseId,
+      { page: CASE_AUDIT_INITIAL_PAGE, size: flight.size, sort: CASE_AUDIT_SORT },
+      flight.controller.signal,
+    ).then(
+      (result) => {
+        if (flight.phase !== "pending") {
+          return;
+        }
+        const current = currentIdentityRef.current;
+        if (
+          refreshFlightRef.current !== flight ||
+          current.session !== flight.session ||
+          current.caseId !== flight.caseId ||
+          current.page !== flight.page ||
+          current.size !== flight.size ||
+          current.paginationIntent !== flight.paginationIntent
+        ) {
+          flight.phase = "released";
+          return;
+        }
+        const terminal = terminalSuccess(projectAuditPage(result.data));
+        flight.phase = "settled";
+        refreshFlightRef.current = null;
+        authoritativeRefreshRef.current = {
+          session: flight.session,
+          caseId: flight.caseId,
+          page: CASE_AUDIT_INITIAL_PAGE,
+          size: flight.size,
+        };
+        setCursor({
+          session: flight.session,
+          caseId: flight.caseId,
+          position: { page: CASE_AUDIT_INITIAL_PAGE, size: flight.size },
+        });
+        setSnapshot({
+          session: flight.session,
+          caseId: flight.caseId,
+          page: CASE_AUDIT_INITIAL_PAGE,
+          size: flight.size,
+          state: deliverTerminalState(terminal),
+          refreshState: "idle",
+        });
+        if (page === CASE_AUDIT_INITIAL_PAGE) {
+          authoritativeRefreshRef.current = null;
+        }
+      },
+      () => {
+        if (flight.phase !== "pending" || flight.controller.signal.aborted) {
+          return;
+        }
+        const current = currentIdentityRef.current;
+        if (
+          refreshFlightRef.current !== flight ||
+          current.session !== flight.session ||
+          current.caseId !== flight.caseId ||
+          current.page !== flight.page ||
+          current.size !== flight.size ||
+          current.paginationIntent !== flight.paginationIntent
+        ) {
+          flight.phase = "released";
+          return;
+        }
+        flight.phase = "settled";
+        refreshFlightRef.current = null;
+        setSnapshot((latest) =>
+          latest.session === flight.session && latest.caseId === flight.caseId
+            ? { ...latest, refreshState: "failed" }
+            : latest,
+        );
+      },
+    );
+  }, [page, published]);
+
+  return {
+    state: published.state,
+    page,
+    size,
+    setPage,
+    setSize,
+    retry,
+    refresh,
+    refreshState: published.refreshState,
+  };
 }
 
 /**

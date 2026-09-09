@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import type { CaseStatus } from "../../api/caseApi";
 import {
   useCaseInvestigationNotes,
   type CaseInvestigationNoteItem,
@@ -14,6 +15,7 @@ import {
   NO_INVESTIGATION_NOTES_MESSAGE,
   NO_INVESTIGATION_NOTES_ON_PAGE_MESSAGE,
 } from "./investigationNotePresentation";
+import { InvestigationNoteComposer } from "./InvestigationNoteComposer";
 
 const INITIAL_PAGE = 0;
 const INITIAL_SIZE = 20;
@@ -83,6 +85,11 @@ function refusalCopy(
 
 export interface CaseInvestigationNotesSectionProps {
   readonly caseId: string;
+  readonly caseStatus?: CaseStatus | null;
+  readonly expectedVersion?: number | null;
+  readonly reconciliationGeneration?: number;
+  readonly refreshSignal?: number;
+  readonly onReconcile?: (minimumDetailVersion?: number) => void;
 }
 
 interface Cursor {
@@ -94,6 +101,11 @@ interface Cursor {
 /** Owns local pagination while the hook owns request lifecycle. */
 export function CaseInvestigationNotesSection({
   caseId,
+  caseStatus = null,
+  expectedVersion = null,
+  reconciliationGeneration = 0,
+  refreshSignal = 0,
+  onReconcile = () => undefined,
 }: CaseInvestigationNotesSectionProps) {
   const [cursor, setCursor] = useState<Cursor>(() => ({
     caseId,
@@ -107,7 +119,24 @@ export function CaseInvestigationNotesSection({
     setCursor(current);
   }
 
-  const { state, retry } = useCaseInvestigationNotes(caseId, current.page, current.size);
+  const setAuthoritativePage = useCallback((page: number) => {
+    setCursor((latest) => ({ ...latest, page }));
+  }, []);
+  const { state, retry, refresh, refreshState } = useCaseInvestigationNotes(
+    caseId,
+    current.page,
+    current.size,
+    setAuthoritativePage,
+  );
+  const observedRefreshSignalRef = useRef(refreshSignal);
+
+  useEffect(() => {
+    if (observedRefreshSignalRef.current === refreshSignal) {
+      return;
+    }
+    observedRefreshSignalRef.current = refreshSignal;
+    refresh();
+  }, [refresh, refreshSignal]);
 
   return (
     <CaseInvestigationNotesPanel
@@ -119,6 +148,17 @@ export function CaseInvestigationNotesSection({
         setCursor({ caseId, page: INITIAL_PAGE, size });
       }}
       onRetry={retry}
+      refreshState={refreshState}
+      onRefresh={refresh}
+      composer={caseStatus !== null && expectedVersion !== null ? (
+        <InvestigationNoteComposer
+          caseId={caseId}
+          caseStatus={caseStatus}
+          expectedVersion={expectedVersion}
+          reconciliationGeneration={reconciliationGeneration}
+          onReconcile={onReconcile}
+        />
+      ) : null}
     />
   );
 }
@@ -128,6 +168,9 @@ export interface CaseInvestigationNotesPanelProps {
   readonly onPageChange: (page: number) => void;
   readonly onPageSizeChange: (size: number) => void;
   readonly onRetry: () => void;
+  readonly refreshState?: "idle" | "refreshing" | "failed";
+  readonly onRefresh?: () => void;
+  readonly composer?: ReactNode;
 }
 
 /** Production panel, also mounted directly by the test-only geometry fixture. */
@@ -136,6 +179,9 @@ export function CaseInvestigationNotesPanel({
   onPageChange,
   onPageSizeChange,
   onRetry,
+  refreshState = "idle",
+  onRefresh = () => undefined,
+  composer = null,
 }: CaseInvestigationNotesPanelProps) {
   const refusal = refusalCopy(state);
   const retryable = RETRYABLE.has(state.status);
@@ -148,12 +194,31 @@ export function CaseInvestigationNotesPanel({
   }, [retryable, state.status]);
 
   return (
-    <section className="panel investigation-notes" aria-labelledby="case-notes-heading">
+    <section
+      className="panel investigation-notes"
+      aria-labelledby="case-notes-heading"
+      aria-busy={refreshState === "refreshing" || undefined}
+    >
       <h3 id="case-notes-heading">Investigation notes</h3>
       <p className="investigation-notes__note">
         Read-only notes recorded for this investigation. Times are Korea Standard Time
         (UTC+09:00).
       </p>
+
+      {composer}
+
+      {refreshState === "failed" && (
+        <div className="notice notice--error investigation-notes__refresh" role="alert">
+          <h4 className="notice__title">The latest investigation notes could not be loaded</h4>
+          <p className="notice__body">
+            The note submission result is unchanged. Refresh the investigation notes before relying
+            on this list.
+          </p>
+          <button className="button" type="button" onClick={onRefresh}>
+            Refresh investigation notes
+          </button>
+        </div>
+      )}
 
       <p
         className="result-line"

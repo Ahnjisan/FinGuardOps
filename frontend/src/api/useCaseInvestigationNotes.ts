@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { AuthSession } from "../auth/authClient";
 import { getOidcAuthClient } from "../auth/oidcAuthClient";
 import { useAuth } from "../auth/useAuth";
@@ -55,6 +55,9 @@ export type CaseInvestigationNotesState =
 export interface UseCaseInvestigationNotesResult {
   readonly state: CaseInvestigationNotesState;
   readonly retry: () => void;
+  /** Finds and publishes the latest authoritative last page in at most two GETs. */
+  readonly refresh: () => void;
+  readonly refreshState: "idle" | "refreshing" | "failed";
 }
 
 function projectItem(note: CaseInvestigationNoteItem): CaseInvestigationNoteItem {
@@ -168,6 +171,32 @@ interface Snapshot {
   readonly page: number;
   readonly size: number;
   readonly state: CaseInvestigationNotesState;
+  readonly refreshState: "idle" | "refreshing" | "failed";
+}
+
+interface RefreshFlight {
+  readonly session: AuthSession;
+  readonly caseId: string;
+  readonly page: number;
+  readonly size: number;
+  readonly generation: number;
+  readonly paginationIntent: number;
+  readonly controller: AbortController;
+  phase: "pending" | "settled" | "released";
+}
+
+interface AuthoritativeRefreshPage {
+  readonly session: AuthSession;
+  readonly caseId: string;
+  readonly page: number;
+  readonly size: number;
+}
+
+interface PaginationIdentity {
+  readonly session: AuthSession | null;
+  readonly caseId: string | null;
+  readonly page: number;
+  readonly size: number;
 }
 
 /**
@@ -179,6 +208,7 @@ export function useCaseInvestigationNotes(
   caseId: string | null,
   page: number,
   size: number,
+  onAuthoritativePage?: (page: number) => void,
 ): UseCaseInvestigationNotesResult {
   const { state: authState } = useAuth();
   const session = authState.status === "authenticated" ? authState.session : null;
@@ -193,8 +223,67 @@ export function useCaseInvestigationNotes(
     page,
     size,
     state: { status: "idle" },
+    refreshState: "idle",
   }));
   const flightRef = useRef<RequestFlight | null>(null);
+  const refreshFlightRef = useRef<RefreshFlight | null>(null);
+  const refreshGenerationRef = useRef(0);
+  const paginationIntentRef = useRef(0);
+  const authoritativeRefreshRef = useRef<AuthoritativeRefreshPage | null>(null);
+  const authoritativePageCallbackRef = useRef(onAuthoritativePage);
+  const paginationIdentityRef = useRef<PaginationIdentity>({
+    session,
+    caseId: requestedId,
+    page,
+    size,
+  });
+  const currentIdentityRef = useRef({
+    session,
+    caseId: requestedId,
+    page,
+    size,
+    paginationIntent: 0,
+  });
+
+  useLayoutEffect(() => {
+    const previousPagination = paginationIdentityRef.current;
+    if (
+      previousPagination.session !== session ||
+      previousPagination.caseId !== requestedId ||
+      previousPagination.page !== page ||
+      previousPagination.size !== size
+    ) {
+      const authoritative = authoritativeRefreshRef.current;
+      const refreshOwnedTransition =
+        authoritative !== null &&
+        authoritative.session === session &&
+        authoritative.caseId === requestedId &&
+        authoritative.page === page &&
+        authoritative.size === size;
+      if (!refreshOwnedTransition) {
+        paginationIntentRef.current += 1;
+        const refreshFlight = refreshFlightRef.current;
+        if (refreshFlight !== null && refreshFlight.phase === "pending") {
+          refreshFlight.phase = "released";
+          refreshFlight.controller.abort();
+          refreshFlightRef.current = null;
+        }
+        authoritativeRefreshRef.current = null;
+      }
+      paginationIdentityRef.current = { session, caseId: requestedId, page, size };
+    }
+    currentIdentityRef.current = {
+      session,
+      caseId: requestedId,
+      page,
+      size,
+      paginationIntent: paginationIntentRef.current,
+    };
+  }, [session, requestedId, page, size]);
+
+  useEffect(() => {
+    authoritativePageCallbackRef.current = onAuthoritativePage;
+  }, [onAuthoritativePage]);
 
   // Clear stale content during render. Waiting for effect cleanup would allow
   // one case, page, size or session to be painted under another identity.
@@ -214,12 +303,25 @@ export function useCaseInvestigationNotes(
         session === null || requestedId === null || !validPosition
           ? { status: "idle" }
           : { status: "loading" },
+      refreshState: "idle",
     };
     setSnapshot(published);
   }
 
   useEffect(() => {
     if (session === null || requestedId === null || !validPosition) {
+      return;
+    }
+
+    const authoritative = authoritativeRefreshRef.current;
+    if (
+      authoritative !== null &&
+      authoritative.session === session &&
+      authoritative.caseId === requestedId &&
+      authoritative.page === page &&
+      authoritative.size === size
+    ) {
+      authoritativeRefreshRef.current = null;
       return;
     }
 
@@ -273,6 +375,7 @@ export function useCaseInvestigationNotes(
           page,
           size,
           state: deliverTerminal(stored),
+          refreshState: "idle",
         });
       },
     };
@@ -310,6 +413,20 @@ export function useCaseInvestigationNotes(
     };
   }, [session, requestedId, page, size, validPosition, attempt]);
 
+  useEffect(() => {
+    return () => {
+      const flight = refreshFlightRef.current;
+      if (flight !== null && flight.phase === "pending") {
+        flight.phase = "released";
+        flight.controller.abort();
+      }
+      if (refreshFlightRef.current === flight) {
+        refreshFlightRef.current = null;
+      }
+      authoritativeRefreshRef.current = null;
+    };
+  }, [session, requestedId, size]);
+
   const retry = useCallback(() => {
     if (!isRetryable(published.state)) {
       return;
@@ -320,11 +437,132 @@ export function useCaseInvestigationNotes(
       page: published.page,
       size: published.size,
       state: { status: "loading" },
+      refreshState: "idle",
     });
     setAttempt((current) => current + 1);
   }, [published]);
 
-  return { state: published.state, retry };
+  const refresh = useCallback(() => {
+    if (
+      published.session === null ||
+      published.caseId === null ||
+      !validPosition ||
+      refreshFlightRef.current?.phase === "pending"
+    ) {
+      return;
+    }
+    const ordinary = flightRef.current;
+    if (ordinary !== null && ordinary.phase.kind === "pending") {
+      ordinary.phase = { kind: "released" };
+      ordinary.listeners.clear();
+      ordinary.controller.abort();
+      flightRef.current = null;
+    }
+    refreshGenerationRef.current += 1;
+    const flight: RefreshFlight = {
+      session: published.session,
+      caseId: published.caseId,
+      page: published.page,
+      size: published.size,
+      generation: refreshGenerationRef.current,
+      paginationIntent: paginationIntentRef.current,
+      controller: new AbortController(),
+      phase: "pending",
+    };
+    refreshFlightRef.current = flight;
+    setSnapshot({ ...published, refreshState: "refreshing" });
+
+    const stillCurrent = (): boolean => {
+      const current = currentIdentityRef.current;
+      return (
+        flight.phase === "pending" &&
+        refreshFlightRef.current === flight &&
+        current.session === flight.session &&
+        current.caseId === flight.caseId &&
+        current.page === flight.page &&
+        current.size === flight.size &&
+        current.paginationIntent === flight.paginationIntent
+      );
+    };
+
+    const fail = (): void => {
+      if (!stillCurrent() || flight.controller.signal.aborted) {
+        return;
+      }
+      flight.phase = "settled";
+      refreshFlightRef.current = null;
+      setSnapshot((latest) =>
+        latest.session === flight.session && latest.caseId === flight.caseId
+          ? { ...latest, refreshState: "failed" }
+          : latest,
+      );
+    };
+
+    const publish = (view: CaseInvestigationNotesView): void => {
+      if (!stillCurrent()) {
+        return;
+      }
+      const projected = terminalSuccess(projectPage(view));
+      const resolvedPage = view.page.number;
+      flight.phase = "settled";
+      refreshFlightRef.current = null;
+      authoritativeRefreshRef.current = {
+        session: flight.session,
+        caseId: flight.caseId,
+        page: resolvedPage,
+        size: flight.size,
+      };
+      setSnapshot({
+        session: flight.session,
+        caseId: flight.caseId,
+        page: resolvedPage,
+        size: flight.size,
+        state: deliverTerminal(projected),
+        refreshState: "idle",
+      });
+      authoritativePageCallbackRef.current?.(resolvedPage);
+      if (page === resolvedPage) {
+        authoritativeRefreshRef.current = null;
+      }
+    };
+
+    fetchInvestigationNoteList(
+      getOidcAuthClient(),
+      flight.caseId,
+      { page: 0, size: flight.size, sort: NOTE_SORT },
+      flight.controller.signal,
+    ).then(
+      (metadataResult) => {
+        if (!stillCurrent()) {
+          return;
+        }
+        const latestPage = Math.max(0, metadataResult.data.page.totalPages - 1);
+        if (latestPage === 0) {
+          publish({ items: metadataResult.data.items, page: metadataResult.data.page });
+          return;
+        }
+        fetchInvestigationNoteList(
+          getOidcAuthClient(),
+          flight.caseId,
+          { page: latestPage, size: flight.size, sort: NOTE_SORT },
+          flight.controller.signal,
+        ).then(
+          (pageResult) => {
+            publish({ items: pageResult.data.items, page: pageResult.data.page });
+          },
+          fail,
+        );
+      },
+      fail,
+    );
+  }, [page, published, validPosition]);
+
+  return {
+    state: published.state,
+    retry,
+    refresh,
+    refreshState: published.refreshState,
+  };
 }
 
 function createFlight(

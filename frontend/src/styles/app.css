@@ -895,6 +895,99 @@ ul.notice__body li + li {
   font-size: 13px;
 }
 
+.investigation-note-composer {
+  min-width: 0;
+  margin-bottom: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--surface-muted);
+}
+
+.investigation-note-composer form,
+.investigation-note-composer textarea {
+  min-width: 0;
+}
+
+.investigation-note-composer label {
+  display: block;
+  margin-bottom: var(--space-1);
+  color: var(--text-strong);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.investigation-note-composer__helper,
+.investigation-note-composer__counter {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.investigation-note-composer__helper {
+  margin-bottom: var(--space-2);
+}
+
+.investigation-note-composer textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 9rem;
+  padding: var(--space-3);
+  resize: vertical;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.investigation-note-composer textarea:focus {
+  outline: 3px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.investigation-note-composer textarea[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.investigation-note-composer__counter {
+  margin-top: var(--space-1);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.investigation-note-composer .form-error {
+  margin-top: var(--space-2);
+  color: var(--danger);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.investigation-note-composer__feedback,
+.investigation-note-composer__live {
+  margin-top: var(--space-3);
+}
+
+.investigation-note-composer__live:empty {
+  margin: 0;
+}
+
+.investigation-note-composer__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  justify-content: flex-end;
+  margin-top: var(--space-3);
+}
+
+.investigation-note-composer__locked,
+.investigation-notes__refresh,
+.audit__refresh,
+.case-detail__refresh {
+  overflow-wrap: anywhere;
+}
+
 .investigation-notes .result-line {
   margin-bottom: var(--space-4);
 }
@@ -1240,6 +1333,20 @@ ul.notice__body li + li {
 
   .main {
     padding: var(--space-5) var(--space-4) var(--space-6);
+  }
+}
+
+@media (max-width: 479px) {
+  .investigation-note-composer {
+    padding: var(--space-3);
+  }
+
+  .investigation-note-composer__actions {
+    flex-direction: column;
+  }
+
+  .investigation-note-composer__actions .button {
+    width: 100%;
   }
 }
 

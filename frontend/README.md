@@ -11,12 +11,14 @@ FDS operations console 디자인 기반(`src/styles/app.css`)을 구현했다. I
 기반 위에 거래 상세(`/transactions/{transactionId}`)와 목록→상세 탐색을 구현했다. 두 route 모두
 `transaction:view` capability로 보호되며, 상세 화면은 조회 전용이다. Issue #253에서는 같은 디자인
 기반 위에 조회 전용 사건 목록(`/cases`)을 구현했고, 이 route는 `case:view` capability로 보호된다.
-Issue #255에서는 같은 capability로 보호되는 조회 전용 사건 상세(`/cases/{caseId}`)와 목록의 Case ID
-→ 상세 탐색을 구현했다. 사건 상세 화면은 Backend 사건 상세 응답의 10개 필드만 읽기 전용으로
-표시하며 mutation UI가 없다. Issue #257에서는 같은 상세 화면 하단에 별도 route 없는 read-only
+Issue #255에서는 같은 capability로 보호되는 사건 상세(`/cases/{caseId}`)와 목록의 Case ID
+→ 상세 탐색을 구현했다. 사건 record는 Backend 사건 상세 응답의 10개 필드만 읽기 전용으로
+표시한다. Issue #257에서는 같은 상세 화면 하단에 별도 route 없는 read-only
 Audit history section을 구현했다. Issue #259에서는 같은 화면에 별도 route 없는 read-only
 Investigation notes section을 추가해 Case record → Investigation notes → Audit history 순서로 배치했다.
-조사 메모 작성·수정·삭제 UI와 Backend POST API 사용은 구현하지 않았다. 사건 workflow·담당자 변경·
+Issue #261에서는 `case:note-write` capability를 가진 `FDS_ANALYST`에게 두 작성 가능 상태의 inline
+composer를 추가하고, 기존 note POST와 authoritative notes/detail/audit refresh를 연결했다. 조사 메모
+수정·삭제 UI는 구현하지 않았다. 사건 workflow·담당자 변경·
 최종 판정·연관 거래·Detection·Rule Evidence·AI 사건 리포트 화면과 운영 대시보드는 아직 없고,
 콘솔 전체의 최종 시각적 리뉴얼은 후속 Issue로 남아 있다.
 
@@ -106,16 +108,16 @@ tsconfig.app.json` 결과에는 test 또는 test-support 파일이 포함되지 
 | `/transactions` | `TransactionListPage` | 거래 목록 (보호, `RequireCapability("transaction:view")`) |
 | `/transactions/{transactionId}` | `TransactionDetailPage` | 거래 상세, 조회 전용 (보호, `RequireCapability("transaction:view")`) |
 | `/cases` | `CaseListPage` | 사건 목록, 조회 전용 (보호, `RequireCapability("case:view")`) |
-| `/cases/{caseId}` | `CaseDetailPage` | 사건 상세, 조회 전용 (보호, `RequireCapability("case:view")`) |
+| `/cases/{caseId}` | `CaseDetailPage` | 사건 상세 조회와 권한·상태 제한 조사 메모 작성 (보호, `RequireCapability("case:view")`) |
 | `/health` | `HealthPage` | Backend `/api/health` 상태 조회 (public) |
 | `/auth/callback` | `AuthCallbackPage` | OIDC redirect callback 처리 |
 | 그 외 모든 경로 | `NotFoundPage` | 404 |
 
 `/`와 `/health`는 public이며 인증 초기화 실패나 Authorization Server 장애와 무관하게 계속
 열려 있다. 로그인 전용 route, silent renew callback, logout callback route는 존재하지 않는다.
-사건 workflow·담당자 변경·최종 판정, 조사 메모 생성·수정·삭제 UI와 별도 notes route,
+사건 workflow·담당자 변경·최종 판정, 조사 메모 수정·삭제 UI와 별도 notes route,
 연관 거래·Detection·Rule Evidence·AI 사건 리포트 화면과 운영 대시보드는 구현되지 않았다.
-조사 메모 조회는 `/cases/{caseId}` 내부의 읽기 전용 section으로 구현되어 있다.
+조사 메모 조회와 생성은 `/cases/{caseId}` 내부 section에서 수행하며 별도 notes route는 없다.
 
 거래 목록, 거래 상세, 사건 목록과 사건 상세가 `RequireCapability`를 적용한 production route다.
 guard는 navigation이 아니라 route element에 있으므로 rail 클릭, 목록의 상세 link, 직접 URL 진입이
@@ -1391,21 +1393,22 @@ required, timeout, network failure, invalid response, generic safe error, explic
 
 ## 사건 상세 화면
 
-`/cases/{caseId}` 사건 상세는 Issue #255에서 구현했고 Issue #257에서 하단 감사 이력 section을
-추가했다. Backend·API·DB·Infra 변경은 없고 신규 dependency·UI framework·font·icon·상태관리
-library도 없다. 거래 상세의 `.detail`·`.panel`·`.facts`를 유지하고 audit list wrapping만
-`app.css`에 최소 추가한다.
+`/cases/{caseId}` 사건 상세는 Issue #255에서 구현했고 Issue #257에서 하단 감사 이력 section,
+Issue #259에서 Investigation notes 조회 section, Issue #261에서 제한된 inline note composer와
+명시적 reconciliation refresh를 추가했다. Backend·API·DB·Infra 변경과 신규 dependency·UI
+framework·font·icon·상태관리 library 추가는 없다.
 
-이 화면은 **조회 전용**이다. mutation form·button·요청은 0개이며, `concurrencyVersion`은 읽기 전용
-Record metadata로만 표시하고 `expectedVersion`으로 어디에도 보내지 않는다.
+Case record와 사건 workflow·담당자·최종 판정은 계속 조회 전용이다. 명시적 예외는
+`case:note-write` capability와 작성 가능 상태로 제한한 inline Investigation note composer 하나다.
+이 composer만 현재 detail의 `concurrencyVersion`을 exact `expectedVersion`으로 POST한다.
 
 ### 요청 계약
 
-`GET /api/v1/cases/{caseId}`와
+`GET /api/v1/cases/{caseId}`, `GET /api/v1/cases/{caseId}/notes?page=0&size=20&sort=createdAt%2Casc`,
 `GET /api/v1/cases/{caseId}/audit-logs?page=0&size=20&sort=changedAt%2Cdesc`가 병렬로 시작한다.
-Issue #245의 `fetchCaseDetail()`과 `fetchCaseAuditList()`만 사용하며 raw `fetch`, DTO 재정의,
-endpoint registry·response validator 우회를 하지 않는다. 두 요청 모두 body가 없다. Frontend
-capability는 `case:view` 그대로이고 Backend의 기존 `case:read`·`case-audit:read`가 최종 판정한다.
+기존 typed API 함수만 사용하며 raw `fetch`, DTO 재정의, endpoint registry·response validator 우회를
+하지 않는다. 세 GET은 body가 없다. Frontend route capability는 `case:view`이고 Backend의 기존
+read 권한들이 최종 판정한다. note 생성만 별도 `case:note-write` UI capability와 Backend 권한을 거친다.
 
 ### 주소 판정
 
@@ -1453,14 +1456,15 @@ Backend 사건 상세 응답의 **10개 필드만** 세 panel로 나눠 읽기 �
 
 **Case record에 표시하지 않는 것**: risk score, risk level, priority, SLA, `DetectionResult`,
 `DetectionEvidence`, Rule Evidence, External Risk, 연관 거래 목록, AI 사건 리포트, `traceId`,
-Backend `code`·`message`·raw body, 업무 action, copy button. 조사 메모 조회 결과는 record field가
-아니라 뒤의 독립 read-only Investigation notes section에만 표시한다.
+Backend `code`·`message`·raw body, workflow action, copy button. 조사 메모 조회 결과는 record field가
+아니라 뒤의 독립 Investigation notes 읽기 목록에만 표시한다.
 
 ### API hook 계약
 
-`src/api/useCaseDetail.ts`가 화면 상태를 소유하며 `useTransactionDetail.ts`와 같은 구조다. 인증
-client는 hook 내부 effect에서 `getOidcAuthClient()`로만 얻고 closure 밖으로 내보내지 않는다. hook이
-반환하는 값은 `state`와 `retry` 둘뿐이다.
+`src/api/useCaseDetail.ts`가 화면 상태를 소유하며 `useTransactionDetail.ts`와 같은 request lifecycle을
+유지한다. 인증 client는 hook 내부 effect에서 `getOidcAuthClient()`로만 얻고 closure 밖으로 내보내지
+않는다. hook은 `state`, `retry`, 명시적 `refresh`, `refreshState`, authoritative
+`reconciliationGeneration`을 반환한다.
 
 - session과 canonical case ID를 **identity**로 추적한다. 최신 요청만 state를 게시하고, 이전 ID·
   session에 속한 늦은 성공·실패·404·401은 무시된다. 이 판정은 abort 성공 여부와 무관하다.
@@ -1519,18 +1523,20 @@ pagination은 URL/history가 아닌 section local state다. 초기 page/size는 
 session 변경 시 page 0으로 돌아간다. out-of-range empty page를 자동 보정 재요청하지 않는다. pager의
 accessible name은 `Audit history pages`다. 상세 성공 뒤 audit 실패는 record를 유지하고 audit 내부
 alert만 표시하지만, 상세 403/404는 section을 unmount해 pending/stored audit state를 폐기한다.
+note reconciliation의 명시적 audit refresh는 page 0을 요청하되, pending 중 사용자가 바꾼 page/size
+intent가 항상 우선한다. obsolete refresh는 abort/release하고 stale success·error를 게시하지 않는다.
 
 ## 미구현 범위
 
 - 사건 workflow·담당자 변경·최종 판정·연관 거래·Detection·Rule Evidence·AI 사건 리포트
-  **화면**과 운영 대시보드. 조사 메모는 사건 상세 내부의 별도 route 없는 read-only section과
-  조회 Hook만 구현됐고, 작성·수정·삭제 route·navigation·form·button·mutation은 구현되지 않았다.
-- 사건 상세 화면의 mutation UI (상태 변경·담당자 변경·최종 판정 form·button·요청이 0개이며,
-  `concurrencyVersion`은 읽기 전용 표시로만 쓰인다)
+  **화면**과 운영 대시보드. 조사 메모는 사건 상세 내부의 별도 route 없는 조회 section과
+  `case:note-write` 전용 inline 생성 form만 구현됐고, 수정·삭제 route·navigation·mutation은 구현되지 않았다.
+- 사건 상세의 상태 변경·담당자 변경·최종 판정 mutation UI (해당 form·button·요청은 0개다.
+  Investigation note 생성만 `concurrencyVersion`을 exact `expectedVersion`으로 사용하는 예외다.)
 - 행 전체 클릭 navigation과 상세 drawer·modal (상세는 별도 route이며 행은 계속 기록이다)
 - 목록으로 돌아갈 때의 filter 복원
-- 거래·사건 화면의 production 업무 action button (상태 변경·담당자 변경·판정·메모 작성·수정·삭제·
-  재처리·사건 생성은 범위 밖이다)
+- 거래·사건 화면의 그 밖의 production 업무 action button (상태 변경·담당자 변경·판정·메모 수정·삭제·
+  재처리·사건 생성은 범위 밖이며 Investigation note 생성만 구현됐다.)
 - 상세 화면의 copy-to-clipboard
 - 위험도(risk score·risk level)와 탐지 결과·사건 연결 표시 (현재 Transaction API 응답에 해당
   필드가 없다)
@@ -1627,8 +1633,8 @@ fetch 1회, 200·404·403·401·stale 401·timeout·network·invalid response·g
 latest-wins와 이전 case·session에 속한 늦은 성공·실패·404 무시, case A→B 교체 시 즉시 데이터
 제거와 이전 요청 abort, session 교체·logout·invalidation에서 데이터 제거, 403·404에서 session
 유지와 통보 0회, current 401의 session 1회 무효화, explicit retry 1회당 fetch 1회, 404·403에서
-`retry()` no-op, 자동 retry·polling 0회, unmount 이후 게시 0회를 확인한다. 게시 경계는 반환 key가
-정확히 `state`·`retry` 두 개이고 `state.data`의 key가 정확히 10개이며, Backend가 보낸 key 순서를
+`retry()` no-op, 자동 retry·polling 0회, unmount 이후 게시 0회를 확인한다. 게시 경계는 공개 반환 key와
+각 값의 고정 타입, `state.data`의 key가 정확히 10개이며, Backend가 보낸 key 순서를
 뒤집어도 게시된 객체의 key 순서가 hook 투영의 순서라는 점으로 **envelope과 게시 객체의 identity
 분리**를 관찰한다. `traceId`·`"case"`·access token·raw error body가 `JSON.stringify(state)`에
 없음, nullable 4종이 `null` 그대로 유지됨, 403·404 게시 값이 각각 `{"status":"forbidden"}`과
@@ -1636,8 +1642,9 @@ latest-wins와 이전 case·session에 속한 늦은 성공·실패·404 무시,
 (`CaseDetailPage.test.tsx`)은 10개 `<dt>`/`<dd>`와 그 정확한 이름 목록, `Updated`·`updatedAt`
 문자열 부재, 네 nullable의 고정 문구와 그 자리의 `<time>` 부재, KST 표시와 원본 UTC `datetime`
 (소수초 9자리 포함), 4개 status·3개 disposition label, status의 badge marker와 disposition의
-badge 부재, 128자 assignee의 단일 노출, 큰 정수 무변형 출력, risk·detection·evidence·note·audit·
-AI 부재, button·form·textbox·combobox·checkbox 0개와 link 1개, 404·403·503·network·timeout·
+badge 부재, 128자 assignee의 단일 노출, 큰 정수 무변형 출력, Case record 안의
+risk·detection·evidence·note·audit·AI 부재, workflow mutation 부재와 허용된 inline note composer,
+404·403·503·network·timeout·
 invalid-response 문구, 404·403의 retry 부재와 `dd` 0개, `Try again` 1회당 요청 1회, 자동 retry
 0회, 오류 요약 focus와 재이동 억제, malformed 주소 11종의 요청 0회·원문 비노출, `Back to cases`
 navigation을 확인한다. route test는 세 허용 role의 직접 진입과 실제
@@ -1890,7 +1897,7 @@ Issue #249의 browser E2E는 실제 Keycloak USER(`FDS_ANALYST`)로 로그인해
 viewport의 rail 폭·filter column 수·가로 overflow 부재, skip link가 첫 tab stop임, filter 적용이
 정확히 요청 1회임, 자동 retry 0회, credential 비노출을 확인한다. 이 relay는 status만이 아니라
 Backend가 실제로 보낸 body를 그대로 브라우저에 전달하므로, 화면이 보는 것은 실제 응답이다.
-API mock과 test 전용 auth bypass는 사용하지 않고 strict TLS를 유지한다.
+API·인증 test double 없이 실제 Keycloak 로그인을 사용하고 strict TLS를 유지한다.
 
 Issue #251은 여기에 거래 상세 404 경계 1개를 더한다(#251 시점 총 14개). 로그아웃 상태에서 canonical 상세
 주소로 직접 진입해 Backend 요청 0회를 확인하고, 그 주소에서 실제 Keycloak 로그인을 수행해 복귀
@@ -2095,7 +2102,8 @@ Backend의 독립적인 access-token 검증과 401/403 응답이다.
 같은 React commit에서 독립적으로 시작한다. detail의 403/404만 notes와 audit를 함께 unmount하며,
 notes 자체의 403/404·timeout·network·invalid response·generic error는 notes section 안에만 남는다.
 403/404에는 retry가 없고 session을 유지한다. timeout·network·invalid response·generic error만 사용자가
-명시적으로 재시도할 수 있으며 자동 retry·polling·last-page correction은 없다.
+명시적으로 재시도할 수 있으며 자동 retry·polling·일반 pagination의 last-page correction은 없다.
+Issue #261의 성공 POST 후 명시적 reconciliation refresh만 최신 last page로 이동하는 예외다.
 
 새 endpoint나 DTO를 만들지 않는다. `fetchInvestigationNoteList`, 기존 endpoint registry, authorized
 transport, investigation-note DTO·validator, pagination helper와 KST helper를 그대로 재사용한다.
@@ -2107,7 +2115,8 @@ UUID 재정규화를 하지 않고 한 item이라도 다르거나 섞여 있으�
 작성 함수와 POST 응답 계약은 이번 변경에서 수정하지 않았다.
 
 `useCaseInvestigationNotes(caseId, page, size)`의 request identity는 session identity·caseId·page·size·
-고정 `createdAt,asc`·retry attempt다. 공개 반환 key는 `state`와 `retry`뿐이다. StrictMode setup-cleanup-
+고정 `createdAt,asc`·retry attempt다. 공개 반환 key는 `state`, `retry`, 명시적 `refresh`,
+`refreshState`다. StrictMode setup-cleanup-
 setup은 grace-window flight 하나를 공유한다. listener가 0인 순간 settle된 sanitized outcome은 같은 key
 replay가 사용하지만, 마지막 subscriber release 후에는 flight와 outcome을 제거한다. released 또는 이미
 settled된 flight는 lazy terminal factory를 실행하지 않아 late payload projection과 failure classification을
@@ -2146,11 +2155,49 @@ mutation 0회를 검증한다. barrier는 pending·released·failed·disposed �
 spec-local controllable scheduler 반례가 target 1·2·3개 누락, 중복·unexpected target과 release·timeout·
 dispose 경쟁에서 이중 settle 및 잔존 callback 0을 고정한다. populated Backend seed는 만들지 않는다. populated 의미 검증은 Hook/component
 unit test와 test-only `case-investigation-notes-geometry.html/.tsx`가 맡는다. fixture는 production
-`CaseInvestigationNotesPanel`과 `app.css`를 직접 사용하되 API mock·route interception·auth bypass가 없고
-production router/build entry에서 참조하지 않는다. SYSTEM·USER, Unicode, CR/LF·연속 공백,
+`CaseInvestigationNotesPanel`, capability-gated production composer와 `app.css`를 직접 사용한다. composer
+렌더링을 위해 synthetic `FDS_ANALYST` session/AuthClient를 주입하지만 실제 credential·token·Keycloak
+login은 없으며 인증·인가 보안 증거가 아니다. 실제 auth/role 경계는 unit·router·실제 Keycloak 통합
+테스트가 담당한다. fixture는 API request·route interception 없이 동작하고 production router/build
+entry에서 참조하지 않는다. SYSTEM·USER, Unicode, CR/LF·연속 공백,
 HTML/URL-like text, 정확히 4,000 code point, 긴 unbroken content·noteId·authorRef, 여러 item과 pager를
-1440×900·1280×800·1024×768에서 렌더해 document horizontal overflow 0을 측정한다.
+1440×900·1280×800·1024×768·390×844에서 렌더해 document horizontal overflow 0을 측정한다.
 
 최종 browser 분해는 실제 Keycloak·Backend 통합 16개 + relay contract 3개 + geometry 3개 = 22개다.
 runner는 worker 1, retries 0, strict TLS이고 Run 경로는 Prepare·pull·build·package download를 수행하지
 않는다. Backend·DB·공식 API·dependency·auth·production router·E2E runner는 변경하지 않았다.
+
+## 사건 상세 Investigation note 작성 (Issue #261)
+
+기존 Investigation notes section 상단의 inline composer는 `case:note-write` capability가 있는
+`FDS_ANALYST`에게만 노출된다. `IN_REVIEW`와 `ADDITIONAL_INFORMATION_REQUIRED`에서는 form을,
+`OPEN`과 `CLOSED`에서는 고정 상태 안내를 표시하며 capability가 없으면 관련 DOM을 만들지 않는다.
+textarea value는 trim·Unicode normalization 없이 Unicode code point 1~4,000 및 Backend-compatible
+blank/control 검증을 통과한 뒤 `{ content, expectedVersion }` exact body로 한 번만 전송한다.
+
+성공은 exact HTTP 201, requested caseId, submitted content, safe `expectedVersion + 1`이 모두 일치할
+때만 확정한다. authorRef는 형식만 검증하며 Frontend session subject와 결합하지 않는다. 성공 POST의
+검증된 `concurrencyVersion` 숫자만 같은 session/case/submission의 detail reconciliation floor로 보존한다.
+raw response·note DTO·content·envelope는 mutation terminal state에 남기지 않는다. detail GET이 floor
+미만이면 Case record와 authoritative generation을 갱신하지 않고 다음 submit 잠금을 유지한다. floor와
+같거나 큰 version을 받고 현재 status도 작성 가능할 때만 잠금이 풀리며, OPEN/CLOSED면 composer form을
+활성화하지 않는다. stale case/session/submission 응답은 무시하고 자동 detail refresh loop는 만들지 않는다.
+
+성공 후 optimistic note를 삽입하지 않고 notes/detail/audit를 독립적으로 background refresh한다. notes는
+authoritative metadata를 거쳐 최신 마지막 page로, audit은 page 0으로 이동한다. 각 refresh는 시작 시
+pagination intent identity를 캡처한다. pending 동안 사용자가 page/size를 바꾸면 사용자 intent generation을
+먼저 갱신하고 obsolete refresh를 release/abort하며, abort 성공 여부와 무관하게 stale success/error의
+content·page·size·latest-page/page-0 publish를 차단한다. refresh 내부의 notes last-page 이동은 사용자
+navigation과 구분한다. 409·timeout·network는 성공 version floor와 혼동하지 않고 자동 POST 재시도 없이
+기존 read reconciliation을 수행한다. 각 refresh 실패는 다른 section이나 성공한 POST 결과를 바꾸지 않으며
+고정 안내와 명시적 refresh 경로만 제공한다.
+
+원문은 textarea memory와 exact POST body 외의 state·오류·메시지·URL·storage·metric·log에 보관하지
+않는다. Enter는 줄바꿈이고 Ctrl/Cmd+Enter만 submit하며 IME composition, double click, 반복 shortcut은
+동시 POST를 만들지 않는다. geometry fixture는 synthetic FDS_ANALYST session/AuthClient로 실제 production
+capability-gated composer를 렌더하는 layout 전용 검증이며 실제 인증 증거가 아니다. 1440×900,
+1280×800, 1024×768, 390×844에서 document horizontal overflow 0, textarea의 containing content box 대비
+실제 computed/bounding width, vertical resize·min-width를 측정한다. 390×844에서는 computed flex direction과
+두 button bounding box로 세로 stacking·비중첩·container 내부 full-width를 확인한다. 실제 notes POST
+browser E2E는 수행하지 않는다. mutation 성공은 API/Hook/component test와 기존 Backend test가 담당한다.
+relay write allowlist도 추가하지 않으며 E2E 분해는 16 + 3 + 3 = 22를 유지한다.
