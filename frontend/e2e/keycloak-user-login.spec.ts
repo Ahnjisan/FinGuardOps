@@ -3491,6 +3491,11 @@ const CONSOLE_VIEWPORTS: readonly {
   { width: 1024, height: 768, railWidth: 180, filterColumns: 2 },
 ];
 
+const NOTES_GEOMETRY_VIEWPORTS: readonly { readonly width: number; readonly height: number }[] = [
+  ...CONSOLE_VIEWPORTS,
+  { width: 390, height: 844 },
+];
+
 async function measuredRailWidth(page: Page): Promise<number> {
   const box = await page.locator("header.rail").boundingBox();
   requireCondition(box !== null, "The navigation rail was not laid out.");
@@ -3965,8 +3970,8 @@ test("a real USER opens a transaction detail address and meets the real Backend 
  * Deliberately a second screen rather than a second assertion on the first one:
  * `/cases` is guarded by its own capability, served by its own Backend endpoint
  * and filtered by its own query validator, and none of those is exercised by
- * the transaction test above. Nothing is mocked here either - no API body, no
- * auth bypass - so what the screen shows is what Spring Boot answered.
+ * the transaction test above. No API or authentication test double is used,
+ * so what the screen shows is what Spring Boot answered after real login.
  *
  * This runtime holds no seeded case rows, so the screen is allowed to settle on
  * a deterministic empty state. That is a real 200 from a real endpoint, and it
@@ -4366,7 +4371,8 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
       "A credential reached the browser console.",
     );
   }
-  // A read-only screen: no status change, no reassignment and no resolution.
+  // This real 404 never renders the note composer; workflow, reassignment and
+  // resolution controls remain unavailable as well.
   requireCondition(
     backend.filter((entry) => entry.method !== "GET").length === 0,
     "The case detail screen sent a business mutation.",
@@ -4494,11 +4500,13 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
  * The address of the test-only geometry fixture, served by the same Vite dev
  * server that serves the application.
  *
- * A real origin and a real module graph: the page imports the production
- * `CaseTable` and the production `app.css`, and Vite transforms and serves both
- * exactly as it does for the console itself. What it does not have is a
- * transport - the fixture makes no request, so there is no API to mock, no
- * route to intercept and no session to bypass.
+ * A real origin and real module graphs: the pages import production components
+ * and `app.css`, and Vite transforms and serves them as it does for the console.
+ * The notes fixture injects a synthetic FDS_ANALYST AuthClient/session so the
+ * production capability-gated composer can be measured. It has no credential,
+ * token or Keycloak login and is not authentication/authorization evidence;
+ * those boundaries are covered by unit, router and real Keycloak integration
+ * tests. None of the geometry fixtures makes an API request.
  */
 const CASE_TABLE_GEOMETRY_URL = `${APP_ORIGIN}/e2e/case-table-geometry.html`;
 const CASE_AUDIT_GEOMETRY_URL = `${APP_ORIGIN}/e2e/case-audit-geometry.html`;
@@ -4856,12 +4864,100 @@ test("populated investigation notes preserve plain text and wrap at every design
     "Note content was truncated or put behind an internal scroller.",
   );
 
-  for (const viewport of CONSOLE_VIEWPORTS) {
+  for (const viewport of NOTES_GEOMETRY_VIEWPORTS) {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     requireCondition(
       !(await documentOverflowsHorizontally(page)),
       `The populated investigation notes scrolled the document at ${String(viewport.width)}px.`,
     );
+    const composer = page.locator(".investigation-note-composer");
+    const textarea = page.getByRole("textbox", { name: "Investigation note" });
+    await expect(composer).toBeVisible();
+    await expect(textarea).toBeVisible();
+    const measured = await textarea.evaluate((element) => {
+      const style = window.getComputedStyle(element);
+      const box = element.getBoundingClientRect();
+      const parent = element.parentElement;
+      if (parent === null) {
+        throw new Error("The investigation note textarea has no containing form.");
+      }
+      const parentStyle = window.getComputedStyle(parent);
+      const parentBox = parent.getBoundingClientRect();
+      const parentContentWidth =
+        parentBox.width -
+        parseFloat(parentStyle.paddingLeft) -
+        parseFloat(parentStyle.paddingRight) -
+        parseFloat(parentStyle.borderLeftWidth) -
+        parseFloat(parentStyle.borderRightWidth);
+      return {
+        left: box.left,
+        right: box.right,
+        width: box.width,
+        computedWidth: parseFloat(style.width),
+        boxSizing: style.boxSizing,
+        parentContentWidth,
+        viewportWidth: window.innerWidth,
+        resize: style.resize,
+        minWidth: style.minWidth,
+      };
+    });
+    requireCondition(
+      measured.left >= -1 && measured.right <= measured.viewportWidth + 1,
+      `The investigation note textarea escaped the viewport at ${String(viewport.width)}px.`,
+    );
+    const widthTolerance = 1.5;
+    requireCondition(
+      measured.boxSizing === "border-box",
+      "The investigation note textarea did not use border-box sizing.",
+    );
+    requireCondition(
+      measured.width <= measured.parentContentWidth + widthTolerance,
+      `The investigation note textarea exceeded its containing content box at ${String(viewport.width)}px.`,
+    );
+    requireCondition(
+      Math.abs(measured.width - measured.parentContentWidth) <= widthTolerance &&
+        Math.abs(measured.computedWidth - measured.width) <= widthTolerance,
+      `The investigation note textarea did not render at 100% of its containing content width at ${String(viewport.width)}px.`,
+    );
+    requireCondition(measured.resize === "vertical", "The investigation note textarea was not vertical-resize only.");
+    requireCondition(measured.minWidth === "0px", "The investigation note textarea did not keep min-width zero.");
+
+    if (viewport.width === 390 && viewport.height === 844) {
+      const actions = await page.locator(".investigation-note-composer__actions").evaluate((element) => {
+        const style = window.getComputedStyle(element);
+        const box = element.getBoundingClientRect();
+        const buttons = Array.from(element.querySelectorAll("button")).map((button) => {
+          const buttonBox = button.getBoundingClientRect();
+          return {
+            left: buttonBox.left,
+            right: buttonBox.right,
+            top: buttonBox.top,
+            bottom: buttonBox.bottom,
+            width: buttonBox.width,
+          };
+        });
+        return { flexDirection: style.flexDirection, box: { left: box.left, right: box.right, width: box.width }, buttons };
+      });
+      requireCondition(actions.flexDirection === "column", "Mobile composer actions were not laid out as a column.");
+      requireCondition(actions.buttons.length === 2, "Mobile composer did not render both actions.");
+      const [cancel, submit] = actions.buttons;
+      const actionTolerance = 1.5;
+      requireCondition(
+        cancel.bottom <= submit.top + actionTolerance,
+        "Mobile Cancel and Add note actions overlapped instead of stacking vertically.",
+      );
+      for (const button of actions.buttons) {
+        requireCondition(
+          button.left >= actions.box.left - actionTolerance &&
+            button.right <= actions.box.right + actionTolerance,
+          "A mobile composer action escaped its container.",
+        );
+        requireCondition(
+          Math.abs(button.width - actions.box.width) <= actionTolerance,
+          "A mobile composer action did not render full width.",
+        );
+      }
+    }
   }
   await page.setViewportSize({ width: 1440, height: 900 });
 

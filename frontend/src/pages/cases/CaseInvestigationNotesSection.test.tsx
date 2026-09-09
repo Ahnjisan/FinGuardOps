@@ -345,4 +345,36 @@ describe("CaseInvestigationNotesPanel geometry seam", () => {
     expect(screen.getByRole("article")).toBeVisible();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
+
+  it("keeps the authoritative list visible beside an isolated refresh failure", async () => {
+    const user = userEvent.setup();
+    const onRefresh = vi.fn();
+    const state: CaseInvestigationNotesState = {
+      status: "success",
+      data: {
+        items: [{
+          noteId: "8d2e3f40-5b6c-4d7e-9f01-000000000001",
+          authorType: "USER",
+          authorRef: USER_REF,
+          content: PLAIN_CONTENT,
+          createdAt: "2026-09-02T00:00:00.123456Z",
+        }],
+        page: { number: 0, size: 20, totalElements: 1, totalPages: 1, first: true, last: true },
+      },
+    };
+    render(
+      <CaseInvestigationNotesPanel
+        state={state}
+        onPageChange={() => undefined}
+        onPageSizeChange={() => undefined}
+        onRetry={() => undefined}
+        refreshState="failed"
+        onRefresh={onRefresh}
+      />,
+    );
+    expect(screen.getByRole("article")).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent("submission result is unchanged");
+    await user.click(screen.getByRole("button", { name: "Refresh investigation notes" }));
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+  });
 });

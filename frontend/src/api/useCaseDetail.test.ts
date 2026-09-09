@@ -885,7 +885,13 @@ describe("useCaseDetail disclosure boundary", () => {
       expect(result.current.state.status).toBe("success");
     });
 
-    expect(Object.keys(result.current).sort()).toEqual(["retry", "state"]);
+    expect(Object.keys(result.current).sort()).toEqual([
+      "reconciliationGeneration",
+      "refresh",
+      "refreshState",
+      "retry",
+      "state",
+    ]);
     expect(typeof result.current.retry).toBe("function");
   });
 
@@ -2135,5 +2141,126 @@ describe("useCaseDetail hands each subscription its own answer", () => {
     expect(second.caseStatus).toBe("IN_REVIEW");
     expect(second).toEqual(caseFields());
     run.view.unmount();
+  });
+});
+
+describe("useCaseDetail authoritative background refresh", () => {
+  it("keeps a reconciliation floor across a stale response until an explicit refresh reaches it", async () => {
+    const { calls } = controlledFetch();
+    const view = render(signedIn());
+    await settle();
+    await answerWith(calls[0], detailBody({ concurrencyVersion: 4 }));
+    const generation = view.result.current.reconciliationGeneration;
+
+    act(() => view.result.current.refresh(5));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    await answerWith(calls[1], detailBody({ concurrencyVersion: 4 }));
+
+    expect(view.result.current.refreshState).toBe("failed");
+    expect(view.result.current.reconciliationGeneration).toBe(generation);
+    expect(view.result.current.state).toEqual({
+      status: "success",
+      data: caseFields({ concurrencyVersion: 4 }),
+    });
+    expect(calls).toHaveLength(2);
+
+    act(() => view.result.current.refresh());
+    await waitFor(() => expect(calls).toHaveLength(3));
+    await answerWith(calls[2], detailBody({ concurrencyVersion: 5 }));
+    expect(view.result.current.refreshState).toBe("idle");
+    expect(view.result.current.reconciliationGeneration).toBe(generation + 1);
+    if (view.result.current.state.status === "success") {
+      expect(view.result.current.state.data.concurrencyVersion).toBe(5);
+    }
+  });
+
+  it.each([5, 6])("accepts detail version %i at or above the reconciliation floor", async (version) => {
+    const { calls } = controlledFetch();
+    const view = render(signedIn());
+    await settle();
+    await answerWith(calls[0], detailBody({ concurrencyVersion: 4 }));
+    const generation = view.result.current.reconciliationGeneration;
+
+    act(() => view.result.current.refresh(5));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    await answerWith(calls[1], detailBody({ concurrencyVersion: version }));
+
+    expect(view.result.current.refreshState).toBe("idle");
+    expect(view.result.current.reconciliationGeneration).toBe(generation + 1);
+    if (view.result.current.state.status === "success") {
+      expect(view.result.current.state.data.concurrencyVersion).toBe(version);
+    }
+  });
+
+  it("releases a floor-bound refresh on case replacement and ignores its late answer", async () => {
+    const { calls } = controlledFetch();
+    const view = render(signedIn());
+    await settle();
+    await answerWith(calls[0], detailBody({ concurrencyVersion: 4 }));
+    act(() => view.result.current.refresh(5));
+    await waitFor(() => expect(calls).toHaveLength(2));
+
+    view.rerender(OTHER_CASE_ID);
+    await waitFor(() => expect(calls).toHaveLength(3));
+    expect(calls[1].request.signal.aborted).toBe(true);
+    await answerWith(calls[1], detailBody({ concurrencyVersion: 9 }));
+    expect(view.result.current.state).toEqual({ status: "loading" });
+
+    await answerWith(
+      calls[2],
+      detailBody({ caseId: OTHER_CASE_ID, concurrencyVersion: 1 }),
+    );
+    if (view.result.current.state.status === "success") {
+      expect(view.result.current.state.data.caseId).toBe(OTHER_CASE_ID);
+      expect(view.result.current.state.data.concurrencyVersion).toBe(1);
+    }
+  });
+
+  it("keeps the record visible and publishes a newer version with a new generation", async () => {
+    const { calls } = controlledFetch();
+    const view = render(signedIn());
+    await settle();
+    await answerWith(calls[0], detailBody({ concurrencyVersion: 4 }));
+    const generation = view.result.current.reconciliationGeneration;
+
+    act(() => view.result.current.refresh());
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(view.result.current.state.status).toBe("success");
+    expect(view.result.current.refreshState).toBe("refreshing");
+
+    await answerWith(
+      calls[1],
+      detailBody({ concurrencyVersion: 5, lastChangedAt: "2026-07-24T02:06:10Z" }),
+    );
+    expect(view.result.current.state.status).toBe("success");
+    if (view.result.current.state.status !== "success") {
+      throw new Error("Expected refreshed detail.");
+    }
+    expect(view.result.current.state.data.concurrencyVersion).toBe(5);
+    expect(view.result.current.refreshState).toBe("idle");
+    expect(view.result.current.reconciliationGeneration).toBe(generation + 1);
+  });
+
+  it("keeps the authoritative record when refresh fails and exposes an explicit retry boundary", async () => {
+    const { calls } = controlledFetch();
+    const view = render(signedIn());
+    await settle();
+    await answerWith(calls[0], detailBody({ concurrencyVersion: 4 }));
+
+    act(() => view.result.current.refresh());
+    await waitFor(() => expect(calls).toHaveLength(2));
+    await act(async () => {
+      calls[1].fail(new TypeError("private network detail"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(view.result.current.refreshState).toBe("failed");
+    expect(view.result.current.state.status).toBe("success");
+    if (view.result.current.state.status === "success") {
+      expect(view.result.current.state.data.concurrencyVersion).toBe(4);
+    }
+
+    act(() => view.result.current.refresh());
+    await waitFor(() => expect(calls).toHaveLength(3));
   });
 });

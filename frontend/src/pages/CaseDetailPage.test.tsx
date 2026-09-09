@@ -235,6 +235,19 @@ function auditBody(): Record<string, unknown> {
   };
 }
 
+function createdNoteBody(content: string, concurrencyVersion = 5): Record<string, unknown> {
+  return {
+    noteId: "9e3f4a50-6b7c-4d8e-9f01-2c3d4e5f6071",
+    caseId: CASE_ID,
+    authorType: "USER",
+    authorRef: "7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f",
+    content,
+    createdAt: "2026-09-02T01:00:00.123456Z",
+    concurrencyVersion,
+    traceId: "trace_demo_note_created_floor",
+  };
+}
+
 function renderPage(client: FakeAuthClient, path: string = DETAIL_ROUTE) {
   return renderRoutesWithAuth(ROUTES, { client, initialEntries: [path] });
 }
@@ -530,19 +543,21 @@ describe("CaseDetailPage record", () => {
     }
   });
 
-  it("offers no mutation control of any kind", async () => {
+  it("offers only the approved note mutation beside read-only section controls", async () => {
     await showRecord();
 
-    // A read-only screen: nothing to press, no form to submit, no field to
-    // type in and no state, assignee or resolution to choose.
+    // The inline note composer is the one approved business mutation. The
+    // case workflow, assignee and resolution remain read-only here.
     expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual([
+      "Cancel",
+      "Add note",
       "Previous",
       "Next",
       "Previous",
       "Next",
     ]);
-    expect(document.querySelectorAll("form")).toHaveLength(0);
-    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(document.querySelectorAll("form")).toHaveLength(1);
+    expect(screen.getByRole("textbox", { name: "Investigation note" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Notes per page" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Entries per page" })).toBeInTheDocument();
     expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
@@ -632,6 +647,223 @@ describe("CaseDetailPage record", () => {
 
     expect(document.body.innerHTML).not.toContain(TRACE_ID);
     expect(document.body.innerHTML).not.toContain("traceId");
+  });
+});
+
+describe("CaseDetailPage note reconciliation", () => {
+  it("keeps the composer locked and the version unchanged when detail is below the POST floor", async () => {
+    const { detail, notes, audit } = controlledAllCaseReads();
+    const user = userEvent.setup();
+    renderPage(signedIn());
+    await settle();
+    await answerWith(detail[0], caseBody({ concurrencyVersion: 4 }));
+    await answerWith(notes[0], notesBody());
+    await answerWith(audit[0], auditBody());
+
+    const submitted = "floor-bound note";
+    await user.type(screen.getByRole("textbox", { name: "Investigation note" }), submitted);
+    await user.click(screen.getByRole("button", { name: "Add note" }));
+    await waitFor(() => expect(notes).toHaveLength(2));
+    await answerWith(notes[1], createdNoteBody(submitted), 201);
+    await waitFor(() => {
+      expect(detail).toHaveLength(2);
+      expect(notes).toHaveLength(3);
+      expect(audit).toHaveLength(2);
+    });
+
+    await answerWith(detail[1], caseBody({ concurrencyVersion: 4 }));
+    const add = screen.getByRole("button", { name: "Add note" });
+    expect(add).toBeDisabled();
+    expect(valueOf("Concurrency version")).toHaveTextContent("4");
+    expect(detail).toHaveLength(2);
+    expect(notes.filter((call) => call.request.method === "POST")).toHaveLength(1);
+    await user.click(add);
+    expect(notes.filter((call) => call.request.method === "POST")).toHaveLength(1);
+
+    await user.click(screen.getByRole("button", { name: "Refresh case information" }));
+    await waitFor(() => expect(detail).toHaveLength(3));
+    await answerWith(detail[2], caseBody({ concurrencyVersion: 5 }));
+    expect(screen.getByRole("button", { name: "Add note" })).toBeEnabled();
+    expect(valueOf("Concurrency version")).toHaveTextContent("5");
+  });
+
+  it.each([5, 6])("uses authoritative detail version %i for the next note POST", async (version) => {
+    const { detail, notes, audit } = controlledAllCaseReads();
+    const user = userEvent.setup();
+    renderPage(signedIn());
+    await settle();
+    await answerWith(detail[0], caseBody({ concurrencyVersion: 4 }));
+    await answerWith(notes[0], notesBody());
+    await answerWith(audit[0], auditBody());
+
+    const first = "first floor note";
+    await user.type(screen.getByRole("textbox", { name: "Investigation note" }), first);
+    await user.click(screen.getByRole("button", { name: "Add note" }));
+    await waitFor(() => expect(notes).toHaveLength(2));
+    await answerWith(notes[1], createdNoteBody(first), 201);
+    await waitFor(() => expect(detail).toHaveLength(2));
+    await answerWith(detail[1], caseBody({ concurrencyVersion: version }));
+
+    const second = `next note at version ${String(version)}`;
+    await user.type(screen.getByRole("textbox", { name: "Investigation note" }), second);
+    await user.click(screen.getByRole("button", { name: "Add note" }));
+    await waitFor(() =>
+      expect(notes.filter((call) => call.request.method === "POST")).toHaveLength(2),
+    );
+    const nextPost = notes.filter((call) => call.request.method === "POST")[1];
+    expect(JSON.parse(await nextPost.request.clone().text())).toEqual({
+      content: second,
+      expectedVersion: version,
+    });
+  });
+
+  it("does not render the composer when sufficient reconciliation closes the case", async () => {
+    const { detail, notes, audit } = controlledAllCaseReads();
+    const user = userEvent.setup();
+    renderPage(signedIn());
+    await settle();
+    await answerWith(detail[0], caseBody({ concurrencyVersion: 4 }));
+    await answerWith(notes[0], notesBody());
+    await answerWith(audit[0], auditBody());
+
+    const submitted = "note before close";
+    await user.type(screen.getByRole("textbox", { name: "Investigation note" }), submitted);
+    await user.click(screen.getByRole("button", { name: "Add note" }));
+    await waitFor(() => expect(notes).toHaveLength(2));
+    await answerWith(notes[1], createdNoteBody(submitted), 201);
+    await waitFor(() => expect(detail).toHaveLength(2));
+    await answerWith(
+      detail[1],
+      caseBody({
+        concurrencyVersion: 5,
+        caseStatus: "CLOSED",
+        finalDisposition: "FALSE_POSITIVE",
+        closedAt: "2026-09-02T01:00:01Z",
+      }),
+    );
+
+    expect(screen.queryByRole("textbox", { name: "Investigation note" })).not.toBeInTheDocument();
+    expect(screen.getByText("Investigation notes cannot be added while this case is closed.")).toBeVisible();
+    expect(notes.filter((call) => call.request.method === "POST")).toHaveLength(1);
+  });
+
+  it("does not optimistically insert and refreshes detail, notes, and audit independently", async () => {
+    const { detail, notes, audit } = controlledAllCaseReads();
+    const user = userEvent.setup();
+    renderPage(signedIn());
+    await settle();
+    await answerWith(detail[0], caseBody({ concurrencyVersion: 4 }));
+    await answerWith(notes[0], notesBody("authoritative old note"));
+    await answerWith(audit[0], auditBody());
+
+    const textarea = screen.getByRole("textbox", { name: "Investigation note" });
+    const submitted = "new draft not optimistic";
+    await user.type(textarea, submitted);
+    await user.click(screen.getByRole("button", { name: "Add note" }));
+    await waitFor(() => expect(notes).toHaveLength(2));
+    expect(notes[1].request.method).toBe("POST");
+
+    await answerWith(
+      notes[1],
+      {
+        noteId: "9e3f4a50-6b7c-4d8e-9f01-2c3d4e5f6071",
+        caseId: CASE_ID,
+        authorType: "USER",
+        authorRef: "7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f",
+        content: submitted,
+        createdAt: "2026-09-02T01:00:00.123456Z",
+        concurrencyVersion: 5,
+        traceId: "trace_demo_note_created_01",
+      },
+      201,
+    );
+    await waitFor(() => {
+      expect(detail).toHaveLength(2);
+      expect(notes).toHaveLength(3);
+      expect(audit).toHaveLength(2);
+    });
+    expect(screen.getByText("authoritative old note")).toBeVisible();
+    expect(screen.queryByText(submitted)).not.toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "" })).toHaveTextContent("Investigation note added.");
+
+    await answerWith(detail[1], caseBody({
+      concurrencyVersion: 5,
+      lastChangedAt: "2026-07-24T02:06:10Z",
+    }));
+    await answerWith(notes[2], notesBody("authoritative refreshed note"));
+    await answerWith(audit[1], {
+      ...auditBody(),
+      content: [{
+        action: "CASE_NOTE_CREATED",
+        reasonCode: "CASE_INVESTIGATION_NOTE_ADDED",
+        actorType: "USER",
+        changedAt: "2026-09-02T01:00:00.123456Z",
+        beforeSummary: null,
+        afterSummary: null,
+        metadata: { noteId: "9e3f4a50-6b7c-4d8e-9f01-2c3d4e5f6071" },
+      }],
+    });
+
+    expect(valueOf("Concurrency version")).toHaveTextContent("5");
+    expect(screen.getByText("authoritative refreshed note")).toBeVisible();
+    expect(screen.getByText("CASE_NOTE_CREATED")).toBeVisible();
+  });
+
+  it("keeps a successful create and the other authoritative refreshes when audit refresh fails", async () => {
+    const { detail, notes, audit } = controlledAllCaseReads();
+    const user = userEvent.setup();
+    renderPage(signedIn());
+    await settle();
+    await answerWith(detail[0], caseBody({ concurrencyVersion: 4 }));
+    await answerWith(notes[0], notesBody("authoritative old note"));
+    await answerWith(audit[0], auditBody());
+
+    const submitted = "successful create with isolated audit failure";
+    await user.type(screen.getByRole("textbox", { name: "Investigation note" }), submitted);
+    await user.click(screen.getByRole("button", { name: "Add note" }));
+    await waitFor(() => expect(notes).toHaveLength(2));
+    await answerWith(
+      notes[1],
+      {
+        noteId: "9e3f4a50-6b7c-4d8e-9f01-2c3d4e5f6071",
+        caseId: CASE_ID,
+        authorType: "USER",
+        authorRef: "7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f",
+        content: submitted,
+        createdAt: "2026-09-02T01:00:00.123456Z",
+        concurrencyVersion: 5,
+        traceId: "trace_demo_note_created_02",
+      },
+      201,
+    );
+    await waitFor(() => {
+      expect(detail).toHaveLength(2);
+      expect(notes).toHaveLength(3);
+      expect(audit).toHaveLength(2);
+    });
+
+    await answerWith(detail[1], caseBody({ concurrencyVersion: 5 }));
+    await answerWith(notes[2], notesBody("authoritative note despite audit failure"));
+    await answerWith(
+      audit[1],
+      {
+        code: "PRIVATE_AUDIT_REFRESH_CODE",
+        message: "private audit refresh body",
+        traceId: "private-audit-refresh-trace",
+      },
+      500,
+    );
+
+    expect(screen.getByRole("status", { name: "" })).toHaveTextContent("Investigation note added.");
+    expect(valueOf("Concurrency version")).toHaveTextContent("5");
+    expect(screen.getByText("authoritative note despite audit failure")).toBeVisible();
+    expect(screen.getByText("CASE_CREATED")).toBeVisible();
+    expect(
+      screen.getByRole("heading", { name: "The latest audit history could not be loaded" }),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Add note" })).toBeEnabled();
+    expect(document.body.textContent).not.toContain("PRIVATE_AUDIT_REFRESH_CODE");
+    expect(document.body.textContent).not.toContain("private-audit-refresh-trace");
   });
 });
 

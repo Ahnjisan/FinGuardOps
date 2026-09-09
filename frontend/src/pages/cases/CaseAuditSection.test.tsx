@@ -843,6 +843,39 @@ describe("CaseAuditPanel as the geometry fixture mounts it", () => {
     expect(screen.getByRole("navigation", { name: "Audit history pages" })).toBeInTheDocument();
   });
 
+  it("keeps the authoritative audit page beside an isolated refresh failure", async () => {
+    const user = userEvent.setup();
+    const onRefresh = vi.fn();
+    render(
+      <CaseAuditPanel
+        state={{
+          status: "success",
+          data: {
+            content: [{
+              action: "CASE_NOTE_CREATED",
+              reasonCode: "CASE_INVESTIGATION_NOTE_ADDED",
+              actorType: "USER",
+              changedAt: "2026-03-10T05:06:07.000000Z",
+              beforeSummary: null,
+              afterSummary: null,
+              metadata: { noteId: NOTE_ID },
+            }],
+            page: { number: 0, size: 20, totalElements: 1, totalPages: 1, first: true, last: true },
+          },
+        }}
+        onPageChange={() => undefined}
+        onPageSizeChange={() => undefined}
+        onRetry={() => undefined}
+        refreshState="failed"
+        onRefresh={onRefresh}
+      />,
+    );
+    expect(screen.getByRole("article")).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent("submission result is unchanged");
+    await user.click(screen.getByRole("button", { name: "Refresh audit history" }));
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+  });
+
   it("renders each settled refusal without a page under it", () => {
     const { unmount } = render(
       <CaseAuditPanel

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { AuthSession } from "../auth/authClient";
 import { getOidcAuthClient } from "../auth/oidcAuthClient";
 import { useAuth } from "../auth/useAuth";
@@ -109,6 +109,11 @@ export interface UseCaseDetailResult {
    * is only ever reached from a control the user operates. One call, one fetch.
    */
   readonly retry: () => void;
+  /** Re-reads a visible record without replacing it with a loading screen. */
+  readonly refresh: (minimumVersion?: number) => void;
+  readonly refreshState: "idle" | "refreshing" | "failed";
+  /** Changes only when an authoritative detail response is published. */
+  readonly reconciliationGeneration: number;
 }
 
 /**
@@ -337,6 +342,22 @@ interface Snapshot {
   /** The case this state was produced for. */
   readonly caseId: string | null;
   readonly state: CaseDetailState;
+  readonly refreshState: "idle" | "refreshing" | "failed";
+  readonly reconciliationGeneration: number;
+}
+
+interface RefreshFlight {
+  readonly session: AuthSession;
+  readonly caseId: string;
+  readonly generation: number;
+  readonly controller: AbortController;
+  phase: "pending" | "settled" | "released";
+}
+
+interface ReconciliationFloor {
+  readonly session: AuthSession;
+  readonly caseId: string;
+  readonly minimumVersion: number;
 }
 
 /**
@@ -361,8 +382,21 @@ export function useCaseDetail(caseId: string | null): UseCaseDetailResult {
     session: null,
     caseId: requestedId,
     state: { status: "idle" },
+    refreshState: "idle",
+    reconciliationGeneration: 0,
   }));
   const flightRef = useRef<RequestFlight | null>(null);
+  const refreshFlightRef = useRef<RefreshFlight | null>(null);
+  const refreshGenerationRef = useRef(0);
+  const reconciliationGenerationRef = useRef(0);
+  const reconciliationFloorRef = useRef<ReconciliationFloor | null>(null);
+  const currentIdentityRef = useRef({ session, caseId: requestedId });
+
+  useLayoutEffect(() => {
+    currentIdentityRef.current = { session, caseId: requestedId };
+    reconciliationGenerationRef.current = 0;
+    reconciliationFloorRef.current = null;
+  }, [session, requestedId]);
 
   // Adjusted during render on purpose. Case A's record must not appear under
   // case B's heading for even one frame, and a session that has just been
@@ -376,6 +410,8 @@ export function useCaseDetail(caseId: string | null): UseCaseDetailResult {
       caseId: requestedId,
       state:
         session === null || requestedId === null ? { status: "idle" } : { status: "loading" },
+      refreshState: "idle",
+      reconciliationGeneration: 0,
     };
     setSnapshot(published);
   }
@@ -473,10 +509,17 @@ export function useCaseDetail(caseId: string | null): UseCaseDetailResult {
         // replay will be built from - so what is published is a copy of it and
         // never it. Two screens sharing one record would otherwise be one
         // in-place edit away from disagreeing with the Backend.
+        const reconciliationGeneration =
+          stored.status === "success"
+            ? reconciliationGenerationRef.current + 1
+            : reconciliationGenerationRef.current;
+        reconciliationGenerationRef.current = reconciliationGeneration;
         setSnapshot({
           session,
           caseId: requestedId,
           state: deliverTerminalState(stored),
+          refreshState: "idle",
+          reconciliationGeneration,
         });
       },
     };
@@ -525,6 +568,19 @@ export function useCaseDetail(caseId: string | null): UseCaseDetailResult {
     };
   }, [session, requestedId, attempt]);
 
+  useEffect(() => {
+    return () => {
+      const flight = refreshFlightRef.current;
+      if (flight !== null && flight.phase === "pending") {
+        flight.phase = "released";
+        flight.controller.abort();
+      }
+      if (refreshFlightRef.current === flight) {
+        refreshFlightRef.current = null;
+      }
+    };
+  }, [session, requestedId]);
+
   const retry = useCallback(() => {
     if (!isRetryable(published.state)) {
       return;
@@ -533,11 +589,132 @@ export function useCaseDetail(caseId: string | null): UseCaseDetailResult {
       session: published.session,
       caseId: published.caseId,
       state: { status: "loading" },
+      refreshState: "idle",
+      reconciliationGeneration: published.reconciliationGeneration,
     });
     setAttempt((current) => current + 1);
   }, [published]);
 
-  return { state: published.state, retry };
+  const refresh = useCallback((minimumVersion?: number) => {
+    if (
+      published.state.status !== "success" ||
+      published.session === null ||
+      published.caseId === null
+    ) {
+      return;
+    }
+    if (
+      minimumVersion !== undefined &&
+      Number.isSafeInteger(minimumVersion) &&
+      minimumVersion >= 0
+    ) {
+      const existingFloor = reconciliationFloorRef.current;
+      reconciliationFloorRef.current = {
+        session: published.session,
+        caseId: published.caseId,
+        minimumVersion:
+          existingFloor !== null &&
+          existingFloor.session === published.session &&
+          existingFloor.caseId === published.caseId
+            ? Math.max(existingFloor.minimumVersion, minimumVersion)
+            : minimumVersion,
+      };
+    }
+    if (refreshFlightRef.current?.phase === "pending") {
+      return;
+    }
+    refreshGenerationRef.current += 1;
+    const flight: RefreshFlight = {
+      session: published.session,
+      caseId: published.caseId,
+      generation: refreshGenerationRef.current,
+      controller: new AbortController(),
+      phase: "pending",
+    };
+    refreshFlightRef.current = flight;
+    setSnapshot({ ...published, refreshState: "refreshing" });
+
+    fetchCaseDetail(getOidcAuthClient(), flight.caseId, flight.controller.signal).then(
+      (result) => {
+        if (flight.phase !== "pending") {
+          return;
+        }
+        const current = currentIdentityRef.current;
+        if (
+          refreshFlightRef.current !== flight ||
+          current.session !== flight.session ||
+          current.caseId !== flight.caseId
+        ) {
+          flight.phase = "released";
+          return;
+        }
+        const data = projectCaseDetail(result.data.case);
+        const floor = reconciliationFloorRef.current;
+        if (
+          floor !== null &&
+          floor.session === flight.session &&
+          floor.caseId === flight.caseId &&
+          data.concurrencyVersion < floor.minimumVersion
+        ) {
+          flight.phase = "settled";
+          refreshFlightRef.current = null;
+          setSnapshot((latest) =>
+            latest.session === flight.session && latest.caseId === flight.caseId
+              ? { ...latest, refreshState: "failed" }
+              : latest,
+          );
+          return;
+        }
+        flight.phase = "settled";
+        refreshFlightRef.current = null;
+        if (
+          floor !== null &&
+          floor.session === flight.session &&
+          floor.caseId === flight.caseId
+        ) {
+          reconciliationFloorRef.current = null;
+        }
+        const reconciliationGeneration = reconciliationGenerationRef.current + 1;
+        reconciliationGenerationRef.current = reconciliationGeneration;
+        setSnapshot({
+          session: flight.session,
+          caseId: flight.caseId,
+          state: { status: "success", data },
+          refreshState: "idle",
+          reconciliationGeneration,
+        });
+      },
+      () => {
+        if (flight.phase !== "pending" || flight.controller.signal.aborted) {
+          return;
+        }
+        const current = currentIdentityRef.current;
+        if (
+          refreshFlightRef.current !== flight ||
+          current.session !== flight.session ||
+          current.caseId !== flight.caseId
+        ) {
+          flight.phase = "released";
+          return;
+        }
+        flight.phase = "settled";
+        refreshFlightRef.current = null;
+        setSnapshot((latest) =>
+          latest.session === flight.session && latest.caseId === flight.caseId
+            ? { ...latest, refreshState: "failed" }
+            : latest,
+        );
+      },
+    );
+  }, [published]);
+
+  return {
+    state: published.state,
+    retry,
+    refresh,
+    refreshState: published.refreshState,
+    reconciliationGeneration: published.reconciliationGeneration,
+  };
 }
 
 /**

@@ -123,6 +123,7 @@ function refusalCopy(
 export interface CaseAuditSectionProps {
   /** The canonical lowercase UUID v4 the detail route carries. */
   readonly caseId: string;
+  readonly refreshSignal?: number;
 }
 
 /**
@@ -135,14 +136,25 @@ export interface CaseAuditSectionProps {
  * and the same production stylesheet can be rendered with entries in them by a
  * geometry fixture that makes no request at all.
  */
-export function CaseAuditSection({ caseId }: CaseAuditSectionProps) {
-  const { state, setPage, setSize, retry } = useCaseAuditLog(caseId);
+export function CaseAuditSection({ caseId, refreshSignal = 0 }: CaseAuditSectionProps) {
+  const { state, setPage, setSize, retry, refresh, refreshState } = useCaseAuditLog(caseId);
+  const observedRefreshSignalRef = useRef(refreshSignal);
+
+  useEffect(() => {
+    if (observedRefreshSignalRef.current === refreshSignal) {
+      return;
+    }
+    observedRefreshSignalRef.current = refreshSignal;
+    refresh();
+  }, [refresh, refreshSignal]);
   return (
     <CaseAuditPanel
       state={state}
       onPageChange={setPage}
       onPageSizeChange={setSize}
       onRetry={retry}
+      refreshState={refreshState}
+      onRefresh={refresh}
     />
   );
 }
@@ -152,6 +164,8 @@ export interface CaseAuditPanelProps {
   readonly onPageChange: (pageNumber: number) => void;
   readonly onPageSizeChange: (size: number) => void;
   readonly onRetry: () => void;
+  readonly refreshState?: "idle" | "refreshing" | "failed";
+  readonly onRefresh?: () => void;
 }
 
 /**
@@ -165,6 +179,8 @@ export function CaseAuditPanel({
   onPageChange,
   onPageSizeChange,
   onRetry,
+  refreshState = "idle",
+  onRefresh = () => undefined,
 }: CaseAuditPanelProps) {
   const refusal = refusalCopy(state);
   const retryable = RETRYABLE.has(state.status);
@@ -177,12 +193,29 @@ export function CaseAuditPanel({
   }, [retryable, state.status]);
 
   return (
-    <section className="panel audit" aria-labelledby="case-audit-heading">
+    <section
+      className="panel audit"
+      aria-labelledby="case-audit-heading"
+      aria-busy={refreshState === "refreshing" || undefined}
+    >
       <h3 id="case-audit-heading">Audit history</h3>
       <p className="audit__note">
         Every recorded change to this case, newest first. Times are Korea Standard Time
         (UTC+09:00).
       </p>
+
+      {refreshState === "failed" && (
+        <div className="notice notice--error audit__refresh" role="alert">
+          <h4 className="notice__title">The latest audit history could not be loaded</h4>
+          <p className="notice__body">
+            The note submission result is unchanged. Refresh the audit history before relying on
+            this trail.
+          </p>
+          <button className="button" type="button" onClick={onRefresh}>
+            Refresh audit history
+          </button>
+        </div>
+      )}
 
       {/*
         The section's own live region, named so it is distinguishable from the

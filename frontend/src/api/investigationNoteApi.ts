@@ -216,6 +216,12 @@ export async function createInvestigationNote(
   if (!isSafeLong(fields.expectedVersion) || fields.expectedVersion < 0) {
     throw new RequestNotAllowedError();
   }
+  // The response binding below must be computable without rounding. Refuse the
+  // one otherwise-valid long whose successor is outside JavaScript's exact
+  // integer range before a credential is requested or a POST is sent.
+  if (fields.expectedVersion === Number.MAX_SAFE_INTEGER) {
+    throw new RequestNotAllowedError();
+  }
 
   const result = await sendAuthorizedBackendRequest(authClient, {
     endpoint: "case-note-create",
@@ -225,5 +231,12 @@ export async function createInvestigationNote(
     validate: isInvestigationNoteCreated,
     signal,
   });
+  if (
+    result.data.caseId !== caseId ||
+    result.data.content !== fields.content ||
+    result.data.concurrencyVersion !== fields.expectedVersion + 1
+  ) {
+    throw new InvalidResponseError();
+  }
   return { data: result.data, traceId: resolveTraceId(result.traceId, result.data.traceId) };
 }

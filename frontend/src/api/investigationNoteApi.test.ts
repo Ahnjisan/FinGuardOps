@@ -330,6 +330,61 @@ describe("createInvestigationNote", () => {
     expect(result.data.concurrencyVersion).toBe(7);
   });
 
+  it("accepts a valid Backend-authoritative authorRef unrelated to the session subject", async () => {
+    mockFetchOnce(async () =>
+      jsonResponse(created({ authorRef: OTHER_CASE_ID }), { status: 201 }),
+    );
+    const result = await createInvestigationNote(signedIn(), CASE_ID, VALID_CREATE);
+    expect(result.data.authorRef).toBe(OTHER_CASE_ID);
+  });
+
+  it.each([
+    ["case id", { caseId: OTHER_CASE_ID }],
+    ["content", { content: `${VALID_CREATE.content} changed` }],
+    ["version", { concurrencyVersion: 8 }],
+  ])("rejects a valid created response with the wrong request-owned %s", async (_label, override) => {
+    const body = created(override);
+    mockFetchOnce(async () => jsonResponse(body, { status: 201 }));
+
+    const rejection = await createInvestigationNote(signedIn(), CASE_ID, VALID_CREATE).catch(
+      (error: unknown) => error,
+    );
+
+    expect(rejection).toBeInstanceOf(InvalidResponseError);
+    expect(String(rejection)).not.toContain(VALID_CREATE.content);
+    expect(String(rejection)).not.toContain(OTHER_CASE_ID);
+    expect(String(rejection)).not.toContain(TRACE_ID);
+  });
+
+  it("refuses expectedVersion whose successor cannot be represented safely", async () => {
+    const client = signedIn();
+    mockFetchOnce(async () => jsonResponse(created(), { status: 201 }));
+    await expect(
+      createInvestigationNote(client, CASE_ID, {
+        content: "safe text",
+        expectedVersion: Number.MAX_SAFE_INTEGER,
+      }),
+    ).rejects.toBeInstanceOf(RequestNotAllowedError);
+    expect(client.calls.authorizeRequest).toBe(0);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  it("refuses a body-less or malformed 201 without exposing the body", async () => {
+    mockFetchOnce(async () => new Response(null, { status: 201 }));
+    await expect(
+      createInvestigationNote(signedIn(), CASE_ID, VALID_CREATE),
+    ).rejects.toBeInstanceOf(InvalidResponseError);
+    vi.unstubAllGlobals();
+
+    const body = { private: "backend-secret" };
+    mockFetchOnce(async () => jsonResponse(body, { status: 201 }));
+    const rejection = await createInvestigationNote(signedIn(), CASE_ID, VALID_CREATE).catch(
+      (error: unknown) => error,
+    );
+    expect(rejection).toBeInstanceOf(InvalidResponseError);
+    expect(JSON.stringify(rejection)).not.toContain("backend-secret");
+  });
+
   it("refuses a 200 for a note creation", async () => {
     for (const status of [200, 202, 204]) {
       mockFetchOnce(async () =>

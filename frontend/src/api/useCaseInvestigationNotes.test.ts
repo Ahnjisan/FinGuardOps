@@ -274,7 +274,12 @@ describe("useCaseInvestigationNotes request identity", () => {
 
     await answer(calls[0], page());
     expect(view.result.current.state.status).toBe("success");
-    expect(Object.keys(view.result.current).sort()).toEqual(["retry", "state"]);
+    expect(Object.keys(view.result.current).sort()).toEqual([
+      "refresh",
+      "refreshState",
+      "retry",
+      "state",
+    ]);
   });
 
   it("does no credential work without a session, canonical case, or valid position", async () => {
@@ -1076,5 +1081,177 @@ describe("useCaseInvestigationNotes session replacement", () => {
     expect(JSON.stringify(publisher.writes)).not.toMatch(
       /RAW_LOGOUT|logout retry body|logout forbidden body|logout not found body/,
     );
+  });
+});
+
+describe("useCaseInvestigationNotes authoritative background refresh", () => {
+  it("lets a user page intent supersede pending refresh metadata without a last-page request", async () => {
+    const { calls } = controlledFetch();
+    const view = render(signedIn());
+    await settle();
+    await answer(calls[0], page([note()]));
+
+    act(() => view.result.current.refresh());
+    await waitFor(() => expect(calls).toHaveLength(2));
+    view.rerender({ caseId: CASE_ID, page: 1, size: 20 });
+    await waitFor(() => expect(calls).toHaveLength(3));
+    expect(calls[1].request.signal.aborted).toBe(true);
+    expect(new URL(calls[2].request.url).searchParams.get("page")).toBe("1");
+
+    const metadata = Array.from({ length: 20 }, (_, index) =>
+      note({ noteId: `8d2e3f40-5b6c-4d7e-9f01-${index.toString(16).padStart(12, "0")}` }),
+    );
+    await answer(calls[1], page(metadata, {
+      totalElements: 41,
+      totalPages: 3,
+      last: false,
+    }));
+    expect(calls).toHaveLength(3);
+    expect(view.result.current.refreshState).toBe("idle");
+
+    await answer(calls[2], page([note({ content: "USER_PAGE" })], {
+      number: 1,
+      totalElements: 21,
+      totalPages: 2,
+      first: false,
+      last: true,
+    }));
+    if (view.result.current.state.status === "success") {
+      expect(view.result.current.state.data.page.number).toBe(1);
+      expect(view.result.current.state.data.items[0].content).toBe("USER_PAGE");
+    }
+  });
+
+  it("preserves a user size intent and does not abort its new request when the old refresh settles", async () => {
+    const { calls } = controlledFetch();
+    const view = render(signedIn());
+    await settle();
+    await answer(calls[0], page([note()]));
+
+    act(() => view.result.current.refresh());
+    await waitFor(() => expect(calls).toHaveLength(2));
+    view.rerender({ caseId: CASE_ID, page: 0, size: 50 });
+    await waitFor(() => expect(calls).toHaveLength(3));
+    expect(calls[1].request.signal.aborted).toBe(true);
+    expect(calls[2].request.signal.aborted).toBe(false);
+    expect(new URL(calls[2].request.url).searchParams.get("size")).toBe("50");
+
+    await answer(calls[1], page([note()]));
+    expect(calls).toHaveLength(3);
+    expect(calls[2].request.signal.aborted).toBe(false);
+    await answer(calls[2], page([note({ content: "SIZE_50" })], { size: 50 }));
+    if (view.result.current.state.status === "success") {
+      expect(view.result.current.state.data.page.size).toBe(50);
+      expect(view.result.current.state.data.items[0].content).toBe("SIZE_50");
+    }
+  });
+
+  it("drops a late refresh last page and stale failure after newer user navigation", async () => {
+    const { calls } = controlledFetch();
+    const view = render(signedIn());
+    await settle();
+    await answer(calls[0], page([note()]));
+    act(() => view.result.current.refresh());
+    await waitFor(() => expect(calls).toHaveLength(2));
+    const metadata = Array.from({ length: 20 }, (_, index) =>
+      note({ noteId: `8d2e3f40-5b6c-4d7e-9f01-${index.toString(16).padStart(12, "0")}` }),
+    );
+    await answer(calls[1], page(metadata, {
+      totalElements: 41,
+      totalPages: 3,
+      last: false,
+    }));
+    await waitFor(() => expect(calls).toHaveLength(3));
+
+    view.rerender({ caseId: CASE_ID, page: 1, size: 20 });
+    await waitFor(() => expect(calls).toHaveLength(4));
+    expect(calls[2].request.signal.aborted).toBe(true);
+    expect(calls[3].request.signal.aborted).toBe(false);
+    await answer(calls[3], page([note({ content: "LATEST_USER_PAGE" })], {
+      number: 1,
+      totalElements: 21,
+      totalPages: 2,
+      first: false,
+      last: true,
+    }));
+    await act(async () => {
+      calls[2].fail(new TypeError("STALE_REFRESH_ERROR"));
+      await flushMicrotasks();
+    });
+
+    expect(view.result.current.refreshState).toBe("idle");
+    if (view.result.current.state.status === "success") {
+      expect(view.result.current.state.data.page.number).toBe(1);
+      expect(view.result.current.state.data.items[0].content).toBe("LATEST_USER_PAGE");
+    }
+  });
+
+  it("uses metadata then the latest last page in at most two GETs without optimistic insertion", async () => {
+    const { calls } = controlledFetch();
+    const onPage = vi.fn();
+    const client = signedIn();
+    const view = renderHook(
+      () => useCaseInvestigationNotes(CASE_ID, 0, 20, onPage),
+      { wrapper: providerWrapper(client) },
+    );
+    await settle();
+    await answer(calls[0], page([note()]));
+    const original = view.result.current.state;
+
+    act(() => view.result.current.refresh());
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(view.result.current.state).toBe(original);
+    expect(view.result.current.refreshState).toBe("refreshing");
+
+    const firstPage = Array.from({ length: 20 }, (_, index) =>
+      note({ noteId: `8d2e3f40-5b6c-4d7e-9f01-${index.toString(16).padStart(12, "0")}` }),
+    );
+    await answer(
+      calls[1],
+      page(firstPage, {
+        number: 0,
+        totalElements: 41,
+        totalPages: 3,
+        first: true,
+        last: false,
+      }),
+    );
+    await waitFor(() => expect(calls).toHaveLength(3));
+    await answer(
+      calls[2],
+      page([note({ noteId: OTHER_NOTE_ID })], {
+        number: 2,
+        totalElements: 41,
+        totalPages: 3,
+        first: false,
+        last: true,
+      }),
+    );
+
+    expect(onPage).toHaveBeenCalledWith(2);
+    expect(view.result.current.refreshState).toBe("idle");
+    expect(calls).toHaveLength(3);
+    if (view.result.current.state.status === "success") {
+      expect(view.result.current.state.data.page.number).toBe(2);
+      expect(view.result.current.state.data.items).toHaveLength(1);
+    }
+  });
+
+  it("keeps the visible page when refresh fails and allows a separate explicit refresh", async () => {
+    const { calls } = controlledFetch();
+    const view = render(signedIn());
+    await settle();
+    await answer(calls[0], page([note()]));
+    act(() => view.result.current.refresh());
+    await waitFor(() => expect(calls).toHaveLength(2));
+    await act(async () => {
+      calls[1].fail(new TypeError("private"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(view.result.current.refreshState).toBe("failed");
+    expect(view.result.current.state.status).toBe("success");
+    act(() => view.result.current.refresh());
+    await waitFor(() => expect(calls).toHaveLength(3));
   });
 });

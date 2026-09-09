@@ -122,8 +122,8 @@ AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 
   Authorization Code + PKCE 인증 경계, 인증 API transport와 권한 UI, capability로 보호되는
   production 업무 화면인 거래 목록(`/transactions`), 조회 전용 거래 상세
   (`/transactions/{transactionId}`), 조회 전용 사건 목록(`/cases`)과 조회 전용 사건 상세
-  (`/cases/{caseId}`), 그 상세의 읽기 전용 Investigation notes·Audit history section, FDS operations console 디자인
-  기반이 구현되었으며 사건 workflow·담당자 변경·최종 판정·조사 메모 mutation·별도 notes route·연관 거래·Detection·Rule Evidence·AI 사건 리포트 화면과
+  (`/cases/{caseId}`), 그 상세의 Investigation notes inline create composer와 읽기 전용 Audit history section, FDS operations console 디자인
+  기반이 구현되었으며 사건 workflow·담당자 변경·최종 판정·조사 메모 수정·삭제·별도 notes route·연관 거래·Detection·Rule Evidence·AI 사건 리포트 화면과
   mutation UI, 운영 대시보드, 콘솔 전체의 최종 시각적 리뉴얼은 구현되지 않음
 - `infra/`: Issue #196의 로컬 Compose Prometheus scrape·External Risk 검증 fixture,
   Issue #199의 service 수준 recording rule 14개와 Issue #201의 로컬 실패율 alert rule
@@ -347,7 +347,7 @@ Case record 계약에 없는 `updatedAt`·위험도·탐지 결과·Rule Evidenc
 추정하지 않고 presentation 단계에서만 고정 문구(`Not decided`·`Unassigned`·`Not started`·
 `Not closed`)로 바꾼다. 상세 route는 거래 상세와 같은 규칙으로 canonical lowercase UUID v4만
 받아들이며, query·fragment·trailing slash·추가 segment가 붙은 주소는 credential 조회와 Backend
-요청 0회로 거부된다. 화면에는 mutation form·button·요청이 하나도 없고, 상태는 loading, data,
+요청 0회로 거부된다. 사건 record 자체는 읽기 전용이고, 상태는 loading, data,
 case not found(404), access denied(403), authentication required(401), timeout, network failure,
 invalid response, generic error, explicit retry, 고정 invalid-route로 나뉘며 404와 403에는 retry를
 제공하지 않는다. Backend `code`·`message`·`traceId`와 raw body는 DOM에도 `console`에도 나오지
@@ -385,8 +385,19 @@ CR/LF·연속 공백을 보존하면서 HTML·Markdown·URL을 해석하거나 �
 및 긴 unbroken text도 truncation 없이 viewport 안에서 줄바꿈한다. noteId는 링크 없는 metadata이고
 authorType·authorRef는 화면에서 Backend raw value 이상의 사람·이메일·역할 의미를 추정하지 않는다.
 
-Issue #251, Issue #253, Issue #255, Issue #257과 Issue #259 모두에서 Backend, AI Service, Infra, Keycloak,
-DB와 API 계약 변경은 없다. 사건 workflow·담당자 변경·resolution·조사 메모 작성·수정·삭제·연관 거래·Detection·
+Issue #261은 기존 Investigation notes section 상단에 inline composer를 추가한다. UI는
+`case:note-write` capability를 가진 session에서만 존재하고, `IN_REVIEW`와
+`ADDITIONAL_INFORMATION_REQUIRED`에서만 form을, `OPEN`과 `CLOSED`에서는 고정 상태 안내를 표시한다.
+content는 Unicode code point 1~4,000과 Backend-compatible whitespace/control 규칙으로 검사하되 trim이나
+normalization 없이 textarea DOM value를 exact POST body에 넣는다. 정확한 201 응답은 requested caseId,
+submitted content, safe `expectedVersion + 1`과 다시 결합하며 authorRef를 session subject에 결합하지 않는다.
+성공·409·timeout·network 뒤에는 POST를 재시도하지 않고 notes/detail/audit read reconciliation을 독립적으로
+시작한다. notes는 authoritative metadata로 최신 마지막 page를 찾고, detail은 최신 version을 확보하며,
+audit은 page 0으로 이동한다. 각 background refresh는 현재 content를 유지하고 서로의 실패나 성공한 POST
+결과를 바꾸지 않는다.
+
+Issue #251, Issue #253, Issue #255, Issue #257, Issue #259와 Issue #261 모두에서 Backend, AI Service, Infra, Keycloak,
+DB와 API 계약 변경은 없다. 사건 workflow·담당자 변경·resolution·조사 메모 수정·삭제·연관 거래·Detection·
 Rule Evidence·AI 사건 리포트 화면과 mutation UI는 후속 Issue이며, 콘솔 전체의 최종 시각적 리뉴얼도
 후속 작업으로 남아 있다.
 

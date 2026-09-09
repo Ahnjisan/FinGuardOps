@@ -2,14 +2,19 @@
  * TEST-ONLY BROWSER GEOMETRY FIXTURE. NOT PART OF THE APPLICATION.
  *
  * The real E2E runtime has no populated case seed. This fixture therefore
- * mounts the production panel directly with a settled public projection and
- * the production stylesheet. It is layout evidence only: no hook, auth,
- * router, API mock, interception, request or Backend is involved.
+ * mounts the production panel and capability-gated composer with a settled
+ * public projection, the production stylesheet, and a synthetic FDS_ANALYST
+ * AuthClient/session. It uses no credential, token or Keycloak login and is
+ * layout evidence only, not authentication or authorization security evidence.
+ * No API request, interception or Backend is involved.
  */
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import type { CaseInvestigationNotesView } from "../src/api/useCaseInvestigationNotes";
+import type { AuthClient, AuthSession } from "../src/auth/authClient";
+import { AuthProvider } from "../src/auth/AuthProvider";
 import { CaseInvestigationNotesPanel } from "../src/pages/cases/CaseInvestigationNotesSection";
+import { InvestigationNoteComposer } from "../src/pages/cases/InvestigationNoteComposer";
 import "../src/styles/app.css";
 
 const PLAIN_PREFIX =
@@ -57,6 +62,20 @@ const GEOMETRY_VIEW: CaseInvestigationNotesView = {
   },
 };
 
+const GEOMETRY_SESSION: AuthSession = {
+  subject: "6f1e0b6c-3a2b-4c8d-9e0f-1a2b3c4d5e6f",
+  roles: ["FDS_ANALYST"],
+};
+
+/** Synthetic capability context used only to render the production composer for measurement. */
+const GEOMETRY_AUTH_CLIENT: AuthClient = {
+  initialize: async () => ({ session: GEOMETRY_SESSION }),
+  signIn: async () => undefined,
+  completeSignIn: async () => ({ session: GEOMETRY_SESSION, returnTo: "/" }),
+  signOut: async () => undefined,
+  onSessionInvalidated: () => () => undefined,
+};
+
 const rootElement = document.getElementById("root");
 if (!rootElement) {
   throw new Error("Root element not found.");
@@ -64,26 +83,37 @@ if (!rootElement) {
 
 createRoot(rootElement).render(
   <StrictMode>
-    <div className="app">
-      <div className="rail" />
-      <main className="main" id="main-content">
-        <section className="detail" aria-labelledby="case-notes-fixture-heading">
-          <div className="page-head">
-            <h2 id="case-notes-fixture-heading">
-              Case investigation notes geometry fixture (test only)
-            </h2>
-            <p>
-              Browser geometry measurement of the production notes panel. No request is made.
-            </p>
-          </div>
-          <CaseInvestigationNotesPanel
-            state={{ status: "success", data: GEOMETRY_VIEW }}
-            onPageChange={() => undefined}
-            onPageSizeChange={() => undefined}
-            onRetry={() => undefined}
-          />
-        </section>
-      </main>
-    </div>
+    <AuthProvider client={GEOMETRY_AUTH_CLIENT}>
+      <div className="app">
+        <div className="rail" />
+        <main className="main" id="main-content">
+          <section className="detail" aria-labelledby="case-notes-fixture-heading">
+            <div className="page-head">
+              <h2 id="case-notes-fixture-heading">
+                Case investigation notes geometry fixture (test only)
+              </h2>
+              <p>
+                Browser geometry measurement of the production notes panel. No request is made.
+              </p>
+            </div>
+            <CaseInvestigationNotesPanel
+              state={{ status: "success", data: GEOMETRY_VIEW }}
+              onPageChange={() => undefined}
+              onPageSizeChange={() => undefined}
+              onRetry={() => undefined}
+              composer={
+                <InvestigationNoteComposer
+                  caseId="5c2d1e0f-7a8b-4c9d-9e0f-1a2b3c4d5e60"
+                  caseStatus="IN_REVIEW"
+                  expectedVersion={6}
+                  reconciliationGeneration={1}
+                  onReconcile={() => undefined}
+                />
+              }
+            />
+          </section>
+        </main>
+      </div>
+    </AuthProvider>
   </StrictMode>,
 );

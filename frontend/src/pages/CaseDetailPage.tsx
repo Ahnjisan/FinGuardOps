@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { isCanonicalUuidV4 } from "../api/backendEndpoints";
 import type { CaseDetail } from "../api/caseApi";
@@ -37,15 +37,13 @@ import {
  * case itself, so both subordinate sections are removed rather than left to
  * repeat the refusal. Unmounting discards their state and blocks late publish.
  *
- * There is no action. No status change, no reassignment, no resolution, no
- * note: this screen implements the reads, and an affordance for a write that it
- * does not perform would be a promise it cannot keep. The audit pager is not
- * one - it asks the same read for a different page.
+ * Status, reassignment and resolution remain read only. The sole mutation is
+ * the capability- and workflow-gated inline investigation-note composer.
  *
  * `concurrencyVersion` is shown for the same reason the rest of the record is -
  * it is part of the response - and for no other. It is record metadata a reader
- * can quote when reporting a case, not an optimistic-locking token this screen
- * spends: nothing here sends `expectedVersion` anywhere.
+ * can quote when reporting a case and the exact optimistic-locking token the
+ * note composer sends as `expectedVersion`.
  */
 
 /**
@@ -203,7 +201,18 @@ function refusalCopy(
 export function CaseDetailPage() {
   const location = useLocation();
   const caseId = readCanonicalCaseId(location);
-  const { state, retry } = useCaseDetail(caseId);
+  const {
+    state,
+    retry,
+    refresh,
+    refreshState,
+    reconciliationGeneration,
+  } = useCaseDetail(caseId);
+  const [subordinateRefreshSignal, setSubordinateRefreshSignal] = useState(0);
+  const reconcileNoteMutation = useCallback((minimumDetailVersion?: number) => {
+    refresh(minimumDetailVersion);
+    setSubordinateRefreshSignal((current) => current + 1);
+  }, [refresh]);
 
   const errorRef = useRef<HTMLDivElement | null>(null);
 
@@ -282,6 +291,18 @@ export function CaseDetailPage() {
 
       {caseId !== null && state.status === "success" && <CaseRecord detail={state.data} />}
 
+      {caseId !== null && state.status === "success" && refreshState === "failed" && (
+        <div className="notice notice--error case-detail__refresh" role="alert">
+          <h3 className="notice__title">The latest case information could not be loaded</h3>
+          <p className="notice__body">
+            The note submission result is unchanged. Refresh the case before adding another note.
+          </p>
+          <button className="button" type="button" onClick={() => refresh()}>
+            Refresh case information
+          </button>
+        </div>
+      )}
+
       {/*
         Both sections mount from the first render of a canonical address. Their
         effects therefore start beside the detail request in the same commit.
@@ -290,8 +311,15 @@ export function CaseDetailPage() {
       */}
       {caseId !== null && showsSubordinateSections(state) && (
         <>
-          <CaseInvestigationNotesSection caseId={caseId} />
-          <CaseAuditSection caseId={caseId} />
+          <CaseInvestigationNotesSection
+            caseId={caseId}
+            caseStatus={state.status === "success" ? state.data.caseStatus : null}
+            expectedVersion={state.status === "success" ? state.data.concurrencyVersion : null}
+            reconciliationGeneration={reconciliationGeneration}
+            refreshSignal={subordinateRefreshSignal}
+            onReconcile={reconcileNoteMutation}
+          />
+          <CaseAuditSection caseId={caseId} refreshSignal={subordinateRefreshSignal} />
         </>
       )}
     </section>

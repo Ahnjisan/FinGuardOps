@@ -1245,6 +1245,8 @@ describe("useCaseAuditLog disclosure boundary", () => {
 
     expect(Object.keys(result.current).sort()).toEqual([
       "page",
+      "refresh",
+      "refreshState",
       "retry",
       "setPage",
       "setSize",
@@ -2047,5 +2049,173 @@ describe("useCaseAuditLog session replacement", () => {
     expect(result.current.page).toBe(0);
     expect(result.current.size).toBe(20);
     expect(new URL(calls[calls.length - 1].request.url).search).toBe(AUDIT_QUERY);
+  });
+});
+
+describe("useCaseAuditLog authoritative background refresh", () => {
+  it("keeps a newer user page when the older page-zero refresh settles", async () => {
+    const { calls } = controlledFetch();
+    const view = render(signedIn());
+    await settle();
+    await answerWith(calls[0], auditBody([created()]));
+
+    act(() => view.result.current.refresh());
+    await waitFor(() => expect(calls).toHaveLength(2));
+    act(() => view.result.current.setPage(1));
+    await waitFor(() => expect(calls).toHaveLength(3));
+    expect(calls[1].request.signal.aborted).toBe(true);
+    expect(calls[2].request.signal.aborted).toBe(false);
+
+    await answerWith(calls[1], auditBody([NOTE_CREATED]));
+    expect(view.result.current.page).toBe(1);
+    expect(calls[2].request.signal.aborted).toBe(false);
+    await answerWith(calls[2], auditBody([created()], {
+      number: 1,
+      totalElements: 21,
+      totalPages: 2,
+      first: false,
+      last: true,
+    }));
+    expect(view.result.current.page).toBe(1);
+    if (view.result.current.state.status === "success") {
+      expect(view.result.current.state.data.page.number).toBe(1);
+      expect(view.result.current.state.data.content[0].action).toBe("CASE_CREATED");
+    }
+  });
+
+  it("keeps a newer size and page-zero intent when an old-size refresh answers", async () => {
+    const { calls } = controlledFetch();
+    const view = render(signedIn());
+    await settle();
+    await answerWith(calls[0], auditBody([created()]));
+    act(() => view.result.current.refresh());
+    await waitFor(() => expect(calls).toHaveLength(2));
+
+    act(() => view.result.current.setSize(50));
+    await waitFor(() => expect(calls).toHaveLength(3));
+    expect(calls[1].request.signal.aborted).toBe(true);
+    expect(calls[2].request.signal.aborted).toBe(false);
+    await answerWith(calls[1], auditBody([NOTE_CREATED]));
+    expect(view.result.current.page).toBe(0);
+    expect(view.result.current.size).toBe(50);
+    expect(calls[2].request.signal.aborted).toBe(false);
+
+    await answerWith(calls[2], auditBody([created()], { size: 50 }));
+    if (view.result.current.state.status === "success") {
+      expect(view.result.current.state.data.page.size).toBe(50);
+      expect(view.result.current.state.data.content[0].action).toBe("CASE_CREATED");
+    }
+  });
+
+  it("publishes only the latest user request across stale refresh success and failure", async () => {
+    const { calls } = controlledFetch();
+    const view = render(signedIn());
+    await settle();
+    await answerWith(calls[0], auditBody([created()]));
+    act(() => view.result.current.refresh());
+    await waitFor(() => expect(calls).toHaveLength(2));
+    act(() => view.result.current.setPage(1));
+    await waitFor(() => expect(calls).toHaveLength(3));
+
+    await answerWith(calls[2], auditBody([NOTE_CREATED], {
+      number: 1,
+      totalElements: 21,
+      totalPages: 2,
+      first: false,
+      last: true,
+    }));
+    await act(async () => {
+      calls[1].fail(new TypeError("STALE_AUDIT_REFRESH_ERROR"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(view.result.current.refreshState).toBe("idle");
+    expect(view.result.current.page).toBe(1);
+    if (view.result.current.state.status === "success") {
+      expect(view.result.current.state.data.content[0].action).toBe("CASE_NOTE_CREATED");
+    }
+  });
+
+  it("isolates a released refresh from combined pagination and case replacement", async () => {
+    const { calls } = controlledFetch();
+    const view = render(signedIn());
+    await settle();
+    await answerWith(calls[0], auditBody([created()]));
+    act(() => view.result.current.refresh());
+    await waitFor(() => expect(calls).toHaveLength(2));
+    act(() => view.result.current.setPage(1));
+    await waitFor(() => expect(calls).toHaveLength(3));
+    view.rerender(OTHER_CASE_ID);
+    await waitFor(() => expect(calls).toHaveLength(4));
+    expect(calls[1].request.signal.aborted).toBe(true);
+    expect(calls[2].request.signal.aborted).toBe(true);
+
+    await answerWith(calls[1], auditBody([NOTE_CREATED]));
+    await answerWith(calls[2], auditBody([NOTE_CREATED], {
+      number: 1,
+      totalElements: 21,
+      totalPages: 2,
+      first: false,
+      last: true,
+    }));
+    expect(view.result.current.page).toBe(0);
+    expect(view.result.current.state).toEqual({ status: "loading" });
+    await answerWith(calls[3], auditBody([created()], {}, OTHER_CASE_ID));
+    if (view.result.current.state.status === "success") {
+      expect(view.result.current.state.data.page.number).toBe(0);
+      expect(view.result.current.state.data.content[0].action).toBe("CASE_CREATED");
+    }
+  });
+
+  it("keeps the current trail while refreshing and returns to page zero", async () => {
+    const { calls } = controlledFetch();
+    const view = render(signedIn());
+    await settle();
+    await answerWith(calls[0], auditBody([created()]));
+
+    act(() => view.result.current.setPage(1));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    await answerWith(
+      calls[1],
+      auditBody([created({ changedAt: "2026-03-08T09:11:11.123456Z" })], {
+        number: 1,
+        totalElements: 21,
+        totalPages: 2,
+        first: false,
+        last: true,
+      }),
+    );
+    expect(view.result.current.page).toBe(1);
+
+    act(() => view.result.current.refresh());
+    await waitFor(() => expect(calls).toHaveLength(3));
+    expect(view.result.current.state.status).toBe("success");
+    expect(view.result.current.refreshState).toBe("refreshing");
+    await answerWith(calls[2], auditBody([NOTE_CREATED]));
+
+    expect(view.result.current.page).toBe(0);
+    expect(view.result.current.refreshState).toBe("idle");
+    expect(calls).toHaveLength(3);
+    if (view.result.current.state.status === "success") {
+      expect(view.result.current.state.data.content[0].action).toBe("CASE_NOTE_CREATED");
+    }
+  });
+
+  it("isolates a refresh failure from the visible trail and permits explicit refresh", async () => {
+    const { calls } = controlledFetch();
+    const view = render(signedIn());
+    await settle();
+    await answerWith(calls[0], auditBody([created()]));
+    act(() => view.result.current.refresh());
+    await waitFor(() => expect(calls).toHaveLength(2));
+    await act(async () => {
+      calls[1].fail(new TypeError("private"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(view.result.current.refreshState).toBe("failed");
+    expect(view.result.current.state.status).toBe("success");
+    act(() => view.result.current.refresh());
+    await waitFor(() => expect(calls).toHaveLength(3));
   });
 });
