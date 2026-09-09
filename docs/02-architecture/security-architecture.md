@@ -935,9 +935,10 @@ authority·새 endpoint는 추가하지 않았다. guard는 route element에 있
   상세 200 화면은 typed API fixture를 쓰는 component·hook test가 담당하고, Backend·DB에 fixture나
   seed를 추가하지 않는다.
 
-Issue #255에서도 Backend, AI Service, Infra, Keycloak, DB와 API 계약 변경은 없다. 사건 상태 변경,
-담당자 변경, 최종 판정, 조사 메모, 연관 거래, Detection·Rule Evidence와 AI 사건 리포트
-화면, 그리고 mutation UI는 아직 구현되지 않았다.
+Issue #255 당시에도 Backend, AI Service, Infra, Keycloak, DB와 API 계약 변경은 없었다. 당시에는 사건 상태 변경,
+담당자 변경, 최종 판정, 조사 메모 조회·mutation, 연관 거래, Detection·Rule Evidence와 AI 사건 리포트
+화면이 아직 구현되지 않았다. 현재는 Issue #259가 사건 상세 내부 read-only notes section만 추가했고
+별도 notes route와 create/update/delete UI는 계속 구현하지 않는다.
 
 Issue #257은 기존 상세 guard 안에서 `GET /api/v1/cases/{caseId}/audit-logs`만 병렬 호출한다.
 Frontend capability는 `case:view`, Backend 최종 권한은 기존 `case-audit:read`이며 role mapping은
@@ -955,6 +956,37 @@ spawn 전에 fail-closed 검증한다. 승인 target은 query 순서와 encoding
 suffix는 계속 거부한다. 실제 Backend E2E는 detail/audit 각 1회의 실제 404와 session 유지·자동 retry
 0회를, production component geometry fixture는 populated 6-action UI의 세 viewport document overflow
 0을 맡는다.
+
+Issue #259의 notes read도 기존 `case:view` 화면 guard와 Backend의 기존 권한 결정을 그대로 사용한다.
+API client는 완전 검증된 200 envelope의 모든 `item.caseId`를 requested caseId와 exact equality로,
+page metadata의 `number`·`size`를 실제 요청값(생략 시 0·20)과 exact numeric equality로 결합 검증하며
+trim·case-fold·UUID 재정규화를 하지 않는다. 하나라도 다르면 전체 응답을 고정
+`InvalidResponseError`로 거부하고 expected/actual ID, raw response, `traceId`를 오류나 Hook state에
+반사하지 않는다. POST 함수와 POST 응답 계약은 변경하지 않는다.
+
+`useCaseInvestigationNotes`는 session·caseId·page·size·`createdAt,asc`·attempt가 모두 같은 flight만
+StrictMode replay에 재사용한다. cleanup은 subscriber publish 권한을 즉시 끊고 마지막 subscriber의
+grace window가 끝나면 controller, listener와 stored outcome을 폐기한다. zero-listener settle은 같은 key의
+즉시 replay를 위해 sanitized outcome을 보존하지만 released·duplicate settle은 projection과 failure
+classification factory 자체를 실행하지 않는다. 저장 projection과 subscriber별 delivery projection을
+분리하므로 raw/stored/첫째·둘째·셋째 delivery의 item array·item·page nested mutation은 서로 전파되지
+않는다. 공개 반환 key는 `state`와 `retry`뿐이며 공개 success data에는 note의 `noteId`, `authorType`,
+`authorRef`, `content`, `createdAt`과 page metadata만 남는다.
+
+화면은 Case record → Investigation notes → Audit history 순서다. notes content는 escaped React text
+node이며 HTML·Markdown·autolink·truncation을 사용하지 않는다. 403·404는 session을 유지하고 retry를
+제공하지 않으며 timeout·network·invalid-response·generic-error만 사용자의 명시적 retry를 허용한다.
+detail 403/404는 notes와 audit를 모두 unmount해 늦은 publish를 막지만 notes 자체 오류는 사건 record와
+audit를 제거하지 않는다.
+
+E2E relay에는 `GET /api/v1/cases/{canonical lowercase UUID v4}/notes`만 추가한다. `page`는 canonical
+decimal int32 0 이상, `size`는 canonical decimal 1..100, `sort`는 `createdAt,asc|desc`만 허용한다.
+bare `?`, duplicate·empty·unknown query, 범위 밖 숫자, audit의 `changedAt` sort, 다른 endpoint query,
+uppercase/v1/bad-variant/unhyphenated/encoded UUID, trailing slash·extra segment·encoded separator와
+POST·PATCH·PUT·DELETE는 process spawn과 Backend observation 전에 고정 문구로 거부한다. 승인 target은
+byte identity를 유지한다. 실제 Backend E2E는 detail·notes·audit 각 1회의 실제 404, 하위 UI 제거,
+session 유지, 자동 retry·polling·mutation 0회를 맡는다. populated 의미·plain-text와 layout은 API mock이나
+auth bypass가 없는 production-component geometry fixture가 1440×900·1280×800·1024×768에서 검증한다.
 
 Stock Keycloak은 HTTP와 HTTPS에 공통 listener host를 적용하므로 2026-09-05 OWNER 결정에 따라
 `KC_HTTP_HOST=0.0.0.0`을 사용한다. HTTPS 8443만 host `127.0.0.1`에 publish하고 HTTP 8082와

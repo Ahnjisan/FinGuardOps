@@ -8,6 +8,7 @@ import {
   type CaseDetailState,
 } from "../api/useCaseDetail";
 import { CaseAuditSection } from "./cases/CaseAuditSection";
+import { CaseInvestigationNotesSection } from "./cases/CaseInvestigationNotesSection";
 import {
   CASE_FINAL_DISPOSITION_LABELS,
   CASE_STATUS_LABELS,
@@ -27,21 +28,14 @@ import {
  * report, because `GET /api/v1/cases/{caseId}` carries none of them and a
  * console that infers one puts a judgement on screen that no system made.
  *
- * Below the record sits the audit history section, which is a second read of a
- * second endpoint and owns everything about itself: its own request, its own
- * loading, empty, error and paging states, and its own copy. The two requests
- * start together rather than one after the other - an analyst opening a case
- * wants the record and how it got there, and serialising them would make the
- * trail wait on a record it does not depend on. They fail apart too: a trail
- * that cannot be loaded leaves the record on screen, and a record that cannot
- * be loaded leaves the trail alone.
+ * Below the record sit investigation notes and audit history. All three reads
+ * mount in the same commit and own independent request, error and paging state;
+ * a notes or audit failure therefore removes neither the record nor its sibling.
  *
  * The two settled refusals are the exception, and deliberately so. A case that
  * does not exist and a case this session may not read are answers about the
- * case itself, so the audit section is removed rather than left to repeat the
- * same refusal in its own words one panel lower. Removing it discards the audit
- * state with it: nothing of a trail belonging to a case the reader may not see
- * survives in this screen.
+ * case itself, so both subordinate sections are removed rather than left to
+ * repeat the refusal. Unmounting discards their state and blocks late publish.
  *
  * There is no action. No status change, no reassignment, no resolution, no
  * note: this screen implements the reads, and an affordance for a write that it
@@ -259,9 +253,7 @@ export function CaseDetailPage() {
       </div>
 
       {/*
-        Named, because the audit section below has a live region of its own.
-        Two unnamed status regions on one screen announce two different things
-        under one name, which is worse than announcing neither.
+        Named, because both subordinate sections have live regions of their own.
       */}
       <div
         className="result-line"
@@ -291,14 +283,17 @@ export function CaseDetailPage() {
       {caseId !== null && state.status === "success" && <CaseRecord detail={state.data} />}
 
       {/*
-        Mounted from the first render of a canonical address, which is what
-        makes the two reads parallel: the section's own effect starts its
-        request in the same commit as the record's. It is removed only for the
-        two answers that are about the case itself - see the note at the top of
-        this file - and removing it takes the audit state with it, so nothing of
-        the trail is left on a screen that has just refused the case.
+        Both sections mount from the first render of a canonical address. Their
+        effects therefore start beside the detail request in the same commit.
+        A detail 403/404 unmounts both and their lifecycle gates refuse any late
+        notes or audit settlement.
       */}
-      {caseId !== null && showsAuditHistory(state) && <CaseAuditSection caseId={caseId} />}
+      {caseId !== null && showsSubordinateSections(state) && (
+        <>
+          <CaseInvestigationNotesSection caseId={caseId} />
+          <CaseAuditSection caseId={caseId} />
+        </>
+      )}
     </section>
   );
 }
@@ -311,7 +306,7 @@ export function CaseDetailPage() {
  * a network failure, an unreadable response. Absent for the two settled
  * refusals, which are answers about the case itself.
  */
-function showsAuditHistory(state: CaseDetailState): boolean {
+function showsSubordinateSections(state: CaseDetailState): boolean {
   return state.status !== "not-found" && state.status !== "forbidden";
 }
 

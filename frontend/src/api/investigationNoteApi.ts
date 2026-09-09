@@ -1,6 +1,6 @@
 import type { CredentialAuthClient } from "../auth/authClient";
 import { readExactRequestFields, sendAuthorizedBackendRequest } from "./authorizedClient";
-import { RequestNotAllowedError } from "./errors";
+import { InvalidResponseError, RequestNotAllowedError } from "./errors";
 import { NOTE_LIST_SORTS } from "./backendEndpoints";
 import {
   buildQueryValues,
@@ -164,6 +164,8 @@ export async function fetchInvestigationNoteList(
   query?: InvestigationNoteListQuery,
   signal?: AbortSignal,
 ): Promise<ApiResult<InvestigationNotePage>> {
+  const requestedPage = query?.page ?? 0;
+  const requestedSize = query?.size ?? 20;
   const result = await sendAuthorizedBackendRequest(authClient, {
     endpoint: "case-note-list",
     params: { caseId },
@@ -172,6 +174,18 @@ export async function fetchInvestigationNoteList(
     validate: isInvestigationNotePage,
     signal,
   });
+  // The item-level `caseId` is an echo used only to bind this page to the
+  // request that produced it. Every item must match byte-for-byte: no trim,
+  // case-fold or UUID repair is allowed. Reject the whole page before exposing
+  // any item, and use the fixed error type so neither identifier nor the raw
+  // response can be reflected to a caller.
+  if (
+    !result.data.items.every((item) => item.caseId === caseId) ||
+    result.data.page.number !== requestedPage ||
+    result.data.page.size !== requestedSize
+  ) {
+    throw new InvalidResponseError();
+  }
   return { data: result.data, traceId: resolveTraceId(result.traceId, result.data.traceId) };
 }
 

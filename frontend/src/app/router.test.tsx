@@ -936,7 +936,17 @@ const INVALID_CASE_ADDRESS_HEADING = "This is not a case address";
 
 describe("the /cases/:caseId production route", () => {
   it.each(CASE_ROLES)("renders the screen on direct entry for %s", async (role) => {
-    const fetchSpy = vi.fn().mockImplementation(() => new Promise<Response>(() => {}));
+    const pendingResponses: Array<(response: Response) => void> = [];
+    let settledResponses = 0;
+    const fetchSpy = vi.fn().mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          pendingResponses.push((response) => {
+            settledResponses += 1;
+            resolve(response);
+          });
+        }),
+    );
     vi.stubGlobal("fetch", fetchSpy);
 
     const { client } = renderSignedInAt(CANONICAL_CASE_ROUTE, [role]);
@@ -945,13 +955,15 @@ describe("the /cases/:caseId production route", () => {
       await screen.findByRole("heading", { name: `Case ${CANONICAL_CASE_ID}` }),
     ).toBeInTheDocument();
     expect(screen.getByText("Loading case...")).toBeInTheDocument();
-    // The record and its audit history start together. Classify the requests by
+    // The record, investigation notes and audit history start together. Classify the requests by
     // their complete target rather than by call index: effect scheduling may
     // choose either order, while a missing, duplicated or third endpoint still
     // has to fail this exact multiset.
     await waitFor(() => {
-      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(fetchSpy).toHaveBeenCalledTimes(3);
     });
+    expect(pendingResponses).toHaveLength(3);
+    expect(settledResponses).toBe(0);
     const requests = fetchSpy.mock.calls.map((call) => call[0] as Request);
     const targets = requests.map((request) => {
       const url = new URL(request.url);
@@ -960,6 +972,7 @@ describe("the /cases/:caseId production route", () => {
     expect([...targets].sort()).toEqual(
       [
         `GET /api/v1/cases/${CANONICAL_CASE_ID}`,
+        `GET /api/v1/cases/${CANONICAL_CASE_ID}/notes?page=0&size=20&sort=createdAt%2Casc`,
         `GET /api/v1/cases/${CANONICAL_CASE_ID}/audit-logs?page=0&size=20&sort=changedAt%2Cdesc`,
       ].sort(),
     );
@@ -971,12 +984,27 @@ describe("the /cases/:caseId production route", () => {
       (request) =>
         new URL(request.url).pathname === `/api/v1/cases/${CANONICAL_CASE_ID}/audit-logs`,
     );
+    const noteRequests = requests.filter(
+      (request) => new URL(request.url).pathname === `/api/v1/cases/${CANONICAL_CASE_ID}/notes`,
+    );
     expect(detailRequests).toHaveLength(1);
+    expect(noteRequests).toHaveLength(1);
     expect(auditRequests).toHaveLength(1);
 
     const detailUrl = new URL(detailRequests[0].url);
     expect(detailUrl.search).toBe("");
     expect(detailUrl.hash).toBe("");
+
+    const notesUrl = new URL(noteRequests[0].url);
+    expect([...notesUrl.searchParams.entries()]).toEqual([
+      ["page", "0"],
+      ["size", "20"],
+      ["sort", "createdAt,asc"],
+    ]);
+    expect(`${notesUrl.pathname}${notesUrl.search}`).toBe(
+      `/api/v1/cases/${CANONICAL_CASE_ID}/notes?page=0&size=20&sort=createdAt%2Casc`,
+    );
+    expect(notesUrl.hash).toBe("");
 
     const auditUrl = new URL(auditRequests[0].url);
     expect([...auditUrl.searchParams.entries()]).toEqual([
@@ -996,7 +1024,7 @@ describe("the /cases/:caseId production route", () => {
       expect(request.headers.get("Authorization")).toBe("Bearer fake.access.token");
       expect(request.credentials).toBe("omit");
     }
-    expect(client.calls.authorizeRequest).toBe(2);
+    expect(client.calls.authorizeRequest).toBe(3);
   });
 
   it.each(NON_CASE_ROLES)("refuses direct entry for %s, sending nothing", async (role) => {
