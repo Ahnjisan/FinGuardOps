@@ -21,9 +21,13 @@ actor 목표 계약을 정의한다. Architecture Decision은
   요청은 deny-by-default로 거부한다.
 - 사건 상태·담당자·종결과 조사 메모 생성 Service에는 동일 authority 상수 기반
   `@PreAuthorize`를 적용했다.
-- login·signup·refresh·logout endpoint와 사용자·role·credential DB가 없다.
-- local/dev Authorization Server로 Keycloak을 선정했지만 container·realm·client·mapper와
-  Frontend·Backend 연동 runtime은 아직 구현되지 않았다.
+- Backend 자체 login·signup·refresh·logout endpoint와 사용자·role·credential DB는 없다.
+  Frontend의 RP-initiated remote logout은 local Keycloak end-session endpoint와 root callback으로
+  구현되었다.
+- local/dev Authorization Server는 고정 Keycloak image의 container·realm·USER/SERVICE client·
+  protocol mapper로 구현되었고 Frontend OIDC와 Backend Resource Server runtime에 연결되었다.
+- Frontend에는 role·capability 판정, 보호된 거래·사건 route·navigation, 사건 note create action이
+  구현되었으며 Backend의 독립적인 401·403 결정을 대체하지 않는다.
 - 사건 workflow·resolution·note writer는 provider가 검증한 USER UUID v4를 기록한다.
 - Issue #215 사건 감사 조회 응답은 `actorType`만 공개하고 `actorId`는 비노출한다.
 
@@ -32,9 +36,12 @@ actor 목표 계약을 정의한다. Architecture Decision은
 Issue #219는 Resource Server 기반과 JWT·principal·공통 오류·listener 경계를 구현했고,
 Issue #221은 endpoint RBAC와 high-risk write method security를 구현했고 Issue #223은
 USER actor와 조사 메모 USER author를 연결했다. Issue #229와 #231은 제품 중립 Frontend
-로그인 경계와 인증 API transport를 구현했다. Issue #233은 local/dev Authorization Server로
-Keycloak을 선정하고 claim 계약만 확정했다. Keycloak runtime과 실제 연동은 후속 범위이며
-구현 완료로 표현하지 않는다.
+로그인 경계와 인증 API transport를 구현했다. Issue #233 당시에는 local/dev Authorization
+Server로 Keycloak을 선정하고 claim 계약만 확정했으며 runtime은 아직 후속 범위였다. 이후
+Issue #239에서 container·realm·client·mapper와 Frontend·Backend 실제 연동을, Issue #243·
+#249~#261에서 role·capability UI와 보호 업무 화면을, Issue #247에서 remote logout과 격리
+Chromium NSS DB strict-TLS E2E를 구현했다. production/cloud Authorization Server·secret manager·
+trusted certificate·HA 배포와 management endpoint 인증·TLS는 아직 구현되지 않았다.
 
 ## 2. 신뢰 경계
 
@@ -54,10 +61,11 @@ Management 8081
 ```
 
 Backend는 access token을 발급·갱신·폐기하지 않는다. 위 경계와 3장의 claim 계약은
-Authorization Server 제품과 무관한 목표 계약이다. local/dev 공급자는 Keycloak으로
-선정했지만 실제 issuer·JWK URI, 검증된 Keycloak 26.x exact image tag·digest와 runtime은
-후속 구현 Issue에서 고정한다. production AWS 제품과 배포 방식도 별도 결정이다. trusted
-header와 고정 production token은 이 경계를 대체할 수 없다.
+Authorization Server 제품과 무관하다. local/dev 공급자는 고정 Keycloak 26.7.3 image tag·digest로
+구현되었고 public issuer `https://localhost:8443/realms/finguardops-local`과 Backend namespace
+loopback JWK URI를 실제 runtime에 연결한다. 이 local 계약은 production/cloud IdP 제품·issuer·
+JWK·secret·trusted certificate·HA 배포를 확정하거나 완료한 것이 아니다. trusted header와 고정
+production token은 이 경계를 대체할 수 없다.
 
 FastAPI의 `GET /api/health`, `POST /api/v1/rule-analysis`,
 `POST /api/v2/rule-analysis`는 별도 컴포넌트 보안 경계이며 이 문서의 Spring Backend
@@ -582,8 +590,8 @@ provider 설정뿐 아니라 실제 token response를 검사한다. `refresh_tok
 session을 게시하지 않고 OIDC user state를 제거하며, callback 이후 memory·user store·Web
 Storage에 원문이 남지 않게 fail-closed한다. `automaticSilentRenew=false`, refresh token
 grant 0회와 silent renew 0회를 유지한다. 실제 Chromium E2E는 정상 token response의 refresh token
-부재와 합성 `refresh_token` 거부, state·nonce·PKCE 변조 거부를 각각 확인한다. 거래·사건·메모·
-이 시점에는 거래·사건·메모·감사 업무 화면이 아직 구현되지 않았다. remote logout은 Issue #247에서 구현했고 실제 Chromium
+부재와 합성 `refresh_token` 거부, state·nonce·PKCE 변조 거부를 각각 확인한다. Issue #239
+당시에는 거래·사건·메모·감사 업무 화면이 아직 구현되지 않았다. 이후 remote logout은 Issue #247에서 구현했고 실제 Chromium
 E2E가 exact end-session endpoint·parameter 집합, exact root callback, logout state 1회 consume,
 local session·credential 0, 재로그인 시 로그인 화면 재노출, consumed callback 재사용 반례와
 token·password·state 원문 비노출을 확인한다. 같은 Issue에서 browser 신뢰 경계를 host Windows
@@ -616,8 +624,11 @@ guard는 결정 이전(`initializing`·`authenticating`)을 거부로 확정하�
 화면은 role·authority·claim·subject를 노출하지 않는 고정 문구만 사용한다. guard는 요청을
 가로채지 않으므로 401의 session-bound invalidation과 403의 session 유지 경계는 그대로다.
 이 UI는 표시 경계이며 endpoint·method authority 검증과 401·403 결정을 대체하지 않는다.
-capability로 보호되는 production route·navigation 항목·action은 아직 0개이며, guard의 직접 URL
-접근 동작은 test 전용 MemoryRouter route로 검증한다.
+Issue #243 당시 capability로 보호되는 production route·navigation 항목·action은 0개였고 guard의
+직접 URL 접근 동작은 test 전용 MemoryRouter route로 검증했다. 이후 거래 목록·상세와 사건 목록·
+상세 route·navigation은 `transaction:view`·`case:view`로 보호되었고, 사건 상세의 inline note
+composer는 `case:note-write`와 사건 상태를 함께 적용한다. workflow·assignee·resolution action UI는
+아직 구현되지 않았다.
 
 Issue #245에서 Frontend는 위 10개 endpoint를 typed API module로 구현했다. 화면·route·
 navigation·button·hook·상태관리는 포함하지 않는다. 거래·사건 filter와 거래·사건·메모·감사
@@ -731,15 +742,15 @@ method security는 Issue #221에서 구현되었다. 아래 표는 구현 상태
 | 완료. `[Backend/Security] Endpoint RBAC와 USER·SERVICE authority matrix 적용` | deny-by-default와 endpoint 최소 권한 | request matcher, role converter, method security | 없음 | 13개 endpoint·401·403, role 혼용 | #219 | full-stack JWT·method security 검증; 구현 |
 | 완료. `[Backend/Audit] 사건 write USER actor와 InvestigationNote author 연결` | 검증 principal을 성공 감사에 연결 | provider/service actor, note author, V14 | 적용 | 성공·stale·rollback·기존 SYSTEM 호환 | #221 | 동시성·migration 검증; 구현 |
 | 완료. `[Infra/Docs] Local Compose·runbook JWT fixture와 인증 E2E 적용` | local issuer와 SERVICE traffic | 선택형 Compose overlay, fixture, verifier, runbook | 없음 | build·wait·traffic·scrape·alert·restart | #219·#221 | local/manual Docker E2E 경계 구현 |
-| 부분 구현. `[Frontend/Security] OIDC PKCE와 memory-only 인증 기반 구현` | SPA 인증 경계 | PKCE redirect, memory token, transaction store, `/auth/callback`, local logout | 없음 | 설정·settings·storage·lifecycle·callback·deadline | #219·#221 | jsdom 단위·컴포넌트 검증; 구현 (#229) |
-| 부분 구현. `[Frontend/Security] 인증 Backend API client와 401·403 경계 구현` | 승인 endpoint에만 credential 전달 | endpoint allowlist, `authorizeRequest()`, 401 invalidation, 403 유지, 단일 deadline | 없음 | allowlist·URL 우회·401·403·timeout·abort | #229 | jsdom 단위 검증; transport 구현 (#231) |
+| 완료. `[Frontend/Security] OIDC PKCE와 memory-only 인증 기반 구현` | SPA 인증 경계 | PKCE redirect, memory token, transaction store, `/auth/callback`, local logout | 없음 | 설정·settings·storage·lifecycle·callback·deadline | #219·#221 | 기반 구현 (#229), local Keycloak USER E2E 연결 (#239), remote logout 추가 (#247) |
+| 완료. `[Frontend/Security] 인증 Backend API client와 401·403 경계 구현` | 승인 endpoint에만 credential 전달 | endpoint allowlist, `authorizeRequest()`, 401 invalidation, 403 유지, 단일 deadline | 없음 | allowlist·URL 우회·401·403·timeout·abort | #229 | transport 구현 (#231), 보호 거래·사건 화면에서 소비 (#249~#261) |
 | 완료. `[Security/Architecture] Keycloak Authorization Server와 권한 Claim 계약 확정` | local/dev 제품과 USER·SERVICE·token claim 계약 | ADR-011·보안 아키텍처·README | 없음 | 문서 claim·role·신뢰 경계 정합성 | #225·#229·#231 | 문서 계약 확정 (#233), local runtime·USER E2E 연결 (#239) |
 | 완료. `[Backend/Security] JWT singleton audience 표준 표현 호환` | RFC 7519 singleton 표현과 stock Keycloak 호환 | Backend raw 검증·decoder/HTTP/validator 테스트·ADR-012 | 없음 | string·array 허용, additional·duplicate·malformed 거부, raw pre-JWK | #233·#235 | Backend 호환 구현 (#236), stock Keycloak 발급 검증 (#239) |
 | 완료. `[Infra/Security] Keycloak local/dev runtime 구현` | 실제 local/dev issuer와 client·mapper | Compose, realm, client scope, protocol mapper | 없음 | tag·digest·realm·claim·singleton audience source·rotation | #233 | Phase 1 fresh/existing runtime 완료 (#239) |
 | 완료. `[Security/E2E] USER 로그인과 Backend 연동` | browser OIDC와 Resource Server 연결 | Frontend·Backend·Keycloak E2E | `@playwright/test` | raw `aud`·access/ID `sub` 원문 동일성·role 집합·refresh fail-closed·401·403 | Keycloak runtime | Chromium runner 구현 (#239), 격리 Linux Chromium·NSS 신뢰로 전환 (#247) |
 | 완료. `[Security/E2E] SERVICE Client Credentials 연동` | 거래·행동 접수 SERVICE 인증 | Keycloak verifier·Compose·문서 | 없음 | 실제 신규·replay·conflict·401·403, PostgreSQL cardinality, External Risk·Rule 1회 | Keycloak runtime | fresh/existing-volume·전용 resource cleanup 구현 (#241) |
-| 부분 구현. `[Frontend/Security] role·authority 권한 UI` | 권한별 표시와 action 노출 | navigation, button, route guard UI | 없음 | browser login·expiry·권한 UI | USER E2E, #231 | 권한 판정 계층과 `RequireCapability` guard 구현 (#243); 이를 적용한 production 보호 route·navigation 항목·action 0개 |
-| 부분 구현. `[Frontend] 업무 typed API와 query pagination` | 보호 API 소비 | 거래·사건·메모·감사 module, page·size·sort | 없음 | DTO·validator·query 조립·3중 URL 재검증 | #231 | typed API 10개, request·response validator, query pagination 기반 구현 (#245); Backend·API·DB 계약 무변경, 이를 소비하는 production 화면·route·navigation·hook 0개 |
+| 완료. `[Frontend/Security] role·authority 권한 UI` | 권한별 표시와 action 노출 | navigation, button, route guard UI | 없음 | browser login·expiry·권한 UI | USER E2E, #231 | 권한 판정 계층과 `RequireCapability` guard 구현 (#243), 거래·사건 보호 route·navigation과 note create action에 적용 (#249~#261) |
+| 완료. `[Frontend] 업무 typed API와 query pagination` | 보호 API 소비 | 거래·사건·메모·감사 module, page·size·sort | 없음 | DTO·validator·query 조립·3중 URL 재검증 | #231 | typed API 10개와 request·response validator·query pagination 기반 구현 (#245), 거래·사건 목록·상세와 notes·audit 화면에서 소비 (#249~#261) |
 | 완료. `[Frontend] Keycloak remote logout` | RP-initiated logout | end-session seed·exact post-logout URI·root callback·transaction schema 분리 | 없음 | 동기 local invalidation·ID token fail-closed·목적지 고정·state 1회 consume·stale callback·실패 | USER E2E | Chromium USER logout·재로그인·callback 재사용 반례 구현 (#247) |
 
 ## 14. 구현 검증 계약
@@ -747,9 +758,10 @@ method security는 Issue #221에서 구현되었다. 아래 표는 구현 상태
 Issue #219·#221 테스트는 credential 없음, malformed·서명 오류·만료 token, issuer·audience,
 time·subject·principal_type·role claim 오류, USER·SERVICE role 혼용, role-derived authority,
 401·403·503·500 trace와 비노출, JWK cache·rotation·장애, management listener 분리와 profile
-간 보안 회귀와 13개 endpoint authority matrix, USER·SERVICE 교차 거부, CORS·encoded path,
-네 method security의 transaction 선차단을 검증한다. 성공 write transaction·SYSTEM AuditLog와
-optimistic rollback은 유지한다. 성공 USER AuditLog는 후속 Audit Issue에서 검증한다.
+간 보안 회귀, public health와 12개 보호 업무 method·path의 matrix, USER·SERVICE 교차 거부,
+CORS·encoded path와 네 method security의 transaction 선차단을 검증했다. 이 시점에는 성공
+USER AuditLog가 후속 Audit Issue 범위였고, 이후 Issue #223 테스트가 네 사건 write의 USER
+AuditLog actor와 InvestigationNote author, stale·rollback·기존 SYSTEM 호환을 검증했다.
 
 ## 15. 공식 참고 문서
 

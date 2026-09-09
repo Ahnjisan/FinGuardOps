@@ -18,10 +18,17 @@
 - 시스템은 위험 점수에 따라 `LOW`, `MEDIUM`, `HIGH`, `CRITICAL` 위험 등급을 분류한다.
 - 시스템은 탐지 사유를 생성한다.
 - 초기 Rule 기반 탐지의 입력, R001~R004 조건, 점수와 위험 등급 경계는 [`rule-v1-detection-contract.md`](./rule-v1-detection-contract.md)를 단일 기준으로 사용한다.
-- Rule v1은 문서로 확정되었고 DetectionResult·Evidence 물리 영속 모델은
-  구현되었지만 Rule 실행, 실행 결과 생성·검증·채택과 FastAPI 연동은
-  아직 구현되지 않았다.
-- 현재 거래 생성은 `RECEIVED`/null legacy Snapshot을 저장한다. 최종 동기 탐지 응답 전환, Snapshot 불변성과 version 재생 정책은 [`../07-decisions/ADR-004-idempotency-response-snapshot-transition.md`](../07-decisions/ADR-004-idempotency-response-snapshot-transition.md)를 따르며 후속 구현이 필요하다.
+- Rule v1의 DetectionResult·Evidence 영속 모델, FastAPI R001~R004 실행·scoring·Evidence
+  계산, Spring Boot HTTP Client와 응답 검증·결과 채택이 구현되었다. External Risk를
+  필수 입력으로 받는 v2도 같은 Rule v1을 실행하며, External Risk 자체는 아직 점수·등급·
+  Evidence 계산에 사용하지 않는다. ML·LLM과 AI 사건 리포트는 별도 미구현 범위다.
+- 현재 public 거래 생성의 단일 멱등 승자는 `RECEIVED` 저장 후 트랜잭션 밖에서 External Risk
+  조회와 FastAPI Rule v2 분석을 수행하고, Spring Boot가 결과를 검증·채택한 뒤 위험 대응·
+  필요한 사건·AuditLog를 최종화한다. 성공하면 이 최종 업무 결과를 Snapshot v2와 멱등
+  `COMPLETED`로 확정하고 HTTP `201`로 동기 반환한다. 과거 strict legacy Snapshot과 Snapshot v1은
+  소급 변경하지 않고 version별로 재생하며, 완료 replay는 External Risk·FastAPI·최종화를 다시
+  호출하지 않는다. Snapshot 전환 계약은
+  [`../07-decisions/ADR-004-idempotency-response-snapshot-transition.md`](../07-decisions/ADR-004-idempotency-response-snapshot-transition.md)를 따른다.
 
 ## 3. 사건 조회
 

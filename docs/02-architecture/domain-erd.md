@@ -27,10 +27,12 @@
 FastAPI `POST /api/v1/rule-analysis`, R001~R004 실행·점수·RiskLevel·Evidence
 계산과 Spring Boot Rule 분석 HTTP Client·v1·v2 내부 오케스트레이션, 기본 Rule 집합
 발행 경계와 위험 대응·사건·AuditLog 원자적 최종화 경계도 구현되어 있다.
-실제 External Risk Provider·영속화·거래 접수 전체 연결, Snapshot v2와 운영
-복구, 사건 추가 거래 연결·병합·분리,
+실제 External Risk HTTP Provider와 public 거래 접수 전체 연결, 성공 Snapshot v2·실패 replay,
+장기 `IN_PROGRESS` 후보 조회와 제한된 one-shot 복구도 구현되어 있다. Frontend는 거래·사건
+목록·상세, 사건 조사 메모 조회·inline 생성과 감사 이력 조회를 구현했다. External Risk 성공
+결과 DB 영속화, recovery scheduler·batch 자동화, 사건 추가 거래 연결·병합·분리,
 감사 단건 상세·검색 filter·cursor pagination·CSV·파일 export·archive·보존 정책,
-Frontend, AI 운영 엔티티와 운영 PostgreSQL 배포 환경은 아직 구현되지 않았다.
+AI 운영 엔티티와 production PostgreSQL 배포 환경은 아직 구현되지 않았다.
 
 ## 2. 설계 범위와 제외 범위
 
@@ -44,7 +46,7 @@ Frontend, AI 운영 엔티티와 운영 PostgreSQL 배포 환경은 아직 구�
 - AI 운영: `AiReportRequest`, `AiReportExecution`, `ProviderCallAttempt`, `AiReport`
 
 `ExternalRiskSnapshot`은 ERD의 영속 Entity가 아니다. External Risk 성공 결과를
-목표 Rule v2 요청으로 조립하는 동안만 사용하는 immutable 인메모리 값이며
+Rule v2 요청으로 조립하는 동안만 사용하는 immutable 인메모리 값이며
 PostgreSQL·DetectionEvidence·AuditLog에 저장하지 않는다.
 
 다음 엔티티는 필요성과 적용 범위를 구분해 관리한다.
@@ -71,7 +73,7 @@ PostgreSQL·DetectionEvidence·AuditLog에 저장하지 않는다.
 - Rule v1 이외의 점수·가중치·위험 등급 통합 정책과 ML 모델 성능 기준. Rule v1은 [`../01-requirements/rule-v1-detection-contract.md`](../01-requirements/rule-v1-detection-contract.md)를 따른다.
 - AI 비용 계산 공식, Provider 가격표 반영과 통화 환산 방식
 - 실제 Provider·모델 선정, Prompt 전문과 Provider 요청·응답 원문 저장
-- 인증·인가 구현
+- 인증·인가 상세 설계와 production/cloud IdP·secret·trusted certificate·HA 배포
 - AI 이력의 구체적인 보존 기간
 - `caseAnalysisSnapshotVersion`의 현재 도입
 - 운영 장애·배포 이력용 `ServiceIncident`·`DeploymentRecord`
@@ -213,7 +215,7 @@ PostgreSQL에 저장하는 거래·탐지·사건·감사·AI 사용량은 업�
 | `FraudRule` 또는 `RuleVersion` | 실행 가능한 Rule의 정의·가중치·버전·활성 상태 보존 | 핵심 |
 | `FraudCase` | 연관 거래 조사의 현재 상태와 최종 판정 관리 | 핵심 |
 | `CaseTransaction` | 사건과 거래의 다대다 관계 및 연결 문맥 관리 | 핵심 |
-| `InvestigationNote` | 시스템 작성 조사 메모 원문과 작성 정보 보존 | 핵심 |
+| `InvestigationNote` | USER·SYSTEM 작성 조사 메모 원문과 작성 정보 보존 | 핵심 |
 | `AuditLog` | 주요 변경의 주체·시각·이전값·변경값·사유 보존 | 핵심 |
 | `AiReportRequest` | 외부 생성 요청, 멱등성, 요청자, 요청 시각과 실행·재사용 결과 연결 | 핵심 후보 |
 | `AiReportExecution` | 정확 일치 조건에 대한 실제 논리 실행과 최종 실행 상태 관리 | 핵심 후보 |
@@ -479,15 +481,16 @@ Code·가중치 snapshot을 함께 저장한다. 신규 생성은 PUBLISHED 버�
 R001~R004의 DRAFT seed와 상세 물리 계약은
 [FraudRule·RuleVersion DB 계약](../04-database/fraud-rule-version-schema.md)을
 따른다. 기본 Rule 집합 발행 경계, FastAPI Rule v1 R001~R004 실행과
-Spring Boot Rule 분석 HTTP Client·v1·v2 내부 오케스트레이션은 구현되었다. 공개 Rule
-관리와 production 일반 발행, 실제 External Risk Provider·거래 접수 전체 연결은
-아직 구현되지 않았다.
+Spring Boot Rule 분석 HTTP Client·v1·v2 내부 오케스트레이션, 실제 External Risk HTTP
+Provider와 public 거래 접수 전체 연결은 구현되었다. 공개 Rule 관리와 production 일반
+발행은 아직 구현되지 않았다.
 
 ### 7.6 비영속 ExternalRiskSnapshot
 
 현재 구현된 `ExternalRiskSnapshot`은 Issue #150의 성공 조회 결과용 immutable
-인메모리 값 객체다. Issue #160의 목표 연결은 이를 거래·행동 이벤트·RuleVersion과
-조합해 `POST /api/v2/rule-analysis` 요청을 완성하는 동안만 사용한다. exact v2
+인메모리 값 객체다. Issue #160 당시에는 이를 거래·행동 이벤트·RuleVersion과 조합하는
+상위 연결이 목표였고, 현재 public 거래 접수는 실제 HTTP 또는 local Mock Provider의 Snapshot으로
+`POST /api/v2/rule-analysis` 요청을 완성한다. exact v2
 필드와 시간·canonical match 계약은
 [External Risk·Rule 분석 입력 계약](../01-requirements/external-risk-rule-analysis-input-contract.md)을
 따른다.
@@ -495,10 +498,12 @@ Spring Boot Rule 분석 HTTP Client·v1·v2 내부 오케스트레이션은 구�
 `ExternalRiskSnapshot`은 PostgreSQL Entity가 아니며 별도 Repository·테이블·FK가
 없다. DetectionEvidence, AuditLog와 최종 멱등 Snapshot v2에도 저장하지 않는다.
 실제 고객·계좌·기기 reference, `traceId`와 Provider 원문도 포함하지 않는다.
-V1~V7 Migration은 변경하지 않고 신규 Flyway Migration을 추가하지 않는다.
+V1~V14 Migration은 적용되며 External Risk 성공 결과를 위한 신규 Flyway Migration은 없다.
 
-External Risk 영속화·감사·복구가 필요해지면 별도 Issue와 DB 계약 승인을 받아야
-한다. IP·피싱, cache·fallback과 실패 Snapshot도 현재 계약에 포함하지 않는다.
+External Risk 성공 결과의 영속화·감사·정정이 필요해지면 별도 Issue와 DB 계약 승인을
+받아야 한다. typed failure의 멱등 Failure Snapshot 저장·재생은 별도 현재 계약으로 구현되었지만
+성공 `ExternalRiskSnapshot`을 영속화하지 않는다. IP·피싱과 cache·retry·fallback도 현재 계약에
+포함하지 않는다.
 
 ### 7.7 FraudCase
 
@@ -1307,12 +1312,17 @@ caseId
 3. `POST:/api/v1/transactions + Idempotency-Key` Unique로 최초 처리를 선점한다.
 4. 동일 키의 지문이 다르면 `IDEMPOTENCY_KEY_CONFLICT`로 거부한다.
 5. 동일 키·동일 지문의 처리가 진행 중이면 `IDEMPOTENCY_REQUEST_IN_PROGRESS`로 거부한다.
-6. 동일 키·동일 지문의 처리가 완료되었으면 strict legacy Snapshot은 `200 OK`, 신규 envelope는 v1 codec이 검증한 저장 `201 Created`로 기존 업무 결과를 반환한다.
+6. 동일 키·동일 지문의 처리가 완료되었으면 strict legacy Snapshot은 `200 OK`, Snapshot v1·v2 envelope는 각 codec이 검증한 저장 `201 Created`로 최초 업무 결과를 반환한다.
 7. 새 요청만 Transaction을 저장하고 최초 성공에는 `201 Created`를 반환한다.
 
 요청 지문과 현재 완료 응답 snapshot은 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)의 물리 계약을 따른다. DB는 최초 선점 24시간 후를 `expires_at`에 저장하지만 현재 Service는 만료를 판정하지 않고 정리 작업도 없다.
 
-현재 완료 응답 snapshot의 업무 본문은 단계적 `RECEIVED`/null 응답이다. 기존 무버전 Snapshot은 strict legacy codec과 `200 OK`로 그대로 재생하고 소급 갱신하지 않는다. 전환 이후 신규 요청은 `responseBody`, `httpStatus=201`, `responseSchemaVersion=transaction-create-response-v1`, `codecVersion=transaction-intake-snapshot-envelope-v1`, `finalizedAt`을 식별하는 envelope로 저장하며 version dispatch가 구현되어 있다. 이는 최종 탐지·위험 대응·사건 연결이 구현되었다는 뜻이 아니다.
+기존 무버전 Snapshot과 Snapshot v1의 단계적 `RECEIVED`/null 응답은 각각 strict legacy codec과
+v1 codec으로 그대로 재생하고 소급 갱신하지 않는다. 현재 신규 요청은 External Risk·Rule 분석,
+결과 채택, 위험 대응·사건·감사 최종화 뒤 최종 업무 본문을 Snapshot v2 envelope와 HTTP `201`로
+저장한다. version dispatch는 legacy·v1·v2를 구분하며 완료 replay는 External Risk Provider·Rule·
+최종화를 다시 호출하지 않는다. 업무 commit 뒤 Snapshot 완료 간극에는 확정 상태를 exact 검증하는
+제한된 one-shot 단건 복구와 별도 append-only 복구 감사를 사용한다. scheduler·batch 자동화는 없다.
 
 ### 13.2 행동 이벤트
 
@@ -1670,7 +1680,7 @@ Issue #215의 사건 감사 조회는 다음 조건으로 구현한다.
 - Feature 요약 보존 범위와 Feature 버전 관리 방식
 - Rule 변경 승인 주체와 별도 AuditLog 연결 방식
 - PUBLISHED 적용 종료·신규 버전 게시를 외부 관리 기능에서 노출할 방식
-- External Risk 영속화·감사·복구가 향후 필요할 경우 별도 Issue와 DB 계약으로
+- External Risk 성공 결과 영속화·감사·정정이 향후 필요할 경우 별도 Issue와 DB 계약으로
   승인할 범위
 - 별도 영속 승인이 있는 경우에만 검토할 외부 위험정보 정정과 기존 근거 관계
 
@@ -1681,7 +1691,7 @@ Issue #215의 사건 감사 조회는 다음 조건으로 구현한다.
 - 대표 거래와 대표 위험 등급 선정 규칙
 - 여러 과거 `CLOSED` 사건 이력을 조회·표시할 후속 UI 정책
 - 사건 병합·분리 및 동일 의심 흐름의 중복 방지 기준
-- 향후 USER 작성자·RBAC 지원 시 별도 migration과 접근 통제 계약
+- 구현된 USER subject 작성자·RBAC 밖의 사용자·담당자 directory 연동과 추가 접근 통제 계약
 
 ### AI 리포트·비용
 
@@ -1699,7 +1709,7 @@ Issue #215의 사건 감사 조회는 다음 조건으로 구현한다.
 ### 멱등성·동시성·감사
 
 - 거래 외 API에 공통 IdempotencyRecord를 적용할 범위
-- 거래 멱등 실패 재생에 추가할 공개 오류 whitelist와 실패 응답 Snapshot 필요 여부
+- External Risk Failure Snapshot으로 다루지 않는 실패의 별도 operation scope·재분석 허용 여부
 - 거래 멱등의 실제 보존 기간, 만료 후 키 재사용, 정리 주기·batch·경합 처리
 - FraudCase, AiReportExecution과 Rule의 충돌 탐지 방식
 - 충돌 후 자동 재시도, 사용자 재입력 또는 병합 정책
@@ -1715,7 +1725,7 @@ Issue #215의 사건 감사 조회는 다음 조건으로 구현한다.
 
 ### 20.1 JPA 상세 설계
 
-- 구현된 거래 Entity `FinancialTransaction`과 후속 탐지·사건 Entity의 Aggregate 경계
+- 구현된 `FinancialTransaction`·탐지·Rule·사건·메모·감사 Entity의 Aggregate 경계와 후속 AI 운영 Entity 경계
 - 거래 외 엔티티의 내부 식별자와 업무 식별자 타입·생성 전략
 - 연관관계 방향, 지연 로딩과 조회 전용 Projection
 - 상태·버전 속성의 Enum 및 null 정책
@@ -1757,9 +1767,9 @@ Rule 물리 모델의 `FraudRule`·`RuleVersion`과 사건 영속 기반의
 
 ### 20.3 마이그레이션·DB 제약 설계
 
-- 구현된 거래·행동·탐지·Rule·사건·AuditLog V1~V7은 변경하지 않으며 External
+- 구현된 거래·행동·탐지·Rule·사건·메모·AuditLog·복구 감사 V1~V14는 변경하지 않으며 External
   Risk를 위한 신규 Flyway Migration을 추가하지 않음
-- V7 이후 사건 조사·AI 운영 DDL은 각 별도 승인 범위
+- AI 운영 DDL은 별도 승인 범위
 - 향후 Snapshot metadata 조회·인덱스 또는 DB 수준 version 제약이 필요할 때의 새 Migration 여부
 - 이 문서의 Unique 후보를 실제 제약으로 적용할 범위
 - `adoptedDetectionResultId`가 같은 Transaction의 DetectionResult만 참조하도록 보장하는 방식
@@ -1784,10 +1794,11 @@ seed와 DetectionEvidence nullable RuleVersion FK를 additive하게 추가하며
 V1~V4를 수정하거나 기존 Evidence를 backfill하지 않는다.
 V6는 `fraud_case`·`case_transaction`과 승인된 FK·Unique·Check·Index를
 additive하게 구현한다. V7은 승인된 네 action의 append-only AuditLog 물리 기반을
-additive하게 구현하고 V10은 사건 조회 인덱스, V11은 사건 workflow 감사, V12는
-사건 resolution 감사를 기존 migration 변경 없이 확장한다. External Risk 비영속 v2
-입력 계약은 신규 Migration을 요구하지 않는다. 사건 조사 메모와 AI 운영 DDL은 별도 승인
-작업이다.
+additive하게 구현하고 V8은 External Risk Failure Snapshot, V9는 append-only 복구 감사,
+V10은 사건 조회 인덱스, V11은 사건 workflow 감사, V12는 사건 resolution 감사를 기존
+migration 변경 없이 확장한다. V13은 조사 메모와 note 감사 계약을, V14는 USER audit actor와
+note author CHECK를 구현한다. External Risk 성공 결과의 비영속 v2 입력 계약은 신규 Migration을
+요구하지 않으며 AI 운영 DDL은 별도 승인 작업이다.
 
 ### 20.4 트랜잭션·동시성 설계
 

@@ -38,7 +38,7 @@
   USER·SERVICE principal과 role-derived authority, 안전한 401·403·JWK 장애 응답 경계
 - stateless·CSRF·exact-origin CORS, public health와 별도 management listener Security 분리,
   Actuator discovery 404와 health 상세 비노출
-- 실제 13개 production endpoint의 USER·SERVICE authority matrix, strict deny-by-default와
+- public health를 제외한 실제 12개 보호 업무 method·path의 USER·SERVICE authority matrix, strict deny-by-default와
   사건 workflow·resolution·조사 메모 생성 Service method security
 - `FraudCase`·`CaseTransaction` Entity, Flyway V6와 HIGH·CRITICAL 거래의 사건·첫 연결 내부 영속 경계
 - 사건 목록·상세 조회 API, read-only Service, 동적 필터와 현재 페이지의 연관 거래
@@ -62,7 +62,8 @@
 - Frontend React·TypeScript·Vite 기반, strict TypeScript project reference와 production 코드
   전용 compile 경계(테스트·test-support는 별도 strict `tsconfig.test.json`으로 독립 typecheck),
   ESLint, Vitest·Testing Library 검증 경계, `createBrowserRouter` 기반 Router(`/`, `/health`,
-  `*`)와 App Shell 구현. `src/main.tsx`의 `bootstrap()`이 React root 생성·render 전에
+  `/auth/callback`, `/transactions`, `/transactions/:transactionId`, `/cases`,
+  `/cases/:caseId`, `*`)와 App Shell 구현. `src/main.tsx`의 `bootstrap()`이 React root 생성·render 전에
   `VITE_API_BASE_URL`, `VITE_OIDC_AUTHORITY`, `VITE_OIDC_CLIENT_ID`를 fail-fast로 1회 검증하고,
   public Backend `GET /api/health` client
   (Authorization 미사용, 자동 retry 0회, fetch 시작부터 body·JSON parsing까지 단일 5초
@@ -70,36 +71,22 @@
   최초 fetch가 1회만 실행되는 module-level in-flight 요청 공유(영구 캐시 없음, unmount 이후
   미갱신)를 구현. `/auth/callback` route와 `oidc-client-ts` 기반 Authorization Code + PKCE
   인증 경계(memory-only token, transient transaction record만 sessionStorage, 최대 15분 hard
-  session deadline, local logout), Backend 보호 API 호출과 capability 기반 권한 UI가 구현됨
+  session deadline, local logout과 Keycloak remote logout), Backend 보호 API 호출과 capability 기반
+  권한 UI, 거래·사건 목록·상세, 사건 상세의 notes read/create와 audit history read가 구현됨
 
-현재 백엔드는 Health Check, 거래 접수·조회, 행동 이벤트 접수와 내부 Rule
-평가용 조회를 구현한다. 거래·멱등·행동 이벤트,
-DetectionResult·DetectionEvidence와 FraudRule·RuleVersion의 PostgreSQL
-애플리케이션 연동도 구현되어 있지만 운영 배포 환경은 없다. 현재 거래
-접수는 단계적 구현 응답인 `RECEIVED`와 탐지 관련 null 값을 반환한다.
-AI Service에는 RuleVersion snapshot 입력 모델, ExecutionPlan Builder,
-Orchestrator, Runner, R001~R004 evaluator, Scoring Calculator, Rule Evidence
-Transformer와 Rule 분석 결과 조합의 내부 경로에 더해 Pydantic 요청·응답
-DTO와 FastAPI `POST /api/v1/rule-analysis` HTTP 경계가 구현되어 있다.
-Spring Boot `RuleAnalysisHttpClient`, Timeout·Trace 전달, 성공·오류 응답 검증과
-오류 분류도 구현되어 있다. 거래 분석 Snapshot 조합, 분석 시작·HTTP 호출,
-탐지 결과 자동 생성·완료·Evidence 영속화·채택과 거래 `ANALYZED` 전이까지의
-v1 내부 오케스트레이션과, 성공 `ExternalRiskSnapshot`을 입력받아 잠긴 시작
-트랜잭션 안에서 Rule Snapshot·v2 요청을 확정하고 commit 뒤 FastAPI v2를 호출하는
-내부 v2 오케스트레이션도 구현되어 있다. 독립 External Risk Port·정책 Service,
-local/dev/test 결정적 Mock과 immutable 인메모리 성공 Snapshot도 구현되어 있다.
-네 위험 등급별 목표 거래 상태, `RiskResponseOutcome`과 사건 필수 여부를 반환하는
-Spring·DB 비의존 순수 decision 정책도 구현되어 있다.
-External Risk 연계에는 무잠금 `READ_COMMITTED` read 종료 뒤 Mock 또는 실제 HTTP Policy를 호출하고
-성공 Snapshot을 내부 v2 경계에 전달하는 per-invocation coordinator가 구현되어 있다.
-실제 HTTP Adapter와 production Provider·Policy·coordinator Bean은 구현되었다. 직접
-재호출·멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수 있다. 다만
-public intake와 External Risk coordinator·Rule v2·위험 대응 최종화·멱등 실패
-저장·재생의 end-to-end 연결, Snapshot v2와 완료 간극 복구 및 AI 운영
-도메인은 아직 구현되지 않았다. public `POST /api/v1/transactions` 자체는 구현되어
-현재 `RECEIVED`·성공 Snapshot v1을 반환한다. 위험 대응
-정책의 `FinancialTransaction` 적용, 필요한 사건·연결, 최종 거래 상태·대응 결과와
-AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 구현되었다.
+현재 백엔드는 Health Check, 거래 접수·조회, 행동 이벤트 접수, Rule 실행·결과 채택과
+거래·멱등·행동·탐지·Rule·사건·메모·감사의 PostgreSQL 애플리케이션 연동을 구현한다.
+public `POST /api/v1/transactions`의 멱등 단일 승자는 `RECEIVED` 거래 저장 뒤 DB 트랜잭션
+밖에서 실제 HTTP 또는 local Mock External Risk Provider를 최대 1회 호출하고, 성공 Snapshot을
+FastAPI `POST /api/v2/rule-analysis`에 전달한다. Spring Boot는 결과를 검증·채택한 뒤 위험 대응,
+필요한 사건·연결과 AuditLog를 최종화하고 성공 Snapshot v2·멱등 `COMPLETED`를 별도 completion
+transaction에서 확정해 최종 HTTP `201`을 동기 반환한다. 확정된 성공·External Risk 실패 replay는
+Provider·Rule·최종화를 다시 호출하지 않는다.
+
+Snapshot v2 완료 간극에는 장기 `IN_PROGRESS` bounded 후보 조회, typed fail-closed 판정, 확정된
+업무 상태와 exact 일치하는 단건 복구, append-only 복구 감사와 제한된 non-web inspect·recover
+one-shot 명령이 구현되어 있다. scheduler·batch 자동화와 장기 completion-gap metric·alert·dashboard,
+External Risk 성공 결과 DB 영속화, AI 운영 도메인 및 production/cloud 배포 환경은 구현되지 않았다.
 
 ### 2.2 문서로 정의됨
 
@@ -119,8 +106,8 @@ AuditLog를 하나의 REQUIRED 트랜잭션으로 확정하는 내부 경계는 
 
 - `ai-service/`: Rule v1 실행·scoring·Evidence 변환과 분석 결과 조합,
   Pydantic 요청·응답 DTO와 분석 HTTP 경계까지 구현되었으며 ML·AI 리포트 없음
-- Spring Boot Rule v1 Client와 내부 분석 오케스트레이션·결과 채택은
-  구현되었으나 거래 접수 Service와 최종 업무 흐름 연결은 없음
+- External Risk 성공 결과 DB 영속화, recovery scheduler·batch 자동화와 completion-gap
+  장기 metric·alert·dashboard 없음
 - `frontend/`: React·TypeScript·Vite foundation, Router, public health client, OIDC
   Authorization Code + PKCE 인증 경계, 인증 API transport와 권한 UI, capability로 보호되는
   production 업무 화면인 거래 목록(`/transactions`), 조회 전용 거래 상세
@@ -478,9 +465,11 @@ Spring Boot는 FastAPI 응답을 그대로 업무 상태로 적용하지 않는�
 - 외부 의존성 장애 격리와 호출 추적을 검증한다.
 
 현재 Spring Boot에는 독립 Port, 응답 검증·정책 계산 Service와 local/dev/test 전용
-Mock Adapter가 구현되어 있다. 성공 Snapshot은 immutable 인메모리 값이며 JPA
-Entity가 아니다. 거래 접수와 FastAPI 분석 입력 연결, 실제 HTTP Provider, DB
-영속화, IP·피싱 정책은 아직 구현되지 않았다.
+Mock Adapter, 실제 HTTP Provider와 production Provider·Policy·coordinator Bean이 구현되어
+있다. public 거래 접수의 멱등 단일 승자는 Provider 성공 Snapshot을 FastAPI v2 분석 입력에
+연결하고 typed failure는 공개 안전 오류와 Failure Snapshot으로 확정한다. 성공 Snapshot은
+immutable 인메모리 값이며 JPA Entity가 아니다. 성공 결과 DB 영속화와 IP·피싱 정책은 아직
+구현되지 않았다.
 
 이 기본안은 다음 이유로 선택한다.
 
@@ -489,9 +478,9 @@ Entity가 아니다. 거래 접수와 FastAPI 분석 입력 연결, 실제 HTTP 
 - FastAPI가 외부 연동과 금융 업무 조정까지 맡아 책임이 과도하게 확대되는 것을 방지한다.
 
 현재 경계는 조회 실패를 위험정보 없음으로 해석하지 않고 typed exception으로
-전파한다. 승인된 목표 연결은 DB 트랜잭션 밖 선행 조회, 실패 시 거래 `RECEIVED`
-유지·DetectionResult 미생성·FastAPI 미호출을 적용한다. 자동 retry, fallback과
-cache는 없으며 공개 HTTP 오류 매핑 구현은 후속 범위다. 상세 계약은
+전파한다. 구현된 상위 연결은 DB 트랜잭션 밖 선행 조회, 실패 시 거래 `RECEIVED`
+유지·DetectionResult 미생성·FastAPI 미호출과 공개 HTTP 오류 매핑·terminal failure replay를
+적용한다. 자동 retry, fallback과 cache는 없다. 상세 계약은
 [`External Risk·Rule 분석 입력 계약`](../01-requirements/external-risk-rule-analysis-input-contract.md)을
 따른다.
 
@@ -669,8 +658,9 @@ ExecutionPlan Builder → Orchestrator → Runner → R001~R004 evaluator → Sc
 Calculator → RuleEvidenceTransformer → RuleAnalysisResult까지의 실행 경로와
 Pydantic 요청·응답 DTO, `POST /api/v1/rule-analysis` HTTP 경계가 구현되어 있다.
 Spring Boot Client와 내부 결과 채택·영속화 오케스트레이션도 구현되어 있지만
-거래 접수와 위험 대응·사건·최종 Snapshot을 포함한 전체 서비스 연동이
-구현되었다는 뜻은 아니다. 내부 HTTP와 Spring Boot Client의 상세 계약은
+이 단계만으로는 거래 접수 전체 연결을 의미하지 않았고, 현재 구현된 상위 coordinator가
+External Risk 조회, `/api/v2/rule-analysis` 호출과 Rule v1 결과 채택, 위험 대응·사건·감사와
+최종 Snapshot v2까지 연결한다. 내부 HTTP와 Spring Boot Client의 상세 계약은
 [`../03-api/rule-v1-analysis-api.md`](../03-api/rule-v1-analysis-api.md#13-spring-boot-client-연동-계약)를
 따르고, 전체 처리 순서와 결과 채택은
 [Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../01-requirements/spring-rule-analysis-orchestration-contract.md)을
@@ -682,7 +672,7 @@ Rule v1 호출에서는 짧은 분석 시작 쓰기 트랜잭션에서 거래를
 뒤 DB 트랜잭션과 잠금 없이 FastAPI를 호출한다. 검증 성공 뒤 새 쓰기
 트랜잭션에서 Evidence, `DetectionResult COMPLETED`, 결과 채택과
 `ANALYZING → ANALYZED`를 원자적으로 반영한다. 이 내부 오케스트레이션은
-구현되어 있으며 거래 접수 Service가 호출하는 연결은 아직 구현되지 않았다.
+구현되어 있으며 현재 거래 접수 Service의 상위 동기 coordinator가 호출한다.
 
 후속 Rule Evidence 경계에서 FastAPI는 RuleVersion metadata, Reason Code,
 원래 contribution, typed observation, Evidence 시각과 plan 기반 출력 순서를
@@ -738,27 +728,25 @@ FastAPI의 계산 결과와 LLM Provider의 생성 결과는 업무 원본이 �
 
 ### 12.1 초기 동기 경계
 
-최종 거래 처리 목표에서 다음 흐름은 결과를 반환하기 전에 일관된 위험 대응을 결정해야 하므로 동기 호출 경계이다.
+현재 최종 거래 처리는 결과를 반환하기 전에 일관된 위험 대응을 결정하는 동기 호출 경계다.
 
 - React에서 Spring Boot로 거래·사건 업무 요청
-- Spring Boot에서 External Risk Mock으로 위험정보 조회
+- Spring Boot에서 실제 HTTP 또는 local Mock External Risk Provider로 위험정보 조회
 - Spring Boot에서 FastAPI로 Rule·ML 분석 요청
 - Spring Boot에서 PostgreSQL로 핵심 업무 결과 저장
 
 서비스 간 계약에는 전체 업무 Entity가 아니라 목적에 필요한 입력, 결과, 버전과
 추적 정보를 전달해야 한다. 현재 Rule wire는 `/api/v1/rule-analysis`, External
-Risk 필수 입력의 목표 wire는 `/api/v2/rule-analysis`이며 exact DTO는
+Risk 필수 입력 wire는 `/api/v2/rule-analysis`이며 exact DTO는
 [`External Risk·Rule 분석 입력 계약`](../01-requirements/external-risk-rule-analysis-input-contract.md)을
 따른다.
 
-목표 연결은 `RECEIVED` 거래 저장 commit과 멱등 단일 승자 확정 뒤 External Risk를
-DB 트랜잭션·행 잠금 없이 조회하고, 성공 Snapshot을 목표
-`POST /api/v2/rule-analysis`의 필수 입력에 포함한다. 현재 Mock 활성 환경의 내부
-coordinator는 read transaction 종료 뒤 이 Policy→Rule v2 순서만 구현한다. 거래 접수
-흐름은 이 최종 경계에 도달하지 않았다. 거래 접수는 PostgreSQL에
-저장한 뒤 `RECEIVED`와 탐지 관련 null 값을 반환하며 External Risk나 구현된
-내부 Rule 분석 오케스트레이터를 호출하지 않고 위험 대응과 사건 연결도 수행하지
-않는다. 이 단계적 구현 상태는 ADR-003의 최종 동기 처리 결정을 변경하지 않는다.
+구현된 연결은 `RECEIVED` 거래 저장 commit과 멱등 단일 승자 확정 뒤 External Risk를
+DB 트랜잭션·행 잠금 없이 조회하고 성공 Snapshot을 `POST /api/v2/rule-analysis`의 필수
+입력에 포함한다. coordinator는 Policy→`/api/v2/rule-analysis`(Rule v1 evaluator)→
+위험 대응·사건·감사 최종화→Snapshot v2
+completion 순서를 연결하고 최종 HTTP `201`을 반환한다. 과거 legacy·Snapshot v1의
+`RECEIVED`/null 응답은 version별 replay 호환으로만 남는다.
 
 ### 12.2 논리적 비동기 경계
 
@@ -785,13 +773,12 @@ Kafka는 다음 조건이 확인된 뒤 이 논리적 비동기 경계를 구현
 
 ### 13.1 거래 접수·탐지
 
-다음 흐름은 ADR-003이 유지하는 최종 동기 분석 목표이다. 현재 거래 접수 구현은
-입력 검증·멱등성 확인·거래 저장과 `RECEIVED` 응답까지다. 실제 External Risk
-Provider, public intake와 External Risk coordinator·Rule v2·위험 대응 최종화·멱등
-실패 저장·재생의 end-to-end 연결은 미구현이다. Mock 성공 Snapshot을 확보해 내부
-Rule v2 오케스트레이터를 호출하는 per-invocation coordinator는 구현되어 있다.
-Provider 호출 단일 승자는 목표 public transaction intake의 Idempotency claim이
-소유하며 Policy, coordinator와 Rule 분석 시작 거래 잠금은 이를 보장하지 않는다.
+다음 ADR-003 최종 동기 분석 흐름은 repository production source에 구현되어 있다. 실제 HTTP
+또는 local Mock External Risk Provider, coordinator·`/api/v2/rule-analysis` 호출·Rule v1 결과 채택·
+위험 대응 최종화, 성공 Snapshot v2와
+멱등 실패 저장·재생이 public 거래 접수에 연결된다. Provider 호출 단일 승자는 public transaction
+intake의 Idempotency claim이 소유하며 Policy, coordinator와 Rule 분석 시작 거래 잠금만으로는 이를
+보장하지 않는다.
 
 ```text
 Client
@@ -809,6 +796,8 @@ Client
 → 성공 시 Spring Boot 위험 대응 결정
 → 필요 시 사건 생성 또는 기존 사건 연결
 → 감사 로그
+→ 성공 Snapshot v2·Idempotency COMPLETED 확정
+→ 최종 HTTP 201 동기 응답
 ```
 
 ```mermaid
@@ -823,7 +812,7 @@ sequenceDiagram
     Spring->>Spring: 헤더·요청 Validation·fingerprint 계산
     Spring->>DB: Idempotency IN_PROGRESS 단일 승자 선점 commit
     Spring->>DB: RECEIVED 거래 저장·Idempotency 거래 연결 commit
-    Spring->>Risk: 목표 DB 트랜잭션 밖 External Risk 조회
+    Spring->>Risk: DB 트랜잭션 밖 External Risk 조회
     alt External Risk 성공
         Risk-->>Spring: 성공 ExternalRiskSnapshot 전달
         Spring->>Spring: analyzeV2(transactionId, snapshot, traceId)
@@ -840,6 +829,9 @@ sequenceDiagram
             alt 응답 검증·변환·완료·채택 성공
                 AI-->>Spring: 위험 점수·Reason Code·근거·버전
                 Spring->>DB: 기존 Evidence·COMPLETED·채택·ANALYZED commit
+                Spring->>DB: 위험 대응·사건·감사 최종화 commit
+                Spring->>DB: Snapshot v2·Idempotency COMPLETED commit
+                Spring-->>Client: 최종 HTTP 201
             else 시작 commit 이후 Client·응답·완료 실패
                 AI--xSpring: 원본 오류
                 Spring->>DB: 기존 실패 경계로 DetectionResult·거래 FAILED
@@ -850,31 +842,28 @@ sequenceDiagram
         end
     else External Risk typed failure
         Risk--xSpring: 여섯 category 중 하나
-        Spring->>DB: 목표 Failure Snapshot·failure_code·FAILED commit
+        Spring->>DB: Failure Snapshot·failure_code·FAILED commit
         Note over Spring,DB: 거래 RECEIVED·DetectionResult/Evidence 없음·FastAPI·최종화 미호출
     end
 ```
 
 External Risk 실패 경로에서는 분석 시작 DB commit과 FastAPI 호출 이후 단계가
-실행되지 않는다. 내부 coordinator는 거래 write 없이 원본 typed failure를 전파한다.
-거래는 `RECEIVED`, DetectionResult·사건·연결·관련 AuditLog는 없다. 실제 HTTP Provider
-기반은 구현되었지만 public intake end-to-end 연결, 멱등 실패 저장·재생은 아직 구현되지 않았다.
-coordinator 직접 재호출이나 멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수
-있다. [ADR-007](../07-decisions/ADR-007-external-risk-idempotent-failure-replay-contract.md)의
-목표에서는 여섯 typed category가 durably confirmed되면 같은 key에서 terminal이고,
-재생은 Provider·FastAPI·최종화를 호출하지 않는다. 실패 저장 전 crash처럼 호출
-여부를 확정할 수 없는 `IN_PROGRESS`에서도 Provider를 자동 재호출하지 않는다.
+실행되지 않는다. 거래는 `RECEIVED`, DetectionResult·사건·연결·관련 AuditLog는 없고 public
+intake가 typed failure를 안전한 공개 오류로 매핑해 Failure Snapshot과 함께 확정한다. 같은 key의
+terminal replay는 저장된 오류를 재생하고 Provider·FastAPI·최종화를 호출하지 않는다. coordinator
+직접 재호출이나 멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수 있다. 실패 저장 전 crash처럼
+호출 여부를 확정할 수 없는 `IN_PROGRESS`에서도 Provider를 자동 재호출하지 않는다. 이 계약은
+[ADR-007](../07-decisions/ADR-007-external-risk-idempotent-failure-replay-contract.md)을 따른다.
 
 거래 상태는 기존 상태 전이 문서의 `RECEIVED`, `ANALYZING`, `ANALYZED`와 최종 처리 상태를 따른다. 요청 형식과 도메인 Validation 실패는 거래로 저장하지 않으며 오류 응답, `traceId`, 로그와 운영 메트릭으로 관측한다. MEDIUM의 모니터링은 별도 위험 대응 결과로 표현하고 AI 리포트 실패로 거래를 `FAILED` 처리하지 않는다.
 
-현재 구현은 `RECEIVED`/null 완료 응답을 멱등 `response_snapshot`으로 거래 접수
-commit에서 v1으로 확정한다. 결과 채택과 거래 `ANALYZED`는 중간 단계이며,
-위험 대응, 최종 거래 상태 전이와 HIGH·CRITICAL의 사건 생성 또는 기존 사건
-연결이 commit된 뒤에만 ADR-006의 Snapshot v2를 확정한다. 최종 업무 commit 뒤
-Snapshot 완료가 실패하면 업무 결과는 유지하고 멱등 레코드는 `IN_PROGRESS`로
-남긴다. 운영 복구는 외부 호출이나 업무 실행 없이 확정된 상태를 검증해 동일한
-Snapshot v2만 확정한다. 내부 위험 대응·사건·감사 최종화는 구현되었고, 거래 접수
-전체 연결·Snapshot v2·복구 실행 경로는 아직 구현되지 않았다. 자세한 계약은
+과거 strict legacy Snapshot과 Snapshot v1의 `RECEIVED`/null 응답은 소급 갱신하지 않고
+version별로 재생한다. 현재 신규 요청은 결과 채택과 거래 `ANALYZED`를 중간 단계로 거쳐 위험 대응,
+최종 거래 상태와 HIGH·CRITICAL 사건 연결을 commit한 뒤 ADR-006의 Snapshot v2를 확정한다. 최종
+업무 commit 뒤 Snapshot 완료가 실패하면 업무 결과는 유지하고 멱등 레코드는 `IN_PROGRESS`로 남는다.
+장기 후보 조회와 제한된 one-shot 복구는 외부 호출이나 업무 재실행 없이 확정 상태를 검증해 동일한
+Snapshot v2만 확정하고 별도 append-only 복구 감사를 남긴다. scheduler·batch 자동화와 장기
+completion-gap metric·alert·dashboard는 미구현이다. 자세한 계약은
 [`ADR-006`](../07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md)을
 따른다.
 
@@ -971,7 +960,7 @@ React는 서비스 상태, 배포 버전, 업무 영향, AI 비용과 장애·�
 | 장애 | 직접 영향 | 유지해야 할 원칙 | 미확정 사항 |
 | --- | --- | --- | --- |
 | FastAPI Timeout | Rule·ML 분석과 후속 위험 대응 실패 | 대상 DetectionResult와 거래를 `FAILED`로 기록하고 결과를 채택하지 않음. Rule v1 Client 자동 retry는 0회 | 실패 후 재분석·수동 복구 계약 |
-| External Risk 여섯 typed category | 외부 위험계좌·기기 근거 사용 불가 | 거래 `RECEIVED` 유지, DetectionResult 미생성, FastAPI·최종화 미호출. `TIMEOUT`, `UNAVAILABLE`, `INVALID_REQUEST`, `UNSUPPORTED_CAPABILITY`, `INVALID_RESPONSE`, `TRANSFORMATION_ERROR`를 `UNMATCHED`·cache·fallback으로 변환하거나 자동 retry하지 않음 | ADR-007에 따른 멱등 Failure Snapshot·공개 HTTP mapper 구현 |
+| External Risk 여섯 typed category | 외부 위험계좌·기기 근거 사용 불가 | 거래 `RECEIVED` 유지, DetectionResult 미생성, FastAPI·최종화 미호출. `TIMEOUT`, `UNAVAILABLE`, `INVALID_REQUEST`, `UNSUPPORTED_CAPABILITY`, `INVALID_RESPONSE`, `TRANSFORMATION_ERROR`를 `UNMATCHED`·cache·fallback으로 변환하거나 자동 retry하지 않고 Failure Snapshot·공개 HTTP 오류로 확정·재생 | 서비스 복구 후 새 operation scope의 재조회·재분석 정책 `TBD` |
 | LLM Timeout·연결 실패 | AI 사건 리포트 지연·실패 | 같은 `executionId`에서 최대 한 번 자동 재시도한 뒤 Rule·ML 결과 기반 템플릿 fallback. 거래·사건 처리 결과는 변경하지 않음 | 재시도 간격·Timeout 값 `TBD` |
 | 비일시적 LLM Provider 오류 | AI 리포트 생성 실패 | 자동 재시도 없이 템플릿 fallback과 오류·사용량 기록 | 다른 모델 전환 조건은 별도 승인 |
 | LLM 출력 형식 오류 | 리포트 품질 검증 실패 | 오류 출력을 정상 리포트로 표시하거나 자동 재시도하지 않고 템플릿 fallback | 품질 검증 기준 `TBD` |
@@ -1019,12 +1008,13 @@ React는 서비스 상태, 배포 버전, 업무 영향, AI 비용과 장애·�
   application 요청은 deny-by-default로 거부한다. 사건 workflow·resolution·조사 메모 생성은
   같은 authority의 method security로 이중 보호한다. 네 사건 write는 검증된 USER
   principal을 AuditLog actor와 InvestigationNote author에 연결한다.
-- Authorization Server 제품·구축, Frontend 인증 API client·권한 UI, production
-  management mTLS·인증 proxy는 후속 구현이다. Frontend Authorization Code + PKCE 경계 자체는
-  Issue #229에서 구현되었다. Issue #225의 선택형 local/manual overlay는
-  Backend namespace에서만 접근할 수 있는 ephemeral RS256 JWKS fixture와 private socket CLI를
-  제공한다. 이는 production Authorization Server가 아니며 base Compose의 JWT 없는 업무
-  요청은 계속 401이다.
+- local/dev에는 고정 Keycloak image의 container·realm·USER/SERVICE client·mapper, 실제 issuer·
+  JWK와 Frontend OIDC·Backend Resource Server 연동이 구현되었다. Frontend 인증 API client,
+  role·capability UI와 Keycloak remote logout도 구현되었다. 현재 브라우저 E2E는 실행별 NSS DB를
+  가진 격리 Linux Chromium에서 strict TLS로 검증한다. Issue #225의 선택형 local/manual overlay는
+  별도의 ephemeral RS256 JWKS 회귀 fixture이며 Keycloak과 같은 Backend에서 동시에 신뢰하지 않는다.
+  이 local 경계는 production Authorization Server·secret manager·trusted certificate·HA 배포 또는
+  management mTLS·인증 proxy 구현을 의미하지 않으며 base Compose의 JWT 없는 업무 요청은 계속 401이다.
 - 실제 금융거래, 본인인증, 거래 차단과 고객 제재는 Mock으로 한정한다.
 
 ## 17. Observability 경계
@@ -1102,7 +1092,10 @@ Grafana는 Prometheus·Backend·Alertmanager의 시작 또는 health dependency�
 - 거래 접수·목록·상세 조회와 거래 멱등성
 - 9개 행동 이벤트 접수와 `eventId` 자연 멱등성
 - 거래·멱등·행동 이벤트의 PostgreSQL 애플리케이션 연동과 Flyway 스키마
-- 단계적 거래 접수 `RECEIVED`/null 응답
+- public 거래 접수의 최종 동기 External Risk→`/api/v2/rule-analysis`(Rule v1 evaluator)→
+  위험 대응·사건·감사 흐름과 HTTP `201`
+- strict legacy·Snapshot v1 재생 호환, 신규 성공 Snapshot v2와 External Risk Failure Snapshot replay
+- 장기 `IN_PROGRESS` bounded 후보 조회와 제한된 one-shot inspect·단건 복구·append-only 복구 감사
 - 저장소 역할 규칙과 GitHub Issue·PR 템플릿
 - FastAPI AI Service 초기 실행·설정·Health API와 테스트 기반
 - RuleVersion snapshot 입력 모델, ExecutionPlan Builder, Orchestrator, Runner,
@@ -1172,35 +1165,36 @@ Grafana는 Prometheus·Backend·Alertmanager의 시작 또는 health dependency�
 - Spring Boot → FastAPI Rule v1 내부 분석 HTTP API 계약
 - Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약
 - 독립 External Risk Port·정책 Service·결정적 local/dev/test Mock 계약
-- External Risk 선행 조회와 목표 `/api/v2/rule-analysis` 필수 입력·실패 계약
+- External Risk 선행 조회와 구현된 `/api/v2/rule-analysis` wire의 필수 입력·실패 계약
 
 ### 18.3 다음 구현 예정
 
-- 비트랜잭션 상위 거래 Service의 External Risk→Rule 분석→최종화 연결
-- RuleVersion publish·운영 준비
-- 최종 Snapshot v2 확정과 완료 간극 운영 복구
+- 공개 RuleVersion 관리·일반 production 발행
+- recovery scheduler·batch 자동화와 completion-gap 장기 metric·alert·dashboard
 - 감사 보존·접근 통제. 401·403·validation·stale·업무 거부는
   업무 AuditLog에서 제외
 
 OAuth2 Resource Server 기반과 401·403·trace 경계는 Issue #219에서, endpoint RBAC와
 method security는 Issue #221에서, USER 감사 주체는 Issue #223에서 구현되었다. Issue #225의
-local/manual JWT fixture와 인증 E2E도 구현되었다. 남은 보안 후속 Issue는 다음과 같다.
-
-1. Frontend 인증 API client와 권한 UI
-   - Authorization Code + PKCE, memory-only token, login·callback·local logout은
-     Issue #229에서 구현되었다([`ADR-009`](../07-decisions/ADR-009-frontend-oidc-pkce-memory-token-boundary.md)).
-   - 남은 범위는 Backend 보호 API 호출용 `Authorization` header, 401·403 UX,
-     role·authority 기반 UI와 remote logout이며 Authorization Server 제품 결정이 선행된다.
+local/manual JWT fixture와 인증 E2E도 구현되었다. Issue #229 당시에는 Authorization Code + PKCE,
+memory-only token, login·callback·local logout까지만 구현되었으나, 이후 인증 API client와 401·403
+경계, role·capability UI, local Keycloak runtime·Frontend·Backend 연동과 remote logout까지
+구현되었다. 남은 보안 범위는 production Authorization Server·secret manager·trusted certificate·
+HA 배포와 management 인증·TLS다.
 
 Infra 인증 E2E는 Frontend 구현의 일부가 아니고 Frontend OIDC도 Compose traffic fixture의
 일부가 아니다. 기술 책임·선행 관계·실패 영향·검증 시간이 다르므로 별도 Issue로 유지한다.
 
-- External Risk public intake 연결과 실패 Snapshot 저장 호출. 성공 Snapshot DB 영속화는 별도 승인 시 검토
+- External Risk 성공 Snapshot DB 영속화는 별도 승인 시 검토
 - production container 배포 환경과 Compose 고도화
 
-AI Service v2 Endpoint·Python DTO와 Backend Java v2 exact wire DTO·mapper·Client·
-내부 오케스트레이션 경계는 구현됐으며, 위 목록의 상위 연결이나 운영 배포 완료를
-의미하지 않는다.
+`/api/v2/rule-analysis`의 v2는 External Risk 필드를 추가한 wire/API schema version이고,
+실행 evaluator는 Rule v1 R001~R004다. Snapshot v2는 별도의 멱등 응답 format version이며
+두 v2 모두 RuleVersion 값과 구분한다. public transaction 상위 coordinator는 거래 저장, External
+Risk 조회, 이 endpoint 호출, 응답 검증·결과 채택, 위험 대응·사건·감사 최종화, Snapshot v2
+completion과 최종 HTTP `201` 동기 응답까지 repository production source에 연결한다. 확정된 성공
+Snapshot과 External Risk Failure Snapshot replay는 Provider·Rule·최종화를 다시 호출하지 않는다.
+이 source/local 구현은 production/cloud 배포·credential 운영·HA·외부 공개 운영 완료를 의미하지 않는다.
 
 Redis의 최초 적용 시점은 실제 캐시 필요와 원본 호출 부하를 확인해 사용자가 결정한다.
 
@@ -1333,7 +1327,7 @@ Docker Compose와 필요 시 Kubernetes 환경에서 기능·장애·관측 기�
 | --- | --- | --- |
 | External Risk 실패 후 재분석·수동 복구 정책 | `TBD` | 별도 승인된 실행 경로, 멱등성과 거래 상태 정합성 |
 | FastAPI Timeout 시 Rule v1 거래 처리 | 분석 시도 `FAILED`, 결과 미채택 | 수동 재개·재처리는 후속 계약에서 결정 |
-| 최종 성공 멱등 Snapshot 확정 시점 | ADR-006에 따라 위험 대응·최종 거래 상태와 HIGH·CRITICAL 사건 연결의 업무 commit 이후 | v2 codec과 완료 간극 운영 복구는 구현 필요 |
+| 최종 성공 멱등 Snapshot 확정 시점 | ADR-006에 따라 위험 대응·최종 거래 상태와 HIGH·CRITICAL 사건 연결의 업무 commit 이후 Snapshot v2로 확정하며 제한된 one-shot 복구도 구현됨 | scheduler·batch 자동화와 completion-gap 장기 metric·alert·dashboard는 후속 범위 |
 | 초기 AI 리포트 비동기 실행 방식 | `TBD` | 실패·재시도·멱등성 검증 가능성, 개인 프로젝트 운영 복잡도 |
 | Redis 최초 도입 시점 | `TBD` | 정확 일치 AI 리포트 중복 호출과 집계 성능 측정. External Risk 용도는 별도 승인 필요 |
 | Kafka 최초 도입 조건 충족 여부 | `TBD` | 비동기 적체, 다중 Consumer, 재처리와 독립 확장 요구 |

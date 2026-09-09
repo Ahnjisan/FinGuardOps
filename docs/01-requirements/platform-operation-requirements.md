@@ -62,15 +62,15 @@ FinGuardOps는 금융거래와 사용자 행동을 기반으로 이상거래를 
 
 | 운영 대상 | 역할 | 현재 도입 상태와 운영 범위 |
 | --- | --- | --- |
-| Spring Boot Backend | 거래 접수·검증, 멱등성, 거래·사건 상태, 위험 대응과 업무 정합성의 최종 소유자 | Health, public `POST /api/v1/transactions`, 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion과 기본 Rule 집합 발행 경계, Rule 분석 HTTP Client·내부 오케스트레이션, External Risk 독립 정책·Mock·실제 HTTP Adapter와 production coordinator Bean, Backend Java v2 DTO·Mapper·Client·내부 오케스트레이션, FraudCase·CaseTransaction과 위험 대응·AuditLog 원자적 최종화 경계가 구현되었다. 사건 목록·상세, 상태·담당자·종료·조사 메모와 `GET /api/v1/cases/{caseId}/audit-logs`도 구현되었다. 감사 조회는 사건 선확인, read-only Page/count, strict projection과 내부 JSON·식별자 비노출 경계를 사용한다. Public intake의 end-to-end 흐름과 성공·실패 replay, 장기 `IN_PROGRESS` bounded 후보 조회, typed 판정, 안전한 completion gap 단건 복구, append-only 복구 감사와 제한된 non-web one-shot inspect·recover 명령도 구현되었다. Issue #186의 public 거래 intake·`RECEIVED`·terminal·replay·conflict, External Risk, Spring Rule outcome·duration Spring Boot 내부 Meter 10개와 production runtime Prometheus registry, `prometheus` profile 전용 `/actuator/prometheus`가 구현되었다. 기본 profile은 export를 비활성화하고 health만 노출하며 opt-in management listener는 기본 `127.0.0.1:8081`이다. Issue #196의 로컬 Compose scrape, Issue #199의 로컬 service recording rule 14개와 Issue #201의 로컬 실패율 alert rule 6개·deterministic test가 구현되었지만 scheduler·batch, 장기 `IN_PROGRESS` Gauge, completion gap metric·alert, management endpoint 인증, production Prometheus 배포·scrape·recording rule·alert·Alertmanager·Grafana·receiver·credential 배포와 외부 알림, 실제 운영 credential 배포, USER 인증·인가와 사건 추가 연결·병합·분리는 미구현이다. |
+| Spring Boot Backend | 거래 접수·검증, 멱등성, 거래·사건 상태, 위험 대응과 업무 정합성의 최종 소유자 | Health, public `POST /api/v1/transactions`, 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion과 기본 Rule 집합 발행 경계, Rule 분석 HTTP Client·내부 오케스트레이션, External Risk 독립 정책·Mock·실제 HTTP Adapter와 production coordinator Bean, Backend Java v2 DTO·Mapper·Client·내부 오케스트레이션, FraudCase·CaseTransaction과 위험 대응·AuditLog 원자적 최종화 경계가 구현되었다. 사건 목록·상세, 상태·담당자·종료·조사 메모와 `GET /api/v1/cases/{caseId}/audit-logs`도 구현되었다. 감사 조회는 사건 선확인, read-only Page/count, strict projection과 내부 JSON·식별자 비노출 경계를 사용한다. Public intake의 end-to-end 흐름과 성공·실패 replay, 장기 `IN_PROGRESS` bounded 후보 조회, typed 판정, 안전한 completion gap 단건 복구, append-only 복구 감사와 제한된 non-web one-shot inspect·recover 명령도 구현되었다. Spring Security OAuth2 Resource Server, strict JWT/JWK 검증, USER·SERVICE principal, 12개 보호 업무 method·path의 RBAC와 USER audit actor 연결도 production source에 구현되었고 local Keycloak과 연동 검증되었다. Issue #186의 public 거래 intake·`RECEIVED`·terminal·replay·conflict, External Risk, Spring Rule outcome·duration Spring Boot 내부 Meter 10개와 production runtime Prometheus registry, `prometheus` profile 전용 `/actuator/prometheus`가 구현되었다. 기본 profile은 export를 비활성화하고 health만 노출하며 opt-in management listener는 기본 `127.0.0.1:8081`이다. Issue #196의 로컬 Compose scrape, Issue #199의 로컬 service recording rule 14개와 Issue #201의 로컬 실패율 alert rule 6개·deterministic test가 구현되었지만 scheduler·batch, 장기 `IN_PROGRESS` Gauge, completion gap metric·alert, management endpoint 인증·TLS, production Authorization Server·credential/secret manager·HA 배포, production Prometheus 배포·scrape·recording rule·alert·Alertmanager·Grafana·receiver·credential 배포와 외부 알림, 실제 운영 credential 배포와 사건 추가 연결·병합·분리는 미구현이다. |
 | FastAPI AI Service | Feature 계산, Rule 실행, ML 추론, 모델 라우팅, AI 사건 리포트와 템플릿 fallback | `POST /api/v1/rule-analysis`, External Risk 필수 입력의 `POST /api/v2/rule-analysis`, R001~R004 실행과 점수·RiskLevel·Evidence 계산은 구현되었다. v2 External Risk는 validation-only이며 ML 추론·모델 라우팅·AI 사건 리포트와 템플릿 fallback은 미구현이다. |
-| PostgreSQL | 거래, 행동 이벤트, 탐지 결과, 사건, 감사 로그와 AI 사용량·비용 데이터의 영속 저장 목표 | V1~V13의 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion, FraudCase·CaseTransaction·InvestigationNote, 업무 AuditLog, Idempotency Failure Snapshot과 별도 append-only 복구 감사 기반이 구현되었다. 사건 감사 조회는 기존 target·changed index를 사용하며 신규 migration을 추가하지 않는다. 성공 업무용 External Risk Snapshot의 별도 DB 영속화와 AI 사용량·비용 데이터는 미구현이며 별도 승인 범위이다. |
+| PostgreSQL | 거래, 행동 이벤트, 탐지 결과, 사건, 감사 로그와 AI 사용량·비용 데이터의 영속 저장 목표 | V1~V14의 거래·멱등·행동 이벤트, DetectionResult·DetectionEvidence, FraudRule·RuleVersion, FraudCase·CaseTransaction·InvestigationNote, 업무 AuditLog, Idempotency Failure Snapshot과 별도 append-only 복구 감사 기반이 구현되었다. 사건 감사 조회는 기존 target·changed index를 사용하며 V14는 USER actor·note author CHECK를 확장하고 신규 index를 추가하지 않는다. 성공 업무용 External Risk Snapshot의 별도 DB 영속화와 AI 사용량·비용 데이터는 미구현이며 별도 승인 범위이다. |
 | Redis | 정확 일치 AI 리포트 캐시와 집계 데이터 사용 목표 | 향후 연동·검증 범위이다. External Risk cache는 현재 계약이 아니며 별도 Issue와 승인이 필요하다. 시맨틱 캐시는 범위에 포함하지 않는다. |
 | Kafka | 사건·리포트·통계 등 비동기 처리 목표 | 핵심 거래·탐지·사건 기능 안정화 이후 도입한다. 현재 구현된 구성으로 간주하지 않는다. |
 | External Risk Provider | 위험 송신·수신 계좌와 위험 기기의 조회 | 선행 PR #177까지 local/dev/test 결정적 Mock과 실제 HTTP Adapter, strict mapper, timeout·bounded body·failure classifier, production Policy·coordinator Bean이 구현되었다. PR #179는 기존 Provider를 public intake의 Idempotency 단일 승자 흐름에 연결하고 Failure Snapshot 저장·재생과 공개 안전 오류 mapping을 연결했다. Mock과 HTTP Bean은 상호 배타적이며 실패를 cache·fallback·`UNMATCHED`로 변환하지 않는다. Issue #196의 Compose fixture는 기존 HTTP 계약의 정상 응답만 제공하는 로컬 검증 전용이며 production Provider가 아니다. Issue #186의 External Risk outcome·duration Meter는 로컬 Prometheus에서 수집할 수 있다. 운영 credential 실제 배포, stuck·completion-gap 탐지 metric, production scrape·alert·dashboard는 미구현이다. |
 | LLM Provider | HIGH·CRITICAL 사건 중심의 생성형 AI 사건 리포트 생성 | 향후 외부 연동 범위이다. 위험 점수, 최종 판정, 거래 차단, 고객 제재와 사건 상태 확정을 수행하지 않는다. |
 | Observability Stack | 로그·메트릭·트레이싱 수집 및 기술 상태 분석 | Issue #186의 Spring Boot 업무 Meter 10개와 runtime registry·opt-in endpoint가 구현되었다. Issue #196은 로컬 Compose Prometheus scrape, Issue #199는 service 수준 recording rule 14개, Issue #201은 로컬 실패율 alert rule 6개, Issue #203은 로컬 Alertmanager 연결·grouping·routing·signal별 inhibition과 bounded webhook firing·resolved 전달·restart·장애 검증 경계를 추가했다. Issue #205는 로컬 Grafana loopback UI, Prometheus datasource, recording rule 14개·target·alert 상태의 16-panel dashboard file provisioning과 fresh·restart·query 검증을 추가했다. 논리 계약은 `observability-metrics-spec.md`, endpoint 경계는 [`management-endpoints.md`](../03-api/management-endpoints.md), 실행 절차는 [`prometheus-local-scrape-runbook.md`](../09-deployment/prometheus-local-scrape-runbook.md)에 정의한다. production Prometheus·Alertmanager·Grafana·receiver·credential 배포와 외부 알림, 인증·TLS·SSO·RBAC, HA·장기 보존, completion gap·장기 `IN_PROGRESS` Gauge와 그 밖의 수집·활용 계층은 미구현이다. |
-| 배포 환경 | 로컬·컨테이너·클라우드 환경에서 버전 배포와 실행 상태 관리 | Issue #196의 로컬 Docker Compose 검증 환경만 구현되었다. CI/CD, production container 배포, Kubernetes와 AWS는 로드맵에 따른 단계적 도입·검증 대상이다. |
+| 배포 환경 | 로컬·컨테이너·클라우드 환경에서 버전 배포와 실행 상태 관리 | Issue #196의 로컬 Docker Compose 검증 환경과 별도 local Keycloak overlay·realm·client·mapper 및 Frontend·Backend strict-TLS E2E 경계가 구현되었다. Backend test CI와 AI Service test CI는 각각 GitHub Actions Workflow로 구현되었으며 Frontend test CI는 없다. 이는 production/cloud 배포가 아니며 container image build·registry push·deployment CD, production rollout·credential 배포, production container·Authorization Server·secret·trusted certificate·HA 배포, Kubernetes와 AWS는 미구현이다. |
 
 Issue #196의 로컬 구성에서 PostgreSQL·AI Service·Backend는 internal application network를
 사용하고 Backend·Prometheus·Grafana·Alertmanager·local webhook receiver는 internal observability
@@ -93,11 +93,14 @@ authority를 최소 권한으로 구분한다. management `8081` scrape에는 �
 private network·방화벽/security group을 기본 경계로 하며 필요 시 mTLS 또는 인증 proxy를
 사용한다. management health·prometheus를 public endpoint로 취급하지 않는다.
 
-이는 목표 운영 계약이다. 현재 Spring Security·JWT·RBAC·management 인증·TLS는 구현되지
-않았고 network 격리와 loopback은 인증·TLS를 대신하지 않는다. production Security chain을
-profile로 비활성화하거나 설정 누락 시 무인증으로 fallback해서는 안 된다. 실제
-Authorization Server 제품·issuer·JWK URI와 production 보호 수단은 후속 구현·배포 Issue에서
-검증한다.
+Spring Security OAuth2 Resource Server, RS256 JWT/JWK의 strict claim 검증, USER·SERVICE
+principal과 12개 보호 업무 method·path의 RBAC는 production source에 구현되었다. local/dev에서는
+고정 Keycloak image의 container·realm·USER/SERVICE client·mapper와 실제 issuer/JWK를 Frontend·
+Backend에 연결하고 격리 Chromium NSS DB 기반 strict-TLS E2E로 검증했다. 이는 repository/local
+구현 경계이며 management endpoint 인증·TLS, production Authorization Server·issuer/JWK 운영,
+credential·secret manager·trusted certificate·HA 배포는 아직 구현되지 않았다. network 격리와
+loopback은 인증·TLS를 대신하지 않으며 production Security chain을 profile로 비활성화하거나 설정
+누락 시 무인증으로 fallback해서는 안 된다.
 
 ## 5. 공통 운영 식별자
 
@@ -652,10 +655,11 @@ React에서 Grafana와 동일한 기술 대시보드를 전부 다시 구현하�
 - production Grafana와 추가 사건·AI·복구 대시보드 구현
 - production Alertmanager·receiver·credential·Slack·email·SMS·PagerDuty
 - Alertmanager HA·장기 retention과 production SLA·SLO
-- 승인된 인증 아키텍처의 production 구현, management 인증·TLS와 OpenTelemetry
+- production Authorization Server·credential/secret manager·trusted certificate·HA 배포,
+  management 인증·TLS와 OpenTelemetry
 - 운영 API 구현
 - Kafka·Kubernetes·AWS 구현
-- 자동 복구 구현
+- scheduler·batch 기반 자동 복구 구현
 - `ServiceIncident`·`DeploymentRecord` Entity 확정
 - 실제 비용 절감률 성과 작성
 - 전체 시스템의 MSA 전환 결정
