@@ -13,7 +13,12 @@ Provider, FastAPI, Rule evaluator·분석, Risk Response decision·최종화, �
 ## 사전 준비
 
 1. 변경 승인과 장애 영향 범위를 확인하고 자동 반복 작업이 없음을 확인한다.
-2. Backend artifact와 V1~V9 Flyway migration이 승인된 버전인지 확인한다.
+2. 현재 Backend artifact와 배포 대상 DB가 Flyway V1~V14 전체 baseline으로 정렬됐는지
+   확인한다. 이는 현재 artifact 실행의 사전조건이다. Recovery audit table과 recovery
+   candidate·audit index는 V9가 직접 도입했다. V10~V14는 각각 사건 조회 index,
+   workflow·resolution AuditLog 제약, InvestigationNote·note 감사와 USER author·audit
+   actor CHECK를 확장하며 recovery table을 다시 만들지 않는다. Migration checksum을
+   임의로 변경하거나 repair하지 않고, 기존 migration을 재작성하거나 수동 적용하지 않는다.
 3. DB 연결 정보를 command-line 인자가 아닌 기존 환경 변수로만 설정한다.
 
 ```powershell
@@ -25,10 +30,12 @@ $env:SPRING_DATASOURCE_PASSWORD = '<secret from approved secret store>'
 실제 값을 문서, shell history, Issue, PR, stdout·stderr 또는 로그에 복사하지 않는다.
 `--spring.datasource.*`와 기타 credential·token·password 인자는 금지한다.
 
-애플리케이션에는 실제 운영자 USER 인증·인가가 구현되어 있지 않다. 명령은 기존
-`SYSTEM` actor와 `finguardops-backend` reference만 사용한다. 실행 주체 승인과 접근
-통제는 OS 계정, 배포 플랫폼, secret store와 DB 권한 등 애플리케이션 외부 운영
-경계에서 수행한다.
+Backend web application에는 Spring Security Resource Server, JWT/JWK 검증, USER·SERVICE
+principal과 기존 업무 endpoint RBAC가 구현되어 있다. 반면 이 non-web recovery command는
+web USER principal을 받지 않으며 command 내부에 별도 운영자 USER 인증·인가가 없다.
+Recovery 감사는 기존 `SYSTEM` actor와 `finguardops-backend` reference만 사용한다. 운영자
+승인·실행 권한과 host 접근 통제는 OS 계정, 배포 플랫폼, secret store와 DB 권한 등
+command 외부 운영 환경에서 수행한다.
 
 ## 정상 startup과 recovery startup
 

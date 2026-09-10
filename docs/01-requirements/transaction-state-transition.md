@@ -483,10 +483,22 @@ External Risk 조회 성공·실패는 민감정보 없는 운영 로그·메트
 민감 정보 원문은 감사 로그에 기록하지 않는다. Issue #156에서 append-only
 AuditLog Entity, Flyway V7과 INSERT 전용 Persistence 경계를 구현했고, 내부 위험
 대응 최종화는 신규 사건이면 사건 감사 2건 뒤 거래 감사 2건, 기존 사건 재사용이나
-LOW·MEDIUM이면 거래 감사 2건을 같은 트랜잭션에 append한다. 사건 조사 상태 전이
-감사, 공개 조회, 보존 기간은 아직 확정하지 않았다.
+LOW·MEDIUM이면 거래 감사 2건을 같은 트랜잭션에 append한다. 사건 status·assignee·
+resolution 성공은 각각 정확히 1건의 `CASE_STATUS_CHANGED`, `CASE_ASSIGNEE_CHANGED`,
+`CASE_RESOLVED`와 전이별 구조화 reason code, `FRAUD_CASE` target·case context,
+허용된 before/after summary, 빈 metadata를 사건 변경과 같은 트랜잭션에 append한다.
+actor는 검증된 USER JWT `sub`이며, 조사 메모 작성 성공은 `CASE_NOTE_CREATED`와
+`{noteId}` metadata만 기록하고 메모 content는 감사 metadata·summary에 포함하지 않는다.
 
-Validation 거절은 Transaction이나 AuditLog 행을 만들지 않는다. 오류 응답, `traceId`, 민감정보를 제외한 로그와 승인된 저카디널리티 운영 메트릭으로만 관측한다.
+공개 `GET /api/v1/cases/{caseId}/audit-logs`는 `page`·`size`와
+`changedAt,asc|desc` 정렬을 지원한다. 응답은 `actorType`을 공개하지만 내부
+`actorId`는 공개하지 않는다. 장기 보존 기간, 자동 purge/destruction과 운영 archival은
+아직 확정하거나 구현하지 않았다.
+
+Validation 거절은 Transaction이나 AuditLog 행을 만들지 않는다. 사건 write의 미인증·
+권한 거부·validation·미존재·상태 충돌·동시성 충돌·영속 실패도 committed business
+AuditLog를 만들지 않는다. 오류 응답, `traceId`, 민감정보를 제외한 로그와 승인된
+저카디널리티 운영 메트릭으로만 관측한다.
 
 ## 15. 사용자 결정 필요 항목
 
@@ -495,10 +507,12 @@ Validation 거절은 Transaction이나 AuditLog 행을 만들지 않는다. 오�
 - External Risk terminal 실패 이후 별도 operation scope의 복구·재분석 명령
 - one-shot 복구 명령을 실행할 OS·배포 플랫폼 권한과 실제 운영 credential 배포
 - 탐지·상태 전이 재시도 가능 오류, 횟수와 간격
-- 동일 거래 또는 연관 거래의 사건 중복 방지와 병합·분리 기준
+- 기존 사건에 다른 거래를 추가로 연결하는 선정 기준, 사용자 주도 수동 연결·관계 제거와
+  사건 병합·분리·다중 사건 운영 기준
 - 장기 후보의 scheduler·batch·metric·alert 운영 방식
 - 동시 상태 변경 충돌 후 재조회·자동 재시도·운영 확인 방식
-- 감사 로그 보존 기간과 접근 범위
+- 감사 로그 장기 보존 기간, 자동 purge/destruction과 운영 archival 정책
+- 애플리케이션 runtime DB role 분리와 운영 계정 권한 정책
 
 ## 16. 구현·미구현 범위
 
@@ -509,6 +523,8 @@ Validation 거절은 Transaction이나 AuditLog 행을 만들지 않는다. 오�
 - V3 DetectionResult·riskLevel·outcome 물리 제약
 - V6 FraudCase·CaseTransaction 물리 스키마
 - V7 append-only AuditLog 물리 스키마
+- V10 사건 조회 index, V11 status·assignee 감사, V12 resolution 감사, V13
+  InvestigationNote·note 감사와 V14 USER actor·author 제약
 - 사건 생성·첫 거래 연결 Persistence 경계
 - 거래·사건·연결·감사 원자적 최종화 Persistence 경계
 - public intake의 `RECEIVED`·Idempotency `IN_PROGRESS` 연결 commit
@@ -522,17 +538,53 @@ Validation 거절은 Transaction이나 AuditLog 행을 만들지 않는다. 오�
 - Idempotency→거래 잠금 및 최신 상태 재검증을 통한 동시 복구 단일 승자
 - strict 입력 검증, 제한된 non-web context와 안전한 JSONL·exit code를 사용하는
   inspect·단건 recover one-shot 명령 및 운영 runbook
+- Spring Security OAuth2 Resource Server와 원격 JWK 기반 RS256 서명, issuer, singleton
+  audience, 시간·claim 검증 및 stateless Bearer 인증
+- USER·SERVICE principal, role→capability 변환, 사건 endpoint의 path/method RBAC와 write
+  Service method security, 미인증 `401`과 권한 부족 `403`
+- `GET /api/v1/cases` 목록 필터·`page`·`size`·`lastChangedAt,asc|desc` 정렬과
+  `GET /api/v1/cases/{caseId}` 상세 조회. 최소 role은 `FDS_VIEWER`이고 필요한 authority는
+  `case:read`이다.
+- `PATCH /api/v1/cases/{caseId}/status`: `FDS_ANALYST`의 `case:workflow:write`,
+  `expectedVersion` 낙관적 동시성, `OPEN` → `IN_REVIEW` →
+  `ADDITIONAL_INFORMATION_REQUIRED` → `IN_REVIEW` 허용 전이와 USER actor 감사
+- `PATCH /api/v1/cases/{caseId}/assignee`: `FDS_ANALYST`의 `case:workflow:write`,
+  명시적 assign/change 및 허용 상태의 null unassign, `expectedVersion`과 USER actor 감사
+- `POST /api/v1/cases/{caseId}/resolution`: `FDS_APPROVER`의
+  `case:resolution:write`, 담당자와 조사 시작 시각이 있는 `IN_REVIEW` 사건의
+  `finalDisposition` 확정·`CLOSED` 전이, `expectedVersion`과 USER actor 감사
+- `GET /api/v1/cases/{caseId}/notes`·`POST /api/v1/cases/{caseId}/notes`: 각각
+  `FDS_VIEWER`의 `case-note:read`·`FDS_ANALYST`의 `case-note:write`, 조회와 USER 작성자 기반
+  append-only InvestigationNote 생성. 작성은
+  `expectedVersion`을 사용하고 공개 note 응답은 `authorType`·`authorRef`를 포함하며 성공
+  감사에는 `noteId`만 포함한다.
+- `GET /api/v1/cases/{caseId}/audit-logs`: `FDS_VIEWER`의 `case-audit:read`, `page`·`size`·
+  `changedAt` 정렬, action별 summary projection과 공개 `actorType` 경계. 내부 `actorId`는
+  응답하지 않으며 audit mutation endpoint는 없다.
+- Frontend 사건 목록·상세, 상세 안의 InvestigationNote 조회·capability 기반 inline 작성,
+  read-only Audit history 조회
+
+내부 transaction 위험 대응 finalization은 `RiskResponseFinalizationService`가 HIGH·CRITICAL
+거래에 FraudCase를 생성하고 첫 CaseTransaction을 연결하며 거래 상태·outcome을 확정하는
+Spring Boot 내부 업무 경계이다. 사건 resolution은 별도 공개
+`POST /api/v1/cases/{caseId}/resolution`이 사건의 `finalDisposition`과 `CLOSED`를 확정하는
+USER 업무 API이므로 두 finalization을 같은 API로 해석하지 않는다. 사건 API의 상세 계약은
+[`case-audit-api.md`](../03-api/case-audit-api.md), 인증·인가 경계는
+[`security-architecture.md`](../02-architecture/security-architecture.md)를 따른다.
 
 다음 운영 범위는 아직 구현되지 않았으며 후속 사용자 승인이 필요하다.
 
 - scheduler·batch·metric·alert·dashboard
 - 자동 retry·fallback·cache
-- 실제 운영 credential 배포
-- 공개 최종화·사건·AuditLog API
-- 실제 USER 인증·인가 연결
-- 사건 조사 상태 전이
-- 사건 추가 거래 연결·병합·분리
-- AuditLog 조회·보존·파기와 runtime DB role 분리
+- production IdP·secret manager 연동, production credential 발급·배포·회전, management
+  endpoint 운영 보안과 HA authorization infrastructure
+- Frontend 사건 workflow status·assignee·resolution mutation UI
+- InvestigationNote 수정·삭제, 별도 notes/audit route와 실제 note POST browser E2E
+- AuditLog 장기 retention 자동화, purge/destruction, archival과 runtime DB role 분리
+- 기존 사건에 다른 transaction을 추가하는 연결, 사용자 주도 수동 연결·관계 제거,
+  사건 병합·분리와 다중 사건 운영 workflow
+- 생성형 AI 사건 리포트 runtime
+- Domain Event 발행과 Kafka runtime
 
 거래 접수의 현재 물리 계약은
 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를

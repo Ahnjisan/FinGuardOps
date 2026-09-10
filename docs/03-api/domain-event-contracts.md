@@ -896,18 +896,20 @@ content와 내부 예외 원문을 기록하지 않는다.
 
 ### 12.1 현재 기준
 
-- Spring Boot Modular Monolith가 거래, 상태, 사건과 AI 요청을 오케스트레이션한다.
-- FastAPI AI Service는 Rule, ML과 AI 리포트 관련 계산을 담당한다.
+- Spring Boot Modular Monolith는 현재 거래·상태·사건을 오케스트레이션하며, AI 요청
+  오케스트레이션은 미래 목표 책임이다.
+- FastAPI AI Service는 현재 Rule·ML 계산을 담당하며, AI 리포트 관련 계산은 미래 목표
+  책임이다.
 - 핵심 기능 안정화 전에는 REST와 내부 애플리케이션 흐름을 우선한다.
 - 거래 위험 판단은 AI 리포트 완료를 기다리지 않는다.
-- AI 리포트는 외부 API에서 비동기 실행·상태 조회 모델을 유지한다.
+- 미래 AI 리포트 외부 API는 비동기 실행·상태 조회 목표 모델을 유지한다.
 - 내부 구현이 REST 호출과 내부 실행을 사용해도 Kafka를 전제로 하지 않는다.
 - PostgreSQL의 검증된 영속 업무 데이터가 정합성 기준이다.
 - Redis가 도입되더라도 정확 일치 조회를 보조하며 업무 원본을 대신하지 않는다.
 
 ### 12.2 현재 동기 경계
 
-다음은 핵심 정합성을 위해 현재 동기 업무 트랜잭션을 우선한다.
+다음은 핵심 정합성을 위해 현재 구현된 동기 업무 트랜잭션을 우선한다.
 
 - 거래 접수와 멱등성 선점
 - External Risk HTTP 조회와 `/api/v2/rule-analysis`의 Rule v1 결과 검증·채택
@@ -916,7 +918,11 @@ content와 내부 예외 원문을 기록하지 않는다.
 - 사건 생성과 최초 CaseTransaction 연결
 - Snapshot v2 completion과 성공·Failure Snapshot replay
 - 확정 가능한 final-success completion gap의 단건 one-shot recovery와 append-only audit
-- 사건 상태·최종 판정·동시성 버전과 AuditLog
+- 사건 상태·최종 판정·동시성 버전, InvestigationNote와 AuditLog
+
+다음은 미래/normative AI report 동기 정합성 계약이며 현재 production aggregate·
+persistence lifecycle로 구현되어 있지 않다.
+
 - 새 AiReportRequest와 AiReportExecution의 최초 상호 연결
 - AiReport 결과 생성과 실행·연결 요청 종료
 
@@ -992,7 +998,24 @@ Spring Boot는 유효한 추적 문맥이 없으면 새 `traceId`를 만들고 F
 
 ## 15. 사용자 결정 필요 사항
 
-이미 확정된 요청·실행 분리, `parentAiRequestId` 제거, 진행 실행 공유, 캐시 무실행, 정확 일치 네 요소, `FAILED` 이후 새 키 재요청, 실제 ProviderCallAttempt 비용 집계와 Kafka 도입 순서는 결정 사항으로 다시 올리지 않는다.
+이미 확정된 요청·실행 분리, `parentAiRequestId` 제거, 진행 실행 공유, 캐시 무실행, 정확 일치 네 요소, `FAILED` 이후 새 키 재요청, 실제 ProviderCallAttempt 비용 집계, Kafka 도입 순서와 동일 거래의 중복 활성 사건 Service 경계는 결정 사항으로 다시 올리지 않는다.
+
+기존 결정안 A(Service 트랜잭션 검증)는 현재 채택·구현됐다. `FraudCasePersistenceService`는
+기본 `REQUIRED`·`Isolation.DEFAULT`(현재 PostgreSQL 기본 `READ_COMMITTED`) 트랜잭션에서
+`FinancialTransactionRepository.findByTransactionIdForUpdate(...)`로 같은 거래 행을 먼저
+`PESSIMISTIC_WRITE` 잠그고 적격성을 검증한 뒤,
+`CaseTransactionRepository.findActiveCaseIdsByTransactionPk(...)`의 일반 조회로 활성 상태
+관계를 확인한다. 활성 사건이 정확히 하나이면 해당 `FraudCase`와 `CaseTransaction`
+관계를 차례로 `PESSIMISTIC_WRITE` 잠근 후 검증해 재사용하고, 둘 이상이면 정합성 오류로
+거부하며, 없으면 새 사건과 첫 관계를 생성한다. 이 경로의 같은 transaction 동시 호출은
+거래 행 잠금으로 직렬화되어 통합 테스트에서 사건·관계 하나로 수렴한다.
+
+V6의 `UNIQUE(fraud_case_id, financial_transaction_id)`는 같은 사건–거래 관계의 중복만
+막으며 transaction별 활성 사건 최대 하나를 보장하는 partial unique constraint는 없다.
+별도 transaction ID advisory lock, 전역·distributed lock과 cross-table trigger도 없다.
+따라서 현재 보장은 위 Service와 거래 행 잠금을 통과하는 `READ_COMMITTED` 경계에 한정되며,
+이를 우회하는 직접 DB 쓰기나 다른 생성 경로까지 schema 하나로 차단하지 않는다. 별도 활성
+관계나 DB 제약 강화는 후속 승인 후보이다.
 
 | 결정 항목 | 선택 가능한 안 | 권장안 | 권장 이유 | API·데이터 모델·구현 영향 | 차단 여부 |
 | --- | --- | --- | --- | --- | --- |
@@ -1004,7 +1027,6 @@ Spring Boot는 유효한 추적 문맥이 없으면 새 `traceId`를 만들고 F
 | Aggregate 순서·오래된 이벤트 방지 | A. 현재 상태만 검증 / B. Envelope에 `aggregateVersion` 추가 / C. payload별 버전 사용 | B | `eventVersion`과 업무 버전을 혼합하지 않고 순서 역행을 탐지하기 쉬움 | Envelope Schema, Aggregate 저장·Consumer 로직에 영향 | Kafka/비동기 구현 전 결정 |
 | 이벤트 중복 처리 기록 저장 | A. PostgreSQL / B. Redis / C. Consumer별 저장소 / D. 혼합 | 초기에는 A 검토 | 영속 업무 결과와 장애 복구를 함께 검증하기 쉬움. 다만 실제 부하 측정 필요 | 테이블·보존 기간·트랜잭션 경계에 영향 | 현재 문서 비차단 |
 | 중복 처리 기록 보존 기간 | A. 업무 데이터와 동일 / B. 전달 재시도 기간 기준 / C. 계층별 차등 | C | HTTP·내부 이벤트·향후 Kafka의 재전달 기간이 다를 수 있음 | 재처리 안전 기간과 저장 비용에 영향 | 후속 결정 |
-| 동일 거래의 중복 활성 사건 기준 | A. Service 트랜잭션 검증 / B. 별도 활성 관계 / C. 중복 상태+DB 제약 / D. Trigger | A 우선 | 현재 모델 변경을 최소화하면서 업무 규칙을 Service에 명시 가능 | 사건 생성 Handler, 격리·잠금·동시성 테스트에 영향 | 사건 구현 전 결정 |
 | AI 완료 결과·활성 실행 동시 존재 시 복구 | A. 완료 결과 유지 후 활성 실행 격리 / B. 전체 오류 격리 후 수동 복구 / C. 상태별 자동 복구 | B 검토 | 정상 조회는 완료 결과 → 활성 실행 순서로 확정되어 있으나 두 상태의 공존은 정합성 위반이므로 업무 결과를 임의 선택하지 않는 복구 절차가 필요 | 복구 작업, 관측·알림과 동시성 테스트에 영향 | AI 실행 구현 전 결정 |
 | External Risk cache·fallback 이벤트 | 현재 도입하지 않음 / 향후 별도 계약으로 도입 | 현재 도입하지 않음 | 현재 경계는 no retry·no cache·no stale data·no fallback·no Circuit Breaker이며 실패 시 Rule 분석을 시작하지 않음 | 향후 도입 시 event type·payload·순서·중복·거래 상태 영향에 별도 승인 필요 | 현재 비차단, 별도 Issue·ADR 승인 필요 |
 | AI 리포트 생성 가능 `caseStatus` | A. 모든 상태 / B. 활성 조사 상태 / C. `IN_REVIEW`만 | B | 조사 지원 목적과 `CLOSED` 읽기 전용 원칙을 함께 유지하기 쉬움 | 생성 Validation과 테스트에 영향 | AI 생성 구현 전 결정 |

@@ -141,8 +141,12 @@ AiReportRequest.resolvedReportRef
   상세는 `ai-operations:read`, 사용량·비용은 `ai-usage:read`를 요구한다.
 - USER·SERVICE principal과 role mapping은
   [`security-architecture.md`](../02-architecture/security-architecture.md)를 따른다.
-- 현재 이 문서의 AI endpoint와 Spring Security·JWT·RBAC는 모두 미구현이다. 임의 Mock
-  Actor header를 목표 계약으로 도입하지 않는다.
+- Backend web application의 공통 Spring Security Resource Server, JWT/JWK 검증,
+  USER·SERVICE principal과 기존 production 업무 endpoint RBAC는 구현되어 있다. 그러나
+  이 문서의 AI report endpoint와 controller·service·persistence lifecycle, 해당 endpoint의
+  method/path authorization·capability 연결, production AI Provider 호출과 별도 audit/event
+  흐름은 아직 구현되지 않았으며 위 API·권한은 미래 목표 계약이다. 임의 Mock Actor
+  header를 목표 계약으로 도입하지 않는다.
 - 감사 기록에는 제한된 요청자 참조값, `aiRequestId`, `caseId`, 요청 시각과 `traceId`를 연결한다.
 
 ### 3.4 시간 범위
