@@ -35,15 +35,20 @@ Client
 업무 HTTP `POST /api/v1/transactions`는 위 최종 동기 흐름으로 구현되어 있다. 입력 검증,
 fingerprint와 Provider 가용성 확인 뒤 `IN_PROGRESS` 단일 승자를 선점하고 거래
 `RECEIVED`·Idempotency 연결을 commit한 다음 DB transaction 밖에서 External Risk와
-Rule v2를 호출한다.
+`/api/v2/rule-analysis`를 호출한다. 이 API v2 wire는 External Risk를 입력받지만
+evaluator는 Rule v1 R001~R004다.
 DetectionResult·DetectionEvidence의 물리 영속 모델과 FastAPI
 `POST /api/v1/rule-analysis` HTTP 경계, Spring Boot `RuleAnalysisHttpClient`,
 Timeout·Trace 전달과 응답 검증·오류 분류, 거래 분석 Snapshot 조합·HTTP
 오케스트레이션과 탐지 실행 결과 자동 생성·채택은 구현되었다. 실제 External Risk
-HTTP Provider와 local/dev/test Mock, per-invocation Policy→Rule v2 coordinator,
+HTTP Provider와 local/dev/test Mock, per-invocation Policy→`/api/v2/rule-analysis`
+coordinator,
 위험 대응 최종화, External Risk Failure Snapshot·공개 typed 오류 재생과 성공
-Snapshot v2 writer가 public 거래 접수에 연결되었다. Snapshot 완료 간극·장기
-`IN_PROGRESS` 운영 복구와 RuleVersion 운영 publish는 아직 구현되지 않았다.
+Snapshot v2 writer가 public 거래 접수에 연결되었다. 최종 업무 성공이 확정된
+Snapshot completion gap의 bounded 후보 조회·typed 단건 one-shot recovery와
+append-only audit는 구현됐다. Provider 호출 여부가 불확실한 작업, failure writer
+crash, Rule 실패 자동 재분석, scheduler·batch·상시 운영·HA coordination과 장기
+completion-gap metric·alert·dashboard 및 RuleVersion 운영 publish는 구현되지 않았다.
 Spring Boot 분석 처리의 기준은
 [Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../01-requirements/spring-rule-analysis-orchestration-contract.md)이다.
 위험 등급별 거래 상태·`RiskResponseOutcome`·사건 필수 여부를 반환하는 순수
@@ -87,7 +92,8 @@ Java·Python DTO·Client, 내부 오케스트레이션과 Mock 성공 Snapshot �
 scoring, Evidence 변환과 Rule 분석 결과 조합의 내부 경로에 더해 Pydantic
 요청·응답 DTO와 FastAPI `POST /api/v1/rule-analysis` HTTP 경계가 구현되어
 있다. Spring Boot Client와 v1·v2 내부 DetectionResult 생성·채택·영속화도
-  구현되어 있고 실제 Provider·거래 접수 v2 연결도 완료되었다. ML은 아직 구현되지 않았다.
+구현되어 있고 실제 Provider·public 거래 접수의 `/api/v2/rule-analysis` 연결도
+완료되었다. ML은 아직 구현되지 않았다.
 상세 Client 계약은
 [Rule v1 내부 분석 API](./rule-v1-analysis-api.md#13-spring-boot-client-연동-계약)를
 따른다.
@@ -121,7 +127,7 @@ FastAPI는 다음 작업을 수행하지 않는다.
 | `eventId` | 행동 이벤트 업무 식별자 |
 | `detectionResultId` | Spring Boot가 생성하는 UUID v4 탐지 결과 업무 식별자 |
 | `caseId` | 생성되었거나 연결된 사건 업무 식별자 |
-| `traceId` | Spring Boot, External Risk Mock과 FastAPI 호출 흐름 추적 식별자 |
+| `traceId` | 최초 Spring Boot 요청에서 검증·결정한 상관관계 문자열. HTTP Provider와 FastAPI outbound 요청에는 `X-Trace-Id` 헤더로, in-process Mock에는 `ExternalRiskProviderRequest.traceId` 필드로 전달되며 Mock에는 HTTP hop·request·header가 없음 |
 
 이 식별자들은 내부 DB 식별자가 아니며 서로 대체할 수 없다.
 
@@ -471,12 +477,21 @@ Risk 계층에서 strict decode한다. public intake 연결·공개 mapper·HTTP
 예상하지 못한 일반 `RuntimeException`을 category로 변환하거나 전용 Snapshot으로
 저장하지 않는다.
 
-External Risk failure writer 실패·저장 직전 crash 또는 최종 성공 완료 간극은
-durable terminal 결과가 아니다. 멱등 레코드는 `IN_PROGRESS`로 남을 수 있고 최초
-요청의 공개 응답은 `500 INTERNAL_ERROR`, 같은 키·fingerprint 재요청은
-`409 IDEMPOTENCY_REQUEST_IN_PROGRESS`이다. DB만으로 Provider 호출 여부를 확정할 수
-없으므로 External Risk를 자동 재호출하지 않는다. 원본 typed exception을 유지하고
-writer 오류를 suppressed로 보존하며 실제 운영 복구는 후속 Issue에서 정한다.
+External Risk failure writer 실패·저장 직전 crash처럼 Provider 호출 결과를 DB만으로
+확정할 수 없는 작업은 durable terminal 결과가 아니다. 멱등 레코드는 `IN_PROGRESS`로
+남을 수 있고 최초 요청의 공개 응답은 `500 INTERNAL_ERROR`, 같은 키·fingerprint
+재요청은 `409 IDEMPOTENCY_REQUEST_IN_PROGRESS`이다. External Risk를 자동 재호출하지
+않고 원본 typed exception과 suppressed writer 오류를 보존하며, 이 불확실 작업과
+failure-writer crash recovery는 구현되지 않았다.
+
+최종 업무 상태·채택 결과·사건 연결·finalization audit가 모두 성공으로 확정됐지만
+Snapshot v2 completion만 실패한 final-success completion gap은 별도 경계다. 구현된
+`IdempotencyRecoveryService`는 임계 시각과 page size로 후보를 bounded 조회하고 typed
+판정을 수행한다. 제한된 non-web one-shot `inspect`/단건 `recover`는 확정 가능한
+`RECOVERABLE_COMPLETION_GAP`에만 같은 Snapshot v2를 생성해 `COMPLETED`로 전이하고
+V9 append-only recovery audit를 남긴다. Provider·Rule·finalization은 재호출하지
+않으며 scheduler·batch·상시 운영·HA coordination과 장기 completion-gap
+metric·alert·dashboard는 구현되지 않았다.
 
 ### 5.8 의존 서비스 Timeout
 
@@ -508,8 +523,9 @@ writer 오류를 suppressed로 보존하며 실제 운영 복구는 후속 Issue
   유지한다.
 - connect·response timeout은 `503 Service Unavailable`과
   `DEPENDENCY_TIMEOUT`으로 반환한다.
-- 실패 후 재분석 정책과 운영 복구 실행 경로는 후속 구현으로 분리한다. 불확실한
-  상태에서 자동 재실행하지 않는 복구 원칙은 ADR-006을 따른다.
+- Rule 실패 후 자동 재분석과 불확실한 Rule 작업의 재수행은 구현되지 않았다.
+  final-success completion gap의 단건 one-shot recovery와 구분하며, 불확실한 상태에서
+  자동 재실행하지 않는 원칙은 ADR-006을 따른다.
 
 connect·response timeout의 상세 분류와 설정은
 [Rule v1 내부 분석 API](./rule-v1-analysis-api.md#13-spring-boot-client-연동-계약)를
@@ -1242,16 +1258,27 @@ Content-Type: application/json
 ## 14. `traceId` 전파
 
 - Spring Boot는 거래·행동·탐지 API의 성공과 오류 응답에 `traceId`를 반환한다.
-- 최초 거래 생성 HTTP 요청의 `traceId`를 별도 생성 없이 분석
-  `analysisTraceId`로 그대로 전달해 Spring Boot, External Risk Mock과 FastAPI
-  호출을 연결한다.
+- 최초 거래 생성 HTTP 요청에서 검증·결정한 `traceId` 문자열을 사용한다. Spring Boot의
+  `TransactionSynchronousProcessingCoordinator`는 먼저
+  `ExternalRiskRuleAnalysisCoordinator.lookupExternalRisk(...)`를 호출하고 결과가 반환된
+  뒤 `analyzeWithExternalRiskSnapshot(...)`을 별도로 호출하므로 External Risk
+  Provider/Mock이 FastAPI를 직접 호출하지 않는다.
+- 선택된 `ExternalRiskLookupPort`가 `ExternalRiskHttpAdapter`이면 outbound HTTP
+  `X-Trace-Id` 헤더에 같은 문자열을 설정한다. `ExternalRiskMockAdapter`이면 in-process
+  호출의 `ExternalRiskProviderRequest.traceId` 필드로 전달하며 HTTP hop·request·header는
+  없다.
+- 반환된 External Risk 결과를 받은 Spring Boot는 `RuleAnalysisOrchestrationService`를
+  통해 `RuleAnalysisHttpClient`의 FastAPI `/api/v2/rule-analysis` outbound 요청에 같은
+  `X-Trace-Id` 헤더를 설정하고 같은 문자열을 분석 `analysisTraceId`로 사용한다.
 - 성공 Snapshot과 External Risk Failure Snapshot에는 `traceId`를 저장하지 않는다.
   완료·실패 재생 응답은 현재 재요청의 `traceId`를 결합하며 최초 분석 trace를
   재요청 trace로 재사용하지 않는다. External Risk 실패 exact replay는 HTTP 상태,
   공개 code, 안전 message와 `fieldErrors`의 의미적 동일성만 보장한다.
 - 조회 API의 `traceId`는 해당 조회 요청을 추적하며 저장된 과거 분석의 `traceId`와 같을 필요가 없다.
 - 탐지 결과에 저장된 분석 당시 추적값과 현재 조회 요청의 `traceId`를 함께 제공할 필요가 있으면 서로 다른 필드명과 의미로 구분한다.
-- OpenTelemetry 전파 헤더의 구체적인 이름과 구현은 이 문서에서 확정하지 않는다.
+- 애플리케이션 레벨 `X-Trace-Id` 상관관계 전파와 별개로 OpenTelemetry/W3C
+  `traceparent`·`tracestate`, 분산 span 생성·연결·export와 production trace backend·
+  collector pipeline은 구현되지 않았다.
 
 ## 15. 민감정보 처리
 
@@ -1297,9 +1324,11 @@ end-to-end 연결도 구현되었다.
 다음은 아직 사용자 결정이 필요하다.
 
 - 별도 operation scope의 External Risk 복구·재분석 명령, 운영자 권한과 감사 방식
-- External Risk 불확실 `IN_PROGRESS`와 완료 간극의 실제 수동·운영 복구 절차
+- External Risk 불확실 `IN_PROGRESS`와 failure-writer crash의 재수행 절차
 - Rule v1 분석 실패 후 재분석·수동 복구 정책. 최초 시도는 DetectionResult와
   거래를 `FAILED`로 기록하고 Client 자동 retry는 `0회`
+- 구현된 final-success completion gap 단건 one-shot을 scheduler·batch·상시 운영·
+  HA coordination·장기 metric·alert·dashboard로 확장할지 여부
 - 오류 응답의 `resource` 최종 이름과 범용 구조
 - v2 이후 응답 계약 또는 envelope codec 변경 시 새 version 식별자와 지원 registry
 - 만료 후 같은 키 재사용, 실제 보존 기간, 정리 방식과 정리 전후 동시성 정책

@@ -201,11 +201,14 @@ Rule 기반 탐지
 ### 3.5 금융권 공동 FDS에서 가져올 요소
 
 장기 목표는 의심 계좌, 위험 IP, 위험 기기와 피싱 의심 정보를 제공하는 외부
-위험정보 경계를 단계적으로 검증하는 것이다. 현재 Issue #150에서는 독립
-External Risk Port·Policy Service, local/dev/test 결정적 Mock, immutable 인메모리
-성공 Snapshot과 내부 failure category만 구현했다. 현재 Mock은 송신·수신 계좌와
-기기 scenario만 지원하며 실제 외부 HTTP Provider, IP·피싱 조회와 거래·FastAPI
-연결은 구현하지 않았다.
+위험정보 경계를 단계적으로 검증하는 것이다. Issue #150 당시에는 독립 External Risk
+Port·Policy Service, local/dev/test 결정적 Mock, immutable 인메모리 성공 Snapshot과
+내부 failure category까지 구현했다. 현재 production source에는 실제 HTTP Provider와
+public 거래 접수 연결, `/api/v2/rule-analysis` 호출, 공개 안전 오류 매핑, External Risk
+Failure Snapshot 저장·재생, 최종 성공 Snapshot v2·재생과 제한된 one-shot recovery도
+구현되어 있다. 현재 Provider와 Mock은 송신·수신 계좌와 기기 신호만 지원하며 IP·피싱
+조회, 성공 External Risk 결과의 별도 DB 영속화와 production credential·cloud 배포는
+구현하지 않았다.
 
 현재 실패 정책은 timeout·unavailable·invalid response에서 분석을 계속하지 않는
 fail-closed다. 실패는 typed exception으로 전파하며 자동 retry, cache, stale data,
@@ -807,10 +810,16 @@ Baseline과 Optimized 구조를 비교한다.
 
 ```text
 거래 요청
-→ 기본 검증
-→ Rule·ML 위험 분석
-→ 위험도 결정
-→ 거래 처리 결과 반환
+→ Validation·fingerprint
+→ Idempotency claim
+→ 거래 RECEIVED 저장
+→ External Risk HTTP 조회
+→ /api/v2/rule-analysis 호출
+→ 응답 검증
+→ Rule v1 R001~R004 결과 채택
+→ 위험 대응·사건·감사 finalization
+→ Snapshot v2 completion
+→ HTTP 201 동기 응답
 ```
 
 고객의 거래 처리 결과와 관련된 흐름은 동기로 처리한다.
@@ -1006,19 +1015,24 @@ ATM_WITHDRAWAL_REQUESTED
 - 로그·메트릭·트레이싱 기반 Observability
 - GitHub Actions 기반 CI/CD
 
-External Risk 선행 조회를 Rule v1 실행 입력에 연결하는 목표 계약은
+External Risk 선행 조회를 Rule v1 실행 입력에 연결하는 계약은
 [`External Risk·Rule 분석 입력 계약`](../01-requirements/external-risk-rule-analysis-input-contract.md)을
 따른다. FastAPI에는 기존 External Risk 없는 `POST /api/v1/rule-analysis`와 필수
 `externalRisk`를 가진 `POST /api/v2/rule-analysis`가 함께 구현되어 있다. v2 요청
 DTO와 strict External Risk wire·교차 필드 검증에 더해 Backend Java v2 exact wire
-DTO·mapper와 `/api/v2/rule-analysis` Client, 기존 v1을 유지하는 별도 내부 v2
+DTO·mapper와 `/api/v2/rule-analysis` Client, 기존 v1을 유지하는 별도 API v2
 오케스트레이션 경계가 구현됐다. Mock profile·property에서는 별도 `READ_COMMITTED`
 read 경계로 immutable command를 조립한 뒤 트랜잭션 밖 Policy를 호출하고 성공
 Snapshot을 `analyzeV2(...)`에 전달하는 내부 per-invocation coordinator도 구현됐다.
-직접 재호출·멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수 있다. 실제 Provider,
-public 거래 접수·멱등 실패 재생, 공개 오류 매핑, External Risk 영속화, Snapshot v2와
-완료 간극 운영 복구는 구현되지 않았다. 이 내부 경계는 운영 배포 또는 end-to-end
-거래 처리 완료를 의미하지 않는다.
+실제 HTTP Provider와 public 거래 접수는 이 coordinator를 통해
+`/api/v2/rule-analysis`의 Rule v1 결과 채택, 위험 대응·사건·감사 finalization,
+Snapshot v2 completion까지 동기로 연결된다. 성공 Snapshot과 External Risk Failure
+Snapshot 재생은 Provider·Rule·finalization을 다시 호출하지 않는다. 확정 가능한
+final-success completion gap의 bounded 조회·typed 판정·단건 one-shot recovery와
+append-only recovery audit도 구현됐다. 직접 재호출·멱등 경계 밖 동시 호출은
+Provider를 다시 호출할 수 있으며, 성공 External Risk 결과의 별도 DB 영속화,
+Provider 불확실 작업·failure writer crash·Rule 실패의 자동 재수행, scheduler·batch,
+retry·cache·fallback과 production credential·cloud 운영은 구현되지 않았다.
 
 - 카드 결제 FDS
 - 증권 거래 FDS
@@ -1138,7 +1152,7 @@ public 거래 접수·멱등 실패 재생, 공개 오류 매핑, External Risk 
 
 ### 20.2 백엔드
 
-> Spring Boot의 거래 멱등성과 상태 전이 경계를 구현하고 있습니다. 현재 External Risk는 독립 Port·정책 Service와 local/dev/test Mock에서 timeout·unavailable·invalid response를 typed failure로 전파하는 fail-closed 경계와 성공 Snapshot을 받는 내부 Rule v2 오케스트레이션 경계를 구현했으며 자동 retry, cache, stale data, Circuit Breaker와 fallback은 적용하지 않았습니다. 실제 Provider와 거래 접수 상위 연결은 후속 범위입니다.
+> Spring Boot의 거래 멱등성과 상태 전이 경계를 구현하고 있습니다. 현재 External Risk는 실제 HTTP Provider와 local/dev/test Mock을 public 거래 접수에 연결하고, 성공 결과를 `/api/v2/rule-analysis`의 Rule v1 평가·결과 채택·위험 대응 최종화·Snapshot v2까지 전달합니다. typed 실패는 공개 안전 오류와 Failure Snapshot으로 저장·재생하며 terminal 성공·실패 replay는 downstream을 다시 호출하지 않습니다. 확정 가능한 final-success completion gap의 단건 one-shot recovery는 구현했지만 자동 retry, cache, stale data, Circuit Breaker, fallback, 불확실 작업 재수행과 production 운영 배포는 적용하지 않았습니다.
 
 ### 20.3 AI 활용
 
@@ -1242,9 +1256,11 @@ public 거래 접수·멱등 실패 재생, 공개 오류 매핑, External Risk 
 
 ### 23.6 외부 연동과 비동기 처리 목표
 
-- 현재 독립 External Risk Port·정책 Service와 local/dev/test 결정적 Mock
-- 내부 Rule v2 오케스트레이션은 구현, 실제 외부 위험정보 HTTP Provider와 거래 접수 연결은 미구현
-- Timeout·Unavailable·Invalid Response의 현재 fail-closed 처리
+- 현재 실제 External Risk HTTP Provider·정책 Service와 local/dev/test 결정적 Mock
+- public 거래 접수에서 `/api/v2/rule-analysis`의 Rule v1 결과 채택·위험 대응 최종화·Snapshot v2까지 동기 연결
+- Timeout·Unavailable·Invalid Response의 fail-closed, 공개 안전 오류와 Failure Snapshot 저장·재생
+- 성공·Failure Snapshot replay의 downstream 재호출 방지와 final-success completion gap의 제한된 one-shot recovery
+- 성공 External Risk 결과 별도 DB 영속화와 자동 recovery·production credential·cloud 배포는 미구현
 - Redis cache·retry·Circuit Breaker·fallback은 별도 Issue·ADR 승인 후의 향후 후보
 - Kafka
 - 중복 메시지 처리

@@ -257,7 +257,7 @@ deviceRef
 
 - 최초 생성 완료 응답은 `201 Created`를 사용한다.
 - 현재 무버전 legacy Snapshot의 완료 재전송은 `200 OK`로 기존 업무 결과를 반환한다.
-- 신규 envelope 완료 재전송은 envelope에 기록되고 v1 codec이 검증한 `201 Created`를 사용한다.
+- Snapshot v1·v2 envelope 완료 재전송은 각 codec이 검증한 저장 `201 Created`를 사용한다.
 - 처리 중인 동일 멱등 요청의 재전송은 `409 Conflict`와 `IDEMPOTENCY_REQUEST_IN_PROGRESS`를 반환한다.
 - 어떤 응답이든 새 거래·탐지·사건을 중복 생성하지 않는다.
 
@@ -267,7 +267,22 @@ deviceRef
 
 거래 접수의 요청 지문, 처리 상태, 완료 응답 snapshot, Unique 범위와 만료 저장 구조는 [`../04-database/transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따른다.
 
-전환 이후 신규 완료 Snapshot은 `responseBody`, 최초 확정 `httpStatus=201`, `responseSchemaVersion=transaction-create-response-v1`, `codecVersion=transaction-intake-snapshot-envelope-v1`, `finalizedAt`을 정확히 가진 envelope로 저장한다. 현재 `responseBody`는 실제 구현된 `RECEIVED`와 네 탐지 관련 JSON null을 가진 일곱 업무 필드이다. 기존 무버전 Snapshot은 이 정확한 일곱 필드와 값 계약을 만족할 때만 strict legacy codec으로 복원하고 신규 envelope로 소급 갱신하지 않는다. 알 수 없는 구조·버전과 역직렬화 실패는 `500 INTERNAL_ERROR`로 fail-closed 처리하며 최신 상태 조회나 신규 거래 처리로 우회하지 않는다.
+현재 codec dispatcher는 legacy·Snapshot v1·Snapshot v2를 구분해 재생한다. 기존
+무버전 legacy Snapshot은 `RECEIVED`와 네 탐지 관련 JSON null을 가진 정확한 일곱
+업무 필드일 때만 strict legacy codec으로 복원하고 `200 OK`를 사용한다. Snapshot
+v1 envelope는 `responseSchemaVersion=transaction-create-response-v1`,
+`codecVersion=transaction-intake-snapshot-envelope-v1`, 저장 `httpStatus=201`과 당시
+`RECEIVED`/null body를 그대로 검증·재생한다. legacy와 v1은 소급 변환하지 않는다.
+
+신규 최종 성공은 위험 대응·사건·감사 finalization 뒤 Snapshot v2로 저장하고 HTTP
+`201 Created`를 반환한다. v2 envelope는 `responseBody`, `httpStatus=201`,
+`responseSchemaVersion=transaction-create-response-v2`,
+`codecVersion=transaction-intake-snapshot-envelope-v2`, `finalizedAt`을 정확히 가진다.
+v2 `responseBody`는 `transactionId`, 최종 `processingStatus`, `riskLevel`,
+`riskResponseOutcome`, `adoptedDetectionResultId`, nullable `caseId`, `createdAt`의 일곱
+업무 필드이며 신규 응답을 `RECEIVED`나 탐지 관련 null placeholder로 저장하지 않는다.
+알 수 없는 구조·version tuple과 역직렬화 실패는 `500 INTERNAL_ERROR`로 fail-closed
+처리하며 최신 상태 조회나 신규 거래 처리로 우회하지 않는다.
 
 거래 접수에서 `FAILED`인 같은 키·같은 지문의 요청은 자동 재실행하지 않는다. 저장된 `failureCode`는 외부 code, message 또는 HTTP 상태로 동적으로 사용하지 않고 다음 공개 whitelist만 고정 매핑한다.
 
@@ -280,8 +295,7 @@ null, 빈 값, 알 수 없는 값과 `TRANSACTION_INTAKE_FAILED` 같은 내부 �
 
 ADR-007이 확정한 여섯 External Risk typed category는 정상적으로 저장된 경우 같은
 operation scope·key에서 모두 terminal이다. 신규 typed 실패는 성공 Snapshot
-legacy·v1·v2를 재사용하지 않고 별도 strict Failure Snapshot에 공개 응답을 저장하는
-목표다.
+legacy·v1·v2를 재사용하지 않고 별도 strict Failure Snapshot에 공개 응답을 저장한다.
 같은 fingerprint 재요청은 Provider를 호출하지 않고 저장 HTTP status·공개 code·
 안전 message·빈 `fieldErrors`를 의미적으로 재생한다. category별 authoritative 공개
 매핑과 현재 구현 여부는
@@ -289,8 +303,10 @@ legacy·v1·v2를 재사용하지 않고 별도 strict Failure Snapshot에 공�
 
 신규 Failure Snapshot과 기존 code-only `FAILED`의 물리 호환성은
 [`transaction-intake-schema.md`](../04-database/transaction-intake-schema.md)를 따른다.
-현재 DB·Entity는 신규 Failure Snapshot을 저장할 수 없고 전용 codec·mapper와 신규
-Migration은 아직 구현되지 않았다.
+Flyway V8의 `idempotency_record` 제약과 현재 Entity는 typed `FAILED`의 non-null
+`response_snapshot`을 허용한다. 전용 Failure Snapshot codec·service와 public 안전
+mapper가 저장·strict decode·HTTP 재생을 구현했으며 Provider·Rule·finalization을
+다시 호출하지 않는다.
 
 다음 항목은 후속 구현 전에 추가 결정한다.
 
@@ -451,13 +467,21 @@ cached known key는 upstream 장애 중에도 검증할 수 있다. 503은 cause
 
 ## 8. `traceId` 원칙
 
-Spring Boot는 클라이언트 요청부터 External Risk Mock과 FastAPI 호출까지 하나의 업무 흐름을 추적할 수 있는 `traceId`를 관리한다.
+Spring Boot는 클라이언트 요청에서 검증·결정한 `traceId` 문자열로 External Risk 조회를 먼저 수행하고 결과가 반환된 뒤 FastAPI Rule Analysis를 별도로 호출한다. 실제 HTTP Provider와 FastAPI outbound 요청에는 `X-Trace-Id` 헤더를 설정하고, local/dev/test의 in-process Mock에는 같은 문자열을 `ExternalRiskProviderRequest.traceId` 필드로 전달하며 HTTP hop·request·header는 없다.
 
 ```text
 Client
-→ Spring Boot
-→ External Risk Mock
-→ FastAPI
+  → Spring Boot TransactionSynchronousProcessingCoordinator
+      → ExternalRiskRuleAnalysisCoordinator.lookupExternalRisk(...)
+          → ExternalRiskPolicyService → ExternalRiskLookupPort (상호 배타적 adapter 선택)
+              ├─ ExternalRiskHttpAdapter: outbound HTTP X-Trace-Id header
+              └─ ExternalRiskMockAdapter (local/dev/test, in-process):
+                 ExternalRiskProviderRequest.traceId field,
+                 HTTP hop/request/header 없음
+      ← External Risk result가 Spring Boot coordinator로 반환
+      → ExternalRiskRuleAnalysisCoordinator.analyzeWithExternalRiskSnapshot(...)
+          → RuleAnalysisOrchestrationService → RuleAnalysisHttpClient
+              → FastAPI Rule Analysis: outbound HTTP X-Trace-Id header
 ```
 
 ### 8.1 HTTP 헤더
@@ -507,7 +531,7 @@ Spring Boot는 `X-Trace-Id`가 정확히 하나의 헤더 값으로 전달되고
   않는다. 공개 `replayed` 필드는 추가하지 않는다.
 - 로그·메트릭·트레이스에 고객·계좌·IP 원문을 `traceId`와 함께 기록하지 않으며 `traceId`를 메트릭 레이블로 추가하지 않는다.
 
-OpenTelemetry, W3C Trace Context의 `traceparent`, 외부 HTTP 호출, Kafka와 비동기 작업으로의 전파, 샘플링과 보존 기간은 이 문서의 현재 구현 범위에서 제외한다.
+애플리케이션 레벨 carrier는 `ExternalRiskHttpAdapter`와 `RuleAnalysisHttpClient`의 outbound HTTP `X-Trace-Id` 헤더, in-process `ExternalRiskMockAdapter`가 받는 `ExternalRiskProviderRequest.traceId` 필드로 구분한다. Mock에는 HTTP hop·request·header가 없고, External Risk 결과가 Spring Boot로 반환된 뒤 Spring Boot가 FastAPI를 별도로 호출한다. `ExternalRiskHttpAdapter`가 production profile에서 활성화되는 source 경계라는 사실은 production credential 구성이나 cloud 배포 완료를 뜻하지 않는다. OpenTelemetry 기반 end-to-end 분산 추적, W3C Trace Context의 `traceparent`·`tracestate` 전파, span 생성·연결·export, production trace backend·collector pipeline과 cross-service span 시각화는 현재 구현 범위에서 제외한다. Kafka·비동기 작업으로의 분산 trace context 전파, 샘플링과 보존 기간도 아직 확정하지 않았다.
 
 ## 9. 사용자 결정 필요 항목
 

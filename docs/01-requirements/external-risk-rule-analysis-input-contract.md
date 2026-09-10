@@ -8,7 +8,8 @@
 `5390984333`에서 승인한 계약과 Issue #162·164·166·168의 단계별 내부 구현,
 Issue #178의 실제 Provider·public 거래 접수 최종 동기 연결 상태를 함께 기록한다.
 Rule 실행 의미와 기존 v1 경계는 유지하면서 public 단일 승자가 External Risk,
-Rule v2, 위험 대응 최종화와 성공·실패 멱등 재생을 조정한다.
+`/api/v2/rule-analysis`의 Rule v1 평가, 위험 대응 최종화와 성공·실패 멱등 재생을
+조정한다.
 
 현재 구현과 남은 운영 범위는 다음과 같이 구분한다.
 
@@ -17,7 +18,7 @@ Rule v2, 위험 대응 최종화와 성공·실패 멱등 재생을 조정한다
 | External Risk | 실제 HTTP Provider와 local/dev/test Mock, 무잠금 command read·Policy lookup, typed Failure Snapshot 저장·재생 | 운영 credential 배포와 신규 metric·dashboard |
 | Rule HTTP | v1 유지, 필수 `externalRisk`를 갖는 v2 DTO·Client·오케스트레이션과 public intake 연결 | 자동 retry·fallback·cache 없음 유지 |
 | Rule 실행 의미 | Rule v1 R001~R004·scoring·Evidence 불변 | 운영 배포 검증 |
-| 거래 접수 | 단일 승자의 `RECEIVED`·`IN_PROGRESS` commit 뒤 External Risk→Rule v2→최종화→Snapshot v2 | crash·완료 간극과 장기 `IN_PROGRESS` 운영 복구 |
+| 거래 접수 | 단일 승자의 `RECEIVED`·`IN_PROGRESS` commit 뒤 External Risk→`/api/v2/rule-analysis`의 Rule v1 결과 채택→최종화→Snapshot v2, final-success completion gap의 bounded 조회·typed 단건 one-shot recovery·append-only audit | Provider 호출 여부가 불확실한 작업과 failure-writer crash의 재수행, Rule 실패 자동 재분석, scheduler·batch·상시 운영·HA coordination·장기 completion-gap metric·alert·dashboard |
 
 `POST /api/v2/rule-analysis`는 wire schema의 새 버전이다. Rule 엔진, evaluator와
 scoring 정책을 Rule v2로 바꾸는 이름이 아니다.
@@ -304,8 +305,16 @@ Boot가 만든 upstream 요청의 결함이므로 공개 거래 API에서는 `50
 
 Failure Snapshot 저장 직전 crash, writer 실패 또는 Provider 호출 여부를 DB만으로
 확정할 수 없는 `IN_PROGRESS`에서는 External Risk 실패를 terminal로 추측하지 않고
-Provider를 자동 재호출하지 않는다. 같은 key에는 409를 반환하며 운영 복구 실행은
-후속 Issue다.
+Provider를 자동 재호출하지 않는다. 같은 key에는 409를 반환하며 이 불확실 작업의
+재수행과 failure-writer crash recovery는 구현되지 않았다.
+
+반면 위험 대응·사건·감사까지 최종 성공 상태가 확정됐지만 Snapshot v2 completion만
+끝나지 않은 `IN_PROGRESS`는 구현된 recovery가 다룬다. `IdempotencyRecoveryService`는
+임계 시각·page size로 후보를 bounded 조회하고 typed 판정을 수행하며, 제한된 non-web
+one-shot `inspect`/단건 `recover`가 확정 가능한 `RECOVERABLE_COMPLETION_GAP`에만 같은
+Snapshot v2를 생성해 `COMPLETED`로 전이한다. 단건 recovery 시도는 V9의 append-only recovery
+audit에 남는다. 이 경계는 Provider·Rule·finalization을 재수행하지 않으며 scheduler,
+batch, 상시 운영, HA coordination과 장기 metric·alert·dashboard를 제공하지 않는다.
 
 ## 11. trace·민감정보·관측
 
@@ -387,9 +396,12 @@ commit 뒤 v2 Client 호출 및 기존 완료·실패 경계 재사용을 구현
 `analyzeV2(...)` 전달을 조정하는 비트랜잭션 내부 coordinator를 구현했다. Issue
 #178에서는 실제 HTTP Provider와 Mock 경로를 public 단일 승자에 연결하고 성공
 Snapshot v2, External Risk Failure Snapshot, typed 오류 재생과 위험 대응 최종화를
-구현했다. 다음은 아직 구현되지 않았다.
+구현했다. 이후 final-success completion gap의 bounded 후보 조회·typed 판정·non-web
+단건 one-shot recovery와 append-only audit가 구현되었다. 다음은 아직 구현되지 않았다.
 
-- crash·완료 간극 운영 복구와 장기 `IN_PROGRESS` 복구
+- Provider 호출 여부가 불확실한 작업과 failure-writer crash의 재수행
+- Rule 실패 자동 재분석
+- recovery scheduler·batch·상시 운영·HA coordination과 장기 completion-gap metric·alert·dashboard
 - External Risk 영속화·Evidence·AuditLog는 이번 목표에서 제외되며 별도 승인 필요
 - retry·cache·Circuit Breaker·fallback
 - 운영 credential 배포와 신규 metric·dashboard
@@ -405,8 +417,9 @@ Provider 장애가 거래 최종 처리 실패로 노출되므로 category별 �
 
 실제 HTTP Provider와 Mock coordinator Bean 경로를 public 거래 접수의 단일
 Idempotency 승자에 연결했다. 순서는 Validation·fingerprint, coordinator 가용성,
-claim commit, 거래 `RECEIVED`·연결 commit, 트랜잭션 밖 Provider, Rule v2, 위험 대응
-최종화 commit, 별도 성공 Snapshot v2 완료 commit이다. 성공 재생과 External Risk
+claim commit, 거래 `RECEIVED`·연결 commit, 트랜잭션 밖 Provider,
+`/api/v2/rule-analysis`의 Rule v1 결과 채택, 위험 대응 최종화 commit, 별도 성공
+Snapshot v2 완료 commit이다. 성공 재생과 External Risk
 실패 재생은 Provider·FastAPI·최종화를 다시 호출하지 않는다.
 
 lookup과 Rule 단계를 명시적으로 분리하므로 command read·Provider 단계의 일반

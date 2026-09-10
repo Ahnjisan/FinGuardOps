@@ -4,10 +4,14 @@
 
 이 문서는 Spring Boot가 External Risk Provider를 조회하는 내부 HTTP 계약의 공식
 기준이다. 실제 HTTP Adapter, strict mapper, timeout·bounded body·failure classifier와
-production Provider·Policy·coordinator Bean은 구현되었다. public transaction intake
-연결, External Risk Failure Snapshot 저장 호출, 공개 오류 mapper, 위험 대응 최종화,
-Idempotency 최종 성공 writer, 완료 간극 운영 복구, 운영 credential 배포와 운영
-메트릭·대시보드는 구현되지 않았다.
+production source의 Provider·Policy·coordinator Bean은 구현되었다. public transaction
+intake의 멱등 단일 승자는 실제 HTTP Provider 또는 local/dev/test Mock을 호출하고,
+성공 결과를 `/api/v2/rule-analysis`의 Rule v1 평가·응답 검증·결과 채택과 위험
+대응·사건·감사 finalization으로 전달한 뒤 Snapshot v2를 완료해 HTTP `201`을
+반환한다. typed 실패의 Failure Snapshot 저장·재생과 공개 안전 오류 mapper, 성공
+Snapshot replay와 final-success completion gap의 제한된 one-shot recovery도 구현됐다.
+성공 External Risk 결과의 별도 DB 영속화, retry·cache·fallback, production credential
+배포, cloud deployment와 운영 dashboard·세부 metric은 구현되지 않았다.
 
 ## 2. HTTP 계약
 
@@ -90,3 +94,23 @@ credential 환경변수 예시는 `FINGUARDOPS_EXTERNAL_RISK_HTTP_API_KEY`다.
 
 credential, Authorization header, request·response body, reference는 DTO의 문자열 표현,
 로그, 예외, Snapshot에 기록하지 않는다.
+
+## 7. public 연결·재생·recovery 경계
+
+- 신규 public 거래 접수는 Validation·fingerprint, Idempotency claim, 거래 `RECEIVED`
+  저장 뒤 활성 DB 트랜잭션 없이 이 Provider를 호출한다.
+- Provider 성공 `ExternalRiskSnapshot`은 `/api/v2/rule-analysis` wire 입력으로만 전달되며
+  Rule v1 R001~R004 결과 검증·채택, 위험 대응·사건·감사 finalization과 Snapshot v2
+  completion까지 동기로 연결된다. 성공 External Risk 결과 자체의 Entity·Repository·
+  table은 없다.
+- 여섯 typed failure는 승인된 `503 DEPENDENCY_TIMEOUT|DEPENDENCY_UNAVAILABLE` 또는
+  `500 INTERNAL_ERROR`와 안전한 고정 message로 매핑하고 Failure Snapshot에 저장한다.
+  같은 key·fingerprint의 Failure Snapshot replay는 Provider·Rule·finalization을 다시
+  호출하지 않는다. 성공 Snapshot legacy·v1·v2 replay도 downstream을 다시 호출하지
+  않는다.
+- 최종 업무 성공이 확정되고 Snapshot v2 completion만 남은 단건은 bounded 후보 조회와
+  typed 판정을 거친 non-web one-shot recovery로 완료할 수 있다. 이 recovery는
+  Provider·Rule·finalization을 재수행하지 않고 append-only audit를 남긴다.
+- Provider 호출 성공 여부가 불확실한 작업, failure-writer crash와 Rule 실패의 재수행,
+  scheduler·batch·상시 운영·HA coordination, 장기 completion-gap metric·alert·dashboard는
+  구현되지 않았다.

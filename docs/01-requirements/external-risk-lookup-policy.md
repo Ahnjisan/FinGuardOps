@@ -5,14 +5,14 @@
 이 문서는 Spring Boot가 외부 위험정보 Provider를 조회할 때 사용하는 내부 Port,
 정책 Service, 결정적 Mock과 성공 Snapshot의 계약을 정의한다. 목표 Rule 입력
 연결은 [External Risk·Rule 분석 입력 계약](./external-risk-rule-analysis-input-contract.md)이
-소유한다. 현재 구현은 local/dev/test 검증용 인메모리 경계, Backend Java v2 exact
-wire DTO·mapper·HTTP Client·내부 오케스트레이션과 Mock 활성 환경의 내부
-per-invocation coordinator까지다. coordinator는 무잠금 `READ_COMMITTED` read를
-종료한 뒤 Policy를 호출하고 성공 Snapshot을 `analyzeV2(...)`에 전달한다. public
-거래 접수 API 자체와 실제 HTTP Provider 기반은 구현되어 있지만 public intake→External Risk
-coordinator·Rule v2·위험 대응 최종화·멱등 External Risk 실패 저장·재생의
-end-to-end 연결은 구현되지 않았다. 이 독립 정책은 위험 점수·등급·최종 대응 또는
-DB 영속화를 소유하지 않는다.
+소유한다. 현재 구현은 local/dev/test 검증용 인메모리 경계와 실제 HTTP Provider,
+Backend Java v2 exact wire DTO·mapper·HTTP Client·내부 오케스트레이션을 포함한다.
+public 거래 접수의 멱등 단일 승자는 무잠금 `READ_COMMITTED` read를 종료한 뒤
+Policy를 호출하고 성공 Snapshot을 `/api/v2/rule-analysis` 입력으로 전달한다. 검증된
+Rule v1 결과 채택, 위험 대응·사건·감사 finalization, Snapshot v2 completion과 성공
+replay까지 동기로 연결되며 typed External Risk 실패는 공개 안전 오류로 매핑해
+Failure Snapshot으로 저장·재생한다. 이 독립 정책은 위험 점수·등급·최종 대응 또는
+성공 External Risk 결과의 DB 영속화를 소유하지 않는다.
 
 ## 2. 구현 범위
 
@@ -25,19 +25,23 @@ DB 영속화를 소유하지 않는다.
 - production HTTP Provider→Policy→coordinator Bean과 Mock 상호 배타 fail-fast
 - 성공 결과만 표현하는 immutable 인메모리 `ExternalRiskSnapshot`
 - Timeout, unavailable, 요청·capability·응답·변환 오류의 내부 failure category
-- Mock profile·property 전용 `ExternalRiskLookupCommandReader`→Policy→Rule v2
-  내부 coordinator. 외부 호출 중 DB 트랜잭션·거래 잠금 없음
+- 실제 HTTP Provider 또는 Mock을 선택하는 `ExternalRiskLookupCommandReader`→Policy→
+  `/api/v2/rule-analysis` 내부 coordinator. 외부 호출 중 DB 트랜잭션·거래 잠금 없음
+- public 거래 접수의 단일 승자 연결과 검증된 Rule v1 결과 채택·위험 대응·사건·감사
+  finalization·Snapshot v2 completion
+- External Risk typed 실패의 공개 안전 오류 매핑, Failure Snapshot 저장과 동일 요청
+  replay. replay에서는 Provider·FastAPI·finalization을 다시 호출하지 않음
 
 다음은 구현되지 않았다.
 
-- 실제 Provider와 public intake→External Risk coordinator·Rule v2·위험 대응
-  최종화·멱등 실패 저장·재생 연결
 - External Risk 기반 점수·등급·위험 대응과 사건 처리
-- `ExternalRiskSnapshot` 영속화·감사·복구. 현재 승인된 목표가 아니며 필요해질
+- 성공 `ExternalRiskSnapshot` 자체의 영속화·감사와 그 데이터의 복구. 현재 승인된
+  목표가 아니며 필요해질
   경우 별도 Issue, DB 계약과 Migration 승인 대상
 - IP·피싱 또는 고객 단위 match 정책
-- 공개 Controller, API DTO와 HTTP 오류 매핑
+- External Risk 전용 공개 Controller와 API DTO
 - retry, fallback, cache와 Circuit Breaker
+- production credential 배포와 cloud 운영
 
 내부 coordinator는 호출당 자동 retry가 없는 per-invocation 경계다. 직접 재호출이나
 멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수 있고, 기존 거래 잠금은 Rule 분석
@@ -125,9 +129,10 @@ Entity·Repository·테이블·FK가 없다. DB, DetectionEvidence, AuditLog와 
 이 원칙은 [ADR-007](../07-decisions/ADR-007-external-risk-idempotent-failure-replay-contract.md)의
 Idempotency Failure Snapshot과 다른 책임이다. Failure Snapshot은 Provider 업무 응답
 원문이나 성공 `ExternalRiskSnapshot`을 영속하는 모델이 아니라, public 거래 접수의
-안전한 실패 응답을 동일 key에서 Provider 없이 재생하는 strict envelope다. 현재
-V1~V7과 Entity는 이 실패 envelope를 저장할 수 없으며 실제 저장에는 후속 신규
-Migration과 Java 구현이 필요하다.
+안전한 실패 응답을 동일 key에서 Provider 없이 재생하는 strict envelope다. Flyway
+V8이 `idempotency_record.response_snapshot`의 typed `FAILED` 저장 제약을 추가했고,
+`IdempotencyRecord`·Failure Snapshot codec/service·public mapper가 저장과 strict
+decode·재생을 구현한다. 이는 성공 `ExternalRiskSnapshot` 영속화를 추가한 것이 아니다.
 
 현재 독립 정책의 시각 검증은 `providerAsOf <= lookedUpAt`이다. 구현된 FastAPI v2는
 `providerAsOf <= evaluationCutoffAt <= lookedUpAt`과 기존
@@ -158,7 +163,7 @@ ADR-007은 여섯 typed category가 정상적으로 저장된 경우 같은 oper
 모두 terminal `FAILED`로 확정하고, 같은 fingerprint 재생에서는 Provider·FastAPI·
 위험 대응 최종화를 호출하지 않는다고 결정했다. 새 key는 같은 `transactionId`의 공식
 재처리 수단이 아니며 재처리는 후속 별도 operation scope로 설계한다. public intake
-연결, Failure Snapshot과 공개 mapper는 아직 구현되지 않았다. 독립 Policy나 내부
+연결, Failure Snapshot과 공개 안전 mapper는 구현되었다. 독립 Policy나 내부
 coordinator를 직접 재호출하면 여전히 Provider를 다시 호출할 수 있다.
 
 자동 retry·cache·stale data·fallback·Circuit Breaker는 도입하지 않는다. 예상하지
@@ -175,7 +180,7 @@ fail-fast gate가 다음을 확인한다.
 - `local`, `dev`, `test` 중 하나 필수
 - `finguardops.external-risk.mock.scenario` 필수
 
-`enabled`의 기본값은 `false`다. External Risk는 향후 웹 요청에서 사용하므로
+`enabled`의 기본값은 `false`다. External Risk는 public 웹 요청에서 사용하므로
 non-web 조건은 두지 않는다. Mock 비활성 상태에는 Mock Configuration, Adapter와
 Mock에 조립된 정책 Service Bean이 모두 생성되지 않는다.
 
@@ -206,7 +211,7 @@ finguardops.external-risk.mock.scenario=MATCHED_SENDER_ACCOUNT
 성공 로그는 `traceId`, `providerCode`, `lookupStatus`, `policyResult`, match 개수만
 기록한다. 실패 로그는 `traceId`와 `failureCategory`만 기록한다. `transactionId`,
 고객·계좌·기기 reference, Provider 요청·응답 원문과 전체 configuration은 기록하지
-않는다. 목표 전용 안전 mapper도 예상된 typed failure의 category와 현재 trace만
-기록하고 Provider cause 전체를 generic stack trace 로그로 보내지 않는다. 실제 HTTP
+않는다. 구현된 public 안전 mapper도 저장된 status·공개 code·안전 message와 현재
+trace만 응답에 사용하고 Provider cause·category를 공개하지 않는다. 실제 HTTP
 Adapter도 parsing cause와 body를 보존하지 않는다. 현재 Mock 정책 자체는 외부 네트워크, DB,
 FastAPI와 LLM 호출을 발생시키지 않는다.
