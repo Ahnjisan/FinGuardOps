@@ -19,21 +19,31 @@ FraudRule·RuleVersion PostgreSQL 영속 모델과 Rule v1 Evidence 저장 전
 `RuleExecutionPlanBuilder`, `RuleExecutionPlanRunner`, `PlannedRuleResult`와
 `RuleScoringCalculator`, `RuleEvidenceTransformer`와 `RuleAnalysisResult`가
 구현되어 있다. Pydantic 요청·응답 DTO와 도메인 매퍼,
-`POST /api/v1/rule-analysis`, `X-Trace-Id` 검증·전파, 1 MiB 요청 제한, 공통
-FastAPI 오류 응답과 위 실행 경로의 HTTP 연결도 구현되어 있다. 상세 HTTP와
-Spring Boot Client 계약은
+v1 wire인 `POST /api/v1/rule-analysis`, External Risk 입력을 추가한 v2 wire인
+`POST /api/v2/rule-analysis`, `X-Trace-Id` 검증·전파, 1 MiB 요청 제한, 공통
+FastAPI 오류 응답과 위 Rule v1 실행 경로의 HTTP 연결도 구현되어 있다. 상세
+HTTP와 Spring Boot Client 계약은
 [Rule v1 내부 분석 API](../03-api/rule-v1-analysis-api.md#13-spring-boot-client-연동-계약)를
-따른다. 현재 거래 접수 성공 응답은 단계적 구현 상태인 `RECEIVED`와 탐지 관련
-null 값을 반환한다.
+따른다.
+
+Spring Backend의 public 거래 접수는 External Risk 조회와 v2 Rule 분석을
+순차 호출한다. Backend가 응답을 검증하고 DetectionResult·DetectionEvidence를
+영속화·채택한 뒤 위험 대응, HIGH·CRITICAL 사건 연결과 감사 finalization을
+수행한다. 신규 성공은 최종 거래 결과를 담은 Snapshot v2를 저장하고 HTTP 201로
+반환한다. legacy raw body와 Snapshot v1은 기존 완료 건 replay 호환 경계로만
+유지하며 신규 성공을 생성하지 않는다. 성공·실패 replay가 구현되어 있고,
+최종 업무 상태 commit 뒤 멱등 completion만 남은 간극은 Backend non-web
+one-shot recovery가 엄격한 정합성 검증 후 Snapshot v2로 제한 복구한다.
 
 다음 항목은 아직 구현되지 않았다.
 
-- 거래 접수 Service에서 Rule v1 분석 오케스트레이터를 호출하는 연결
-- 최종 동기 거래 응답과 멱등 Snapshot 확정
-- 위험 대응과 장애 후 거래 복구·재처리 정책
-- 사건 생성·연결
+- Rule 실패 자동 재분석, 자동 retry와 fallback
+- scheduler·batch 기반 recovery와 임의 상태 복구
+- ML 탐지, 추가 신호의 점수 통합과 Rule v1 외 evaluator
+- AI Service endpoint 인증·인가, mTLS·gateway와 production credential·배포
 
-ADR-003에서 결정한 최종 동기 분석 목표는 유지한다. 현재 단계 응답을 최종 계약으로 간주하지 않으며, 문서 확정을 구현 완료로 표현하지 않는다.
+이 현재 구현 상태는 아래 R001~R004의 조건·점수·가중치와 실행 순서 계약을
+변경하지 않는다. API v2는 입력 wire 확장이며 evaluator version 변경이 아니다.
 
 ## 2. 적용 범위
 
@@ -853,22 +863,26 @@ Reason Code, 화면 설명, 사건 리포트와 운영 보고에서는 이 프�
 
 ## 13. 장애와 미구현 범위
 
-FastAPI Timeout·응답 부재·검증 실패 시 Spring Boot는 임의 점수, `LOW` 또는 빈 Evidence를 정상 결과로 생성하지 않는다. 실패 상태와 재시도·복구 방식은 최종 동기 처리 구현 전에 별도 승인해야 한다.
+FastAPI Timeout·응답 부재·검증 실패 시 Spring Boot는 임의 점수, `LOW` 또는 빈
+Evidence를 정상 결과로 생성하지 않는다. 확인된 Rule 실패는 DetectionResult와
+거래·멱등 실패 상태로 기록하지만 자동 retry·fallback·재분석은 수행하지 않는다.
+구현된 one-shot recovery는 final-success completion gap만 대상으로 하며 Rule
+평가를 다시 실행하거나 `RECEIVED`·`ANALYZING` 상태를 임의 복구하지 않는다.
 
 다음 항목은 Rule v1 계약 범위에 포함하지 않는다.
 
 - ML 추론과 ML 점수 통합
-- External Risk 조회와 외부 위험 점수 통합
+- External Risk를 R001~R004 evaluator 또는 Rule 점수에 반영하는 추가 신호 통합
 - 자금흐름·반복 거래·다계좌 집계 Rule
 - 고객별 금액 기준선과 기기 신뢰도 계산
 - 실제 한도 상향·상향 폭 판정
 - 행동 이벤트 접수에 따른 자동 재평가
-- 실제 거래 승인·추가 인증·보류·차단과 고객 제재
-- 사건 생성·병합·분리 정책
+- 결제망·계좌 시스템에서 실제 승인·추가 인증·보류·차단을 집행하는 기능과 고객 제재
+- 현재 HIGH·CRITICAL 사건 생성·재사용 경계를 넘는 사건 병합·분리 정책
 - 생성형 AI 리포트 구현
 - 운영 PostgreSQL·Redis·Kafka, Docker Compose, Kubernetes와 AWS 배포 환경
 
-현재 PostgreSQL 애플리케이션 연동과 Flyway V1~V5 기반 거래·멱등·행동
+현재 PostgreSQL 애플리케이션 연동과 Flyway migration 기반 거래·멱등·행동
 이벤트, DetectionResult·DetectionEvidence와 FraudRule·RuleVersion 물리
 스키마가 구현되어 있다. Rule 평가용 BehaviorEvent 내부 시간창 조회,
 Rule·Evidence typed JSON 검증, RuleVersion 기간 중복 방지,
@@ -877,16 +891,20 @@ DetectionEvidence FK·snapshot 정합성과 Evidence 시간·코드 저장 경�
 Orchestrator, 실행 plan·builder, Runner·planned result와 scoring calculator가
 구현되어 있다. Evidence Transformer와 `RuleAnalysisResult`도 구현되어 있다.
 Pydantic 요청·응답 DTO와 도메인 매퍼, FastAPI
-`POST /api/v1/rule-analysis`, Trace·요청 크기·공통 오류 응답 경계와 실행
-경로 연결도 구현되어 있다. Spring Boot Rule v1 HTTP Client, 평가 Snapshot
-구성, 실제 호출, 응답 교차 검증, DetectionResult·DetectionEvidence 자동
-생성·채택·영속화와 실패 기록도 구현되어 있다. 거래 접수 연결, 최종 멱등
-응답, 위험 대응과 전체 서비스 연동 및 운영 배포 환경은 구현되지 않았다.
-장애 후 거래 복구·재처리 정책도 아직 확정되지 않았다.
+`POST /api/v1/rule-analysis`와 `POST /api/v2/rule-analysis`, Trace·요청 크기·공통
+오류 응답 경계와 Rule v1 실행 경로 연결도 구현되어 있다. Spring Boot는 실행
+가능한 RuleVersion Snapshot과 typed 설정을 고정하고 External Risk를 포함한 v2
+요청을 호출하며, 응답을 canonical Rule v1 execution plan과 교차검증한다.
+DetectionResult·DetectionEvidence 생성·채택·영속화와 실패 기록, public 거래
+접수, 위험 대응·사건·감사 finalization, 신규 HTTP 201·Snapshot v2 completion과
+replay도 연결되어 있다. final-success completion gap에는 제한된 non-web one-shot
+recovery가 있다. 자동 retry·fallback·Rule 재분석, scheduler·batch recovery와
+운영 배포 환경은 구현되지 않았다.
 
 ## 14. 후속 구현 순서
 
-1. 현재 `RECEIVED`/null 거래 접수 응답과 최종 동기 응답 사이의 전환 정책을 정하고, 기존 멱등 `response_snapshot`의 스키마·재생 호환·만료 데이터 처리 방식을 확정한다.
+1. 과거 단계: 당시 public 거래 접수는 `RECEIVED`/null 응답을 반환했고, 최종
+   동기 응답과 기존 멱등 `response_snapshot`의 스키마·재생 호환 정책이 미결이었다.
 2. 완료(PR #143): Spring Boot가 평가 cutoff, 입력 Snapshot과 활성 Rule 집합을
    고정하고 canonical `ruleSetVersion`을 선계산한다.
 3. 완료(PR #133): [Rule v1 내부 분석 API](../03-api/rule-v1-analysis-api.md)에
@@ -895,10 +913,13 @@ Pydantic 요청·응답 DTO와 도메인 매퍼, FastAPI
 4. 완료(Issue #144): [상세 Client 계약](../03-api/rule-v1-analysis-api.md#13-spring-boot-client-연동-계약)에
    따라 Spring Boot의 FastAPI 정확히 1회 호출, 결과 변환·영속화·채택과
    장애 처리를 구현한다.
-5. ADR-003의 최종 동기 거래 처리 흐름에 위험 대응과 사건 연결을 통합하고 멱등·동시성·실패 복구를 검증한다.
+5. 완료: ADR-003의 최종 동기 거래 처리 흐름에 External Risk, Rule 결과 채택,
+   위험 대응·사건·감사 finalization과 Snapshot v2 completion을 연결했다.
 6. 경계값·복합 적중·늦은 이벤트·Timeout·성능·관측 지표 테스트와 실험을 수행한 뒤 운영 정책 후보를 재승인한다.
 
-1번의 멱등 응답 snapshot 호환 문제는 이 문서에서 해결된 것으로 간주하지 않는다. 후속 구현 전에 사용자가 결정해야 하는 과제이다.
+1번은 당시의 미결 기록이다. 현재 신규 성공은 Snapshot v2·HTTP 201을 사용하고
+legacy raw body와 Snapshot v1은 replay 호환 경계로 보존한다. 자동 만료 처리와
+scheduler·batch recovery는 여전히 후속 범위다.
 
 ## 15. 사용자가 재검증해야 하는 초기 실험값
 
