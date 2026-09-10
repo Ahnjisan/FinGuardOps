@@ -10,9 +10,12 @@ V1~V5를 수정하지 않고 `fraud_case`와 `case_transaction`을 추가하며,
 구현 범위는 사건 영속 모델, 거래 연결, 중복 연결 제약과 내부 persistence
 boundary이며, 위험 대응 최종화 경계가 이를 재사용해 신규 사건·첫 연결 또는 기존
 활성 사건을 거래 최종 상태·대응 결과·AuditLog와 같은 REQUIRED 트랜잭션에서
-확정한다. Issue #209의 상태·담당자 mutation과 Issue #211의 사건 종료를 포함하지만 기존 사건에
-다른 거래 추가, 사건 병합·분리, 거래 접수 전체 연결과 Snapshot v2는 포함하지
-않는다. AuditLog 계약은
+확정한다. 현재 public `POST /api/v1/transactions`도 Rule 결과 채택 뒤 이 finalization
+경계를 호출하고, 그 commit이 성공한 뒤 별도 transaction에서 Snapshot v2를
+완료한다. Issue #209의 상태·담당자 mutation과 Issue #211의 사건 종료를 포함하지만
+기존 사건에 다른 거래 추가와 사건 병합·분리는 포함하지 않는다. Snapshot v2의
+저장·codec 책임은 이 문서가 아니라 `idempotency_record.response_snapshot` 계약에
+있다. AuditLog 계약은
 [`audit-log-schema.md`](audit-log-schema.md)를 따른다.
 
 ## 2. 관계와 식별자
@@ -93,11 +96,62 @@ resolution은 일반 조회로 사건을 가져와 `expectedVersion`을 먼저 �
 않는다. 사건 생성·연결, 거래 최종화, 감사 중 어느 단계라도 실패하면 모두
 rollback한다.
 
-## 7. 미구현 경계
+## 7. Public 거래 finalization과 recovery 경계
 
-- 기존 사건에 추가 거래 연결
-- 사건 병합·분리
-- 거래 접수 전체 오케스트레이션과 Snapshot v2
+채택된 DetectionResult의 risk별 현재 finalization 결과는 다음과 같다.
+
+| Risk | 거래 최종 `processing_status` | `risk_response_outcome` | `CaseTransaction` 관계 |
+| --- | --- | --- | --- |
+| `LOW` | `APPROVED` | `APPROVED` | 0개 |
+| `MEDIUM` | `APPROVED` | `APPROVED_WITH_MONITORING` | 0개 |
+| `HIGH` | `ADDITIONAL_AUTH_REQUIRED` | `ADDITIONAL_AUTH_REQUIRED` | 정확히 1개 |
+| `CRITICAL` | `HELD` | `HELD` | 정확히 1개 |
+
+HIGH/CRITICAL finalization은 해당 transaction에 활성 사건 관계가 없으면 `OPEN`
+FraudCase와 첫 CaseTransaction을 생성하고, 이미 같은 transaction에 정확히 하나의
+활성 사건 관계가 있으면 그 관계만 재사용한다. 다른 기존 사건에 새 거래를 추가하는
+일반 기능은 구현하지 않았다. 여러 활성 관계를 임의 선택하지 않으며 사건 생성·관계,
+거래 최종 상태·outcome과 finalization AuditLog는 같은 `REQUIRED` transaction에서 함께
+commit하거나 rollback한다. LOW/MEDIUM은 사건 Service를 호출하지 않는다.
+
+one-shot recovery는 모든 CaseTransaction 관계를 transaction PK로 조회해 LOW/MEDIUM은
+0개, HIGH/CRITICAL은 정확히 1개인지 확인한다. 정확히 한 관계인 경우
+`CaseTransaction.belongsTo(fraudCase, transaction)`로 같은 FraudCase와 transaction을
+연결하는지도 확인한다. 누락·복수·LOW/MEDIUM의 허용되지 않은 관계와 소유 불일치는
+`INCONSISTENT_CASE_RELATIONSHIP`으로 거부한다.
+
+recovery는 FraudCase의 `case_status`, 담당자, `final_disposition`, InvestigationNote
+내용이나 사건 lifecycle 의미 전체를 검사하지 않는다. 특히 현재 source는 recovery
+시 FraudCase 상태가 active인지 확인하지 않는다.
+
+finalization 감사 검사는 `audit_log`에서 해당 transaction ID와 두 transaction action을
+조회한 결과에 한정한다.
+
+- 전체 로그가 정확히 2개이며 `TRANSACTION_RISK_RESPONSE_APPLIED`와
+  `TRANSACTION_STATUS_CHANGED`가 각각 정확히 1개
+- 두 로그 모두 `target_type=FINANCIAL_TRANSACTION`, `target_id`와 `transaction_id`가
+  대상 transaction ID, `case_id=null`
+- risk action은 reason `RISK_RESPONSE_DECIDED_BY_POLICY`, before summary null,
+  after summary의 exact `riskResponseOutcome`가 현재 outcome과 일치
+- status action은 reason `TRANSACTION_FINALIZED_BY_RISK_POLICY`, before summary의 exact
+  `processingStatus=ANALYZED`, after summary의 exact 상태가 현재 최종 상태와 일치
+- 두 metadata 모두 exact `sourceRiskLevel`, `detectionResultId`,
+  `detectionResultVersion` field와 현재 값을 사용
+
+recovery는 이 검사에서 `audit_id`, actor, `trace_id`, `changed_at`을 비교하지 않으며
+CASE_CREATED·CASE_TRANSACTION_LINKED 같은 사건 action의 존재·내용도 다시 검사하지
+않는다.
+
+일반 `audit_log`는 transaction/case 업무 상태 변경, finalization과
+InvestigationNote 관련 감사를 저장한다. V7의 DB trigger가 UPDATE·DELETE를 거부한다.
+반면 `idempotency_recovery_audit_log`는 inspect가 아니라 실제 단건 `recover`의
+성공·거부·내부 실패 판정 결과를 업무 감사와 분리해 저장한다. recovery audit의
+append-only는 `@Immutable`, lifecycle mutation 거부와 insert-only Repository인
+application 경계이며 V9에는 UPDATE·DELETE 거부 DB trigger가 없다. V9의 CHECK·Unique·
+index 책임을 DB trigger 보장으로 확대하지 않는다.
+
+계속 미구현인 사건 범위는 기존 사건에 다른 거래 추가, 사건 병합·분리다. Snapshot
+v2 one-shot recovery는 구현되어 있지만 이 문서는 Snapshot 자체를 저장하지 않는다.
 
 ## 8. 조회 경계
 
@@ -111,8 +165,9 @@ Entity collection 추가와 전체 연관 거래 로딩은 사용하지 않는�
 정확한 필터·응답·오류 계약은
 [`../03-api/case-audit-api.md`](../03-api/case-audit-api.md)를 따른다.
 
-내부 위험 대응·사건·감사 최종화는 구현되었지만, 이를 사건 업무 전체나 공개 거래
-처리 완료로 간주하지 않는다.
+위험 대응·사건·감사 finalization은 public 거래 처리에 연결되었다. 다만 finalization
+commit만으로 HTTP 성공이 확정되는 것은 아니며 별도 Snapshot v2 completion이 성공해야
+신규 `201 Created`를 반환한다. 사건 조사 lifecycle 전체가 자동 완료되는 것도 아니다.
 
 ## 9. 조사 mutation 동시성
 
@@ -136,8 +191,11 @@ Flyway V13은 내부 `BIGINT identity` PK와 외부 UUID v4 `note_id`, `fraud_ca
 FK(`ON DELETE RESTRICT`), `TEXT content`,
 `TIMESTAMPTZ(6) created_at`을 추가한다. `content`는 DB `char_length` 1..4,000,
 Unicode whitespace-only 및 CR/LF 이외 제어문자 방어 CHECK를 적용한다.
-V14는 `SYSTEM/finguardops-backend`와 `USER/canonical lowercase UUID v4` 작성자 조합만
-허용하며 SQL NULL·문자열 null·교차 조합·비정규 UUID를 거부한다. 기존 행은 재작성하지 않는다.
+V13 당시 note author와 `CASE_NOTE_CREATED` audit actor는
+`SYSTEM/finguardops-backend` 조합만 허용했다. V14가 두 CHECK를 교체해 기존 SYSTEM
+조합을 유지하면서 `USER/canonical lowercase RFC 4122 UUID v4` note author와 audit
+actor를 허용한다. SQL NULL·문자열 null·교차 조합·비정규 UUID는 거부하고 기존 행은
+재작성하지 않는다.
 
 `ix_investigation_note_case_created(fraud_case_id, created_at, id)`는 asc·desc Page와
 같은 시각의 내부 tie-breaker를 지원한다. 내부 `id`는 API에 노출하지 않는다.
@@ -148,3 +206,28 @@ UPDATE·DELETE를 거부한다. `FraudCase`에는 note collection을 추가하�
 먼저 flush한 뒤 note와 AuditLog를 flush한다. 감사 실패를 포함한 어느 단계의 실패도
 부모 version·시각·note·감사를 모두 rollback한다. API 계약은
 [`../03-api/case-audit-api.md#11-조사-메모-생성`](../03-api/case-audit-api.md#11-조사-메모-생성)을 따른다.
+
+## 11. Flyway V1~V14 책임 경계
+
+세 DB 상세 문서에서 참조하는 migration 계보는 다음과 같이 귀속한다.
+
+| Version | 실제 책임 |
+| --- | --- |
+| V1 | `financial_transaction`, `idempotency_record`, `response_snapshot`과 기본 제약·index |
+| V2 | `behavior_event` |
+| V3 | DetectionResult/Evidence와 거래 채택·risk 컬럼, 관련 제약·trigger |
+| V4 | behavior-event Rule 조회 index |
+| V5 | FraudRule·RuleVersion과 Evidence의 nullable RuleVersion FK·snapshot 검증 |
+| V6 | `fraud_case`, `case_transaction`과 관계·index |
+| V7 | 일반 `audit_log`, finalization 감사 제약·index와 DB append-only trigger |
+| V8 | `idempotency_record`의 FAILED 상태 CHECK를 typed External Risk Failure Snapshot 허용 형태로 교체 |
+| V9 | `idempotency_recovery_audit_log`와 recovery audit/candidate index. recovery audit DB append-only trigger는 없음 |
+| V10 | 사건 무필터 변경 시각 조회 index |
+| V11 | 일반 AuditLog의 사건 상태·담당자 workflow action/reason/summary 제약 확장 |
+| V12 | 일반 AuditLog의 사건 resolution action/reason/summary 제약 확장 |
+| V13 | InvestigationNote table·index·append-only trigger와 note 감사 schema. 당시 author/actor는 SYSTEM-only |
+| V14 | 기존 SYSTEM 조합을 유지하며 note USER author와 USER audit actor CHECK 허용 확장 |
+
+후속 version이 선행 migration 파일을 소급 수정한 것으로 해석하지 않는다. 특히 V9의
+recovery 감사와 V7의 일반 업무 감사, V13의 SYSTEM-only 도입과 V14의 USER 확장을
+각각 분리한다.
