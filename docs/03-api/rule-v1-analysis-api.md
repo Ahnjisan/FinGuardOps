@@ -16,6 +16,10 @@ Spring Boot
 → Spring Boot 결과 검증·채택·영속화
 ```
 
+이 문서에서 API v1/v2는 wire schema version, Rule v1은 R001~R004 evaluator와
+execution-plan 계약, RuleVersion은 DB rule metadata·identity·version, Snapshot
+v1/v2는 Spring Backend idempotency response JSON envelope version을 뜻한다.
+
 현재 AI Service에는 RuleVersion Snapshot, ExecutionPlan Builder,
 Orchestrator, Runner, R001~R004 evaluator, `RuleScoringCalculator`,
 `RuleEvidenceTransformer`와 `RuleAnalysisResult`까지의 순수 내부 경로가
@@ -25,11 +29,14 @@ Handler도 구현되어 있다. Spring Boot `RuleAnalysisHttpClient`, Timeout·T
 전달, 성공·오류 응답 검증과 transport·응답 오류 분류도 구현되어 있다.
 거래·행동 이벤트·RuleVersion Snapshot, DetectionResult 시작 commit,
 FastAPI 정확히 1회 호출, 응답의 Evidence 변환, 결과 완료·채택과 실패 기록을
-연결하는 Spring Boot 오케스트레이션도 구현되어 있다. 거래 접수와 최종 멱등
-응답 연결은 아직 구현되지 않았으므로 전체 서비스 연동 완료로 해석하지 않는다.
-최종 거래 성공, Snapshot v2와 완료 간극 복구는
+연결하는 Spring Boot 오케스트레이션도 구현되어 있다. public 거래 접수는
+External Risk 조회, v2 Client 호출, response validation, DetectionResult 채택,
+위험 대응·사건·감사 finalization, 신규 성공 HTTP 201과 Snapshot v2 completion까지
+연결한다. 성공과 실패의 멱등 replay 및 final-success completion gap을 엄격히
+검증하는 제한된 non-web one-shot recovery도 구현되어 있다. 이 finalization,
+Snapshot과 recovery 경계는
 [`ADR-006`](../07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md)을
-따르며 이 내부 Rule 분석 API의 책임이 아니다.
+따르는 Spring Backend 책임이며 FastAPI의 책임이 아니다.
 
 이 API는 외부 사용자 API가 아니라 Private Network 안에서 사용하는
 Spring Boot → FastAPI 내부 서비스 API다. 인증·인가는 아직 구현되지 않았으며
@@ -274,8 +281,11 @@ v2는 External Risk를 검증하지만 R001~R004 evaluator에는 전달하지 �
 External Risk echo와 전용 hash를 응답에 추가하지 않는다. Python v2 DTO·검증과
 FastAPI Endpoint, Backend Java v2 exact wire DTO·mapper와 직접 Client 경계가
 구현됐다. 별도 내부 `analyzeV2(...)`와 잠긴 시작 트랜잭션의 Snapshot 조립·mapper
-경계, Mock Policy 성공 Snapshot을 전달하는 per-invocation coordinator도 구현됐다.
-실제 Provider와 public 거래 접수·멱등 실패 재생은 아직 구현되지 않았다.
+경계, External Risk Policy 성공 Snapshot을 전달하는 per-invocation coordinator도
+구현됐다. HTTP Provider 구성과 local/dev/test Mock 구성은 각각의 조건에서 이
+coordinator를 제공하며, public 거래 접수는 External Risk 조회와 v2 Rule 분석을
+호출한다. External Risk typed 실패 Snapshot과 code-only Rule 실패, 완료 성공의
+멱등 replay도 Spring Backend에 구현되어 있다.
 
 v2의 JSON 타입·필수·null·Enum·UTC 형식·unknown field 오류는
 `400 INVALID_REQUEST`, match 조합·개수·canonical 순서와 시간 관계 오류는
@@ -742,10 +752,11 @@ Client는 Rule 적중 여부, scoring 또는 Evidence를 Java에서 다시 계�
   신규 `analyzeV2(...)`는 고정값 `/api/v2/rule-analysis`를 호출한다. 두 메서드는
   하나의 공통 private HTTP exchange 경계를 재사용하며 자동 endpoint 협상·전환은
   없다.
-- Mock 활성 환경의 내부 coordinator는 `READ_COMMITTED` read 종료 뒤 Policy 성공
-  Snapshot으로 v2 메서드를 호출한다. 실제 External Risk Provider와 public 거래 접수·
-  멱등 실패 재생은 미구현이며, 구현된 내부 경계는 운영 배포나 end-to-end 거래 처리
-  완료를 의미하지 않는다.
+- Mock 또는 HTTP Provider가 활성화된 환경의 coordinator는 read 종료 뒤 Policy
+  성공 Snapshot으로 v2 메서드를 호출한다. public 거래 접수는 이 coordinator를
+  통해 External Risk와 Rule 분석을 호출하고, 멱등 경계는 성공·typed External
+  Risk 실패·code-only Rule 실패를 재생한다. 이는 production credential·cloud
+  deployment 또는 endpoint 인증 구현을 의미하지 않는다.
 - 하나의 Client 호출은 하나의 HTTP 요청만 수행한다.
 
 ### 13.3 설정 계약
@@ -907,6 +918,7 @@ Spring Boot가 만든 요청·Rule·배포 capability나 upstream 응답 계약�
 11. 이 계약 밖의 상위 거래 처리 흐름이 위험 대응, 최종 거래 상태 전이와
     HIGH·CRITICAL의 사건 생성 또는 기존 사건 연결을 수행하고 commit한다.
 12. 모든 최종 업무 commit 이후에만 ADR-006의 Snapshot v2를 확정한다.
+13. 신규 성공은 Snapshot v2의 최종 응답으로 HTTP 201을 반환한다.
 
 mapper가 실패하면 시작 트랜잭션 전체를 rollback해 거래 `RECEIVED`,
 DetectionResult·Evidence 0건을 유지하고 HTTP Client와 `failAnalysis()`를 호출하지
@@ -915,15 +927,30 @@ DetectionResult·Evidence 0건을 유지하고 HTTP Client와 `failAnalysis()`�
 Rule 분석 HTTP 오케스트레이터는 External Risk 조회·정책, 위험 대응, 사건 또는
 Snapshot v2를 소유하지 않는다.
 
-현재 FastAPI v1 `RuleAnalysisRequest`에는 External Risk 입력이 없다. Issue #150은
-Spring Boot 내부의 독립 Port·Policy Service·local/dev/test Mock·인메모리 성공
-Snapshot만 구현했으며 FastAPI·Python·`RuleAnalysisRequest`를 변경하지 않았다.
+완료 성공 replay는 저장된 legacy raw body, Snapshot v1 또는 Snapshot v2를 codec
+version에 따라 해석하고 저장된 HTTP 200/201 경계를 보존한다. 신규 성공 생성은
+Snapshot v2·HTTP 201만 사용한다. External Risk typed 실패는 별도 failure Snapshot,
+확정 Rule 실패는 code-only 실패로 재생하며 어느 경우에도 Provider나 Rule API를
+다시 호출하지 않는다. 제한된 one-shot recovery는 멱등 레코드, 최종 거래 상태와
+위험 대응 조합, 채택된 DetectionResult, 조회된 Evidence의 해당 DetectionResult
+소유 관계, 사건 관계와 finalization 감사 등 구현된 조건이 일치하는 final-success
+completion gap만 Provider·Rule API·finalization을 재호출하지 않고 Snapshot v2로
+복구한다. Evidence에 대해서는 소유 관계만 확인하며, 완전성·예상 개수·matched Rule
+집합·Rule ID·RuleVersion·reason·contribution·순서·observation 내용의 의미
+무결성을 다시 검증하지 않는다. `RECEIVED`·`ANALYZING`·`ANALYZED` 상태, Rule 실패 또는
+불일치 상태는 재분석·fallback으로 보정하지 않는다. scheduler·batch recovery는
+구현되어 있지 않다.
+
+다음은 각 Issue 당시의 구현 단계 기록이다. FastAPI v1 `RuleAnalysisRequest`에는
+현재도 External Risk 입력이 없으며, Issue #150 당시에는 Spring Boot 내부의 독립
+Port·Policy Service·local/dev/test Mock·인메모리 성공 Snapshot만 구현했고
+FastAPI·Python·`RuleAnalysisRequest`를 변경하지 않았다.
 Issue #160에서 승인한 v2 입력 계약에 따라 Issue #162에서 Python DTO·검증과
 FastAPI Endpoint를 구현했고 Issue #164에서 Backend Java v2 exact wire DTO·mapper와
 직접 Client 경계를 구현했다. Issue #166에서 별도 내부 v2 오케스트레이션 경계를
 구현했고 Issue #168에서 Mock Policy 성공 Snapshot을 전달하는 비트랜잭션 내부
-coordinator를 구현했다. 직접 재호출·멱등 경계 밖 동시 호출은 Provider를 다시 호출할
-수 있으며 실제 Provider와 public 거래 접수·멱등 실패 재생은 후속 Issue다.
+coordinator를 구현했다. 그 당시 실제 Provider와 public 거래 접수·멱등 실패 재생은
+후속 Issue였으며, 이후 구현된 현재 상태는 위 13.7절을 따른다.
 
 ### 13.8 로그와 정보 보호
 
@@ -948,7 +975,7 @@ Client 로그는 다음 최소 항목만 기록할 수 있다.
 stack trace와 내부 예외 상세는 외부 응답에 노출하지 않는다. 내부 진단 로그가
 필요해도 위 민감정보와 HTTP 원문을 포함하지 않는다.
 
-### 13.9 Java Client 테스트 상태와 후속 오케스트레이션 검증
+### 13.9 Java Client와 상위 오케스트레이션 테스트 상태
 
 현재 Java Client와 v1·v2 오케스트레이션 단위·통합 테스트는 정상 요청,
 all-unmatched 성공, 엄격한 Trace·wire·업무 응답 검증, Client category 분류,
@@ -975,18 +1002,20 @@ connect·response timeout, 자동 retry 0회, 트랜잭션 밖 HTTP 호출과 �
 - v2 시작 commit 뒤 활성 트랜잭션 없이 `analyzeV2(...)`가 정확히 1회 호출됨
 - v1/v2 동시 시작에서 기존 거래 우선 잠금과 단일 승자 계약이 유지됨
 - v2 사후 실패에서 원본 예외·Client category·suppressed recording failure가 유지됨
+- public 신규 성공이 v2 Rule 결과를 채택·finalization하고 Snapshot v2·HTTP 201로 완료됨
+- 완료 성공과 External Risk·Rule 실패 replay가 downstream 호출을 반복하지 않음
+- final-success completion gap만 one-shot recovery하고 비최종·불일치 상태는 거부함
 
 ## 14. 현재 구현 이후 제외 범위
 
-- 거래 접수 Service에서 Rule v1 오케스트레이터를 호출하는 연결
-- 실제 Provider와 public 거래 접수를 내부 coordinator에 연결하는 경로
-- 멱등 External Risk 실패 저장·재생
-- 거래 접수에서 구현된 위험 대응·최종 거래 상태·사건·AuditLog 원자적 최종화
-  경계를 호출하는 연결
-- 최종 동기 응답과 Snapshot v2 확정
-- Snapshot 완료 간극 운영 복구
-- RuleVersion publish·운영 준비와 별도 동기화·캐시·배포 산출물
-- 인증·인가, CORS와 네트워크 보안 구현
-- 선택적 Gateway 요청 본문 조기 차단 구현
-- ML과 생성형 AI 연동
-- DB 스키마와 Migration 변경
+- AI Service endpoint 인증·인가와 production service credential
+- mTLS, API gateway, NetworkPolicy와 선택적 Gateway 요청 본문 조기 차단
+- 자동 retry, circuit breaker와 fallback
+- Rule 실패 자동 재분석과 임의 상태 복구
+- scheduler·batch recovery
+- 별도 execution wrapper와 `executionId`
+- DB 기반 arbitrary `execution_order` 운영 변경
+- RuleVersion entity·기본 Rule 집합 게시를 넘는 범용 production publish 운영
+- FastAPI production 세부 metrics와 OpenTelemetry/W3C 분산 tracing 확장
+- Redis·Kafka, ML·LLM과 AI report 연동
+- production/cloud deployment와 HA

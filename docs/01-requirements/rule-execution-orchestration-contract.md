@@ -17,11 +17,14 @@
 - `RuleExecutionPlanRunner` 이후 `RuleScoringCalculator`: 구현됨
 - Evidence 변환과 Rule 분석 결과 조합: 구현됨
 - Pydantic 요청·응답 DTO와 도메인 매퍼, FastAPI
-  `POST /api/v1/rule-analysis`, Trace·1 MiB 요청 제한·공통 오류 경계와 기존 실행
-  경로 연결: 구현됨
-- Spring Boot Rule v1 HTTP Client: 구현됨
-- Spring Boot 내부 Rule v1 분석 HTTP 오케스트레이션: 구현됨
-- Spring Boot 거래 접수와 최종 응답을 포함한 전체 서비스 연동: 미구현
+  `POST /api/v1/rule-analysis`와 `POST /api/v2/rule-analysis`, Trace·1 MiB 요청
+  제한·공통 오류 경계와 Rule v1 실행 경로 연결: 구현됨
+- Spring Boot RuleVersion snapshot·typed execution-setting 호환성 검증과 Rule v1
+  registry: 구현됨
+- Spring Boot v1/v2 HTTP Client·response validator와 내부 분석 오케스트레이션:
+  구현됨
+- DetectionResult 영속화·채택과 public 거래 접수 상위 연결: 구현됨
+- 위험 대응·사건·감사 finalization, Snapshot v2 completion과 HTTP 201: 구현됨
 
 현재 구현된 evaluator와 Registry의 기준은
 [`ai-service/src/finguardops_ai/rules/v1/`](../../ai-service/src/finguardops_ai/rules/v1/)에
@@ -31,7 +34,8 @@
 
 Spring Boot의 거래 접수, Snapshot 고정, 외부 호출, 결과 영속·채택 경계는
 [Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](./spring-rule-analysis-orchestration-contract.md)이
-소유한다. 이 문서는 FastAPI 내부 evaluator 실행 계약으로만 유지한다.
+소유한다. 이 문서는 FastAPI 내부 evaluator 실행 계약으로 유지하며, 다른
+계층의 구현 상태를 이 컴포넌트의 직접 책임으로 확대하지 않는다.
 
 ## 2. 주요 용어와 책임 계층
 
@@ -299,38 +303,51 @@ Registry가 특정 요청 ID에 callable을 연결했다는 사실만으로 반�
 추가하지 않는다. downstream 계층도 raw 결과의 순서나 `rule_id`를 근거 없이
 변경해서는 안 된다.
 
-## 11. RuleVersion 실행 계획 계약과 연결 경계
+## 11. RuleVersion 실행 계획 계약과 시스템 연결 경계
 
-현재 내부 계약과 공식 시스템 계약 사이에는 다음 연결 경계가 남아 있다.
+현재 Registry의 `RuleId`는 내부 evaluator capability ID이고 DB `ruleCode`,
+RuleVersion identity 또는 API version과 같은 개념이 아니다. 현재
+`RuleEvaluationInput`과 raw `RuleEvaluationResult`에도 RuleVersion ID, 버전 번호,
+실행 조건과 weight를 복제하지 않는다. 이 하위 오케스트레이터만으로 고정된
+RuleVersion 집합의 선택·전달·영속화를 표현하지 않으며, 선행 Builder와 후속
+Spring Backend 계층이 각각 해당 책임을 가진다.
 
-- 현재 Registry의 `RuleId`는 내부 evaluator capability ID다.
-- [공식 Rule v1 문서](./rule-v1-detection-contract.md)는 `ruleCode`를 evaluator
-  선택자로 표현한다.
-- 현재 `RuleEvaluationInput`과 `RuleEvaluationResult`에는 RuleVersion ID,
-  버전 번호, 실행 조건과 weight가 없다.
-- 따라서 현재 오케스트레이터만으로 "고정된 활성 RuleVersion 집합 실행" 전체를
-  표현할 수 없다.
-- [FraudRule·RuleVersion DB 계약](../04-database/fraud-rule-version-schema.md)의
-  초기 RuleVersion seed는 모두 DRAFT다. 오케스트레이터는 이 상태를 정상적인
-  빈 실행으로 해석하지 않는다.
-- 내부 fail-fast·무재시도 정책은 상위 시스템의 거래 복구 및 재호출 정책을
-  결정하지 않는다.
+구현된 public 거래 성공 흐름은 다음 책임 순서를 따른다.
 
-`ruleCode → RuleId` 연결, 활성 RuleVersion snapshot, dependency, 설정
-호환성과 결정적 실행 순서는
+1. Spring Backend가 거래 cutoff에 실행 가능한 RuleVersion snapshot을 고정한다.
+2. Spring Backend와 FastAPI가 conditionDefinition을 Rule별 typed execution
+   settings로 검증한다.
+3. Spring Backend가 External Risk Snapshot을 포함한 API v2 request를 구성한다.
+4. Spring Backend v2 Client가 `POST /api/v2/rule-analysis`를 정확히 한 번 호출한다.
+5. FastAPI가 canonical Rule v1 execution plan으로 R001~R004 evaluator를 실행해
+   Rule Analysis response를 반환한다.
+6. Spring Backend response validator가 요청 snapshot, execution plan, 점수와
+   Evidence 정합성을 검증한다.
+7. Spring Backend가 DetectionResult·DetectionEvidence를 영속화하고 결과를
+   거래에 채택한다.
+8. Spring Backend가 위험 대응, HIGH·CRITICAL 사건 연결과 감사 finalization을
+   수행한다.
+9. Spring Backend idempotency boundary가 신규 성공 Snapshot v2를 completion한다.
+10. public transaction endpoint가 신규 성공을 HTTP 201로 반환한다.
+
+여기서 API v2는 External Risk 입력을 추가한 wire schema이고, evaluator와
+execution plan은 계속 Rule v1 R001~R004다. DB의 RuleVersion과 멱등 응답 envelope인
+Snapshot v2도 각각 별도의 version 축이다.
+
+`ruleCode → RuleId` 연결, RuleVersion snapshot, dependency, 설정 호환성과 결정적
+실행 순서는
 [RuleVersion 기반 Rule 실행 계획 내부 계약](./rule-execution-plan-contract.md)에
-정의되어 있다. 현재 Python에는 불변 `RuleExecutionPlan`,
+정의되어 있다. FastAPI에는 불변 `RuleExecutionPlan`,
 `RuleExecutionPlanItem`, 순수 `RuleExecutionPlanBuilder`, plan 실행·결합을
-담당하는 `RuleExecutionPlanRunner`, `PlannedRuleResult`와 별도 downstream
+담당하는 `RuleExecutionPlanRunner`, `PlannedRuleResult`와 downstream
 `RuleScoringCalculator`, `RuleEvidenceTransformer`와 `RuleAnalysisResult`가
-구현되어 있다. Pydantic 요청·응답 DTO와 도메인 매퍼, FastAPI 분석 Endpoint,
-HTTP 오류·Trace 경계와 Spring Boot Client도 구현되어 있다. 평가 Snapshot의
-실제 조합·전달, 거래 상태 전이, 결과 영속·채택 오케스트레이션과 전체 서비스
-연동은 아직 구현되지 않았다. 상세 Client 계약은
+구현되어 있다. Pydantic 요청·응답 DTO, v1/v2 Endpoint, HTTP 오류·Trace 경계도
+구현되어 있다. Spring Backend는 별도 Client·validator·persistence·transaction
+계층으로 위 public 흐름을 연결한다. 상세 Client 계약은
 [Rule v1 내부 분석 API](../03-api/rule-v1-analysis-api.md#13-spring-boot-client-연동-계약)를
 따르고, Spring Boot 처리 경계는
 [Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](./spring-rule-analysis-orchestration-contract.md)을
-따른다. 실행 계획의 weight는 오케스트레이터에서 snapshot 정보로만 보존하며
+따른다. 실행 계획의 weight는 선행 plan item의 snapshot 정보로 보존하며
 이 오케스트레이터 자체는 weight를 적용하거나 scoring하지 않는다. downstream 구현은
 [ADR-005](../07-decisions/ADR-005-fraud-rule-version-model.md)의 RuleVersion
 불변성과 Spring Boot·PostgreSQL 데이터 소유권을 유지해야 한다.
@@ -356,9 +373,11 @@ DB·ADR 계약을 변경하지 않는다.
 - Evidence, `observationSummary`와 reasonCode 변환
 - DetectionResult 검증·저장·채택 구현
 - FastAPI 내부 HTTP Endpoint와 Spring Boot 연동
+- AI Service endpoint 인증·인가와 mTLS·gateway
 - retry, fallback과 병렬 실행
+- Rule 실패 자동 재분석과 scheduler·batch recovery
 - 로그·메트릭 저장
-- Redis, Kafka, ML과 LLM 연동
+- Redis, event/Kafka orchestration, ML과 LLM 연동
 - 신규 외부 의존성
 - 공식 Rule v1, DB와 ADR 계약 변경
 

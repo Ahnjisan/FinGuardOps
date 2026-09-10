@@ -34,24 +34,30 @@ Spring Boot의 활성 RuleVersion 업무 snapshot
   `RuleExecutionPlanBuilder`: 구현됨
 - `RuleExecutionPlanRunner` 실행·결합 계약과 Python 구현: 구현됨
 - `PlannedRuleResult` 계약과 Python 구현: 구현됨
-- 활성 RuleVersion 전체 조회·업무 snapshot 생성: 미구현
-- RuleVersion 설정 전달과 typed evaluator settings: 미구현
-- Spring Boot·FastAPI 실제 연동: 미구현
+- 실행 가능한 활성 RuleVersion 조회·업무 snapshot 생성: Spring Boot 구현됨
+- RuleVersion 설정 전달과 typed execution-setting parsing·호환성 검증:
+  Spring Boot·FastAPI 구현됨
+- canonical Rule v1 execution registry와 양측 execution-plan 교차 검증: 구현됨
+- Spring Boot·FastAPI v1/v2 실제 연동: 구현됨
 - `RuleScoringCalculator`와 점수·위험 등급 계산: 구현됨
 - Evidence Transformer와 `RuleAnalysisResult`: 구현됨
 - Pydantic 요청·응답 DTO와 도메인 매퍼, FastAPI
-  `POST /api/v1/rule-analysis`, Trace·1 MiB 요청 제한·공통 오류 경계와 실행 경로
-  연결: 구현됨
-- DetectionResult 처리: 미구현 후속 범위
+  `POST /api/v1/rule-analysis`와 `POST /api/v2/rule-analysis`, Trace·1 MiB 요청
+  제한·공통 오류 경계와 Rule v1 실행 경로 연결: 구현됨
+- DetectionResult·DetectionEvidence 영속화와 결과 채택: Spring Boot 구현됨
+- public 거래 접수의 External Risk → v2 Rule 분석 연결: Spring Boot 구현됨
 
-현재 순수 Builder 구현은 전달받은 RuleVersion snapshot을 plan으로 변환하고,
-Runner는 plan을 기존 Orchestrator로 실행해 ordered raw result와 strict index로
-결합한다. 구현된 `RuleScoringCalculator`는 정상 결합 결과를
-`scoring-policy-v1`에 따라 점수로 계산한다. 이 순수 실행·scoring 경로가
-구현되었고 후속 Evidence 변환과 Rule 분석 결과 조합도 구현되어 있다. 이 순수
-내부 경로와 FastAPI HTTP 경계가 구현되었다는 사실은 Spring Boot Client,
-평가 Snapshot의 실제 전달, 응답 교차 검증과 전체 서비스 연동이 구현되었다는
-뜻이 아니다. 상세 Client 계약은
+현재 Spring Boot는 거래 cutoff에 실행 가능한 RuleVersion을 조회해 snapshot과
+canonical Rule v1 실행 순서를 고정하고, conditionDefinition을 Rule별 typed
+설정으로 검증한다. FastAPI Builder도 전달받은 RuleVersion snapshot을 typed
+설정의 immutable plan으로 변환하고, Runner는 plan을 기존 Orchestrator로 실행해
+ordered raw result와 strict index로 결합한다. 구현된 `RuleScoringCalculator`는
+정상 결합 결과를 `scoring-policy-v1`에 따라 점수로 계산하고 Evidence 변환과
+Rule 분석 결과를 조합한다. Spring Backend response validator는 동일한 canonical
+registry로 요청 snapshot, `ruleSetVersion`, contribution·Evidence를 다시
+교차검증하며, 검증된 결과를 DetectionResult로 영속화·채택한다. public 거래
+접수도 External Risk Snapshot을 포함한 API v2 요청으로 이 경로에 연결되어 있다.
+상세 Client 계약은
 [Rule v1 내부 분석 API](../03-api/rule-v1-analysis-api.md#13-spring-boot-client-연동-계약)를
 따른다.
 
@@ -1029,26 +1035,29 @@ Runner는 다음 작업을 수행하지 않는다.
 Spring Boot는 거래·RuleVersion·DetectionResult 업무 정합성의 최종 소유자다.
 서비스 간 분석 요청·응답과 API 오류 매핑은
 [Rule v1 내부 분석 API](../03-api/rule-v1-analysis-api.md)에 정의되어 있으며
-FastAPI Endpoint와 HTTP 경계는 구현되어 있다. Spring Boot Client, 실제 호출과
-응답 교차 검증, 거래 실패 상태와 복구·재처리 정책은 후속 범위다.
+FastAPI v1/v2 Endpoint와 HTTP 경계, Spring Boot Client의 실제 호출과 response
+validation, DetectionResult 영속화·채택 및 public 거래 연결은 구현되어 있다.
+이 시스템 연결은 Runner가 직접 DB·HTTP·영속화를 수행한다는 뜻이 아니다.
+자동 retry·fallback·Rule 실패 자동 재분석과 scheduler·batch recovery는 후속
+범위다.
 
 ### 20.3 현재 제외 범위
 
 Builder·Runner·Scoring Calculator와 Evidence Transformer는 현재 구현되어
 있다. Pydantic 요청·응답 DTO와 도메인 매퍼, FastAPI
-`POST /api/v1/rule-analysis`, Trace·1 MiB 요청 제한·공통 오류 경계와 실행 경로
-연결도 구현되어 있다. 다음 항목은 아직 구현되지 않은 후속 범위다.
+`POST /api/v1/rule-analysis`와 `POST /api/v2/rule-analysis`, Trace·1 MiB 요청
+제한·공통 오류 경계와 Rule v1 실행 경로 연결도 구현되어 있다. Spring Boot의
+RuleVersion snapshot·typed 설정 검증, v2 Client, response validator,
+DetectionResult 영속화·채택과 public 거래 연결도 구현되어 있다. 다음 항목은
+아직 구현되지 않은 후속 범위다.
 
 - 실행 단위 wrapper, `executionId`, 상태와 실행 시각
-- Python·Java Service, Repository와 DB Migration 구현
-- `execution_order` DB 컬럼
-- DetectionResult 생성·검증·저장·채택
-- Spring Boot Rule v1 HTTP Client, 평가 Snapshot 구성과 실제 FastAPI 호출
-- FastAPI 응답의 Spring Boot 교차 검증과 전체 서비스 연동
+- DB에서 arbitrary `execution_order`를 운영 중 변경하는 기능
+- RuleVersion entity·기본 Rule 집합 게시를 넘는 범용 production publish 운영
 - retry와 fallback
-- 로그와 메트릭
+- FastAPI production 세부 metrics와 분산 tracing 확장
 - Redis, Kafka, ML과 LLM
-- 전체 시스템 아키텍처와 ERD 정합화
+- production credential·cloud deployment와 HA
 
 ## 21. 구현 검증 조건
 
@@ -1094,8 +1103,9 @@ Orchestrator의 입력 순서 보존, 전체 capability 사전 resolution, 순�
 - plan metadata 보존과 weight·Reason Code 미사용
 
 Runner와 위 테스트는 구현되어 있다. Evidence 변환도 별도 계층으로 구현되어
-있지만, 이 사실만으로 DetectionResult 생성 또는 실제 서비스 연동이
-구현되었다는 뜻은 아니다.
+있다. Runner 자체는 DetectionResult 생성 또는 서비스 연동을 수행하지 않지만,
+Spring Boot의 별도 persistence·orchestration 계층은 DetectionResult 영속화·채택과
+public 거래 흐름 연결을 구현한다.
 
 ### 21.3 현재 scoring 구현
 
@@ -1127,6 +1137,7 @@ Runner와 위 테스트는 구현되어 있다. Evidence 변환도 별도 계층
 
 현재 `RuleScoringCalculator`, 결과 타입, 오류 범주와 해당 테스트는 구현되어
 있다. `RuleEvidenceTransformer`와 Evidence 결과·오류 타입도 구현되어 있다.
-FastAPI Endpoint·Pydantic DTO와 HTTP 오류·Trace 경계는 구현되어 있지만
-Spring Boot Client와 DetectionResult 자동 생성·채택·영속화 및 전체 서비스
-연동은 아직 구현되지 않았다.
+FastAPI v1/v2 Endpoint·Pydantic DTO와 HTTP 오류·Trace 경계, Spring Boot
+Client·response validator, DetectionResult 생성·채택·영속화와 public 거래
+연동도 구현되어 있다. API v2는 External Risk wire 입력만 추가하며 Rule v1
+R001~R004 조건·점수·execution plan을 변경하지 않는다.

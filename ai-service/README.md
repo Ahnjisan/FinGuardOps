@@ -1,25 +1,32 @@
 # FinGuardOps AI Service
 
 FinGuardOps의 Feature·Rule·ML 및 AI 리포트 계산 책임을 담당할 FastAPI
-서비스이다. 현재 구현 범위는 애플리케이션 설정, Health API, R001~R004 Rule v1
-개별 순수 evaluator, 불변 RuleEvaluatorRegistry, ordered raw evaluator 실행을
-담당하는 RuleExecutionOrchestrator, RuleVersion snapshot을 immutable
-RuleExecutionPlan으로 변환하는 순수 builder, plan·raw result를 결합하는
-RuleExecutionPlanRunner·PlannedRuleResult와 `scoring-policy-v1`의
+서비스이다. 현재 AI Service 구현 범위는 애플리케이션 설정, Health API,
+R001~R004 Rule v1 개별 순수 evaluator, 불변 RuleEvaluatorRegistry, ordered raw
+evaluator 실행을 담당하는 RuleExecutionOrchestrator, RuleVersion snapshot을
+immutable RuleExecutionPlan으로 변환하는 순수 builder, plan·raw result를
+결합하는 RuleExecutionPlanRunner·PlannedRuleResult와 `scoring-policy-v1`의
 RuleScoringCalculator, RuleEvidenceTransformer와 RuleAnalysisResult 조합이다.
-Pydantic 요청·응답 DTO와 명시적 매퍼, `POST /api/v1/rule-analysis`, Trace·실제
-수신 byte 기반 본문 제한 Middleware와 공통 오류 Handler도 구현되어 있다.
-필수 External Risk를 strict하게 검증하되 같은 Rule v1 경계를 실행하는
-`POST /api/v2/rule-analysis`도 구현되어 있다. Spring Boot `RuleAnalysisHttpClient`,
-거래·행동 이벤트·활성 RuleVersion Snapshot 조합, 분석 시작 commit, FastAPI 1회
-호출, DetectionResult·DetectionEvidence 완료·채택과 실패 기록을 연결하는 내부
-오케스트레이션도 구현되어 있다. Backend Java v2 Client와 External Risk를 포함한
-Snapshot 조합, 거래 접수 전체 상위 오케스트레이션은 구현되지 않았다.
+Pydantic 요청·응답 DTO와 명시적 매퍼, v1 wire인
+`POST /api/v1/rule-analysis`, 필수 External Risk 입력을 추가한 v2 wire인
+`POST /api/v2/rule-analysis`, Trace·실제 수신 byte 기반 본문 제한 Middleware와
+공통 오류 Handler도 구현되어 있다. API v2도 조건·점수가 같은 Rule v1
+R001~R004 evaluator를 실행하며 External Risk는 검증 후 evaluator 입력에는
+전달하지 않는다.
+
+Spring Boot는 거래·행동 이벤트·실행 가능한 RuleVersion Snapshot과 typed 실행
+설정을 고정하고 External Risk Snapshot을 v2 요청에 결합해
+`RuleAnalysisHttpClient.analyzeV2(...)`로 호출한다. Backend response validator는
+응답을 요청의 canonical Rule v1 execution plan과 교차검증하고, Backend
+오케스트레이션은 DetectionResult·DetectionEvidence를 영속화해 결과를 채택한다.
+public 거래 접수 흐름도 External Risk 조회, v2 Rule 분석, 위험 대응·사건·감사
+finalization, 신규 성공 HTTP 201과 Snapshot v2 completion까지 연결되어 있다.
+이 영속화·채택·finalization·Snapshot completion과 제한된 one-shot recovery는
+Spring Backend 책임이며 FastAPI가 직접 수행하지 않는다.
 
 Spring Boot → FastAPI 내부 Rule v1 분석 요청·응답, 추적, 직렬화와 오류 계약은
 [Rule v1 내부 분석 API](../docs/03-api/rule-v1-analysis-api.md)에 정의되어 있다.
-FastAPI HTTP 경계와 Spring Boot Client는 구현되었지만 거래 분석 실행 경로
-전체가 연결되었다는 뜻은 아니다. Spring Boot의 처리 순서와 결과 채택 경계는
+Spring Boot의 처리 순서와 결과 채택 경계는
 [Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../docs/01-requirements/spring-rule-analysis-orchestration-contract.md)에
 정의한다.
 
@@ -110,26 +117,31 @@ fail-fast 정책은
 - [Rule v1 Evidence 변환·분석 결과 조합 계약](../docs/01-requirements/rule-v1-detection-contract.md#6-reason-code와-evidence):
   공개 타입·진입점 계약과 Python 구현·테스트 완료
 - [Rule v1 내부 분석 API 계약](../docs/03-api/rule-v1-analysis-api.md):
-  문서 정의 및 FastAPI Endpoint·Pydantic DTO·Trace·본문 제한·오류 처리 구현 완료,
+  문서 정의 및 FastAPI v1/v2 Endpoint·Pydantic DTO·Trace·본문 제한·오류 처리 구현 완료,
   Spring Boot Client·Timeout·Trace 전달·응답 검증·오류 분류 구현 완료
 - FastAPI `POST /api/v2/rule-analysis` 필수 External Risk DTO·wire/교차 계약 검증:
   구현 완료. External Risk는 validation-only이며 Rule·점수·Evidence에는 전달하지 않음
 - 거래·행동 이벤트·활성 RuleVersion Snapshot 조합과 분석 시작·완료·채택 경계:
-  External Risk 없는 현재 v1 내부 경로 구현 완료
+  Spring Boot가 typed 설정과 canonical Rule v1 registry로 교차검증하는 v1/v2 내부 경로 구현 완료
 - [Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../docs/01-requirements/spring-rule-analysis-orchestration-contract.md):
-  문서 정의 및 현재 v1 내부 실행 경로 구현 완료
+  문서 정의 및 v2 Client 호출·response validation·DetectionResult 채택 경로 구현 완료
+- public 거래 접수 상위 흐름:
+  External Risk 조회 → v2 Rule 분석 → 위험 대응·사건·감사 finalization → Snapshot v2 completion 구현 완료
+- 멱등 재생과 제한된 복구:
+  성공 Snapshot과 실패 상태·External Risk 실패 Snapshot 재생, final-success completion gap의 non-web one-shot recovery 구현 완료
 - R004 `observed_amount` facts 보강과 Evidence 변환·Rule 분석 결과 조합:
   구현 완료
-- DetectionResult·DetectionEvidence 영속화와 결과 채택: 현재 v1 내부 경로 구현 완료
+- DetectionResult·DetectionEvidence 영속화와 결과 채택: Spring Boot v1/v2 내부 경로 구현 완료
 
 개별 evaluator·Registry, raw evaluator orchestration과 plan 기반 실행·결합은
 구현되었고 Evidence·Reason Code 변환과 Rule 분석 결과 조합까지 순수 내부
 경로로 구현되어 있다. RuleVersion snapshot을 HTTP DTO로 수신해 기존 내부
 경로를 실행하고 응답 DTO로 반환하는 FastAPI Rule 분석 endpoint도 구현되어
-있다. Spring Boot HTTP Client와 실제 활성 RuleVersion 조회·Snapshot 조합,
-DetectionResult·DetectionEvidence 영속화·결과 채택을 연결하는 현재 v1 내부
-오케스트레이션도 구현되어 있다. Backend Java v2 DTO·Mapper·Client, External Risk
-포함 Snapshot 조합과 거래 접수 전체 연결은 후속 범위이다.
+있다. Spring Boot HTTP Client와 실제 실행 가능한 RuleVersion 조회·Snapshot 조합,
+typed 설정 검증, DetectionResult·DetectionEvidence 영속화·결과 채택을 연결하는
+v1/v2 내부 오케스트레이션도 구현되어 있다. Backend Java v2 DTO·Mapper·Client는
+External Risk Snapshot을 결합하며 public 거래 접수 상위 흐름은 v2 호출 이후
+finalization과 Snapshot v2 completion까지 연결한다.
 순수 builder는 전달받은
 `evaluationCutoffAt`의 UTC 표현과 RuleVersion 적용 기간을 검증하고, 구현된
 Runner는 plan의 cutoff와 거래 `occurredAt`의 정확한 일치 및 ordered raw result
@@ -150,5 +162,12 @@ RuleEvidenceTransformer.transform(
 확정한 공개 타입명은 `RuleEvidenceTransformer`, `RuleEvidenceOutput`,
 `RuleEvidenceObservation`, `RuleAnalysisResult`, `RuleEvidenceError`,
 `RuleEvidenceErrorCategory`이며 현재 패키지에서 export한다. FastAPI Rule 분석
-endpoint와 Pydantic 요청·응답 DTO 및 Spring Boot Client는 구현되어 있으며,
-자동 영속화와 결과 채택을 수행하는 통합 실행 경로는 아직 없다.
+endpoint와 Pydantic 요청·응답 DTO가 evaluator와 Rule Analysis response를
+담당하고, Spring Boot가 Client 호출, response validation, DetectionResult
+영속화·채택, finalization과 멱등 completion을 담당한다.
+
+현재 구현되지 않은 범위는 AI Service endpoint 인증·인가, mTLS·API gateway,
+production credential과 cloud deployment, 자동 retry·fallback·Rule 실패 자동
+재분석, FastAPI production observability 확장, ML·LLM·AI report다. 구현된
+application-level `X-Trace-Id`를 OpenTelemetry 또는 W3C 분산 tracing 구현으로
+해석하지 않는다.
