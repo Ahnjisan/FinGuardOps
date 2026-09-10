@@ -4,10 +4,15 @@
 
 이 문서는 FinGuardOps 거래 접수 구현의 기준이 되는 PostgreSQL 물리 스키마와 멱등 처리 계약을 정의한다.
 
-적용 범위는 다음 두 테이블이다.
+핵심 적용 범위는 다음 두 테이블이다.
 
 - `financial_transaction`
 - `idempotency_record`
+
+V9의 `idempotency_recovery_audit_log`는 이 두 테이블의 업무 데이터를 대신하는
+저장소가 아니라 one-shot recovery의 시도·판정 결과를 분리해 남기는 감사
+테이블이다. 특히 Snapshot은 이 테이블이나 별도 Snapshot Entity/table에 저장하지
+않고 `idempotency_record.response_snapshot` 하나에 저장한다.
 
 이 문서는 다음 기준 문서와 함께 사용한다.
 
@@ -32,6 +37,8 @@
 - 거래 금액, 통화와 발생 시각 검증
 - 거래 상태 변경을 위한 낙관적 잠금
 - 거래 생성 요청의 멱등 선점, 충돌 판별과 완료 결과 재사용
+- `idempotency_record.response_snapshot`에 공존하는 성공·실패 Snapshot 형식
+- final-success completion gap 한정 one-shot recovery와 별도 recovery 감사
 - External Risk Failure Snapshot을 위한 V1 초기 제약과 V8 적용 제약의 구분
 - 멱등 기록의 24시간 후 `expires_at` 시각 저장
 - Flyway와 실제 PostgreSQL 기반 검증 원칙
@@ -46,10 +53,14 @@
 - Kafka, Outbox, Worker와 Scheduler 구현
 - 인증·인가와 CORS
 
+위 제외 항목은 이 문서가 상세 구현을 소유하지 않는다는 뜻이며 현재 구현 여부를
+뜻하지 않는다. 현재 public 거래 접수와 recovery의 연결 상태는 3절과 11절에서
+production source 기준으로 별도 명시한다.
+
 탐지 결과와 채택 관계는 후속 승인된
 [`detection-result-schema.md`](./detection-result-schema.md)와 V3
-Migration에서 추가되었다. 사건 관계는 사건 물리 스키마 승인 후 별도
-Migration으로 추가한다.
+Migration에서 추가되었다. 사건 관계도 이후 승인된 사건 물리 스키마와
+V6 Migration에서 추가되었다.
 
 ## 3. 확정된 거래 접수 경계
 
@@ -65,13 +76,25 @@ JSON·헤더 형식 검증
 → financial_transaction RECEIVED 저장·멱등 레코드 연결 commit
 → 활성 DB transaction 없이 External Risk 최대 1회 호출
 → 성공이면 후속 분석·위험 대응 처리
-→ 최종 성공 Snapshot v2 또는 External Risk Failure Snapshot terminal 확정 commit
+→ 최종 성공 Snapshot v2 또는 해당 terminal failure 확정 commit
 ```
 
-Issue #178 public 거래 접수는 Validation→지문 계산→`IN_PROGRESS` 선점 commit 뒤
-`financial_transaction(RECEIVED)`·멱등 연결을 별도 commit하고 External Risk와 Rule
-v2를 transaction 밖에서 호출한다. 위험 대응 최종화 commit 뒤 성공 Snapshot v2와
-`COMPLETED`를 별도 completion transaction으로 확정한다.
+현재 public 거래 접수는 하나의 DB transaction이 아니다. production 경계는 다음과
+같다.
+
+| 단계 | transaction·lock 경계 | 현재 처리 |
+| --- | --- | --- |
+| 1. 멱등 `IN_PROGRESS` claim | `REQUIRES_NEW`; scope-key Unique INSERT로 단일 승자 확정 | 네트워크 호출 전에 claim을 commit한다. |
+| 2. `financial_transaction` 저장·FK 연결 | 별도 `REQUIRED`; Idempotency PK 행을 `PESSIMISTIC_WRITE`로 잠그고 `RECEIVED` 거래 저장과 FK 연결을 함께 commit | claim transaction을 이어 쓰지 않는다. |
+| 3. External Risk | 거래 command read만 `READ_COMMITTED`, read-only; Provider 호출에는 활성 DB transaction 없음 | Provider는 최초 claim 승자만 최대 1회 호출한다. |
+| 4. Rule 분석 시작·RuleVersion snapshot | `REQUIRES_NEW`, `REPEATABLE_READ`; 거래 행을 `PESSIMISTIC_WRITE`로 잠그고 실행 가능한 RuleVersion·행동 snapshot, DetectionResult `PENDING → IN_PROGRESS`, 거래 `ANALYZING`을 commit | API wire v2여도 evaluator는 Rule v1 R001~R004다. |
+| 5. FastAPI 호출 | 활성 DB transaction 없이 `POST /api/v2/rule-analysis` 호출 | External Risk wire 입력을 포함한다. |
+| 6. 결과 영속·채택 | 별도 `REQUIRES_NEW`; 거래와 DetectionResult를 잠그고 matched Evidence 저장, DetectionResult `COMPLETED`, 거래 채택·`ANALYZED`를 함께 commit | 전체 응답 검증을 통과한 결과만 저장한다. |
+| 7. 위험 대응 finalization | 별도 `REQUIRED`; 거래를 먼저 잠그고 필요한 사건·CaseTransaction, 거래 최종 상태·outcome, 일반 `audit_log`를 함께 commit | LOW/MEDIUM은 사건 관계 0개, HIGH/CRITICAL은 정확히 1개다. |
+| 8. 성공 completion | 별도 `REQUIRES_NEW`; Idempotency 행을 잠그고 Snapshot v2 저장과 `COMPLETED`를 함께 commit | 신규 성공 HTTP는 `201 Created`다. |
+
+각 lock은 해당 짧은 transaction 안에서만 유지된다. External Risk와 FastAPI 호출,
+finalization, Snapshot completion을 감싸는 단일 DB transaction은 없다.
 
 - JSON 파싱, `Idempotency-Key` 검증, 필수 필드·UUID·Enum·금액·통화·시각 형식 검증 실패는 `400 Bad Request`와 `VALIDATION_ERROR`로 처리한다.
 - 형식은 올바르지만 거래 유형별 `recipientAccountRef`·`channel` 또는 그 밖의 도메인 규칙을 위반하면 `422 Unprocessable Entity`와 `VALIDATION_ERROR`로 처리한다.
@@ -242,6 +265,34 @@ COMPLETED
 FAILED
 ```
 
+Snapshot의 실제 저장 위치와 Java 매핑은 다음 하나뿐이다.
+
+| 구분 | 실제 값 |
+| --- | --- |
+| table | `idempotency_record` |
+| column | `response_snapshot` |
+| PostgreSQL type | `JSONB` |
+| JPA field | `JsonNode responseSnapshot` |
+
+Snapshot 전용 Entity나 별도 Snapshot table은 없다.
+`idempotency_recovery_audit_log`도 Snapshot 저장소가 아니라 recovery 후보에 대한
+단건 시도·판정·결과를 남기는 감사 table이다. 같은 `response_snapshot` 컬럼에는
+다음 네 형식이 저장될 수 있다.
+
+1. legacy/raw 성공 Snapshot: 무버전 일곱 업무 필드 object
+2. 성공 Snapshot v1 envelope
+3. 성공 Snapshot v2 envelope
+4. typed External Risk Failure Snapshot
+
+현재 신규 transaction 성공과 성공 one-shot recovery는 Snapshot v2만 생성한다.
+legacy/raw와 성공 Snapshot v1은 호환 replay 대상으로 유지하지만 신규 생성 형식은
+아니다.
+
+성공 v1과 v2 envelope의 최상위 필드는 모두 `responseBody`, `httpStatus`,
+`responseSchemaVersion`, `codecVersion`, `finalizedAt`이다. version 판별에는 실제
+`responseSchemaVersion`과 `codecVersion` tuple만 사용한다. `responseVersion`, 일반적인
+`schemaVersion`, 별도 Snapshot entity ID는 실제 field나 식별자가 아니다.
+
 거래 생성의 확정 동작은 다음과 같다.
 
 | 상황 | HTTP·오류 | 처리 |
@@ -276,7 +327,7 @@ envelope를 보존했다. 기존 v1 record의 재생 계약은 계속 유지한�
 }
 ```
 
-`traceId`, `idempotencyRecordId`, 요청 지문, 내부 PK, 요청 본문, 고객·계좌 참조값은 snapshot에 저장하지 않는다. 네 nullable 업무 필드는 JSON에서 생략하지 않고 명시적 null로 저장한다. v1 envelope 완료 재전송은 검증된 `responseBody`와 저장된 `201`을 복원하고 현재 재전송 요청의 새 `traceId`를 결합한다.
+`traceId`, `idempotencyRecordId`, 요청 지문, 내부 PK, 요청 본문, 고객·계좌 참조값은 snapshot에 저장하지 않는다. 네 nullable 업무 필드는 JSON에서 생략하지 않고 명시적 null로 저장한다. v1 envelope 완료 재전송은 검증된 `responseBody`와 저장된 `201`을 복원하고 현재 재전송 요청에서 결정된 `traceId`를 결합한다. 이전 요청의 trace ID를 Snapshot 원문에 저장하거나 replay하지 않는다.
 
 기존 무버전 Snapshot은 `responseBody`에 표시한 일곱 필드만 최상위에 정확히 가지며 `processingStatus=RECEIVED`, 네 탐지 관련 필드가 모두 JSON null일 때만 strict legacy로 복원한다. legacy 재전송은 `200 OK`를 유지하며 신규 envelope로 갱신하지 않는다. 손상되었거나 두 계약과 다른 snapshot, 알 수 없는 version은 보정하지 않고 `500 INTERNAL_ERROR`로 처리하며 snapshot 원문을 로그나 오류 응답에 노출하지 않는다.
 
@@ -294,8 +345,10 @@ PostgreSQL JSONB 저장·조회, public intake·최종화 호출과 멱등 `COMP
 연결은 구현되었다.
 
 legacy와 v1 Snapshot은 수정·backfill하지 않고 최신 DB 상태로 보정하지 않는다.
-기존 version의 의미를 확장하지 않으며 기존 Snapshot 재생에서 분석·위험 대응·사건
-처리를 시작하지 않는다. 기존 `response_snapshot JSONB`와 object Check는 v2
+기존 version의 의미를 확장하지 않으며 legacy·v1·v2 성공 replay에서는 Provider와
+Rule Analysis를 호출하지 않고 DetectionResult/Evidence 추가 저장, 거래 결과 재채택,
+finalization, 사건·일반 AuditLog 생성을 다시 수행하지 않는다. 기존
+`response_snapshot JSONB`와 object Check는 v2
 성공 envelope 자체를 저장할 수 있다. External Risk Failure Snapshot은 V8에서
 `FAILED` Check를 안전하게 교체해 저장할 수 있게 되었다.
 
@@ -326,11 +379,25 @@ AND finished_at IS NOT NULL
 | legacy code-only | nullable 유지 | `NULL` | NOT NULL | NOT NULL |
 | 신규 typed External Risk failure | NOT NULL | strict `external-risk-failure` object | NOT NULL, `responseBody.code`와 일치 | NOT NULL |
 
-신규 typed Snapshot의 exact 필드는 ADR-007을 단일 결정 기준으로 삼는다. 저장
-discriminator는 `snapshotType=external-risk-failure`, 공개 응답 schema는
-`transaction-create-error-v1`, codec은
-`external-risk-failure-snapshot-envelope-v1`이다. UTF-8 canonical JSON은 최대
-4 KiB이고 알 수 없는 type·version·필드와 손상 데이터는 fail-closed 처리한다.
+typed External Risk Failure Snapshot의 exact 최상위 필드는 `snapshotType`,
+`responseBody`, `httpStatus`, `failureCategory`, `responseSchemaVersion`,
+`codecVersion`, `finalizedAt`이다. `responseBody`는 exact `code`, `message`,
+`fieldErrors`를 가지며 `fieldErrors`는 빈 배열이다. 저장 discriminator는
+`snapshotType=external-risk-failure`, 공개 응답 schema는
+`responseSchemaVersion=transaction-create-error-v1`, codec은
+`codecVersion=external-risk-failure-snapshot-envelope-v1`이다.
+
+| `failureCategory` | replay HTTP | 공개 code |
+| --- | --- | --- |
+| `TIMEOUT` | `503 Service Unavailable` | `DEPENDENCY_TIMEOUT` |
+| `UNAVAILABLE` | `503 Service Unavailable` | `DEPENDENCY_UNAVAILABLE` |
+| `INVALID_REQUEST` | `500 Internal Server Error` | `INTERNAL_ERROR` |
+| `UNSUPPORTED_CAPABILITY` | `500 Internal Server Error` | `INTERNAL_ERROR` |
+| `INVALID_RESPONSE` | `500 Internal Server Error` | `INTERNAL_ERROR` |
+| `TRANSFORMATION_ERROR` | `500 Internal Server Error` | `INTERNAL_ERROR` |
+
+UTF-8 canonical JSON은 최대 4 KiB이고 알 수 없는 type·version·field, category와
+손상 데이터는 fail-closed 처리한다.
 `failureCategory`는 내부 영속·관측용이며 공개 응답에는 포함하지 않는다. V8은 exact
 필드, discriminator·version·category·공개 code 관계와 거래 FK를 검증하고, Java
 strict codec은 canonical UTF-8 크기·UTC 시각·`finished_at` 일치와 손상 데이터를
@@ -351,17 +418,26 @@ Failure Snapshot과 `FAILED`가 정상 commit된 같은 키·같은 지문 요�
 재실행하지 않는다. 공개 HTTP·code·message는
 [거래·행동·탐지 API](../03-api/transaction-detection-api.md)가 권위 기준이다.
 
-최종 업무 상태 commit 뒤 Snapshot 생성 또는 멱등 `COMPLETED` commit이 실패하면
-이미 확정된 업무 결과를 되돌리지 않고 멱등 레코드를 `IN_PROGRESS`로 유지한다.
-최초 요청은 `500 INTERNAL_ERROR`, 같은 요청은
-`409 IDEMPOTENCY_REQUEST_IN_PROGRESS`다. 상태와 탐지 기준만 이번 계약에서 정하고
-운영 복구 명령은 후속 Issue로 분리한다.
+code-only terminal failure는 typed Failure Snapshot과 다른 경계다.
+`response_snapshot = NULL`인 채 terminal `failure_code`와 `finished_at`을 저장한다.
+현재 production에서는 거래 저장 실패와, External Risk 성공 뒤 Rule 분석 실패가
+거래 `FAILED`로 확정되었음을 별도 reader가 확인한 경계 등이 이 writer를 사용한다.
+이 형태의 동일 요청 replay도 업무를 자동 재실행하지 않는다.
+
+최종 업무 상태 commit 뒤 Snapshot v2 생성 또는 멱등 `COMPLETED` commit만 실패하면
+업무 결과·DetectionResult/Evidence·사건·일반 AuditLog는 이미 확정된 반면 멱등 레코드는
+`IN_PROGRESS`로 남는다. 이것이 final-success completion gap이다. 최초 요청은
+`500 INTERNAL_ERROR`, 같은 요청은 `409 IDEMPOTENCY_REQUEST_IN_PROGRESS`이며,
+현재 one-shot recovery는 이 간극으로 검증된 단건만 Snapshot v2와 `COMPLETED`로
+복구한다.
 
 External Risk typed failure writer가 실패하거나 저장 직전 crash가 나면 durable
 failure로 간주하지 않고 `IN_PROGRESS`로 남을 수 있다. DB만으로 Provider 호출 여부를
 확정할 수 없는 이 상태와 그 밖의 완료 간극에서는 Provider·FastAPI·최종화를 자동
-재실행하지 않는다. 원본 예외를 유지하고 writer 오류를 suppressed로 보존하는 Java
-원칙과 실제 복구 구현은 후속 Issue 범위다.
+재실행하지 않는다. Provider 호출 여부가 불확실한 `RECEIVED`/`IN_PROGRESS`,
+failure-writer crash, typed Failure Snapshot이 commit되지 않은 상태는 일반 one-shot
+recovery 대상이 아니다. 원본 예외를 유지하고 writer 오류를 suppressed로 보존하는
+Java 원칙은 구현되어 있으며 이 불확실 상태의 자동 복구는 미구현이다.
 
 ### 6.4 24시간 시각 저장과 미구현 만료 정책
 
@@ -813,6 +889,24 @@ CREATE INDEX ix_idempotency_record_status_updated_at
 - 단건 복구는 `REQUIRES_NEW`에서 Idempotency record를 먼저 잠그고 거래를 두 번째로
   잠근다. 뒤에 잠금을 얻은 경합 실행은 최신 terminal 상태를 재검증해 거부된다.
 
+현재 구현된 recovery 경계는 다음과 같다.
+
+- `POST:/api/v1/transactions`, stale `IN_PROGRESS`, DB transaction timestamp 기준 cutoff,
+  1~100 limit의 bounded candidate 조회와 typed `IdempotencyRecoveryCandidate`
+- 일반 web server와 분리된 non-web `IdempotencyRecoveryCommandRunner`의 단일
+  `inspect` candidate-list 실행과 정확한 record 하나의 `recover` 실행
+- typed `IdempotencyRecoveryDecision`·`IdempotencyRecoveryResult`로 성공·거부 판정
+- final-success completion gap만 Snapshot v2·HTTP 201 envelope와 `COMPLETED`로 복구
+- Provider, Rule Analysis, Evidence 저장, 거래 결과 채택, finalization, 사건·일반
+  AuditLog 재호출 없음
+- 성공·거부와 내부 실패의 별도 append-only recovery audit
+
+`inspect`는 bounded 후보 목록을 한 번 읽을 뿐 각 후보를 복구하거나 전체 DB를
+순회하지 않는다. `recover`도 batch가 아니라 전달받은 내부 record ID 하나만 처리한다.
+scheduler, batch 자동 recovery, cron·상시 daemon, HA recovery coordination, Provider
+uncertainty와 failure-writer crash의 일반 복구, External Risk 재호출, Rule 자동 재분석은
+구현되지 않았다.
+
 현재 terminal 상태 불변성은 Entity 상태 전이 검증, Service writer와 row lock으로
 보호한다. DB Check는 terminal 행의 필드 조합을 검사하지만 terminal 행에 대한 후속
 UPDATE 자체를 금지하지 않으며 DB trigger 수준의 절대 불변성은 구현되지 않았다.
@@ -828,9 +922,9 @@ trigger 추가는 ADR-007의 필수 후속 구현 범위가 아니다.
 | `UUID` | `java.util.UUID` | 문자열 ID로 중복 보관하지 않음 |
 | `NUMERIC(19,4)` | `BigDecimal` | `double`을 거치지 않음 |
 | `TIMESTAMPTZ` | `Instant` 우선 | API에서는 UTC `Z` 표기 |
-| 상태·유형·채널 문자열 | API 계약 값의 `STRING` 매핑 | Java Enum 사용 여부는 후속 구현 승인에서 결정하고 DB 허용값과 정확히 일치 |
+| 상태·유형·채널 문자열 | Java Enum + `@Enumerated(EnumType.STRING)` | DB 허용값과 정확히 일치 |
 | `version BIGINT` | `Long` 또는 `long` + `@Version` | 최초 0, 업무 버전과 분리 |
-| `JSONB` | 승인된 구조화 응답 snapshot | 자유 형식 업무 입력 저장소로 사용하지 않음 |
+| `response_snapshot JSONB` | `JsonNode responseSnapshot` | `IdempotencyRecord` 안의 성공·typed failure Snapshot 저장 필드. 자유 형식 업무 입력이나 별도 Snapshot Entity로 사용하지 않음 |
 
 Java 매핑 변경은 이 물리 DB 계약과 함께 검증한다.
 
@@ -844,7 +938,10 @@ Java 매핑 변경은 이 물리 DB 계약과 함께 검증한다.
 - 적용 완료된 V1 Migration은 수정하지 않는다. External Risk Failure Snapshot을 위한
   V8은 같은 이름의 `FAILED` 상태 제약을 교체하고 기존 행을 backfill하지 않는다.
 - 로컬 H2나 다른 호환 DB 결과를 PostgreSQL 동작의 증거로 사용하지 않는다.
-- 실제 Migration 경로와 버전 번호는 Flyway 의존성 도입·구성 작업에서 현재 백엔드 구조와 선행 버전을 확인한 뒤 확정한다.
+- 실제 migration 경로는 `backend/src/main/resources/db/migration`이며 현재 책임은 V1의
+  transaction·idempotency table과 `response_snapshot`, V8의 typed failure 허용 상태
+  CHECK 교체, V9의 recovery audit table·recovery candidate/audit index 추가로 구분한다.
+  V9는 Snapshot column이나 recovery append-only DB trigger를 추가하지 않는다.
 
 ## 14. Testcontainers 검증 계약
 
@@ -904,8 +1001,8 @@ Java 매핑 변경은 이 물리 DB 계약과 함께 검증한다.
 - 별도 명시적 UPDATE 트랜잭션에서 실제 거래 연결·완료·실패 변경 후 `created_at`과 `expires_at`은 불변이고 `updated_at`은 해당 트랜잭션의 `CURRENT_TIMESTAMP`와 정확히 일치한다.
 - 완료·실패의 `finished_at`은 호출자가 전달한 마이크로초 정밀도 업무 시각을 그대로 보존한다.
 - `expires_at` 인덱스로 만료 정리 대상 조회가 가능하다.
-- V9 partial index `(operation_scope, updated_at, id) WHERE processing_status =
-  'IN_PROGRESS'`는 bounded 복구 후보 조회와 일치한다.
+- V9 partial index `(operation_scope, updated_at, id) WHERE processing_status = 'IN_PROGRESS'`는
+  bounded 복구 후보 조회와 일치한다.
 
 테스트는 예외 타입만 확인하지 않고 위반한 PostgreSQL constraint 이름 또는 SQLState를 함께 확인해 의도한 제약이 실제로 동작했는지 검증한다.
 
@@ -913,10 +1010,13 @@ Java 매핑 변경은 이 물리 DB 계약과 함께 검증한다.
 
 - Validation 거절은 거래 테이블이나 멱등 테이블 행으로 집계하지 않는다.
 - 요청 결과, 오류 코드와 처리 단계는 로그·트레이스에서 `traceId`로 연결한다.
-- 멱등 결과의 향후 메트릭 후보는 최소 `first_success`, `completed_replay`,
-  `failed_replay`, `key_conflict`, `request_in_progress`, `duplicate_transaction`,
-  failure writer 실패와 완료 간극을 저카디널리티 결과 레이블로 구분한다. 실제 metric과
-  운영 배포는 아직 구현되지 않았다.
+- 일반 거래·멱등 관측은 Issue #186의 Micrometer 경계가 구현되어 있다. public intake
+  outcome, 최초 `RECEIVED`, terminal outcome·duration, duplicate
+  `in_progress|completed|failed`, idempotency conflict, External Risk와 Rule Analysis
+  outcome·duration을 승인된 저카디널리티 tag로 기록한다.
+- 위 일반 meter는 recovery 전용 장기 운영 계측이 아니다. completion gap과 장기
+  `IN_PROGRESS` Gauge, recovery candidate·decision·result·duration 전용 metric, 해당
+  alert·dashboard는 구현되지 않았다.
 - 원본 `Idempotency-Key`, `transactionId`, 고객·계좌 참조값과 요청 지문은 메트릭 레이블로 사용하지 않는다.
 - 이 스키마는 External Risk, FastAPI 또는 LLM 호출을 추가하지 않는다.
 - 완료 재전송과 처리 중 충돌은 새 탐지·사건·AI 호출을 만들지 않으므로 중복 외부 호출과 비용 발생을 막아야 한다.
@@ -926,12 +1026,13 @@ Java 매핑 변경은 이 물리 DB 계약과 함께 검증한다.
 이번 물리 계약 이후에도 다음 항목은 별도 승인과 구현 설계가 필요하다.
 
 - 멱등 만료 레코드 정리 주기, batch 크기, 잠금과 장애 재시도 방식
-- 실제 one-shot 복구 Runner·CLI와 scheduler·batch·metric·alert
+- recovery scheduler·batch 자동 실행·상시 daemon·HA coordination
+- 장기 recovery 전용 metric·alert·dashboard
 - 자동 retry·fallback·cache
 - 운영 credential 배포와 신규 metric·dashboard
 - 상태 변경 충돌 후 자동 재시도 여부
 - 최종 상태 거래의 재분석·정정 이력 모델
-- External Risk 불확실 `IN_PROGRESS`와 완료 간극을 복구하는 별도 operation scope의 승인된 명령·운영 절차
+- Provider 호출 여부가 불확실한 `IN_PROGRESS`와 failure-writer crash의 일반 자동 복구
 - 참조값 생성 주체, 추가 문자 제한, 암호화·마스킹과 보존 기간
 - 추가 Migration과 스키마 변경은 별도 승인
 
@@ -969,6 +1070,14 @@ immutable UUID v4 `audit_id`, FK 없는 양수 `idempotency_record_id`, nullable
 `TIMESTAMPTZ(6) attempted_at`을 저장한다. decision/result 조합은 성공
 `RECOVERABLE_COMPLETION_GAP/RECOVERED`, 정상 거부의 typed decision/`REJECTED`,
 내부 실패 `INTERNAL_FAILURE/FAILED`만 허용한다.
+
+이 테이블은 Snapshot이나 transaction/case 업무 감사 저장소가 아니다. 단건
+`recover`가 검사한 상태와 성공·거부 결과를 기록하며, recovery transaction 자체가
+실패하면 rollback 뒤 별도 `REQUIRES_NEW` writer가 내부 실패 감사를 시도한다.
+application 경계는 `@Immutable`, `@PreUpdate`·`@PreRemove` 거부와 insert-only
+Repository로 append-only를 유지한다. V9 DB는 UUID·actor·decision/result CHECK와
+Unique·조회 index를 제공하지만 UPDATE·DELETE 거부 trigger는 추가하지 않았으므로 DB
+trigger가 append-only를 보장한다고 표현하지 않는다.
 
 성공 복구는 같은 DB transaction timestamp를 Snapshot `finalizedAt`, Idempotency
 `finished_at`, 감사 `attempted_at`에 사용하고 Snapshot·`COMPLETED`·감사를 원자적으로

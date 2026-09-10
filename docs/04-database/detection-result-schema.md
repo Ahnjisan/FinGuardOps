@@ -9,42 +9,44 @@
 FraudRule·RuleVersion과 nullable Evidence FK를 additive하게 연결한다.
 JPA Entity, Repository와 내부 persistence service가 구현되어 있다.
 
-Rule 분석 성공 경로에서 DetectionResult `COMPLETED`, Evidence 저장, 거래 결과
-채택과 `ANALYZING → ANALYZED`를 함께 commit하는 내부 오케스트레이션도
-구현되어 있다. `ANALYZED`는 위험 대응 전 중간 상태이며 최종 거래 성공 상태가
-아니다. 별도 내부 최종화 경계는 채택된 `COMPLETED` 결과의 소유 관계와 위험 등급을
-다시 검증하고, 필요한 사건·거래 최종 상태·AuditLog를 원자적으로 확정한다.
+현재 public `POST /api/v1/transactions`는 External Risk 조회 뒤 FastAPI
+`POST /api/v2/rule-analysis`를 호출한다. Spring Backend가 응답 전체를 검증해 matched
+Evidence를 저장하고 DetectionResult를 `COMPLETED`로 확정한 뒤 거래가 그 결과를
+채택하도록 한다. `ANALYZING → ANALYZED`까지는 하나의 성공 persistence transaction이고,
+`ANALYZED`는 위험 대응 전 중간 상태이지 최종 거래 성공 상태가 아니다.
 
-다음 기능은 구현하지 않는다.
+그 다음 별도 finalization transaction이 채택된 `COMPLETED` 결과의 소유 관계와 위험
+등급을 다시 검증하고 필요한 사건·거래 최종 상태·일반 AuditLog를 확정한다. 마지막으로
+별도 completion transaction이 Snapshot v2와 Idempotency `COMPLETED`를 저장하며 신규
+성공 응답은 HTTP `201 Created`다. 이 일련의 흐름 전체를 하나의 DB transaction으로
+해석하지 않는다.
 
-- 거래 접수 Service에서 Spring Boot Rule 분석 실행 경로를 호출하는 연결
-- 실제 External Risk Provider와 거래 접수 전체 실행 경로의 연결
-- 최종 동기 응답과 Snapshot v2 확정
-- Snapshot 완료 간극 운영 복구
+다음 기능은 이 물리 계약의 현재 구현 범위 밖이거나 미구현이다.
+
 - RuleVersion 운영 publish
 - ML 추론
 - 외부 탐지 실행 API와 탐지 결과 조회 API
 - External Risk Snapshot의 DetectionEvidence·AuditLog 영속화와 AI 리포트 연결.
   이번 목표에는 포함하지 않으며 별도 승인 대상
+- scheduler·batch 기반 Snapshot 자동 recovery와 장기 recovery 전용 metric·alert·dashboard
 
-FastAPI Rule v1 Endpoint, Spring Boot `RuleAnalysisHttpClient`와 이 영속 모델을
+FastAPI의 Rule v1 evaluator endpoint, Spring Boot `RuleAnalysisHttpClient`와 이 영속 모델을
 자동으로 생성·완료·채택하거나 실패로 확정하는 실행 경로는 구현되어 있다.
 그 경로의 기준은
 [Spring Boot Rule v1 분석 오케스트레이션·결과 채택 계약](../01-requirements/spring-rule-analysis-orchestration-contract.md)이다.
 
 위험 대응·최종 거래 상태와 필요한 사건 연결의 업무 commit 이후에만
 [`ADR-006`](../07-decisions/ADR-006-final-transaction-success-and-idempotency-recovery.md)의
-Snapshot v2를 확정한다. 이 DetectionResult DB 계약은 Snapshot 완료를 소유하지
-않으며 v2 codec이나 완료 간극 복구 실행 경로를 정의하지 않는다.
-
-현재 `POST /api/v1/transactions`는 기존 계약대로 Transaction을
-`RECEIVED`로 저장하고 탐지 관련 null을 반환한다.
+Snapshot v2를 확정한다. finalization 성공 뒤 completion만 실패한 단건은 현재
+one-shot recovery가 강한 final state 검사를 통과한 경우에만 Snapshot v2로 복구한다.
+이 DetectionResult DB 계약은 Snapshot 저장을 소유하지 않으며 저장 위치는
+`idempotency_record.response_snapshot`이다.
 
 External Risk는 목표 분석 시작보다 앞선 인메모리 조회다. 실패하면 거래가
 `RECEIVED`를 유지하고 DetectionResult와 DetectionEvidence 행을 생성하지 않으며
-FastAPI도 호출하지 않는다. 성공 Snapshot도 이 물리 모델, AuditLog 또는 별도
-External Risk 테이블에 저장하지 않는다. 따라서 Issue #160 문서 계약에는 신규
-컬럼·테이블·Flyway가 필요하지 않다.
+FastAPI도 호출하지 않는다. External Risk 입력과 typed failure Snapshot은
+DetectionEvidence, 일반 AuditLog 또는 별도 External Risk table에 저장하지 않는다.
+typed failure Snapshot은 `idempotency_record.response_snapshot`에 저장한다.
 
 ## 2. 책임 경계
 
@@ -55,6 +57,19 @@ External Risk 테이블에 저장하지 않는다. 따라서 Issue #160 문서 �
 
 Evidence에는 실제 고객·계좌·기기·수취인 식별자, 원문 IP, 전체 Feature
 벡터와 원문 행동 로그를 저장하지 않는다.
+
+서로 다른 version 축은 다음과 같이 구분한다.
+
+| version 축 | 의미 |
+| --- | --- |
+| Rule Analysis API v1/v2 | Spring–FastAPI wire schema. 현재 public intake는 External Risk 입력이 추가된 API v2를 사용 |
+| Rule v1 | R001~R004 evaluator, 실행 순서, scoring·group cap·risk threshold 계약 |
+| `RuleVersion` | DB의 FraudRule별 metadata·version identity와 실행 가능한 PUBLISHED snapshot |
+| 성공 Snapshot v1/v2 | `idempotency_record.response_snapshot`의 transaction 응답 envelope version |
+
+API v2는 Rule v2 evaluator를 뜻하지 않는다. API v2의 External Risk object는 wire
+정합성 검증 대상이지만 현재 Rule v1 R001~R004의 조건, weight, scoring과 Evidence
+계약을 변경하지 않는다.
 
 ## 3. `detection_result`
 
@@ -118,7 +133,7 @@ canonical 해시를 계산해 저장하고, 성공 응답 해시와 exact 비교
 현재 Spring Boot 분석 시작 경계와 Client validator에 이 선계산·exact 비교
 경로가 구현되어 있다.
 
-목표 v2 요청에 External Risk를 추가해도 `rule_set_version`은 실행 RuleVersion
+현재 Rule Analysis API v2 요청에 External Risk를 추가해도 `rule_set_version`은 실행 RuleVersion
 집합의 canonical hash로 유지한다. `scoring_policy_version=scoring-policy-v1`,
 `feature_version=rule-v1`, `model_version=null`과 R001~R004 Evidence 계약도
 변경하지 않는다.
@@ -215,8 +230,9 @@ R002와 R004의 `eventId`, R003의 `passwordChangedEventId`와
 허용하지 않는다.
 
 R003은 `PASSWORD_CHANGED`와 `TRANSFER_LIMIT_CHANGED` 두 이벤트를 모두
-사용한다. `passwordChangedAt <= transferLimitChangedAt <=
-DetectionResult.evaluationCutoffAt`을 검증하고 두 이벤트 모두
+사용한다.
+`passwordChangedAt <= transferLimitChangedAt <= DetectionResult.evaluationCutoffAt`을
+검증하고 두 이벤트 모두
 `windowSeconds` 안에 있어야 한다. `elapsedSeconds`는
 `evaluationCutoffAt - transferLimitChangedAt`의 경과 초와 같아야 한다.
 기존 단일 `securityEventType`, `securityChangedAt` 필드는 두 이벤트를
@@ -250,15 +266,66 @@ Java 도메인 값 객체가 검증한다. 원문 행동 이벤트 전체, 고�
 | `CRITICAL` | `HELD` |
 
 Transaction이 `FAILED`로 전이되어도 이전에 정상 채택한 결과·등급·대응을
-유지할 수 있다. DetectionResult에는 `adopted` 컬럼을 두지 않는다.
+유지할 수 있다. 채택 방향은 Transaction의 `adopted_detection_result_id`가
+DetectionResult를 참조하는 것이며 DetectionResult에는 `adopted` boolean이나
+`adopted` 컬럼을 두지 않는다.
 
 Rule v1 분석 성공에서는 Evidence 저장, DetectionResult `COMPLETED`, 거래의
 결과 채택과 `ANALYZING → ANALYZED`를 하나의 쓰기 트랜잭션으로 수행한다.
-분석 실패에서는 대상 DetectionResult와 거래를 `FAILED`로 기록하고 결과를
-채택하지 않는다. 내부 Rule 분석 오케스트레이터는 실제
+분석 실패에서는 `IN_PROGRESS → FAILED` DetectionResult와 `ANALYZING → FAILED`
+거래를 함께 기록하고 결과를 채택하지 않는다. DB trigger가 허용하는 더 낮은 수준의
+DetectionResult 전이는 `PENDING → IN_PROGRESS/FAILED`와
+`IN_PROGRESS → COMPLETED/FAILED`이며 두 terminal 상태는 변경할 수 없다. 내부 Rule 분석
+오케스트레이터는 실제
 `RuleAnalysisPersistenceService.completeAndAdopt` 경계를 사용한다. 기존 저수준
 `DetectionResultPersistenceService.complete`는 Evidence와 결과 `COMPLETED`만
 한 트랜잭션으로 처리하며 거래 채택·상태 전이는 포함하지 않는다.
+
+### 6.1 FastAPI와 Spring Backend 책임
+
+FastAPI는 Rule v1 R001~R004를 평가하고 scoring과 Rule Analysis response를 생성한다.
+FastAPI가 Spring Backend DB에 DetectionResult나 DetectionEvidence를 저장하지 않는다.
+
+Spring Backend는 다음을 소유한다.
+
+- evaluation cutoff에서 실행 가능한 PUBLISHED `RuleVersion` 선택과 immutable request
+  snapshot·canonical `ruleSetVersion` 생성
+- Rule v1 metadata에 따른 typed execution settings 구성·검증과 External Risk wire를
+  포함한 API v2 request 생성
+- `POST /api/v2/rule-analysis` 호출과 HTTP·trace·body 및 업무 response 전체 정합성 검증
+- 검증된 matched Evidence를 persistence draft로 변환하고 저장
+- DetectionResult `COMPLETED`, 거래 `adopted_detection_result_id`·risk 채택과
+  `ANALYZED` 전환
+- 별도 위험 대응·사건·일반 AuditLog finalization 연결
+
+### 6.2 일반 response validator와 recovery Evidence 검사
+
+일반 Rule Analysis 성공 경로의 `RuleAnalysisResponseValidator`는 request snapshot과
+Rule v1 고정 계약을 기준으로 다음을 검증한다.
+
+- transaction ID, `evaluationCutoffAt`, canonical `ruleSetVersion`
+- request plan과 response의 Rule ID 집합·중복·누락·unknown Rule, execution order
+- 각 Rule의 `matched`, canonical weight 기반 contribution과 R001 prerequisite
+- amount/security group 순서·cap·raw/applied/reduction, total score와 risk level
+- matched Rule 수와 Evidence 수의 정확한 일치, Rule ID·Evidence 순서
+- `ruleVersionId`, `ruleCode`, canonical `ruleVersion`, reason, execution order,
+  contribution의 request·scoring 일치
+- observation exact allowlist·scalar type, transaction amount, behavior event UUID·type·
+  customer/account/device/beneficiary reference, event time·cutoff·window·elapsed 의미
+
+이 검증은 FastAPI가 보낸 결과가 request snapshot과 고정 계약에 일치하는지 확인하는
+것이다. Java Backend가 R001~R004 조건을 다시 실행해 `matched`를 독립 계산하는 두 번째
+Rule evaluator는 아니다. all-unmatched 정상 응답은 matched Rule이 0개이므로 Evidence도
+정확히 빈 목록이어야 한다.
+
+반면 final-success completion gap의 one-shot recovery는 거래의
+`adopted_detection_result_id`로 채택 결과를 확인하고 그 DetectionResult ID로 Evidence를
+조회한 뒤, 조회된 각 Evidence의 DetectionResult ID가 adopted ID와 같은지만
+`allMatch()`로 검사한다. recovery는 Evidence completeness, 예상 개수, matched Rule
+집합, Rule ID, RuleVersion, reason, contribution, 정렬 순서와 observation 내용을 다시
+검증하지 않는다. 따라서 조회 결과가 빈 목록이면 ownership `allMatch()` 자체는
+통과할 수 있으며, 일반 response validator의 all-unmatched completeness 검사를
+recovery가 다시 수행한다고 해석해서는 안 된다.
 
 ## 7. 버전과 동시성
 
@@ -304,9 +371,12 @@ Evidence는 완료 트랜잭션에서 먼저 저장한 뒤 결과를 COMPLETED�
 
 ## 10. Migration과 검증
 
-V3는 V1·V2를 수정하지 않고 두 테이블과 거래의 nullable 컬럼을
-추가한다. V5는 V1~V4를 수정하지 않고 RuleVersion nullable FK와
-snapshot 검증을 추가한다. 기존 거래와 Evidence는 backfill하지 않는다.
+V1의 `financial_transaction`과 V2의 `behavior_event`를 선행 기반으로 V3가
+`detection_result`, `detection_evidence`, 거래의 nullable 채택·risk 컬럼과
+제약·history/adoption trigger를 추가한다. V4는 behavior-event Rule 조회 index만,
+V5는 `fraud_rule`·`rule_version`과 Evidence의 nullable `rule_version_id` FK 및
+RuleVersion snapshot trigger 검증을 추가한다. 기존 거래와 Evidence는 backfill하지
+않는다.
 
 PostgreSQL 17 Testcontainers에서 Migration 순서, Hibernate validation,
 감사·업무 시각의 마이크로초 정밀도와 DB transaction timestamp,
@@ -314,6 +384,8 @@ PostgreSQL 17 Testcontainers에서 Migration 순서, Hibernate validation,
 rollback과 기존 거래 접수·멱등·Snapshot 회귀를 검증한다. H2 호환
 결과를 근거로 사용하지 않는다.
 
-External Risk v2 내부 오케스트레이션 연결에도 V1~V7을 수정하거나 Snapshot을
-DetectionEvidence로 저장하지 않는다. 영속·감사 요구가 생기면 별도 DB 계약과
-Migration 승인을 거친다.
+V6·V7은 사건·일반 AuditLog, V8·V9는 typed failure Snapshot 허용·recovery audit,
+V10~V14는 사건 조회·workflow·resolution·InvestigationNote 감사 계약을 확장하며
+DetectionResult/Evidence table의 위 책임을 바꾸지 않는다. External Risk API v2 연결도
+Snapshot을 DetectionEvidence로 저장하지 않는다. 별도 영속·감사 요구가 생기면 DB
+계약과 Migration 승인을 거친다.
