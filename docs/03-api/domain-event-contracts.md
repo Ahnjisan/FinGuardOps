@@ -13,7 +13,12 @@
 - 외부 `AiReportRequest` 흐름과 실제 `AiReportExecution`·`ProviderCallAttempt` 흐름을 구분한다.
 - 현재 동기 처리와 비동기 AI 리포트 처리, 향후 메시지 기반 처리의 경계를 정의한다.
 
-이 문서는 Kafka 구현 문서가 아니다. 현재 단계에서 Kafka Topic, Producer, Consumer, Consumer Group, DLQ 또는 Outbox를 구현하거나 확정하지 않는다.
+이 문서는 Kafka 구현 문서가 아니다. 현재 단계에서 Event DTO, Producer, 실제 event
+emission, Kafka Topic, Consumer, Consumer Group, DLQ 또는 Outbox를 구현하거나 확정하지
+않는다. 다만 그 아래의 public 거래 접수 동기 흐름인 External Risk 조회,
+`/api/v2/rule-analysis`의 Rule v1 결과 채택, 위험 대응·사건·감사 finalization,
+Snapshot v2 completion, 성공·Failure Snapshot replay와 제한된 one-shot recovery는
+구현되어 있다.
 
 ## 2. 적용 범위와 전송 방식
 
@@ -45,7 +50,7 @@ FastAPI AI Service
 → LLM 출력 검증과 템플릿 fallback 생성
 ```
 
-FastAPI와 생성형 AI는 거래 상태, 위험 등급, 위험 대응, 사건 상태와 최종 판정을 확정하지 않는다. Spring Boot가 FastAPI 응답을 검증하고 영속 업무 데이터에 반영한 뒤 발생시킨 이벤트가 업무 상태 변화의 기준이다.
+FastAPI와 생성형 AI는 거래 상태, 위험 등급, 위험 대응, 사건 상태와 최종 판정을 확정하지 않는다. Spring Boot가 FastAPI 응답을 검증하고 영속 업무 데이터에 반영한 상태 변화가 현재 업무 정합성의 기준이며, 향후 도메인 이벤트는 그 확정 이후에만 발행하는 계약이다.
 
 ### 2.2 제외 범위
 
@@ -238,7 +243,7 @@ JSON 파싱, 필수 헤더, 기본 필드 형식 또는 거래 유형별 도메�
 | 최소 payload | `behaviorEventType`, `behaviorOccurredAt`, `externalCustomerRef`, 선택적 `accountRef`, `deviceRef`, `transactionId`, `beneficiaryRef` |
 | 중복 처리 | 같은 행동 이벤트 `eventId`+같은 정규화 요청은 기존 결과 반환, 다른 내용이면 `DUPLICATE_EVENT` |
 | 원거래 판단 영향 | 관측 신호이며 위험 등급·대응을 직접 확정하지 않음 |
-| 처리 범위 | 현재 저장과 내부 전달. 향후 메시지 전달 가능 |
+| 처리 범위 | 현재 REST 저장까지. 내부 이벤트 DTO·발행과 메시지 전달은 미구현 |
 
 Envelope `eventId`와 REST 행동 엔티티의 `eventId`가 같은 이름을 사용하므로 직렬화 시 두 의미를 혼합하지 않는다. Envelope `eventId`는 논리 도메인 이벤트의 전달·재처리를 식별하고 REST `BehaviorEvent.eventId`는 호출자가 생성한 UUID v4 행동 Aggregate 식별자이다. 이 문서에서는 행동 엔티티 식별자를 `aggregateId`로 전달한다.
 
@@ -256,7 +261,7 @@ Envelope `eventType=BehaviorEventReceived`는 발생한 도메인 이벤트의 �
 | 최소 payload | `detectionResultId`, `transactionId`, `detectionResultVersion`, 승인된 feature 입력 버전, 분석 요청 시각 |
 | 중복 처리 | 같은 `transactionId+detectionResultVersion`의 완료·진행 상태를 확인하고 중복 분석 시작 방지 |
 | 원거래 판단 영향 | 요청 사실만으로 거래 상태를 최종 확정하지 않음 |
-| 처리 범위 | public `POST /api/v1/transactions`, FastAPI `/api/v1/rule-analysis`·`/api/v2/rule-analysis`, Backend Java v1 Client와 v2 exact DTO·mapper·직접 Client, 내부 `analyzeV2(...)`·`startAnalysisV2(...)`, 잠긴 시작 트랜잭션의 Snapshot 조립·v2 mapper·DetectionResult 생성, commit 이후 트랜잭션 밖 FastAPI v2 호출과 기존 완료·채택·실패 영속 경계, Mock Policy 성공 Snapshot을 전달하는 per-invocation coordinator는 구현됨. public intake와 External Risk coordinator·Rule v2·위험 대응 최종화·멱등 실패 저장·재생의 end-to-end 연결, 이 이벤트 DTO·Producer·실제 발행, 실제 External Risk Provider, 공개 External Risk 오류 mapper·Failure Snapshot, 성공 Snapshot v2·운영 복구와 운영 배포·메트릭은 미구현 |
+| 처리 범위 | public `POST /api/v1/transactions`, 실제 External Risk HTTP Provider와 local/dev/test Mock, `/api/v1/rule-analysis`·`/api/v2/rule-analysis`, Backend Java v1 Client와 v2 exact DTO·mapper·직접 Client, 내부 `analyzeV2(...)`·`startAnalysisV2(...)`, 잠긴 시작 트랜잭션의 Snapshot 조립·v2 mapper·DetectionResult 생성, commit 이후 트랜잭션 밖 FastAPI v2 호출, Rule v1 결과 검증·채택, 위험 대응·사건·감사 finalization, 성공 Snapshot v2와 External Risk Failure Snapshot 저장·재생, 제한된 one-shot recovery는 구현됨. 이 이벤트 DTO·Producer·실제 발행, Kafka·consumer·DLQ·비동기 재처리, 성공 External Risk 결과 영속화, 자동 recovery와 운영 배포는 미구현 |
 
 `detectionResultId`와 `detectionResultVersion`은 분석 시작 트랜잭션에서 생성되고
 FastAPI 호출 전에 `IN_PROGRESS` 상태와 함께 commit된다. 이 commit 이후 실패한
@@ -459,11 +464,10 @@ Provider 사용량은 payload에 복제하지 않고 `executionId` 아래 실제
 
 ### 8.1 거래부터 사건 생성
 
-public 거래 접수 API 자체는 구현되어 있다. 다음 sequence는 구현된 Mock Policy→Rule v2
-per-invocation coordinator와 내부 Rule v2 시작·완료·실패 경계, 아직 미구현인 실제
-Provider 및 public intake부터 External Risk·Rule v2·최종화·멱등 실패 저장·재생까지의
-end-to-end 연결을 함께 나타낸 목표 계약이다. 표시된 논리 이벤트는 계약 이름이며
-이벤트 DTO·Producer·실제 발행 경로는 구현되지 않았다.
+다음 sequence의 public intake→External Risk→`/api/v2/rule-analysis`의 Rule v1 결과
+채택→finalization→Snapshot v2 또는 Failure Snapshot terminal 저장·재생은 구현된
+동기 흐름이다. 표시된 논리 이벤트는 계약 이름일 뿐 Event DTO·Producer·실제 event
+emission, Kafka·consumer·DLQ·비동기 재처리 경로가 구현됐다는 의미는 아니다.
 
 ```mermaid
 sequenceDiagram
@@ -480,7 +484,7 @@ sequenceDiagram
     Spring->>DB: Transaction(RECEIVED) 저장·Idempotency record 연결
     DB-->>Spring: RECEIVED·연결 상태 commit
     Spring-->>Spring: 목표 논리 TransactionReceived
-    Spring->>Risk: DB 트랜잭션 밖 External Risk 조회(Mock coordinator 구현·실제 Provider 미구현)
+    Spring->>Risk: DB 트랜잭션 밖 External Risk 조회(HTTP Provider 또는 local Mock)
     alt External Risk 성공
         Risk-->>Spring: 호출자가 확보한 성공 ExternalRiskSnapshot 전달
         Spring->>Spring: analyzeV2(transactionId, snapshot, traceId)
@@ -512,8 +516,9 @@ sequenceDiagram
                 end
                 DB-->>Spring: 사건·연결·거래·AuditLog REQUIRED commit
                 Spring-->>Spring: 목표 논리 RiskResponseDecided
-                Spring->>DB: 목표 최종 멱등 Snapshot v2 확정(미구현)
-                DB-->>Spring: 목표 Snapshot v2 commit(미구현)
+                Spring->>DB: 최종 멱등 Snapshot v2 확정
+                DB-->>Spring: Snapshot v2 commit
+                Spring-->>Client: HTTP 201 동기 응답
             else 시작 commit 이후 FastAPI·응답 검증·변환·채택 실패
                 FastAPI--xSpring: 원본 오류
                 Spring->>DB: 기존 실패 경계로 DetectionResult FAILED·Transaction FAILED
@@ -539,9 +544,10 @@ External Risk 선행 실패는 Rule 분석 시작 전 경계다. 거래는 `RECE
 DetectionResult·Evidence를 생성하지 않으며 FastAPI와 위험 대응 최종화를 호출하지
 않는다. Case·AuditLog 또는 다른 후속 도메인 이벤트도 생성하지 않으며 저장된 실패의
 replay 자체가 새 도메인 이벤트를 생성하지 않는다. 내부 coordinator는 별도 read
-transaction 종료 뒤 Mock Policy를 호출하고 실패를 원본 typed exception으로 전파한다.
-실제 Provider와 public intake end-to-end 연결·멱등 실패 저장·재생은 아직 구현되지
-않았다. 직접 재호출·멱등 경계 밖 동시 호출은 Provider를 다시 호출할 수 있다. 상세
+transaction 종료 뒤 실제 HTTP Provider 또는 Mock Policy를 호출하고 실패를 원본 typed
+exception으로 전파한다. public intake 연결, Failure Snapshot 저장·공개 안전 오류
+mapping·재생은 구현되었다. 직접 재호출·멱등 경계 밖 동시 호출은 Provider를 다시
+호출할 수 있다. 상세
 Failure Snapshot은 [ADR-007](../07-decisions/ADR-007-external-risk-idempotent-failure-replay-contract.md),
 공개 응답은 [거래·행동·탐지 API](./transaction-detection-api.md)를 따른다.
 
@@ -557,9 +563,12 @@ Snapshot 조립 또는 mapper가 실패하면 시작 트랜잭션 전체를 roll
 `ANALYZING`, 해당 DetectionResult는 이미 `IN_PROGRESS`다. 실패 기록 경계는 같은
 쓰기 트랜잭션에서 거래와 DetectionResult를 모두 `FAILED`로 확정하고 실패 결과를
 채택하지 않으며 Evidence를 만들지 않는다. 원래 오류를 성공이나 fallback으로 바꾸지
-않으며 자동 retry와 fallback은 없다. 공개 오류 매핑과 External Risk 영속화,
-Snapshot v2 운영 복구, 도메인 이벤트 DTO·Producer·실제 발행 경로 및 운영 메트릭은
-아직 구현되지 않았다.
+않으며 자동 retry와 fallback은 없다. 공개 안전 오류 매핑과 Snapshot v2 completion은
+구현되어 있고, 확정 가능한 final-success completion gap은 bounded 후보 조회·typed
+판정·non-web 단건 one-shot recovery와 append-only audit로만 복구한다. Provider 호출
+여부가 불확실한 작업, failure-writer crash, Rule 실패 자동 재분석, scheduler·batch·
+상시 운영·HA coordination, 성공 External Risk 결과 영속화, 도메인 이벤트 DTO·Producer·
+실제 발행 경로 및 장기 recovery metric·alert·dashboard는 구현되지 않았다.
 
 내부 위험 대응 최종화는 LOW·MEDIUM에서 사건 없이 거래 AuditLog 2건을 기록하고,
 HIGH·CRITICAL 신규 사건에서는 사건·첫 연결을 먼저 만든 뒤 사건 AuditLog 2건과
@@ -901,9 +910,12 @@ content와 내부 예외 원문을 기록하지 않는다.
 다음은 핵심 정합성을 위해 현재 동기 업무 트랜잭션을 우선한다.
 
 - 거래 접수와 멱등성 선점
+- External Risk HTTP 조회와 `/api/v2/rule-analysis`의 Rule v1 결과 검증·채택
 - DetectionResult 채택과 Transaction 위험 현재값 반영
 - 위험 대응 결정과 AuditLog
 - 사건 생성과 최초 CaseTransaction 연결
+- Snapshot v2 completion과 성공·Failure Snapshot replay
+- 확정 가능한 final-success completion gap의 단건 one-shot recovery와 append-only audit
 - 사건 상태·최종 판정·동시성 버전과 AuditLog
 - 새 AiReportRequest와 AiReportExecution의 최초 상호 연결
 - AiReport 결과 생성과 실행·연결 요청 종료
@@ -975,8 +987,8 @@ Spring Boot는 유효한 추적 문맥이 없으면 새 `traceId`를 만들고 F
 | 항목 | 기존 문서 표현 또는 발생 조건 | 이 문서의 확정·처리 |
 | --- | --- | --- |
 | `eventId` 의미 | `api-conventions.md`는 행동 이벤트 식별자로 정의. `system-architecture.md`와 `platform-operation-requirements.md`는 향후 Kafka 이벤트 발행·소비 식별자로 표현 | Envelope `eventId`와 BehaviorEvent 업무 식별자의 이름 충돌로 기록. 논리 Envelope에서는 이벤트 자체 ID, 행동 엔티티 ID는 `aggregateId`로 표현. 물리 필드 매핑은 후속 결정 |
-| External Risk 선행 실패 | 여섯 typed category는 Rule 분석을 시작하지 않고 실패를 `UNMATCHED`나 정상 결과로 이벤트화하지 않음 | 목표 거래 연결은 거래 `RECEIVED` 유지, DetectionResult·Evidence·Case·AuditLog와 후속 이벤트 미생성, FastAPI·최종화 미호출과 terminal 멱등 `FAILED`를 적용한다. 같은 요청 재생은 Provider를 다시 호출하거나 새 이벤트를 만들지 않으며 이번 Issue도 External Risk 도메인 이벤트를 추가·발행하지 않음 |
-| Rule 분석 시작 commit 이후 실패 | FastAPI·응답 검증·변환·채택 실패 시 거래는 이미 `ANALYZING`, DetectionResult는 `IN_PROGRESS` | 동일 쓰기 트랜잭션에서 거래와 DetectionResult를 `FAILED`로 확정하고 실패 결과를 채택하지 않는다. 원래 오류를 성공·fallback으로 바꾸지 않고 자동 retry·fallback을 사용하지 않으며 공개 오류 매핑과 이벤트 발행은 미구현 |
+| External Risk 선행 실패 | 여섯 typed category는 Rule 분석을 시작하지 않고 실패를 `UNMATCHED`나 정상 결과로 이벤트화하지 않음 | 구현된 거래 연결은 거래 `RECEIVED` 유지, DetectionResult·Evidence·Case·AuditLog와 후속 이벤트 미생성, FastAPI·최종화 미호출과 Failure Snapshot 기반 terminal 멱등 `FAILED`를 적용한다. 같은 요청 재생은 Provider를 다시 호출하거나 새 이벤트를 만들지 않으며 이번 문서 정비도 External Risk 도메인 이벤트를 추가·발행하지 않음 |
+| Rule 분석 시작 commit 이후 실패 | FastAPI·응답 검증·변환·채택 실패 시 거래는 이미 `ANALYZING`, DetectionResult는 `IN_PROGRESS` | 동일 쓰기 트랜잭션에서 거래와 DetectionResult를 `FAILED`로 확정하고 실패 결과를 채택하지 않는다. 원래 오류를 성공·fallback으로 바꾸지 않고 자동 retry·fallback을 사용하지 않는다. public 거래 접수의 안전 오류 매핑은 구현됐지만 이벤트 DTO·발행은 미구현 |
 
 ## 15. 사용자 결정 필요 사항
 
@@ -1018,10 +1030,12 @@ coordinator와 `READ_COMMITTED` command reader를 구현해 성공 Snapshot을
 `analyzeV2(...)`에 전달한다.
 `/api/v1/rule-analysis`는 구현된 기존 Endpoint로 유지하고 `/api/v2/rule-analysis`와
 public `POST /api/v1/transactions`도 구현되어 있다. 실제 External Risk Provider와
-public intake→External Risk coordinator→Rule v2→위험 대응 최종화의 end-to-end 연결,
-멱등 실패 저장·재생·공개 오류 mapper·External Risk Failure Snapshot·성공 Snapshot
-v2·이벤트 발행·운영 배포는 아직 구현되지 않았으므로, 이 내부 코드 경계는
-end-to-end 거래 처리나 운영 배포 완료를 의미하지 않는다.
+public intake→External Risk coordinator→`/api/v2/rule-analysis`의 Rule v1 결과 채택→
+위험 대응·사건·감사 finalization→성공 Snapshot v2의 end-to-end 동기 연결,
+멱등 Failure Snapshot 저장·재생·공개 안전 오류 mapper와 제한된 one-shot recovery도
+구현되었다. Event DTO·Producer·실제 event emission, Kafka·consumer·DLQ·비동기 재처리,
+자동 recovery와 production/cloud 운영 배포는 구현되지 않았으므로 동기 흐름 구현을
+event-driven architecture 또는 운영 배포 완료로 해석하지 않는다.
 
 - [ ] 이벤트가 Kafka 전용 계약으로 구현되지 않는가
 - [ ] Envelope `eventId`와 BehaviorEvent 업무 식별자를 혼합하지 않는가

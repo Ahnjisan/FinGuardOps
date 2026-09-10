@@ -36,8 +36,9 @@ FastAPI 내부에서 immutable execution plan을 만들고 evaluator를 순차 �
 ### 2.2 제외
 
 - 실패 후 자동 재분석과 새 버전 생성 정책
-- External Risk Provider 직접 호출·정책 결정, ML, LLM, 위험 대응과 사건 생성
-- 최종 거래 성공 Snapshot v2 codec과 완료 간극 운영 복구 구현
+- External Risk HTTP Adapter·정책 내부, ML, LLM과 위험 대응·사건 생성 정책 내부
+- Provider·Rule 상태가 불확실한 작업의 재수행, failure-writer crash recovery와
+  recovery scheduler·batch·상시 운영·HA coordination
 - Java·Python 신규 Endpoint·DTO, 상태·컬럼·Migration 구현
 - Client 자동 retry와 fallback
 
@@ -368,8 +369,11 @@ terminal 상태 검증을 사용한다. Timeout 실패가 먼저 commit되어 �
 최종 업무 commit 뒤 Snapshot 완료가 실패하면 업무 결과는 되돌리지 않고 멱등
 레코드를 `FAILED`로 바꾸지 않으며 `IN_PROGRESS`로 유지한다. 최초 요청은
 `500 INTERNAL_ERROR`, 같은 요청은 `409 IDEMPOTENCY_REQUEST_IN_PROGRESS`로
-응답하고 외부 호출과 업무 처리를 반복하지 않는다. 운영 복구는 확정된 상태를
-검증해 동일 v2 Snapshot만 생성하고 멱등 레코드를 `COMPLETED`로 전이한다.
+응답하고 외부 호출과 업무 처리를 반복하지 않는다. 구현된 non-web one-shot recovery는
+bounded 후보 조회와 typed 판정으로 최종 성공 상태·사건 연결·finalization audit가
+확정된 단건 `RECOVERABLE_COMPLETION_GAP`만 검증한다. 이때 Provider·Rule·finalization을
+재수행하지 않고 동일 Snapshot v2를 생성해 멱등 레코드를 `COMPLETED`로 전이하며,
+시도 결과는 append-only recovery audit에 남긴다.
 
 ## 14. 관측과 보안
 
@@ -441,16 +445,22 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
 - 실제 HTTP Provider와 Mock coordinator 중 정확히 하나를 선택하는 public 거래 접수
   최종 동기 orchestration
 - 거래 `RECEIVED`·Idempotency 연결 commit 뒤 `IN_PROGRESS`를 유지한 채 External
-  Risk→Rule v2→위험 대응 최종화→별도 성공 Snapshot v2 완료를 실행하는 경계
+  Risk→`/api/v2/rule-analysis`의 Rule v1 결과 채택→위험 대응 최종화→별도 성공
+  Snapshot v2 완료를 실행하는 경계
 - External Risk typed Failure Snapshot 저장·strict 재생과 공개 오류 mapping
 - Rule 확정 실패의 code-only `DEPENDENCY_UNAVAILABLE`, terminal 성공·실패 재생의
   downstream 0회 호출
+- final-success completion gap의 bounded 후보 조회·typed 판정, non-web one-shot
+  `inspect`/단건 `recover`, Snapshot v2 completion과 append-only recovery audit
 
 ### 15.2 구현되지 않음
 
 - ExternalRiskSnapshot DB 영속화는 이번 목표에 포함하지 않으며 별도 승인 대상
-- crash·Snapshot 완료 간극과 장기 `IN_PROGRESS` 운영 복구 실행 경로
+- Provider 호출 여부가 불확실한 작업과 failure-writer crash의 재수행
+- Rule 실패 자동 재분석
+- recovery scheduler·batch·상시 운영·HA coordination과 장기 completion-gap metric·alert·dashboard
 - 자동 retry·fallback·cache
+- Spring Boot→FastAPI 내부 Rule endpoint 전용 인증
 - 운영 credential 배포와 신규 metric·dashboard
 - 공개 RuleVersion 관리 API와 production 발행·일반 버전 배포 관리
 
@@ -471,7 +481,9 @@ connect·response timeout, 외부 호출 지연시간, 결과 채택 rollback과
   시작 트랜잭션에서 v1 Snapshot과 결합하고, 시작 commit 뒤
   `POST /api/v2/rule-analysis`를 호출한다. 실제 Provider와 Mock coordinator는 별도
   read transaction 종료 뒤 Policy 성공 Snapshot을 이 v2 경계에 전달한다. External
-  Risk 영속화와 운영 복구·credential·metric은 여전히 후속 범위다.
+  Risk 성공 결과 영속화, 불확실 작업 재수행, 자동 recovery·credential·metric은
+  여전히 후속 범위다. 확정 가능한 final-success completion gap의 단건 one-shot
+  recovery는 현재 구현되어 있다.
 - V5 초기 RuleVersion은 항상 모두 `DRAFT`다. 별도 one-shot 명령을 명시적으로
   실행한 local/dev/test 환경에서만 기본 네 버전이 실행 가능해지며, 정상 앱 시작은
   자동 발행하지 않는다.
