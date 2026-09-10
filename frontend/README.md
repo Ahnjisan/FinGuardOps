@@ -184,7 +184,7 @@ literal과, `/transactions/{canonical lowercase UUID v4}`·`/cases/{canonical lo
   `/transactions/{uuid}?tab=raw`가 canonical 상세 route로 되살아나므로, 이 결합에는 trim,
   decode, normalization을 적용하지 않는다. query나 fragment가 있으면 주소 전체가 allowlist를
   통과하지 못해 기본 route `/`로 fail-closed되며, 제거 후 재허용은 하지 않는다.
-- literal 세 개는 `===` 문자열 비교다. prefix 매칭이 아니다.
+- literal 네 개는 `===` 문자열 비교다. prefix 매칭이 아니다.
 - 상세 경로는 `startsWith("/transactions/")`나 `includes("/transactions")`로 판정하지 않는다.
   정확히 한 segment를 떼어내 `isCanonicalUuidV4`로 검사하고, 통과한 36자로 경로를 **다시 조립해**
   반환한다. 따라서 입력 문자열의 어떤 바이트도 그대로 반환되지 않는다.
@@ -305,10 +305,14 @@ StrictMode의 setup→cleanup→setup에서도 callback 작업은 공유 record�
 첫 effect의 cleanup 이후에도 성공·실패 결과가 유실되지 않는다. 실제 unmount 이후에는
 navigate도 상태 갱신도 하지 않는다.
 
-성공 시 복귀 경로는 `/`와 `/health`만 허용하는 exact allowlist를 통과한 값만 사용한다.
-decode, trim, backslash 치환, `startsWith` 판정을 하지 않으므로 절대 URL,
-protocol-relative(`//host`), backslash 변형, encoded slash/backslash, allowlist 밖 내부
-경로는 모두 `/`로 대체된다. raw 복귀 값은 화면·console·오류에 출력하지 않는다.
+성공 시 복귀 경로는 literal 네 개(`/`, `/health`, `/transactions`, `/cases`)와 parameterized 상세
+경로 두 종류(`/transactions/{transactionId}`, `/cases/{caseId}`)만 허용하는 exact allowlist를 통과한
+값만 사용한다. 두 identifier는 production validator와 동일한 canonical lowercase RFC 4122 UUID v4이며
+정확히 한 path segment여야 한다. query, fragment, trailing slash, uppercase·non-v4·noncanonical·
+malformed UUID, 추가 child path, encoded slash/backslash는 거부한다. decode, trim, backslash 치환,
+`startsWith` 판정을 하지 않으므로 같은 origin을 포함한 절대 URL, protocol-relative(`//host`) URL,
+다른 origin·scheme·port, userinfo, backslash 변형, allowlist 밖 내부 경로도 모두 `/`로 대체된다. raw
+복귀 값은 화면·console·오류에 출력하지 않는다.
 
 ### 세션 수명과 logout
 
