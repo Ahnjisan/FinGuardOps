@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+
+    "types": ["node"],
+
+    // page.evaluate() 안에서 Vite dev server가 해석하는 root-absolute module만 exact key로 대응한다.
+    // wildcard가 없으므로 경로 오타와 승인하지 않은 /src module은 계속 TS2307로 실패한다.
+    "paths": {
+      "/src/auth/oidcAuthClient.ts": ["./src/auth/oidcAuthClient.ts"],
+      "/src/api/authorizedClient.ts": ["./src/api/authorizedClient.ts"]
+    }
+  },
+  "include": [
+    "src/vite-env.d.ts",
+    "e2e/**/*.ts",
+    "e2e/**/*.tsx",
+    "playwright.config.ts"
+  ]
+}
