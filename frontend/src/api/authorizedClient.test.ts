@@ -2082,3 +2082,130 @@ describe("authorized transport — hand-crafted query re-verification", () => {
     }
   });
 });
+
+/**
+ * 호출자가 이름 있는 option으로 넘긴 dispatch guard.
+ *
+ * guard는 destination·credential 검증을 대신하지 않는다. 인증 port 호출과 발급 요청 재검증을 모두
+ * 통과한 뒤 실제 fetch와 같은 동기 turn에서 한 번 실행되며, guard의 거부는 Backend 401이 아니므로
+ * session을 무효화하지 않는다.
+ */
+describe("authorized transport — final dispatch guard", () => {
+  function guardedCaseDetail(
+    client: CredentialAuthClient,
+    assertDispatchAllowed: () => void,
+    signal?: AbortSignal,
+  ) {
+    return sendAuthorizedBackendRequest(client, {
+      endpoint: "case-detail",
+      params: { caseId: CASE_ID },
+      expectedStatus: 200,
+      validate: isRecord,
+      signal,
+      assertDispatchAllowed,
+    });
+  }
+
+  it("runs after authorization and request re-verification, in the same turn as fetch", async () => {
+    const order: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() => {
+        order.push("fetch");
+        return Promise.resolve(jsonResponse({ ok: true }));
+      }),
+    );
+    const client = createLocalFakeAuthClient();
+
+    await guardedCaseDetail(client, () => {
+      order.push(`guard:authorized=${String(client.calls.authorizeRequest)}`);
+      // guard와 fetch 사이에 microtask 경계가 있으면 이 기록이 fetch보다 먼저 남는다.
+      queueMicrotask(() => order.push("microtask"));
+    });
+
+    expect(order).toEqual(["guard:authorized=1", "fetch", "microtask"]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends nothing and returns the guard's refusal unchanged", async () => {
+    mockFetchOnce(async () => jsonResponse({ ok: true }));
+    const client = createLocalFakeAuthClient();
+    const refusal = new RequestNotAllowedError();
+
+    const error = await guardedCaseDetail(client, () => {
+      throw refusal;
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBe(refusal);
+    expect(error).not.toBeInstanceOf(NetworkError);
+    expect(error).not.toBeInstanceOf(TimeoutError);
+    expect(client.calls.authorizeRequest).toBe(1);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(client.calls.invalidateIfCurrent).toBe(0);
+  });
+
+  it("never treats a guard-thrown UnauthorizedError as a rejected credential", async () => {
+    mockFetchOnce(async () => jsonResponse({ ok: true }));
+    const client = createLocalFakeAuthClient();
+    client.onSessionInvalidated(() => undefined);
+    const refusal = new UnauthorizedError();
+
+    const error = await guardedCaseDetail(client, () => {
+      throw refusal;
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBe(refusal);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(client.calls.invalidateIfCurrent).toBe(0);
+    expect(client.calls.effectiveInvalidations).toBe(0);
+    expect(client.calls.notified).toBe(0);
+  });
+
+  it("is not consulted when the port yields no credential or an altered request", async () => {
+    const rows = [
+      [createLocalFakeAuthClient({ signedIn: false }), AuthenticationRequiredError],
+      [createLocalFakeAuthClient({ rewriteUrlTo: "http://evil.example/collect" }), RequestNotAllowedError],
+      [createLocalFakeAuthClient({ appendSecondCredential: true }), RequestNotAllowedError],
+    ] as const;
+    for (const [client, expected] of rows) {
+      mockFetchOnce(async () => jsonResponse({ ok: true }));
+      const guard = vi.fn();
+
+      await expect(guardedCaseDetail(client, guard)).rejects.toBeInstanceOf(expected);
+
+      expect(guard).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("is not consulted when the request was cancelled during authorization", async () => {
+    const external = new AbortController();
+    mockFetchOnce(async () => jsonResponse({ ok: true }));
+    const client = createLocalFakeAuthClient();
+    const release = client.deferAuthorization();
+    const guard = vi.fn();
+
+    const pending = guardedCaseDetail(client, guard, external.signal);
+    await Promise.resolve();
+    external.abort();
+    release();
+
+    await expect(pending).rejects.toBeInstanceOf(NetworkError);
+    expect(guard).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps the current-credential 401 rule after a passing guard", async () => {
+    statusOnce(401);
+    const client = createLocalFakeAuthClient();
+    const guard = vi.fn();
+
+    await expect(guardedCaseDetail(client, guard)).rejects.toBeInstanceOf(UnauthorizedError);
+
+    expect(guard).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(client.calls.invalidateIfCurrent).toBe(1);
+    expect(client.calls.effectiveInvalidations).toBe(1);
+  });
+});

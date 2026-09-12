@@ -7,8 +7,10 @@ import {
   type CaseDetailErrorKind,
   type CaseDetailState,
 } from "../api/useCaseDetail";
+import type { CaseWorkflowReconciliationScope } from "../api/useCaseWorkflowMutations";
 import { CaseAuditSection } from "./cases/CaseAuditSection";
 import { CaseInvestigationNotesSection } from "./cases/CaseInvestigationNotesSection";
+import { CaseWorkflowSection } from "./cases/CaseWorkflowSection";
 import {
   CASE_FINAL_DISPOSITION_LABELS,
   CASE_STATUS_LABELS,
@@ -20,7 +22,7 @@ import {
 } from "./cases/casePresentation";
 
 /**
- * One fraud case, read only.
+ * One fraud case record with capability-gated workflow actions.
  *
  * Everything in the record on this screen comes from the `CaseDetail` contract
  * and nothing else. There is no risk level, no risk score, no detection result,
@@ -28,22 +30,24 @@ import {
  * report, because `GET /api/v1/cases/{caseId}` carries none of them and a
  * console that infers one puts a judgement on screen that no system made.
  *
- * Below the record sit investigation notes and audit history. All three reads
- * mount in the same commit and own independent request, error and paging state;
- * a notes or audit failure therefore removes neither the record nor its sibling.
+ * Below the record sit the workflow section, investigation notes and audit
+ * history. All three reads mount in the same commit and own independent
+ * request, error and paging state; a notes or audit failure therefore removes
+ * neither the record nor its sibling.
  *
  * The two settled refusals are the exception, and deliberately so. A case that
  * does not exist and a case this session may not read are answers about the
  * case itself, so both subordinate sections are removed rather than left to
  * repeat the refusal. Unmounting discards their state and blocks late publish.
  *
- * Status, reassignment and resolution remain read only. The sole mutation is
- * the capability- and workflow-gated inline investigation-note composer.
+ * Status and reassignment share one page-level mutation lane and reconcile
+ * through authoritative detail/audit reads. Resolution remains unimplemented.
+ * The investigation-note composer retains its separate append lifecycle.
  *
  * `concurrencyVersion` is shown for the same reason the rest of the record is -
  * it is part of the response - and for no other. It is record metadata a reader
  * can quote when reporting a case and the exact optimistic-locking token the
- * note composer sends as `expectedVersion`.
+ * note composer and workflow lane send as `expectedVersion`.
  */
 
 /**
@@ -208,10 +212,22 @@ export function CaseDetailPage() {
     refreshState,
     reconciliationGeneration,
   } = useCaseDetail(caseId);
-  const [subordinateRefreshSignal, setSubordinateRefreshSignal] = useState(0);
+  const [notesRefreshSignal, setNotesRefreshSignal] = useState(0);
+  const [auditRefreshSignal, setAuditRefreshSignal] = useState(0);
   const reconcileNoteMutation = useCallback((minimumDetailVersion?: number) => {
     refresh(minimumDetailVersion);
-    setSubordinateRefreshSignal((current) => current + 1);
+    setNotesRefreshSignal((current) => current + 1);
+    setAuditRefreshSignal((current) => current + 1);
+  }, [refresh]);
+  const reconcileWorkflowMutation = useCallback((
+    scope: CaseWorkflowReconciliationScope,
+    minimumDetailVersion: number,
+  ) => {
+    refresh(minimumDetailVersion);
+    setAuditRefreshSignal((current) => current + 1);
+    if (scope === "detail-notes-audit") {
+      setNotesRefreshSignal((current) => current + 1);
+    }
   }, [refresh]);
 
   const errorRef = useRef<HTMLDivElement | null>(null);
@@ -291,11 +307,20 @@ export function CaseDetailPage() {
 
       {caseId !== null && state.status === "success" && <CaseRecord detail={state.data} />}
 
+      {caseId !== null && state.status === "success" && (
+        <CaseWorkflowSection
+          detail={state.data}
+          reconciliationGeneration={reconciliationGeneration}
+          detailRefreshState={refreshState}
+          onReconcile={reconcileWorkflowMutation}
+        />
+      )}
+
       {caseId !== null && state.status === "success" && refreshState === "failed" && (
         <div className="notice notice--error case-detail__refresh" role="alert">
           <h3 className="notice__title">The latest case information could not be loaded</h3>
           <p className="notice__body">
-            The note submission result is unchanged. Refresh the case before adding another note.
+            The last mutation result is unchanged. Refresh the case before taking another action.
           </p>
           <button className="button" type="button" onClick={() => refresh()}>
             Refresh case information
@@ -316,10 +341,10 @@ export function CaseDetailPage() {
             caseStatus={state.status === "success" ? state.data.caseStatus : null}
             expectedVersion={state.status === "success" ? state.data.concurrencyVersion : null}
             reconciliationGeneration={reconciliationGeneration}
-            refreshSignal={subordinateRefreshSignal}
+            refreshSignal={notesRefreshSignal}
             onReconcile={reconcileNoteMutation}
           />
-          <CaseAuditSection caseId={caseId} refreshSignal={subordinateRefreshSignal} />
+          <CaseAuditSection caseId={caseId} refreshSignal={auditRefreshSignal} />
         </>
       )}
     </section>

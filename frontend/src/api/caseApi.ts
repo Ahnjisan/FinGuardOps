@@ -489,6 +489,158 @@ export function buildCaseResolutionBody(request: unknown): Record<string, unknow
 }
 
 /**
+ * Re-validates the detail snapshot a workflow command is being bound to.
+ *
+ * The snapshot has already crossed `useCaseDetail` in production, but the API
+ * client is also a public boundary and must fail closed when called from
+ * untyped code. Requiring the exact ten-field detail shape before credential
+ * lookup means a caller cannot use a partial or decorated object to relax the
+ * response binding below.
+ */
+function requireWorkflowBaseline(caseId: string, value: unknown): CaseDetail {
+  if (!isCaseDetail(value) || value.caseId !== caseId) {
+    throw new RequestNotAllowedError();
+  }
+  return value;
+}
+
+function sameNullableString(left: string | null, right: string | null): boolean {
+  return left === right;
+}
+
+/** Refuses a status command that is not valid for the submitted snapshot. */
+function assertStatusCommandMatchesBaseline(
+  baseline: CaseDetail,
+  body: Readonly<Record<string, unknown>>,
+): void {
+  if (
+    body.expectedVersion !== baseline.concurrencyVersion ||
+    (body.expectedVersion as number) >= Number.MAX_SAFE_INTEGER
+  ) {
+    throw new RequestNotAllowedError();
+  }
+
+  const reasonCode = body.reasonCode;
+  const allowed =
+    (baseline.caseStatus === "OPEN" && reasonCode === "CASE_REVIEW_STARTED") ||
+    (baseline.caseStatus === "IN_REVIEW" &&
+      reasonCode === "CASE_ADDITIONAL_INFORMATION_REQUESTED") ||
+    (baseline.caseStatus === "ADDITIONAL_INFORMATION_REQUIRED" &&
+      baseline.assigneeRef !== null &&
+      reasonCode === "CASE_REVIEW_RESUMED");
+  if (!allowed) {
+    throw new RequestNotAllowedError();
+  }
+}
+
+/** Refuses an assignee command that is not valid for the submitted snapshot. */
+function assertAssigneeCommandMatchesBaseline(
+  baseline: CaseDetail,
+  body: Readonly<Record<string, unknown>>,
+): void {
+  if (
+    body.expectedVersion !== baseline.concurrencyVersion ||
+    (body.expectedVersion as number) >= Number.MAX_SAFE_INTEGER ||
+    baseline.caseStatus === "OPEN" ||
+    baseline.caseStatus === "CLOSED"
+  ) {
+    throw new RequestNotAllowedError();
+  }
+
+  const after = body.assigneeRef;
+  const before = baseline.assigneeRef;
+  const reasonCode = body.reasonCode;
+  if (after === null) {
+    if (
+      baseline.caseStatus !== "ADDITIONAL_INFORMATION_REQUIRED" ||
+      before === null ||
+      reasonCode !== "CASE_ASSIGNEE_RELEASED"
+    ) {
+      throw new RequestNotAllowedError();
+    }
+    return;
+  }
+
+  if (typeof after !== "string" || after === before) {
+    throw new RequestNotAllowedError();
+  }
+  if (baseline.caseStatus === "IN_REVIEW" && before === null) {
+    throw new RequestNotAllowedError();
+  }
+  const expectedReason = before === null ? "CASE_ASSIGNEE_ASSIGNED" : "CASE_ASSIGNEE_CHANGED";
+  if (reasonCode !== expectedReason) {
+    throw new RequestNotAllowedError();
+  }
+}
+
+function isBoundStatusMutation(
+  value: unknown,
+  requestedCaseId: string,
+  baseline: CaseDetail,
+  body: Readonly<Record<string, unknown>>,
+): value is CaseMutation {
+  if (!isCaseMutation(value)) {
+    return false;
+  }
+  const expectedVersion = body.expectedVersion as number;
+  if (
+    value.caseId !== requestedCaseId ||
+    value.concurrencyVersion !== expectedVersion + 1 ||
+    value.caseStatus !== body.targetStatus ||
+    value.finalDisposition !== baseline.finalDisposition ||
+    !sameNullableString(value.closedAt, baseline.closedAt)
+  ) {
+    return false;
+  }
+
+  if (body.reasonCode === "CASE_REVIEW_STARTED") {
+    return (
+      value.assigneeRef === body.assigneeRef &&
+      (baseline.reviewStartedAt === null
+        ? value.reviewStartedAt !== null
+        : value.reviewStartedAt === baseline.reviewStartedAt)
+    );
+  }
+
+  return (
+    value.assigneeRef === baseline.assigneeRef &&
+    value.reviewStartedAt === baseline.reviewStartedAt
+  );
+}
+
+function isBoundAssigneeMutation(
+  value: unknown,
+  requestedCaseId: string,
+  baseline: CaseDetail,
+  body: Readonly<Record<string, unknown>>,
+): value is CaseMutation {
+  if (!isCaseMutation(value)) {
+    return false;
+  }
+  const expectedVersion = body.expectedVersion as number;
+  return (
+    value.caseId === requestedCaseId &&
+    value.concurrencyVersion === expectedVersion + 1 &&
+    value.caseStatus === baseline.caseStatus &&
+    value.assigneeRef === body.assigneeRef &&
+    value.reviewStartedAt === baseline.reviewStartedAt &&
+    value.finalDisposition === baseline.finalDisposition &&
+    value.closedAt === baseline.closedAt
+  );
+}
+
+/**
+ * 상태·담당자 PATCH의 마지막 optional options 객체. 기존 positional 인자의 순서는 바꾸지 않는다.
+ */
+export interface CaseWorkflowRequestOptions {
+  /**
+   * authorized transport에 이름 있는 option으로 그대로 전달하는 실제 fetch 직전 최종 guard.
+   * 이 module은 guard를 직접 실행하거나 destination·credential 판정을 다시 구현하지 않는다.
+   */
+  readonly assertDispatchAllowed?: () => void;
+}
+
+/**
  * `PATCH /api/v1/cases/{caseId}/status`.
  *
  * The body sent is a fresh plain object built from validated values, not the
@@ -499,15 +651,22 @@ export async function changeCaseStatus(
   authClient: CredentialAuthClient,
   caseId: string,
   request: CaseStatusChangeRequest,
+  currentDetail: CaseDetail,
   signal?: AbortSignal,
+  options?: CaseWorkflowRequestOptions,
 ): Promise<ApiResult<CaseMutation>> {
+  const body = buildCaseStatusChangeBody(request);
+  const baseline = requireWorkflowBaseline(caseId, currentDetail);
+  assertStatusCommandMatchesBaseline(baseline, body);
   const result = await sendAuthorizedBackendRequest(authClient, {
     endpoint: "case-status-change",
     params: { caseId },
-    body: buildCaseStatusChangeBody(request),
+    body,
     expectedStatus: 200,
-    validate: isCaseMutation,
+    validate: (value): value is CaseMutation =>
+      isBoundStatusMutation(value, caseId, baseline, body),
     signal,
+    assertDispatchAllowed: options?.assertDispatchAllowed,
   });
   return { data: result.data, traceId: resolveTraceId(result.traceId, result.data.traceId) };
 }
@@ -523,15 +682,22 @@ export async function changeCaseAssignee(
   authClient: CredentialAuthClient,
   caseId: string,
   request: CaseAssigneeChangeRequest,
+  currentDetail: CaseDetail,
   signal?: AbortSignal,
+  options?: CaseWorkflowRequestOptions,
 ): Promise<ApiResult<CaseMutation>> {
+  const body = buildCaseAssigneeChangeBody(request);
+  const baseline = requireWorkflowBaseline(caseId, currentDetail);
+  assertAssigneeCommandMatchesBaseline(baseline, body);
   const result = await sendAuthorizedBackendRequest(authClient, {
     endpoint: "case-assignee-change",
     params: { caseId },
-    body: buildCaseAssigneeChangeBody(request),
+    body,
     expectedStatus: 200,
-    validate: isCaseMutation,
+    validate: (value): value is CaseMutation =>
+      isBoundAssigneeMutation(value, caseId, baseline, body),
     signal,
+    assertDispatchAllowed: options?.assertDispatchAllowed,
   });
   return { data: result.data, traceId: resolveTraceId(result.traceId, result.data.traceId) };
 }
