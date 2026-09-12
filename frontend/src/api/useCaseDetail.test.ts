@@ -2264,3 +2264,298 @@ describe("useCaseDetail authoritative background refresh", () => {
     await waitFor(() => expect(calls).toHaveLength(3));
   });
 });
+
+describe("useCaseDetail authoritative refresh refusals", () => {
+  it.each([
+    [403, "forbidden"],
+    [404, "not-found"],
+  ] as const)(
+    "removes a successful record when the current explicit refresh answers %i",
+    async (status, terminalStatus) => {
+      const { calls, spy } = controlledFetch();
+      const client = signedIn();
+      const view = render(client);
+      await settle();
+      await answerWith(
+        calls[0],
+        detailBody({ assigneeRef: "PREVIOUS_PROTECTED_RECORD", concurrencyVersion: 4 }),
+      );
+      expect(view.result.current.state.status).toBe("success");
+
+      const refreshThatStartedTheFlight = view.result.current.refresh;
+      act(() => refreshThatStartedTheFlight());
+      await waitFor(() => expect(calls).toHaveLength(2));
+      expect(view.result.current.refreshState).toBe("refreshing");
+      await answerWith(
+        calls[1],
+        {
+          code: `RAW_REFRESH_${String(status)}`,
+          message: "private refresh refusal",
+          traceId: "trace_private_refresh_refusal",
+        },
+        status,
+      );
+
+      expect(view.result.current.state).toEqual({ status: terminalStatus });
+      expect(Object.keys(view.result.current.state)).toEqual(["status"]);
+      expect(JSON.stringify(view.result.current.state)).toBe(`{"status":"${terminalStatus}"}`);
+      expect(JSON.stringify(view.result.current.state)).not.toMatch(
+        /PREVIOUS_PROTECTED_RECORD|RAW_REFRESH|private refresh|trace_private|data|caseId/,
+      );
+      expect(view.result.current.refreshState).toBe("idle");
+      expect(view.result.current.reconciliationGeneration).toBe(0);
+      expect(client.calls.invalidateIfCurrent).toBe(0);
+      expect(client.calls.notified).toBe(0);
+
+      act(() => {
+        view.result.current.refresh();
+        refreshThatStartedTheFlight();
+      });
+      await settle();
+      expect(spy).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each([
+    [403, "forbidden"],
+    [404, "not-found"],
+  ] as const)(
+    "lets a current minimum-version refresh answer %i instead of retaining the floor's old record",
+    async (status, terminalStatus) => {
+      const { calls, spy } = controlledFetch();
+      const client = signedIn();
+      const view = render(client);
+      await settle();
+      await answerWith(
+        calls[0],
+        detailBody({ assigneeRef: "FLOOR_PROTECTED_RECORD", concurrencyVersion: 4 }),
+      );
+
+      act(() => view.result.current.refresh(5));
+      await waitFor(() => expect(calls).toHaveLength(2));
+      await answerWith(
+        calls[1],
+        {
+          code: `RAW_FLOOR_${String(status)}`,
+          message: "private floor refusal",
+          traceId: "trace_private_floor_refusal",
+        },
+        status,
+      );
+
+      expect(view.result.current.state).toEqual({ status: terminalStatus });
+      expect(Object.keys(view.result.current.state)).toEqual(["status"]);
+      expect(JSON.stringify(view.result.current.state)).not.toMatch(
+        /FLOOR_PROTECTED_RECORD|RAW_FLOOR|private floor|trace_private|data/,
+      );
+      expect(view.result.current.refreshState).toBe("idle");
+      expect(view.result.current.reconciliationGeneration).toBe(0);
+      expect(client.calls.invalidateIfCurrent).toBe(0);
+      expect(client.calls.notified).toBe(0);
+      await settle();
+      expect(spy).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each([403, 404])(
+    "ignores a stale session A refresh answering %i after session B has published",
+    async (status) => {
+      const { calls, spy } = controlledFetch();
+      const client = createFakeAuthClient({ initialSession: SESSION, accessToken: ACCESS_TOKEN });
+      adapter.client = client;
+      const view = renderControlled();
+      await settle();
+      await answerWith(calls[0], detailBody({ assigneeRef: "session-a-record" }));
+
+      act(() => view.result.current.refresh());
+      await waitFor(() => expect(calls).toHaveLength(2));
+      act(() => {
+        setAuthState?.({ status: "authenticated", session: SECOND_SESSION });
+      });
+      await waitFor(() => expect(calls).toHaveLength(3));
+      await answerWith(calls[2], detailBody({ assigneeRef: "session-b-record" }));
+      const invalidationsBefore = client.calls.invalidateIfCurrent;
+      const notificationsBefore = client.calls.notified;
+
+      await answerWith(calls[1], { code: "STALE_SESSION_REFUSAL" }, status);
+
+      expect(view.result.current.state.status).toBe("success");
+      if (view.result.current.state.status === "success") {
+        expect(view.result.current.state.data.assigneeRef).toBe("session-b-record");
+      }
+      expect(client.calls.invalidateIfCurrent).toBe(invalidationsBefore);
+      expect(client.calls.notified).toBe(notificationsBefore);
+      expect(spy).toHaveBeenCalledTimes(3);
+    },
+  );
+
+  it.each([403, 404])(
+    "ignores a stale case A refresh answering %i after case B has published",
+    async (status) => {
+      const { calls, spy } = controlledFetch();
+      const view = render(signedIn());
+      await settle();
+      await answerWith(calls[0], detailBody({ assigneeRef: "case-a-record" }));
+
+      act(() => view.result.current.refresh());
+      await waitFor(() => expect(calls).toHaveLength(2));
+      view.rerender(OTHER_CASE_ID);
+      await waitFor(() => expect(calls).toHaveLength(3));
+      await answerWith(
+        calls[2],
+        detailBody({ caseId: OTHER_CASE_ID, assigneeRef: "case-b-record" }),
+      );
+      await answerWith(calls[1], { code: "STALE_CASE_REFUSAL" }, status);
+
+      expect(view.result.current.state.status).toBe("success");
+      if (view.result.current.state.status === "success") {
+        expect(view.result.current.state.data.caseId).toBe(OTHER_CASE_ID);
+        expect(view.result.current.state.data.assigneeRef).toBe("case-b-record");
+      }
+      expect(spy).toHaveBeenCalledTimes(3);
+    },
+  );
+
+  it.each([403, 404])(
+    "ignores an older refresh answering %i after a newer refresh succeeded for the restored identity",
+    async (status) => {
+      const { calls, spy } = controlledFetch();
+      const client = createFakeAuthClient({ initialSession: SESSION, accessToken: ACCESS_TOKEN });
+      adapter.client = client;
+      const view = renderControlled();
+      await settle();
+      await answerWith(calls[0], detailBody({ concurrencyVersion: 4 }));
+      act(() => view.result.current.refresh());
+      await waitFor(() => expect(calls).toHaveLength(2));
+
+      act(() => {
+        setAuthState?.({ status: "unauthenticated" });
+      });
+      await settle();
+      act(() => {
+        setAuthState?.({ status: "authenticated", session: SESSION });
+      });
+      await waitFor(() => expect(calls).toHaveLength(3));
+      await answerWith(calls[2], detailBody({ concurrencyVersion: 5 }));
+      act(() => view.result.current.refresh());
+      await waitFor(() => expect(calls).toHaveLength(4));
+      await answerWith(
+        calls[3],
+        detailBody({ concurrencyVersion: 6, assigneeRef: "newest-refresh-record" }),
+      );
+
+      await answerWith(calls[1], { code: "OLDER_REFRESH_REFUSAL" }, status);
+
+      expect(view.result.current.state.status).toBe("success");
+      if (view.result.current.state.status === "success") {
+        expect(view.result.current.state.data.concurrencyVersion).toBe(6);
+        expect(view.result.current.state.data.assigneeRef).toBe("newest-refresh-record");
+      }
+      expect(spy).toHaveBeenCalledTimes(4);
+    },
+  );
+
+  it.each([403, 404])(
+    "does not classify or publish a released refresh that answers %i after unmount",
+    async (status) => {
+      const { calls, spy } = controlledFetch();
+      const view = render(signedIn());
+      await settle();
+      await answerWith(calls[0], detailBody({ concurrencyVersion: 4 }));
+      act(() => view.result.current.refresh());
+      await waitFor(() => expect(calls).toHaveLength(2));
+
+      view.unmount();
+      await flushMicrotasks(3);
+      expect(calls[1].request.signal.aborted).toBe(true);
+      const writesBefore = publisher.writes.length;
+      act(() => view.result.current.refresh());
+      await answerWith(calls[1], { code: "RELEASED_REFRESH_REFUSAL" }, status);
+      calls[1].fail(new Error("duplicate settle must be ignored"));
+      await flushMicrotasks(3);
+
+      expect(publisher.writes).toHaveLength(writesBefore);
+      expect(spy).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each([400, 409, 422, 500, 503])(
+    "keeps the successful snapshot for transient/general refresh HTTP %i",
+    async (status) => {
+      const { calls, spy } = controlledFetch();
+      const client = signedIn();
+      const view = render(client);
+      await settle();
+      await answerWith(
+        calls[0],
+        detailBody({ assigneeRef: "preserved-transient-record", concurrencyVersion: 4 }),
+      );
+      act(() => view.result.current.refresh());
+      await waitFor(() => expect(calls).toHaveLength(2));
+      await answerWith(
+        calls[1],
+        { code: "PRIVATE_TRANSIENT", message: "private transient", traceId: "private-trace" },
+        status,
+      );
+
+      expect(view.result.current.refreshState).toBe("failed");
+      expect(view.result.current.state.status).toBe("success");
+      if (view.result.current.state.status === "success") {
+        expect(view.result.current.state.data.assigneeRef).toBe("preserved-transient-record");
+      }
+      expect(JSON.stringify(view.result.current.state)).not.toMatch(
+        /PRIVATE_TRANSIENT|private transient|private-trace/,
+      );
+      expect(client.calls.invalidateIfCurrent).toBe(0);
+      await settle();
+      expect(spy).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("keeps the successful snapshot when the current refresh reaches its deadline", async () => {
+    const { calls, spy } = controlledFetch();
+    const view = render(signedIn());
+    await settle();
+    await answerWith(
+      calls[0],
+      detailBody({ assigneeRef: "preserved-timeout-record", concurrencyVersion: 4 }),
+    );
+
+    vi.useFakeTimers();
+    try {
+      act(() => view.result.current.refresh());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(calls).toHaveLength(2);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+
+      expect(view.result.current.refreshState).toBe("failed");
+      expect(view.result.current.state.status).toBe("success");
+      if (view.result.current.state.status === "success") {
+        expect(view.result.current.state.data.assigneeRef).toBe("preserved-timeout-record");
+      }
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the successful snapshot when a refresh response is invalid", async () => {
+    const { calls } = controlledFetch();
+    const view = render(signedIn());
+    await settle();
+    await answerWith(calls[0], detailBody({ concurrencyVersion: 4 }));
+    act(() => view.result.current.refresh());
+    await waitFor(() => expect(calls).toHaveLength(2));
+    await answerWith(calls[1], { case: { ...caseFields(), concurrencyVersion: 5 } });
+
+    expect(view.result.current.refreshState).toBe("failed");
+    expect(view.result.current.state).toEqual({
+      status: "success",
+      data: caseFields({ concurrencyVersion: 4 }),
+    });
+  });
+});

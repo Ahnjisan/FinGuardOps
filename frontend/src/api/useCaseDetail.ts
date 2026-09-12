@@ -391,6 +391,15 @@ export function useCaseDetail(caseId: string | null): UseCaseDetailResult {
   const reconciliationGenerationRef = useRef(0);
   const reconciliationFloorRef = useRef<ReconciliationFloor | null>(null);
   const currentIdentityRef = useRef({ session, caseId: requestedId });
+  const currentPublishedRef = useRef<Snapshot | null>(null);
+  const mountedRef = useRef(false);
+
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useLayoutEffect(() => {
     currentIdentityRef.current = { session, caseId: requestedId };
@@ -415,6 +424,9 @@ export function useCaseDetail(caseId: string | null): UseCaseDetailResult {
     };
     setSnapshot(published);
   }
+  useLayoutEffect(() => {
+    currentPublishedRef.current = published;
+  }, [published]);
 
   useEffect(() => {
     // No session or no canonical id, no request. This is why an unauthorized
@@ -597,6 +609,8 @@ export function useCaseDetail(caseId: string | null): UseCaseDetailResult {
 
   const refresh = useCallback((minimumVersion?: number) => {
     if (
+      !mountedRef.current ||
+      currentPublishedRef.current !== published ||
       published.state.status !== "success" ||
       published.session === null ||
       published.caseId === null
@@ -641,7 +655,9 @@ export function useCaseDetail(caseId: string | null): UseCaseDetailResult {
         }
         const current = currentIdentityRef.current;
         if (
+          !mountedRef.current ||
           refreshFlightRef.current !== flight ||
+          refreshGenerationRef.current !== flight.generation ||
           current.session !== flight.session ||
           current.caseId !== flight.caseId
         ) {
@@ -684,21 +700,51 @@ export function useCaseDetail(caseId: string | null): UseCaseDetailResult {
           reconciliationGeneration,
         });
       },
-      () => {
+      (error: unknown) => {
         if (flight.phase !== "pending" || flight.controller.signal.aborted) {
           return;
         }
         const current = currentIdentityRef.current;
         if (
+          !mountedRef.current ||
           refreshFlightRef.current !== flight ||
+          refreshGenerationRef.current !== flight.generation ||
           current.session !== flight.session ||
           current.caseId !== flight.caseId
         ) {
           flight.phase = "released";
           return;
         }
+        // Classification is deliberately after every current-flight and
+        // mounted-subscriber gate. A released request, an older refresh intent
+        // or a request for another session/case must not even construct a
+        // terminal projection, let alone remove the record now on screen.
+        const outcome = classifyFailure(error);
         flight.phase = "settled";
         refreshFlightRef.current = null;
+        if (outcome.status === "forbidden" || outcome.status === "not-found") {
+          // A current 403/404 is an authoritative visibility answer, including
+          // when it arrives during a minimum-version reconciliation. Forget
+          // both the protected success snapshot and its floor; the fixed
+          // refusal carries no previous record or refresh metadata.
+          const floor = reconciliationFloorRef.current;
+          if (
+            floor !== null &&
+            floor.session === flight.session &&
+            floor.caseId === flight.caseId
+          ) {
+            reconciliationFloorRef.current = null;
+          }
+          reconciliationGenerationRef.current = 0;
+          setSnapshot({
+            session: flight.session,
+            caseId: flight.caseId,
+            state: deliverTerminalState(outcome),
+            refreshState: "idle",
+            reconciliationGeneration: 0,
+          });
+          return;
+        }
         setSnapshot((latest) =>
           latest.session === flight.session && latest.caseId === flight.caseId
             ? { ...latest, refreshState: "failed" }

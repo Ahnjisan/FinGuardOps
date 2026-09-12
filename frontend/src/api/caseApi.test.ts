@@ -22,6 +22,7 @@ import {
   isCaseListPage,
   isCaseMutation,
   type CaseAssigneeChangeRequest,
+  type CaseDetail,
   type CaseListQuery,
   type CaseResolutionRequest,
   type CaseStatusChangeRequest,
@@ -30,6 +31,7 @@ import {
 const BASE = "http://localhost:8080";
 const CASE_ID = "5c671624-8714-4bd7-871a-a9445e6f453e";
 const ASSIGNEE_ID = "2a000000-0000-4000-9000-000000000002";
+const CURRENT_ASSIGNEE_ID = "3b000000-0000-4000-a000-000000000003";
 const TRANSACTION_ID = "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001";
 const TRACE_ID = "trace_demo_case_list_01";
 
@@ -80,11 +82,36 @@ function mutation(overrides: Record<string, unknown> = {}): Record<string, unkno
     reviewStartedAt: "2026-07-24T01:25:00Z",
     closedAt: null,
     lastChangedAt: "2026-07-24T01:25:00Z",
-    concurrencyVersion: 2,
+    concurrencyVersion: 1,
     traceId: TRACE_ID,
     ...overrides,
   };
 }
+
+function workflowDetail(overrides: Partial<CaseDetail> = {}): CaseDetail {
+  return {
+    caseId: CASE_ID,
+    caseStatus: "IN_REVIEW",
+    finalDisposition: null,
+    assigneeRef: CURRENT_ASSIGNEE_ID,
+    relatedTransactionCount: 3,
+    createdAt: "2026-07-24T01:15:33Z",
+    reviewStartedAt: "2026-07-24T01:25:00Z",
+    closedAt: null,
+    lastChangedAt: "2026-07-24T02:05:10Z",
+    concurrencyVersion: 5,
+    ...overrides,
+  };
+}
+
+const OPEN_WORKFLOW_DETAIL = workflowDetail({
+  caseStatus: "OPEN",
+  assigneeRef: null,
+  reviewStartedAt: null,
+  concurrencyVersion: 0,
+});
+
+const REVIEW_WORKFLOW_DETAIL = workflowDetail();
 
 function listBody(
   content: readonly Record<string, unknown>[] = [listItem()],
@@ -350,7 +377,7 @@ describe("changeCaseStatus", () => {
   it("sends PATCH with a rebuilt body carrying exactly the contract fields", async () => {
     mockFetchOnce(async () => jsonResponse(mutation()));
 
-    await changeCaseStatus(signedIn(), CASE_ID, VALID_STATUS_CHANGE);
+    await changeCaseStatus(signedIn(), CASE_ID, VALID_STATUS_CHANGE, OPEN_WORKFLOW_DETAIL);
 
     const request = sentRequest();
     expect(request.method).toBe("PATCH");
@@ -366,13 +393,21 @@ describe("changeCaseStatus", () => {
   });
 
   it("omits assigneeRef entirely when the caller omits the key", async () => {
-    mockFetchOnce(async () => jsonResponse(mutation()));
+    mockFetchOnce(async () =>
+      jsonResponse(
+        mutation({
+          caseStatus: "ADDITIONAL_INFORMATION_REQUIRED",
+          assigneeRef: CURRENT_ASSIGNEE_ID,
+          concurrencyVersion: 4,
+        }),
+      ),
+    );
 
     await changeCaseStatus(signedIn(), CASE_ID, {
       targetStatus: "ADDITIONAL_INFORMATION_REQUIRED",
       reasonCode: "CASE_ADDITIONAL_INFORMATION_REQUESTED",
       expectedVersion: 3,
-    });
+    }, workflowDetail({ concurrencyVersion: 3 }));
 
     const body = (await sentBody()) as Record<string, unknown>;
     expect(Object.keys(body).sort()).toEqual(["expectedVersion", "reasonCode", "targetStatus"]);
@@ -400,7 +435,12 @@ describe("changeCaseStatus", () => {
       const client = signedIn();
       mockFetchOnce(async () => jsonResponse(mutation()));
       await expect(
-        changeCaseStatus(client, CASE_ID, request as unknown as CaseStatusChangeRequest),
+        changeCaseStatus(
+          client,
+          CASE_ID,
+          request as unknown as CaseStatusChangeRequest,
+          OPEN_WORKFLOW_DETAIL,
+        ),
       ).rejects.toBeInstanceOf(RequestNotAllowedError);
       expect(client.calls.authorizeRequest).toBe(0);
       expect(vi.mocked(fetch)).not.toHaveBeenCalled();
@@ -442,7 +482,12 @@ describe("changeCaseStatus", () => {
       mockFetchOnce(async () => jsonResponse(mutation()));
 
       await expect(
-        changeCaseStatus(client, CASE_ID, request as CaseStatusChangeRequest),
+        changeCaseStatus(
+          client,
+          CASE_ID,
+          request as CaseStatusChangeRequest,
+          OPEN_WORKFLOW_DETAIL,
+        ),
       ).rejects.toBeInstanceOf(RequestNotAllowedError);
       expect(client.calls.authorizeRequest).toBe(0);
       expect(vi.mocked(fetch)).not.toHaveBeenCalled();
@@ -454,9 +499,9 @@ describe("changeCaseStatus", () => {
     for (const id of [CASE_ID.toUpperCase(), `${CASE_ID}/notes`, "not-a-uuid", ""]) {
       const client = signedIn();
       mockFetchOnce(async () => jsonResponse(mutation()));
-      await expect(changeCaseStatus(client, id, VALID_STATUS_CHANGE)).rejects.toBeInstanceOf(
-        RequestNotAllowedError,
-      );
+      await expect(
+        changeCaseStatus(client, id, VALID_STATUS_CHANGE, OPEN_WORKFLOW_DETAIL),
+      ).rejects.toBeInstanceOf(RequestNotAllowedError);
       expect(client.calls.authorizeRequest).toBe(0);
       vi.unstubAllGlobals();
     }
@@ -465,9 +510,14 @@ describe("changeCaseStatus", () => {
 
 describe("changeCaseAssignee", () => {
   it("sends PATCH with exactly the three contract fields", async () => {
-    mockFetchOnce(async () => jsonResponse(mutation()));
+    mockFetchOnce(async () => jsonResponse(mutation({ concurrencyVersion: 6 })));
 
-    await changeCaseAssignee(signedIn(), CASE_ID, VALID_ASSIGNEE_CHANGE);
+    await changeCaseAssignee(
+      signedIn(),
+      CASE_ID,
+      VALID_ASSIGNEE_CHANGE,
+      REVIEW_WORKFLOW_DETAIL,
+    );
 
     expect(sentRequest().url).toBe(`${BASE}/api/v1/cases/${CASE_ID}/assignee`);
     expect(sentRequest().method).toBe("PATCH");
@@ -479,13 +529,21 @@ describe("changeCaseAssignee", () => {
   });
 
   it("sends an explicit null to release the assignee", async () => {
-    mockFetchOnce(async () => jsonResponse(mutation({ assigneeRef: null })));
+    mockFetchOnce(async () =>
+      jsonResponse(
+        mutation({
+          caseStatus: "ADDITIONAL_INFORMATION_REQUIRED",
+          assigneeRef: null,
+          concurrencyVersion: 6,
+        }),
+      ),
+    );
 
     await changeCaseAssignee(signedIn(), CASE_ID, {
       assigneeRef: null,
       reasonCode: "CASE_ASSIGNEE_RELEASED",
       expectedVersion: 5,
-    });
+    }, workflowDetail({ caseStatus: "ADDITIONAL_INFORMATION_REQUIRED" }));
 
     expect(await sentBody()).toEqual({
       assigneeRef: null,
@@ -502,7 +560,7 @@ describe("changeCaseAssignee", () => {
       changeCaseAssignee(client, CASE_ID, {
         reasonCode: "CASE_ASSIGNEE_RELEASED",
         expectedVersion: 5,
-      } as CaseAssigneeChangeRequest),
+      } as CaseAssigneeChangeRequest, REVIEW_WORKFLOW_DETAIL),
     ).rejects.toBeInstanceOf(RequestNotAllowedError);
     expect(client.calls.authorizeRequest).toBe(0);
   });
@@ -520,12 +578,280 @@ describe("changeCaseAssignee", () => {
         changeCaseAssignee(client, CASE_ID, {
           ...VALID_ASSIGNEE_CHANGE,
           reasonCode,
-        } as CaseAssigneeChangeRequest),
+        } as CaseAssigneeChangeRequest, REVIEW_WORKFLOW_DETAIL),
       ).rejects.toBeInstanceOf(RequestNotAllowedError);
       expect(client.calls.authorizeRequest).toBe(0);
       vi.unstubAllGlobals();
     }
   });
+});
+
+describe("case workflow request-response semantic binding", () => {
+  it("binds all three status transitions to their submitted snapshot", async () => {
+    const rows: ReadonlyArray<{
+      readonly baseline: CaseDetail;
+      readonly request: CaseStatusChangeRequest;
+      readonly response: Record<string, unknown>;
+    }> = [
+      {
+        baseline: OPEN_WORKFLOW_DETAIL,
+        request: VALID_STATUS_CHANGE,
+        response: mutation(),
+      },
+      {
+        baseline: REVIEW_WORKFLOW_DETAIL,
+        request: {
+          targetStatus: "ADDITIONAL_INFORMATION_REQUIRED",
+          reasonCode: "CASE_ADDITIONAL_INFORMATION_REQUESTED",
+          expectedVersion: 5,
+        },
+        response: mutation({
+          caseStatus: "ADDITIONAL_INFORMATION_REQUIRED",
+          assigneeRef: CURRENT_ASSIGNEE_ID,
+          concurrencyVersion: 6,
+        }),
+      },
+      {
+        baseline: workflowDetail({ caseStatus: "ADDITIONAL_INFORMATION_REQUIRED" }),
+        request: {
+          targetStatus: "IN_REVIEW",
+          reasonCode: "CASE_REVIEW_RESUMED",
+          expectedVersion: 5,
+        },
+        response: mutation({ assigneeRef: CURRENT_ASSIGNEE_ID, concurrencyVersion: 6 }),
+      },
+    ];
+
+    for (const row of rows) {
+      mockFetchOnce(async () => jsonResponse(row.response));
+      await expect(
+        changeCaseStatus(signedIn(), CASE_ID, row.request, row.baseline),
+      ).resolves.toBeDefined();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects a status success that does not preserve its request and workflow fields", async () => {
+    const OTHER_CASE_ID = "6d782735-9825-4ce8-982b-b0556f705e4f";
+    for (const overrides of [
+      { caseId: OTHER_CASE_ID },
+      { concurrencyVersion: 0 },
+      { concurrencyVersion: 2 },
+      { caseStatus: "ADDITIONAL_INFORMATION_REQUIRED" },
+      { assigneeRef: CURRENT_ASSIGNEE_ID },
+      { reviewStartedAt: null },
+      { finalDisposition: "NORMAL" },
+      { closedAt: "2026-07-24T01:25:00Z" },
+    ]) {
+      mockFetchOnce(async () => jsonResponse(mutation(overrides)));
+      const error = await changeCaseStatus(
+        signedIn(),
+        CASE_ID,
+        VALID_STATUS_CHANGE,
+        OPEN_WORKFLOW_DETAIL,
+      ).catch((thrown: unknown) => thrown);
+      expect(error).toBeInstanceOf(InvalidResponseError);
+      expect(error).toMatchObject({
+        name: "InvalidResponseError",
+        message: "Received an unexpected response shape.",
+      });
+      expect(JSON.stringify(error)).not.toMatch(/6d782735|3b000000|trace|IN_REVIEW/i);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("binds assignment, reassignment and explicit release to the current status", async () => {
+    const rows: ReadonlyArray<{
+      readonly baseline: CaseDetail;
+      readonly request: CaseAssigneeChangeRequest;
+      readonly response: Record<string, unknown>;
+    }> = [
+      {
+        baseline: REVIEW_WORKFLOW_DETAIL,
+        request: VALID_ASSIGNEE_CHANGE,
+        response: mutation({ concurrencyVersion: 6 }),
+      },
+      {
+        baseline: workflowDetail({
+          caseStatus: "ADDITIONAL_INFORMATION_REQUIRED",
+          assigneeRef: null,
+        }),
+        request: {
+          assigneeRef: ASSIGNEE_ID,
+          reasonCode: "CASE_ASSIGNEE_ASSIGNED",
+          expectedVersion: 5,
+        },
+        response: mutation({ caseStatus: "ADDITIONAL_INFORMATION_REQUIRED", concurrencyVersion: 6 }),
+      },
+      {
+        baseline: workflowDetail({ caseStatus: "ADDITIONAL_INFORMATION_REQUIRED" }),
+        request: VALID_ASSIGNEE_CHANGE,
+        response: mutation({ caseStatus: "ADDITIONAL_INFORMATION_REQUIRED", concurrencyVersion: 6 }),
+      },
+      {
+        baseline: workflowDetail({ caseStatus: "ADDITIONAL_INFORMATION_REQUIRED" }),
+        request: {
+          assigneeRef: null,
+          reasonCode: "CASE_ASSIGNEE_RELEASED",
+          expectedVersion: 5,
+        },
+        response: mutation({
+          caseStatus: "ADDITIONAL_INFORMATION_REQUIRED",
+          assigneeRef: null,
+          concurrencyVersion: 6,
+        }),
+      },
+    ];
+
+    for (const row of rows) {
+      mockFetchOnce(async () => jsonResponse(row.response));
+      await expect(
+        changeCaseAssignee(signedIn(), CASE_ID, row.request, row.baseline),
+      ).resolves.toBeDefined();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects forbidden baseline states, stale versions, duplicate assignees and wrong reasons before credential lookup", async () => {
+    const rows: ReadonlyArray<readonly [CaseDetail, CaseAssigneeChangeRequest]> = [
+      [OPEN_WORKFLOW_DETAIL, VALID_ASSIGNEE_CHANGE],
+      [workflowDetail({ caseStatus: "CLOSED", finalDisposition: "NORMAL", closedAt: "2026-07-24T03:00:00Z" }), VALID_ASSIGNEE_CHANGE],
+      [REVIEW_WORKFLOW_DETAIL, { ...VALID_ASSIGNEE_CHANGE, expectedVersion: 4 }],
+      [REVIEW_WORKFLOW_DETAIL, { ...VALID_ASSIGNEE_CHANGE, assigneeRef: CURRENT_ASSIGNEE_ID }],
+      [
+        workflowDetail({ caseStatus: "ADDITIONAL_INFORMATION_REQUIRED", assigneeRef: null }),
+        { ...VALID_ASSIGNEE_CHANGE, reasonCode: "CASE_ASSIGNEE_CHANGED" },
+      ],
+      [
+        workflowDetail({ caseStatus: "ADDITIONAL_INFORMATION_REQUIRED" }),
+        { assigneeRef: null, reasonCode: "CASE_ASSIGNEE_RELEASED", expectedVersion: 4 },
+      ],
+    ];
+
+    for (const [baseline, request] of rows) {
+      const client = signedIn();
+      mockFetchOnce(async () => jsonResponse(mutation({ concurrencyVersion: 6 })));
+      await expect(
+        changeCaseAssignee(client, CASE_ID, request, baseline),
+      ).rejects.toBeInstanceOf(RequestNotAllowedError);
+      expect(client.calls.authorizeRequest).toBe(0);
+      expect(fetch).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects assignee success drift in status, timestamp and closure fields", async () => {
+    for (const overrides of [
+      { concurrencyVersion: 5 },
+      { concurrencyVersion: 7 },
+      { caseStatus: "ADDITIONAL_INFORMATION_REQUIRED" },
+      { assigneeRef: CURRENT_ASSIGNEE_ID },
+      { reviewStartedAt: "2026-07-24T01:26:00Z" },
+      { finalDisposition: "FALSE_POSITIVE" },
+      { closedAt: "2026-07-24T03:00:00Z" },
+    ]) {
+      mockFetchOnce(async () => jsonResponse(mutation({ concurrencyVersion: 6, ...overrides })));
+      await expect(
+        changeCaseAssignee(
+          signedIn(),
+          CASE_ID,
+          VALID_ASSIGNEE_CHANGE,
+          REVIEW_WORKFLOW_DETAIL,
+        ),
+      ).rejects.toBeInstanceOf(InvalidResponseError);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects MAX_SAFE_INTEGER because the required successor is not safe", async () => {
+    const client = signedIn();
+    mockFetchOnce(async () => jsonResponse(mutation()));
+    await expect(
+      changeCaseStatus(
+        client,
+        CASE_ID,
+        { ...VALID_STATUS_CHANGE, expectedVersion: Number.MAX_SAFE_INTEGER },
+        workflowDetail({
+          caseStatus: "OPEN",
+          assigneeRef: null,
+          reviewStartedAt: null,
+          concurrencyVersion: Number.MAX_SAFE_INTEGER,
+        }),
+      ),
+    ).rejects.toBeInstanceOf(RequestNotAllowedError);
+    expect(client.calls.authorizeRequest).toBe(0);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * workflow PATCH의 마지막 optional options 객체.
+ *
+ * 기존 positional 인자(`signal` 포함)의 순서는 그대로이고, guard는 실제 authorized transport와
+ * HTTP client를 거쳐 credential 발급 뒤 fetch 직전에 실행된다.
+ */
+describe("case workflow writes — final dispatch guard option", () => {
+  function send(
+    kind: "status" | "assignee",
+    client: FakeAuthClient,
+    assertDispatchAllowed: () => void,
+  ) {
+    return kind === "status"
+      ? changeCaseStatus(client, CASE_ID, VALID_STATUS_CHANGE, OPEN_WORKFLOW_DETAIL, undefined, {
+          assertDispatchAllowed,
+        })
+      : changeCaseAssignee(
+          client,
+          CASE_ID,
+          VALID_ASSIGNEE_CHANGE,
+          REVIEW_WORKFLOW_DETAIL,
+          undefined,
+          { assertDispatchAllowed },
+        );
+  }
+
+  it.each(["status", "assignee"] as const)(
+    "forwards the named guard for a %s change and runs it after authorization, immediately before fetch",
+    async (kind) => {
+      const order: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation(() => {
+          order.push("fetch");
+          return Promise.resolve(
+            jsonResponse(kind === "status" ? mutation() : mutation({ concurrencyVersion: 6 })),
+          );
+        }),
+      );
+      const client = signedIn();
+
+      await send(kind, client, () => {
+        order.push(`guard:authorized=${String(client.calls.authorizeRequest)}`);
+        queueMicrotask(() => order.push("microtask"));
+      });
+
+      expect(order).toEqual(["guard:authorized=1", "fetch", "microtask"]);
+    },
+  );
+
+  it.each(["status", "assignee"] as const)(
+    "sends no %s PATCH and returns the guard's refusal unchanged",
+    async (kind) => {
+      mockFetchOnce(async () => jsonResponse(mutation()));
+      const client = signedIn();
+      const refusal = new RequestNotAllowedError();
+
+      const error = await send(kind, client, () => {
+        throw refusal;
+      }).catch((caught: unknown) => caught);
+
+      expect(error).toBe(refusal);
+      expect(client.calls.authorizeRequest).toBe(1);
+      expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+      expect(client.calls.invalidateIfCurrent).toBe(0);
+      expect(client.calls.notified).toBe(0);
+    },
+  );
 });
 
 describe("createCaseResolution", () => {
@@ -624,8 +950,20 @@ describe("case mutation responses", () => {
 
 describe("case API — failure boundaries", () => {
   const WRITES: ReadonlyArray<readonly [string, () => Promise<unknown>]> = [
-    ["status", () => changeCaseStatus(signedIn(), CASE_ID, VALID_STATUS_CHANGE)],
-    ["assignee", () => changeCaseAssignee(signedIn(), CASE_ID, VALID_ASSIGNEE_CHANGE)],
+    [
+      "status",
+      () => changeCaseStatus(signedIn(), CASE_ID, VALID_STATUS_CHANGE, OPEN_WORKFLOW_DETAIL),
+    ],
+    [
+      "assignee",
+      () =>
+        changeCaseAssignee(
+          signedIn(),
+          CASE_ID,
+          VALID_ASSIGNEE_CHANGE,
+          REVIEW_WORKFLOW_DETAIL,
+        ),
+    ],
     ["resolution", () => createCaseResolution(signedIn(), CASE_ID, VALID_RESOLUTION)],
   ];
 
@@ -670,16 +1008,16 @@ describe("case API — failure boundaries", () => {
     const unauthorized = signedIn();
     mockFetchOnce(async () => jsonResponse({}, { status: 401 }));
     await expect(
-      changeCaseStatus(unauthorized, CASE_ID, VALID_STATUS_CHANGE),
+      changeCaseStatus(unauthorized, CASE_ID, VALID_STATUS_CHANGE, OPEN_WORKFLOW_DETAIL),
     ).rejects.toBeInstanceOf(UnauthorizedError);
     expect(unauthorized.calls.invalidateIfCurrent).toBe(1);
     vi.unstubAllGlobals();
 
     const forbidden = signedIn();
     mockFetchOnce(async () => jsonResponse({}, { status: 403 }));
-    await expect(changeCaseStatus(forbidden, CASE_ID, VALID_STATUS_CHANGE)).rejects.toBeInstanceOf(
-      ForbiddenError,
-    );
+    await expect(
+      changeCaseStatus(forbidden, CASE_ID, VALID_STATUS_CHANGE, OPEN_WORKFLOW_DETAIL),
+    ).rejects.toBeInstanceOf(ForbiddenError);
     expect(forbidden.calls.invalidateIfCurrent).toBe(0);
   });
 
@@ -688,7 +1026,7 @@ describe("case API — failure boundaries", () => {
       jsonResponse(mutation(), { headers: { "X-Trace-Id": "trace_demo_other_01" } }),
     );
     await expect(
-      changeCaseStatus(signedIn(), CASE_ID, VALID_STATUS_CHANGE),
+      changeCaseStatus(signedIn(), CASE_ID, VALID_STATUS_CHANGE, OPEN_WORKFLOW_DETAIL),
     ).rejects.toBeInstanceOf(InvalidResponseError);
   });
 
@@ -696,7 +1034,9 @@ describe("case API — failure boundaries", () => {
     const client = createFakeAuthClient({ initialSession: null });
     mockFetchOnce(async () => jsonResponse(mutation()));
 
-    await expect(changeCaseStatus(client, CASE_ID, VALID_STATUS_CHANGE)).rejects.toThrow();
+    await expect(
+      changeCaseStatus(client, CASE_ID, VALID_STATUS_CHANGE, OPEN_WORKFLOW_DETAIL),
+    ).rejects.toThrow();
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();
   });
 
@@ -950,7 +1290,7 @@ describe("case write combinations — refused before any credential", () => {
               targetStatus: "IN_REVIEW",
               reasonCode: "CASE_REVIEW_STARTED",
               expectedVersion: 0,
-            } as unknown as CaseStatusChangeRequest),
+            } as unknown as CaseStatusChangeRequest, OPEN_WORKFLOW_DETAIL),
         ],
         [
           "review resumed carrying an assignee",
@@ -960,7 +1300,7 @@ describe("case write combinations — refused before any credential", () => {
               assigneeRef: ASSIGNEE_ID,
               reasonCode: "CASE_REVIEW_RESUMED",
               expectedVersion: 5,
-            } as unknown as CaseStatusChangeRequest),
+            } as unknown as CaseStatusChangeRequest, REVIEW_WORKFLOW_DETAIL),
         ],
         [
           "information requested into the wrong state",
@@ -969,7 +1309,7 @@ describe("case write combinations — refused before any credential", () => {
               targetStatus: "IN_REVIEW",
               reasonCode: "CASE_ADDITIONAL_INFORMATION_REQUESTED",
               expectedVersion: 4,
-            } as unknown as CaseStatusChangeRequest),
+            } as unknown as CaseStatusChangeRequest, workflowDetail({ concurrencyVersion: 4 })),
         ],
         [
           "release naming an assignee",
@@ -978,7 +1318,7 @@ describe("case write combinations — refused before any credential", () => {
               assigneeRef: ASSIGNEE_ID,
               reasonCode: "CASE_ASSIGNEE_RELEASED",
               expectedVersion: 5,
-            } as unknown as CaseAssigneeChangeRequest),
+            } as unknown as CaseAssigneeChangeRequest, REVIEW_WORKFLOW_DETAIL),
         ],
         [
           "assignment releasing instead",
@@ -987,7 +1327,7 @@ describe("case write combinations — refused before any credential", () => {
               assigneeRef: null,
               reasonCode: "CASE_ASSIGNEE_ASSIGNED",
               expectedVersion: 5,
-            } as unknown as CaseAssigneeChangeRequest),
+            } as unknown as CaseAssigneeChangeRequest, REVIEW_WORKFLOW_DETAIL),
         ],
       ];
 
@@ -1003,12 +1343,20 @@ describe("case write combinations — refused before any credential", () => {
   });
 
   it("sends the approved combinations it does accept", async () => {
-    mockFetchOnce(async () => jsonResponse(mutation()));
+    mockFetchOnce(async () =>
+      jsonResponse(
+        mutation({
+          caseStatus: "ADDITIONAL_INFORMATION_REQUIRED",
+          assigneeRef: CURRENT_ASSIGNEE_ID,
+          concurrencyVersion: 5,
+        }),
+      ),
+    );
     await changeCaseStatus(signedIn(), CASE_ID, {
       targetStatus: "ADDITIONAL_INFORMATION_REQUIRED",
       reasonCode: "CASE_ADDITIONAL_INFORMATION_REQUESTED",
       expectedVersion: 4,
-    });
+    }, workflowDetail({ concurrencyVersion: 4 }));
     expect(await sentBody()).toEqual({
       targetStatus: "ADDITIONAL_INFORMATION_REQUIRED",
       reasonCode: "CASE_ADDITIONAL_INFORMATION_REQUESTED",
@@ -1016,12 +1364,20 @@ describe("case write combinations — refused before any credential", () => {
     });
     vi.unstubAllGlobals();
 
-    mockFetchOnce(async () => jsonResponse(mutation({ assigneeRef: null })));
+    mockFetchOnce(async () =>
+      jsonResponse(
+        mutation({
+          caseStatus: "ADDITIONAL_INFORMATION_REQUIRED",
+          assigneeRef: null,
+          concurrencyVersion: 6,
+        }),
+      ),
+    );
     await changeCaseAssignee(signedIn(), CASE_ID, {
       assigneeRef: null,
       reasonCode: "CASE_ASSIGNEE_RELEASED",
       expectedVersion: 5,
-    });
+    }, workflowDetail({ caseStatus: "ADDITIONAL_INFORMATION_REQUIRED" }));
     expect(await sentBody()).toEqual({
       assigneeRef: null,
       reasonCode: "CASE_ASSIGNEE_RELEASED",

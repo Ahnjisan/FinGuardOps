@@ -2,18 +2,21 @@
  * TEST-ONLY BROWSER GEOMETRY FIXTURE. NOT PART OF THE APPLICATION.
  *
  * The real E2E runtime has no populated case seed. This fixture therefore
- * mounts the production panel and capability-gated composer with a settled
- * public projection, the production stylesheet, and a synthetic FDS_ANALYST
- * AuthClient/session. It uses no credential, token or Keycloak login and is
- * layout evidence only, not authentication or authorization security evidence.
- * No API request, interception or Backend is involved.
+ * mounts the production workflow section, notes panel and capability-gated
+ * composer with settled public projections, the production stylesheet, and a
+ * synthetic FDS_ANALYST AuthClient/session. It uses no credential, token or
+ * Keycloak login and is layout evidence only, not authentication or
+ * authorization security evidence. No API request, interception or Backend is
+ * involved.
  */
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import type { CaseDetail } from "../src/api/caseApi";
 import type { CaseInvestigationNotesView } from "../src/api/useCaseInvestigationNotes";
 import type { AuthClient, AuthSession } from "../src/auth/authClient";
 import { AuthProvider } from "../src/auth/AuthProvider";
 import { CaseInvestigationNotesPanel } from "../src/pages/cases/CaseInvestigationNotesSection";
+import { CaseWorkflowSection } from "../src/pages/cases/CaseWorkflowSection";
 import { InvestigationNoteComposer } from "../src/pages/cases/InvestigationNoteComposer";
 import "../src/styles/app.css";
 
@@ -62,6 +65,19 @@ const GEOMETRY_VIEW: CaseInvestigationNotesView = {
   },
 };
 
+const GEOMETRY_WORKFLOW_DETAIL: CaseDetail = {
+  caseId: "5c2d1e0f-7a8b-4c9d-9e0f-1a2b3c4d5e60",
+  caseStatus: "ADDITIONAL_INFORMATION_REQUIRED",
+  finalDisposition: null,
+  assigneeRef: "7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f",
+  relatedTransactionCount: 3,
+  createdAt: "2026-09-02T00:00:00Z",
+  reviewStartedAt: "2026-09-02T00:30:00Z",
+  closedAt: null,
+  lastChangedAt: "2026-09-02T01:00:00Z",
+  concurrencyVersion: 6,
+};
+
 const GEOMETRY_SESSION: AuthSession = {
   subject: "6f1e0b6c-3a2b-4c8d-9e0f-1a2b3c4d5e6f",
   roles: ["FDS_ANALYST"],
@@ -96,6 +112,12 @@ createRoot(rootElement).render(
                 Browser geometry measurement of the production notes panel. No request is made.
               </p>
             </div>
+            <CaseWorkflowSection
+              detail={GEOMETRY_WORKFLOW_DETAIL}
+              reconciliationGeneration={1}
+              detailRefreshState="idle"
+              onReconcile={() => undefined}
+            />
             <CaseInvestigationNotesPanel
               state={{ status: "success", data: GEOMETRY_VIEW }}
               onPageChange={() => undefined}

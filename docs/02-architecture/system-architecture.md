@@ -72,7 +72,7 @@
   미갱신)를 구현. `/auth/callback` route와 `oidc-client-ts` 기반 Authorization Code + PKCE
   인증 경계(memory-only token, transient transaction record만 sessionStorage, 최대 15분 hard
   session deadline, local logout과 Keycloak remote logout), Backend 보호 API 호출과 capability 기반
-  권한 UI, 거래·사건 목록·상세, 사건 상세의 notes read/create와 audit history read가 구현됨
+  권한 UI, 거래·사건 목록·상세, 사건 상세의 상태·담당자 workflow, notes read/create와 audit history read가 구현됨
 
 현재 백엔드는 Health Check, 거래 접수·조회, 행동 이벤트 접수, Rule 실행·결과 채택과
 거래·멱등·행동·탐지·Rule·사건·메모·감사의 PostgreSQL 애플리케이션 연동을 구현한다.
@@ -111,10 +111,10 @@ External Risk 성공 결과 DB 영속화, AI 운영 도메인 및 production/clo
 - `frontend/`: React·TypeScript·Vite foundation, Router, public health client, OIDC
   Authorization Code + PKCE 인증 경계, 인증 API transport와 권한 UI, capability로 보호되는
   production 업무 화면인 거래 목록(`/transactions`), 조회 전용 거래 상세
-  (`/transactions/{transactionId}`), 조회 전용 사건 목록(`/cases`)과 조회 전용 사건 상세
-  (`/cases/{caseId}`), 그 상세의 Investigation notes inline create composer와 읽기 전용 Audit history section, FDS operations console 디자인
-  기반이 구현되었으며 사건 workflow·담당자 변경·최종 판정·조사 메모 수정·삭제·별도 notes route·연관 거래·Detection·Rule Evidence·AI 사건 리포트 화면과
-  mutation UI, 운영 대시보드, 콘솔 전체의 최종 시각적 리뉴얼은 구현되지 않음
+  (`/transactions/{transactionId}`), 조회 전용 사건 목록(`/cases`)과 사건 상세
+  (`/cases/{caseId}`), 그 상세의 상태·담당자 workflow, Investigation notes inline create composer와 읽기 전용 Audit history section, FDS operations console 디자인
+  기반이 구현되었으며 사건 최종 판정·조사 메모 수정·삭제·별도 notes route·연관 거래·Detection·Rule Evidence·AI 사건 리포트 화면과
+  그 밖의 mutation UI, 운영 대시보드, 실제 Backend workflow mutation browser E2E, 콘솔 전체의 최종 시각적 리뉴얼은 구현되지 않음
 - `infra/`: Issue #196의 로컬 Compose Prometheus scrape·External Risk 검증 fixture,
   Issue #199의 service 수준 recording rule 14개와 Issue #201의 로컬 실패율 alert rule
   6개·deterministic test, Issue #203의 로컬 Alertmanager routing·signal별 inhibition·
@@ -288,13 +288,14 @@ React는 API 계약을 임의로 만들거나 금융 업무 상태를 자체 확
 
 거래 목록(`/transactions`, Issue #249), 거래 상세(`/transactions/{transactionId}`, Issue #251),
 사건 목록(`/cases`, Issue #253)과 사건 상세(`/cases/{caseId}`, Issue #255) 넷이다. 사건 상세에는
-Issue #257의 Audit history, Issue #259의 Investigation notes 조회와 Issue #261의 inline note
-composer가 통합되어 있다. 앞의 둘은
+Issue #257의 Audit history, Issue #259의 Investigation notes 조회, Issue #261의 inline note
+composer와 Issue #277의 상태·담당자 workflow가 통합되어 있다. 앞의 둘은
 Frontend UI capability `transaction:view`로, 뒤의 둘은 `case:view`로 보호하며, 최종 판정은 각각
 Backend authority `transaction:read`, `case:read`와 401·403 응답이 내린다. Frontend capability와 Backend authority는 서로 다른 계층에
 속하므로 혼용하지 않는다.
 
-목록은 filter·sort·pagination과 loading·empty·error·data 상태를 갖는다. 상세는 조회 전용이며
+목록은 filter·sort·pagination과 loading·empty·error·data 상태를 갖는다. 상세 record는 조회 전용이며
+사건 상세의 독립 section만 capability·상태로 제한한 workflow와 note create를 제공한다. 상세 조회는
 loading, data, transaction not found(404), access denied(403), authentication required(401),
 timeout, network failure, invalid response, generic error, explicit retry, 그리고 malformed
 주소에 대한 고정 invalid-route 상태를 갖는다. 목록에서 상세로 가는 경로는 행 전체 클릭이 아니라
@@ -329,7 +330,7 @@ action은 없다. 표시하는 값은
 `FraudCaseQueryValidator` 계약 안에서만 동작하고, 생성 시간 범위와 최종 변경 시간 범위는 서로
 독립적으로 검증한다.
 
-사건 상세의 Case record는 조회 전용이고 사건 workflow mutation UI는 없다. record는
+사건 상세의 Case record는 조회 전용이고 그 뒤의 독립 workflow section만 상태·담당자 mutation을 제공한다. record는
 `GET /api/v1/cases/{caseId}` 응답의 10개 필드만 읽기 전용 `<dl>`로 표시한다. `caseId`,
 `caseStatus`, `finalDisposition`, `assigneeRef`, `relatedTransactionCount`, `createdAt`,
 `reviewStartedAt`, `closedAt`, `lastChangedAt`, `concurrencyVersion`이 전부다. 다만 같은 화면의
@@ -390,10 +391,29 @@ submitted content, safe `expectedVersion + 1`과 다시 결합하며 authorRef�
 audit은 page 0으로 이동한다. 각 background refresh는 현재 content를 유지하고 서로의 실패나 성공한 POST
 결과를 바꾸지 않는다.
 
-Issue #251, Issue #253, Issue #255, Issue #257, Issue #259와 Issue #261 모두에서 Backend, AI Service, Infra, Keycloak,
-DB와 API 계약 변경은 없다. 사건 workflow·담당자 변경·resolution, 조사 메모 수정·삭제와 별도 notes
-route, 연관 거래·Detection·Rule Evidence·AI 사건 리포트 화면 및 그 밖의 mutation UI는 후속
-Issue이며, 콘솔 전체의 최종 시각적 리뉴얼도 후속 작업으로 남아 있다.
+Issue #277은 Case record와 Investigation notes 사이에 `case:workflow` capability 전용 상태·담당자
+section을 추가한다. `OPEN → IN_REVIEW`, `IN_REVIEW → ADDITIONAL_INFORMATION_REQUIRED`, 담당자가 있는
+`ADDITIONAL_INFORMATION_REQUIRED → IN_REVIEW`와 상태별 담당자 배정·변경·명시적 해제 행렬만 허용한다.
+두 PATCH는 하나의 page-level lane에서 직렬화되고 submit 직전 session/case/capability/status/assignee/version을
+재검증한다. submit flight identity는 이 값들과 `reconciliationGeneration`으로 구성되며, credential 조회 직전,
+authorize 완료 직후(이중 방어), authorized transport의 실제 fetch 직전 최종 guard와 응답 settle 직전에 같은
+identity를 확인한다. identity가 바뀐 stale flight는 fetch를 보내지 않거나 응답을 publish·reconciliation하지
+않으며, 이 stale 판정 자체는 session을 무효화하지 않는다. 응답 shape 뒤 requested case ID, exact successor
+version, target status·assignee와 보존 field를 결합 검증하며 raw DTO를 Case record에 optimistic merge하지 않는다.
+
+확인된 성공은 successor version을 detail floor로 두고 detail·audit만, 409와 timeout·network·invalid 2xx는
+현재 version을 floor로 두고 detail·notes·audit를 독립 refresh한다. 정상 성공 뒤 authoritative detail이 올리는
+generation은 stale submit이 아니며, floor 미만 detail에서는 lane을 계속 잠그고 floor 이상 detail에서만 해제한다.
+authoritative detail을 얻기 전에는 다음 mutation을 막고 PATCH를 자동 retry·replay하지 않는다.
+session/case/status/version/capability/reconciliationGeneration 교체와 unmount는 flight를 release/abort하며
+abort를 무시한 late settlement도 게시하지 않는다. 이 Frontend guard는 Backend endpoint authorization이나
+`expectedVersion` optimistic concurrency를 대체하지 않는다. 공개 outcome은
+field 단위로 재투영해 raw request/response/Error, credential·subject·traceId·AuditLog actor를 보존하지 않는다.
+
+Issue #251, Issue #253, Issue #255, Issue #257, Issue #259, Issue #261과 Issue #277 모두에서 Backend, AI Service,
+Infra, Keycloak, DB와 API 계약 변경은 없다. resolution, 조사 메모 수정·삭제와 별도 notes route, 연관 거래·
+Detection·Rule Evidence·AI 사건 리포트 화면 및 그 밖의 mutation UI는 후속 Issue이며, 실제 Backend
+workflow mutation browser E2E와 콘솔 전체의 최종 시각적 리뉴얼도 후속 작업으로 남아 있다.
 
 ### 7.2 Spring Boot Modular Monolith
 

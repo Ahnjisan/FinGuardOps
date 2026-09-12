@@ -63,6 +63,14 @@ export interface AuthorizedRequestOptions<TData> {
   /** Runs inside the deadline. A 2xx response that fails it is not a success. */
   readonly validate: (body: unknown) => body is TData;
   readonly signal?: AbortSignal;
+  /**
+   * 실제 fetch 직전 최종 guard.
+   *
+   * HTTP client가 prepare(credential 획득과 발급 요청 재검증), deadline, abort 검사를 모두 마친 뒤
+   * fetch와 같은 동기 turn에서 한 번 실행한다. destination·credential 판정을 대신하지 않고, 던진 오류는
+   * 그대로 호출자에게 전파된다. Backend 401이 아니므로 어떤 session도 무효화하지 않는다.
+   */
+  readonly assertDispatchAllowed?: () => void;
 }
 
 export interface AuthorizedResult<TData> {
@@ -243,12 +251,18 @@ export async function sendAuthorizedBackendRequest<TData>(
    * a 401 here can never act on a session that authorized something else.
    */
   let invalidateIfCurrent: (() => void) | undefined;
+  /**
+   * 이 요청의 응답이 실제로 401이었을 때 classifier가 만든 오류. session 무효화는 이 객체에만
+   * 반응하므로 dispatch guard 등 다른 경로가 던진 UnauthorizedError는 credential 판정이 되지 않는다.
+   */
+  let credentialRejection: UnauthorizedError | undefined;
 
   try {
     const result = await httpRequest<TData>({
       timeoutMs: AUTHENTICATED_REQUEST_TIMEOUT_MS,
       signal: options.signal,
       expectedStatus: options.expectedStatus,
+      assertDispatchAllowed: options.assertDispatchAllowed,
       prepare: async (signal: AbortSignal) => {
         const unauthenticatedRequest = new Request(url, {
           method: descriptor.method,
@@ -278,7 +292,8 @@ export async function sendAuthorizedBackendRequest<TData>(
         // is the only thing an error is allowed to carry, so no response
         // content, challenge, role or claim can reach the UI.
         if (response.status === 401) {
-          return new UnauthorizedError(extractSafeTraceId(response.headers));
+          credentialRejection = new UnauthorizedError(extractSafeTraceId(response.headers));
+          return credentialRejection;
         }
         if (response.status === 403) {
           return new ForbiddenError(extractSafeTraceId(response.headers));
@@ -290,13 +305,14 @@ export async function sendAuthorizedBackendRequest<TData>(
 
     return { data: result.body, traceId: readSuccessTraceId(result.headers) };
   } catch (error: unknown) {
-    if (error instanceof UnauthorizedError) {
+    if (credentialRejection !== undefined && error === credentialRejection) {
       // The Backend rejected the credential this request carried, so the
       // session that signed it is over — and only that session. If it has since
       // been replaced, signed out or expired, this is a no-op rather than a
       // logout of whoever is signed in now. Concurrent 401s from one session
       // still collapse into a single teardown at the port. The failed request
       // is not replayed and nothing navigates.
+      // dispatch guard가 던진 UnauthorizedError처럼 응답 401이 아닌 오류는 여기에 도달하지 않는다.
       invalidateIfCurrent?.();
     }
     // A 403 deliberately falls through untouched: the session and the memory

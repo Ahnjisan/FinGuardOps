@@ -62,6 +62,17 @@ export interface HttpRequestOptions<TBody = unknown> extends HttpDeadlineOptions
    * narrowed type is what the caller receives.
    */
   validate?: (body: unknown) => body is TBody;
+  /**
+   * 실제 dispatch 직전 최종 guard.
+   *
+   * prepare 완료, deadline 검사, abort 검사를 모두 통과한 뒤 `dispatch()`를 부르기 직전에 같은 동기
+   * turn에서 한 번 실행한다. 둘 사이에는 await·Promise callback·microtask 경계가 없다. 던진 오류는
+   * NetworkError·TimeoutError로 바꾸지 않고 그대로 전파하며, 그때 dispatch는 호출되지 않는다.
+   *
+   * 호출자의 요청 소유권처럼 prepare 반환 이후 microtask 구간에서 바뀔 수 있는 조건만 확인한다.
+   * destination·credential 검증은 계속 prepare와 호출자 transport의 책임이다.
+   */
+  assertDispatchAllowed?: () => void;
 }
 
 async function performRequest<TBody>(
@@ -100,6 +111,10 @@ async function performRequest<TBody>(
   if (signal.aborted) {
     throw new NetworkError();
   }
+
+  // 최종 dispatch guard. 이 호출과 아래 `dispatch()` 사이에는 await가 없으므로 guard의 판정은 실제
+  // 네트워크 호출과 같은 동기 turn에 속한다. guard가 던진 오류는 아래 network 분류를 거치지 않는다.
+  options.assertDispatchAllowed?.();
 
   let response: Response;
   try {

@@ -885,3 +885,148 @@ describe("httpRequest — exact success status", () => {
     }
   });
 });
+
+/**
+ * 실제 dispatch 직전 최종 guard.
+ *
+ * prepare 완료, deadline 검사, abort 검사를 모두 통과한 뒤 `dispatch()`와 같은 동기 turn에서 한 번
+ * 실행된다. guard가 던진 오류는 네트워크 실패나 timeout으로 바뀌지 않고 그대로 전파된다.
+ */
+describe("httpRequest — final dispatch guard", () => {
+  it("runs once after asynchronous preparation, in the same synchronous turn as dispatch", async () => {
+    const order: string[] = [];
+
+    await httpRequest({
+      timeoutMs: TIMEOUT_MS,
+      prepare: async () => {
+        await Promise.resolve();
+        order.push("prepared");
+        return () => {
+          order.push("dispatch");
+          return Promise.resolve(jsonResponse({ ok: true }));
+        };
+      },
+      assertDispatchAllowed: () => {
+        order.push("guard");
+        // guard와 dispatch 사이에 microtask 경계가 있으면 이 기록이 dispatch보다 먼저 남는다.
+        queueMicrotask(() => order.push("microtask"));
+      },
+    });
+
+    expect(order).toEqual(["prepared", "guard", "dispatch", "microtask"]);
+  });
+
+  it("propagates the guard's own error unchanged and never dispatches", async () => {
+    class StaleFlightError extends Error {}
+    const refusal = new StaleFlightError();
+    const dispatch = vi.fn(async () => jsonResponse({ ok: true }));
+
+    const error = await httpRequest({
+      timeoutMs: TIMEOUT_MS,
+      prepare: () => dispatch,
+      assertDispatchAllowed: () => {
+        throw refusal;
+      },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBe(refusal);
+    expect(error).not.toBeInstanceOf(NetworkError);
+    expect(error).not.toBeInstanceOf(TimeoutError);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("keeps the guard's refusal rather than reporting a timeout when the guard itself overran", async () => {
+    const clock = stubMonotonicClock();
+    const refusal = new Error("stale flight");
+    const dispatch = vi.fn(async () => jsonResponse({ ok: true }));
+
+    const error = await httpRequest({
+      timeoutMs: TIMEOUT_MS,
+      prepare: () => dispatch,
+      assertDispatchAllowed: () => {
+        clock.advanceTo(6000);
+        throw refusal;
+      },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBe(refusal);
+    expect(error).not.toBeInstanceOf(TimeoutError);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("is not consulted when preparation overran the deadline", async () => {
+    const clock = stubMonotonicClock();
+    const guard = vi.fn();
+    const dispatch = vi.fn(async () => jsonResponse({ ok: true }));
+
+    await expect(
+      httpRequest({
+        timeoutMs: TIMEOUT_MS,
+        prepare: () => {
+          clock.advanceTo(5000);
+          return dispatch;
+        },
+        assertDispatchAllowed: guard,
+      }),
+    ).rejects.toBeInstanceOf(TimeoutError);
+
+    expect(guard).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("is not consulted when the request was cancelled while preparation was pending", async () => {
+    const controller = new AbortController();
+    const guard = vi.fn();
+    const dispatch = vi.fn(async () => jsonResponse({ ok: true }));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const pending = httpRequest({
+      timeoutMs: TIMEOUT_MS,
+      signal: controller.signal,
+      prepare: async () => {
+        await gate;
+        return dispatch;
+      },
+      assertDispatchAllowed: guard,
+    });
+    await Promise.resolve();
+    controller.abort();
+    release();
+
+    await expect(pending).rejects.toBeInstanceOf(NetworkError);
+    expect(guard).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("is not consulted when preparation itself fails", async () => {
+    class NoSessionError extends Error {}
+    const guard = vi.fn();
+
+    await expect(
+      httpRequest({
+        timeoutMs: TIMEOUT_MS,
+        prepare: () => Promise.reject(new NoSessionError()),
+        assertDispatchAllowed: guard,
+      }),
+    ).rejects.toBeInstanceOf(NoSessionError);
+
+    expect(guard).not.toHaveBeenCalled();
+  });
+
+  it("leaves a network failure after a passing guard classified as a network failure", async () => {
+    const guard = vi.fn();
+
+    await expect(
+      httpRequest({
+        timeoutMs: TIMEOUT_MS,
+        prepare: () => () => Promise.reject(new TypeError("Failed to fetch")),
+        assertDispatchAllowed: guard,
+      }),
+    ).rejects.toBeInstanceOf(NetworkError);
+
+    expect(guard).toHaveBeenCalledTimes(1);
+  });
+});

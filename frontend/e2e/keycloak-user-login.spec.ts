@@ -1,11 +1,18 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { request as httpsRequest } from "node:https";
 import { dirname, resolve } from "node:path";
 import { env } from "node:process";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
-import { expect, test, type Page, type Request as PlaywrightRequest, type Route } from "@playwright/test";
+import {
+  expect,
+  test,
+  type Page,
+  type Request as PlaywrightRequest,
+  type Route,
+} from "@playwright/test";
 
 const APP_ORIGIN = "http://localhost:5173";
 const CALLBACK_URL = `${APP_ORIGIN}/auth/callback`;
@@ -294,6 +301,8 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PASSWORD_PATH = resolve(REPO_ROOT, "infra", "keycloak", ".local", "secrets", "user-password");
 const TLS_CERTIFICATE_PATH = resolve(REPO_ROOT, "infra", "keycloak", ".local", "tls", "localhost.crt");
 const COMPOSE_PROJECT = env.FINGUARDOPS_E2E_COMPOSE_PROJECT;
+const EXPECTED_COMPOSE_PROJECT = "finguardops-keycloak-browser-e2e";
+const BACKEND_CONTAINER_NAME = `${EXPECTED_COMPOSE_PROJECT}-backend-1`;
 
 interface ProtocolRecord {
   readonly key: string;
@@ -379,6 +388,18 @@ function decodeJwtPayload(token: string): Record<string, unknown> {
     return parsed as Record<string, unknown>;
   } catch {
     throw new Error("A JWT payload was invalid.");
+  }
+}
+
+function decodeJwtHeader(token: string): Record<string, unknown> {
+  const parts = token.split(".");
+  requireCondition(parts.length === 3, "A token did not have the required JWT shape.");
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8"));
+    requireCondition(typeof parsed === "object" && parsed !== null, "A JWT header was invalid.");
+    return parsed as Record<string, unknown>;
+  } catch {
+    throw new Error("A JWT header was invalid.");
   }
 }
 
@@ -578,8 +599,22 @@ function parseTokenResponse(value: unknown): TokenMaterial {
 }
 
 function requireTokenClaims(tokens: TokenMaterial): void {
+  const accessHeader = decodeJwtHeader(tokens.accessToken);
   const access = decodeJwtPayload(tokens.accessToken);
   const identity = decodeJwtPayload(tokens.idToken);
+
+  requireCondition(
+    accessHeader.alg === "RS256" &&
+      typeof accessHeader.kid === "string" &&
+      accessHeader.kid.trim() !== "" &&
+      !Object.prototype.hasOwnProperty.call(accessHeader, "jku") &&
+      !Object.prototype.hasOwnProperty.call(accessHeader, "x5u"),
+    "The access token header did not satisfy the Backend contract.",
+  );
+  requireCondition(
+    access.iss === AUTHORITY,
+    "The access token issuer differed from the Backend contract.",
+  );
 
   requireNonBlankString(access.sub, "The access token subject was invalid.");
   requireNonBlankString(identity.sub, "The ID token subject was invalid.");
@@ -616,12 +651,6 @@ function requireTokenClaims(tokens: TokenMaterial): void {
   );
 }
 
-function parseHttpStatus(output: string): number {
-  const match = /^HTTP\/1\.[01] ([0-9]{3})\b/.exec(output.trim());
-  requireCondition(match !== null, "The Backend relay returned an invalid status line.");
-  return Number(match[1]);
-}
-
 /** What the Backend actually answered: its status, and its body verbatim. */
 interface RelayedResponse {
   readonly status: number;
@@ -630,8 +659,12 @@ interface RelayedResponse {
   readonly target: string;
 }
 
-/** A relayed body this suite will accept into the browser. */
-const MAX_RELAYED_BODY_BYTES = 2 * 1024 * 1024;
+/** The largest complete raw response accepted from the case-list size=100 contract. */
+const MAX_RELAY_STDOUT_BYTES = 2 * 1024 * 1024;
+const MAX_RELAY_RESPONSE_HEADER_BYTES = 64 * 1024;
+const MAX_RELAY_RESPONSE_HEADER_COUNT = 100;
+const MAX_RELAY_DECODED_BODY_BYTES = MAX_RELAY_STDOUT_BYTES - MAX_RELAY_RESPONSE_HEADER_BYTES;
+const HTTP_TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 
 /**
  * Decodes `Transfer-Encoding: chunked`, which is what Spring Boot answers a
@@ -644,19 +677,33 @@ const MAX_RELAYED_BODY_BYTES = 2 * 1024 * 1024;
 function decodeChunkedBody(raw: Buffer): Buffer {
   const parts: Buffer[] = [];
   let offset = 0;
+  let decodedByteLength = 0;
   for (;;) {
     const lineEnd = raw.indexOf("\r\n", offset, "latin1");
     requireCondition(lineEnd !== -1, "The Backend relay returned an unterminated chunk header.");
-    const header = raw.toString("latin1", offset, lineEnd).split(";")[0].trim();
-    requireCondition(/^[0-9a-fA-F]{1,8}$/.test(header), "The Backend relay returned an invalid chunk size.");
+    const header = raw.toString("latin1", offset, lineEnd);
+    requireCondition(/^(?:0|[1-9a-fA-F][0-9a-fA-F]{0,7})$/.test(header), "The Backend relay returned an invalid chunk size.");
     const size = Number.parseInt(header, 16);
-    if (size === 0) {
-      return Buffer.concat(parts);
-    }
     const start = lineEnd + 2;
-    requireCondition(start + size <= raw.length, "The Backend relay returned a truncated chunk.");
+    if (size === 0) {
+      requireCondition(
+        raw.length === start + 2 && raw[start] === 0x0d && raw[start + 1] === 0x0a,
+        "The Backend relay returned invalid chunk termination.",
+      );
+      return Buffer.concat(parts, decodedByteLength);
+    }
+    const end = start + size;
+    requireCondition(
+      end + 2 <= raw.length && raw[end] === 0x0d && raw[end + 1] === 0x0a,
+      "The Backend relay returned invalid chunk framing.",
+    );
+    decodedByteLength += size;
+    requireCondition(
+      decodedByteLength <= MAX_RELAY_DECODED_BODY_BYTES,
+      "The Backend relay response was too large.",
+    );
     parts.push(raw.subarray(start, start + size));
-    offset = start + size + 2;
+    offset = end + 2;
   }
 }
 
@@ -668,16 +715,91 @@ function decodeChunkedBody(raw: Buffer): Buffer {
  * about what those bytes mean belongs where it can be read and bounded.
  */
 function parseRelayedResponse(raw: Buffer): Omit<RelayedResponse, "target"> {
-  requireCondition(raw.length <= MAX_RELAYED_BODY_BYTES, "The Backend relay response was too large.");
+  requireCondition(raw.length <= MAX_RELAY_STDOUT_BYTES, "The Backend relay response was too large.");
   const separator = raw.indexOf("\r\n\r\n", 0, "latin1");
   requireCondition(separator !== -1, "The Backend relay returned no header boundary.");
-  const head = raw.toString("latin1", 0, separator).split("\r\n");
-  const status = parseHttpStatus(head[0]);
-  const chunked = head
-    .slice(1)
-    .some((line) => /^transfer-encoding:\s*chunked\s*$/i.test(line));
-  const rest = raw.subarray(separator + 4);
-  return { status, body: (chunked ? decodeChunkedBody(rest) : rest).toString("utf8") };
+  requireCondition(
+    separator <= MAX_RELAY_RESPONSE_HEADER_BYTES,
+    "The Backend relay response headers were too large.",
+  );
+  const lines = raw.toString("latin1", 0, separator).split("\r\n");
+  const statusMatch = /^HTTP\/1\.[01] ([0-9]{3})(?: ([\x20-\x7e]*))?$/.exec(lines[0]);
+  requireCondition(statusMatch !== null, "The Backend relay returned an invalid status line.");
+  const status = Number(statusMatch[1]);
+  requireCondition(status >= 100 && status <= 599, "The Backend relay returned an invalid status code.");
+  requireCondition(
+    lines.length - 1 <= MAX_RELAY_RESPONSE_HEADER_COUNT,
+    "The Backend relay returned too many headers.",
+  );
+
+  const headers = new Map<string, string[]>();
+  for (const line of lines.slice(1)) {
+    const colon = line.indexOf(":");
+    requireCondition(colon > 0, "The Backend relay returned a malformed header.");
+    const name = line.slice(0, colon);
+    const rawValue = line.slice(colon + 1);
+    requireCondition(
+      !rawValue.startsWith("\t") &&
+        !rawValue.startsWith("  ") &&
+        !rawValue.endsWith(" ") &&
+        !rawValue.endsWith("\t"),
+      "The Backend relay returned non-canonical header whitespace.",
+    );
+    const value = rawValue.startsWith(" ") ? rawValue.slice(1) : rawValue;
+    requireCondition(HTTP_TOKEN.test(name), "The Backend relay returned a malformed header name.");
+    requireCondition(
+      [...value].every((character) => {
+        const code = character.charCodeAt(0);
+        return code >= 32 && code <= 126;
+      }),
+      "The Backend relay returned a malformed header value.",
+    );
+    const key = name.toLowerCase();
+    const values = headers.get(key) ?? [];
+    values.push(value);
+    headers.set(key, values);
+  }
+
+  const contentLengths = headers.get("content-length") ?? [];
+  const transferEncodings = headers.get("transfer-encoding") ?? [];
+  requireCondition(contentLengths.length <= 1, "The Backend relay returned duplicate Content-Length.");
+  requireCondition(transferEncodings.length <= 1, "The Backend relay returned duplicate Transfer-Encoding.");
+  requireCondition(
+    contentLengths.length === 0 || transferEncodings.length === 0,
+    "The Backend relay returned ambiguous response framing.",
+  );
+  const framedBody = raw.subarray(separator + 4);
+  let body: Buffer;
+  if (contentLengths.length === 1) {
+    const declaredText = contentLengths[0];
+    requireCondition(
+      /^(?:0|[1-9][0-9]*)$/.test(declaredText),
+      "The Backend relay returned an invalid Content-Length.",
+    );
+    const declared = Number(declaredText);
+    requireCondition(Number.isSafeInteger(declared), "The Backend relay returned an unsafe Content-Length.");
+    requireCondition(
+      declared === framedBody.byteLength,
+      "The Backend relay returned a body with the wrong Content-Length.",
+    );
+    body = framedBody;
+  } else if (transferEncodings.length === 1) {
+    requireCondition(
+      transferEncodings[0].toLowerCase() === "chunked",
+      "The Backend relay returned an unsupported Transfer-Encoding.",
+    );
+    body = decodeChunkedBody(framedBody);
+  } else {
+    const connectionValues = headers.get("connection") ?? [];
+    const connectionTokens = connectionValues.flatMap((value) => value.toLowerCase().split(",").map((token) => token.trim()));
+    requireCondition(
+      connectionTokens.includes("close"),
+      "The Backend relay returned an unframed persistent response.",
+    );
+    body = framedBody;
+  }
+  requireCondition(body.byteLength <= MAX_RELAY_DECODED_BODY_BYTES, "The Backend relay response was too large.");
+  return { status, body: body.toString("utf8") };
 }
 
 /**
@@ -843,7 +965,7 @@ function resolveRelayTarget(request: PlaywrightRequest): string {
  * how many Backend answers it has recorded.
  *
  * Counters rather than assertions about a mock, because there is no mock: the
- * relay really does spawn `docker compose exec` and really does open
+ * relay really does spawn `docker exec` and really does open
  * `/dev/tcp`. "A refused request reached neither" is only a claim worth making
  * if it is measured at the two places where it would stop being true, so both
  * are incremented at the exact statement that performs the act.
@@ -851,98 +973,983 @@ function resolveRelayTarget(request: PlaywrightRequest): string {
 let relaySpawnCount = 0;
 let relayObservationCount = 0;
 
-function relayToBackend(request: PlaywrightRequest): RelayedResponse {
-  requireNonBlankString(COMPOSE_PROJECT, "The dedicated Compose project was not configured.");
-  const target = resolveRelayTarget(request);
+/** production authorized transport가 인증 요청 하나에 허용하는 전체 시간. */
+const PRODUCTION_AUTHENTICATED_REQUEST_TIMEOUT_MS = 5_000;
+/**
+ * route가 이 harness에 도착한 순간부터 fulfill 또는 abort를 시작해야 하는 상한.
+ *
+ * production 제한 시간은 credential 조회 직전에 시작하고 route 도착은 그 직후이다. barrier
+ * 대기, docker exec, 응답 해석과 detail 전달 순서 대기가 모두 이 안에 들어간다. 로그인과
+ * Keycloak callback 시간은 포함하지 않는다.
+ */
+const RELAY_REQUEST_DEADLINE_MS = 4_000;
+/** fulfill/abort 호출이 settle해야 하는 상한. 넘기면 성공으로 보지 않고 harness 실패로 센다. */
+const RELAY_ROUTE_ACTION_TIMEOUT_MS = 750;
+/** host docker CLI에 TERM을 요청한 뒤 KILL을 요청하기까지의 유예. */
+const RELAY_HOST_KILL_GRACE_MS = 500;
+/**
+ * container 안 relay process group의 수명 상한.
+ *
+ * GNU timeout은 `--foreground` 없이 실행되면 자기 process group 전체에 TERM을, 유예 뒤 KILL을
+ * 보낸다. owner·writer·reader가 모두 그 group에 속하므로 host CLI가 먼저 사라져도 container 안의
+ * relay는 이 상한 안에 스스로 끝난다. teardown은 이 종료를 기다리기만 하고 신호를 보내지 않는다.
+ */
+const CONTAINER_RELAY_TIMEOUT_SECONDS = "3";
+const CONTAINER_RELAY_KILL_AFTER_SECONDS = "0.5";
+/** teardown이 host child의 실제 close와 route handler settle을 각각 기다리는 상한. */
+const RELAY_HOST_CLOSE_TIMEOUT_MS = 5_000;
+const RELAY_HANDLER_SETTLE_TIMEOUT_MS = 5_000;
+/** container 안에서 marker process-zero를 poll하는 상한(초). relay group 수명보다 넉넉하다. */
+const CONTAINER_AUDIT_POLL_SECONDS = "8";
+/** audit docker exec 한 번의 host 상한. poll 상한에 Docker Desktop exec 시작·종료 변동을 더한다. */
+const CONTAINER_AUDIT_HOST_TIMEOUT_MS = 15_000;
+/**
+ * route가 이미 끝난 뒤의 증거를 기다리는 상한. 요청 처리 상한이 아니며 production 5초
+ * 요청 제한보다 먼저 실패한다.
+ */
+const BACKEND_OBSERVATION_WAIT_TIMEOUT_MS = 4_000;
+const MAX_RELAY_STDERR_BYTES = 64 * 1024;
+const BACKEND_RELAY_FAILURE_MESSAGE = "The Backend relay failed.";
+const RELAY_MARKER_PREFIX = "fgo-e2e-relay-";
+const CONTAINER_MARKER_AUDIT_LABEL = "container-marker-audit";
 
-  const credential = request.headers()["authorization"] ?? "";
-  requireCondition(!credential.includes("\r") && !credential.includes("\n"), "An invalid credential header was refused.");
-  const body = request.postData() ?? "";
-  requireCondition(!body.includes("\r") && !body.includes("\n"), "A multiline E2E body was refused.");
-
-  const script = [
-    "set -euo pipefail",
-    "IFS= read -r method",
-    // The whole request target - path and query - as one already-validated,
-    // whitespace-free token, read as data rather than assembled into a command
-    // string. Compose is still invoked as an argument vector.
-    "IFS= read -r target",
-    "IFS= read -r credential",
-    "IFS= read -r body",
-    "exec 3<>/dev/tcp/127.0.0.1/8080",
-    "printf '%s %s HTTP/1.1\\r\\nHost: localhost\\r\\nAccept: application/json\\r\\nConnection: close\\r\\n' \"$method\" \"$target\" >&3",
-    "if [[ -n $credential ]]; then printf 'Authorization: %s\\r\\n' \"$credential\" >&3; fi",
-    "if [[ -n $body ]]; then printf 'Content-Type: application/json\\r\\nContent-Length: %s\\r\\n' \"${#body}\" >&3; fi",
-    "printf '\\r\\n%s' \"$body\" >&3",
-    // The whole response, byte for byte. The status line alone was enough while
-    // every assertion was about a status code; a screen that renders what the
-    // Backend actually returned needs the body it actually returned, and
-    // inventing one here would make this an assertion about the relay.
-    "cat <&3",
-  ].join("\n");
-
-  relaySpawnCount += 1;
-  const result = spawnSync(
-    "docker",
-    [
-      "compose",
-      "-p",
-      COMPOSE_PROJECT,
-      "--env-file",
-      "infra/.env.example",
-      "-f",
-      "infra/compose.yml",
-      "-f",
-      "infra/compose.keycloak-local-e2e.yml",
-      "exec",
-      "-T",
-      "backend",
-      "bash",
-      "-c",
-      script,
-    ],
-    {
-      cwd: REPO_ROOT,
-      // No `encoding`, so stdout stays a Buffer: chunk sizes are octet counts
-      // and a decoded string cannot be sliced by them.
-      maxBuffer: MAX_RELAYED_BODY_BYTES,
-      input: `${request.method()}\n${target}\n${credential}\n${body}\n`,
-      // A Backend answer relayed inside an already running container. This is
-      // the bound the run holds Compose exec to; exceeding it is a failure of
-      // this relay, reported as the same fixed sentence as any other, and never
-      // widened to absorb a slow Backend.
-      timeout: 15_000,
-      windowsHide: true,
-    },
-  );
-  requireCondition(result.status === 0, "The Backend relay failed.");
-  return { ...parseRelayedResponse(result.stdout), target };
+/**
+ * harness의 시간 원천. 실제 relay는 monotonic clock과 Node timer를 쓰고, 결정적 테스트는 같은
+ * production class에 수동 clock만 주입한다.
+ */
+interface RelayClock {
+  now(): number;
+  setTimeout(callback: () => void, delayMs: number): unknown;
+  clearTimeout(handle: unknown): void;
 }
 
-interface RelayOptions {
-  /**
-   * The endpoint path or paths whose response body is retained in memory.
-   *
-   * Opt-in, and named paths rather than all of them: a body is only kept where a
-   * test has a reason to read it back, so a run that does not ask keeps nothing
-   * at all. Nothing about the relay's behaviour towards the browser changes -
-   * the same bytes are forwarded either way.
-   */
-  readonly captureBodyOf?: string | readonly string[];
-  /** Holds only these approved reads until every target has reached the relay. */
-  readonly parallelStartBarrier?: ParallelStartBarrier;
+const realRelayClock: RelayClock = {
+  now: () => performance.now(),
+  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+  clearTimeout: (handle) => {
+    clearTimeout(handle as ReturnType<typeof setTimeout>);
+  },
+};
+
+interface RelayChildStdin {
+  write(chunk: Buffer): boolean;
+  end(): void;
+  on(event: "error", listener: (error: Error) => void): unknown;
+  once(event: "drain" | "finish" | "close", listener: () => void): unknown;
+}
+
+interface RelayChildOutput {
+  on(event: "data", listener: (chunk: Buffer) => void): unknown;
+  on(event: "error", listener: (error: Error) => void): unknown;
+}
+
+/** relay가 사용하는 child process 표면. 실제 Node child와 결정적 테스트의 fake가 같은 계약을 따른다. */
+interface RelayChild {
+  readonly pid?: number;
+  readonly stdin: RelayChildStdin;
+  readonly stdout: RelayChildOutput;
+  readonly stderr: RelayChildOutput;
+  kill(signal: NodeJS.Signals): boolean;
+  on(event: "error", listener: (error: Error) => void): unknown;
+  once(event: "spawn", listener: () => void): unknown;
+  once(
+    event: "close",
+    listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+  ): unknown;
+}
+
+/** executable과 argv만 전달한다. shell, 추가 환경 변수, stdin 외의 입력 경로는 없다. */
+interface RelaySpawnOptions {
+  readonly cwd: string;
+  readonly shell: false;
+  readonly windowsHide: true;
+}
+
+type RelaySpawn = (
+  executable: "docker",
+  args: readonly string[],
+  options: RelaySpawnOptions,
+) => RelayChild;
+
+const RELAY_SPAWN_OPTIONS: RelaySpawnOptions = Object.freeze({
+  cwd: REPO_ROOT,
+  shell: false,
+  windowsHide: true,
+} as const);
+
+const realRelaySpawn: RelaySpawn = (executable, args, options) =>
+  spawn(executable, [...args], {
+    cwd: options.cwd,
+    shell: options.shell,
+    windowsHide: options.windowsHide,
+    stdio: ["pipe", "pipe", "pipe"],
+  }) as unknown as RelayChild;
+
+type RelayProcessFailureReason =
+  | "spawn-error"
+  | "stdin-error"
+  | "stream-error"
+  | "stdout-limit"
+  | "stderr-limit"
+  | "non-zero-exit"
+  | "signal"
+  | "deadline"
+  | "stopped"
+  | "malformed-response";
+
+/** 원문 없이 분류만 갖는 relay 실패. message는 항상 고정 문구이다. */
+class RelayProcessError extends Error {
+  constructor(readonly reason: RelayProcessFailureReason) {
+    super(BACKEND_RELAY_FAILURE_MESSAGE);
+  }
+}
+
+type RelayCleanupStage =
+  | "unroute"
+  | "handlers"
+  | "host-close"
+  | "container-audit"
+  | "container-present"
+  | "internal";
+
+/** teardown 실패. 실패한 단계 이름 외에는 어떤 값도 담지 않는다. */
+class RelayCleanupError extends Error {
+  constructor(readonly stage: RelayCleanupStage) {
+    super(`The Backend relay cleanup failed at ${stage}.`);
+  }
+}
+
+interface RelayProcessEvent {
+  readonly sequence: number;
+  readonly kind: "spawn" | "close";
+  readonly label: string;
+}
+
+/**
+ * relay와 audit가 띄운 host `docker` child를 소유한다.
+ *
+ * child는 실제 `close` 이벤트를 받을 때까지 소유 목록에 남는다. 결과 Promise가 먼저 끝나도
+ * (요청 deadline, 출력 상한, stdin 오류, 명시적 중지) 소유는 해제되지 않으며, teardown은
+ * `waitForClose`로 실제 close를 bounded하게 기다린다. container 안의 process-zero는 이 class의
+ * 책임이 아니므로 요청 경로는 그것을 기다리지 않는다.
+ */
+class RelayProcessPool {
+  private readonly open = new Map<RelayChild, (reason: RelayProcessFailureReason) => void>();
+  private readonly emptyWaiters = new Set<() => void>();
+  private readonly recorded: RelayProcessEvent[] = [];
+  private sequence = 0;
+  private lateEvents = 0;
+
+  constructor(
+    private readonly spawnChild: RelaySpawn = realRelaySpawn,
+    private readonly clock: RelayClock = realRelayClock,
+  ) {}
+
+  run(label: string, args: readonly string[], input: Buffer, timeoutMs: number): Promise<Buffer> {
+    return new Promise<Buffer>((resolveRun, rejectRun) => {
+      if (!(timeoutMs > 0)) {
+        rejectRun(new RelayProcessError("deadline"));
+        return;
+      }
+      let child: RelayChild;
+      try {
+        child = this.spawnChild("docker", args, RELAY_SPAWN_OPTIONS);
+      } catch {
+        rejectRun(new RelayProcessError("spawn-error"));
+        return;
+      }
+
+      const stdoutChunks: Buffer[] = [];
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      let settled = false;
+      let spawned = false;
+      let closed = false;
+      let stopRequested = false;
+      let stdinFinished = false;
+      let deadlineHandle: unknown = null;
+      let killHandle: unknown = null;
+
+      const fail = (reason: RelayProcessFailureReason): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        stdoutChunks.length = 0;
+        rejectRun(new RelayProcessError(reason));
+      };
+      // 결과를 먼저 실패로 확정한 뒤 host child에만 TERM, 유예 뒤 KILL을 요청한다. 소유 해제는
+      // 실제 close 이벤트만 결정한다.
+      const stop = (reason: RelayProcessFailureReason): void => {
+        fail(reason);
+        if (closed || stopRequested) {
+          return;
+        }
+        stopRequested = true;
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          // close 이벤트가 소유 해제를 결정한다.
+        }
+        killHandle = this.clock.setTimeout(() => {
+          killHandle = null;
+          if (!closed) {
+            try {
+              child.kill("SIGKILL");
+            } catch {
+              // close 이벤트가 소유 해제를 결정한다.
+            }
+          }
+        }, RELAY_HOST_KILL_GRACE_MS);
+      };
+      const finishClose = (): void => {
+        if (closed) {
+          return;
+        }
+        closed = true;
+        if (deadlineHandle !== null) {
+          this.clock.clearTimeout(deadlineHandle);
+          deadlineHandle = null;
+        }
+        if (killHandle !== null) {
+          this.clock.clearTimeout(killHandle);
+          killHandle = null;
+        }
+        this.open.delete(child);
+        this.record("close", label);
+        if (this.open.size === 0) {
+          for (const waiter of [...this.emptyWaiters]) {
+            waiter();
+          }
+        }
+      };
+      const noteLate = (): void => {
+        if (settled) {
+          this.lateEvents += 1;
+        }
+      };
+
+      this.open.set(child, stop);
+      child.once("spawn", () => {
+        spawned = true;
+        this.record("spawn", label);
+      });
+      child.on("error", () => {
+        noteLate();
+        if (!spawned && child.pid === undefined) {
+          // 시작하지 못한 child는 close를 보장하지 않으므로 여기서 소유를 끝낸다.
+          fail("spawn-error");
+          finishClose();
+          return;
+        }
+        stop("stream-error");
+      });
+      child.once("close", (code, signal) => {
+        finishClose();
+        if (settled) {
+          return;
+        }
+        if (signal !== null) {
+          fail("signal");
+          return;
+        }
+        if (code !== 0) {
+          fail("non-zero-exit");
+          return;
+        }
+        settled = true;
+        const output = Buffer.concat(stdoutChunks, stdoutBytes);
+        stdoutChunks.length = 0;
+        resolveRun(output);
+      });
+      child.stdout.on("data", (chunk) => {
+        if (settled) {
+          this.lateEvents += 1;
+          return;
+        }
+        // 상한은 append 전에 검사한다. 상한을 넘기는 chunk는 한 byte도 보관하지 않는다.
+        if (chunk.byteLength > MAX_RELAY_STDOUT_BYTES - stdoutBytes) {
+          stop("stdout-limit");
+          return;
+        }
+        stdoutBytes += chunk.byteLength;
+        stdoutChunks.push(chunk);
+      });
+      child.stdout.on("error", () => {
+        noteLate();
+        stop("stream-error");
+      });
+      child.stderr.on("data", (chunk) => {
+        if (settled) {
+          this.lateEvents += 1;
+          return;
+        }
+        // stderr는 저장하지 않고 크기만 센다. 어떤 오류나 보고에도 반사되지 않는다.
+        if (chunk.byteLength > MAX_RELAY_STDERR_BYTES - stderrBytes) {
+          stop("stderr-limit");
+          return;
+        }
+        stderrBytes += chunk.byteLength;
+      });
+      child.stderr.on("error", () => {
+        noteLate();
+        stop("stream-error");
+      });
+      child.stdin.on("error", () => {
+        noteLate();
+        stop("stdin-error");
+      });
+      child.stdin.once("finish", () => {
+        stdinFinished = true;
+      });
+      child.stdin.once("close", () => {
+        if (!stdinFinished) {
+          stop("stdin-error");
+        }
+      });
+
+      deadlineHandle = this.clock.setTimeout(() => {
+        deadlineHandle = null;
+        stop("deadline");
+      }, timeoutMs);
+      try {
+        if (child.stdin.write(input)) {
+          child.stdin.end();
+        } else {
+          // backpressure: drain 전에는 stdin을 닫지 않는다.
+          child.stdin.once("drain", () => {
+            if (!settled && !closed) {
+              child.stdin.end();
+            }
+          });
+        }
+      } catch {
+        stop("stdin-error");
+      }
+    });
+  }
+
+  /** 아직 close하지 않은 모든 host child에 중지를 요청한다. container process에는 신호를 보내지 않는다. */
+  stopAll(): void {
+    for (const stop of [...this.open.values()]) {
+      stop("stopped");
+    }
+  }
+
+  waitForClose(timeoutMs: number): Promise<void> {
+    if (this.open.size === 0) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolveClose, rejectClose) => {
+      let handle: unknown = null;
+      const onEmpty = (): void => {
+        this.emptyWaiters.delete(onEmpty);
+        if (handle !== null) {
+          this.clock.clearTimeout(handle);
+          handle = null;
+        }
+        resolveClose();
+      };
+      this.emptyWaiters.add(onEmpty);
+      handle = this.clock.setTimeout(() => {
+        handle = null;
+        this.emptyWaiters.delete(onEmpty);
+        rejectClose(new RelayCleanupError("host-close"));
+      }, timeoutMs);
+    });
+  }
+
+  openChildCount(): number {
+    return this.open.size;
+  }
+
+  events(): readonly RelayProcessEvent[] {
+    return this.recorded.map((event) => ({ ...event }));
+  }
+
+  lateEventCount(): number {
+    return this.lateEvents;
+  }
+
+  private record(kind: RelayProcessEvent["kind"], label: string): void {
+    this.sequence += 1;
+    this.recorded.push({ sequence: this.sequence, kind, label });
+  }
+}
+
+/**
+ * container 안에서 요청 bytes를 Backend socket으로 복사하는 script.
+ *
+ * stdin은 이미 완성된 HTTP 요청 bytes이며 script는 그 내용을 해석하거나 조립하지 않는다. writer와
+ * reader는 relay marker를 argv[0]으로 갖고, 이 script와 같은 process group에 남아 바깥 GNU timeout의
+ * group 신호를 함께 받는다. background job을 분리하거나 process group을 바꾸는 명령은 없다.
+ */
+const RELAY_SOCKET_SCRIPT = [
+  "set -euo pipefail",
+  "readonly relay_marker=$1",
+  "writer_pid=",
+  'cleanup() { rc=$?; trap - EXIT TERM INT; if [[ -n ${writer_pid:-} ]]; then kill "$writer_pid" 2>/dev/null || true; wait "$writer_pid" 2>/dev/null || true; fi; exit "$rc"; }',
+  "trap cleanup EXIT TERM INT",
+  "exec 4<&0",
+  "exec 3<>/dev/tcp/127.0.0.1/8080",
+  '( exec -a "$relay_marker" cat <&4 >&3 ) &',
+  "writer_pid=$!",
+  '( exec -a "$relay_marker" cat <&3 )',
+  'wait "$writer_pid"',
+  "writer_pid=",
+].join("\n");
+
+/**
+ * docker exec의 진입 script. 검증된 token으로 marker를 만들고 GNU timeout을 그 marker 이름으로 exec한다.
+ * timeout은 새 process group의 leader가 되므로 relay의 모든 descendant가 그 group에 남는다.
+ */
+const RELAY_OWNER_SCRIPT = [
+  "set -euo pipefail",
+  "readonly relay_token=$1",
+  "readonly relay_script=$2",
+  `[[ $relay_token =~ ^${CANONICAL_UUID_V4_PATTERN}$ ]] || exit 70`,
+  `readonly relay_marker="${RELAY_MARKER_PREFIX}\${relay_token}"`,
+  `exec -a "$relay_marker" timeout --signal=TERM --kill-after=${CONTAINER_RELAY_KILL_AFTER_SECONDS}s ${CONTAINER_RELAY_TIMEOUT_SECONDS}s bash -c "$relay_script" -- "$relay_marker"`,
+].join("\n");
+
+function relayDockerArguments(token: string): readonly string[] {
+  requireCondition(CANONICAL_UUID_V4.test(token), "The Backend relay token was invalid.");
+  return [
+    "exec",
+    "-i",
+    BACKEND_CONTAINER_NAME,
+    "bash",
+    "-c",
+    RELAY_OWNER_SCRIPT,
+    "--",
+    token,
+    RELAY_SOCKET_SCRIPT,
+  ];
+}
+
+/**
+ * relay marker의 수를 읽기만 하는 audit script. 어떤 process에도 신호를 보내지 않는다.
+ *
+ * stdin의 token이 있으면 그 relay의 exact marker만, 빈 줄이면 이 suite가 쓰는 marker 형식 전체를 센다.
+ * `/proc/<pid>/cmdline`의 argv[0]만 비교하므로 audit 자신(`bash`, `sleep`)은 세지 않는다.
+ * `until-zero`는 0이 될 때까지, `until-present`는 1 이상이 될 때까지 poll하고, 상한에 도달하면 그때의
+ * 수를 그대로 보고한다. 출력은 `zero` 또는 `present:<n>` 한 줄뿐이다.
+ */
+const CONTAINER_MARKER_AUDIT_SCRIPT = [
+  "set -euo pipefail",
+  "readonly mode=$1",
+  "readonly poll_seconds=$2",
+  "[[ $mode == until-zero || $mode == until-present ]] || exit 70",
+  `[[ $poll_seconds == 0 || $poll_seconds == ${CONTAINER_AUDIT_POLL_SECONDS} ]] || exit 70`,
+  "relay_token=",
+  "IFS= read -r relay_token || true",
+  `[[ -z $relay_token || $relay_token =~ ^${CANONICAL_UUID_V4_PATTERN}$ ]] || exit 70`,
+  "count_markers() {",
+  "  local count=0 process argument",
+  "  for process in /proc/[0-9]*; do",
+  "    argument=",
+  `    IFS= read -r -d '' argument 2>/dev/null < "$process/cmdline" || true`,
+  "    if [[ -z $relay_token ]]; then",
+  `      if [[ $argument =~ ^${RELAY_MARKER_PREFIX}${CANONICAL_UUID_V4_PATTERN}$ ]]; then count=$((count + 1)); fi`,
+  `    elif [[ $argument == "${RELAY_MARKER_PREFIX}\${relay_token}" ]]; then`,
+  "      count=$((count + 1))",
+  "    fi",
+  "  done",
+  "  printf '%d' \"$count\"",
+  "}",
+  "started=$SECONDS",
+  "while :; do",
+  "  count=$(count_markers)",
+  "  if [[ $mode == until-zero ]] && (( count == 0 )); then printf 'zero\\n'; exit 0; fi",
+  "  if [[ $mode == until-present ]] && (( count > 0 )); then printf 'present:%d\\n' \"$count\"; exit 0; fi",
+  "  if (( SECONDS - started >= poll_seconds )); then",
+  "    if (( count == 0 )); then printf 'zero\\n'; else printf 'present:%d\\n' \"$count\"; fi",
+  "    exit 0",
+  "  fi",
+  "  sleep 0.1",
+  "done",
+].join("\n");
+
+type RelayMarkerAuditMode = "until-zero" | "until-present";
+type RelayMarkerAuditPoll = "0" | typeof CONTAINER_AUDIT_POLL_SECONDS;
+/** token의 marker 수를 반환한다. `null`은 suite 전체 marker이다. 실패는 `RelayCleanupError`이다. */
+type RelayMarkerAudit = (
+  token: string | null,
+  mode: RelayMarkerAuditMode,
+  poll: RelayMarkerAuditPoll,
+) => Promise<number>;
+
+function markerAuditArguments(
+  mode: RelayMarkerAuditMode,
+  poll: RelayMarkerAuditPoll,
+): readonly string[] {
+  return [
+    "exec",
+    "-i",
+    BACKEND_CONTAINER_NAME,
+    "bash",
+    "-c",
+    CONTAINER_MARKER_AUDIT_SCRIPT,
+    "--",
+    mode,
+    poll,
+  ];
+}
+
+function parseMarkerAuditOutput(output: Buffer): number {
+  const text = output.toString("latin1");
+  if (text === "zero\n") {
+    return 0;
+  }
+  const match = /^present:([1-9][0-9]{0,5})\n$/.exec(text);
+  if (match === null) {
+    throw new RelayCleanupError("container-audit");
+  }
+  return Number(match[1]);
+}
+
+function createDockerMarkerAudit(pool: RelayProcessPool): RelayMarkerAudit {
+  return async (token, mode, poll) => {
+    if (token !== null && !CANONICAL_UUID_V4.test(token)) {
+      throw new RelayCleanupError("container-audit");
+    }
+    let output: Buffer;
+    try {
+      output = await pool.run(
+        CONTAINER_MARKER_AUDIT_LABEL,
+        markerAuditArguments(mode, poll),
+        Buffer.from(`${token ?? ""}\n`, "ascii"),
+        CONTAINER_AUDIT_HOST_TIMEOUT_MS,
+      );
+    } catch {
+      throw new RelayCleanupError("container-audit");
+    }
+    return parseMarkerAuditOutput(output);
+  };
+}
+
+type RelayCleanupState = "active" | "cleaning" | "failed" | "clean";
+/** cleanup owner와 그 owner를 만든 test ID. process-zero가 확인된 owner만 스스로 빠진다. */
+type RelayCleanupRegistry = Map<RelayResourceOwner, string>;
+
+const relayCleanupRegistry: RelayCleanupRegistry = new Map();
+let currentRelayTestId: string | null = null;
+/** 현재 test의 relay가 route action을 상한 안에 settle하지 못한 횟수를 읽는 함수들. */
+const relayRouteStallReaders: (() => number)[] = [];
+
+interface RelayResourceOwnerOptions {
+  readonly token: string;
+  readonly pool: RelayProcessPool;
+  readonly audit: RelayMarkerAudit;
+  readonly registry: RelayCleanupRegistry;
+  readonly testId: string;
+  /** host child 정리 전에 route·handler 같은 호출자 자원을 정리한다. `RelayCleanupError`로 실패한다. */
+  readonly releaseCallers?: () => Promise<void>;
+}
+
+/**
+ * relay token 하나와 그 host child를 소유하고 teardown 상태를 관리한다.
+ *
+ * active → cleaning → clean | failed 이며, failed에서 다시 cleanup을 부르면 새 bounded attempt를
+ * 시작한다. cleaning 중의 동시 호출은 같은 Promise를 공유하고 clean 이후의 호출은 아무 일도 하지 않는다.
+ * 실패한 attempt의 Promise는 보관하지 않는다.
+ *
+ * attempt는 business HTTP 요청을 다시 보내지 않는다. 호출자 자원을 정리하고, host child의 실제
+ * close를 기다린 뒤, container의 exact marker가 0인지 읽기 전용으로 확인한다. 0이 확인되어야만
+ * registry에서 빠지며, 그 전에는 token·child·registry entry를 그대로 유지한다.
+ */
+class RelayResourceOwner {
+  readonly token: string;
+  private readonly pool: RelayProcessPool;
+  private readonly audit: RelayMarkerAudit;
+  private readonly registry: RelayCleanupRegistry;
+  private readonly releaseCallers: (() => Promise<void>) | undefined;
+  private currentState: RelayCleanupState = "active";
+  private inFlight: Promise<void> | null = null;
+  private attemptCount = 0;
+
+  constructor(options: RelayResourceOwnerOptions) {
+    requireCondition(CANONICAL_UUID_V4.test(options.token), "The Backend relay token was invalid.");
+    this.token = options.token;
+    this.pool = options.pool;
+    this.audit = options.audit;
+    this.registry = options.registry;
+    this.releaseCallers = options.releaseCallers;
+    options.registry.set(this, options.testId);
+  }
+
+  state(): RelayCleanupState {
+    return this.currentState;
+  }
+
+  attempts(): number {
+    return this.attemptCount;
+  }
+
+  cleanup(): Promise<void> {
+    if (this.currentState === "clean") {
+      return Promise.resolve();
+    }
+    if (this.inFlight !== null) {
+      return this.inFlight;
+    }
+    this.currentState = "cleaning";
+    this.attemptCount += 1;
+    const attempt = this.runAttempt().then(
+      () => {
+        this.currentState = "clean";
+        this.inFlight = null;
+        this.registry.delete(this);
+      },
+      (error: unknown) => {
+        this.currentState = "failed";
+        this.inFlight = null;
+        throw error instanceof RelayCleanupError ? error : new RelayCleanupError("internal");
+      },
+    );
+    void attempt.catch(() => undefined);
+    this.inFlight = attempt;
+    return attempt;
+  }
+
+  private async runAttempt(): Promise<void> {
+    if (this.releaseCallers !== undefined) {
+      await this.releaseCallers();
+    }
+    this.pool.stopAll();
+    await this.pool.waitForClose(RELAY_HOST_CLOSE_TIMEOUT_MS);
+    const remaining = await this.audit(this.token, "until-zero", CONTAINER_AUDIT_POLL_SECONDS);
+    // audit child 자신도 host가 소유한 자원이다. clean 전에 그 close까지 확인한다.
+    await this.pool.waitForClose(RELAY_HOST_CLOSE_TIMEOUT_MS);
+    if (remaining !== 0) {
+      throw new RelayCleanupError("container-present");
+    }
+  }
+}
+
+/**
+ * 이 worker에서 relay를 처음 설치하기 전에 한 번 확인한다. 성공만 기억하므로 실패한 확인은 다음
+ * 설치에서 다시 수행한다.
+ *
+ * Backend container의 이름·Compose 소유권, GNU timeout 존재, 그리고 이전 worker가 남긴 suite
+ * marker가 없는지를 읽기 전용으로 확인한다. 남은 marker가 있어도 종료하지 않고 실패한다.
+ */
+let relayRuntimeVerified = false;
+
+async function verifyRelayRuntime(): Promise<void> {
+  if (relayRuntimeVerified) {
+    return;
+  }
+  requireCondition(
+    COMPOSE_PROJECT === EXPECTED_COMPOSE_PROJECT,
+    "The dedicated Compose project was not configured.",
+  );
+  const pool = new RelayProcessPool();
+  let primary: unknown = null;
+  try {
+    const inspect = await pool.run(
+      "runtime-inspect",
+      [
+        "inspect",
+        "--format",
+        '{{.Name}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{.Id}}',
+        BACKEND_CONTAINER_NAME,
+      ],
+      Buffer.alloc(0),
+      CONTAINER_AUDIT_HOST_TIMEOUT_MS,
+    );
+    requireCondition(
+      new RegExp(
+        `^/${BACKEND_CONTAINER_NAME}\\|${EXPECTED_COMPOSE_PROJECT}\\|backend\\|[0-9a-f]{64}$`,
+      ).test(inspect.toString("ascii").trim()),
+      "The Backend relay container ownership check failed.",
+    );
+    const timeoutVersion = await pool.run(
+      "runtime-timeout",
+      ["exec", BACKEND_CONTAINER_NAME, "timeout", "--version"],
+      Buffer.alloc(0),
+      CONTAINER_AUDIT_HOST_TIMEOUT_MS,
+    );
+    requireCondition(
+      timeoutVersion.toString("ascii").startsWith("timeout (GNU coreutils)"),
+      "The Backend relay container has no verified GNU timeout executable.",
+    );
+    const leftovers = await createDockerMarkerAudit(pool)(
+      null,
+      "until-zero",
+      CONTAINER_AUDIT_POLL_SECONDS,
+    );
+    requireCondition(
+      leftovers === 0,
+      "Backend relay processes from an earlier test remained in the container.",
+    );
+  } catch (error: unknown) {
+    primary = error;
+  }
+  pool.stopAll();
+  let closeFailure: unknown = null;
+  try {
+    await pool.waitForClose(RELAY_HOST_CLOSE_TIMEOUT_MS);
+  } catch (error: unknown) {
+    closeFailure = error;
+  }
+  if (primary !== null && closeFailure !== null) {
+    throw new AggregateError(
+      [primary, closeFailure],
+      "The Backend relay runtime check and its cleanup failed.",
+    );
+  }
+  if (primary !== null) {
+    throw primary;
+  }
+  if (closeFailure !== null) {
+    throw closeFailure;
+  }
+  relayRuntimeVerified = true;
+}
+
+interface BuiltRelayRequest {
+  readonly method: string;
+  readonly target: string;
+  readonly bodyByteLength: number;
+  readonly bytes: Buffer;
+}
+
+const MAX_RELAY_REQUEST_BODY_BYTES = 64 * 1024;
+
+function buildRelayRequestBytes(request: PlaywrightRequest): BuiltRelayRequest {
+  const method = request.method();
+  requireCondition(/^[A-Z]+$/.test(method), "An invalid Backend method was requested.");
+  requireCondition(method === "GET" || method === "POST", "A Backend request used a method this relay will not write.");
+
+  const target = resolveRelayTarget(request);
+  requireCondition(
+    /^[\x21-\x7e]+$/.test(target),
+    "A Backend request target carried a character this relay will not write.",
+  );
+
+  const bodyText = request.postData() ?? "";
+  requireCondition(!bodyText.includes("\u0000"), "An invalid Backend request body was refused.");
+  const body = Buffer.from(bodyText, "utf8");
+  requireCondition(
+    body.byteLength <= MAX_RELAY_REQUEST_BODY_BYTES &&
+      ((method === "GET" && body.byteLength === 0) || (method === "POST" && body.byteLength > 0)),
+    "An invalid Backend request body was refused.",
+  );
+
+  const credential = request.headers()["authorization"] ?? "";
+  requireCondition(
+    credential === "" || /^Bearer [\x21-\x7e]+$/.test(credential),
+    "An invalid credential header was refused.",
+  );
+  const headerLines = [
+    `${method} ${target} HTTP/1.1`,
+    "Host: localhost:8080",
+    "Accept: application/json",
+    "Connection: close",
+    ...(credential === "" ? [] : [`Authorization: ${credential}`]),
+    `Content-Length: ${String(body.byteLength)}`,
+    ...(method === "POST" ? ["Content-Type: application/json"] : []),
+  ];
+  requireCondition(
+    headerLines.every((line) => !line.includes("\u0000") && !line.includes("\r") && !line.includes("\n")),
+    "An invalid Backend request header was refused.",
+  );
+  const head = Buffer.from(`${headerLines.join("\r\n")}\r\n\r\n`, "ascii");
+  const bytes = Buffer.concat([head, body], head.byteLength + body.byteLength);
+  requireCondition(
+    bytes.subarray(head.byteLength).byteLength === body.byteLength && bytes.byteLength === head.byteLength + body.byteLength,
+    "The Backend request bytes were not exact.",
+  );
+  return { method, target, bodyByteLength: body.byteLength, bytes };
+}
+
+/** 검증된 요청 bytes를 relay token의 container process로 보내고 응답을 엄격하게 해석한다. */
+function relayBuiltRequest(
+  built: BuiltRelayRequest,
+  pool: RelayProcessPool,
+  token: string,
+  timeoutMs: number,
+): Promise<RelayedResponse> {
+  relaySpawnCount += 1;
+  return pool.run(built.target, relayDockerArguments(token), built.bytes, timeoutMs).then((stdout) => {
+    let parsed: Omit<RelayedResponse, "target">;
+    try {
+      parsed = parseRelayedResponse(stdout);
+    } catch {
+      throw new RelayProcessError("malformed-response");
+    }
+    return { ...parsed, target: built.target };
+  });
+}
+
+/**
+ * 요청 하나를 검증하고 relay한다. closed allowlist 판정과 요청 bytes 생성은 동기 단계에서 끝나므로
+ * 거부된 요청은 process·socket·observation을 만들기 전에 고정 문구로 throw한다.
+ */
+function relayToBackend(
+  request: PlaywrightRequest,
+  pool?: RelayProcessPool,
+  token?: string,
+  timeoutMs: number = RELAY_REQUEST_DEADLINE_MS,
+): Promise<RelayedResponse> {
+  requireCondition(
+    COMPOSE_PROJECT === EXPECTED_COMPOSE_PROJECT,
+    "The dedicated Compose project was not configured.",
+  );
+  const built = buildRelayRequestBytes(request);
+  requireCondition(pool !== undefined && token !== undefined, BACKEND_RELAY_FAILURE_MESSAGE);
+  return relayBuiltRequest(built, pool, token, timeoutMs);
+}
+
+function requireParserRejection(raw: Buffer): void {
+  let rejected = false;
+  try {
+    parseRelayedResponse(raw);
+  } catch (error: unknown) {
+    rejected = error instanceof Error && error.message.startsWith("The Backend relay returned");
+  }
+  requireCondition(rejected, "The strict Backend response parser accepted ambiguous bytes.");
+}
+
+function requireFixedHeaderValueRejection(raw: Buffer, forbiddenValue: string): void {
+  let message: string | null = null;
+  try {
+    parseRelayedResponse(raw);
+  } catch (error: unknown) {
+    message = error instanceof Error ? error.message : null;
+  }
+  requireCondition(
+    message === "The Backend relay returned a malformed header value." &&
+      !message.includes(forbiddenValue),
+    "A NUL response header did not use the fixed parser error.",
+  );
+}
+
+function verifyRelayByteFramingAndParser(): void {
+  const credential = "Bearer deterministic-byte-secret";
+  const get = buildRelayRequestBytes(
+    relayCandidate("GET", `${BACKEND_ORIGIN}${INITIAL_CASE_TARGET}`, credential),
+  );
+  const expectedGet = Buffer.from(
+    `GET ${INITIAL_CASE_TARGET} HTTP/1.1\r\n` +
+      "Host: localhost:8080\r\n" +
+      "Accept: application/json\r\n" +
+      "Connection: close\r\n" +
+      `Authorization: ${credential}\r\n` +
+      "Content-Length: 0\r\n\r\n",
+    "ascii",
+  );
+  requireCondition(
+    get.bytes.equals(expectedGet) &&
+      get.bodyByteLength === 0 &&
+      !get.bytes.includes(Buffer.from("Content-Type:")),
+    "The approved GET request bytes were not exact.",
+  );
+
+  const bodyText = '{"resolution":"FRAUD","comment":"한글"}';
+  const post = buildRelayRequestBytes(
+    relayCandidate("POST", `${BACKEND_ORIGIN}${CASE_RESOLUTION_PATH}`, credential, bodyText),
+  );
+  const separator = post.bytes.indexOf("\r\n\r\n", 0, "latin1");
+  const body = Buffer.from(bodyText, "utf8");
+  const head = post.bytes.toString("ascii", 0, separator + 4);
+  requireCondition(
+    separator > 0 &&
+      post.bodyByteLength === body.byteLength &&
+      body.byteLength !== bodyText.length &&
+      post.bytes.subarray(separator + 4).equals(body) &&
+      head.includes(`Content-Length: ${String(body.byteLength)}\r\n`) &&
+      (head.match(/Authorization:/g) ?? []).length === 1 &&
+      (head.match(/Content-Length:/g) ?? []).length === 1 &&
+      (head.match(/Content-Type:/g) ?? []).length === 1,
+    "The approved write request was not byte-exact.",
+  );
+
+  for (const invalid of [
+    relayCandidate("GET", `${BACKEND_ORIGIN}${INITIAL_CASE_TARGET}`, credential, "x"),
+    relayCandidate("POST", `${BACKEND_ORIGIN}${CASE_RESOLUTION_PATH}`, credential, null),
+    relayCandidate("GET", `${BACKEND_ORIGIN}${INITIAL_CASE_TARGET}`, `${credential}\r\nInjected: yes`),
+    relayCandidate("GET", `${BACKEND_ORIGIN}${INITIAL_CASE_TARGET}`, `${credential}\u0000`),
+    relayCandidate("GET", `${BACKEND_ORIGIN}${INITIAL_CASE_TARGET}`, `${credential}\nInjected: yes`),
+    relayCandidate("POST", `${BACKEND_ORIGIN}${CASE_RESOLUTION_PATH}`, credential, "\u0000"),
+    relayCandidate(
+      "POST",
+      `${BACKEND_ORIGIN}${CASE_RESOLUTION_PATH}`,
+      credential,
+      "x".repeat(MAX_RELAY_REQUEST_BODY_BYTES + 1),
+    ),
+  ]) {
+    let rejected = false;
+    try {
+      buildRelayRequestBytes(invalid);
+    } catch {
+      rejected = true;
+    }
+    requireCondition(rejected, "The Backend request byte builder accepted unsafe input.");
+  }
+
+  const validBody = Buffer.from("한글", "utf8");
+  const validContentLength = Buffer.concat([
+    Buffer.from(
+      `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${String(validBody.byteLength)}\r\n\r\n`,
+      "ascii",
+    ),
+    validBody,
+  ]);
+  requireCondition(
+    parseRelayedResponse(validContentLength).body === "한글",
+    "The strict Backend response parser changed a byte-framed body.",
+  );
+  requireCondition(
+    parseRelayedResponse(
+      Buffer.from("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n"),
+    ).body === "abc",
+    "The strict Backend response parser rejected canonical chunk framing.",
+  );
+
+  for (const value of ["\u0000alpha", "alpha\u0000beta", "alpha\u0000"] as const) {
+    requireFixedHeaderValueRejection(
+      Buffer.from(
+        `HTTP/1.1 200 OK\r\nX-Test: ${value}\r\nContent-Length: 0\r\n\r\n`,
+        "utf8",
+      ),
+      value,
+    );
+  }
+
+  for (const raw of [
+    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\na",
+    "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nab",
+    "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\na",
+    "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\na",
+    "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\na",
+    "HTTP/1.1 OK\r\nContent-Length: 0\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nBad Header: value\r\nContent-Length: 0\r\n\r\n",
+    "HTTP/1.1 200 OK\r\n folded\r\nContent-Length: 0\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nX-Test: alpha\tbeta\r\nContent-Length: 0\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nX-Test:\tbeta\r\nContent-Length: 0\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nX-Test: beta\t\r\nContent-Length: 0\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nX-Test: alpha\u0001beta\r\nContent-Length: 0\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nX-Test: alpha\u007fbeta\r\nContent-Length: 0\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nContent-Length: +1\r\n\r\na",
+    "HTTP/1.1 200 OK\r\nContent-Length: 01\r\n\r\na",
+    "HTTP/1.1 200 OK\r\nContent-Length: 9007199254740992\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\na",
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\naX\r\n0\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n0\r\n\r\ntrailing",
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n",
+  ]) {
+    requireParserRejection(Buffer.from(raw, "utf8"));
+  }
 }
 
 type ParallelStartBarrierState = "pending" | "released" | "failed" | "disposed";
+type ParallelStartArrivalWatchdogState = "idle" | "armed" | "disarmed" | "expired" | "cancelled";
 
 interface ParallelStartTarget {
   readonly method: string;
   readonly target: string;
-}
-
-interface ParallelStartScheduler {
-  schedule(callback: () => void, delayMs: number): unknown;
-  cancel(handle: unknown): void;
 }
 
 interface ParallelStartBarrierSnapshot {
@@ -950,32 +1957,50 @@ interface ParallelStartBarrierSnapshot {
   readonly expectedTargetCount: number;
   readonly arrivedTargetCount: number;
   readonly pendingWaiterCount: number;
+  /** 첫 exact route가 시작하는 barrier timer만 센다. */
   readonly activeTimerCount: number;
+  /** 로그인 완료 뒤 첫 exact route를 기다리는 no-arrival watchdog timer만 센다. */
+  readonly activeArrivalWatchdogTimerCount: number;
+  /** waiter와 두 timer를 합한 잔존 callback 수. */
   readonly activeCallbackCount: number;
   readonly completionResolveCount: number;
   readonly completionRejectCount: number;
+  /** barrier timer 만료 횟수. no-arrival watchdog 만료는 포함하지 않는다. */
   readonly timeoutCallbackCount: number;
+  readonly arrivalWatchdogState: ParallelStartArrivalWatchdogState;
+  readonly arrivalWatchdogCallbackCount: number;
 }
 
-const PARALLEL_START_TIMEOUT_MS = 15_000;
+/** 세 read가 모이기를 기다리는 상한. 첫 exact route 도착 시 시작하며 request deadline 안에 끝난다. */
+const PARALLEL_START_TIMEOUT_MS = 1_500;
+/**
+ * 로그인 완료 뒤 첫 exact route가 도착하기를 기다리는 별도 상한.
+ *
+ * barrier timer와 timer·상태·고정 오류가 모두 분리되어 있다. 첫 exact route가 도착하면 해제되고,
+ * 그 시점부터 barrier 상한이 따로 시작한다. 두 상한을 합쳐 늘리지 않는다.
+ */
+const PARALLEL_START_ARRIVAL_WATCHDOG_MS = 1_500;
 const PARALLEL_START_TIMEOUT_MESSAGE = "The parallel-start barrier timed out.";
+const PARALLEL_START_NO_ARRIVAL_MESSAGE = "The parallel-start reads did not arrive.";
 const PARALLEL_START_DUPLICATE_MESSAGE =
   "The parallel-start barrier received a duplicate target.";
 const PARALLEL_START_DISPOSED_MESSAGE = "The parallel-start barrier is unavailable.";
 
+// 요청 종결은 production 5초보다 먼저, container relay는 audit poll 상한보다 먼저 끝나야 한다.
+requireCondition(
+  PARALLEL_START_TIMEOUT_MS < RELAY_REQUEST_DEADLINE_MS &&
+    RELAY_REQUEST_DEADLINE_MS + RELAY_ROUTE_ACTION_TIMEOUT_MS <
+      PRODUCTION_AUTHENTICATED_REQUEST_TIMEOUT_MS &&
+    Number(CONTAINER_RELAY_TIMEOUT_SECONDS) + Number(CONTAINER_RELAY_KILL_AFTER_SECONDS) <
+      Number(CONTAINER_AUDIT_POLL_SECONDS) &&
+    Number(CONTAINER_AUDIT_POLL_SECONDS) * 1_000 < CONTAINER_AUDIT_HOST_TIMEOUT_MS,
+  "The E2E relay bounds no longer end requests before the production deadline or outlast the relay lifetime.",
+);
+
 class ParallelStartBarrierError extends Error {}
 
-const realParallelStartScheduler: ParallelStartScheduler = {
-  schedule(callback, delayMs) {
-    return setTimeout(callback, delayMs);
-  },
-  cancel(handle) {
-    clearTimeout(handle as ReturnType<typeof setTimeout>);
-  },
-};
-
 function parallelStartTargetKey(method: string, target: string): string {
-  return `${method}\u0000${target}`;
+  return `${method} ${target}`;
 }
 
 function rejectedParallelStartWait(message: string): Promise<void> {
@@ -991,12 +2016,15 @@ function rejectedParallelStartWait(message: string): Promise<void> {
  * and keeps release, failure and disposal as distinct states. The relay only
  * forwards a target after `wait` resolves; an unexpected target is not enrolled
  * and remains the closed allowlist's responsibility.
+ *
+ * 두 상한은 timer·상태·고정 오류가 분리되어 있다. no-arrival watchdog은 로그인 완료 뒤 첫 exact
+ * route를 기다리고, barrier timer는 첫 exact route가 도착한 순간부터 세 route가 모이기를 기다린다.
  */
 class ParallelStartBarrier {
   readonly completion: Promise<void>;
 
   private state: ParallelStartBarrierState = "pending";
-  private readonly scheduler: ParallelStartScheduler;
+  private readonly clock: RelayClock;
   private readonly timeoutMs: number;
   private readonly configuredTargetKeys: ReadonlySet<string>;
   private readonly targetKeys: Set<string>;
@@ -1006,6 +2034,9 @@ class ParallelStartBarrier {
     readonly reject: (error: ParallelStartBarrierError) => void;
   }>();
   private timerHandle: unknown | null = null;
+  private arrivalWatchdogHandle: unknown | null = null;
+  private arrivalWatchdogState: ParallelStartArrivalWatchdogState = "idle";
+  private arrivalWatchdogCallbackCount = 0;
   private resolveCompletion!: () => void;
   private rejectCompletion!: (error: ParallelStartBarrierError) => void;
   private completionResolveCount = 0;
@@ -1015,7 +2046,7 @@ class ParallelStartBarrier {
   constructor(
     targets: readonly ParallelStartTarget[],
     timeoutMs: number,
-    scheduler: ParallelStartScheduler = realParallelStartScheduler,
+    clock: RelayClock = realRelayClock,
   ) {
     const targetKeys = targets.map(({ method, target }) => parallelStartTargetKey(method, target));
     requireCondition(
@@ -1026,7 +2057,7 @@ class ParallelStartBarrier {
       Number.isSafeInteger(timeoutMs) && timeoutMs > 0,
       "The parallel-start barrier requires a bounded timeout.",
     );
-    this.scheduler = scheduler;
+    this.clock = clock;
     this.timeoutMs = timeoutMs;
     this.configuredTargetKeys = new Set(targetKeys);
     this.targetKeys = new Set(targetKeys);
@@ -1040,17 +2071,53 @@ class ParallelStartBarrier {
     void this.completion.catch(() => undefined);
   }
 
+  /**
+   * barrier timer를 시작한다. 첫 exact `wait()`와 결정적 lifecycle matrix만 호출하며
+   * production-like scenario는 호출하지 않는다. 이미 시작했거나 끝났다면 아무 일도 하지 않는다.
+   */
   start(): void {
     if (this.state !== "pending" || this.timerHandle !== null) {
       return;
     }
-    this.timerHandle = this.scheduler.schedule(() => {
+    this.timerHandle = this.clock.setTimeout(() => {
       if (this.state !== "pending") {
         return;
       }
       this.timeoutCallbackCount += 1;
       this.fail(PARALLEL_START_TIMEOUT_MESSAGE);
     }, this.timeoutMs);
+  }
+
+  /**
+   * 로그인 완료 뒤 첫 exact route를 기다리는 no-arrival watchdog을 한 번만 arm한다.
+   *
+   * barrier timer는 시작하지 않는다. 이미 arm·해제·만료·취소됐거나, route가 이미 도착해 barrier
+   * timer가 시작됐거나, barrier가 끝났다면 timer를 추가하지 않는다. 만료하면 barrier timeout과 다른
+   * 고정 오류로 completion을 끝낸다.
+   */
+  armArrivalWatchdog(timeoutMs: number): void {
+    requireCondition(
+      Number.isSafeInteger(timeoutMs) && timeoutMs > 0,
+      "The parallel-start arrival watchdog requires a bounded timeout.",
+    );
+    if (
+      this.state !== "pending" ||
+      this.arrivalWatchdogState !== "idle" ||
+      this.arrivedTargetKeys.size > 0 ||
+      this.timerHandle !== null
+    ) {
+      return;
+    }
+    this.arrivalWatchdogState = "armed";
+    this.arrivalWatchdogHandle = this.clock.setTimeout(() => {
+      if (this.state !== "pending" || this.arrivalWatchdogState !== "armed") {
+        return;
+      }
+      this.arrivalWatchdogHandle = null;
+      this.arrivalWatchdogCallbackCount += 1;
+      this.arrivalWatchdogState = "expired";
+      this.fail(PARALLEL_START_NO_ARRIVAL_MESSAGE);
+    }, timeoutMs);
   }
 
   wait(method: string, target: string): Promise<void> | null {
@@ -1064,8 +2131,9 @@ class ParallelStartBarrier {
     if (this.state !== "pending") {
       return null;
     }
-    // A matching request that wins the race with the explicit arm still gets
-    // the same bounded lifetime rather than waiting without a timer.
+    // 첫 exact route가 no-arrival watchdog을 해제하고 barrier timer 시작과 도착 등록을 함께 수행한다.
+    // 로그인 완료만으로는 barrier timer가 시작되지 않는다.
+    this.disarmArrivalWatchdog();
     this.start();
     if (this.arrivedTargetKeys.has(key)) {
       this.fail(PARALLEL_START_DUPLICATE_MESSAGE);
@@ -1092,6 +2160,7 @@ class ParallelStartBarrier {
       this.rejectOnce(new ParallelStartBarrierError(PARALLEL_START_DISPOSED_MESSAGE));
     }
     this.clearTimer();
+    this.cancelArrivalWatchdog();
     const error = new ParallelStartBarrierError(PARALLEL_START_DISPOSED_MESSAGE);
     for (const waiter of this.waiters) {
       waiter.reject(error);
@@ -1104,16 +2173,20 @@ class ParallelStartBarrier {
 
   snapshot(): ParallelStartBarrierSnapshot {
     const activeTimerCount = this.timerHandle === null ? 0 : 1;
+    const activeArrivalWatchdogTimerCount = this.arrivalWatchdogHandle === null ? 0 : 1;
     return {
       state: this.state,
       expectedTargetCount: this.targetKeys.size,
       arrivedTargetCount: this.arrivedTargetKeys.size,
       pendingWaiterCount: this.waiters.size,
       activeTimerCount,
-      activeCallbackCount: this.waiters.size + activeTimerCount,
+      activeArrivalWatchdogTimerCount,
+      activeCallbackCount: this.waiters.size + activeTimerCount + activeArrivalWatchdogTimerCount,
       completionResolveCount: this.completionResolveCount,
       completionRejectCount: this.completionRejectCount,
       timeoutCallbackCount: this.timeoutCallbackCount,
+      arrivalWatchdogState: this.arrivalWatchdogState,
+      arrivalWatchdogCallbackCount: this.arrivalWatchdogCallbackCount,
     };
   }
 
@@ -1122,6 +2195,7 @@ class ParallelStartBarrier {
       return;
     }
     this.clearTimer();
+    this.cancelArrivalWatchdog();
     this.state = "released";
     this.completionResolveCount += 1;
     this.resolveCompletion();
@@ -1136,6 +2210,7 @@ class ParallelStartBarrier {
       return;
     }
     this.clearTimer();
+    this.cancelArrivalWatchdog();
     this.state = "failed";
     const error = new ParallelStartBarrierError(message);
     this.rejectOnce(error);
@@ -1156,37 +2231,677 @@ class ParallelStartBarrier {
     if (this.timerHandle === null) {
       return;
     }
-    this.scheduler.cancel(this.timerHandle);
+    this.clock.clearTimeout(this.timerHandle);
     this.timerHandle = null;
+  }
+
+  /** 첫 exact route가 도착하면 no-arrival watchdog을 해제한다. barrier timer에는 영향을 주지 않는다. */
+  private disarmArrivalWatchdog(): void {
+    this.clearArrivalWatchdogTimer();
+    if (this.arrivalWatchdogState === "armed") {
+      this.arrivalWatchdogState = "disarmed";
+    }
+  }
+
+  /** release·fail·dispose가 끝낸 barrier의 watchdog을 정리한다. 해제·만료 기록은 바꾸지 않는다. */
+  private cancelArrivalWatchdog(): void {
+    this.clearArrivalWatchdogTimer();
+    if (this.arrivalWatchdogState === "armed") {
+      this.arrivalWatchdogState = "cancelled";
+    }
+  }
+
+  private clearArrivalWatchdogTimer(): void {
+    if (this.arrivalWatchdogHandle === null) {
+      return;
+    }
+    this.clock.clearTimeout(this.arrivalWatchdogHandle);
+    this.arrivalWatchdogHandle = null;
   }
 }
 
-interface ControllableParallelStartScheduler extends ParallelStartScheduler {
-  readonly pendingCount: () => number;
-  readonly runAll: () => number;
+interface DeferredValue<T> {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
 }
 
-function createControllableParallelStartScheduler(): ControllableParallelStartScheduler {
-  const callbacks = new Map<object, () => void>();
-  return {
-    schedule(callback) {
-      const handle = {};
-      callbacks.set(handle, callback);
-      return handle;
-    },
-    cancel(handle) {
-      callbacks.delete(handle as object);
-    },
-    pendingCount: () => callbacks.size,
-    runAll: () => {
-      const pending = [...callbacks.values()];
-      callbacks.clear();
-      for (const callback of pending) {
-        callback();
+function deferredValue<T>(): DeferredValue<T> {
+  let resolveValue!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolveValue = resolvePromise;
+  });
+  return { promise, resolve: resolveValue };
+}
+
+type BoundedOutcome = "settled" | "rejected" | "timeout";
+
+/** Promise가 상한 안에 settle했는지만 알려 준다. timeout은 성공으로 취급하지 않는다. */
+function settleWithin(
+  promise: Promise<unknown>,
+  timeoutMs: number,
+  clock: RelayClock,
+): Promise<BoundedOutcome> {
+  return new Promise<BoundedOutcome>((resolveOutcome) => {
+    let done = false;
+    let handle: unknown = null;
+    const finish = (outcome: BoundedOutcome): void => {
+      if (done) {
+        return;
       }
-      return pending.length;
+      done = true;
+      if (handle !== null) {
+        clock.clearTimeout(handle);
+        handle = null;
+      }
+      resolveOutcome(outcome);
+    };
+    handle = clock.setTimeout(() => {
+      handle = null;
+      finish("timeout");
+    }, timeoutMs);
+    promise.then(
+      () => finish("settled"),
+      () => finish("rejected"),
+    );
+  });
+}
+
+/** 요청 deadline 전에 settle한 결과만 돌려준다. 원래 rejection은 그대로 전달한다. */
+function awaitBeforeDeadline<T>(
+  promise: Promise<T>,
+  deadlineAt: number,
+  clock: RelayClock,
+): Promise<T> {
+  const remaining = deadlineAt - clock.now();
+  if (remaining <= 0) {
+    return Promise.reject(new RelayProcessError("deadline"));
+  }
+  return new Promise<T>((resolveValue, rejectValue) => {
+    let done = false;
+    const handle = clock.setTimeout(() => {
+      if (!done) {
+        done = true;
+        rejectValue(new RelayProcessError("deadline"));
+      }
+    }, remaining);
+    promise.then(
+      (value) => {
+        if (!done) {
+          done = true;
+          clock.clearTimeout(handle);
+          resolveValue(value);
+        }
+      },
+      (error: unknown) => {
+        if (!done) {
+          done = true;
+          clock.clearTimeout(handle);
+          rejectValue(error);
+        }
+      },
+    );
+  });
+}
+
+interface RelayOptions {
+  /**
+   * The endpoint path or paths whose response body is retained in memory.
+   *
+   * Opt-in, and named paths rather than all of them: a body is only kept where a
+   * test has a reason to read it back, so a run that does not ask keeps nothing
+   * at all. Nothing about the relay's behaviour towards the browser changes -
+   * the same bytes are forwarded either way.
+   */
+  readonly captureBodyOf?: string | readonly string[];
+  /** Holds only these approved reads until every target has reached the relay. */
+  readonly parallelStartBarrier?: ParallelStartBarrier;
+  /** barrier 대상 중 이 target은 나머지 barrier route가 종결된 뒤에 전달한다. */
+  readonly deliverLast?: string;
+  /** 결정적 계약 테스트 seam. 실제 relay는 Node spawn을 쓴다. */
+  readonly spawnChild?: RelaySpawn;
+  /** 결정적 계약 테스트 seam. 실제 relay는 monotonic clock을 쓴다. */
+  readonly clock?: RelayClock;
+  /** 결정적 계약 테스트 seam. 실제 relay는 Docker marker audit을 쓴다. */
+  readonly markerAudit?: (pool: RelayProcessPool) => RelayMarkerAudit;
+  /** 결정적 계약 테스트 seam. 실제 relay는 공통 registry와 현재 test ID를 쓴다. */
+  readonly registry?: RelayCleanupRegistry;
+  readonly testId?: string;
+}
+
+interface BackendRelay extends Array<BackendObservation> {
+  /** teardown을 기다린다. process-zero가 확인되지 않으면 고정 단계 이름과 함께 실패한다. */
+  readonly dispose: () => Promise<void>;
+  readonly cleanupState: () => RelayCleanupState;
+  readonly activeHandlerCount: () => number;
+  readonly openProcessCount: () => number;
+  readonly processEvents: () => readonly RelayProcessEvent[];
+  readonly routeFulfillCount: () => number;
+  readonly routeAbortCount: () => number;
+  readonly routeActionFailureCount: () => number;
+  readonly routeActionStallCount: () => number;
+  readonly relayFailureCount: () => number;
+  readonly barrierArrivalCountAtFirstForwarding: () => number | null;
+  readonly barrierAbortCount: () => number;
+  readonly parallelFulfillmentOrder: () => readonly string[];
+}
+
+/**
+ * page의 Backend 요청을 closed allowlist 뒤의 실제 Backend로 relay한다.
+ *
+ * 요청마다 route 도착 시점 기준의 독립 deadline 안에서 fulfill 또는 abort를 정확히 한 번 시작한다.
+ * relay가 띄운 host child와 container process의 정리는 요청 경로와 분리된 teardown owner의 책임이며,
+ * owner는 route 설치보다 먼저 공통 registry에 등록된다.
+ */
+async function installBackendRelay(
+  page: Page,
+  options: RelayOptions = {},
+): Promise<BackendRelay> {
+  if (options.spawnChild === undefined) {
+    await verifyRelayRuntime();
+  }
+  const registry = options.registry ?? relayCleanupRegistry;
+  const testId = options.testId ?? currentRelayTestId;
+  requireCondition(testId !== null, "The Backend relay had no owning test.");
+  const clock = options.clock ?? realRelayClock;
+  const pool = new RelayProcessPool(options.spawnChild, clock);
+  const observations = [] as unknown as BackendRelay;
+  const capturedPaths =
+    typeof options.captureBodyOf === "string"
+      ? [options.captureBodyOf]
+      : (options.captureBodyOf ?? []);
+  const relayPattern = "http://localhost:8080/**";
+  const activeHandlers = new Set<Promise<void>>();
+  const parallelRouteDone = new Map<string, DeferredValue<void>>();
+  const parallelFulfillmentOrder: string[] = [];
+  let routeHandler: ((route: Route) => Promise<void>) | null = null;
+  let disposed = false;
+  let routeInstalled = false;
+  let routeFulfillCount = 0;
+  let routeAbortCount = 0;
+  let routeActionFailureCount = 0;
+  let routeActionStallCount = 0;
+  let relayFailureCount = 0;
+  let barrierArrivalCountAtFirstForwarding: number | null = null;
+  let barrierAbortCount = 0;
+
+  // 새 요청을 받지 않게 한 뒤 route를 제거하고, in-flight host child를 멈춰 handler가 종결되기를
+  // 기다린다. 어느 단계든 상한을 넘기면 cleanup 실패이며 다음 attempt가 같은 단계부터 다시 확인한다.
+  const releaseCallers = async (): Promise<void> => {
+    disposed = true;
+    options.parallelStartBarrier?.dispose();
+    for (const done of parallelRouteDone.values()) {
+      done.resolve();
+    }
+    if (routeInstalled) {
+      if (page.isClosed() || routeHandler === null) {
+        routeInstalled = false;
+      } else {
+        let unrouting: Promise<void>;
+        try {
+          unrouting = page.unroute(relayPattern, routeHandler);
+        } catch {
+          throw new RelayCleanupError("unroute");
+        }
+        if ((await settleWithin(unrouting, RELAY_HANDLER_SETTLE_TIMEOUT_MS, clock)) !== "settled") {
+          throw new RelayCleanupError("unroute");
+        }
+        routeInstalled = false;
+      }
+    }
+    pool.stopAll();
+    const handlers = await settleWithin(
+      Promise.allSettled([...activeHandlers]),
+      RELAY_HANDLER_SETTLE_TIMEOUT_MS,
+      clock,
+    );
+    if (handlers !== "settled" || activeHandlers.size !== 0) {
+      throw new RelayCleanupError("handlers");
+    }
+  };
+
+  const owner = new RelayResourceOwner({
+    token: randomUUID(),
+    pool,
+    audit: (options.markerAudit ?? createDockerMarkerAudit)(pool),
+    registry,
+    testId,
+    releaseCallers,
+  });
+  if (registry === relayCleanupRegistry) {
+    relayRouteStallReaders.push(() => routeActionStallCount);
+  }
+
+  const processRoute = async (route: Route): Promise<void> => {
+    const deadlineAt = clock.now() + RELAY_REQUEST_DEADLINE_MS;
+    let terminal = false;
+    let parallelTarget: string | null = null;
+    // 요청마다 fulfill/abort는 정확히 한 번만 시작한다. 닫힌 page에는 action을 보내지 않는다.
+    const terminate = async (
+      kind: "fulfill" | "abort",
+      action: () => Promise<void>,
+    ): Promise<boolean> => {
+      if (terminal) {
+        return false;
+      }
+      terminal = true;
+      if (page.isClosed()) {
+        return false;
+      }
+      if (kind === "fulfill") {
+        routeFulfillCount += 1;
+      } else {
+        routeAbortCount += 1;
+      }
+      let pending: Promise<void>;
+      try {
+        pending = action();
+      } catch {
+        routeActionFailureCount += 1;
+        return false;
+      }
+      const outcome = await settleWithin(pending, RELAY_ROUTE_ACTION_TIMEOUT_MS, clock);
+      if (outcome === "timeout") {
+        routeActionStallCount += 1;
+      } else if (outcome === "rejected") {
+        routeActionFailureCount += 1;
+      }
+      return outcome === "settled";
+    };
+    const abort = (): Promise<boolean> => terminate("abort", () => route.abort("failed"));
+
+    try {
+      if (disposed) {
+        await abort();
+        return;
+      }
+      const request = route.request();
+      if (request.method() === "OPTIONS") {
+        await terminate("fulfill", () =>
+          route.fulfill({
+            status: 204,
+            headers: {
+              "access-control-allow-origin": APP_ORIGIN,
+              "access-control-allow-methods": "GET, POST, PATCH",
+              "access-control-allow-headers": "authorization, content-type",
+            },
+          }),
+        );
+        return;
+      }
+      // closed allowlist와 요청 bytes는 barrier·spawn보다 먼저 확정한다.
+      const built = buildRelayRequestBytes(request);
+      const barrier = options.parallelStartBarrier;
+      const barrierWait = barrier?.wait(request.method(), built.target) ?? null;
+      if (barrier !== undefined && barrierWait !== null) {
+        parallelTarget = built.target;
+        if (!parallelRouteDone.has(built.target)) {
+          parallelRouteDone.set(built.target, deferredValue<void>());
+        }
+        try {
+          await awaitBeforeDeadline(barrierWait, deadlineAt, clock);
+        } catch (error: unknown) {
+          if (error instanceof ParallelStartBarrierError) {
+            barrierAbortCount += 1;
+          }
+          throw error;
+        }
+        const snapshot = barrier.snapshot();
+        requireCondition(
+          snapshot.state === "released" && snapshot.arrivedTargetCount === 3,
+          "A parallel-start target was forwarded before all three reads arrived.",
+        );
+        barrierArrivalCountAtFirstForwarding ??= snapshot.arrivedTargetCount;
+      }
+      const relayed = await relayBuiltRequest(built, pool, owner.token, deadlineAt - clock.now());
+      if (parallelTarget !== null && parallelTarget === options.deliverLast) {
+        // detail 404는 하위 section을 제거하므로 notes·audit route가 먼저 끝난 뒤 전달한다.
+        const others = [...parallelRouteDone.entries()]
+          .filter(([target]) => target !== parallelTarget)
+          .map(([, done]) => done.promise);
+        await awaitBeforeDeadline(Promise.all(others), deadlineAt, clock);
+      }
+      if (disposed) {
+        await abort();
+        return;
+      }
+      requireCondition(clock.now() < deadlineAt, BACKEND_RELAY_FAILURE_MESSAGE);
+      // Observation begins only after real forwarding and strict byte parsing.
+      const pathname = relayed.target.split("?")[0];
+      relayObservationCount += 1;
+      observations.push({
+        method: request.method(),
+        pathname,
+        target: relayed.target,
+        status: relayed.status,
+        requestBodyByteLength: built.bodyByteLength,
+        ...(capturedPaths.includes(pathname) ? { body: relayed.body } : {}),
+      });
+      const fulfilled = await terminate("fulfill", () =>
+        route.fulfill({
+          status: relayed.status,
+          contentType: "application/json",
+          headers: { "access-control-allow-origin": APP_ORIGIN },
+          body: relayed.body === "" ? "{}" : relayed.body,
+        }),
+      );
+      if (fulfilled && parallelTarget !== null) {
+        parallelFulfillmentOrder.push(parallelTarget);
+      }
+    } catch {
+      // 원문 parser·process 오류는 보관하거나 반사하지 않고 고정 abort로만 끝낸다.
+      relayFailureCount += 1;
+      await abort();
+    } finally {
+      if (parallelTarget !== null) {
+        parallelRouteDone.get(parallelTarget)?.resolve();
+      }
+    }
+  };
+
+  const installedHandler = (route: Route): Promise<void> => {
+    const handler = processRoute(route);
+    activeHandlers.add(handler);
+    void handler.then(
+      () => activeHandlers.delete(handler),
+      () => activeHandlers.delete(handler),
+    );
+    return handler;
+  };
+  routeHandler = installedHandler;
+  await page.route(relayPattern, installedHandler);
+  routeInstalled = true;
+
+  Object.defineProperties(observations, {
+    dispose: { value: () => owner.cleanup() },
+    cleanupState: { value: () => owner.state() },
+    activeHandlerCount: { value: () => activeHandlers.size },
+    openProcessCount: { value: () => pool.openChildCount() },
+    processEvents: { value: () => pool.events() },
+    routeFulfillCount: { value: () => routeFulfillCount },
+    routeAbortCount: { value: () => routeAbortCount },
+    routeActionFailureCount: { value: () => routeActionFailureCount },
+    routeActionStallCount: { value: () => routeActionStallCount },
+    relayFailureCount: { value: () => relayFailureCount },
+    barrierArrivalCountAtFirstForwarding: { value: () => barrierArrivalCountAtFirstForwarding },
+    barrierAbortCount: { value: () => barrierAbortCount },
+    parallelFulfillmentOrder: { value: () => [...parallelFulfillmentOrder] },
+  });
+  return observations;
+}
+
+/** 결정적 테스트용 수동 clock. 시간은 `advance`로만 흐른다. */
+class ManualRelayClock implements RelayClock {
+  private current = 0;
+  private nextHandle = 1;
+  private readonly timers = new Map<number, { readonly at: number; readonly callback: () => void }>();
+
+  now(): number {
+    return this.current;
+  }
+
+  setTimeout(callback: () => void, delayMs: number): unknown {
+    const handle = this.nextHandle;
+    this.nextHandle += 1;
+    this.timers.set(handle, { at: this.current + Math.max(0, delayMs), callback });
+    return handle;
+  }
+
+  clearTimeout(handle: unknown): void {
+    this.timers.delete(handle as number);
+  }
+
+  pendingTimerCount(): number {
+    return this.timers.size;
+  }
+
+  advance(delayMs: number): void {
+    const target = this.current + delayMs;
+    for (;;) {
+      const due = [...this.timers.entries()]
+        .filter(([, timer]) => timer.at <= target)
+        .sort((left, right) => left[1].at - right[1].at || left[0] - right[0])[0];
+      if (due === undefined) {
+        break;
+      }
+      this.timers.delete(due[0]);
+      this.current = Math.max(this.current, due[1].at);
+      due[1].callback();
+    }
+    this.current = target;
+  }
+
+  /** 시간과 무관하게 현재 예약된 callback을 모두 실행하고 실행 수를 돌려준다. */
+  runAll(): number {
+    const pending = [...this.timers.values()];
+    this.timers.clear();
+    for (const timer of pending) {
+      timer.callback();
+    }
+    return pending.length;
+  }
+}
+
+async function flushRelayTasks(turns = 4): Promise<void> {
+  for (let index = 0; index < turns; index += 1) {
+    await new Promise<void>((resolveTurn) => {
+      setImmediate(resolveTurn);
+    });
+  }
+}
+
+type ObservedOutcome<T> =
+  | { readonly status: "fulfilled"; readonly value: T }
+  | { readonly status: "rejected"; readonly error: unknown };
+
+function observeOutcome<T>(promise: Promise<T>): Promise<ObservedOutcome<T>> {
+  return promise.then<ObservedOutcome<T>, ObservedOutcome<T>>(
+    (value) => ({ status: "fulfilled", value }),
+    (error: unknown) => ({ status: "rejected", error }),
+  );
+}
+
+function requireProcessFailure(
+  outcome: ObservedOutcome<unknown>,
+  reason: RelayProcessFailureReason,
+): void {
+  requireCondition(
+    outcome.status === "rejected" &&
+      outcome.error instanceof RelayProcessError &&
+      outcome.error.reason === reason &&
+      outcome.error.message === BACKEND_RELAY_FAILURE_MESSAGE,
+    `The relay process did not fail with the fixed ${reason} outcome.`,
+  );
+}
+
+function requireCleanupFailure(outcome: ObservedOutcome<unknown>, stage: RelayCleanupStage): void {
+  requireCondition(
+    outcome.status === "rejected" &&
+      outcome.error instanceof RelayCleanupError &&
+      outcome.error.stage === stage,
+    `The relay cleanup did not fail at ${stage}.`,
+  );
+}
+
+class FakeRelayStdin extends EventEmitter {
+  readonly writes: Buffer[] = [];
+  endCount = 0;
+  writeResult = true;
+  finishOnEnd = true;
+
+  write(chunk: Buffer): boolean {
+    this.writes.push(Buffer.from(chunk));
+    return this.writeResult;
+  }
+
+  end(): void {
+    this.endCount += 1;
+    if (this.finishOnEnd) {
+      this.emit("finish");
+    }
+  }
+}
+
+/** Node child와 같은 이벤트 계약을 따르는 fake. pool의 상태 머신은 production class 그대로다. */
+class FakeRelayChild extends EventEmitter {
+  readonly stdin = new FakeRelayStdin();
+  readonly stdout = new EventEmitter();
+  readonly stderr = new EventEmitter();
+  readonly signals: NodeJS.Signals[] = [];
+  pid: number | undefined = 4242;
+
+  constructor(
+    readonly args: readonly string[],
+    readonly options: RelaySpawnOptions,
+  ) {
+    super();
+  }
+
+  kill(signal: NodeJS.Signals): boolean {
+    this.signals.push(signal);
+    return true;
+  }
+
+  spawnForTest(): void {
+    this.emit("spawn");
+  }
+
+  writeForTest(stream: "stdout" | "stderr", bytes: Buffer | string): void {
+    this[stream].emit("data", Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes, "utf8"));
+  }
+
+  closeForTest(code: number | null, signal: NodeJS.Signals | null = null): void {
+    this.emit("close", code, signal);
+  }
+
+  asChild(): RelayChild {
+    return this as unknown as RelayChild;
+  }
+}
+
+interface FakeRelaySpawner {
+  readonly spawn: RelaySpawn;
+  readonly children: FakeRelayChild[];
+  throwOnSpawn: boolean;
+  onSpawn: ((child: FakeRelayChild) => void) | null;
+}
+
+function createFakeRelaySpawner(): FakeRelaySpawner {
+  const children: FakeRelayChild[] = [];
+  const spawner: FakeRelaySpawner = {
+    children,
+    throwOnSpawn: false,
+    onSpawn: null,
+    spawn: (executable, args, options) => {
+      requireCondition(executable === "docker", "The fake relay spawner received another executable.");
+      if (spawner.throwOnSpawn) {
+        throw new Error("fake spawn secret");
+      }
+      const child = new FakeRelayChild(args, options);
+      children.push(child);
+      spawner.onSpawn?.(child);
+      return child.asChild();
     },
   };
+  return spawner;
+}
+
+type FakeRouteActionBehavior = "resolve" | "reject" | "stall";
+
+class FakeBackendRelayPage {
+  routeInstallCount = 0;
+  routeRemovalCount = 0;
+  private closed = false;
+  private handler: ((route: Route) => Promise<void>) | null = null;
+  private lastHandler: ((route: Route) => Promise<void>) | null = null;
+
+  async route(_pattern: string, handler: (route: Route) => Promise<void>): Promise<void> {
+    this.routeInstallCount += 1;
+    this.handler = handler;
+    this.lastHandler = handler;
+  }
+
+  unroute(_pattern: string, handler: (route: Route) => Promise<void>): Promise<void> {
+    requireCondition(this.handler === handler, "The fake relay page removed another handler.");
+    this.routeRemovalCount += 1;
+    this.handler = null;
+    return Promise.resolve();
+  }
+
+  isClosed(): boolean {
+    return this.closed;
+  }
+
+  closeForTest(): void {
+    this.closed = true;
+  }
+
+  invoke(route: Route): Promise<void> {
+    requireCondition(this.handler !== null, "The fake relay page had no route handler.");
+    return this.handler(route);
+  }
+
+  /** unroute 직전에 브라우저가 이미 잡아 둔 route가 늦게 도착한 경우를 재현한다. */
+  invokeAfterUnroute(route: Route): Promise<void> {
+    requireCondition(this.lastHandler !== null, "The fake relay page never installed a handler.");
+    return this.lastHandler(route);
+  }
+
+  asPage(): Page {
+    return this as unknown as Page;
+  }
+}
+
+class FakeBackendRoute {
+  abortCount = 0;
+  fulfillCount = 0;
+  fulfilledStatus: number | null = null;
+  fulfilledBody: string | null = null;
+
+  constructor(
+    private readonly requestValue: PlaywrightRequest,
+    private readonly behavior: FakeRouteActionBehavior = "resolve",
+  ) {}
+
+  request(): PlaywrightRequest {
+    return this.requestValue;
+  }
+
+  abort(): Promise<void> {
+    this.abortCount += 1;
+    return this.outcome();
+  }
+
+  fulfill(response: Parameters<Route["fulfill"]>[0]): Promise<void> {
+    this.fulfillCount += 1;
+    this.fulfilledStatus = response?.status ?? null;
+    this.fulfilledBody = typeof response?.body === "string" ? response.body : null;
+    return this.outcome();
+  }
+
+  asRoute(): Route {
+    return this as unknown as Route;
+  }
+
+  private outcome(): Promise<void> {
+    if (this.behavior === "resolve") {
+      return Promise.resolve();
+    }
+    if (this.behavior === "reject") {
+      return Promise.reject(new Error("fake route action secret"));
+    }
+    return new Promise<void>(() => undefined);
+  }
+}
+
+function httpResponseBytes(status: number, body: string): Buffer {
+  const payload = Buffer.from(body, "utf8");
+  return Buffer.concat([
+    Buffer.from(
+      `HTTP/1.1 ${String(status)} X\r\nContent-Type: application/json\r\nContent-Length: ${String(payload.byteLength)}\r\n\r\n`,
+      "ascii",
+    ),
+    payload,
+  ]);
 }
 
 type ObservedParallelStartOutcome =
@@ -1194,7 +2909,7 @@ type ObservedParallelStartOutcome =
   | { readonly status: "rejected"; readonly error: unknown };
 
 function observeParallelStart(promise: Promise<void>): Promise<ObservedParallelStartOutcome> {
-  return promise.then<ObservedParallelStartOutcome>(
+  return promise.then<ObservedParallelStartOutcome, ObservedParallelStartOutcome>(
     () => ({ status: "fulfilled" }),
     (error: unknown) => ({ status: "rejected", error }),
   );
@@ -1228,13 +2943,17 @@ function requireFixedParallelStartFailure(
 
 function requireNoParallelStartResources(
   barrier: ParallelStartBarrier,
-  scheduler: ControllableParallelStartScheduler,
+  clock: ManualRelayClock,
 ): void {
   const snapshot = barrier.snapshot();
   requireCondition(snapshot.pendingWaiterCount === 0, "A parallel-start waiter remained pending.");
   requireCondition(snapshot.activeTimerCount === 0, "A parallel-start timer remained active.");
+  requireCondition(
+    snapshot.activeArrivalWatchdogTimerCount === 0,
+    "A parallel-start no-arrival watchdog timer remained active.",
+  );
   requireCondition(snapshot.activeCallbackCount === 0, "A parallel-start callback remained active.");
-  requireCondition(scheduler.pendingCount() === 0, "The parallel-start scheduler retained a callback.");
+  requireCondition(clock.pendingTimerCount() === 0, "The parallel-start clock retained a callback.");
 }
 
 function requireUnchangedParallelStartSnapshot(
@@ -1271,7 +2990,7 @@ function verifyTerminalBarrierRelayPassThrough(
   const observationsBefore = relayObservationCount;
   let refusal: string | null = null;
   try {
-    relayToBackend(relayCandidate("GET", `${BACKEND_ORIGIN}${rejectedTarget}`));
+    void relayToBackend(relayCandidate("GET", `${BACKEND_ORIGIN}${rejectedTarget}`));
   } catch (error: unknown) {
     refusal = error instanceof Error ? error.message : "unknown";
   }
@@ -1285,8 +3004,58 @@ function verifyTerminalBarrierRelayPassThrough(
   );
 }
 
+/**
+ * 첫 exact route 이전에 barrier timer를 시작하는 경로가 0개임을 spec 원문으로 고정한다.
+ *
+ * timer 시작 호출은 class 내부의 첫 exact `wait()`와 아래 결정적 lifecycle matrix에만 허용한다.
+ * production-like 사건 상세 404 scenario는 시작 호출이 0개이고, 로그인 완료 뒤 별도 no-arrival
+ * watchdog만 정확히 한 번 arm한다. 경계 문자열은 조각을 이어 만들어 이 함수 자신과 겹치지 않게 한다.
+ */
+function verifyParallelStartBarrierStartSites(): void {
+  const source = readFileSync(fileURLToPath(import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  const lifecycleHeader = [
+    "async function ",
+    "verifyParallelStartBarrierLifecycle",
+    "(): Promise<void> {",
+  ].join("");
+  const scenarioHeader = [
+    'test("a real USER opens a case detail address ',
+    'and meets the real Backend 404"',
+  ].join("");
+  const lifecycleBegin = source.indexOf(lifecycleHeader);
+  const lifecycleEnd = lifecycleBegin < 0 ? -1 : source.indexOf("\n}\n", lifecycleBegin);
+  const scenarioBegin = source.indexOf(scenarioHeader);
+  const scenarioEnd = scenarioBegin < 0 ? -1 : source.indexOf("\n});\n", scenarioBegin);
+  requireCondition(
+    lifecycleBegin >= 0 &&
+      lifecycleEnd > lifecycleBegin &&
+      source.indexOf(lifecycleHeader, lifecycleBegin + 1) < 0 &&
+      scenarioBegin >= 0 &&
+      scenarioEnd > scenarioBegin &&
+      source.indexOf(scenarioHeader, scenarioBegin + 1) < 0,
+    "The parallel-start start-site check could not locate its source boundaries.",
+  );
+  const startCall = /([A-Za-z_$][\w$]*)\s*\.\s*start\s*\(\s*\)/g;
+  for (const match of source.matchAll(startCall)) {
+    requireCondition(
+      match[1] === "this" || (match.index > lifecycleBegin && match.index < lifecycleEnd),
+      "A parallel-start barrier timer can start outside its first exact route or lifecycle matrix.",
+    );
+  }
+  const scenario = source.slice(scenarioBegin, scenarioEnd);
+  requireCondition(
+    [...scenario.matchAll(startCall)].length === 0,
+    "The case detail scenario starts the parallel-start barrier before its first exact route.",
+  );
+  requireCondition(
+    [...scenario.matchAll(/\.\s*armArrivalWatchdog\s*\(/g)].length === 1,
+    "The case detail scenario did not arm exactly one no-arrival watchdog.",
+  );
+}
+
 /** Deterministic lifecycle matrix for the spec-local barrier helper. */
 async function verifyParallelStartBarrierLifecycle(): Promise<void> {
+  verifyParallelStartBarrierStartSites();
   const barrierCaseId = "0badcafe-0000-4000-8000-000000000259";
   const targets: readonly ParallelStartTarget[] = [
     { method: "GET", target: `/parallel/${barrierCaseId}` },
@@ -1310,15 +3079,15 @@ async function verifyParallelStartBarrierLifecycle(): Promise<void> {
     "createdAt%2Casc",
   ];
   const createBarrier = () => {
-    const scheduler = createControllableParallelStartScheduler();
-    const barrier = new ParallelStartBarrier(targets, 1, scheduler);
+    const clock = new ManualRelayClock();
+    const barrier = new ParallelStartBarrier(targets, 1, clock);
     barrier.start();
-    return { barrier, scheduler };
+    return { barrier, clock };
   };
 
   // A: three distinct exact targets release exactly once and cancel the timer.
   {
-    const { barrier, scheduler } = createBarrier();
+    const { barrier, clock } = createBarrier();
     const completion = observeParallelStart(barrier.completion);
     const waits = targets.map(({ method, target }) =>
       observeParallelStart(requireParallelStartWait(barrier.wait(method, target))),
@@ -1338,8 +3107,8 @@ async function verifyParallelStartBarrierLifecycle(): Promise<void> {
         released.timeoutCallbackCount === 0,
       "A complete parallel-start barrier recorded the wrong terminal state.",
     );
-    requireNoParallelStartResources(barrier, scheduler);
-    requireCondition(scheduler.runAll() === 0, "A released barrier still ran a timeout callback.");
+    requireNoParallelStartResources(barrier, clock);
+    requireCondition(clock.runAll() === 0, "A released barrier still ran a timeout callback.");
     const beforeReleasedPassThrough = barrier.snapshot();
     requireCondition(
       barrier.wait("GET", "/parallel/unexpected") === null &&
@@ -1354,8 +3123,8 @@ async function verifyParallelStartBarrierLifecycle(): Promise<void> {
     verifyTerminalBarrierRelayPassThrough(barrier, "released");
     barrier.dispose();
     barrier.dispose();
-    requireNoParallelStartResources(barrier, scheduler);
-    requireCondition(scheduler.runAll() === 0, "A disposed released barrier ran a callback.");
+    requireNoParallelStartResources(barrier, clock);
+    requireCondition(clock.runAll() === 0, "A disposed released barrier ran a callback.");
     const beforeDisposedPassThrough = barrier.snapshot();
     requireCondition(
       barrier.wait("GET", "/parallel/unexpected") === null &&
@@ -1371,12 +3140,12 @@ async function verifyParallelStartBarrierLifecycle(): Promise<void> {
   }
 
   const verifyMissingTargets = async (arrivalCount: 0 | 1 | 2): Promise<void> => {
-    const { barrier, scheduler } = createBarrier();
+    const { barrier, clock } = createBarrier();
     const completion = observeParallelStart(barrier.completion);
     const waits = targets.slice(0, arrivalCount).map(({ method, target }) =>
       observeParallelStart(requireParallelStartWait(barrier.wait(method, target))),
     );
-    requireCondition(scheduler.runAll() === 1, "A pending barrier did not run its timeout once.");
+    requireCondition(clock.runAll() === 1, "A pending barrier did not run its timeout once.");
     const outcomes = await Promise.all([completion, ...waits]);
     for (const outcome of outcomes) {
       requireFixedParallelStartFailure(outcome, PARALLEL_START_TIMEOUT_MESSAGE, forbiddenValues);
@@ -1391,7 +3160,7 @@ async function verifyParallelStartBarrierLifecycle(): Promise<void> {
         failed.timeoutCallbackCount === 1,
       "A timed-out parallel-start barrier retained targets or settled incorrectly.",
     );
-    requireNoParallelStartResources(barrier, scheduler);
+    requireNoParallelStartResources(barrier, clock);
     const beforeFailedPassThrough = barrier.snapshot();
     requireCondition(
       barrier.wait("GET", "/parallel/unexpected") === null &&
@@ -1405,7 +3174,7 @@ async function verifyParallelStartBarrierLifecycle(): Promise<void> {
     );
     verifyTerminalBarrierRelayPassThrough(barrier, "failed");
     barrier.dispose();
-    requireNoParallelStartResources(barrier, scheduler);
+    requireNoParallelStartResources(barrier, clock);
   };
 
   // B-D: one, two, or all three missing targets fail without real-time waits.
@@ -1415,7 +3184,7 @@ async function verifyParallelStartBarrierLifecycle(): Promise<void> {
 
   // E: a duplicate cannot impersonate the third distinct target.
   {
-    const { barrier, scheduler } = createBarrier();
+    const { barrier, clock } = createBarrier();
     const completion = observeParallelStart(barrier.completion);
     const first = observeParallelStart(
       requireParallelStartWait(barrier.wait(targets[0].method, targets[0].target)),
@@ -1437,14 +3206,14 @@ async function verifyParallelStartBarrierLifecycle(): Promise<void> {
         failed.completionRejectCount === 1,
       "A duplicate parallel-start target completed the barrier.",
     );
-    requireNoParallelStartResources(barrier, scheduler);
-    requireCondition(scheduler.runAll() === 0, "A duplicate failure left a timeout callback.");
+    requireNoParallelStartResources(barrier, clock);
+    requireCondition(clock.runAll() === 0, "A duplicate failure left a timeout callback.");
     barrier.dispose();
   }
 
   // F: an unexpected target neither completes nor allocates a waiter.
   {
-    const { barrier, scheduler } = createBarrier();
+    const { barrier, clock } = createBarrier();
     const completion = observeParallelStart(barrier.completion);
     const beforeUnexpected = barrier.snapshot();
     requireCondition(
@@ -1470,13 +3239,13 @@ async function verifyParallelStartBarrierLifecycle(): Promise<void> {
       PARALLEL_START_DISPOSED_MESSAGE,
       forbiddenValues,
     );
-    requireNoParallelStartResources(barrier, scheduler);
-    requireCondition(scheduler.runAll() === 0, "A disposed barrier ran a callback.");
+    requireNoParallelStartResources(barrier, clock);
+    requireCondition(clock.runAll() === 0, "A disposed barrier ran a callback.");
   }
 
   // G: disposal immediately before release and timeout is one-shot and empty.
   {
-    const { barrier, scheduler } = createBarrier();
+    const { barrier, clock } = createBarrier();
     const completion = observeParallelStart(barrier.completion);
     const waits = targets.slice(0, 2).map(({ method, target }) =>
       observeParallelStart(requireParallelStartWait(barrier.wait(method, target))),
@@ -1508,145 +3277,1109 @@ async function verifyParallelStartBarrierLifecycle(): Promise<void> {
         disposed.timeoutCallbackCount === 0,
       "Dispose immediately before release settled the barrier more than once.",
     );
-    requireNoParallelStartResources(barrier, scheduler);
-    requireCondition(scheduler.runAll() === 0, "Dispose immediately before timeout ran a callback.");
+    requireNoParallelStartResources(barrier, clock);
+    requireCondition(clock.runAll() === 0, "Dispose immediately before timeout ran a callback.");
+  }
+
+  // H: 명시적 start 전에는 timer가 없고, 첫 exact 도착이 timer 시작과 도착 등록을 함께 수행한다.
+  {
+    const clock = new ManualRelayClock();
+    const barrier = new ParallelStartBarrier(targets, 1, clock);
+    const idle = barrier.snapshot();
+    requireCondition(
+      idle.state === "pending" && idle.activeTimerCount === 0 && clock.pendingTimerCount() === 0,
+      "A parallel-start barrier started before its first exact route.",
+    );
+    const completion = observeParallelStart(barrier.completion);
+    const first = observeParallelStart(
+      requireParallelStartWait(barrier.wait(targets[0].method, targets[0].target)),
+    );
+    const armed = barrier.snapshot();
+    requireCondition(
+      armed.activeTimerCount === 1 && armed.arrivedTargetCount === 1 && clock.pendingTimerCount() === 1,
+      "The first exact route did not arm the barrier and register its arrival together.",
+    );
+    barrier.start();
+    requireCondition(clock.pendingTimerCount() === 1, "A second start armed another barrier timer.");
+    clock.advance(1);
+    for (const outcome of await Promise.all([completion, first])) {
+      requireFixedParallelStartFailure(outcome, PARALLEL_START_TIMEOUT_MESSAGE, forbiddenValues);
+    }
+    requireNoParallelStartResources(barrier, clock);
+  }
+
+  // I: 로그인 완료에 해당하는 watchdog arm은 barrier timer를 시작하지 않고, 중복 arm도 timer를 늘리지 않는다.
+  //    route가 하나도 오지 않으면 barrier timeout이 아닌 no-arrival 고정 오류로 끝난다.
+  {
+    const clock = new ManualRelayClock();
+    const barrier = new ParallelStartBarrier(targets, 1, clock);
+    const completion = observeParallelStart(barrier.completion);
+    barrier.armArrivalWatchdog(2);
+    barrier.armArrivalWatchdog(2);
+    const armed = barrier.snapshot();
+    requireCondition(
+      armed.state === "pending" &&
+        armed.activeTimerCount === 0 &&
+        armed.activeArrivalWatchdogTimerCount === 1 &&
+        armed.arrivalWatchdogState === "armed" &&
+        armed.activeCallbackCount === 1 &&
+        clock.pendingTimerCount() === 1,
+      "Arming the no-arrival watchdog started the barrier or added a second timer.",
+    );
+    clock.advance(1);
+    requireCondition(
+      barrier.snapshot().state === "pending",
+      "The no-arrival watchdog expired on the barrier bound.",
+    );
+    clock.advance(1);
+    requireFixedParallelStartFailure(
+      await completion,
+      PARALLEL_START_NO_ARRIVAL_MESSAGE,
+      forbiddenValues,
+    );
+    const expired = barrier.snapshot();
+    requireCondition(
+      expired.state === "failed" &&
+        expired.arrivalWatchdogState === "expired" &&
+        expired.arrivalWatchdogCallbackCount === 1 &&
+        expired.timeoutCallbackCount === 0 &&
+        expired.completionResolveCount === 0 &&
+        expired.completionRejectCount === 1,
+      "A no-arrival watchdog expiry was classified as a barrier timeout.",
+    );
+    requireNoParallelStartResources(barrier, clock);
+    barrier.armArrivalWatchdog(2);
+    requireNoParallelStartResources(barrier, clock);
+    barrier.dispose();
+    requireNoParallelStartResources(barrier, clock);
+    requireCondition(clock.runAll() === 0, "An expired no-arrival watchdog left a callback.");
+  }
+
+  // J: 첫 exact route가 watchdog을 해제하고 barrier timer를 시작한다. 일부 route만 오면 barrier 고정 오류다.
+  {
+    const clock = new ManualRelayClock();
+    const barrier = new ParallelStartBarrier(targets, 3, clock);
+    const completion = observeParallelStart(barrier.completion);
+    barrier.armArrivalWatchdog(2);
+    clock.advance(1);
+    const first = observeParallelStart(
+      requireParallelStartWait(barrier.wait(targets[0].method, targets[0].target)),
+    );
+    const disarmed = barrier.snapshot();
+    requireCondition(
+      disarmed.arrivalWatchdogState === "disarmed" &&
+        disarmed.activeArrivalWatchdogTimerCount === 0 &&
+        disarmed.activeTimerCount === 1 &&
+        disarmed.arrivedTargetCount === 1 &&
+        clock.pendingTimerCount() === 1,
+      "The first exact route did not disarm the no-arrival watchdog and start the barrier timer.",
+    );
+    barrier.armArrivalWatchdog(2);
+    requireCondition(
+      clock.pendingTimerCount() === 1 && barrier.snapshot().arrivalWatchdogState === "disarmed",
+      "Re-arming after the first exact route added a no-arrival watchdog timer.",
+    );
+    const second = observeParallelStart(
+      requireParallelStartWait(barrier.wait(targets[1].method, targets[1].target)),
+    );
+    clock.advance(2);
+    requireCondition(
+      barrier.snapshot().state === "pending",
+      "A disarmed no-arrival watchdog still expired.",
+    );
+    clock.advance(1);
+    for (const outcome of await Promise.all([completion, first, second])) {
+      requireFixedParallelStartFailure(outcome, PARALLEL_START_TIMEOUT_MESSAGE, forbiddenValues);
+    }
+    const failed = barrier.snapshot();
+    requireCondition(
+      failed.state === "failed" &&
+        failed.timeoutCallbackCount === 1 &&
+        failed.arrivalWatchdogCallbackCount === 0 &&
+        failed.arrivalWatchdogState === "disarmed",
+      "A partial arrival was not classified as a barrier timeout.",
+    );
+    requireNoParallelStartResources(barrier, clock);
+    requireCondition(clock.runAll() === 0, "A partial-arrival barrier left a callback.");
+  }
+
+  // K: release 뒤 re-arm·dispose 경쟁에서도 두 timer·waiter·callback이 0이고 다시 settle하지 않는다.
+  {
+    const clock = new ManualRelayClock();
+    const barrier = new ParallelStartBarrier(targets, 3, clock);
+    const completion = observeParallelStart(barrier.completion);
+    barrier.armArrivalWatchdog(2);
+    const waits = targets.map(({ method, target }) =>
+      observeParallelStart(requireParallelStartWait(barrier.wait(method, target))),
+    );
+    const outcomes = await Promise.all([completion, ...waits]);
+    requireCondition(
+      outcomes.every(({ status }) => status === "fulfilled"),
+      "A watched parallel-start barrier did not release every observer.",
+    );
+    barrier.armArrivalWatchdog(2);
+    requireNoParallelStartResources(barrier, clock);
+    barrier.dispose();
+    const disposed = barrier.snapshot();
+    requireCondition(
+      disposed.state === "disposed" &&
+        disposed.completionResolveCount === 1 &&
+        disposed.completionRejectCount === 0 &&
+        disposed.timeoutCallbackCount === 0 &&
+        disposed.arrivalWatchdogCallbackCount === 0,
+      "Release followed by re-arm and dispose armed or settled the barrier again.",
+    );
+    requireNoParallelStartResources(barrier, clock);
+    requireCondition(clock.runAll() === 0, "A released watched barrier ran a callback.");
+  }
+
+  // L: watchdog이 arm된 채 dispose되면 watchdog은 한 번만 취소되고 no-arrival 오류로 바뀌지 않는다.
+  {
+    const clock = new ManualRelayClock();
+    const barrier = new ParallelStartBarrier(targets, 3, clock);
+    const completion = observeParallelStart(barrier.completion);
+    barrier.armArrivalWatchdog(2);
+    barrier.dispose();
+    barrier.dispose();
+    requireFixedParallelStartFailure(
+      await completion,
+      PARALLEL_START_DISPOSED_MESSAGE,
+      forbiddenValues,
+    );
+    const disposed = barrier.snapshot();
+    requireCondition(
+      disposed.state === "disposed" &&
+        disposed.arrivalWatchdogState === "cancelled" &&
+        disposed.arrivalWatchdogCallbackCount === 0 &&
+        disposed.completionRejectCount === 1,
+      "Dispose while the no-arrival watchdog was armed did not cancel it exactly once.",
+    );
+    requireNoParallelStartResources(barrier, clock);
+    requireCondition(clock.runAll() === 0, "A disposed no-arrival watchdog ran a callback.");
   }
 }
 
-interface BackendRelay extends Array<BackendObservation> {
-  readonly dispose: () => Promise<void>;
-  readonly pendingHandlerCount: () => number;
-  readonly listenerCount: () => number;
-  readonly isDisposed: () => boolean;
-  readonly barrierArrivalCountAtFirstForwarding: () => number | null;
-  readonly barrierAbortCount: () => number;
+/** host process pool의 결정적 계약. fake child만 주입하고 상태 머신은 production class를 쓴다. */
+async function verifyRelayProcessPoolLifecycle(): Promise<void> {
+  const credentialSecret = "deterministic-pool-secret";
+  const request = buildRelayRequestBytes(
+    relayCandidate("GET", `${BACKEND_ORIGIN}${INITIAL_CASE_TARGET}`, `Bearer ${credentialSecret}`),
+  );
+  const token = "0badcafe-0000-4000-8000-000000000001";
+  const args = relayDockerArguments(token);
+  const createPool = () => {
+    const spawner = createFakeRelaySpawner();
+    const clock = new ManualRelayClock();
+    return { spawner, clock, pool: new RelayProcessPool(spawner.spawn, clock) };
+  };
+
+  // A: argv에는 고정 script와 token만, stdin에는 정확한 요청 bytes만 들어간다.
+  {
+    const { spawner, clock, pool } = createPool();
+    const outcome = observeOutcome(pool.run("success", args, request.bytes, 1_000));
+    const child = spawner.children[0];
+    requireCondition(
+      spawner.children.length === 1 &&
+        child.options.shell === false &&
+        child.options.windowsHide === true &&
+        child.args.every(
+          (argument) =>
+            !argument.includes(credentialSecret) && !argument.includes(INITIAL_CASE_TARGET),
+        ) &&
+        child.stdin.writes.length === 1 &&
+        child.stdin.writes[0].equals(request.bytes) &&
+        child.stdin.endCount === 1,
+      "The relay process received request or credential data outside stdin.",
+    );
+    const response = httpResponseBytes(200, "{}");
+    child.spawnForTest();
+    child.writeForTest("stdout", response.subarray(0, 7));
+    child.writeForTest("stdout", response.subarray(7));
+    child.writeForTest("stderr", "stderr secret");
+    child.closeForTest(0);
+    const result = await outcome;
+    const events = pool.events();
+    requireCondition(
+      result.status === "fulfilled" &&
+        result.value.equals(response) &&
+        pool.openChildCount() === 0 &&
+        clock.pendingTimerCount() === 0 &&
+        events.length === 2 &&
+        events[0].kind === "spawn" &&
+        events[1].kind === "close",
+      "A successful relay process did not return its exact bytes and release ownership on close.",
+    );
+  }
+
+  // B: 출력 상한은 append 전에 검사하고, 상한 초과는 실패 확정 뒤에도 실제 close까지 소유한다.
+  for (const [stream, limit, reason] of [
+    ["stdout", MAX_RELAY_STDOUT_BYTES, "stdout-limit"],
+    ["stderr", MAX_RELAY_STDERR_BYTES, "stderr-limit"],
+  ] as const) {
+    const { spawner, clock, pool } = createPool();
+    const outcome = observeOutcome(pool.run(stream, args, request.bytes, 1_000));
+    const child = spawner.children[0];
+    child.spawnForTest();
+    child.writeForTest(stream, Buffer.alloc(limit, 0x61));
+    requireCondition(child.signals.length === 0, "An output of exactly the bound was rejected.");
+    child.writeForTest(stream, Buffer.alloc(1, 0x61));
+    // 상한 초과가 무시되면 결과가 끝나지 않으므로 기다리기 전에 중지 요청부터 확인한다.
+    requireCondition(
+      child.signals.join(",") === "SIGTERM" && pool.openChildCount() === 1,
+      "An output bound did not stop the child while keeping ownership.",
+    );
+    requireProcessFailure(await outcome, reason);
+    child.writeForTest(stream, "late secret");
+    clock.advance(RELAY_HOST_KILL_GRACE_MS);
+    requireCondition(child.signals.join(",") === "SIGTERM,SIGKILL", "A stopped child did not escalate to KILL.");
+    child.closeForTest(null, "SIGKILL");
+    requireCondition(
+      pool.openChildCount() === 0 && pool.lateEventCount() === 1 && clock.pendingTimerCount() === 0,
+      "A stopped child did not release ownership exactly on close.",
+    );
+  }
+
+  // C: spawn 실패는 child 없이 끝나고, spawn 전 error는 소유를 남기지 않는다.
+  {
+    const { spawner, clock, pool } = createPool();
+    spawner.throwOnSpawn = true;
+    requireProcessFailure(await observeOutcome(pool.run("throw", args, request.bytes, 1_000)), "spawn-error");
+    requireCondition(
+      spawner.children.length === 0 && pool.openChildCount() === 0 && clock.pendingTimerCount() === 0,
+      "A synchronous spawn failure retained ownership.",
+    );
+    spawner.throwOnSpawn = false;
+    const outcome = observeOutcome(pool.run("error", args, request.bytes, 1_000));
+    const child = spawner.children[0];
+    child.pid = undefined;
+    child.emit("error", new Error("spawn error secret"));
+    requireProcessFailure(await outcome, "spawn-error");
+    requireCondition(
+      pool.openChildCount() === 0 && clock.pendingTimerCount() === 0 && pool.events().length === 1,
+      "A child that never spawned retained ownership.",
+    );
+  }
+
+  // D: backpressure는 drain 전 stdin을 닫지 않고, stdin 오류와 조기 close는 고정 실패이다.
+  {
+    const { spawner, pool } = createPool();
+    spawner.onSpawn = (child) => {
+      child.stdin.writeResult = false;
+    };
+    const outcome = observeOutcome(pool.run("drain", args, request.bytes, 1_000));
+    const child = spawner.children[0];
+    // asserts 함수가 mutable property를 literal로 좁히지 않도록 관찰값을 따로 읽는다.
+    const endCountBeforeDrain: number = child.stdin.endCount;
+    requireCondition(endCountBeforeDrain === 0, "Stdin was closed before drain.");
+    child.stdin.emit("drain");
+    requireCondition(child.stdin.endCount === 1, "Stdin was not closed after drain.");
+    child.spawnForTest();
+    child.writeForTest("stdout", "ok");
+    child.closeForTest(0);
+    const result = await outcome;
+    requireCondition(result.status === "fulfilled", "A drained relay process did not complete.");
+  }
+  for (const failure of ["error", "premature-close"] as const) {
+    const { spawner, pool } = createPool();
+    spawner.onSpawn = (child) => {
+      child.stdin.finishOnEnd = failure !== "premature-close";
+    };
+    const outcome = observeOutcome(pool.run(failure, args, request.bytes, 1_000));
+    const child = spawner.children[0];
+    child.spawnForTest();
+    if (failure === "error") {
+      child.stdin.emit("error", new Error("stdin secret"));
+    } else {
+      child.stdin.emit("close");
+    }
+    requireProcessFailure(await outcome, "stdin-error");
+    child.closeForTest(null, "SIGTERM");
+    requireCondition(
+      child.signals[0] === "SIGTERM" && pool.openChildCount() === 0,
+      "A stdin failure did not stop and then release its child.",
+    );
+  }
+
+  // E: non-zero exit와 signal은 서로 다른 분류이지만 같은 고정 문구로 끝난다.
+  for (const [code, signal, reason] of [
+    [7, null, "non-zero-exit"],
+    [null, "SIGTERM", "signal"],
+  ] as const) {
+    const { spawner, pool } = createPool();
+    const outcome = observeOutcome(pool.run(reason, args, request.bytes, 1_000));
+    const child = spawner.children[0];
+    child.spawnForTest();
+    child.writeForTest("stdout", "partial secret");
+    child.closeForTest(code, signal);
+    requireProcessFailure(await outcome, reason);
+    requireCondition(pool.openChildCount() === 0, "An exited child retained ownership.");
+  }
+
+  // F: request deadline은 결과를 먼저 확정하고, 늦은 출력·오류·close는 관찰만 된다.
+  {
+    const { spawner, clock, pool } = createPool();
+    const outcome = observeOutcome(pool.run("deadline", args, request.bytes, 1_000));
+    const child = spawner.children[0];
+    child.spawnForTest();
+    clock.advance(999);
+    requireCondition(child.signals.length === 0, "A relay process stopped before its deadline.");
+    clock.advance(1);
+    requireProcessFailure(await outcome, "deadline");
+    requireCondition(child.signals.join(",") === "SIGTERM", "The deadline did not request TERM.");
+    clock.advance(RELAY_HOST_KILL_GRACE_MS);
+    child.writeForTest("stdout", httpResponseBytes(200, "{}"));
+    child.emit("error", new Error("late error secret"));
+    child.closeForTest(0);
+    requireCondition(
+      child.signals.join(",") === "SIGTERM,SIGKILL" &&
+        pool.openChildCount() === 0 &&
+        pool.lateEventCount() === 2 &&
+        clock.pendingTimerCount() === 0,
+      "Late relay events changed the outcome or retained ownership.",
+    );
+    const before = spawner.children.length;
+    requireProcessFailure(await observeOutcome(pool.run("expired", args, request.bytes, 0)), "deadline");
+    requireCondition(spawner.children.length === before, "An expired relay deadline still spawned.");
+  }
+
+  // G: close가 오지 않으면 teardown 대기는 bounded 실패하고 child 소유를 유지한다.
+  {
+    const { spawner, clock, pool } = createPool();
+    const outcome = observeOutcome(pool.run("never-closes", args, request.bytes, 10_000));
+    const child = spawner.children[0];
+    child.spawnForTest();
+    pool.stopAll();
+    requireProcessFailure(await outcome, "stopped");
+    const waiting = observeOutcome(pool.waitForClose(RELAY_HOST_CLOSE_TIMEOUT_MS));
+    clock.advance(RELAY_HOST_CLOSE_TIMEOUT_MS);
+    requireCleanupFailure(await waiting, "host-close");
+    requireCondition(
+      pool.openChildCount() === 1 && child.signals.join(",") === "SIGTERM,SIGKILL",
+      "A child without close lost ownership after a bounded teardown failure.",
+    );
+    child.closeForTest(null, "SIGKILL");
+    await pool.waitForClose(RELAY_HOST_CLOSE_TIMEOUT_MS);
+    requireCondition(pool.openChildCount() === 0 && clock.pendingTimerCount() === 0, "A late close was not observed.");
+  }
+
+  // H: 세 relay는 첫 close 전에 모두 spawn되어 병렬로 존재할 수 있다.
+  {
+    const { spawner, pool } = createPool();
+    const outcomes = ["a", "b", "c"].map((label) =>
+      observeOutcome(pool.run(label, args, request.bytes, 1_000)),
+    );
+    for (const child of spawner.children) {
+      child.spawnForTest();
+    }
+    spawner.children[1].closeForTest(0);
+    spawner.children[0].closeForTest(0);
+    spawner.children[2].closeForTest(0);
+    const events = pool.events();
+    const firstClose = events.findIndex(({ kind }) => kind === "close");
+    requireCondition(
+      firstClose === 3 &&
+        events.slice(0, 3).every(({ kind }) => kind === "spawn") &&
+        (await Promise.all(outcomes)).every(({ status }) => status === "fulfilled") &&
+        pool.openChildCount() === 0,
+      "Three relay processes were not concurrently owned before the first close.",
+    );
+  }
 }
 
-async function installBackendRelay(
-  page: Page,
-  options: RelayOptions = {},
-): Promise<BackendRelay> {
-  const observations = [] as unknown as BackendRelay;
-  const capturedPaths =
-    typeof options.captureBodyOf === "string"
-      ? [options.captureBodyOf]
-      : (options.captureBodyOf ?? []);
-  const relayPattern = "http://localhost:8080/**";
-  const activeHandlers = new Set<Promise<void>>();
-  let disposed = false;
-  let closeListenerActive = true;
-  let barrierArrivalCountAtFirstForwarding: number | null = null;
-  let barrierAbortCount = 0;
+/** container marker audit의 argv·stdin·출력 계약. 실제 script는 어떤 process에도 신호를 보내지 않는다. */
+async function verifyContainerMarkerAuditContract(): Promise<void> {
+  requireCondition(
+    parseMarkerAuditOutput(Buffer.from("zero\n", "latin1")) === 0 &&
+      parseMarkerAuditOutput(Buffer.from("present:3\n", "latin1")) === 3,
+    "A canonical marker audit output was refused.",
+  );
+  for (const malformed of [
+    "zero",
+    "present:0\n",
+    "present:-1\n",
+    "present:01\n",
+    "present:3\r\n",
+    "zero\nzero\n",
+    "ZERO\n",
+    "",
+  ]) {
+    let stage: RelayCleanupStage | null = null;
+    try {
+      parseMarkerAuditOutput(Buffer.from(malformed, "latin1"));
+    } catch (error: unknown) {
+      stage = error instanceof RelayCleanupError ? error.stage : null;
+    }
+    requireCondition(stage === "container-audit", "A malformed marker audit output was accepted.");
+  }
+  requireCondition(
+    !/\bkill\b|pkill|killall|timeout/.test(CONTAINER_MARKER_AUDIT_SCRIPT),
+    "The marker audit script can signal or bound another process.",
+  );
 
-  const processRoute = async (route: Route): Promise<void> => {
-    if (disposed) {
-      if (!page.isClosed()) {
-        await route.abort("failed");
+  const spawner = createFakeRelaySpawner();
+  const pool = new RelayProcessPool(spawner.spawn, new ManualRelayClock());
+  const audit = createDockerMarkerAudit(pool);
+  const token = "0badcafe-0000-4000-8000-000000000002";
+
+  const counted = observeOutcome(audit(token, "until-zero", CONTAINER_AUDIT_POLL_SECONDS));
+  const tokenChild = spawner.children[0];
+  requireCondition(
+    tokenChild.args.join(" ") ===
+      markerAuditArguments("until-zero", CONTAINER_AUDIT_POLL_SECONDS).join(" ") &&
+      !tokenChild.args.includes(token) &&
+      tokenChild.stdin.writes[0].toString("latin1") === `${token}\n`,
+    "The marker audit did not keep its token on stdin with fixed argv.",
+  );
+  tokenChild.spawnForTest();
+  tokenChild.writeForTest("stdout", "present:2\n");
+  tokenChild.closeForTest(0);
+  const tokenResult = await counted;
+  requireCondition(
+    tokenResult.status === "fulfilled" && tokenResult.value === 2,
+    "The marker audit did not report the exact present count.",
+  );
+
+  const suite = observeOutcome(audit(null, "until-zero", "0"));
+  const suiteChild = spawner.children[1];
+  requireCondition(
+    suiteChild.stdin.writes[0].toString("latin1") === "\n" && suiteChild.args.at(-1) === "0",
+    "The suite-wide marker audit did not use an empty token line.",
+  );
+  suiteChild.spawnForTest();
+  suiteChild.writeForTest("stdout", "zero\n");
+  suiteChild.closeForTest(0);
+  const suiteResult = await suite;
+  requireCondition(
+    suiteResult.status === "fulfilled" && suiteResult.value === 0,
+    "The suite-wide marker audit did not report zero.",
+  );
+
+  const before = spawner.children.length;
+  requireCleanupFailure(await observeOutcome(audit("not-a-token", "until-zero", "0")), "container-audit");
+  requireCondition(spawner.children.length === before, "An invalid marker token reached Docker.");
+
+  const failing = observeOutcome(audit(token, "until-zero", "0"));
+  const failingChild = spawner.children[before];
+  failingChild.spawnForTest();
+  failingChild.writeForTest("stdout", "zero\n");
+  failingChild.closeForTest(1);
+  requireCleanupFailure(await failing, "container-audit");
+}
+
+/** cleanup owner 상태 머신의 결정적 계약. production owner에 pool·audit·release seam만 주입한다. */
+async function verifyRelayCleanupOwnerLifecycle(): Promise<void> {
+  const token = "0badcafe-0000-4000-8000-000000000003";
+  const scriptedAudit = (answers: (number | RelayCleanupError)[]) => {
+    const calls: string[] = [];
+    const audit: RelayMarkerAudit = async (auditToken, mode, poll) => {
+      calls.push(`${String(auditToken)}:${mode}:${poll}`);
+      const next = answers.shift();
+      requireCondition(next !== undefined, "The owner requested an unexpected marker audit.");
+      if (next instanceof RelayCleanupError) {
+        throw next;
       }
-      return;
-    }
-    const request = route.request();
-    if (request.method() === "OPTIONS") {
-      await route.fulfill({
-        status: 204,
-        headers: {
-          "access-control-allow-origin": APP_ORIGIN,
-          "access-control-allow-methods": "GET, POST, PATCH",
-          "access-control-allow-headers": "authorization, content-type",
-        },
-      });
-      return;
-    }
-    const requestedUrl = new URL(request.url());
-    const requestedTarget = `${requestedUrl.pathname}${requestedUrl.search}`;
-    const barrier = options.parallelStartBarrier;
-    const barrierWait = barrier?.wait(request.method(), requestedTarget) ?? null;
-    if (barrierWait !== null) {
-      try {
-        await barrierWait;
-      } catch (error: unknown) {
-        if (error instanceof ParallelStartBarrierError) {
-          if (!page.isClosed()) {
-            barrierAbortCount += 1;
-            await route.abort("failed");
-          }
-          return;
-        }
-        throw error;
-      }
-      const snapshot = barrier.snapshot();
-      requireCondition(
-        snapshot.state === "released" && snapshot.arrivedTargetCount === 3,
-        "A parallel-start target was forwarded before all three reads arrived.",
-      );
-      barrierArrivalCountAtFirstForwarding ??= snapshot.arrivedTargetCount;
-    }
-    const relayed = relayToBackend(request);
-    // Recorded from the relay's own target, so what this suite observes and
-    // what the Backend was asked for cannot drift into two different things.
-    const pathname = relayed.target.split("?")[0];
-    relayObservationCount += 1;
-    observations.push({
-      method: request.method(),
-      pathname,
-      target: relayed.target,
-      status: relayed.status,
-      requestBodyByteLength: Buffer.byteLength(request.postData() ?? ""),
-      ...(capturedPaths.includes(pathname) ? { body: relayed.body } : {}),
-    });
-    await route.fulfill({
-      status: relayed.status,
-      contentType: "application/json",
-      headers: { "access-control-allow-origin": APP_ORIGIN },
-      // What Backend answered, unchanged. An empty body becomes `{}` so a
-      // no-content answer is still parseable JSON rather than a transport error
-      // this suite would then be measuring instead of the application.
-      body: relayed.body === "" ? "{}" : relayed.body,
-    });
+      return next;
+    };
+    return { audit, calls };
   };
 
-  const routeHandler = (route: Route): Promise<void> => {
-    const handler = processRoute(route);
-    activeHandlers.add(handler);
-    void handler.then(
-      () => activeHandlers.delete(handler),
-      () => activeHandlers.delete(handler),
+  // A: 성공은 clean terminal이며 동시 호출은 같은 Promise를 공유한다.
+  {
+    const registry: RelayCleanupRegistry = new Map();
+    const pool = new RelayProcessPool(createFakeRelaySpawner().spawn, new ManualRelayClock());
+    const { audit, calls } = scriptedAudit([0]);
+    const owner = new RelayResourceOwner({ token, pool, audit, registry, testId: "deterministic" });
+    requireCondition(
+      owner.state() === "active" && registry.get(owner) === "deterministic",
+      "A relay owner was not registered before cleanup.",
     );
-    return handler;
-  };
-  const pageCloseListener = (): void => {
-    page.off("close", pageCloseListener);
-    closeListenerActive = false;
-    disposed = true;
-    options.parallelStartBarrier?.dispose();
-  };
-  page.on("close", pageCloseListener);
-  await page.route(relayPattern, routeHandler);
+    const first = owner.cleanup();
+    const second = owner.cleanup();
+    requireCondition(first === second && owner.state() === "cleaning", "Concurrent cleanup did not share one attempt.");
+    await first;
+    requireCondition(
+      owner.state() === "clean" &&
+        registry.size === 0 &&
+        owner.attempts() === 1 &&
+        calls.join("|") === `${token}:until-zero:${CONTAINER_AUDIT_POLL_SECONDS}`,
+      "A successful cleanup did not reach clean after one exact audit.",
+    );
+    await owner.cleanup();
+    requireCondition(owner.attempts() === 1 && calls.length === 1, "A clean owner started another attempt.");
+  }
 
-  const dispose = async (): Promise<void> => {
-    const cleanupAlreadyStarted = disposed;
-    disposed = true;
-    options.parallelStartBarrier?.dispose();
-    if (closeListenerActive) {
-      page.off("close", pageCloseListener);
-      closeListenerActive = false;
-    }
-    if (!cleanupAlreadyStarted && !page.isClosed()) {
-      await page.unroute(relayPattern, routeHandler);
-    }
-    await Promise.allSettled([...activeHandlers]);
+  // B: 남은 marker와 audit 실패는 failed로 남기고, 재호출은 새 attempt이다.
+  for (const firstAnswer of [2, new RelayCleanupError("container-audit")]) {
+    const registry: RelayCleanupRegistry = new Map();
+    const pool = new RelayProcessPool(createFakeRelaySpawner().spawn, new ManualRelayClock());
+    const { audit, calls } = scriptedAudit([firstAnswer, 0]);
+    const owner = new RelayResourceOwner({ token, pool, audit, registry, testId: "deterministic" });
+    const firstAttempt = owner.cleanup();
+    requireCleanupFailure(
+      await observeOutcome(firstAttempt),
+      typeof firstAnswer === "number" ? "container-present" : "container-audit",
+    );
+    requireCondition(
+      owner.state() === "failed" && registry.get(owner) === "deterministic" && owner.token === token,
+      "A failed cleanup removed ownership or registry evidence.",
+    );
+    const retry = owner.cleanup();
+    requireCondition(retry !== firstAttempt, "A failed cleanup Promise was memoized.");
+    await retry;
+    requireCondition(
+      owner.state() === "clean" && registry.size === 0 && owner.attempts() === 2 && calls.length === 2,
+      "A failed cleanup could not be retried to clean.",
+    );
+  }
+
+  // C: host close가 오지 않으면 bounded 실패하고 child 소유를 유지한다. 재시도는 business 요청을 다시 보내지 않는다.
+  {
+    const registry: RelayCleanupRegistry = new Map();
+    const spawner = createFakeRelaySpawner();
+    const clock = new ManualRelayClock();
+    const pool = new RelayProcessPool(spawner.spawn, clock);
+    const relay = observeOutcome(
+      pool.run("in-flight", relayDockerArguments(token), Buffer.from("GET / HTTP/1.1\r\n\r\n", "ascii"), 4_000),
+    );
+    const child = spawner.children[0];
+    child.spawnForTest();
+    const { audit, calls } = scriptedAudit([0]);
+    const owner = new RelayResourceOwner({ token, pool, audit, registry, testId: "deterministic" });
+    const attempt = observeOutcome(owner.cleanup());
+    await flushRelayTasks();
+    requireCondition(child.signals.join(",") === "SIGTERM", "Cleanup did not stop the in-flight host child.");
+    clock.advance(RELAY_HOST_KILL_GRACE_MS);
+    clock.advance(RELAY_HOST_CLOSE_TIMEOUT_MS);
+    requireCleanupFailure(await attempt, "host-close");
+    requireProcessFailure(await relay, "stopped");
+    const auditsBeforeRetry: number = calls.length;
+    requireCondition(
+      owner.state() === "failed" &&
+        pool.openChildCount() === 1 &&
+        registry.has(owner) &&
+        auditsBeforeRetry === 0 &&
+        child.signals.join(",") === "SIGTERM,SIGKILL",
+      "A host-close failure lost child ownership or audited too early.",
+    );
+    child.closeForTest(null, "SIGKILL");
+    await owner.cleanup();
+    requireCondition(
+      owner.state() === "clean" && spawner.children.length === 1 && calls.length === 1 && registry.size === 0,
+      "Cleanup retry spawned a business request or skipped the container audit.",
+    );
+  }
+
+  // D: 호출자 자원 정리 실패도 failed로 남고 같은 owner로 재시도한다.
+  {
+    const registry: RelayCleanupRegistry = new Map();
+    const pool = new RelayProcessPool(createFakeRelaySpawner().spawn, new ManualRelayClock());
+    const { audit, calls } = scriptedAudit([0]);
+    let remainingFailures = 1;
+    const owner = new RelayResourceOwner({
+      token,
+      pool,
+      audit,
+      registry,
+      testId: "deterministic",
+      releaseCallers: async () => {
+        if (remainingFailures > 0) {
+          remainingFailures -= 1;
+          throw new RelayCleanupError("handlers");
+        }
+      },
+    });
+    requireCleanupFailure(await observeOutcome(owner.cleanup()), "handlers");
+    const auditsAfterHandlerFailure: number = calls.length;
+    requireCondition(
+      owner.state() === "failed" && auditsAfterHandlerFailure === 0 && registry.has(owner),
+      "A handler cleanup failure was hidden.",
+    );
+    await owner.cleanup();
+    requireCondition(owner.state() === "clean" && calls.length === 1 && registry.size === 0, "A handler cleanup failure could not be retried.");
+  }
+}
+
+/** 설치된 route handler의 결정적 계약. fake page·route·child만 주입한다. */
+async function verifyBackendRelayRouteLifecycle(): Promise<void> {
+  const credentialSecret = "deterministic-route-secret";
+  const okBody = '{"content":[]}';
+  const createHarness = async (
+    extra: (clock: ManualRelayClock) => Partial<RelayOptions> = () => ({}),
+  ) => {
+    const spawner = createFakeRelaySpawner();
+    const clock = new ManualRelayClock();
+    const page = new FakeBackendRelayPage();
+    const registry: RelayCleanupRegistry = new Map();
+    const audits: string[] = [];
+    const relay = await installBackendRelay(page.asPage(), {
+      spawnChild: spawner.spawn,
+      clock,
+      registry,
+      testId: "deterministic",
+      markerAudit: () => async (token) => {
+        audits.push(String(token));
+        return 0;
+      },
+      ...extra(clock),
+    });
+    return { spawner, clock, page, registry, relay, audits };
   };
-  Object.defineProperties(observations, {
-    dispose: { value: dispose },
-    pendingHandlerCount: { value: () => activeHandlers.size },
-    listenerCount: { value: () => (closeListenerActive ? 1 : 0) },
-    isDisposed: { value: () => disposed },
-    barrierArrivalCountAtFirstForwarding: {
-      value: () => barrierArrivalCountAtFirstForwarding,
-    },
-    barrierAbortCount: { value: () => barrierAbortCount },
-  });
-  return observations;
+  const routeTo = (method: string, target: string, behavior: FakeRouteActionBehavior = "resolve") =>
+    new FakeBackendRoute(
+      relayCandidate(method, `${BACKEND_ORIGIN}${target}`, `Bearer ${credentialSecret}`),
+      behavior,
+    );
+  const requireClean = async (harness: Awaited<ReturnType<typeof createHarness>>): Promise<void> => {
+    await harness.relay.dispose();
+    requireCondition(
+      harness.relay.cleanupState() === "clean" &&
+        harness.registry.size === 0 &&
+        harness.relay.activeHandlerCount() === 0 &&
+        harness.relay.openProcessCount() === 0 &&
+        harness.clock.pendingTimerCount() === 0,
+      "A deterministic relay did not reach clean teardown.",
+    );
+  };
+
+  // A: 거부 요청은 spawn·observation 없이 abort 한 번으로 끝난다.
+  {
+    const harness = await createHarness();
+    const spawnsBefore = relaySpawnCount;
+    const observationsBefore = relayObservationCount;
+    const refused = routeTo("PATCH", `${CASE_LIST_PATH}/${SYNTHETIC_CASE_ID}/status`);
+    await harness.page.invoke(refused.asRoute());
+    requireCondition(
+      refused.abortCount === 1 &&
+        refused.fulfillCount === 0 &&
+        harness.spawner.children.length === 0 &&
+        harness.relay.length === 0 &&
+        relaySpawnCount === spawnsBefore &&
+        relayObservationCount === observationsBefore,
+      "A refused Backend write spawned, observed or settled more than once.",
+    );
+    await requireClean(harness);
+  }
+
+  // B: 성공은 실제 응답 bytes를 한 번 관찰하고 한 번 fulfill한다.
+  {
+    const harness = await createHarness(() => ({ captureBodyOf: CASE_LIST_PATH }));
+    const success = routeTo("GET", INITIAL_CASE_TARGET);
+    const handling = harness.page.invoke(success.asRoute());
+    await flushRelayTasks();
+    const child = harness.spawner.children[0];
+    requireCondition(
+      child !== undefined &&
+        child.args.every(
+          (argument) => !argument.includes(credentialSecret) && !argument.includes(INITIAL_CASE_TARGET),
+        ) &&
+        child.stdin.writes[0].includes(Buffer.from(`Authorization: Bearer ${credentialSecret}\r\n`, "ascii")),
+      "The installed relay did not keep the request on stdin.",
+    );
+    child.spawnForTest();
+    child.writeForTest("stdout", httpResponseBytes(200, okBody));
+    child.closeForTest(0);
+    await handling;
+    requireCondition(
+      success.fulfillCount === 1 &&
+        success.abortCount === 0 &&
+        success.fulfilledStatus === 200 &&
+        success.fulfilledBody === okBody &&
+        harness.relay.length === 1 &&
+        harness.relay[0].target === INITIAL_CASE_TARGET &&
+        harness.relay[0].body === okBody &&
+        harness.relay.relayFailureCount() === 0,
+      "A successful relay was not observed and fulfilled exactly once.",
+    );
+    await requireClean(harness);
+  }
+
+  // C: process 실패와 malformed 응답은 abort 한 번이며, 거부된 route action은 성공으로 보지 않는다.
+  for (const failure of ["non-zero-exit", "malformed-response", "action-rejected"] as const) {
+    const harness = await createHarness();
+    const route = routeTo("GET", INITIAL_CASE_TARGET, failure === "action-rejected" ? "reject" : "resolve");
+    const handling = harness.page.invoke(route.asRoute());
+    await flushRelayTasks();
+    const child = harness.spawner.children[0];
+    child.spawnForTest();
+    child.writeForTest(
+      "stdout",
+      failure === "malformed-response"
+        ? "HTTP/1.1 200 X\r\nContent-Length: 2\r\n\r\nraw-response-secret"
+        : httpResponseBytes(200, okBody),
+    );
+    child.closeForTest(failure === "non-zero-exit" ? 7 : 0);
+    await handling;
+    const rejectedAction = failure === "action-rejected";
+    requireCondition(
+      route.fulfillCount === (rejectedAction ? 1 : 0) &&
+        route.abortCount === (rejectedAction ? 0 : 1) &&
+        harness.relay.length === (rejectedAction ? 1 : 0) &&
+        harness.relay.routeActionFailureCount() === (rejectedAction ? 1 : 0) &&
+        harness.relay.relayFailureCount() === (rejectedAction ? 0 : 1),
+      `The ${failure} relay path did not settle its route exactly once.`,
+    );
+    await requireClean(harness);
+  }
+
+  // D: request deadline에 TERM을 요청하고 production 5초 전에 abort하며, 늦은 결과는 무시한다.
+  {
+    const harness = await createHarness();
+    const slow = routeTo("GET", INITIAL_CASE_TARGET);
+    const handling = harness.page.invoke(slow.asRoute());
+    await flushRelayTasks();
+    const child = harness.spawner.children[0];
+    child.spawnForTest();
+    harness.clock.advance(RELAY_REQUEST_DEADLINE_MS - 1);
+    await flushRelayTasks();
+    const abortsBeforeDeadline: number = slow.abortCount;
+    const signalsBeforeDeadline: number = child.signals.length;
+    requireCondition(
+      abortsBeforeDeadline === 0 && signalsBeforeDeadline === 0,
+      "A relay route ended before its request deadline.",
+    );
+    harness.clock.advance(1);
+    await flushRelayTasks();
+    // deadline이 무시되면 handler가 끝나지 않으므로 기다리기 전에 abort부터 확인한다.
+    const abortsAtDeadline: number = slow.abortCount;
+    requireCondition(abortsAtDeadline === 1, "The request deadline did not abort the route.");
+    await handling;
+    requireCondition(
+      slow.abortCount === 1 &&
+        slow.fulfillCount === 0 &&
+        child.signals.join(",") === "SIGTERM" &&
+        harness.clock.now() < PRODUCTION_AUTHENTICATED_REQUEST_TIMEOUT_MS &&
+        harness.relay.openProcessCount() === 1,
+      "The request deadline did not abort before production timeout while keeping host ownership.",
+    );
+    child.writeForTest("stdout", httpResponseBytes(200, okBody));
+    child.closeForTest(0);
+    await flushRelayTasks();
+    requireCondition(
+      slow.fulfillCount === 0 && slow.abortCount === 1 && harness.relay.length === 0 && harness.relay.openProcessCount() === 0,
+      "A late relay result reached the browser.",
+    );
+    await requireClean(harness);
+  }
+
+  // E: 멈춘 route action은 상한 뒤 handler를 끝내지만 성공으로 세지 않는다.
+  {
+    const harness = await createHarness();
+    const stalled = routeTo("GET", INITIAL_CASE_TARGET, "stall");
+    const handling = harness.page.invoke(stalled.asRoute());
+    await flushRelayTasks();
+    const child = harness.spawner.children[0];
+    child.spawnForTest();
+    child.writeForTest("stdout", httpResponseBytes(200, okBody));
+    child.closeForTest(0);
+    await flushRelayTasks();
+    requireCondition(stalled.fulfillCount === 1 && harness.relay.activeHandlerCount() === 1, "A stalled fulfill was not pending.");
+    harness.clock.advance(RELAY_ROUTE_ACTION_TIMEOUT_MS);
+    await handling;
+    requireCondition(
+      harness.relay.routeActionStallCount() === 1 && stalled.abortCount === 0 && harness.relay.activeHandlerCount() === 0,
+      "A stalled route action was treated as settled or retried.",
+    );
+    await requireClean(harness);
+  }
+
+  // F: 이미 닫힌 page에는 terminal action을 보내지 않는다.
+  {
+    const harness = await createHarness();
+    const closing = routeTo("GET", INITIAL_CASE_TARGET);
+    const handling = harness.page.invoke(closing.asRoute());
+    await flushRelayTasks();
+    const child = harness.spawner.children[0];
+    child.spawnForTest();
+    harness.page.closeForTest();
+    child.writeForTest("stdout", httpResponseBytes(200, okBody));
+    child.closeForTest(0);
+    await handling;
+    requireCondition(closing.fulfillCount === 0 && closing.abortCount === 0, "A closed page received a route action.");
+    await requireClean(harness);
+    requireCondition(harness.page.routeRemovalCount === 0, "A closed page was unrouted.");
+  }
+
+  // G: dispose는 route를 제거하고 in-flight host child를 멈춘 뒤 handler 종결과 close를 기다린다.
+  {
+    const harness = await createHarness();
+    const pending = routeTo("GET", INITIAL_CASE_TARGET);
+    const handling = harness.page.invoke(pending.asRoute());
+    await flushRelayTasks();
+    const child = harness.spawner.children[0];
+    child.spawnForTest();
+    const disposal = observeOutcome(harness.relay.dispose());
+    await flushRelayTasks();
+    requireCondition(
+      harness.relay.cleanupState() === "cleaning" &&
+        harness.page.routeRemovalCount === 1 &&
+        child.signals.join(",") === "SIGTERM" &&
+        pending.abortCount === 1,
+      "Dispose did not unroute, stop the host child and abort the in-flight route.",
+    );
+    child.closeForTest(null, "SIGTERM");
+    await handling;
+    const disposed = await disposal;
+    requireCondition(
+      disposed.status === "fulfilled" &&
+        pending.fulfillCount === 0 &&
+        harness.relay.cleanupState() === "clean" &&
+        harness.audits.length === 1 &&
+        harness.registry.size === 0,
+      "Dispose did not reach clean after the host child closed.",
+    );
+    const late = routeTo("GET", INITIAL_CASE_TARGET);
+    await harness.page.invokeAfterUnroute(late.asRoute());
+    requireCondition(
+      late.abortCount === 1 && late.fulfillCount === 0 && harness.spawner.children.length === 1,
+      "A route arriving after dispose spawned a relay.",
+    );
+    await harness.relay.dispose();
+    requireCondition(harness.audits.length === 1, "A clean relay audited again.");
+  }
+
+  // H: 세 barrier read는 첫 close 전에 모두 spawn되고, detail은 먼저 응답해도 마지막에 전달된다.
+  {
+    const targets = [CASE_DETAIL_TARGET, INITIAL_CASE_NOTES_TARGET, INITIAL_CASE_AUDIT_TARGET];
+    const harness = await createHarness((clock) => ({
+      parallelStartBarrier: new ParallelStartBarrier(
+        targets.map((target) => ({ method: "GET", target })),
+        PARALLEL_START_TIMEOUT_MS,
+        clock,
+      ),
+      deliverLast: CASE_DETAIL_TARGET,
+    }));
+    const routes = targets.map((target) => routeTo("GET", target));
+    const handlings = routes.map((route) => harness.page.invoke(route.asRoute()));
+    await flushRelayTasks();
+    const childFor = (target: string): FakeRelayChild => {
+      const found = harness.spawner.children.find((child) =>
+        child.stdin.writes[0]?.toString("latin1").startsWith(`GET ${target} HTTP/1.1\r\n`),
+      );
+      requireCondition(found !== undefined, "A barrier read did not spawn a relay process.");
+      return found;
+    };
+    requireCondition(harness.spawner.children.length === 3, "The released barrier did not start three relays.");
+    for (const child of harness.spawner.children) {
+      child.spawnForTest();
+    }
+    const detailChild = childFor(CASE_DETAIL_TARGET);
+    detailChild.writeForTest("stdout", httpResponseBytes(404, "{}"));
+    detailChild.closeForTest(0);
+    await flushRelayTasks();
+    requireCondition(routes[0].fulfillCount === 0, "Detail was delivered before notes and audit.");
+    for (const target of [INITIAL_CASE_NOTES_TARGET, INITIAL_CASE_AUDIT_TARGET]) {
+      const child = childFor(target);
+      child.writeForTest("stdout", httpResponseBytes(404, "{}"));
+      child.closeForTest(0);
+    }
+    await Promise.all(handlings);
+    const order = harness.relay.parallelFulfillmentOrder();
+    const events = harness.relay.processEvents();
+    const firstClose = events.findIndex(({ kind }) => kind === "close");
+    requireCondition(
+      order.length === 3 &&
+        new Set(order).size === 3 &&
+        order[2] === CASE_DETAIL_TARGET &&
+        routes.every((route) => route.fulfillCount === 1 && route.abortCount === 0) &&
+        firstClose === 3 &&
+        events.slice(0, 3).every(({ kind }) => kind === "spawn") &&
+        harness.relay.barrierArrivalCountAtFirstForwarding() === 3,
+      "The three barrier reads were not concurrent or detail was not delivered last.",
+    );
+    await requireClean(harness);
+  }
+
+  // I: 세 번째 read가 오지 않으면 도착한 route만 barrier 상한 뒤 abort하고 spawn하지 않는다.
+  {
+    const targets = [CASE_DETAIL_TARGET, INITIAL_CASE_NOTES_TARGET, INITIAL_CASE_AUDIT_TARGET];
+    const harness = await createHarness((clock) => ({
+      parallelStartBarrier: new ParallelStartBarrier(
+        targets.map((target) => ({ method: "GET", target })),
+        PARALLEL_START_TIMEOUT_MS,
+        clock,
+      ),
+    }));
+    const routes = targets.slice(0, 2).map((target) => routeTo("GET", target));
+    const handlings = routes.map((route) => harness.page.invoke(route.asRoute()));
+    await flushRelayTasks();
+    harness.clock.advance(PARALLEL_START_TIMEOUT_MS);
+    await Promise.all(handlings);
+    requireCondition(
+      routes.every((route) => route.abortCount === 1 && route.fulfillCount === 0) &&
+        harness.relay.barrierAbortCount() === 2 &&
+        harness.spawner.children.length === 0,
+      "A timed-out barrier forwarded a read or settled it more than once.",
+    );
+    await requireClean(harness);
+  }
+}
+
+/**
+ * TERM을 무시하는 두 descendant를 가진 process group. GNU timeout의 group KILL로만 끝나며
+ * marker 격리와 wait-only cleanup을 실제 Docker에서 확인하는 데만 쓴다. token은 stdin으로 받는다.
+ */
+const ACTUAL_TERM_IGNORING_GROUP_SCRIPT = [
+  "set -euo pipefail",
+  "IFS= read -r relay_token",
+  `[[ $relay_token =~ ^${CANONICAL_UUID_V4_PATTERN}$ ]] || exit 70`,
+  `readonly relay_marker="${RELAY_MARKER_PREFIX}\${relay_token}"`,
+  `exec -a "$relay_marker" timeout --signal=TERM --kill-after=0.5s 9s bash -c 'trap "" TERM; (exec -a "$1" sleep 30) & (exec -a "$1" sleep 30) & wait' -- "$relay_marker"`,
+].join("\n");
+
+const ACTUAL_TERM_IGNORING_GROUP_ARGUMENTS: readonly string[] = [
+  "exec",
+  "-i",
+  BACKEND_CONTAINER_NAME,
+  "bash",
+  "-c",
+  ACTUAL_TERM_IGNORING_GROUP_SCRIPT,
+];
+
+/**
+ * 실제 Docker 증거: marker A·B 격리, wait-only process-zero, 설치된 handler를 통한 Backend 왕복.
+ *
+ * A는 production relay script에 끝나지 않은 요청을 보내 reader가 Backend 응답을 기다리게 한다. B는
+ * TERM을 무시하는 descendant group이다. 두 owner는 공통 registry에 등록되므로 어느 assertion에서
+ * 실패해도 여기의 cleanup과 afterEach의 재시도가 같은 owner를 정리한다.
+ */
+async function verifyActualRelayMarkerIsolationAndRoundTrip(): Promise<void> {
+  await verifyRelayRuntime();
+  const testId = currentRelayTestId;
+  requireCondition(testId !== null, "The actual relay verification had no owning test.");
+  const cleanups: (() => Promise<void>)[] = [];
+  const hostOutcomes: Promise<unknown>[] = [];
+  let primary: unknown = null;
+  try {
+    const observerPool = new RelayProcessPool();
+    cleanups.push(async () => {
+      observerPool.stopAll();
+      await observerPool.waitForClose(RELAY_HOST_CLOSE_TIMEOUT_MS);
+    });
+    const observe = createDockerMarkerAudit(observerPool);
+    const poolA = new RelayProcessPool();
+    const ownerA = new RelayResourceOwner({
+      token: randomUUID(),
+      pool: poolA,
+      audit: createDockerMarkerAudit(poolA),
+      registry: relayCleanupRegistry,
+      testId,
+    });
+    cleanups.push(() => ownerA.cleanup());
+    const poolB = new RelayProcessPool();
+    const ownerB = new RelayResourceOwner({
+      token: randomUUID(),
+      pool: poolB,
+      audit: createDockerMarkerAudit(poolB),
+      registry: relayCleanupRegistry,
+      testId,
+    });
+    cleanups.push(() => ownerB.cleanup());
+
+    const unfinished = buildRelayRequestBytes(
+      relayCandidate("GET", `${BACKEND_ORIGIN}${INITIAL_CASE_TARGET}`),
+    );
+    requireCondition(
+      unfinished.bytes.subarray(unfinished.bytes.byteLength - 4).toString("latin1") === "\r\n\r\n",
+      "The unfinished relay request was not built from a complete request.",
+    );
+    hostOutcomes.push(
+      observeOutcome(
+        poolA.run(
+          "actual-unfinished-relay",
+          relayDockerArguments(ownerA.token),
+          unfinished.bytes.subarray(0, unfinished.bytes.byteLength - 2),
+          CONTAINER_AUDIT_HOST_TIMEOUT_MS,
+        ),
+      ),
+    );
+    hostOutcomes.push(
+      observeOutcome(
+        poolB.run(
+          "actual-term-ignoring-group",
+          ACTUAL_TERM_IGNORING_GROUP_ARGUMENTS,
+          Buffer.from(`${ownerB.token}\n`, "ascii"),
+          CONTAINER_AUDIT_HOST_TIMEOUT_MS,
+        ),
+      ),
+    );
+    requireCondition(
+      (await observe(ownerA.token, "until-present", CONTAINER_AUDIT_POLL_SECONDS)) > 0,
+      "The unfinished relay marker was not present in the container.",
+    );
+    requireCondition(
+      (await observe(ownerB.token, "until-present", CONTAINER_AUDIT_POLL_SECONDS)) > 0,
+      "The TERM-ignoring relay group was not present in the container.",
+    );
+
+    // A cleanup은 host CLI만 멈추고 container 안의 A가 GNU timeout으로 끝나기를 기다린다.
+    await ownerA.cleanup();
+    requireCondition(
+      ownerA.state() === "clean" && poolA.openChildCount() === 0,
+      "Marker A did not reach clean host and container process-zero.",
+    );
+    requireCondition(
+      (await observe(ownerA.token, "until-zero", "0")) === 0,
+      "Marker A remained after its clean state.",
+    );
+    requireCondition(
+      (await observe(ownerB.token, "until-zero", "0")) > 0,
+      "Cleaning marker A ended marker B or reported it as zero.",
+    );
+    // B는 TERM을 무시하므로 GNU timeout의 process group KILL 이후에만 0이 된다.
+    await ownerB.cleanup();
+    requireCondition(
+      ownerB.state() === "clean" &&
+        poolB.openChildCount() === 0 &&
+        (await observe(ownerB.token, "until-zero", "0")) === 0,
+      "Marker B did not reach process-zero after its TERM-ignoring group was killed.",
+    );
+
+    // 실제 installed handler를 통한 Backend 왕복. credential 없는 approved read는 실제 401이다.
+    const page = new FakeBackendRelayPage();
+    const relay = await installBackendRelay(page.asPage());
+    cleanups.push(() => relay.dispose());
+    const unauthenticated = new FakeBackendRoute(
+      relayCandidate("GET", `${BACKEND_ORIGIN}${INITIAL_CASE_TARGET}`),
+    );
+    await page.invoke(unauthenticated.asRoute());
+    requireCondition(
+      unauthenticated.fulfillCount === 1 &&
+        unauthenticated.abortCount === 0 &&
+        unauthenticated.fulfilledStatus === 401 &&
+        relay.length === 1 &&
+        relay[0].status === 401 &&
+        relay[0].target === INITIAL_CASE_TARGET &&
+        relay.relayFailureCount() === 0,
+      "The installed relay handler did not complete a real Backend 401 round trip.",
+    );
+    await relay.dispose();
+    requireCondition(
+      relay.cleanupState() === "clean" &&
+        relay.openProcessCount() === 0 &&
+        relay.activeHandlerCount() === 0 &&
+        page.routeRemovalCount === 1,
+      "The installed relay did not reach host and container process-zero.",
+    );
+    requireCondition(
+      (await observe(null, "until-zero", "0")) === 0,
+      "Backend relay markers remained after the actual verification.",
+    );
+  } catch (error: unknown) {
+    primary = error;
+  }
+  const cleanupOutcomes = await Promise.allSettled(cleanups.map((cleanup) => cleanup()));
+  await Promise.allSettled(hostOutcomes);
+  const cleanupFailed = cleanupOutcomes.some(({ status }) => status === "rejected");
+  if (primary !== null && cleanupFailed) {
+    throw new AggregateError(
+      [primary, new Error("The actual Backend relay cleanup failed.")],
+      "The actual Backend relay verification and its cleanup failed.",
+    );
+  }
+  if (primary !== null) {
+    throw primary;
+  }
+  requireCondition(!cleanupFailed, "The actual Backend relay cleanup failed.");
 }
 
 async function browserContainsAny(page: Page, values: readonly string[]): Promise<boolean> {
@@ -1908,8 +4641,46 @@ async function fetchTokenResponse(route: Route): Promise<{
   return { status: result.status, body: parsed as Record<string, unknown> };
 }
 
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ page }, testInfo) => {
+  // 이전 test의 relay가 process-zero를 확인하지 못했다면 같은 worker에서 새 test를 시작하지 않는다.
+  // 새 worker는 relay 설치 전의 읽기 전용 suite marker audit가 같은 확인을 맡는다.
+  requireCondition(
+    relayCleanupRegistry.size === 0,
+    "A previous test still owns Backend relay resources.",
+  );
+  currentRelayTestId = testInfo.testId;
+  relayRouteStallReaders.length = 0;
   await installSessionPublicationProbe(page);
+});
+
+test.afterEach(async ({ page }, testInfo) => {
+  void page;
+  const owned = [...relayCleanupRegistry]
+    .filter(([, testId]) => testId === testInfo.testId)
+    .map(([owner]) => owner);
+  // active는 첫 attempt, failed는 bounded 재시도이다. clean인 owner는 이미 registry에 없다.
+  const outcomes = await Promise.allSettled(owned.map((owner) => owner.cleanup()));
+  const stalls = relayRouteStallReaders.reduce((sum, read) => sum + read(), 0);
+  relayRouteStallReaders.length = 0;
+  currentRelayTestId = null;
+  const failedStages = [
+    ...new Set(
+      outcomes.flatMap((outcome) =>
+        outcome.status === "rejected"
+          ? [outcome.reason instanceof RelayCleanupError ? outcome.reason.stage : "internal"]
+          : [],
+      ),
+    ),
+  ];
+  requireCondition(
+    failedStages.length === 0,
+    `The Backend relay cleanup did not reach process-zero (${failedStages.join(",")}).`,
+  );
+  requireCondition(stalls === 0, "A Backend relay route action did not settle within its bound.");
+  requireCondition(
+    relayCleanupRegistry.size === 0,
+    "The Backend relay registry retained cleanup owned by another test.",
+  );
 });
 
 /**
@@ -1921,12 +4692,17 @@ test.beforeEach(async ({ page }) => {
  * refusal happens in `resolveRelayTarget`, before a process, a socket or an
  * observation exists.
  */
-function relayCandidate(method: string, url: string): PlaywrightRequest {
+function relayCandidate(
+  method: string,
+  url: string,
+  authorization = "",
+  body: string | null = null,
+): PlaywrightRequest {
   return {
     method: () => method,
     url: () => url,
-    headers: () => ({}),
-    postData: () => null,
+    headers: () => (authorization === "" ? {} : { authorization }),
+    postData: () => body,
   } as unknown as PlaywrightRequest;
 }
 
@@ -2341,7 +5117,7 @@ function requireUniqueRelayDeclarations(
  *
  * No browser, no Keycloak and no Backend: `relayToBackend` is called directly,
  * which is the only way to observe that a refused request is refused *before*
- * `docker compose exec` is spawned and before `/dev/tcp` is opened. The two
+ * `docker exec` is spawned and before `/dev/tcp` is opened. The two
  * counters are the evidence; a refusal that happened one statement later would
  * leave them moved.
  *
@@ -2351,7 +5127,27 @@ function requireUniqueRelayDeclarations(
  * filter value is finally written down.
  */
 test("the Backend relay refuses a write, a foreign filter and a non-canonical query", async () => {
-  await verifyParallelStartBarrierLifecycle();
+  verifyRelayByteFramingAndParser();
+  const unhandledRejections: unknown[] = [];
+  const onUnhandledRejection = (reason: unknown): void => {
+    unhandledRejections.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandledRejection);
+  try {
+    await verifyParallelStartBarrierLifecycle();
+    await verifyRelayProcessPoolLifecycle();
+    await verifyContainerMarkerAuditContract();
+    await verifyRelayCleanupOwnerLifecycle();
+    await verifyBackendRelayRouteLifecycle();
+    await test.step(
+      "actual marker isolation and relay round trip",
+      verifyActualRelayMarkerIsolationAndRoundTrip,
+    );
+    await flushRelayTasks();
+  } finally {
+    process.off("unhandledRejection", onUnhandledRejection);
+  }
+  requireCondition(unhandledRejections.length === 0, "A relay promise rejection was unhandled.");
   requireCondition(REFUSED_RELAY_REQUESTS.length === 64, "The relay query-refusal matrix drifted.");
   requireUniqueRelayDeclarations(REFUSED_RELAY_REQUESTS, "relay query-refusal");
   const spawnsBefore = relaySpawnCount;
@@ -2360,7 +5156,7 @@ test("the Backend relay refuses a write, a foreign filter and a non-canonical qu
   for (const refused of REFUSED_RELAY_REQUESTS) {
     let message: string | null = null;
     try {
-      relayToBackend(relayCandidate(refused.method, refused.url));
+      void relayToBackend(relayCandidate(refused.method, refused.url));
     } catch (error: unknown) {
       message = error instanceof Error ? error.message : "unknown";
     }
@@ -2841,7 +5637,7 @@ const REFUSED_UNAPPROVED_ENDPOINTS: readonly {
  * says a relayed query is bounded; this one says a relayed *address* is, with a
  * query or without one. Both are asserted through `relayToBackend` rather than
  * through the resolver alone, because "refused" here has to mean refused before
- * `docker compose exec` is spawned and before `/dev/tcp` is opened, and the two
+ * `docker exec` is spawned and before `/dev/tcp` is opened, and the two
  * counters are the only way to observe that difference.
  */
 test("the Backend relay refuses every endpoint it was not approved to reach", () => {
@@ -2914,6 +5710,17 @@ test("the Backend relay refuses every endpoint it was not approved to reach", ()
  * re-encode or reorder it on the way.
  */
 test("the Backend relay still admits the real reads and the one declared write probe", () => {
+  requireCondition(
+    RELAYABLE_READ_PATHS.length === 6 &&
+      new Set(RELAYABLE_READ_PATHS.map(({ name }) => name)).size === 6,
+    "The six read relay descriptors were not unique.",
+  );
+  requireCondition(
+    RELAYABLE_WRITE_PROBES.length === 1 &&
+      RELAYABLE_WRITE_PROBES[0].method === "POST" &&
+      RELAYABLE_WRITE_PROBES[0].name === "case-resolution-probe",
+    "The one write-probe descriptor drifted.",
+  );
   const spawnsBefore = relaySpawnCount;
   const admitted: readonly {
     readonly method: string;
@@ -3209,6 +6016,16 @@ for (const idTokenNonceMutation of ["missing", "mismatch"] as const) {
     const tokenGrantTypes: string[] = [];
     const backendRequests: string[] = [];
     const consoleMessages: string[] = [];
+    let resolveTokenMutation: () => void = () => undefined;
+    let rejectTokenMutation: (error: Error) => void = () => undefined;
+    const tokenMutationCompleted = new Promise<void>((resolvePromise, rejectPromise) => {
+      resolveTokenMutation = resolvePromise;
+      rejectTokenMutation = rejectPromise;
+    });
+    // Observe the rejection at creation time. The awaited original promise below
+    // still fails the test, while a route failure that races with the click can
+    // never become an unhandled rejection.
+    void tokenMutationCompleted.catch(() => undefined);
     page.on("console", (message) => consoleMessages.push(message.text()));
     page.on("request", (request) => {
       if (request.url() === TOKEN_URL && request.method() === "POST") {
@@ -3219,25 +6036,37 @@ for (const idTokenNonceMutation of ["missing", "mismatch"] as const) {
       }
     });
     await page.route((url) => url.toString() === TOKEN_URL, async (route) => {
-      const upstream = await fetchTokenResponse(route);
-      const fields = upstream.body;
-      requireNonBlankString(fields.id_token, "The ID token was missing.");
-      const idToken = mutateJwtPayload(fields.id_token, (payload) => {
-        if (idTokenNonceMutation === "missing") {
-          delete payload.nonce;
-        } else {
-          payload.nonce = sentinel;
-        }
-      });
-      await route.fulfill({
-        status: upstream.status,
-        contentType: "application/json",
-        body: JSON.stringify({ ...fields, id_token: idToken }),
-      });
+      try {
+        const upstream = await fetchTokenResponse(route);
+        const fields = upstream.body;
+        requireNonBlankString(fields.id_token, "The ID token was missing.");
+        const idToken = mutateJwtPayload(fields.id_token, (payload) => {
+          if (idTokenNonceMutation === "missing") {
+            delete payload.nonce;
+          } else {
+            payload.nonce = sentinel;
+          }
+        });
+        await route.fulfill({
+          status: upstream.status,
+          contentType: "application/json",
+          body: JSON.stringify({ ...fields, id_token: idToken }),
+        });
+        resolveTokenMutation();
+      } catch {
+        const safeError = new Error("The ID token mutation route failed.");
+        rejectTokenMutation(safeError);
+        throw safeError;
+      }
     });
 
     await beginLogin(page, password);
     await submitLogin(page);
+    // `click()` may finish once callback navigation commits while the async
+    // token route is still forwarding. Waiting on the concrete route event (not
+    // a longer assertion timeout) keeps the existing five-second UI deadline
+    // focused on application settlement after the mutated response is delivered.
+    await tokenMutationCompleted;
     await expectAuthenticationFailure(page);
 
     requireCondition(
@@ -3738,7 +6567,14 @@ test("a real USER reaches the transaction console over the real Backend", async 
   const navigationBeforeApply = await navigationState(page);
   await page.getByLabel("Processing status").selectOption("HELD");
   await page.getByLabel("Customer reference").fill(E2E_CUSTOMER_REF);
+  const appliedResponse = page.waitForResponse(
+    (response) =>
+      response.url() === `${BACKEND_ORIGIN}${APPLIED_TRANSACTION_TARGET}` &&
+      response.request().method() === "GET",
+    { timeout: BACKEND_OBSERVATION_WAIT_TIMEOUT_MS },
+  );
   await page.getByRole("button", { name: "Apply filters" }).click();
+  await appliedResponse;
   await expect(results).not.toContainText("Applying filters", { timeout: 15_000 });
   const filtered = backend.filter(
     (entry) => entry.method === "GET" && entry.pathname === TRANSACTION_LIST_PATH,
@@ -3862,6 +6698,11 @@ test("a real USER opens a transaction detail address and meets the real Backend 
 
   // One authorized request to the real detail endpoint, answered by Spring Boot.
   await expect(page.getByRole("alert")).toBeVisible({ timeout: 15_000 });
+  await expect
+    .poll(() => detailRequests().length, {
+      timeout: BACKEND_OBSERVATION_WAIT_TIMEOUT_MS,
+    })
+    .toBe(1);
   const requested = detailRequests();
   requireCondition(requested.length === 1, "The transaction detail was not requested exactly once.");
   requireCondition(requested[0].target === detailPath, "The detail request carried a query string.");
@@ -4088,7 +6929,14 @@ test("a real USER reaches the case console over the real Backend", async ({ page
   const navigationBeforeApply = await navigationState(page);
   await page.getByLabel("Case status").selectOption("OPEN");
   await page.getByLabel("Assignee reference").fill(E2E_ASSIGNEE_REF);
+  const appliedResponse = page.waitForResponse(
+    (response) =>
+      response.url() === `${BACKEND_ORIGIN}${APPLIED_CASE_TARGET}` &&
+      response.request().method() === "GET",
+    { timeout: BACKEND_OBSERVATION_WAIT_TIMEOUT_MS },
+  );
   await page.getByRole("button", { name: "Apply filters" }).click();
+  await appliedResponse;
   await expect(results).not.toContainText("Applying filters", { timeout: 15_000 });
   const filtered = backend.filter(
     (entry) => entry.method === "GET" && entry.pathname === CASE_LIST_PATH,
@@ -4191,11 +7039,13 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
     ],
     PARALLEL_START_TIMEOUT_MS,
   );
+  // relay 자원은 공통 registry가 소유한다. 중간 assertion이 실패해도 afterEach가 같은 owner를 정리하고
+  // 두 실패를 모두 보고하므로 finally로 원래 오류를 덮지 않는다.
   const backend = await installBackendRelay(page, {
     captureBodyOf: [CASE_DETAIL_TARGET, CASE_NOTES_TARGET, CASE_AUDIT_TARGET],
     parallelStartBarrier,
+    deliverLast: CASE_DETAIL_TARGET,
   });
-  try {
   const detailRequests = () =>
     backend.filter((entry) => entry.method === "GET" && entry.pathname === CASE_DETAIL_TARGET);
   const auditRequests = () =>
@@ -4219,9 +7069,28 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
   await expect(page.locator("#username")).toBeVisible({ timeout: 30_000 });
   await page.locator("#username").fill(USERNAME);
   await page.locator("#password").fill(password);
-  parallelStartBarrier.start();
-  await submitLogin(page);
-  const tokens = parseTokenResponse(await (await tokenResponsePromise).json());
+  // barrier timer와 no-arrival watchdog 모두 로그인 제출 전에는 시작하지 않는다. relay deadline은
+  // route마다 도착 시점부터 따로 센다.
+  const beforeSubmission = parallelStartBarrier.snapshot();
+  requireCondition(
+    beforeSubmission.state === "pending" &&
+      beforeSubmission.activeTimerCount === 0 &&
+      beforeSubmission.activeArrivalWatchdogTimerCount === 0,
+    "The parallel-start barrier started before login submission.",
+  );
+  const loginSubmission = submitLogin(page);
+  const tokenResponse = await tokenResponsePromise;
+  await loginSubmission;
+  // 로그인 완료 뒤에는 barrier timer가 아니라 별도 no-arrival watchdog만 arm한다. barrier timer는 첫
+  // exact route가 도착할 때만 시작되고 그때 watchdog은 해제된다. 이미 route가 도착했거나 barrier가
+  // 끝났다면 arm은 아무 일도 하지 않는다.
+  parallelStartBarrier.armArrivalWatchdog(PARALLEL_START_ARRIVAL_WATCHDOG_MS);
+  const afterLogin = parallelStartBarrier.snapshot();
+  requireCondition(
+    afterLogin.activeTimerCount === 0 || afterLogin.arrivedTargetCount > 0,
+    "The parallel-start barrier started before its first exact route.",
+  );
+  const tokens = parseTokenResponse(await tokenResponse.json());
   requireTokenClaims(tokens);
 
   // The return route, decided by the allowlist from the validated identifier:
@@ -4239,7 +7108,10 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
   // One authorized request to the real case detail endpoint, answered by
   // Spring Boot.
   await parallelStartBarrier.completion;
-  await expect(page.getByRole("alert")).toBeVisible({ timeout: 15_000 });
+  const caseNotFoundAlert = page.getByRole("alert").filter({ hasText: "Case not found" });
+  await expect(caseNotFoundAlert).toBeVisible({
+    timeout: BACKEND_OBSERVATION_WAIT_TIMEOUT_MS,
+  });
   const releasedBarrier = parallelStartBarrier.snapshot();
   requireCondition(
     releasedBarrier.state === "released" &&
@@ -4251,8 +7123,10 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
     releasedBarrier.completionResolveCount === 1 &&
       releasedBarrier.completionRejectCount === 0 &&
       releasedBarrier.timeoutCallbackCount === 0 &&
+      releasedBarrier.arrivalWatchdogCallbackCount === 0 &&
       releasedBarrier.pendingWaiterCount === 0 &&
       releasedBarrier.activeTimerCount === 0 &&
+      releasedBarrier.activeArrivalWatchdogTimerCount === 0 &&
       releasedBarrier.activeCallbackCount === 0,
     "The released parallel-start barrier retained work or settled more than once.",
   );
@@ -4289,9 +7163,49 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
     auditRequested[0].status === 404,
     "The real case audit request did not return 404.",
   );
+  // 404 확정 직후: Case workflow DOM이 없어야 한다. 이 시점의 Backend 관찰 수를 기록해 뒤의 재검사와 비교한다.
+  await requireNoCaseWorkflowDom(page);
+  const observationsAtNotFound = backend.length;
+  // 응답이 화면에 나타난 뒤에도 Playwright의 fulfill Promise가 늦게 끝날 수 있다. 증거 대기 상한 안에서
+  // handler 종결을 기다린 뒤 순서를 읽으며, production이나 브라우저 deadline은 늘리지 않는다.
+  await expect
+    .poll(() => backend.activeHandlerCount(), { timeout: BACKEND_OBSERVATION_WAIT_TIMEOUT_MS })
+    .toBe(0);
+  const initialTargets = new Set([
+    CASE_DETAIL_TARGET,
+    INITIAL_CASE_NOTES_TARGET,
+    INITIAL_CASE_AUDIT_TARGET,
+  ]);
+  const initialEvents = backend
+    .processEvents()
+    .filter(({ label }) => initialTargets.has(label));
+  const initialStarts = initialEvents.filter(({ kind }) => kind === "spawn");
+  const firstInitialClose = initialEvents.find(({ kind }) => kind === "close");
+  requireCondition(
+    initialStarts.length === 3 &&
+      new Set(initialStarts.map(({ label }) => label)).size === 3 &&
+      firstInitialClose !== undefined &&
+      initialStarts.every(({ sequence }) => sequence < firstInitialClose.sequence),
+    "The three case reads did not start as concurrent relay processes before the first close.",
+  );
+  const parallelFulfillmentOrder = backend.parallelFulfillmentOrder();
+  requireCondition(
+    parallelFulfillmentOrder.length === 3 &&
+      new Set(parallelFulfillmentOrder).size === 3 &&
+      parallelFulfillmentOrder[2] === CASE_DETAIL_TARGET &&
+      parallelFulfillmentOrder.every((target) => initialTargets.has(target)),
+    "The three real Backend responses were not delivered once with detail last.",
+  );
+  requireCondition(
+    backend.relayFailureCount() === 0 &&
+      backend.routeAbortCount() === 0 &&
+      backend.routeActionFailureCount() === 0 &&
+      backend.routeActionStallCount() === 0,
+    "A successful case relay failed, aborted, or did not settle its route action.",
+  );
 
   // The fixed not-found screen, and not one field of a record.
-  await expect(page.getByRole("alert")).toContainText("Case not found");
+  await expect(caseNotFoundAlert).toContainText("Case not found");
   await expect(page.getByRole("main").getByRole("status")).toContainText("No record shown.");
   await expect(page.getByRole("heading", { name: "Investigation notes" })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Audit history" })).toHaveCount(0);
@@ -4317,6 +7231,11 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
   ]) {
     requireCondition(!screenText.includes(forbidden), "The not-found screen disclosed more than it should.");
   }
+  requireCondition(
+    !screenText.toLowerCase().includes("timed out") &&
+      !screenText.toLowerCase().includes("timeout"),
+    "The real Backend 404 was replaced by a timeout alert.",
+  );
 
   // A 404 is not a session verdict: the analyst is still signed in and can
   // still leave the way they came.
@@ -4348,6 +7267,13 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
   requireCondition(detailRequests().length === 1, "The case screen retried or polled on its own.");
   requireCondition(noteRequests().length === 1, "The notes section retried or polled on its own.");
   requireCondition(auditRequests().length === 1, "The audit section retried or polled on its own.");
+  // late-settlement 관찰 뒤에도 workflow DOM은 0개이고, 두 검사 사이 Backend 요청은 하나도 늘지 않았다.
+  await requireNoCaseWorkflowDom(page);
+  requireCondition(
+    backend.length === observationsAtNotFound &&
+      backend.filter((entry) => entry.method !== "GET").length === 0,
+    "The not-found case screen made another Backend request between the workflow DOM checks.",
+  );
 
   // The address bar holds the case identifier and nothing else, and the
   // credentials reached neither the document, the URL, Web Storage nor the
@@ -4466,6 +7392,16 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
     "Returning to cases sent a business mutation.",
   );
   await expect(page.getByRole("heading", { name: "Cases", level: 2 })).toBeVisible();
+  const returnedResults = page.getByRole("main").getByRole("status");
+  await expect(returnedResults).not.toContainText("Loading cases", {
+    timeout: BACKEND_OBSERVATION_WAIT_TIMEOUT_MS,
+  });
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect
+    .poll(() => backend.activeHandlerCount(), {
+      timeout: BACKEND_OBSERVATION_WAIT_TIMEOUT_MS,
+    })
+    .toBe(0);
   requireCondition(
     !(await documentOverflowsHorizontally(page)),
     "The case list scrolled horizontally after returning from the detail screen.",
@@ -4478,23 +7414,92 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
       "A credential reached the browser console after returning to cases.",
     );
   }
-  } finally {
-    await backend.dispose();
-    const disposedBarrier = parallelStartBarrier.snapshot();
+  const relayStarts = backend
+    .processEvents()
+    .filter(({ kind, label }) => kind === "spawn" && label !== CONTAINER_MARKER_AUDIT_LABEL);
+  for (const target of [
+    CASE_DETAIL_TARGET,
+    INITIAL_CASE_NOTES_TARGET,
+    INITIAL_CASE_AUDIT_TARGET,
+    INITIAL_CASE_TARGET,
+  ]) {
     requireCondition(
-      backend.isDisposed() &&
-        backend.pendingHandlerCount() === 0 &&
-        backend.listenerCount() === 0 &&
-        disposedBarrier.state === "disposed" &&
-        disposedBarrier.expectedTargetCount === 0 &&
-        disposedBarrier.arrivedTargetCount === 0 &&
-        disposedBarrier.pendingWaiterCount === 0 &&
-        disposedBarrier.activeTimerCount === 0 &&
-        disposedBarrier.activeCallbackCount === 0,
-      "The case relay or parallel-start barrier retained cleanup work.",
+      relayStarts.filter(({ label }) => label === target).length === 1,
+      "A case relay target did not start exactly one relay process.",
     );
   }
+  requireCondition(
+    relayStarts.length === 4 &&
+      backend.relayFailureCount() === 0 &&
+      backend.routeAbortCount() === 0 &&
+      backend.routeActionFailureCount() === 0 &&
+      backend.routeActionStallCount() === 0,
+    "An unexpected Backend relay started, failed or did not settle before teardown.",
+  );
+
+  // 테스트 본문이 teardown 완료를 직접 기다려 host child와 container marker의 process-zero를 확인한다.
+  // 실패하면 이 오류와 afterEach의 재시도 결과가 함께 보고되며, 앞선 assertion 오류를 덮지 않는다.
+  await backend.dispose();
+  requireCondition(
+    backend.cleanupState() === "clean" &&
+      backend.openProcessCount() === 0 &&
+      backend.activeHandlerCount() === 0,
+    "The case relay did not reach host and container process-zero.",
+  );
+  requireCondition(
+    backend
+      .processEvents()
+      .filter(({ kind, label }) => kind === "spawn" && label !== CONTAINER_MARKER_AUDIT_LABEL)
+      .length === 4,
+    "Teardown admitted another Backend relay request.",
+  );
+  const disposedBarrier = parallelStartBarrier.snapshot();
+  requireCondition(
+    disposedBarrier.state === "disposed" &&
+      disposedBarrier.expectedTargetCount === 0 &&
+      disposedBarrier.arrivedTargetCount === 0 &&
+      disposedBarrier.pendingWaiterCount === 0 &&
+      disposedBarrier.activeTimerCount === 0 &&
+      disposedBarrier.activeCallbackCount === 0,
+    "The parallel-start barrier retained cleanup work.",
+  );
 });
+
+/**
+ * 실제 404 화면에 Case workflow DOM이 하나도 없는지 production accessible name으로 확인한다.
+ *
+ * class 이름이나 test 전용 data 속성에 기대지 않고 대표 요소를 role과 exact name으로 찾는다. 대기나
+ * timeout 없이 호출 시점의 개수만 읽으며, 실패 문구는 고정 label만 담는다.
+ */
+async function requireNoCaseWorkflowDom(page: Page): Promise<void> {
+  const workflowElements = [
+    { label: "heading", locator: page.getByRole("heading", { name: "Case workflow", exact: true }) },
+    { label: "review status group", locator: page.getByRole("group", { name: "Review status", exact: true }) },
+    { label: "assignee group", locator: page.getByRole("group", { name: "Assignee", exact: true }) },
+    { label: "start review group", locator: page.getByRole("group", { name: "Start review", exact: true }) },
+    {
+      label: "additional information action",
+      locator: page.getByRole("button", { name: "Request additional information", exact: true }),
+    },
+    { label: "resume review action", locator: page.getByRole("button", { name: "Resume review", exact: true }) },
+    { label: "start review action", locator: page.getByRole("button", { name: "Start review", exact: true }) },
+    { label: "assignee UUID textbox", locator: page.getByRole("textbox", { name: "Assignee UUID", exact: true }) },
+    { label: "assign action", locator: page.getByRole("button", { name: "Assign analyst", exact: true }) },
+    { label: "change assignee action", locator: page.getByRole("button", { name: "Change assignee", exact: true }) },
+    { label: "release assignee action", locator: page.getByRole("button", { name: "Release assignee", exact: true }) },
+    {
+      label: "refresh control",
+      locator: page.getByRole("button", { name: "Refresh workflow information", exact: true }),
+    },
+    { label: "result live region", locator: page.getByRole("status", { name: "Case workflow result", exact: true }) },
+  ];
+  for (const { label, locator } of workflowElements) {
+    requireCondition(
+      (await locator.count()) === 0,
+      `The not-found case screen rendered the workflow ${label}.`,
+    );
+  }
+}
 
 /**
  * The address of the test-only geometry fixture, served by the same Vite dev
@@ -4503,10 +7508,11 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
  * A real origin and real module graphs: the pages import production components
  * and `app.css`, and Vite transforms and serves them as it does for the console.
  * The notes fixture injects a synthetic FDS_ANALYST AuthClient/session so the
- * production capability-gated composer can be measured. It has no credential,
- * token or Keycloak login and is not authentication/authorization evidence;
- * those boundaries are covered by unit, router and real Keycloak integration
- * tests. None of the geometry fixtures makes an API request.
+ * production workflow section and capability-gated composer can be measured.
+ * It has no credential, token or Keycloak login and is not authentication or
+ * authorization evidence; those boundaries are covered by unit, router and
+ * real Keycloak integration tests. None of the geometry fixtures makes an API
+ * request.
  */
 const CASE_TABLE_GEOMETRY_URL = `${APP_ORIGIN}/e2e/case-table-geometry.html`;
 const CASE_AUDIT_GEOMETRY_URL = `${APP_ORIGIN}/e2e/case-audit-geometry.html`;
@@ -4826,6 +7832,38 @@ test("populated investigation notes preserve plain text and wrap at every design
   const observationsBefore = relayObservationCount;
 
   await page.goto(CASE_NOTES_GEOMETRY_URL);
+  await expect(page.getByRole("heading", { name: "Case workflow", level: 3 })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Resume review" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Change assignee" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Release assignee" })).toBeVisible();
+  const displayedWorkflowStatus = page
+    .locator("section.case-workflow > p.case-workflow__summary > strong")
+    .filter({ hasText: /^Information required$/ });
+  await expect(displayedWorkflowStatus).toHaveCount(1);
+  await expect(displayedWorkflowStatus).toBeVisible();
+  await expect(displayedWorkflowStatus).toHaveText("Information required");
+  const workflowAssignee = page.locator(".case-workflow__assignee code");
+  // Deliberately independent from the fixture source: this literal is not
+  // imported or shared, so a fixture edit cannot silently rewrite the oracle.
+  const expectedWorkflowAssignee = "7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f";
+  await expect(workflowAssignee).toHaveText(expectedWorkflowAssignee);
+  const renderedAssigneeEvidence = await workflowAssignee.evaluate((element) => {
+    const text = element.textContent ?? "";
+    return {
+      text,
+      codePointLength: Array.from(text).length,
+      asciiOnly: Array.from(text).every((character) => character.codePointAt(0)! <= 0x7f),
+    };
+  });
+  requireCondition(
+    renderedAssigneeEvidence.text === expectedWorkflowAssignee &&
+      renderedAssigneeEvidence.codePointLength === 36 &&
+      renderedAssigneeEvidence.asciiOnly &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        renderedAssigneeEvidence.text,
+      ),
+    "The workflow DOM did not contain the independently expected 36-code-point ASCII UUID v4.",
+  );
   await expect(page.getByRole("heading", { name: "Investigation notes", level: 3 })).toBeVisible();
   const articles = page.getByRole("article");
   await expect(articles).toHaveCount(3);
@@ -4870,6 +7908,249 @@ test("populated investigation notes preserve plain text and wrap at every design
       !(await documentOverflowsHorizontally(page)),
       `The populated investigation notes scrolled the document at ${String(viewport.width)}px.`,
     );
+    const workflowGeometry = await page.locator(".case-workflow").evaluate((element) => {
+      const panel = element.getBoundingClientRect();
+      const main = element.closest("main")?.getBoundingClientRect() ?? null;
+      const assignee = element.querySelector<HTMLElement>(".case-workflow__assignee > code");
+      const assigneeBox = assignee?.getBoundingClientRect() ?? null;
+      const assigneeParent = assignee?.parentElement ?? null;
+      const assigneeParentBox = assigneeParent?.getBoundingClientRect() ?? null;
+      const assigneeStyle = assignee === null ? null : window.getComputedStyle(assignee);
+      const assigneeParentStyle =
+        assigneeParent === null ? null : window.getComputedStyle(assigneeParent);
+      const statusSummary = element.querySelector<HTMLElement>(".case-workflow__summary");
+      const statusLabel = statusSummary?.querySelector<HTMLElement>(":scope > strong") ?? null;
+      const statusLabelBox = statusLabel?.getBoundingClientRect() ?? null;
+      const statusStyle = statusLabel === null ? null : window.getComputedStyle(statusLabel);
+      const statusParentStyle =
+        statusSummary === null ? null : window.getComputedStyle(statusSummary);
+      const statusRange = document.createRange();
+      if (statusLabel !== null) {
+        statusRange.selectNodeContents(statusLabel);
+      }
+      const statusLineBoxes =
+        statusLabel === null
+          ? []
+          : Array.from(statusRange.getClientRects())
+              .filter((box) => box.width > 0 && box.height > 0)
+              .map((box) => ({
+                left: box.left,
+                right: box.right,
+                top: box.top,
+                bottom: box.bottom,
+              }));
+      const isDisplayed = (target: HTMLElement, box: DOMRect): boolean => {
+        const style = window.getComputedStyle(target);
+        return (
+          !target.hidden &&
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          style.visibility !== "collapse" &&
+          box.width > 0 &&
+          box.height > 0 &&
+          target.getClientRects().length > 0
+        );
+      };
+      const controls = Array.from(element.querySelectorAll("button, input")).map((control) => {
+        const box = control.getBoundingClientRect();
+        const group = control.closest("fieldset")?.getBoundingClientRect() ?? null;
+        const style = window.getComputedStyle(control);
+        return {
+          tag: control.tagName,
+          text: control.textContent ?? "",
+          left: box.left,
+          right: box.right,
+          top: box.top,
+          bottom: box.bottom,
+          width: box.width,
+          groupWidth: group?.width ?? 0,
+          whiteSpace: style.whiteSpace,
+          overflowWrap: style.overflowWrap,
+        };
+      });
+      return {
+        panel: { left: panel.left, right: panel.right },
+        main: main === null ? null : { left: main.left, right: main.right },
+        viewportWidth: window.innerWidth,
+        assignee:
+          assignee === null ||
+          assigneeBox === null ||
+          assigneeParent === null ||
+          assigneeParentBox === null ||
+          assigneeStyle === null ||
+          assigneeParentStyle === null
+            ? null
+            : {
+                text: assignee.textContent ?? "",
+                tag: assignee.tagName,
+                displayed: isDisplayed(assignee, assigneeBox),
+                left: assigneeBox.left,
+                right: assigneeBox.right,
+                width: assigneeBox.width,
+                scrollWidth: assignee.scrollWidth,
+                clientWidth: assignee.clientWidth,
+                overflowWrap: assigneeStyle.overflowWrap,
+                wordBreak: assigneeStyle.wordBreak,
+                parent: {
+                  tag: assigneeParent.tagName,
+                  isDirectAssigneeContainer:
+                    assignee.parentElement === assigneeParent &&
+                    assigneeParent.matches("p.case-workflow__assignee"),
+                  displayed: isDisplayed(assigneeParent, assigneeParentBox),
+                  left: assigneeParentBox.left,
+                  right: assigneeParentBox.right,
+                  width: assigneeParentBox.width,
+                  borderLeftWidth: parseFloat(assigneeParentStyle.borderLeftWidth),
+                  borderRightWidth: parseFloat(assigneeParentStyle.borderRightWidth),
+                  paddingLeft: parseFloat(assigneeParentStyle.paddingLeft),
+                  paddingRight: parseFloat(assigneeParentStyle.paddingRight),
+                  contentLeft:
+                    assigneeParentBox.left +
+                    parseFloat(assigneeParentStyle.borderLeftWidth) +
+                    parseFloat(assigneeParentStyle.paddingLeft),
+                  contentRight:
+                    assigneeParentBox.right -
+                    parseFloat(assigneeParentStyle.borderRightWidth) -
+                    parseFloat(assigneeParentStyle.paddingRight),
+                  contentWidth:
+                    assigneeParentBox.width -
+                    parseFloat(assigneeParentStyle.borderLeftWidth) -
+                    parseFloat(assigneeParentStyle.borderRightWidth) -
+                    parseFloat(assigneeParentStyle.paddingLeft) -
+                    parseFloat(assigneeParentStyle.paddingRight),
+                  scrollWidth: assigneeParent.scrollWidth,
+                  clientWidth: assigneeParent.clientWidth,
+                },
+              },
+        status:
+          statusSummary === null ||
+          statusLabel === null ||
+          statusLabelBox === null ||
+          statusStyle === null ||
+          statusParentStyle === null
+            ? null
+            : {
+                text: statusLabel.textContent ?? "",
+                tag: statusLabel.tagName,
+                displayed: isDisplayed(statusLabel, statusLabelBox),
+                whiteSpace: statusStyle.whiteSpace,
+                overflowWrap: statusStyle.overflowWrap,
+                wordBreak: statusStyle.wordBreak,
+                scrollWidth: statusLabel.scrollWidth,
+                clientWidth: statusLabel.clientWidth,
+                parent: {
+                  tag: statusSummary.tagName,
+                  isDirectSummary:
+                    statusLabel.parentElement === statusSummary &&
+                    statusSummary.matches("p.case-workflow__summary"),
+                  displayed: isDisplayed(statusSummary, statusSummary.getBoundingClientRect()),
+                  contentLeft:
+                    statusSummary.getBoundingClientRect().left +
+                    parseFloat(statusParentStyle.borderLeftWidth) +
+                    parseFloat(statusParentStyle.paddingLeft),
+                  contentRight:
+                    statusSummary.getBoundingClientRect().right -
+                    parseFloat(statusParentStyle.borderRightWidth) -
+                    parseFloat(statusParentStyle.paddingRight),
+                  scrollWidth: statusSummary.scrollWidth,
+                  clientWidth: statusSummary.clientWidth,
+                },
+                lineBoxes: statusLineBoxes,
+              },
+        controls,
+      };
+    });
+    requireCondition(workflowGeometry.main !== null, "The workflow fixture had no main region.");
+    requireCondition(
+      workflowGeometry.panel.left >= workflowGeometry.main.left - 1 &&
+        workflowGeometry.panel.right <= workflowGeometry.main.right + 1 &&
+        workflowGeometry.panel.left >= -1 &&
+        workflowGeometry.panel.right <= workflowGeometry.viewportWidth + 1,
+      `The workflow section escaped its container at ${String(viewport.width)}px.`,
+    );
+    requireCondition(workflowGeometry.assignee !== null, "The workflow assignee UUID was absent.");
+    const workflowGeometryTolerance = 1;
+    requireCondition(
+      workflowGeometry.assignee.text === expectedWorkflowAssignee &&
+        workflowGeometry.assignee.tag === "CODE" &&
+        workflowGeometry.assignee.displayed &&
+        workflowGeometry.assignee.parent.tag === "P" &&
+        workflowGeometry.assignee.parent.isDirectAssigneeContainer &&
+        workflowGeometry.assignee.parent.displayed &&
+        workflowGeometry.assignee.left >=
+          workflowGeometry.assignee.parent.contentLeft - workflowGeometryTolerance &&
+        workflowGeometry.assignee.right <=
+          workflowGeometry.assignee.parent.contentRight + workflowGeometryTolerance &&
+        workflowGeometry.assignee.width <=
+          workflowGeometry.assignee.parent.contentWidth + workflowGeometryTolerance &&
+        workflowGeometry.assignee.scrollWidth <=
+          workflowGeometry.assignee.clientWidth + workflowGeometryTolerance &&
+        workflowGeometry.assignee.parent.scrollWidth <=
+          workflowGeometry.assignee.parent.clientWidth + workflowGeometryTolerance &&
+        workflowGeometry.assignee.overflowWrap === "anywhere" &&
+        workflowGeometry.assignee.wordBreak === "break-word",
+      `The workflow UUID did not remain inside its direct parent content box at ${String(viewport.width)}px.`,
+    );
+    // closure 안에서도 null 판정이 유지되도록 검증한 값을 local constant로 고정한다.
+    const workflowStatus = workflowGeometry.status;
+    requireCondition(workflowStatus !== null, "The workflow status label was absent.");
+    requireCondition(
+      workflowStatus.text === "Information required" &&
+        workflowStatus.tag === "STRONG" &&
+        workflowStatus.displayed &&
+        workflowStatus.parent.tag === "P" &&
+        workflowStatus.parent.isDirectSummary &&
+        workflowStatus.parent.displayed &&
+        workflowStatus.whiteSpace === "normal" &&
+        workflowStatus.overflowWrap === "anywhere" &&
+        workflowStatus.scrollWidth <=
+          workflowStatus.clientWidth + workflowGeometryTolerance &&
+        workflowStatus.parent.scrollWidth <=
+          workflowStatus.parent.clientWidth + workflowGeometryTolerance &&
+        workflowStatus.lineBoxes.length > 0 &&
+        workflowStatus.lineBoxes.every(
+          (box) =>
+            box.left >=
+              workflowStatus.parent.contentLeft - workflowGeometryTolerance &&
+            box.right <=
+              workflowStatus.parent.contentRight + workflowGeometryTolerance &&
+            box.left >= -workflowGeometryTolerance &&
+            box.right <= workflowGeometry.viewportWidth + workflowGeometryTolerance,
+        ),
+      `The longest production status label did not remain inside its direct parent content box at ${String(viewport.width)}px.`,
+    );
+    requireCondition(
+      workflowGeometry.controls.length === 4,
+      `The workflow fixture did not render three actions and one UUID input at ${String(viewport.width)}px.`,
+    );
+    for (const control of workflowGeometry.controls) {
+      requireCondition(
+        control.left >= workflowGeometry.panel.left - 1 &&
+          control.right <= workflowGeometry.panel.right + 1,
+        `A workflow control escaped its panel at ${String(viewport.width)}px.`,
+      );
+      if (control.tag === "BUTTON") {
+        requireCondition(
+          control.whiteSpace === "normal" && control.overflowWrap === "anywhere",
+          `A workflow action label could not wrap at ${String(viewport.width)}px.`,
+        );
+      }
+    }
+    for (let left = 0; left < workflowGeometry.controls.length; left += 1) {
+      for (let right = left + 1; right < workflowGeometry.controls.length; right += 1) {
+        const first = workflowGeometry.controls[left];
+        const second = workflowGeometry.controls[right];
+        const overlaps =
+          first.left < second.right - 0.5 &&
+          first.right > second.left + 0.5 &&
+          first.top < second.bottom - 0.5 &&
+          first.bottom > second.top + 0.5;
+        requireCondition(
+          !overlaps,
+          `Workflow controls overlapped at ${String(viewport.width)}px.`,
+        );
+      }
+    }
     const composer = page.locator(".investigation-note-composer");
     const textarea = page.getByRole("textbox", { name: "Investigation note" });
     await expect(composer).toBeVisible();
@@ -4923,6 +8204,12 @@ test("populated investigation notes preserve plain text and wrap at every design
     requireCondition(measured.minWidth === "0px", "The investigation note textarea did not keep min-width zero.");
 
     if (viewport.width === 390 && viewport.height === 844) {
+      for (const control of workflowGeometry.controls.filter(({ tag }) => tag === "BUTTON")) {
+        requireCondition(
+          Math.abs(control.width - control.groupWidth) <= 1.5,
+          "A mobile workflow action did not render at its fieldset width.",
+        );
+      }
       const actions = await page.locator(".investigation-note-composer__actions").evaluate((element) => {
         const style = window.getComputedStyle(element);
         const box = element.getBoundingClientRect();
@@ -4959,6 +8246,130 @@ test("populated investigation notes preserve plain text and wrap at every design
       }
     }
   }
+
+  // The four design widths above prove the production console contract. This
+  // additional narrow layout makes wrapping observable rather than merely
+  // permitted: the same production summary and stylesheet must occupy at least
+  // two real line boxes without widening the document.
+  await page.setViewportSize({ width: 280, height: 844 });
+  const narrowStatusEvidence = await displayedWorkflowStatus.evaluate((element) => {
+    // Playwright는 element를 HTMLElement | SVGElement로 넘긴다. production label이 HTMLElement가 아니면
+    // 측정하지 않고 null을 돌려 아래 필수 조건에서 fail-closed한다.
+    if (!(element instanceof HTMLElement)) {
+      return null;
+    }
+    const lineGroupingTolerance = 0.5;
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const lineRects = Array.from(range.getClientRects())
+      .filter((rect) => rect.width > 0 && rect.height > 0)
+      .map((rect) => ({
+        left: rect.left,
+        right: rect.right,
+        top: rect.top,
+        bottom: rect.bottom,
+      }));
+    const uniqueLines: { top: number; bottom: number }[] = [];
+    for (const rect of lineRects) {
+      const isKnownLine = uniqueLines.some(
+        (line) =>
+          Math.abs(line.top - rect.top) <= lineGroupingTolerance ||
+          Math.abs(line.bottom - rect.bottom) <= lineGroupingTolerance,
+      );
+      if (!isKnownLine) {
+        uniqueLines.push({ top: rect.top, bottom: rect.bottom });
+      }
+    }
+    const box = element.getBoundingClientRect();
+    const parent = element.parentElement;
+    if (parent === null) {
+      return null;
+    }
+    const parentBox = parent.getBoundingClientRect();
+    const parentStyle = window.getComputedStyle(parent);
+    const labelStyle = window.getComputedStyle(element);
+    const isDisplayed = (target: HTMLElement, targetBox: DOMRect): boolean => {
+      const style = window.getComputedStyle(target);
+      return (
+        !target.hidden &&
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        style.visibility !== "collapse" &&
+        targetBox.width > 0 &&
+        targetBox.height > 0 &&
+        target.getClientRects().length > 0
+      );
+    };
+    const borderLeftWidth = parseFloat(parentStyle.borderLeftWidth);
+    const borderRightWidth = parseFloat(parentStyle.borderRightWidth);
+    const paddingLeft = parseFloat(parentStyle.paddingLeft);
+    const paddingRight = parseFloat(parentStyle.paddingRight);
+    const contentLeft = parentBox.left + borderLeftWidth + paddingLeft;
+    const contentRight = parentBox.right - borderRightWidth - paddingRight;
+    return {
+      text: element.textContent ?? "",
+      tag: element.tagName,
+      isProductionStatusLabel:
+        element.parentElement === parent &&
+        parent.matches("p.case-workflow__summary") &&
+        element.closest("section.case-workflow") !== null,
+      displayed: isDisplayed(element, box),
+      parentDisplayed: isDisplayed(parent, parentBox),
+      lineCount: uniqueLines.length,
+      lineRects,
+      labelScrollWidth: element.scrollWidth,
+      labelClientWidth: element.clientWidth,
+      parentScrollWidth: parent.scrollWidth,
+      parentClientWidth: parent.clientWidth,
+      left: box.left,
+      right: box.right,
+      overflowWrap: labelStyle.overflowWrap,
+      parent: {
+        tag: parent.tagName,
+        left: parentBox.left,
+        right: parentBox.right,
+        width: parentBox.width,
+        borderLeftWidth,
+        borderRightWidth,
+        paddingLeft,
+        paddingRight,
+        contentLeft,
+        contentRight,
+        contentWidth: contentRight - contentLeft,
+      },
+      viewportWidth: window.innerWidth,
+    };
+  });
+  requireCondition(narrowStatusEvidence !== null, "The narrow workflow status summary was absent.");
+  const narrowGeometryTolerance = 1;
+  requireCondition(
+    narrowStatusEvidence.text === "Information required" &&
+      narrowStatusEvidence.tag === "STRONG" &&
+      narrowStatusEvidence.parent.tag === "P" &&
+      narrowStatusEvidence.isProductionStatusLabel &&
+      narrowStatusEvidence.displayed &&
+      narrowStatusEvidence.parentDisplayed &&
+      narrowStatusEvidence.lineCount >= 2 &&
+      narrowStatusEvidence.lineRects.length >= narrowStatusEvidence.lineCount &&
+      narrowStatusEvidence.lineRects.every(
+        (rect) =>
+          rect.left >= narrowStatusEvidence.parent.contentLeft - narrowGeometryTolerance &&
+          rect.right <= narrowStatusEvidence.parent.contentRight + narrowGeometryTolerance &&
+          rect.left >= -narrowGeometryTolerance &&
+          rect.right <= narrowStatusEvidence.viewportWidth + narrowGeometryTolerance,
+      ) &&
+      narrowStatusEvidence.labelScrollWidth <=
+        narrowStatusEvidence.labelClientWidth + narrowGeometryTolerance &&
+      narrowStatusEvidence.parentScrollWidth <=
+        narrowStatusEvidence.parentClientWidth + narrowGeometryTolerance &&
+      narrowStatusEvidence.left >=
+        narrowStatusEvidence.parent.contentLeft - narrowGeometryTolerance &&
+      narrowStatusEvidence.right <=
+        narrowStatusEvidence.parent.contentRight + narrowGeometryTolerance &&
+      narrowStatusEvidence.overflowWrap === "anywhere" &&
+      !(await documentOverflowsHorizontally(page)),
+    "The production status label itself did not produce contained multi-line wrapping at 280px.",
+  );
   await page.setViewportSize({ width: 1440, height: 900 });
 
   requireCondition(

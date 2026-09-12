@@ -627,8 +627,8 @@ guard는 결정 이전(`initializing`·`authenticating`)을 거부로 확정하�
 Issue #243 당시 capability로 보호되는 production route·navigation 항목·action은 0개였고 guard의
 직접 URL 접근 동작은 test 전용 MemoryRouter route로 검증했다. 이후 거래 목록·상세와 사건 목록·
 상세 route·navigation은 `transaction:view`·`case:view`로 보호되었고, 사건 상세의 inline note
-composer는 `case:note-write`와 사건 상태를 함께 적용한다. workflow·assignee·resolution action UI는
-아직 구현되지 않았다.
+composer는 `case:note-write`와 사건 상태를 함께 적용한다. Issue #277의 상태·담당자 action은
+`case:workflow` capability와 상태별 허용 행렬을 함께 적용하며 resolution action UI는 아직 구현되지 않았다.
 
 Issue #245에서 Frontend는 위 10개 endpoint를 typed API module로 구현했다. 화면·route·
 navigation·button·hook·상태관리는 포함하지 않는다. 거래·사건 filter와 거래·사건·메모·감사
@@ -669,6 +669,13 @@ validator가 같은 표를 강제한다. `CASE_REVIEW_STARTED`는 `IN_REVIEW`와
 key 자체를 금지하며, 담당자 변경은 `null`을 `CASE_ASSIGNEE_RELEASED`에만, UUID를
 `CASE_ASSIGNEE_ASSIGNED`·`CASE_ASSIGNEE_CHANGED`에만 허용한다. 성공할 수 없는 조합은
 credential 조회 이전에 거부하고, 누락과 명시적 null의 차이는 계속 보존한다.
+
+Issue #277은 이 shape validator 뒤에 request-response semantic binding을 추가한다. 두 PATCH 모두
+requested case ID와 exact `expectedVersion + 1`을 확인하고, 상태 변경은 submitted target status와
+전이별 assignee·reviewStartedAt·finalDisposition·closedAt 경계를, 담당자 변경은 submitted UUID 또는
+명시적 null과 기존 status·workflow timestamp·closure field 보존을 확인한다. `expectedVersion + 1`이
+JavaScript safe integer가 아니면 credential 조회 전에 거부한다. binding 실패는 입력·응답·trace ID를
+반사하지 않는 고정 `InvalidResponseError`다.
 
 성공 status는 endpoint별로 정확히 비교한다. 조사 메모 생성만 `201`이고 나머지 아홉 개는
 `200`이며, 다른 2xx는 body를 읽지 않고 거부한다. 성공 응답의 `X-Trace-Id`는 부재와
@@ -928,7 +935,7 @@ authority·새 endpoint는 추가하지 않았다. guard는 route element에 있
 - hook이 게시하는 성공 값은 응답 10개 필드를 field 단위로 복사한 새 객체 하나뿐이다. envelope,
   parse된 `case` 객체, `traceId`, raw error body, credential, token, request header는 React state
   경계 앞에서 폐기되므로 state 직렬화·DevTools·error reporter 어디에서도 도달할 수 없다.
-- 요청당 `fetch`는 최대 1회이고 자동 retry·replay·polling은 0회다. 화면에는 mutation form·
+- Issue #255 시점의 요청당 `fetch`는 최대 1회이고 자동 retry·replay·polling은 0회다. 당시 화면에는 mutation form·
   button·요청이 하나도 없으며, `concurrencyVersion`은 읽기 전용 표시로만 쓰이고 어떤 요청에도
   `expectedVersion`으로 실리지 않는다.
 - E2E relay allowlist에는 `GET /api/v1/cases/{canonical lowercase UUID v4}` 한 종류만 추가했다.
@@ -988,10 +995,12 @@ classification factory 자체를 실행하지 않는다. 저장 projection과 su
 공개 success data에는 note의 `noteId`, `authorType`,
 `authorRef`, `content`, `createdAt`과 page metadata만 남는다.
 
-화면은 Case record → Investigation notes → Audit history 순서다. notes content는 escaped React text
-node이며 HTML·Markdown·autolink·truncation을 사용하지 않는다. 403·404는 session을 유지하고 retry를
-제공하지 않으며 timeout·network·invalid-response·generic-error만 사용자의 명시적 retry를 허용한다.
-detail 403/404는 notes와 audit를 모두 unmount해 늦은 publish를 막지만 notes 자체 오류는 사건 record와
+Issue #277 이후 화면은 Case record → Workflow → Investigation notes → Audit history 순서다. notes content는 escaped React text
+node이며 HTML·Markdown·autolink·truncation을 사용하지 않는다. initial load와 이미 성공한 record의
+current refresh에서 오는 403·404는 session을 유지하고 retry를 제공하지 않는 terminal refusal이다.
+이 전환은 이전 Case record와 Workflow를 제거하고 notes와 audit를 unmount해 늦은 publish를 막는다.
+stale session·case·refresh와 release 이후의 403/404는 현재 화면을 바꾸지 않는다. timeout·network·
+invalid-response·generic refresh failure는 이전 success record를 유지하며, notes 자체 오류도 사건 record와
 audit를 제거하지 않는다.
 
 create mutation state에는 content, Response, Error, credential, Backend body/code/message/traceId를 넣지 않는다.
@@ -1000,7 +1009,7 @@ reconciliation을 게시한다. released/already-settled flight는 projection/cl
 않고, unmount·navigation·case/session/version 교체는 pending POST를 abort하고 늦은 draft clear·focus·refresh
 callback을 차단한다. current credential 401 invalidation은 authorized transport가 담당하며 stale credential의
 401은 새 session에 영향을 주지 않는다. 실제 notes POST browser E2E와 relay write allowlist 확장은 하지 않고,
-production composer를 포함한 기존 geometry fixture를 1440×900·1280×800·1024×768·390×844에서 측정한다.
+production composer와 workflow section을 포함한 기존 geometry fixture를 1440×900·1280×800·1024×768·390×844에서 측정한다.
 
 E2E relay에는 `GET /api/v1/cases/{canonical lowercase UUID v4}/notes`만 추가한다. `page`는 canonical
 decimal int32 0 이상, `size`는 canonical decimal 1..100, `sort`는 `createdAt,asc|desc`만 허용한다.
@@ -1009,7 +1018,48 @@ uppercase/v1/bad-variant/unhyphenated/encoded UUID, trailing slash·extra segmen
 POST·PATCH·PUT·DELETE는 process spawn과 Backend observation 전에 고정 문구로 거부한다. 승인 target은
 byte identity를 유지한다. 실제 Backend E2E는 detail·notes·audit 각 1회의 실제 404, 하위 UI 제거,
 session 유지, 자동 retry·polling·mutation 0회를 맡는다. populated 의미·plain-text와 layout은 API mock이나
-auth bypass가 없는 production-component geometry fixture가 1440×900·1280×800·1024×768에서 검증한다.
+route interception이 없는 production-component geometry fixture가 1440×900·1280×800·1024×768·390×844에서 검증한다.
+
+Issue #277의 상태·담당자 UI는 `case:workflow`가 있는 `FDS_ANALYST`와 Analyst+Approver에만 존재한다.
+viewer·Approver 단독과 사건 capability가 없는 operator/admin session에는 관련 DOM과 요청이 없다.
+실제 production DOM은 상태별 workflow fieldset/action과 별도 담당자 form으로 구성되고, 둘은 shared lane
+하나를 사용한다. submit 직전 session identity, canonical case ID, capability, status, assignee와 expected
+version을 다시 확인하고, submit flight identity에는 `reconciliationGeneration`도 포함한다. 같은 조건과 flight
+소유권은 세 계층에서 다시 확인한다. credential 조회 직전 검사, credential 획득 중 stale이 된 flight를 막는
+authorize 완료 직후 이중 방어 검사, 그리고 prepare 반환 이후 microtask 구간을 막기 위해 authorized transport가
+deadline·abort 검사 뒤 실제 fetch와 같은 동기 turn에서 실행하는 최종 dispatch guard다. 앞의 두 검사가 실패하면
+발급된 요청을 버리고 최종 guard가 실패하면 fetch를 호출하지 않으므로 fetch·상태 게시·reconciliation·session
+invalidation이 모두 0이다. guard의 거부는 응답 401이 아니므로 session을 무효화하지 않는다. PATCH 전송 뒤 응답
+settle 전에 identity(generation 포함)가 바뀐 stale 응답도 게시·reconciliation하지 않는다. 정상 성공 뒤
+authoritative detail refresh가 올리는 generation은 stale 판정이 아니라 minimum-version floor 판정 대상이다.
+destination·credential·current-session 판정은 기존 authorized transport와 인증 port가 계속 담당하며, 이 Frontend
+guard는 Backend endpoint authorization이나 `expectedVersion` optimistic concurrency를 대체하지 않는다.
+pending/reconciling 중에는 모든 workflow control을 막으며
+double click·반복 Enter·IME composition으로 두 번째 PATCH를 만들지 않는다. UUID는 trim·case-fold 없이
+canonical lowercase UUID v4만 받고, 해제는 별도 explicit action만 `null`을 보낸다.
+
+unmount나 session/case/status/assignee/version/capability/reconciliationGeneration 교체는 pending flight를 release/abort한다.
+transport가 abort를 무시해도 stale success/error/401/403/404/409는 게시하지 않으며 교체된 session을
+무효화하지 않는다. released/already-settled flight는 outcome projection이나 failure classification factory를
+실행하지 않는다. stored outcome과 subscriber delivery를 root/nested field 단위로 매번 다시 투영하므로
+delivery mutation이 이후 replay에 전파되지 않는다. state와 live region에는 action kind와 고정 상태만
+남고 Backend code/message/field error, raw body/header/Error/Response, trace ID, credential/token/cookie,
+session subject, AuditLog actor와 unknown envelope field는 도달하지 않는다.
+
+확인된 성공은 mutation DTO를 record에 optimistic merge하지 않고 successor version을 minimum detail floor로
+보존한 뒤 detail과 audit page 0만 독립 refresh한다. notes refresh는 0회다. 모든 409와 timeout·network·
+invalid 2xx는 자동 PATCH 재제출 없이 detail·notes·audit를 각각 refresh하고 authoritative detail을 얻기
+전까지 lane을 잠근다. refresh 실패는 서로 격리되고 명시적 read refresh가 남는다. current credential
+401만 기존 transport가 session을 무효화하며 403/404는 유지한다. resolution UI와 실제 Backend workflow
+mutation 성공 browser E2E는 계속 미구현이고 relay status/assignee write allowlist도 추가하지 않는다.
+E2E relay는 요청 bytes와 credential을 argv·환경 변수가 아닌 stdin으로만 전달하고, route마다 도착 시점부터
+production 5초 제한보다 먼저 fulfill 또는 abort한다. 요청 종결과 분리된 teardown은 해당 relay의 exact marker가
+0인지 읽기 전용으로 확인할 뿐 container process에 신호를 보내지 않으며, 이 확인의 재시도는 Backend 요청을
+다시 보내지 않는다.
+담당자 directory·search·profile API/UI와 production 담당자 allowlist도 구현하지 않았으며 UI capability는
+표시 경계일 뿐 Backend의 endpoint authorization을 대체하지 않는다.
+production `CaseWorkflowSection` geometry만 기존 fixture에서 네 viewport로 검증하므로 layout 증거와 실제
+Backend mutation 증거를 혼용하지 않는다. Backend/API/DB/Auth/Infra 계약과 AI 호출·비용 변경은 없다.
 
 Stock Keycloak은 HTTP와 HTTPS에 공통 listener host를 적용하므로 2026-09-05 OWNER 결정에 따라
 `KC_HTTP_HOST=0.0.0.0`을 사용한다. HTTPS 8443만 host `127.0.0.1`에 publish하고 HTTP 8082와

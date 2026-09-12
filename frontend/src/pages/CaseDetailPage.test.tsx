@@ -155,12 +155,14 @@ function controlledAllCaseReads(): {
   readonly detail: PendingCall[];
   readonly notes: PendingCall[];
   readonly audit: PendingCall[];
+  readonly workflow: PendingCall[];
   readonly spy: ReturnType<typeof vi.fn>;
 } {
   const calls: PendingCall[] = [];
   const detail: PendingCall[] = [];
   const notes: PendingCall[] = [];
   const audit: PendingCall[] = [];
+  const workflow: PendingCall[] = [];
   const spy = vi.fn().mockImplementation((request: Request) => {
     let settleCall!: (response: Response) => void;
     let fail!: (error: unknown) => void;
@@ -172,7 +174,9 @@ function controlledAllCaseReads(): {
     const call = { promise, request, settle: settleCall, fail };
     calls.push(call);
     const pathname = new URL(request.url).pathname;
-    if (pathname.endsWith("/notes")) {
+    if (request.method === "PATCH") {
+      workflow.push(call);
+    } else if (pathname.endsWith("/notes")) {
       notes.push(call);
     } else if (pathname.endsWith("/audit-logs")) {
       audit.push(call);
@@ -182,7 +186,7 @@ function controlledAllCaseReads(): {
     return promise;
   });
   vi.stubGlobal("fetch", spy);
-  return { calls, detail, notes, audit, spy };
+  return { calls, detail, notes, audit, workflow, spy };
 }
 
 function notesBody(content = "Visible investigation note"): Record<string, unknown> {
@@ -245,6 +249,21 @@ function createdNoteBody(content: string, concurrencyVersion = 5): Record<string
     createdAt: "2026-09-02T01:00:00.123456Z",
     concurrencyVersion,
     traceId: "trace_demo_note_created_floor",
+  };
+}
+
+function workflowMutationBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    caseId: CASE_ID,
+    caseStatus: "ADDITIONAL_INFORMATION_REQUIRED",
+    finalDisposition: null,
+    assigneeRef: ASSIGNEE_REF,
+    reviewStartedAt: "2026-07-24T01:25:00Z",
+    closedAt: null,
+    lastChangedAt: "2026-07-24T02:06:00Z",
+    concurrencyVersion: 5,
+    traceId: "trace_demo_case_workflow_page_01",
+    ...overrides,
   };
 }
 
@@ -487,7 +506,7 @@ describe("CaseDetailPage record", () => {
     expect(disposition.querySelector(".badge")).toBeNull();
   });
 
-  it("prints a 128-character assignee reference in full, once, and nowhere else", async () => {
+  it("prints a 128-character assignee reference in full in the record and workflow, and nowhere else", async () => {
     await showRecord({ assigneeRef: LONG_ASSIGNEE_REF });
 
     expect(LONG_ASSIGNEE_REF).toHaveLength(128);
@@ -500,7 +519,7 @@ describe("CaseDetailPage record", () => {
     // Once as text, and not repeated into a title, an aria-label, a hidden
     // element or a data attribute.
     const occurrences = document.body.innerHTML.split(LONG_ASSIGNEE_REF).length - 1;
-    expect(occurrences).toBe(1);
+    expect(occurrences).toBe(2);
     for (const element of Array.from(document.querySelectorAll("*"))) {
       for (const attribute of Array.from(element.attributes)) {
         expect(attribute.value).not.toContain(LONG_ASSIGNEE_REF);
@@ -543,12 +562,14 @@ describe("CaseDetailPage record", () => {
     }
   });
 
-  it("offers only the approved note mutation beside read-only section controls", async () => {
+  it("offers only approved workflow and note mutations beside read-only section controls", async () => {
     await showRecord();
 
-    // The inline note composer is the one approved business mutation. The
-    // case workflow, assignee and resolution remain read-only here.
+    // Workflow and note creation are the approved mutations. Resolution
+    // remains absent, and pagination controls stay read-only navigation.
     expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual([
+      "Request additional information",
+      "Change assignee",
       "Cancel",
       "Add note",
       "Previous",
@@ -556,7 +577,7 @@ describe("CaseDetailPage record", () => {
       "Previous",
       "Next",
     ]);
-    expect(document.querySelectorAll("form")).toHaveLength(1);
+    expect(document.querySelectorAll("form")).toHaveLength(2);
     expect(screen.getByRole("textbox", { name: "Investigation note" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Notes per page" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Entries per page" })).toBeInTheDocument();
@@ -631,6 +652,7 @@ describe("CaseDetailPage record", () => {
       "Case",
       "Investigation timeline",
       "Record metadata",
+      "Case workflow",
       "Investigation notes",
       "Audit history",
     ]);
@@ -650,7 +672,218 @@ describe("CaseDetailPage record", () => {
   });
 });
 
+describe("CaseDetailPage workflow reconciliation", () => {
+  it("does not optimistically mutate and refreshes detail plus audit, but zero notes, after success", async () => {
+    const { detail: detailCalls, notes, audit, workflow } = controlledAllCaseReads();
+    const user = userEvent.setup();
+    renderPage(signedIn());
+    await settle();
+    await answerWith(detailCalls[0], caseBody({ concurrencyVersion: 4 }));
+    await answerWith(notes[0], notesBody());
+    await answerWith(audit[0], auditBody());
+
+    await user.click(screen.getByRole("button", { name: "Request additional information" }));
+    await waitFor(() => expect(workflow).toHaveLength(1));
+    expect(workflow[0].request.method).toBe("PATCH");
+    expect(new URL(workflow[0].request.url).pathname).toBe(
+      `/api/v1/cases/${CASE_ID}/status`,
+    );
+    expect(JSON.parse(await workflow[0].request.clone().text())).toEqual({
+      targetStatus: "ADDITIONAL_INFORMATION_REQUIRED",
+      reasonCode: "CASE_ADDITIONAL_INFORMATION_REQUESTED",
+      expectedVersion: 4,
+    });
+
+    await answerWith(workflow[0], workflowMutationBody());
+    await waitFor(() => {
+      expect(detailCalls).toHaveLength(2);
+      expect(audit).toHaveLength(2);
+    });
+    expect(notes).toHaveLength(1);
+    expect(valueOf("Case status")).toHaveTextContent("In review");
+    expect(valueOf("Concurrency version")).toHaveTextContent("4");
+    expect(screen.getByText("Refreshing authoritative case information")).toBeVisible();
+
+    await answerWith(
+      detailCalls[1],
+      caseBody({
+        caseStatus: "ADDITIONAL_INFORMATION_REQUIRED",
+        concurrencyVersion: 5,
+        lastChangedAt: "2026-07-24T02:06:00Z",
+      }),
+    );
+    await answerWith(audit[1], auditBody());
+    await waitFor(() => {
+      expect(valueOf("Case status")).toHaveTextContent("Information required");
+      expect(valueOf("Concurrency version")).toHaveTextContent("5");
+      expect(screen.getByRole("status", { name: "Case workflow result" })).toHaveTextContent(
+        "Additional information requested from authoritative case information.",
+      );
+    });
+    expect(notes).toHaveLength(1);
+    expect(workflow).toHaveLength(1);
+  });
+
+  it.each(["conflict", "network", "invalid-success"] as const)(
+    "refreshes detail, notes and audit after %s and never retries PATCH",
+    async (outcome) => {
+      const { detail: detailCalls, notes, audit, workflow } = controlledAllCaseReads();
+      const user = userEvent.setup();
+      renderPage(signedIn());
+      await settle();
+      await answerWith(detailCalls[0], caseBody({ concurrencyVersion: 4 }));
+      await answerWith(notes[0], notesBody());
+      await answerWith(audit[0], auditBody());
+
+      await user.click(screen.getByRole("button", { name: "Request additional information" }));
+      await waitFor(() => expect(workflow).toHaveLength(1));
+      if (outcome === "network") {
+        await act(async () => {
+          workflow[0].fail(new TypeError("PRIVATE_NETWORK_FAILURE"));
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+      } else if (outcome === "invalid-success") {
+        await answerWith(
+          workflow[0],
+          workflowMutationBody({ concurrencyVersion: 99, traceId: "PRIVATE_TRACE" }),
+        );
+      } else {
+        await answerWith(
+          workflow[0],
+          { code: "PRIVATE_CONFLICT", message: "PRIVATE_MESSAGE" },
+          409,
+        );
+      }
+
+      await waitFor(() => {
+        expect(detailCalls).toHaveLength(2);
+        expect(notes).toHaveLength(2);
+        expect(audit).toHaveLength(2);
+      });
+      expect(workflow).toHaveLength(1);
+      expect(valueOf("Concurrency version")).toHaveTextContent("4");
+
+      await answerWith(detailCalls[1], caseBody({ concurrencyVersion: 5 }));
+      await answerWith(notes[1], notesBody("authoritative workflow reconciliation note"));
+      await answerWith(audit[1], auditBody());
+      const title =
+        outcome === "conflict"
+          ? "The case changed before this action"
+          : "The workflow result could not be confirmed";
+      await waitFor(() =>
+        expect(screen.getByRole("heading", { name: title, level: 4 })).toBeVisible(),
+      );
+      expect(screen.getByText("authoritative workflow reconciliation note")).toBeVisible();
+      expect(workflow).toHaveLength(1);
+      expect(document.body.innerHTML).not.toMatch(/PRIVATE_CONFLICT|PRIVATE_MESSAGE|PRIVATE_TRACE/);
+    },
+  );
+
+  it("keeps the authoritative detail result and lane contract when an audit refresh failure overlaps the generation advance", async () => {
+    const { detail: detailCalls, notes, audit, workflow } = controlledAllCaseReads();
+    const user = userEvent.setup();
+    renderPage(signedIn());
+    await settle();
+    await answerWith(detailCalls[0], caseBody({ concurrencyVersion: 4 }));
+    await answerWith(notes[0], notesBody());
+    await answerWith(audit[0], auditBody());
+
+    await user.click(screen.getByRole("button", { name: "Request additional information" }));
+    await waitFor(() => expect(workflow).toHaveLength(1));
+    await answerWith(workflow[0], workflowMutationBody());
+    await waitFor(() => {
+      expect(detailCalls).toHaveLength(2);
+      expect(audit).toHaveLength(2);
+    });
+
+    // audit refresh 실패가 먼저 도착해도 authoritative detail 전에는 lane이 풀리지 않는다.
+    await answerWith(
+      audit[1],
+      {
+        code: "PRIVATE_AUDIT_REFRESH_CODE",
+        message: "private audit refresh body",
+        traceId: "private-audit-refresh-trace",
+      },
+      500,
+    );
+    expect(
+      screen.getByRole("heading", { name: "The latest audit history could not be loaded" }),
+    ).toBeVisible();
+    expect(screen.getByText("Refreshing authoritative case information")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Request additional information" })).toBeDisabled();
+    expect(valueOf("Concurrency version")).toHaveTextContent("4");
+
+    // floor 이상 authoritative detail이 generation을 올리면 audit 실패와 무관하게 성공으로 해제된다.
+    await answerWith(
+      detailCalls[1],
+      caseBody({
+        caseStatus: "ADDITIONAL_INFORMATION_REQUIRED",
+        concurrencyVersion: 5,
+        lastChangedAt: "2026-07-24T02:06:00Z",
+      }),
+    );
+    await waitFor(() => {
+      expect(screen.getByRole("status", { name: "Case workflow result" })).toHaveTextContent(
+        "Additional information requested from authoritative case information.",
+      );
+    });
+    expect(valueOf("Case status")).toHaveTextContent("Information required");
+    expect(valueOf("Concurrency version")).toHaveTextContent("5");
+    expect(
+      screen.getByRole("heading", { name: "The latest audit history could not be loaded" }),
+    ).toBeVisible();
+    expect(screen.queryByText("Refreshing authoritative case information")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resume review" })).toBeEnabled();
+    expect(notes).toHaveLength(1);
+    expect(audit).toHaveLength(2);
+    expect(workflow).toHaveLength(1);
+    expect(document.body.textContent).not.toContain("PRIVATE_AUDIT_REFRESH_CODE");
+    expect(document.body.textContent).not.toContain("private-audit-refresh-trace");
+  });
+
+  it("isolates a failed notes refresh from authoritative detail and audit reconciliation", async () => {
+    const { detail: detailCalls, notes, audit, workflow } = controlledAllCaseReads();
+    const user = userEvent.setup();
+    renderPage(signedIn());
+    await settle();
+    await answerWith(detailCalls[0], caseBody({ concurrencyVersion: 4 }));
+    await answerWith(notes[0], notesBody());
+    await answerWith(audit[0], auditBody());
+    await user.click(screen.getByRole("button", { name: "Request additional information" }));
+    await waitFor(() => expect(workflow).toHaveLength(1));
+    await answerWith(workflow[0], { code: "PRIVATE" }, 409);
+    await waitFor(() => {
+      expect(detailCalls).toHaveLength(2);
+      expect(notes).toHaveLength(2);
+      expect(audit).toHaveLength(2);
+    });
+
+    await answerWith(detailCalls[1], caseBody({ concurrencyVersion: 5 }));
+    await answerWith(
+      notes[1],
+      { code: "PRIVATE_NOTES", message: "PRIVATE_NOTES_BODY" },
+      503,
+    );
+    await answerWith(audit[1], auditBody());
+    expect(valueOf("Concurrency version")).toHaveTextContent("5");
+    expect(
+      screen.getByRole("heading", { name: "The case changed before this action", level: 4 }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("heading", {
+        name: "The latest investigation notes could not be loaded",
+        level: 4,
+      }),
+    ).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Audit history", level: 3 })).toBeVisible();
+    expect(document.body.innerHTML).not.toMatch(/PRIVATE_NOTES/);
+  });
+});
+
 describe("CaseDetailPage note reconciliation", () => {
+  // 인위적 대기 없음: waitFor는 요청 도착 조건만, settle은 microtask만 기다린다. 단독 약 1.0초이나
+  // workflow section이 함께 렌더되는 이 파일은 전체 병렬 suite에서 약 3배 느려져 기본 5초를 넘을 수 있다.
   it("keeps the composer locked and the version unchanged when detail is below the POST floor", async () => {
     const { detail, notes, audit } = controlledAllCaseReads();
     const user = userEvent.setup();
@@ -685,8 +918,10 @@ describe("CaseDetailPage note reconciliation", () => {
     await answerWith(detail[2], caseBody({ concurrencyVersion: 5 }));
     expect(screen.getByRole("button", { name: "Add note" })).toBeEnabled();
     expect(valueOf("Concurrency version")).toHaveTextContent("5");
-  });
+  }, 20_000);
 
+  // 인위적 대기 없음: 두 note를 실제 입력·제출하고 요청 도착 조건만 기다린다. 단독 약 1.3초이나
+  // 전체 병렬 suite에서는 기본 5초를 넘은 실제 실패가 관찰되어 이 테스트의 상한만 명시한다.
   it.each([5, 6])("uses authoritative detail version %i for the next note POST", async (version) => {
     const { detail, notes, audit } = controlledAllCaseReads();
     const user = userEvent.setup();
@@ -715,7 +950,7 @@ describe("CaseDetailPage note reconciliation", () => {
       content: second,
       expectedVersion: version,
     });
-  });
+  }, 20_000);
 
   it("does not render the composer when sufficient reconciliation closes the case", async () => {
     const { detail, notes, audit } = controlledAllCaseReads();
@@ -809,6 +1044,8 @@ describe("CaseDetailPage note reconciliation", () => {
     expect(screen.getByText("CASE_NOTE_CREATED")).toBeVisible();
   });
 
+  // 인위적 대기 없음: 요청 도착 조건과 microtask만 기다린다. 단독 약 1.3초(여러 파일 동시 실행 시
+  // 약 2.1초)이며 전체 병렬 suite에서 약 3배 느려지면 기본 5초를 넘을 수 있어 상한만 명시한다.
   it("keeps a successful create and the other authoritative refreshes when audit refresh fails", async () => {
     const { detail, notes, audit } = controlledAllCaseReads();
     const user = userEvent.setup();
@@ -864,7 +1101,7 @@ describe("CaseDetailPage note reconciliation", () => {
     expect(screen.getByRole("button", { name: "Add note" })).toBeEnabled();
     expect(document.body.textContent).not.toContain("PRIVATE_AUDIT_REFRESH_CODE");
     expect(document.body.textContent).not.toContain("private-audit-refresh-trace");
-  });
+  }, 20_000);
 });
 
 describe("CaseDetailPage failures", () => {
@@ -917,6 +1154,133 @@ describe("CaseDetailPage failures", () => {
       screen.queryByRole("heading", { name: "Investigation notes" }),
     ).not.toBeInTheDocument();
   });
+
+  it.each([
+    [403, "Access denied", "success"],
+    [403, "Access denied", "failure"],
+    [404, "Case not found", "success"],
+    [404, "Case not found", "failure"],
+  ] as const)(
+    "removes a previously successful page on refresh %i (%s) and blocks late subordinate %s",
+    async (detailStatus, refusalTitle, lateOutcome) => {
+      const { detail, notes, audit, workflow, spy } = controlledAllCaseReads();
+      const credential = "page.refresh.private.credential";
+      const client = createFakeAuthClient({ initialSession: SESSION, accessToken: credential });
+      adapter.client = client;
+      const user = userEvent.setup();
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      renderPage(client);
+      await settle();
+
+      await answerWith(detail[0], caseBody({ concurrencyVersion: 4 }));
+      await answerWith(notes[0], notesBody("INITIAL_PROTECTED_NOTE"));
+      await answerWith(audit[0], auditBody());
+      expect(screen.getByRole("heading", { name: "Case", level: 3 })).toBeVisible();
+      expect(screen.getByRole("heading", { name: "Case workflow", level: 3 })).toBeVisible();
+      expect(screen.getByRole("heading", { name: "Investigation notes", level: 3 })).toBeVisible();
+      expect(screen.getByRole("heading", { name: "Audit history", level: 3 })).toBeVisible();
+      expect(valueOf("Case ID")).toHaveTextContent(CASE_ID);
+
+      const submittedNote = "note that starts authoritative refresh";
+      await user.type(screen.getByRole("textbox", { name: "Investigation note" }), submittedNote);
+      await user.click(screen.getByRole("button", { name: "Add note" }));
+      await waitFor(() => expect(notes).toHaveLength(2));
+      await answerWith(notes[1], createdNoteBody(submittedNote), 201);
+      await waitFor(() => {
+        expect(detail).toHaveLength(2);
+        expect(notes).toHaveLength(3);
+        expect(audit).toHaveLength(2);
+      });
+
+      // Keep all three subordinate lifecycles pending while the detail refresh
+      // reaches its authoritative refusal. The workflow request uses the still
+      // visible record and must be released when that record disappears.
+      await user.click(screen.getByRole("button", { name: "Request additional information" }));
+      await waitFor(() => expect(workflow).toHaveLength(1));
+      expect(detail[1].request.signal.aborted).toBe(false);
+      expect(notes[2].request.signal.aborted).toBe(false);
+      expect(audit[1].request.signal.aborted).toBe(false);
+      expect(workflow[0].request.signal.aborted).toBe(false);
+
+      await answerWith(
+        detail[1],
+        {
+          code: `RAW_REFRESH_${String(detailStatus)}`,
+          message: "private detail refresh refusal",
+          traceId: "trace_private_detail_refresh",
+        },
+        detailStatus,
+      );
+      await waitFor(() => {
+        expect(screen.getByRole("alert")).toHaveTextContent(refusalTitle);
+      });
+
+      expect(screen.queryByRole("heading", { name: "Case", level: 3 })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "Case workflow", level: 3 })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "Investigation notes", level: 3 })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "Audit history", level: 3 })).not.toBeInTheDocument();
+      expect(document.querySelectorAll("dd")).toHaveLength(0);
+      expect(workflow[0].request.signal.aborted).toBe(true);
+      expect(notes[2].request.signal.aborted).toBe(true);
+      expect(audit[1].request.signal.aborted).toBe(true);
+      expect(client.calls.invalidateIfCurrent).toBe(0);
+      expect(client.calls.notified).toBe(0);
+      expect(screen.queryByRole("button", { name: /Try again|Refresh .*information/ })).not.toBeInTheDocument();
+      expect(document.body.textContent ?? "").not.toMatch(
+        /INITIAL_PROTECTED_NOTE|RAW_REFRESH|private detail refresh|trace_private_detail_refresh/,
+      );
+      expect(document.body.innerHTML).not.toContain(credential);
+      expect(document.body.innerHTML).not.toContain(SESSION.subject);
+
+      if (lateOutcome === "success") {
+        await answerWith(workflow[0], workflowMutationBody());
+        await answerWith(notes[2], notesBody("LATE_REFRESH_NOTE_SUCCESS"));
+        await answerWith(audit[1], auditBody());
+      } else {
+        await answerWith(
+          workflow[0],
+          { code: "LATE_WORKFLOW_FAILURE", message: "private workflow failure" },
+          409,
+        );
+        await answerWith(
+          notes[2],
+          { code: "LATE_NOTES_FAILURE", message: "private notes failure" },
+          503,
+        );
+        await answerWith(
+          audit[1],
+          { code: "LATE_AUDIT_FAILURE", message: "private audit failure" },
+          503,
+        );
+      }
+      await settle();
+
+      expect(screen.getByRole("alert")).toHaveTextContent(refusalTitle);
+      expect(screen.queryByRole("heading", { name: "Case", level: 3 })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "Case workflow", level: 3 })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "Investigation notes", level: 3 })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "Audit history", level: 3 })).not.toBeInTheDocument();
+      expect(document.body.textContent ?? "").not.toMatch(
+        /LATE_REFRESH|LATE_WORKFLOW|LATE_NOTES|LATE_AUDIT|private workflow|private notes|private audit/,
+      );
+      expect(detail).toHaveLength(2);
+      expect(notes).toHaveLength(3);
+      expect(audit).toHaveLength(2);
+      expect(workflow).toHaveLength(1);
+      expect(spy).toHaveBeenCalledTimes(8);
+      expect(client.calls.invalidateIfCurrent).toBe(0);
+      expect(client.calls.notified).toBe(0);
+      expect(
+        consoleError.mock.calls.some((call) =>
+          call.some((value) => /state update|unmounted component/i.test(String(value))),
+        ),
+      ).toBe(false);
+    },
+    // 인위적 대기는 없다. 세 초기 read, note 입력, workflow 요청과 refresh를 모두 실제 UI
+    // 상호작용으로 거치므로 단독 실행에서도 1.4~3.1초가 걸리고 전체 병렬 suite에서는 기본
+    // 5초를 넘을 수 있다. 저장소의 무거운 UI 테스트 관례에 맞춰 이 테스트만 상한을 명시한다.
+    20_000,
+  );
 
   it.each([
     ["success", 404],
