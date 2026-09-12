@@ -424,8 +424,9 @@ function requireUniqueStringArray(value: unknown, message: string): asserts valu
   requireCondition(new Set(value).size === value.length, message);
 }
 
-function installSessionPublicationProbe(page: Page): Promise<void> {
-  return page.addInitScript(() => {
+async function installSessionPublicationProbe(page: Page): Promise<void> {
+  // addInitScript가 돌려주는 Disposable은 호출자에게 넘기지 않고 등록 완료만 기다린다.
+  await page.addInitScript(() => {
     const probe = { count: 0, observed: false };
     Object.defineProperty(window, "__finguardopsSessionProbe", {
       value: probe,
@@ -634,14 +635,17 @@ function requireTokenClaims(tokens: TokenMaterial): void {
   requireCondition(identity.family_name === "Analyst", "The stock family-name claim was not issued.");
   requireCondition(identity.name === "Local Analyst", "The stock full-name claim was not issued.");
 
-  requireUniqueStringArray(access.roles, "The access token roles were invalid.");
-  requireUniqueStringArray(identity.roles, "The ID token roles were invalid.");
+  // 검증한 roles 값을 지역 상수로 고정해 callback 안에서도 같은 narrowing이 유지되게 한다.
+  const accessRoles = access.roles;
+  const identityRoles = identity.roles;
+  requireUniqueStringArray(accessRoles, "The access token roles were invalid.");
+  requireUniqueStringArray(identityRoles, "The ID token roles were invalid.");
   requireCondition(
-    access.roles.length === identity.roles.length &&
-      access.roles.every((role) => identity.roles.includes(role)),
+    accessRoles.length === identityRoles.length &&
+      accessRoles.every((role) => identityRoles.includes(role)),
     "The access and ID token roles differed.",
   );
-  requireCondition(access.roles.length === 1 && access.roles[0] === "FDS_ANALYST", "The USER role set was invalid.");
+  requireCondition(accessRoles.length === 1 && accessRoles[0] === "FDS_ANALYST", "The USER role set was invalid.");
 
   const audience = access.aud;
   requireCondition(
@@ -5884,6 +5888,7 @@ test("real USER login enforces PKCE, token claims, and Backend boundaries", asyn
     try {
       await sendAuthorizedBackendRequest(getOidcAuthClient(), {
         endpoint: "case-list",
+        expectedStatus: 200,
         validate: (body: unknown): body is Record<string, unknown> => typeof body === "object" && body !== null,
       });
       return "ok";
@@ -5931,7 +5936,13 @@ test("real USER login enforces PKCE, token claims, and Backend boundaries", asyn
           reasonCode: "CASE_RESOLUTION_COMPLETED",
           expectedVersion: 0,
         },
-        validate: () => null,
+        expectedStatus: 200,
+        // 이 요청은 403이 기대 결과이므로 어떤 body도 성공으로 받아들이지 않는다.
+        validate: (body: unknown): body is never => {
+          // 성공 응답 본문은 사용하지 않지만 type predicate의 입력 계약은 유지한다.
+          void body;
+          return false;
+        },
       });
       return "unexpected-success";
     } catch (error: unknown) {

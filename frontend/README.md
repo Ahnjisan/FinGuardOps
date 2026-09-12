@@ -46,7 +46,8 @@ npm ci
 | --- | --- |
 | `npm run dev` | 로컬 개발 서버 실행 |
 | `npm run lint` | ESLint 정적 검사 |
-| `npm run typecheck` | production app·Vite/Node config 타입 검사 (`tsc -b --noEmit`)와 test 전용 타입 검사 (`tsc --noEmit -p tsconfig.test.json`)를 함께 실행 |
+| `npm run typecheck` | production app·Vite/Node config 타입 검사 (`tsc -b --noEmit`), test 전용 타입 검사 (`tsc --noEmit -p tsconfig.test.json`)와 E2E 전용 타입 검사 (`npm run typecheck:e2e`)를 함께 실행 |
+| `npm run typecheck:e2e` | E2E spec·geometry fixture와 `playwright.config.ts`만 독립 타입 검사 (`tsc --noEmit -p tsconfig.e2e.json`) |
 | `npm run test` | Vitest 기반 단위·컴포넌트 테스트 실행 |
 | `npm run build` | 타입 검사 후 production build (`dist/`) 생성 |
 | `npm run preview` | `dist/` 정적 build 결과를 로컬에서 미리보기 |
@@ -97,9 +98,13 @@ render에 도달하지 않고, 애플리케이션은 원문 값을 화면이나 
 
 `tsconfig.app.json`은 `src/**/*.test.ts(x)`와 `src/test/**`를 production 컴파일에서 명시적으로
 제외한다(`exclude`). 테스트 코드는 별도 `tsconfig.test.json`(strict, `vitest/globals`·
-`@testing-library/jest-dom`·`node` 타입 명시)으로 독립 typecheck하며, `npm run typecheck` 한
-번으로 production app·Vite/Node config·test 세 영역을 모두 검증한다. `npx tsc --listFilesOnly -p
-tsconfig.app.json` 결과에는 test 또는 test-support 파일이 포함되지 않는다.
+`@testing-library/jest-dom`·`node` 타입 명시)으로 독립 typecheck한다. `e2e/**`의 spec·geometry
+fixture와 `playwright.config.ts`는 별도 `tsconfig.e2e.json`(strict, `node` 타입 명시, `skipLibCheck`
+없음)으로 독립 typecheck하며, `npm run typecheck` 한 번으로 production app·Vite/Node config·test·E2E
+네 영역을 모두 검증한다. `tsconfig.e2e.json`은 `page.evaluate()` 안의 `/src/auth/oidcAuthClient.ts`와
+`/src/api/authorizedClient.ts` 두 import만 exact `paths`로 대응하며, root `tsconfig.json` references와
+`npm run build`에는 포함하지 않는다. `npx tsc --listFilesOnly -p tsconfig.app.json` 결과에는 test
+또는 test-support 파일이 포함되지 않는다.
 
 ## 구현된 Route
 
