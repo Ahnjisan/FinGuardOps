@@ -528,6 +528,69 @@ describe("changeCaseStatus", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it("returns a fresh nine-field projection that shares no top-level reference with the raw DTO", async () => {
+    // 테스트 double의 response.json()은 JSON 재파싱 없이 테스트가 보관한 이 객체 참조를 그대로 돌려준다.
+    const rawDto = mutation();
+    const { resolveJson } = mockFetchOkWithControlledJson();
+    resolveJson(rawDto);
+    const expected = {
+      caseId: CASE_ID,
+      caseStatus: "IN_REVIEW",
+      finalDisposition: null,
+      assigneeRef: ASSIGNEE_ID,
+      reviewStartedAt: "2026-07-24T01:25:00Z",
+      closedAt: null,
+      lastChangedAt: "2026-07-24T01:25:00Z",
+      concurrencyVersion: 1,
+      traceId: TRACE_ID,
+    };
+
+    const result = await changeCaseStatus(
+      signedIn(),
+      CASE_ID,
+      VALID_STATUS_CHANGE,
+      OPEN_WORKFLOW_DETAIL,
+    );
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    expect(Object.is(result.data, rawDto)).toBe(false);
+    expect(result.data).not.toBe(rawDto);
+    expect(Object.getPrototypeOf(result.data)).toBe(Object.prototype);
+    expect(result.data).toStrictEqual(expected);
+    expect(result.traceId).toBe(TRACE_ID);
+
+    // 반환 뒤 raw DTO의 상태·version을 바꾸거나 unknown field를 붙여도 projection에는 전파되지 않는다.
+    rawDto.caseStatus = "ADDITIONAL_INFORMATION_REQUIRED";
+    rawDto.concurrencyVersion = 2;
+    rawDto.actorId = ASSIGNEE_ID;
+    expect(result.data).toStrictEqual(expected);
+    expect(result.data).not.toHaveProperty("actorId");
+  });
+
+  it("still refuses a held raw DTO carrying an unknown field with the fixed InvalidResponseError", async () => {
+    // 기존 exact-shape 검증이 이미 거부하는 green 회귀 테스트다. projection 도입 뒤에도 거부가 유지되어야 한다.
+    const rawDto = { ...mutation(), actorId: ASSIGNEE_ID };
+    const { resolveJson } = mockFetchOkWithControlledJson();
+    resolveJson(rawDto);
+
+    const error = await changeCaseStatus(
+      signedIn(),
+      CASE_ID,
+      VALID_STATUS_CHANGE,
+      OPEN_WORKFLOW_DETAIL,
+    ).catch((thrown: unknown) => thrown);
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    expect(error).toBeInstanceOf(InvalidResponseError);
+    expect(error).toMatchObject({
+      name: "InvalidResponseError",
+      message: "Received an unexpected response shape.",
+    });
+    expect(`${String(error)} ${JSON.stringify(error)}`).not.toMatch(
+      /5c671624|2a000000|3b000000|trace|IN_REVIEW|actorId|fake\.access\.token|Bearer|\/api\/v1|PATCH/i,
+    );
+  });
 });
 
 describe("changeCaseAssignee", () => {
@@ -605,6 +668,69 @@ describe("changeCaseAssignee", () => {
       expect(client.calls.authorizeRequest).toBe(0);
       vi.unstubAllGlobals();
     }
+  });
+
+  it("returns a fresh nine-field projection that shares no top-level reference with the raw DTO", async () => {
+    // 테스트 double의 response.json()은 JSON 재파싱 없이 테스트가 보관한 이 객체 참조를 그대로 돌려준다.
+    const rawDto = mutation({ concurrencyVersion: 6 });
+    const { resolveJson } = mockFetchOkWithControlledJson();
+    resolveJson(rawDto);
+    const expected = {
+      caseId: CASE_ID,
+      caseStatus: "IN_REVIEW",
+      finalDisposition: null,
+      assigneeRef: ASSIGNEE_ID,
+      reviewStartedAt: "2026-07-24T01:25:00Z",
+      closedAt: null,
+      lastChangedAt: "2026-07-24T01:25:00Z",
+      concurrencyVersion: 6,
+      traceId: TRACE_ID,
+    };
+
+    const result = await changeCaseAssignee(
+      signedIn(),
+      CASE_ID,
+      VALID_ASSIGNEE_CHANGE,
+      REVIEW_WORKFLOW_DETAIL,
+    );
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    expect(Object.is(result.data, rawDto)).toBe(false);
+    expect(result.data).not.toBe(rawDto);
+    expect(Object.getPrototypeOf(result.data)).toBe(Object.prototype);
+    expect(result.data).toStrictEqual(expected);
+    expect(result.traceId).toBe(TRACE_ID);
+
+    // 반환 뒤 raw DTO의 담당자·version을 바꾸거나 unknown field를 붙여도 projection에는 전파되지 않는다.
+    rawDto.assigneeRef = CURRENT_ASSIGNEE_ID;
+    rawDto.concurrencyVersion = 7;
+    rawDto.actorId = ASSIGNEE_ID;
+    expect(result.data).toStrictEqual(expected);
+    expect(result.data).not.toHaveProperty("actorId");
+  });
+
+  it("still refuses a held raw DTO carrying an unknown field with the fixed InvalidResponseError", async () => {
+    // 기존 exact-shape 검증이 이미 거부하는 green 회귀 테스트다. projection 도입 뒤에도 거부가 유지되어야 한다.
+    const rawDto = { ...mutation({ concurrencyVersion: 6 }), actorId: ASSIGNEE_ID };
+    const { resolveJson } = mockFetchOkWithControlledJson();
+    resolveJson(rawDto);
+
+    const error = await changeCaseAssignee(
+      signedIn(),
+      CASE_ID,
+      VALID_ASSIGNEE_CHANGE,
+      REVIEW_WORKFLOW_DETAIL,
+    ).catch((thrown: unknown) => thrown);
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    expect(error).toBeInstanceOf(InvalidResponseError);
+    expect(error).toMatchObject({
+      name: "InvalidResponseError",
+      message: "Received an unexpected response shape.",
+    });
+    expect(`${String(error)} ${JSON.stringify(error)}`).not.toMatch(
+      /5c671624|2a000000|3b000000|trace|IN_REVIEW|actorId|fake\.access\.token|Bearer|\/api\/v1|PATCH/i,
+    );
   });
 });
 

@@ -730,7 +730,20 @@ export async function changeCaseStatus(
     signal,
     assertDispatchAllowed: options?.assertDispatchAllowed,
   });
-  return { data: result.data, traceId: resolveTraceId(result.traceId, result.data.traceId) };
+  // 검증을 통과한 9개 필드만 새 plain object에 복사해 transport가 돌려준 raw DTO와 참조를 공유하지 않는다.
+  const validated = result.data;
+  const data: CaseMutation = {
+    caseId: validated.caseId,
+    caseStatus: validated.caseStatus,
+    finalDisposition: validated.finalDisposition,
+    assigneeRef: validated.assigneeRef,
+    reviewStartedAt: validated.reviewStartedAt,
+    closedAt: validated.closedAt,
+    lastChangedAt: validated.lastChangedAt,
+    concurrencyVersion: validated.concurrencyVersion,
+    traceId: validated.traceId,
+  };
+  return { data, traceId: resolveTraceId(result.traceId, data.traceId) };
 }
 
 /**
@@ -761,7 +774,20 @@ export async function changeCaseAssignee(
     signal,
     assertDispatchAllowed: options?.assertDispatchAllowed,
   });
-  return { data: result.data, traceId: resolveTraceId(result.traceId, result.data.traceId) };
+  // 검증을 통과한 9개 필드만 새 plain object에 복사해 transport가 돌려준 raw DTO와 참조를 공유하지 않는다.
+  const validated = result.data;
+  const data: CaseMutation = {
+    caseId: validated.caseId,
+    caseStatus: validated.caseStatus,
+    finalDisposition: validated.finalDisposition,
+    assigneeRef: validated.assigneeRef,
+    reviewStartedAt: validated.reviewStartedAt,
+    closedAt: validated.closedAt,
+    lastChangedAt: validated.lastChangedAt,
+    concurrencyVersion: validated.concurrencyVersion,
+    traceId: validated.traceId,
+  };
+  return { data, traceId: resolveTraceId(result.traceId, data.traceId) };
 }
 
 /**
