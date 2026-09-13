@@ -289,13 +289,14 @@ React는 API 계약을 임의로 만들거나 금융 업무 상태를 자체 확
 거래 목록(`/transactions`, Issue #249), 거래 상세(`/transactions/{transactionId}`, Issue #251),
 사건 목록(`/cases`, Issue #253)과 사건 상세(`/cases/{caseId}`, Issue #255) 넷이다. 사건 상세에는
 Issue #257의 Audit history, Issue #259의 Investigation notes 조회, Issue #261의 inline note
-composer와 Issue #277의 상태·담당자 workflow가 통합되어 있다. 앞의 둘은
+composer, Issue #277의 상태·담당자 workflow와 Issue #281의 사건 최종 판정(Resolution) form이 통합되어
+있다. 앞의 둘은
 Frontend UI capability `transaction:view`로, 뒤의 둘은 `case:view`로 보호하며, 최종 판정은 각각
 Backend authority `transaction:read`, `case:read`와 401·403 응답이 내린다. Frontend capability와 Backend authority는 서로 다른 계층에
 속하므로 혼용하지 않는다.
 
 목록은 filter·sort·pagination과 loading·empty·error·data 상태를 갖는다. 상세 record는 조회 전용이며
-사건 상세의 독립 section만 capability·상태로 제한한 workflow와 note create를 제공한다. 상세 조회는
+사건 상세의 독립 section만 capability·상태로 제한한 workflow·resolution과 note create를 제공한다. 상세 조회는
 loading, data, transaction not found(404), access denied(403), authentication required(401),
 timeout, network failure, invalid response, generic error, explicit retry, 그리고 malformed
 주소에 대한 고정 invalid-route 상태를 갖는다. 목록에서 상세로 가는 경로는 행 전체 클릭이 아니라
@@ -330,7 +331,7 @@ action은 없다. 표시하는 값은
 `FraudCaseQueryValidator` 계약 안에서만 동작하고, 생성 시간 범위와 최종 변경 시간 범위는 서로
 독립적으로 검증한다.
 
-사건 상세의 Case record는 조회 전용이고 그 뒤의 독립 workflow section만 상태·담당자 mutation을 제공한다. record는
+사건 상세의 Case record는 조회 전용이고 그 뒤의 독립 workflow section만 상태·담당자·최종 판정 mutation을 제공한다. record는
 `GET /api/v1/cases/{caseId}` 응답의 10개 필드만 읽기 전용 `<dl>`로 표시한다. `caseId`,
 `caseStatus`, `finalDisposition`, `assigneeRef`, `relatedTransactionCount`, `createdAt`,
 `reviewStartedAt`, `closedAt`, `lastChangedAt`, `concurrencyVersion`이 전부다. 다만 같은 화면의
@@ -410,10 +411,23 @@ abort를 무시한 late settlement도 게시하지 않는다. 이 Frontend guard
 `expectedVersion` optimistic concurrency를 대체하지 않는다. 공개 outcome은
 field 단위로 재투영해 raw request/response/Error, credential·subject·traceId·AuditLog actor를 보존하지 않는다.
 
-Issue #251, Issue #253, Issue #255, Issue #257, Issue #259, Issue #261과 Issue #277 모두에서 Backend, AI Service,
-Infra, Keycloak, DB와 API 계약 변경은 없다. resolution, 조사 메모 수정·삭제와 별도 notes route, 연관 거래·
+Issue #281은 같은 `Case workflow` section 안에 `case:resolve` capability 전용 최종 판정 fieldset을 추가한다.
+section은 `case:workflow || case:resolve`에서 렌더되고 상태·담당자 control은 `case:workflow`에만, 판정 form은
+`case:resolve`와 종결 가능한 `IN_REVIEW` detail(담당자·`reviewStartedAt` 존재, 판정·`closedAt` 부재, 안전한
+version)에만 존재한다. 부적격 상태의 승인 담당자에게는 비민감 고정 안내만, CLOSED에는 기존 종결 안내만 보인다.
+Resolution은 별도 hook 없이 기존 lane의 action으로 flight identity와 세 단계 current-flight guard를 공유하고,
+`createCaseResolution`은 detail baseline·AbortSignal·dispatch guard option을 받아 요청 caseId, successor version,
+`CLOSED`, 요청 판정, non-null `closedAt === lastChangedAt`, 담당자·`reviewStartedAt` 보존을 결합 검증한다.
+확인된 성공은 detail·audit만 refresh하고 floor 이상 authoritative detail이 `CLOSED`와 요청 판정을 함께 보일
+때만 성공을 전달하며, 불일치는 lane을 잠근 채 고정 오류와 명시적 refresh를 제공한다. 400·422·5xx는 자동 read
+없는 고정 server-error, 401은 기존 transport session invalidation, 403·404는 terminal, 409·timeout·network·
+invalid response는 detail·notes·audit reconciliation이다. POST 자동 retry·polling·replay는 없고 note composer
+lane은 분리된 채 Backend 409 계약으로 경합을 해결한다.
+
+Issue #251, Issue #253, Issue #255, Issue #257, Issue #259, Issue #261, Issue #277과 Issue #281 모두에서 Backend,
+AI Service, Infra, Keycloak, DB와 API 계약 변경은 없다. 조사 메모 수정·삭제와 별도 notes route, 연관 거래·
 Detection·Rule Evidence·AI 사건 리포트 화면 및 그 밖의 mutation UI는 후속 Issue이며, 실제 Backend
-workflow mutation browser E2E와 콘솔 전체의 최종 시각적 리뉴얼도 후속 작업으로 남아 있다.
+workflow·resolution mutation 성공 browser E2E와 콘솔 전체의 최종 시각적 리뉴얼도 후속 작업으로 남아 있다.
 
 ### 7.2 Spring Boot Modular Monolith
 

@@ -7520,6 +7520,8 @@ async function requireNoCaseWorkflowDom(page: Page): Promise<void> {
  * and `app.css`, and Vite transforms and serves them as it does for the console.
  * The notes fixture injects a synthetic FDS_ANALYST AuthClient/session so the
  * production workflow section and capability-gated composer can be measured.
+ * resolution fixture는 synthetic FDS_ANALYST+FDS_APPROVER session으로 같은 production section의
+ * workflow control과 사건 최종 판정 fieldset을 함께 렌더한다.
  * It has no credential, token or Keycloak login and is not authentication or
  * authorization evidence; those boundaries are covered by unit, router and
  * real Keycloak integration tests. None of the geometry fixtures makes an API
@@ -7529,6 +7531,7 @@ const CASE_TABLE_GEOMETRY_URL = `${APP_ORIGIN}/e2e/case-table-geometry.html`;
 const CASE_AUDIT_GEOMETRY_URL = `${APP_ORIGIN}/e2e/case-audit-geometry.html`;
 const CASE_NOTES_GEOMETRY_URL =
   `${APP_ORIGIN}/e2e/case-investigation-notes-geometry.html`;
+const CASE_RESOLUTION_GEOMETRY_URL = `${APP_ORIGIN}/e2e/case-resolution-geometry.html`;
 
 /** The 128-character assignee reference the fixture renders. Backend's bound. */
 const GEOMETRY_ASSIGNEE_REF =
@@ -7829,7 +7832,7 @@ test("the populated case audit history wraps inside the document at every design
   );
 });
 
-test("populated investigation notes preserve plain text and wrap at every design width", async ({
+test("populated investigation notes preserve plain text and case resolution controls wrap at every design width", async ({
   page,
 }) => {
   const offPageRequests: string[] = [];
@@ -8383,12 +8386,303 @@ test("populated investigation notes preserve plain text and wrap at every design
   );
   await page.setViewportSize({ width: 1440, height: 900 });
 
+  // 두 번째 fixture: production CaseWorkflowSection의 사건 최종 판정 fieldset이다. 공식 test 수를
+  // 늘리지 않도록 같은 test 안에서 네 design width를 측정한다. radio 선택과 제출을 하지 않으므로
+  // 어떤 API 요청도 만들지 않으며, 마지막 off-origin·relay 검사가 두 fixture를 함께 확인한다.
+  await page.goto(CASE_RESOLUTION_GEOMETRY_URL);
+  await expect(page.getByRole("heading", { name: "Case workflow", level: 3 })).toBeVisible();
+  const resolutionGroup = page.getByRole("group", { name: "Case resolution", exact: true });
+  await expect(resolutionGroup).toBeVisible();
+  await expect(
+    resolutionGroup.getByRole("radiogroup", { name: "Final disposition", exact: true }),
+  ).toBeVisible();
+  await expect(resolutionGroup.getByRole("radio")).toHaveCount(3);
+  const resolutionLabels = ["Normal", "False positive", "Confirmed fraud"];
+  for (const name of resolutionLabels) {
+    await expect(resolutionGroup.getByRole("radio", { name, exact: true })).not.toBeChecked();
+  }
+  await expect(
+    resolutionGroup.getByRole("button", { name: "Resolve case", exact: true }),
+  ).toBeVisible();
+  await expect(resolutionGroup.getByText(/cannot be undone/)).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Request additional information", exact: true }),
+  ).toBeVisible();
+
+  for (const viewport of NOTES_GEOMETRY_VIEWPORTS) {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    const at = `${String(viewport.width)}px`;
+    requireCondition(
+      !(await documentOverflowsHorizontally(page)),
+      `The case resolution fixture scrolled the document at ${at}.`,
+    );
+    const resolution = await page.locator("section.case-workflow").evaluate((section) => {
+      const rectOf = (element: Element) => {
+        const rect = element.getBoundingClientRect();
+        return {
+          left: rect.left,
+          right: rect.right,
+          top: rect.top,
+          bottom: rect.bottom,
+          width: rect.width,
+        };
+      };
+      const fieldset = section.querySelector<HTMLFieldSetElement>("form.case-resolution > fieldset");
+      const main = section.closest("main");
+      if (fieldset === null || main === null) {
+        return null;
+      }
+      const fieldsetBox = fieldset.getBoundingClientRect();
+      const fieldsetStyle = window.getComputedStyle(fieldset);
+      const contentLeft =
+        fieldsetBox.left +
+        parseFloat(fieldsetStyle.borderLeftWidth) +
+        parseFloat(fieldsetStyle.paddingLeft);
+      const contentRight =
+        fieldsetBox.right -
+        parseFloat(fieldsetStyle.borderRightWidth) -
+        parseFloat(fieldsetStyle.paddingRight);
+      const helper = fieldset.querySelector<HTMLElement>("#case-resolution-helper");
+      const helperLines: { left: number; right: number; top: number }[] = [];
+      if (helper !== null) {
+        const range = document.createRange();
+        range.selectNodeContents(helper);
+        for (const rect of Array.from(range.getClientRects())) {
+          if (rect.width > 0 && rect.height > 0) {
+            helperLines.push({ left: rect.left, right: rect.right, top: rect.top });
+          }
+        }
+      }
+      const helperLineTops: number[] = [];
+      for (const line of helperLines) {
+        if (!helperLineTops.some((top) => Math.abs(top - line.top) <= 0.5)) {
+          helperLineTops.push(line.top);
+        }
+      }
+      const options = Array.from(
+        fieldset.querySelectorAll<HTMLLabelElement>("label.case-resolution__option"),
+      ).map((label) => {
+        const input = label.querySelector<HTMLInputElement>("input[type='radio']");
+        const text = label.querySelector<HTMLElement>(":scope > span");
+        const textStyle = text === null ? null : window.getComputedStyle(text);
+        return {
+          display: window.getComputedStyle(label).display,
+          input: input === null ? null : rectOf(input),
+          text:
+            text === null || textStyle === null
+              ? null
+              : {
+                  ...rectOf(text),
+                  value: text.textContent ?? "",
+                  scrollWidth: text.scrollWidth,
+                  clientWidth: text.clientWidth,
+                  whiteSpace: textStyle.whiteSpace,
+                  overflowWrap: textStyle.overflowWrap,
+                },
+        };
+      });
+      const actions = fieldset.querySelector<HTMLElement>(":scope > .case-workflow__actions");
+      const submit = actions?.querySelector<HTMLButtonElement>("button[type='submit']") ?? null;
+      const submitStyle = submit === null ? null : window.getComputedStyle(submit);
+      const controls = Array.from(
+        section.querySelectorAll("button, input, label.case-resolution__option > span"),
+      ).map((control) => ({
+        ...rectOf(control),
+        tag: control.tagName,
+        groupWidth: control.closest("fieldset")?.getBoundingClientRect().width ?? 0,
+      }));
+      return {
+        panel: rectOf(section),
+        main: rectOf(main),
+        viewportWidth: window.innerWidth,
+        fieldset: {
+          ...rectOf(fieldset),
+          borderTopStyle: fieldsetStyle.borderTopStyle,
+          contentLeft,
+          contentRight,
+        },
+        helper:
+          helper === null
+            ? null
+            : {
+                lineCount: helperLineTops.length,
+                lines: helperLines,
+                scrollWidth: helper.scrollWidth,
+                clientWidth: helper.clientWidth,
+              },
+        options,
+        actionsDirection: actions === null ? "" : window.getComputedStyle(actions).flexDirection,
+        submit:
+          submit === null || submitStyle === null
+            ? null
+            : {
+                ...rectOf(submit),
+                text: submit.textContent ?? "",
+                whiteSpace: submitStyle.whiteSpace,
+                overflowWrap: submitStyle.overflowWrap,
+              },
+        controls,
+      };
+    });
+    requireCondition(resolution !== null, `The case resolution fieldset was absent at ${at}.`);
+    const resolutionTolerance = 1;
+    // closure 안에서도 null 판정이 유지되도록 검증 대상을 local constant로 고정한다.
+    const resolutionPanel = resolution.panel;
+    const resolutionFieldset = resolution.fieldset;
+    requireCondition(
+      resolutionPanel.left >= resolution.main.left - resolutionTolerance &&
+        resolutionPanel.right <= resolution.main.right + resolutionTolerance &&
+        resolutionPanel.left >= -resolutionTolerance &&
+        resolutionPanel.right <= resolution.viewportWidth + resolutionTolerance,
+      `The case workflow section escaped the main region at ${at}.`,
+    );
+    requireCondition(
+      resolutionFieldset.borderTopStyle === "solid" &&
+        resolutionFieldset.left >= resolutionPanel.left - resolutionTolerance &&
+        resolutionFieldset.right <= resolutionPanel.right + resolutionTolerance,
+      `The production resolution fieldset style or containment was missing at ${at}.`,
+    );
+    const resolutionHelper = resolution.helper;
+    requireCondition(
+      resolutionHelper !== null &&
+        resolutionHelper.lineCount >= 1 &&
+        resolutionHelper.scrollWidth <= resolutionHelper.clientWidth + resolutionTolerance &&
+        resolutionHelper.lines.every(
+          (line) =>
+            line.left >= resolutionFieldset.contentLeft - resolutionTolerance &&
+            line.right <= resolutionFieldset.contentRight + resolutionTolerance,
+        ),
+      `The irreversible resolution warning did not wrap inside its fieldset at ${at}.`,
+    );
+    requireCondition(
+      JSON.stringify(resolution.options.map((option) => option.text?.value ?? null)) ===
+        JSON.stringify(resolutionLabels),
+      `The resolution fieldset did not render the three production disposition labels at ${at}.`,
+    );
+    for (const option of resolution.options) {
+      const radio = option.input;
+      const label = option.text;
+      requireCondition(
+        option.display === "flex" &&
+          radio !== null &&
+          label !== null &&
+          label.whiteSpace === "normal" &&
+          label.overflowWrap === "anywhere" &&
+          label.scrollWidth <= label.clientWidth + resolutionTolerance &&
+          radio.left >= resolutionFieldset.contentLeft - resolutionTolerance &&
+          radio.right <= label.left + resolutionTolerance &&
+          label.right <= resolutionFieldset.contentRight + resolutionTolerance,
+        `A disposition label did not wrap beside its radio inside the fieldset at ${at}.`,
+      );
+    }
+    const resolutionSubmit = resolution.submit;
+    requireCondition(
+      resolutionSubmit !== null &&
+        resolutionSubmit.text === "Resolve case" &&
+        resolutionSubmit.whiteSpace === "normal" &&
+        resolutionSubmit.overflowWrap === "anywhere" &&
+        resolutionSubmit.left >= resolutionFieldset.contentLeft - resolutionTolerance &&
+        resolutionSubmit.right <= resolutionFieldset.contentRight + resolutionTolerance,
+      `The resolve action escaped its fieldset or could not wrap at ${at}.`,
+    );
+    requireCondition(
+      resolution.controls.length === 10,
+      `The resolution fixture did not render three workflow controls, three radios, three labels and one resolve action at ${at}.`,
+    );
+    for (const control of resolution.controls) {
+      requireCondition(
+        control.left >= resolutionPanel.left - resolutionTolerance &&
+          control.right <= resolutionPanel.right + resolutionTolerance,
+        `A workflow or resolution control escaped its section at ${at}.`,
+      );
+    }
+    for (let left = 0; left < resolution.controls.length; left += 1) {
+      for (let right = left + 1; right < resolution.controls.length; right += 1) {
+        const first = resolution.controls[left];
+        const second = resolution.controls[right];
+        const overlaps =
+          first.left < second.right - 0.5 &&
+          first.right > second.left + 0.5 &&
+          first.top < second.bottom - 0.5 &&
+          first.bottom > second.top + 0.5;
+        requireCondition(!overlaps, `Resolution radios, labels or actions overlapped at ${at}.`);
+      }
+    }
+    if (viewport.width === 390 && viewport.height === 844) {
+      requireCondition(
+        resolution.actionsDirection === "column",
+        "Mobile resolution actions were not laid out as a column.",
+      );
+      requireCondition(
+        resolutionHelper.lineCount >= 2,
+        "The irreversible resolution warning did not wrap onto multiple lines at 390px.",
+      );
+      for (const control of resolution.controls.filter(({ tag }) => tag === "BUTTON")) {
+        requireCondition(
+          Math.abs(control.width - control.groupWidth) <= 1.5,
+          "A mobile workflow or resolution action did not render at its fieldset width.",
+        );
+      }
+    }
+  }
+
+  // keyboard 초점 표시: production `:focus-visible` outline이 resolution control에 실제로 적용되는지 본다.
+  // Tab·Shift+Tab은 radio를 선택하지 않으므로 draft와 요청은 계속 0이다.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const readResolutionFocus = () =>
+    page.evaluate(() => {
+      const active = document.activeElement;
+      if (!(active instanceof HTMLElement)) {
+        return null;
+      }
+      const style = window.getComputedStyle(active);
+      return {
+        tag: active.tagName,
+        type: active.getAttribute("type") ?? "",
+        name: active.getAttribute("name") ?? "",
+        text: active.textContent ?? "",
+        inResolution: active.closest("form.case-resolution") !== null,
+        focusVisible: active.matches(":focus-visible"),
+        outlineStyle: style.outlineStyle,
+        outlineWidth: style.outlineWidth,
+      };
+    });
+  await resolutionGroup.getByRole("radio", { name: "Normal", exact: true }).focus();
+  await page.keyboard.press("Tab");
+  const actionFocus = await readResolutionFocus();
+  requireCondition(
+    actionFocus !== null &&
+      actionFocus.tag === "BUTTON" &&
+      actionFocus.text === "Resolve case" &&
+      actionFocus.inResolution &&
+      actionFocus.focusVisible &&
+      actionFocus.outlineStyle === "solid" &&
+      actionFocus.outlineWidth === "2px",
+    "The keyboard-focused resolve action did not show the production focus outline.",
+  );
+  await page.keyboard.press("Shift+Tab");
+  const radioFocus = await readResolutionFocus();
+  requireCondition(
+    radioFocus !== null &&
+      radioFocus.tag === "INPUT" &&
+      radioFocus.type === "radio" &&
+      radioFocus.name === "case-resolution-disposition" &&
+      radioFocus.inResolution &&
+      radioFocus.focusVisible &&
+      radioFocus.outlineStyle === "solid" &&
+      radioFocus.outlineWidth === "2px",
+    "The keyboard-focused disposition radio did not show the production focus outline.",
+  );
+  for (const name of resolutionLabels) {
+    await expect(resolutionGroup.getByRole("radio", { name, exact: true })).not.toBeChecked();
+  }
+
   requireCondition(
     offPageRequests.length === 0,
-    "The notes geometry fixture requested something outside the application origin.",
+    "The notes or resolution geometry fixture requested something outside the application origin.",
   );
   requireCondition(
     relaySpawnCount === spawnsBefore && relayObservationCount === observationsBefore,
-    "The notes geometry fixture reached the Backend relay.",
+    "The notes or resolution geometry fixture reached the Backend relay.",
   );
 });

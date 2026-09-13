@@ -42,13 +42,13 @@ finalDisposition
 
 ### 담당자
 
-사건을 검토하고 조사 메모, 상태, 최종 판정과 변경 사유를 관리하는 FDS 분석 담당자이다.
+사건을 검토하고 조사 메모, 상태와 변경 사유를 관리하는 FDS 분석 담당자(`FDS_ANALYST`)이다. 최종 판정은 담당자가 아니라 FDS 승인 담당자(`FDS_APPROVER`)가 확정한다.
 
 초기 계약에서 `OPEN` 사건은 담당자가 없을 수 있지만 `IN_REVIEW` 사건에는 담당자가 반드시 있어야 한다. `OPEN`에서 `IN_REVIEW`로 전이할 때 상태 변경 요청의 `assigneeRef`로 담당자를 함께 지정하고, `ADDITIONAL_INFORMATION_REQUIRED`에서 `IN_REVIEW`로 복귀할 때는 기존 담당자가 있어야 한다. `IN_REVIEW`는 담당자 변경만, `ADDITIONAL_INFORMATION_REQUIRED`는 배정·변경·해제를 허용한다. 자동 배정 도입 여부는 `TBD`이다.
 
 ### 최종 판정
 
-조사 결과 정상, 오탐 또는 이상거래로 판단한 값이다. 생성형 AI나 플랫폼·클라우드 운영자가 확정할 수 없다.
+조사 결과 정상, 오탐 또는 이상거래로 판단한 값이다. FDS 승인 담당자(`FDS_APPROVER`, `case:resolution:write`)가 resolution API로만 확정하며 FDS 분석 담당자, 생성형 AI나 플랫폼·클라우드 운영자는 확정할 수 없다.
 
 ## 4. 상태 목록
 
@@ -95,7 +95,7 @@ Rule 또는 모델의 부정확한 경보로 확인되어 탐지 정책 개선 �
 
 ### `CONFIRMED_FRAUD`
 
-FDS 분석 담당자의 조사 결과 이상거래로 확정된 최종 판정이다. 이 프로젝트에서 실제 고객 제재나 실제 거래 차단을 수행한다는 의미는 아니다.
+조사 결과를 바탕으로 FDS 승인 담당자가 이상거래로 확정한 최종 판정이다. 이 프로젝트에서 실제 고객 제재나 실제 거래 차단을 수행한다는 의미는 아니다.
 
 ## 6. 텍스트 상태 전이도
 
@@ -168,7 +168,7 @@ CLOSED → IN_REVIEW
 ### `IN_REVIEW` → `CLOSED`
 
 - 전이 조건: 조사 결과가 확정되고 `NORMAL`, `FALSE_POSITIVE`, `CONFIRMED_FRAUD` 중 하나의 `finalDisposition`과 `CASE_RESOLUTION_COMPLETED` 사유 코드가 제공된다.
-- 변경 주체: FDS 분석 담당자
+- 변경 주체: FDS 승인 담당자(`FDS_APPROVER`, `case:resolution:write`). FDS 분석 담당자(`FDS_ANALYST`)에게는 이 권한이 없다.
 - 생성되는 결과: 필수 최종 판정, `CLOSED`, 같은 마이크로초 시각의 `closedAt`·`lastChangedAt`, 실제 증가한 `concurrencyVersion`과 구조화된 감사
 - 최종 판정: 필수
 - 실패 시 처리: 상태와 판정 중 일부만 반영되지 않도록 정합성을 유지한다.
@@ -245,8 +245,14 @@ CLOSED → IN_REVIEW
 
 - 사건을 검토하고 조사 메모를 작성한다.
 - 허용된 범위에서 사건 상태를 변경한다.
-- 조사 근거를 바탕으로 `NORMAL`, `FALSE_POSITIVE`, `CONFIRMED_FRAUD`를 확정한다.
 - 변경 사유를 기록한다.
+- 최종 판정을 확정하거나 사건을 종료하지 않는다.
+
+### FDS 승인 담당자
+
+- `FDS_APPROVER` 역할이며 `case:resolution:write` 권한으로 `IN_REVIEW` 사건만 resolution API로 종료한다.
+- 조사 근거를 바탕으로 `NORMAL`, `FALSE_POSITIVE`, `CONFIRMED_FRAUD` 중 하나를 확정한다.
+- 사건 상태·담당자 일반 변경과 조사 메모 작성 권한은 갖지 않는다.
 
 ### 플랫폼·클라우드 운영자
 
@@ -290,7 +296,7 @@ CLOSED → IN_REVIEW
 - 동일 version 동시 요청은 정확히 하나만 성공하며 충돌 또는 감사 실패는 사건과
   감사 전체를 rollback한다.
 
-시스템의 연관 거래 추가와 담당자의 사건 종료가 동시에 발생하는 경우, 종료 허용 여부와 재검토 필요 조건도 `TBD`이다.
+시스템의 연관 거래 추가와 승인 담당자의 사건 종료가 동시에 발생하는 경우, 종료 허용 여부와 재검토 필요 조건도 `TBD`이다.
 
 ## 13. 실패·재시도 원칙
 

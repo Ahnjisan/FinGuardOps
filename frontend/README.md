@@ -19,8 +19,10 @@ Investigation notes section을 추가해 Case record → Investigation notes →
 Issue #261에서는 `case:note-write` capability를 가진 `FDS_ANALYST`에게 두 작성 가능 상태의 inline
 composer를 추가하고, 기존 note POST와 authoritative notes/detail/audit refresh를 연결했다. Issue
 #277에서는 Case record와 Investigation notes 사이에 `case:workflow` capability로 제한한 상태·담당자
-mutation UI와 shared mutation/reconciliation lane을 추가했다. 조사 메모 수정·삭제와 사건 최종 판정·
-연관 거래·Detection·Rule Evidence·AI 사건 리포트 화면, 실제 Backend workflow mutation browser E2E와 운영 대시보드는 아직 없고,
+mutation UI와 shared mutation/reconciliation lane을 추가했다. Issue #281에서는 같은 `Case workflow`
+section 안에 `case:resolve` capability로 제한한 사건 최종 판정(Resolution) form을 추가하고 같은 shared
+lane에 합쳤다. 조사 메모 수정·삭제와 연관 거래·Detection·Rule Evidence·AI 사건 리포트 화면, 실제 Backend
+상태·담당자·최종 판정 mutation 성공 browser E2E와 운영 대시보드는 아직 없고,
 콘솔 전체의 최종 시각적 리뉴얼은 후속 Issue로 남아 있다.
 
 ## 요구사항
@@ -114,16 +116,17 @@ fixture와 `playwright.config.ts`는 별도 `tsconfig.e2e.json`(strict, `node` �
 | `/transactions` | `TransactionListPage` | 거래 목록 (보호, `RequireCapability("transaction:view")`) |
 | `/transactions/{transactionId}` | `TransactionDetailPage` | 거래 상세, 조회 전용 (보호, `RequireCapability("transaction:view")`) |
 | `/cases` | `CaseListPage` | 사건 목록, 조회 전용 (보호, `RequireCapability("case:view")`) |
-| `/cases/{caseId}` | `CaseDetailPage` | 사건 상세 조회, 권한·상태 제한 workflow와 조사 메모 작성 (보호, `RequireCapability("case:view")`) |
+| `/cases/{caseId}` | `CaseDetailPage` | 사건 상세 조회, 권한·상태 제한 workflow·최종 판정과 조사 메모 작성 (보호, `RequireCapability("case:view")`) |
 | `/health` | `HealthPage` | Backend `/api/health` 상태 조회 (public) |
 | `/auth/callback` | `AuthCallbackPage` | OIDC redirect callback 처리 |
 | 그 외 모든 경로 | `NotFoundPage` | 404 |
 
 `/`와 `/health`는 public이며 인증 초기화 실패나 Authorization Server 장애와 무관하게 계속
 열려 있다. 로그인 전용 route, silent renew callback, logout callback route는 존재하지 않는다.
-사건 최종 판정, 조사 메모 수정·삭제 UI와 별도 notes route,
+조사 메모 수정·삭제 UI와 별도 notes route,
 연관 거래·Detection·Rule Evidence·AI 사건 리포트 화면과 운영 대시보드는 구현되지 않았다.
-조사 메모 조회와 생성은 `/cases/{caseId}` 내부 section에서 수행하며 별도 notes route는 없다.
+조사 메모 조회·생성과 사건 최종 판정은 `/cases/{caseId}` 내부 section에서 수행하며 별도 notes·resolution
+route는 없다.
 
 거래 목록, 거래 상세, 사건 목록과 사건 상세가 `RequireCapability`를 적용한 production route다.
 guard는 navigation이 아니라 route element에 있으므로 rail 클릭, 목록의 상세 link, 직접 URL 진입이
@@ -1405,13 +1408,14 @@ required, timeout, network failure, invalid response, generic safe error, explic
 
 `/cases/{caseId}` 사건 상세는 Issue #255에서 구현했고 Issue #257에서 하단 감사 이력 section,
 Issue #259에서 Investigation notes 조회 section, Issue #261에서 제한된 inline note composer와
-명시적 reconciliation refresh, Issue #277에서 상태·담당자 workflow section과 shared mutation lane을
-추가했다. Backend·API·DB·Infra 변경과 신규 dependency·UI
-framework·font·icon·상태관리 library 추가는 없다.
+명시적 reconciliation refresh, Issue #277에서 상태·담당자 workflow section과 shared mutation lane을,
+Issue #281에서 같은 section 안의 사건 최종 판정(Resolution) form을 추가했다. Backend·API·DB·Infra 변경과
+신규 dependency·UI framework·font·icon·상태관리 library 추가는 없다.
 
-Case record와 최종 판정은 계속 조회 전용이다. `case:workflow` capability 사용자는 허용된 상태·담당자
-PATCH를, `case:note-write` capability 사용자는 작성 가능 상태의 inline Investigation note POST를 수행할
-수 있다. 두 mutation 모두 현재 detail의 `concurrencyVersion`을 exact `expectedVersion`으로 사용한다.
+Case record는 계속 조회 전용이다. `case:workflow` capability 사용자는 허용된 상태·담당자
+PATCH를, `case:resolve` capability 사용자는 종결 가능한 `IN_REVIEW` 사건의 최종 판정 POST를,
+`case:note-write` capability 사용자는 작성 가능 상태의 inline Investigation note POST를 수행할
+수 있다. 세 mutation 모두 현재 detail의 `concurrencyVersion`을 exact `expectedVersion`으로 사용한다.
 
 ### 요청 계약
 
@@ -1419,8 +1423,8 @@ PATCH를, `case:note-write` capability 사용자는 작성 가능 상태의 inli
 `GET /api/v1/cases/{caseId}/audit-logs?page=0&size=20&sort=changedAt%2Cdesc`가 병렬로 시작한다.
 기존 typed API 함수만 사용하며 raw `fetch`, DTO 재정의, endpoint registry·response validator 우회를
 하지 않는다. 세 GET은 body가 없다. Frontend route capability는 `case:view`이고 Backend의 기존
-read 권한들이 최종 판정한다. 상태·담당자 변경은 별도 `case:workflow`, note 생성은
-`case:note-write` UI capability와 각 Backend 권한을 거친다.
+read 권한들이 최종 판정한다. 상태·담당자 변경은 별도 `case:workflow`, 사건 최종 판정은 `case:resolve`,
+note 생성은 `case:note-write` UI capability와 각 Backend 권한을 거친다.
 
 ### 주소 판정
 
@@ -1540,10 +1544,11 @@ intent가 항상 우선한다. obsolete refresh는 abort/release하고 stale suc
 
 ## 미구현 범위
 
-- 사건 최종 판정·연관 거래·Detection·Rule Evidence·AI 사건 리포트 **화면**과 운영 대시보드.
-  상태·담당자 workflow는 구현됐고 조사 메모는 사건 상세 내부의 별도 route 없는 조회 section과
-  `case:note-write` 전용 inline 생성 form만 구현됐고, 수정·삭제 route·navigation·mutation은 구현되지 않았다.
-- 사건 상세의 최종 판정 mutation UI와 실제 Backend 상태·담당자 mutation 성공 browser E2E.
+- 연관 거래·Detection·Rule Evidence·AI 사건 리포트 **화면**과 운영 대시보드.
+  상태·담당자 workflow와 최종 판정 form은 사건 상세 section 안에 구현됐고, 조사 메모는 사건 상세 내부의
+  별도 route 없는 조회 section과 `case:note-write` 전용 inline 생성 form만 구현됐으며, 수정·삭제
+  route·navigation·mutation은 구현되지 않았다.
+- 실제 Backend 상태·담당자·최종 판정 mutation 성공 browser E2E, 최종 판정 수정·취소와 CLOSED 사건 재개방 UI.
 - 담당자 directory·search·profile API/UI와 production 담당자 allowlist. 현재 담당자 입력은 사용자가
   이미 알고 있는 canonical lowercase UUID v4를 직접 입력하는 경계다.
 - 행 전체 클릭 navigation과 상세 drawer·modal (상세는 별도 route이며 행은 계속 기록이다)
@@ -2234,6 +2239,9 @@ relay write allowlist도 추가하지 않으며 E2E 분해는 16 + 3 + 3 = 22를
 
 ## 사건 상세 상태·담당자 workflow (Issue #277)
 
+이 절은 Issue #277 완료 시점의 역사 기록이다. 이후 같은 section에 추가된 사건 최종 판정 form과
+`case:workflow || case:resolve` section 노출 경계의 현재 구현 상태는 아래 Issue #281 절을 따른다.
+
 `CaseWorkflowSection`은 Case record와 Investigation notes 사이에 있고 `case:workflow` capability가 없는
 session에는 관련 DOM을 만들지 않는다. `OPEN`은 담당자 UUID를 필수로 받는 검토 시작만,
 `IN_REVIEW`는 추가 정보 요청과 다른 담당자로 변경만, `ADDITIONAL_INFORMATION_REQUIRED`는 담당자가
@@ -2269,8 +2277,9 @@ authoritative detail을 얻기 전 lane을 잠근다. refresh 실패는 서로 �
 해제된다. current detail refresh의 403/404는 floor와 이전 success record를 폐기하고 각각 fixed
 forbidden/not-found로 전환해 Case record·Workflow·Investigation notes·Audit history를 모두 unmount한다.
 stale session·case·refresh와 release 이후의 403/404는 이 전환을 게시하지 않고 session도 무효화하지
-않는다. 최종 판정(resolution) mutation UI, 담당자 directory·search·profile API/UI, production 담당자
-allowlist, optimistic mutation과 automatic mutation retry는 계속 미구현이다.
+않는다. Issue #277 시점에는 최종 판정(resolution) mutation UI(이후 Issue #281에서 구현), 담당자
+directory·search·profile API/UI, production 담당자 allowlist, optimistic mutation과 automatic mutation
+retry가 미구현이었다.
 
 production component geometry는 기존 `case-investigation-notes-geometry` fixture가 같은 `app.css`와 함께
 1440×900·1280×800·1024×768·390×844에서 검증한다. 이는 layout 증거이며 실제 Backend mutation 성공
@@ -2292,3 +2301,65 @@ relay는 GNU timeout process group으로 스스로 끝나고, host process와 co
 될 때까지 읽기 전용으로 기다리며, 실패하면 원래 테스트가 실패하고 afterEach가 같은 owner로 다시 확인한다.
 이 재확인은 Backend HTTP 요청을 다시 보내지 않는다. 한 테스트의 실패가 이후 테스트를 연쇄 skip하지 않도록
 serial mode는 사용하지 않는다.
+
+## 사건 상세 최종 판정 Resolution (Issue #281)
+
+`CaseWorkflowSection`은 `case:workflow` 또는 `case:resolve` capability가 있으면 렌더된다. 상태·담당자
+control은 `case:workflow`, 최종 판정 form은 `case:resolve`로 각각 제한하므로 `FDS_ANALYST` 단독에는
+workflow control만, `FDS_APPROVER` 단독에는 section heading, 현재 상태·담당자 요약과 최종 판정 영역만,
+Analyst+Approver에는 둘 다 보인다. `FDS_VIEWER`·`RULE_OPERATOR`·`RECOVERY_OPERATOR`·`PLATFORM_ADMIN`과
+USER session으로 게시되지 않는 SERVICE principal에는 section·Resolution DOM과 요청이 모두 0이다. capability는
+표시 경계이며 Backend `case:resolution:write` authorization을 대체하지 않는다.
+
+최종 판정 form은 `isResolvableCaseDetail`이 참일 때만 존재한다. Backend `FraudCase.resolve` 사전조건과 같은
+`IN_REVIEW`, 담당자와 `reviewStartedAt` non-null, `finalDisposition`과 `closedAt` null에 successor가 safe
+integer인 version 조건을 더한 판정이다. OPEN·ADDITIONAL_INFORMATION_REQUIRED·불완전한 IN_REVIEW에서는 원인이나
+raw 상태를 노출하지 않는 고정 안내 `Case resolution is not available for the current case state.`만, CLOSED에서는
+기존 종결 안내만 표시한다.
+
+form은 `Case resolution` fieldset 안에서 `NORMAL`·`FALSE_POSITIVE`·`CONFIRMED_FRAUD` 세 native radio를
+`role="radiogroup"`(`Final disposition`)으로 묶고 기본 선택을 두지 않는다. browser `confirm()` 단계는 없고,
+판정이 사건을 종결하며 되돌릴 수 없다는 안내와 고정 reason code `CASE_RESOLUTION_COMPLETED`를 form 안에
+표시한다. 미선택 제출은 요청 없이 radiogroup에 `aria-invalid`와 helper·오류를 가리키는 `aria-describedby`를
+연결하고 첫 radio로 focus한다. 요청 오류는 action별 고정 문구의 단일 오류 heading(`tabIndex=-1`)으로 focus하고,
+성공은 기존 단일 polite·atomic live region(`Case resolved from authoritative case information.`)으로 알린다.
+종결로 form이 사라지면 focus는 `Case workflow` section heading(`tabIndex=-1`)으로 돌아간다.
+
+`createCaseResolution(authClient, caseId, request, currentDetail, signal?, options?)`은 status/assignee와 같은
+signature다. 종결 가능한 baseline과 그 version에 결합된 `{ finalDisposition, reasonCode, expectedVersion }` exact
+body만 credential 조회 전에 통과하고 `options.assertDispatchAllowed`를 authorized transport의 실제 fetch 직전
+guard로 전달한다. 성공은 exact HTTP 200, 정확한 9개 응답 field, 요청 caseId, `expectedVersion + 1`, `CLOSED`,
+요청 판정, non-null `closedAt`, baseline 담당자·`reviewStartedAt` 보존, `closedAt === lastChangedAt`을 모두 결합
+검증하며 불일치는 원문을 반사하지 않는 고정 `InvalidResponseError`다.
+
+Resolution은 별도 hook 없이 기존 `useCaseWorkflowMutations` lane을 공유하므로 status·assignee·resolution 중
+하나가 submitting/reconciling이면 나머지는 새 요청을 만들지 않는다. flight identity는 session·action별
+capability·case·status·assignee·version·`reconciliationGeneration`이고 resolution flight는 종결 가능 조건 유지도
+요구한다. 같은 identity를 credential 조회 직전, authorize 완료 직후, 실제 dispatch 직전과 응답 settle 직전에
+확인하므로 abort를 무시한 늦은 success·error도 게시하지 않는다. POST 자동 retry·polling·replay는 없다.
+
+성공 DTO는 record에 optimistic merge하지 않는다. successor version을 floor로 detail과 audit page 0만 refresh하고
+notes는 refresh하지 않는다. floor 미만 detail에서는 lane을 유지하며, floor 이상이라도 authoritative detail이
+`CLOSED`와 요청 판정을 함께 보일 때만 성공을 전달한다. 일치하지 않으면 lane을 잠근 채 고정 오류
+`The resolution is not confirmed by the latest case record`와 명시적 `Refresh workflow information`만 제공한다.
+audit refresh 실패는 detail 성공과 격리된다. 400·422·5xx는 action별 고정 `server-error`이고 자동 read가 없다.
+401은 기존 transport가 현재 session을 무효화하고, 403·404는 즉시 terminal이며, 409·timeout·network·invalid
+response만 detail·notes·audit reconciliation을 수행한다.
+
+판정 draft는 capability·session·case 변경, 종결 가능 조건 상실(CLOSED 수신 포함)과 성공에서 초기화되고, 요청
+실패와 종결 가능 조건을 유지하는 version·담당자 refresh에서는 보존된다. InvestigationNote composer는 별도 lane을
+유지하며 note POST와 resolution의 경합은 Backend optimistic concurrency의 409 계약이 결정한다.
+
+geometry는 test-only `e2e/case-resolution-geometry.html/.tsx`가 synthetic `FDS_ANALYST`+`FDS_APPROVER` session과
+종결 가능한 IN_REVIEW detail로 production `CaseWorkflowSection`과 `app.css`를 렌더해 측정한다. 실제
+credential·Keycloak login·API 요청이 없는 layout 증거다. 기존 geometry test 한 건(`populated investigation notes
+preserve plain text and case resolution controls wrap at every design width`)이 notes fixture 다음에 이 fixture를 열어
+1440×900·1280×800·1024×768·390×844에서 document overflow 0, section의 main 영역 포함, radio·label·button 비중첩,
+disposition label wrapping 스타일, 되돌릴 수 없음 안내의 fieldset 내 줄바꿈(390px에서 여러 줄), 모바일 column과
+full-width action, keyboard focus의 production `:focus-visible` outline을 확인한다. 기존 fixture는 변경하지 않았고
+공식 browser 분해는 실제 Keycloak·Backend 통합 16개 + relay contract 3개 + geometry 3개 = 22개, worker 1, retries 0,
+strict TLS 그대로다.
+
+실제 Backend Resolution 성공 write browser E2E는 추가하지 않았다. relay write allowlist는 기존 Analyst 403 resolution
+authorization probe 1개 그대로이며, 성공 경로는 API client·Hook·component·CaseDetailPage unit test와 기존 Backend test가
+담당한다. Backend·API wire 계약·DB·Auth·capability mapping·router·E2E runner/config는 변경하지 않았다.

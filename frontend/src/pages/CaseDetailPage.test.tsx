@@ -174,7 +174,8 @@ function controlledAllCaseReads(): {
     const call = { promise, request, settle: settleCall, fail };
     calls.push(call);
     const pathname = new URL(request.url).pathname;
-    if (request.method === "PATCH") {
+    // Resolution POST도 status/assignee PATCH와 같은 workflow lane의 write로 분류한다.
+    if (request.method === "PATCH" || pathname.endsWith("/resolution")) {
       workflow.push(call);
     } else if (pathname.endsWith("/notes")) {
       notes.push(call);
@@ -265,6 +266,46 @@ function workflowMutationBody(overrides: Record<string, unknown> = {}): Record<s
     traceId: "trace_demo_case_workflow_page_01",
     ...overrides,
   };
+}
+
+/** `case:resolve`만 가진 승인 담당자 session. */
+const APPROVER_SESSION: AuthSession = {
+  subject: "4d2c1b0a-9e8f-4a7b-8c6d-5e4f3a2b1c0d",
+  displayName: "Local Approver",
+  roles: ["FDS_APPROVER"],
+};
+
+/** `caseBody({ concurrencyVersion: 4 })` baseline에 정확히 결합되는 CLOSED successor. */
+function resolutionMutationBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    caseId: CASE_ID,
+    caseStatus: "CLOSED",
+    finalDisposition: "CONFIRMED_FRAUD",
+    assigneeRef: ASSIGNEE_REF,
+    reviewStartedAt: "2026-07-24T01:25:00Z",
+    closedAt: "2026-07-24T02:06:00Z",
+    lastChangedAt: "2026-07-24T02:06:00Z",
+    concurrencyVersion: 5,
+    traceId: "trace_demo_case_resolution_page_01",
+    ...overrides,
+  };
+}
+
+function closedCaseBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return caseBody({
+    caseStatus: "CLOSED",
+    finalDisposition: "CONFIRMED_FRAUD",
+    closedAt: "2026-07-24T02:06:00Z",
+    lastChangedAt: "2026-07-24T02:06:00Z",
+    concurrencyVersion: 5,
+    ...overrides,
+  });
+}
+
+function signedInAs(session: AuthSession): FakeAuthClient {
+  const client = createFakeAuthClient({ initialSession: session });
+  adapter.client = client;
+  return client;
 }
 
 function renderPage(client: FakeAuthClient, path: string = DETAIL_ROUTE) {
@@ -878,6 +919,191 @@ describe("CaseDetailPage workflow reconciliation", () => {
     ).toBeVisible();
     expect(screen.getByRole("heading", { name: "Audit history", level: 3 })).toBeVisible();
     expect(document.body.innerHTML).not.toMatch(/PRIVATE_NOTES/);
+  });
+});
+
+describe("CaseDetailPage resolution reconciliation", () => {
+  async function showApproverRecord() {
+    const reads = controlledAllCaseReads();
+    const user = userEvent.setup();
+    renderPage(signedInAs(APPROVER_SESSION));
+    await settle();
+    await answerWith(reads.detail[0], caseBody({ concurrencyVersion: 4 }));
+    await answerWith(reads.notes[0], notesBody());
+    await answerWith(reads.audit[0], auditBody());
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: "Case workflow", level: 3 })).toBeVisible(),
+    );
+    return { ...reads, user };
+  }
+
+  async function resolveAs(
+    user: ReturnType<typeof userEvent.setup>,
+    disposition: string,
+  ): Promise<void> {
+    await user.click(screen.getByRole("radio", { name: disposition }));
+    await user.click(screen.getByRole("button", { name: "Resolve case" }));
+  }
+
+  it("lets an FDS_APPROVER resolve without optimistic merge and refreshes detail plus audit, but zero notes", async () => {
+    const { detail: detailCalls, notes, audit, workflow, user } = await showApproverRecord();
+
+    // Approver 단독 session에는 Resolution form만 있고 상태·담당자·note 작성 control은 없다.
+    expect(screen.getByRole("group", { name: "Case resolution" })).toBeVisible();
+    expect(screen.queryByRole("textbox", { name: "Assignee UUID" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Request additional information" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Investigation note" })).not.toBeInTheDocument();
+
+    await resolveAs(user, "Confirmed fraud");
+    await waitFor(() => expect(workflow).toHaveLength(1));
+    expect(workflow[0].request.method).toBe("POST");
+    expect(new URL(workflow[0].request.url).pathname).toBe(`/api/v1/cases/${CASE_ID}/resolution`);
+    expect(JSON.parse(await workflow[0].request.clone().text())).toEqual({
+      finalDisposition: "CONFIRMED_FRAUD",
+      reasonCode: "CASE_RESOLUTION_COMPLETED",
+      expectedVersion: 4,
+    });
+
+    await answerWith(workflow[0], resolutionMutationBody());
+    await waitFor(() => {
+      expect(detailCalls).toHaveLength(2);
+      expect(audit).toHaveLength(2);
+    });
+    expect(notes).toHaveLength(1);
+    expect(valueOf("Case status")).toHaveTextContent("In review");
+    expect(valueOf("Final disposition")).toHaveTextContent("Not decided");
+    expect(valueOf("Concurrency version")).toHaveTextContent("4");
+    expect(screen.getByText("Refreshing authoritative case information")).toBeVisible();
+
+    await answerWith(detailCalls[1], closedCaseBody());
+    await answerWith(audit[1], auditBody());
+    await waitFor(() => {
+      expect(valueOf("Case status")).toHaveTextContent("Closed");
+      expect(valueOf("Final disposition")).toHaveTextContent("Confirmed fraud");
+      expect(screen.getByRole("status", { name: "Case workflow result" })).toHaveTextContent(
+        "Case resolved from authoritative case information.",
+      );
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: "Case workflow", level: 3 })).toHaveFocus(),
+    );
+    expect(screen.queryByRole("radio")).not.toBeInTheDocument();
+    expect(notes).toHaveLength(1);
+    expect(workflow).toHaveLength(1);
+    expect(document.body.innerHTML).not.toContain("trace_demo_case_resolution_page_01");
+  });
+
+  it.each(["conflict", "network", "invalid-success"] as const)(
+    "refreshes detail, notes and audit after a resolution %s and never retries POST",
+    async (outcome) => {
+      const { detail: detailCalls, notes, audit, workflow, user } = await showApproverRecord();
+      await resolveAs(user, "Normal");
+      await waitFor(() => expect(workflow).toHaveLength(1));
+
+      if (outcome === "network") {
+        await act(async () => {
+          workflow[0].fail(new TypeError("PRIVATE_NETWORK_FAILURE"));
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+      } else if (outcome === "invalid-success") {
+        await answerWith(
+          workflow[0],
+          resolutionMutationBody({ finalDisposition: "NORMAL", concurrencyVersion: 99, traceId: "PRIVATE_TRACE" }),
+        );
+      } else {
+        await answerWith(workflow[0], { code: "PRIVATE_CONFLICT", message: "PRIVATE_MESSAGE" }, 409);
+      }
+
+      await waitFor(() => {
+        expect(detailCalls).toHaveLength(2);
+        expect(notes).toHaveLength(2);
+        expect(audit).toHaveLength(2);
+      });
+      expect(workflow).toHaveLength(1);
+      expect(valueOf("Concurrency version")).toHaveTextContent("4");
+
+      await answerWith(detailCalls[1], caseBody({ concurrencyVersion: 5 }));
+      await answerWith(notes[1], notesBody("authoritative resolution reconciliation note"));
+      await answerWith(audit[1], auditBody());
+      const title =
+        outcome === "conflict"
+          ? "The case changed before the resolution"
+          : "The resolution result could not be confirmed";
+      await waitFor(() =>
+        expect(screen.getByRole("heading", { name: title, level: 4 })).toHaveFocus(),
+      );
+      expect(screen.getByRole("radio", { name: "Normal" })).toBeChecked();
+      expect(screen.getByText("authoritative resolution reconciliation note")).toBeVisible();
+      expect(workflow).toHaveLength(1);
+      expect(document.body.innerHTML).not.toMatch(/PRIVATE_CONFLICT|PRIVATE_MESSAGE|PRIVATE_TRACE/);
+    },
+  );
+
+  it("keeps the resolution lane blocked when the refreshed detail is below the success floor", async () => {
+    const { detail: detailCalls, audit, workflow, user } = await showApproverRecord();
+    await resolveAs(user, "Confirmed fraud");
+    await waitFor(() => expect(workflow).toHaveLength(1));
+    await answerWith(workflow[0], resolutionMutationBody());
+    await waitFor(() => expect(detailCalls).toHaveLength(2));
+
+    // floor(5) 미만 detail은 publish되지 않고 lane도 풀리지 않는다.
+    await answerWith(detailCalls[1], caseBody({ concurrencyVersion: 4 }));
+    await answerWith(audit[1], auditBody());
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "The latest case information could not be loaded" }),
+      ).toBeVisible(),
+    );
+    expect(valueOf("Concurrency version")).toHaveTextContent("4");
+    expect(valueOf("Case status")).toHaveTextContent("In review");
+    expect(screen.getByRole("button", { name: "Refresh workflow information" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Resolve case" })).toBeDisabled();
+    expect(screen.getByRole("status", { name: "Case workflow result" }).textContent).toBe("");
+    expect(workflow).toHaveLength(1);
+    expect(detailCalls).toHaveLength(2);
+  });
+
+  it("isolates an audit refresh failure from an authoritative resolution success", async () => {
+    const { detail: detailCalls, notes, audit, workflow, user } = await showApproverRecord();
+    await resolveAs(user, "Confirmed fraud");
+    await waitFor(() => expect(workflow).toHaveLength(1));
+    await answerWith(workflow[0], resolutionMutationBody());
+    await waitFor(() => {
+      expect(detailCalls).toHaveLength(2);
+      expect(audit).toHaveLength(2);
+    });
+
+    await answerWith(
+      audit[1],
+      {
+        code: "PRIVATE_AUDIT_REFRESH_CODE",
+        message: "private audit refresh body",
+        traceId: "private-audit-refresh-trace",
+      },
+      500,
+    );
+    expect(
+      screen.getByRole("heading", { name: "The latest audit history could not be loaded" }),
+    ).toBeVisible();
+    expect(screen.getByText("Refreshing authoritative case information")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Resolve case" })).toBeDisabled();
+
+    await answerWith(detailCalls[1], closedCaseBody());
+    await waitFor(() =>
+      expect(screen.getByRole("status", { name: "Case workflow result" })).toHaveTextContent(
+        "Case resolved from authoritative case information.",
+      ),
+    );
+    expect(valueOf("Case status")).toHaveTextContent("Closed");
+    expect(
+      screen.getByRole("heading", { name: "The latest audit history could not be loaded" }),
+    ).toBeVisible();
+    expect(screen.queryByText("Refreshing authoritative case information")).not.toBeInTheDocument();
+    expect(notes).toHaveLength(1);
+    expect(audit).toHaveLength(2);
+    expect(workflow).toHaveLength(1);
+    expect(document.body.textContent).not.toMatch(/PRIVATE_AUDIT_REFRESH_CODE|private-audit-refresh-trace/);
   });
 });
 

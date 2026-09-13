@@ -1012,6 +1012,52 @@ ul.notice__body li + li {
   margin: 0;
 }
 
+/* 사건 최종 판정
+   -------------------------------------------------------------------------
+   workflow section 안의 별도 fieldset이다. native radio만 쓰고 label 문구는 radio 옆에서
+   줄바꿈되어 document 폭을 넓히지 않는다. 제출 버튼은 workflow action 행을 재사용하므로
+   좁은 화면에서는 전체 폭으로 쌓인다. */
+
+.case-resolution {
+  margin-top: var(--space-4);
+}
+
+.case-resolution__options {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-top: var(--space-2);
+}
+
+.case-resolution__label {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.case-workflow__group label.case-resolution__option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+  color: var(--text);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.case-resolution__option input {
+  flex: none;
+  margin: 3px 0 0;
+}
+
+.case-resolution__option span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 /* Investigation notes
    -------------------------------------------------------------------------
    Read-only plain text. `pre-wrap` preserves the Backend's CR/LF and runs of

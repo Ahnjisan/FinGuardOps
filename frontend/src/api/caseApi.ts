@@ -504,6 +504,28 @@ function requireWorkflowBaseline(caseId: string, value: unknown): CaseDetail {
   return value;
 }
 
+/**
+ * 사건 최종 판정을 보낼 수 있는 detail인지 판정한다.
+ *
+ * Backend `FraudCaseWorkflowService.resolve`와 `FraudCase.resolve`의 사전조건을 옮긴다:
+ * `IN_REVIEW`, 담당자와 최초 조사 시각 존재, 아직 없는 판정과 종결 시각. 여기에 successor
+ * version(`expectedVersion + 1`)도 JavaScript safe integer여야 한다는 client 조건을 더한다.
+ * 화면 노출, hook submit 검증, API baseline 검증이 이 판정 하나를 공유하며 Backend의 최종
+ * authorization·업무 검증·optimistic concurrency를 대체하지 않는다.
+ */
+export function isResolvableCaseDetail(detail: CaseDetail): boolean {
+  return (
+    detail.caseStatus === "IN_REVIEW" &&
+    detail.assigneeRef !== null &&
+    detail.reviewStartedAt !== null &&
+    detail.finalDisposition === null &&
+    detail.closedAt === null &&
+    isSafeLong(detail.concurrencyVersion) &&
+    detail.concurrencyVersion >= 0 &&
+    detail.concurrencyVersion < Number.MAX_SAFE_INTEGER
+  );
+}
+
 function sameNullableString(left: string | null, right: string | null): boolean {
   return left === right;
 }
@@ -573,6 +595,16 @@ function assertAssigneeCommandMatchesBaseline(
   }
 }
 
+/** 제출 snapshot에서 성공할 수 없는 resolution 명령을 credential 조회 전에 거부한다. */
+function assertResolutionCommandMatchesBaseline(
+  baseline: CaseDetail,
+  body: Readonly<Record<string, unknown>>,
+): void {
+  if (body.expectedVersion !== baseline.concurrencyVersion || !isResolvableCaseDetail(baseline)) {
+    throw new RequestNotAllowedError();
+  }
+}
+
 function isBoundStatusMutation(
   value: unknown,
   requestedCaseId: string,
@@ -630,7 +662,37 @@ function isBoundAssigneeMutation(
 }
 
 /**
- * 상태·담당자 PATCH의 마지막 optional options 객체. 기존 positional 인자의 순서는 바꾸지 않는다.
+ * resolution 성공 응답을 요청과 baseline에 결합한다.
+ *
+ * `FraudCase.resolve`는 CLOSED, 요청한 판정, 같은 시각의 `closedAt`·`lastChangedAt`을 만들고
+ * 담당자와 최초 조사 시각은 바꾸지 않는다. baseline version은 이미 명령의 `expectedVersion`과
+ * 같음이 확인되었으므로 successor는 baseline version + 1이다.
+ */
+function isBoundResolutionMutation(
+  value: unknown,
+  requestedCaseId: string,
+  baseline: CaseDetail,
+  body: Readonly<Record<string, unknown>>,
+): value is CaseMutation {
+  if (!isCaseMutation(value)) {
+    return false;
+  }
+  return (
+    value.caseId === requestedCaseId &&
+    value.concurrencyVersion === baseline.concurrencyVersion + 1 &&
+    value.caseStatus === "CLOSED" &&
+    value.finalDisposition !== null &&
+    value.finalDisposition === body.finalDisposition &&
+    value.closedAt !== null &&
+    value.closedAt === value.lastChangedAt &&
+    value.assigneeRef === baseline.assigneeRef &&
+    value.reviewStartedAt === baseline.reviewStartedAt
+  );
+}
+
+/**
+ * 상태·담당자 PATCH와 resolution POST의 마지막 optional options 객체. 기존 positional 인자의 순서는
+ * 바꾸지 않는다.
  */
 export interface CaseWorkflowRequestOptions {
   /**
@@ -707,20 +769,45 @@ export async function changeCaseAssignee(
  *
  * Answers 200, not 201: the resolution is a state change on an existing case
  * rather than a new addressable resource, and Backend returns no `Location`.
+ *
+ * 상태·담당자 PATCH와 같은 positional 순서(현재 detail baseline, AbortSignal, options)를 쓴다.
+ * 종결 가능한 baseline과 그 version에 결합된 명령만 credential 조회 전에 통과하고, 성공 응답은
+ * 요청 caseId·successor version·CLOSED·요청 판정·종결 시각과 담당자·최초 조사 시각 보존에
+ * 결합해 검증한다. 불일치는 원문을 반사하지 않는 고정 `InvalidResponseError`다.
  */
 export async function createCaseResolution(
   authClient: CredentialAuthClient,
   caseId: string,
   request: CaseResolutionRequest,
+  currentDetail: CaseDetail,
   signal?: AbortSignal,
+  options?: CaseWorkflowRequestOptions,
 ): Promise<ApiResult<CaseMutation>> {
+  const body = buildCaseResolutionBody(request);
+  const baseline = requireWorkflowBaseline(caseId, currentDetail);
+  assertResolutionCommandMatchesBaseline(baseline, body);
   const result = await sendAuthorizedBackendRequest(authClient, {
     endpoint: "case-resolution-create",
     params: { caseId },
-    body: buildCaseResolutionBody(request),
+    body,
     expectedStatus: 200,
-    validate: isCaseMutation,
+    validate: (value): value is CaseMutation =>
+      isBoundResolutionMutation(value, caseId, baseline, body),
     signal,
+    assertDispatchAllowed: options?.assertDispatchAllowed,
   });
-  return { data: result.data, traceId: resolveTraceId(result.traceId, result.data.traceId) };
+  // 검증을 통과한 9개 필드만 새 plain object에 복사해 transport가 돌려준 raw DTO와 참조를 공유하지 않는다.
+  const validated = result.data;
+  const data: CaseMutation = {
+    caseId: validated.caseId,
+    caseStatus: validated.caseStatus,
+    finalDisposition: validated.finalDisposition,
+    assigneeRef: validated.assigneeRef,
+    reviewStartedAt: validated.reviewStartedAt,
+    closedAt: validated.closedAt,
+    lastChangedAt: validated.lastChangedAt,
+    concurrencyVersion: validated.concurrencyVersion,
+    traceId: validated.traceId,
+  };
+  return { data, traceId: resolveTraceId(result.traceId, data.traceId) };
 }

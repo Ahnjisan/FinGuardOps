@@ -4,9 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuthClient, AuthSession } from "../auth/authClient";
 import { AuthProvider } from "../auth/AuthProvider";
 import { useAuth } from "../auth/useAuth";
+import type { UserRole } from "../auth/userRoles";
 import { createFakeAuthClient, type FakeAuthClient } from "../test/fakeAuthClient";
 import { jsonResponse } from "../test/mockFetch";
-import type { CaseDetail } from "./caseApi";
+import type { CaseDetail, CaseFinalDisposition } from "./caseApi";
 import { RequestNotAllowedError } from "./errors";
 import type {
   CaseWorkflowReconciliationScope,
@@ -33,6 +34,11 @@ const SESSION_A: AuthSession = {
 const SESSION_B: AuthSession = {
   subject: "9e3f4a50-6b7c-4d8e-9f01-2c3d4e5f6071",
   roles: ["FDS_ANALYST", "FDS_APPROVER"],
+};
+/** `case:resolve`만 가진 승인 담당자 session. */
+const SESSION_APPROVER: AuthSession = {
+  subject: "4d2c1b0a-9e8f-4a7b-8c6d-5e4f3a2b1c0d",
+  roles: ["FDS_APPROVER"],
 };
 
 interface Props {
@@ -128,6 +134,8 @@ function mutationResponse(
   let caseStatus = baseline.caseStatus;
   let assigneeRef = baseline.assigneeRef;
   let reviewStartedAt = baseline.reviewStartedAt;
+  let finalDisposition = baseline.finalDisposition;
+  let closedAt = baseline.closedAt;
   if (action.kind === "start-review") {
     caseStatus = "IN_REVIEW";
     assigneeRef = action.assigneeRef;
@@ -138,16 +146,21 @@ function mutationResponse(
     caseStatus = "IN_REVIEW";
   } else if (action.kind === "change-assignee") {
     assigneeRef = action.assigneeRef;
+  } else if (action.kind === "resolve-case") {
+    // Backend resolve()와 같이 CLOSED·요청 판정·같은 시각의 closedAt/lastChangedAt을 만든다.
+    caseStatus = "CLOSED";
+    finalDisposition = action.finalDisposition;
+    closedAt = "2026-09-01T03:00:00Z";
   } else {
     assigneeRef = null;
   }
   return {
     caseId: baseline.caseId,
     caseStatus,
-    finalDisposition: baseline.finalDisposition,
+    finalDisposition,
     assigneeRef,
     reviewStartedAt,
-    closedAt: baseline.closedAt,
+    closedAt,
     lastChangedAt: "2026-09-01T03:00:00Z",
     concurrencyVersion: baseline.concurrencyVersion + 1,
     traceId: "trace_demo_case_workflow_hook_01",
@@ -1203,5 +1216,680 @@ describe("useCaseWorkflowMutations reconciliation and projection", () => {
     expect(JSON.stringify(third)).toBe(
       '{"status":"reconciling","submission":1,"result":"success","notice":{"action":"request-additional-information"}}',
     );
+  });
+});
+
+/** 종결 가능한 IN_REVIEW baseline에 대한 기본 resolution action. */
+const RESOLVE: CaseWorkflowAction = { kind: "resolve-case", finalDisposition: "CONFIRMED_FRAUD" };
+
+function closedDetail(
+  finalDisposition: CaseFinalDisposition = "CONFIRMED_FRAUD",
+  version = 7,
+): CaseDetail {
+  return detail({
+    caseStatus: "CLOSED",
+    finalDisposition,
+    closedAt: "2026-09-01T03:00:00Z",
+    lastChangedAt: "2026-09-01T03:00:00Z",
+    concurrencyVersion: version,
+  });
+}
+
+function nextProps(
+  reconcile: Props["reconcile"],
+  nextDetail: CaseDetail | null,
+  generation: number,
+  overrides: Partial<Props> = {},
+): Props {
+  return {
+    caseId: CASE_ID,
+    detail: nextDetail,
+    generation,
+    refreshState: "idle",
+    reconcile,
+    ...overrides,
+  };
+}
+
+describe("useCaseWorkflowMutations resolution request and capability", () => {
+  it.each(["NORMAL", "FALSE_POSITIVE", "CONFIRMED_FRAUD"] as const)(
+    "sends one exact %s resolution POST for an FDS_APPROVER session",
+    async (finalDisposition) => {
+      const calls = controlledFetch();
+      const client = signedIn(SESSION_APPROVER);
+      const view = renderMutation(client);
+      await settle();
+
+      act(() => view.result.current.submit({ kind: "resolve-case", finalDisposition }));
+      await waitFor(() => expect(calls).toHaveLength(1));
+
+      expect(calls[0].request.method).toBe("POST");
+      expect(new URL(calls[0].request.url).pathname).toBe(`/api/v1/cases/${CASE_ID}/resolution`);
+      expect(new URL(calls[0].request.url).search).toBe("");
+      expect(JSON.parse(await calls[0].request.clone().text())).toEqual({
+        finalDisposition,
+        reasonCode: "CASE_RESOLUTION_COMPLETED",
+        expectedVersion: 6,
+      });
+      expect(client.calls.authorizeRequest).toBe(1);
+      expect(view.result.current.state).toMatchObject({
+        status: "submitting",
+        notice: { action: "resolve-case" },
+      });
+      view.unmount();
+    },
+  );
+
+  it("applies case:resolve and case:workflow independently before any credential lookup", async () => {
+    controlledFetch();
+    const rows: ReadonlyArray<readonly [readonly [UserRole, ...UserRole[]], CaseWorkflowAction]> = [
+      [["FDS_ANALYST"], RESOLVE],
+      [["FDS_VIEWER"], RESOLVE],
+      [["RULE_OPERATOR"], RESOLVE],
+      [["RECOVERY_OPERATOR"], RESOLVE],
+      [["PLATFORM_ADMIN"], RESOLVE],
+      [["FDS_APPROVER"], { kind: "request-additional-information" }],
+      [["FDS_APPROVER"], { kind: "change-assignee", assigneeRef: NEXT_ASSIGNEE }],
+    ];
+    for (const [roles, action] of rows) {
+      const client = signedIn({ ...SESSION_A, roles });
+      const view = renderMutation(client);
+      await settle();
+      act(() => view.result.current.submit(action));
+      expect(view.result.current.state.status, `${roles.join("+")} ${action.kind}`).toBe("forbidden");
+      expect(client.calls.authorizeRequest).toBe(0);
+      view.unmount();
+    }
+
+    // SERVICE principal은 Frontend USER session으로 게시되지 않으므로 session이 없는 상태와 같다.
+    const signedOut = createFakeAuthClient({ initialSession: null });
+    adapter.client = signedOut;
+    const missing = renderMutation(signedOut);
+    await settle();
+    act(() => missing.result.current.submit(RESOLVE));
+    expect(missing.result.current.state.status).toBe("authentication-required");
+    expect(signedOut.calls.authorizeRequest).toBe(0);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("refuses an ineligible or unsafe resolution baseline locally, then accepts the eligible one", async () => {
+    const calls = controlledFetch();
+    const client = signedIn(SESSION_B);
+    const view = renderMutation(client);
+    await settle();
+    const rows: ReadonlyArray<readonly [string, CaseDetail]> = [
+      ["OPEN", openDetail()],
+      ["ADDITIONAL_INFORMATION_REQUIRED", detail({ caseStatus: "ADDITIONAL_INFORMATION_REQUIRED" })],
+      ["CLOSED", closedDetail("NORMAL", 6)],
+      ["IN_REVIEW without an assignee", detail({ assigneeRef: null })],
+      ["IN_REVIEW without reviewStartedAt", detail({ reviewStartedAt: null })],
+      ["IN_REVIEW with a disposition", detail({ finalDisposition: "NORMAL" })],
+      ["IN_REVIEW with closedAt", detail({ closedAt: "2026-09-01T03:00:00Z" })],
+      ["MAX_SAFE_INTEGER", detail({ concurrencyVersion: Number.MAX_SAFE_INTEGER })],
+    ];
+    for (const [name, baseline] of rows) {
+      view.rerender(nextProps(vi.fn(), baseline, 3));
+      act(() => view.result.current.submit(RESOLVE));
+      expect(view.result.current.state, name).toMatchObject({
+        status: "validation-error",
+        field: "action",
+        notice: { action: "resolve-case" },
+      });
+    }
+    expect(client.calls.authorizeRequest).toBe(0);
+    expect(calls).toHaveLength(0);
+
+    view.rerender(nextProps(vi.fn(), detail(), 3));
+    act(() => view.result.current.submit(RESOLVE));
+    await waitFor(() => expect(calls).toHaveLength(1));
+  });
+
+  it("requires one selected known disposition and never sends an unselected or foreign value", async () => {
+    const calls = controlledFetch();
+    const client = signedIn(SESSION_APPROVER);
+    const view = renderMutation(client);
+    await settle();
+
+    act(() => view.result.current.submit({ kind: "resolve-case", finalDisposition: null }));
+    expect(view.result.current.state).toMatchObject({
+      status: "validation-error",
+      field: "disposition",
+      notice: { action: "resolve-case" },
+    });
+
+    // 타입 밖 호출자를 재현한다. hook은 kind·key 집합·값을 runtime에서 다시 검증한다.
+    const untrusted: ReadonlyArray<readonly [unknown, "disposition" | "action"]> = [
+      [{ kind: "resolve-case", finalDisposition: "normal" }, "disposition"],
+      [{ kind: "resolve-case", finalDisposition: "UNKNOWN" }, "disposition"],
+      [{ kind: "resolve-case", finalDisposition: "" }, "disposition"],
+      [{ kind: "resolve-case" }, "action"],
+      [{ kind: "resolve-case", finalDisposition: 7 }, "action"],
+      [
+        {
+          kind: "resolve-case",
+          finalDisposition: "NORMAL",
+          reasonCode: "CASE_RESOLUTION_COMPLETED",
+        },
+        "action",
+      ],
+    ];
+    for (const [value, field] of untrusted) {
+      act(() => {
+        Reflect.apply(view.result.current.submit, undefined, [value]);
+      });
+      expect(view.result.current.state, JSON.stringify(value)).toMatchObject({
+        status: "validation-error",
+        field,
+      });
+      expect(JSON.stringify(view.result.current.state)).not.toMatch(/UNKNOWN|normal|reasonCode/);
+    }
+    expect(client.calls.authorizeRequest).toBe(0);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("allows one resolution flight under repeated submits", async () => {
+    const calls = controlledFetch();
+    const view = renderMutation(signedIn(SESSION_APPROVER));
+    await settle();
+    act(() => {
+      view.result.current.submit(RESOLVE);
+      view.result.current.submit({ kind: "resolve-case", finalDisposition: "NORMAL" });
+      view.result.current.submit(RESOLVE);
+    });
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(JSON.parse(await calls[0].request.clone().text())).toMatchObject({
+      finalDisposition: "CONFIRMED_FRAUD",
+    });
+    expect(view.result.current.busy).toBe(true);
+    await settle();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("shares one lane between resolution and status/assignee for an Analyst+Approver session", async () => {
+    // resolution이 pending이거나 reconciling이면 status·assignee는 새 flight를 만들지 않는다.
+    const resolutionCalls = controlledFetch();
+    const baseline = detail();
+    const resolving = renderMutation(signedIn(SESSION_B), { detail: baseline });
+    await settle();
+    act(() => resolving.result.current.submit(RESOLVE));
+    await waitFor(() => expect(resolutionCalls).toHaveLength(1));
+    act(() => {
+      resolving.result.current.submit({ kind: "request-additional-information" });
+      resolving.result.current.submit({ kind: "change-assignee", assigneeRef: NEXT_ASSIGNEE });
+    });
+    await settle();
+    expect(resolutionCalls).toHaveLength(1);
+    expect(resolving.result.current.state).toMatchObject({
+      status: "submitting",
+      notice: { action: "resolve-case" },
+    });
+
+    await answer(resolutionCalls[0], jsonResponse(mutationResponse(baseline, RESOLVE)));
+    expect(resolving.result.current.state).toMatchObject({ status: "reconciling", result: "success" });
+    act(() => resolving.result.current.submit({ kind: "request-additional-information" }));
+    await settle();
+    expect(resolutionCalls).toHaveLength(1);
+    resolving.unmount();
+    vi.unstubAllGlobals();
+
+    // status PATCH가 pending이면 resolution도 같은 lane에서 차단된다.
+    const statusCalls = controlledFetch();
+    const changing = renderMutation(signedIn(SESSION_B));
+    await settle();
+    act(() => changing.result.current.submit({ kind: "request-additional-information" }));
+    await waitFor(() => expect(statusCalls).toHaveLength(1));
+    act(() => changing.result.current.submit(RESOLVE));
+    await settle();
+    expect(statusCalls).toHaveLength(1);
+    expect(statusCalls[0].request.method).toBe("PATCH");
+  });
+});
+
+describe("useCaseWorkflowMutations resolution flight identity", () => {
+  it("refuses a resolution POST credential lookup when the flight is no longer current", async () => {
+    // 1단계: credential 조회 직전 검사. status/assignee와 같은 wrapper가 resolution POST에도 적용된다.
+    const client = createFakeAuthClient({ initialSession: SESSION_APPROVER });
+    const request = new Request(`http://localhost:8080/api/v1/cases/${CASE_ID}/resolution`, {
+      method: "POST",
+    });
+    const refused = bindCredentialLookupToFlight(client, () => false);
+    await expect(refused.authorizeRequest(request)).rejects.toBeInstanceOf(RequestNotAllowedError);
+    expect(client.calls.authorizeRequest).toBe(0);
+  });
+
+  it.each(["version", "generation", "eligibility", "capability-restored"] as const)(
+    "sends no resolution POST when the %s changes during credential lookup even if abort is ignored",
+    async (change) => {
+      const calls = controlledFetch();
+      const base = createFakeAuthClient({ initialSession: SESSION_APPROVER });
+      const handOff = createHandOffClient(base, () => undefined);
+      adapter.client = handOff.client;
+      vi.spyOn(AbortController.prototype, "abort").mockImplementation(() => undefined);
+      const reconcile = vi.fn();
+      const baseline = detail();
+      const view = renderMutation(handOff.client, { detail: baseline, generation: 3, reconcile });
+      await settle();
+      const originalSession = sessionControl.current?.session ?? null;
+      if (originalSession === null) {
+        throw new Error("같은 session 복구 반례에는 게시된 원래 session이 필요하다.");
+      }
+
+      act(() => view.result.current.submit(RESOLVE));
+      await waitFor(() => expect(handOff.lookups()).toBe(1));
+
+      if (change === "version") {
+        view.rerender(nextProps(reconcile, detail({ concurrencyVersion: 7 }), 4));
+      } else if (change === "generation") {
+        view.rerender(nextProps(reconcile, baseline, 4));
+      } else if (change === "eligibility") {
+        // status·assignee·version이 같아도 종결 가능 조건을 잃은 detail은 flight를 stale로 만든다.
+        view.rerender(nextProps(reconcile, detail({ reviewStartedAt: null }), 3));
+      } else {
+        act(() => base.emitSessionInvalidated());
+        await waitFor(() => expect(sessionControl.current?.session ?? null).toBeNull());
+        act(() => {
+          sessionControl.current?.start();
+          sessionControl.current?.succeed(originalSession);
+        });
+        await waitFor(() => expect(sessionControl.current?.session).toBe(originalSession));
+      }
+      await settle();
+
+      await act(async () => {
+        handOff.release();
+        for (let turn = 0; turn < 10; turn += 1) {
+          await Promise.resolve();
+        }
+      });
+      await settle();
+
+      expect(base.calls.authorizeRequest).toBe(1);
+      expect(handOff.handOffs()).toBe(0);
+      expect(calls).toHaveLength(0);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(base.calls.invalidateIfCurrent).toBe(0);
+      expect(reconcile).not.toHaveBeenCalled();
+      expect(view.result.current.state.status).toBe("idle");
+      expect(JSON.stringify(view.result.current)).not.toMatch(/Bearer|fake\.access\.token/);
+    },
+  );
+
+  it.each(["generation", "version"] as const)(
+    "sends no resolution POST when the %s changes after authorization but before dispatch, even if abort is ignored",
+    async (change) => {
+      const calls = controlledFetch();
+      const base = createFakeAuthClient({ initialSession: SESSION_APPROVER });
+      const reconcile = vi.fn();
+      const baseline = detail();
+      let rerender: ((props: Props) => void) | null = null;
+      const handOff = createHandOffClient(base, () => {
+        rerender?.(
+          nextProps(
+            reconcile,
+            change === "generation" ? baseline : detail({ concurrencyVersion: 7 }),
+            4,
+          ),
+        );
+      });
+      adapter.client = handOff.client;
+      vi.spyOn(AbortController.prototype, "abort").mockImplementation(() => undefined);
+      const view = renderMutation(handOff.client, { detail: baseline, generation: 3, reconcile });
+      rerender = (props) => view.rerender(props);
+      await settle();
+
+      act(() => view.result.current.submit(RESOLVE));
+      await waitFor(() => expect(handOff.lookups()).toBe(1));
+      await settle();
+      expect(view.result.current.state.status).toBe("submitting");
+
+      // act 밖에서 발급을 끝내야 hand-off 지점의 rerender가 dispatch 전에 즉시 commit된다.
+      handOff.release();
+      for (let turn = 0; turn < 50; turn += 1) {
+        await Promise.resolve();
+      }
+      await settle();
+
+      expect(handOff.handOffs()).toBe(1);
+      expect(base.calls.authorizeRequest).toBe(1);
+      expect(calls).toHaveLength(0);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(base.calls.invalidateIfCurrent).toBe(0);
+      expect(base.calls.notified).toBe(0);
+      expect(reconcile).not.toHaveBeenCalled();
+      expect(view.result.current.state.status).toBe("idle");
+    },
+  );
+
+  it.each(["success", "conflict", "network-error"] as const)(
+    "publishes and reconciles nothing when only the generation changes after resolution dispatch (%s)",
+    async (outcome) => {
+      const calls = controlledFetch();
+      const client = signedIn(SESSION_APPROVER);
+      const reconcile = vi.fn();
+      const baseline = detail();
+      vi.spyOn(AbortController.prototype, "abort").mockImplementation(() => undefined);
+      const view = renderMutation(client, { detail: baseline, generation: 3, reconcile });
+      await settle();
+      act(() => view.result.current.submit(RESOLVE));
+      await waitFor(() => expect(calls).toHaveLength(1));
+
+      view.rerender(nextProps(reconcile, baseline, 4));
+      await settle();
+      expect(view.result.current.state.status).toBe("idle");
+
+      if (outcome === "success") {
+        await answer(calls[0], jsonResponse(mutationResponse(baseline, RESOLVE)));
+      } else if (outcome === "conflict") {
+        await answer(calls[0], jsonResponse({ code: "PRIVATE_CONFLICT" }, { status: 409 }));
+      } else {
+        await act(async () => {
+          calls[0].reject(new TypeError("PRIVATE_STALE_NETWORK_FAILURE"));
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+      }
+      await settle();
+
+      expect(reconcile).not.toHaveBeenCalled();
+      expect(view.result.current.state.status).toBe("idle");
+      expect(calls).toHaveLength(1);
+      expect(client.calls.invalidateIfCurrent).toBe(0);
+    },
+  );
+
+  it.each(["unmount", "case", "status"] as const)(
+    "releases a pending resolution on %s replacement and ignores abort-resistant late success and error",
+    async (change) => {
+      for (const outcome of ["success", "error"] as const) {
+        const calls = controlledFetch();
+        vi.spyOn(AbortController.prototype, "abort").mockImplementation(() => undefined);
+        const reconcile = vi.fn();
+        const baseline = detail();
+        const view = renderMutation(signedIn(SESSION_APPROVER), { detail: baseline, reconcile });
+        await settle();
+        act(() => view.result.current.submit(RESOLVE));
+        await waitFor(() => expect(calls).toHaveLength(1));
+
+        if (change === "unmount") {
+          view.unmount();
+        } else if (change === "case") {
+          view.rerender(
+            nextProps(reconcile, detail({ caseId: OTHER_CASE_ID }), 0, { caseId: OTHER_CASE_ID }),
+          );
+        } else {
+          view.rerender(
+            nextProps(
+              reconcile,
+              detail({ caseStatus: "ADDITIONAL_INFORMATION_REQUIRED", concurrencyVersion: 7 }),
+              4,
+            ),
+          );
+        }
+        await settle();
+
+        if (outcome === "success") {
+          await answer(calls[0], jsonResponse(mutationResponse(baseline, RESOLVE)));
+        } else {
+          await answer(calls[0], jsonResponse({ code: "PRIVATE_LATE" }, { status: 409 }));
+        }
+        await settle();
+
+        expect(reconcile).not.toHaveBeenCalled();
+        expect(calls).toHaveLength(1);
+        if (change !== "unmount") {
+          expect(view.result.current.state.status).toBe("idle");
+          view.unmount();
+        }
+        vi.restoreAllMocks();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it.each([200, 401, 403, 409] as const)(
+    "drops a stale session-A resolution %i after session B replaces it",
+    async (status) => {
+      const calls = controlledFetch();
+      const client = createFakeAuthClient({
+        initialSession: SESSION_APPROVER,
+        completeSignInResult: { session: SESSION_B, returnTo: "/" },
+      });
+      adapter.client = client;
+      const reconcile = vi.fn();
+      const baseline = detail();
+      const view = renderMutation(client, { detail: baseline, reconcile });
+      await settle();
+      act(() => view.result.current.submit(RESOLVE));
+      await waitFor(() => expect(calls).toHaveLength(1));
+
+      act(() => client.emitSessionInvalidated());
+      await settle();
+      const completed = await client.completeSignIn(
+        "http://localhost/auth/callback?code=x&state=y",
+      );
+      act(() => {
+        sessionControl.current?.start();
+        sessionControl.current?.succeed(completed.session);
+      });
+      await settle();
+      expect(view.result.current.state.status).toBe("idle");
+
+      await answer(
+        calls[0],
+        status === 200
+          ? jsonResponse(mutationResponse(baseline, RESOLVE))
+          : jsonResponse({ code: "PRIVATE_CODE", traceId: "private_trace" }, { status }),
+      );
+      await settle();
+      expect(reconcile).not.toHaveBeenCalled();
+      expect(view.result.current.state.status).toBe("idle");
+      if (status === 401) {
+        expect(client.calls.notified).toBe(0);
+      }
+    },
+  );
+});
+
+describe("useCaseWorkflowMutations resolution reconciliation", () => {
+  it("keeps a resolution success blocked until a floor-meeting authoritative CLOSED record shows the requested disposition", async () => {
+    const calls = controlledFetch();
+    const reconcile = vi.fn();
+    const baseline = detail();
+    const view = renderMutation(signedIn(SESSION_B), { detail: baseline, generation: 3, reconcile });
+    await settle();
+    act(() => view.result.current.submit(RESOLVE));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    await answer(calls[0], jsonResponse(mutationResponse(baseline, RESOLVE)));
+
+    expect(view.result.current.state).toMatchObject({ status: "reconciling", result: "success" });
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(reconcile).toHaveBeenCalledWith("detail-audit", 7);
+
+    // floor(7) 미만 authoritative detail은 generation이 올라도 lane을 풀지 않는다.
+    view.rerender(nextProps(reconcile, detail({ concurrencyVersion: 6 }), 4));
+    await settle();
+    expect(view.result.current.state).toMatchObject({ status: "reconciling", result: "success" });
+    expect(view.result.current.busy).toBe(true);
+
+    // floor는 충족했지만 CLOSED가 아니면 성공을 전달하지 않고 고정 unconfirmed로 lane을 유지한다.
+    view.rerender(nextProps(reconcile, detail({ concurrencyVersion: 7 }), 5));
+    await waitFor(() =>
+      expect(view.result.current.state).toMatchObject({
+        status: "reconciling",
+        result: "unconfirmed",
+      }),
+    );
+    expect(view.result.current.busy).toBe(true);
+    act(() => {
+      view.result.current.submit({ kind: "request-additional-information" });
+      view.result.current.submit(RESOLVE);
+    });
+    await settle();
+    expect(view.result.current.state).toMatchObject({ status: "reconciling", result: "unconfirmed" });
+    expect(calls).toHaveLength(1);
+
+    // CLOSED여도 요청과 다른 disposition이면 여전히 확정하지 않는다.
+    view.rerender(nextProps(reconcile, closedDetail("NORMAL"), 6));
+    await settle();
+    expect(view.result.current.state).toMatchObject({ status: "reconciling", result: "unconfirmed" });
+
+    // 명시적 read refresh만 다시 요청하고 POST는 재전송하지 않는다.
+    act(() => view.result.current.retryReconciliation());
+    expect(reconcile).toHaveBeenCalledTimes(2);
+    expect(reconcile).toHaveBeenLastCalledWith("detail-audit", 7);
+
+    view.rerender(nextProps(reconcile, closedDetail("CONFIRMED_FRAUD"), 7));
+    await waitFor(() => expect(view.result.current.state.status).toBe("success"));
+    expect(view.result.current.busy).toBe(false);
+    expect(calls).toHaveLength(1);
+    expect(JSON.stringify(view.result.current.state)).toBe(
+      '{"status":"success","submission":1,"notice":{"action":"resolve-case"}}',
+    );
+  });
+
+  it.each(["conflict", "network", "invalid-success"] as const)(
+    "reconciles a resolution %s with detail, notes and audit and never retries POST",
+    async (kind) => {
+      const calls = controlledFetch();
+      const reconcile = vi.fn();
+      const baseline = detail();
+      const view = renderMutation(signedIn(SESSION_APPROVER), {
+        detail: baseline,
+        generation: 3,
+        reconcile,
+      });
+      await settle();
+      act(() => view.result.current.submit(RESOLVE));
+      await waitFor(() => expect(calls).toHaveLength(1));
+
+      if (kind === "network") {
+        await act(async () => {
+          calls[0].reject(new TypeError("PRIVATE_NETWORK_VALUE"));
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+      } else if (kind === "invalid-success") {
+        await answer(
+          calls[0],
+          jsonResponse(mutationResponse(baseline, RESOLVE, { finalDisposition: "NORMAL" })),
+        );
+      } else {
+        await answer(calls[0], jsonResponse({ code: "PRIVATE", message: "PRIVATE" }, { status: 409 }));
+      }
+
+      const expected = kind === "conflict" ? "conflict" : "ambiguous";
+      expect(view.result.current.state).toMatchObject({ status: "reconciling", result: expected });
+      expect(reconcile).toHaveBeenCalledTimes(1);
+      expect(reconcile).toHaveBeenCalledWith("detail-notes-audit", 6);
+      expect(calls).toHaveLength(1);
+
+      view.rerender(nextProps(reconcile, detail({ concurrencyVersion: 7 }), 4));
+      await waitFor(() => expect(view.result.current.state.status).toBe(expected));
+      expect(calls).toHaveLength(1);
+
+      // 자동 재전송은 없고, 사용자의 명시적 재제출만 새 version으로 한 번 보낸다.
+      act(() => view.result.current.submit(RESOLVE));
+      await waitFor(() => expect(calls).toHaveLength(2));
+      expect(JSON.parse(await calls[1].request.clone().text())).toMatchObject({ expectedVersion: 7 });
+    },
+  );
+
+  it("treats the resolution request deadline as ambiguous and starts all read reconciliation", async () => {
+    vi.useFakeTimers();
+    const calls = controlledFetch();
+    const reconcile = vi.fn();
+    const view = renderMutation(signedIn(SESSION_APPROVER), { reconcile });
+    await settle();
+    act(() => view.result.current.submit(RESOLVE));
+    await settle();
+    expect(calls).toHaveLength(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+
+    expect(view.result.current.state).toMatchObject({ status: "reconciling", result: "ambiguous" });
+    expect(reconcile).toHaveBeenCalledWith("detail-notes-audit", 6);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("keeps a failed resolution read refresh isolated and offers an explicit refresh without resending POST", async () => {
+    const calls = controlledFetch();
+    const reconcile = vi.fn();
+    const baseline = detail();
+    const view = renderMutation(signedIn(SESSION_APPROVER), { detail: baseline, reconcile });
+    await settle();
+    act(() => view.result.current.submit(RESOLVE));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    await answer(calls[0], jsonResponse({ code: "PRIVATE" }, { status: 409 }));
+    view.rerender(nextProps(reconcile, baseline, 3, { refreshState: "failed" }));
+    act(() => view.result.current.retryReconciliation());
+    expect(reconcile).toHaveBeenCalledTimes(2);
+    expect(reconcile).toHaveBeenLastCalledWith("detail-notes-audit", 6);
+    expect(view.result.current.busy).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("classifies resolution 400, 422 and 5xx as fixed server errors and 403/404 as terminal without reconciliation", async () => {
+    const rows = [
+      [400, "server-error"],
+      [422, "server-error"],
+      [500, "server-error"],
+      [503, "server-error"],
+      [403, "forbidden"],
+      [404, "not-found"],
+    ] as const;
+    for (const [status, expected] of rows) {
+      const calls = controlledFetch();
+      const reconcile = vi.fn();
+      const client = signedIn(SESSION_APPROVER);
+      const view = renderMutation(client, { reconcile });
+      await settle();
+      act(() => view.result.current.submit(RESOLVE));
+      await waitFor(() => expect(calls).toHaveLength(1));
+      await answer(
+        calls[0],
+        jsonResponse(
+          {
+            code: "PRIVATE_BACKEND_CODE",
+            message: "PRIVATE_BACKEND_MESSAGE",
+            traceId: "PRIVATE_TRACE",
+            fieldErrors: [{ field: "PRIVATE_FIELD" }],
+            actorId: "PRIVATE_ACTOR",
+          },
+          { status },
+        ),
+      );
+      expect(view.result.current.state, String(status)).toMatchObject({
+        status: expected,
+        notice: { action: "resolve-case" },
+      });
+      expect(JSON.stringify(view.result.current)).not.toMatch(
+        /PRIVATE|trace|actor|credential|token|subject|fieldErrors|CONFIRMED/i,
+      );
+      expect(reconcile).not.toHaveBeenCalled();
+      expect(client.calls.invalidateIfCurrent).toBe(0);
+      expect(client.calls.notified).toBe(0);
+      expect(calls).toHaveLength(1);
+      view.unmount();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("lets the authorized transport invalidate only the current credential on a resolution 401", async () => {
+    const calls = controlledFetch();
+    const client = signedIn(SESSION_APPROVER);
+    const reconcile = vi.fn();
+    const view = renderMutation(client, { reconcile });
+    await settle();
+    act(() => view.result.current.submit(RESOLVE));
+    await waitFor(() => expect(calls).toHaveLength(1));
+
+    await answer(calls[0], jsonResponse({ code: "PRIVATE_UNAUTHORIZED" }, { status: 401 }));
+    await waitFor(() => expect(view.result.current.state.status).toBe("idle"));
+    expect(client.calls.invalidateIfCurrent).toBe(1);
+    expect(client.calls.notified).toBe(1);
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
   });
 });
