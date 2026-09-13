@@ -40,9 +40,11 @@ import {
  * case itself, so both subordinate sections are removed rather than left to
  * repeat the refusal. Unmounting discards their state and blocks late publish.
  *
- * Status and reassignment share one page-level mutation lane and reconcile
- * through authoritative detail/audit reads. Resolution remains unimplemented.
- * The investigation-note composer retains its separate append lifecycle.
+ * Status, reassignment and resolution share one page-level mutation lane and
+ * reconcile through authoritative detail/audit reads.
+ * 상태·담당자 control은 `case:workflow`, 최종 판정 form은 `case:resolve` capability에만 노출된다.
+ * The investigation-note composer retains its separate append lifecycle; a note
+ * racing a resolution is decided by Backend optimistic concurrency (409).
  *
  * `concurrencyVersion` is shown for the same reason the rest of the record is -
  * it is part of the response - and for no other. It is record metadata a reader

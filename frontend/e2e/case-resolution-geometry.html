@@ -1,0 +1,19 @@
+<!doctype html>
+<!--
+  TEST-ONLY BROWSER GEOMETRY FIXTURE. NOT PART OF THE APPLICATION.
+
+  production CaseWorkflowSection의 사건 최종 판정 fieldset을 production app.css와 고정 synthetic
+  state로 렌더한다. API 요청, route interception, 인증 우회, Backend 모사를 하지 않으며 production
+  index/router 코드는 이 파일을 참조하지 않는다.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Case resolution geometry fixture (test only)</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/e2e/case-resolution-geometry.tsx"></script>
+  </body>
+</html>

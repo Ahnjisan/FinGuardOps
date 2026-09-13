@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuthSession } from "../auth/authClient";
 import { createFakeAuthClient, type FakeAuthClient } from "../test/fakeAuthClient";
-import { jsonResponse, mockFetchOnce, mockFetchRejectOnce } from "../test/mockFetch";
+import {
+  jsonResponse,
+  mockFetchOkWithControlledJson,
+  mockFetchOnce,
+  mockFetchRejectOnce,
+} from "../test/mockFetch";
 import {
   ForbiddenError,
   HttpError,
@@ -158,6 +163,23 @@ const VALID_RESOLUTION: CaseResolutionRequest = {
   reasonCode: "CASE_RESOLUTION_COMPLETED",
   expectedVersion: 6,
 };
+
+/** 종결 가능한 IN_REVIEW baseline: 담당자·조사 시작 시각이 있고 판정·종결 시각은 아직 없다. */
+const RESOLUTION_BASELINE = workflowDetail({ concurrencyVersion: 6 });
+
+/** `RESOLUTION_BASELINE`과 `VALID_RESOLUTION`에 정확히 결합되는 CLOSED successor. */
+function resolutionMutation(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return mutation({
+    caseStatus: "CLOSED",
+    finalDisposition: "CONFIRMED_FRAUD",
+    assigneeRef: CURRENT_ASSIGNEE_ID,
+    reviewStartedAt: "2026-07-24T01:25:00Z",
+    closedAt: "2026-07-24T03:10:00.123456Z",
+    lastChangedAt: "2026-07-24T03:10:00.123456Z",
+    concurrencyVersion: 7,
+    ...overrides,
+  });
+}
 
 beforeEach(() => {
   vi.stubEnv("VITE_API_BASE_URL", BASE);
@@ -792,15 +814,17 @@ describe("case workflow request-response semantic binding", () => {
  */
 describe("case workflow writes — final dispatch guard option", () => {
   function send(
-    kind: "status" | "assignee",
+    kind: "status" | "assignee" | "resolution",
     client: FakeAuthClient,
     assertDispatchAllowed: () => void,
   ) {
-    return kind === "status"
-      ? changeCaseStatus(client, CASE_ID, VALID_STATUS_CHANGE, OPEN_WORKFLOW_DETAIL, undefined, {
+    switch (kind) {
+      case "status":
+        return changeCaseStatus(client, CASE_ID, VALID_STATUS_CHANGE, OPEN_WORKFLOW_DETAIL, undefined, {
           assertDispatchAllowed,
-        })
-      : changeCaseAssignee(
+        });
+      case "assignee":
+        return changeCaseAssignee(
           client,
           CASE_ID,
           VALID_ASSIGNEE_CHANGE,
@@ -808,9 +832,31 @@ describe("case workflow writes — final dispatch guard option", () => {
           undefined,
           { assertDispatchAllowed },
         );
+      case "resolution":
+        // Resolution POST도 status/assignee와 같은 positional 순서와 options 객체를 사용한다.
+        return createCaseResolution(
+          client,
+          CASE_ID,
+          VALID_RESOLUTION,
+          RESOLUTION_BASELINE,
+          undefined,
+          { assertDispatchAllowed },
+        );
+    }
   }
 
-  it.each(["status", "assignee"] as const)(
+  function successBody(kind: "status" | "assignee" | "resolution"): Record<string, unknown> {
+    switch (kind) {
+      case "status":
+        return mutation();
+      case "assignee":
+        return mutation({ concurrencyVersion: 6 });
+      case "resolution":
+        return resolutionMutation();
+    }
+  }
+
+  it.each(["status", "assignee", "resolution"] as const)(
     "forwards the named guard for a %s change and runs it after authorization, immediately before fetch",
     async (kind) => {
       const order: string[] = [];
@@ -818,9 +864,7 @@ describe("case workflow writes — final dispatch guard option", () => {
         "fetch",
         vi.fn().mockImplementation(() => {
           order.push("fetch");
-          return Promise.resolve(
-            jsonResponse(kind === "status" ? mutation() : mutation({ concurrencyVersion: 6 })),
-          );
+          return Promise.resolve(jsonResponse(successBody(kind)));
         }),
       );
       const client = signedIn();
@@ -834,10 +878,10 @@ describe("case workflow writes — final dispatch guard option", () => {
     },
   );
 
-  it.each(["status", "assignee"] as const)(
-    "sends no %s PATCH and returns the guard's refusal unchanged",
+  it.each(["status", "assignee", "resolution"] as const)(
+    "sends no %s write and returns the guard's refusal unchanged",
     async (kind) => {
-      mockFetchOnce(async () => jsonResponse(mutation()));
+      mockFetchOnce(async () => jsonResponse(successBody(kind)));
       const client = signedIn();
       const refusal = new RequestNotAllowedError();
 
@@ -855,20 +899,16 @@ describe("case workflow writes — final dispatch guard option", () => {
 });
 
 describe("createCaseResolution", () => {
-  it("sends POST and expects 200, not 201", async () => {
-    mockFetchOnce(async () =>
-      jsonResponse(
-        mutation({
-          caseStatus: "CLOSED",
-          finalDisposition: "CONFIRMED_FRAUD",
-          closedAt: "2026-07-24T03:10:00.123456Z",
-          lastChangedAt: "2026-07-24T03:10:00.123456Z",
-          concurrencyVersion: 7,
-        }),
-      ),
-    );
+  it("sends one exact POST bound to an eligible IN_REVIEW baseline and expects 200, not 201", async () => {
+    mockFetchOnce(async () => jsonResponse(resolutionMutation()));
+    const client = signedIn();
 
-    const result = await createCaseResolution(signedIn(), CASE_ID, VALID_RESOLUTION);
+    const result = await createCaseResolution(
+      client,
+      CASE_ID,
+      VALID_RESOLUTION,
+      RESOLUTION_BASELINE,
+    );
 
     expect(sentRequest().method).toBe("POST");
     expect(sentRequest().url).toBe(`${BASE}/api/v1/cases/${CASE_ID}/resolution`);
@@ -878,13 +918,35 @@ describe("createCaseResolution", () => {
       expectedVersion: 6,
     });
     expect(result.data.caseStatus).toBe("CLOSED");
+    expect(result.data.finalDisposition).toBe("CONFIRMED_FRAUD");
     expect(result.data.concurrencyVersion).toBe(7);
+    expect(client.calls.authorizeRequest).toBe(1);
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["NORMAL", "FALSE_POSITIVE", "CONFIRMED_FRAUD"] as const)(
+    "binds a %s resolution to its own CLOSED successor",
+    async (finalDisposition) => {
+      mockFetchOnce(async () => jsonResponse(resolutionMutation({ finalDisposition })));
+      const result = await createCaseResolution(
+        signedIn(),
+        CASE_ID,
+        { ...VALID_RESOLUTION, finalDisposition },
+        RESOLUTION_BASELINE,
+      );
+      expect(await sentBody()).toEqual({
+        finalDisposition,
+        reasonCode: "CASE_RESOLUTION_COMPLETED",
+        expectedVersion: 6,
+      });
+      expect(result.data.finalDisposition).toBe(finalDisposition);
+    },
+  );
+
   it("refuses a 201 for a resolution", async () => {
-    mockFetchOnce(async () => jsonResponse(mutation(), { status: 201 }));
+    mockFetchOnce(async () => jsonResponse(resolutionMutation(), { status: 201 }));
     await expect(
-      createCaseResolution(signedIn(), CASE_ID, VALID_RESOLUTION),
+      createCaseResolution(signedIn(), CASE_ID, VALID_RESOLUTION, RESOLUTION_BASELINE),
     ).rejects.toBeInstanceOf(InvalidResponseError);
   });
 
@@ -899,13 +961,198 @@ describe("createCaseResolution", () => {
       { ...VALID_RESOLUTION, reason: "free text" },
     ]) {
       const client = signedIn();
-      mockFetchOnce(async () => jsonResponse(mutation()));
+      mockFetchOnce(async () => jsonResponse(resolutionMutation()));
       await expect(
-        createCaseResolution(client, CASE_ID, request as CaseResolutionRequest),
+        createCaseResolution(
+          client,
+          CASE_ID,
+          request as CaseResolutionRequest,
+          RESOLUTION_BASELINE,
+        ),
       ).rejects.toBeInstanceOf(RequestNotAllowedError);
       expect(client.calls.authorizeRequest).toBe(0);
+      expect(fetch).not.toHaveBeenCalled();
       vi.unstubAllGlobals();
     }
+  });
+
+  it("refuses an ineligible, stale, unsafe or foreign baseline before credential lookup", async () => {
+    const OTHER_CASE_ID = "6d782735-9825-4ce8-982b-b0556f705e4f";
+    // 타입상 CaseDetail이지만 exact 10-field 계약을 벗어난 caller 객체다.
+    const decoratedBaseline = { ...RESOLUTION_BASELINE, actorId: ASSIGNEE_ID };
+    const rows: ReadonlyArray<readonly [string, CaseDetail, CaseResolutionRequest]> = [
+      [
+        "OPEN",
+        workflowDetail({
+          caseStatus: "OPEN",
+          assigneeRef: null,
+          reviewStartedAt: null,
+          concurrencyVersion: 6,
+        }),
+        VALID_RESOLUTION,
+      ],
+      [
+        "ADDITIONAL_INFORMATION_REQUIRED",
+        workflowDetail({ caseStatus: "ADDITIONAL_INFORMATION_REQUIRED", concurrencyVersion: 6 }),
+        VALID_RESOLUTION,
+      ],
+      [
+        "CLOSED",
+        workflowDetail({
+          caseStatus: "CLOSED",
+          finalDisposition: "NORMAL",
+          closedAt: "2026-07-24T03:00:00Z",
+          concurrencyVersion: 6,
+        }),
+        VALID_RESOLUTION,
+      ],
+      ["IN_REVIEW without an assignee", workflowDetail({ assigneeRef: null, concurrencyVersion: 6 }), VALID_RESOLUTION],
+      [
+        "IN_REVIEW without reviewStartedAt",
+        workflowDetail({ reviewStartedAt: null, concurrencyVersion: 6 }),
+        VALID_RESOLUTION,
+      ],
+      [
+        "IN_REVIEW with a disposition",
+        workflowDetail({ finalDisposition: "NORMAL", concurrencyVersion: 6 }),
+        VALID_RESOLUTION,
+      ],
+      [
+        "IN_REVIEW with closedAt",
+        workflowDetail({ closedAt: "2026-07-24T03:00:00Z", concurrencyVersion: 6 }),
+        VALID_RESOLUTION,
+      ],
+      ["a stale expectedVersion", RESOLUTION_BASELINE, { ...VALID_RESOLUTION, expectedVersion: 5 }],
+      [
+        "MAX_SAFE_INTEGER",
+        workflowDetail({ concurrencyVersion: Number.MAX_SAFE_INTEGER }),
+        { ...VALID_RESOLUTION, expectedVersion: Number.MAX_SAFE_INTEGER },
+      ],
+      ["another case", workflowDetail({ caseId: OTHER_CASE_ID, concurrencyVersion: 6 }), VALID_RESOLUTION],
+      ["a decorated baseline", decoratedBaseline, VALID_RESOLUTION],
+    ];
+
+    for (const [name, baseline, request] of rows) {
+      const client = signedIn();
+      mockFetchOnce(async () => jsonResponse(resolutionMutation()));
+      const error = await createCaseResolution(client, CASE_ID, request, baseline).catch(
+        (thrown: unknown) => thrown,
+      );
+      expect(error, name).toBeInstanceOf(RequestNotAllowedError);
+      expect(client.calls.authorizeRequest, name).toBe(0);
+      expect(fetch, name).not.toHaveBeenCalled();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects every resolution success that does not bind to its request and baseline", async () => {
+    const OTHER_CASE_ID = "6d782735-9825-4ce8-982b-b0556f705e4f";
+    const extraField = { ...resolutionMutation(), actorId: ASSIGNEE_ID };
+    const missingField = resolutionMutation();
+    delete missingField.traceId;
+    const rows: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
+      ["another case", resolutionMutation({ caseId: OTHER_CASE_ID })],
+      ["the unchanged version", resolutionMutation({ concurrencyVersion: 6 })],
+      ["a skipped version", resolutionMutation({ concurrencyVersion: 8 })],
+      ["an IN_REVIEW status", resolutionMutation({ caseStatus: "IN_REVIEW" })],
+      [
+        "an ADDITIONAL_INFORMATION_REQUIRED status",
+        resolutionMutation({ caseStatus: "ADDITIONAL_INFORMATION_REQUIRED" }),
+      ],
+      ["another disposition", resolutionMutation({ finalDisposition: "NORMAL" })],
+      ["no disposition", resolutionMutation({ finalDisposition: null })],
+      ["no closure time", resolutionMutation({ closedAt: null })],
+      ["another assignee", resolutionMutation({ assigneeRef: ASSIGNEE_ID })],
+      ["a released assignee", resolutionMutation({ assigneeRef: null })],
+      ["a moved review start", resolutionMutation({ reviewStartedAt: "2026-07-24T01:26:00Z" })],
+      ["a cleared review start", resolutionMutation({ reviewStartedAt: null })],
+      [
+        "closedAt different from lastChangedAt",
+        resolutionMutation({ lastChangedAt: "2026-07-24T03:10:00.123457Z" }),
+      ],
+      ["a tenth field", extraField],
+      ["an eighth field set", missingField],
+    ];
+
+    for (const [name, body] of rows) {
+      mockFetchOnce(async () => jsonResponse(body));
+      const error = await createCaseResolution(
+        signedIn(),
+        CASE_ID,
+        VALID_RESOLUTION,
+        RESOLUTION_BASELINE,
+      ).catch((thrown: unknown) => thrown);
+      expect(error, name).toBeInstanceOf(InvalidResponseError);
+      expect(error, name).toMatchObject({
+        name: "InvalidResponseError",
+        message: "Received an unexpected response shape.",
+      });
+      expect(`${String(error)} ${JSON.stringify(error)}`, name).not.toMatch(
+        /6d782735|2a000000|3b000000|trace|NORMAL|CONFIRMED|CLOSED|IN_REVIEW|actorId/i,
+      );
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("returns a fresh nine-field projection that shares no top-level reference with the raw DTO", async () => {
+    // 테스트 double의 response.json()은 JSON 재파싱 없이 테스트가 보관한 이 객체 참조를 그대로 돌려준다.
+    const rawDto = resolutionMutation();
+    const { resolveJson } = mockFetchOkWithControlledJson();
+    resolveJson(rawDto);
+    const expected = {
+      caseId: CASE_ID,
+      caseStatus: "CLOSED",
+      finalDisposition: "CONFIRMED_FRAUD",
+      assigneeRef: CURRENT_ASSIGNEE_ID,
+      reviewStartedAt: "2026-07-24T01:25:00Z",
+      closedAt: "2026-07-24T03:10:00.123456Z",
+      lastChangedAt: "2026-07-24T03:10:00.123456Z",
+      concurrencyVersion: 7,
+      traceId: TRACE_ID,
+    };
+
+    const result = await createCaseResolution(
+      signedIn(),
+      CASE_ID,
+      VALID_RESOLUTION,
+      RESOLUTION_BASELINE,
+    );
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    expect(Object.is(result.data, rawDto)).toBe(false);
+    expect(result.data).not.toBe(rawDto);
+    expect(Object.getPrototypeOf(result.data)).toBe(Object.prototype);
+    expect(result.data).toStrictEqual(expected);
+    expect(result.traceId).toBe(TRACE_ID);
+
+    // 반환 뒤 raw DTO를 바꾸거나 unknown field를 붙여도 projection에는 전파되지 않는다.
+    rawDto.caseStatus = "IN_REVIEW";
+    rawDto.concurrencyVersion = 8;
+    rawDto.actorId = ASSIGNEE_ID;
+    expect(result.data).toStrictEqual(expected);
+    expect(result.data).not.toHaveProperty("actorId");
+  });
+
+  it("still refuses a held raw DTO carrying an unknown field with the fixed InvalidResponseError", async () => {
+    const rawDto = { ...resolutionMutation(), actorId: ASSIGNEE_ID };
+    const { resolveJson } = mockFetchOkWithControlledJson();
+    resolveJson(rawDto);
+
+    const error = await createCaseResolution(
+      signedIn(),
+      CASE_ID,
+      VALID_RESOLUTION,
+      RESOLUTION_BASELINE,
+    ).catch((thrown: unknown) => thrown);
+
+    expect(error).toBeInstanceOf(InvalidResponseError);
+    expect(error).toMatchObject({
+      name: "InvalidResponseError",
+      message: "Received an unexpected response shape.",
+    });
+    expect(`${String(error)} ${JSON.stringify(error)}`).not.toMatch(
+      /2a000000|3b000000|trace|CONFIRMED|CLOSED|actorId/i,
+    );
   });
 });
 
@@ -964,7 +1211,10 @@ describe("case API — failure boundaries", () => {
           REVIEW_WORKFLOW_DETAIL,
         ),
     ],
-    ["resolution", () => createCaseResolution(signedIn(), CASE_ID, VALID_RESOLUTION)],
+    [
+      "resolution",
+      () => createCaseResolution(signedIn(), CASE_ID, VALID_RESOLUTION, RESOLUTION_BASELINE),
+    ],
   ];
 
   it("performs exactly one fetch per write, whatever the failure", async () => {
@@ -996,9 +1246,12 @@ describe("case API — failure boundaries", () => {
       ),
     );
 
-    const error = await createCaseResolution(signedIn(), CASE_ID, VALID_RESOLUTION).catch(
-      (thrown: unknown) => thrown,
-    );
+    const error = await createCaseResolution(
+      signedIn(),
+      CASE_ID,
+      VALID_RESOLUTION,
+      RESOLUTION_BASELINE,
+    ).catch((thrown: unknown) => thrown);
     expect(error).toBeInstanceOf(HttpError);
     expect((error as HttpError).status).toBe(409);
     expect(JSON.stringify(error)).not.toContain("leaked");

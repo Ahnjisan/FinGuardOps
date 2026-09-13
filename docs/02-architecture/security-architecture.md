@@ -628,7 +628,9 @@ Issue #243 당시 capability로 보호되는 production route·navigation 항목
 직접 URL 접근 동작은 test 전용 MemoryRouter route로 검증했다. 이후 거래 목록·상세와 사건 목록·
 상세 route·navigation은 `transaction:view`·`case:view`로 보호되었고, 사건 상세의 inline note
 composer는 `case:note-write`와 사건 상태를 함께 적용한다. Issue #277의 상태·담당자 action은
-`case:workflow` capability와 상태별 허용 행렬을 함께 적용하며 resolution action UI는 아직 구현되지 않았다.
+`case:workflow` capability와 상태별 허용 행렬을 함께 적용한다. Issue #281의 최종 판정 form은 `case:resolve`
+capability와 종결 가능 조건(`IN_REVIEW`, 담당자·`reviewStartedAt` 존재, 판정·`closedAt` 부재, 안전한 version)을
+함께 적용한다.
 
 Issue #245에서 Frontend는 위 10개 endpoint를 typed API module로 구현했다. 화면·route·
 navigation·button·hook·상태관리는 포함하지 않는다. 거래·사건 filter와 거래·사건·메모·감사
@@ -676,6 +678,11 @@ requested case ID와 exact `expectedVersion + 1`을 확인하고, 상태 변경�
 명시적 null과 기존 status·workflow timestamp·closure field 보존을 확인한다. `expectedVersion + 1`이
 JavaScript safe integer가 아니면 credential 조회 전에 거부한다. binding 실패는 입력·응답·trace ID를
 반사하지 않는 고정 `InvalidResponseError`다.
+
+Issue #281은 resolution POST에도 같은 경계를 적용한다. `createCaseResolution`은 현재 detail baseline이 종결
+가능하고 `expectedVersion`이 그 version과 같을 때만 credential을 조회하며, 성공 응답의 정확한 9개 field,
+requested case ID, `expectedVersion + 1`, `CLOSED`, 요청 판정, non-null `closedAt`, baseline 담당자·
+`reviewStartedAt` 보존과 `closedAt === lastChangedAt`을 결합 검증한다. 불일치도 같은 고정 `InvalidResponseError`다.
 
 성공 status는 endpoint별로 정확히 비교한다. 조사 메모 생성만 `201`이고 나머지 아홉 개는
 `200`이며, 다른 2xx는 body를 읽지 않고 거부한다. 성공 응답의 `X-Trace-Id`는 부재와
@@ -1021,7 +1028,8 @@ session 유지, 자동 retry·polling·mutation 0회를 맡는다. populated 의
 route interception이 없는 production-component geometry fixture가 1440×900·1280×800·1024×768·390×844에서 검증한다.
 
 Issue #277의 상태·담당자 UI는 `case:workflow`가 있는 `FDS_ANALYST`와 Analyst+Approver에만 존재한다.
-viewer·Approver 단독과 사건 capability가 없는 operator/admin session에는 관련 DOM과 요청이 없다.
+viewer·Approver 단독과 사건 capability가 없는 operator/admin session에는 상태·담당자 DOM과 요청이 없다.
+Issue #281 이후 Approver 단독 session에는 같은 section의 최종 판정 영역만 존재한다.
 실제 production DOM은 상태별 workflow fieldset/action과 별도 담당자 form으로 구성되고, 둘은 shared lane
 하나를 사용한다. submit 직전 session identity, canonical case ID, capability, status, assignee와 expected
 version을 다시 확인하고, submit flight identity에는 `reconciliationGeneration`도 포함한다. 같은 조건과 flight
@@ -1050,8 +1058,9 @@ session subject, AuditLog actor와 unknown envelope field는 도달하지 않는
 보존한 뒤 detail과 audit page 0만 독립 refresh한다. notes refresh는 0회다. 모든 409와 timeout·network·
 invalid 2xx는 자동 PATCH 재제출 없이 detail·notes·audit를 각각 refresh하고 authoritative detail을 얻기
 전까지 lane을 잠근다. refresh 실패는 서로 격리되고 명시적 read refresh가 남는다. current credential
-401만 기존 transport가 session을 무효화하며 403/404는 유지한다. resolution UI와 실제 Backend workflow
-mutation 성공 browser E2E는 계속 미구현이고 relay status/assignee write allowlist도 추가하지 않는다.
+401만 기존 transport가 session을 무효화하며 403/404는 유지한다. Issue #277 당시 resolution UI는
+미구현이었고(이후 Issue #281에서 구현), 실제 Backend workflow mutation 성공 browser E2E는 계속 미구현이며
+relay status/assignee write allowlist도 추가하지 않는다.
 E2E relay는 요청 bytes와 credential을 argv·환경 변수가 아닌 stdin으로만 전달하고, route마다 도착 시점부터
 production 5초 제한보다 먼저 fulfill 또는 abort한다. 요청 종결과 분리된 teardown은 해당 relay의 exact marker가
 0인지 읽기 전용으로 확인할 뿐 container process에 신호를 보내지 않으며, 이 확인의 재시도는 Backend 요청을
@@ -1060,6 +1069,23 @@ production 5초 제한보다 먼저 fulfill 또는 abort한다. 요청 종결과
 표시 경계일 뿐 Backend의 endpoint authorization을 대체하지 않는다.
 production `CaseWorkflowSection` geometry만 기존 fixture에서 네 viewport로 검증하므로 layout 증거와 실제
 Backend mutation 증거를 혼용하지 않는다. Backend/API/DB/Auth/Infra 계약과 AI 호출·비용 변경은 없다.
+
+Issue #281의 최종 판정 UI는 `case:resolve`가 있는 `FDS_APPROVER`와 Analyst+Approver에만 존재하고, viewer·
+Analyst 단독·operator·Platform Admin과 USER session으로 게시되지 않는 SERVICE principal에는 Resolution DOM과
+요청이 없다. 종결 가능 조건을 벗어난 사건에서는 원인·raw 상태를 노출하지 않는 고정 안내만 표시한다.
+Resolution action은 기존 shared lane의 flight identity(session·action별 capability·case·status·assignee·version·
+`reconciliationGeneration`, resolution은 종결 가능 조건 포함)와 credential 조회 직전·authorize 직후·실제 dispatch
+직전 세 단계 검사, 응답 settle gate를 그대로 공유하므로 stale session/case/capability/version/generation과
+unmount의 늦은 결과는 게시·reconciliation·session invalidation 없이 버려진다. state·live region·오류 문구에는
+action kind와 고정 문구만 남고 선택한 판정 원문, Backend code/message/field error, raw body·trace ID·credential·
+subject는 도달하지 않는다. 확인된 성공도 optimistic merge하지 않으며 floor 이상 authoritative detail이 `CLOSED`와
+요청 판정을 함께 보일 때만 성공을 전달한다. 400·422·5xx는 자동 read 없는 고정 server-error, 401만 기존 transport
+invalidation, 403·404는 terminal, 409·timeout·network·invalid response만 detail·notes·audit reconciliation이며
+POST 자동 retry·polling·replay는 없다. 이 UI 경계는 Backend `case:resolution:write` endpoint·method authorization과
+`expectedVersion` optimistic concurrency를 대체하지 않는다. geometry는 test-only `case-resolution-geometry`
+fixture를 기존 geometry test 한 건 안에서 네 viewport로 측정하는 layout 증거이며, 실제 Backend Resolution 성공
+write browser E2E는 수행하지 않고 relay write allowlist는 기존 Analyst 403 resolution probe 1개 그대로다.
+Backend/API/DB/Auth/Infra 계약 변경은 없다.
 
 Stock Keycloak은 HTTP와 HTTPS에 공통 listener host를 적용하므로 2026-09-05 OWNER 결정에 따라
 `KC_HTTP_HOST=0.0.0.0`을 사용한다. HTTPS 8443만 host `127.0.0.1`에 publish하고 HTTP 8082와
