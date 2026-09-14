@@ -7,6 +7,7 @@ import { AuthProvider } from "../auth/AuthProvider";
 import type { AuthState } from "../auth/authState";
 import { createFakeAuthClient, type FakeAuthClient } from "../test/fakeAuthClient";
 import { jsonResponse } from "../test/mockFetch";
+import type { CaseDetailState, UseCaseDetailResult } from "./useCaseDetail";
 
 /**
  * The adapter the hook reaches for at its own credential boundary.
@@ -857,6 +858,77 @@ describe("useCaseDetail error classification", () => {
     await waitFor(() => {
       expect(result.current.state).toEqual({ status: "error", error: "invalid-response" });
     });
+  });
+
+  it("refuses a well-formed record belonging to a case it did not ask for", async () => {
+    // 요청 사건 A에 형식상 유효한 사건 B가 응답돼도 API 경계가 고정 invalid-response로 거부한다 (Issue #289).
+    // render마다 공개 결과를 기록해 success·data가 한 frame도 게시되지 않았음을 확인한다.
+    const { calls, spy } = controlledFetch();
+    const client = signedIn();
+    const rendered: UseCaseDetailResult[] = [];
+    const mismatched = detailBody({ caseId: OTHER_CASE_ID });
+
+    const { result } = renderHook(
+      (current: string | null) => {
+        const value = useCaseDetail(current);
+        rendered.push(value);
+        return value;
+      },
+      { initialProps: CASE_ID, wrapper: providerWrapper(client) },
+    );
+    await settle();
+    expect(calls).toHaveLength(1);
+
+    await act(async () => {
+      calls[0].settle(jsonResponse(mismatched, { headers: { "X-Trace-Id": TRACE_ID } }));
+      await calls[0].promise;
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(result.current.state).toEqual({ status: "error", error: "invalid-response" });
+    });
+    expect(JSON.stringify(result.current.state)).toBe(
+      '{"status":"error","error":"invalid-response"}',
+    );
+    expect(result.current.refreshState).toBe("idle");
+    expect(result.current.reconciliationGeneration).toBe(0);
+
+    // 공개 state와 hook 내부 publisher 어디에도 success 또는 data가 게시되지 않았다. Case projection은
+    // success 게시 경로에서만 만들어지므로 projection된 record도 0개다. publisher snapshot의 요청 identity에
+    // 사건 A가 기록되는 것은 요청 bookkeeping이므로 여기서는 state만 검사한다.
+    const renderedStates = rendered.map((value) => value.state);
+    const publishedStates = publisher.writes.map(
+      (write) => (write as { readonly state: CaseDetailState }).state,
+    );
+    for (const states of [renderedStates, publishedStates]) {
+      expect(states.filter((state) => state.status === "success")).toHaveLength(0);
+      expect(states.some((state) => "data" in state)).toBe(false);
+    }
+
+    // 모든 공개 결과에 두 UUID, trace ID, assignee reference와 raw body가 없다. Case 상세 DTO에는 customer
+    // reference 필드가 없으므로 이름 자체가 나타나지 않는지만 확인한다.
+    const everPublic = JSON.stringify(rendered);
+    for (const secret of [
+      CASE_ID,
+      OTHER_CASE_ID,
+      TRACE_ID,
+      ASSIGNEE_REF,
+      "traceId",
+      JSON.stringify(mismatched),
+    ]) {
+      expect(everPublic).not.toContain(secret);
+    }
+    expect(everPublic).not.toMatch(/customer|assignee|_ref_|trace/i);
+    expect(client.calls.invalidateIfCurrent).toBe(0);
+    expect(client.calls.notified).toBe(0);
+
+    // 자동 retry·polling이 없으므로 settle 이후에도 fetch는 정확히 1회다.
+    await settle();
+    await settle();
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(calls).toHaveLength(1);
+    expect(result.current.state).toEqual({ status: "error", error: "invalid-response" });
   });
 
   it("reports an unmapped Backend status as the generic failure", async () => {
@@ -2262,6 +2334,77 @@ describe("useCaseDetail authoritative background refresh", () => {
 
     act(() => view.result.current.refresh());
     await waitFor(() => expect(calls).toHaveLength(3));
+  });
+
+  it("does not let a well-formed other case satisfy or release a reconciliation floor", async () => {
+    // floor 5가 걸린 refresh에 형식상 유효한 사건 B version 6이 도착해도 API 경계가 거부한다 (Issue #289).
+    // B의 version은 floor 이상이지만 floor 충족·record 교체·generation 증가가 모두 없어야 하고, 다음 명시적
+    // refresh의 사건 A version 4는 여전히 floor 미충족으로 실패해야 한다.
+    const { calls, spy } = controlledFetch();
+    const client = signedIn();
+    const view = render(client);
+    await settle();
+    await answerWith(calls[0], detailBody({ concurrencyVersion: 4 }));
+    const recordA = { status: "success", data: caseFields({ concurrencyVersion: 4 }) };
+    expect(view.result.current.state).toEqual(recordA);
+    const generation = view.result.current.reconciliationGeneration;
+    const writesBefore = publisher.writes.length;
+
+    act(() => view.result.current.refresh(5));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    const mismatched = detailBody({ caseId: OTHER_CASE_ID, concurrencyVersion: 6 });
+    await act(async () => {
+      calls[1].settle(jsonResponse(mismatched, { headers: { "X-Trace-Id": TRACE_ID } }));
+      await calls[1].promise;
+      await Promise.resolve();
+    });
+
+    expect(view.result.current.refreshState).toBe("failed");
+    expect(view.result.current.reconciliationGeneration).toBe(generation);
+    expect(view.result.current.state).toEqual(recordA);
+
+    act(() => view.result.current.refresh());
+    await waitFor(() => expect(calls).toHaveLength(3));
+    await act(async () => {
+      calls[2].settle(
+        jsonResponse(detailBody({ concurrencyVersion: 4 }), { headers: { "X-Trace-Id": TRACE_ID } }),
+      );
+      await calls[2].promise;
+      await Promise.resolve();
+    });
+
+    // B가 floor를 해제하지 않았으므로 사건 A version 4는 floor 5 미충족으로 실패한다. workflow·note
+    // reconciliation lane의 해제는 generation 증가와 floor 이상 detail을 요구하므로 해제 조건도 생기지 않는다.
+    expect(view.result.current.refreshState).toBe("failed");
+    expect(view.result.current.reconciliationGeneration).toBe(generation);
+    expect(view.result.current.state).toEqual(recordA);
+
+    // refresh 이후 publisher에 기록된 모든 snapshot은 사건 A version 4와 같은 generation만 담는다.
+    const refreshWrites = publisher.writes.slice(writesBefore) as ReadonlyArray<{
+      readonly caseId: unknown;
+      readonly state: CaseDetailState;
+      readonly reconciliationGeneration: number;
+    }>;
+    expect(refreshWrites.length).toBeGreaterThan(0);
+    for (const write of refreshWrites) {
+      expect(write.caseId).toBe(CASE_ID);
+      expect(write.state).toEqual(recordA);
+      expect(write.reconciliationGeneration).toBe(generation);
+    }
+    expect(JSON.stringify(publisher.writes)).not.toContain(OTHER_CASE_ID);
+    expect(client.calls.invalidateIfCurrent).toBe(0);
+    expect(client.calls.notified).toBe(0);
+
+    // 자동 retry·polling과 PATCH·POST 재실행이 없으므로 요청은 사건 A 상세 GET 정확히 3회다.
+    await settle();
+    expect(spy).toHaveBeenCalledTimes(3);
+    expect(calls).toHaveLength(3);
+    for (const call of calls) {
+      const url = new URL(call.request.url);
+      expect(call.request.method).toBe("GET");
+      expect(url.pathname).toBe(`/api/v1/cases/${CASE_ID}`);
+      expect(url.search).toBe("");
+    }
   });
 });
 
