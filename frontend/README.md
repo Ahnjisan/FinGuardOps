@@ -1150,6 +1150,20 @@ Web Storage에 넣지 않고, 로그와 오류 메시지에 원문을 반사하�
   `request-rejected`, `unknown`으로 분류하며 값에는 raw response·trace id·token·reference가
   들어가지 않는다.
 - 요청당 `fetch`는 최대 1회, 자동 retry는 0회다.
+- 성공 값은 화면이 그리는 `content`와 `page` 둘뿐이다(Issue #285). `src/api/transactionApi.ts`는
+  wire DTO `TransactionListPage`를 exact-shape로 검증하고 envelope `traceId`를 response header와 대조해
+  `ApiResult.traceId`로 보유한다. `useTransactionList`는 그 결과를 그대로 게시하지 않고 hook publish
+  경계에서 `Pick<TransactionListPage, "content" | "page">` 타입의 typed projection을 만들어 게시한다.
+  `traceId`는 공개 React state에 저장하지 않으므로 state에서 그 key와 값에 도달할 수 없다.
+- 투영은 성공 delivery마다 한 번 실행되며 새 root·새 `content` 배열·행마다 새 10-field item·새
+  6-field `page` 객체를 만든다. 값은 모두 primitive이므로 이보다 깊은 복사는 없고, 정규화·trim·
+  기본값 적용도 하지 않는다. 같은 raw 객체가 두 번 전달돼도 두 state는 참조를 공유하지 않으며, raw
+  DTO나 이전 state의 사후 mutation은 게시된 state와 후속 delivery에 전파되지 않는다. spread·JSON
+  재직렬화·`structuredClone`·deep clone·freeze를 사용하지 않고 render마다 복사하지 않는다.
+- unknown field는 투영이 조용히 떨어뜨리지 않는다. root·page·item 어디에 있든 기존 validator가 고정
+  `invalid-response`로 거부하고 성공 state는 게시되지 않는다.
+- endpoint·query·wire schema·validator, pagination·filter·sort, timeout·오류 분류, session
+  invalidation과 stale request 억제 lifecycle은 투영과 무관하게 그대로다.
 
 ### 화면 상태
 
@@ -1198,7 +1212,10 @@ AppShell과 `app.css` token을 그대로 재사용하며, 상세 화면에 필�
 없다. 인증 client는 hook 내부 effect의 `getOidcAuthClient()`로만 얻고 closure 밖으로 내보내지
 않는다. 반환값은 `state`와 `retry` 둘뿐이며, token·traceId·raw error·authClient·raw response는
 포함되지 않는다. 200 응답의 envelope에서도 `transaction`만 게시하고 `traceId`는 hook 경계에서
-버린다.
+버린다. 게시하는 transaction은 `fetchTransactionDetail()`이 검증한 raw 객체가 아니라, 성공
+delivery마다 한 번 검증된 13개 필드를 명시적으로 복사한 새 plain object다(Issue #285). 값은 모두
+primitive이므로 이보다 깊은 복사는 없고, raw transaction이나 이전 state의 사후 mutation은 게시된
+state와 후속 delivery에 전파되지 않는다. endpoint·wire schema·validator는 그대로다.
 
 - transactionId·session·retry attempt를 identity로 추적한다. 최신 요청만 state를 게시한다.
 - route가 A에서 B로 바뀌면 render 단계에서 즉시 A의 데이터를 제거한다. effect cleanup을 기다리지
@@ -1377,8 +1394,9 @@ state·DOM·Web Storage 어디에도 게시되지 않는다.
   envelope의 어떤 객체도 React state에서 identity로 도달되지 않는다. 값은 그대로 옮기며 정규화·
   반올림·trim·기본값 적용을 하지 않고, validator를 다시 구현하지도 않는다. `src/api/caseApi.ts`는
   변경하지 않는다.
-- 이 투영은 사건 목록 hook 하나에만 적용했다. `useTransactionList`는 여전히 검증된 envelope을
-  그대로 게시하며, 그 보정은 이번 Issue의 범위가 아니라 별도 후속 Issue로 다룬다.
+- Issue #253 당시 이 투영은 사건 목록 hook 하나에만 적용했고, `useTransactionList`의 같은 보정은
+  별도 후속 Issue로 남겼다. 그 보정은 Issue #285에서 적용했으며, 현재 `useTransactionList`도
+  `content`와 `page`만 새 객체로 투영해 게시한다(위 `거래 목록 화면`의 `API hook 계약` 참고).
 
 ### 화면 상태
 
@@ -1588,7 +1606,10 @@ status label이 risk·score를 뜻하지 않음을 확인한다. hook은 session
 StrictMode에서 fetch 1회, 최신 요청만 게시, 이전 요청의 늦은 성공·실패 무시, 이전 요청 abort,
 session 교체·logout·401에서 즉시 data 제거, stale 401이 새 session을 제거하지 않음, 403에서
 session 유지, timeout·network·invalid response 구분, 자동 retry 0회, 게시 값에 credential·
-trace id 부재를 확인한다. 화면은 초기 query 계약, draft/committed 분리, apply·reset·sort·page·
+trace id 부재를 확인한다. 또한 `response.json()`이 보관된 raw 객체를 그대로 돌려주는 double로 raw
+DTO와 공개 state의 root·`content`·item·`page` 참조 분리, raw 사후 mutation 비전파, 같은 raw 객체의
+delivery별 독립 graph, root·page·item unknown field의 고정 invalid response 거부를 확인한다(Issue
+#285). 화면은 초기 query 계약, draft/committed 분리, apply·reset·sort·page·
 page size, 역전 범위와 공백 reference 거부(요청 0회), empty·error·retry, reference의 URL·Web
 Storage 비노출, `aria-sort`·live region·focus 이동·keyboard 순회를 확인한다. route는 세 허용
 role의 직접 진입, 세 비허용 role의 거부와 Backend 요청 0회, unauthenticated 진입, 복귀 경로
@@ -1631,7 +1652,10 @@ fetch 0회, StrictMode fetch 1회, 200·404·403·401·stale 401·timeout·netwo
 generic error, latest-wins와 이전 요청의 늦은 성공·실패 무시, route A→B 교체 시 즉시 데이터 제거,
 session 교체·logout·invalidation에서 데이터 제거, 403·404에서 session 유지, explicit retry 1회당
 fetch 1회, 자동 retry 0회, unmount 이후 게시 0회, 반환값에 raw error·trace id·token·envelope
-부재를 확인한다. 화면은 13개 필드 표시와 그 외 필드 부재, 15자리 금액, KST 표시와 UTC `datetime`,
+부재를 확인한다. 또한 보관된 raw 객체를 그대로 돌려주는 double로 raw transaction과 공개 state의
+참조 분리와 13개 field·prototype, primitive·nullable 필드 사후 mutation과 사후 unknown field 비전파,
+session 교체 후 같은 raw transaction 재전달 시 독립 객체를 확인한다(Issue #285). 화면은 13개 필드
+표시와 그 외 필드 부재, 15자리 금액, KST 표시와 UTC `datetime`,
 nullable reference, 긴 reference의 단일 노출, 모든 enum label, 위험도·탐지·사건·업무 action DOM
 부재, 404·403·503·network·timeout·invalid-response 문구, `Try again` 1회당 요청 1회, 오류 요약
 focus, malformed 주소의 요청 0회와 원문 비노출을 확인한다. 목록의 상세 link는 accessible name,

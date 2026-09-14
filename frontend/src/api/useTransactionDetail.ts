@@ -110,6 +110,34 @@ function classifyError(error: unknown): TransactionDetailErrorKind {
 }
 
 /**
+ * 화면에 게시할 거래 한 건의 사본 (Issue #285).
+ *
+ * `fetchTransactionDetail()`이 검증한 raw transaction 객체를 그대로 게시하지 않고, 13개 필드를
+ * spread 없이 필드 단위로 새 plain object에 옮긴다. 값은 모두 string 또는 null primitive이므로 이보다
+ * 깊은 복사는 없고, 정규화·trim·기본값 적용도 하지 않는다. validator는 여기서 반복하지 않는다.
+ *
+ * 성공 delivery마다 정확히 한 번 호출되므로 raw transaction이나 이전 delivery의 state를 사후에 바꿔도
+ * 이미 게시된 state와 후속 delivery에 전파되지 않으며, render마다 다시 복사하지도 않는다.
+ */
+function projectTransactionDetail(transaction: TransactionDetail): TransactionDetail {
+  return {
+    transactionId: transaction.transactionId,
+    transactionType: transaction.transactionType,
+    amount: transaction.amount,
+    currencyCode: transaction.currencyCode,
+    occurredAt: transaction.occurredAt,
+    externalCustomerRef: transaction.externalCustomerRef,
+    senderAccountRef: transaction.senderAccountRef,
+    recipientAccountRef: transaction.recipientAccountRef,
+    channel: transaction.channel,
+    deviceRef: transaction.deviceRef,
+    processingStatus: transaction.processingStatus,
+    createdAt: transaction.createdAt,
+    updatedAt: transaction.updatedAt,
+  };
+}
+
+/**
  * One outstanding request, together with what it belongs to.
  *
  * `subscribers` is what makes React StrictMode's setup-cleanup-setup replay
@@ -241,7 +269,7 @@ export function useTransactionDetail(
           // The envelope's trace id stops here. Only the validated transaction
           // is published, so no screen can render a support reference it was
           // never meant to show.
-          publish({ status: "success", data: result.data.transaction });
+          publish({ status: "success", data: projectTransactionDetail(result.data.transaction) });
         },
         (error: unknown) => {
           // An abort is this hook's own decision, not an outcome to report.

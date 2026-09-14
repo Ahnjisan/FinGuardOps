@@ -921,3 +921,212 @@ describe("useTransactionDetail session replacement", () => {
     });
   });
 });
+
+type MutableRecord = Record<string, unknown>;
+
+/** 테스트가 보관하고 사후에 직접 변경하는 wire detail body. */
+interface HeldDetailBody extends MutableRecord {
+  transaction: MutableRecord;
+  traceId: string;
+}
+
+const SORTED_DETAIL_KEYS = [
+  "amount",
+  "channel",
+  "createdAt",
+  "currencyCode",
+  "deviceRef",
+  "externalCustomerRef",
+  "occurredAt",
+  "processingStatus",
+  "recipientAccountRef",
+  "senderAccountRef",
+  "transactionId",
+  "transactionType",
+  "updatedAt",
+];
+
+/** 매번 새로 만드는 raw wire detail body. */
+function heldDetailBody(): HeldDetailBody {
+  return {
+    transaction: {
+      transactionId: TRANSACTION_ID,
+      transactionType: "ACCOUNT_TRANSFER",
+      amount: "1250000",
+      currencyCode: "KRW",
+      occurredAt: "2026-07-23T01:15:30Z",
+      externalCustomerRef: CUSTOMER_REF,
+      senderAccountRef: "acct_ref_demo_s91c",
+      recipientAccountRef: "acct_ref_demo_r44d",
+      channel: "MOBILE_BANKING",
+      deviceRef: "device_ref_demo_31aa",
+      processingStatus: "ADDITIONAL_AUTH_REQUIRED",
+      createdAt: "2026-07-23T01:15:31Z",
+      updatedAt: "2026-07-23T01:16:02Z",
+    },
+    traceId: TRACE_ID,
+  };
+}
+
+/** `heldDetailBody()`가 게시돼야 할 13개 필드. raw에서 파생하지 않고 literal로 고정한다. */
+function expectedTransaction(): MutableRecord {
+  return {
+    transactionId: TRANSACTION_ID,
+    transactionType: "ACCOUNT_TRANSFER",
+    amount: "1250000",
+    currencyCode: "KRW",
+    occurredAt: "2026-07-23T01:15:30Z",
+    externalCustomerRef: CUSTOMER_REF,
+    senderAccountRef: "acct_ref_demo_s91c",
+    recipientAccountRef: "acct_ref_demo_r44d",
+    channel: "MOBILE_BANKING",
+    deviceRef: "device_ref_demo_31aa",
+    processingStatus: "ADDITIONAL_AUTH_REQUIRED",
+    createdAt: "2026-07-23T01:15:31Z",
+    updatedAt: "2026-07-23T01:16:02Z",
+  };
+}
+
+/**
+ * 테스트가 보관한 raw 객체 참조를 그대로 돌려주는 200 응답 double.
+ *
+ * `jsonResponse()`는 body를 문자열로 직렬화하므로 transport의 `response.json()`이 매번 새 객체를
+ * 만들어 identity 비교가 불가능하다. 이 double의 `json()`은 재파싱 없이 전달받은 참조를 반환하므로,
+ * 실제 transport·validator를 통과한 뒤 hook이 게시한 객체가 raw transaction과 같은 객체인지 직접
+ * 관찰할 수 있다. body와 같은 `X-Trace-Id` header를 실어 기존 trace 대조 검증도 그대로 거친다.
+ */
+function heldJsonResponse(raw: unknown): Response {
+  return {
+    ok: true,
+    status: 200,
+    headers: new Headers({ "Content-Type": "application/json", "X-Trace-Id": TRACE_ID }),
+    json: () => Promise.resolve(raw),
+  } as unknown as Response;
+}
+
+async function answerWithHeld(call: PendingCall, raw: unknown): Promise<void> {
+  await act(async () => {
+    call.settle(heldJsonResponse(raw));
+    await call.promise;
+    await Promise.resolve();
+  });
+}
+
+/**
+ * Hook이 React state에 게시하는 transaction 객체의 소유권 (Issue #285).
+ *
+ * hook은 wire envelope 대신 transaction만 게시하되, 검증된 13개 필드를 복사한 새 plain object여야
+ * 한다. raw transaction이나 이전 delivery의 state를 사후에 바꿔도 이미 게시된 state와 후속
+ * delivery에 전파되지 않아야 한다. 모든 성공 응답은 `heldJsonResponse()`로 전달해 JSON 재파싱에
+ * 의한 우연한 분리를 배제한다.
+ */
+describe("useTransactionDetail published object graph", () => {
+  beforeEach(() => {
+    adapter.client = createFakeAuthClient({
+      initialSession: SESSION,
+      accessToken: ACCESS_TOKEN,
+    });
+    setAuthState = null;
+  });
+
+  it("publishes a fresh 13-field transaction rather than the raw transaction object", async () => {
+    const { calls } = controlledFetch();
+    const client = signedIn();
+    const raw = heldDetailBody();
+
+    const { result } = render(client);
+    await settle();
+    await answerWithHeld(calls[0], raw);
+    await waitFor(() => {
+      expect(result.current.state.status).toBe("success");
+    });
+    if (result.current.state.status !== "success") {
+      throw new Error("unreachable");
+    }
+    const published = result.current.state.data;
+
+    expect(published as unknown).not.toBe(raw.transaction);
+    expect(published as unknown).not.toBe(raw);
+    expect(Object.getPrototypeOf(published)).toBe(Object.prototype);
+    expect(Object.keys(published).sort()).toEqual(SORTED_DETAIL_KEYS);
+    expect(published).toStrictEqual(expectedTransaction());
+  });
+
+  it("keeps the published transaction unchanged when the raw transaction is mutated afterwards", async () => {
+    const { calls } = controlledFetch();
+    const client = signedIn();
+    const raw = heldDetailBody();
+
+    const { result } = render(client);
+    await settle();
+    await answerWithHeld(calls[0], raw);
+    await waitFor(() => {
+      expect(result.current.state.status).toBe("success");
+    });
+
+    // primitive 필드 변경.
+    raw.transaction.amount = "1";
+    raw.transaction.processingStatus = "HELD";
+    raw.transaction.updatedAt = "2026-07-24T00:00:00Z";
+    // nullable 필드 변경.
+    raw.transaction.recipientAccountRef = null;
+    raw.transaction.deviceRef = null;
+    // 사후 unknown field 추가.
+    raw.transaction.riskScore = 91;
+
+    expect(result.current.state).toStrictEqual({ status: "success", data: expectedTransaction() });
+    if (result.current.state.status !== "success") {
+      throw new Error("unreachable");
+    }
+    expect("riskScore" in result.current.state.data).toBe(false);
+  });
+
+  it("gives the same raw transaction, delivered again after a session replacement, its own object", async () => {
+    const { calls } = controlledFetch();
+    const raw = heldDetailBody();
+
+    const { result } = renderControlled();
+    await settle();
+    await answerWithHeld(calls[0], raw);
+    await waitFor(() => {
+      expect(result.current.state.status).toBe("success");
+    });
+    if (result.current.state.status !== "success") {
+      throw new Error("unreachable");
+    }
+    const first = result.current.state.data;
+
+    // 이전 state를 계약 안의 값으로 바꾼다. raw나 새 delivery에 닿으면 안 된다.
+    const mutableFirst = first as unknown as MutableRecord;
+    mutableFirst.amount = "777";
+    mutableFirst.deviceRef = null;
+
+    // session을 교체하고, 새 session의 요청에 같은 raw 객체를 다시 전달한다.
+    act(() => {
+      setAuthState?.({ status: "authenticated", session: SECOND_SESSION });
+    });
+    await settle();
+    expect(calls).toHaveLength(2);
+    await answerWithHeld(calls[1], raw);
+    await waitFor(() => {
+      expect(result.current.state.status).toBe("success");
+    });
+    if (result.current.state.status !== "success") {
+      throw new Error("unreachable");
+    }
+    const second = result.current.state.data;
+
+    expect(second as unknown).not.toBe(first);
+    expect(second as unknown).not.toBe(raw.transaction);
+    expect(second).toStrictEqual(expectedTransaction());
+
+    // 새 delivery 뒤 이전 state와 raw를 다시 바꿔도 새 state는 그대로다.
+    mutableFirst.processingStatus = "HELD";
+    mutableFirst.riskScore = 91;
+    raw.transaction.amount = "2";
+    raw.transaction.recipientAccountRef = null;
+    raw.transaction.channel = "ATM";
+    raw.transaction.unknownAfterDelivery = true;
+    expect(result.current.state).toStrictEqual({ status: "success", data: expectedTransaction() });
+  });
+});

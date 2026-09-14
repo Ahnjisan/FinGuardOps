@@ -13,6 +13,7 @@ import {
 } from "./errors";
 import {
   fetchTransactionList,
+  type TransactionListItem,
   type TransactionListPage,
   type TransactionListQuery,
 } from "./transactionApi";
@@ -57,11 +58,21 @@ export type TransactionListErrorKind =
 /** Whether a load is the first one for this session or a re-query of it. */
 export type TransactionLoadPhase = "initial" | "refresh";
 
+/**
+ * 목록 화면이 받는 거래 목록의 전부 (Issue #285).
+ *
+ * `TransactionListPage`는 wire 계약이다. transport가 response header와 대조해야 하므로 `traceId`를
+ * 가지며, 그 검증은 `transactionApi`에서 끝난다. 목록 화면에는 행과 page metadata만 필요하므로 이
+ * 타입은 그 둘만 허용한다. 별도 선언이 아니라 `Pick`이므로 wire 필드의 추가·삭제가 여기서 바로
+ * 컴파일 결과로 드러난다. `traceId` key는 React state에 존재하지 않는다.
+ */
+type TransactionListView = Pick<TransactionListPage, "content" | "page">;
+
 export type TransactionListState =
   /** No authenticated session, so no request has been made and none will be. */
   | { readonly status: "idle" }
   | { readonly status: "loading"; readonly phase: TransactionLoadPhase }
-  | { readonly status: "success"; readonly data: TransactionListPage }
+  | { readonly status: "success"; readonly data: TransactionListView }
   | { readonly status: "error"; readonly error: TransactionListErrorKind };
 
 export interface UseTransactionListResult {
@@ -97,6 +108,53 @@ function classifyError(error: unknown): TransactionListErrorKind {
     return "request-rejected";
   }
   return "unknown";
+}
+
+/**
+ * 거래 한 행의 화면용 사본.
+ *
+ * spread가 아니라 필드 단위로, 검증된 raw 객체가 아니라 새 plain object로 옮긴다. validator가 허용한
+ * 10개 필드를 그대로 복사할 뿐 정규화·trim·기본값 적용을 하지 않는다. 값은 모두 string 또는 null
+ * primitive이므로 이보다 깊은 복사는 없다.
+ */
+function projectTransactionListItem(item: TransactionListItem): TransactionListItem {
+  return {
+    transactionId: item.transactionId,
+    transactionType: item.transactionType,
+    amount: item.amount,
+    currencyCode: item.currencyCode,
+    occurredAt: item.occurredAt,
+    externalCustomerRef: item.externalCustomerRef,
+    senderAccountRef: item.senderAccountRef,
+    recipientAccountRef: item.recipientAccountRef,
+    processingStatus: item.processingStatus,
+    createdAt: item.createdAt,
+  };
+}
+
+/**
+ * 검증된 wire DTO가 화면 state가 되는 유일한 지점 (Issue #285).
+ *
+ * `isTransactionListPage`와 transport가 이미 응답 shape과 header·body trace 일치를 판정했다. 이
+ * 함수는 목록 화면이 그리는 `content`와 `page`만 남기고, 새 root·새 `content` 배열·행마다 새 객체·
+ * 새 6-field `page` 객체를 만든다. `traceId`는 복사하지 않으므로 React state에 도달하지 않는다.
+ * validator는 여기서 반복하지 않는다.
+ *
+ * 성공 delivery마다 정확히 한 번 호출되므로 raw DTO나 이전 delivery의 state를 사후에 바꿔도 이미
+ * 게시된 state와 후속 delivery에 전파되지 않으며, render마다 다시 복사하지도 않는다.
+ */
+function projectTransactionListView(envelope: TransactionListPage): TransactionListView {
+  return {
+    content: envelope.content.map(projectTransactionListItem),
+    page: {
+      number: envelope.page.number,
+      size: envelope.page.size,
+      totalElements: envelope.page.totalElements,
+      totalPages: envelope.page.totalPages,
+      first: envelope.page.first,
+      last: envelope.page.last,
+    },
+  };
 }
 
 /**
@@ -221,7 +279,7 @@ export function useTransactionList(query: TransactionListQuery): UseTransactionL
     fetchTransactionList(getOidcAuthClient(), query, controller.signal)
       .then(
         (result) => {
-          publish({ status: "success", data: result.data });
+          publish({ status: "success", data: projectTransactionListView(result.data) });
         },
         (error: unknown) => {
           // An abort is this hook's own decision, not an outcome to report.
