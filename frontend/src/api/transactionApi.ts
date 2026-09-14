@@ -245,7 +245,13 @@ export async function fetchTransactionList(
   return { data: result.data, traceId: resolveTraceId(result.traceId, result.data.traceId) };
 }
 
-/** `GET /api/v1/transactions/{transactionId}`. Accepts no query argument at all. */
+/**
+ * `GET /api/v1/transactions/{transactionId}`. Accepts no query argument at all.
+ *
+ * 성공 응답은 형식 검증을 통과한 뒤 요청 path의 `transactionId`에 결합한다 (Issue #287). 응답
+ * `transaction.transactionId`를 요청 원문과 `===`로만 비교하고 trim·대소문자 변환·UUID 재파싱을 하지
+ * 않으므로, 형식이 유효한 다른 거래도 원문을 반사하지 않는 고정 `InvalidResponseError`가 된다.
+ */
 export async function fetchTransactionDetail(
   authClient: CredentialAuthClient,
   transactionId: string,
@@ -255,7 +261,8 @@ export async function fetchTransactionDetail(
     endpoint: "transaction-detail",
     params: { transactionId },
     expectedStatus: 200,
-    validate: isTransactionDetailEnvelope,
+    validate: (body): body is TransactionDetailEnvelope =>
+      isTransactionDetailEnvelope(body) && body.transaction.transactionId === transactionId,
     signal,
   });
   return { data: result.data, traceId: resolveTraceId(result.traceId, result.data.traceId) };

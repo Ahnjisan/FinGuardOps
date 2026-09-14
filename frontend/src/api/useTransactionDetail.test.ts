@@ -7,6 +7,7 @@ import { AuthProvider } from "../auth/AuthProvider";
 import type { AuthState } from "../auth/authState";
 import { createFakeAuthClient, type FakeAuthClient } from "../test/fakeAuthClient";
 import { jsonResponse } from "../test/mockFetch";
+import type { TransactionDetailState } from "./useTransactionDetail";
 
 /**
  * The adapter the hook reaches for at its own credential boundary.
@@ -654,6 +655,61 @@ describe("useTransactionDetail error classification", () => {
     await waitFor(() => {
       expect(result.current.state).toEqual({ status: "error", error: "invalid-response" });
     });
+  });
+
+  it("refuses a well-formed record belonging to a transaction it did not ask for", async () => {
+    // 요청 A에 형식상 유효한 거래 B가 응답돼도 API 경계가 고정 invalid-response로 거부한다 (Issue #287).
+    // render마다 공개 state를 기록해 success·data가 한 frame도 게시되지 않았음을 확인한다.
+    const { calls, spy } = controlledFetch();
+    const client = signedIn();
+    const rendered: TransactionDetailState[] = [];
+    const mismatched = detailBody({ transactionId: OTHER_TRANSACTION_ID });
+
+    const { result } = renderHook(
+      (current: string | null) => {
+        const value = useTransactionDetail(current);
+        rendered.push(value.state);
+        return value;
+      },
+      { initialProps: TRANSACTION_ID, wrapper: providerWrapper(client) },
+    );
+    await settle();
+    expect(calls).toHaveLength(1);
+
+    await act(async () => {
+      calls[0].settle(jsonResponse(mismatched, { headers: { "X-Trace-Id": TRACE_ID } }));
+      await calls[0].promise;
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(result.current.state).toEqual({ status: "error", error: "invalid-response" });
+    });
+    expect(JSON.stringify(result.current.state)).toBe(
+      '{"status":"error","error":"invalid-response"}',
+    );
+    expect(rendered.filter((state) => state.status === "success")).toHaveLength(0);
+    expect(rendered.some((state) => "data" in state)).toBe(false);
+    const everPublished = JSON.stringify(rendered);
+    for (const secret of [
+      TRANSACTION_ID,
+      OTHER_TRANSACTION_ID,
+      TRACE_ID,
+      CUSTOMER_REF,
+      "traceId",
+      JSON.stringify(mismatched),
+    ]) {
+      expect(everPublished).not.toContain(secret);
+    }
+    expect(client.calls.invalidateIfCurrent).toBe(0);
+    expect(client.calls.notified).toBe(0);
+
+    // 자동 retry·polling이 없으므로 settle 이후에도 fetch는 정확히 1회다.
+    await settle();
+    await settle();
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(calls).toHaveLength(1);
+    expect(result.current.state).toEqual({ status: "error", error: "invalid-response" });
   });
 
   it("reports an unmapped Backend status as the generic failure", async () => {

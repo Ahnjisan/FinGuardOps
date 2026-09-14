@@ -466,6 +466,56 @@ describe("fetchTransactionDetail", () => {
     expect(isTransactionDetailEnvelope({ ...detailBody(), extra: 1 })).toBe(false);
     expect(isTransactionDetailEnvelope({ transaction: detailItem() })).toBe(false);
   });
+
+  it("refuses a detail success whose transaction id is not exactly the requested one", async () => {
+    // 요청 path의 transactionId와 응답 transaction.transactionId의 결합 검증 (Issue #287).
+    // 세 번째 값은 형식 validator만의 판정이다. 다른 canonical UUID v4 행만 형식 검증을 통과하므로
+    // binding 검증만 거부할 수 있는 반례이고, 나머지 행은 정규화 없이 기존 형식 계약이 거부한다.
+    const OTHER_TRANSACTION_ID = "3a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+    const rows: ReadonlyArray<readonly [string, string, boolean]> = [
+      ["요청과 다른 canonical UUID v4", OTHER_TRANSACTION_ID, true],
+      ["대문자 UUID", TRANSACTION_ID.toUpperCase(), false],
+      ["하이픈 없는 UUID", "2f4c0a4e8a9d4c2f9a1b7d6e5f430001", false],
+      ["UUID v4가 아닌 값", "2f4c0a4e-8a9d-1c2f-9a1b-7d6e5f430001", false],
+      ["앞 공백", ` ${TRANSACTION_ID}`, false],
+      ["뒤 공백", `${TRANSACTION_ID} `, false],
+      ["내부 공백", "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f43 0001", false],
+    ];
+
+    for (const [name, responseTransactionId, formatValid] of rows) {
+      const body = detailBody({ transactionId: responseTransactionId });
+      expect(isTransactionDetailEnvelope(body), name).toBe(formatValid);
+
+      const client = signedIn();
+      // header trace도 body와 같은 값으로 실어 두 trace 경로 모두 오류에 반사되지 않는지 확인한다.
+      mockFetchOnce(async () => jsonResponse(body, { headers: { "X-Trace-Id": TRACE_ID } }));
+
+      const error = await fetchTransactionDetail(client, TRANSACTION_ID).catch(
+        (thrown: unknown) => thrown,
+      );
+
+      expect(error, name).toBeInstanceOf(InvalidResponseError);
+      expect(error, name).toMatchObject({
+        name: "InvalidResponseError",
+        message: "Received an unexpected response shape.",
+      });
+      expect(vi.mocked(fetch), name).toHaveBeenCalledTimes(1);
+      const request = vi.mocked(fetch).mock.calls[0][0] as Request;
+      expect(request.url, name).toBe(`${BASE}/api/v1/transactions/${TRANSACTION_ID}`);
+      expect(request.method, name).toBe("GET");
+      expect(new URL(request.url).search, name).toBe("");
+      expect(client.calls.invalidateIfCurrent, name).toBe(0);
+      expect(client.calls.notified, name).toBe(0);
+
+      // 오류의 문자열·JSON 표현에 요청·응답 UUID, trace ID, raw body가 남지 않는다.
+      const disclosed = `${String(error)} ${JSON.stringify(error)}`;
+      for (const secret of [TRANSACTION_ID, responseTransactionId, TRACE_ID, JSON.stringify(body)]) {
+        expect(disclosed, name).not.toContain(secret);
+      }
+      expect(disclosed, name).not.toMatch(/2f4c0a4e|3a1b2c3d|7d6e5f43|9e0f1a2b|trace|_ref_demo_/i);
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("transaction API — status, trace and failure boundaries", () => {
