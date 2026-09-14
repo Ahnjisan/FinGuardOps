@@ -596,6 +596,66 @@ describe("useTransactionList error classification", () => {
     });
   });
 
+  it("refuses a well-formed page whose number is not the requested page and publishes none of it", async () => {
+    // Issue #291: DEFAULT_QUERY(page=0·size=20) 요청에 형식·산술은 유효하지만 number=1인 응답을 실제
+    // fetchTransactionList transport·validator 경계로 전달한다. API 오류 mock으로 우회하지 않는다.
+    const { calls, spy } = controlledFetch();
+    const client = signedIn();
+    const body = {
+      content: [listItem()],
+      page: { number: 1, size: 20, totalElements: 21, totalPages: 2, first: false, last: true },
+      traceId: TRACE_ID,
+    };
+
+    const states: unknown[] = [];
+    const { result } = renderHook(
+      (current: TransactionListQuery) => {
+        const value = useTransactionList(current);
+        states.push(value.state);
+        return value;
+      },
+      { initialProps: DEFAULT_QUERY, wrapper: providerWrapper(client) },
+    );
+    await settle();
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect((spy.mock.calls[0][0] as Request).url).toBe(
+      "http://localhost:8080/api/v1/transactions?page=0&size=20&sort=occurredAt%2Cdesc",
+    );
+
+    await act(async () => {
+      calls[0].settle(jsonResponse(body, { headers: { "X-Trace-Id": TRACE_ID } }));
+      await calls[0].promise;
+    });
+
+    await waitFor(() => {
+      expect(result.current.state).toEqual({ status: "error", error: "invalid-response" });
+    });
+    // settle 이후에도 자동 retry·polling에 의한 추가 요청이 없다.
+    await settle();
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(client.calls.authorizeRequest).toBe(1);
+    expect(client.calls.invalidateIfCurrent).toBe(0);
+    expect(client.calls.notified).toBe(0);
+    expect(result.current.state).toEqual({ status: "error", error: "invalid-response" });
+
+    // render마다 기록한 state 어디에도 success·data·content·page가 게시되지 않았다.
+    expect(states.map((state) => (state as { status: string }).status)).not.toContain("success");
+    const { keys, values } = reachableKeysAndValues(states);
+    for (const key of ["data", "content", "page", "traceId"]) {
+      expect(keys).not.toContain(key);
+    }
+    for (const marker of [TRACE_ID, TRANSACTION_ID, "cust_ref_demo_a7f2", "acct_ref_demo_s91c"]) {
+      expect(values).not.toContain(marker);
+    }
+    const serialized = JSON.stringify(states);
+    expect(serialized).not.toContain(JSON.stringify(body));
+    expect(serialized).not.toContain("fake.access.token");
+    expect(serialized).not.toContain("Bearer");
+    expect(JSON.stringify(result.current.state)).toBe(
+      '{"status":"error","error":"invalid-response"}',
+    );
+  });
+
   it("accepts an empty page as data rather than as an error", async () => {
     const { calls } = controlledFetch();
     const client = signedIn();
