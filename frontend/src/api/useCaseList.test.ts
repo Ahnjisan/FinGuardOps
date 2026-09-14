@@ -935,8 +935,9 @@ describe("useCaseList error classification", () => {
  * panel, a `JSON.stringify`, a serializing error reporter and a future
  * component that walks the state all arrive at the same nothing.
  *
- * The identical problem in `useTransactionList` is untouched here and is
- * tracked separately; nothing in this file asserts anything about it.
+ * `useTransactionList`의 같은 경계는 Issue #285에서 hook publish 시점의 typed projection으로
+ * 보정했고, 그 계약은 `useTransactionList.test.ts`가 검증한다. 이 파일은 그에 대해 아무것도
+ * 단언하지 않는다.
  */
 describe("useCaseList published data", () => {
   async function successState() {
