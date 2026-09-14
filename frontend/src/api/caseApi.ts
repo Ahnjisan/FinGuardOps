@@ -384,7 +384,13 @@ export async function fetchCaseList(
   return { data: result.data, traceId: resolveTraceId(result.traceId, result.data.traceId) };
 }
 
-/** `GET /api/v1/cases/{caseId}`. Accepts no query argument at all. */
+/**
+ * `GET /api/v1/cases/{caseId}`. Accepts no query argument at all.
+ *
+ * 성공 응답은 형식 검증을 통과한 뒤 요청 path의 `caseId`에 결합한다 (Issue #289). 응답 `case.caseId`를
+ * 요청 원문과 `===`로만 비교하고 trim·대소문자 변환·UUID 재파싱을 하지 않으므로, 형식이 유효한 다른
+ * 사건도 원문을 반사하지 않는 고정 `InvalidResponseError`가 된다.
+ */
 export async function fetchCaseDetail(
   authClient: CredentialAuthClient,
   caseId: string,
@@ -394,7 +400,8 @@ export async function fetchCaseDetail(
     endpoint: "case-detail",
     params: { caseId },
     expectedStatus: 200,
-    validate: isCaseDetailEnvelope,
+    validate: (body): body is CaseDetailEnvelope =>
+      isCaseDetailEnvelope(body) && body.case.caseId === caseId,
     signal,
   });
   return { data: result.data, traceId: resolveTraceId(result.traceId, result.data.traceId) };

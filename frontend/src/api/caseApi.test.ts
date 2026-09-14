@@ -393,6 +393,54 @@ describe("case read responses", () => {
       expect(isCaseListPage(listBody([listItem()], pageOverrides))).toBe(false);
     }
   });
+
+  it("refuses a detail success whose case id is not exactly the requested one", async () => {
+    // 요청 path의 caseId와 응답 case.caseId의 결합 검증 (Issue #289).
+    // 세 번째 값은 형식 validator만의 판정이다. 다른 canonical UUID v4 행만 형식 검증을 통과하므로
+    // binding 검증만 거부할 수 있는 반례이고, 나머지 행은 정규화 없이 기존 형식 계약이 거부하는 회귀 반례다.
+    const OTHER_CASE_ID = "7e1d2c3b-4a5f-4b6c-8d7e-9f0a1b2c3d4e";
+    const rows: ReadonlyArray<readonly [string, string, boolean]> = [
+      ["요청과 다른 canonical UUID v4", OTHER_CASE_ID, true],
+      ["대문자 UUID", CASE_ID.toUpperCase(), false],
+      ["하이픈 없는 UUID", "5c67162487144bd7871aa9445e6f453e", false],
+      ["UUID v4가 아닌 값", "5c671624-8714-1bd7-871a-a9445e6f453e", false],
+      ["앞 공백", ` ${CASE_ID}`, false],
+      ["뒤 공백", `${CASE_ID} `, false],
+      ["내부 공백", "5c671624-8714-4bd7-871a-a9445e6f 453e", false],
+    ];
+
+    for (const [name, responseCaseId, formatValid] of rows) {
+      const body = { case: detailItem({ caseId: responseCaseId }), traceId: TRACE_ID };
+      expect(isCaseDetailEnvelope(body), name).toBe(formatValid);
+
+      const client = signedIn();
+      // header trace도 body와 같은 값으로 실어 두 trace 경로 모두 오류에 반사되지 않는지 확인한다.
+      mockFetchOnce(async () => jsonResponse(body, { headers: { "X-Trace-Id": TRACE_ID } }));
+
+      const error = await fetchCaseDetail(client, CASE_ID).catch((thrown: unknown) => thrown);
+
+      expect(error, name).toBeInstanceOf(InvalidResponseError);
+      expect(error, name).toMatchObject({
+        name: "InvalidResponseError",
+        message: "Received an unexpected response shape.",
+      });
+      expect(vi.mocked(fetch), name).toHaveBeenCalledTimes(1);
+      const request = sentRequest();
+      expect(request.url, name).toBe(`${BASE}/api/v1/cases/${CASE_ID}`);
+      expect(request.method, name).toBe("GET");
+      expect(new URL(request.url).search, name).toBe("");
+      expect(client.calls.invalidateIfCurrent, name).toBe(0);
+      expect(client.calls.notified, name).toBe(0);
+
+      // 오류의 문자열·JSON 표현에 요청·응답 UUID, trace ID, raw body가 남지 않는다.
+      const disclosed = `${String(error)} ${JSON.stringify(error)}`;
+      for (const secret of [CASE_ID, responseCaseId, TRACE_ID, JSON.stringify(body)]) {
+        expect(disclosed, name).not.toContain(secret);
+      }
+      expect(disclosed, name).not.toMatch(/5c671624|7e1d2c3b|a9445e6f|9f0a1b2c|trace|_ref_demo_/i);
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("changeCaseStatus", () => {
