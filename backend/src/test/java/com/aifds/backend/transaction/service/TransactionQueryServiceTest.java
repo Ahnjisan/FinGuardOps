@@ -7,6 +7,12 @@ import com.aifds.backend.transaction.exception.TransactionQueryTimeoutException;
 import com.aifds.backend.transaction.exception.TransactionQueryUnavailableException;
 import com.aifds.backend.transaction.repository.FinancialTransactionRepository;
 import com.aifds.backend.transaction.validation.TransactionQueryValidator;
+import com.aifds.backend.transaction.validation.TransactionValidationException;
+import jakarta.persistence.criteria.CriteriaBuilder;
+import jakarta.persistence.criteria.CriteriaQuery;
+import jakarta.persistence.criteria.Path;
+import jakarta.persistence.criteria.Predicate;
+import jakarta.persistence.criteria.Root;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -28,7 +34,9 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -113,6 +121,83 @@ class TransactionQueryServiceTest {
                 any(Specification.class),
                 any(Pageable.class)
         );
+    }
+
+    @Test
+    void rejectsUnsafePaginationBeforeAccessingRepository() {
+        TransactionListRequest unsafe = new TransactionListRequest(
+                null, null, null, null, null, null,
+                "1073741824", "2", null
+        );
+
+        Throwable failure = catchThrowable(() ->
+                service.findAll(unsafe, TRACE_ID)
+        );
+
+        verify(repository, never()).findAll(
+                any(Specification.class),
+                any(Pageable.class)
+        );
+        assertThat(failure)
+                .isInstanceOfSatisfying(
+                        TransactionValidationException.class,
+                        exception -> {
+                            assertThat(exception.getField()).isEqualTo("page");
+                            assertThat(exception.getCode()).isEqualTo(
+                                    TransactionQueryValidator.PAGE_OUT_OF_RANGE
+                            );
+                            assertThat(exception.getReason()).isEqualTo(
+                                    "page is too large for the requested size"
+                            );
+                        }
+                );
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void createsExactPageableAndFilterAtLastAllowedOffset() {
+        TransactionListRequest boundary = new TransactionListRequest(
+                null, null, null, null, " CustomerRef ", null,
+                "2147483647", "1", "occurredAt,asc"
+        );
+        when(repository.findAll(
+                any(Specification.class),
+                any(Pageable.class)
+        )).thenReturn(new PageImpl<>(List.of()));
+
+        service.findAll(boundary, TRACE_ID);
+
+        ArgumentCaptor<Specification<FinancialTransaction>> specification =
+                ArgumentCaptor.forClass(Specification.class);
+        ArgumentCaptor<Pageable> pageable =
+                ArgumentCaptor.forClass(Pageable.class);
+        verify(repository).findAll(
+                specification.capture(),
+                pageable.capture()
+        );
+        assertThat(pageable.getValue().getPageNumber())
+                .isEqualTo(Integer.MAX_VALUE);
+        assertThat(pageable.getValue().getPageSize()).isEqualTo(1);
+        assertThat(pageable.getValue().getOffset())
+                .isEqualTo(Integer.MAX_VALUE);
+        assertThat(pageable.getValue().getSort().stream().toList())
+                .containsExactly(
+                        new Sort.Order(Sort.Direction.ASC, "occurredAt"),
+                        new Sort.Order(Sort.Direction.ASC, "id")
+                );
+
+        Root<FinancialTransaction> root = mock(Root.class);
+        CriteriaQuery<?> query = mock(CriteriaQuery.class);
+        CriteriaBuilder builder = mock(CriteriaBuilder.class);
+        Path<Object> externalCustomerRef = mock(Path.class);
+        Predicate predicate = mock(Predicate.class);
+        when(root.<Object>get("externalCustomerRef"))
+                .thenReturn(externalCustomerRef);
+        when(builder.equal(externalCustomerRef, " CustomerRef "))
+                .thenReturn(predicate);
+
+        assertThat(specification.getValue().toPredicate(root, query, builder))
+                .isSameAs(predicate);
     }
 
     @Test

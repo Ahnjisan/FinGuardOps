@@ -182,6 +182,243 @@ class TransactionQueryValidatorTest {
     }
 
     @Test
+    void rejectsPaginationOffsetBeyondIntegerRange() {
+        TransactionListRequest request = new TransactionListRequest(
+                null, null, null, null, null, null,
+                "1073741824", "2", null
+        );
+
+        assertThatThrownBy(() -> validator.validate(request))
+                .isInstanceOfSatisfying(
+                        TransactionValidationException.class,
+                        exception -> {
+                            assertThat(exception.getType())
+                                    .isEqualTo(TransactionValidationType.DOMAIN);
+                            assertThat(exception.getField()).isEqualTo("page");
+                            assertThat(exception.getCode()).isEqualTo(
+                                    TransactionQueryValidator.PAGE_OUT_OF_RANGE
+                            );
+                            assertThat(exception.getReason()).isEqualTo(
+                                    "page is too large for the requested size"
+                            );
+                            assertThat(exception.getMessage()).doesNotContain(
+                                    "1073741824",
+                                    "2",
+                                    "2147483648"
+                            );
+                        }
+                );
+    }
+
+    @Test
+    void acceptsPaginationOffsetsAtApprovedBoundaries() {
+        assertPagination("2147483647", "1", 2147483647, 1);
+        assertPagination("21474836", "100", 21474836, 100);
+        assertPagination("0", "100", 0, 100);
+        assertPagination("10", "1", 10, 1);
+    }
+
+    @Test
+    void rejectsFirstPaginationOffsetBeyondSizeOneHundredBoundary() {
+        assertOffsetValidation(new TransactionListRequest(
+                null, null, null, null, null, null,
+                "21474837", "100", null
+        ));
+    }
+
+    @Test
+    void appliesSamePaginationOffsetRuleWithFilterAndSort() {
+        assertOffsetValidation(new TransactionListRequest(
+                null, null, null, null, "customer_filter", null,
+                "1073741824", "2", null
+        ));
+        assertOffsetValidation(new TransactionListRequest(
+                null, null, null, null, null, null,
+                "1073741824", "2", "occurredAt,asc"
+        ));
+    }
+
+    @Test
+    void keepsIndividualPageAndSizeErrorsAheadOfOffsetValidation() {
+        assertNotOffsetValidation(
+                new TransactionListRequest(
+                        null, null, null, null, null, null,
+                        "not-a-page", "2", null
+                ),
+                "page",
+                TransactionQueryValidator.INVALID_PAGE_FORMAT
+        );
+        assertNotOffsetValidation(
+                new TransactionListRequest(
+                        null, null, null, null, null, null,
+                        "-1", "2", null
+                ),
+                "page",
+                TransactionQueryValidator.PAGE_OUT_OF_RANGE
+        );
+        assertNotOffsetValidation(
+                new TransactionListRequest(
+                        null, null, null, null, null, null,
+                        "1073741824", "not-a-size", null
+                ),
+                "size",
+                TransactionQueryValidator.INVALID_SIZE_FORMAT
+        );
+        assertNotOffsetValidation(
+                new TransactionListRequest(
+                        null, null, null, null, null, null,
+                        "21474837", "101", null
+                ),
+                "size",
+                TransactionQueryValidator.SIZE_OUT_OF_RANGE
+        );
+    }
+
+    @Test
+    void keepsMalformedSortAheadOfUnsafePaginationOffset() {
+        assertLegacyValidation(
+                new TransactionListRequest(
+                        null, null, null, null, null, null,
+                        "1073741824", "2", "invalid-sort"
+                ),
+                TransactionValidationType.FORMAT,
+                "sort",
+                TransactionQueryValidator.INVALID_SORT_FORMAT,
+                "sort must use field,direction format",
+                "invalid-sort"
+        );
+    }
+
+    @Test
+    void keepsEveryLegacyQueryErrorAheadOfUnsafePaginationOffset() {
+        assertLegacyValidation(
+                new TransactionListRequest(
+                        "invalid-time", null, null, null, null, null,
+                        "1073741824", "2", null
+                ),
+                TransactionValidationType.FORMAT,
+                "occurredAtFrom",
+                TransactionQueryValidator.INVALID_DATETIME_FORMAT,
+                "occurredAtFrom must use UTC ISO-8601 Z notation",
+                "invalid-time"
+        );
+        assertLegacyValidation(
+                new TransactionListRequest(
+                        "2026-07-24T00:00:00Z",
+                        "2026-07-23T00:00:00Z",
+                        null, null, null, null,
+                        "1073741824", "2", null
+                ),
+                TransactionValidationType.DOMAIN,
+                "occurredAtFrom",
+                TransactionQueryValidator.INVALID_OCCURRED_AT_RANGE,
+                "occurredAtFrom must not be after occurredAtTo",
+                "2026-07-24T00:00:00Z"
+        );
+        assertLegacyValidation(
+                requestWithCounts("ACCOUNT_TRANSFER", null, null, 2, 0, 0),
+                TransactionValidationType.FORMAT,
+                "transactionType",
+                TransactionRequestValidator.UNSUPPORTED_TRANSACTION_TYPE,
+                "transactionType must be provided at most once",
+                "ACCOUNT_TRANSFER"
+        );
+        assertLegacyValidation(
+                requestWithCounts(null, "RECEIVED", null, 0, 2, 0),
+                TransactionValidationType.FORMAT,
+                "processingStatus",
+                TransactionQueryValidator.UNSUPPORTED_PROCESSING_STATUS,
+                "processingStatus must be provided at most once",
+                "RECEIVED"
+        );
+        assertLegacyValidation(
+                requestWithCounts(null, null, "occurredAt,desc", 0, 0, 2),
+                TransactionValidationType.FORMAT,
+                "sort",
+                TransactionQueryValidator.INVALID_SORT_FORMAT,
+                "sort must be provided at most once",
+                "occurredAt,desc"
+        );
+        assertLegacyValidation(
+                new TransactionListRequest(
+                        null, null, "invalid-type", null, null, null,
+                        "1073741824", "2", null
+                ),
+                TransactionValidationType.FORMAT,
+                "transactionType",
+                TransactionRequestValidator.UNSUPPORTED_TRANSACTION_TYPE,
+                "transactionType is not supported",
+                "invalid-type"
+        );
+        assertLegacyValidation(
+                new TransactionListRequest(
+                        null, null, null, "invalid-status", null, null,
+                        "1073741824", "2", null
+                ),
+                TransactionValidationType.FORMAT,
+                "processingStatus",
+                TransactionQueryValidator.UNSUPPORTED_PROCESSING_STATUS,
+                "processingStatus is not supported",
+                "invalid-status"
+        );
+        assertLegacyValidation(
+                new TransactionListRequest(
+                        null, null, null, null, " ", null,
+                        "1073741824", "2", null
+                ),
+                TransactionValidationType.FORMAT,
+                "externalCustomerRef",
+                TransactionQueryValidator.INVALID_REFERENCE_VALUE,
+                "externalCustomerRef must not be blank",
+                "1073741824"
+        );
+        assertLegacyValidation(
+                new TransactionListRequest(
+                        null, null, null, null, null, "\t",
+                        "1073741824", "2", null
+                ),
+                TransactionValidationType.FORMAT,
+                "accountRef",
+                TransactionQueryValidator.INVALID_REFERENCE_VALUE,
+                "accountRef must not be blank",
+                "1073741824"
+        );
+        assertLegacyValidation(
+                new TransactionListRequest(
+                        null, null, null, null, null, null,
+                        "1073741824", "2", ""
+                ),
+                TransactionValidationType.FORMAT,
+                "sort",
+                TransactionQueryValidator.INVALID_SORT_FORMAT,
+                "sort must use field,direction format",
+                "1073741824"
+        );
+        assertLegacyValidation(
+                new TransactionListRequest(
+                        null, null, null, null, null, null,
+                        "1073741824", "2", "createdAt,desc"
+                ),
+                TransactionValidationType.FORMAT,
+                "sort",
+                TransactionQueryValidator.UNSUPPORTED_SORT_FIELD,
+                "sort field is not supported",
+                "createdAt,desc"
+        );
+        assertLegacyValidation(
+                new TransactionListRequest(
+                        null, null, null, null, null, null,
+                        "1073741824", "2", "occurredAt,DESC"
+                ),
+                TransactionValidationType.FORMAT,
+                "sort",
+                TransactionQueryValidator.UNSUPPORTED_SORT_DIRECTION,
+                "sort direction is not supported",
+                "occurredAt,DESC"
+        );
+    }
+
+    @Test
     void acceptsOnlyOneApprovedSortFieldAndLowercaseDirection() {
         assertThat(validator.validate(withSort("occurredAt,asc"))
                 .sortDirection()).isEqualTo(Sort.Direction.ASC);
@@ -268,6 +505,109 @@ class TransactionQueryValidatorTest {
                             assertThat(exception.getCode()).isEqualTo(code);
                         }
                 );
+    }
+
+    private void assertPagination(
+            String page,
+            String size,
+            int expectedPage,
+            int expectedSize
+    ) {
+        TransactionQueryCriteria criteria = validator.validate(
+                new TransactionListRequest(
+                        null, null, null, null, null, null,
+                        page, size, null
+                )
+        );
+
+        assertThat(criteria.page()).isEqualTo(expectedPage);
+        assertThat(criteria.size()).isEqualTo(expectedSize);
+    }
+
+    private void assertOffsetValidation(TransactionListRequest request) {
+        assertThatThrownBy(() -> validator.validate(request))
+                .isInstanceOfSatisfying(
+                        TransactionValidationException.class,
+                        exception -> {
+                            assertThat(exception.getType())
+                                    .isEqualTo(TransactionValidationType.DOMAIN);
+                            assertThat(exception.getField()).isEqualTo("page");
+                            assertThat(exception.getCode()).isEqualTo(
+                                    TransactionQueryValidator.PAGE_OUT_OF_RANGE
+                            );
+                            assertThat(exception.getReason()).isEqualTo(
+                                    "page is too large for the requested size"
+                            );
+                        }
+                );
+    }
+
+    private void assertNotOffsetValidation(
+            TransactionListRequest request,
+            String expectedField,
+            String expectedCode
+    ) {
+        assertThatThrownBy(() -> validator.validate(request))
+                .isInstanceOfSatisfying(
+                        TransactionValidationException.class,
+                        exception -> {
+                            assertThat(exception.getField())
+                                    .isEqualTo(expectedField);
+                            assertThat(exception.getCode())
+                                    .isEqualTo(expectedCode);
+                            assertThat(exception.getReason()).isNotEqualTo(
+                                    "page is too large for the requested size"
+                            );
+                        }
+                );
+    }
+
+    private void assertLegacyValidation(
+            TransactionListRequest request,
+            TransactionValidationType expectedType,
+            String expectedField,
+            String expectedCode,
+            String expectedReason,
+            String rawValue
+    ) {
+        assertThatThrownBy(() -> validator.validate(request))
+                .isInstanceOfSatisfying(
+                        TransactionValidationException.class,
+                        exception -> {
+                            assertThat(exception.getType())
+                                    .isEqualTo(expectedType);
+                            assertThat(exception.getField())
+                                    .isEqualTo(expectedField);
+                            assertThat(exception.getCode())
+                                    .isEqualTo(expectedCode)
+                                    .isNotEqualTo(
+                                            TransactionQueryValidator
+                                                    .PAGE_OUT_OF_RANGE
+                                    );
+                            assertThat(exception.getReason())
+                                    .isEqualTo(expectedReason)
+                                    .doesNotContain(
+                                            rawValue,
+                                            "1073741824",
+                                            "2147483648"
+                                    );
+                        }
+                );
+    }
+
+    private TransactionListRequest requestWithCounts(
+            String transactionType,
+            String processingStatus,
+            String sort,
+            int transactionTypeCount,
+            int processingStatusCount,
+            int sortCount
+    ) {
+        return new TransactionListRequest(
+                null, null, transactionType, processingStatus, null, null,
+                "1073741824", "2", sort,
+                transactionTypeCount, processingStatusCount, sortCount
+        );
     }
 
     private TransactionListRequest request() {

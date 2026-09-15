@@ -103,6 +103,13 @@ public class TransactionQueryValidator {
         validatePageAndSize(page, size);
 
         Sort.Direction direction = parseSort(request.sort());
+        if ((long) page * (long) size > Integer.MAX_VALUE) {
+            throw domain(
+                    "page",
+                    PAGE_OUT_OF_RANGE,
+                    "page is too large for the requested size"
+            );
+        }
         return new TransactionQueryCriteria(
                 occurredAtFrom,
                 occurredAtTo,

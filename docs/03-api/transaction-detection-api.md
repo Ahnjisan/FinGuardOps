@@ -612,6 +612,9 @@ GET /api/v1/transactions?occurredAtFrom=2026-07-23T00:00:00Z&occurredAtTo=2026-0
 - 부분 일치, 대소문자 무시와 wildcard 검색은 지원하지 않는다.
 - `sort`는 `occurredAt,asc` 또는 `occurredAt,desc`만 허용한다. 반복된 `sort`, 다중 정렬, 다른 필드와 다른 방향 표기는 허용하지 않는다.
 - 같은 `occurredAt`을 가진 거래는 내부 `id`를 같은 방향의 보조 정렬키로 사용한다. 내부 `id`는 요청 정렬 필드나 응답 필드로 노출하지 않는다.
+- 페이지네이션 offset은 `page × size <= 2147483647`을 만족해야 한다. 초과하면 `422 Unprocessable Entity`와 field `page`, code `PAGE_OUT_OF_RANGE`를 반환한다.
+- 서버는 `page` 또는 `size`를 허용 범위의 상한값으로 강제하거나 자동 조정하지 않는다.
+- offset 범위는 실제 데이터의 `totalElements`, `totalPages`, 결과 `content` 길이와 별개로 검증한다.
 
 현재 `financial_transaction` 저장 구조에 조회 원천이 없는 `riskLevel`, `activeCaseLinked`, `hasCaseHistory`는 요청 파라미터가 아니다. 관련 저장 구조와 후속 API 계약이 승인되기 전까지 지원하지 않는다.
 
@@ -677,7 +680,7 @@ Content-Type: application/json
 | --- | --- |
 | `200 OK` | 조회 성공. 결과가 없으면 빈 `content` 반환 |
 | `400 Bad Request` | 시각·Enum·페이지·크기·정렬 형식 또는 참조값 오류 |
-| `422 Unprocessable Entity` | 시작 시각이 종료 시각보다 늦거나 페이지·크기가 허용 범위를 벗어남 |
+| `422 Unprocessable Entity` | 시작 시각이 종료 시각보다 늦거나 페이지·크기 또는 `page × size`가 허용 범위를 벗어남 |
 | `503 Service Unavailable` | 조회 Timeout은 `DEPENDENCY_TIMEOUT`, 명확한 저장소 가용성 장애는 `DEPENDENCY_UNAVAILABLE` |
 | `500 Internal Server Error` | 그 밖의 DataAccess 오류 또는 예상하지 못한 서버 오류 |
 
