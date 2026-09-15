@@ -14,6 +14,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.context.annotation.Import;
@@ -23,6 +24,7 @@ import org.springframework.dao.QueryTimeoutException;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
@@ -39,7 +41,9 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
@@ -283,6 +287,137 @@ class TransactionQueryControllerTest {
                         ))
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"));
+    }
+
+    @Test
+    void rejectsUnsafePaginationAsSafe422BeforeRepositoryAccess()
+            throws Exception {
+        MvcResult result = mockMvc.perform(get(PATH)
+                        .queryParam("page", "1073741824")
+                        .queryParam("size", "2")
+                        .queryParam("credential", "credential_raw_offset_test")
+                        .queryParam(
+                                "authorization",
+                                "authorization_raw_offset_test"
+                        )
+                        .header(TraceIdFilter.TRACE_ID_HEADER, TRACE_ID))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(header().string(
+                        TraceIdFilter.TRACE_ID_HEADER,
+                        TRACE_ID
+                ))
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.message")
+                        .value("요청 필드를 확인해 주세요."))
+                .andExpect(jsonPath("$.fieldErrors[0].field").value("page"))
+                .andExpect(jsonPath("$.fieldErrors[0].code")
+                        .value("PAGE_OUT_OF_RANGE"))
+                .andExpect(jsonPath("$.fieldErrors[0].reason").value(
+                        "page is too large for the requested size"
+                ))
+                .andExpect(jsonPath("$.traceId").value(TRACE_ID))
+                .andReturn();
+
+        verify(repository, never()).findAll(
+                any(Specification.class),
+                any(Pageable.class)
+        );
+        assertThat(result.getResponse().getStatus()).isNotEqualTo(500);
+        assertThat(result.getResponse().getContentAsString())
+                .doesNotContain(
+                        "1073741824",
+                        "\"2\"",
+                        "2147483648",
+                        "PageableUtils",
+                        "InvalidDataAccessApiUsageException",
+                        "Spring Data",
+                        "JPA",
+                        "jakarta.persistence",
+                        "select ",
+                        "credential_raw_offset_test",
+                        "authorization_raw_offset_test",
+                        "Authorization"
+                );
+    }
+
+    @Test
+    void keepsMalformedSortAsSafe400AheadOfUnsafePaginationOffset()
+            throws Exception {
+        MvcResult result = mockMvc.perform(get(PATH)
+                        .queryParam("page", "1073741824")
+                        .queryParam("size", "2")
+                        .queryParam("sort", "invalid-sort")
+                        .header(TraceIdFilter.TRACE_ID_HEADER, TRACE_ID))
+                .andExpect(status().isBadRequest())
+                .andExpect(header().string(
+                        TraceIdFilter.TRACE_ID_HEADER,
+                        TRACE_ID
+                ))
+                .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.message")
+                        .value("요청 필드를 확인해 주세요."))
+                .andExpect(jsonPath("$.fieldErrors[0].field").value("sort"))
+                .andExpect(jsonPath("$.fieldErrors[0].code")
+                        .value("INVALID_SORT_FORMAT"))
+                .andExpect(jsonPath("$.fieldErrors[0].reason")
+                        .value("sort must use field,direction format"))
+                .andExpect(jsonPath("$.traceId").value(TRACE_ID))
+                .andReturn();
+
+        verify(repository, never()).findAll(
+                any(Specification.class),
+                any(Pageable.class)
+        );
+        assertThat(result.getResponse().getStatus()).isNotEqualTo(422);
+        assertThat(result.getResponse().getContentAsString())
+                .doesNotContain(
+                        "1073741824",
+                        "\"2\"",
+                        "invalid-sort",
+                        "2147483648"
+                );
+    }
+
+    @Test
+    void allowsLastSizeOneHundredBoundaryWithoutDatabaseExecution()
+            throws Exception {
+        Pageable returnedPageable = PageRequest.of(21474836, 100);
+        when(repository.findAll(
+                any(Specification.class),
+                any(Pageable.class)
+        )).thenReturn(new PageImpl<>(
+                List.of(),
+                returnedPageable,
+                0
+        ));
+
+        mockMvc.perform(get(PATH)
+                        .queryParam("externalCustomerRef", " CustomerRef ")
+                        .queryParam("page", "21474836")
+                        .queryParam("size", "100")
+                        .queryParam("sort", "occurredAt,asc")
+                        .header(TraceIdFilter.TRACE_ID_HEADER, TRACE_ID))
+                .andExpect(status().isOk())
+                .andExpect(header().string(
+                        TraceIdFilter.TRACE_ID_HEADER,
+                        TRACE_ID
+                ))
+                .andExpect(jsonPath("$.traceId").value(TRACE_ID));
+
+        ArgumentCaptor<Pageable> pageable =
+                ArgumentCaptor.forClass(Pageable.class);
+        verify(repository).findAll(
+                any(Specification.class),
+                pageable.capture()
+        );
+        assertThat(pageable.getValue().getPageNumber()).isEqualTo(21474836);
+        assertThat(pageable.getValue().getPageSize()).isEqualTo(100);
+        assertThat(pageable.getValue().getOffset()).isEqualTo(2147483600L);
+        assertThat(pageable.getValue().getSort().stream().toList())
+                .containsExactly(
+                        new Sort.Order(Sort.Direction.ASC, "occurredAt"),
+                        new Sort.Order(Sort.Direction.ASC, "id")
+                );
     }
 
     @Test
