@@ -65,6 +65,13 @@ public class InvestigationNoteValidator {
             case "createdAt,desc" -> FraudCaseNoteCommand.Direction.DESC;
             default -> throw format("sort", "INVALID_SORT", "sort must be createdAt,asc or createdAt,desc");
         };
+        if ((long) page * (long) size > Integer.MAX_VALUE) {
+            throw domain(
+                    "page",
+                    "INVALID_PAGE",
+                    "page is too large for the requested size"
+            );
+        }
         return new FraudCaseNoteCommand.ListQuery(caseId, page, size, direction);
     }
 

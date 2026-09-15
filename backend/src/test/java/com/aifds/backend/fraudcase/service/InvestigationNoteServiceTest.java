@@ -15,6 +15,8 @@ import com.aifds.backend.fraudcase.exception.InvestigationNoteException;
 import com.aifds.backend.fraudcase.repository.FraudCaseRepository;
 import com.aifds.backend.fraudcase.repository.InvestigationNoteRepository;
 import com.aifds.backend.fraudcase.validation.InvestigationNoteValidator;
+import com.aifds.backend.fraudcase.validation.InvestigationNoteValidationException;
+import com.aifds.backend.fraudcase.validation.InvestigationNoteValidationType;
 import com.aifds.backend.security.principal.CurrentAuditActorProvider;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -22,16 +24,22 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.repository.Query;
 
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.mockito.Mockito.*;
 
 class InvestigationNoteServiceTest {
@@ -151,5 +159,73 @@ class InvestigationNoteServiceTest {
                 new FraudCaseNoteCommand.Create(caseId, "secret memo", 6), "trace_note_001"
         )).isInstanceOf(InvestigationNoteException.class)
                 .extracting("reason").isEqualTo(InvestigationNoteException.Reason.INTERNAL_FAILURE);
+    }
+
+    @Test
+    void validatorServicePipelineRejectsUnsafeOffsetBeforeRepositories() {
+        InvestigationNoteValidator listValidator =
+                new InvestigationNoteValidator();
+
+        Throwable failure = catchThrowable(() -> service.list(
+                listValidator.validateList(caseId.toString(), Map.of(
+                        "page", List.of("1073741824"),
+                        "size", List.of("2")
+                )),
+                "trace_note_unsafe_offset_01"
+        ));
+
+        assertAll(
+                () -> assertThat(failure).isInstanceOfSatisfying(
+                        InvestigationNoteValidationException.class,
+                        exception -> {
+                            assertThat(exception.getType()).isEqualTo(
+                                    InvestigationNoteValidationType.DOMAIN
+                            );
+                            assertThat(exception.getField()).isEqualTo("page");
+                            assertThat(exception.getCode()).isEqualTo(
+                                    "INVALID_PAGE"
+                            );
+                            assertThat(exception.getReason()).isEqualTo(
+                                    "page is too large for the requested size"
+                            );
+                        }
+                ),
+                () -> verify(cases, never()).findByCaseId(any()),
+                () -> verify(notes, never()).findPageAscending(any(), any()),
+                () -> verify(notes, never()).findPageDescending(any(), any())
+        );
+    }
+
+    @Test
+    void createsExactPageableAtMaximumAllowedOffsetAndUsesStableSort()
+            throws Exception {
+        InvestigationNoteValidator listValidator =
+                new InvestigationNoteValidator();
+        when(notes.findPageAscending(eq(5L), any(Pageable.class)))
+                .thenReturn(Page.empty());
+
+        service.list(listValidator.validateList(caseId.toString(), Map.of(
+                "page", List.of("2147483647"),
+                "size", List.of("1"),
+                "sort", List.of("createdAt,asc")
+        )), "trace_note_boundary_01");
+
+        ArgumentCaptor<Pageable> pageable = ArgumentCaptor.forClass(
+                Pageable.class
+        );
+        verify(notes).findPageAscending(eq(5L), pageable.capture());
+        verify(notes, never()).findPageDescending(any(), any());
+        assertThat(pageable.getValue().getPageNumber())
+                .isEqualTo(Integer.MAX_VALUE);
+        assertThat(pageable.getValue().getPageSize()).isEqualTo(1);
+        assertThat(pageable.getValue().getOffset())
+                .isEqualTo(Integer.MAX_VALUE);
+
+        Query query = InvestigationNoteRepository.class.getMethod(
+                "findPageAscending", Long.class, Pageable.class
+        ).getAnnotation(Query.class);
+        assertThat(query.value()).contains(
+                "ORDER BY note.createdAt ASC, note.id ASC"
+        );
     }
 }

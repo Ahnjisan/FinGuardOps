@@ -38,6 +38,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.hamcrest.Matchers.nullValue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -241,7 +242,7 @@ class FraudCaseAuditLogQueryIntegrationTest
     }
 
     @Test
-    void returnsEmptyOutOfRangePageAndDistinguishesMissingCase()
+    void returnsEmptySafeOutOfRangePageAndDistinguishesMissingCase()
             throws Exception {
         mockMvc.perform(get(PATH)
                         .queryParam("page", "99")
@@ -250,13 +251,6 @@ class FraudCaseAuditLogQueryIntegrationTest
                 .andExpect(jsonPath("$.content").isEmpty())
                 .andExpect(jsonPath("$.page.totalElements").value(8))
                 .andExpect(jsonPath("$.page.totalPages").value(4));
-
-        mockMvc.perform(get(PATH)
-                        .queryParam("page", "2147483647")
-                        .queryParam("size", "100"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.content").isEmpty())
-                .andExpect(jsonPath("$.page.totalElements").value(8));
 
         mockMvc.perform(get("/api/v1/cases/"
                         + "10000000-0000-4000-9000-000000000099"
@@ -272,6 +266,45 @@ class FraudCaseAuditLogQueryIntegrationTest
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.content").isEmpty())
                 .andExpect(jsonPath("$.page.totalElements").value(0));
+    }
+
+    @Test
+    void rejectsUnsafeOffsetBeforePostgresqlPaginationQuery()
+            throws Exception {
+        String traceId = "trace_audit_unsafe_offset_01";
+        Statistics statistics = entityManagerFactory.unwrap(
+                SessionFactory.class
+        ).getStatistics();
+        boolean previouslyEnabled = statistics.isStatisticsEnabled();
+        statistics.setStatisticsEnabled(true);
+        statistics.clear();
+        try {
+            mockMvc.perform(get(PATH)
+                            .queryParam("page", "2147483647")
+                            .queryParam("size", "100")
+                            .header(TraceIdFilter.TRACE_ID_HEADER, traceId))
+                    .andExpect(status().isUnprocessableEntity())
+                    .andExpect(header().string(
+                            TraceIdFilter.TRACE_ID_HEADER, traceId
+                    ))
+                    .andExpect(jsonPath("$.code")
+                            .value("VALIDATION_ERROR"))
+                    .andExpect(jsonPath("$.message")
+                            .value("요청 필드를 확인해 주세요."))
+                    .andExpect(jsonPath("$.fieldErrors.length()").value(1))
+                    .andExpect(jsonPath("$.fieldErrors[0].field")
+                            .value("page"))
+                    .andExpect(jsonPath("$.fieldErrors[0].code")
+                            .value("PAGE_OUT_OF_RANGE"))
+                    .andExpect(jsonPath("$.fieldErrors[0].reason").value(
+                            "page is too large for the requested size"
+                    ))
+                    .andExpect(jsonPath("$.traceId").value(traceId));
+            assertThat(statistics.getPrepareStatementCount()).isZero();
+        } finally {
+            statistics.clear();
+            statistics.setStatisticsEnabled(previouslyEnabled);
+        }
     }
 
     @Test
