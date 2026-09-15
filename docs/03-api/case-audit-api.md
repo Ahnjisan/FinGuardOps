@@ -239,6 +239,11 @@ GET /api/v1/cases?caseStatus=IN_REVIEW&page=0&size=20&sort=lastChangedAt,asc
 `[from,to)`이고 같은 시작·끝은 빈 범위이며, 시작이 끝보다 늦으면 `422`이다.
 형식·중복·미지원 값과 정렬 오류는 `400`이다.
 
+사건 목록의 pagination 입력은 `page × size <= 2147483647`을 만족해야 한다.
+이를 초과하면 `422`와 field `page`, code `PAGE_OUT_OF_RANGE`로 거부하며 page를
+자동 clamp하거나 size를 축소하지 않는다. 이 검증은 실제 결과 수, `totalPages`,
+`content` 길이 또는 실제 마지막 page와 독립적으로 수행한다.
+
 ### 5.3 목록 항목
 
 목록 응답은 사건 대기열에 필요한 다음 요약만 포함한다.
@@ -294,7 +299,7 @@ Content-Type: application/json
 | --- | --- |
 | `200 OK` | 조회 성공. 결과가 없으면 빈 `content` 반환 |
 | `400 Bad Request` | Enum, 식별자, 시각, 페이지 또는 정렬 형식 오류 |
-| `422 Unprocessable Entity` | 시작 시각이 종료 시각보다 늦는 등 의미상 처리할 수 없는 필터 |
+| `422 Unprocessable Entity` | 시작 시각이 종료 시각보다 늦거나 pagination 입력의 `page × size`가 허용 범위를 초과함 |
 | `503 Service Unavailable` | 명확한 조회 Timeout 또는 저장소 가용성 장애 |
 | `500 Internal Server Error` | 공개할 수 없는 예기치 않은 서버 오류 |
 
