@@ -106,6 +106,14 @@ public class FraudCaseQueryValidator {
                 INVALID_SIZE_FORMAT
         );
         validatePageAndSize(page, size);
+        Sort.Direction sortDirection = parseSort(request.sort());
+        if ((long) page * (long) size > Integer.MAX_VALUE) {
+            throw domain(
+                    "page",
+                    PAGE_OUT_OF_RANGE,
+                    "page is too large for the requested size"
+            );
+        }
 
         return new FraudCaseQueryCriteria(
                 caseStatus,
@@ -118,7 +126,7 @@ public class FraudCaseQueryValidator {
                 transactionId,
                 page,
                 size,
-                parseSort(request.sort())
+                sortDirection
         );
     }
 

@@ -2,12 +2,20 @@ package com.aifds.backend.fraudcase.service;
 
 import com.aifds.backend.fraudcase.dto.FraudCaseListRequest;
 import com.aifds.backend.fraudcase.entity.FraudCase;
+import com.aifds.backend.fraudcase.entity.FraudCaseStatus;
 import com.aifds.backend.fraudcase.exception.FraudCaseNotFoundException;
 import com.aifds.backend.fraudcase.exception.FraudCaseQueryTimeoutException;
 import com.aifds.backend.fraudcase.exception.FraudCaseQueryUnavailableException;
 import com.aifds.backend.fraudcase.repository.CaseTransactionRepository;
 import com.aifds.backend.fraudcase.repository.FraudCaseRepository;
 import com.aifds.backend.fraudcase.validation.FraudCaseQueryValidator;
+import com.aifds.backend.fraudcase.validation.FraudCaseValidationException;
+import com.aifds.backend.fraudcase.validation.FraudCaseValidationType;
+import jakarta.persistence.criteria.CriteriaBuilder;
+import jakarta.persistence.criteria.CriteriaQuery;
+import jakarta.persistence.criteria.Path;
+import jakarta.persistence.criteria.Predicate;
+import jakarta.persistence.criteria.Root;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -33,9 +41,12 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -186,6 +197,97 @@ class FraudCaseQueryServiceTest {
     }
 
     @Test
+    void rejectsUnsafePaginationBeforeAccessingEitherRepository() {
+        List<Throwable> failures = java.util.Arrays.asList(
+                catchThrowable(() -> service.findAll(
+                        request("1073741824", "2", null, null),
+                        TRACE_ID
+                )),
+                catchThrowable(() -> service.findAll(
+                        request("21474837", "100", null, null),
+                        TRACE_ID
+                ))
+        );
+
+        assertAll(
+                () -> verify(fraudCaseRepository, never()).findAll(
+                        any(Specification.class),
+                        any(Pageable.class)
+                ),
+                () -> verifyNoInteractions(caseTransactionRepository),
+                () -> assertThat(failures).allSatisfy(failure ->
+                        assertThat(failure).isInstanceOfSatisfying(
+                                FraudCaseValidationException.class,
+                                exception -> {
+                                    assertThat(exception.getType()).isEqualTo(
+                                            FraudCaseValidationType.DOMAIN
+                                    );
+                                    assertThat(exception.getField())
+                                            .isEqualTo("page");
+                                    assertThat(exception.getCode()).isEqualTo(
+                                            FraudCaseQueryValidator
+                                                    .PAGE_OUT_OF_RANGE
+                                    );
+                                    assertThat(exception.getReason()).isEqualTo(
+                                            "page is too large for the requested size"
+                                    );
+                                }
+                        )
+                )
+        );
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void createsExactPageableAndCaseFilterAtMaximumAllowedOffset() {
+        FraudCaseListRequest boundary = request(
+                "2147483647",
+                "1",
+                "OPEN",
+                "lastChangedAt,desc"
+        );
+        when(fraudCaseRepository.findAll(
+                any(Specification.class),
+                any(Pageable.class)
+        )).thenReturn(new PageImpl<>(List.of()));
+
+        service.findAll(boundary, TRACE_ID);
+
+        ArgumentCaptor<Specification<FraudCase>> specification =
+                ArgumentCaptor.forClass(Specification.class);
+        ArgumentCaptor<Pageable> pageable = ArgumentCaptor.forClass(
+                Pageable.class
+        );
+        verify(fraudCaseRepository).findAll(
+                specification.capture(),
+                pageable.capture()
+        );
+        assertThat(pageable.getValue().getPageNumber())
+                .isEqualTo(Integer.MAX_VALUE);
+        assertThat(pageable.getValue().getPageSize()).isEqualTo(1);
+        assertThat(pageable.getValue().getOffset())
+                .isEqualTo(Integer.MAX_VALUE);
+        assertThat(pageable.getValue().getSort().stream().toList())
+                .containsExactly(
+                        new Sort.Order(Sort.Direction.DESC, "lastChangedAt"),
+                        new Sort.Order(Sort.Direction.DESC, "id")
+                );
+
+        Root<FraudCase> root = mock(Root.class);
+        CriteriaQuery<?> query = mock(CriteriaQuery.class);
+        CriteriaBuilder builder = mock(CriteriaBuilder.class);
+        Path<Object> caseStatus = mock(Path.class);
+        Predicate predicate = mock(Predicate.class);
+        when(root.<Object>get("caseStatus")).thenReturn(caseStatus);
+        when(builder.equal(caseStatus, FraudCaseStatus.OPEN))
+                .thenReturn(predicate);
+
+        assertThat(specification.getValue().toPredicate(root, query, builder))
+                .isSameAs(predicate);
+        verifyNoInteractions(caseTransactionRepository);
+    }
+
+    @Test
     void classifiesOnlyWhitelistedDataAccessFailures() {
         when(fraudCaseRepository.findAll(
                 any(Specification.class),
@@ -268,6 +370,18 @@ class FraudCaseQueryServiceTest {
         return new FraudCaseListRequest(
                 null, null, null, null, null, null, null, null,
                 null, null, sort
+        );
+    }
+
+    private FraudCaseListRequest request(
+            String page,
+            String size,
+            String caseStatus,
+            String sort
+    ) {
+        return new FraudCaseListRequest(
+                caseStatus, null, null, null, null, null, null, null,
+                page, size, sort
         );
     }
 }
