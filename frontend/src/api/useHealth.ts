@@ -136,7 +136,12 @@ export function subscribeToHealthRequest(
         return;
       }
       active = false;
-      onSuccess(result);
+      // 공유 Promise의 결과 객체는 어떤 subscriber에게도 그대로 넘기지 않는다. active subscriber마다 새
+      // result root와 data를 만들어 한 subscriber의 변경이 다른 subscriber나 다음 delivery에 닿지 않게 한다.
+      onSuccess({
+        data: { status: result.data.status, service: result.data.service },
+        traceId: result.traceId,
+      });
     },
     (error: unknown) => {
       if (!active) {

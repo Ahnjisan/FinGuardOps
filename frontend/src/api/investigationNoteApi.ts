@@ -231,12 +231,26 @@ export async function createInvestigationNote(
     validate: isInvestigationNoteCreated,
     signal,
   });
+  // 검증을 통과한 8개 필드를 명시적 plain object에 한 번만 복사한다. 아래 binding 판정, trace ID 해석과
+  // 반환은 모두 이 projection을 사용하므로 판정한 snapshot과 반환한 snapshot이 같고, transport가 돌려준
+  // raw DTO와 참조를 공유하지 않는다.
+  const validated = result.data;
+  const data: InvestigationNoteCreated = {
+    noteId: validated.noteId,
+    caseId: validated.caseId,
+    authorType: validated.authorType,
+    authorRef: validated.authorRef,
+    content: validated.content,
+    createdAt: validated.createdAt,
+    concurrencyVersion: validated.concurrencyVersion,
+    traceId: validated.traceId,
+  };
   if (
-    result.data.caseId !== caseId ||
-    result.data.content !== fields.content ||
-    result.data.concurrencyVersion !== fields.expectedVersion + 1
+    data.caseId !== caseId ||
+    data.content !== fields.content ||
+    data.concurrencyVersion !== fields.expectedVersion + 1
   ) {
     throw new InvalidResponseError();
   }
-  return { data: result.data, traceId: resolveTraceId(result.traceId, result.data.traceId) };
+  return { data, traceId: resolveTraceId(result.traceId, data.traceId) };
 }

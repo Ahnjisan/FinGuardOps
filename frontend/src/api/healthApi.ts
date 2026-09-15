@@ -34,8 +34,11 @@ export async function fetchHealth(signal?: AbortSignal): Promise<HealthResult> {
     throw new InvalidResponseError();
   }
 
+  // 검증된 body의 status·service만 새 data에 복사하고 result root도 새로 만든다. transport가 돌려준 raw
+  // 객체의 prototype, 열거되지 않는 field, symbol key와 이후 변경은 반환값에 도달하지 않는다.
+  const validated = response.body;
   return {
-    data: response.body,
+    data: { status: validated.status, service: validated.service },
     traceId: extractSafeTraceId(response.headers),
   };
 }

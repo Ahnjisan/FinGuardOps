@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { subscribeToHealthRequest, useHealth } from "./useHealth";
 import { jsonResponse } from "../test/mockFetch";
+import type { HealthResult } from "./types";
 
 interface Deferred<T> {
   resolve: (value: T) => void;
@@ -682,5 +683,180 @@ describe("useHealth — retry guards (unchanged contract)", () => {
 
     await flushMicrotasks();
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Issue #301: 공유 Health 요청의 subscriber delivery projection.
+ *
+ * `stubControlledJsonFetch()`와 아래 double의 `response.json()`은 JSON 재직렬화 없이 테스트가 보관한 raw
+ * 객체 참조를 그대로 돌려준다. 공유 Promise와 fetch 1회는 유지하되 subscriber마다 독립 객체를 받아야 한다.
+ */
+describe("useHealth — subscriber delivery projection", () => {
+  function successData(state: ReturnType<typeof useHealth>["state"]): HealthResult {
+    if (state.status !== "success") {
+      throw new Error(`expected a success state but was ${state.status}`);
+    }
+    return state.data;
+  }
+
+  it("delivers a fresh result root and data to every active subscriber of one shared request", async () => {
+    const raw = { status: "UP", service: "backend" };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const response = new Response(null, {
+          status: 200,
+          headers: { "X-Trace-Id": "trace0123abcd" },
+        });
+        Object.defineProperty(response, "json", { value: async () => raw });
+        return response;
+      }),
+    );
+    const deliveredA: HealthResult[] = [];
+    const deliveredB: HealthResult[] = [];
+
+    subscribeToHealthRequest((result) => {
+      deliveredA.push(result);
+    }, vi.fn());
+    subscribeToHealthRequest((result) => {
+      deliveredB.push(result);
+    }, vi.fn());
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await flushMicrotasks();
+
+    expect(deliveredA).toHaveLength(1);
+    expect(deliveredB).toHaveLength(1);
+    const [a] = deliveredA;
+    const [b] = deliveredB;
+    expect(b).not.toBe(a);
+    expect(b.data).not.toBe(a.data);
+    expect(a.data).not.toBe(raw);
+    expect(b.data).not.toBe(raw);
+    for (const delivered of [a, b]) {
+      expect(Object.getPrototypeOf(delivered)).toBe(Object.prototype);
+      expect(Object.getPrototypeOf(delivered.data)).toBe(Object.prototype);
+      expect(delivered).toStrictEqual({
+        data: { status: "UP", service: "backend" },
+        traceId: "trace0123abcd",
+      });
+    }
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("isolates a mutation made by one subscriber from the next subscriber and the held raw body", async () => {
+    const calls = stubControlledJsonFetch();
+    const raw = { status: "UP", service: "backend" };
+    const deliveredB: HealthResult[] = [];
+
+    subscribeToHealthRequest((result) => {
+      // 먼저 호출되는 subscriber가 자기 delivery의 root와 data를 바꾼다.
+      Object.assign(result.data, { status: "DOWN" });
+      Object.assign(result, { traceId: "trace_mutated_by_a_01" });
+    }, vi.fn());
+    subscribeToHealthRequest((result) => {
+      deliveredB.push(result);
+    }, vi.fn());
+    expect(calls).toHaveLength(1);
+
+    calls[0].resolveJson(raw);
+    await flushMicrotasks();
+
+    expect(deliveredB).toHaveLength(1);
+    expect(deliveredB[0]).toStrictEqual({
+      data: { status: "UP", service: "backend" },
+      traceId: undefined,
+    });
+    expect(raw).toStrictEqual({ status: "UP", service: "backend" });
+  });
+
+  it("keeps a published StrictMode state independent of a later raw body mutation with one fetch", async () => {
+    const calls = stubControlledJsonFetch();
+    const raw = { status: "UP", service: "backend" };
+    const { result } = renderHook(() => useHealth(), {
+      wrapper: ({ children }) => createElement(StrictMode, null, children),
+    });
+    expect(calls).toHaveLength(1);
+
+    await act(async () => {
+      calls[0].resolveJson(raw);
+      await flushMicrotasks();
+    });
+    await waitFor(() => {
+      expect(result.current.state.status).toBe("success");
+    });
+
+    expect(successData(result.current.state).data).not.toBe(raw);
+    raw.status = "DOWN";
+    raw.service = "ai-service";
+    expect(successData(result.current.state).data).toStrictEqual({
+      status: "UP",
+      service: "backend",
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].signal.aborted).toBe(false);
+  });
+
+  it("gives two concurrently mounted hooks independent published objects from one fetch", async () => {
+    const calls = stubControlledJsonFetch();
+    const raw = { status: "UP", service: "backend" };
+    const first = renderHook(() => useHealth());
+    const second = renderHook(() => useHealth());
+    expect(calls).toHaveLength(1);
+
+    await act(async () => {
+      calls[0].resolveJson(raw);
+      await flushMicrotasks();
+    });
+    await waitFor(() => {
+      expect(first.result.current.state.status).toBe("success");
+      expect(second.result.current.state.status).toBe("success");
+    });
+
+    const firstResult = successData(first.result.current.state);
+    const secondResult = successData(second.result.current.state);
+    expect(secondResult).not.toBe(firstResult);
+    expect(secondResult.data).not.toBe(firstResult.data);
+    expect(firstResult.data).not.toBe(raw);
+    expect(secondResult.data).not.toBe(raw);
+
+    Object.assign(firstResult.data, { status: "DOWN" });
+    expect(secondResult.data).toStrictEqual({ status: "UP", service: "backend" });
+    expect(raw).toStrictEqual({ status: "UP", service: "backend" });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("delivers an independent object on a genuine remount after the earlier published state was mutated", async () => {
+    const calls = stubControlledJsonFetch();
+    const raw = { status: "UP", service: "backend" };
+
+    const first = renderHook(() => useHealth());
+    await act(async () => {
+      calls[0].resolveJson(raw);
+      await flushMicrotasks();
+    });
+    await waitFor(() => {
+      expect(first.result.current.state.status).toBe("success");
+    });
+    const firstResult = successData(first.result.current.state);
+    // 첫 화면이 게시받은 객체를 바꾼 뒤 unmount한다. 같은 raw body가 다음 요청에 다시 전달된다.
+    Object.assign(firstResult.data, { status: "DOWN" });
+    first.unmount();
+
+    const second = renderHook(() => useHealth());
+    expect(calls).toHaveLength(2);
+    await act(async () => {
+      calls[1].resolveJson(raw);
+      await flushMicrotasks();
+    });
+    await waitFor(() => {
+      expect(second.result.current.state.status).not.toBe("loading");
+    });
+
+    const secondResult = successData(second.result.current.state);
+    expect(secondResult).not.toBe(firstResult);
+    expect(secondResult.data).not.toBe(firstResult.data);
+    expect(secondResult.data).not.toBe(raw);
+    expect(secondResult.data).toStrictEqual({ status: "UP", service: "backend" });
   });
 });

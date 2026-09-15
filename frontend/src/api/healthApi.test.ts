@@ -352,3 +352,117 @@ describe("fetchHealth — separation from the authenticated transport", () => {
     });
   });
 });
+
+/**
+ * Issue #301: Health 성공 응답 projection 경계.
+ *
+ * 이 describe의 fetch double은 JSON 재직렬화 없이 테스트가 보관한 raw 객체 참조를 `response.json()`으로
+ * 그대로 돌려준다. validator는 바꾸지 않고 승인된 두 필드만 새 객체로 게시되는지 확인한다.
+ */
+describe("fetchHealth — success response projection", () => {
+  function stubHeldHealthBody(raw: object, headers: Record<string, string> = {}): void {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const response = new Response(null, { status: 200, headers });
+        Object.defineProperty(response, "json", { value: async () => raw });
+        return response;
+      }),
+    );
+  }
+
+  it("returns a fresh result root and data carrying only status and service", async () => {
+    const raw = { status: "UP", service: "backend" };
+    stubHeldHealthBody(raw, { "X-Trace-Id": "trace0123abcd" });
+
+    const result = await fetchHealth();
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(result.data).not.toBe(raw);
+    expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
+    expect(Object.getPrototypeOf(result.data)).toBe(Object.prototype);
+    expect(new Set(Object.getOwnPropertyNames(result))).toEqual(new Set(["data", "traceId"]));
+    expect(new Set(Object.getOwnPropertyNames(result.data))).toEqual(
+      new Set(["status", "service"]),
+    );
+    expect(result).toStrictEqual({
+      data: { status: "UP", service: "backend" },
+      traceId: "trace0123abcd",
+    });
+  });
+
+  it("does not let a later mutation of the held raw body reach the result and keeps an absent trace id key", async () => {
+    const raw: Record<string, unknown> = { status: "UP", service: "backend" };
+    stubHeldHealthBody(raw);
+
+    const result = await fetchHealth();
+    raw.status = "DOWN";
+    raw.service = "ai-service";
+    raw.extra = "unexpected";
+
+    expect(result.data).toStrictEqual({ status: "UP", service: "backend" });
+    expect(result.data).not.toHaveProperty("extra");
+    // header가 없어도 기존 계약대로 traceId key는 undefined 값으로 남는다.
+    expect(Object.prototype.hasOwnProperty.call(result, "traceId")).toBe(true);
+    expect(result.traceId).toBeUndefined();
+  });
+
+  it("returns an independent result for every delivery of the same held raw body", async () => {
+    const raw = { status: "UP", service: "backend" };
+    stubHeldHealthBody(raw);
+
+    const first = await fetchHealth();
+    const second = await fetchHealth();
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(second).not.toBe(first);
+    expect(first.data).not.toBe(raw);
+    expect(second.data).not.toBe(raw);
+    expect(second.data).not.toBe(first.data);
+  });
+
+  it("keeps a mutation of an earlier result out of the next delivery of the same raw body", async () => {
+    const raw = { status: "UP", service: "backend" };
+    stubHeldHealthBody(raw);
+
+    const first = await fetchHealth();
+    // 호출자가 첫 결과를 바꿔도 raw body와 다음 delivery는 검증된 원래 값을 유지해야 한다.
+    Object.assign(first.data, { status: "DOWN" });
+    const second = await fetchHealth();
+
+    expect(raw).toStrictEqual({ status: "UP", service: "backend" });
+    expect(second.data).toStrictEqual({ status: "UP", service: "backend" });
+  });
+
+  it("publishes an Object.prototype plain object for a held raw body with a null or foreign prototype", async () => {
+    // JSON.parse는 만들 수 없지만 현재 Health validator가 허용하는 raw다.
+    for (const prototype of [null, { inheritedSecret: "inherited-secret" }]) {
+      const raw = { status: "UP", service: "backend" };
+      Object.setPrototypeOf(raw, prototype);
+      stubHeldHealthBody(raw);
+
+      const result = await fetchHealth();
+
+      expect(Object.getPrototypeOf(result.data)).toBe(Object.prototype);
+      expect("inheritedSecret" in result.data).toBe(false);
+      expect(result.data).toStrictEqual({ status: "UP", service: "backend" });
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not carry a non-enumerable or symbol-keyed own field of the held raw body", async () => {
+    const hidden = Symbol("hidden");
+    const raw = { status: "UP", service: "backend" };
+    Object.defineProperty(raw, "hiddenSecret", { value: "hidden-secret", enumerable: false });
+    Object.defineProperty(raw, hidden, { value: "symbol-secret", enumerable: true });
+    stubHeldHealthBody(raw);
+
+    const result = await fetchHealth();
+
+    expect(new Set(Object.getOwnPropertyNames(result.data))).toEqual(
+      new Set(["status", "service"]),
+    );
+    expect(Object.getOwnPropertySymbols(result.data)).toEqual([]);
+    expect(result.data).not.toHaveProperty("hiddenSecret");
+  });
+});

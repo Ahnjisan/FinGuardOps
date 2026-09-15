@@ -541,6 +541,102 @@ describe("createInvestigationNote", () => {
     }
   });
 });
+
+/**
+ * Issue #301: 생성 응답 projection 경계.
+ *
+ * 이 describe의 fetch double은 JSON 재직렬화 없이 테스트가 보관한 raw 객체 참조를 `response.json()`으로
+ * 그대로 돌려준다. 그래서 반환값이 raw DTO와 참조를 공유하는지 직접 관찰할 수 있다.
+ */
+describe("createInvestigationNote — created response projection", () => {
+  function stubHeldCreatedBody(raw: Record<string, unknown>): void {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const response = new Response(null, { status: 201 });
+        Object.defineProperty(response, "json", { value: async () => raw });
+        return response;
+      }),
+    );
+  }
+
+  it("returns a fresh eight-field plain object that shares no reference with the held raw DTO", async () => {
+    const raw = created();
+    stubHeldCreatedBody(raw);
+    const client = signedIn();
+
+    const result = await createInvestigationNote(client, CASE_ID, VALID_CREATE);
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    expect(result.data).not.toBe(raw);
+    expect(Object.getPrototypeOf(result.data)).toBe(Object.prototype);
+    expect(new Set(Object.getOwnPropertyNames(result.data))).toEqual(new Set(Object.keys(created())));
+    expect(Object.getOwnPropertySymbols(result.data)).toEqual([]);
+    expect(result.data).toStrictEqual(created());
+    expect(result.traceId).toBe(TRACE_ID);
+    expect(client.calls.invalidateIfCurrent).toBe(0);
+  });
+
+  it("does not let a later mutation of the held raw DTO reach the returned data", async () => {
+    const raw = created();
+    stubHeldCreatedBody(raw);
+
+    const result = await createInvestigationNote(signedIn(), CASE_ID, VALID_CREATE);
+    // 반환 뒤 raw DTO의 binding 필드·author·trace를 바꾸고 unknown field를 붙인다.
+    raw.caseId = OTHER_CASE_ID;
+    raw.content = "변경된 원문";
+    raw.authorRef = OTHER_CASE_ID;
+    raw.concurrencyVersion = 99;
+    raw.traceId = "trace_demo_mutated_raw_01";
+    raw.actorId = USER_REF;
+
+    expect(result.data).toStrictEqual(created());
+    expect(result.data).not.toHaveProperty("actorId");
+    expect(result.traceId).toBe(TRACE_ID);
+  });
+
+  it("returns an independent object for every delivery of the same held raw DTO", async () => {
+    const raw = created();
+    stubHeldCreatedBody(raw);
+
+    const first = await createInvestigationNote(signedIn(), CASE_ID, VALID_CREATE);
+    const second = await createInvestigationNote(signedIn(), CASE_ID, VALID_CREATE);
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
+    expect(first.data).not.toBe(raw);
+    expect(second.data).not.toBe(raw);
+    expect(second.data).not.toBe(first.data);
+    expect(second.data).toStrictEqual(first.data);
+  });
+
+  it("keeps a mutation of an earlier returned object out of the next delivery", async () => {
+    const raw = created();
+    stubHeldCreatedBody(raw);
+
+    const first = await createInvestigationNote(signedIn(), CASE_ID, VALID_CREATE);
+    // 호출자가 첫 반환값을 바꿔도 raw DTO와 다음 delivery는 검증된 원래 값을 유지해야 한다.
+    Object.assign(first.data, { authorRef: OTHER_CASE_ID });
+    const second = await createInvestigationNote(signedIn(), CASE_ID, VALID_CREATE);
+
+    expect(raw.authorRef).toBe(USER_REF);
+    expect(second.data.authorRef).toBe(USER_REF);
+    expect(second.data).toStrictEqual(created());
+  });
+
+  it("returns an Object.prototype plain object even when the held raw DTO has a null prototype", async () => {
+    const raw = created();
+    // JSON.parse는 만들 수 없지만 현재 exact-shape 검증이 허용하는 null prototype raw다.
+    Object.setPrototypeOf(raw, null);
+    stubHeldCreatedBody(raw);
+
+    const result = await createInvestigationNote(signedIn(), CASE_ID, VALID_CREATE);
+
+    expect(Object.getPrototypeOf(raw)).toBeNull();
+    expect(result.data).not.toBe(raw);
+    expect(Object.getPrototypeOf(result.data)).toBe(Object.prototype);
+    expect(result.data).toStrictEqual(created());
+  });
+});
 
 /**
  * Whitespace here has to mean what Java means by it, because Backend decides
