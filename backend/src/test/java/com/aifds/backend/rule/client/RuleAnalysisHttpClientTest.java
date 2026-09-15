@@ -26,6 +26,7 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.client.ClientHttpRequestFactory;
+import org.springframework.http.client.ClientHttpRequestInterceptor;
 import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
@@ -835,23 +836,89 @@ class RuleAnalysisHttpClientTest {
     }
 
     @Test
-    void mapsConnectionRefusalAsUnavailableWithoutRetry() throws IOException {
-        int unusedPort;
-        try (ServerSocket socket = new ServerSocket(0)) {
-            unusedPort = socket.getLocalPort();
-        }
-        RuleAnalysisHttpClient unavailableClient = client(
-                URI.create("http://127.0.0.1:" + unusedPort),
+    void mapsConnectionRefusalAsUnavailableWithoutRetry() {
+        URI unavailableUri = URI.create("http://127.0.0.1:0");
+        String credential = "Bearer connection_refusal_credential_303";
+        AtomicInteger applicationRequests = new AtomicInteger();
+        AtomicInteger delegateExecutions = new AtomicInteger();
+        AtomicReference<URI> rawUri = new AtomicReference<>();
+        AtomicReference<byte[]> rawRequestBody = new AtomicReference<>();
+        AtomicReference<String> observedCredential = new AtomicReference<>();
+        AtomicReference<Throwable> delegateFailure = new AtomicReference<>();
+        ClientHttpRequestInterceptor transportObserver = (
+                httpRequest,
+                body,
+                execution
+        ) -> {
+            applicationRequests.incrementAndGet();
+            rawUri.set(httpRequest.getURI());
+            rawRequestBody.set(body.clone());
+            observedCredential.set(
+                    httpRequest.getHeaders().getFirst("Authorization")
+            );
+            delegateExecutions.incrementAndGet();
+            try {
+                return execution.execute(httpRequest, body);
+            } catch (IOException | RuntimeException exception) {
+                delegateFailure.set(exception);
+                throw exception;
+            }
+        };
+        RuleAnalysisClientConfiguration configuration =
+                new RuleAnalysisClientConfiguration();
+        AiServiceProperties properties = new AiServiceProperties(
+                unavailableUri,
+                Duration.ofMillis(200),
                 Duration.ofMillis(200)
         );
+        RestClient observedRestClient = configuration.ruleAnalysisRestClient(
+                        properties,
+                        configuration.ruleAnalysisJdkHttpClient(properties),
+                        mapper
+                )
+                .mutate()
+                .defaultHeader("Authorization", credential)
+                .requestInterceptor(transportObserver)
+                .build();
+        RuleAnalysisHttpClient unavailableClient =
+                configuration.ruleAnalysisHttpClient(
+                        observedRestClient,
+                        mapper,
+                        new RuleAnalysisResponseValidator(),
+                        properties
+                );
 
         assertThatThrownBy(() -> unavailableClient.analyze(request, TRACE_ID))
                 .isInstanceOfSatisfying(
                         RuleAnalysisClientException.class,
-                        exception -> assertThat(exception.category()).isEqualTo(
-                                RuleAnalysisClientErrorCategory.AI_SERVICE_UNAVAILABLE
-                        )
+                        exception -> {
+                            assertThat(exception.category()).isEqualTo(
+                                    RuleAnalysisClientErrorCategory
+                                            .AI_SERVICE_UNAVAILABLE
+                            );
+                            assertThat(exception.httpStatus()).isEmpty();
+                            assertSafeException(
+                                    exception,
+                                    rawUri.get().toString(),
+                                    new String(
+                                            rawRequestBody.get(),
+                                            StandardCharsets.UTF_8
+                                    ),
+                                    observedCredential.get(),
+                                    delegateFailure.get().toString()
+                            );
+                        }
                 );
+
+        assertThat(applicationRequests).hasValue(1);
+        assertThat(delegateExecutions).hasValue(1);
+        assertThat(delegateExecutions.get() - 1).isZero();
+        assertThat(rawUri).hasValue(
+                URI.create("http://127.0.0.1:0/api/v1/rule-analysis")
+        );
+        assertThat(rawRequestBody.get()).isNotEmpty();
+        assertThat(observedCredential).hasValue(credential);
+        assertCauseChainContains(delegateFailure.get(), ConnectException.class);
     }
 
     @Test
@@ -1105,6 +1172,17 @@ class RuleAnalysisHttpClientTest {
         StringWriter stackTrace = new StringWriter();
         exception.printStackTrace(new PrintWriter(stackTrace));
         assertThat(stackTrace.toString()).doesNotContain(forbiddenValues);
+    }
+
+    private void assertCauseChainContains(
+            Throwable exception,
+            Class<? extends Throwable> expectedType
+    ) {
+        Throwable current = exception;
+        while (current != null && !expectedType.isInstance(current)) {
+            current = current.getCause();
+        }
+        assertThat(current).isInstanceOf(expectedType);
     }
 
     private ResponseSpec jsonResponse(int status, String body) {
