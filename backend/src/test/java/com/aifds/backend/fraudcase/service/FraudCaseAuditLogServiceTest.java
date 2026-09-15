@@ -10,6 +10,8 @@ import com.aifds.backend.fraudcase.exception.FraudCaseQueryUnavailableException;
 import com.aifds.backend.fraudcase.query.FraudCaseAuditLogQuery;
 import com.aifds.backend.fraudcase.repository.FraudCaseRepository;
 import com.aifds.backend.fraudcase.validation.FraudCaseAuditLogQueryValidator;
+import com.aifds.backend.fraudcase.validation.FraudCaseValidationException;
+import com.aifds.backend.fraudcase.validation.FraudCaseValidationType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -19,6 +21,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.QueryTimeoutException;
+import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
@@ -32,10 +35,9 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.junit.jupiter.api.Assertions.assertAll;
+import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 class FraudCaseAuditLogServiceTest {
@@ -130,6 +132,67 @@ class FraudCaseAuditLogServiceTest {
         assertThat(pageable.getValue().getSort())
                 .extracting(Sort.Order::getDirection)
                 .containsExactly(Sort.Direction.ASC, Sort.Direction.ASC);
+    }
+
+    @Test
+    void rejectsUnsafeOffsetBeforeRepositoriesAndMapper() {
+        Throwable failure = catchThrowable(() -> service.findAll(request(Map.of(
+                "page", List.of("1073741824"),
+                "size", List.of("2")
+        )), TRACE_ID));
+
+        assertAll(
+                () -> assertThat(failure).isInstanceOfSatisfying(
+                        FraudCaseValidationException.class,
+                        exception -> {
+                            assertThat(exception.getType()).isEqualTo(
+                                    FraudCaseValidationType.DOMAIN
+                            );
+                            assertThat(exception.getField()).isEqualTo("page");
+                            assertThat(exception.getCode()).isEqualTo(
+                                    "PAGE_OUT_OF_RANGE"
+                            );
+                            assertThat(exception.getReason()).isEqualTo(
+                                    "page is too large for the requested size"
+                            );
+                        }
+                ),
+                () -> verifyNoInteractions(
+                        fraudCaseRepository, auditLogRepository, mapper
+                )
+        );
+    }
+
+    @Test
+    void createsExactPageableAndStableSortAtMaximumAllowedOffset() {
+        when(fraudCaseRepository.existsByCaseId(CASE_ID)).thenReturn(true);
+        when(auditLogRepository.findFraudCaseAuditLogs(
+                any(UUID.class), any(Pageable.class)
+        )).thenReturn(Page.empty());
+
+        service.findAll(request(Map.of(
+                "page", List.of("2147483647"),
+                "size", List.of("1"),
+                "sort", List.of("changedAt,asc")
+        )), TRACE_ID);
+
+        ArgumentCaptor<Pageable> pageable = ArgumentCaptor.forClass(
+                Pageable.class
+        );
+        verify(auditLogRepository).findFraudCaseAuditLogs(
+                eq(CASE_ID), pageable.capture()
+        );
+        assertThat(pageable.getValue().getPageNumber())
+                .isEqualTo(Integer.MAX_VALUE);
+        assertThat(pageable.getValue().getPageSize()).isEqualTo(1);
+        assertThat(pageable.getValue().getOffset())
+                .isEqualTo(Integer.MAX_VALUE);
+        assertThat(pageable.getValue().getSort().stream().toList())
+                .containsExactly(
+                        new Sort.Order(Sort.Direction.ASC, "changedAt"),
+                        new Sort.Order(Sort.Direction.ASC, "id")
+                );
+        verifyNoInteractions(mapper);
     }
 
     @Test

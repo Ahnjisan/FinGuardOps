@@ -76,11 +76,20 @@ public class FraudCaseAuditLogQueryValidator {
                     "size must be between 1 and 100"
             );
         }
+        Sort.Direction sortDirection = parseSort(
+                single(parameters, "sort")
+        );
+        if ((long) page * (long) size > Integer.MAX_VALUE) {
+            throw domain(
+                    "page", PAGE_OUT_OF_RANGE,
+                    "page is too large for the requested size"
+            );
+        }
         return new FraudCaseAuditLogQuery(
                 caseId,
                 page,
                 size,
-                parseSort(single(parameters, "sort"))
+                sortDirection
         );
     }
 

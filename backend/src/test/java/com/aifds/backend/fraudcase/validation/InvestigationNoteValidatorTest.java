@@ -66,4 +66,86 @@ class InvestigationNoteValidatorTest {
                 CASE_ID, new InvestigationNoteCreateRequest("memo", -1L)
         )).isInstanceOf(InvestigationNoteValidationException.class);
     }
+
+    @Test
+    void rejectsPaginationOffsetsBeyondIntegerRange() {
+        for (Map<String, List<String>> parameters : List.of(
+                Map.of(
+                        "page", List.of("1073741824"),
+                        "size", List.of("2")
+                ),
+                Map.of(
+                        "page", List.of("21474837"),
+                        "size", List.of("100")
+                )
+        )) {
+            assertThatThrownBy(() -> validator.validateList(
+                    CASE_ID, parameters
+            )).isInstanceOfSatisfying(
+                    InvestigationNoteValidationException.class,
+                    exception -> {
+                        assertThat(exception.getType()).isEqualTo(
+                                InvestigationNoteValidationType.DOMAIN
+                        );
+                        assertThat(exception.getField()).isEqualTo("page");
+                        assertThat(exception.getCode()).isEqualTo(
+                                "INVALID_PAGE"
+                        );
+                        assertThat(exception.getReason()).isEqualTo(
+                                "page is too large for the requested size"
+                        );
+                    }
+            );
+        }
+    }
+
+    @Test
+    void acceptsApprovedPaginationOffsetBoundaries() {
+        assertThat(validator.validateList(CASE_ID, Map.of()))
+                .extracting("page", "size")
+                .containsExactly(0, 20);
+        assertListPagination("0", "1", 0, 1);
+        assertListPagination("0", "100", 0, 100);
+        assertListPagination("10", "1", 10, 1);
+        assertListPagination("2147483647", "1", Integer.MAX_VALUE, 1);
+        assertListPagination("21474836", "100", 21474836, 100);
+    }
+
+    @Test
+    void keepsSortValidationAheadOfUnsafePaginationOffset() {
+        assertThatThrownBy(() -> validator.validateList(CASE_ID, Map.of(
+                "page", List.of("1073741824"),
+                "size", List.of("2"),
+                "sort", List.of("id,asc")
+        ))).isInstanceOfSatisfying(
+                InvestigationNoteValidationException.class,
+                exception -> {
+                    assertThat(exception.getType()).isEqualTo(
+                            InvestigationNoteValidationType.FORMAT
+                    );
+                    assertThat(exception.getField()).isEqualTo("sort");
+                    assertThat(exception.getCode()).isEqualTo("INVALID_SORT");
+                    assertThat(exception.getReason()).isEqualTo(
+                            "sort must be createdAt,asc or createdAt,desc"
+                    ).isNotEqualTo(
+                            "page is too large for the requested size"
+                    );
+                }
+        );
+    }
+
+    private void assertListPagination(
+            String page,
+            String size,
+            int expectedPage,
+            int expectedSize
+    ) {
+        FraudCaseNoteCommand.ListQuery query = validator.validateList(
+                CASE_ID,
+                Map.of("page", List.of(page), "size", List.of(size))
+        );
+
+        assertThat(query.page()).isEqualTo(expectedPage);
+        assertThat(query.size()).isEqualTo(expectedSize);
+    }
 }

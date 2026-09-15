@@ -36,9 +36,10 @@ class FraudCaseAuditLogQueryValidatorTest {
         assertThat(bounded.size()).isEqualTo(100);
         assertThat(bounded.sortDirection()).isEqualTo(Sort.Direction.ASC);
 
-        FraudCaseAuditLogQuery maximumPage = validator.validate(request(
-                Map.of("page", List.of("2147483647"))
-        ));
+        FraudCaseAuditLogQuery maximumPage = validator.validate(request(Map.of(
+                "page", List.of("2147483647"),
+                "size", List.of("1")
+        )));
         assertThat(maximumPage.page()).isEqualTo(Integer.MAX_VALUE);
     }
 
@@ -106,6 +107,87 @@ class FraudCaseAuditLogQueryValidatorTest {
                     .isEqualTo(FraudCaseAuditLogQueryValidator
                             .MULTIPLE_VALUES_NOT_ALLOWED);
         }
+    }
+
+    @Test
+    void rejectsPaginationOffsetsBeyondIntegerRange() {
+        for (Map<String, List<String>> parameters : List.of(
+                Map.of(
+                        "page", List.of("1073741824"),
+                        "size", List.of("2")
+                ),
+                Map.of(
+                        "page", List.of("21474837"),
+                        "size", List.of("100")
+                )
+        )) {
+            assertThatThrownBy(() -> validator.validate(request(parameters)))
+                    .isInstanceOfSatisfying(
+                            FraudCaseValidationException.class,
+                            exception -> {
+                                assertThat(exception.getType()).isEqualTo(
+                                        FraudCaseValidationType.DOMAIN
+                                );
+                                assertThat(exception.getField())
+                                        .isEqualTo("page");
+                                assertThat(exception.getCode()).isEqualTo(
+                                        "PAGE_OUT_OF_RANGE"
+                                );
+                                assertThat(exception.getReason()).isEqualTo(
+                                        "page is too large for the requested size"
+                                );
+                            }
+                    );
+        }
+    }
+
+    @Test
+    void acceptsApprovedPaginationOffsetBoundaries() {
+        assertPagination("0", "1", 0, 1);
+        assertPagination("0", "100", 0, 100);
+        assertPagination("10", "1", 10, 1);
+        assertPagination("2147483647", "1", Integer.MAX_VALUE, 1);
+        assertPagination("21474836", "100", 21474836, 100);
+    }
+
+    @Test
+    void keepsSortValidationAheadOfUnsafePaginationOffset() {
+        assertThatThrownBy(() -> validator.validate(request(Map.of(
+                "page", List.of("1073741824"),
+                "size", List.of("2"),
+                "sort", List.of("changedAt,up")
+        )))).isInstanceOfSatisfying(
+                FraudCaseValidationException.class,
+                exception -> {
+                    assertThat(exception.getType()).isEqualTo(
+                            FraudCaseValidationType.FORMAT
+                    );
+                    assertThat(exception.getField()).isEqualTo("sort");
+                    assertThat(exception.getCode()).isEqualTo(
+                            "UNSUPPORTED_SORT_DIRECTION"
+                    );
+                    assertThat(exception.getReason()).isEqualTo(
+                            "sort direction is not supported"
+                    ).isNotEqualTo(
+                            "page is too large for the requested size"
+                    );
+                }
+        );
+    }
+
+    private void assertPagination(
+            String page,
+            String size,
+            int expectedPage,
+            int expectedSize
+    ) {
+        FraudCaseAuditLogQuery query = validator.validate(request(Map.of(
+                "page", List.of(page),
+                "size", List.of(size)
+        )));
+
+        assertThat(query.page()).isEqualTo(expectedPage);
+        assertThat(query.size()).isEqualTo(expectedSize);
     }
 
     private void assertInvalid(

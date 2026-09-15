@@ -894,6 +894,11 @@ Content-Type: application/json
 정렬은 `createdAt,asc|desc`만 허용하며 내부 `id`를 같은 방향 tie-breaker로 사용하되
 응답에 노출하지 않는다. 사건 존재를 먼저 확인하므로 존재하는 사건의 빈 목록은 `200`이다.
 
+pagination 입력은 `page × size <= 2147483647`을 만족해야 한다. 이를 초과하면 `422`와
+field `page`, code `INVALID_PAGE`, reason
+`page is too large for the requested size`로 거부한다. page를 자동 보정하거나 size를
+축소하지 않으며, 이 검증은 실제 결과 수와 마지막 page에 독립적이다.
+
 ### 12.3 상태 코드
 
 | 상태 코드 | 사용 기준 |
@@ -901,7 +906,7 @@ Content-Type: application/json
 | `200 OK` | 조회 성공. 메모가 없으면 빈 `items` 반환 |
 | `400 Bad Request` | 식별자, 페이지 또는 정렬 형식 오류 |
 | `404 Not Found` | 해당 사건이 없음 |
-| `422 Unprocessable Entity` | 음수 page 또는 허용 범위 밖 size |
+| `422 Unprocessable Entity` | 음수 page, 허용 범위 밖 size 또는 pagination offset 한계 초과 |
 | `503 Service Unavailable` | DB timeout 또는 unavailable |
 | `500 Internal Server Error` | 공개할 수 없는 예기치 않은 서버 오류 |
 
@@ -933,7 +938,13 @@ GET /api/v1/cases/5c671624-8714-4bd7-871a-a9445e6f453e/audit-logs?page=0&size=20
 `page`, `size`, `sort` 이외의 query parameter와 모든 scalar 중복은 `400`이다.
 페이지·크기 숫자 형식 오류는 `400`, 음수 page와 size 범위 위반은 `422`다.
 동일 `changedAt`에서는 내부 `id`를 요청 방향과 같은 최종 정렬키로 사용하되
-응답에는 노출하지 않는다. 범위 밖 page는 `200`과 빈 `content`다.
+응답에는 노출하지 않는다.
+
+pagination 입력은 `page × size <= 2147483647`을 만족해야 한다. 이를 초과하면 `422`와
+field `page`, code `PAGE_OUT_OF_RANGE`, reason
+`page is too large for the requested size`로 거부한다. page를 자동 보정하거나 size를
+축소하지 않으며, 이 검증은 실제 결과 수와 마지막 page에 독립적이다. 안전 조건을
+만족하지만 결과 범위를 벗어난 page는 `200`과 빈 `content`다.
 
 ### 13.3 응답 항목
 
@@ -1026,7 +1037,7 @@ Content-Type: application/json
 | `200 OK` | 조회 성공. 감사 이력이 없으면 빈 `content` 반환 |
 | `400 Bad Request` | 식별자·페이지·크기·정렬 형식, unknown query 또는 scalar 중복 |
 | `404 Not Found` | 해당 사건이 없음 |
-| `422 Unprocessable Entity` | 음수 page 또는 허용 범위 밖 size |
+| `422 Unprocessable Entity` | 음수 page, 허용 범위 밖 size 또는 pagination offset 한계 초과 |
 | `503 Service Unavailable` | 명확한 DB timeout 또는 unavailable |
 | `500 Internal Server Error` | 공개할 수 없는 예기치 않은 서버 오류 |
 
