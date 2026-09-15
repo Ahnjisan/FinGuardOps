@@ -33,7 +33,20 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
       - name: Run unit and web tests
+        id: backend_unit_tests
         run: ./gradlew test
+      - name: Upload Backend unit test failure reports
+        if: ${{ failure() && !cancelled() && steps.backend_unit_tests.outcome == 'failure' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: backend-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            backend/build/reports/tests/test/**
+            backend/build/test-results/test/*.xml
+          if-no-files-found: warn
+          retention-days: 14
+          include-hidden-files: false
 
   postgresql-integration-test:
     name: PostgreSQL integration tests
