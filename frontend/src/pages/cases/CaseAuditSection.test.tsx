@@ -539,7 +539,18 @@ describe("CaseAuditSection pagination", () => {
   });
 
   it("disables Previous on the first page and Next on the last", async () => {
-    const calls = await firstOfSeven();
+    // Issue #299: Next가 요청한 page=1에는 number=1 응답만 결합된다. 7-page trail의 마지막 page(number=6)를
+    // page=1 응답으로 흉내 내던 fixture를 실제 2-page trail(37건)의 page 0·page 1 응답으로 보정한다.
+    const { calls } = controlledFetch();
+    renderSection(signedIn());
+    await settle();
+    await answerWith(
+      calls[0],
+      auditBody(fullPage(CREATED), { totalElements: 37, totalPages: 2, last: false }),
+    );
+    await waitFor(() => {
+      expect(screen.getAllByRole("article")).toHaveLength(20);
+    });
 
     expect(screen.getByRole("button", { name: "Previous" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Next" })).toBeEnabled();
@@ -550,9 +561,9 @@ describe("CaseAuditSection pagination", () => {
     await answerWith(
       calls[1],
       auditBody(Array.from({ length: 17 }, () => LINKED), {
-        number: 6,
-        totalElements: 137,
-        totalPages: 7,
+        number: 1,
+        totalElements: 37,
+        totalPages: 2,
         first: false,
         last: true,
       }),

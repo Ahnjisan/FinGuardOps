@@ -1207,6 +1207,99 @@ describe("useCaseAuditLog error classification", () => {
     });
   });
 
+  it("refuses a well-formed first page whose number is not the requested page and publishes none of it", async () => {
+    // Issue #299: 첫 요청(page=0·size=20)에 형식·산술·caseId는 유효하지만 number=1인 응답을 실제
+    // fetchCaseAuditList transport·validator 경계로 전달한다. API 오류 mock으로 우회하지 않는다.
+    const { calls, spy } = controlledFetch();
+    const client = signedIn();
+    const body = auditBody([NOTE_CREATED], {
+      number: 1,
+      totalElements: 21,
+      totalPages: 2,
+      first: false,
+      last: true,
+    });
+
+    const { result } = render(client);
+    await settle();
+    expect(calls).toHaveLength(1);
+    expect(new URL(calls[0].request.url).pathname).toBe(AUDIT_PATH);
+    expect(new URL(calls[0].request.url).search).toBe(AUDIT_QUERY);
+
+    await act(async () => {
+      calls[0].settle(jsonResponse(body, { headers: { "X-Trace-Id": TRACE_ID } }));
+      await calls[0].promise;
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(result.current.state).toEqual({ status: "invalid-response" });
+    });
+    // settle 이후에도 자동 retry·polling에 의한 추가 요청이나 session 무효화가 없다.
+    await settle();
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(client.calls.authorizeRequest).toBe(1);
+    expect(client.calls.invalidateIfCurrent).toBe(0);
+    expect(client.calls.notified).toBe(0);
+    expect(result.current.state).toEqual({ status: "invalid-response" });
+    expect(result.current.page).toBe(0);
+    expect(result.current.size).toBe(20);
+
+    // hook의 snapshot publisher에 success·empty·data가 한 번도 전달되지 않았다.
+    expect(successfulPublishCount()).toBe(0);
+    const publishedStates = publisher.writes.map((write) => (write as { state: unknown }).state);
+    expect(publishedStates.map((state) => (state as { status: string }).status)).not.toContain(
+      "empty",
+    );
+    const keys = recursiveOwnKeys(publishedStates);
+    for (const key of ["data", "content", "page", "caseId", "traceId"]) {
+      expect(keys.has(key)).toBe(false);
+    }
+    expect(recursiveContainsError(publishedStates)).toBe(false);
+    const serialized = JSON.stringify(publisher.writes);
+    for (const marker of [JSON.stringify(body), TRACE_ID, NOTE_ID, ACCESS_TOKEN, "Bearer"]) {
+      expect(serialized).not.toContain(marker);
+    }
+    expect(JSON.stringify(result.current.state)).toBe('{"status":"invalid-response"}');
+  });
+
+  it("refuses a page that does not carry the size the reader asked for, and keeps that size", async () => {
+    // Issue #299: setSize(50)은 page=0·size=50을 요청한다. 형식·caseId는 유효하지만 size=20인 응답은 결합
+    // 검증에서 거부되어 새 content가 게시되지 않고 reader가 고른 size는 유지된다.
+    const { calls, spy } = controlledFetch();
+    const client = signedIn();
+    const { result } = render(client);
+    await settle();
+    await answerWith(calls[0], auditBody([created()]));
+    await waitFor(() => {
+      expect(result.current.state.status).toBe("success");
+    });
+    const successesBefore = successfulPublishCount();
+
+    act(() => {
+      result.current.setSize(50);
+    });
+    await settle();
+    expect(calls).toHaveLength(2);
+    expect(new URL(calls[1].request.url).search).toBe("?page=0&size=50&sort=changedAt%2Cdesc");
+
+    await answerWith(calls[1], auditBody([NOTE_CREATED]));
+
+    await waitFor(() => {
+      expect(result.current.state).toEqual({ status: "invalid-response" });
+    });
+    await settle();
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(result.current.page).toBe(0);
+    expect(result.current.size).toBe(50);
+    expect(successfulPublishCount()).toBe(successesBefore);
+    expect(JSON.stringify(publisher.writes)).not.toContain(NOTE_ID);
+    expect(client.calls.authorizeRequest).toBe(2);
+    expect(client.calls.invalidateIfCurrent).toBe(0);
+    expect(client.calls.notified).toBe(0);
+    expect(JSON.stringify(result.current.state)).toBe('{"status":"invalid-response"}');
+  });
+
   it("refuses the whole page when one entry of six is malformed", async () => {
     const { calls } = controlledFetch();
     const client = signedIn();
@@ -2217,5 +2310,51 @@ describe("useCaseAuditLog authoritative background refresh", () => {
     expect(view.result.current.state.status).toBe("success");
     act(() => view.result.current.refresh());
     await waitFor(() => expect(calls).toHaveLength(3));
+  });
+
+  it("keeps the current trail and page and marks the refresh failed when its page does not match", async () => {
+    // Issue #299: refresh는 page=0·현재 size로 요청한다. 형식·caseId는 유효하지만 number=1인 응답은 결합
+    // 검증에서 거부되어 기존 trail과 현재 page를 유지하고 refreshState만 failed가 된다.
+    const { calls, spy } = controlledFetch();
+    const client = signedIn();
+    const view = render(client);
+    await settle();
+    await answerWith(calls[0], auditBody([created()]));
+    await waitFor(() => expect(view.result.current.state.status).toBe("success"));
+
+    act(() => view.result.current.refresh());
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(new URL(calls[1].request.url).search).toBe(AUDIT_QUERY);
+    expect(view.result.current.refreshState).toBe("refreshing");
+    const successesBefore = successfulPublishCount();
+
+    await answerWith(
+      calls[1],
+      auditBody([NOTE_CREATED], {
+        number: 1,
+        totalElements: 21,
+        totalPages: 2,
+        first: false,
+        last: true,
+      }),
+    );
+
+    await waitFor(() => expect(view.result.current.refreshState).toBe("failed"));
+    await settle();
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(view.result.current.page).toBe(0);
+    expect(view.result.current.size).toBe(20);
+    expect(view.result.current.state.status).toBe("success");
+    if (view.result.current.state.status !== "success") {
+      throw new Error("unreachable");
+    }
+    expect(view.result.current.state.data.page.number).toBe(0);
+    expect(view.result.current.state.data.content).toHaveLength(1);
+    expect(view.result.current.state.data.content[0].action).toBe("CASE_CREATED");
+    expect(successfulPublishCount()).toBe(successesBefore);
+    expect(JSON.stringify(publisher.writes)).not.toContain(NOTE_ID);
+    expect(client.calls.authorizeRequest).toBe(2);
+    expect(client.calls.invalidateIfCurrent).toBe(0);
+    expect(client.calls.notified).toBe(0);
   });
 });
