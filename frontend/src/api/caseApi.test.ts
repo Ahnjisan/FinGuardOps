@@ -15,6 +15,7 @@ import {
   RequestNotAllowedError,
   UnauthorizedError,
 } from "./errors";
+import { buildQueryValues } from "./pagination";
 import {
   buildCaseAssigneeChangeBody,
   buildCaseStatusChangeBody,
@@ -29,7 +30,9 @@ import {
   type CaseAssigneeChangeRequest,
   type CaseDetail,
   type CaseListQuery,
+  type CaseListSort,
   type CaseResolutionRequest,
+  type CaseStatus,
   type CaseStatusChangeRequest,
 } from "./caseApi";
 
@@ -438,6 +441,497 @@ describe("case read responses", () => {
         expect(disclosed, name).not.toContain(secret);
       }
       expect(disclosed, name).not.toMatch(/5c671624|7e1d2c3b|a9445e6f|9f0a1b2c|trace|_ref_demo_/i);
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("fetchCaseList — pagination binding (Issue #299)", () => {
+  /** 한 page의 metadata. 모든 행은 `isConsistentPageMetadata()` 산술을 만족하도록 직접 적는다. */
+  type PageRow = Record<string, unknown>;
+
+  it("refuses a well-formed page whose number or size is not the requested effective pagination", async () => {
+    // 요청 effective page·size와 응답 page.number·page.size의 결합 검증 (Issue #299).
+    // page·size를 생략하면 URL에 싣지 않고 Backend 기본값 page=0·size=20을 기대한다. 모든 body는 기존 형식·
+    // 산술 validator `isCaseListPage()`를 통과하므로 binding 검증만 거부할 수 있는 반례이다.
+    const rows: ReadonlyArray<
+      readonly [string, CaseListQuery | undefined, string, boolean, boolean, PageRow]
+    > = [
+      [
+        "명시적 page mismatch",
+        { page: 1, size: 20 },
+        "?page=1&size=20",
+        true,
+        true,
+        { number: 0, size: 20, totalElements: 1, totalPages: 1, first: true, last: true },
+      ],
+      [
+        "명시적 size mismatch",
+        { page: 0, size: 50 },
+        "?page=0&size=50",
+        true,
+        true,
+        { number: 0, size: 20, totalElements: 1, totalPages: 1, first: true, last: true },
+      ],
+      [
+        "page 생략, 응답 number가 기본값 0과 다름",
+        { size: 20 },
+        "?size=20",
+        false,
+        true,
+        { number: 1, size: 20, totalElements: 21, totalPages: 2, first: false, last: true },
+      ],
+      [
+        "size 생략, 응답 size가 기본값 20과 다름",
+        { page: 0 },
+        "?page=0",
+        true,
+        false,
+        { number: 0, size: 50, totalElements: 1, totalPages: 1, first: true, last: true },
+      ],
+      [
+        "query 전체 생략, 응답 size가 기본값 20과 다름",
+        undefined,
+        "",
+        false,
+        false,
+        { number: 0, size: 50, totalElements: 1, totalPages: 1, first: true, last: true },
+      ],
+    ];
+
+    for (const [name, query, search, hasPage, hasSize, page] of rows) {
+      const body = listBody([listItem()], page);
+      expect(isCaseListPage(body), name).toBe(true);
+
+      const client = signedIn();
+      // header trace도 body와 같은 값으로 실어 두 trace 경로 모두 오류에 반사되지 않는지 확인한다.
+      mockFetchOnce(async () => jsonResponse(body, { headers: { "X-Trace-Id": TRACE_ID } }));
+
+      const error = await fetchCaseList(client, query).catch((thrown: unknown) => thrown);
+
+      expect(error, name).toBeInstanceOf(InvalidResponseError);
+      expect(Reflect.ownKeys(error as object).sort(), name).toEqual(["message", "name", "stack"]);
+      expect(String(error), name).toBe(
+        "InvalidResponseError: Received an unexpected response shape.",
+      );
+      expect(JSON.stringify(error), name).toBe('{"name":"InvalidResponseError"}');
+
+      expect(vi.mocked(fetch), name).toHaveBeenCalledTimes(1);
+      const request = sentRequest();
+      expect(request.method, name).toBe("GET");
+      expect(request.url, name).toBe(`${BASE}/api/v1/cases${search}`);
+      const parsed = new URL(request.url);
+      expect(parsed.searchParams.has("page"), name).toBe(hasPage);
+      expect(parsed.searchParams.has("size"), name).toBe(hasSize);
+      expect(client.calls.authorizeRequest, name).toBe(1);
+      expect(client.calls.invalidateIfCurrent, name).toBe(0);
+      expect(client.calls.notified, name).toBe(0);
+
+      // raw body 전체, page metadata, trace·사건·담당자 marker가 오류 표현에 남지 않는다.
+      const disclosed = `${String(error)} ${JSON.stringify(error)}`;
+      for (const secret of [
+        JSON.stringify(body),
+        JSON.stringify(body.page),
+        TRACE_ID,
+        CASE_ID,
+        "analyst_ref_demo_07",
+      ]) {
+        expect(disclosed, name).not.toContain(secret);
+      }
+      expect(disclosed, name).not.toMatch(/trace|_ref_demo_|5c671624|totalElements/i);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("accepts a partial last page, empty pages and the omitted defaults when number and size match", async () => {
+    // Issue #299 green 회귀: production 수정 전에도 통과하는 의도된 회귀 테스트이다. 응답 number·size가 요청
+    // effective 값과 같으면 content가 size보다 적거나 비어 있어도 거부하지 않는다.
+    const rows: ReadonlyArray<
+      readonly [string, CaseListQuery | undefined, string, number, number, number, PageRow]
+    > = [
+      [
+        "마지막 페이지의 일부 content",
+        { page: 2, size: 20 },
+        "?page=2&size=20",
+        3,
+        2,
+        20,
+        { number: 2, size: 20, totalElements: 43, totalPages: 3, first: false, last: true },
+      ],
+      [
+        "totalPages를 초과한 빈 page",
+        { page: 5, size: 20 },
+        "?page=5&size=20",
+        0,
+        5,
+        20,
+        { number: 5, size: 20, totalElements: 43, totalPages: 3, first: false, last: true },
+      ],
+      [
+        "전체 결과 0건인 빈 page",
+        { page: 0, size: 50 },
+        "?page=0&size=50",
+        0,
+        0,
+        50,
+        { number: 0, size: 50, totalElements: 0, totalPages: 0, first: true, last: true },
+      ],
+      [
+        "query 생략과 Backend 기본값 응답",
+        undefined,
+        "",
+        1,
+        0,
+        20,
+        { number: 0, size: 20, totalElements: 1, totalPages: 1, first: true, last: true },
+      ],
+    ];
+
+    for (const [name, query, search, contentLength, number, size, page] of rows) {
+      const body = listBody(
+        Array.from({ length: contentLength }, () => listItem()),
+        page,
+      );
+      expect(isCaseListPage(body), name).toBe(true);
+
+      const client = signedIn();
+      mockFetchOnce(async () => jsonResponse(body, { headers: { "X-Trace-Id": TRACE_ID } }));
+
+      const result = await fetchCaseList(client, query);
+
+      expect(vi.mocked(fetch), name).toHaveBeenCalledTimes(1);
+      expect(sentRequest().url, name).toBe(`${BASE}/api/v1/cases${search}`);
+      expect(result.data.content, name).toHaveLength(contentLength);
+      expect(result.data.page, name).toStrictEqual(page);
+      expect(result.data.page.number, name).toBe(number);
+      expect(result.data.page.size, name).toBe(size);
+      expect(result.traceId, name).toBe(TRACE_ID);
+      expect(client.calls.authorizeRequest, name).toBe(1);
+      expect(client.calls.invalidateIfCurrent, name).toBe(0);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reads page and size once and binds both the URL and the response to that one snapshot", async () => {
+    // Issue #299 A1. page·size getter는 첫 평가에서만 1·20을 주고 다시 평가되면 다른 유효 값 3·50을 준다.
+    // 원본을 다시 읽는 구현은 평가 횟수가 2가 되거나 URL·기대값이 갈라진다. getter마다 평가 시점의
+    // credential 조회 횟수를 기록해 읽기가 credential 조회 전에 끝났는지도 확인한다.
+    const client = signedIn();
+    const pageReads: number[] = [];
+    const sizeReads: number[] = [];
+    const query: CaseListQuery = {
+      caseStatus: "IN_REVIEW",
+      get page() {
+        pageReads.push(client.calls.authorizeRequest);
+        return pageReads.length === 1 ? 1 : 3;
+      },
+      get size() {
+        sizeReads.push(client.calls.authorizeRequest);
+        return sizeReads.length === 1 ? 20 : 50;
+      },
+      sort: "lastChangedAt,desc",
+    };
+    const body = listBody([listItem()], {
+      number: 1,
+      size: 20,
+      totalElements: 21,
+      totalPages: 2,
+      first: false,
+      last: true,
+    });
+    expect(isCaseListPage(body)).toBe(true);
+    mockFetchOnce(async () => jsonResponse(body, { headers: { "X-Trace-Id": TRACE_ID } }));
+
+    const result = await fetchCaseList(client, query);
+
+    expect(pageReads).toEqual([0]);
+    expect(sizeReads).toEqual([0]);
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    expect(sentRequest().url).toBe(
+      `${BASE}/api/v1/cases?caseStatus=IN_REVIEW&page=1&size=20&sort=lastChangedAt%2Cdesc`,
+    );
+    expect(result.data.page.number).toBe(1);
+    expect(result.data.page.size).toBe(20);
+    expect(client.calls.authorizeRequest).toBe(1);
+    expect(client.calls.invalidateIfCurrent).toBe(0);
+    expect(client.calls.notified).toBe(0);
+  });
+
+  it("evaluates an identity-dependent sort accessor with the caller's query as the receiver", async () => {
+    // Issue #299 A2. sort getter는 원본 query identity로 평가될 때만 lastChangedAt,asc를 주고, 다른 객체를
+    // receiver로 평가되면 유효한 다른 값 lastChangedAt,desc를 준다. 기존 `buildQueryValues()` 결과를 기준값으로
+    // 기록하고 보정 경로 URL도 정확히 같은 값·순서를 쓰는지 확인한다.
+    function identitySortQuery(): CaseListQuery {
+      const query: CaseListQuery = {
+        page: 0,
+        size: 20,
+        get sort() {
+          return this === query ? "lastChangedAt,asc" : "lastChangedAt,desc";
+        },
+      };
+      return query;
+    }
+    const baseline = Object.entries(buildQueryValues("case-list", identitySortQuery()) ?? {});
+    expect(baseline).toEqual([
+      ["page", "0"],
+      ["size", "20"],
+      ["sort", "lastChangedAt,asc"],
+    ]);
+
+    const client = signedIn();
+    mockFetchOnce(async () => jsonResponse(listBody(), { headers: { "X-Trace-Id": TRACE_ID } }));
+
+    const result = await fetchCaseList(client, identitySortQuery());
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    expect(sentRequest().url).toBe(`${BASE}/api/v1/cases?page=0&size=20&sort=lastChangedAt%2Casc`);
+    expect([...new URL(sentRequest().url).searchParams]).toEqual(baseline);
+    expect(result.data.page.number).toBe(0);
+    expect(result.data.page.size).toBe(20);
+    expect(client.calls.authorizeRequest).toBe(1);
+    expect(client.calls.invalidateIfCurrent).toBe(0);
+  });
+
+  it("keeps a preceding accessor's side effect on this.page in the existing evaluation order", async () => {
+    // Issue #299 A3 선행. 기존 `buildQueryValues()`는 contract 순서대로 caseStatus를 page보다 먼저 읽는다.
+    // caseStatus getter가 원본 receiver의 `this.page`를 0에서 2로 바꾸므로 이후 page 직렬화는 2를 쓴다. 보정
+    // 경로 URL도 기존 경로와 같아야 하고, 응답 number 2가 정상 성공해야 validator 기대값도 URL의 page 2와 같다.
+    function precedingQuery(): {
+      page: number;
+      readonly size: number;
+      readonly caseStatus: CaseStatus;
+    } {
+      return {
+        page: 0,
+        size: 20,
+        get caseStatus(): CaseStatus {
+          this.page = 2;
+          return "OPEN";
+        },
+      };
+    }
+    const baselineQuery = precedingQuery();
+    const baseline = Object.entries(buildQueryValues("case-list", baselineQuery) ?? {});
+    expect(baseline).toEqual([
+      ["caseStatus", "OPEN"],
+      ["page", "2"],
+      ["size", "20"],
+    ]);
+    expect(baselineQuery.page).toBe(2);
+
+    const client = signedIn();
+    const body = listBody([listItem()], {
+      number: 2,
+      size: 20,
+      totalElements: 41,
+      totalPages: 3,
+      first: false,
+      last: true,
+    });
+    expect(isCaseListPage(body)).toBe(true);
+    mockFetchOnce(async () => jsonResponse(body, { headers: { "X-Trace-Id": TRACE_ID } }));
+    const query = precedingQuery();
+
+    const result = await fetchCaseList(client, query);
+
+    expect(query.page).toBe(2);
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    expect(sentRequest().url).toBe(`${BASE}/api/v1/cases?caseStatus=OPEN&page=2&size=20`);
+    expect([...new URL(sentRequest().url).searchParams]).toEqual(baseline);
+    expect(result.data.page.number).toBe(2);
+    expect(result.data.page.size).toBe(20);
+    expect(client.calls.authorizeRequest).toBe(1);
+    expect(client.calls.invalidateIfCurrent).toBe(0);
+  });
+
+  it("binds a trailing accessor's side effect to the page value the URL already used", async () => {
+    // Issue #299 A3 후행. sort getter는 contract 순서상 page·size 직렬화 뒤에 평가되며 원본 `this.page`를
+    // 0에서 5로 바꾼다. URL은 기존과 같이 page=0을 쓰므로 validator 기대값도 첫 직접 조회 값 0이어야 한다.
+    // 바뀐 원본 값 5를 담은 응답은 URL에 쓰이지 않은 좌표이므로 거부해야 한다.
+    function trailingQuery(): {
+      page: number;
+      readonly size: number;
+      readonly sort: CaseListSort;
+    } {
+      return {
+        page: 0,
+        size: 20,
+        get sort(): CaseListSort {
+          this.page = 5;
+          return "lastChangedAt,desc";
+        },
+      };
+    }
+    const baselineQuery = trailingQuery();
+    const baseline = Object.entries(buildQueryValues("case-list", baselineQuery) ?? {});
+    expect(baseline).toEqual([
+      ["page", "0"],
+      ["size", "20"],
+      ["sort", "lastChangedAt,desc"],
+    ]);
+    expect(baselineQuery.page).toBe(5);
+
+    const accepted = signedIn();
+    mockFetchOnce(async () => jsonResponse(listBody(), { headers: { "X-Trace-Id": TRACE_ID } }));
+    const acceptedQuery = trailingQuery();
+
+    const result = await fetchCaseList(accepted, acceptedQuery);
+
+    expect(acceptedQuery.page).toBe(5);
+    expect(sentRequest().url).toBe(`${BASE}/api/v1/cases?page=0&size=20&sort=lastChangedAt%2Cdesc`);
+    expect([...new URL(sentRequest().url).searchParams]).toEqual(baseline);
+    expect(result.data.page.number).toBe(0);
+    expect(accepted.calls.authorizeRequest).toBe(1);
+    vi.unstubAllGlobals();
+
+    const refused = signedIn();
+    const mutatedPageBody = listBody([], {
+      number: 5,
+      size: 20,
+      totalElements: 1,
+      totalPages: 1,
+      first: false,
+      last: true,
+    });
+    expect(isCaseListPage(mutatedPageBody)).toBe(true);
+    mockFetchOnce(async () =>
+      jsonResponse(mutatedPageBody, { headers: { "X-Trace-Id": TRACE_ID } }),
+    );
+    const refusedQuery = trailingQuery();
+
+    const error = await fetchCaseList(refused, refusedQuery).catch((thrown: unknown) => thrown);
+
+    expect(error).toBeInstanceOf(InvalidResponseError);
+    expect(JSON.stringify(error)).toBe('{"name":"InvalidResponseError"}');
+    expect(refusedQuery.page).toBe(5);
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    expect(sentRequest().url).toBe(`${BASE}/api/v1/cases?page=0&size=20&sort=lastChangedAt%2Cdesc`);
+    expect(refused.calls.authorizeRequest).toBe(1);
+    expect(refused.calls.invalidateIfCurrent).toBe(0);
+  });
+
+  it("keeps an accessor that reads private storage keyed by the caller's query", async () => {
+    // Issue #299 A4. Object.prototype을 가진 허용 query의 assigneeRef getter가 원본 query identity를 key로
+    // WeakMap private storage를 읽는다. private field brand check처럼 다른 receiver로 평가되면 TypeError를
+    // 던진다. 기존 경로와 보정 경로 모두 같은 URL로 성공해야 한다.
+    const privateRefs = new WeakMap<object, string>();
+    function privateStorageQuery(): CaseListQuery {
+      const query: CaseListQuery = {
+        get assigneeRef() {
+          const value = privateRefs.get(this);
+          if (value === undefined) {
+            throw new TypeError("Cannot read private member from an object whose class did not declare it");
+          }
+          return value;
+        },
+        page: 0,
+        size: 20,
+      };
+      privateRefs.set(query, "analyst_ref_demo_07");
+      return query;
+    }
+    const baselineQuery = privateStorageQuery();
+    expect(Object.getPrototypeOf(baselineQuery)).toBe(Object.prototype);
+    const baseline = Object.entries(buildQueryValues("case-list", baselineQuery) ?? {});
+    expect(baseline).toEqual([
+      ["assigneeRef", "analyst_ref_demo_07"],
+      ["page", "0"],
+      ["size", "20"],
+    ]);
+
+    const client = signedIn();
+    mockFetchOnce(async () => jsonResponse(listBody(), { headers: { "X-Trace-Id": TRACE_ID } }));
+
+    const result = await fetchCaseList(client, privateStorageQuery());
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    expect(sentRequest().url).toBe(`${BASE}/api/v1/cases?assigneeRef=analyst_ref_demo_07&page=0&size=20`);
+    expect([...new URL(sentRequest().url).searchParams]).toEqual(baseline);
+    expect(result.data.content).toHaveLength(1);
+    expect(result.traceId).toBe(TRACE_ID);
+    expect(client.calls.authorizeRequest).toBe(1);
+    expect(client.calls.invalidateIfCurrent).toBe(0);
+  });
+
+  it("does not evaluate page or size getters differently from the existing validation on a refused query", async () => {
+    // Issue #299 A5. 기존 `buildQueryValues()`는 배열·prototype·symbol key·허용되지 않은 key를 값 조회 전에
+    // 거부하고, contract 순서상 앞선 값이 거부되면 뒤의 page·size를 읽지 않는다. 같은 모양의 query를 기존
+    // 경로와 보정 경로에 각각 넘겨 page·size getter 평가 횟수와 credential 조회 0회가 같은지 확인한다.
+    interface Reads {
+      page: number;
+      size: number;
+    }
+    function countingPagination(reads: Reads, page: unknown): PropertyDescriptorMap {
+      return {
+        page: {
+          enumerable: true,
+          get: () => {
+            reads.page += 1;
+            return page;
+          },
+        },
+        size: {
+          enumerable: true,
+          get: () => {
+            reads.size += 1;
+            return 20;
+          },
+        },
+      };
+    }
+    const rows: ReadonlyArray<readonly [string, (reads: Reads) => object, number, number]> = [
+      ["배열", (reads) => Object.defineProperties([], countingPagination(reads, 0)), 0, 0],
+      [
+        "custom prototype",
+        (reads) => Object.defineProperties(Object.create({ inherited: 1 }), countingPagination(reads, 0)),
+        0,
+        0,
+      ],
+      [
+        "symbol key",
+        (reads) => Object.defineProperties({ [Symbol("marker")]: 1 }, countingPagination(reads, 0)),
+        0,
+        0,
+      ],
+      [
+        "허용되지 않은 key",
+        (reads) => Object.defineProperties({ unknownFilter: "1" }, countingPagination(reads, 0)),
+        0,
+        0,
+      ],
+      [
+        "contract 순서상 앞선 filter 거부",
+        (reads) => Object.defineProperties({ caseStatus: "UNKNOWN" }, countingPagination(reads, 0)),
+        0,
+        0,
+      ],
+      ["page 거부 후 size 미평가", (reads) => Object.defineProperties({}, countingPagination(reads, -1)), 1, 0],
+      [
+        "contract 순서상 뒤 sort 거부",
+        (reads) => Object.defineProperties({ sort: "createdAt,desc" }, countingPagination(reads, 0)),
+        1,
+        1,
+      ],
+    ];
+
+    for (const [name, build, pageReads, sizeReads] of rows) {
+      const baselineReads: Reads = { page: 0, size: 0 };
+      expect(() => buildQueryValues("case-list", build(baselineReads)), name).toThrow(
+        RequestNotAllowedError,
+      );
+      expect(baselineReads, name).toEqual({ page: pageReads, size: sizeReads });
+
+      const reads: Reads = { page: 0, size: 0 };
+      const client = signedIn();
+      mockFetchOnce(async () => jsonResponse(listBody()));
+
+      await expect(fetchCaseList(client, build(reads)), name).rejects.toBeInstanceOf(
+        RequestNotAllowedError,
+      );
+
+      expect(reads, name).toEqual({ page: pageReads, size: sizeReads });
+      expect(client.calls.authorizeRequest, name).toBe(0);
+      expect(vi.mocked(fetch), name).not.toHaveBeenCalled();
       vi.unstubAllGlobals();
     }
   });

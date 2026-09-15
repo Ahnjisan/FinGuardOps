@@ -368,17 +368,80 @@ function requireChoice<T extends string>(value: unknown, allowed: readonly T[]):
   return value;
 }
 
-/** `GET /api/v1/cases`. */
+/** Backend가 사건 목록 page 생략 시 적용하는 기본값. URL에는 싣지 않고 응답 결합 기대값으로만 쓴다 (Issue #299). */
+const DEFAULT_CASE_LIST_PAGE = 0;
+
+/** Backend가 사건 목록 size 생략 시 적용하는 기본값. URL에는 싣지 않고 응답 결합 기대값으로만 쓴다 (Issue #299). */
+const DEFAULT_CASE_LIST_SIZE = 20;
+
+/**
+ * 사건 목록 요청 1건의 URL query 생성에 쓰는 request-local read-through view (Issue #299, Issue #291 방식).
+ *
+ * 원본 query를 복제·동결·변경하지 않는다. view는 property 값 조회(`get`)만 가로채고 prototype·own key·
+ * descriptor·property 존재 여부 조회는 원본에 그대로 위임하므로, `buildQueryValues()`의 구조 검증 결과와
+ * 평가 순서는 원본을 직접 넘길 때와 같다. 모든 값은 원본 query를 receiver로 평가하므로 다른 accessor의
+ * `this`·identity·private storage·side effect도 바뀌지 않는다.
+ *
+ * page·size만 view에서 처음 직접 읽힌 값을 `consumed`에 저장하고, 같은 요청에서 다시 직접 읽히면 그 값을
+ * 돌려준다. 다른 accessor가 원본 receiver에서 내부적으로 읽는 `this.page`는 가로채지 않는다. filter·sort
+ * 값은 저장하지 않는다. `consumed`에 없거나 `undefined`인 page·size는 URL에서 빠진 값이다.
+ *
+ * 객체가 아닌 query는 Proxy로 감쌀 수 없고 읽을 property도 없으므로 그대로 넘겨 기존 거부 경로를 유지한다.
+ */
+function createCaseListQueryView(query: CaseListQuery | undefined): {
+  readonly view: unknown;
+  readonly consumed: ReadonlyMap<"page" | "size", unknown>;
+} {
+  const consumed = new Map<"page" | "size", unknown>();
+  if (typeof query !== "object" || query === null) {
+    return { view: query, consumed };
+  }
+  const view = new Proxy(query, {
+    get(target, property) {
+      if (property !== "page" && property !== "size") {
+        const value: unknown = Reflect.get(target, property, target);
+        return value;
+      }
+      if (!consumed.has(property)) {
+        const value: unknown = Reflect.get(target, property, target);
+        consumed.set(property, value);
+      }
+      return consumed.get(property);
+    },
+  });
+  return { view, consumed };
+}
+
+/**
+ * `GET /api/v1/cases`.
+ *
+ * 성공 응답은 형식 검증을 통과한 뒤 요청의 effective pagination에 결합한다 (Issue #299). URL query는
+ * `createCaseListQueryView()`의 request-local view로 만들고, validator는 그 URL 생성에 실제 사용된
+ * page·size만 기대한다. 두 값은 credential 조회 전에 확정된다. 생략되거나 `undefined`인 page·size는
+ * 기존처럼 URL에서 빠지고 validator만 Backend 기본값 page=0·size=20을 기대한다. 응답
+ * `page.number`·`page.size`는 숫자 `===`로만 비교하고 문자열 변환·clamp·반올림·정규화를 하지 않는다.
+ * 형식이 유효한 다른 page·size 응답도 원문을 반사하지 않는 고정 `InvalidResponseError`가 된다.
+ * 공개 `isCaseListPage()`는 형식 검증 전용으로 그대로 둔다.
+ */
 export async function fetchCaseList(
   authClient: CredentialAuthClient,
   query?: CaseListQuery,
   signal?: AbortSignal,
 ): Promise<ApiResult<CaseListPage>> {
+  const { view, consumed } = createCaseListQueryView(query);
+  const requestQuery = buildQueryValues("case-list", view);
+  const consumedPage = consumed.get("page");
+  const consumedSize = consumed.get("size");
+  const expectedPage = consumedPage === undefined ? DEFAULT_CASE_LIST_PAGE : consumedPage;
+  const expectedSize = consumedSize === undefined ? DEFAULT_CASE_LIST_SIZE : consumedSize;
   const result = await sendAuthorizedBackendRequest(authClient, {
     endpoint: "case-list",
-    query: buildQueryValues("case-list", query),
+    query: requestQuery,
     expectedStatus: 200,
-    validate: isCaseListPage,
+    validate: (body): body is CaseListPage =>
+      isCaseListPage(body) &&
+      body.page.number === expectedPage &&
+      body.page.size === expectedSize,
     signal,
   });
   return { data: result.data, traceId: resolveTraceId(result.traceId, result.data.traceId) };
