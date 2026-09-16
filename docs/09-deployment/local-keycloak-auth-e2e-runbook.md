@@ -83,9 +83,10 @@ public discovery는 `https://localhost:8443`을 사용하며 verifier는
 클릭하지 않으며, `ignoreHTTPSErrors` · `--ignore-certificate-errors` · SPKI allowlist · hostname
 우회를 쓰지 않는다.
 
-준비와 실행은 분리된 두 단계다. 네트워크를 쓰는 준비 작업은 `-Mode Prepare`에만 있고, 공식 E2E인
-`-Mode Run`은 이미 local에 있는 image만 사용한다. `-Mode Run`은 준비 작업을 암묵적으로 대신
-실행하지 않는다.
+PowerShell runner가 `Prepare`, `Service`, `Run`, `Validate`, `Cleanup`과 receipt를 소유하는 유일한
+lifecycle owner다. 모든 mode는 첫 receipt I/O 전에 같은 global mutex를 fail-fast로 획득한다.
+Python verifier는 `Service`의 child process이며 Git, receipt, mutex, Docker build와 cleanup에 접근하지
+않는다. 공식 순서는 `Prepare → Service → Run`이고, 복구가 필요하면 `Cleanup`을 실행한다.
 
 repository root의 PowerShell에서 dependency를 먼저 설치한 뒤 준비 단계를 실행한다. host Chromium은
 더 이상 필요하지 않다. 실제 credential은 명령 인자나 환경 변수로 전달하지 않는다.
@@ -97,21 +98,36 @@ Set-Location ..
 .\frontend\scripts\run-keycloak-e2e.ps1 -Mode Prepare
 ```
 
-Prepare는 이 단계에서만 네트워크를 사용한다. 고정된 Compose image를 모두 pull하고, 이 저장소가
-빌드하는 image를 build하며, 고정 digest의 Playwright base image를 pull한 뒤
-`frontend/Dockerfile.playwright-e2e`로 browser image `finguardops-playwright-e2e:local`을 빌드한다.
+Prepare는 clean committed worktree의 full commit SHA, tree SHA와 canonical repository identity를
+확정하고 build 전후에 이 값과 clean 상태가 변하지 않았는지 검사한다. Git archive는 사용하지 않고
+normal working tree를 build context로 사용한다. Backend, AI Service와 browser에는 공통
+`e2e-<commit12>-<runId32>` suffix를 가진 unique tag를 사용한다. 기존
+`finguardops-backend:local`, `finguardops-ai-service:local`, `finguardops-playwright-e2e:local`은
+build, tag, remove 대상이 아니다. 고정 digest의 Playwright base image를 pull한 뒤
+`frontend/Dockerfile.playwright-e2e`로 unique browser image를 빌드한다.
 `apt`는 이 image build 안에서만 실행되어 exact version `libnss3-tools=2:3.98-1ubuntu0.2`를 설치하고
 같은 layer에서 package manager cache를 제거한다. Playwright version, `certutil` package version과
 base image digest는 OCI label로 image에 고정되며 browser는 image의 non-root `pwuser`로 실행된다.
 
-준비가 끝나면 공식 E2E를 실행한다.
+준비가 끝나면 SERVICE ingestion 경계를 먼저 실행하고 browser E2E를 실행한다.
 
 ```powershell
-.\frontend\scripts\run-keycloak-e2e.ps1
+.\frontend\scripts\run-keycloak-e2e.ps1 -Mode Service
+.\frontend\scripts\run-keycloak-e2e.ps1 -Mode Run
 ```
 
-Run은 registry에 접근하지 않는다. 시작 시 merged Compose 설정이 선언한 모든 service image와 browser
-image가 local에 있는지 `docker image inspect`로만 확인한다.
+Service와 Run은 registry에 접근하지 않는다. Compose는 `--no-build --pull never`, browser는
+`--pull never`로만 시작한다. raw overlay Compose와 raw `--build`는 공식 경로가 아니다. 각 mode는
+현재 exact tag를 inspect해 image ID와 다섯 ownership label(commit, tree, run ID, repository ID,
+image role)을 검증하고, 생성된 container의 `.Config.Image`와 `.Image`도 비교한다.
+
+receipt JSON은 immutable canonical compact UTF-8/no-BOM/LF 파일이며
+`schemaVersion`, `runId`, `repositoryId`, `commitSha`, `treeSha` 다섯 key만 이 순서로 가진다.
+`e2e-image-manifest.json`은 Prepared, `e2e-image-cleanup-required.json`은 Recovery 상태다. Prepare는
+Recovery를 CreateNew로 만들고 성공 시 Prepared로 atomic rename한다. Service는 실행 동안
+Prepared를 Recovery로 이동하고 성공 시 resource cleanup 뒤 Prepared로 복원한다. Run은 Recovery로
+이동한 뒤 성공·실패 모두 resource, owned image와 receipt를 정리한다. 두 receipt가 동시에 있거나
+schema·경로·reparse 검증이 실패하면 fail-closed한다.
 
 browser image는 label로 판정하지 않는다. label은 image를 만드는 쪽이 자유롭게 쓸 수 있으므로 같은
 label을 그대로 복제한 임의 image가 통과해서는 안 된다. Run은 label을 조기 중단용으로만 읽고, 실제
@@ -200,9 +216,11 @@ browser profile과 artifacts는 container와 함께 사라진다. `package.json`
 않고 Prepare가 빌드한 image에 이미 들어 있다. 공용 image cache는 자동 삭제하지 않고 잔존 실패
 판정에서도 제외한다.
 
-비정상 종료로 전용 resource가 남으면 다음 명령이 전용 browser container와 전용 Compose project만
-정리한다. `.local` certificate·private key·password, Prepare가 빌드한
-`finguardops-playwright-e2e:local`과 다른 Docker resource는 삭제하지 않는다.
+비정상 종료로 전용 resource가 남으면 다음 명령이 Prepared 또는 Recovery receipt 하나의 ownership을
+재검증한 뒤 exact Compose resource와 세 unique tag만 정리한다. Image 삭제는
+`docker image rm --no-prune <exact-reference>` 형태만 허용한다. moved tag, label/ID 불일치와 사용 중
+image는 삭제하지 않으며 receipt를 유지한다. `.local` certificate·private key·password와 기존
+`*:local` image는 삭제하지 않는다.
 
 ```powershell
 .\frontend\scripts\run-keycloak-e2e.ps1 -Mode Cleanup
@@ -247,50 +265,28 @@ logout state 원문은 DOM·storage·console에 남지 않는다.
 
 ## 4. 공식 사전검증
 
-다음 순서를 application stack보다 먼저 실행한다. `--no-interpolate`는 merged config에 기존
-Compose credential 값이 펼쳐지는 것을 피한다.
+Prepared receipt가 있을 때만 다음 명령을 사용한다. 이 mode는 receipt와 source identity, exact image
+reference·ID·label, browser runtime과 certificate를 읽기 전용으로 검증하고 lifecycle 상태를 바꾸지
+않는다.
 
-```bash
-mkdir -p infra/keycloak/.local/config
-docker compose \
-  -f infra/compose.yml \
-  -f infra/compose.keycloak-local-e2e.yml \
-  config --no-interpolate --format json \
-  > infra/keycloak/.local/config/keycloak-merged.json
-python -B infra/keycloak/verify_e2e.py static \
-  --config infra/keycloak/.local/config/keycloak-merged.json \
-  --realm infra/keycloak/realm/finguardops-local-realm.json
+```powershell
+.\frontend\scripts\run-keycloak-e2e.ps1 -Mode Validate
 ```
 
-두 overlay를 넣은 반례는 `STATIC_MULTIPLE_ISSUERS`로 non-zero 종료해야 한다.
-
-```bash
-docker compose \
-  -f infra/compose.yml \
-  -f infra/compose.local-jwt-e2e.yml \
-  -f infra/compose.keycloak-local-e2e.yml \
-  config --no-interpolate --format json \
-  > infra/keycloak/.local/config/forbidden-mixed.json
-python -B infra/keycloak/verify_e2e.py static \
-  --config infra/keycloak/.local/config/forbidden-mixed.json \
-  --realm infra/keycloak/realm/finguardops-local-realm.json
-```
+Required image/label 환경변수를 runner가 검증해 설정하므로 overlay를 raw Compose 명령에 직접 전달하는
+경로는 공식 사전검증이 아니다. 특히 변수를 수동으로 구성하거나 `--build`를 추가해 runner를 우회하지
+않는다.
 
 ## 5. Fresh start와 완료 판정
 
-project 이름은 이 실행 전용의 exact 값으로 고정한다. 아래 예시는 credential 값이 아니다.
+`Service`가 Python verifier child를 실행해 static, fresh, existing-volume restart, host TLS와 단계별
+ingestion을 수행한다. Python에는 PowerShell이 검증한 Backend/AI image reference, commit SHA,
+tree SHA, run ID와 repository ID만 환경변수로 전달한다. Python은 `--no-build --pull never`로만
+Compose를 시작하고 cleanup하지 않는다. PowerShell이 child 성공 후 container image identity를
+검사하고 resource를 정리한 뒤 Recovery receipt를 Prepared로 되돌린다.
 
-```bash
-PROJECT_NAME=finguardops-keycloak-local
-compose=(docker compose -p "$PROJECT_NAME" --env-file infra/.env \
-  -f infra/compose.yml -f infra/compose.keycloak-local-e2e.yml)
-"${compose[@]}" up -d --build keycloak-verify
-"${compose[@]}" wait keycloak-verify
-verify_id=$("${compose[@]}" ps -aq keycloak-verify)
-test "$(docker inspect --format '{{.State.ExitCode}}' "$verify_id")" = 0
-"${compose[@]}" logs --no-color keycloak-bootstrap keycloak-verify
-python -B infra/keycloak/verify_e2e.py host \
-  --certificate infra/keycloak/.local/tls/localhost.crt
+```powershell
+.\frontend\scripts\run-keycloak-e2e.ps1 -Mode Service
 ```
 
 Compose `--wait` 출력만으로 성공을 판정하지 않는다. 최종 준비 완료 조건은 `keycloak-verify`
@@ -316,24 +312,9 @@ HTTP fallback 또는 container 내부 discovery 성공으로 이 검사를 대�
 
 ## 6. Existing-volume 재실행
 
-같은 `PROJECT_NAME`을 유지하고 `keycloak-data`는 삭제하지 않는다.
-
-```bash
-"${compose[@]}" up -d --force-recreate keycloak keycloak-bootstrap keycloak-verify
-"${compose[@]}" wait keycloak-verify
-verify_id=$("${compose[@]}" ps -aq keycloak-verify)
-test "$(docker inspect --format '{{.State.ExitCode}}' "$verify_id")" = 0
-"${compose[@]}" logs --no-color keycloak keycloak-bootstrap keycloak-verify
-python -B infra/keycloak/verify_e2e.py host \
-  --certificate infra/keycloak/.local/tls/localhost.crt
-
-for run in 1 2 3 4 5; do
-  "${compose[@]}" up -d --force-recreate keycloak-verify
-  "${compose[@]}" wait keycloak-verify
-  verify_id=$("${compose[@]}" ps -aq keycloak-verify)
-  test "$(docker inspect --format '{{.State.ExitCode}}' "$verify_id")" = 0
-done
-```
+Existing-volume restart는 `Service` child 내부의 검증 단계다. Operator가 같은 project에 raw Compose를
+반복 실행하지 않는다. 이 단계도 `--no-build --pull never`를 유지하며 완료 후 PowerShell owner가
+전용 volume을 포함한 exact project resource를 정리한다.
 
 Keycloak log의 `Import skipped`, bootstrap 완료와 verifier 완료를 함께 확인한다. reconcile은 exact
 name/clientId로 재조회하고 role/client/scope/mapper duplicate를 거부하며 USER client에 stock
@@ -352,20 +333,11 @@ name/clientId로 재조회하고 role/client/scope/mapper duplicate를 거부하
 
 ## 7. 안전한 종료와 제한된 clean reset
 
-데이터를 유지한 종료는 다음과 같다.
-
-```bash
-"${compose[@]}" stop
-```
-
-fresh 검증을 다시 할 때만 현재 exact project의 container/network를 내리고 그 project의
-`keycloak-data` 하나를 제거한다. 광범위한 prune이나 다른 volume 삭제는 금지한다.
-
-```bash
-test "$PROJECT_NAME" = finguardops-keycloak-local
-"${compose[@]}" down
-docker volume rm "${PROJECT_NAME}_keycloak-data"
-```
+중단 또는 실패 뒤에는 `-Mode Cleanup`만 사용한다. Prepared와 Recovery receipt 중 정확히 하나가
+있어야 하며 둘 다 있으면 fail-closed한다. Cleanup은 ownership을 재검증한 exact browser container,
+Compose project, volume과 unique tag만 제거한다. Receipt 삭제도 cleanup 단계이며 실패하면 cleanup
+실패로 처리한다. 기존 primary failure가 있으면 그 오류를 유지하고 고정된 cleanup 진단만 부가한다.
+`--force` image 삭제, image ID 직접 삭제, glob/prefix 삭제와 모든 prune은 금지한다.
 
 ## 8. Rotation과 local artifact 제거
 
@@ -375,9 +347,9 @@ fresh 상태에서만 수행한다. TLS rotation은 exact certificate/key 두 �
 private key를 terminal에 출력하지 말고 Keycloak과 helper를 재생성해 bootstrap/verifier를 다시
 통과시킨다. 이전 SERVICE secret의 교차 사용은 실패해야 한다.
 
-검증이 끝나면 trust store에서 localhost certificate를 제거하고, 필요한 증거를 비민감 결과로
-기록한 뒤 ignored `infra/keycloak/.local/` 전체를 삭제할 수 있다. 실행 중인 container가 해당
-파일을 참조하지 않는지 먼저 확인한다.
+검증이 끝나면 필요한 증거를 비민감 결과로 기록한 뒤 ignored `infra/keycloak/.local/`의 credential과
+TLS artifact를 별도 승인 절차로 삭제할 수 있다. runner는 Windows trust store를 사용하지 않는다.
+실행 중인 container와 receipt가 해당 파일을 참조하지 않는지 먼저 확인한다.
 
 ## 9. 신뢰 경계와 troubleshooting
 
@@ -431,14 +403,12 @@ private key를 terminal에 출력하지 말고 Keycloak과 helper를 재생성�
 
 ### 10.2 공식 fresh/existing-volume 명령
 
-위 2절의 local secret·TLS artifact를 준비한 뒤 repository root에서 실행한다. project 이름은
-이번 실행 전용이어야 하며 아래 명령 하나가 static, fresh, existing-volume restart, host TLS,
-단계별 ingestion과 cleanup을 수행한다.
+위 2절의 local secret·TLS artifact와 Prepared receipt가 있는 상태에서 repository root의 PowerShell로
+실행한다. Python `all`을 직접 실행하지 않는다. PowerShell이 검증한 여섯 환경변수와 lock 아래에서만
+child가 실행되며, lifecycle transition과 cleanup은 PowerShell이 담당한다.
 
-```bash
-python -B infra/keycloak/verify_e2e.py all \
-  --repo-root . \
-  --project finguardops-kc241-e2e-manual
+```powershell
+.\frontend\scripts\run-keycloak-e2e.ps1 -Mode Service
 ```
 
 검사는 다음 단계 사이마다 DB global snapshot, transaction-specific cardinality, 두 dependency
@@ -466,8 +436,8 @@ External Risk와 Rule v2 실제 hit는 Transaction 최초 성공에서만 각각
 
 ### 10.3 SERVICE cleanup과 판정
 
-정상·실패 종료 모두 exact Compose project label을 가진 전용 container, network, volume과 전용
-browser container만 대상으로 삼고 네 종류의 잔존이 0인지 확인한다. 공용 local
-Docker image는 자동 삭제하지 않으며 잔존 여부를 cleanup 실패로 분류하지 않는다. ignored
-credential·TLS artifact는 자동 삭제하지 않는다. 필요하면 위 7·8절의 OWNER 확인 절차로만
-별도 정리한다.
+Service 성공 시 PowerShell은 exact Compose project label을 가진 container, network와 volume이 0인지
+확인한 뒤 Recovery receipt를 Prepared로 복원하며 unique image는 Run을 위해 유지한다. Service 실패
+시 primary failure를 보존하면서 resource, 세 owned unique tag와 Recovery receipt를 정리한다. cleanup이
+완전하지 않으면 Recovery receipt를 유지해 Browser Run을 구조적으로 차단한다. 기존 `*:local` image와
+ignored credential·TLS artifact는 자동 삭제하지 않는다.

@@ -1096,19 +1096,28 @@ management 9000은 publish하지 않는다. HTTP listener 자체는 공유 names
 segmentation, trusted TLS, secret manager와 production Authorization Server 계약이 필요하다.
 별도 proxy/service/image와 helper 공유 persistent volume은 없고 Keycloak용 `keycloak-data`만 추가한다.
 Issue #241의 SERVICE 검증은 `user_password`를 bootstrap에만 read-only mount하고 verifier·Backend·
-AI Service에는 제공하지 않는다. USER 회귀는 #239 USER runbook과 Frontend 인증 targeted test를
-그대로 유지하고 production 파일·realm·bootstrap을 변경하지 않는 방식으로 확인한다. headless USER 로그인, direct grant,
-Chromium과 Playwright는 이 검증 경계 밖이다. Issue #247 이후 브라우저 신뢰는 Windows 인증서
-저장소를 전혀 사용하지 않고, 실행별 NSS database를 가진 격리 Linux Chromium container 안에만
-존재한다. 그 container image는 별도 준비 단계에서 고정 digest의 Playwright image 위에 exact version
-`libnss3-tools`만 더해 빌드하며, 공식 E2E Run은 registry에 접근하지 않고 이미 local에 있는 image만
-`--no-build --pull never`와 exact image ID로 실행한다. image 신뢰는 label에 두지 않는다. Run은
-고정 digest base가 local에 있는지, base와 준비 image가 모두 linux/amd64인지, base의 RootFS layer
-목록이 준비 image RootFS의 exact ordered prefix인지, Dockerfile 구조대로 layer가 정확히 하나만
-추가되었는지, `Config.User`가 exact `pwuser`인지를 먼저 검사하고, 이어서 network 없는 read-only·
-capability 0 container 안에서 package version, `certutil` 실행, Node·Playwright core·browser
-revision과 실제 UID, mount 집합을 확인한다. 실패는 관측값을 반사하지 않는 고정 오류다. Run 경로에는
-npm과 npx가 없고 Playwright와 Vite는 설치된 local entry point를 Node로 직접 실행한다.
-fresh/existing runtime은 같은
-전용 project 안에서 수행하고 종료 시 해당 label의 container·network·volume이 0이어야 한다. 공용
-local Docker image는 삭제·잔존 판정 대상이 아니다.
+AI Service에는 제공하지 않는다. PowerShell runner가 `Prepare`, `Service`, `Run`, `Validate`, `Cleanup`,
+receipt와 exact cleanup의 유일한 lifecycle owner다. 모든 mode는 첫 receipt I/O 전에 기존 global mutex를
+fail-fast로 획득한다. Python verifier는 `Service`의 child이며 Git, receipt, mutex, build와 cleanup에
+접근하지 않고 PowerShell이 검증한 Backend/AI image reference, commit/tree SHA, run ID와 repository ID만
+받는다.
+
+Prepare는 clean committed worktree의 identity를 build 전후에 검사하고 normal working tree context로
+세 unique image를 생성한다. tag suffix는 `e2e-<commit12>-<runId32>`이며 commit, tree, run,
+repository와 role 다섯 ownership label을 기록한다. 기존 `finguardops-backend:local`,
+`finguardops-ai-service:local`, `finguardops-playwright-e2e:local`은 어떤 build/tag/remove 명령의 대상도
+아니다. Git archive와 raw overlay Compose `--build`는 사용하지 않는다.
+
+Prepared `e2e-image-manifest.json`과 Recovery `e2e-image-cleanup-required.json`은 같은 immutable
+five-field canonical JSON을 파일명으로 전이한다. Service 실패와 중단은 Prepared receipt를 없애 Browser
+Run을 구조적으로 차단한다. Cleanup은 exact tag의 현재 ID·label과 container `.Config.Image`·`.Image`를
+재검증하며 `docker image rm --no-prune <exact-reference>`만 사용한다. moved tag, label/ID 불일치,
+사용 중 image, force, image-ID 삭제, prefix/glob와 prune은 거부한다. Primary failure는 receipt 삭제를
+포함한 cleanup failure보다 항상 우선한다.
+
+Issue #247 이후 브라우저 신뢰는 Windows 인증서 저장소를 사용하지 않고 실행별 NSS database를 가진
+격리 Linux Chromium container 안에만 존재한다. Service와 Run의 Compose는 `--no-build --pull never`,
+browser는 `--pull never`로 실행한다. 고정 digest base와 layer prefix, `Config.User`, package version,
+`certutil`, Node·Playwright core·browser revision, 실제 UID와 mount 집합을 확인하며 실패는 관측값을
+반사하지 않는 고정 오류다. Run 경로에는 npm과 npx가 없고 설치된 local entry point를 Node로 직접
+실행한다. cleanup 완료 시 전용 container·network·volume·unique image·receipt가 0이어야 한다.
