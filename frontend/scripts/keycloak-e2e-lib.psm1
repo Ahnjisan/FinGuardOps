@@ -2005,8 +2005,9 @@ function Invoke-ApprovedContainer([string]$ImageId, $Plan, [string]$Operation) {
         Assert-ContainerCompletion $container $ImageId
     }
     catch { $primary = $_.Exception }
+    $removeOwnedContainer = { param($activeContainer) Remove-OwnedContainer $activeContainer }
     $actions = @([pscustomobject]@{
-        Action = { Remove-OwnedContainer $container }.GetNewClosure()
+        Action = { & $removeOwnedContainer $container }.GetNewClosure()
         ErrorCode = 'CONTAINER_CLEANUP_FAILED'
         SkipAfterCleanupFailure = $false
     })
@@ -2908,11 +2909,12 @@ function Invoke-E2EPrepareMode {
         -RepositoryId (Get-E2EReceiptValue $source 'repositoryId') `
         -CommitSha (Get-E2EReceiptValue $source 'commitSha') `
         -TreeSha (Get-E2EReceiptValue $source 'treeSha')
-    $body = {
+    $moduleBody = {
+        param($activeReceipt)
         $boundaries = @{
             GetSource = {
                 $identity = Get-E2ESourceIdentity
-                New-E2EReceipt -RunId (Get-E2EReceiptValue $receipt 'runId') `
+                New-E2EReceipt -RunId (Get-E2EReceiptValue $activeReceipt 'runId') `
                     -RepositoryId (Get-E2EReceiptValue $identity 'repositoryId') `
                     -CommitSha (Get-E2EReceiptValue $identity 'commitSha') `
                     -TreeSha (Get-E2EReceiptValue $identity 'treeSha')
@@ -2922,7 +2924,10 @@ function Invoke-E2EPrepareMode {
             RenameRecoveryToPrepared = { Move-E2EReceiptFile -Source $RecoveryReceiptPath -Destination $PreparedReceiptPath -RepositoryRoot $RepositoryRoot }
             Cleanup = { param($value) Invoke-E2EFullCleanup -Receipt $value -ReceiptPath $RecoveryReceiptPath }
         }
-        Invoke-E2EPrepareLifecycle -Receipt $receipt -Boundaries $boundaries
+        Invoke-E2EPrepareLifecycle -Receipt $activeReceipt -Boundaries $boundaries
+    }
+    $body = {
+        & $moduleBody $receipt
     }.GetNewClosure()
     Invoke-E2EOwnerEnvironmentScope -Receipt $receipt -Body $body
     Write-Output 'Keycloak E2E images prepared with an isolated ownership receipt.'
@@ -2931,18 +2936,22 @@ function Invoke-E2EPrepareMode {
 function Invoke-E2EServiceMode {
     $receipt = Get-E2EPreparedReceipt
     Assert-E2ESourceMatchesReceipt -Receipt $receipt
-    $body = {
+    $moduleBody = {
+        param($activeReceipt)
         $boundaries = @{
-            ReadPrepared = { return $receipt }
+            ReadPrepared = { return $activeReceipt }
             RenamePreparedToRecovery = { Move-E2EReceiptFile -Source $PreparedReceiptPath -Destination $RecoveryReceiptPath -RepositoryRoot $RepositoryRoot }
             AssertImages = { param($value) Assert-E2EOwnedImages -Receipt $value | Out-Null }
             RunChild = { param($value) Invoke-E2EServiceChild -Receipt $value }
             AssertContainers = { param($value) Assert-E2EContainerImages -Receipt $value -Project (Get-E2EServiceProjectName -Receipt $value) }
-            CleanupResources = { Invoke-E2EProjectCleanup -Project (Get-E2EServiceProjectName -Receipt $receipt) }
+            CleanupResources = { Invoke-E2EProjectCleanup -Project (Get-E2EServiceProjectName -Receipt $activeReceipt) }
             RenameRecoveryToPrepared = { Move-E2EReceiptFile -Source $RecoveryReceiptPath -Destination $PreparedReceiptPath -RepositoryRoot $RepositoryRoot }
             Cleanup = { param($value) Invoke-E2EFullCleanup -Receipt $value -ReceiptPath $RecoveryReceiptPath }
         }
         Invoke-E2EServiceLifecycle -Boundaries $boundaries
+    }
+    $body = {
+        & $moduleBody $receipt
     }.GetNewClosure()
     Invoke-E2EOwnerEnvironmentScope -Receipt $receipt -Body $body
     Write-Output 'Keycloak SERVICE verification completed and the prepared receipt was restored.'
@@ -2951,15 +2960,19 @@ function Invoke-E2EServiceMode {
 function Invoke-E2ERunMode {
     $receipt = Get-E2EPreparedReceipt
     Assert-E2ESourceMatchesReceipt -Receipt $receipt
-    $body = {
+    $moduleBody = {
+        param($activeReceipt)
         $boundaries = @{
-            ReadPrepared = { return $receipt }
+            ReadPrepared = { return $activeReceipt }
             RenamePreparedToRecovery = { Move-E2EReceiptFile -Source $PreparedReceiptPath -Destination $RecoveryReceiptPath -RepositoryRoot $RepositoryRoot }
             AssertImages = { param($value) Assert-E2EOwnedImages -Receipt $value | Out-Null }
             RunBrowser = { param($value) Invoke-E2EBrowserRunCore -Receipt $value }
             Cleanup = { param($value) Invoke-E2EFullCleanup -Receipt $value -ReceiptPath $RecoveryReceiptPath }
         }
         Invoke-E2ERunLifecycle -Boundaries $boundaries
+    }
+    $body = {
+        & $moduleBody $receipt
     }.GetNewClosure()
     Invoke-E2EOwnerEnvironmentScope -Receipt $receipt -Body $body
 }
@@ -2967,8 +2980,9 @@ function Invoke-E2ERunMode {
 function Invoke-E2EValidateMode {
     $receipt = Get-E2EPreparedReceipt
     Assert-E2ESourceMatchesReceipt -Receipt $receipt
-    $body = {
-        $records = Assert-E2EOwnedImages -Receipt $receipt
+    $moduleBody = {
+        param($activeReceipt)
+        $records = Assert-E2EOwnedImages -Receipt $activeReceipt
         $certificate = Assert-SafeCertificate $CertificatePath
         $primary = $null
         try { Assert-CertificateKeyPair $records.Browser.Id } catch { $primary = $_.Exception }
@@ -2978,6 +2992,9 @@ function Invoke-E2EValidateMode {
             SkipAfterCleanupFailure = $false
         })
         Invoke-E2ECleanupActions -Primary $primary -Actions $actions
+    }
+    $body = {
+        & $moduleBody $receipt
     }.GetNewClosure()
     Invoke-E2EOwnerEnvironmentScope -Receipt $receipt -Body $body
     Write-Output 'Prepared Keycloak E2E ownership and certificate validation completed.'

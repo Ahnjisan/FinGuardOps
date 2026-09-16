@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Preflight', 'MajorFixPreflight', 'MajorFixFixture11', 'MajorFixTargeted', 'OwnerFixPreflight', 'OwnerFixTargeted', 'WaitBrowserPreflight', 'WaitBrowserTargeted', 'Formal')]
+    [ValidateSet('Preflight', 'MajorFixPreflight', 'MajorFixFixture11', 'MajorFixTargeted', 'OwnerFixPreflight', 'OwnerFixTargeted', 'WaitBrowserPreflight', 'WaitBrowserTargeted', 'SessionStateTargeted', 'Formal')]
     [string]$Mode = 'Formal'
 )
 
@@ -1005,7 +1005,447 @@ Export-ModuleMember -Function Enter-E2ELifecycleLock,Exit-E2ELifecycleLock,New-E
     Assert-True (-not [System.IO.Directory]::Exists($root)) 'Lock fixture artifacts remain.'
 }
 
+function Get-SessionStateEnvironmentDigest {
+    $pairs = @([System.Environment]::GetEnvironmentVariables('Process').GetEnumerator() |
+            ForEach-Object { [string]$_.Key + '=' + [string]$_.Value } |
+            Sort-Object)
+    $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes(($pairs -join "`n"))
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+}
+
+function Get-SessionStateGitSnapshot {
+    $head = (& git rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'HARNESS_GIT_HEAD_FAILED' }
+    $tree = (& git rev-parse 'HEAD^{tree}').Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'HARNESS_GIT_TREE_FAILED' }
+    $index = (& git write-tree).Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'HARNESS_GIT_INDEX_FAILED' }
+    $status = @(& git status --porcelain=v1 --untracked-files=all)
+    if ($LASTEXITCODE -ne 0) { throw 'HARNESS_GIT_STATUS_FAILED' }
+    return [pscustomobject]@{
+        Head = $head
+        Tree = $tree
+        Index = $index
+        Status = $status -join "`n"
+    }
+}
+
+function New-SessionStateChildSource {
+    return @'
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)][string]$ModulePath,
+    [Parameter(Mandatory = $true)][string]$ResultPath,
+    [Parameter(Mandatory = $true)][string]$DockerShimDirectory
+)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$env:PATH = $DockerShimDirectory + [System.IO.Path]::PathSeparator + $env:PATH
+$events = [System.Collections.Generic.List[string]]::new()
+$failures = [System.Collections.Generic.List[string]]::new()
+$privateNames = @(
+    'Get-E2ESourceIdentity',
+    'Get-E2EReceiptValue',
+    'Invoke-E2EPrepareBuild',
+    'Invoke-E2EPrepareMode',
+    'Invoke-E2EServiceMode',
+    'Invoke-E2ERunMode',
+    'Invoke-E2EValidateMode',
+    'Assert-E2EOwnedImages',
+    'Invoke-E2EServiceChild',
+    'Assert-E2EContainerImages',
+    'Invoke-E2EProjectCleanup',
+    'Invoke-E2EBrowserRunCore',
+    'Assert-SafeCertificate',
+    'Assert-CertificateKeyPair',
+    'Remove-OwnedContainer'
+)
+$privateExportCount = 0
+$commandNotFoundCount = 0
+$dispatchCount = 0
+$sourceCallbackCount = 0
+$certificateDisposed = $false
+$approvedSuccessRemovals = 0
+$approvedPrimaryCleanupRemovals = 0
+$approvedCleanupOnlyRemovals = 0
+$approvedPrimaryIdentityPreserved = $false
+$approvedCleanupOnlyError = $null
+$dockerShimResolved = [string]::Equals(
+    (Get-Command docker -ErrorAction Stop).Source,
+    (Join-Path $DockerShimDirectory 'docker.cmd'),
+    [System.StringComparison]::OrdinalIgnoreCase
+)
+
+function New-ChildReceipt {
+    return [ordered]@{
+        schemaVersion = [int]1
+        runId = '0123456789abcdef0123456789abcdef'
+        repositoryId = ('a' * 64)
+        commitSha = ('b' * 40)
+        treeSha = ('c' * 40)
+    }
+}
+
+function Get-ChildEnvironmentDigest {
+    $pairs = @([System.Environment]::GetEnvironmentVariables('Process').GetEnumerator() |
+            ForEach-Object { [string]$_.Key + '=' + [string]$_.Value } |
+            Sort-Object)
+    $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes(($pairs -join "`n"))
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+}
+
+function Test-ChildCommandNotFound($ErrorRecord) {
+    if ($null -eq $ErrorRecord) { return $false }
+    if ($ErrorRecord.FullyQualifiedErrorId -match 'CommandNotFound') { return $true }
+    $exception = $ErrorRecord.Exception
+    while ($null -ne $exception) {
+        if ($exception -is [System.Management.Automation.CommandNotFoundException] -or
+            $exception.GetType().FullName -eq 'System.Management.Automation.CommandNotFoundException') {
+            return $true
+        }
+        $exception = $exception.InnerException
+    }
+    return $false
+}
+
+$childEnvironmentBefore = Get-ChildEnvironmentDigest
+foreach ($mode in @('Prepare', 'Service', 'Run', 'Validate')) {
+    $module = $null
+    try {
+        $module = Import-Module $ModulePath -Force -PassThru
+        $privateExportCount += @(Get-Command -Module $module.Name |
+                Where-Object { $privateNames -contains $_.Name }).Count
+        $receipt = New-ChildReceipt
+        & $module {
+            param($activeMode, $activeReceipt, $eventSink)
+            $script:SessionStateMode = $activeMode
+            $script:SessionStateReceipt = $activeReceipt
+            $script:SessionStateEvents = $eventSink
+            $script:SessionStateCertificate = $null
+
+            function script:Enter-E2ELifecycleLock {
+                $value = [System.Threading.Mutex]::new($false)
+                if (-not $value.WaitOne(0)) { $value.Dispose(); throw 'HARNESS_LOCK_FAILED' }
+                return $value
+            }
+            function script:Get-E2EReceiptState {
+                if ($script:SessionStateMode -eq 'Prepare') { return 'None' }
+                return 'Prepared'
+            }
+            function script:Read-E2EReceiptFile {
+                $script:SessionStateEvents.Add('receipt-read')
+                return $script:SessionStateReceipt
+            }
+            function script:Get-E2ESourceIdentity {
+                $script:SessionStateEvents.Add(('source:' + $script:SessionStateMode))
+                return $script:SessionStateReceipt
+            }
+            function script:Set-E2EOwnerEnvironment {
+                param($Receipt)
+                $script:SessionStateEvents.Add(('owner-set:' + $script:SessionStateMode))
+                return [ordered]@{}
+            }
+            function script:Restore-E2EOwnerEnvironment {
+                param($Previous)
+                $script:SessionStateEvents.Add(('owner-restore:' + $script:SessionStateMode))
+            }
+            function script:New-E2EReceiptFile {
+                param($Path, $Receipt, $RepositoryRoot)
+                $script:SessionStateEvents.Add('prepare-create-recovery')
+            }
+            function script:Move-E2EReceiptFile {
+                param($Source, $Destination, $RepositoryRoot)
+                $script:SessionStateEvents.Add(('receipt-move:' + $script:SessionStateMode))
+            }
+            function script:Invoke-E2EPrepareBuild {
+                param($Receipt)
+                $script:SessionStateEvents.Add('prepare-build')
+            }
+            function script:Invoke-E2EFullCleanup {
+                param($Receipt, $ReceiptPath, $RepositoryRootPath, $LeafBoundaries, [switch]$RequireLeafBoundaries)
+                $script:SessionStateEvents.Add(('full-cleanup:' + $script:SessionStateMode))
+            }
+            function script:Assert-E2EOwnedImages {
+                param($Receipt)
+                $script:SessionStateEvents.Add(('assert-images:' + $script:SessionStateMode))
+                return [ordered]@{ Browser = [pscustomobject]@{ Id = 'sha256:' + ('d' * 64) } }
+            }
+            function script:Invoke-E2EServiceChild {
+                param($Receipt)
+                $script:SessionStateEvents.Add('service-child')
+            }
+            function script:Assert-E2EContainerImages {
+                param($Receipt, $Project)
+                $script:SessionStateEvents.Add('service-containers')
+            }
+            function script:Invoke-E2EProjectCleanup {
+                param($Project)
+                $script:SessionStateEvents.Add('service-project-cleanup')
+            }
+            function script:Invoke-E2EBrowserRunCore {
+                param($Receipt)
+                $script:SessionStateEvents.Add('run-browser')
+            }
+            function script:Assert-SafeCertificate {
+                param($Path)
+                $script:SessionStateEvents.Add('validate-certificate')
+                $script:SessionStateCertificate = [System.IO.MemoryStream]::new()
+                return $script:SessionStateCertificate
+            }
+            function script:Assert-CertificateKeyPair {
+                param($BrowserImageId)
+                $script:SessionStateEvents.Add('validate-key-pair')
+            }
+        } $mode $receipt $events
+
+        $command = Get-Command Invoke-KeycloakE2E -Module $module.Name -ErrorAction Stop
+        & $command -Mode $mode | Out-Null
+        $dispatchCount++
+        if ($mode -eq 'Prepare') {
+            $sourceCallbackCount = @($events | Where-Object { $_ -eq 'source:Prepare' }).Count
+        }
+        if ($mode -eq 'Validate') {
+            $certificateDisposed = & $module {
+                $null -ne $script:SessionStateCertificate -and -not $script:SessionStateCertificate.CanRead
+            }
+        }
+    }
+    catch {
+        if (Test-ChildCommandNotFound $_) { $commandNotFoundCount++ }
+        $failures.Add(('{0}:{1}:{2}' -f $mode, $_.Exception.GetType().FullName, $_.Exception.Message))
+    }
+    finally {
+        if ($null -ne $module) { Remove-Module $module -Force }
+    }
+}
+
+$module = $null
+try {
+    $module = Import-Module $ModulePath -Force -PassThru
+    $privateExportCount += @(Get-Command -Module $module.Name |
+            Where-Object { $privateNames -contains $_.Name }).Count
+    $approved = & $module {
+        param($eventSink)
+        $script:ApprovedEvents = $eventSink
+        $script:ApprovedCase = 'success'
+        $script:ApprovedPrimary = [System.InvalidOperationException]::new('APPROVED_PRIMARY')
+        $script:ApprovedRemoveCounts = [ordered]@{ Success = 0; PrimaryCleanup = 0; CleanupOnly = 0 }
+
+        function script:New-CreatedContainer { return ('e' * 64) }
+        function script:Assert-ContainerConfinement {
+            if ($script:ApprovedCase -eq 'primary-cleanup') { throw $script:ApprovedPrimary }
+        }
+        function script:Invoke-Native { param([scriptblock]$Command) }
+        function script:Assert-Success { param([string]$Operation) }
+        function script:Assert-ContainerCompletion {}
+        function script:Remove-OwnedContainer {
+            param([string]$ContainerId)
+            if ($script:ApprovedCase -eq 'success') {
+                $script:ApprovedRemoveCounts.Success++
+                return
+            }
+            if ($script:ApprovedCase -eq 'primary-cleanup') {
+                $script:ApprovedRemoveCounts.PrimaryCleanup++
+            }
+            else {
+                $script:ApprovedRemoveCounts.CleanupOnly++
+            }
+            throw 'NeverReflect approved cleanup credential'
+        }
+
+        $plan = [pscustomobject]@{ Arguments = @('create'); Expectation = [pscustomobject]@{} }
+        Invoke-ApprovedContainer -ImageId ('sha256:' + ('f' * 64)) -Plan $plan -Operation 'Approved success'
+
+        $script:ApprovedCase = 'primary-cleanup'
+        $primaryIdentity = $false
+        try {
+            Invoke-ApprovedContainer -ImageId ('sha256:' + ('f' * 64)) -Plan $plan -Operation 'Approved primary'
+        }
+        catch {
+            $primaryIdentity = [object]::ReferenceEquals($script:ApprovedPrimary, $_.Exception)
+        }
+
+        $script:ApprovedCase = 'cleanup-only'
+        $cleanupOnlyError = $null
+        try {
+            Invoke-ApprovedContainer -ImageId ('sha256:' + ('f' * 64)) -Plan $plan -Operation 'Approved cleanup only'
+        }
+        catch { $cleanupOnlyError = $_.Exception.Message }
+
+        return [pscustomobject]@{
+            SuccessRemovals = $script:ApprovedRemoveCounts.Success
+            PrimaryCleanupRemovals = $script:ApprovedRemoveCounts.PrimaryCleanup
+            CleanupOnlyRemovals = $script:ApprovedRemoveCounts.CleanupOnly
+            PrimaryIdentityPreserved = $primaryIdentity
+            CleanupOnlyError = $cleanupOnlyError
+        }
+    } $events
+    $approvedSuccessRemovals = $approved.SuccessRemovals
+    $approvedPrimaryCleanupRemovals = $approved.PrimaryCleanupRemovals
+    $approvedCleanupOnlyRemovals = $approved.CleanupOnlyRemovals
+    $approvedPrimaryIdentityPreserved = $approved.PrimaryIdentityPreserved
+    $approvedCleanupOnlyError = $approved.CleanupOnlyError
+}
+catch {
+    if (Test-ChildCommandNotFound $_) { $commandNotFoundCount++ }
+    $failures.Add(('Approved:{0}:{1}' -f $_.Exception.GetType().FullName, $_.Exception.Message))
+}
+finally {
+    if ($null -ne $module) { Remove-Module $module -Force }
+}
+
+$childEnvironmentAfter = Get-ChildEnvironmentDigest
+$result = [ordered]@{
+    PowerShellVersion = $PSVersionTable.PSVersion.ToString()
+    DispatchCount = $dispatchCount
+    SourceCallbackCount = $sourceCallbackCount
+    CommandNotFoundCount = $commandNotFoundCount
+    PrivateExportCount = $privateExportCount
+    CertificateDisposed = $certificateDisposed
+    ApprovedSuccessRemovals = $approvedSuccessRemovals
+    ApprovedPrimaryCleanupRemovals = $approvedPrimaryCleanupRemovals
+    ApprovedCleanupOnlyRemovals = $approvedCleanupOnlyRemovals
+    ApprovedPrimaryIdentityPreserved = $approvedPrimaryIdentityPreserved
+    ApprovedCleanupOnlyError = $approvedCleanupOnlyError
+    DockerShimResolved = $dockerShimResolved
+    ChildEnvironmentBefore = $childEnvironmentBefore
+    ChildEnvironmentAfter = $childEnvironmentAfter
+    Failures = @($failures)
+    Events = @($events)
+}
+[System.IO.File]::WriteAllText(
+    $ResultPath,
+    ($result | ConvertTo-Json -Depth 6 -Compress),
+    [System.Text.UTF8Encoding]::new($false)
+)
+'@
+}
+
+function Invoke-SessionStateChild {
+    $root = Join-Path ([System.IO.Path]::GetTempPath()) ('finguardops-session-state-' + [guid]::NewGuid().ToString('N'))
+    $child = Join-Path $root 'session-state-child.ps1'
+    $resultPath = Join-Path $root 'result.json'
+    $dockerShim = Join-Path $root 'docker.cmd'
+    $dockerSentinel = Join-Path $root 'docker-calls.txt'
+    $process = $null
+    [System.IO.Directory]::CreateDirectory($root) | Out-Null
+    try {
+        $source = New-SessionStateChildSource
+        [System.IO.File]::WriteAllText($child, ($source -replace "(?<!`r)`n", "`r`n") + "`r`n", [System.Text.UTF8Encoding]::new($false))
+        $dockerSource = "@echo off`r`n>>`"$dockerSentinel`" echo called`r`nexit /b 97`r`n"
+        [System.IO.File]::WriteAllText($dockerShim, $dockerSource, [System.Text.Encoding]::ASCII)
+        Assert-Parsed $child
+
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = 'powershell.exe'
+        $startInfo.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -ModulePath "{1}" -ResultPath "{2}" -DockerShimDirectory "{3}"' -f `
+            $child, $ModulePath, $resultPath, $root
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $startInfo
+        if (-not $process.Start()) { throw 'SESSION_STATE_CHILD_START_FAILED' }
+        if (-not $process.WaitForExit(30000)) {
+            $process.Kill()
+            throw 'SESSION_STATE_CHILD_TIMEOUT'
+        }
+        $stdoutDetail = $process.StandardOutput.ReadToEnd().Trim()
+        $stderrDetail = $process.StandardError.ReadToEnd().Trim()
+        if ($process.ExitCode -ne 0 -or -not [System.IO.File]::Exists($resultPath)) {
+            throw ('SESSION_STATE_CHILD_FAILED exit={0} stdout={1} stderr={2}' -f $process.ExitCode, $stdoutDetail, $stderrDetail)
+        }
+        $result = [System.IO.File]::ReadAllText($resultPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+        $result | Add-Member -NotePropertyName DockerSentinelCalls `
+            -NotePropertyValue $(if ([System.IO.File]::Exists($dockerSentinel)) { @([System.IO.File]::ReadAllLines($dockerSentinel)).Count } else { 0 })
+        return $result
+    }
+    finally {
+        $processId = if ($null -ne $process) { $process.Id } else { $null }
+        if ($null -ne $process) {
+            if (-not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
+            $process.Dispose()
+        }
+        if ([System.IO.Directory]::Exists($root)) {
+            [System.IO.Directory]::Delete($root, $true)
+        }
+        if ([System.IO.Directory]::Exists($root)) { throw 'SESSION_STATE_TEMP_RESIDUE' }
+        if ($null -ne $processId -and $null -ne (Get-Process -Id $processId -ErrorAction SilentlyContinue)) {
+            throw 'SESSION_STATE_PROCESS_RESIDUE'
+        }
+    }
+}
+
+function Invoke-SessionStateTargetedTests {
+    $script:Failures = [System.Collections.Generic.List[string]]::new()
+
+    Invoke-TestCase 'D185-D194 production callback session-state' {
+        $gitBefore = Get-SessionStateGitSnapshot
+        $environmentBefore = Get-SessionStateEnvironmentDigest
+        $preparedPath = Join-Path (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $ModulePath))) 'infra\keycloak\.local\state\e2e-image-manifest.json'
+        $recoveryPath = Join-Path (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $ModulePath))) 'infra\keycloak\.local\state\e2e-image-cleanup-required.json'
+        $preparedBefore = [System.IO.File]::Exists($preparedPath)
+        $recoveryBefore = [System.IO.File]::Exists($recoveryPath)
+
+        $result = Invoke-SessionStateChild
+
+        $gitAfter = Get-SessionStateGitSnapshot
+        $environmentAfter = Get-SessionStateEnvironmentDigest
+        Assert-True ($result.PowerShellVersion -like '5.1.*') 'Targeted child did not use Windows PowerShell 5.1.'
+        Assert-Equal 0 ([int]$result.CommandNotFoundCount) ('Production callback CommandNotFoundException count differs. failures=' + (@($result.Failures) -join '; '))
+        Assert-Equal 4 ([int]$result.DispatchCount) 'Not every production mode crossed the exported dispatch boundary.'
+        Assert-Equal 3 ([int]$result.SourceCallbackCount) 'Prepare GetSource did not use the actual production boundary twice.'
+        Assert-Equal 0 ([int]$result.PrivateExportCount) 'A private production helper was exported.'
+        Assert-Equal @(
+            'source:Prepare','owner-set:Prepare','source:Prepare','prepare-create-recovery','prepare-build',
+            'source:Prepare','receipt-move:Prepare','owner-restore:Prepare',
+            'receipt-read','source:Service','owner-set:Service','receipt-move:Service',
+            'assert-images:Service','service-child','service-containers','service-project-cleanup',
+            'receipt-move:Service','owner-restore:Service',
+            'receipt-read','source:Run','owner-set:Run','receipt-move:Run','assert-images:Run',
+            'run-browser','full-cleanup:Run','owner-restore:Run',
+            'receipt-read','source:Validate','owner-set:Validate','assert-images:Validate',
+            'validate-certificate','validate-key-pair','owner-restore:Validate'
+        ) @($result.Events) 'Production callback ordering or private helper resolution differs.'
+        Assert-True ([bool]$result.CertificateDisposed) 'Validate did not dispose its certificate through the production boundary.'
+        Assert-Equal 1 ([int]$result.ApprovedSuccessRemovals) 'Approved-container success cleanup did not reach the safe remover exactly once.'
+        Assert-Equal 1 ([int]$result.ApprovedPrimaryCleanupRemovals) 'Approved-container primary cleanup did not reach the safe remover exactly once.'
+        Assert-Equal 1 ([int]$result.ApprovedCleanupOnlyRemovals) 'Approved-container cleanup-only path did not reach the safe remover exactly once.'
+        Assert-True ([bool]$result.ApprovedPrimaryIdentityPreserved) 'Approved-container cleanup replaced the primary exception object.'
+        Assert-Equal 'CONTAINER_CLEANUP_FAILED' ([string]$result.ApprovedCleanupOnlyError) 'Approved-container cleanup-only fixed error changed.'
+        Assert-True ([bool]$result.DockerShimResolved) 'The child did not resolve Docker to its safe sentinel.'
+        Assert-Equal 0 ([int]$result.DockerSentinelCalls) 'The targeted child invoked Docker.'
+        Assert-Equal ([string]$result.ChildEnvironmentBefore) ([string]$result.ChildEnvironmentAfter) 'The targeted child changed its environment.'
+        Assert-Equal 0 @($result.Failures).Count ('Production child failures: ' + (@($result.Failures) -join '; '))
+        Assert-Equal $environmentBefore $environmentAfter 'The targeted run changed the parent environment.'
+        Assert-Equal $gitBefore.Head $gitAfter.Head 'The targeted run changed HEAD.'
+        Assert-Equal $gitBefore.Tree $gitAfter.Tree 'The targeted run changed the repository tree.'
+        Assert-Equal $gitBefore.Index $gitAfter.Index 'The targeted run changed the index.'
+        Assert-Equal $gitBefore.Status $gitAfter.Status 'The targeted run changed repository status.'
+        Assert-Equal $preparedBefore ([System.IO.File]::Exists($preparedPath)) 'The targeted run changed prepared receipt state.'
+        Assert-Equal $recoveryBefore ([System.IO.File]::Exists($recoveryPath)) 'The targeted run changed recovery receipt state.'
+        Write-Output ('EVIDENCE session-state pwsh={0} dispatch=4 get-source=3 command-not-found=0 private-export=0 docker=0 residue=0' -f $result.PowerShellVersion)
+    }
+
+    if ($script:Failures.Count -ne 0) {
+        Write-Output ('session-state targeted failures: ' + $script:Failures.Count)
+        foreach ($failure in $script:Failures) { Write-Output $failure }
+        exit 1
+    }
+    Write-Output 'Session-state targeted contract tests passed count=1'
+}
+
 function Invoke-FormalTests {
+    Invoke-SessionStateTargetedTests
     Invoke-WaitBrowserTargetedTests
     Invoke-OwnerFixTargetedTests
     Invoke-MajorFixTargetedTests
@@ -1322,6 +1762,11 @@ if ($Mode -eq 'WaitBrowserPreflight') {
 
 if ($Mode -eq 'WaitBrowserTargeted') {
     Invoke-WaitBrowserTargetedTests
+    exit 0
+}
+
+if ($Mode -eq 'SessionStateTargeted') {
+    Invoke-SessionStateTargetedTests
     exit 0
 }
 
