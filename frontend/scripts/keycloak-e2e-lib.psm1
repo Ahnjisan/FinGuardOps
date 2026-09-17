@@ -74,6 +74,21 @@ $NodeModulesPath = Join-Path $FrontendRoot 'node_modules'
 $PlaywrightCorePath = Join-Path $NodeModulesPath 'playwright-core'
 $PlaywrightTestPath = Join-Path $NodeModulesPath '@playwright/test'
 $VitePath = Join-Path $NodeModulesPath 'vite'
+# The host paths the production browser container is created with, and the one
+# container path each of them is allowed to appear at.
+#
+# Creation resolves every entry to an owned physical location and refuses a
+# missing path or a reparse point anywhere under the repository. Removal-time
+# ownership compares what the daemon recorded against the same canonical paths
+# without re-reading the filesystem, because whether a repository file is
+# present now says nothing about which container the daemon is holding. Both
+# boundaries are written from this one declaration, so the mount set creation
+# approves and the mount set removal insists on cannot drift apart.
+$BrowserBindContract = @(
+    [ordered]@{ HostPath = $CertificatePath; Destination = '/finguardops/tls/localhost.crt'; Directory = $false },
+    [ordered]@{ HostPath = $ScriptsPath; Destination = '/finguardops/scripts'; Directory = $true },
+    [ordered]@{ HostPath = $PlaywrightCorePath; Destination = '/finguardops/playwright-core'; Directory = $true }
+)
 $OutputDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("finguardops-playwright-{0}" -f [guid]::NewGuid().ToString('N'))
 $ComposeArguments = @(
     'compose',
@@ -91,13 +106,25 @@ $ProtectedImageReferences = @(
     'finguardops-ai-service:local',
     'finguardops-playwright-e2e:local'
 )
+# The Compose contract, as names rather than as a query.
+#
+# Cleanup removes what this repository's two Compose files declare, under a
+# project name this run owns, and nothing else. Holding the three lists here
+# means the ownership contract and the removal targets are the same statement:
+# a service, network or volume that is not spelled out below is never a
+# removal target, however it is labelled.
+$E2EComposeServices = @('postgresql', 'ai-service', 'external-risk-mock', 'backend', 'prometheus',
+    'grafana', 'alertmanager', 'alertmanager-webhook', 'keycloak', 'keycloak-bootstrap',
+    'keycloak-verify')
+$E2EComposeNetworks = @('application', 'observability', 'prometheus-ui', 'grafana-ui')
+$E2EComposeVolumes = @('keycloak-data', 'prometheus-data', 'alertmanager-data', 'grafana-data')
 
 # The one lock that decides who owns the dedicated Compose project.
 #
 # The project name below is fixed, so two runs started at the same time would
 # both find the project empty, both create containers, networks and volumes
 # under it, and then the first one to finish would take the other one's
-# resources down with its own `compose down`. Ownership therefore has to be
+# resources down as part of its own cleanup. Ownership therefore has to be
 # established before the emptiness check rather than inferred from it.
 #
 # A Windows system-wide named mutex is what says so. It is named after the
@@ -662,7 +689,7 @@ function Invoke-E2ERunCoreCleanup {
         @('RestoreProjectEnvironment', 'ENVIRONMENT_RESTORE_FAILED'),
         @('RestoreBrowserEnvironment', 'ENVIRONMENT_RESTORE_FAILED'),
         @('RemoveBrowser', 'BROWSER_CONTAINER_CLEANUP_FAILED'),
-        @('ComposeDown', 'COMPOSE_CLEANUP_FAILED'),
+        @('RemoveProjectResources', 'RESOURCE_CLEANUP_FAILED'),
         @('RemoveOutput', 'OUTPUT_DIRECTORY_CLEANUP_FAILED'),
         @('DisposeCertificate', 'CERTIFICATE_DISPOSE_FAILED'),
         @('ReleaseRunMutex', 'RUN_LOCK_RELEASE_FAILED'),
@@ -765,9 +792,24 @@ function Invoke-E2EServiceLifecycle {
 
     $receipt = & $Boundaries.ReadPrepared
     & $Boundaries.RenamePreparedToRecovery | Out-Null
+    # The image record preflight, deliberately outside the cleanup boundary.
+    #
+    # Nothing below has happened yet: no child process, no container runtime
+    # check, no Docker resource lifecycle. A record rejected here therefore
+    # describes a state this run never created, and the answer is a fixed error
+    # with the prepared images and the receipt left exactly as they are - not a
+    # mutation-capable cleanup driven by the very record the validator has just
+    # refused to believe. Cleanup arbitration begins after the child.
+    $imageValues = @(& $Boundaries.AssertImages $receipt)
+    Assert-E2EImageRecordSet -Values $imageValues -Receipt $receipt
+    # The first step of this mode that can create anything, and it runs only
+    # here: after the validator above has accepted the record, and still
+    # outside the cleanup boundary. A browser runtime failure therefore leaves
+    # no child, no container check and no receipt deletion behind either - the
+    # throwaway container it created answers for itself.
+    & $Boundaries.AssertBrowserRuntime $receipt | Out-Null
     $primary = $null
     try {
-        & $Boundaries.AssertImages $receipt | Out-Null
         & $Boundaries.RunChild $receipt | Out-Null
         & $Boundaries.AssertContainers $receipt | Out-Null
         & $Boundaries.CleanupResources | Out-Null
@@ -1956,20 +1998,104 @@ function New-CreatedContainer([string[]]$Arguments) {
     return $created
 }
 
-# Removes exactly one container this run created, by the identifier it was
-# created under, and proves it is gone. `--volumes` takes any anonymous volume
-# that container itself owns with it; nothing outside this run is named, matched
-# or pruned.
-function Remove-OwnedContainer([string]$ContainerId) {
-    if ($ContainerId -notmatch '^[0-9a-f]{64}$') {
+# Whether the exact identifier is still a container the daemon knows about.
+#
+# Asked by full identifier and answered by full identifier: an answer naming
+# anything else is not an answer about this container, and is refused rather
+# than counted.
+function Get-OwnedContainerPresence([string]$ContainerId) {
+    $output = Invoke-NativeStdout {
+        & docker ps -a --no-trunc --filter "id=$ContainerId" --format '{{.ID}}'
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw 'A container this run created could not be accounted for.'
+    }
+    $found = @()
+    if ($null -ne $output) {
+        $found = @(($output -split '\r?\n') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+    }
+    if (@($found | Where-Object { $_ -cne $ContainerId }).Count -ne 0) {
+        throw 'A container this run created could not be accounted for.'
+    }
+    return $found.Count
+}
+
+# The approved identifier, still this run's container, on the approved image,
+# and carrying no volume mount at all - plus, when the caller supplies the
+# browser ownership contract, the whole of that contract.
+#
+# `docker rm` without `--volumes` leaves a volume behind, so a container that
+# acquired one is a container this cleanup cannot finish, and it says so
+# instead of removing half of it. The document it read is returned, so the
+# state below is the state this check just approved rather than a second read.
+function Assert-OwnedContainerRemovable([string]$ContainerId, [string]$ImageId, $BrowserContract) {
+    $document = Get-ContainerDocument $ContainerId
+    if ((Get-JsonMember $document 'Id') -cne $ContainerId -or
+        (Get-JsonMember $document 'Image') -cne $ImageId) {
         throw 'A container removal was asked for an identifier this run did not create.'
     }
-    Invoke-Native { & docker rm --force --volumes $ContainerId | Out-Null }
-    $remaining = @(Invoke-NativeStdout {
-            & docker ps -a --no-trunc --filter "id=$ContainerId" --format '{{.ID}}'
-        } -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
-    if ($remaining.Count -ne 0) {
-        throw 'A container this run created could not be removed.'
+    foreach ($mount in @(Get-JsonMember $document 'Mounts')) {
+        if ((Get-JsonMember $mount 'Type') -ceq 'volume') {
+            throw 'A container this run created carries a volume mount it was not approved with.'
+        }
+    }
+    # The dedicated browser container is additionally required to be the
+    # dedicated browser container, and that is one validator both of its
+    # callers go through rather than a check each of them writes for itself.
+    if ($null -ne $BrowserContract) {
+        Assert-E2EOwnedBrowserContainer -Document $document -ContainerId $ContainerId `
+            -ImageId $ImageId -Contract $BrowserContract
+    }
+    return $document
+}
+
+# Removes exactly one container this run created, by the identifier it was
+# created under, and proves it is gone.
+#
+# Nothing here is forced and nothing here takes storage with it. `--force`
+# kills a container that is running, and a browser container that is still
+# running is exactly the case that means the world is not what this cleanup
+# believes; `--volumes` removes storage this function never looked at. So the
+# identifier is proved to still be this run's container on the approved image
+# with no volume mount, stopped normally if it is running, proved once more
+# because stopping is itself a window, and only then removed - after which the
+# same identifier is asked for again and has to be gone. A container that is
+# already absent is success: there is nothing left for this to do.
+#
+# A caller that supplies the browser ownership contract gets two more things
+# for the same identifier: every ownership check that contract names, applied
+# at each of the two approval points below, and a closing audit of the one
+# fixed name a browser container is ever given. The dedicated browser
+# container has exactly two callers and they both arrive here, so what may be
+# removed is decided in one place for both of them.
+function Remove-OwnedContainer([string]$ContainerId, [string]$ImageId, $BrowserContract) {
+    if ($ContainerId -cnotmatch '^[0-9a-f]{64}$' -or $ImageId -cnotmatch '^sha256:[0-9a-f]{64}$') {
+        throw 'A container removal was asked for an identifier this run did not create.'
+    }
+    if ((Get-OwnedContainerPresence $ContainerId) -ne 0) {
+        $document = Assert-OwnedContainerRemovable $ContainerId $ImageId $BrowserContract
+        if ((Get-JsonMember (Get-JsonMember $document 'State') 'Running') -eq $true) {
+            Invoke-Native { & docker stop $ContainerId | Out-Null }
+            if ($LASTEXITCODE -ne 0) {
+                throw 'A container this run created could not be removed.'
+            }
+            $stopped = Assert-OwnedContainerRemovable $ContainerId $ImageId $BrowserContract
+            if ((Get-JsonMember (Get-JsonMember $stopped 'State') 'Running') -ne $false) {
+                throw 'A container this run created could not be removed.'
+            }
+        }
+        Invoke-Native { & docker rm $ContainerId | Out-Null }
+        if ($LASTEXITCODE -ne 0) {
+            throw 'A container this run created could not be removed.'
+        }
+        if ((Get-OwnedContainerPresence $ContainerId) -ne 0) {
+            throw 'A container this run created could not be removed.'
+        }
+    }
+    # A browser container also has exactly one name it is ever given, so the
+    # audit asks for that name too.
+    if ($null -ne $BrowserContract) {
+        Assert-E2ENoOwnedBrowserResidue -Contract $BrowserContract
     }
 }
 
@@ -2005,9 +2131,9 @@ function Invoke-ApprovedContainer([string]$ImageId, $Plan, [string]$Operation) {
         Assert-ContainerCompletion $container $ImageId
     }
     catch { $primary = $_.Exception }
-    $removeOwnedContainer = { param($activeContainer) Remove-OwnedContainer $activeContainer }
+    $removeOwnedContainer = { param($activeContainer, $activeImage) Remove-OwnedContainer $activeContainer $activeImage }
     $actions = @([pscustomobject]@{
-        Action = { & $removeOwnedContainer $container }.GetNewClosure()
+        Action = { & $removeOwnedContainer $container $ImageId }.GetNewClosure()
         ErrorCode = 'CONTAINER_CLEANUP_FAILED'
         SkipAfterCleanupFailure = $false
     })
@@ -2074,7 +2200,7 @@ function Assert-BrowserRuntime([string]$BrowserImageId, [string]$PlaywrightVersi
     Invoke-ApprovedContainer `
         $BrowserImageId `
         (Get-BrowserRuntimePlan $BrowserImageId $PlaywrightVersion) `
-        'Prepared browser image runtime verification'
+        'Prepared browser image runtime verification' | Out-Null
 }
 
 # Proves the certificate is validly self-signed and matches its private key, in
@@ -2124,18 +2250,201 @@ function Assert-CertificateKeyPair([string]$BrowserImageId) {
         'Isolated localhost certificate verification'
 }
 
-# Removes a browser container left behind by an earlier run, by name. Used by
-# cleanup mode; the run itself owns its container by identifier and never
-# removes anything it did not create.
-function Remove-BrowserContainer {
-    $existing = @(& docker ps -a --filter "name=^/$BrowserContainerName$" --format '{{.ID}}')
-    if ($LASTEXITCODE -eq 0 -and $existing.Count -ne 0) {
-        & docker rm -f $BrowserContainerName | Out-Null
+
+# The approved bind list, resolved to owned physical host paths. This is the
+# creation-time list: every path must exist and must be link-free before the
+# daemon is handed it.
+function Get-BrowserServerApprovedBinds {
+    $binds = [System.Collections.Generic.List[object]]::new()
+    foreach ($entry in $BrowserBindContract) {
+        if ($entry.Directory) {
+            $binds.Add((New-ApprovedBind $entry.HostPath $entry.Destination -Directory))
+        }
+        else {
+            $binds.Add((New-ApprovedBind $entry.HostPath $entry.Destination))
+        }
     }
-    $remaining = @(& docker ps -a --filter "name=^/$BrowserContainerName$" --format '{{.ID}}')
-    Assert-Success 'Dedicated browser container cleanup check'
-    if ($remaining.Count -ne 0) {
-        throw 'The dedicated browser container could not be removed.'
+    return $binds.ToArray()
+}
+
+# The same bind list, as the expectation a removal is judged against.
+#
+# `New-ApprovedBind` returns the trimmed full path of an owned location, so what
+# this produces is the identical `Source` string whenever creation would have
+# succeeded. What it does not do is re-assert that the host path still exists,
+# because a container the daemon is already holding is judged against the
+# contract it was created under rather than against the world as it is now.
+# Nothing in the comparison itself is relaxed: `Test-SamePhysicalPath` still
+# decides one whole canonical path against another, and a reparse point still
+# cannot be spelled to look like the approved source.
+function Get-BrowserServerExpectedBinds {
+    $binds = [System.Collections.Generic.List[object]]::new()
+    foreach ($entry in $BrowserBindContract) {
+        $binds.Add([ordered]@{
+            Source      = Get-TrimmedPath ([System.IO.Path]::GetFullPath($entry.HostPath))
+            Destination = $entry.Destination
+        })
+    }
+    return $binds.ToArray()
+}
+
+# The confinement the production browser creation boundary approves, written
+# once. The create call is checked against it before the container starts, and
+# the removal boundary re-checks the same contract before anything is stopped,
+# so neither statement can be weakened without the other.
+function Get-BrowserServerExpectation($Binds) {
+    $publication = [ordered]@{ HostIp = '127.0.0.1'; HostPort = "$BrowserHostPort" }
+    return New-ContainerExpectation `
+        -NetworkMode 'bridge' `
+        -ReadOnlyRootFilesystem $false `
+        -Binds $Binds `
+        -Init $true `
+        -ExtraHosts @('host.docker.internal:host-gateway') `
+        -PortBindings ([ordered]@{ "$BrowserContainerPort/tcp" = @($publication) })
+}
+
+# The expected values a browser container removal is judged against, derived
+# from this run's receipt and from the browser creation contract above, and from
+# nothing else.
+#
+# The receipt names the browser image reference; that reference is resolved
+# through the authoritative image record, which is what establishes the image
+# identifier and the five ownership labels this run's browser container has to
+# carry. A reference that names no local image, or an image that is not
+# labelled as this run's browser image, is a fixed error here - before any
+# candidate container has been looked at, let alone mutated.
+#
+# The container itself is never compared against the reference, because the
+# create call above names the image by identifier and the daemon records what
+# it was given. The reference is what the identifier is *derived from*, so a
+# retagged or rebuilt browser image resolves to a different identifier and
+# every container on the old one stops being owned.
+function Get-E2EBrowserOwnershipContract {
+    param([Parameter(Mandatory = $true)]$Receipt)
+
+    $images = Get-E2EImageSet -Receipt $Receipt
+    $record = Get-E2ENormalizedImageRecord -Reference $images.Browser -Role 'browser' -Receipt $Receipt
+    if ($record.Reference -cne $images.Browser -or $record.Role -cne 'browser' -or
+        $record.Id -cnotmatch '^sha256:[0-9a-f]{64}$') {
+        throw 'BROWSER_OWNERSHIP_INVALID'
+    }
+    return [ordered]@{
+        Name        = $BrowserContainerName
+        Reference   = $record.Reference
+        ImageId     = $record.Id
+        Labels      = $record.Labels
+        Role        = $record.Role
+        Expectation = Get-BrowserServerExpectation (Get-BrowserServerExpectedBinds)
+    }
+}
+
+# The one production statement that a candidate container is this run's own
+# dedicated browser container. Both the Run-end cleanup and the explicit
+# Cleanup mode ask exactly this question, of exactly this function, before
+# anything is stopped or removed.
+#
+# An exact full identifier fixes which container a mutation would touch; it
+# does not say that container is this run's. The fixed name does not say so
+# either: a container carrying that name, and even this run's image identifier,
+# but with a volume, an extra bind, a device, an added capability or a
+# published port nobody approved is a foreign container, and a foreign
+# container is refused rather than finished.
+#
+# Every expected value comes from the receipt or from the creation contract.
+# Nothing is taken from the document being judged, so a container cannot
+# describe itself into being owned, and every rejection is one fixed sentence
+# that echoes no observed value.
+function Assert-E2EOwnedBrowserContainer {
+    param(
+        [Parameter(Mandatory = $true)]$Document,
+        [Parameter(Mandatory = $true)][string]$ContainerId,
+        [Parameter(Mandatory = $true)][string]$ImageId,
+        [Parameter(Mandatory = $true)]$Contract
+    )
+
+    $message = 'A browser container removal was asked for a container this run does not own.'
+    # The identifier the caller pinned, the image the receipt resolves to, and
+    # the container the daemon answered about are all required to be one
+    # identifier and one image.
+    if ($ContainerId -cnotmatch '^[0-9a-f]{64}$' -or $Contract.ImageId -cne $ImageId) {
+        throw $message
+    }
+    if ((Get-JsonMember $Document 'Id') -cne $ContainerId -or
+        (Get-JsonMember $Document 'Image') -cne $Contract.ImageId -or
+        (Get-JsonMember $Document 'Name') -cne ('/' + $Contract.Name)) {
+        throw $message
+    }
+
+    $configuration = Get-JsonMember $Document 'Config'
+    if ($null -eq $configuration -or
+        (Get-JsonMember $configuration 'Image') -cne $Contract.ImageId) {
+        throw $message
+    }
+    # The five receipt-derived ownership labels the prepared browser image was
+    # built with, read off the container the daemon created from that image.
+    # The role is one of them, so a container built from this run's backend or
+    # ai-service image fails here as well.
+    $labels = Get-JsonMember $configuration 'Labels'
+    if ($null -eq $labels) { throw $message }
+    foreach ($key in $Contract.Labels.Keys) {
+        if (-not [string]::Equals(
+                [string](Get-JsonMember $labels $key),
+                [string]$Contract.Labels[$key],
+                [System.StringComparison]::Ordinal)) {
+            throw $message
+        }
+    }
+
+    $expected = $Contract.Expectation
+    $hostConfiguration = Get-JsonMember $Document 'HostConfig'
+    if ($null -eq $hostConfiguration) { throw $message }
+    if ((Get-JsonMember $hostConfiguration 'NetworkMode') -cne $expected.NetworkMode) {
+        throw $message
+    }
+    $attached = @(Get-JsonMemberNames (Get-JsonMember (Get-JsonMember $Document 'NetworkSettings') 'Networks'))
+    Assert-ExactStrings $attached @($expected.NetworkMode) $message
+    if ((Test-JsonFlag (Get-JsonMember $hostConfiguration 'ReadonlyRootfs')) -ne $expected.ReadOnlyRootFilesystem -or
+        (Test-JsonFlag (Get-JsonMember $hostConfiguration 'Init')) -ne $expected.Init -or
+        (Test-JsonFlag (Get-JsonMember $hostConfiguration 'Privileged')) -or
+        (Test-JsonFlag (Get-JsonMember $hostConfiguration 'PublishAllPorts'))) {
+        throw $message
+    }
+    Assert-NoEntries (Get-JsonMember $hostConfiguration 'CapAdd') $message
+    Assert-ExactStrings (Get-JsonMember $hostConfiguration 'CapDrop') $expected.CapabilityDrop $message
+    Assert-ExactStrings (Get-JsonMember $hostConfiguration 'SecurityOpt') $expected.SecurityOptions $message
+    Assert-ExactStrings (Get-JsonMember $hostConfiguration 'ExtraHosts') $expected.ExtraHosts $message
+    Assert-NoEntries (Get-JsonMember $hostConfiguration 'Devices') $message
+    Assert-NoEntries (Get-JsonMember $hostConfiguration 'DeviceRequests') $message
+    Assert-NoEntries (Get-JsonMember $hostConfiguration 'DeviceCgroupRules') $message
+    Assert-NoEntries (Get-JsonMember $hostConfiguration 'VolumesFrom') $message
+    Assert-NoEntries (Get-JsonMember $hostConfiguration 'Mounts') $message
+    Assert-ExactBinds (Get-JsonMember $hostConfiguration 'Binds') $expected.Binds $message
+    Assert-ExactMap (Get-JsonMember $hostConfiguration 'Tmpfs') $expected.Tmpfs $message
+    Assert-ExactPortBindings (Get-JsonMember $hostConfiguration 'PortBindings') $expected.PortBindings $message
+    # The resolved mount list, which is where a named volume, an anonymous
+    # volume or a mount the image itself declares would appear even though
+    # `Binds` names none of them.
+    Assert-ExactMounts (Get-JsonMember $Document 'Mounts') $expected.Binds $message
+}
+
+# The fixed name, after the exact identifier is gone. An identifier that is
+# absent says nothing about a second container that took the name while this
+# removal was running, so the name is asked for as well. Nothing here removes
+# anything.
+function Assert-E2ENoOwnedBrowserResidue {
+    param([Parameter(Mandatory = $true)]$Contract)
+
+    $filters = Get-E2EExactNameFilters -Names @($Contract.Name) -Prefix '/'
+    $output = Invoke-NativeStdout { & docker ps -aq --no-trunc @filters }
+    if ($LASTEXITCODE -ne 0) {
+        throw 'A container this run created could not be accounted for.'
+    }
+    $found = @()
+    if ($null -ne $output) {
+        $found = @(($output -split '\r?\n') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+    }
+    if ($found.Count -ne 0) {
+        throw 'A container this run created could not be removed.'
     }
 }
 
@@ -2144,20 +2453,9 @@ function Remove-BrowserContainer {
 # are approved the same way and for the same reason: before it starts, from the
 # daemon's record, by exact comparison.
 function Get-BrowserServerPlan([string]$BrowserImageId, [string]$PlaywrightVersion) {
-    $binds = @(
-        (New-ApprovedBind $CertificatePath '/finguardops/tls/localhost.crt'),
-        (New-ApprovedBind $ScriptsPath '/finguardops/scripts' -Directory),
-        (New-ApprovedBind $PlaywrightCorePath '/finguardops/playwright-core' -Directory)
-    )
-    $publication = [ordered]@{ HostIp = '127.0.0.1'; HostPort = "$BrowserHostPort" }
+    $binds = Get-BrowserServerApprovedBinds
     return [ordered]@{
-        Expectation = New-ContainerExpectation `
-            -NetworkMode 'bridge' `
-            -ReadOnlyRootFilesystem $false `
-            -Binds $binds `
-            -Init $true `
-            -ExtraHosts @('host.docker.internal:host-gateway') `
-            -PortBindings ([ordered]@{ "$BrowserContainerPort/tcp" = @($publication) })
+        Expectation = Get-BrowserServerExpectation $binds
         Arguments   = @(
             'create',
             '--name', $BrowserContainerName,
@@ -2276,21 +2574,16 @@ function Wait-BrowserServer {
     throw 'The dedicated browser server did not become ready.'
 }
 
-function Invoke-ComposeDown {
-    Invoke-E2EInLocation -Path $RepositoryRoot -Body {
-        Invoke-Native { & docker @ComposeArguments down --volumes --remove-orphans }
-        Assert-Success 'Dedicated Compose cleanup'
-    }
-}
-
 function Invoke-E2EBrowserRunCore {
 param([Parameter(Mandatory = $true)]$Receipt)
 
 $certificate = $null
 $runState = [pscustomobject]@{ ComposeStarted = $false }
 # The identifier of the one browser container this run creates, and the only
-# container the cleanup below is allowed to remove.
+# container the cleanup below is allowed to remove, together with the image
+# identifier it was approved against - the cleanup re-proves both.
 $browserContainer = $null
+$browserContainerImage = $null
 # The run lock, and whether this run actually holds it. The two are tracked
 # separately on purpose: a mutex object that exists is not a mutex that was
 # acquired, and only an acquired one may be released.
@@ -2371,6 +2664,7 @@ try {
         # Created stopped, approved against the exact configuration this file
         # names, and only then started - by the identifier that was approved.
         $browserPlan = Get-BrowserServerPlan $browserImageId $playwrightVersion
+        $browserContainerImage = $browserImageId
         $browserContainer = New-CreatedContainer $browserPlan.Arguments
         Start-BrowserContainer $browserContainer $browserImageId $browserPlan.Expectation
         Wait-BrowserServer $browserContainer
@@ -2405,16 +2699,27 @@ $cleanupBoundaries = @{
         }
         RemoveBrowser = {
             if ($null -ne $browserContainer) {
-                # Takes the per-run NSS database, the browser profile and the
-                # artifacts directory with it: all of them live only inside here.
-                # Named by the identifier this run created, so nothing else can be
-                # removed even if the name were moved onto another container.
-                Remove-OwnedContainer $browserContainer
+                # Named by the identifier this run created, so nothing else can
+                # be removed even if the name were moved onto another container,
+                # and judged by the same production browser ownership validator
+                # the explicit Cleanup mode goes through, against expected
+                # values derived from this run's receipt and from the browser
+                # creation contract rather than from the container itself. The
+                # per-run NSS database, the browser profile and the artifacts
+                # directory are tmpfs and binds inside this container, so
+                # removing it is enough; no volume is named, forced or taken
+                # along.
+                Remove-OwnedContainer $browserContainer $browserContainerImage `
+                    (Get-E2EBrowserOwnershipContract -Receipt $Receipt)
             }
     }
-    ComposeDown = {
+    RemoveProjectResources = {
             if ($runState.ComposeStarted) {
-                Invoke-ComposeDown
+                # The same exact-resource cleanup the Cleanup mode uses. A
+                # project-wide `compose down` would also answer for whatever
+                # else happened to carry this project's label by the time it
+                # ran, which is not a question this run is entitled to answer.
+                Invoke-E2EProjectCleanup -Project $ProjectName -Receipt $Receipt
             }
         }
         RemoveOutput = {
@@ -2597,6 +2902,17 @@ function Get-E2ENormalizedImageRecord {
     }
 }
 
+# The prepared image records, read from the local image store and from nowhere
+# else.
+#
+# Every question this asks is a read: `docker image inspect` is answered from
+# the local store and reaches no registry, and nothing here creates, starts or
+# removes anything. That is the whole point of the split below it. A record
+# this has produced is still only a candidate, so the authoritative validator
+# runs on what comes back before any caller is allowed to act on it, and the
+# one mutation-capable preflight - the browser runtime check, which starts a
+# throwaway container - is a separate boundary that runs only after that
+# validator has accepted the record.
 function Assert-E2EOwnedImages {
     param([Parameter(Mandatory = $true)]$Receipt)
 
@@ -2606,13 +2922,112 @@ function Assert-E2EOwnedImages {
         AiService = Get-E2ENormalizedImageRecord -Reference $images.AiService -Role 'ai-service' -Receipt $Receipt
         Browser = Get-E2ENormalizedImageRecord -Reference $images.Browser -Role 'browser' -Receipt $Receipt
     }
-    $playwrightVersion = Get-PlaywrightVersion
-    $browserId = Assert-BrowserImage $playwrightVersion
-    if ($browserId -ne $records.Browser.Id) {
+    $browserId = Assert-BrowserImage (Get-PlaywrightVersion)
+    if ($browserId -cne $records.Browser.Id) {
         throw 'IMAGE_OWNERSHIP_INVALID'
     }
-    Assert-BrowserRuntime $browserId $playwrightVersion
+    Assert-E2EImageRecordSet -Values @($records) -Receipt $Receipt | Out-Null
     return $records
+}
+
+# The prepared browser image, proved from the inside.
+#
+# This is the one preflight step that runs a container, and it is deliberately
+# not part of the record reader above. A caller reaches it only with a record
+# the authoritative validator has already accepted, so a record describing some
+# other image can never be the thing that causes a container to be created,
+# started or removed. It re-derives the browser identifier from the daemon
+# rather than trusting a record it was handed, and it writes nothing to the
+# pipeline, so a success here cannot be mistaken for - or mixed into - an image
+# record.
+function Assert-E2EPreparedBrowserRuntime {
+    param([Parameter(Mandatory = $true)]$Receipt)
+
+    $playwrightVersion = Get-PlaywrightVersion
+    $browserId = Assert-BrowserImage $playwrightVersion
+    $images = Get-E2EImageSet -Receipt $Receipt
+    $record = Get-E2ENormalizedImageRecord -Reference $images.Browser -Role 'browser' -Receipt $Receipt
+    if ($browserId -cne $record.Id) {
+        throw 'IMAGE_OWNERSHIP_INVALID'
+    }
+    Assert-BrowserRuntime $browserId $playwrightVersion | Out-Null
+}
+
+# What the three prepared images actually are, according to the receipt and the
+# local image store rather than according to the record being checked.
+#
+# `docker image inspect` is answered entirely from the local store and reaches
+# no registry, so asking costs nothing but a read. What comes back is the only
+# thing a candidate record may be compared against: the exact reference the
+# receipt names, the exact image ID the daemon reports for that reference, the
+# five ownership labels the receipt implies, and the role. A record carrying a
+# well-formed `sha256:` string that is not this ID describes some other image,
+# and a format check on its own would accept it.
+function Get-E2EAuthoritativeImageIdentity {
+    param([Parameter(Mandatory = $true)]$Receipt)
+
+    $images = Get-E2EImageSet -Receipt $Receipt
+    $identity = [ordered]@{}
+    foreach ($entry in @(
+        @('Backend', 'backend', $images.Backend),
+        @('AiService', 'ai-service', $images.AiService),
+        @('Browser', 'browser', $images.Browser)
+    )) {
+        $document = Get-LocalImageDocument $entry[2]
+        if ($null -eq $document) { throw 'IMAGE_RECORD_INVALID' }
+        $identifier = Get-JsonMember $document 'Id'
+        if ($identifier -isnot [string] -or $identifier -cnotmatch '^sha256:[0-9a-f]{64}$') {
+            throw 'IMAGE_RECORD_INVALID'
+        }
+        $identity[$entry[0]] = [pscustomobject]@{
+            Reference = [string]$entry[2]
+            Id = [string]$identifier
+            Role = [string]$entry[1]
+            Labels = Get-E2EOwnershipLabels -Receipt $Receipt -Role $entry[1]
+        }
+    }
+    return $identity
+}
+
+function Assert-E2EImageRecordSet {
+    param([Parameter(Mandatory = $true)][object[]]$Values, [Parameter(Mandatory = $true)]$Receipt)
+
+    if ($Values.Count -ne 1 -or $Values[0] -isnot [System.Collections.Specialized.OrderedDictionary]) {
+        throw 'IMAGE_RECORD_INVALID'
+    }
+    $records = $Values[0]
+    $keys = @($records.Keys)
+    $expectedKeys = @('Backend', 'AiService', 'Browser')
+    if ($keys.Count -ne 3) { throw 'IMAGE_RECORD_INVALID' }
+    for ($index = 0; $index -lt 3; $index++) {
+        if (-not [string]::Equals([string]$keys[$index], $expectedKeys[$index], [System.StringComparison]::Ordinal)) {
+            throw 'IMAGE_RECORD_INVALID'
+        }
+    }
+    $authoritative = Get-E2EAuthoritativeImageIdentity -Receipt $Receipt
+    foreach ($key in $expectedKeys) {
+        $expected = $authoritative[$key]
+        $record = $records[$key]
+        if ($record -isnot [pscustomobject] -or
+            @($record.PSObject.Properties.Name).Count -ne 5 -or
+            @($record.PSObject.Properties.Name | Where-Object { $_ -notin @('Reference','Id','Labels','Role','InUse') }).Count -ne 0 -or
+            $record.Reference -isnot [string] -or $record.Reference -cne $expected.Reference -or
+            $record.Id -isnot [string] -or $record.Id -cnotmatch '^sha256:[0-9a-f]{64}$' -or
+            $record.Id -cne $expected.Id -or
+            $record.Role -isnot [string] -or $record.Role -cne $expected.Role -or
+            $record.InUse -isnot [bool] -or $record.InUse -or
+            $record.Labels -isnot [System.Collections.IDictionary]) {
+            throw 'IMAGE_RECORD_INVALID'
+        }
+        $labels = $expected.Labels
+        if ($record.Labels.Count -ne $labels.Count) { throw 'IMAGE_RECORD_INVALID' }
+        foreach ($name in $labels.Keys) {
+            if (-not $record.Labels.Contains($name) -or
+                -not [string]::Equals([string]$record.Labels[$name], [string]$labels[$name], [System.StringComparison]::Ordinal)) {
+                throw 'IMAGE_RECORD_INVALID'
+            }
+        }
+    }
 }
 
 function Invoke-E2EPrepareBuild {
@@ -2660,6 +3075,7 @@ function Invoke-E2EPrepareBuild {
     }
     Invoke-E2EPrepareBrowserBuildLifecycle -Boundaries $browserBuildBoundaries
     Assert-E2EOwnedImages -Receipt $Receipt | Out-Null
+    Assert-E2EPreparedBrowserRuntime -Receipt $Receipt | Out-Null
 }
 
 function Get-E2EComposeBaseArguments {
@@ -2670,21 +3086,619 @@ function Get-E2EComposeBaseArguments {
     )
 }
 
-function Invoke-E2EProjectCleanup {
-    param([Parameter(Mandatory = $true)][string]$Project)
+function Get-E2EComposeOwnershipContract {
+    param([Parameter(Mandatory = $true)][string]$Project, [Parameter(Mandatory = $true)]$Receipt,
+        [Parameter(Mandatory = $true)][string[]]$PresentServices)
 
     $arguments = Get-E2EComposeBaseArguments -Project $Project
-    Invoke-E2EInLocation -Path $RepositoryRoot -Body {
-        try { Invoke-Native { & docker @arguments down --volumes --remove-orphans } } catch {}
+    $encoded = Invoke-E2EInLocation -Path $RepositoryRoot -Body {
+        $output = Invoke-NativeStdout { & docker @arguments config --format json }
+        if ($LASTEXITCODE -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
+        return $output
     }
-    $containers = @(Invoke-NativeStdout { & docker ps -aq --filter "label=com.docker.compose.project=$Project" })
-    if ($LASTEXITCODE -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
-    $networks = @(Invoke-NativeStdout { & docker network ls -q --filter "label=com.docker.compose.project=$Project" })
-    if ($LASTEXITCODE -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
-    $volumes = @(Invoke-NativeStdout { & docker volume ls -q --filter "label=com.docker.compose.project=$Project" })
-    if ($LASTEXITCODE -ne 0 -or @($containers | Where-Object { $_ }).Count -ne 0 -or
-        @($networks | Where-Object { $_ }).Count -ne 0 -or @($volumes | Where-Object { $_ }).Count -ne 0) {
+    try { $config = $encoded | ConvertFrom-Json } catch { throw 'RESOURCE_CLEANUP_FAILED' }
+    if ((Get-JsonMember $config 'name') -cne $Project) { throw 'RESOURCE_CLEANUP_FAILED' }
+    $services = Get-JsonMember $config 'services'
+    $expectedServices = $E2EComposeServices
+    $actualServices = @(Get-JsonMemberNames $services)
+    if ($actualServices.Count -ne $expectedServices.Count -or
+        @($actualServices | Where-Object { $expectedServices -cnotcontains $_ }).Count -ne 0) {
         throw 'RESOURCE_CLEANUP_FAILED'
+    }
+    $images = Get-E2EImageSet -Receipt $Receipt
+    $unique = @{
+        backend = [pscustomobject]@{ Reference=$images.Backend; Role='backend' }
+        'ai-service' = [pscustomobject]@{ Reference=$images.AiService; Role='ai-service' }
+        'external-risk-mock' = [pscustomobject]@{ Reference=$images.AiService; Role='ai-service' }
+        'alertmanager-webhook' = [pscustomobject]@{ Reference=$images.AiService; Role='ai-service' }
+    }
+    $records = @{}
+    foreach ($service in $expectedServices) {
+        $definition = Get-JsonMember $services $service
+        $reference = Get-JsonMember $definition 'image'
+        $id = $null
+        if ($reference -isnot [string]) { throw 'RESOURCE_CLEANUP_FAILED' }
+        if ($unique.ContainsKey($service)) {
+            if ($reference -cne $unique[$service].Reference) { throw 'RESOURCE_CLEANUP_FAILED' }
+            if ($PresentServices -ccontains $service) {
+                $role = $unique[$service].Role
+                $image = Get-E2ENormalizedImageRecord -Reference $reference -Role $role -Receipt $Receipt
+                $id = $image.Id
+            }
+        }
+        else {
+            if ($reference -cnotmatch '^[^\s]+@sha256:[0-9a-f]{64}$') { throw 'RESOURCE_CLEANUP_FAILED' }
+            if ($PresentServices -ccontains $service) {
+                $image = Get-LocalImageDocument $reference
+                $id = Get-JsonMember $image 'Id'
+                if ($id -isnot [string] -or $id -cnotmatch '^sha256:[0-9a-f]{64}$') {
+                    throw 'RESOURCE_CLEANUP_FAILED'
+                }
+            }
+        }
+        $records[$service] = [pscustomobject]@{ Reference=$reference; Id=$id; Definition=$definition }
+    }
+    return $records
+}
+
+function Assert-E2EComposeContainerIdentity {
+    param($Document, [string]$Id, [string]$Project, [string]$Service, $Contract, $Receipt,
+        [string[]]$AllIds, [string]$PriorBackendId)
+
+    $config = Get-JsonMember $Document 'Config'
+    $labels = Get-JsonMember $config 'Labels'
+    $expectedFiles = @(
+        [System.IO.Path]::GetFullPath((Join-Path $RepositoryRoot 'infra/compose.yml')),
+        [System.IO.Path]::GetFullPath((Join-Path $RepositoryRoot 'infra/compose.keycloak-local-e2e.yml'))
+    ) -join ','
+    $observedFiles = Get-JsonMember $labels 'com.docker.compose.project.config_files'
+    $observedRoot = Get-JsonMember $labels 'com.docker.compose.project.working_dir'
+    if ((Get-JsonMember $Document 'Id') -cne $Id -or
+        (Get-JsonMember $labels 'com.docker.compose.project') -cne $Project -or
+        (Get-JsonMember $labels 'com.docker.compose.service') -cne $Service -or
+        (Get-JsonMember $labels 'com.docker.compose.container-number') -cne '1' -or
+        (Get-JsonMember $labels 'com.docker.compose.oneoff') -cnotin @('False','false') -or
+        $observedFiles -isnot [string] -or $observedFiles.Replace('/', '\') -cne $expectedFiles.Replace('/', '\') -or
+        $observedRoot -isnot [string] -or $observedRoot.Replace('/', '\') -cne ([System.IO.Path]::GetFullPath($RepositoryRoot)).Replace('/', '\') -or
+        (Get-JsonMember $config 'Image') -cne $Contract.Reference -or
+        (Get-JsonMember $Document 'Image') -cne $Contract.Id) {
+        throw 'RESOURCE_CLEANUP_FAILED'
+    }
+    if ($Service -in @('backend','ai-service','external-risk-mock','alertmanager-webhook')) {
+        $role = if ($Service -eq 'backend') { 'backend' } else { 'ai-service' }
+        $expectedLabels = Get-E2EOwnershipLabels -Receipt $Receipt -Role $role
+        foreach ($key in $expectedLabels.Keys) {
+            if ((Get-JsonMember $labels $key) -cne $expectedLabels[$key]) { throw 'RESOURCE_CLEANUP_FAILED' }
+        }
+    }
+    $host = Get-JsonMember $Document 'HostConfig'
+    $networkMode = Get-JsonMember $host 'NetworkMode'
+    $networks = Get-JsonMember (Get-JsonMember $Document 'NetworkSettings') 'Networks'
+    $definition = $Contract.Definition
+    $shared = Get-JsonMember $definition 'network_mode'
+    if ($null -ne $shared) {
+        if ($shared -cne 'service:backend') { throw 'RESOURCE_CLEANUP_FAILED' }
+        $actualNetworks = @(Get-JsonMemberNames $networks)
+        if ($networkMode -isnot [string] -or $networkMode -cnotmatch '^container:[0-9a-f]{64}$' -or
+            ($AllIds -cnotcontains $networkMode.Substring(10) -and $networkMode.Substring(10) -cne $PriorBackendId) -or
+            $actualNetworks.Count -ne 0) {
+            throw 'RESOURCE_CLEANUP_FAILED'
+        }
+    }
+    else {
+        $expectedNetworks = @((Get-JsonMemberNames (Get-JsonMember $definition 'networks')) | ForEach-Object { $Project + '_' + $_ })
+        $actualNetworks = @(Get-JsonMemberNames $networks)
+        if ($networkMode -cnotin $expectedNetworks) { throw 'RESOURCE_CLEANUP_FAILED' }
+        if ($actualNetworks.Count -ne $expectedNetworks.Count -or
+            @($actualNetworks | Where-Object { $expectedNetworks -cnotcontains $_ }).Count -ne 0) {
+            throw 'RESOURCE_CLEANUP_FAILED'
+        }
+    }
+    $mounts = @(Get-JsonMember $Document 'Mounts')
+    if ($Service -eq 'postgresql') {
+        $volumes = @($mounts | Where-Object { (Get-JsonMember $_ 'Type') -ceq 'volume' })
+        if ($volumes.Count -ne 1 -or (Get-JsonMember $volumes[0] 'Destination') -cne '/var/lib/postgresql/data' -or
+            (Get-JsonMember $volumes[0] 'Name') -cnotmatch '^[0-9a-f]{64}$') { throw 'RESOURCE_CLEANUP_FAILED' }
+    }
+    if ($Service -eq 'keycloak') {
+        $volume = @($mounts | Where-Object { (Get-JsonMember $_ 'Type') -ceq 'volume' })
+        if ($volume.Count -ne 1 -or (Get-JsonMember $volume[0] 'Name') -cne ($Project + '_keycloak-data') -or
+            (Get-JsonMember $volume[0] 'Destination') -cne '/opt/keycloak/data') { throw 'RESOURCE_CLEANUP_FAILED' }
+    }
+    if ($Service -eq 'keycloak-bootstrap') {
+        $bootstrap = @($mounts | Where-Object { (Get-JsonMember $_ 'Type') -ceq 'bind' -and
+            (Get-JsonMember $_ 'Destination') -ceq '/opt/finguardops/bootstrap.py' })
+        if ($bootstrap.Count -ne 1 -or
+            (Get-JsonMember $bootstrap[0] 'Source') -cne ([System.IO.Path]::GetFullPath((Join-Path $RepositoryRoot 'infra/keycloak/bootstrap.py')))) {
+            throw 'RESOURCE_CLEANUP_FAILED'
+        }
+    }
+    $declared = Get-JsonMember $definition 'volumes'
+    $declaredMounts = if ($null -eq $declared) { @() } else { @($declared) }
+    $approvedMounts = [System.Collections.Generic.List[object]]::new()
+    foreach ($volume in $declaredMounts) {
+        $type = Get-JsonMember $volume 'type'
+        $source = Get-JsonMember $volume 'source'
+        $target = Get-JsonMember $volume 'target'
+        if ($type -cnotin @('volume','bind') -or $target -isnot [string]) { throw 'RESOURCE_CLEANUP_FAILED' }
+        $expectedSource = if ($type -eq 'volume') { $Project + '_' + $source } else { $source }
+        $matches = @($mounts | Where-Object {
+            (Get-JsonMember $_ 'Type') -ceq $type -and
+            (Get-JsonMember $_ 'Destination') -ceq $target -and
+            $(if ($type -eq 'volume') { (Get-JsonMember $_ 'Name') -ceq $expectedSource }
+                else { (Get-JsonMember $_ 'Source') -ceq $expectedSource })
+        })
+        if ($matches.Count -ne 1) { throw 'RESOURCE_CLEANUP_FAILED' }
+        $approvedMounts.Add($matches[0])
+    }
+    $declaredSecrets = Get-JsonMember $definition 'secrets'
+    $secretEntries = if ($null -eq $declaredSecrets) { @() } else { @($declaredSecrets) }
+    foreach ($secret in $secretEntries) {
+        $target = Get-JsonMember $secret 'target'
+        if ($target -isnot [string] -or $target -match '[/\\]') { throw 'RESOURCE_CLEANUP_FAILED' }
+        $matches = @($mounts | Where-Object {
+            (Get-JsonMember $_ 'Type') -ceq 'bind' -and
+            (Get-JsonMember $_ 'Destination') -ceq ('/run/secrets/' + $target)
+        })
+        if ($matches.Count -ne 1) { throw 'RESOURCE_CLEANUP_FAILED' }
+        $approvedMounts.Add($matches[0])
+    }
+    foreach ($mount in $mounts) {
+        if ($approvedMounts.Contains($mount)) { continue }
+        if ($Service -eq 'postgresql' -and (Get-JsonMember $mount 'Type') -ceq 'volume' -and
+            (Get-JsonMember $mount 'Destination') -ceq '/var/lib/postgresql/data') { continue }
+        throw 'RESOURCE_CLEANUP_FAILED'
+    }
+}
+
+function Invoke-E2EProjectCleanup {
+    param([Parameter(Mandatory = $true)][string]$Project, [Parameter(Mandatory = $true)]$Receipt)
+
+    # One path, and it is the exact one.
+    #
+    # `docker compose down --volumes --remove-orphans` used to run here, with
+    # exact removal kept as a fallback. Two things were wrong with that. It is
+    # project-wide: `--remove-orphans` removes whatever carries the project
+    # label, which is a set an outside actor can add to, and `--volumes` takes
+    # volumes the verification above never looked at. And it is a second read
+    # of the world: whatever the inventory proved, the state `down` acts on is
+    # the state at the moment `down` runs, so the gap between the two could
+    # never be closed by checking harder beforehand. Removing only pinned
+    # identifiers, each re-verified immediately before it is used, closes it -
+    # a resource that changed underneath is no longer the resource that was
+    # approved, and the command names an identifier that no longer matches.
+    try {
+        $before = Get-E2EProjectResourceInventory -Project $Project -Receipt $Receipt
+        Invoke-E2EExactResourceCleanup -Before $before -Receipt $Receipt
+        $after = Get-E2EProjectResourceInventory -Project $Project -Receipt $Receipt -PreviousInventory $before
+        Assert-E2EInventorySubset -Before $before -After $after
+        if ($after.Containers.Count -ne 0 -or $after.Networks.Count -ne 0 -or
+            @(Get-E2EExistingVolumeNames -Names @($before.Volumes | ForEach-Object { [string]$_.Name })).Count -ne 0) {
+            throw 'RESOURCE_CLEANUP_FAILED'
+        }
+    }
+    catch { throw 'RESOURCE_CLEANUP_FAILED' }
+}
+
+function Get-E2EExistingVolumeNames {
+    param([string[]]$Names)
+    foreach ($name in $Names) {
+        $found = @(Get-E2EDockerLines { & docker volume ls -q --filter "name=^$name$" })
+        if ($found.Count -gt 1 -or
+            ($found.Count -eq 1 -and $found[0] -cne $name)) { throw 'RESOURCE_CLEANUP_FAILED' }
+        if ($found.Count -eq 1) { Write-Output $name }
+    }
+}
+
+# A JSON object of string values as an ordered map with ordinal keys.
+#
+# An absent member and an empty object are kept apart: a volume that declares
+# no `Options` at all is not the same volume as one whose options were emptied,
+# and the comparison below is entitled to notice the difference.
+function Get-E2EStringMap($Value) {
+    if ($null -eq $Value) { return $null }
+    $map = [System.Collections.Specialized.OrderedDictionary]::new([System.StringComparer]::Ordinal)
+    foreach ($name in @(Get-JsonMemberNames $Value)) {
+        $entry = Get-JsonMember $Value $name
+        if ($name -isnot [string] -or $entry -isnot [string] -or $map.Contains([string]$name)) {
+            throw 'RESOURCE_CLEANUP_FAILED'
+        }
+        $map[[string]$name] = [string]$entry
+    }
+    return $map
+}
+
+function Test-E2EStringMapEqual($Expected, $Actual) {
+    if ($null -eq $Expected -or $null -eq $Actual) {
+        return ($null -eq $Expected -and $null -eq $Actual)
+    }
+    if ($Expected.Count -ne $Actual.Count) { return $false }
+    foreach ($name in @($Expected.Keys)) {
+        if (-not $Actual.Contains($name)) { return $false }
+        if (-not [string]::Equals([string]$Expected[$name], [string]$Actual[$name], [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+# Everything Docker's Volume API can be asked about one volume, as one record.
+#
+# `docker volume rm` takes a name and nothing else: there is no immutable
+# volume ID and no compare-and-delete, so "is this still the volume that was
+# approved?" can only be answered from the fields the daemon does report. All
+# of them are captured here - the creation timestamp, the driver, the scope,
+# the mountpoint, every label and every driver option - and compared exactly
+# immediately before a removal. A volume that was replaced under the same name
+# between the inventory and the removal is a different record and is refused.
+#
+# This is the strongest identity the API offers. It does not claim to settle a
+# race run by an actor with direct daemon access between the last inspect and
+# the single delete command, which no caller of this API can close.
+function Get-E2EVolumeIdentity {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $encoded = Invoke-NativeStdout { & docker volume inspect --format '{{json .}}' $Name }
+    if ($LASTEXITCODE -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
+    try { $document = $encoded | ConvertFrom-Json } catch { throw 'RESOURCE_CLEANUP_FAILED' }
+    if ($null -eq $document -or $document -is [array] -or $document -is [string]) {
+        throw 'RESOURCE_CLEANUP_FAILED'
+    }
+    if ((Get-JsonMember $document 'Name') -cne $Name) { throw 'RESOURCE_CLEANUP_FAILED' }
+    $identity = [ordered]@{ Name = [string]$Name }
+    foreach ($field in @('CreatedAt', 'Driver', 'Scope', 'Mountpoint')) {
+        $value = Get-JsonMember $document $field
+        if ($value -isnot [string] -or $value.Length -eq 0) { throw 'RESOURCE_CLEANUP_FAILED' }
+        $identity[$field] = [string]$value
+    }
+    foreach ($field in @('Labels', 'Options')) {
+        $identity[$field] = Get-E2EStringMap (Get-JsonMember $document $field)
+    }
+    return [pscustomobject]$identity
+}
+
+function Test-E2EVolumeIdentityEqual($Expected, $Actual) {
+    if ($null -eq $Expected -or $null -eq $Actual) { return $false }
+    foreach ($field in @('Name', 'CreatedAt', 'Driver', 'Scope', 'Mountpoint')) {
+        if (-not [string]::Equals([string]$Expected.$field, [string]$Actual.$field, [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+    }
+    return (Test-E2EStringMapEqual $Expected.Labels $Actual.Labels) -and
+        (Test-E2EStringMapEqual $Expected.Options $Actual.Options)
+}
+
+# The argument vector for "exactly these names and nothing else".
+#
+# Docker's `name` filter is a regular expression, so an unanchored value would
+# also match a longer name that merely contains it. Every value produced here
+# is anchored at both ends, and repeated `name` values are ORed by Docker, so
+# the whole vector asks for the given names exactly.
+function Get-E2EExactNameFilters {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Names,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Prefix
+    )
+
+    $arguments = [System.Collections.Generic.List[string]]::new()
+    foreach ($name in $Names) {
+        $arguments.Add('--filter')
+        $arguments.Add('name=^' + $Prefix + [regex]::Escape($name) + '$')
+    }
+    return $arguments.ToArray()
+}
+
+function Get-E2EDockerLines([scriptblock]$Command) {
+    $output = Invoke-NativeStdout $Command
+    $code = $LASTEXITCODE
+    if ($code -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
+    if ([string]::IsNullOrEmpty($output)) { return }
+    foreach ($line in ($output -split '\r?\n')) {
+        if ($line.Length -ne 0) { Write-Output $line }
+    }
+}
+
+function Get-E2EProjectResourceInventory {
+    param([Parameter(Mandatory = $true)][string]$Project, [Parameter(Mandatory = $true)]$Receipt, $PreviousInventory)
+    if ($Project -cne $ProjectName -and $Project -cnotmatch '^finguardops-kc241-e2e-[0-9a-f]{12}$') {
+        throw 'RESOURCE_CLEANUP_FAILED'
+    }
+    $services = $E2EComposeServices
+    $networkNames = $E2EComposeNetworks
+    $volumeNames = $E2EComposeVolumes
+    $projectFilter = "label=com.docker.compose.project=$Project"
+    # What may be removed is decided by name, not by label.
+    #
+    # A label query answers "what currently carries this project's label",
+    # and that is a set an outside actor can add to between the answer and the
+    # removal. The names below are fixed by the Compose contract and by the
+    # project this run owns, so looking them up asks a question whose answer
+    # nobody else can extend. The label query still runs, immediately after and
+    # read-only, but only to refuse a project holding something these names do
+    # not account for - never to contribute a removal target.
+    $expectedNames = [ordered]@{}
+    foreach ($service in $services) { $expectedNames[$service] = $Project + '-' + $service + '-1' }
+    $nameFilters = Get-E2EExactNameFilters -Names @($expectedNames.Values) -Prefix '/'
+    $candidates = @(Get-E2EDockerLines { & docker ps -aq --no-trunc @nameFilters })
+    $ids = @()
+    $serviceDocuments = @{}
+    $presentServices = [System.Collections.Generic.List[string]]::new()
+    foreach ($id in $candidates) {
+        if ($id -cnotmatch '^[0-9a-f]{64}$' -or $ids -ccontains $id) { throw 'RESOURCE_CLEANUP_FAILED' }
+        $document = Get-ContainerDocument $id
+        $observedName = Get-JsonMember $document 'Name'
+        if ($observedName -isnot [string]) { throw 'RESOURCE_CLEANUP_FAILED' }
+        $service = $null
+        foreach ($candidate in $services) {
+            if ($observedName -ceq ('/' + $expectedNames[$candidate])) { $service = $candidate; break }
+        }
+        if ($null -eq $service -or $presentServices -ccontains $service) { throw 'RESOURCE_CLEANUP_FAILED' }
+        $declaredService = Get-JsonMember (Get-JsonMember (Get-JsonMember $document 'Config') 'Labels') 'com.docker.compose.service'
+        if ($declaredService -cne $service) { throw 'RESOURCE_CLEANUP_FAILED' }
+        $ids += $id
+        $serviceDocuments[$id] = $document
+        $presentServices.Add($service)
+    }
+    $labelled = @(Get-E2EDockerLines { & docker ps -aq --no-trunc --filter $projectFilter })
+    if ($labelled.Count -ne @($labelled | Sort-Object -Unique).Count) { throw 'RESOURCE_CLEANUP_FAILED' }
+    foreach ($id in $labelled) {
+        if ($id -cnotmatch '^[0-9a-f]{64}$' -or $ids -cnotcontains $id) { throw 'RESOURCE_CLEANUP_FAILED' }
+    }
+    $contract = if ($ids.Count -ne 0) { Get-E2EComposeOwnershipContract -Project $Project -Receipt $Receipt -PresentServices $presentServices.ToArray() } else { @{} }
+    $containers = [System.Collections.Generic.List[object]]::new()
+    $foundServices = [System.Collections.Generic.List[string]]::new()
+    $priorBackend = @()
+    if ($null -ne $PreviousInventory) {
+        if ($PreviousInventory.Project -cne $Project) { throw 'RESOURCE_CLEANUP_FAILED' }
+        $priorBackend = @($PreviousInventory.Containers | Where-Object { $_.Service -ceq 'backend' })
+        if ($priorBackend.Count -gt 1) { throw 'RESOURCE_CLEANUP_FAILED' }
+    }
+    $priorBackendId = if ($priorBackend.Count -eq 1) { [string]$priorBackend[0].Id } else { '' }
+    $anonymous = [System.Collections.Generic.List[string]]::new()
+    $mountedNamed = [System.Collections.Generic.List[string]]::new()
+    foreach ($id in $ids) {
+        if ($id -cnotmatch '^[0-9a-f]{64}$') { throw 'RESOURCE_CLEANUP_FAILED' }
+        $document = $serviceDocuments[$id]
+        $config = Get-JsonMember $document 'Config'
+        $labels = Get-JsonMember $config 'Labels'
+        $service = Get-JsonMember $labels 'com.docker.compose.service'
+        $state = Get-JsonMember $document 'State'
+        if ((Get-JsonMember $document 'Id') -cne $id -or
+            (Get-JsonMember $labels 'com.docker.compose.project') -cne $Project -or
+            $services -cnotcontains $service -or
+            (Get-JsonMember $state 'Running') -isnot [bool] -or
+            (Get-JsonMember $state 'Status') -notin @('running','exited','created','paused','restarting','dead')) {
+            throw 'RESOURCE_CLEANUP_FAILED'
+        }
+        if ($foundServices -ccontains $service) { throw 'RESOURCE_CLEANUP_FAILED' }
+        $foundServices.Add($service)
+        Assert-E2EComposeContainerIdentity -Document $document -Id $id -Project $Project `
+            -Service $service -Contract $contract[$service] -Receipt $Receipt -AllIds $ids -PriorBackendId $priorBackendId
+        foreach ($mount in @(Get-JsonMember $document 'Mounts')) {
+            if ((Get-JsonMember $mount 'Type') -cne 'volume') { continue }
+            $name = Get-JsonMember $mount 'Name'
+            if ($name -isnot [string] -or [string]::IsNullOrWhiteSpace($name)) { throw 'RESOURCE_CLEANUP_FAILED' }
+            if ($name -cmatch ('^' + [regex]::Escape($Project) + '_(?:' + ($volumeNames -join '|') + ')$')) {
+                if ($mountedNamed -cnotcontains $name) { $mountedNamed.Add($name) }
+            }
+            else {
+                if ($name -cnotmatch '^[0-9a-f]{64}$') { throw 'RESOURCE_CLEANUP_FAILED' }
+                if ($anonymous -cnotcontains $name) { $anonymous.Add($name) }
+            }
+        }
+        $containers.Add([pscustomobject]@{ Id=$id; Service=$service; Image=(Get-JsonMember $document 'Image');
+            ImageReference=(Get-JsonMember $config 'Image'); Running=(Get-JsonMember $state 'Running');
+            NetworkMode=(Get-JsonMember (Get-JsonMember $document 'HostConfig') 'NetworkMode');
+            NetworkAttachments=(Get-JsonMember (Get-JsonMember $document 'NetworkSettings') 'Networks') })
+    }
+    $backendEntries = @($containers | Where-Object { $_.Service -ceq 'backend' })
+    foreach ($entry in $containers) {
+        if ($entry.Service -in @('external-risk-mock','keycloak','keycloak-bootstrap','keycloak-verify')) {
+            $expectedBackendId = if ($backendEntries.Count -eq 1) { $backendEntries[0].Id } else { $priorBackendId }
+            if ([string]::IsNullOrEmpty($expectedBackendId) -or $entry.NetworkMode -cne ('container:' + $expectedBackendId)) {
+                throw 'RESOURCE_CLEANUP_FAILED'
+            }
+        }
+    }
+    $expectedNetworks = [ordered]@{}
+    foreach ($networkName in $networkNames) { $expectedNetworks[$networkName] = $Project + '_' + $networkName }
+    $networkFilters = Get-E2EExactNameFilters -Names @($expectedNetworks.Values) -Prefix ''
+    $networkCandidates = @(Get-E2EDockerLines { & docker network ls -q --no-trunc @networkFilters })
+    $networks = [System.Collections.Generic.List[object]]::new()
+    $networkIdentifiers = [System.Collections.Generic.List[string]]::new()
+    foreach ($id in $networkCandidates) {
+        if ($id -cnotmatch '^[0-9a-f]{64}$' -or $networkIdentifiers -ccontains $id) { throw 'RESOURCE_CLEANUP_FAILED' }
+        $networkIdentifiers.Add($id)
+        $encoded = Invoke-NativeStdout { & docker network inspect --format '{{json .}}' $id }
+        if ($LASTEXITCODE -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
+        try { $document = $encoded | ConvertFrom-Json } catch { throw 'RESOURCE_CLEANUP_FAILED' }
+        $labels = Get-JsonMember $document 'Labels'
+        $network = Get-JsonMember $labels 'com.docker.compose.network'
+        $attached = @(Get-JsonMemberNames (Get-JsonMember $document 'Containers'))
+        $observedName = Get-JsonMember $document 'Name'
+        if ($network -isnot [string] -or $networkNames -cnotcontains $network -or
+            $observedName -isnot [string] -or $observedName -cne $expectedNetworks[$network] -or
+            (Get-JsonMember $document 'Id') -cne $id -or
+            (Get-JsonMember $labels 'com.docker.compose.project') -cne $Project -or
+            @($networks | Where-Object { $_.Name -ceq $network }).Count -ne 0 -or
+            @($attached | Where-Object { $ids -cnotcontains $_ }).Count -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
+        $networks.Add([pscustomobject]@{ Id=$id; Name=$network; Attached=$attached })
+    }
+    $networkIds = @($networkIdentifiers.ToArray())
+    $labelledNetworks = @(Get-E2EDockerLines { & docker network ls -q --no-trunc --filter $projectFilter })
+    if ($labelledNetworks.Count -ne @($labelledNetworks | Sort-Object -Unique).Count) { throw 'RESOURCE_CLEANUP_FAILED' }
+    foreach ($id in $labelledNetworks) {
+        if ($id -cnotmatch '^[0-9a-f]{64}$' -or $networkIds -cnotcontains $id) { throw 'RESOURCE_CLEANUP_FAILED' }
+    }
+    foreach ($entry in $containers) {
+        foreach ($name in @(Get-JsonMemberNames $entry.NetworkAttachments)) {
+            $matches = @($networks | Where-Object { $_.Name -ceq $name.Substring($Project.Length + 1) })
+            $attachment = Get-JsonMember $entry.NetworkAttachments $name
+            if ($matches.Count -ne 1 -or $name -cnotlike ($Project + '_*') -or
+                (Get-JsonMember $attachment 'NetworkID') -cne $matches[0].Id -or
+                $matches[0].Attached -cnotcontains $entry.Id) { throw 'RESOURCE_CLEANUP_FAILED' }
+        }
+    }
+    $expectedVolumes = @($volumeNames | ForEach-Object { $Project + '_' + $_ })
+    $named = @(Get-E2EExistingVolumeNames -Names $expectedVolumes)
+    if ($named.Count -ne @($named | Sort-Object -Unique).Count) { throw 'RESOURCE_CLEANUP_FAILED' }
+    $labelledVolumes = @(Get-E2EDockerLines { & docker volume ls -q --filter $projectFilter })
+    if ($labelledVolumes.Count -ne @($labelledVolumes | Sort-Object -Unique).Count) { throw 'RESOURCE_CLEANUP_FAILED' }
+    foreach ($name in $labelledVolumes) {
+        if ($named -cnotcontains $name) { throw 'RESOURCE_CLEANUP_FAILED' }
+    }
+    if (@($mountedNamed | Where-Object { $named -cnotcontains $_ }).Count -ne 0) {
+        throw 'RESOURCE_CLEANUP_FAILED'
+    }
+    # Each volume is pinned as its whole identity rather than as a name, so the
+    # removal step has something to compare against that a same-name volume
+    # created in the meantime does not satisfy.
+    $volumes = [System.Collections.Generic.List[object]]::new()
+    $volumeIdentityNames = [System.Collections.Generic.List[string]]::new()
+    foreach ($name in @($named) + @($anonymous)) {
+        $identity = Get-E2EVolumeIdentity -Name $name
+        $labels = $identity.Labels
+        if ($null -eq $labels) { throw 'RESOURCE_CLEANUP_FAILED' }
+        if ($named -ccontains $name) {
+            if (-not $labels.Contains('com.docker.compose.volume') -or
+                -not $labels.Contains('com.docker.compose.project')) { throw 'RESOURCE_CLEANUP_FAILED' }
+            $volume = [string]$labels['com.docker.compose.volume']
+            if ($volumeNames -cnotcontains $volume -or $name -cne ($Project + '_' + $volume) -or
+                [string]$labels['com.docker.compose.project'] -cne $Project) { throw 'RESOURCE_CLEANUP_FAILED' }
+        }
+        elseif (-not $labels.Contains('com.docker.volume.anonymous') -or
+            [string]$labels['com.docker.volume.anonymous'] -cne '') { throw 'RESOURCE_CLEANUP_FAILED' }
+        if ($volumeIdentityNames -ccontains $name) { throw 'RESOURCE_CLEANUP_FAILED' }
+        $volumeIdentityNames.Add($name)
+        $volumes.Add($identity)
+    }
+    # A volume seen only in an owned mount must never also serve another container.
+    if ($volumes.Count -ne 0) {
+        $allIds = @(Get-E2EDockerLines { & docker ps -aq --no-trunc })
+        foreach ($id in $allIds) {
+            $document = Get-ContainerDocument $id
+            foreach ($mount in @(Get-JsonMember $document 'Mounts')) {
+                if ((Get-JsonMember $mount 'Type') -eq 'volume' -and
+                    $volumeIdentityNames -ccontains (Get-JsonMember $mount 'Name') -and $ids -cnotcontains $id) {
+                    throw 'RESOURCE_CLEANUP_FAILED'
+                }
+            }
+        }
+    }
+    return [pscustomobject]@{ Project=$Project; Containers=@($containers.ToArray());
+        Networks=@($networks.ToArray()); Volumes=@($volumes.ToArray()) }
+}
+
+function Assert-E2EInventorySubset {
+    param($Before, $After)
+    if ($Before.Project -cne $After.Project) { throw 'RESOURCE_CLEANUP_FAILED' }
+    foreach ($current in $After.Containers) {
+        $prior = @($Before.Containers | Where-Object { $_.Id -ceq $current.Id })
+        if ($prior.Count -ne 1 -or $prior[0].Service -cne $current.Service -or
+            $prior[0].Image -cne $current.Image -or $prior[0].ImageReference -cne $current.ImageReference) {
+            throw 'RESOURCE_CLEANUP_FAILED'
+        }
+    }
+    foreach ($current in $After.Networks) {
+        $prior = @($Before.Networks | Where-Object { $_.Id -ceq $current.Id })
+        if ($prior.Count -ne 1 -or $prior[0].Name -cne $current.Name) { throw 'RESOURCE_CLEANUP_FAILED' }
+    }
+    foreach ($current in $After.Volumes) {
+        $prior = @($Before.Volumes | Where-Object { $_.Name -ceq $current.Name })
+        if ($prior.Count -ne 1 -or -not (Test-E2EVolumeIdentityEqual $prior[0] $current)) {
+            throw 'RESOURCE_CLEANUP_FAILED'
+        }
+    }
+}
+
+# The only path by which this script removes a Compose resource.
+#
+# Every target here is an identifier that the inventory pinned and approved,
+# and every target is re-established immediately before the command that acts
+# on it: the inventory is taken again, proved to be a subset of what was
+# approved, and the entry looked up by its exact full identifier. A container
+# that was replaced under the same name is a different identifier and is simply
+# not found; a network that acquired an attachment, or a volume that acquired a
+# user, fails rather than being removed. Nothing is matched by prefix, glob,
+# project label or service label, nothing is forced, and nothing this run did
+# not approve is named.
+function Invoke-E2EExactResourceCleanup {
+    param($Before, [Parameter(Mandatory = $true)]$Receipt)
+    foreach ($entry in $Before.Containers) {
+        $current = Get-E2EProjectResourceInventory -Project $Before.Project -Receipt $Receipt -PreviousInventory $Before
+        Assert-E2EInventorySubset -Before $Before -After $current
+        $owned = @($current.Containers | Where-Object { $_.Id -ceq $entry.Id })
+        if ($owned.Count -eq 0) { continue }
+        if ($owned[0].Running) {
+            Invoke-Native { & docker stop $entry.Id 2>$null | Out-Null }
+            $code = $LASTEXITCODE
+            if ($code -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
+            $stopped = Get-ContainerDocument $entry.Id
+            if ((Get-JsonMember $stopped 'Id') -cne $entry.Id -or
+                (Get-JsonMember (Get-JsonMember $stopped 'State') 'Running') -ne $false) {
+                throw 'RESOURCE_CLEANUP_FAILED'
+            }
+            # Stopping is itself a window, so ownership of this exact identifier
+            # is established once more before anything is removed.
+            $current = Get-E2EProjectResourceInventory -Project $Before.Project -Receipt $Receipt -PreviousInventory $Before
+            Assert-E2EInventorySubset -Before $Before -After $current
+            if (@($current.Containers | Where-Object { $_.Id -ceq $entry.Id }).Count -ne 1) {
+                throw 'RESOURCE_CLEANUP_FAILED'
+            }
+        }
+        Invoke-Native { & docker rm $entry.Id 2>$null | Out-Null }
+        $code = $LASTEXITCODE
+        if ($code -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
+        $remaining = Get-E2EProjectResourceInventory -Project $Before.Project -Receipt $Receipt -PreviousInventory $Before
+        Assert-E2EInventorySubset -Before $Before -After $remaining
+        if (@($remaining.Containers | Where-Object { $_.Id -ceq $entry.Id }).Count -ne 0) {
+            throw 'RESOURCE_CLEANUP_FAILED'
+        }
+    }
+    foreach ($entry in $Before.Networks) {
+        $current = Get-E2EProjectResourceInventory -Project $Before.Project -Receipt $Receipt -PreviousInventory $Before
+        Assert-E2EInventorySubset -Before $Before -After $current
+        $owned = @($current.Networks | Where-Object { $_.Id -ceq $entry.Id })
+        if ($owned.Count -eq 0) { continue }
+        if ($owned[0].Attached.Count -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
+        Invoke-Native { & docker network rm $entry.Id 2>$null | Out-Null }
+        $code = $LASTEXITCODE
+        if ($code -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
+        $remaining = Get-E2EProjectResourceInventory -Project $Before.Project -Receipt $Receipt -PreviousInventory $Before
+        Assert-E2EInventorySubset -Before $Before -After $remaining
+        if (@($remaining.Networks | Where-Object { $_.Id -ceq $entry.Id }).Count -ne 0) {
+            throw 'RESOURCE_CLEANUP_FAILED'
+        }
+    }
+    foreach ($entry in $Before.Volumes) {
+        $name = [string]$entry.Name
+        $current = Get-E2EProjectResourceInventory -Project $Before.Project -Receipt $Receipt -PreviousInventory $Before
+        Assert-E2EInventorySubset -Before $Before -After $current
+        # A volume that is simply gone is nothing to do. A volume that is still
+        # there has to be the same volume: the exact name is inspected once
+        # more and every field the Volume API reports - creation time, driver,
+        # scope, mountpoint, labels, options - has to equal what the inventory
+        # pinned. One difference, and this leaves it alone rather than removing
+        # whatever now answers to that name.
+        if (@(Get-E2EExistingVolumeNames -Names @($name)).Count -eq 0) { continue }
+        if (-not (Test-E2EVolumeIdentityEqual $entry (Get-E2EVolumeIdentity -Name $name))) {
+            throw 'RESOURCE_CLEANUP_FAILED'
+        }
+        $allIds = @(Get-E2EDockerLines { & docker ps -aq --no-trunc })
+        foreach ($id in $allIds) {
+            $document = Get-ContainerDocument $id
+            if (@(Get-JsonMember $document 'Mounts' | Where-Object {
+                    (Get-JsonMember $_ 'Type') -eq 'volume' -and (Get-JsonMember $_ 'Name') -ceq $name
+                }).Count -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
+        }
+        # The exact name, without `--force`, without a prefix, a glob or a
+        # label. This is the only volume removal this script performs.
+        Invoke-Native { & docker volume rm $name 2>$null | Out-Null }
+        $code = $LASTEXITCODE
+        if ($code -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
+        if (@(Get-E2EExistingVolumeNames -Names @($name)).Count -ne 0) {
+            throw 'RESOURCE_CLEANUP_FAILED'
+        }
     }
 }
 
@@ -2729,33 +3743,81 @@ function Assert-E2EExistingProjectOwnership {
     }
 }
 
+# The explicit Cleanup mode's browser container.
+#
+# Discovery is all this does on its own: the one fixed name this script ever
+# gives a browser container answers with a candidate full identifier, and every
+# decision about whether that identifier may be stopped or removed belongs to
+# the boundary the Run-end cleanup goes through - `Remove-OwnedContainer`,
+# handed the receipt-derived browser ownership contract. There is no second,
+# weaker browser deletion for this mode to use.
+#
+# A name that nothing carries is success: there is nothing here to finish, and
+# the contract is deliberately not built in that case, so a mode that runs
+# after the owned images are already gone stays idempotent rather than failing
+# on an image nothing needs.
 function Remove-E2EOwnedBrowserContainer {
     param([Parameter(Mandatory = $true)]$Receipt)
 
-    $ids = @(Invoke-NativeStdout { & docker ps -aq --filter "name=^/$BrowserContainerName$" })
-    if ($LASTEXITCODE -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
-    $ids = @($ids | Where-Object { $_ })
+    $filters = Get-E2EExactNameFilters -Names @($BrowserContainerName) -Prefix '/'
+    $ids = @(Get-E2EDockerLines { & docker ps -aq --no-trunc @filters })
     if ($ids.Count -eq 0) { return }
-    if ($ids.Count -ne 1) { throw 'RESOURCE_OWNERSHIP_INVALID' }
-    $images = Get-E2EImageSet -Receipt $Receipt
-    $record = Get-E2ENormalizedImageRecord -Reference $images.Browser -Role 'browser' -Receipt $Receipt
-    $document = Get-ContainerDocument $ids[0]
-    $config = Get-JsonMember $document 'Config'
-    if ((Get-JsonMember $config 'Image') -ne $record.Id -or (Get-JsonMember $document 'Image') -ne $record.Id) {
+    if ($ids.Count -ne 1 -or $ids[0] -cnotmatch '^[0-9a-f]{64}$') {
         throw 'RESOURCE_OWNERSHIP_INVALID'
     }
-    Invoke-Native { & docker rm -f $ids[0] | Out-Null }
-    Assert-Success 'Dedicated browser container cleanup'
+    $contract = Get-E2EBrowserOwnershipContract -Receipt $Receipt
+    Remove-OwnedContainer $ids[0] $contract.ImageId $contract
 }
 
 function Invoke-E2EResourceCleanup {
     param([Parameter(Mandatory = $true)]$Receipt)
 
-    Remove-E2EOwnedBrowserContainer -Receipt $Receipt
+    $serviceProject = Get-E2EServiceProjectName -Receipt $Receipt
+    # Every read-only question about both projects is asked before the first
+    # command that changes anything, so a world this run does not recognise
+    # stops it while there is still nothing to undo.
+    Get-E2EProjectResourceInventory -Project $ProjectName -Receipt $Receipt | Out-Null
+    Get-E2EProjectResourceInventory -Project $serviceProject -Receipt $Receipt | Out-Null
     Assert-E2EExistingProjectOwnership -Receipt $Receipt -Project $ProjectName
-    Assert-E2EExistingProjectOwnership -Receipt $Receipt -Project (Get-E2EServiceProjectName -Receipt $Receipt)
-    Invoke-E2EProjectCleanup -Project $ProjectName
-    Invoke-E2EProjectCleanup -Project (Get-E2EServiceProjectName -Receipt $Receipt)
+    Assert-E2EExistingProjectOwnership -Receipt $Receipt -Project $serviceProject
+    Remove-E2EOwnedBrowserContainer -Receipt $Receipt
+    Invoke-E2EProjectCleanup -Project $ProjectName -Receipt $Receipt
+    Invoke-E2EProjectCleanup -Project $serviceProject -Receipt $Receipt
+}
+
+# The read-only statement that cleanup actually finished.
+#
+# Every removal above proved its own target gone, but "each target is gone" is
+# not "nothing owned is left": a resource that appeared under either project
+# while cleanup was running, or an owned image the image step did not remove,
+# satisfies every individual proof. The receipt is what lets a later run find
+# and finish this work, so it is deleted only after this says there is nothing
+# left to find. Nothing here removes anything.
+function Invoke-E2EResidueAudit {
+    param([Parameter(Mandatory = $true)]$Receipt)
+
+    foreach ($project in @($ProjectName, (Get-E2EServiceProjectName -Receipt $Receipt))) {
+        $inventory = $null
+        try {
+            $inventory = Get-E2EProjectResourceInventory -Project $project -Receipt $Receipt
+        }
+        catch { throw 'CLEANUP_RESIDUE_DETECTED' }
+        if ($inventory.Containers.Count -ne 0 -or $inventory.Networks.Count -ne 0 -or
+            $inventory.Volumes.Count -ne 0) {
+            throw 'CLEANUP_RESIDUE_DETECTED'
+        }
+    }
+    $browserFilter = 'name=^/' + $BrowserContainerName + '$'
+    $remaining = $null
+    try {
+        $remaining = @(Get-E2EDockerLines { & docker ps -aq --no-trunc --filter $browserFilter })
+    }
+    catch { throw 'CLEANUP_RESIDUE_DETECTED' }
+    if ($remaining.Count -ne 0) { throw 'CLEANUP_RESIDUE_DETECTED' }
+    $images = Get-E2EImageSet -Receipt $Receipt
+    foreach ($reference in @($images.Backend, $images.AiService, $images.Browser)) {
+        if ($null -ne (Get-LocalImageDocument $reference)) { throw 'CLEANUP_RESIDUE_DETECTED' }
+    }
 }
 
 function Invoke-E2EImageCleanup {
@@ -2805,13 +3867,16 @@ function Invoke-E2EFullCleanup {
         $LeafBoundaries = @{
             ResourceCleanup = { param($value) Invoke-E2EResourceCleanup -Receipt $value }
             ImageCleanup = { param($value) Invoke-E2EImageCleanup -Receipt $value }
+            FinalAudit = { param($value) Invoke-E2EResidueAudit -Receipt $value }
             DeleteFile = { param([string]$value) [System.IO.File]::Delete($value) }
         }
     }
     $resourceCleanup = $LeafBoundaries['ResourceCleanup']
     $imageCleanup = $LeafBoundaries['ImageCleanup']
+    $finalAudit = $LeafBoundaries['FinalAudit']
     $deleteFile = $LeafBoundaries['DeleteFile']
-    if ($resourceCleanup -isnot [scriptblock] -or $imageCleanup -isnot [scriptblock] -or $deleteFile -isnot [scriptblock]) {
+    if ($resourceCleanup -isnot [scriptblock] -or $imageCleanup -isnot [scriptblock] -or
+        $finalAudit -isnot [scriptblock] -or $deleteFile -isnot [scriptblock]) {
         throw 'CLEANUP_BOUNDARY_INVALID'
     }
     $actions = @(
@@ -2823,7 +3888,12 @@ function Invoke-E2EFullCleanup {
         [pscustomobject]@{
             Action = { & $imageCleanup $Receipt }.GetNewClosure()
             ErrorCode = 'IMAGE_CLEANUP_FAILED'
-            SkipAfterCleanupFailure = $false
+            SkipAfterCleanupFailure = $true
+        },
+        [pscustomobject]@{
+            Action = { & $finalAudit $Receipt }.GetNewClosure()
+            ErrorCode = 'CLEANUP_RESIDUE_DETECTED'
+            SkipAfterCleanupFailure = $true
         },
         [pscustomobject]@{
             Action = { Remove-E2EReceiptFile -Path $ReceiptPath -RepositoryRoot $RepositoryRootPath -DeleteFile $deleteFile }.GetNewClosure()
@@ -2840,7 +3910,9 @@ function Assert-E2EContainerImages {
         [Parameter(Mandatory = $true)][string]$Project
     )
 
-    $records = Assert-E2EOwnedImages -Receipt $Receipt
+    $values = @(Assert-E2EOwnedImages -Receipt $Receipt)
+    Assert-E2EImageRecordSet -Values $values -Receipt $Receipt
+    $records = $values[0]
     $images = Get-E2EImageSet -Receipt $Receipt
     $expected = @{
         backend = [pscustomobject]@{ Reference = $images.Backend; Id = $records.Backend.Id }
@@ -2941,10 +4013,11 @@ function Invoke-E2EServiceMode {
         $boundaries = @{
             ReadPrepared = { return $activeReceipt }
             RenamePreparedToRecovery = { Move-E2EReceiptFile -Source $PreparedReceiptPath -Destination $RecoveryReceiptPath -RepositoryRoot $RepositoryRoot }
-            AssertImages = { param($value) Assert-E2EOwnedImages -Receipt $value | Out-Null }
+            AssertImages = { param($value) Assert-E2EOwnedImages -Receipt $value }
+            AssertBrowserRuntime = { param($value) Assert-E2EPreparedBrowserRuntime -Receipt $value }
             RunChild = { param($value) Invoke-E2EServiceChild -Receipt $value }
             AssertContainers = { param($value) Assert-E2EContainerImages -Receipt $value -Project (Get-E2EServiceProjectName -Receipt $value) }
-            CleanupResources = { Invoke-E2EProjectCleanup -Project (Get-E2EServiceProjectName -Receipt $activeReceipt) }
+            CleanupResources = { Invoke-E2EProjectCleanup -Project (Get-E2EServiceProjectName -Receipt $activeReceipt) -Receipt $activeReceipt }
             RenameRecoveryToPrepared = { Move-E2EReceiptFile -Source $RecoveryReceiptPath -Destination $PreparedReceiptPath -RepositoryRoot $RepositoryRoot }
             Cleanup = { param($value) Invoke-E2EFullCleanup -Receipt $value -ReceiptPath $RecoveryReceiptPath }
         }
@@ -2982,7 +4055,10 @@ function Invoke-E2EValidateMode {
     Assert-E2ESourceMatchesReceipt -Receipt $receipt
     $moduleBody = {
         param($activeReceipt)
-        $records = Assert-E2EOwnedImages -Receipt $activeReceipt
+        $values = @(Assert-E2EOwnedImages -Receipt $activeReceipt)
+        Assert-E2EImageRecordSet -Values $values -Receipt $activeReceipt
+        Assert-E2EPreparedBrowserRuntime -Receipt $activeReceipt | Out-Null
+        $records = $values[0]
         $certificate = Assert-SafeCertificate $CertificatePath
         $primary = $null
         try { Assert-CertificateKeyPair $records.Browser.Id } catch { $primary = $_.Exception }
