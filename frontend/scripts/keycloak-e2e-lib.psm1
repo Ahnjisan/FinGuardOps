@@ -609,11 +609,24 @@ function Select-E2EFailure {
 function Get-E2ESafeCleanupFailure {
     param(
         [Parameter(Mandatory = $true)]$ErrorRecord,
-        [Parameter(Mandatory = $true)][ValidatePattern('^[A-Z][A-Z0-9_]{0,63}$')][string]$FallbackCode
+        [Parameter(Mandatory = $true)][ValidatePattern('\A[A-Z][A-Z0-9_]{0,63}\z')][string]$FallbackCode
     )
 
+    # `$` is not the end of the string. It also matches immediately before a
+    # final line feed, so `RESOURCE_CLEANUP_FAILED<LF>` satisfied the old
+    # pattern and was handed straight back as the operational failure - one
+    # smuggled line break, in the one value this boundary exists to keep fixed,
+    # and a line break is what turns one record in a run log into two. The
+    # anchors are absolute here, and the candidate has to be a scalar this run
+    # is willing to decide on at all before the pattern is applied to it.
+    #
+    # A candidate that is anything else is not repaired into a code and is not
+    # echoed: the caller's own fixed fallback is raised instead, so nothing the
+    # failing boundary was handed reaches the message.
     $exception = $ErrorRecord.Exception
-    if ($null -ne $exception -and $exception.Message -cmatch '^[A-Z][A-Z0-9_]{0,63}$') {
+    if ($null -ne $exception -and $exception.Message -is [string] -and
+        (Test-E2ECleanScalar $exception.Message) -and
+        $exception.Message -cmatch '\A[A-Z][A-Z0-9_]{0,63}\z') {
         return $exception
     }
     return [System.InvalidOperationException]::new($FallbackCode)
@@ -1336,7 +1349,7 @@ function Get-ComposeServiceImages {
 # no registry metadata lookup and no authentication, even when the answer is no.
 function Get-LocalImageIdentifier([string]$Reference) {
     $identifier = (Invoke-NativeStdout { & docker image inspect --format '{{.Id}}' $Reference }).Trim()
-    if ($LASTEXITCODE -ne 0 -or $identifier -notmatch '^sha256:[0-9a-f]{64}$') {
+    if ($LASTEXITCODE -ne 0 -or $identifier -notmatch '\Asha256:[0-9a-f]{64}\z') {
         return $null
     }
     return $identifier
@@ -1420,7 +1433,7 @@ function Get-ImageLayers($Document, [string]$Message) {
         throw $Message
     }
     foreach ($layer in $layers) {
-        if ($layer -isnot [string] -or $layer -notmatch '^sha256:[0-9a-f]{64}$') {
+        if ($layer -isnot [string] -or $layer -notmatch '\Asha256:[0-9a-f]{64}\z') {
             throw $Message
         }
     }
@@ -1455,7 +1468,7 @@ function Assert-BrowserImage([string]$PlaywrightVersion) {
     }
 
     $identifier = Get-JsonMember $customDocument 'Id'
-    if ($identifier -isnot [string] -or $identifier -notmatch '^sha256:[0-9a-f]{64}$') {
+    if ($identifier -isnot [string] -or $identifier -notmatch '\Asha256:[0-9a-f]{64}\z') {
         throw 'The prepared browser image identifier could not be read.'
     }
 
@@ -1563,6 +1576,92 @@ function Test-JsonFlag($Value) {
     return ($Value -is [bool]) -and $Value
 }
 
+# The comparison every ownership decision below is made with.
+#
+# PowerShell's string operators compare through a culture, and on this platform
+# the invariant culture treats a Unicode Format character as no character at
+# all. `-ceq`, `-cne`, `-ccontains`, `-cnotcontains`, `-cin` and `-cnotin` each
+# answer that `finguardops-kc241-e2e-local` and the same name carrying a
+# SOFT HYPHEN, a ZERO WIDTH NON-JOINER, a ZERO WIDTH JOINER, a WORD JOINER or a
+# ZERO WIDTH NO-BREAK SPACE are one string - and `-eq`/`-ne` additionally
+# answer that they are one string in either letter case. Every value these
+# decisions are taken on comes from the daemon, so a foreign container,
+# network, volume or image could be spelled into carrying a label, a name or an
+# identifier this run would otherwise have refused.
+#
+# So the decision is taken on the UTF-16 sequence itself. Nothing is trimmed,
+# stripped or normalized first and nothing already approved becomes refused: a
+# candidate whose sequence differs from the expected one by a single character
+# is a different value and is refused as the value it is. A value that is not a
+# string, on either side, is a difference as well.
+function Test-E2EOrdinalEqual($Left, $Right) {
+    if ($Left -isnot [string] -or $Right -isnot [string]) {
+        return $false
+    }
+    return [string]::Equals([string]$Left, [string]$Right, [System.StringComparison]::Ordinal)
+}
+
+# The same decision for a canonical Windows path, where letter case is the one
+# difference Windows itself does not treat as a difference. Everything else,
+# including a smuggled Format character, still is one.
+function Test-E2EOrdinalPathEqual($Left, $Right) {
+    if ($Left -isnot [string] -or $Right -isnot [string]) {
+        return $false
+    }
+    return [string]::Equals([string]$Left, [string]$Right, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+# Membership, decided one element at a time by the comparison above rather than
+# by the collection operators, which compare through the same culture.
+function Test-E2EOrdinalContains($Values, $Candidate) {
+    if ($Candidate -isnot [string]) {
+        return $false
+    }
+    foreach ($value in @($Values)) {
+        if (Test-E2EOrdinalEqual $value $Candidate) {
+            return $true
+        }
+    }
+    return $false
+}
+
+# Two sequences: the same count, and the same value at each position.
+function Test-E2EOrdinalSequenceEqual($Expected, $Actual) {
+    $left = @($Expected)
+    $right = @($Actual)
+    if ($left.Count -ne $right.Count) {
+        return $false
+    }
+    for ($index = 0; $index -lt $left.Count; $index++) {
+        if (-not (Test-E2EOrdinalEqual $left[$index] $right[$index])) {
+            return $false
+        }
+    }
+    return $true
+}
+
+# Two sets, compared through an explicit ordinal comparer. A repeated value on
+# either side is not a set and is refused rather than collapsed.
+function Test-E2EOrdinalSetEqual($Expected, $Actual) {
+    $left = @($Expected)
+    $right = @($Actual)
+    if ($left.Count -ne $right.Count) {
+        return $false
+    }
+    $remaining = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($value in $left) {
+        if ($value -isnot [string] -or -not $remaining.Add([string]$value)) {
+            return $false
+        }
+    }
+    foreach ($value in $right) {
+        if ($value -isnot [string] -or -not $remaining.Remove([string]$value)) {
+            return $false
+        }
+    }
+    return $remaining.Count -eq 0
+}
+
 function Assert-NoEntries($Value, [string]$Message) {
     if ($null -eq $Value) {
         return
@@ -1577,14 +1676,8 @@ function Assert-ExactStrings($Value, [string[]]$Expected, [string]$Message) {
     if ($null -ne $Value) {
         $observed = @($Value)
     }
-    if ($observed.Count -ne $Expected.Count) {
+    if (-not (Test-E2EOrdinalSequenceEqual $Expected $observed)) {
         throw $Message
-    }
-    for ($index = 0; $index -lt $Expected.Count; $index++) {
-        if ($observed[$index] -isnot [string] -or
-            -not [string]::Equals($observed[$index], $Expected[$index], [System.StringComparison]::Ordinal)) {
-            throw $Message
-        }
     }
 }
 
@@ -1603,7 +1696,41 @@ function Assert-ExactMap($Value, $Expected, [string]$Message) {
     }
 }
 
-# The spellings of a Windows path this comparison is willing to canonicalize.
+# A scalar this run is about to decide a security question on, examined before
+# anything has had a chance to normalize it.
+#
+# `[System.IO.Path]::GetFullPath` drops a trailing control character on this
+# platform: `C:\repo\infra` and `C:\repo\infra<LF>` normalize to one string, so
+# a Compose label, a bind source or a mount source carrying a smuggled line
+# break would compare equal to the approved path and be approved as it. A line
+# break is also what turns one value into two for anything that reads a label
+# or a daemon's answer a line at a time.
+#
+# So the spelling is decided here rather than repaired later. The value is not
+# trimmed and it is not rewritten: a scalar carrying a control character, a
+# Unicode line separator or a Unicode paragraph separator anywhere in it is
+# refused as the value it is, and each boundary stops on the fixed error it
+# already had without echoing what it was handed.
+#
+# Nothing else is refused, and nothing already approved becomes refused. Each
+# character is decided by its own Unicode category, so a space, a non-ASCII
+# letter, a path separator and a drive colon each still mean what they meant,
+# and the canonical whole-path comparison that follows is unchanged.
+function Test-E2ECleanScalar($Value) {
+    if ($Value -isnot [string]) {
+        return $false
+    }
+    foreach ($character in $Value.ToCharArray()) {
+        $category = [System.Globalization.CharUnicodeInfo]::GetUnicodeCategory($character)
+        if ($category -eq [System.Globalization.UnicodeCategory]::Control -or
+            $category -eq [System.Globalization.UnicodeCategory]::LineSeparator -or
+            $category -eq [System.Globalization.UnicodeCategory]::ParagraphSeparator) {
+            return $false
+        }
+    }
+    return $true
+}
+
 #
 # `GetFullPath` will happily turn `C:\review\sibling\..\approved` into
 # `C:\review\approved`, which would make a bind of a *different* directory
@@ -1680,6 +1807,11 @@ function Test-CanonicalWindowsPath([string]$Path) {
 # not resolved for the comparison, so a junction or other reparse point cannot
 # be spelled to look like the approved source.
 function Test-SamePhysicalPath($Observed, [string]$Expected) {
+    # Decided before `GetFullPath` is allowed to touch either side, because
+    # normalizing is what would hide a smuggled line break rather than reveal it.
+    if (-not (Test-E2ECleanScalar $Observed) -or -not (Test-E2ECleanScalar $Expected)) {
+        return $false
+    }
     if ($Observed -isnot [string] -or [string]::IsNullOrWhiteSpace($Observed)) {
         return $false
     }
@@ -1693,7 +1825,62 @@ function Test-SamePhysicalPath($Observed, [string]$Expected) {
     catch {
         return $false
     }
-    return [string]::Equals($normalized, $Expected, [System.StringComparison]::OrdinalIgnoreCase)
+    return Test-E2EOrdinalPathEqual $normalized $Expected
+}
+
+# The one non-Windows spelling of a Windows host path this script recognises.
+#
+# Docker Desktop runs the daemon inside a Linux virtual machine, and a Windows
+# host path bound into a container is recorded there as that machine's view of
+# it: `/run/desktop/mnt/host/<drive-letter>/<rest>`, with every separator a
+# forward slash. That is a spelling of one Windows path, and it is the only
+# non-Windows spelling accepted anywhere below.
+#
+# What is recognised is the literal prefix and nothing else. The prefix is
+# matched in full and anchored at the start; the drive letter is the single
+# character the prefix itself carries, so a path on another drive carries
+# another letter and becomes another Windows path; the remainder is turned back
+# into a Windows path and handed to the same canonical whole-path comparison
+# every other source goes through. Nothing here is a prefix, suffix or
+# substring test of the observed value against the expected one, and a
+# remainder that is empty, that is itself absolute, or that carries a backslash
+# is not this representation and is refused.
+function ConvertFrom-E2EDockerDesktopHostPath($Observed) {
+    if ($Observed -isnot [string]) {
+        return $null
+    }
+    # Before the prefix is matched and before the remainder is turned back into
+    # a Windows path: a contaminated value is not this representation.
+    if (-not (Test-E2ECleanScalar $Observed)) {
+        return $null
+    }
+    if ($Observed -cnotmatch '^/run/desktop/mnt/host/(?<drive>[A-Za-z])/(?<rest>[^/\\].*)$') {
+        return $null
+    }
+    $rest = $Matches['rest']
+    if ($rest.Contains('\')) {
+        return $null
+    }
+    return $Matches['drive'] + ':\' + $rest.Replace('/', '\')
+}
+
+# A bind source, in either spelling the daemon can record it in.
+#
+# The Windows spelling is decided exactly as before. The Docker Desktop
+# spelling is first turned back into the Windows path it denotes and then
+# decided by that same comparison, so the set of paths this approves is the set
+# `Test-SamePhysicalPath` approves and not one path more: a different drive, a
+# different physical source, an unknown prefix, or a path that merely ends in
+# the same segments, each fail here.
+function Test-SameBindSourcePath($Observed, [string]$Expected) {
+    if (Test-SamePhysicalPath $Observed $Expected) {
+        return $true
+    }
+    $converted = ConvertFrom-E2EDockerDesktopHostPath $Observed
+    if ($null -eq $converted) {
+        return $false
+    }
+    return (Test-SamePhysicalPath $converted $Expected)
 }
 
 # `HostConfig.Binds`, as the daemon recorded them, against the exact bind list
@@ -1719,13 +1906,18 @@ function Assert-ExactBinds($Value, $Expected, [string]$Message) {
     }
     $matched = @{}
     foreach ($entry in $observed) {
-        if ($entry -isnot [string] -or
-            $entry -notmatch '^(?<source>[A-Za-z]:[\\/][^:]*):(?<destination>/[^:]+):(?<mode>[a-z,]+)$') {
+        # The whole entry is decided before it is split, so a line break cannot
+        # ride along inside a group and be normalized away afterwards.
+        if ($entry -isnot [string] -or -not (Test-E2ECleanScalar $entry) -or
+            $entry -notmatch '\A(?<source>(?:[A-Za-z]:[\\/]|/run/desktop/mnt/host/[A-Za-z]/)[^:]*):(?<destination>/[^:]+):(?<mode>[a-z,]+)\z') {
             throw $Message
         }
         $source = $Matches['source']
         $destination = $Matches['destination']
         $mode = $Matches['mode']
+        if (-not (Test-E2ECleanScalar $source) -or -not (Test-E2ECleanScalar $destination)) {
+            throw $Message
+        }
         $approved = $null
         foreach ($candidate in $Expected) {
             if ([string]::Equals($candidate.Destination, $destination, [System.StringComparison]::Ordinal)) {
@@ -1740,7 +1932,7 @@ function Assert-ExactBinds($Value, $Expected, [string]$Message) {
         if (-not [string]::Equals($mode, 'ro', [System.StringComparison]::Ordinal)) {
             throw $Message
         }
-        if (-not (Test-SamePhysicalPath $source $approved.Source)) {
+        if (-not (Test-SameBindSourcePath $source $approved.Source)) {
             throw $Message
         }
         $matched[$destination] = $true
@@ -1765,7 +1957,7 @@ function Assert-ExactMounts($Value, $Expected, [string]$Message) {
     $matched = @{}
     foreach ($mount in $observed) {
         $destination = Get-JsonMember $mount 'Destination'
-        if ($destination -isnot [string]) {
+        if ($destination -isnot [string] -or -not (Test-E2ECleanScalar $destination)) {
             throw $Message
         }
         $approved = $null
@@ -1797,7 +1989,11 @@ function Assert-ExactMounts($Value, $Expected, [string]$Message) {
         if (-not [string]::Equals((Get-JsonMember $mount 'Propagation'), 'rprivate', [System.StringComparison]::Ordinal)) {
             throw $Message
         }
-        if (-not (Test-SamePhysicalPath (Get-JsonMember $mount 'Source') $approved.Source)) {
+        $source = Get-JsonMember $mount 'Source'
+        if (-not (Test-E2ECleanScalar $source)) {
+            throw $Message
+        }
+        if (-not (Test-SameBindSourcePath $source $approved.Source)) {
             throw $Message
         }
         $matched[$destination] = $true
@@ -1883,6 +2079,15 @@ function New-ContainerExpectation {
 # resolved as a container and can never be answered by an image that happens to
 # share it.
 function Get-ContainerDocument([string]$ContainerId) {
+    # The operand is a full 64-character identifier or nothing is asked at all.
+    # An abbreviated identifier is a prefix query, which the daemon is free to
+    # answer with whichever container happens to match it, so it is never what
+    # this script inspects - and the answer is required to name the identifier
+    # that was asked for, so a document about another container is refused
+    # rather than read.
+    if ($ContainerId -cnotmatch '\A[0-9a-f]{64}\z') {
+        throw 'A container this run created could not be inspected.'
+    }
     $encoded = Invoke-NativeStdout { & docker container inspect --format '{{json .}}' $ContainerId }
     if ($LASTEXITCODE -ne 0) {
         throw 'A container this run created could not be inspected.'
@@ -1900,6 +2105,9 @@ function Get-ContainerDocument([string]$ContainerId) {
         $document = $document[0]
     }
     if ($null -eq $document) {
+        throw 'A container this run created could not be inspected.'
+    }
+    if (-not (Test-E2EOrdinalEqual (Get-JsonMember $document 'Id') $ContainerId)) {
         throw 'A container this run created could not be inspected.'
     }
     return $document
@@ -1992,7 +2200,7 @@ function Assert-ContainerConfinement([string]$ContainerId, [string]$ImageId, $Ex
 # operands somewhere else.
 function New-CreatedContainer([string[]]$Arguments) {
     $created = (Invoke-NativeStdout { & docker @Arguments }).Trim()
-    if ($LASTEXITCODE -ne 0 -or $created -notmatch '^[0-9a-f]{64}$') {
+    if ($LASTEXITCODE -ne 0 -or $created -notmatch '\A[0-9a-f]{64}\z') {
         throw 'A container for this run could not be created.'
     }
     return $created
@@ -2014,7 +2222,7 @@ function Get-OwnedContainerPresence([string]$ContainerId) {
     if ($null -ne $output) {
         $found = @(($output -split '\r?\n') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
     }
-    if (@($found | Where-Object { $_ -cne $ContainerId }).Count -ne 0) {
+    if (@($found | Where-Object { -not (Test-E2EOrdinalEqual $_ $ContainerId) }).Count -ne 0) {
         throw 'A container this run created could not be accounted for.'
     }
     return $found.Count
@@ -2030,12 +2238,18 @@ function Get-OwnedContainerPresence([string]$ContainerId) {
 # state below is the state this check just approved rather than a second read.
 function Assert-OwnedContainerRemovable([string]$ContainerId, [string]$ImageId, $BrowserContract) {
     $document = Get-ContainerDocument $ContainerId
-    if ((Get-JsonMember $document 'Id') -cne $ContainerId -or
-        (Get-JsonMember $document 'Image') -cne $ImageId) {
+    if (-not (Test-E2EOrdinalEqual (Get-JsonMember $document 'Id') $ContainerId) -or
+        -not (Test-E2EOrdinalEqual (Get-JsonMember $document 'Image') $ImageId)) {
         throw 'A container removal was asked for an identifier this run did not create.'
     }
+    # A volume mount is refused by its type and, independently, by the fact that
+    # it carries a volume name at all. The type is one daemon-supplied scalar,
+    # and a decision that removes a container should not rest on a single
+    # comparison of it: a named or anonymous volume is recorded with a `Name`,
+    # and a bind or a tmpfs mount is not.
     foreach ($mount in @(Get-JsonMember $document 'Mounts')) {
-        if ((Get-JsonMember $mount 'Type') -ceq 'volume') {
+        if ((Get-JsonMember $mount 'Type') -ceq 'volume' -or
+            -not [string]::IsNullOrEmpty([string](Get-JsonMember $mount 'Name'))) {
             throw 'A container this run created carries a volume mount it was not approved with.'
         }
     }
@@ -2069,7 +2283,7 @@ function Assert-OwnedContainerRemovable([string]$ContainerId, [string]$ImageId, 
 # container has exactly two callers and they both arrive here, so what may be
 # removed is decided in one place for both of them.
 function Remove-OwnedContainer([string]$ContainerId, [string]$ImageId, $BrowserContract) {
-    if ($ContainerId -cnotmatch '^[0-9a-f]{64}$' -or $ImageId -cnotmatch '^sha256:[0-9a-f]{64}$') {
+    if ($ContainerId -cnotmatch '\A[0-9a-f]{64}\z' -or $ImageId -cnotmatch '\Asha256:[0-9a-f]{64}\z') {
         throw 'A container removal was asked for an identifier this run did not create.'
     }
     if ((Get-OwnedContainerPresence $ContainerId) -ne 0) {
@@ -2324,8 +2538,9 @@ function Get-E2EBrowserOwnershipContract {
 
     $images = Get-E2EImageSet -Receipt $Receipt
     $record = Get-E2ENormalizedImageRecord -Reference $images.Browser -Role 'browser' -Receipt $Receipt
-    if ($record.Reference -cne $images.Browser -or $record.Role -cne 'browser' -or
-        $record.Id -cnotmatch '^sha256:[0-9a-f]{64}$') {
+    if (-not (Test-E2EOrdinalEqual $record.Reference $images.Browser) -or
+        -not (Test-E2EOrdinalEqual $record.Role 'browser') -or
+        $record.Id -cnotmatch '\Asha256:[0-9a-f]{64}\z') {
         throw 'BROWSER_OWNERSHIP_INVALID'
     }
     return [ordered]@{
@@ -2366,18 +2581,19 @@ function Assert-E2EOwnedBrowserContainer {
     # The identifier the caller pinned, the image the receipt resolves to, and
     # the container the daemon answered about are all required to be one
     # identifier and one image.
-    if ($ContainerId -cnotmatch '^[0-9a-f]{64}$' -or $Contract.ImageId -cne $ImageId) {
+    if ($ContainerId -cnotmatch '\A[0-9a-f]{64}\z' -or
+        -not (Test-E2EOrdinalEqual $Contract.ImageId $ImageId)) {
         throw $message
     }
-    if ((Get-JsonMember $Document 'Id') -cne $ContainerId -or
-        (Get-JsonMember $Document 'Image') -cne $Contract.ImageId -or
-        (Get-JsonMember $Document 'Name') -cne ('/' + $Contract.Name)) {
+    if (-not (Test-E2EOrdinalEqual (Get-JsonMember $Document 'Id') $ContainerId) -or
+        -not (Test-E2EOrdinalEqual (Get-JsonMember $Document 'Image') $Contract.ImageId) -or
+        -not (Test-E2EOrdinalEqual (Get-JsonMember $Document 'Name') ('/' + $Contract.Name))) {
         throw $message
     }
 
     $configuration = Get-JsonMember $Document 'Config'
     if ($null -eq $configuration -or
-        (Get-JsonMember $configuration 'Image') -cne $Contract.ImageId) {
+        -not (Test-E2EOrdinalEqual (Get-JsonMember $configuration 'Image') $Contract.ImageId)) {
         throw $message
     }
     # The five receipt-derived ownership labels the prepared browser image was
@@ -2398,7 +2614,7 @@ function Assert-E2EOwnedBrowserContainer {
     $expected = $Contract.Expectation
     $hostConfiguration = Get-JsonMember $Document 'HostConfig'
     if ($null -eq $hostConfiguration) { throw $message }
-    if ((Get-JsonMember $hostConfiguration 'NetworkMode') -cne $expected.NetworkMode) {
+    if (-not (Test-E2EOrdinalEqual (Get-JsonMember $hostConfiguration 'NetworkMode') $expected.NetworkMode)) {
         throw $message
     }
     $attached = @(Get-JsonMemberNames (Get-JsonMember (Get-JsonMember $Document 'NetworkSettings') 'Networks'))
@@ -2878,7 +3094,7 @@ function Get-E2ENormalizedImageRecord {
         throw 'IMAGE_OWNERSHIP_INVALID'
     }
     $identifier = Get-JsonMember $document 'Id'
-    if ($identifier -isnot [string] -or $identifier -notmatch '^sha256:[0-9a-f]{64}$') {
+    if ($identifier -isnot [string] -or $identifier -notmatch '\Asha256:[0-9a-f]{64}\z') {
         throw 'IMAGE_OWNERSHIP_INVALID'
     }
     $configuration = Get-JsonMember $document 'Config'
@@ -2923,7 +3139,7 @@ function Assert-E2EOwnedImages {
         Browser = Get-E2ENormalizedImageRecord -Reference $images.Browser -Role 'browser' -Receipt $Receipt
     }
     $browserId = Assert-BrowserImage (Get-PlaywrightVersion)
-    if ($browserId -cne $records.Browser.Id) {
+    if (-not (Test-E2EOrdinalEqual $browserId $records.Browser.Id)) {
         throw 'IMAGE_OWNERSHIP_INVALID'
     }
     Assert-E2EImageRecordSet -Values @($records) -Receipt $Receipt | Out-Null
@@ -2947,7 +3163,7 @@ function Assert-E2EPreparedBrowserRuntime {
     $browserId = Assert-BrowserImage $playwrightVersion
     $images = Get-E2EImageSet -Receipt $Receipt
     $record = Get-E2ENormalizedImageRecord -Reference $images.Browser -Role 'browser' -Receipt $Receipt
-    if ($browserId -cne $record.Id) {
+    if (-not (Test-E2EOrdinalEqual $browserId $record.Id)) {
         throw 'IMAGE_OWNERSHIP_INVALID'
     }
     Assert-BrowserRuntime $browserId $playwrightVersion | Out-Null
@@ -2976,7 +3192,7 @@ function Get-E2EAuthoritativeImageIdentity {
         $document = Get-LocalImageDocument $entry[2]
         if ($null -eq $document) { throw 'IMAGE_RECORD_INVALID' }
         $identifier = Get-JsonMember $document 'Id'
-        if ($identifier -isnot [string] -or $identifier -cnotmatch '^sha256:[0-9a-f]{64}$') {
+        if ($identifier -isnot [string] -or $identifier -cnotmatch '\Asha256:[0-9a-f]{64}\z') {
             throw 'IMAGE_RECORD_INVALID'
         }
         $identity[$entry[0]] = [pscustomobject]@{
@@ -2998,12 +3214,7 @@ function Assert-E2EImageRecordSet {
     $records = $Values[0]
     $keys = @($records.Keys)
     $expectedKeys = @('Backend', 'AiService', 'Browser')
-    if ($keys.Count -ne 3) { throw 'IMAGE_RECORD_INVALID' }
-    for ($index = 0; $index -lt 3; $index++) {
-        if (-not [string]::Equals([string]$keys[$index], $expectedKeys[$index], [System.StringComparison]::Ordinal)) {
-            throw 'IMAGE_RECORD_INVALID'
-        }
-    }
+    if (-not (Test-E2EOrdinalSequenceEqual $expectedKeys $keys)) { throw 'IMAGE_RECORD_INVALID' }
     $authoritative = Get-E2EAuthoritativeImageIdentity -Receipt $Receipt
     foreach ($key in $expectedKeys) {
         $expected = $authoritative[$key]
@@ -3011,10 +3222,10 @@ function Assert-E2EImageRecordSet {
         if ($record -isnot [pscustomobject] -or
             @($record.PSObject.Properties.Name).Count -ne 5 -or
             @($record.PSObject.Properties.Name | Where-Object { $_ -notin @('Reference','Id','Labels','Role','InUse') }).Count -ne 0 -or
-            $record.Reference -isnot [string] -or $record.Reference -cne $expected.Reference -or
-            $record.Id -isnot [string] -or $record.Id -cnotmatch '^sha256:[0-9a-f]{64}$' -or
-            $record.Id -cne $expected.Id -or
-            $record.Role -isnot [string] -or $record.Role -cne $expected.Role -or
+            -not (Test-E2EOrdinalEqual $record.Reference $expected.Reference) -or
+            $record.Id -cnotmatch '\Asha256:[0-9a-f]{64}\z' -or
+            -not (Test-E2EOrdinalEqual $record.Id $expected.Id) -or
+            -not (Test-E2EOrdinalEqual $record.Role $expected.Role) -or
             $record.InUse -isnot [bool] -or $record.InUse -or
             $record.Labels -isnot [System.Collections.IDictionary]) {
             throw 'IMAGE_RECORD_INVALID'
@@ -3086,6 +3297,41 @@ function Get-E2EComposeBaseArguments {
     )
 }
 
+# The two Compose files this run is defined by, as full paths.
+#
+# The argument vector spells them relative to the repository root, because that
+# is the directory the production Compose invocation runs in. What the daemon
+# records is what Compose resolved them to, so the expectation is written here
+# as the same two files resolved the same way, and is never read back off the
+# container being judged.
+function Get-E2EComposeProjectFiles {
+    return @(
+        [System.IO.Path]::GetFullPath((Join-Path $RepositoryRoot 'infra/compose.yml')),
+        [System.IO.Path]::GetFullPath((Join-Path $RepositoryRoot 'infra/compose.keycloak-local-e2e.yml'))
+    )
+}
+
+# The directory Compose calls the project's own.
+#
+# `com.docker.compose.project.working_dir` is not the directory the command ran
+# in. Compose records the directory of the first `-f` file, and this run's first
+# file is `infra/compose.yml`, so a container this project created carries the
+# repository's `infra` directory here. The repository root is where the command
+# runs and is a different directory: a container carrying it is not one of
+# this project's, and is refused.
+#
+# The value is computed from the file list above - the same declaration the
+# argument vector is built from - and from nothing a candidate reports about
+# itself.
+function Get-E2EComposeWorkingDirectory {
+    $files = Get-E2EComposeProjectFiles
+    $directory = [System.IO.Path]::GetDirectoryName($files[0])
+    if ([string]::IsNullOrEmpty($directory)) { throw 'RESOURCE_CLEANUP_FAILED' }
+    $canonical = Get-TrimmedPath ([System.IO.Path]::GetFullPath($directory))
+    if (-not (Test-CanonicalWindowsPath $canonical)) { throw 'RESOURCE_CLEANUP_FAILED' }
+    return $canonical
+}
+
 function Get-E2EComposeOwnershipContract {
     param([Parameter(Mandatory = $true)][string]$Project, [Parameter(Mandatory = $true)]$Receipt,
         [Parameter(Mandatory = $true)][string[]]$PresentServices)
@@ -3097,12 +3343,11 @@ function Get-E2EComposeOwnershipContract {
         return $output
     }
     try { $config = $encoded | ConvertFrom-Json } catch { throw 'RESOURCE_CLEANUP_FAILED' }
-    if ((Get-JsonMember $config 'name') -cne $Project) { throw 'RESOURCE_CLEANUP_FAILED' }
+    if (-not (Test-E2EOrdinalEqual (Get-JsonMember $config 'name') $Project)) { throw 'RESOURCE_CLEANUP_FAILED' }
     $services = Get-JsonMember $config 'services'
     $expectedServices = $E2EComposeServices
     $actualServices = @(Get-JsonMemberNames $services)
-    if ($actualServices.Count -ne $expectedServices.Count -or
-        @($actualServices | Where-Object { $expectedServices -cnotcontains $_ }).Count -ne 0) {
+    if (-not (Test-E2EOrdinalSetEqual $expectedServices $actualServices)) {
         throw 'RESOURCE_CLEANUP_FAILED'
     }
     $images = Get-E2EImageSet -Receipt $Receipt
@@ -3119,19 +3364,19 @@ function Get-E2EComposeOwnershipContract {
         $id = $null
         if ($reference -isnot [string]) { throw 'RESOURCE_CLEANUP_FAILED' }
         if ($unique.ContainsKey($service)) {
-            if ($reference -cne $unique[$service].Reference) { throw 'RESOURCE_CLEANUP_FAILED' }
-            if ($PresentServices -ccontains $service) {
+            if (-not (Test-E2EOrdinalEqual $reference $unique[$service].Reference)) { throw 'RESOURCE_CLEANUP_FAILED' }
+            if (Test-E2EOrdinalContains $PresentServices $service) {
                 $role = $unique[$service].Role
                 $image = Get-E2ENormalizedImageRecord -Reference $reference -Role $role -Receipt $Receipt
                 $id = $image.Id
             }
         }
         else {
-            if ($reference -cnotmatch '^[^\s]+@sha256:[0-9a-f]{64}$') { throw 'RESOURCE_CLEANUP_FAILED' }
-            if ($PresentServices -ccontains $service) {
+            if ($reference -cnotmatch '\A[^\s]+@sha256:[0-9a-f]{64}\z') { throw 'RESOURCE_CLEANUP_FAILED' }
+            if (Test-E2EOrdinalContains $PresentServices $service) {
                 $image = Get-LocalImageDocument $reference
                 $id = Get-JsonMember $image 'Id'
-                if ($id -isnot [string] -or $id -cnotmatch '^sha256:[0-9a-f]{64}$') {
+                if ($id -isnot [string] -or $id -cnotmatch '\Asha256:[0-9a-f]{64}\z') {
                     throw 'RESOURCE_CLEANUP_FAILED'
                 }
             }
@@ -3147,28 +3392,46 @@ function Assert-E2EComposeContainerIdentity {
 
     $config = Get-JsonMember $Document 'Config'
     $labels = Get-JsonMember $config 'Labels'
-    $expectedFiles = @(
-        [System.IO.Path]::GetFullPath((Join-Path $RepositoryRoot 'infra/compose.yml')),
-        [System.IO.Path]::GetFullPath((Join-Path $RepositoryRoot 'infra/compose.keycloak-local-e2e.yml'))
-    ) -join ','
+    $expectedFiles = Get-E2EComposeProjectFiles
     $observedFiles = Get-JsonMember $labels 'com.docker.compose.project.config_files'
     $observedRoot = Get-JsonMember $labels 'com.docker.compose.project.working_dir'
-    if ((Get-JsonMember $Document 'Id') -cne $Id -or
-        (Get-JsonMember $labels 'com.docker.compose.project') -cne $Project -or
-        (Get-JsonMember $labels 'com.docker.compose.service') -cne $Service -or
-        (Get-JsonMember $labels 'com.docker.compose.container-number') -cne '1' -or
-        (Get-JsonMember $labels 'com.docker.compose.oneoff') -cnotin @('False','false') -or
-        $observedFiles -isnot [string] -or $observedFiles.Replace('/', '\') -cne $expectedFiles.Replace('/', '\') -or
-        $observedRoot -isnot [string] -or $observedRoot.Replace('/', '\') -cne ([System.IO.Path]::GetFullPath($RepositoryRoot)).Replace('/', '\') -or
-        (Get-JsonMember $config 'Image') -cne $Contract.Reference -or
-        (Get-JsonMember $Document 'Image') -cne $Contract.Id) {
+    if (-not (Test-E2EOrdinalEqual (Get-JsonMember $Document 'Id') $Id) -or
+        -not (Test-E2EOrdinalEqual (Get-JsonMember $labels 'com.docker.compose.project') $Project) -or
+        -not (Test-E2EOrdinalEqual (Get-JsonMember $labels 'com.docker.compose.service') $Service) -or
+        -not (Test-E2EOrdinalEqual (Get-JsonMember $labels 'com.docker.compose.container-number') '1') -or
+        -not (Test-E2EOrdinalContains @('False','false') (Get-JsonMember $labels 'com.docker.compose.oneoff')) -or
+        -not (Test-E2EOrdinalEqual (Get-JsonMember $config 'Image') $Contract.Reference) -or
+        -not (Test-E2EOrdinalEqual (Get-JsonMember $Document 'Image') $Contract.Id)) {
+        throw 'RESOURCE_CLEANUP_FAILED'
+    }
+    # The two Compose path labels, each decided as a whole canonical path
+    # against a value computed from this repository rather than from the
+    # container. A label that is absent, that carries more than one value, or
+    # that carries anything besides the exact expected path, is not a spelling
+    # of that path: it is not a string, or it is a different string, and either
+    # way it fails here. The repository root, a sibling directory, a directory
+    # underneath the expected one, and a path on another drive that merely ends
+    # in the same segments are each a different string as well.
+    # The raw label is decided before the comma split, because the split is
+    # what would turn one smuggled line break into a value that looks clean.
+    if ($observedFiles -isnot [string] -or -not (Test-E2ECleanScalar $observedFiles)) { throw 'RESOURCE_CLEANUP_FAILED' }
+    $observedFileList = @($observedFiles -split ',')
+    if ($observedFileList.Count -ne $expectedFiles.Count) { throw 'RESOURCE_CLEANUP_FAILED' }
+    for ($index = 0; $index -lt $expectedFiles.Count; $index++) {
+        if (-not (Test-E2ECleanScalar $observedFileList[$index]) -or
+            -not (Test-SamePhysicalPath $observedFileList[$index] $expectedFiles[$index])) {
+            throw 'RESOURCE_CLEANUP_FAILED'
+        }
+    }
+    if (-not (Test-E2ECleanScalar $observedRoot) -or
+        -not (Test-SamePhysicalPath $observedRoot (Get-E2EComposeWorkingDirectory))) {
         throw 'RESOURCE_CLEANUP_FAILED'
     }
     if ($Service -in @('backend','ai-service','external-risk-mock','alertmanager-webhook')) {
         $role = if ($Service -eq 'backend') { 'backend' } else { 'ai-service' }
         $expectedLabels = Get-E2EOwnershipLabels -Receipt $Receipt -Role $role
         foreach ($key in $expectedLabels.Keys) {
-            if ((Get-JsonMember $labels $key) -cne $expectedLabels[$key]) { throw 'RESOURCE_CLEANUP_FAILED' }
+            if (-not (Test-E2EOrdinalEqual (Get-JsonMember $labels $key) $expectedLabels[$key])) { throw 'RESOURCE_CLEANUP_FAILED' }
         }
     }
     $host = Get-JsonMember $Document 'HostConfig'
@@ -3177,10 +3440,11 @@ function Assert-E2EComposeContainerIdentity {
     $definition = $Contract.Definition
     $shared = Get-JsonMember $definition 'network_mode'
     if ($null -ne $shared) {
-        if ($shared -cne 'service:backend') { throw 'RESOURCE_CLEANUP_FAILED' }
+        if (-not (Test-E2EOrdinalEqual $shared 'service:backend')) { throw 'RESOURCE_CLEANUP_FAILED' }
         $actualNetworks = @(Get-JsonMemberNames $networks)
-        if ($networkMode -isnot [string] -or $networkMode -cnotmatch '^container:[0-9a-f]{64}$' -or
-            ($AllIds -cnotcontains $networkMode.Substring(10) -and $networkMode.Substring(10) -cne $PriorBackendId) -or
+        if ($networkMode -isnot [string] -or $networkMode -cnotmatch '\Acontainer:[0-9a-f]{64}\z' -or
+            (-not (Test-E2EOrdinalContains $AllIds $networkMode.Substring(10)) -and
+                -not (Test-E2EOrdinalEqual $networkMode.Substring(10) $PriorBackendId)) -or
             $actualNetworks.Count -ne 0) {
             throw 'RESOURCE_CLEANUP_FAILED'
         }
@@ -3188,28 +3452,42 @@ function Assert-E2EComposeContainerIdentity {
     else {
         $expectedNetworks = @((Get-JsonMemberNames (Get-JsonMember $definition 'networks')) | ForEach-Object { $Project + '_' + $_ })
         $actualNetworks = @(Get-JsonMemberNames $networks)
-        if ($networkMode -cnotin $expectedNetworks) { throw 'RESOURCE_CLEANUP_FAILED' }
-        if ($actualNetworks.Count -ne $expectedNetworks.Count -or
-            @($actualNetworks | Where-Object { $expectedNetworks -cnotcontains $_ }).Count -ne 0) {
+        if (-not (Test-E2EOrdinalContains $expectedNetworks $networkMode)) { throw 'RESOURCE_CLEANUP_FAILED' }
+        if (-not (Test-E2EOrdinalSetEqual $expectedNetworks $actualNetworks)) {
             throw 'RESOURCE_CLEANUP_FAILED'
         }
     }
     $mounts = @(Get-JsonMember $Document 'Mounts')
+    # Every mount scalar this identity is decided on, before any of them is
+    # canonicalized, split or compared. The comparisons below are the ones this
+    # boundary already made; what is new is that a value carrying a smuggled
+    # control character never reaches them, because normalizing a path and
+    # comparing a label are each a step that would treat such a character as no
+    # difference rather than as the difference it is.
+    foreach ($mount in $mounts) {
+        foreach ($key in @('Source', 'Destination', 'Name')) {
+            $scalar = Get-JsonMember $mount $key
+            if ($scalar -is [string] -and -not (Test-E2ECleanScalar $scalar)) { throw 'RESOURCE_CLEANUP_FAILED' }
+        }
+    }
     if ($Service -eq 'postgresql') {
-        $volumes = @($mounts | Where-Object { (Get-JsonMember $_ 'Type') -ceq 'volume' })
-        if ($volumes.Count -ne 1 -or (Get-JsonMember $volumes[0] 'Destination') -cne '/var/lib/postgresql/data' -or
-            (Get-JsonMember $volumes[0] 'Name') -cnotmatch '^[0-9a-f]{64}$') { throw 'RESOURCE_CLEANUP_FAILED' }
+        $volumes = @($mounts | Where-Object { Test-E2EOrdinalEqual (Get-JsonMember $_ 'Type') 'volume' })
+        if ($volumes.Count -ne 1 -or
+            -not (Test-E2EOrdinalEqual (Get-JsonMember $volumes[0] 'Destination') '/var/lib/postgresql/data') -or
+            (Get-JsonMember $volumes[0] 'Name') -cnotmatch '\A[0-9a-f]{64}\z') { throw 'RESOURCE_CLEANUP_FAILED' }
     }
     if ($Service -eq 'keycloak') {
-        $volume = @($mounts | Where-Object { (Get-JsonMember $_ 'Type') -ceq 'volume' })
-        if ($volume.Count -ne 1 -or (Get-JsonMember $volume[0] 'Name') -cne ($Project + '_keycloak-data') -or
-            (Get-JsonMember $volume[0] 'Destination') -cne '/opt/keycloak/data') { throw 'RESOURCE_CLEANUP_FAILED' }
+        $volume = @($mounts | Where-Object { Test-E2EOrdinalEqual (Get-JsonMember $_ 'Type') 'volume' })
+        if ($volume.Count -ne 1 -or
+            -not (Test-E2EOrdinalEqual (Get-JsonMember $volume[0] 'Name') ($Project + '_keycloak-data')) -or
+            -not (Test-E2EOrdinalEqual (Get-JsonMember $volume[0] 'Destination') '/opt/keycloak/data')) { throw 'RESOURCE_CLEANUP_FAILED' }
     }
     if ($Service -eq 'keycloak-bootstrap') {
-        $bootstrap = @($mounts | Where-Object { (Get-JsonMember $_ 'Type') -ceq 'bind' -and
-            (Get-JsonMember $_ 'Destination') -ceq '/opt/finguardops/bootstrap.py' })
+        $bootstrap = @($mounts | Where-Object { (Test-E2EOrdinalEqual (Get-JsonMember $_ 'Type') 'bind') -and
+            (Test-E2EOrdinalEqual (Get-JsonMember $_ 'Destination') '/opt/finguardops/bootstrap.py') })
+        $bootstrapSource = Get-TrimmedPath ([System.IO.Path]::GetFullPath((Join-Path $RepositoryRoot 'infra/keycloak/bootstrap.py')))
         if ($bootstrap.Count -ne 1 -or
-            (Get-JsonMember $bootstrap[0] 'Source') -cne ([System.IO.Path]::GetFullPath((Join-Path $RepositoryRoot 'infra/keycloak/bootstrap.py')))) {
+            -not (Test-SameBindSourcePath (Get-JsonMember $bootstrap[0] 'Source') $bootstrapSource)) {
             throw 'RESOURCE_CLEANUP_FAILED'
         }
     }
@@ -3220,15 +3498,36 @@ function Assert-E2EComposeContainerIdentity {
         $type = Get-JsonMember $volume 'type'
         $source = Get-JsonMember $volume 'source'
         $target = Get-JsonMember $volume 'target'
-        if ($type -cnotin @('volume','bind') -or $target -isnot [string]) { throw 'RESOURCE_CLEANUP_FAILED' }
-        $expectedSource = if ($type -eq 'volume') { $Project + '_' + $source } else { $source }
+        if (-not (Test-E2EOrdinalContains @('volume','bind') $type) -or $target -isnot [string]) { throw 'RESOURCE_CLEANUP_FAILED' }
+        # A bind source is compared as one whole canonical path, computed from
+        # what this repository declares rather than taken from the document
+        # being judged, and accepted in either spelling the daemon records it
+        # in. A named volume is still compared as the exact project-qualified
+        # name it is.
+        $expectedSource = $null
+        if ($type -ceq 'volume') {
+            $expectedSource = $Project + '_' + $source
+        }
+        else {
+            if ($source -isnot [string] -or -not (Test-CanonicalWindowsPath $source)) {
+                throw 'RESOURCE_CLEANUP_FAILED'
+            }
+            $expectedSource = Get-TrimmedPath ([System.IO.Path]::GetFullPath($source))
+        }
         $matches = @($mounts | Where-Object {
-            (Get-JsonMember $_ 'Type') -ceq $type -and
-            (Get-JsonMember $_ 'Destination') -ceq $target -and
-            $(if ($type -eq 'volume') { (Get-JsonMember $_ 'Name') -ceq $expectedSource }
-                else { (Get-JsonMember $_ 'Source') -ceq $expectedSource })
+            (Test-E2EOrdinalEqual (Get-JsonMember $_ 'Type') $type) -and
+            (Test-E2EOrdinalEqual (Get-JsonMember $_ 'Destination') $target) -and
+            $(if ($type -ceq 'volume') { Test-E2EOrdinalEqual (Get-JsonMember $_ 'Name') $expectedSource }
+                else { Test-SameBindSourcePath (Get-JsonMember $_ 'Source') $expectedSource })
         })
         if ($matches.Count -ne 1) { throw 'RESOURCE_CLEANUP_FAILED' }
+        # A mount this repository declares read-only is required to be
+        # read-only where the daemon recorded it, as a boolean the daemon
+        # actually wrote.
+        if ((Get-JsonMember $volume 'read_only') -eq $true) {
+            $writable = Get-JsonMember $matches[0] 'RW'
+            if ($writable -isnot [bool] -or $writable) { throw 'RESOURCE_CLEANUP_FAILED' }
+        }
         $approvedMounts.Add($matches[0])
     }
     $declaredSecrets = Get-JsonMember $definition 'secrets'
@@ -3237,16 +3536,17 @@ function Assert-E2EComposeContainerIdentity {
         $target = Get-JsonMember $secret 'target'
         if ($target -isnot [string] -or $target -match '[/\\]') { throw 'RESOURCE_CLEANUP_FAILED' }
         $matches = @($mounts | Where-Object {
-            (Get-JsonMember $_ 'Type') -ceq 'bind' -and
-            (Get-JsonMember $_ 'Destination') -ceq ('/run/secrets/' + $target)
+            (Test-E2EOrdinalEqual (Get-JsonMember $_ 'Type') 'bind') -and
+            (Test-E2EOrdinalEqual (Get-JsonMember $_ 'Destination') ('/run/secrets/' + $target))
         })
         if ($matches.Count -ne 1) { throw 'RESOURCE_CLEANUP_FAILED' }
         $approvedMounts.Add($matches[0])
     }
     foreach ($mount in $mounts) {
         if ($approvedMounts.Contains($mount)) { continue }
-        if ($Service -eq 'postgresql' -and (Get-JsonMember $mount 'Type') -ceq 'volume' -and
-            (Get-JsonMember $mount 'Destination') -ceq '/var/lib/postgresql/data') { continue }
+        if ($Service -eq 'postgresql' -and
+            (Test-E2EOrdinalEqual (Get-JsonMember $mount 'Type') 'volume') -and
+            (Test-E2EOrdinalEqual (Get-JsonMember $mount 'Destination') '/var/lib/postgresql/data')) { continue }
         throw 'RESOURCE_CLEANUP_FAILED'
     }
 }
@@ -3285,7 +3585,7 @@ function Get-E2EExistingVolumeNames {
     foreach ($name in $Names) {
         $found = @(Get-E2EDockerLines { & docker volume ls -q --filter "name=^$name$" })
         if ($found.Count -gt 1 -or
-            ($found.Count -eq 1 -and $found[0] -cne $name)) { throw 'RESOURCE_CLEANUP_FAILED' }
+            ($found.Count -eq 1 -and -not (Test-E2EOrdinalEqual $found[0] $name))) { throw 'RESOURCE_CLEANUP_FAILED' }
         if ($found.Count -eq 1) { Write-Output $name }
     }
 }
@@ -3344,7 +3644,7 @@ function Get-E2EVolumeIdentity {
     if ($null -eq $document -or $document -is [array] -or $document -is [string]) {
         throw 'RESOURCE_CLEANUP_FAILED'
     }
-    if ((Get-JsonMember $document 'Name') -cne $Name) { throw 'RESOURCE_CLEANUP_FAILED' }
+    if (-not (Test-E2EOrdinalEqual (Get-JsonMember $document 'Name') $Name)) { throw 'RESOURCE_CLEANUP_FAILED' }
     $identity = [ordered]@{ Name = [string]$Name }
     foreach ($field in @('CreatedAt', 'Driver', 'Scope', 'Mountpoint')) {
         $value = Get-JsonMember $document $field
@@ -3388,6 +3688,35 @@ function Get-E2EExactNameFilters {
     return $arguments.ToArray()
 }
 
+# A container discovery's answer, as the full identifiers it is required to be.
+#
+# One place decides what a container discovery is allowed to have returned, so
+# every boundary that goes on to inspect, stop or remove by identifier is
+# working from the same statement: each line is a full 64-character lower-case
+# identifier, no line repeats, and anything else is the caller's own fixed
+# error rather than a target.
+function Get-E2EFullContainerIdentifiers {
+    param(
+        [AllowNull()][AllowEmptyString()]$Output,
+        [int]$ExitCode,
+        [Parameter(Mandatory = $true)][string]$ErrorCode
+    )
+
+    if ($ExitCode -ne 0) { throw $ErrorCode }
+    $identifiers = [System.Collections.Generic.List[string]]::new()
+    if ($Output -isnot [string]) {
+        if ($null -eq $Output) { return @() }
+        throw $ErrorCode
+    }
+    foreach ($line in ($Output -split '\r?\n')) {
+        $value = $line.Trim()
+        if ($value.Length -eq 0) { continue }
+        if ($value -cnotmatch '\A[0-9a-f]{64}\z' -or (Test-E2EOrdinalContains $identifiers $value)) { throw $ErrorCode }
+        $identifiers.Add($value)
+    }
+    return @($identifiers.ToArray())
+}
+
 function Get-E2EDockerLines([scriptblock]$Command) {
     $output = Invoke-NativeStdout $Command
     $code = $LASTEXITCODE
@@ -3400,7 +3729,7 @@ function Get-E2EDockerLines([scriptblock]$Command) {
 
 function Get-E2EProjectResourceInventory {
     param([Parameter(Mandatory = $true)][string]$Project, [Parameter(Mandatory = $true)]$Receipt, $PreviousInventory)
-    if ($Project -cne $ProjectName -and $Project -cnotmatch '^finguardops-kc241-e2e-[0-9a-f]{12}$') {
+    if (-not (Test-E2EOrdinalEqual $Project $ProjectName) -and $Project -cnotmatch '\Afinguardops-kc241-e2e-[0-9a-f]{12}\z') {
         throw 'RESOURCE_CLEANUP_FAILED'
     }
     $services = $E2EComposeServices
@@ -3424,17 +3753,17 @@ function Get-E2EProjectResourceInventory {
     $serviceDocuments = @{}
     $presentServices = [System.Collections.Generic.List[string]]::new()
     foreach ($id in $candidates) {
-        if ($id -cnotmatch '^[0-9a-f]{64}$' -or $ids -ccontains $id) { throw 'RESOURCE_CLEANUP_FAILED' }
+        if ($id -cnotmatch '\A[0-9a-f]{64}\z' -or (Test-E2EOrdinalContains $ids $id)) { throw 'RESOURCE_CLEANUP_FAILED' }
         $document = Get-ContainerDocument $id
         $observedName = Get-JsonMember $document 'Name'
         if ($observedName -isnot [string]) { throw 'RESOURCE_CLEANUP_FAILED' }
         $service = $null
         foreach ($candidate in $services) {
-            if ($observedName -ceq ('/' + $expectedNames[$candidate])) { $service = $candidate; break }
+            if (Test-E2EOrdinalEqual $observedName ('/' + $expectedNames[$candidate])) { $service = $candidate; break }
         }
-        if ($null -eq $service -or $presentServices -ccontains $service) { throw 'RESOURCE_CLEANUP_FAILED' }
+        if ($null -eq $service -or (Test-E2EOrdinalContains $presentServices $service)) { throw 'RESOURCE_CLEANUP_FAILED' }
         $declaredService = Get-JsonMember (Get-JsonMember (Get-JsonMember $document 'Config') 'Labels') 'com.docker.compose.service'
-        if ($declaredService -cne $service) { throw 'RESOURCE_CLEANUP_FAILED' }
+        if (-not (Test-E2EOrdinalEqual $declaredService $service)) { throw 'RESOURCE_CLEANUP_FAILED' }
         $ids += $id
         $serviceDocuments[$id] = $document
         $presentServices.Add($service)
@@ -3442,48 +3771,52 @@ function Get-E2EProjectResourceInventory {
     $labelled = @(Get-E2EDockerLines { & docker ps -aq --no-trunc --filter $projectFilter })
     if ($labelled.Count -ne @($labelled | Sort-Object -Unique).Count) { throw 'RESOURCE_CLEANUP_FAILED' }
     foreach ($id in $labelled) {
-        if ($id -cnotmatch '^[0-9a-f]{64}$' -or $ids -cnotcontains $id) { throw 'RESOURCE_CLEANUP_FAILED' }
+        if ($id -cnotmatch '\A[0-9a-f]{64}\z' -or -not (Test-E2EOrdinalContains $ids $id)) { throw 'RESOURCE_CLEANUP_FAILED' }
     }
     $contract = if ($ids.Count -ne 0) { Get-E2EComposeOwnershipContract -Project $Project -Receipt $Receipt -PresentServices $presentServices.ToArray() } else { @{} }
     $containers = [System.Collections.Generic.List[object]]::new()
     $foundServices = [System.Collections.Generic.List[string]]::new()
     $priorBackend = @()
     if ($null -ne $PreviousInventory) {
-        if ($PreviousInventory.Project -cne $Project) { throw 'RESOURCE_CLEANUP_FAILED' }
-        $priorBackend = @($PreviousInventory.Containers | Where-Object { $_.Service -ceq 'backend' })
+        if (-not (Test-E2EOrdinalEqual $PreviousInventory.Project $Project)) { throw 'RESOURCE_CLEANUP_FAILED' }
+        $priorBackend = @($PreviousInventory.Containers | Where-Object { Test-E2EOrdinalEqual $_.Service 'backend' })
         if ($priorBackend.Count -gt 1) { throw 'RESOURCE_CLEANUP_FAILED' }
     }
     $priorBackendId = if ($priorBackend.Count -eq 1) { [string]$priorBackend[0].Id } else { '' }
     $anonymous = [System.Collections.Generic.List[string]]::new()
     $mountedNamed = [System.Collections.Generic.List[string]]::new()
     foreach ($id in $ids) {
-        if ($id -cnotmatch '^[0-9a-f]{64}$') { throw 'RESOURCE_CLEANUP_FAILED' }
+        if ($id -cnotmatch '\A[0-9a-f]{64}\z') { throw 'RESOURCE_CLEANUP_FAILED' }
         $document = $serviceDocuments[$id]
         $config = Get-JsonMember $document 'Config'
         $labels = Get-JsonMember $config 'Labels'
         $service = Get-JsonMember $labels 'com.docker.compose.service'
         $state = Get-JsonMember $document 'State'
-        if ((Get-JsonMember $document 'Id') -cne $id -or
-            (Get-JsonMember $labels 'com.docker.compose.project') -cne $Project -or
-            $services -cnotcontains $service -or
+        if (-not (Test-E2EOrdinalEqual (Get-JsonMember $document 'Id') $id) -or
+            -not (Test-E2EOrdinalEqual (Get-JsonMember $labels 'com.docker.compose.project') $Project) -or
+            -not (Test-E2EOrdinalContains $services $service) -or
             (Get-JsonMember $state 'Running') -isnot [bool] -or
-            (Get-JsonMember $state 'Status') -notin @('running','exited','created','paused','restarting','dead')) {
+            -not (Test-E2EOrdinalContains @('running','exited','created','paused','restarting','dead') (Get-JsonMember $state 'Status'))) {
             throw 'RESOURCE_CLEANUP_FAILED'
         }
-        if ($foundServices -ccontains $service) { throw 'RESOURCE_CLEANUP_FAILED' }
+        if (Test-E2EOrdinalContains $foundServices $service) { throw 'RESOURCE_CLEANUP_FAILED' }
         $foundServices.Add($service)
         Assert-E2EComposeContainerIdentity -Document $document -Id $id -Project $Project `
             -Service $service -Contract $contract[$service] -Receipt $Receipt -AllIds $ids -PriorBackendId $priorBackendId
         foreach ($mount in @(Get-JsonMember $document 'Mounts')) {
-            if ((Get-JsonMember $mount 'Type') -cne 'volume') { continue }
+            # Every mount on this container has already been decided by the
+            # identity check above, which approves a mount only when its type is
+            # ordinally the declared one - so `volume` here is the type the
+            # daemon recorded and this run approved, not a spelling of it.
+            if (-not (Test-E2EOrdinalEqual (Get-JsonMember $mount 'Type') 'volume')) { continue }
             $name = Get-JsonMember $mount 'Name'
             if ($name -isnot [string] -or [string]::IsNullOrWhiteSpace($name)) { throw 'RESOURCE_CLEANUP_FAILED' }
-            if ($name -cmatch ('^' + [regex]::Escape($Project) + '_(?:' + ($volumeNames -join '|') + ')$')) {
-                if ($mountedNamed -cnotcontains $name) { $mountedNamed.Add($name) }
+            if ($name -cmatch ('\A' + [regex]::Escape($Project) + '_(?:' + ($volumeNames -join '|') + ')\z')) {
+                if (-not (Test-E2EOrdinalContains $mountedNamed $name)) { $mountedNamed.Add($name) }
             }
             else {
-                if ($name -cnotmatch '^[0-9a-f]{64}$') { throw 'RESOURCE_CLEANUP_FAILED' }
-                if ($anonymous -cnotcontains $name) { $anonymous.Add($name) }
+                if ($name -cnotmatch '\A[0-9a-f]{64}\z') { throw 'RESOURCE_CLEANUP_FAILED' }
+                if (-not (Test-E2EOrdinalContains $anonymous $name)) { $anonymous.Add($name) }
             }
         }
         $containers.Add([pscustomobject]@{ Id=$id; Service=$service; Image=(Get-JsonMember $document 'Image');
@@ -3491,11 +3824,12 @@ function Get-E2EProjectResourceInventory {
             NetworkMode=(Get-JsonMember (Get-JsonMember $document 'HostConfig') 'NetworkMode');
             NetworkAttachments=(Get-JsonMember (Get-JsonMember $document 'NetworkSettings') 'Networks') })
     }
-    $backendEntries = @($containers | Where-Object { $_.Service -ceq 'backend' })
+    $backendEntries = @($containers | Where-Object { Test-E2EOrdinalEqual $_.Service 'backend' })
     foreach ($entry in $containers) {
-        if ($entry.Service -in @('external-risk-mock','keycloak','keycloak-bootstrap','keycloak-verify')) {
+        if (Test-E2EOrdinalContains @('external-risk-mock','keycloak','keycloak-bootstrap','keycloak-verify') $entry.Service) {
             $expectedBackendId = if ($backendEntries.Count -eq 1) { $backendEntries[0].Id } else { $priorBackendId }
-            if ([string]::IsNullOrEmpty($expectedBackendId) -or $entry.NetworkMode -cne ('container:' + $expectedBackendId)) {
+            if ([string]::IsNullOrEmpty($expectedBackendId) -or
+                -not (Test-E2EOrdinalEqual $entry.NetworkMode ('container:' + $expectedBackendId))) {
                 throw 'RESOURCE_CLEANUP_FAILED'
             }
         }
@@ -3507,7 +3841,7 @@ function Get-E2EProjectResourceInventory {
     $networks = [System.Collections.Generic.List[object]]::new()
     $networkIdentifiers = [System.Collections.Generic.List[string]]::new()
     foreach ($id in $networkCandidates) {
-        if ($id -cnotmatch '^[0-9a-f]{64}$' -or $networkIdentifiers -ccontains $id) { throw 'RESOURCE_CLEANUP_FAILED' }
+        if ($id -cnotmatch '\A[0-9a-f]{64}\z' -or (Test-E2EOrdinalContains $networkIdentifiers $id)) { throw 'RESOURCE_CLEANUP_FAILED' }
         $networkIdentifiers.Add($id)
         $encoded = Invoke-NativeStdout { & docker network inspect --format '{{json .}}' $id }
         if ($LASTEXITCODE -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
@@ -3516,27 +3850,31 @@ function Get-E2EProjectResourceInventory {
         $network = Get-JsonMember $labels 'com.docker.compose.network'
         $attached = @(Get-JsonMemberNames (Get-JsonMember $document 'Containers'))
         $observedName = Get-JsonMember $document 'Name'
-        if ($network -isnot [string] -or $networkNames -cnotcontains $network -or
-            $observedName -isnot [string] -or $observedName -cne $expectedNetworks[$network] -or
-            (Get-JsonMember $document 'Id') -cne $id -or
-            (Get-JsonMember $labels 'com.docker.compose.project') -cne $Project -or
-            @($networks | Where-Object { $_.Name -ceq $network }).Count -ne 0 -or
-            @($attached | Where-Object { $ids -cnotcontains $_ }).Count -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
+        if (-not (Test-E2EOrdinalContains $networkNames $network) -or
+            -not (Test-E2EOrdinalEqual $observedName $expectedNetworks[$network]) -or
+            -not (Test-E2EOrdinalEqual (Get-JsonMember $document 'Id') $id) -or
+            -not (Test-E2EOrdinalEqual (Get-JsonMember $labels 'com.docker.compose.project') $Project) -or
+            @($networks | Where-Object { Test-E2EOrdinalEqual $_.Name $network }).Count -ne 0 -or
+            @($attached | Where-Object { -not (Test-E2EOrdinalContains $ids $_) }).Count -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
         $networks.Add([pscustomobject]@{ Id=$id; Name=$network; Attached=$attached })
     }
     $networkIds = @($networkIdentifiers.ToArray())
     $labelledNetworks = @(Get-E2EDockerLines { & docker network ls -q --no-trunc --filter $projectFilter })
     if ($labelledNetworks.Count -ne @($labelledNetworks | Sort-Object -Unique).Count) { throw 'RESOURCE_CLEANUP_FAILED' }
     foreach ($id in $labelledNetworks) {
-        if ($id -cnotmatch '^[0-9a-f]{64}$' -or $networkIds -cnotcontains $id) { throw 'RESOURCE_CLEANUP_FAILED' }
+        if ($id -cnotmatch '\A[0-9a-f]{64}\z' -or -not (Test-E2EOrdinalContains $networkIds $id)) { throw 'RESOURCE_CLEANUP_FAILED' }
     }
     foreach ($entry in $containers) {
         foreach ($name in @(Get-JsonMemberNames $entry.NetworkAttachments)) {
-            $matches = @($networks | Where-Object { $_.Name -ceq $name.Substring($Project.Length + 1) })
+            if ($name -isnot [string] -or $name.Length -le $Project.Length -or
+                -not (Test-E2EOrdinalEqual $name.Substring(0, $Project.Length + 1) ($Project + '_'))) {
+                throw 'RESOURCE_CLEANUP_FAILED'
+            }
+            $matches = @($networks | Where-Object { Test-E2EOrdinalEqual $_.Name $name.Substring($Project.Length + 1) })
             $attachment = Get-JsonMember $entry.NetworkAttachments $name
-            if ($matches.Count -ne 1 -or $name -cnotlike ($Project + '_*') -or
-                (Get-JsonMember $attachment 'NetworkID') -cne $matches[0].Id -or
-                $matches[0].Attached -cnotcontains $entry.Id) { throw 'RESOURCE_CLEANUP_FAILED' }
+            if ($matches.Count -ne 1 -or
+                -not (Test-E2EOrdinalEqual (Get-JsonMember $attachment 'NetworkID') $matches[0].Id) -or
+                -not (Test-E2EOrdinalContains $matches[0].Attached $entry.Id)) { throw 'RESOURCE_CLEANUP_FAILED' }
         }
     }
     $expectedVolumes = @($volumeNames | ForEach-Object { $Project + '_' + $_ })
@@ -3545,9 +3883,9 @@ function Get-E2EProjectResourceInventory {
     $labelledVolumes = @(Get-E2EDockerLines { & docker volume ls -q --filter $projectFilter })
     if ($labelledVolumes.Count -ne @($labelledVolumes | Sort-Object -Unique).Count) { throw 'RESOURCE_CLEANUP_FAILED' }
     foreach ($name in $labelledVolumes) {
-        if ($named -cnotcontains $name) { throw 'RESOURCE_CLEANUP_FAILED' }
+        if (-not (Test-E2EOrdinalContains $named $name)) { throw 'RESOURCE_CLEANUP_FAILED' }
     }
-    if (@($mountedNamed | Where-Object { $named -cnotcontains $_ }).Count -ne 0) {
+    if (@($mountedNamed | Where-Object { -not (Test-E2EOrdinalContains $named $_) }).Count -ne 0) {
         throw 'RESOURCE_CLEANUP_FAILED'
     }
     # Each volume is pinned as its whole identity rather than as a name, so the
@@ -3559,16 +3897,17 @@ function Get-E2EProjectResourceInventory {
         $identity = Get-E2EVolumeIdentity -Name $name
         $labels = $identity.Labels
         if ($null -eq $labels) { throw 'RESOURCE_CLEANUP_FAILED' }
-        if ($named -ccontains $name) {
+        if (Test-E2EOrdinalContains $named $name) {
             if (-not $labels.Contains('com.docker.compose.volume') -or
                 -not $labels.Contains('com.docker.compose.project')) { throw 'RESOURCE_CLEANUP_FAILED' }
             $volume = [string]$labels['com.docker.compose.volume']
-            if ($volumeNames -cnotcontains $volume -or $name -cne ($Project + '_' + $volume) -or
-                [string]$labels['com.docker.compose.project'] -cne $Project) { throw 'RESOURCE_CLEANUP_FAILED' }
+            if (-not (Test-E2EOrdinalContains $volumeNames $volume) -or
+                -not (Test-E2EOrdinalEqual $name ($Project + '_' + $volume)) -or
+                -not (Test-E2EOrdinalEqual ([string]$labels['com.docker.compose.project']) $Project)) { throw 'RESOURCE_CLEANUP_FAILED' }
         }
         elseif (-not $labels.Contains('com.docker.volume.anonymous') -or
-            [string]$labels['com.docker.volume.anonymous'] -cne '') { throw 'RESOURCE_CLEANUP_FAILED' }
-        if ($volumeIdentityNames -ccontains $name) { throw 'RESOURCE_CLEANUP_FAILED' }
+            -not (Test-E2EOrdinalEqual ([string]$labels['com.docker.volume.anonymous']) '')) { throw 'RESOURCE_CLEANUP_FAILED' }
+        if (Test-E2EOrdinalContains $volumeIdentityNames $name) { throw 'RESOURCE_CLEANUP_FAILED' }
         $volumeIdentityNames.Add($name)
         $volumes.Add($identity)
     }
@@ -3577,9 +3916,13 @@ function Get-E2EProjectResourceInventory {
         $allIds = @(Get-E2EDockerLines { & docker ps -aq --no-trunc })
         foreach ($id in $allIds) {
             $document = Get-ContainerDocument $id
+            # A mount that names one of these volumes is a user of it,
+            # whatever it calls its own type: the name is the identity the
+            # Volume API removes by, and the type is one more daemon-supplied
+            # scalar this refusal deliberately does not depend on.
             foreach ($mount in @(Get-JsonMember $document 'Mounts')) {
-                if ((Get-JsonMember $mount 'Type') -eq 'volume' -and
-                    $volumeIdentityNames -ccontains (Get-JsonMember $mount 'Name') -and $ids -cnotcontains $id) {
+                if ((Test-E2EOrdinalContains $volumeIdentityNames (Get-JsonMember $mount 'Name')) -and
+                    -not (Test-E2EOrdinalContains $ids $id)) {
                     throw 'RESOURCE_CLEANUP_FAILED'
                 }
             }
@@ -3591,20 +3934,22 @@ function Get-E2EProjectResourceInventory {
 
 function Assert-E2EInventorySubset {
     param($Before, $After)
-    if ($Before.Project -cne $After.Project) { throw 'RESOURCE_CLEANUP_FAILED' }
+    if (-not (Test-E2EOrdinalEqual $Before.Project $After.Project)) { throw 'RESOURCE_CLEANUP_FAILED' }
     foreach ($current in $After.Containers) {
-        $prior = @($Before.Containers | Where-Object { $_.Id -ceq $current.Id })
-        if ($prior.Count -ne 1 -or $prior[0].Service -cne $current.Service -or
-            $prior[0].Image -cne $current.Image -or $prior[0].ImageReference -cne $current.ImageReference) {
+        $prior = @($Before.Containers | Where-Object { Test-E2EOrdinalEqual $_.Id $current.Id })
+        if ($prior.Count -ne 1 -or
+            -not (Test-E2EOrdinalEqual $prior[0].Service $current.Service) -or
+            -not (Test-E2EOrdinalEqual $prior[0].Image $current.Image) -or
+            -not (Test-E2EOrdinalEqual $prior[0].ImageReference $current.ImageReference)) {
             throw 'RESOURCE_CLEANUP_FAILED'
         }
     }
     foreach ($current in $After.Networks) {
-        $prior = @($Before.Networks | Where-Object { $_.Id -ceq $current.Id })
-        if ($prior.Count -ne 1 -or $prior[0].Name -cne $current.Name) { throw 'RESOURCE_CLEANUP_FAILED' }
+        $prior = @($Before.Networks | Where-Object { Test-E2EOrdinalEqual $_.Id $current.Id })
+        if ($prior.Count -ne 1 -or -not (Test-E2EOrdinalEqual $prior[0].Name $current.Name)) { throw 'RESOURCE_CLEANUP_FAILED' }
     }
     foreach ($current in $After.Volumes) {
-        $prior = @($Before.Volumes | Where-Object { $_.Name -ceq $current.Name })
+        $prior = @($Before.Volumes | Where-Object { Test-E2EOrdinalEqual $_.Name $current.Name })
         if ($prior.Count -ne 1 -or -not (Test-E2EVolumeIdentityEqual $prior[0] $current)) {
             throw 'RESOURCE_CLEANUP_FAILED'
         }
@@ -3627,14 +3972,14 @@ function Invoke-E2EExactResourceCleanup {
     foreach ($entry in $Before.Containers) {
         $current = Get-E2EProjectResourceInventory -Project $Before.Project -Receipt $Receipt -PreviousInventory $Before
         Assert-E2EInventorySubset -Before $Before -After $current
-        $owned = @($current.Containers | Where-Object { $_.Id -ceq $entry.Id })
+        $owned = @($current.Containers | Where-Object { Test-E2EOrdinalEqual $_.Id $entry.Id })
         if ($owned.Count -eq 0) { continue }
         if ($owned[0].Running) {
             Invoke-Native { & docker stop $entry.Id 2>$null | Out-Null }
             $code = $LASTEXITCODE
             if ($code -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
             $stopped = Get-ContainerDocument $entry.Id
-            if ((Get-JsonMember $stopped 'Id') -cne $entry.Id -or
+            if (-not (Test-E2EOrdinalEqual (Get-JsonMember $stopped 'Id') $entry.Id) -or
                 (Get-JsonMember (Get-JsonMember $stopped 'State') 'Running') -ne $false) {
                 throw 'RESOURCE_CLEANUP_FAILED'
             }
@@ -3642,7 +3987,7 @@ function Invoke-E2EExactResourceCleanup {
             # is established once more before anything is removed.
             $current = Get-E2EProjectResourceInventory -Project $Before.Project -Receipt $Receipt -PreviousInventory $Before
             Assert-E2EInventorySubset -Before $Before -After $current
-            if (@($current.Containers | Where-Object { $_.Id -ceq $entry.Id }).Count -ne 1) {
+            if (@($current.Containers | Where-Object { Test-E2EOrdinalEqual $_.Id $entry.Id }).Count -ne 1) {
                 throw 'RESOURCE_CLEANUP_FAILED'
             }
         }
@@ -3651,14 +3996,14 @@ function Invoke-E2EExactResourceCleanup {
         if ($code -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
         $remaining = Get-E2EProjectResourceInventory -Project $Before.Project -Receipt $Receipt -PreviousInventory $Before
         Assert-E2EInventorySubset -Before $Before -After $remaining
-        if (@($remaining.Containers | Where-Object { $_.Id -ceq $entry.Id }).Count -ne 0) {
+        if (@($remaining.Containers | Where-Object { Test-E2EOrdinalEqual $_.Id $entry.Id }).Count -ne 0) {
             throw 'RESOURCE_CLEANUP_FAILED'
         }
     }
     foreach ($entry in $Before.Networks) {
         $current = Get-E2EProjectResourceInventory -Project $Before.Project -Receipt $Receipt -PreviousInventory $Before
         Assert-E2EInventorySubset -Before $Before -After $current
-        $owned = @($current.Networks | Where-Object { $_.Id -ceq $entry.Id })
+        $owned = @($current.Networks | Where-Object { Test-E2EOrdinalEqual $_.Id $entry.Id })
         if ($owned.Count -eq 0) { continue }
         if ($owned[0].Attached.Count -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
         Invoke-Native { & docker network rm $entry.Id 2>$null | Out-Null }
@@ -3666,7 +4011,7 @@ function Invoke-E2EExactResourceCleanup {
         if ($code -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
         $remaining = Get-E2EProjectResourceInventory -Project $Before.Project -Receipt $Receipt -PreviousInventory $Before
         Assert-E2EInventorySubset -Before $Before -After $remaining
-        if (@($remaining.Networks | Where-Object { $_.Id -ceq $entry.Id }).Count -ne 0) {
+        if (@($remaining.Networks | Where-Object { Test-E2EOrdinalEqual $_.Id $entry.Id }).Count -ne 0) {
             throw 'RESOURCE_CLEANUP_FAILED'
         }
     }
@@ -3688,7 +4033,7 @@ function Invoke-E2EExactResourceCleanup {
         foreach ($id in $allIds) {
             $document = Get-ContainerDocument $id
             if (@(Get-JsonMember $document 'Mounts' | Where-Object {
-                    (Get-JsonMember $_ 'Type') -eq 'volume' -and (Get-JsonMember $_ 'Name') -ceq $name
+                    Test-E2EOrdinalEqual (Get-JsonMember $_ 'Name') $name
                 }).Count -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
         }
         # The exact name, without `--force`, without a prefix, a glob or a
@@ -3708,27 +4053,44 @@ function Assert-E2EExistingProjectOwnership {
         [Parameter(Mandatory = $true)][string]$Project
     )
 
-    $ids = @(Invoke-NativeStdout { & docker ps -aq --filter "label=com.docker.compose.project=$Project" })
-    if ($LASTEXITCODE -ne 0) { throw 'RESOURCE_OWNERSHIP_INVALID' }
-    $ids = @($ids | Where-Object { $_ })
+    # Full identifiers, asked for as such and required to be such.
+    #
+    # Without `--no-trunc` the client answers with twelve characters, and a
+    # twelve-character identifier handed to `inspect` is a prefix query the
+    # daemon resolves to whichever container matches it. Every answer is
+    # therefore required to be a full 64-character lower-case identifier, and a
+    # short one, a longer prefix, a differently-cased one or a repeated one is
+    # a discovery this run does not understand rather than a container it owns.
+    $ids = @(Get-E2EFullContainerIdentifiers `
+        -Output (Invoke-NativeStdout { & docker ps -aq --no-trunc --filter "label=com.docker.compose.project=$Project" }) `
+        -ExitCode $LASTEXITCODE -ErrorCode 'RESOURCE_OWNERSHIP_INVALID')
     if ($ids.Count -eq 0) { return }
     $images = Get-E2EImageSet -Receipt $Receipt
     $records = @{}
     foreach ($id in $ids) {
         $document = Get-ContainerDocument $id
+        if (-not (Test-E2EOrdinalEqual (Get-JsonMember $document 'Id') $id)) { throw 'RESOURCE_OWNERSHIP_INVALID' }
         $configuration = Get-JsonMember $document 'Config'
         $labels = Get-JsonMember $configuration 'Labels'
-        if ((Get-JsonMember $labels 'com.docker.compose.project') -ne $Project) {
+        if (-not (Test-E2EOrdinalEqual (Get-JsonMember $labels 'com.docker.compose.project') $Project)) {
             throw 'RESOURCE_OWNERSHIP_INVALID'
         }
+        # The service label decides which image this container is required to be
+        # running, so a label that is not exactly one of the services this
+        # repository declares is a container this project does not account for
+        # rather than one to pass over: skipping it is what would let a label
+        # spelled with a smuggled character escape the check below entirely.
         $service = Get-JsonMember $labels 'com.docker.compose.service'
+        if (-not (Test-E2EOrdinalContains $E2EComposeServices $service)) {
+            throw 'RESOURCE_OWNERSHIP_INVALID'
+        }
         $expectedReference = $null
         $role = $null
-        if ($service -eq 'backend') {
+        if (Test-E2EOrdinalEqual $service 'backend') {
             $expectedReference = $images.Backend
             $role = 'backend'
         }
-        elseif ($service -in @('ai-service', 'external-risk-mock', 'alertmanager-webhook')) {
+        elseif (Test-E2EOrdinalContains @('ai-service', 'external-risk-mock', 'alertmanager-webhook') $service) {
             $expectedReference = $images.AiService
             $role = 'ai-service'
         }
@@ -3736,8 +4098,8 @@ function Assert-E2EExistingProjectOwnership {
         if (-not $records.ContainsKey($role)) {
             $records[$role] = Get-E2ENormalizedImageRecord -Reference $expectedReference -Role $role -Receipt $Receipt
         }
-        if ((Get-JsonMember $configuration 'Image') -ne $expectedReference -or
-            (Get-JsonMember $document 'Image') -ne $records[$role].Id) {
+        if (-not (Test-E2EOrdinalEqual (Get-JsonMember $configuration 'Image') $expectedReference) -or
+            -not (Test-E2EOrdinalEqual (Get-JsonMember $document 'Image') $records[$role].Id)) {
             throw 'RESOURCE_OWNERSHIP_INVALID'
         }
     }
@@ -3762,7 +4124,7 @@ function Remove-E2EOwnedBrowserContainer {
     $filters = Get-E2EExactNameFilters -Names @($BrowserContainerName) -Prefix '/'
     $ids = @(Get-E2EDockerLines { & docker ps -aq --no-trunc @filters })
     if ($ids.Count -eq 0) { return }
-    if ($ids.Count -ne 1 -or $ids[0] -cnotmatch '^[0-9a-f]{64}$') {
+    if ($ids.Count -ne 1 -or $ids[0] -cnotmatch '\A[0-9a-f]{64}\z') {
         throw 'RESOURCE_OWNERSHIP_INVALID'
     }
     $contract = Get-E2EBrowserOwnershipContract -Receipt $Receipt
@@ -3921,9 +4283,9 @@ function Assert-E2EContainerImages {
         'alertmanager-webhook' = [pscustomobject]@{ Reference = $images.AiService; Id = $records.AiService.Id }
     }
     foreach ($service in $expected.Keys) {
-        $ids = @(Invoke-NativeStdout { & docker ps -aq --filter "label=com.docker.compose.project=$Project" --filter "label=com.docker.compose.service=$service" })
-        if ($LASTEXITCODE -ne 0) { throw 'CONTAINER_OWNERSHIP_INVALID' }
-        $ids = @($ids | Where-Object { $_ })
+        $ids = @(Get-E2EFullContainerIdentifiers `
+            -Output (Invoke-NativeStdout { & docker ps -aq --no-trunc --filter "label=com.docker.compose.project=$Project" --filter "label=com.docker.compose.service=$service" }) `
+            -ExitCode $LASTEXITCODE -ErrorCode 'CONTAINER_OWNERSHIP_INVALID')
         if ($ids.Count -eq 0) {
             if ($service -eq 'alertmanager-webhook') { continue }
             throw 'CONTAINER_OWNERSHIP_INVALID'
@@ -3931,8 +4293,9 @@ function Assert-E2EContainerImages {
         if ($ids.Count -ne 1) { throw 'CONTAINER_OWNERSHIP_INVALID' }
         $document = Get-ContainerDocument $ids[0]
         $config = Get-JsonMember $document 'Config'
-        if ((Get-JsonMember $config 'Image') -ne $expected[$service].Reference -or
-            (Get-JsonMember $document 'Image') -ne $expected[$service].Id) {
+        if (-not (Test-E2EOrdinalEqual (Get-JsonMember $document 'Id') $ids[0]) -or
+            -not (Test-E2EOrdinalEqual (Get-JsonMember $config 'Image') $expected[$service].Reference) -or
+            -not (Test-E2EOrdinalEqual (Get-JsonMember $document 'Image') $expected[$service].Id)) {
             throw 'CONTAINER_OWNERSHIP_INVALID'
         }
     }

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Preflight', 'MajorFixPreflight', 'MajorFixFixture11', 'MajorFixTargeted', 'OwnerFixPreflight', 'OwnerFixTargeted', 'WaitBrowserPreflight', 'WaitBrowserTargeted', 'SessionStateTargeted', 'D209Preflight', 'D209A', 'D209B', 'D225Service', 'D248Targeted', 'CleanupBrowserTargeted', 'Formal')]
+    [ValidateSet('Preflight', 'MajorFixPreflight', 'MajorFixFixture11', 'MajorFixTargeted', 'OwnerFixPreflight', 'OwnerFixTargeted', 'WaitBrowserPreflight', 'WaitBrowserTargeted', 'SessionStateTargeted', 'D209Preflight', 'D209A', 'D209B', 'D225Service', 'D248Targeted', 'CleanupBrowserTargeted', 'D273Targeted', 'D281Targeted', 'Formal')]
     [string]$Mode = 'Formal'
 )
 
@@ -1026,11 +1026,23 @@ function Invoke-D209ATests {
             }
             $values = @(Assert-E2EOwnedImages -Receipt $activeReceipt)
             $script:D209Mismatch = ''
+            $script:D209Discovery = ''
             function script:Invoke-NativeStdout {
                 param([scriptblock]$Command)
                 $script:D209Service = [string](Get-Variable -Scope 1 -Name service -ValueOnly)
+                $script:D209Discovery = $Command.ToString()
                 $global:LASTEXITCODE = 0
-                return ('f' * 64)
+                $full = 'f' * 64
+                # The daemon's answer, in each of the shapes a container
+                # discovery can honestly or dishonestly come back in.
+                switch ($script:D209Mismatch) {
+                    'short' { return $full.Substring(0, 12) }
+                    'prefix' { return $full.Substring(0, 63) }
+                    'upper' { return $full.ToUpperInvariant() }
+                    'duplicate' { return ($full + "`n" + $full) }
+                    'ambiguous' { return ($full + "`n" + ('9' * 64)) }
+                    default { return $full }
+                }
             }
             function script:Get-ContainerDocument {
                 param([string]$ContainerId)
@@ -1040,14 +1052,21 @@ function Invoke-D209ATests {
                 $id = if ($role -eq 'backend') { 'sha256:' + ('1' * 64) } else { 'sha256:' + ('2' * 64) }
                 if ($script:D209Mismatch -eq 'reference') { $reference = 'wrong:reference' }
                 if ($script:D209Mismatch -eq 'id') { $id = 'sha256:' + ('9' * 64) }
-                return [pscustomobject]@{ Config=[pscustomobject]@{ Image=$reference }; Image=$id }
+                $documentId = if ($script:D209Mismatch -eq 'document-id') { '9' * 64 } else { $ContainerId }
+                return [pscustomobject]@{ Id=$documentId; Config=[pscustomobject]@{ Image=$reference }; Image=$id }
             }
             Assert-E2EContainerImages -Receipt $activeReceipt -Project 'fixture-project'
             $script:D209Mismatch = 'reference'
             $referenceFailure = try { Assert-E2EContainerImages -Receipt $activeReceipt -Project 'fixture-project'; '' } catch { $_.Exception.Message }
             $script:D209Mismatch = 'id'
             $idFailure = try { Assert-E2EContainerImages -Receipt $activeReceipt -Project 'fixture-project'; '' } catch { $_.Exception.Message }
+            $identifierFailures = [ordered]@{}
+            foreach ($shape in @('short', 'prefix', 'upper', 'duplicate', 'ambiguous', 'document-id')) {
+                $script:D209Mismatch = $shape
+                $identifierFailures[$shape] = try { Assert-E2EContainerImages -Receipt $activeReceipt -Project 'fixture-project'; '' } catch { $_.Exception.Message }
+            }
             $script:D209Mismatch = ''
+            $discovery = $script:D209Discovery
             $script:D209Receipt = $activeReceipt
             function script:Get-E2EPreparedReceipt { return $script:D209Receipt }
             function script:Assert-E2ESourceMatchesReceipt {}
@@ -1058,7 +1077,7 @@ function Invoke-D209ATests {
             function script:Assert-E2EOwnedImages { return 'BROWSER_RUNTIME_VERIFIED'; return $script:D209Records }
             $containerPollution = try { Assert-E2EContainerImages -Receipt $activeReceipt -Project 'fixture-project'; '' } catch { $_.Exception.Message }
             $validatePollution = try { Invoke-E2EValidateMode | Out-Null; '' } catch { $_.Exception.Message }
-            return [pscustomobject]@{ Values=$values; ReferenceFailure=$referenceFailure; IdFailure=$idFailure; ContainerPollution=$containerPollution; ValidatePollution=$validatePollution }
+            return [pscustomobject]@{ Values=$values; ReferenceFailure=$referenceFailure; IdFailure=$idFailure; ContainerPollution=$containerPollution; ValidatePollution=$validatePollution; IdentifierFailures=$identifierFailures; Discovery=$discovery }
         } $receipt
         Assert-Equal 1 $result.Values.Count 'Image record return cardinality differs.'
         $records = $result.Values[0]
@@ -1077,6 +1096,10 @@ function Invoke-D209ATests {
         Assert-True (@($result.Values | Where-Object { $_ -is [string] }).Count -eq 0) 'Native stdout contaminated image records.'
         Assert-Equal 'CONTAINER_OWNERSHIP_INVALID' $result.ReferenceFailure '.Config.Image mismatch was accepted.'
         Assert-Equal 'CONTAINER_OWNERSHIP_INVALID' $result.IdFailure '.Image mismatch was accepted.'
+        Assert-True ($result.Discovery -cmatch '--no-trunc') 'Container discovery does not ask for full identifiers.'
+        foreach ($shape in @('short', 'prefix', 'upper', 'duplicate', 'ambiguous', 'document-id')) {
+            Assert-Equal 'CONTAINER_OWNERSHIP_INVALID' $result.IdentifierFailures[$shape] "An abbreviated or ambiguous identifier was accepted: $shape"
+        }
         Assert-Equal 'IMAGE_RECORD_INVALID' $result.ContainerPollution 'Container consumer accepted record contamination.'
         Assert-Equal 'IMAGE_RECORD_INVALID' $result.ValidatePollution 'Validate consumer accepted record contamination.'
         $records.Backend.Id = 'invalid-id'
@@ -1569,7 +1592,7 @@ function Invoke-D209BTests {
             'FINGUARDOPS_D242_NET_ATTACH_AFTER', 'FINGUARDOPS_D242_NET_REPLACE_AFTER',
             'FINGUARDOPS_D242_VOLUME_SWAP', 'FINGUARDOPS_D242_VOL_USER_AFTER',
             'FINGUARDOPS_D242_IMAGES_GONE', 'FINGUARDOPS_D248_DRIFT_AT',
-            'FINGUARDOPS_D248_DRIFT_FIELD', 'FINGUARDOPS_D248_USER_AT')
+            'FINGUARDOPS_D248_DRIFT_FIELD', 'FINGUARDOPS_D248_USER_AT', 'FINGUARDOPS_D273_BIND')
         $environmentNames = @('FINGUARDOPS_D209_ROOT', 'FINGUARDOPS_D209_REPOSITORY_ROOT') + $scenarioNames
         $previousEnvironment = @{}
         foreach ($name in $environmentNames) { $previousEnvironment[$name] = [System.Environment]::GetEnvironmentVariable($name, 'Process') }
@@ -1675,6 +1698,9 @@ function New-FakeContainerDocument {
 
     $repoRoot = $env:FINGUARDOPS_D209_REPOSITORY_ROOT
     $configFiles = @((Join-Path $repoRoot 'infra/compose.yml'), (Join-Path $repoRoot 'infra/compose.keycloak-local-e2e.yml')) -join ','
+    # Compose records the directory of the first `-f` file, which is the
+    # repository's `infra` directory and not the repository root.
+    $workingDir = Join-Path $repoRoot 'infra'
     $expectedReference = $contract.services.PSObject.Properties[$Service].Value.image
     $isPrimary = $Service -ceq $activeService -and $Target -cne $backendId
     $reference = if ($isPrimary -and $env:FINGUARDOPS_D225_CONFIG_IMAGE) { $env:FINGUARDOPS_D225_CONFIG_IMAGE } else { $expectedReference }
@@ -1690,7 +1716,10 @@ function New-FakeContainerDocument {
         'com.docker.compose.container-number' = $(if ($isPrimary -and $env:FINGUARDOPS_D225_NUMBER) { $env:FINGUARDOPS_D225_NUMBER } else { '1' })
         'com.docker.compose.oneoff' = $(if ($isPrimary -and $env:FINGUARDOPS_D225_ONEOFF) { $env:FINGUARDOPS_D225_ONEOFF } else { 'False' })
         'com.docker.compose.project.config_files' = $(if ($isPrimary -and $env:FINGUARDOPS_D225_CONFIG_FILES) { $env:FINGUARDOPS_D225_CONFIG_FILES } else { $configFiles })
-        'com.docker.compose.project.working_dir' = $(if ($isPrimary -and $env:FINGUARDOPS_D225_WORKDIR) { $env:FINGUARDOPS_D225_WORKDIR } else { $repoRoot })
+        'com.docker.compose.project.working_dir' = $(if ($isPrimary -and $env:FINGUARDOPS_D225_WORKDIR) { $env:FINGUARDOPS_D225_WORKDIR } else { $workingDir })
+    }
+    if ($isPrimary -and $env:FINGUARDOPS_D225_WORKDIR -ceq '@@absent@@') {
+        $labels.Remove('com.docker.compose.project.working_dir')
     }
     if ($Service -in @('ai-service', 'backend', 'external-risk-mock', 'alertmanager-webhook')) {
         $role = if ($Service -eq 'backend') { 'backend' } else { 'ai-service' }
@@ -1707,7 +1736,22 @@ function New-FakeContainerDocument {
     if ($Service -ne 'postgresql') {
         foreach ($volume in @($contract.services.PSObject.Properties[$Service].Value.volumes)) {
             if ($volume.type -eq 'volume') { $mounts += , @{ Type = 'volume'; Name = ($project + '_' + $volume.source); Destination = $volume.target } }
-            elseif ($volume.type -eq 'bind') { $mounts += , @{ Type = 'bind'; Source = $volume.source; Destination = $volume.target } }
+            elseif ($volume.type -eq 'bind') {
+                # Docker Desktop runs the daemon in a Linux VM, so a Windows
+                # host bind source comes back as the VM's view of it unless a
+                # case asks for the Windows spelling instead.
+                $spelling = $env:FINGUARDOPS_D273_BIND
+                $source = $volume.source
+                if ($spelling -cne 'windows') {
+                    $drive = $source.Substring(0, 1).ToLowerInvariant()
+                    if ($isPrimary -and $spelling -ceq 'other-drive') { $drive = 'd' }
+                    $source = '/run/desktop/mnt/host/' + $drive + '/' + ($source.Substring(3) -replace '\\', '/')
+                    if ($isPrimary -and $spelling -ceq 'unknown-prefix') { $source = $source -replace '^/run/desktop', '' }
+                }
+                $writable = $isPrimary -and $spelling -ceq 'writable'
+                $mounts += , @{ Type = 'bind'; Source = $source; Destination = $volume.target
+                    Mode = $(if ($writable) { 'rw' } else { 'ro' }); RW = $writable; Propagation = 'rprivate' }
+            }
         }
         foreach ($secret in @($contract.services.PSObject.Properties[$Service].Value.secrets)) {
             if ($null -eq $secret) { continue }
@@ -2022,6 +2066,20 @@ exit 81
                 [pscustomobject]@{ Name = 'oneoff-mismatch'; Service = ''; Fail = ''; Env = @{ FINGUARDOPS_D225_ONEOFF = 'True' }; Absent = @(); Success = $false; Mutating = $false },
                 [pscustomobject]@{ Name = 'config-files-mismatch'; Service = ''; Fail = ''; Env = @{ FINGUARDOPS_D225_CONFIG_FILES = 'wrong.yml' }; Absent = @(); Success = $false; Mutating = $false },
                 [pscustomobject]@{ Name = 'working-directory-mismatch'; Service = ''; Fail = ''; Env = @{ FINGUARDOPS_D225_WORKDIR = 'C:\wrong' }; Absent = @(); Success = $false; Mutating = $false },
+                # The repository root is where the Compose command runs, not
+                # the directory Compose records as the project's own.
+                [pscustomobject]@{ Name = 'working-directory-repository-root'; Service = ''; Fail = ''; Env = @{ FINGUARDOPS_D225_WORKDIR = $env:FINGUARDOPS_D209_REPOSITORY_ROOT }; Absent = @(); Success = $false; Mutating = $false },
+                [pscustomobject]@{ Name = 'working-directory-sibling'; Service = ''; Fail = ''; Env = @{ FINGUARDOPS_D225_WORKDIR = (Join-Path $env:FINGUARDOPS_D209_REPOSITORY_ROOT 'infrastructure') }; Absent = @(); Success = $false; Mutating = $false },
+                [pscustomobject]@{ Name = 'working-directory-suffix-only'; Service = ''; Fail = ''; Env = @{ FINGUARDOPS_D225_WORKDIR = 'C:\elsewhere\infra' }; Absent = @(); Success = $false; Mutating = $false },
+                [pscustomobject]@{ Name = 'working-directory-absent'; Service = ''; Fail = ''; Env = @{ FINGUARDOPS_D225_WORKDIR = '@@absent@@' }; Absent = @(); Success = $false; Mutating = $false },
+                # The bind source, in every spelling the daemon can report it
+                # in. The Windows spelling and the Docker Desktop spelling name
+                # one path; the other three name something else.
+                [pscustomobject]@{ Name = 'bind-source-windows-spelling'; Service = 'keycloak-bootstrap'; Fail = ''; Env = @{ FINGUARDOPS_D273_BIND = 'windows' }; Absent = @(); Success = $true; Mutating = $true },
+                [pscustomobject]@{ Name = 'bind-source-other-drive'; Service = 'keycloak-bootstrap'; Fail = ''; Env = @{ FINGUARDOPS_D273_BIND = 'other-drive' }; Absent = @(); Success = $false; Mutating = $false },
+                [pscustomobject]@{ Name = 'bind-source-unknown-prefix'; Service = 'keycloak-bootstrap'; Fail = ''; Env = @{ FINGUARDOPS_D273_BIND = 'unknown-prefix' }; Absent = @(); Success = $false; Mutating = $false },
+                [pscustomobject]@{ Name = 'bind-source-writable'; Service = 'keycloak-bootstrap'; Fail = ''; Env = @{ FINGUARDOPS_D273_BIND = 'writable' }; Absent = @(); Success = $false; Mutating = $false },
+                [pscustomobject]@{ Name = 'bind-source-prometheus-desktop'; Service = 'prometheus'; Fail = ''; Env = @{}; Absent = @(); Success = $true; Mutating = $true },
                 [pscustomobject]@{ Name = 'container-name-mismatch'; Service = ''; Fail = ''; Env = @{ FINGUARDOPS_D242_NAME = 'wrong' }; Absent = @(); Success = $false; Mutating = $false },
                 [pscustomobject]@{ Name = 'network-namespace-mismatch'; Service = 'keycloak'; Fail = ''; Env = @{ FINGUARDOPS_D225_NAMESPACE = 'wrong' }; Absent = @(); Success = $false; Mutating = $false },
                 [pscustomobject]@{ Name = 'network-attachment-mismatch'; Service = ''; Fail = ''; Env = @{ FINGUARDOPS_D225_NETWORK = 'wrong' }; Absent = @(); Success = $false; Mutating = $false },
@@ -3852,6 +3910,1495 @@ function Invoke-CleanupBrowserTargetedTests {
     Write-Output 'Cleanup browser targeted passed'
 }
 
+# --- D273 Compose working directory, Docker Desktop bind sources, full IDs ---
+#
+# Three production contracts the clean-commit runtime gate found unproven, each
+# asked of the production validator itself. Every fixture below only describes
+# a world - a Compose configuration the real `docker compose config` produced,
+# a container document, a daemon that answers `ps`, `inspect`, `stop` and `rm`
+# - and no fixture decides whether that world is acceptable. That decision is
+# the production module's, every time.
+
+function Get-D273RepositoryRoot {
+    return [System.IO.Path]::GetFullPath((& $script:E2EModule { $RepositoryRoot }))
+}
+
+# The real Compose configuration, produced by the production argument vector.
+# `docker compose config` reads files and resolves variables; it creates,
+# starts and removes nothing.
+function Get-D273ComposeConfiguration {
+    param([Parameter(Mandatory = $true)][string]$Project, [Parameter(Mandatory = $true)]$Receipt)
+
+    $previous = & $script:E2EModule { param($value) Set-E2EOwnerEnvironment -Receipt $value } $Receipt
+    try {
+        $encoded = & $script:E2EModule {
+            param($activeProject)
+            $arguments = Get-E2EComposeBaseArguments -Project $activeProject
+            Invoke-E2EInLocation -Path $RepositoryRoot -Body {
+                $value = Invoke-NativeStdout { & docker @arguments config --format json }
+                if ($LASTEXITCODE -ne 0) { throw 'COMPOSE_CONFIG_FIXTURE_FAILED' }
+                return $value
+            }
+        } $Project
+    }
+    finally { & $script:E2EModule { param($value) Restore-E2EOwnerEnvironment -Previous $value } $previous }
+    return (($encoded -join "`n") | ConvertFrom-Json)
+}
+
+# The Docker Desktop Linux VM's spelling of a Windows host path, written here
+# so a counterexample can differ from it by exactly one thing.
+function ConvertTo-D273DesktopPath([string]$Path, [string]$Drive) {
+    if ($Path -cnotmatch '^(?<drive>[A-Za-z]):[\\/](?<rest>.*)$') { throw ('D273_PATH_INVALID ' + $Path) }
+    $letter = if ([string]::IsNullOrEmpty($Drive)) { $Matches['drive'].ToLowerInvariant() } else { $Drive }
+    return '/run/desktop/mnt/host/' + $letter + '/' + ($Matches['rest'] -replace '\\', '/')
+}
+
+# A `prometheus` container as the daemon records one: two read-only binds, one
+# named volume, two project networks, no ownership labels and no secrets.
+function New-D273PrometheusDocument {
+    param(
+        [Parameter(Mandatory = $true)][string]$Id,
+        [Parameter(Mandatory = $true)][string]$Project,
+        [Parameter(Mandatory = $true)]$Definition,
+        [Parameter(Mandatory = $true)][string]$ImageId,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][string[]]$ConfigFiles,
+        [string]$BindSpelling = 'windows'
+    )
+
+    $mounts = [System.Collections.Generic.List[object]]::new()
+    foreach ($volume in @($Definition.volumes)) {
+        if ($volume.type -ceq 'volume') {
+            $mounts.Add([ordered]@{ Type = 'volume'; Name = ($Project + '_' + $volume.source); Source = ''
+                Destination = $volume.target; Mode = 'z'; RW = $true; Propagation = '' })
+            continue
+        }
+        $source = if ($BindSpelling -ceq 'desktop') { ConvertTo-D273DesktopPath $volume.source '' } else { $volume.source }
+        $mounts.Add([ordered]@{ Type = 'bind'; Name = ''; Source = $source
+            Destination = $volume.target; Mode = 'ro'; RW = $false; Propagation = 'rprivate' })
+    }
+    $networkNames = @($Definition.networks.PSObject.Properties.Name)
+    $attachments = [ordered]@{}
+    foreach ($name in $networkNames) { $attachments[($Project + '_' + $name)] = [ordered]@{ NetworkID = ('e' * 64) } }
+    return [ordered]@{
+        Id     = $Id
+        Name   = '/' + $Project + '-prometheus-1'
+        Image  = $ImageId
+        Config = [ordered]@{
+            Image  = $Definition.image
+            Labels = [ordered]@{
+                'com.docker.compose.project' = $Project
+                'com.docker.compose.service' = 'prometheus'
+                'com.docker.compose.container-number' = '1'
+                'com.docker.compose.oneoff' = 'False'
+                'com.docker.compose.project.config_files' = ($ConfigFiles -join ',')
+                'com.docker.compose.project.working_dir' = $WorkingDirectory
+            }
+        }
+        State           = [ordered]@{ Status = 'exited'; Running = $false }
+        HostConfig      = [ordered]@{ NetworkMode = ($Project + '_' + $networkNames[0]) }
+        NetworkSettings = [ordered]@{ Networks = $attachments }
+        Mounts          = $mounts.ToArray()
+    }
+}
+
+# The document as the daemon hands it over, parsed the way production parses
+# `docker container inspect` output.
+function ConvertTo-D273Document($Value) {
+    return (ConvertFrom-Json -InputObject (ConvertTo-Json -InputObject $Value -Depth 12 -Compress))
+}
+
+function Get-D273IdentityFailure($Document, [string]$Id, [string]$Project, $Contract, $Receipt) {
+    return Get-CapturedException {
+        & $script:E2EModule {
+            param($document, $id, $project, $contract, $receipt, $ids)
+            Assert-E2EComposeContainerIdentity -Document $document -Id $id -Project $project `
+                -Service 'prometheus' -Contract $contract -Receipt $receipt -AllIds $ids -PriorBackendId ''
+        } $Document $Id $Project $Contract $Receipt @($Id)
+    }
+}
+
+function Get-D273ComposeIdentityCases {
+    param([string]$Root, [string]$Infra)
+
+    $desktopInfra = ConvertTo-D273DesktopPath $Infra ''
+    return @(
+        # Approved: the canonical directory the production Compose invocation
+        # actually works in, and the spellings Windows treats as the same one.
+        [pscustomobject]@{ Name = 'working-dir-canonical-infra'; WorkingDirectory = $Infra; Accept = $true; Mutate = $null },
+        [pscustomobject]@{ Name = 'working-dir-forward-separators'; WorkingDirectory = $Infra.Replace('\', '/'); Accept = $true; Mutate = $null },
+        [pscustomobject]@{ Name = 'working-dir-lower-case'; WorkingDirectory = $Infra.ToLowerInvariant(); Accept = $true; Mutate = $null },
+        [pscustomobject]@{ Name = 'working-dir-upper-drive'; WorkingDirectory = $Infra.Substring(0, 1).ToUpperInvariant() + $Infra.Substring(1); Accept = $true; Mutate = $null },
+        [pscustomobject]@{ Name = 'working-dir-trailing-separator'; WorkingDirectory = $Infra + '\'; Accept = $true; Mutate = $null },
+        # Refused: the repository root is the process working directory, not the
+        # Compose project working directory.
+        [pscustomobject]@{ Name = 'working-dir-repository-root'; WorkingDirectory = $Root; Accept = $false; Mutate = $null },
+        [pscustomobject]@{ Name = 'working-dir-sibling'; WorkingDirectory = (Join-Path $Root 'infra-sibling'); Accept = $false; Mutate = $null },
+        [pscustomobject]@{ Name = 'working-dir-prefix-sibling'; WorkingDirectory = (Join-Path $Root 'infrastructure'); Accept = $false; Mutate = $null },
+        [pscustomobject]@{ Name = 'working-dir-child'; WorkingDirectory = (Join-Path $Infra 'keycloak'); Accept = $false; Mutate = $null },
+        [pscustomobject]@{ Name = 'working-dir-suffix-only'; WorkingDirectory = 'C:\elsewhere\infra'; Accept = $false; Mutate = $null },
+        [pscustomobject]@{ Name = 'working-dir-other-drive'; WorkingDirectory = 'D:' + $Infra.Substring(2); Accept = $false; Mutate = $null },
+        [pscustomobject]@{ Name = 'working-dir-traversal'; WorkingDirectory = $Root + '\infra\..\infra'; Accept = $false; Mutate = $null },
+        [pscustomobject]@{ Name = 'working-dir-desktop-spelling'; WorkingDirectory = $desktopInfra; Accept = $false; Mutate = $null },
+        [pscustomobject]@{ Name = 'working-dir-polluted'; WorkingDirectory = $Infra + ';' + $Root; Accept = $false; Mutate = $null },
+        [pscustomobject]@{ Name = 'working-dir-empty'; WorkingDirectory = ''; Accept = $false; Mutate = $null },
+        [pscustomobject]@{
+            Name = 'working-dir-missing'; WorkingDirectory = $Infra; Accept = $false
+            Mutate = { param($document) $document['Config']['Labels'].Remove('com.docker.compose.project.working_dir') }
+        },
+        [pscustomobject]@{
+            Name = 'working-dir-multiple'; WorkingDirectory = $Infra; Accept = $false
+            Mutate = { param($document, $root, $infra) $document['Config']['Labels']['com.docker.compose.project.working_dir'] = @($infra, $root) }
+        },
+        # The Compose file list stays exactly what it was.
+        [pscustomobject]@{
+            Name = 'config-files-mismatch'; WorkingDirectory = $Infra; Accept = $false
+            Mutate = { param($document) $document['Config']['Labels']['com.docker.compose.project.config_files'] = 'wrong.yml' }
+        },
+        [pscustomobject]@{
+            Name = 'config-files-partial'; WorkingDirectory = $Infra; Accept = $false
+            Mutate = { param($document, $root)
+                $document['Config']['Labels']['com.docker.compose.project.config_files'] =
+                    [System.IO.Path]::GetFullPath((Join-Path $root 'infra/compose.yml')) }
+        },
+        # The bind source, in every spelling the daemon can report it in.
+        [pscustomobject]@{ Name = 'bind-windows-source'; WorkingDirectory = $Infra; Accept = $true; Spelling = 'windows'; Mutate = $null },
+        [pscustomobject]@{ Name = 'bind-desktop-source'; WorkingDirectory = $Infra; Accept = $true; Spelling = 'desktop'; Mutate = $null },
+        [pscustomobject]@{
+            Name = 'bind-desktop-other-drive'; WorkingDirectory = $Infra; Accept = $false; Spelling = 'desktop'
+            Mutate = { param($document)
+                foreach ($mount in @($document['Mounts'])) {
+                    if ($mount['Type'] -ceq 'bind') { $mount['Source'] = $mount['Source'].Replace('/mnt/host/c/', '/mnt/host/d/') }
+                } }
+        },
+        [pscustomobject]@{
+            Name = 'bind-desktop-suffix-only'; WorkingDirectory = $Infra; Accept = $false; Spelling = 'desktop'
+            Mutate = { param($document)
+                foreach ($mount in @($document['Mounts'])) {
+                    if ($mount['Type'] -ceq 'bind') { $mount['Source'] = '/run/desktop/mnt/host/c/elsewhere/infra/prometheus/prometheus.yml' }
+                } }
+        },
+        [pscustomobject]@{
+            Name = 'bind-desktop-unknown-prefix'; WorkingDirectory = $Infra; Accept = $false; Spelling = 'desktop'
+            Mutate = { param($document)
+                foreach ($mount in @($document['Mounts'])) {
+                    if ($mount['Type'] -ceq 'bind') { $mount['Source'] = $mount['Source'].Replace('/run/desktop/mnt/host/', '/mnt/host/') }
+                } }
+        },
+        [pscustomobject]@{
+            Name = 'bind-writable'; WorkingDirectory = $Infra; Accept = $false; Spelling = 'desktop'
+            Mutate = { param($document)
+                foreach ($mount in @($document['Mounts'])) {
+                    if ($mount['Type'] -ceq 'bind') { $mount['Mode'] = 'rw'; $mount['RW'] = $true }
+                } }
+        },
+        [pscustomobject]@{
+            Name = 'bind-wrong-destination'; WorkingDirectory = $Infra; Accept = $false; Spelling = 'desktop'
+            Mutate = { param($document)
+                foreach ($mount in @($document['Mounts'])) {
+                    if ($mount['Type'] -ceq 'bind') { $mount['Destination'] = '/etc/prometheus/elsewhere.yml'; break }
+                } }
+        },
+        [pscustomobject]@{
+            Name = 'bind-added'; WorkingDirectory = $Infra; Accept = $false; Spelling = 'desktop'
+            Mutate = { param($document)
+                $extra = [ordered]@{ Type = 'bind'; Name = ''; Source = '/run/desktop/mnt/host/c/windows'
+                    Destination = '/etc/prometheus/extra'; Mode = 'ro'; RW = $false; Propagation = 'rprivate' }
+                $document['Mounts'] = @(@($document['Mounts']) + @($extra)) }
+        },
+        [pscustomobject]@{
+            Name = 'bind-missing'; WorkingDirectory = $Infra; Accept = $false; Spelling = 'desktop'
+            Mutate = { param($document)
+                $document['Mounts'] = @(@($document['Mounts']) | Where-Object { $_['Type'] -cne 'bind' }) }
+        }
+    )
+}
+
+function Invoke-D273ComposeIdentityTests {
+    param([string]$Project, $Receipt, $Configuration)
+
+    $root = Get-D273RepositoryRoot
+    $infra = [System.IO.Path]::GetFullPath((Join-Path $root 'infra'))
+    $configFiles = @(
+        [System.IO.Path]::GetFullPath((Join-Path $root 'infra/compose.yml')),
+        [System.IO.Path]::GetFullPath((Join-Path $root 'infra/compose.keycloak-local-e2e.yml'))
+    )
+    $definition = $Configuration.services.PSObject.Properties['prometheus'].Value
+    $id = '1' * 64
+    $imageId = 'sha256:' + ('2' * 64)
+    $contract = [pscustomobject]@{ Reference = $definition.image; Id = $imageId; Definition = $definition }
+
+    foreach ($case in @(Get-D273ComposeIdentityCases -Root $root -Infra $infra)) {
+        $spelling = if ($case.PSObject.Properties['Spelling']) { $case.Spelling } else { 'windows' }
+        $document = New-D273PrometheusDocument -Id $id -Project $Project -Definition $definition `
+            -ImageId $imageId -WorkingDirectory $case.WorkingDirectory -ConfigFiles $configFiles -BindSpelling $spelling
+        if ($null -ne $case.Mutate) { & $case.Mutate $document $root $infra }
+        $failure = Get-D273IdentityFailure (ConvertTo-D273Document $document) $id $Project $contract $Receipt
+        if ($case.Accept) {
+            $detail = if ($null -ne $failure) { $failure.Message } else { '' }
+            Assert-True ($null -eq $failure) "$($case.Name) was refused: $detail"
+        }
+        else {
+            Assert-True ($null -ne $failure) "$($case.Name) was accepted."
+            Assert-Equal 'RESOURCE_CLEANUP_FAILED' $failure.Message "$($case.Name) returned the wrong fixed error."
+            Assert-NoRawCleanupDetail $failure "$($case.Name) reflected an internal detail."
+        }
+    }
+
+    # The expected working directory is the repository's `infra` directory and
+    # not the repository root, and it is computed from the production Compose
+    # declaration rather than read back off the container being judged.
+    $computed = & $script:E2EModule { Get-E2EComposeWorkingDirectory }
+    Assert-Equal $infra $computed 'The production Compose working directory is not the repository infra directory.'
+    Assert-True ($computed -cne $root) 'The production Compose working directory is the repository root.'
+}
+
+function Invoke-D273BrowserBindTests {
+    $expected = @(& $script:E2EModule { Get-BrowserServerExpectedBinds })
+    Assert-Equal 3 $expected.Count 'The production browser bind contract is not three binds.'
+
+    $windows = @($expected | ForEach-Object { $_.Source + ':' + $_.Destination + ':ro' })
+    $desktop = @($expected | ForEach-Object { (ConvertTo-D273DesktopPath $_.Source '') + ':' + $_.Destination + ':ro' })
+    $upperDrive = @($expected | ForEach-Object { (ConvertTo-D273DesktopPath $_.Source $_.Source.Substring(0, 1).ToUpperInvariant()) + ':' + $_.Destination + ':ro' })
+    $otherDrive = @($desktop | ForEach-Object { $_.Replace('/mnt/host/c/', '/mnt/host/d/') })
+    $unknownPrefix = @($desktop | ForEach-Object { $_.Replace('/run/desktop/mnt/host/', '/mnt/host/') })
+    $suffixOnly = @($expected | ForEach-Object { '/run/desktop/mnt/host/c/elsewhere' + (ConvertTo-D273DesktopPath $_.Source '').Substring('/run/desktop/mnt/host/c'.Length) + ':' + $_.Destination + ':ro' })
+
+    $bindCases = @(
+        [pscustomobject]@{ Name = 'binds-windows'; Value = $windows; Accept = $true },
+        [pscustomobject]@{ Name = 'binds-desktop'; Value = $desktop; Accept = $true },
+        [pscustomobject]@{ Name = 'binds-desktop-upper-drive'; Value = $upperDrive; Accept = $true },
+        [pscustomobject]@{ Name = 'binds-desktop-other-drive'; Value = $otherDrive; Accept = $false },
+        [pscustomobject]@{ Name = 'binds-desktop-unknown-prefix'; Value = $unknownPrefix; Accept = $false },
+        [pscustomobject]@{ Name = 'binds-desktop-suffix-only'; Value = $suffixOnly; Accept = $false },
+        [pscustomobject]@{ Name = 'binds-writable'; Value = @($desktop | ForEach-Object { $_.Substring(0, $_.Length - 2) + 'rw' }); Accept = $false },
+        [pscustomobject]@{ Name = 'binds-wrong-destination'; Value = @($desktop[0].Replace($expected[0].Destination, '/finguardops/elsewhere')) + @($desktop[1], $desktop[2]); Accept = $false },
+        [pscustomobject]@{ Name = 'binds-missing'; Value = @($desktop[0], $desktop[1]); Accept = $false },
+        [pscustomobject]@{ Name = 'binds-added'; Value = @($desktop) + @('/run/desktop/mnt/host/c/windows:/finguardops/extra:ro'); Accept = $false }
+    )
+    foreach ($case in $bindCases) {
+        $failure = Get-CapturedException {
+            & $script:E2EModule { param($value, $approved, $message) Assert-ExactBinds $value $approved $message } `
+                $case.Value $expected 'D273_BIND_REFUSED'
+        }
+        if ($case.Accept) {
+            $detail = if ($null -ne $failure) { $failure.Message } else { '' }
+            Assert-True ($null -eq $failure) "$($case.Name) was refused: $detail"
+        }
+        else {
+            Assert-True ($null -ne $failure) "$($case.Name) was accepted."
+            Assert-Equal 'D273_BIND_REFUSED' $failure.Message "$($case.Name) returned the wrong message."
+        }
+    }
+
+    $mountCases = @(
+        [pscustomobject]@{ Name = 'mounts-windows'; Spelling = 'windows'; Accept = $true; Mutate = $null },
+        [pscustomobject]@{ Name = 'mounts-desktop'; Spelling = 'desktop'; Accept = $true; Mutate = $null },
+        [pscustomobject]@{ Name = 'mounts-desktop-other-drive'; Spelling = 'desktop'; Accept = $false
+            Mutate = { param($mounts) foreach ($mount in $mounts) { $mount['Source'] = $mount['Source'].Replace('/mnt/host/c/', '/mnt/host/d/') } } },
+        [pscustomobject]@{ Name = 'mounts-writable'; Spelling = 'desktop'; Accept = $false
+            Mutate = { param($mounts) foreach ($mount in $mounts) { $mount['RW'] = $true; $mount['Mode'] = 'rw' } } },
+        [pscustomobject]@{ Name = 'mounts-wrong-propagation'; Spelling = 'desktop'; Accept = $false
+            Mutate = { param($mounts) foreach ($mount in $mounts) { $mount['Propagation'] = 'rshared' } } },
+        [pscustomobject]@{ Name = 'mounts-wrong-destination'; Spelling = 'desktop'; Accept = $false
+            Mutate = { param($mounts) $mounts[0]['Destination'] = '/finguardops/elsewhere' } },
+        [pscustomobject]@{ Name = 'mounts-volume-type'; Spelling = 'desktop'; Accept = $false
+            Mutate = { param($mounts) $mounts[0]['Type'] = 'volume' } }
+    )
+    foreach ($case in $mountCases) {
+        $mounts = [System.Collections.Generic.List[object]]::new()
+        foreach ($bind in $expected) {
+            $source = if ($case.Spelling -ceq 'desktop') { ConvertTo-D273DesktopPath $bind.Source '' } else { $bind.Source }
+            $mounts.Add([ordered]@{ Type = 'bind'; Source = $source; Destination = $bind.Destination
+                Mode = 'ro'; RW = $false; Propagation = 'rprivate' })
+        }
+        $list = @($mounts.ToArray())
+        if ($null -ne $case.Mutate) { & $case.Mutate $list }
+        $encoded = ConvertTo-Json -InputObject $list -Depth 8 -Compress
+        $parsed = ConvertFrom-Json -InputObject $encoded
+        $documents = @($parsed)
+        $failure = Get-CapturedException {
+            & $script:E2EModule { param($value, $approved, $message) Assert-ExactMounts $value $approved $message } `
+                $documents $expected 'D273_MOUNT_REFUSED'
+        }
+        if ($case.Accept) {
+            $detail = if ($null -ne $failure) { $failure.Message } else { '' }
+            Assert-True ($null -eq $failure) "$($case.Name) was refused: $detail"
+        }
+        else {
+            Assert-True ($null -ne $failure) "$($case.Name) was accepted."
+            Assert-Equal 'D273_MOUNT_REFUSED' $failure.Message "$($case.Name) returned the wrong message."
+        }
+    }
+}
+
+# A Docker daemon and nothing else. It answers `ps`, `container inspect` and
+# `image inspect`, truncates an identifier exactly as the real client does when
+# `--no-trunc` was not asked for, accepts a prefix on `inspect` exactly as the
+# real daemon does, and records every argument vector it was given.
+function New-D273IdentityDockerFake {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    [System.IO.Directory]::CreateDirectory($Root) | Out-Null
+    $shim = Join-Path $Root 'docker.cmd'
+    $source = Join-Path $Root 'docker-shim.ps1'
+    [System.IO.File]::WriteAllText($shim, "@echo off`r`nset `"FINGUARDOPS_D273_ARGS=%*`"`r`npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"%~dp0docker-shim.ps1`"`r`n", [System.Text.Encoding]::ASCII)
+    $fakeSource = @'
+$DockerArgs = $env:FINGUARDOPS_D273_ARGS -split ' '
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$root = $env:FINGUARDOPS_D273_ROOT
+$events = Join-Path $root 'events.txt'
+[System.IO.File]::AppendAllText($events, ($DockerArgs -join ' ') + "`n")
+$full = [System.IO.File]::ReadAllText((Join-Path $root 'container-id.txt')).Trim()
+$mode = $env:FINGUARDOPS_D273_MODE
+
+if ($DockerArgs[0] -eq 'image' -and $DockerArgs[1] -eq 'inspect') {
+    $map = Get-Content (Join-Path $root 'image.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $entry = $map.PSObject.Properties[$DockerArgs[-1]]
+    if ($null -eq $entry) { exit 1 }
+    Write-Output ($entry.Value | ConvertTo-Json -Depth 10 -Compress)
+    exit 0
+}
+if ($DockerArgs[0] -eq 'ps') {
+    if ($mode -eq 'fail') { exit 29 }
+    $truncated = $full.Substring(0, 12)
+    $answer = if ($DockerArgs -ccontains '--no-trunc') { $full } else { $truncated }
+    if ($mode -eq 'short') { $answer = $truncated }
+    if ($mode -eq 'prefix') { $answer = $full.Substring(0, 63) }
+    if ($mode -eq 'uppercase') { $answer = $full.ToUpperInvariant() }
+    Write-Output $answer
+    if ($mode -eq 'duplicate') { Write-Output $answer }
+    if ($mode -eq 'ambiguous') { Write-Output ('9' * 64) }
+    exit 0
+}
+if ($DockerArgs[0] -eq 'container' -and $DockerArgs[1] -eq 'inspect') {
+    $operand = $DockerArgs[-1]
+    if ($operand.Length -lt 12 -or -not $full.StartsWith($operand, [System.StringComparison]::Ordinal)) { exit 1 }
+    $document = Get-Content (Join-Path $root 'document.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($mode -eq 'document-id') { $document.Id = '9' * 64 }
+    Write-Output ($document | ConvertTo-Json -Depth 12 -Compress)
+    exit 0
+}
+exit 81
+'@
+    [System.IO.File]::WriteAllText($source, ($fakeSource -replace "(?<!`r)`n", "`r`n") + "`r`n", [System.Text.UTF8Encoding]::new($false))
+    Assert-Parsed $source
+    return $shim
+}
+
+function Invoke-D273FullIdentityTests {
+    param([string]$Project, $Receipt)
+
+    $root = Join-Path ([System.IO.Path]::GetTempPath()) ('finguardops-d273-' + [guid]::NewGuid().ToString('N'))
+    $events = Join-Path $root 'events.txt'
+    $full = 'a1b2c3d4e5f6' + ('0' * 52)
+    $imageId = 'sha256:' + ('b' * 64)
+    $names = @('FINGUARDOPS_D273_ROOT', 'FINGUARDOPS_D273_MODE', 'FINGUARDOPS_D273_ARGS')
+    $previous = @{}
+    foreach ($name in $names) { $previous[$name] = [System.Environment]::GetEnvironmentVariable($name, 'Process') }
+    $oldPath = $env:PATH
+    try {
+        $shim = New-D273IdentityDockerFake -Root $root
+        foreach ($name in $names) { [System.Environment]::SetEnvironmentVariable($name, $null, 'Process') }
+        $env:FINGUARDOPS_D273_ROOT = $root
+        $env:PATH = $root + [System.IO.Path]::PathSeparator + $oldPath
+        Assert-Equal $shim (Get-Command docker -ErrorAction Stop).Source 'D273 Docker fake sentinel was not selected.'
+
+        $images = & $script:E2EModule { param($value) Get-E2EImageSet -Receipt $value } $Receipt
+        $labels = & $script:E2EModule { param($value) Get-E2EOwnershipLabels -Receipt $value -Role 'backend' } $Receipt
+        [System.IO.File]::WriteAllText((Join-Path $root 'container-id.txt'), $full, [System.Text.Encoding]::ASCII)
+        $imageMap = [ordered]@{}
+        $imageMap[$images.Backend] = [ordered]@{ Id = $imageId; Config = [ordered]@{ Labels = $labels } }
+        [System.IO.File]::WriteAllText((Join-Path $root 'image.json'),
+            ($imageMap | ConvertTo-Json -Depth 8 -Compress), [System.Text.UTF8Encoding]::new($false))
+        $document = [ordered]@{
+            Id     = $full
+            Name   = '/' + $Project + '-backend-1'
+            Image  = $imageId
+            Config = [ordered]@{
+                Image  = $images.Backend
+                Labels = [ordered]@{
+                    'com.docker.compose.project' = $Project
+                    'com.docker.compose.service' = 'backend'
+                }
+            }
+        }
+        [System.IO.File]::WriteAllText((Join-Path $root 'document.json'),
+            ($document | ConvertTo-Json -Depth 8 -Compress), [System.Text.UTF8Encoding]::new($false))
+
+        $discovery = 'ps -aq --no-trunc --filter label=com.docker.compose.project=' + $Project
+        $refused = 'RESOURCE_OWNERSHIP_INVALID'
+        $uninspectable = 'A container this run created could not be inspected.'
+        $cases = @(
+            [pscustomobject]@{ Name = 'full-identifier'; Mode = ''; Accept = $true; Inspects = 1; Error = '' },
+            [pscustomobject]@{ Name = 'discovery-failure'; Mode = 'fail'; Accept = $false; Inspects = 0; Error = $refused },
+            [pscustomobject]@{ Name = 'short-identifier'; Mode = 'short'; Accept = $false; Inspects = 0; Error = $refused },
+            [pscustomobject]@{ Name = 'prefix-identifier'; Mode = 'prefix'; Accept = $false; Inspects = 0; Error = $refused },
+            [pscustomobject]@{ Name = 'upper-case-identifier'; Mode = 'uppercase'; Accept = $false; Inspects = 0; Error = $refused },
+            [pscustomobject]@{ Name = 'duplicate-identifier'; Mode = 'duplicate'; Accept = $false; Inspects = 0; Error = $refused },
+            # Two different full identifiers under one project name: the second
+            # is not a container this run owns, and the inspect boundary refuses
+            # it rather than counting it.
+            [pscustomobject]@{ Name = 'ambiguous-identifier'; Mode = 'ambiguous'; Accept = $false; Inspects = -1; Error = $uninspectable },
+            [pscustomobject]@{ Name = 'inspect-answers-another-container'; Mode = 'document-id'; Accept = $false; Inspects = -1; Error = $uninspectable }
+        )
+        foreach ($case in $cases) {
+            $env:FINGUARDOPS_D273_MODE = $case.Mode
+            [System.IO.File]::WriteAllText($events, '', [System.Text.Encoding]::ASCII)
+            $failure = Get-CapturedException {
+                & $script:E2EModule { param($value, $project) Assert-E2EExistingProjectOwnership -Receipt $value -Project $project } `
+                    $Receipt $Project
+            }
+            $commands = @([System.IO.File]::ReadAllLines($events) | Where-Object { $_ })
+            Assert-True ($commands.Count -ge 1) "$($case.Name) asked the daemon nothing."
+            Assert-Equal $discovery $commands[0] "$($case.Name) discovery vector differs."
+            $inspects = @($commands | Where-Object { $_ -cmatch '^container inspect ' })
+            foreach ($inspect in $inspects) {
+                Assert-True ($inspect -cmatch ' (?<id>[0-9a-f]{64})$') "$($case.Name) inspected an abbreviated identifier: $inspect"
+            }
+            Assert-Equal 0 @($commands | Where-Object { $_ -cmatch '^(stop|rm|prune) ' -or $_ -cmatch '^(container|image|network|volume|system) (rm|prune) ' -or $_ -cmatch '^compose .* down' }).Count `
+                "$($case.Name) mutated something."
+            if ($case.Inspects -ge 0) {
+                Assert-Equal $case.Inspects $inspects.Count "$($case.Name) inspect count differs."
+            }
+            if ($case.Accept) {
+                $detail = if ($null -ne $failure) { $failure.Message } else { '' }
+                Assert-True ($null -eq $failure) "$($case.Name) was refused: $detail"
+            }
+            else {
+                Assert-True ($null -ne $failure) "$($case.Name) was accepted."
+                Assert-Equal $case.Error $failure.Message "$($case.Name) returned the wrong fixed error."
+            }
+        }
+    }
+    finally {
+        $env:PATH = $oldPath
+        foreach ($name in $names) { [System.Environment]::SetEnvironmentVariable($name, $previous[$name], 'Process') }
+        if ([System.IO.Directory]::Exists($root)) { [System.IO.Directory]::Delete($root, $true) }
+    }
+    if ([System.IO.Directory]::Exists($root)) { throw 'D273_TEMP_CLEANUP_FAILED' }
+}
+
+# The characters this run refuses to decide a security question on.
+#
+# Each case turns an otherwise approved value into the same value carrying one
+# smuggled character, so what the boundary is being asked differs from the
+# approved question by that character and by nothing else.
+function Get-D277ContaminationCases {
+    return @(
+        [pscustomobject]@{ Name = 'trailing-lf'; Apply = { param($value) $value + "`n" } },
+        [pscustomobject]@{ Name = 'trailing-cr'; Apply = { param($value) $value + "`r" } },
+        [pscustomobject]@{ Name = 'trailing-crlf'; Apply = { param($value) $value + "`r`n" } },
+        [pscustomobject]@{ Name = 'leading-lf'; Apply = { param($value) "`n" + $value } },
+        [pscustomobject]@{ Name = 'leading-cr'; Apply = { param($value) "`r" + $value } },
+        [pscustomobject]@{ Name = 'embedded-lf'; Apply = { param($value) $value.Insert($value.Length - 1, "`n") } },
+        [pscustomobject]@{ Name = 'embedded-cr'; Apply = { param($value) $value.Insert($value.Length - 1, "`r") } },
+        [pscustomobject]@{ Name = 'trailing-nul'; Apply = { param($value) $value + [string][char]0 } },
+        [pscustomobject]@{ Name = 'embedded-nul'; Apply = { param($value) $value.Insert($value.Length - 1, [string][char]0) } },
+        [pscustomobject]@{ Name = 'trailing-line-separator'; Apply = { param($value) $value + [string][char]0x2028 } },
+        [pscustomobject]@{ Name = 'trailing-paragraph-separator'; Apply = { param($value) $value + [string][char]0x2029 } },
+        [pscustomobject]@{ Name = 'embedded-line-separator'; Apply = { param($value) $value.Insert($value.Length - 1, [string][char]0x2028) } },
+        [pscustomobject]@{ Name = 'trailing-vertical-tab'; Apply = { param($value) $value + [string][char]0x0B } },
+        [pscustomobject]@{ Name = 'trailing-delete'; Apply = { param($value) $value + [string][char]0x7F } }
+    )
+}
+
+# No fixed error a contaminated value reaches may carry that value back out. A
+# line break in a run log is what splits one record into two, so the check is
+# for the characters themselves rather than for a substring of the input.
+function Assert-D277NoContaminationEcho($Failure, [string]$Message) {
+    if ($null -eq $Failure) { return }
+    foreach ($character in $Failure.Message.ToCharArray()) {
+        $category = [System.Globalization.CharUnicodeInfo]::GetUnicodeCategory($character)
+        if ($category -eq [System.Globalization.UnicodeCategory]::Control -or
+            $category -eq [System.Globalization.UnicodeCategory]::LineSeparator -or
+            $category -eq [System.Globalization.UnicodeCategory]::ParagraphSeparator) {
+            throw $Message
+        }
+    }
+}
+
+# The two path comparisons every mount and every Compose path label is decided
+# by, asked directly.
+function Invoke-D277PathScalarTests {
+    $root = Get-D273RepositoryRoot
+    $infra = [System.IO.Path]::GetFullPath((Join-Path $root 'infra'))
+    $desktop = ConvertTo-D273DesktopPath $infra ''
+
+    $same = { param($observed, $expected) Test-SamePhysicalPath $observed $expected }
+    $bind = { param($observed, $expected) Test-SameBindSourcePath $observed $expected }
+    $convert = { param($observed) ConvertFrom-E2EDockerDesktopHostPath $observed }
+
+    # Every clean spelling this boundary has always approved stays approved.
+    foreach ($clean in @($infra, $infra.Replace('\', '/'), ($infra + '\'), $infra.ToLowerInvariant())) {
+        Assert-True (& $script:E2EModule $same $clean $infra) 'A clean canonical Windows path was refused.'
+        Assert-True (& $script:E2EModule $bind $clean $infra) 'A clean canonical Windows bind source was refused.'
+    }
+    Assert-True (& $script:E2EModule $bind $desktop $infra) 'A clean Docker Desktop bind source was refused.'
+    # The drive letter comes back as the Docker Desktop spelling carried it, and
+    # letter case is the one difference Windows does not treat as a difference.
+    Assert-True ([string]::Equals($infra, (& $script:E2EModule $convert $desktop), [System.StringComparison]::OrdinalIgnoreCase)) `
+        'A clean Docker Desktop path did not convert to the Windows path it denotes.'
+
+    foreach ($case in Get-D277ContaminationCases) {
+        $windows = & $case.Apply $infra
+        $polluted = & $case.Apply $desktop
+        Assert-True (-not (& $script:E2EModule $same $windows $infra)) `
+            "Test-SamePhysicalPath accepted a contaminated observed path: $($case.Name)"
+        Assert-True (-not (& $script:E2EModule $same $infra $windows)) `
+            "Test-SamePhysicalPath accepted a contaminated expected path: $($case.Name)"
+        Assert-True (-not (& $script:E2EModule $bind $windows $infra)) `
+            "Test-SameBindSourcePath accepted a contaminated Windows source: $($case.Name)"
+        Assert-True (-not (& $script:E2EModule $bind $polluted $infra)) `
+            "Test-SameBindSourcePath accepted a contaminated Docker Desktop source: $($case.Name)"
+        Assert-True (-not (& $script:E2EModule $bind $desktop $windows)) `
+            "Test-SameBindSourcePath accepted a contaminated expected source: $($case.Name)"
+        Assert-True ($null -eq (& $script:E2EModule $convert $polluted)) `
+            "The Docker Desktop conversion accepted a contaminated path: $($case.Name)"
+    }
+}
+
+# The two Compose path labels, as the daemon hands them over: the raw
+# `config_files` label before it is split, each path the split produced, and
+# the raw `working_dir` label.
+function Invoke-D277ComposeLabelTests {
+    param([string]$Project, $Receipt, $Configuration)
+
+    $root = Get-D273RepositoryRoot
+    $infra = [System.IO.Path]::GetFullPath((Join-Path $root 'infra'))
+    $configFiles = @(
+        [System.IO.Path]::GetFullPath((Join-Path $root 'infra/compose.yml')),
+        [System.IO.Path]::GetFullPath((Join-Path $root 'infra/compose.keycloak-local-e2e.yml'))
+    )
+    $definition = $Configuration.services.PSObject.Properties['prometheus'].Value
+    $id = '1' * 64
+    $imageId = 'sha256:' + ('2' * 64)
+    $contract = [pscustomobject]@{ Reference = $definition.image; Id = $imageId; Definition = $definition }
+
+    # The clean document this whole family differs from by one character.
+    $baseline = New-D273PrometheusDocument -Id $id -Project $Project -Definition $definition `
+        -ImageId $imageId -WorkingDirectory $infra -ConfigFiles $configFiles
+    $baselineFailure = Get-D273IdentityFailure (ConvertTo-D273Document $baseline) $id $Project $contract $Receipt
+    Assert-True ($null -eq $baselineFailure) 'The clean Compose identity document was refused.'
+
+    foreach ($case in Get-D277ContaminationCases) {
+        $variants = @(
+            [pscustomobject]@{ Name = 'working-dir'; Directory = (& $case.Apply $infra); Files = $configFiles; Raw = ''; Spelling = 'windows'; Mutate = $null },
+            [pscustomobject]@{ Name = 'config-file-first'; Directory = $infra; Files = @((& $case.Apply $configFiles[0]), $configFiles[1]); Raw = ''; Spelling = 'windows'; Mutate = $null },
+            [pscustomobject]@{ Name = 'config-file-last'; Directory = $infra; Files = @($configFiles[0], (& $case.Apply $configFiles[1])); Raw = ''; Spelling = 'windows'; Mutate = $null },
+            [pscustomobject]@{ Name = 'config-files-raw'; Directory = $infra; Files = $configFiles; Raw = (& $case.Apply ($configFiles -join ',')); Spelling = 'windows'; Mutate = $null },
+            [pscustomobject]@{
+                Name = 'mount-source-windows'; Directory = $infra; Files = $configFiles; Raw = ''; Spelling = 'windows'
+                Mutate = { param($document, $apply)
+                    foreach ($mount in @($document['Mounts'])) {
+                        if ($mount['Type'] -ceq 'bind') { $mount['Source'] = & $apply $mount['Source'] }
+                    } }
+            },
+            [pscustomobject]@{
+                Name = 'mount-source-desktop'; Directory = $infra; Files = $configFiles; Raw = ''; Spelling = 'desktop'
+                Mutate = { param($document, $apply)
+                    foreach ($mount in @($document['Mounts'])) {
+                        if ($mount['Type'] -ceq 'bind') { $mount['Source'] = & $apply $mount['Source'] }
+                    } }
+            },
+            [pscustomobject]@{
+                Name = 'mount-destination'; Directory = $infra; Files = $configFiles; Raw = ''; Spelling = 'windows'
+                Mutate = { param($document, $apply)
+                    foreach ($mount in @($document['Mounts'])) {
+                        if ($mount['Type'] -ceq 'bind') { $mount['Destination'] = & $apply $mount['Destination'] }
+                    } }
+            }
+        )
+        foreach ($variant in $variants) {
+            $document = New-D273PrometheusDocument -Id $id -Project $Project -Definition $definition `
+                -ImageId $imageId -WorkingDirectory $variant.Directory -ConfigFiles $variant.Files -BindSpelling $variant.Spelling
+            if ($variant.Raw.Length -ne 0) {
+                $document['Config']['Labels']['com.docker.compose.project.config_files'] = $variant.Raw
+            }
+            if ($null -ne $variant.Mutate) { & $variant.Mutate $document $case.Apply }
+            $failure = Get-D273IdentityFailure (ConvertTo-D273Document $document) $id $Project $contract $Receipt
+            Assert-True ($null -ne $failure) "Compose $($variant.Name) accepted contamination: $($case.Name)"
+            Assert-Equal 'RESOURCE_CLEANUP_FAILED' $failure.Message "Compose $($variant.Name) returned the wrong fixed error: $($case.Name)"
+            Assert-NoRawCleanupDetail $failure "Compose $($variant.Name) reflected an internal detail: $($case.Name)"
+            Assert-D277NoContaminationEcho $failure "Compose $($variant.Name) reflected the contaminated value: $($case.Name)"
+        }
+    }
+}
+
+# The browser container's own bind and mount boundaries, contaminated in the
+# host path, in the container path, in the whole `Binds` entry, and in `Binds`
+# and `Mounts` at the same time.
+function Invoke-D277BrowserScalarTests {
+    $expected = @(& $script:E2EModule { Get-BrowserServerExpectedBinds })
+    Assert-Equal 3 $expected.Count 'The production browser bind contract is not three binds.'
+
+    $bindBoundary = { param($value, $approved, $message) Assert-ExactBinds $value $approved $message }
+    $mountBoundary = { param($value, $approved, $message) Assert-ExactMounts $value $approved $message }
+
+    $cleanBinds = @($expected | ForEach-Object { $_.Source + ':' + $_.Destination + ':ro' })
+    $cleanMounts = @($expected | ForEach-Object {
+        [ordered]@{ Type = 'bind'; Source = $_.Source; Destination = $_.Destination
+            Mode = 'ro'; RW = $false; Propagation = 'rprivate' } })
+    Assert-True ($null -eq (Get-CapturedException { & $script:E2EModule $bindBoundary $cleanBinds $expected 'D277_BIND_REFUSED' })) `
+        'The clean browser bind list was refused.'
+    $cleanDocuments = ConvertFrom-Json (ConvertTo-Json -InputObject @($cleanMounts) -Depth 8 -Compress)
+    Assert-True ($null -eq (Get-CapturedException {
+        & $script:E2EModule $mountBoundary @($cleanDocuments) $expected 'D277_MOUNT_REFUSED' })) `
+        'The clean browser mount list was refused.'
+
+    foreach ($case in Get-D277ContaminationCases) {
+        $bindCases = @(
+            [pscustomobject]@{ Name = 'binds-windows-source'
+                Value = @($expected | ForEach-Object { (& $case.Apply $_.Source) + ':' + $_.Destination + ':ro' }) },
+            [pscustomobject]@{ Name = 'binds-desktop-source'
+                Value = @($expected | ForEach-Object { (& $case.Apply (ConvertTo-D273DesktopPath $_.Source '')) + ':' + $_.Destination + ':ro' }) },
+            [pscustomobject]@{ Name = 'binds-destination'
+                Value = @($expected | ForEach-Object { $_.Source + ':' + (& $case.Apply $_.Destination) + ':ro' }) },
+            [pscustomobject]@{ Name = 'binds-whole-entry'
+                Value = @($expected | ForEach-Object { & $case.Apply ($_.Source + ':' + $_.Destination + ':ro') }) }
+        )
+        foreach ($entry in $bindCases) {
+            $failure = Get-CapturedException { & $script:E2EModule $bindBoundary $entry.Value $expected 'D277_BIND_REFUSED' }
+            Assert-True ($null -ne $failure) "$($entry.Name) accepted contamination: $($case.Name)"
+            Assert-Equal 'D277_BIND_REFUSED' $failure.Message "$($entry.Name) returned the wrong fixed error: $($case.Name)"
+            Assert-D277NoContaminationEcho $failure "$($entry.Name) reflected the contaminated value: $($case.Name)"
+        }
+
+        $mountCases = @(
+            [pscustomobject]@{ Name = 'mounts-windows-source'; Field = 'Source'; Spelling = 'windows' },
+            [pscustomobject]@{ Name = 'mounts-desktop-source'; Field = 'Source'; Spelling = 'desktop' },
+            [pscustomobject]@{ Name = 'mounts-destination'; Field = 'Destination'; Spelling = 'windows' }
+        )
+        foreach ($entry in $mountCases) {
+            $mounts = [System.Collections.Generic.List[object]]::new()
+            foreach ($approved in $expected) {
+                $source = if ($entry.Spelling -ceq 'desktop') { ConvertTo-D273DesktopPath $approved.Source '' } else { $approved.Source }
+                $mount = [ordered]@{ Type = 'bind'; Source = $source; Destination = $approved.Destination
+                    Mode = 'ro'; RW = $false; Propagation = 'rprivate' }
+                $mount[$entry.Field] = & $case.Apply $mount[$entry.Field]
+                $mounts.Add($mount)
+            }
+            $parsed = ConvertFrom-Json (ConvertTo-Json -InputObject @($mounts.ToArray()) -Depth 8 -Compress)
+            $documents = @($parsed)
+            $failure = Get-CapturedException { & $script:E2EModule $mountBoundary $documents $expected 'D277_MOUNT_REFUSED' }
+            Assert-True ($null -ne $failure) "$($entry.Name) accepted contamination: $($case.Name)"
+            Assert-Equal 'D277_MOUNT_REFUSED' $failure.Message "$($entry.Name) returned the wrong fixed error: $($case.Name)"
+            Assert-D277NoContaminationEcho $failure "$($entry.Name) reflected the contaminated value: $($case.Name)"
+        }
+
+        # `Binds` and `Mounts` carrying the same smuggled character at once.
+        $bothBinds = @($expected | ForEach-Object { (& $case.Apply $_.Source) + ':' + $_.Destination + ':ro' })
+        $bothMounts = [System.Collections.Generic.List[object]]::new()
+        foreach ($approved in $expected) {
+            $bothMounts.Add([ordered]@{ Type = 'bind'; Source = (& $case.Apply $approved.Source)
+                Destination = $approved.Destination; Mode = 'ro'; RW = $false; Propagation = 'rprivate' })
+        }
+        $bindFailure = Get-CapturedException { & $script:E2EModule $bindBoundary $bothBinds $expected 'D277_BIND_REFUSED' }
+        $bothParsed = ConvertFrom-Json (ConvertTo-Json -InputObject @($bothMounts.ToArray()) -Depth 8 -Compress)
+        $mountFailure = Get-CapturedException {
+            & $script:E2EModule $mountBoundary @($bothParsed) $expected 'D277_MOUNT_REFUSED' }
+        Assert-True ($null -ne $bindFailure) "binds-and-mounts accepted contaminated Binds: $($case.Name)"
+        Assert-True ($null -ne $mountFailure) "binds-and-mounts accepted contaminated Mounts: $($case.Name)"
+        Assert-Equal 'D277_BIND_REFUSED' $bindFailure.Message "binds-and-mounts returned the wrong bind error: $($case.Name)"
+        Assert-Equal 'D277_MOUNT_REFUSED' $mountFailure.Message "binds-and-mounts returned the wrong mount error: $($case.Name)"
+    }
+}
+
+# A container identifier is a full 64-character lowercase hexadecimal string
+# and is that string absolutely: no line break may terminate it.
+function Get-D277IdentifierCases([string]$Clean) {
+    return @(
+        [pscustomobject]@{ Name = 'clean-64-hex'; Value = $Clean; Accept = $true },
+        [pscustomobject]@{ Name = 'trailing-lf'; Value = $Clean + "`n"; Accept = $false },
+        [pscustomobject]@{ Name = 'trailing-cr'; Value = $Clean + "`r"; Accept = $false },
+        [pscustomobject]@{ Name = 'trailing-crlf'; Value = $Clean + "`r`n"; Accept = $false },
+        [pscustomobject]@{ Name = 'leading-lf'; Value = "`n" + $Clean; Accept = $false },
+        [pscustomobject]@{ Name = 'leading-cr'; Value = "`r" + $Clean; Accept = $false },
+        [pscustomobject]@{ Name = 'embedded-lf'; Value = $Clean.Insert(32, "`n"); Accept = $false },
+        [pscustomobject]@{ Name = 'embedded-cr'; Value = $Clean.Insert(32, "`r"); Accept = $false },
+        [pscustomobject]@{ Name = 'trailing-nul'; Value = $Clean + [string][char]0; Accept = $false },
+        [pscustomobject]@{ Name = 'embedded-nul'; Value = $Clean.Insert(32, [string][char]0); Accept = $false },
+        [pscustomobject]@{ Name = 'trailing-line-separator'; Value = $Clean + [string][char]0x2028; Accept = $false },
+        [pscustomobject]@{ Name = 'trailing-paragraph-separator'; Value = $Clean + [string][char]0x2029; Accept = $false },
+        [pscustomobject]@{ Name = 'trailing-vertical-tab'; Value = $Clean + [string][char]0x0B; Accept = $false },
+        [pscustomobject]@{ Name = 'sixty-three-characters'; Value = $Clean.Substring(0, 63); Accept = $false },
+        [pscustomobject]@{ Name = 'sixty-five-characters'; Value = $Clean + '0'; Accept = $false },
+        [pscustomobject]@{ Name = 'upper-case'; Value = $Clean.ToUpperInvariant(); Accept = $false },
+        [pscustomobject]@{ Name = 'non-hexadecimal'; Value = $Clean.Substring(0, 63) + 'g'; Accept = $false },
+        [pscustomobject]@{ Name = 'trailing-space'; Value = $Clean + ' '; Accept = $false },
+        [pscustomobject]@{ Name = 'empty'; Value = ''; Accept = $false }
+    )
+}
+
+function Invoke-D277IdentifierTerminationTests {
+    param([string]$Project, $Receipt)
+
+    $root = Join-Path ([System.IO.Path]::GetTempPath()) ('finguardops-d277-' + [guid]::NewGuid().ToString('N'))
+    $events = Join-Path $root 'events.txt'
+    $full = 'a1b2c3d4e5f6' + ('0' * 52)
+    $imageId = 'sha256:' + ('b' * 64)
+    $names = @('FINGUARDOPS_D273_ROOT', 'FINGUARDOPS_D273_MODE', 'FINGUARDOPS_D273_ARGS')
+    $previous = @{}
+    foreach ($name in $names) { $previous[$name] = [System.Environment]::GetEnvironmentVariable($name, 'Process') }
+    $oldPath = $env:PATH
+    try {
+        $shim = New-D273IdentityDockerFake -Root $root
+        foreach ($name in $names) { [System.Environment]::SetEnvironmentVariable($name, $null, 'Process') }
+        $env:FINGUARDOPS_D273_ROOT = $root
+        $env:FINGUARDOPS_D273_MODE = ''
+        $env:PATH = $root + [System.IO.Path]::PathSeparator + $oldPath
+        Assert-Equal $shim (Get-Command docker -ErrorAction Stop).Source 'D277 Docker fake sentinel was not selected.'
+
+        [System.IO.File]::WriteAllText((Join-Path $root 'container-id.txt'), $full, [System.Text.Encoding]::ASCII)
+        [System.IO.File]::WriteAllText((Join-Path $root 'image.json'), '{}', [System.Text.UTF8Encoding]::new($false))
+        $document = [ordered]@{
+            Id = $full; Name = '/' + $Project + '-backend-1'; Image = $imageId
+            Config = [ordered]@{ Image = 'reference'; Labels = [ordered]@{ 'com.docker.compose.project' = $Project } }
+        }
+        [System.IO.File]::WriteAllText((Join-Path $root 'document.json'),
+            ($document | ConvertTo-Json -Depth 8 -Compress), [System.Text.UTF8Encoding]::new($false))
+
+        foreach ($case in Get-D277IdentifierCases -Clean $full) {
+            [System.IO.File]::WriteAllText($events, '', [System.Text.Encoding]::ASCII)
+            $failure = Get-CapturedException {
+                & $script:E2EModule { param($value) Get-ContainerDocument $value } $case.Value
+            }
+            $commands = @([System.IO.File]::ReadAllLines($events) | Where-Object { $_ })
+            $inspects = @($commands | Where-Object { $_ -cmatch '^container inspect ' })
+            Assert-Equal 0 @($commands | Where-Object {
+                $_ -cmatch '^(stop|rm|start|run|create|tag|build|pull|push|prune) ' -or
+                $_ -cmatch '^(container|image|network|volume|system|builder) (rm|prune|create|stop|start|tag|build|pull) ' -or
+                $_ -cmatch '^compose .* (down|up|rm|stop)' }).Count `
+                "$($case.Name) mutated something."
+            if ($case.Accept) {
+                $detail = if ($null -ne $failure) { $failure.Message } else { '' }
+                Assert-True ($null -eq $failure) "$($case.Name) was refused: $detail"
+                Assert-Equal 1 $inspects.Count "$($case.Name) inspect count differs."
+            }
+            else {
+                Assert-True ($null -ne $failure) "$($case.Name) was accepted."
+                Assert-Equal 'A container this run created could not be inspected.' $failure.Message `
+                    "$($case.Name) returned the wrong fixed error."
+                Assert-D277NoContaminationEcho $failure "$($case.Name) reflected the malformed identifier."
+                Assert-Equal 0 $commands.Count "$($case.Name) asked the daemon something."
+                Assert-Equal 0 $inspects.Count "$($case.Name) inspected a malformed identifier."
+            }
+        }
+
+        # Every boundary that decides a Docker resource identifier answers the
+        # same way, so a line break terminates none of them.
+        $terminates = & $script:E2EModule {
+            param($value)
+            return @(
+                ($value -cmatch '\A[0-9a-f]{64}\z'),
+                (('sha256:' + $value) -cmatch '\Asha256:[0-9a-f]{64}\z'),
+                (('container:' + $value) -cmatch '\Acontainer:[0-9a-f]{64}\z')
+            )
+        } ($full + "`n")
+        foreach ($answer in $terminates) {
+            Assert-True (-not $answer) 'A Docker identifier boundary was terminated by a line break.'
+        }
+    }
+    finally {
+        $env:PATH = $oldPath
+        foreach ($name in $names) { [System.Environment]::SetEnvironmentVariable($name, $previous[$name], 'Process') }
+        if ([System.IO.Directory]::Exists($root)) { [System.IO.Directory]::Delete($root, $true) }
+    }
+    if ([System.IO.Directory]::Exists($root)) { throw 'D277_TEMP_CLEANUP_FAILED' }
+}
+
+function Invoke-D273TargetedTests {
+    $script:Failures = [System.Collections.Generic.List[string]]::new()
+    $project = 'finguardops-kc241-e2e-0123456789ab'
+    $receipt = New-TestReceipt
+    $configuration = Get-D273ComposeConfiguration -Project $project -Receipt $receipt
+
+    Invoke-TestCase 'D273 Compose container identity is judged against the infra working directory' {
+        Invoke-D273ComposeIdentityTests -Project $project -Receipt $receipt -Configuration $configuration
+    }
+    Invoke-TestCase 'D273 browser bind sources accept only the exact Docker Desktop representation' {
+        Invoke-D273BrowserBindTests
+    }
+    Invoke-TestCase 'D273 container ownership uses full identifiers only' {
+        Invoke-D273FullIdentityTests -Project $project -Receipt $receipt
+    }
+    Invoke-TestCase 'D277 path comparisons refuse a contaminated scalar before normalizing it' {
+        Invoke-D277PathScalarTests
+    }
+    Invoke-TestCase 'D277 Compose path labels refuse a contaminated scalar' {
+        Invoke-D277ComposeLabelTests -Project $project -Receipt $receipt -Configuration $configuration
+    }
+    Invoke-TestCase 'D277 browser binds and mounts refuse a contaminated scalar' {
+        Invoke-D277BrowserScalarTests
+    }
+    Invoke-TestCase 'D277 a container identifier is terminated absolutely' {
+        Invoke-D277IdentifierTerminationTests -Project $project -Receipt $receipt
+    }
+
+    if ($script:Failures.Count -ne 0) {
+        foreach ($failure in $script:Failures) { Write-Output $failure }
+        exit 1
+    }
+    Write-Output 'D273 targeted passed'
+}
+
+# The characters this run refuses to decide an ownership question on.
+#
+# Each of these is a Unicode Format character, which `Test-E2ECleanScalar` has
+# never refused and never needed to: none of them is a control character, a line
+# separator or a paragraph separator, and none of them splits a log record. What
+# they do is something else entirely. PowerShell's string operators compare
+# through a culture, and on this platform the invariant culture treats every one
+# of them as no character at all, so `-ceq`, `-cne`, `-ccontains`, `-cnotcontains`
+# and `-cnotin` each answer that an approved label and the same label carrying one
+# of them are the same string.
+#
+# U+200B is included although the platform's collation does distinguish it: a
+# counterexample family that only contains the characters that currently succeed
+# would stop being a counterexample family the moment the collation changed.
+function Get-D281FormatCases {
+    return @(
+        [pscustomobject]@{ Name = 'soft-hyphen'; Character = [string][char]0x00AD },
+        [pscustomobject]@{ Name = 'zero-width-space'; Character = [string][char]0x200B },
+        [pscustomobject]@{ Name = 'zero-width-non-joiner'; Character = [string][char]0x200C },
+        [pscustomobject]@{ Name = 'zero-width-joiner'; Character = [string][char]0x200D },
+        [pscustomobject]@{ Name = 'word-joiner'; Character = [string][char]0x2060 },
+        [pscustomobject]@{ Name = 'zero-width-no-break-space'; Character = [string][char]0xFEFF }
+    )
+}
+
+# The commands a fake Docker recorded that would have changed the world.
+function Get-D281MutationEvents([string]$EventPath) {
+    $commands = @([System.IO.File]::ReadAllLines($EventPath) | Where-Object { $_ })
+    return @($commands | Where-Object {
+        $_ -cmatch '^(stop|rm|start|run|create|tag|build|pull|push|prune) ' -or
+        $_ -cmatch '^(container|image|network|volume|system|builder) (rm|prune|create|stop|start|tag|build|pull) ' -or
+        $_ -cmatch '^compose .* (down|up|rm|stop)' })
+}
+
+# A native Docker leaf, and nothing above it. Every answer is read from a file
+# this fixture wrote; no production validator is reimplemented here.
+function New-D281DockerFake {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    [System.IO.Directory]::CreateDirectory($Root) | Out-Null
+    $shim = Join-Path $Root 'docker.cmd'
+    [System.IO.File]::WriteAllText($shim,
+        "@echo off`r`nset `"FINGUARDOPS_D281_ARGS=%*`"`r`npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"%~dp0docker-shim.ps1`"`r`n",
+        [System.Text.Encoding]::ASCII)
+    $source = @'
+$DockerArgs = $env:FINGUARDOPS_D281_ARGS -split ' '
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$root = $env:FINGUARDOPS_D281_ROOT
+$line = ($DockerArgs -join ' ')
+[System.IO.File]::AppendAllText((Join-Path $root 'events.txt'), $line + "`n")
+
+function Read-Json([string]$Name) {
+    $path = Join-Path $root $Name
+    if (-not [System.IO.File]::Exists($path)) { return $null }
+    return (Get-Content $path -Raw -Encoding UTF8 | ConvertFrom-Json)
+}
+
+if ($DockerArgs[0] -eq 'image' -and $DockerArgs[1] -eq 'inspect') {
+    $map = Read-Json 'image.json'
+    if ($null -eq $map) { exit 1 }
+    $entry = $map.PSObject.Properties[$DockerArgs[-1]]
+    if ($null -eq $entry) { exit 1 }
+    Write-Output ($entry.Value | ConvertTo-Json -Depth 10 -Compress)
+    exit 0
+}
+if ($DockerArgs[0] -eq 'container' -and $DockerArgs[1] -eq 'inspect') {
+    $map = Read-Json 'documents.json'
+    if ($null -eq $map) { exit 1 }
+    $entry = $map.PSObject.Properties[$DockerArgs[-1]]
+    if ($null -eq $entry) { exit 1 }
+    Write-Output ($entry.Value | ConvertTo-Json -Depth 12 -Compress)
+    exit 0
+}
+if ($DockerArgs[0] -eq 'ps') {
+    $path = Join-Path $root 'ps.txt'
+    if (-not [System.IO.File]::Exists($path)) { exit 0 }
+    foreach ($value in @(Get-Content $path -Encoding UTF8 | Where-Object { $_ })) { Write-Output $value }
+    exit 0
+}
+if ($DockerArgs[0] -eq 'volume' -and $DockerArgs[1] -eq 'ls') { exit 0 }
+if ($DockerArgs[0] -eq 'network' -and $DockerArgs[1] -eq 'ls') {
+    $state = Join-Path $root 'network-present.txt'
+    if (-not [System.IO.File]::Exists($state)) { exit 0 }
+    if ([System.IO.File]::ReadAllText($state).Trim() -ne '1') { exit 0 }
+    $wanted = [System.IO.File]::ReadAllText((Join-Path $root 'network-filter.txt')).Trim()
+    if ($line.Contains($wanted)) {
+        Write-Output ([System.IO.File]::ReadAllText((Join-Path $root 'network-id.txt')).Trim())
+    }
+    exit 0
+}
+if ($DockerArgs[0] -eq 'network' -and $DockerArgs[1] -eq 'inspect') {
+    Write-Output (Get-Content (Join-Path $root 'network.json') -Raw -Encoding UTF8)
+    exit 0
+}
+if ($DockerArgs[0] -eq 'network' -and $DockerArgs[1] -eq 'rm') {
+    [System.IO.File]::WriteAllText((Join-Path $root 'network-present.txt'), '0')
+    exit 0
+}
+exit 81
+'@
+    [System.IO.File]::WriteAllText((Join-Path $Root 'docker-shim.ps1'),
+        ($source -replace "(?<!`r)`n", "`r`n") + "`r`n", [System.Text.UTF8Encoding]::new($false))
+    Assert-Parsed (Join-Path $Root 'docker-shim.ps1')
+    return $shim
+}
+
+function Invoke-D281WithDockerFake([string]$Root, [scriptblock]$Body) {
+    $names = @('FINGUARDOPS_D281_ROOT', 'FINGUARDOPS_D281_ARGS')
+    $previous = @{}
+    foreach ($name in $names) { $previous[$name] = [System.Environment]::GetEnvironmentVariable($name, 'Process') }
+    $oldPath = $env:PATH
+    try {
+        $shim = New-D281DockerFake -Root $Root
+        $env:FINGUARDOPS_D281_ROOT = $Root
+        $env:PATH = $Root + [System.IO.Path]::PathSeparator + $oldPath
+        Assert-Equal $shim (Get-Command docker -ErrorAction Stop).Source 'D281 Docker fake sentinel was not selected.'
+        & $Body
+    }
+    finally {
+        $env:PATH = $oldPath
+        foreach ($name in $names) { [System.Environment]::SetEnvironmentVariable($name, $previous[$name], 'Process') }
+        if ([System.IO.Directory]::Exists($Root)) { [System.IO.Directory]::Delete($Root, $true) }
+    }
+    if ([System.IO.Directory]::Exists($Root)) { throw 'D281_TEMP_CLEANUP_FAILED' }
+}
+
+function New-D281TempRoot([string]$Tag) {
+    return Join-Path ([System.IO.Path]::GetTempPath()) ('finguardops-d281-' + $Tag + '-' + [guid]::NewGuid().ToString('N'))
+}
+
+# The helpers themselves, against the operators they exist to replace.
+function Invoke-D281OrdinalHelperTests {
+    $approved = 'finguardops-kc241-e2e-0123456789ab'
+    $equal = { param($left, $right) Test-E2EOrdinalEqual $left $right }
+    $pathEqual = { param($left, $right) Test-E2EOrdinalPathEqual $left $right }
+    $contains = { param($values, $candidate) Test-E2EOrdinalContains $values $candidate }
+    $sequence = { param($expected, $actual) Test-E2EOrdinalSequenceEqual $expected $actual }
+    $set = { param($expected, $actual) Test-E2EOrdinalSetEqual $expected $actual }
+
+    Assert-True (& $script:E2EModule $equal $approved $approved) 'An identical scalar was refused.'
+    Assert-True (& $script:E2EModule $pathEqual 'C:\Repo\Infra' 'c:\repo\infra') 'A Windows path differing only in case was refused.'
+    Assert-True (& $script:E2EModule $contains @('alpha', 'beta') 'beta') 'An exact member was refused.'
+    Assert-True (& $script:E2EModule $sequence @('alpha', 'beta') @('alpha', 'beta')) 'An identical sequence was refused.'
+    Assert-True (& $script:E2EModule $set @('alpha', 'beta') @('beta', 'alpha')) 'An identical set was refused.'
+
+    # Null, a non-string and a type difference are differences, not matches.
+    Assert-True (-not (& $script:E2EModule $equal $null $approved)) 'A null candidate was accepted.'
+    Assert-True (-not (& $script:E2EModule $equal $approved $null)) 'A null expectation was accepted.'
+    Assert-True (-not (& $script:E2EModule $equal $null $null)) 'Two nulls were accepted as equal.'
+    Assert-True (-not (& $script:E2EModule $equal 1 '1')) 'A non-string candidate was accepted.'
+    Assert-True (-not (& $script:E2EModule $pathEqual $null 'C:\repo')) 'A null path candidate was accepted.'
+    Assert-True (-not (& $script:E2EModule $contains @('alpha') $null)) 'A null member was accepted.'
+    # Case is a difference everywhere except in a Windows path.
+    Assert-True (-not (& $script:E2EModule $equal $approved $approved.ToUpperInvariant())) 'A case difference was accepted.'
+    # A set is a set: a repeated value on either side is not one.
+    Assert-True (-not (& $script:E2EModule $set @('alpha', 'alpha') @('alpha', 'beta'))) 'A repeated expectation was accepted as a set.'
+    Assert-True (-not (& $script:E2EModule $set @('alpha', 'beta') @('alpha', 'alpha'))) 'A repeated candidate was accepted as a set.'
+    Assert-True (-not (& $script:E2EModule $sequence @('alpha', 'beta') @('beta', 'alpha'))) 'A reordered sequence was accepted.'
+    Assert-True (-not (& $script:E2EModule $sequence @('alpha') @('alpha', 'beta'))) 'A longer sequence was accepted.'
+
+    foreach ($case in Get-D281FormatCases) {
+        $polluted = $approved.Insert(11, $case.Character)
+        Assert-True (-not (& $script:E2EModule $equal $approved $polluted)) `
+            "Test-E2EOrdinalEqual accepted a contaminated candidate: $($case.Name)"
+        Assert-True (-not (& $script:E2EModule $equal $polluted $approved)) `
+            "Test-E2EOrdinalEqual accepted a contaminated expectation: $($case.Name)"
+        Assert-True (-not (& $script:E2EModule $pathEqual 'C:\repo\infra' ('C:\repo\inf' + $case.Character + 'ra'))) `
+            "Test-E2EOrdinalPathEqual accepted a contaminated path: $($case.Name)"
+        Assert-True (-not (& $script:E2EModule $contains @($approved) $polluted)) `
+            "Test-E2EOrdinalContains accepted a contaminated member: $($case.Name)"
+        Assert-True (-not (& $script:E2EModule $sequence @($approved) @($polluted))) `
+            "Test-E2EOrdinalSequenceEqual accepted a contaminated element: $($case.Name)"
+        Assert-True (-not (& $script:E2EModule $set @($approved) @($polluted))) `
+            "Test-E2EOrdinalSetEqual accepted a contaminated member: $($case.Name)"
+    }
+}
+
+# A `prometheus` container as the daemon records one, with each of the six
+# non-path identity scalars contaminated in turn. This is the validator that
+# stands between Compose container discovery and `docker stop` / `docker rm`.
+function Invoke-D281ComposeIdentityTests {
+    param([string]$Project, $Receipt, $Configuration)
+
+    $root = Get-D273RepositoryRoot
+    $infra = [System.IO.Path]::GetFullPath((Join-Path $root 'infra'))
+    $configFiles = @(
+        [System.IO.Path]::GetFullPath((Join-Path $root 'infra/compose.yml')),
+        [System.IO.Path]::GetFullPath((Join-Path $root 'infra/compose.keycloak-local-e2e.yml'))
+    )
+    $definition = $Configuration.services.PSObject.Properties['prometheus'].Value
+    $id = '1' * 64
+    $imageId = 'sha256:' + ('2' * 64)
+    $contract = [pscustomobject]@{ Reference = $definition.image; Id = $imageId; Definition = $definition }
+
+    $baseline = New-D273PrometheusDocument -Id $id -Project $Project -Definition $definition `
+        -ImageId $imageId -WorkingDirectory $infra -ConfigFiles $configFiles
+    Assert-True ($null -eq (Get-D273IdentityFailure (ConvertTo-D273Document $baseline) $id $Project $contract $Receipt)) `
+        'The clean Compose identity document was refused.'
+
+    foreach ($case in Get-D281FormatCases) {
+        $character = $case.Character
+        $variants = @(
+            [pscustomobject]@{ Name = 'document-id'; Apply = { param($d) $d['Id'] = $d['Id'].Insert(32, $character) } },
+            [pscustomobject]@{ Name = 'project-label'; Apply = { param($d) $d['Config']['Labels']['com.docker.compose.project'] = $Project.Insert(11, $character) } },
+            [pscustomobject]@{ Name = 'service-label'; Apply = { param($d) $d['Config']['Labels']['com.docker.compose.service'] = 'prom' + $character + 'etheus' } },
+            [pscustomobject]@{ Name = 'container-number'; Apply = { param($d) $d['Config']['Labels']['com.docker.compose.container-number'] = '1' + $character } },
+            [pscustomobject]@{ Name = 'oneoff-label'; Apply = { param($d) $d['Config']['Labels']['com.docker.compose.oneoff'] = 'Fal' + $character + 'se' } },
+            [pscustomobject]@{ Name = 'config-image'; Apply = { param($d) $d['Config']['Image'] = ([string]$d['Config']['Image']).Insert(3, $character) } },
+            [pscustomobject]@{ Name = 'document-image'; Apply = { param($d) $d['Image'] = ([string]$d['Image']).Insert(10, $character) } },
+            [pscustomobject]@{ Name = 'network-mode'; Apply = { param($d) $d['HostConfig']['NetworkMode'] = ([string]$d['HostConfig']['NetworkMode']).Insert(2, $character) } },
+            [pscustomobject]@{ Name = 'mount-type'; Apply = { param($d)
+                foreach ($mount in @($d['Mounts'])) { $mount['Type'] = ([string]$mount['Type']).Insert(1, $character) } } },
+            [pscustomobject]@{ Name = 'mount-volume-name'; Apply = { param($d)
+                foreach ($mount in @($d['Mounts'])) {
+                    if ($mount['Type'] -ceq 'volume') { $mount['Name'] = ([string]$mount['Name']).Insert(11, $character) }
+                } } }
+        )
+        foreach ($variant in $variants) {
+            $document = New-D273PrometheusDocument -Id $id -Project $Project -Definition $definition `
+                -ImageId $imageId -WorkingDirectory $infra -ConfigFiles $configFiles
+            & $variant.Apply $document
+            $failure = Get-D273IdentityFailure (ConvertTo-D273Document $document) $id $Project $contract $Receipt
+            Assert-True ($null -ne $failure) "Compose $($variant.Name) accepted contamination: $($case.Name)"
+            Assert-Equal 'RESOURCE_CLEANUP_FAILED' $failure.Message `
+                "Compose $($variant.Name) returned the wrong fixed error: $($case.Name)"
+            Assert-NoRawCleanupDetail $failure "Compose $($variant.Name) reflected an internal detail: $($case.Name)"
+            Assert-D281NoContaminationEcho $failure $character `
+                "Compose $($variant.Name) reflected the contaminated value: $($case.Name)"
+        }
+    }
+}
+
+# No fixed error a contaminated value reaches may carry that character back out.
+function Assert-D281NoContaminationEcho($Failure, [string]$Character, [string]$Message) {
+    if ($null -eq $Failure) { return }
+    if ($Failure.Message.Contains($Character)) { throw $Message }
+    Assert-D277NoContaminationEcho $Failure $Message
+}
+
+# The one production statement that a candidate container is this run's own
+# dedicated browser container, asked of a document that differs from an approved
+# one by a single Format character.
+function Invoke-D281BrowserOwnershipTests {
+    param($Receipt)
+
+    $imageId = 'sha256:' + ('7' * 64)
+    $containerId = '3' * 64
+    $labels = & $script:E2EModule { param($r) Get-E2EOwnershipLabels -Receipt $r -Role 'browser' } $Receipt
+    $expectation = & $script:E2EModule { Get-BrowserServerExpectation (Get-BrowserServerExpectedBinds) }
+    $name = & $script:E2EModule { $BrowserContainerName }
+    $images = & $script:E2EModule { param($r) Get-E2EImageSet -Receipt $r } $Receipt
+    $contract = [ordered]@{
+        Name = $name; Reference = $images.Browser; ImageId = $imageId
+        Labels = $labels; Role = 'browser'; Expectation = $expectation
+    }
+
+    $build = {
+        param($ContainerName, $DocumentImage, $ConfigImage, $NetworkMode, $LabelOverrides)
+        $binds = @($expectation.Binds | ForEach-Object { $_.Source + ':' + $_.Destination + ':ro' })
+        $mounts = @($expectation.Binds | ForEach-Object {
+            [ordered]@{ Type = 'bind'; Source = $_.Source; Destination = $_.Destination
+                Mode = 'ro'; RW = $false; Propagation = 'rprivate' } })
+        $ports = [ordered]@{}
+        foreach ($port in $expectation.PortBindings.Keys) {
+            $ports[$port] = @($expectation.PortBindings[$port] | ForEach-Object {
+                [ordered]@{ HostIp = $_.HostIp; HostPort = $_.HostPort } })
+        }
+        $documentLabels = [ordered]@{}
+        foreach ($key in $labels.Keys) { $documentLabels[$key] = $labels[$key] }
+        if ($null -ne $LabelOverrides) {
+            foreach ($key in $LabelOverrides.Keys) { $documentLabels[$key] = $LabelOverrides[$key] }
+        }
+        return [ordered]@{
+            Id = $containerId; Name = $ContainerName; Image = $DocumentImage
+            Config = [ordered]@{ Image = $ConfigImage; Labels = $documentLabels }
+            HostConfig = [ordered]@{
+                NetworkMode = $NetworkMode; ReadonlyRootfs = $expectation.ReadOnlyRootFilesystem
+                Init = $expectation.Init; Privileged = $false; PublishAllPorts = $false
+                CapAdd = @(); CapDrop = $expectation.CapabilityDrop
+                SecurityOpt = $expectation.SecurityOptions; ExtraHosts = $expectation.ExtraHosts
+                Devices = @(); DeviceRequests = @(); DeviceCgroupRules = @(); VolumesFrom = @(); Mounts = @()
+                Binds = $binds; Tmpfs = $expectation.Tmpfs; PortBindings = $ports
+            }
+            NetworkSettings = [ordered]@{ Networks = [ordered]@{ "$($expectation.NetworkMode)" = [ordered]@{} } }
+            Mounts = $mounts
+        }
+    }
+    $judge = {
+        param($Document)
+        return Get-CapturedException {
+            & $script:E2EModule {
+                param($document, $id, $image, $contract)
+                Assert-E2EOwnedBrowserContainer -Document $document -ContainerId $id -ImageId $image -Contract $contract
+            } $Document $containerId $imageId $contract
+        }
+    }
+    $message = 'A browser container removal was asked for a container this run does not own.'
+    $clean = ConvertTo-D273Document (& $build ('/' + $name) $imageId $imageId $expectation.NetworkMode $null)
+    Assert-True ($null -eq (& $judge $clean)) 'The clean browser ownership document was refused.'
+
+    foreach ($case in Get-D281FormatCases) {
+        $character = $case.Character
+        $variants = @(
+            [pscustomobject]@{ Name = 'container-name'
+                Document = (& $build ('/' + $name.Insert(6, $character)) $imageId $imageId $expectation.NetworkMode $null) },
+            [pscustomobject]@{ Name = 'document-image'
+                Document = (& $build ('/' + $name) $imageId.Insert(10, $character) $imageId $expectation.NetworkMode $null) },
+            [pscustomobject]@{ Name = 'config-image'
+                Document = (& $build ('/' + $name) $imageId $imageId.Insert(10, $character) $expectation.NetworkMode $null) },
+            [pscustomobject]@{ Name = 'network-mode'
+                Document = (& $build ('/' + $name) $imageId $imageId $expectation.NetworkMode.Insert(2, $character) $null) },
+            [pscustomobject]@{ Name = 'image-role-label'
+                Document = (& $build ('/' + $name) $imageId $imageId $expectation.NetworkMode `
+                    ([ordered]@{ 'com.finguardops.e2e.image-role' = 'brow' + $character + 'ser' })) }
+        )
+        foreach ($variant in $variants) {
+            $failure = & $judge (ConvertTo-D273Document $variant.Document)
+            Assert-True ($null -ne $failure) "Browser $($variant.Name) accepted contamination: $($case.Name)"
+            Assert-Equal $message $failure.Message "Browser $($variant.Name) returned the wrong fixed error: $($case.Name)"
+            Assert-D281NoContaminationEcho $failure $character `
+                "Browser $($variant.Name) reflected the contaminated value: $($case.Name)"
+        }
+    }
+}
+
+# The authoritative image record set, and the pre-mutation project ownership
+# validator, each asked through the production Docker leaf.
+function Invoke-D281ImageAndProjectOwnershipTests {
+    param([string]$Project, $Receipt)
+
+    $root = New-D281TempRoot 'ownership'
+    Invoke-D281WithDockerFake $root {
+        $events = Join-Path $root 'events.txt'
+        $images = & $script:E2EModule { param($r) Get-E2EImageSet -Receipt $r } $Receipt
+        $identifiers = [ordered]@{ Backend = 'sha256:' + ('4' * 64); AiService = 'sha256:' + ('5' * 64); Browser = 'sha256:' + ('6' * 64) }
+        $roles = [ordered]@{ Backend = 'backend'; AiService = 'ai-service'; Browser = 'browser' }
+        $imageMap = [ordered]@{}
+        foreach ($key in $roles.Keys) {
+            $imageMap[$images[$key]] = [ordered]@{
+                Id = $identifiers[$key]
+                Config = [ordered]@{ Labels = (& $script:E2EModule {
+                    param($r, $role) Get-E2EOwnershipLabels -Receipt $r -Role $role } $Receipt $roles[$key]) }
+            }
+        }
+        [System.IO.File]::WriteAllText((Join-Path $root 'image.json'),
+            ($imageMap | ConvertTo-Json -Depth 8 -Compress), [System.Text.UTF8Encoding]::new($false))
+
+        $buildRecords = {
+            param([string]$Field, [string]$Character)
+            $records = [ordered]@{}
+            foreach ($key in $roles.Keys) {
+                $reference = $images[$key]
+                $identifier = $identifiers[$key]
+                $role = $roles[$key]
+                if ($Field -ceq 'Reference') { $reference = $reference.Insert(5, $Character) }
+                if ($Field -ceq 'Id') { $identifier = $identifier.Insert(10, $Character) }
+                if ($Field -ceq 'Role') { $role = $role.Insert(1, $Character) }
+                $records[$key] = [pscustomobject]@{
+                    Reference = $reference; Id = $identifier; Role = $role; InUse = $false
+                    Labels = (& $script:E2EModule { param($r, $value) Get-E2EOwnershipLabels -Receipt $r -Role $value } $Receipt $roles[$key])
+                }
+            }
+            return $records
+        }
+        $judgeRecords = {
+            param($Records)
+            return Get-CapturedException {
+                & $script:E2EModule { param($value, $r) Assert-E2EImageRecordSet -Values @($value) -Receipt $r } $Records $Receipt
+            }
+        }
+        [System.IO.File]::WriteAllText($events, '', [System.Text.Encoding]::ASCII)
+        Assert-True ($null -eq (& $judgeRecords (& $buildRecords '' ''))) 'The clean image record set was refused.'
+        Assert-Equal 0 @(Get-D281MutationEvents $events).Count 'The clean image record set mutated something.'
+
+        foreach ($case in Get-D281FormatCases) {
+            foreach ($field in @('Reference', 'Id', 'Role')) {
+                [System.IO.File]::WriteAllText($events, '', [System.Text.Encoding]::ASCII)
+                $failure = & $judgeRecords (& $buildRecords $field $case.Character)
+                Assert-True ($null -ne $failure) "Image record $field accepted contamination: $($case.Name)"
+                Assert-Equal 'IMAGE_RECORD_INVALID' $failure.Message "Image record $field returned the wrong fixed error: $($case.Name)"
+                Assert-D281NoContaminationEcho $failure $case.Character "Image record $field reflected the contaminated value: $($case.Name)"
+                Assert-Equal 0 @(Get-D281MutationEvents $events).Count "Image record $field mutated something: $($case.Name)"
+            }
+        }
+
+        # The pre-mutation project ownership validator.
+        $full = 'a1b2c3d4e5f6' + ('0' * 52)
+        [System.IO.File]::WriteAllText((Join-Path $root 'ps.txt'), $full, [System.Text.Encoding]::ASCII)
+        $writeDocument = {
+            param([string]$ProjectLabel, [string]$ServiceLabel, [string]$ConfigImage, [string]$DocumentImage)
+            $document = [ordered]@{
+                Id = $full; Name = '/' + $Project + '-backend-1'; Image = $DocumentImage
+                Config = [ordered]@{
+                    Image = $ConfigImage
+                    Labels = [ordered]@{
+                        'com.docker.compose.project' = $ProjectLabel
+                        'com.docker.compose.service' = $ServiceLabel
+                    }
+                }
+            }
+            $map = [ordered]@{}
+            $map[$full] = $document
+            [System.IO.File]::WriteAllText((Join-Path $root 'documents.json'),
+                ($map | ConvertTo-Json -Depth 12 -Compress), [System.Text.UTF8Encoding]::new($false))
+        }
+        $judgeProject = {
+            [System.IO.File]::WriteAllText($events, '', [System.Text.Encoding]::ASCII)
+            $failure = Get-CapturedException {
+                & $script:E2EModule { param($r, $p) Assert-E2EExistingProjectOwnership -Receipt $r -Project $p } $Receipt $Project
+            }
+            return [pscustomobject]@{ Failure = $failure; Mutations = @(Get-D281MutationEvents $events).Count }
+        }
+        & $writeDocument $Project 'backend' $images.Backend $identifiers.Backend
+        $clean = & $judgeProject
+        Assert-True ($null -eq $clean.Failure) 'The clean project ownership document was refused.'
+        Assert-Equal 0 $clean.Mutations 'The clean project ownership check mutated something.'
+
+        foreach ($case in Get-D281FormatCases) {
+            $character = $case.Character
+            $variants = @(
+                [pscustomobject]@{ Name = 'project-label'; Values = @($Project.Insert(11, $character), 'backend', $images.Backend, $identifiers.Backend) },
+                [pscustomobject]@{ Name = 'service-label'; Values = @($Project, 'back' + $character + 'end', $images.Backend, $identifiers.Backend) },
+                [pscustomobject]@{ Name = 'config-image'; Values = @($Project, 'backend', $images.Backend.Insert(5, $character), $identifiers.Backend) },
+                [pscustomobject]@{ Name = 'document-image'; Values = @($Project, 'backend', $images.Backend, $identifiers.Backend.Insert(10, $character)) }
+            )
+            foreach ($variant in $variants) {
+                & $writeDocument $variant.Values[0] $variant.Values[1] $variant.Values[2] $variant.Values[3]
+                $result = & $judgeProject
+                Assert-True ($null -ne $result.Failure) "Project $($variant.Name) accepted contamination: $($case.Name)"
+                Assert-Equal 'RESOURCE_OWNERSHIP_INVALID' $result.Failure.Message `
+                    "Project $($variant.Name) returned the wrong fixed error: $($case.Name)"
+                Assert-D281NoContaminationEcho $result.Failure $character `
+                    "Project $($variant.Name) reflected the contaminated value: $($case.Name)"
+                Assert-Equal 0 $result.Mutations "Project $($variant.Name) mutated something: $($case.Name)"
+            }
+        }
+
+        # Letter case is a difference here as well: `-eq` and `-ne` answered
+        # that it was not, and this boundary decides which image a container
+        # under this project is allowed to be running.
+        foreach ($variant in @(
+            [pscustomobject]@{ Name = 'service-label-case'; Values = @($Project, 'BACKEND', $images.Backend, $identifiers.Backend) },
+            [pscustomobject]@{ Name = 'project-label-case'; Values = @($Project.ToUpperInvariant(), 'backend', $images.Backend, $identifiers.Backend) },
+            [pscustomobject]@{ Name = 'config-image-case'; Values = @($Project, 'backend', $images.Backend.ToUpperInvariant(), $identifiers.Backend) },
+            [pscustomobject]@{ Name = 'document-image-case'; Values = @($Project, 'backend', $images.Backend, $identifiers.Backend.ToUpperInvariant()) }
+        )) {
+            & $writeDocument $variant.Values[0] $variant.Values[1] $variant.Values[2] $variant.Values[3]
+            $result = & $judgeProject
+            Assert-True ($null -ne $result.Failure) "Project $($variant.Name) accepted a case difference."
+            Assert-Equal 'RESOURCE_OWNERSHIP_INVALID' $result.Failure.Message "Project $($variant.Name) returned the wrong fixed error."
+            Assert-Equal 0 $result.Mutations "Project $($variant.Name) mutated something."
+        }
+    }
+}
+
+# The whole cleanup, from the first read to the receipt deletion, against a world
+# holding one network whose project label differs from this run's by a single
+# Format character. Every leaf below is a native Docker command or a file.
+function Invoke-D281FullCleanupReceiptTests {
+    param($Receipt)
+
+    $serviceProject = & $script:E2EModule { param($r) Get-E2EServiceProjectName -Receipt $r } $Receipt
+    $networkId = '9' * 64
+    $root = New-D281TempRoot 'cleanup'
+    Invoke-D281WithDockerFake $root {
+        $events = Join-Path $root 'events.txt'
+        [System.IO.File]::WriteAllText((Join-Path $root 'network-id.txt'), $networkId, [System.Text.Encoding]::ASCII)
+        [System.IO.File]::WriteAllText((Join-Path $root 'network-filter.txt'),
+            ($serviceProject + '_application$'), [System.Text.Encoding]::ASCII)
+        $repository = Join-Path $root 'repo'
+        $state = Join-Path $repository 'infra\keycloak\.local\state'
+        [System.IO.Directory]::CreateDirectory($state) | Out-Null
+        $receiptPath = Join-Path $state 'e2e-image-cleanup-required.json'
+
+        $run = {
+            param([string]$ProjectLabel)
+            $network = [ordered]@{
+                Id = $networkId
+                Name = $serviceProject + '_application'
+                Labels = [ordered]@{
+                    'com.docker.compose.network' = 'application'
+                    'com.docker.compose.project' = $ProjectLabel
+                }
+                Containers = [ordered]@{}
+            }
+            [System.IO.File]::WriteAllText((Join-Path $root 'network.json'),
+                ($network | ConvertTo-Json -Depth 8 -Compress), [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText((Join-Path $root 'network-present.txt'), '1', [System.Text.Encoding]::ASCII)
+            [System.IO.File]::WriteAllText($events, '', [System.Text.Encoding]::ASCII)
+            & $script:E2EModule { param($p, $r, $base) New-E2EReceiptFile -Path $p -Receipt $r -RepositoryRoot $base } `
+                $receiptPath $Receipt $repository
+            $failure = Get-CapturedException {
+                & $script:E2EModule { param($r, $p, $base) Invoke-E2EFullCleanup -Receipt $r -ReceiptPath $p -RepositoryRootPath $base } `
+                    $Receipt $receiptPath $repository
+            }
+            $mutations = @(Get-D281MutationEvents $events)
+            $result = [pscustomobject]@{
+                Failure = $failure
+                Mutations = $mutations.Count
+                NetworkRemovals = @($mutations | Where-Object { $_ -cmatch '^network rm ' }).Count
+                ReceiptKept = [System.IO.File]::Exists($receiptPath)
+            }
+            if ($result.ReceiptKept) { [System.IO.File]::Delete($receiptPath) }
+            return $result
+        }
+
+        # The clean world still finishes: the owned network is removed and the
+        # receipt is deleted, exactly as before.
+        $clean = & $run $serviceProject
+        Assert-True ($null -eq $clean.Failure) 'A clean full cleanup failed.'
+        Assert-Equal 1 $clean.NetworkRemovals 'A clean full cleanup did not remove the owned network.'
+        Assert-True (-not $clean.ReceiptKept) 'A clean full cleanup did not delete the receipt.'
+
+        foreach ($case in Get-D281FormatCases) {
+            $result = & $run ($serviceProject + $case.Character)
+            Assert-True ($null -ne $result.Failure) "Full cleanup accepted a contaminated network: $($case.Name)"
+            Assert-Equal 'RESOURCE_CLEANUP_FAILED' $result.Failure.Message `
+                "Full cleanup returned the wrong fixed error: $($case.Name)"
+            Assert-D281NoContaminationEcho $result.Failure $case.Character `
+                "Full cleanup reflected the contaminated value: $($case.Name)"
+            Assert-Equal 0 $result.Mutations "Full cleanup mutated something: $($case.Name)"
+            Assert-Equal 0 $result.NetworkRemovals "Full cleanup removed a foreign network: $($case.Name)"
+            Assert-True $result.ReceiptKept "Full cleanup deleted the receipt after refusing: $($case.Name)"
+        }
+    }
+}
+
+# Every candidate the safe cleanup error code boundary can be handed.
+function Get-D281ErrorCodeCases {
+    $fixed = 'RESOURCE_CLEANUP_FAILED'
+    return @(
+        [pscustomobject]@{ Name = 'clean-fixed-code'; Value = $fixed; Accept = $true },
+        [pscustomobject]@{ Name = 'longest-accepted-code'; Value = 'A' + ('B' * 63); Accept = $true },
+        [pscustomobject]@{ Name = 'trailing-lf'; Value = $fixed + "`n"; Accept = $false },
+        [pscustomobject]@{ Name = 'trailing-cr'; Value = $fixed + "`r"; Accept = $false },
+        [pscustomobject]@{ Name = 'trailing-crlf'; Value = $fixed + "`r`n"; Accept = $false },
+        [pscustomobject]@{ Name = 'leading-lf'; Value = "`n" + $fixed; Accept = $false },
+        [pscustomobject]@{ Name = 'leading-cr'; Value = "`r" + $fixed; Accept = $false },
+        [pscustomobject]@{ Name = 'embedded-lf'; Value = $fixed.Insert(8, "`n"); Accept = $false },
+        [pscustomobject]@{ Name = 'embedded-cr'; Value = $fixed.Insert(8, "`r"); Accept = $false },
+        [pscustomobject]@{ Name = 'line-feed-then-record'; Value = $fixed + "`nRESOURCE_CLEANUP_FAILED"; Accept = $false },
+        [pscustomobject]@{ Name = 'trailing-nul'; Value = $fixed + [string][char]0; Accept = $false },
+        [pscustomobject]@{ Name = 'embedded-nul'; Value = $fixed.Insert(8, [string][char]0); Accept = $false },
+        [pscustomobject]@{ Name = 'soft-hyphen'; Value = $fixed.Insert(8, [string][char]0x00AD); Accept = $false },
+        [pscustomobject]@{ Name = 'zero-width-space'; Value = $fixed.Insert(8, [string][char]0x200B); Accept = $false },
+        [pscustomobject]@{ Name = 'word-joiner'; Value = $fixed.Insert(8, [string][char]0x2060); Accept = $false },
+        [pscustomobject]@{ Name = 'zero-width-no-break-space'; Value = $fixed.Insert(8, [string][char]0xFEFF); Accept = $false },
+        [pscustomobject]@{ Name = 'line-separator'; Value = $fixed + [string][char]0x2028; Accept = $false },
+        [pscustomobject]@{ Name = 'lower-case'; Value = $fixed.ToLowerInvariant(); Accept = $false },
+        [pscustomobject]@{ Name = 'trailing-space'; Value = $fixed + ' '; Accept = $false },
+        [pscustomobject]@{ Name = 'embedded-space'; Value = $fixed.Insert(8, ' '); Accept = $false },
+        [pscustomobject]@{ Name = 'leading-digit'; Value = '1' + $fixed; Accept = $false },
+        [pscustomobject]@{ Name = 'sixty-five-characters'; Value = 'A' + ('B' * 64); Accept = $false },
+        [pscustomobject]@{ Name = 'empty'; Value = ''; Accept = $false }
+    )
+}
+
+function Invoke-D281SafeErrorCodeTests {
+    $fallback = 'IMAGE_CLEANUP_FAILED'
+    foreach ($case in Get-D281ErrorCodeCases) {
+        $record = $null
+        try { throw [System.InvalidOperationException]::new($case.Value) } catch { $record = $_ }
+        $selected = & $script:E2EModule { param($r, $f) Get-E2ESafeCleanupFailure -ErrorRecord $r -FallbackCode $f } $record $fallback
+
+        # The same candidate, through the one production caller that reaches
+        # this boundary at all.
+        $raised = Get-CapturedException {
+            & $script:E2EModule {
+                param($value, $code)
+                $actions = @([pscustomobject]@{
+                    Action = { throw [System.InvalidOperationException]::new($value) }.GetNewClosure()
+                    ErrorCode = $code
+                    SkipAfterCleanupFailure = $false
+                })
+                Invoke-E2ECleanupActions -Primary $null -Actions $actions
+            } $case.Value $fallback
+        }
+        Assert-True ($null -ne $raised) "$($case.Name) raised nothing."
+        if ($case.Accept) {
+            Assert-Equal $case.Value $selected.Message "$($case.Name) was not returned as its own code."
+            Assert-Equal $case.Value $raised.Message "$($case.Name) was not preserved through the cleanup actions."
+        }
+        else {
+            Assert-Equal $fallback $selected.Message "$($case.Name) was not replaced by the fallback code."
+            Assert-Equal $fallback $raised.Message "$($case.Name) was not replaced through the cleanup actions."
+            if ($case.Value.Length -ne 0) {
+                Assert-True (-not $selected.Message.Contains($case.Value)) "$($case.Name) reflected the raw candidate."
+            }
+            Assert-D277NoContaminationEcho $raised "$($case.Name) reflected a contaminated character."
+        }
+    }
+
+    # A fallback code is itself bounded absolutely.
+    Assert-Throws {
+        & $script:E2EModule {
+            $record = $null
+            try { throw [System.InvalidOperationException]::new('X') } catch { $record = $_ }
+            Get-E2ESafeCleanupFailure -ErrorRecord $record -FallbackCode "IMAGE_CLEANUP_FAILED`n"
+        }
+    } '.' 'A fallback code carrying a line break was accepted.'
+
+    # Arbitration and primary identity are unchanged.
+    $primary = [System.InvalidOperationException]::new('PRIMARY_CODE')
+    $cleanup = [System.InvalidOperationException]::new('CLEANUP_CODE')
+    Assert-True ([object]::ReferenceEquals($primary, (& $script:E2EModule {
+        param($p, $c) Select-E2EFailure -Primary $p -Cleanup $c } $primary $cleanup))) `
+        'Cleanup replaced the primary failure.'
+    Assert-True ([object]::ReferenceEquals($cleanup, (& $script:E2EModule {
+        param($p, $c) Select-E2EFailure -Primary $p -Cleanup $c } $null $cleanup))) `
+        'The dedicated cleanup failure was not selected.'
+    $preserved = Get-CapturedException {
+        & $script:E2EModule {
+            param($p)
+            $actions = @([pscustomobject]@{
+                Action = { throw [System.InvalidOperationException]::new("RESOURCE_CLEANUP_FAILED`n") }
+                ErrorCode = 'IMAGE_CLEANUP_FAILED'
+                SkipAfterCleanupFailure = $false
+            })
+            Invoke-E2ECleanupActions -Primary $p -Actions $actions -DiagnosticWriter { param($value) }
+        } $primary
+    }
+    Assert-True ([object]::ReferenceEquals($primary, $preserved)) `
+        'A malformed cleanup code displaced the primary exception object.'
+}
+
+function Invoke-D281TargetedTests {
+    $script:Failures = [System.Collections.Generic.List[string]]::new()
+    $project = 'finguardops-kc241-e2e-0123456789ab'
+    $receipt = New-TestReceipt
+    $configuration = Get-D273ComposeConfiguration -Project $project -Receipt $receipt
+
+    Invoke-TestCase 'D281 the ordinal comparison helpers refuse a Unicode Format counterexample' {
+        Invoke-D281OrdinalHelperTests
+    }
+    Invoke-TestCase 'D281 Compose container ownership refuses a Format-contaminated scalar' {
+        Invoke-D281ComposeIdentityTests -Project $project -Receipt $receipt -Configuration $configuration
+    }
+    Invoke-TestCase 'D281 browser container ownership refuses a Format-contaminated scalar' {
+        Invoke-D281BrowserOwnershipTests -Receipt $receipt
+    }
+    Invoke-TestCase 'D281 image and project ownership refuse a Format-contaminated scalar without mutating' {
+        Invoke-D281ImageAndProjectOwnershipTests -Project $project -Receipt $receipt
+    }
+    Invoke-TestCase 'D281 full cleanup refuses a contaminated network and preserves the receipt' {
+        Invoke-D281FullCleanupReceiptTests -Receipt $receipt
+    }
+    Invoke-TestCase 'D281 the safe cleanup error code is bounded absolutely' {
+        Invoke-D281SafeErrorCodeTests
+    }
+
+    if ($script:Failures.Count -ne 0) {
+        foreach ($failure in $script:Failures) { Write-Output $failure }
+        exit 1
+    }
+    Write-Output 'D281 targeted passed'
+}
+
 function Invoke-FormalTests {
     Invoke-SessionStateTargetedTests
     Invoke-WaitBrowserTargetedTests
@@ -4183,6 +5730,16 @@ if ($Mode -eq 'D248Targeted') {
 
 if ($Mode -eq 'CleanupBrowserTargeted') {
     Invoke-CleanupBrowserTargetedTests
+    exit 0
+}
+
+if ($Mode -eq 'D273Targeted') {
+    Invoke-D273TargetedTests
+    exit 0
+}
+
+if ($Mode -eq 'D281Targeted') {
+    Invoke-D281TargetedTests
     exit 0
 }
 
