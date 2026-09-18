@@ -474,8 +474,9 @@ function Invoke-OwnerFixTargetedTests {
             }
             $ownerBody = { $markers.Add('body'); throw $state.Primary }.GetNewClosure()
             $ownerBoundaries = $boundaries
+            $ownerReceipt = New-TestReceipt
             $invocation = {
-                Invoke-E2EOwnerEnvironmentScope -Receipt (New-TestReceipt) `
+                Invoke-E2EOwnerEnvironmentScope -Receipt $ownerReceipt `
                     -Boundaries $ownerBoundaries -Body $ownerBody
             }.GetNewClosure()
             $failure = Get-CapturedException $invocation
@@ -5623,8 +5624,8 @@ function New-D294DockerLeaf {
                     } else { [ordered]@{} })
                     PublishAllPorts = $false; Privileged = $false; ReadonlyRootfs = $true
                     CapAdd = $null; CapDrop = $null; SecurityOpt = @('no-new-privileges:true')
-                    Devices = @(); DeviceRequests = $null; PidMode = ''; IpcMode = 'private'; UTSMode = ''
-                    UsernsMode = ''; CgroupnsMode = 'private'; ExtraHosts = $null
+                    Devices = $null; DeviceRequests = $null; PidMode = ''; IpcMode = 'private'; UTSMode = ''
+                    UsernsMode = ''; CgroupnsMode = 'private'; ExtraHosts = @()
                     Tmpfs = [ordered]@{ '/tmp' = '' }; GroupAdd = $null; Init = $null; AutoRemove = $false }
                 State = [ordered]@{ Status = $container.Status; Running = $container.Running
                     Paused = $false; Restarting = $false; Dead = $false }
@@ -6399,14 +6400,14 @@ function Invoke-D299Red {
 # https://docs.docker.com/reference/cli/docker/container/run/
 # Scalars compare ordinal/exact, CapAdd/CapDrop/SecurityOpt as sets, Devices and
 # DeviceRequests as sequences, and Tmpfs/PortBindings/ExposedPorts as maps.
-# The daemon represents omitted optional lists as null except Devices=[];
+# The daemon represents omitted Devices as null and ExtraHosts as [];
 # omitted Tmpfs and Init are null, while PortBindings is an empty object.
 function New-D308EngineDefaults {
     return [ordered]@{
         PublishAllPorts=$false; Privileged=$false; ReadonlyRootfs=$false
-        CapAdd=$null; CapDrop=$null; SecurityOpt=$null; Devices=@(); DeviceRequests=$null
+        CapAdd=$null; CapDrop=$null; SecurityOpt=$null; Devices=$null; DeviceRequests=$null
         PidMode=''; IpcMode='private'; UTSMode=''; UsernsMode=''; CgroupnsMode='private'
-        ExtraHosts=$null; Tmpfs=$null; GroupAdd=$null; Init=$null; AutoRemove=$false
+        ExtraHosts=@(); Tmpfs=$null; GroupAdd=$null; Init=$null; AutoRemove=$false
     }
 }
 
@@ -6598,9 +6599,9 @@ function New-D308CleanCandidate($Definition, $Image) {
     }
     $candidateHost = [ordered]@{ PortBindings=$published; PublishAllPorts=$false; Privileged=$false
         ReadonlyRootfs=((Get-D308Optional $Definition 'read_only') -eq $true)
-        CapAdd=$null; CapDrop=$null; SecurityOpt=$null; Devices=@(); DeviceRequests=$null
+        CapAdd=$null; CapDrop=$null; SecurityOpt=$null; Devices=$null; DeviceRequests=$null
         PidMode=''; IpcMode='private'; UTSMode=''; UsernsMode=''; CgroupnsMode='private'
-        ExtraHosts=$null; Tmpfs=$null; GroupAdd=$null; Init=$null; AutoRemove=$false }
+        ExtraHosts=@(); Tmpfs=$null; GroupAdd=$null; Init=$null; AutoRemove=$false }
     foreach ($pair in @(@('CapAdd','cap_add'),@('CapDrop','cap_drop'),@('SecurityOpt','security_opt'))) {
         $declared = Get-D308Optional $Definition $pair[1]
         if ($null -ne $declared) { $candidateHost[$pair[0]] = [string[]]@($declared) }
@@ -6738,8 +6739,8 @@ function Invoke-D308Oracle {
                             'CgroupnsMode','ExtraHosts','Tmpfs','GroupAdd','Init','AutoRemove') }
                     foreach ($field in $fields) {
                         foreach ($variant in @('missing','null','wrong-type')) {
-                            if ($variant -ceq 'null' -and $field -in @('CapAdd','CapDrop','DeviceRequests',
-                                'ExtraHosts','GroupAdd','Init')) { continue }
+                            if ($variant -ceq 'null' -and $field -in @('CapAdd','CapDrop','Devices',
+                                'DeviceRequests','GroupAdd','Init')) { continue }
                             $dirty = New-D308CleanCandidate $definition $image
                             if ($variant -ceq 'missing') { $dirty[$location].Remove($field) }
                             elseif ($variant -ceq 'null') { $dirty[$location][$field] = $null }
@@ -6807,8 +6808,8 @@ function Invoke-D299TargetedTests {
                     'CgroupnsMode','ExtraHosts','Tmpfs','GroupAdd','Init','AutoRemove') }
             foreach ($field in $fields) {
                 foreach ($variant in @('missing','null','wrong-type')) {
-                    if ($variant -ceq 'null' -and $field -in @('CapAdd','CapDrop','DeviceRequests',
-                        'ExtraHosts','GroupAdd','Init')) { continue }
+                    if ($variant -ceq 'null' -and $field -in @('CapAdd','CapDrop','Devices',
+                        'DeviceRequests','GroupAdd','Init')) { continue }
                     $world = New-D294World -Receipt $receipt
                     $fieldName = $field
                     $locationName = $location

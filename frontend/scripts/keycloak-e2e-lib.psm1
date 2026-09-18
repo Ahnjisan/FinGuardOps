@@ -3583,8 +3583,8 @@ function Assert-E2EComposePortSecurityContract($Document, $Contract) {
         @('ReadonlyRootfs', [bool](Get-JsonMember $definition 'read_only')),
         @('PidMode', ''), @('IpcMode', 'private'), @('UTSMode', ''),
         @('UsernsMode', ''), @('CgroupnsMode', 'private'),
-        @('Devices', @()), @('DeviceRequests', $null),
-        @('ExtraHosts', $null), @('GroupAdd', $null),
+        @('Devices', $null), @('DeviceRequests', $null),
+        @('ExtraHosts', @()), @('GroupAdd', $null),
         @('Init', $null), @('AutoRemove', $false)
     )) {
         Assert-E2EExactContractValue $pair[1] (Get-E2EExactMember $host $pair[0])
