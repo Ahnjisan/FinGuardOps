@@ -3585,9 +3585,14 @@ function Assert-E2EComposePortSecurityContract($Document, $Contract) {
         @('UsernsMode', ''), @('CgroupnsMode', 'private'),
         @('Devices', $null), @('DeviceRequests', $null),
         @('ExtraHosts', @()), @('GroupAdd', $null),
-        @('Init', $null), @('AutoRemove', $false)
+        @('AutoRemove', $false)
     )) {
         Assert-E2EExactContractValue $pair[1] (Get-E2EExactMember $host $pair[0])
+    }
+    foreach ($key in @(Get-E2EExactKeys $host)) {
+        if ([string]::Equals($key, 'Init', [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'RESOURCE_CLEANUP_FAILED'
+        }
     }
     foreach ($pair in @(
         @('CapAdd', 'cap_add'), @('CapDrop', 'cap_drop'),

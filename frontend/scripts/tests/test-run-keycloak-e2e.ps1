@@ -5626,7 +5626,7 @@ function New-D294DockerLeaf {
                     CapAdd = $null; CapDrop = $null; SecurityOpt = @('no-new-privileges:true')
                     Devices = $null; DeviceRequests = $null; PidMode = ''; IpcMode = 'private'; UTSMode = ''
                     UsernsMode = ''; CgroupnsMode = 'private'; ExtraHosts = @()
-                    Tmpfs = [ordered]@{ '/tmp' = '' }; GroupAdd = $null; Init = $null; AutoRemove = $false }
+                    Tmpfs = [ordered]@{ '/tmp' = '' }; GroupAdd = $null; AutoRemove = $false }
                 State = [ordered]@{ Status = $container.Status; Running = $container.Running
                     Paused = $false; Restarting = $false; Dead = $false }
                 Mounts = @()
@@ -6401,13 +6401,13 @@ function Invoke-D299Red {
 # Scalars compare ordinal/exact, CapAdd/CapDrop/SecurityOpt as sets, Devices and
 # DeviceRequests as sequences, and Tmpfs/PortBindings/ExposedPorts as maps.
 # The daemon represents omitted Devices as null and ExtraHosts as [];
-# omitted Tmpfs and Init are null, while PortBindings is an empty object.
+# omitted Tmpfs is null, Init is absent, and PortBindings is an empty object.
 function New-D308EngineDefaults {
     return [ordered]@{
         PublishAllPorts=$false; Privileged=$false; ReadonlyRootfs=$false
         CapAdd=$null; CapDrop=$null; SecurityOpt=$null; Devices=$null; DeviceRequests=$null
         PidMode=''; IpcMode='private'; UTSMode=''; UsernsMode=''; CgroupnsMode='private'
-        ExtraHosts=@(); Tmpfs=$null; GroupAdd=$null; Init=$null; AutoRemove=$false
+        ExtraHosts=@(); Tmpfs=$null; GroupAdd=$null; AutoRemove=$false
     }
 }
 
@@ -6601,7 +6601,7 @@ function New-D308CleanCandidate($Definition, $Image) {
         ReadonlyRootfs=((Get-D308Optional $Definition 'read_only') -eq $true)
         CapAdd=$null; CapDrop=$null; SecurityOpt=$null; Devices=$null; DeviceRequests=$null
         PidMode=''; IpcMode='private'; UTSMode=''; UsernsMode=''; CgroupnsMode='private'
-        ExtraHosts=@(); Tmpfs=$null; GroupAdd=$null; Init=$null; AutoRemove=$false }
+        ExtraHosts=@(); Tmpfs=$null; GroupAdd=$null; AutoRemove=$false }
     foreach ($pair in @(@('CapAdd','cap_add'),@('CapDrop','cap_drop'),@('SecurityOpt','security_opt'))) {
         $declared = Get-D308Optional $Definition $pair[1]
         if ($null -ne $declared) { $candidateHost[$pair[0]] = [string[]]@($declared) }
@@ -6739,8 +6739,9 @@ function Invoke-D308Oracle {
                             'CgroupnsMode','ExtraHosts','Tmpfs','GroupAdd','Init','AutoRemove') }
                     foreach ($field in $fields) {
                         foreach ($variant in @('missing','null','wrong-type')) {
+                            if ($variant -ceq 'missing' -and $field -ceq 'Init') { continue }
                             if ($variant -ceq 'null' -and $field -in @('CapAdd','CapDrop','Devices',
-                                'DeviceRequests','GroupAdd','Init')) { continue }
+                                'DeviceRequests','GroupAdd')) { continue }
                             $dirty = New-D308CleanCandidate $definition $image
                             if ($variant -ceq 'missing') { $dirty[$location].Remove($field) }
                             elseif ($variant -ceq 'null') { $dirty[$location][$field] = $null }
@@ -6808,8 +6809,9 @@ function Invoke-D299TargetedTests {
                     'CgroupnsMode','ExtraHosts','Tmpfs','GroupAdd','Init','AutoRemove') }
             foreach ($field in $fields) {
                 foreach ($variant in @('missing','null','wrong-type')) {
+                    if ($variant -ceq 'missing' -and $field -ceq 'Init') { continue }
                     if ($variant -ceq 'null' -and $field -in @('CapAdd','CapDrop','Devices',
-                        'DeviceRequests','GroupAdd','Init')) { continue }
+                        'DeviceRequests','GroupAdd')) { continue }
                     $world = New-D294World -Receipt $receipt
                     $fieldName = $field
                     $locationName = $location
