@@ -2078,6 +2078,45 @@ function New-ContainerExpectation {
 # `docker container inspect` rather than `docker inspect`, so the identifier is
 # resolved as a container and can never be answered by an image that happens to
 # share it.
+function Assert-E2ENoDuplicateJsonKeys([string]$Encoded) {
+    $frames = [System.Collections.Generic.Stack[object]]::new()
+    for ($index = 0; $index -lt $Encoded.Length; $index++) {
+        $character = $Encoded[$index]
+        if ($character -eq '"') {
+            $start = $index
+            $escaped = $false
+            do {
+                $index++
+                if ($index -ge $Encoded.Length) { throw 'RESOURCE_CLEANUP_FAILED' }
+                if ($escaped) { $escaped = $false; continue }
+                if ($Encoded[$index] -eq '\') { $escaped = $true; continue }
+            } while ($Encoded[$index] -ne '"')
+            if ($frames.Count -ne 0 -and $frames.Peek().Kind -ceq 'object' -and $frames.Peek().ExpectKey) {
+                try { $key = ConvertFrom-Json -InputObject $Encoded.Substring($start, $index - $start + 1) }
+                catch { throw 'RESOURCE_CLEANUP_FAILED' }
+                if ($key -isnot [string] -or -not $frames.Peek().Keys.Add($key)) {
+                    throw 'RESOURCE_CLEANUP_FAILED'
+                }
+                $frames.Peek().ExpectKey = $false
+            }
+            continue
+        }
+        if ($character -eq '{') {
+            $frames.Push([pscustomobject]@{ Kind='object'; ExpectKey=$true
+                Keys=[System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal) })
+        }
+        elseif ($character -eq '[') { $frames.Push([pscustomobject]@{ Kind='array' }) }
+        elseif ($character -eq '}' -or $character -eq ']') {
+            if ($frames.Count -eq 0) { throw 'RESOURCE_CLEANUP_FAILED' }
+            [void]$frames.Pop()
+        }
+        elseif ($character -eq ',' -and $frames.Count -ne 0 -and $frames.Peek().Kind -ceq 'object') {
+            $frames.Peek().ExpectKey = $true
+        }
+    }
+    if ($frames.Count -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
+}
+
 function Get-ContainerDocument([string]$ContainerId) {
     # The operand is a full 64-character identifier or nothing is asked at all.
     # An abbreviated identifier is a prefix query, which the daemon is free to
@@ -2092,6 +2131,7 @@ function Get-ContainerDocument([string]$ContainerId) {
     if ($LASTEXITCODE -ne 0) {
         throw 'A container this run created could not be inspected.'
     }
+    Assert-E2ENoDuplicateJsonKeys $encoded
     try {
         $document = $encoded | ConvertFrom-Json
     }
@@ -3381,9 +3421,197 @@ function Get-E2EComposeOwnershipContract {
                 }
             }
         }
-        $records[$service] = [pscustomobject]@{ Reference=$reference; Id=$id; Definition=$definition }
+        $imagePorts = @()
+        if (Test-E2EOrdinalContains $PresentServices $service) {
+            $sourceImage = Get-LocalImageDocument $reference
+            if (-not (Test-E2EOrdinalEqual (Get-JsonMember $sourceImage 'Id') $id)) {
+                throw 'RESOURCE_CLEANUP_FAILED'
+            }
+            $sourceConfig = Get-JsonMember $sourceImage 'Config'
+            $declaredImagePorts = Get-JsonMember $sourceConfig 'ExposedPorts'
+            if ($null -ne $declaredImagePorts) { $imagePorts = @(Get-JsonMemberNames $declaredImagePorts) }
+        }
+        $records[$service] = [pscustomobject]@{ Reference=$reference; Id=$id; Definition=$definition
+            ImageExposedPorts=$imagePorts }
     }
     return $records
+}
+
+function Get-E2EExactMember($Object, [string]$Name) {
+    if ($null -eq $Object -or $Object -is [array] -or $Object -is [string]) {
+        throw 'RESOURCE_CLEANUP_FAILED'
+    }
+    if ($Object -is [System.Collections.IDictionary]) {
+        foreach ($key in $Object.Keys) {
+            if (Test-E2EOrdinalEqual $key $Name) { return ,$Object[$key] }
+        }
+    }
+    else {
+        foreach ($property in $Object.PSObject.Properties) {
+            if (Test-E2EOrdinalEqual $property.Name $Name) { return ,$property.Value }
+        }
+    }
+    throw 'RESOURCE_CLEANUP_FAILED'
+}
+
+function Get-E2EExactKeys($Object) {
+    if ($null -eq $Object -or $Object -is [array] -or $Object -is [string] -or
+        $Object -is [bool] -or $Object -is [ValueType]) { throw 'RESOURCE_CLEANUP_FAILED' }
+    if ($Object -is [System.Collections.IDictionary]) { return @($Object.Keys) }
+    $names = @()
+    foreach ($property in $Object.PSObject.Properties) { $names += [string]$property.Name }
+    return $names
+}
+
+function Assert-E2EContainerState($State) {
+    if ($null -eq $State -or $State -is [array] -or $State -is [string]) {
+        throw 'RESOURCE_CLEANUP_FAILED'
+    }
+    $running = Get-E2EExactMember $State 'Running'
+    $status = Get-E2EExactMember $State 'Status'
+    $paused = Get-E2EExactMember $State 'Paused'
+    $restarting = Get-E2EExactMember $State 'Restarting'
+    $dead = Get-E2EExactMember $State 'Dead'
+    if ($running -isnot [bool] -or $paused -isnot [bool] -or $restarting -isnot [bool] -or
+        $dead -isnot [bool] -or $paused -or $restarting -or $dead -or
+        $status -isnot [string] -or
+        $(if ($running) { -not (Test-E2EOrdinalEqual $status 'running') }
+            else { -not (Test-E2EOrdinalContains @('created','exited') $status) })) {
+        throw 'RESOURCE_CLEANUP_FAILED'
+    }
+}
+
+function Assert-E2EExactContractValue($Expected, $Actual) {
+    if ($null -eq $Expected) {
+        if ($null -ne $Actual) { throw 'RESOURCE_CLEANUP_FAILED' }
+        return
+    }
+    if ($Expected -is [bool]) {
+        if ($Actual -isnot [bool] -or $Actual -ne $Expected) { throw 'RESOURCE_CLEANUP_FAILED' }
+        return
+    }
+    if ($Expected -is [string]) {
+        if (-not (Test-E2EOrdinalEqual $Expected $Actual)) { throw 'RESOURCE_CLEANUP_FAILED' }
+        return
+    }
+    if ($Expected -is [array]) {
+        if ($Actual -isnot [array] -or $Actual.Count -ne $Expected.Count) { throw 'RESOURCE_CLEANUP_FAILED' }
+        for ($index = 0; $index -lt $Expected.Count; $index++) {
+            Assert-E2EExactContractValue $Expected[$index] $Actual[$index]
+        }
+        return
+    }
+    if ($Expected -is [System.Collections.IDictionary]) {
+        $expectedKeys = @($Expected.Keys)
+        $actualKeys = @(Get-E2EExactKeys $Actual)
+        if (-not (Test-E2EOrdinalSetEqual $expectedKeys $actualKeys)) { throw 'RESOURCE_CLEANUP_FAILED' }
+        foreach ($key in $expectedKeys) {
+            Assert-E2EExactContractValue $Expected[$key] (Get-E2EExactMember $Actual $key)
+        }
+        return
+    }
+    throw 'RESOURCE_CLEANUP_FAILED'
+}
+
+function Assert-E2EExactContractSet($Expected, $Actual) {
+    if ($null -eq $Expected) {
+        if ($null -ne $Actual) { throw 'RESOURCE_CLEANUP_FAILED' }
+        return
+    }
+    if ($Actual -isnot [array] -or -not (Test-E2EOrdinalSetEqual $Expected $Actual)) {
+        throw 'RESOURCE_CLEANUP_FAILED'
+    }
+}
+
+function Get-E2EComposeStringSet($Definition, [string]$Name) {
+    $member = $Definition.PSObject.Properties[$Name]
+    if ($null -eq $member) { return $null }
+    if ($member.Value -isnot [array]) { throw 'RESOURCE_CLEANUP_FAILED' }
+    $values = @($member.Value)
+    if (-not (Test-E2EOrdinalSetEqual $values $values)) { throw 'RESOURCE_CLEANUP_FAILED' }
+    return ,$values
+}
+
+function Assert-E2EComposePortSecurityContract($Document, $Contract) {
+    $definition = $Contract.Definition
+    $config = Get-E2EExactMember $Document 'Config'
+    $host = Get-E2EExactMember $Document 'HostConfig'
+    $exposed = [ordered]@{}
+    foreach ($port in @($Contract.ImageExposedPorts)) {
+        if ($port -isnot [string] -or $port -cnotmatch '\A[0-9]+/(?:tcp|udp|sctp)\z' -or $exposed.Contains($port)) {
+            throw 'RESOURCE_CLEANUP_FAILED'
+        }
+        $exposed[$port] = [ordered]@{}
+    }
+    $exposeProperty = $definition.PSObject.Properties['expose']
+    $declaredExpose = $null
+    if ($null -ne $exposeProperty) { $declaredExpose = $exposeProperty.Value }
+    if ($null -ne $declaredExpose) {
+        if ($declaredExpose -isnot [array]) { throw 'RESOURCE_CLEANUP_FAILED' }
+        foreach ($item in $declaredExpose) {
+            if ($item -isnot [string] -or $item -cnotmatch '\A[0-9]+(?:/(?:tcp|udp|sctp))?\z') { throw 'RESOURCE_CLEANUP_FAILED' }
+            $key = if ($item.Contains('/')) { $item } else { $item + '/tcp' }
+            $exposed[$key] = [ordered]@{}
+        }
+    }
+    $bindings = [ordered]@{}
+    $portsProperty = $definition.PSObject.Properties['ports']
+    $declaredPorts = $null
+    if ($null -ne $portsProperty) { $declaredPorts = $portsProperty.Value }
+    if ($null -ne $declaredPorts) {
+        if ($declaredPorts -isnot [array]) { throw 'RESOURCE_CLEANUP_FAILED' }
+        foreach ($port in $declaredPorts) {
+            $target = Get-E2EExactMember $port 'target'
+            $protocol = Get-E2EExactMember $port 'protocol'
+            $hostIp = Get-E2EExactMember $port 'host_ip'
+            $published = Get-E2EExactMember $port 'published'
+            if ($target -isnot [int] -or $target -lt 1 -or $target -gt 65535 -or
+                $protocol -isnot [string] -or $protocol -cnotmatch '\A(?:tcp|udp|sctp)\z' -or
+                $hostIp -isnot [string] -or $published -isnot [string] -or
+                $published -cnotmatch '\A[0-9]+\z') { throw 'RESOURCE_CLEANUP_FAILED' }
+            $key = [string]$target + '/' + $protocol
+            if ($bindings.Contains($key)) { throw 'RESOURCE_CLEANUP_FAILED' }
+            $exposed[$key] = [ordered]@{}
+            $bindings[$key] = @([ordered]@{ HostIp=$hostIp; HostPort=$published })
+        }
+    }
+    $expectedExposed = if ($exposed.Count -eq 0) { $null } else { $exposed }
+    Assert-E2EExactContractValue $expectedExposed (Get-E2EExactMember $config 'ExposedPorts')
+    Assert-E2EExactContractValue $bindings (Get-E2EExactMember $host 'PortBindings')
+    foreach ($pair in @(
+        @('PublishAllPorts', $false), @('Privileged', $false),
+        @('ReadonlyRootfs', [bool](Get-JsonMember $definition 'read_only')),
+        @('PidMode', ''), @('IpcMode', 'private'), @('UTSMode', ''),
+        @('UsernsMode', ''), @('CgroupnsMode', 'private'),
+        @('Devices', @()), @('DeviceRequests', $null),
+        @('ExtraHosts', $null), @('GroupAdd', $null),
+        @('Init', $null), @('AutoRemove', $false)
+    )) {
+        Assert-E2EExactContractValue $pair[1] (Get-E2EExactMember $host $pair[0])
+    }
+    foreach ($pair in @(
+        @('CapAdd', 'cap_add'), @('CapDrop', 'cap_drop'),
+        @('SecurityOpt', 'security_opt')
+    )) {
+        $expected = Get-E2EComposeStringSet $definition $pair[1]
+        Assert-E2EExactContractSet $expected (Get-E2EExactMember $host $pair[0])
+    }
+    $tmpfs = [ordered]@{}
+    $tmpfsProperty = $definition.PSObject.Properties['tmpfs']
+    $declaredTmpfs = $null
+    if ($null -ne $tmpfsProperty) { $declaredTmpfs = $tmpfsProperty.Value }
+    if ($null -ne $declaredTmpfs) {
+        if ($declaredTmpfs -isnot [array]) { throw 'RESOURCE_CLEANUP_FAILED' }
+        foreach ($entry in $declaredTmpfs) {
+            if ($entry -isnot [string] -or $entry -cnotmatch '\A(/[^:]+)(?::(.*))?\z') { throw 'RESOURCE_CLEANUP_FAILED' }
+            if ($tmpfs.Contains($Matches[1])) { throw 'RESOURCE_CLEANUP_FAILED' }
+            $tmpfs[$Matches[1]] = [string]$Matches[2]
+        }
+    }
+    if ($tmpfs.Count -eq 0) {
+        Assert-E2EExactContractValue $null (Get-E2EExactMember $host 'Tmpfs')
+    }
+    else { Assert-E2EExactContractValue $tmpfs (Get-E2EExactMember $host 'Tmpfs') }
 }
 
 function Assert-E2EComposeContainerIdentity {
@@ -3452,11 +3680,13 @@ function Assert-E2EComposeContainerIdentity {
     else {
         $expectedNetworks = @((Get-JsonMemberNames (Get-JsonMember $definition 'networks')) | ForEach-Object { $Project + '_' + $_ })
         $actualNetworks = @(Get-JsonMemberNames $networks)
-        if (-not (Test-E2EOrdinalContains $expectedNetworks $networkMode)) { throw 'RESOURCE_CLEANUP_FAILED' }
+        if ($expectedNetworks.Count -eq 0 -or
+            -not (Test-E2EOrdinalEqual $expectedNetworks[0] $networkMode)) { throw 'RESOURCE_CLEANUP_FAILED' }
         if (-not (Test-E2EOrdinalSetEqual $expectedNetworks $actualNetworks)) {
             throw 'RESOURCE_CLEANUP_FAILED'
         }
     }
+    Assert-E2EComposePortSecurityContract -Document $Document -Contract $Contract
     $mounts = @(Get-JsonMember $Document 'Mounts')
     # Every mount scalar this identity is decided on, before any of them is
     # canonicalized, split or compared. The comparisons below are the ones this
@@ -3791,14 +4021,14 @@ function Get-E2EProjectResourceInventory {
         $config = Get-JsonMember $document 'Config'
         $labels = Get-JsonMember $config 'Labels'
         $service = Get-JsonMember $labels 'com.docker.compose.service'
-        $state = Get-JsonMember $document 'State'
+        $state = Get-E2EExactMember $document 'State'
         if (-not (Test-E2EOrdinalEqual (Get-JsonMember $document 'Id') $id) -or
             -not (Test-E2EOrdinalEqual (Get-JsonMember $labels 'com.docker.compose.project') $Project) -or
             -not (Test-E2EOrdinalContains $services $service) -or
-            (Get-JsonMember $state 'Running') -isnot [bool] -or
-            -not (Test-E2EOrdinalContains @('running','exited','created','paused','restarting','dead') (Get-JsonMember $state 'Status'))) {
+            $null -eq $state) {
             throw 'RESOURCE_CLEANUP_FAILED'
         }
+        Assert-E2EContainerState $state
         if (Test-E2EOrdinalContains $foundServices $service) { throw 'RESOURCE_CLEANUP_FAILED' }
         $foundServices.Add($service)
         Assert-E2EComposeContainerIdentity -Document $document -Id $id -Project $Project `
@@ -3872,9 +4102,25 @@ function Get-E2EProjectResourceInventory {
             }
             $matches = @($networks | Where-Object { Test-E2EOrdinalEqual $_.Name $name.Substring($Project.Length + 1) })
             $attachment = Get-JsonMember $entry.NetworkAttachments $name
+            # 실행 중인 container는 network 쪽 `.Containers`에도 exact full ID로 있어야
+            # 한다. 정지된 container는 Docker가 container 쪽 network identity를 그대로
+            # 둔 채 network 쪽에서만 빼므로 그 부재만 허용하고, container 쪽 network
+            # 집합과 NetworkID 검사는 상태와 관계없이 똑같이 적용한다.
             if ($matches.Count -ne 1 -or
                 -not (Test-E2EOrdinalEqual (Get-JsonMember $attachment 'NetworkID') $matches[0].Id) -or
-                -not (Test-E2EOrdinalContains $matches[0].Attached $entry.Id)) { throw 'RESOURCE_CLEANUP_FAILED' }
+                ($entry.Running -and -not (Test-E2EOrdinalContains $matches[0].Attached $entry.Id))) { throw 'RESOURCE_CLEANUP_FAILED' }
+        }
+    }
+    # 반대 방향. network 쪽에 실제로 남아 있는 entry는 실행 중이든 정지됐든 이 run이
+    # 소유한 container 하나를 가리켜야 하고, 그 container가 container 쪽에서도 바로 이
+    # network ID에 붙어 있어야 한다. 위의 부재 허용은 이 관계가 없는 entry를 받아들이는
+    # 근거가 되지 못한다.
+    foreach ($network in $networks) {
+        foreach ($attachedId in @($network.Attached)) {
+            $owners = @($containers | Where-Object { Test-E2EOrdinalEqual $_.Id $attachedId })
+            $attachment = if ($owners.Count -eq 1) { Get-JsonMember $owners[0].NetworkAttachments ($Project + '_' + $network.Name) } else { $null }
+            if ($owners.Count -ne 1 -or
+                -not (Test-E2EOrdinalEqual (Get-JsonMember $attachment 'NetworkID') $network.Id)) { throw 'RESOURCE_CLEANUP_FAILED' }
         }
     }
     $expectedVolumes = @($volumeNames | ForEach-Object { $Project + '_' + $_ })
@@ -3979,10 +4225,12 @@ function Invoke-E2EExactResourceCleanup {
             $code = $LASTEXITCODE
             if ($code -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
             $stopped = Get-ContainerDocument $entry.Id
+            $stoppedState = Get-E2EExactMember $stopped 'State'
             if (-not (Test-E2EOrdinalEqual (Get-JsonMember $stopped 'Id') $entry.Id) -or
-                (Get-JsonMember (Get-JsonMember $stopped 'State') 'Running') -ne $false) {
+                (Get-JsonMember $stoppedState 'Running') -ne $false) {
                 throw 'RESOURCE_CLEANUP_FAILED'
             }
+            Assert-E2EContainerState $stoppedState
             # Stopping is itself a window, so ownership of this exact identifier
             # is established once more before anything is removed.
             $current = Get-E2EProjectResourceInventory -Project $Before.Project -Receipt $Receipt -PreviousInventory $Before

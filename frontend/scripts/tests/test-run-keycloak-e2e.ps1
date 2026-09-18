@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Preflight', 'MajorFixPreflight', 'MajorFixFixture11', 'MajorFixTargeted', 'OwnerFixPreflight', 'OwnerFixTargeted', 'WaitBrowserPreflight', 'WaitBrowserTargeted', 'SessionStateTargeted', 'D209Preflight', 'D209A', 'D209B', 'D225Service', 'D248Targeted', 'CleanupBrowserTargeted', 'D273Targeted', 'D281Targeted', 'Formal')]
+    [ValidateSet('Preflight', 'MajorFixPreflight', 'MajorFixFixture11', 'MajorFixTargeted', 'OwnerFixPreflight', 'OwnerFixTargeted', 'WaitBrowserPreflight', 'WaitBrowserTargeted', 'SessionStateTargeted', 'D209Preflight', 'D209A', 'D209B', 'D225Service', 'D248Targeted', 'CleanupBrowserTargeted', 'D273Targeted', 'D281Targeted', 'D294Preflight', 'D294Targeted', 'D299Red', 'D299Targeted', 'D308Oracle', 'Formal')]
     [string]$Mode = 'Formal'
 )
 
@@ -1613,6 +1613,11 @@ function Invoke-D209BTests {
             }
             finally { & $script:E2EModule { param($value) Restore-E2EOwnerEnvironment -Previous $value } $previousOwner }
             [System.IO.File]::WriteAllText($shim, "@echo off`r`nset `"FINGUARDOPS_D209_ARGS=%*`"`r`npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"%~dp0docker-shim.ps1`"`r`n", [System.Text.Encoding]::ASCII)
+            # 아래 fake의 `network inspect`는 실제 Docker처럼 정지된 container를 network 쪽
+            # `.Containers`에서 뺀다. container 쪽 attachment와 NetworkID는
+            # New-FakeContainerDocument가 상태와 관계없이 그대로 유지한다. (D294)
+            # fake source는 BOM 없이 기록되어 자식 PowerShell 5.1이 ANSI로 읽으므로
+            # here-string 안에는 ASCII만 둔다.
             $fakeSource = @'
 $DockerArgs = $env:FINGUARDOPS_D209_ARGS -split ' '
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -1774,12 +1779,48 @@ function New-FakeContainerDocument {
     }
     $status = if ($Target -ceq $backendId) { [System.IO.File]::ReadAllText($backendState) } else { [System.IO.File]::ReadAllText($state) }
     $observedName = if ($isPrimary -and $env:FINGUARDOPS_D242_NAME -eq 'wrong') { '/' + $project + '-unexpected-1' } else { '/' + $project + '-' + $Service + '-1' }
+    $definition = $contract.services.PSObject.Properties[$Service].Value
+    $exposed = [ordered]@{}
+    foreach ($item in @($definition.expose)) {
+        if ($null -eq $item) { continue }
+        $portKey = if ([string]$item -match '/') { [string]$item } else { [string]$item + '/tcp' }
+        $exposed[$portKey] = [ordered]@{}
+    }
+    $bindings = [ordered]@{}
+    foreach ($port in @($definition.ports)) {
+        if ($null -eq $port) { continue }
+        $portKey = [string]$port.target + '/' + [string]$port.protocol
+        $exposed[$portKey] = [ordered]@{}
+        $bindings[$portKey] = @([ordered]@{ HostIp = [string]$port.host_ip; HostPort = [string]$port.published })
+    }
+    $tmpfs = $null
+    if ($null -ne $definition.tmpfs) {
+        $tmpfs = [ordered]@{}
+        foreach ($entry in @($definition.tmpfs)) {
+            $parts = ([string]$entry) -split ':', 2
+            $tmpfs[$parts[0]] = if ($parts.Count -eq 2) { $parts[1] } else { '' }
+        }
+    }
+    $capDrop = $null
+    if ($null -ne $definition.cap_drop) { $capDrop = @($definition.cap_drop) }
+    $securityOpt = $null
+    if ($null -ne $definition.security_opt) { $securityOpt = @($definition.security_opt) }
+    $exposedValue = $null
+    if ($exposed.Count -ne 0) { $exposedValue = $exposed }
+    $hostConfig = [ordered]@{
+        NetworkMode = $networkMode; PortBindings = $bindings; PublishAllPorts = $false
+        Privileged = $false; ReadonlyRootfs = ($definition.read_only -eq $true)
+        CapAdd = $null; CapDrop = $capDrop; SecurityOpt = $securityOpt
+        Devices = @(); DeviceRequests = $null; PidMode = ''; IpcMode = 'private'; UTSMode = ''
+        UsernsMode = ''; CgroupnsMode = 'private'; ExtraHosts = $null; Tmpfs = $tmpfs
+        GroupAdd = $null; Init = $null; AutoRemove = $false
+    }
     return [ordered]@{
         Id = $Target
         Name = $observedName
-        Config = @{ Image = $reference; Labels = $labels }
-        HostConfig = @{ NetworkMode = $networkMode }
-        State = @{ Status = $status; Running = ($status -eq 'running') }
+        Config = @{ Image = $reference; Labels = $labels; ExposedPorts = $exposedValue }
+        HostConfig = $hostConfig
+        State = @{ Status = $status; Running = ($status -eq 'running'); Paused = $false; Restarting = $false; Dead = $false }
         Image = $imageId
         Mounts = $mounts
         NetworkSettings = @{ Networks = $attachments }
@@ -1815,7 +1856,7 @@ if ($DockerArgs[0] -eq 'image' -and $DockerArgs[1] -eq 'inspect') {
             'com.finguardops.e2e.image-role' = 'ai-service'
         }
     }
-    Write-Output (@{ Id = $imageId; Config = @{ Labels = $labels } } | ConvertTo-Json -Depth 5 -Compress); exit 0
+    Write-Output (@{ Id = $imageId; Config = @{ Labels = $labels; ExposedPorts = $null } } | ConvertTo-Json -Depth 5 -Compress); exit 0
 }
 if ($DockerArgs[0] -eq 'ps') {
     if ($line -match 'name=') {
@@ -1862,6 +1903,8 @@ if ($DockerArgs[0] -eq 'network' -and $DockerArgs[1] -eq 'inspect') {
     foreach ($entry in $present) {
         if ($entry.Service -in $sharedServices) { continue }
         if ($entry.Service -ceq 'unknown-sidecar') { continue }
+        $entryStatus = if ($entry.Id -ceq $backendId) { [System.IO.File]::ReadAllText($backendState) } else { [System.IO.File]::ReadAllText($state) }
+        if ($entryStatus -ne 'running') { continue }
         $attached[$entry.Id] = @{}
     }
     if ($env:FINGUARDOPS_D209_UNRELATED_NETWORK -eq '1') { $attached[$foreignId] = @{} }
@@ -3986,6 +4029,7 @@ function New-D273PrometheusDocument {
         Image  = $ImageId
         Config = [ordered]@{
             Image  = $Definition.image
+            ExposedPorts = [ordered]@{ '9090/tcp' = [ordered]@{} }
             Labels = [ordered]@{
                 'com.docker.compose.project' = $Project
                 'com.docker.compose.service' = 'prometheus'
@@ -3996,7 +4040,14 @@ function New-D273PrometheusDocument {
             }
         }
         State           = [ordered]@{ Status = 'exited'; Running = $false }
-        HostConfig      = [ordered]@{ NetworkMode = ($Project + '_' + $networkNames[0]) }
+        HostConfig      = [ordered]@{
+            NetworkMode = ($Project + '_' + $networkNames[0])
+            PortBindings = [ordered]@{ '9090/tcp' = @([ordered]@{ HostIp = '127.0.0.1'; HostPort = '9090' }) }
+            PublishAllPorts = $false; Privileged = $false; ReadonlyRootfs = $false
+            CapAdd = $null; CapDrop = $null; SecurityOpt = @('no-new-privileges:true')
+            Devices = @(); DeviceRequests = $null; PidMode = ''; IpcMode = 'private'; UTSMode = ''
+            UsernsMode = ''; CgroupnsMode = 'private'; ExtraHosts = $null; Tmpfs = $null
+            GroupAdd = $null; Init = $null; AutoRemove = $false }
         NetworkSettings = [ordered]@{ Networks = $attachments }
         Mounts          = $mounts.ToArray()
     }
@@ -4126,7 +4177,7 @@ function Invoke-D273ComposeIdentityTests {
     $definition = $Configuration.services.PSObject.Properties['prometheus'].Value
     $id = '1' * 64
     $imageId = 'sha256:' + ('2' * 64)
-    $contract = [pscustomobject]@{ Reference = $definition.image; Id = $imageId; Definition = $definition }
+    $contract = [pscustomobject]@{ Reference = $definition.image; Id = $imageId; Definition = $definition; ImageExposedPorts = @() }
 
     foreach ($case in @(Get-D273ComposeIdentityCases -Root $root -Infra $infra)) {
         $spelling = if ($case.PSObject.Properties['Spelling']) { $case.Spelling } else { 'windows' }
@@ -4473,7 +4524,7 @@ function Invoke-D277ComposeLabelTests {
     $definition = $Configuration.services.PSObject.Properties['prometheus'].Value
     $id = '1' * 64
     $imageId = 'sha256:' + ('2' * 64)
-    $contract = [pscustomobject]@{ Reference = $definition.image; Id = $imageId; Definition = $definition }
+    $contract = [pscustomobject]@{ Reference = $definition.image; Id = $imageId; Definition = $definition; ImageExposedPorts = @() }
 
     # The clean document this whole family differs from by one character.
     $baseline = New-D273PrometheusDocument -Id $id -Project $Project -Definition $definition `
@@ -4934,7 +4985,7 @@ function Invoke-D281ComposeIdentityTests {
     $definition = $Configuration.services.PSObject.Properties['prometheus'].Value
     $id = '1' * 64
     $imageId = 'sha256:' + ('2' * 64)
-    $contract = [pscustomobject]@{ Reference = $definition.image; Id = $imageId; Definition = $definition }
+    $contract = [pscustomobject]@{ Reference = $definition.image; Id = $imageId; Definition = $definition; ImageExposedPorts = @() }
 
     $baseline = New-D273PrometheusDocument -Id $id -Project $Project -Definition $definition `
         -ImageId $imageId -WorkingDirectory $infra -ConfigFiles $configFiles
@@ -5399,6 +5450,1424 @@ function Invoke-D281TargetedTests {
     Write-Output 'D281 targeted passed'
 }
 
+# D294-D298: 정지된 container의 network 역방향 membership.
+#
+# 실제 Docker는 container를 stop한 뒤에도 container 쪽 `.NetworkSettings.Networks`와
+# 그 NetworkID를 그대로 두지만, network 쪽 `.Containers`에서는 그 container를 뺀다.
+# 아래 fake는 그 native 상태 전이만 흉내 내는 in-process `docker` leaf이고, 소유권
+# 판정은 전부 production 함수가 내린다. 실행 중에는 PATH가 sentinel 디렉터리 하나로
+# 바뀌므로 실제 Docker, Git, Python, Node, PowerShell 자식 프로세스는 호출되는 순간
+# sentinel 파일로 드러난다.
+function New-D294World {
+    param([Parameter(Mandatory = $true)]$Receipt)
+
+    $project = & $script:E2EModule { param($value) Get-E2EServiceProjectName -Receipt $value } $Receipt
+    $images = Get-E2EImageSet -Receipt $Receipt
+    $files = [string[]]@(& $script:E2EModule { Get-E2EComposeProjectFiles })
+    $workingDirectory = [string](& $script:E2EModule { Get-E2EComposeWorkingDirectory })
+    $services = [ordered]@{}
+    foreach ($service in @('postgresql', 'ai-service', 'external-risk-mock', 'backend', 'prometheus',
+        'grafana', 'alertmanager', 'alertmanager-webhook', 'keycloak', 'keycloak-bootstrap', 'keycloak-verify')) {
+        $services[$service] = [ordered]@{ image = ('fixture/' + $service + '@sha256:' + ('0' * 64)) }
+    }
+    $services['backend'] = [ordered]@{ image = $images.Backend
+        expose = @('8081'); ports = @([ordered]@{ target = 8443; published = '8443'; host_ip = '127.0.0.1'; protocol = 'tcp' })
+        read_only = $true; tmpfs = @('/tmp'); security_opt = @('no-new-privileges:true')
+        networks = [ordered]@{ application = [ordered]@{}; observability = [ordered]@{} } }
+    $services['ai-service'] = [ordered]@{ image = $images.AiService; expose = @('8000')
+        read_only = $true; tmpfs = @('/tmp'); security_opt = @('no-new-privileges:true')
+        networks = [ordered]@{ application = [ordered]@{} } }
+    $services['external-risk-mock'] = [ordered]@{ image = $images.AiService; network_mode = 'service:backend' }
+    $services['alertmanager-webhook'] = [ordered]@{ image = $images.AiService }
+    $contract = [ordered]@{ name = $project; services = $services }
+
+    $imageJson = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
+    $imageJson[$images.Backend] = ConvertTo-Json -Compress -Depth 8 -InputObject ([ordered]@{
+        Id = 'sha256:' + ('b' * 64); Config = [ordered]@{ Labels = (Get-E2EOwnershipLabels -Receipt $Receipt -Role 'backend')
+            ExposedPorts = [ordered]@{ '8080/tcp' = [ordered]@{}; '8081/tcp' = [ordered]@{} } } })
+    $imageJson[$images.AiService] = ConvertTo-Json -Compress -Depth 8 -InputObject ([ordered]@{
+        Id = 'sha256:' + ('c' * 64); Config = [ordered]@{ Labels = (Get-E2EOwnershipLabels -Receipt $Receipt -Role 'ai-service')
+            ExposedPorts = [ordered]@{ '8000/tcp' = [ordered]@{} } } })
+
+    $applicationId = 'e1' * 32
+    $observabilityId = 'd2' * 32
+    $containers = [System.Collections.Generic.List[object]]::new()
+    foreach ($spec in @(
+        [pscustomobject]@{ Id = ('ab' * 32); Service = 'backend'; Role = 'backend'; Reference = $images.Backend
+            ImageId = ('sha256:' + ('b' * 64)); Networks = @('application', 'observability') },
+        [pscustomobject]@{ Id = ('cd' * 32); Service = 'ai-service'; Role = 'ai-service'; Reference = $images.AiService
+            ImageId = ('sha256:' + ('c' * 64)); Networks = @('application') })) {
+        $labels = [ordered]@{
+            'com.docker.compose.project' = $project
+            'com.docker.compose.service' = $spec.Service
+            'com.docker.compose.container-number' = '1'
+            'com.docker.compose.oneoff' = 'False'
+            'com.docker.compose.project.config_files' = ($files -join ',')
+            'com.docker.compose.project.working_dir' = $workingDirectory
+        }
+        $ownership = Get-E2EOwnershipLabels -Receipt $Receipt -Role $spec.Role
+        foreach ($key in $ownership.Keys) { $labels[$key] = $ownership[$key] }
+        $attachments = [ordered]@{}
+        foreach ($name in $spec.Networks) {
+            $attachments[($project + '_' + $name)] = $(if ($name -ceq 'application') { $applicationId } else { $observabilityId })
+        }
+        $containers.Add([pscustomobject]@{ Id = $spec.Id; Service = $spec.Service; Name = ($project + '-' + $spec.Service + '-1')
+            Reference = $spec.Reference; ImageId = $spec.ImageId; Labels = $labels
+            NetworkMode = ($project + '_application'); Networks = $attachments
+            Running = $true; Status = 'running'; Present = $true })
+    }
+    $networks = [System.Collections.Generic.List[object]]::new()
+    foreach ($spec in @(
+        [pscustomobject]@{ Name = 'application'; Id = $applicationId; Members = @($containers[0].Id, $containers[1].Id) },
+        [pscustomobject]@{ Name = 'observability'; Id = $observabilityId; Members = @($containers[0].Id) })) {
+        $members = [System.Collections.Generic.List[string]]::new()
+        foreach ($member in $spec.Members) { $members.Add($member) }
+        $networks.Add([pscustomobject]@{ Name = $spec.Name; Id = $spec.Id; Present = $true; Members = $members
+            AnswerTwice = $false; RawContainers = $null })
+    }
+    # 어느 container도 mount하지 않은 named volume 하나. volume 단계가 정상 순서
+    # `container -> network -> volume` 안에서 실제로 실행되게 한다.
+    $volumeName = $project + '_keycloak-data'
+    $volumes = [System.Collections.Generic.List[object]]::new()
+    $volumes.Add([pscustomobject]@{ Name = $volumeName; Present = $true
+        Json = (ConvertTo-Json -Compress -Depth 5 -InputObject ([ordered]@{
+            Name = $volumeName; CreatedAt = '2026-01-01T01:01:01Z'; Driver = 'local'; Scope = 'local'
+            Mountpoint = ('/var/lib/docker/volumes/' + $volumeName + '/_data')
+            Labels = [ordered]@{ 'com.docker.compose.project' = $project; 'com.docker.compose.volume' = 'keycloak-data' }
+            Options = [ordered]@{} })) })
+    return [pscustomobject]@{
+        Project = $project
+        Receipt = $Receipt
+        ContractJson = (ConvertTo-Json -Compress -Depth 12 -InputObject $contract)
+        ImageJson = $imageJson
+        Containers = $containers
+        Networks = $networks
+        Volumes = $volumes
+        Events = [System.Collections.Generic.List[string]]::new()
+        Unknown = [System.Collections.Generic.List[string]]::new()
+        DuplicateNetworkListing = $false
+        AfterStop = $null
+        InspectMutation = $null
+        InspectDocumentCount = 1
+        InspectRawDuplicate = $false
+        InspectRawCaseVariant = $false
+    }
+}
+
+# 이미 정지된 container. 실제 Docker와 같이 network 쪽 `.Containers`에서만 빠진다.
+function Set-D294Stopped($World, $Container) {
+    $Container.Running = $false
+    $Container.Status = 'exited'
+    foreach ($network in $World.Networks) { [void]$network.Members.Remove($Container.Id) }
+}
+
+# Native `docker`의 상태와 출력만 모사한다. 판단하지 않고, 모르는 질문은 81로 끝낸다.
+function New-D294DockerLeaf {
+    param([Parameter(Mandatory = $true)]$World)
+
+    $D294World = $World
+    return {
+        $world = $D294World
+        $arguments = [string[]]@($args | ForEach-Object { [string]$_ })
+        $line = $arguments -join ' '
+        $world.Events.Add($line)
+        $global:LASTEXITCODE = 0
+        $filters = [System.Collections.Generic.List[string]]::new()
+        for ($index = 0; $index -lt $arguments.Count - 1; $index++) {
+            if ($arguments[$index] -ceq '--filter') { $filters.Add($arguments[$index + 1]) }
+        }
+        $projectFilter = 'label=com.docker.compose.project=' + $world.Project
+        $target = $arguments[$arguments.Count - 1]
+        $verb = if ($arguments.Count -ge 2) { $arguments[0] + ' ' + $arguments[1] } else { $arguments[0] }
+        $present = @($world.Containers | Where-Object { $_.Present })
+        $liveNetworks = @($world.Networks | Where-Object { $_.Present })
+        $liveVolumes = @($world.Volumes | Where-Object { $_.Present })
+        $quote = { param($value) ConvertTo-Json -Compress -InputObject ([string]$value) }
+
+        if ($arguments[0] -ceq 'compose' -and $line.EndsWith(' config --format json', [System.StringComparison]::Ordinal)) {
+            return $world.ContractJson
+        }
+        if ($verb -ceq 'image inspect') {
+            if ($world.ImageJson.ContainsKey($target)) { return $world.ImageJson[$target] }
+            $global:LASTEXITCODE = 1
+            return
+        }
+        if ($verb -ceq 'ps -aq') {
+            if ($filters.Count -eq 0 -or ($filters.Count -eq 1 -and $filters[0] -ceq $projectFilter)) {
+                return @($present | ForEach-Object { $_.Id })
+            }
+            $wanted = @($filters | Where-Object { $_ -cmatch '\Aname=\^/.+\$\z' } | ForEach-Object { $_.Substring(7, $_.Length - 8) })
+            if ($wanted.Count -eq $filters.Count) {
+                return @($present | Where-Object { $wanted -ccontains $_.Name } | ForEach-Object { $_.Id })
+            }
+        }
+        if ($verb -ceq 'container inspect') {
+            $match = @($present | Where-Object { $_.Id -ceq $target })
+            if ($match.Count -ne 1) { $global:LASTEXITCODE = 1; return }
+            $container = $match[0]
+            $attachments = [ordered]@{}
+            foreach ($name in @($container.Networks.Keys)) {
+                $attachments[$name] = [ordered]@{ NetworkID = $container.Networks[$name]
+                    EndpointID = $(if ($container.Running) { 'endpoint' } else { '' }) }
+            }
+            $inspect = [ordered]@{
+                Id = $container.Id; Name = ('/' + $container.Name); Image = $container.ImageId
+                Config = [ordered]@{ Image = $container.Reference; Labels = $container.Labels
+                    ExposedPorts = $(if ($container.Service -ceq 'backend') {
+                        [ordered]@{ '8080/tcp' = [ordered]@{}; '8081/tcp' = [ordered]@{}; '8443/tcp' = [ordered]@{} }
+                    } else { [ordered]@{ '8000/tcp' = [ordered]@{} } }) }
+                HostConfig = [ordered]@{
+                    NetworkMode = $container.NetworkMode
+                    PortBindings = $(if ($container.Service -ceq 'backend') {
+                        [ordered]@{ '8443/tcp' = @([ordered]@{ HostIp = '127.0.0.1'; HostPort = '8443' }) }
+                    } else { [ordered]@{} })
+                    PublishAllPorts = $false; Privileged = $false; ReadonlyRootfs = $true
+                    CapAdd = $null; CapDrop = $null; SecurityOpt = @('no-new-privileges:true')
+                    Devices = @(); DeviceRequests = $null; PidMode = ''; IpcMode = 'private'; UTSMode = ''
+                    UsernsMode = ''; CgroupnsMode = 'private'; ExtraHosts = $null
+                    Tmpfs = [ordered]@{ '/tmp' = '' }; GroupAdd = $null; Init = $null; AutoRemove = $false }
+                State = [ordered]@{ Status = $container.Status; Running = $container.Running
+                    Paused = $false; Restarting = $false; Dead = $false }
+                Mounts = @()
+                NetworkSettings = [ordered]@{ Networks = $attachments } }
+            if ($null -ne $world.InspectMutation -and $container.Id -ceq $world.Containers[0].Id) {
+                & $world.InspectMutation $inspect
+            }
+            if ($container.Id -ceq $world.Containers[0].Id -and $world.InspectDocumentCount -ne 1) {
+                if ($world.InspectDocumentCount -eq 0) { return '[]' }
+                return ('[' + (ConvertTo-Json -Compress -Depth 16 -InputObject $inspect) + ',' +
+                    (ConvertTo-Json -Compress -Depth 16 -InputObject $inspect) + ']')
+            }
+            $json = ConvertTo-Json -Compress -Depth 16 -InputObject $inspect
+            if ($world.InspectRawDuplicate -and $container.Id -ceq $world.Containers[0].Id) {
+                $json = $json.Replace('"8443/tcp":', '"8443/tcp":{},"8443/tcp":')
+            }
+            if ($world.InspectRawCaseVariant -and $container.Id -ceq $world.Containers[0].Id) {
+                $json = $json.Replace('"8443/tcp":', '"8443/TCP":{},"8443/tcp":')
+            }
+            return $json
+        }
+        if ($verb -ceq 'network ls') {
+            $answer = [System.Collections.Generic.List[string]]::new()
+            if ($filters.Count -eq 1 -and $filters[0] -ceq $projectFilter) {
+                foreach ($network in $liveNetworks) { $answer.Add($network.Id) }
+                return $answer.ToArray()
+            }
+            $wanted = @($filters | Where-Object { $_ -cmatch '\Aname=\^.+\$\z' } | ForEach-Object { $_.Substring(6, $_.Length - 7) })
+            if ($wanted.Count -ne 0 -and $wanted.Count -eq $filters.Count) {
+                foreach ($network in $liveNetworks) {
+                    if ($wanted -ccontains ($world.Project + '_' + $network.Name)) {
+                        $answer.Add($network.Id)
+                        if ($world.DuplicateNetworkListing) { $answer.Add($network.Id) }
+                    }
+                }
+                return $answer.ToArray()
+            }
+        }
+        if ($verb -ceq 'network inspect') {
+            $match = @($liveNetworks | Where-Object { $_.Id -ceq $target })
+            if ($match.Count -ne 1) { $global:LASTEXITCODE = 1; return }
+            $network = $match[0]
+            $members = if ($null -ne $network.RawContainers) { [string]$network.RawContainers }
+                else { '{' + ((@($network.Members) | ForEach-Object { (& $quote $_) + ':{"EndpointID":"endpoint"}' }) -join ',') + '}' }
+            $labels = ConvertTo-Json -Compress -InputObject ([ordered]@{
+                'com.docker.compose.network' = $network.Name; 'com.docker.compose.project' = $world.Project })
+            $document = '{"Id":' + (& $quote $network.Id) + ',"Name":' + (& $quote ($world.Project + '_' + $network.Name)) +
+                ',"Labels":' + $labels + ',"Containers":' + $members + '}'
+            if ($network.AnswerTwice) { return ('[' + $document + ',' + $document + ']') }
+            return $document
+        }
+        if ($verb -ceq 'volume ls') {
+            if ($filters.Count -eq 1 -and $filters[0] -ceq $projectFilter) { return @($liveVolumes | ForEach-Object { $_.Name }) }
+            if ($filters.Count -eq 1 -and $filters[0] -cmatch '\Aname=\^.+\$\z') {
+                $wanted = $filters[0].Substring(6, $filters[0].Length - 7)
+                return @($liveVolumes | Where-Object { $_.Name -ceq $wanted } | ForEach-Object { $_.Name })
+            }
+        }
+        if ($verb -ceq 'volume inspect') {
+            $match = @($liveVolumes | Where-Object { $_.Name -ceq $target })
+            if ($match.Count -ne 1) { $global:LASTEXITCODE = 1; return }
+            return $match[0].Json
+        }
+        if ($arguments.Count -eq 2 -and $arguments[0] -ceq 'stop') {
+            $match = @($present | Where-Object { $_.Id -ceq $arguments[1] })
+            if ($match.Count -ne 1) { $global:LASTEXITCODE = 1; return }
+            # 실제 Docker의 stop 전이: container 쪽 network identity는 그대로 두고
+            # network 쪽 `.Containers`에서만 그 exact full ID를 뺀다.
+            $match[0].Running = $false
+            $match[0].Status = 'exited'
+            foreach ($network in $world.Networks) { [void]$network.Members.Remove($match[0].Id) }
+            if ($null -ne $world.AfterStop) { & $world.AfterStop $world $match[0] }
+            return $match[0].Id
+        }
+        if ($arguments.Count -eq 2 -and $arguments[0] -ceq 'rm') {
+            $match = @($present | Where-Object { $_.Id -ceq $arguments[1] })
+            # 실행 중인 container는 `--force` 없이 제거되지 않는다.
+            if ($match.Count -ne 1 -or $match[0].Running) { $global:LASTEXITCODE = 1; return }
+            $match[0].Present = $false
+            foreach ($network in $world.Networks) { [void]$network.Members.Remove($match[0].Id) }
+            return $match[0].Id
+        }
+        if ($arguments.Count -eq 3 -and $verb -ceq 'network rm') {
+            $match = @($liveNetworks | Where-Object { $_.Id -ceq $arguments[2] })
+            # endpoint가 남은 network는 제거되지 않는다.
+            if ($match.Count -ne 1 -or $match[0].Members.Count -ne 0) { $global:LASTEXITCODE = 1; return }
+            $match[0].Present = $false
+            return $match[0].Id
+        }
+        if ($arguments.Count -eq 3 -and $verb -ceq 'volume rm') {
+            $match = @($liveVolumes | Where-Object { $_.Name -ceq $arguments[2] })
+            if ($match.Count -ne 1) { $global:LASTEXITCODE = 1; return }
+            $match[0].Present = $false
+            return $match[0].Name
+        }
+        $world.Unknown.Add($line)
+        $global:LASTEXITCODE = 81
+    }.GetNewClosure()
+}
+
+function Invoke-D294WithFake {
+    param([Parameter(Mandatory = $true)]$World, [Parameter(Mandatory = $true)][scriptblock]$Body)
+
+    # `Remove-Item`과 `Test-Path`는 `function:global:` 한정자를 따르지 않으므로 함수
+    # 존재는 command 조회로 확인하고, 제거는 한정자 없는 경로로 한다.
+    if (@(Get-Command docker -CommandType Function -ErrorAction SilentlyContinue).Count -ne 0) { throw 'D294_HARNESS_DOCKER_FUNCTION_PRESENT' }
+    $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('finguardops-d294-' + [guid]::NewGuid().ToString('N'))
+    $sentinel = Join-Path $fixtureRoot 'sentinel'
+    $hits = Join-Path $sentinel 'sentinel-hits.txt'
+    $oldPath = $env:PATH
+    $hit = $false
+    try {
+        [System.IO.Directory]::CreateDirectory($sentinel) | Out-Null
+        foreach ($name in @('docker', 'git', 'python', 'python3', 'py', 'node', 'npm', 'npx', 'powershell', 'pwsh')) {
+            [System.IO.File]::WriteAllText((Join-Path $sentinel ($name + '.cmd')),
+                "@echo off`r`necho $name>>`"%~dp0sentinel-hits.txt`"`r`nexit /b 99`r`n", [System.Text.Encoding]::ASCII)
+        }
+        $env:PATH = $sentinel
+        Set-Item -LiteralPath 'function:global:docker' -Value (New-D294DockerLeaf -World $World)
+        $resolved = & $script:E2EModule { Get-Command docker -ErrorAction Stop }
+        Assert-Equal 'Function' ([string]$resolved.CommandType) 'D294 fake Docker leaf was not selected inside the module.'
+        $application = @(Get-Command docker -CommandType Application -ErrorAction Stop)
+        Assert-Equal 1 $application.Count 'D294 PATH exposes more than the Docker sentinel.'
+        Assert-True ($application[0].Source.StartsWith($sentinel + [System.IO.Path]::DirectorySeparatorChar,
+            [System.StringComparison]::OrdinalIgnoreCase)) 'D294 PATH exposes a real Docker executable.'
+        & $Body $fixtureRoot
+    }
+    finally {
+        while (@(Get-Command docker -CommandType Function -ErrorAction SilentlyContinue).Count -ne 0) { Remove-Item -Path 'Function:\docker' }
+        $env:PATH = $oldPath
+        $hit = [System.IO.File]::Exists($hits)
+        if ([System.IO.Directory]::Exists($fixtureRoot)) { [System.IO.Directory]::Delete($fixtureRoot, $true) }
+    }
+    Assert-True (-not $hit) 'D294 reached a real native command through the PATH sentinel.'
+    Assert-True (-not [System.IO.Directory]::Exists($fixtureRoot)) 'D294 fixture root remains.'
+    Assert-Equal 0 $World.Unknown.Count ('D294 fake Docker was asked something it does not model: ' + ($World.Unknown -join ' | '))
+}
+
+# 읽기 전용 질문이 아닌 모든 Docker 호출과 leaf marker(`@...`)를 순서대로.
+function Get-D294Steps([AllowEmptyCollection()][string[]]$Events) {
+    return [string[]]@($Events | Where-Object {
+        $_ -cnotmatch '\Aps -aq( |\z)' -and
+        $_ -cnotmatch '\A(container|image|network|volume) (inspect|ls) ' -and
+        $_ -cnotmatch '\Acompose .* config --format json\z'
+    })
+}
+
+function Get-D294Mutations([AllowEmptyCollection()][string[]]$Events) {
+    return [string[]]@(Get-D294Steps $Events | Where-Object { $_ -cnotmatch '\A@' })
+}
+
+function Assert-D294SafeMutations($World, [AllowEmptyCollection()][string[]]$Events, [string]$Name) {
+    $containerIds = @($World.Containers | ForEach-Object { $_.Id })
+    $networkIds = @($World.Networks | ForEach-Object { $_.Id })
+    $volumeNames = @($World.Volumes | ForEach-Object { $_.Name })
+    foreach ($entry in $Events) {
+        if ($entry -cmatch '\A@' -or $entry -cmatch '\Acompose .* config --format json\z') { continue }
+        Assert-True ($entry -cnotmatch '(\A| )(-f|--force|--volumes|-v|--remove-orphans|down|prune)( |\z)') `
+            "$Name issued a forced or project-wide Docker command: $entry"
+    }
+    foreach ($mutation in (Get-D294Mutations $Events)) {
+        $owned = $false
+        if ($mutation -cmatch '\A(stop|rm) (?<id>[0-9a-f]{64})\z') { $owned = $containerIds -ccontains $Matches['id'] }
+        elseif ($mutation -cmatch '\Anetwork rm (?<id>[0-9a-f]{64})\z') { $owned = $networkIds -ccontains $Matches['id'] }
+        elseif ($mutation -cmatch '\Avolume rm (?<name>[a-z0-9_-]+)\z') { $owned = $volumeNames -ccontains $Matches['name'] }
+        Assert-True $owned "$Name mutated something by an operand this fixture never owned: $mutation"
+    }
+}
+
+function New-D294Leaves([AllowEmptyCollection()][System.Collections.Generic.List[string]]$Events, $Trace = $null) {
+    $resource = & $script:E2EModule {
+        return { param($value) Invoke-E2EProjectCleanup -Project (Get-E2EServiceProjectName -Receipt $value) -Receipt $value }
+    }
+    return @{
+        ResourceCleanup = $resource
+        ImageCleanup = { param($value) $Events.Add('@image') }.GetNewClosure()
+        FinalAudit = { param($value) $Events.Add('@audit') }.GetNewClosure()
+        DeleteFile = { param([string]$value) $Events.Add('@receipt'); if ($null -ne $Trace) { $Trace.Events.Add('remover-called') }; [System.IO.File]::Delete($value) }.GetNewClosure()
+    }
+}
+
+# repository 밖 fixture receipt 하나를 두고 production 전체 cleanup을 실행한다.
+function New-D294ReceiptPath([string]$FixtureRoot) {
+    $state = Join-Path $FixtureRoot 'infra\keycloak\.local\state'
+    [System.IO.Directory]::CreateDirectory($state) | Out-Null
+    $path = Join-Path $state 'e2e-image-cleanup-required.json'
+    $receipt = $script:D294ActiveReceipt
+    & $script:E2EModule { param($p, $r, $root) New-E2EReceiptFile -Path $p -Receipt $r -RepositoryRoot $root } `
+        $path $receipt $FixtureRoot
+    return $path
+}
+
+function Read-D294Receipt([string]$Path, [string]$FixtureRoot) {
+    $raw = [System.IO.File]::ReadAllBytes($Path)
+    $expected = [byte[]](& $script:E2EModule { param($r) ConvertTo-E2EReceiptBytes -Receipt $r } $script:D294ActiveReceipt)
+    Assert-True (& $script:E2EModule { param($left, $right) Test-ByteEquality $left $right } $raw $expected) `
+        'D294 receipt bytes differ from the production writer.'
+    $parsed = & $script:E2EModule { param($p, $root) Read-E2EReceiptFile -Path $p -RepositoryRoot $root } $Path $FixtureRoot
+    & $script:E2EModule { param($r) Assert-E2EReceiptObject $r } $parsed
+    Assert-Equal @('schemaVersion','runId','repositoryId','commitSha','treeSha') @($parsed.Keys) `
+        'D294 parsed receipt key order differs.'
+    Assert-Equal 1 $parsed.schemaVersion 'D294 parsed receipt schema differs.'
+    foreach ($field in @('runId','repositoryId','commitSha','treeSha')) {
+        Assert-Equal $script:D294ActiveReceipt[$field] $parsed[$field] "D294 parsed receipt $field differs."
+    }
+    return $parsed
+}
+
+function Invoke-D294FullCleanup($World, [string]$FixtureRoot, $Trace = $null) {
+    $script:D294ActiveReceipt = $World.Receipt
+    $receiptPath = New-D294ReceiptPath $FixtureRoot
+    if ($null -ne $Trace) { $Trace.WriterCalls++; $Trace.Events.Add('writer-created') }
+    $raw = [System.IO.File]::ReadAllBytes($receiptPath)
+    $utf8 = [System.Text.UTF8Encoding]::new($false, $true)
+    $literal = '{"schemaVersion":1,"runId":"' + $World.Receipt.runId + '","repositoryId":"' +
+        $World.Receipt.repositoryId + '","commitSha":"' + $World.Receipt.commitSha +
+        '","treeSha":"' + $World.Receipt.treeSha + '"}' + "`n"
+    Assert-Equal $literal ($utf8.GetString($raw)) 'D308 canonical receipt bytes differ.'
+    if ($null -ne $Trace) { $Trace.Events.Add('canonical-verified') }
+    $parsed = Read-D294Receipt $receiptPath $FixtureRoot
+    if ($null -ne $Trace) { $Trace.ParserCalls++; $Trace.ParserObject = $parsed; $Trace.Events.Add('parser-read') }
+    $World.Events.Clear()
+    $leaves = New-D294Leaves $World.Events $Trace
+    if ($null -ne $Trace) {
+        $Trace.ForwardedObject = $parsed
+        $Trace.Events.Add('parser-object-forwarded')
+        $Trace.Events.Add('cleanup-entered')
+    }
+    $failure = Get-CapturedException {
+        Invoke-E2EFullCleanup -Receipt $parsed -ReceiptPath $receiptPath -RepositoryRootPath $FixtureRoot `
+            -LeafBoundaries $leaves -RequireLeafBoundaries
+    }
+    $result = [pscustomobject]@{ Failure = $failure; ReceiptKept = [System.IO.File]::Exists($receiptPath)
+        Events = [string[]]$World.Events.ToArray() }
+    if ($null -ne $Trace -and $result.ReceiptKept) { $Trace.Events.Add('receipt-preserved') }
+    if ($result.ReceiptKept) { [System.IO.File]::Delete($receiptPath) }
+    return $result
+}
+
+function Get-D294InventoryFailure($World) {
+    $World.Events.Clear()
+    $failure = Get-CapturedException {
+        & $script:E2EModule { param($project, $value) Get-E2EProjectResourceInventory -Project $project -Receipt $value } `
+            $World.Project $World.Receipt | Out-Null
+    }
+    Assert-Equal @() @(Get-D294Mutations $World.Events.ToArray()) 'A read-only inventory mutated something.'
+    return $failure
+}
+
+# 정상 cleanup의 전체 순서. 이미 정지된 container에는 `stop`이 없다.
+function Get-D294FullSequence($World, [string[]]$AlreadyStopped = @()) {
+    $sequence = [System.Collections.Generic.List[string]]::new()
+    foreach ($container in $World.Containers) {
+        if ($AlreadyStopped -cnotcontains $container.Id) { $sequence.Add('stop ' + $container.Id) }
+        $sequence.Add('rm ' + $container.Id)
+    }
+    foreach ($network in $World.Networks) { $sequence.Add('network rm ' + $network.Id) }
+    foreach ($volume in $World.Volumes) { $sequence.Add('volume rm ' + $volume.Name) }
+    foreach ($marker in @('@image', '@audit', '@receipt')) { $sequence.Add($marker) }
+    return [string[]]$sequence.ToArray()
+}
+
+function Assert-D294CleanupSucceeded($World, $Result, [string[]]$ExpectedSteps, [string]$Name) {
+    $detail = if ($null -ne $Result.Failure) { $Result.Failure.Message } else { '' }
+    Assert-True ($null -eq $Result.Failure) ("$Name failed: $detail steps=" + ((Get-D294Steps $Result.Events) -join ';'))
+    Assert-D294SafeMutations $World $Result.Events $Name
+    Assert-Equal $ExpectedSteps @(Get-D294Steps $Result.Events) "$Name step order differs."
+    Assert-True (-not $Result.ReceiptKept) "$Name kept the receipt after a clean finish."
+    Assert-Equal 0 @($World.Containers | Where-Object { $_.Present }).Count "$Name left an owned container."
+    Assert-Equal 0 @($World.Networks | Where-Object { $_.Present }).Count "$Name left an owned network."
+    Assert-Equal 0 @($World.Volumes | Where-Object { $_.Present }).Count "$Name left an owned volume."
+}
+
+function Assert-D294CleanupRefused($World, $Result, [string[]]$ExpectedMutations, [string]$Name) {
+    Assert-True ($null -ne $Result.Failure) "$Name was accepted."
+    Assert-Equal 'RESOURCE_CLEANUP_FAILED' $Result.Failure.Message "$Name returned the wrong fixed error."
+    Assert-D294SafeMutations $World $Result.Events $Name
+    Assert-Equal @($ExpectedMutations) @(Get-D294Mutations $Result.Events) "$Name mutation sequence differs."
+    Assert-Equal @() @($Result.Events | Where-Object { $_ -cmatch '\A@' }) "$Name ran image cleanup, the final audit or the receipt delete."
+    Assert-True $Result.ReceiptKept "$Name removed the receipt."
+    Assert-NoRawCleanupDetail $Result.Failure "$Name reflected a raw cleanup detail."
+}
+
+# Fake 자체가 실제 Docker의 stop 전이를 그대로 따르는지, native 출력으로 확인한다.
+function Assert-D294FakeStopTransition($World) {
+    $backend = $World.Containers[0]
+    $application = $World.Networks[0]
+    $before = ConvertFrom-Json -InputObject (docker container inspect --format '{{json .}}' $backend.Id)
+    Assert-Equal 0 $global:LASTEXITCODE 'The fake did not answer the container inspect.'
+    Assert-True ($before.State.Running -eq $true) 'The fixture container was not running before stop.'
+    Assert-True ($null -ne (ConvertFrom-Json -InputObject (docker network inspect --format '{{json .}}' $application.Id)).Containers.PSObject.Properties[$backend.Id]) `
+        'The running container was not in network .Containers before stop.'
+    & $script:E2EModule { param($id) Invoke-Native { & docker stop $id 2>$null | Out-Null } } $backend.Id
+    Assert-Equal 0 $global:LASTEXITCODE 'The fake refused an exact stop.'
+    $after = ConvertFrom-Json -InputObject (docker container inspect --format '{{json .}}' $backend.Id)
+    Assert-Equal $backend.Id $after.Id 'The stopped container changed its full identifier.'
+    Assert-True ($after.State.Running -eq $false) 'The stopped container still reports Running.'
+    Assert-Equal @($before.NetworkSettings.Networks.PSObject.Properties.Name) @($after.NetworkSettings.Networks.PSObject.Properties.Name) `
+        'Stop changed the container-side network set.'
+    foreach ($name in @($before.NetworkSettings.Networks.PSObject.Properties.Name)) {
+        Assert-Equal $before.NetworkSettings.Networks.$name.NetworkID $after.NetworkSettings.Networks.$name.NetworkID `
+            'Stop changed a container-side NetworkID.'
+    }
+    foreach ($network in $World.Networks) {
+        $members = (ConvertFrom-Json -InputObject (docker network inspect --format '{{json .}}' $network.Id)).Containers
+        Assert-True ($null -eq $members.PSObject.Properties[$backend.Id]) 'Stop left the container in network .Containers.'
+    }
+    $remaining = (ConvertFrom-Json -InputObject (docker network inspect --format '{{json .}}' $application.Id)).Containers
+    Assert-True ($null -ne $remaining.PSObject.Properties[$World.Containers[1].Id]) 'Stop removed another container from network .Containers.'
+}
+
+function Invoke-D294Preflight {
+    Assert-Parsed $ModulePath
+    Assert-Parsed $PSCommandPath
+    $script:Failures = [System.Collections.Generic.List[string]]::new()
+    $receipt = New-TestReceipt
+    Invoke-TestCase 'D294 preflight: production inventory accepts the running fixture world' {
+        $world = New-D294World -Receipt $receipt
+        Invoke-D294WithFake $world {
+            param($fixtureRoot)
+            $repositoryRoot = [System.IO.Path]::GetFullPath((& $script:E2EModule { $RepositoryRoot })).TrimEnd('\') + '\'
+            Assert-True ($fixtureRoot.StartsWith([System.IO.Path]::GetTempPath(), [System.StringComparison]::OrdinalIgnoreCase) -and
+                -not $fixtureRoot.StartsWith($repositoryRoot, [System.StringComparison]::OrdinalIgnoreCase)) `
+                'The D294 fixture is not a temporary directory outside the repository.'
+            $failure = Get-D294InventoryFailure $world
+            $detail = if ($null -ne $failure) { $failure.Message } else { '' }
+            Assert-True ($null -eq $failure) "The running fixture world was refused: $detail"
+            Assert-True (@($world.Events | Where-Object { $_ -cmatch '\Acompose .* config --format json\z' }).Count -ge 1) `
+                'Production did not read the Compose contract through the fake leaf.'
+        }
+    }
+    Invoke-TestCase 'D294 preflight: the fake stop transition matches the Docker daemon' {
+        $world = New-D294World -Receipt $receipt
+        Invoke-D294WithFake $world { param($fixtureRoot) Assert-D294FakeStopTransition $world }
+    }
+    if ($script:Failures.Count -ne 0) {
+        foreach ($failure in $script:Failures) { Write-Output $failure }
+        exit 1
+    }
+    Write-Output 'D294 harness preflight passed real-docker=0 child-process=0 fixture-residue=0'
+}
+
+function Invoke-D294TargetedTests {
+    $script:Failures = [System.Collections.Generic.List[string]]::new()
+    $receipt = New-TestReceipt
+    $foreign = '9' * 64
+
+    Invoke-TestCase 'D294 core: a stopped container absent from network .Containers is still owned' {
+        $world = New-D294World -Receipt $receipt
+        Invoke-D294WithFake $world {
+            param($fixtureRoot)
+            $backend = $world.Containers[0]
+            # 대조군: 정지했지만 network 쪽 entry가 남아 있으면 통과한다.
+            $backend.Running = $false
+            $backend.Status = 'exited'
+            $control = Get-D294InventoryFailure $world
+            $detail = if ($null -ne $control) { $control.Message } else { '' }
+            Assert-True ($null -eq $control) "The stopped-with-entry control was refused: $detail"
+            # 대조군과의 차이는 network 쪽 entry의 부재 하나뿐이다.
+            Set-D294Stopped $world $backend
+            $failure = Get-D294InventoryFailure $world
+            $detail = if ($null -ne $failure) { $failure.Message } else { '' }
+            Assert-True ($null -eq $failure) "A stopped container absent from network .Containers was refused: $detail"
+        }
+    }
+    Invoke-TestCase 'D294 01/10/11/16 running exact: stop, re-verify without the entry, remove by exact identifiers in order' {
+        $world = New-D294World -Receipt $receipt
+        Invoke-D294WithFake $world {
+            param($fixtureRoot)
+            Assert-True ($null -eq (Get-D294InventoryFailure $world)) 'The running exact world was refused.'
+            $result = Invoke-D294FullCleanup $world $fixtureRoot
+            Assert-D294CleanupSucceeded $world $result (Get-D294FullSequence $world) 'running-exact'
+            $backend = $world.Containers[0].Id
+            $stop = [array]::IndexOf($result.Events, 'stop ' + $backend)
+            $remove = [array]::IndexOf($result.Events, 'rm ' + $backend)
+            $between = @($result.Events[($stop + 1)..($remove - 1)])
+            Assert-True ($between -ccontains ('container inspect --format {{json .}} ' + $backend)) 'Stop was not followed by an exact re-inspect.'
+            Assert-True ($between -ccontains ('network inspect --format {{json .}} ' + $world.Networks[0].Id)) `
+                'Ownership was not re-verified against the network after stop.'
+        }
+    }
+    Invoke-TestCase 'D294 02 running container missing from network .Containers is refused before mutation' {
+        $world = New-D294World -Receipt $receipt
+        Invoke-D294WithFake $world {
+            param($fixtureRoot)
+            [void]$world.Networks[1].Members.Remove($world.Containers[0].Id)
+            Assert-Equal 'RESOURCE_CLEANUP_FAILED' (Get-D294InventoryFailure $world).Message 'A running container without its network entry was accepted.'
+            Assert-D294CleanupRefused $world (Invoke-D294FullCleanup $world $fixtureRoot) @() 'running-reverse-missing'
+        }
+    }
+    Invoke-TestCase 'D294 03 stopped container absent from network .Containers is removed exactly' {
+        $world = New-D294World -Receipt $receipt
+        Invoke-D294WithFake $world {
+            param($fixtureRoot)
+            Set-D294Stopped $world $world.Containers[0]
+            $result = Invoke-D294FullCleanup $world $fixtureRoot
+            Assert-D294CleanupSucceeded $world $result (Get-D294FullSequence $world @($world.Containers[0].Id)) 'stopped-reverse-absent'
+        }
+        $world = New-D294World -Receipt $receipt
+        Invoke-D294WithFake $world {
+            param($fixtureRoot)
+            foreach ($container in $world.Containers) { Set-D294Stopped $world $container }
+            $result = Invoke-D294FullCleanup $world $fixtureRoot
+            Assert-D294CleanupSucceeded $world $result (Get-D294FullSequence $world @($world.Containers | ForEach-Object { $_.Id })) 'all-stopped-reverse-absent'
+        }
+    }
+    Invoke-TestCase 'D294 04 stopped container still in network .Containers is removed exactly' {
+        $world = New-D294World -Receipt $receipt
+        Invoke-D294WithFake $world {
+            param($fixtureRoot)
+            $world.Containers[0].Running = $false
+            $world.Containers[0].Status = 'exited'
+            $result = Invoke-D294FullCleanup $world $fixtureRoot
+            Assert-D294CleanupSucceeded $world $result (Get-D294FullSequence $world @($world.Containers[0].Id)) 'stopped-reverse-remaining'
+        }
+    }
+    Invoke-TestCase 'D294 05 stopped container missing a container-side network is refused' {
+        foreach ($variant in @('one', 'all')) {
+            $world = New-D294World -Receipt $receipt
+            Invoke-D294WithFake $world {
+                param($fixtureRoot)
+                $backend = $world.Containers[0]
+                Set-D294Stopped $world $backend
+                if ($variant -ceq 'one') { $backend.Networks.Remove($world.Project + '_observability') }
+                else { $backend.Networks.Clear() }
+                Assert-D294CleanupRefused $world (Invoke-D294FullCleanup $world $fixtureRoot) @() "stopped-container-network-missing-$variant"
+            }
+        }
+    }
+    Invoke-TestCase 'D294 06 stopped container with a wrong container-side NetworkID is refused' {
+        foreach ($variant in @('absent', 'remaining')) {
+            $world = New-D294World -Receipt $receipt
+            Invoke-D294WithFake $world {
+                param($fixtureRoot)
+                $backend = $world.Containers[0]
+                if ($variant -ceq 'absent') { Set-D294Stopped $world $backend }
+                else { $backend.Running = $false; $backend.Status = 'exited' }
+                $backend.Networks[($world.Project + '_application')] = 'f3' * 32
+                Assert-D294CleanupRefused $world (Invoke-D294FullCleanup $world $fixtureRoot) @() "stopped-wrong-network-id-$variant"
+            }
+        }
+    }
+    Invoke-TestCase 'D294 07 a foreign full identifier in network .Containers is refused' {
+        foreach ($variant in @('running', 'stopped')) {
+            $world = New-D294World -Receipt $receipt
+            Invoke-D294WithFake $world {
+                param($fixtureRoot)
+                if ($variant -ceq 'stopped') { Set-D294Stopped $world $world.Containers[0] }
+                $world.Networks[0].Members.Add($foreign)
+                Assert-D294CleanupRefused $world (Invoke-D294FullCleanup $world $fixtureRoot) @() "network-foreign-full-id-$variant"
+            }
+        }
+        # stop이 만든 부재 허용이 그 순간 끼어든 foreign entry까지 허용하지는 않는다.
+        $world = New-D294World -Receipt $receipt
+        $world.AfterStop = { param($value, $stopped) $value.Networks[0].Members.Add('9' * 64) }
+        Invoke-D294WithFake $world {
+            param($fixtureRoot)
+            Assert-D294CleanupRefused $world (Invoke-D294FullCleanup $world $fixtureRoot) @('stop ' + $world.Containers[0].Id) 'network-foreign-full-id-after-stop'
+            Assert-True $world.Containers[0].Present 'A container was removed after a foreign network entry appeared.'
+        }
+    }
+    Invoke-TestCase 'D294 08 a short, prefix, upper-case or malformed network entry is refused' {
+        $backendId = 'ab' * 32
+        foreach ($entry in @($backendId.Substring(0, 12), $backendId.Substring(0, 63), $backendId.ToUpperInvariant(),
+            ($backendId + '0'), ('sha256:' + $backendId), 'not-a-container-id', '')) {
+            $world = New-D294World -Receipt $receipt
+            Invoke-D294WithFake $world {
+                param($fixtureRoot)
+                Set-D294Stopped $world $world.Containers[0]
+                $world.Networks[0].Members.Add($entry)
+                Assert-D294CleanupRefused $world (Invoke-D294FullCleanup $world $fixtureRoot) @() "malformed-network-entry-[$entry]"
+            }
+        }
+    }
+    Invoke-TestCase 'D294 09 a duplicate or ambiguous network entry is refused' {
+        $cases = @(
+            [pscustomobject]@{ Name = 'case-variant-duplicate-key'; Arrange = { param($w) $w.Networks[0].Members.Add($w.Containers[1].Id.ToUpperInvariant()) } },
+            [pscustomobject]@{ Name = 'two-network-documents'; Arrange = { param($w) $w.Networks[0].AnswerTwice = $true } },
+            [pscustomobject]@{ Name = 'network-listed-twice'; Arrange = { param($w) $w.DuplicateNetworkListing = $true } },
+            [pscustomobject]@{ Name = 'owned-running-entry-without-container-side-network'; Arrange = { param($w) $w.Networks[1].Members.Add($w.Containers[1].Id) } },
+            [pscustomobject]@{ Name = 'owned-stopped-entry-without-container-side-network'; Arrange = {
+                param($w)
+                Set-D294Stopped $w $w.Containers[1]
+                $w.Networks[1].Members.Add($w.Containers[1].Id)
+            } }
+        )
+        foreach ($case in $cases) {
+            $world = New-D294World -Receipt $receipt
+            Invoke-D294WithFake $world {
+                param($fixtureRoot)
+                & $case.Arrange $world
+                Assert-D294CleanupRefused $world (Invoke-D294FullCleanup $world $fixtureRoot) @() $case.Name
+            }
+        }
+    }
+    Invoke-TestCase 'D294 12/13/14/15 a primary failure survives a refused cleanup and the receipt stays' {
+        foreach ($variant in @('before-mutation', 'after-stop')) {
+            $world = New-D294World -Receipt $receipt
+            if ($variant -ceq 'after-stop') { $world.AfterStop = { param($value, $stopped) $value.Networks[0].Members.Add('9' * 64) } }
+            Invoke-D294WithFake $world {
+                param($fixtureRoot)
+                if ($variant -ceq 'before-mutation') { [void]$world.Networks[1].Members.Remove($world.Containers[0].Id) }
+                $script:D294ActiveReceipt = $world.Receipt
+                $receiptPath = New-D294ReceiptPath $fixtureRoot
+                $parsed = Read-D294Receipt $receiptPath $fixtureRoot
+                $world.Events.Clear()
+                $leaves = New-D294Leaves $world.Events
+                $primary = [System.InvalidOperationException]::new('D294_PRIMARY')
+                # `GetNewClosure()`는 이 scope의 지역 변수만 담으므로 receipt를 지역으로 고정한다.
+                $activeReceipt = $parsed
+                $lifecycle = @{
+                    ReadPrepared = { return $activeReceipt }.GetNewClosure()
+                    RenamePreparedToRecovery = { }
+                    AssertImages = { param($value) throw $primary }.GetNewClosure()
+                    RunBrowser = { param($value) }
+                    Cleanup = {
+                        param($value)
+                        Invoke-E2EFullCleanup -Receipt $value -ReceiptPath $receiptPath -RepositoryRootPath $fixtureRoot `
+                            -LeafBoundaries $leaves -RequireLeafBoundaries
+                    }.GetNewClosure()
+                }
+                $failure = Get-CapturedException { Invoke-E2ERunLifecycle -Boundaries $lifecycle }
+                $events = [string[]]$world.Events.ToArray()
+                Assert-True ([object]::ReferenceEquals($primary, $failure)) "$variant replaced the primary exception object."
+                Assert-True ([System.IO.File]::Exists($receiptPath)) "$variant removed the receipt."
+                Assert-D294SafeMutations $world $events $variant
+                $expected = if ($variant -ceq 'after-stop') { @('stop ' + $world.Containers[0].Id) } else { @() }
+                Assert-True ($events.Count -ne 0) "$variant never reached the Docker leaf."
+                Assert-Equal @($expected) @(Get-D294Mutations $events) "$variant mutation sequence differs."
+                Assert-Equal @() @($events | Where-Object { $_ -cmatch '\A@' }) "$variant ran image cleanup, the final audit or the receipt delete."
+            }
+        }
+    }
+
+    if ($script:Failures.Count -ne 0) {
+        foreach ($failure in $script:Failures) { Write-Output $failure }
+        exit 1
+    }
+    Write-Output 'D294 targeted passed'
+}
+
+function Get-D299Contaminations {
+    return @(
+        [pscustomobject]@{ Name='exposed-extra'; Change={ param($d) $d.Config.ExposedPorts['9999/tcp']=[ordered]@{} } },
+        [pscustomobject]@{ Name='binding-extra'; Change={ param($d) $d.HostConfig.PortBindings['9999/tcp']=@([ordered]@{HostIp='127.0.0.1';HostPort='9999'}) } },
+        [pscustomobject]@{ Name='host-ip'; Change={ param($d) $d.HostConfig.PortBindings['8443/tcp'][0].HostIp='0.0.0.0' } },
+        [pscustomobject]@{ Name='host-port'; Change={ param($d) $d.HostConfig.PortBindings['8443/tcp'][0].HostPort='9443' } },
+        [pscustomobject]@{ Name='host-ip-cr'; Change={ param($d) $d.HostConfig.PortBindings['8443/tcp'][0].HostIp="127.0.0.1`r" } },
+        [pscustomobject]@{ Name='host-port-lf'; Change={ param($d) $d.HostConfig.PortBindings['8443/tcp'][0].HostPort="8443`n" } },
+        [pscustomobject]@{ Name='host-port-whitespace'; Change={ param($d) $d.HostConfig.PortBindings['8443/tcp'][0].HostPort=' 8443' } },
+        [pscustomobject]@{ Name='host-port-culture'; Change={ param($d) $d.HostConfig.PortBindings['8443/tcp'][0].HostPort='８４４３' } },
+        [pscustomobject]@{ Name='container-port-protocol'; Change={ param($d) $d.HostConfig.PortBindings['8443/udp']=$d.HostConfig.PortBindings['8443/tcp'];$d.HostConfig.PortBindings.Remove('8443/tcp') } },
+        [pscustomobject]@{ Name='publish-all'; Change={ param($d) $d.HostConfig.PublishAllPorts=$true } },
+        [pscustomobject]@{ Name='declared-port-missing'; Change={ param($d) $d.Config.ExposedPorts.Remove('8081/tcp') } },
+        [pscustomobject]@{ Name='declared-binding-missing'; Change={ param($d) $d.HostConfig.PortBindings.Remove('8443/tcp') } },
+        [pscustomobject]@{ Name='binding-duplicate'; Change={ param($d) $d.HostConfig.PortBindings['8443/tcp']=@($d.HostConfig.PortBindings['8443/tcp'][0],$d.HostConfig.PortBindings['8443/tcp'][0]) } },
+        [pscustomobject]@{ Name='privileged'; Change={ param($d) $d.HostConfig.Privileged=$true } },
+        [pscustomobject]@{ Name='readonly-root'; Change={ param($d) $d.HostConfig.ReadonlyRootfs=$false } },
+        [pscustomobject]@{ Name='cap-add-extra'; Change={ param($d) $d.HostConfig.CapAdd=@('SYS_ADMIN') } },
+        [pscustomobject]@{ Name='cap-add-missing'; Change={ param($d) $d.HostConfig.CapAdd=@() } },
+        [pscustomobject]@{ Name='cap-drop-extra'; Change={ param($d) $d.HostConfig.CapDrop=@('ALL') } },
+        [pscustomobject]@{ Name='cap-drop-missing'; Change={ param($d) $d.HostConfig.CapDrop=@() } },
+        [pscustomobject]@{ Name='security-opt-extra'; Change={ param($d) $d.HostConfig.SecurityOpt=@('no-new-privileges:true','seccomp=unconfined') } },
+        [pscustomobject]@{ Name='security-opt-missing'; Change={ param($d) $d.HostConfig.SecurityOpt=@() } },
+        [pscustomobject]@{ Name='devices'; Change={ param($d) $d.HostConfig.Devices=@([ordered]@{PathOnHost='/dev/null';PathInContainer='/dev/null';CgroupPermissions='rwm'}) } },
+        [pscustomobject]@{ Name='device-requests'; Change={ param($d) $d.HostConfig.DeviceRequests=@([ordered]@{Driver='nvidia';Count=1}) } },
+        [pscustomobject]@{ Name='pid-mode'; Change={ param($d) $d.HostConfig.PidMode='host' } },
+        [pscustomobject]@{ Name='ipc-mode'; Change={ param($d) $d.HostConfig.IpcMode='host' } },
+        [pscustomobject]@{ Name='uts-mode'; Change={ param($d) $d.HostConfig.UTSMode='host' } },
+        [pscustomobject]@{ Name='userns-mode'; Change={ param($d) $d.HostConfig.UsernsMode='host' } },
+        [pscustomobject]@{ Name='cgroupns-mode'; Change={ param($d) $d.HostConfig.CgroupnsMode='host' } },
+        [pscustomobject]@{ Name='extra-hosts'; Change={ param($d) $d.HostConfig.ExtraHosts=@('evil:127.0.0.1') } },
+        [pscustomobject]@{ Name='tmpfs-extra'; Change={ param($d) $d.HostConfig.Tmpfs['/evil']='rw' } },
+        [pscustomobject]@{ Name='group-add'; Change={ param($d) $d.HostConfig.GroupAdd=@('0') } },
+        [pscustomobject]@{ Name='init'; Change={ param($d) $d.HostConfig.Init=$true } },
+        [pscustomobject]@{ Name='auto-remove'; Change={ param($d) $d.HostConfig.AutoRemove=$true } },
+        [pscustomobject]@{ Name='network-mode'; Change={ param($d) $d.HostConfig.NetworkMode='host' } },
+        [pscustomobject]@{ Name='network-mode-other-declared'; Change={ param($d)
+            $d.HostConfig.NetworkMode = @($d.NetworkSettings.Networks.Keys)[1] } },
+        [pscustomobject]@{ Name='running-false-status-running'; Change={ param($d) $d.State.Running=$false;$d.State.Status='running' } },
+        [pscustomobject]@{ Name='running-false-status-restarting'; Change={ param($d) $d.State.Running=$false;$d.State.Status='restarting' } },
+        [pscustomobject]@{ Name='running-false-status-dead'; Change={ param($d) $d.State.Running=$false;$d.State.Status='dead' } },
+        [pscustomobject]@{ Name='running-true-status-exited'; Change={ param($d) $d.State.Running=$true;$d.State.Status='exited' } },
+        [pscustomobject]@{ Name='running-true-status-restarting'; Change={ param($d) $d.State.Running=$true;$d.State.Status='restarting' } },
+        [pscustomobject]@{ Name='paused'; Change={ param($d) $d.State.Paused=$true } },
+        [pscustomobject]@{ Name='restarting'; Change={ param($d) $d.State.Restarting=$true } },
+        [pscustomobject]@{ Name='dead'; Change={ param($d) $d.State.Dead=$true } },
+        [pscustomobject]@{ Name='running-string-false'; Change={ param($d) $d.State.Running='false' } },
+        [pscustomobject]@{ Name='running-string-true'; Change={ param($d) $d.State.Running='true' } },
+        [pscustomobject]@{ Name='status-missing'; Change={ param($d) $d.State.Remove('Status') } },
+        [pscustomobject]@{ Name='running-missing'; Change={ param($d) $d.State.Remove('Running') } },
+        [pscustomobject]@{ Name='state-array'; Change={ param($d) $d.State=@($d.State) } },
+        [pscustomobject]@{ Name='state-malformed'; Change={ param($d) $d.State=[ordered]@{Running=$false;Status='exited'} } },
+        [pscustomobject]@{ Name='inspect-zero'; Change=$null; Documents=0 },
+        [pscustomobject]@{ Name='inspect-two'; Change=$null; Documents=2 }
+    )
+}
+
+function New-D308Trace {
+    return [pscustomobject]@{ Events = [System.Collections.Generic.List[string]]::new()
+        WriterCalls = 0; ParserCalls = 0; ParserObject = $null; ForwardedObject = $null }
+}
+
+function Assert-D308ReceiptBoundary($Trace, [string]$LastEvent) {
+    $expected = @('writer-created','canonical-verified','parser-read','parser-object-forwarded',
+        'cleanup-entered',$LastEvent)
+    if ($Trace.WriterCalls -ne 1 -or $Trace.ParserCalls -ne 1 -or
+        $null -eq $Trace.ParserObject -or
+        -not [object]::ReferenceEquals($Trace.ParserObject, $Trace.ForwardedObject) -or
+        -not [System.Linq.Enumerable]::SequenceEqual([string[]]$Trace.Events.ToArray(), [string[]]$expected)) {
+        throw 'D308_RECEIPT_BOUNDARY_INVALID'
+    }
+}
+
+function Assert-D308RepositoryReceiptsAbsent {
+    $repository = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
+    $state = Join-Path $repository 'infra\keycloak\.local\state'
+    foreach ($name in @('e2e-image-manifest.json','e2e-image-cleanup-required.json')) {
+        Assert-True (-not [System.IO.File]::Exists((Join-Path $state $name))) `
+            'D308_REPOSITORY_RECEIPT_IO_DETECTED'
+    }
+}
+
+function Invoke-D308RedC {
+    $receipt = New-TestReceipt
+    Assert-D308RepositoryReceiptsAbsent
+    $legacyWorld = New-D294World -Receipt $receipt
+    Invoke-D294WithFake $legacyWorld {
+        param($fixtureRoot)
+        $legacy = New-D308Trace
+        $directObject = [ordered]@{ schemaVersion = 1; runId = $receipt.runId
+            repositoryId = $receipt.repositoryId; commitSha = $receipt.commitSha; treeSha = $receipt.treeSha }
+        $legacy.ForwardedObject = $directObject
+        $legacy.Events.Add('cleanup-attempted')
+        $rejected = Get-CapturedException { Assert-D308ReceiptBoundary $legacy 'receipt-preserved' }
+        Assert-Equal 'D308_RECEIPT_BOUNDARY_INVALID' $rejected.Message 'Legacy direct-object bypass was accepted.'
+        Assert-Equal 0 $legacy.WriterCalls 'Legacy fixture called the writer.'
+        Assert-Equal 0 $legacy.ParserCalls 'Legacy fixture called the parser.'
+        Assert-True ($null -eq $legacy.ParserObject) 'Legacy fixture has a parser output identity.'
+        Assert-Equal @() @(Get-D294Mutations $legacyWorld.Events.ToArray()) 'Legacy fixture mutated a resource.'
+        Assert-D308RepositoryReceiptsAbsent
+    }
+    Write-Output 'RED C legacy direct-object cleanup attempt rejected writer=0 parser=0'
+    foreach ($failureMode in @($false, $true)) {
+        $world = New-D294World -Receipt $receipt
+        $trace = New-D308Trace
+        Invoke-D294WithFake $world {
+            param($fixtureRoot)
+            if ($failureMode) {
+                $world.InspectMutation = { param($d) $d.HostConfig.Privileged = $true }
+            }
+            $result = Invoke-D294FullCleanup $world $fixtureRoot $trace
+            if ($failureMode) {
+                Assert-D294CleanupRefused $world $result @() 'D308 receipt failure'
+                Assert-D308ReceiptBoundary $trace 'receipt-preserved'
+                Assert-Equal 0 @($trace.Events | Where-Object { $_ -ceq 'remover-called' }).Count 'Failure invoked remover.'
+            }
+            else {
+                Assert-D294CleanupSucceeded $world $result (Get-D294FullSequence $world) 'D308 receipt success'
+                Assert-D308ReceiptBoundary $trace 'remover-called'
+                Assert-Equal 1 @($trace.Events | Where-Object { $_ -ceq 'remover-called' }).Count 'Success remover count differs.'
+            }
+        }
+    }
+    Assert-D308RepositoryReceiptsAbsent
+    Write-Output 'RED C canonical success=deleted resource-failure=preserved trace=verified'
+}
+
+function Write-D308HeadModule([string]$Path) {
+    $info = [System.Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = 'git.exe'
+    $info.Arguments = 'show HEAD:frontend/scripts/keycloak-e2e-lib.psm1'
+    $info.UseShellExecute = $false
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::Start($info)
+    try {
+        $memory = [System.IO.MemoryStream]::new()
+        $process.StandardOutput.BaseStream.CopyTo($memory)
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) { throw 'D308_HEAD_READ_FAILED' }
+        [System.IO.File]::WriteAllBytes($Path, $memory.ToArray())
+    }
+    finally { $process.Dispose() }
+}
+
+function Invoke-D308RedAB {
+    $root = Join-Path ([System.IO.Path]::GetTempPath()) ('finguardops-d308-head-' + [guid]::NewGuid().ToString('N'))
+    $headModule = $null
+    $oldModule = $script:E2EModule
+    try {
+        $moduleFolder = Join-Path $root 'frontend\scripts'
+        [System.IO.Directory]::CreateDirectory($moduleFolder) | Out-Null
+        $modulePath = Join-Path $moduleFolder 'keycloak-e2e-lib.psm1'
+        Write-D308HeadModule $modulePath
+        Assert-Parsed $modulePath
+        $headModule = Import-Module $modulePath -PassThru -Force
+        foreach ($case in @(
+            [pscustomobject]@{ Name='A-privileged'; Change={param($d) $d.HostConfig.Privileged=$true} },
+            [pscustomobject]@{ Name='B-contradictory-state'; Change={param($d) $d.State.Running=$false;$d.State.Status='running'} })) {
+            $script:E2EModule = $headModule
+            $oldWorld = New-D294World -Receipt (New-TestReceipt)
+            $oldWorld.InspectMutation = $case.Change
+            if ($case.Name -ceq 'B-contradictory-state') {
+                $oldWorld.Containers[0].Running = $false
+                $oldWorld.Containers[0].Status = 'exited'
+            }
+            # HEAD required the obsolete reverse entry after stop. This legacy-only
+            # daemon shape lets its full cleanup continue beyond the first mutation.
+            $oldWorld.AfterStop = {
+                param($world, $container)
+                foreach ($network in $world.Networks) {
+                    if ($container.Networks.Contains($world.Project + '_' + $network.Name)) {
+                        $network.Members.Add($container.Id)
+                    }
+                }
+            }
+            Invoke-D294WithFake $oldWorld {
+                param($fixtureRoot)
+                $result = Invoke-D294FullCleanup $oldWorld $fixtureRoot
+                $steps = @(Get-D294Steps $result.Events)
+                Assert-True (@(Get-D294Mutations $result.Events).Count -gt 0) "$($case.Name) HEAD made no mutation."
+                Assert-True ($steps -ccontains '@image') "$($case.Name) HEAD did not reach image cleanup."
+                Assert-True ($steps -ccontains '@audit') "$($case.Name) HEAD did not reach audit."
+                Assert-True ($steps -ccontains '@receipt') "$($case.Name) HEAD did not reach receipt removal."
+                Assert-True (-not $result.ReceiptKept) "$($case.Name) HEAD retained receipt."
+                Assert-D294SafeMutations $oldWorld $result.Events $case.Name
+            }
+            $script:E2EModule = $oldModule
+            $world = New-D294World -Receipt (New-TestReceipt)
+            $world.InspectMutation = $case.Change
+            if ($case.Name -ceq 'B-contradictory-state') { Set-D294Stopped $world $world.Containers[0] }
+            Invoke-D294WithFake $world {
+                param($fixtureRoot)
+                Assert-D294CleanupRefused $world (Invoke-D294FullCleanup $world $fixtureRoot) @() $case.Name
+            }
+            Write-Output ("RED {0} HEAD=mutation,image,audit,receipt CURRENT=refused-before-mutation" -f $case.Name)
+        }
+    }
+    finally {
+        if ($null -ne $headModule) { Remove-Module $headModule -Force }
+        $script:E2EModule = Import-Module $ModulePath -Force -PassThru
+        if ([System.IO.Directory]::Exists($root)) { [System.IO.Directory]::Delete($root, $true) }
+    }
+    Assert-True (-not [System.IO.Directory]::Exists($root)) 'D308 HEAD temp module residue remains.'
+}
+
+function Invoke-D299Red {
+    Invoke-D294Preflight
+    $receipt = New-TestReceipt
+    foreach ($case in (Get-D299Contaminations)) {
+        $world = New-D294World -Receipt $receipt
+        Invoke-D294WithFake $world {
+            param($fixtureRoot)
+            if ($null -ne $case.Change) { $world.InspectMutation = $case.Change }
+            if ($null -ne $case.PSObject.Properties['Documents']) { $world.InspectDocumentCount = $case.Documents }
+            $failure = Get-D294InventoryFailure $world
+            Assert-Equal @() @(Get-D294Mutations $world.Events.ToArray()) "$($case.Name) mutated during Red."
+            $verdict = if ($null -eq $failure) { 'ACCEPTED' } else { 'REJECTED:' + $failure.Message }
+            Write-Output ('RED ' + $case.Name + ' ' + $verdict)
+        }
+    }
+    Invoke-D308RedC
+    Invoke-D308RedAB
+}
+
+# Docker Engine 29.6.2 / API v1.55 (local daemon). These are the inspect
+# representations of omitted HostConfig options, not values copied from the
+# production module. Docker Engine API containers/create HostConfig schema and
+# docker container run reference: https://docs.docker.com/reference/api/engine/
+# https://docs.docker.com/reference/cli/docker/container/run/
+# Scalars compare ordinal/exact, CapAdd/CapDrop/SecurityOpt as sets, Devices and
+# DeviceRequests as sequences, and Tmpfs/PortBindings/ExposedPorts as maps.
+# The daemon represents omitted optional lists as null except Devices=[];
+# omitted Tmpfs and Init are null, while PortBindings is an empty object.
+function New-D308EngineDefaults {
+    return [ordered]@{
+        PublishAllPorts=$false; Privileged=$false; ReadonlyRootfs=$false
+        CapAdd=$null; CapDrop=$null; SecurityOpt=$null; Devices=@(); DeviceRequests=$null
+        PidMode=''; IpcMode='private'; UTSMode=''; UsernsMode=''; CgroupnsMode='private'
+        ExtraHosts=$null; Tmpfs=$null; GroupAdd=$null; Init=$null; AutoRemove=$false
+    }
+}
+
+function Get-D308RawSources($Receipt) {
+    $project = 'finguardops-kc241-e2e-' + $Receipt.runId.Substring(0, 12)
+    $suffix = 'e2e-' + $Receipt.commitSha.Substring(0, 12) + '-' + $Receipt.runId
+    $backend = 'finguardops-backend:' + $suffix
+    $ai = 'finguardops-ai-service:' + $suffix
+    $names = @('FINGUARDOPS_E2E_BACKEND_IMAGE','FINGUARDOPS_E2E_AI_SERVICE_IMAGE',
+        'FINGUARDOPS_E2E_REVISION','FINGUARDOPS_E2E_SOURCE_TREE','FINGUARDOPS_E2E_RUN_ID',
+        'FINGUARDOPS_E2E_REPOSITORY_ID')
+    $values = @($backend,$ai,$Receipt.commitSha,$Receipt.treeSha,$Receipt.runId,$Receipt.repositoryId)
+    $saved = @{}
+    $oldLocation = Get-Location
+    $repository = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
+    try {
+        for ($i=0; $i -lt $names.Count; $i++) {
+            $saved[$names[$i]] = [System.Environment]::GetEnvironmentVariable($names[$i], 'Process')
+            [System.Environment]::SetEnvironmentVariable($names[$i], $values[$i], 'Process')
+        }
+        Set-Location -LiteralPath $repository
+        $raw = & docker compose -p $project --env-file infra/.env.example -f infra/compose.yml `
+            -f infra/compose.keycloak-local-e2e.yml config --format json
+        if ($LASTEXITCODE -ne 0) { throw 'D308_COMPOSE_READ_FAILED' }
+        $config = ($raw -join "`n") | ConvertFrom-Json
+        Assert-True ([string]::Equals($project, [string]$config.name, [System.StringComparison]::Ordinal)) `
+            'D308_CONTRACT_MISMATCH field=project-name'
+        $serviceNames = [string[]]@($config.services.PSObject.Properties.Name)
+        $allowlist = [string[]]@(& $script:E2EModule { $E2EComposeServices })
+        $uniqueNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        foreach ($name in $serviceNames) { Assert-True ($uniqueNames.Add($name)) 'D308 duplicate Compose service.' }
+        $sortedAllowlist = [string[]]@($allowlist | Sort-Object -CaseSensitive)
+        $sortedServices = [string[]]@($serviceNames | Sort-Object -CaseSensitive)
+        Assert-True ($sortedAllowlist.Count -eq $sortedServices.Count -and
+            [System.Linq.Enumerable]::SequenceEqual($sortedAllowlist, $sortedServices)) `
+            'D308_CONTRACT_MISMATCH field=service-set'
+        $documents = [System.Collections.Generic.Dictionary[string,object]]::new([System.StringComparer]::Ordinal)
+        foreach ($name in $serviceNames) {
+            $definition = $config.services.PSObject.Properties[$name].Value
+            $source = [string]$definition.image
+            if ($name -ceq 'backend') {
+                Assert-True ([string]::Equals($backend,$source,[System.StringComparison]::Ordinal)) `
+                    'D308_CONTRACT_MISMATCH service=backend field=image-reference'
+                $source = 'finguardops-backend:local'
+            }
+            elseif ($name -in @('ai-service','external-risk-mock','alertmanager-webhook')) {
+                Assert-True ([string]::Equals($ai,$source,[System.StringComparison]::Ordinal)) `
+                    ("D308_CONTRACT_MISMATCH service={0} field=image-reference" -f $name)
+                $source = 'finguardops-ai-service:local'
+            }
+            else { Assert-True ($source -cmatch '\A[^\s]+@sha256:[0-9a-f]{64}\z') 'D308 image reference format differs.' }
+            if (-not $documents.ContainsKey($source)) {
+                $imageRaw = & docker image inspect $source
+                if ($LASTEXITCODE -ne 0) { throw 'D308_IMAGE_READ_FAILED' }
+                $imageList = @(($imageRaw -join "`n") | ConvertFrom-Json)
+                Assert-Equal 1 $imageList.Count 'D308 image inspect cardinality differs.'
+                Assert-True ($imageList[0].Id -cmatch '\Asha256:[0-9a-f]{64}\z') 'D308 image ID is invalid.'
+                $documents[$source] = $imageList[0]
+            }
+        }
+        Assert-True ((@($documents['finguardops-backend:local'].Config.ExposedPorts.PSObject.Properties.Name) -join ',') -ceq '8080/tcp,8081/tcp') `
+            'D308_CONTRACT_MISMATCH service=backend field=local-image-exposed'
+        Assert-True ((@($documents['finguardops-ai-service:local'].Config.ExposedPorts.PSObject.Properties.Name) -join ',') -ceq '8000/tcp') `
+            'D308_CONTRACT_MISMATCH service=ai-service field=local-image-exposed'
+        return [pscustomobject]@{ Project=$project; Config=$config; Services=$serviceNames; Images=$documents
+            BackendReference=$backend; AiReference=$ai }
+    }
+    finally {
+        Set-Location -LiteralPath $oldLocation.Path
+        foreach ($name in $names) { [System.Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
+    }
+}
+
+function New-D308OwnershipLabels($Receipt, [string]$Role) {
+    return [ordered]@{
+        'org.opencontainers.image.revision' = $Receipt.commitSha
+        'com.finguardops.e2e.source-tree' = $Receipt.treeSha
+        'com.finguardops.e2e.run-id' = $Receipt.runId
+        'com.finguardops.e2e.repository-id' = $Receipt.repositoryId
+        'com.finguardops.e2e.image-role' = $Role
+    }
+}
+
+function Get-D308ImageSource($Sources, [string]$Service) {
+    if ($Service -ceq 'backend') { return $Sources.Images['finguardops-backend:local'] }
+    if ($Service -in @('ai-service','external-risk-mock','alertmanager-webhook')) {
+        return $Sources.Images['finguardops-ai-service:local']
+    }
+    return $Sources.Images[[string]$Sources.Config.services.PSObject.Properties[$Service].Value.image]
+}
+
+function Get-D308ImageExposed($Image) {
+    $property = $Image.Config.PSObject.Properties['ExposedPorts']
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+function Get-D308ImageLabels($Image) {
+    $property = $Image.Config.PSObject.Properties['Labels']
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+function Get-D308Optional($Object, [string]$Name) {
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+function New-D308ExpectedContract($Definition, $Image) {
+    $defaults = New-D308EngineDefaults
+    $exposed = [ordered]@{}
+    $imageExposed = Get-D308ImageExposed $Image
+    if ($null -ne $imageExposed) {
+        foreach ($key in @($imageExposed.PSObject.Properties.Name)) { $exposed[$key] = [ordered]@{} }
+    }
+    $declaredExpose = Get-D308Optional $Definition 'expose'
+    if ($null -ne $declaredExpose) {
+        foreach ($port in @($declaredExpose)) {
+            $key = [string]$port
+            if (-not $key.Contains('/')) { $key += '/tcp' }
+            Assert-True ($key -cmatch '\A[0-9]+/(tcp|udp|sctp)\z') 'D308 invalid Compose expose.'
+            $exposed[$key] = [ordered]@{}
+        }
+    }
+    $bindings = [ordered]@{}
+    $declaredPorts = Get-D308Optional $Definition 'ports'
+    if ($null -ne $declaredPorts) {
+        foreach ($port in @($declaredPorts)) {
+            $key = ([string]$port.target) + '/' + [string]$port.protocol
+            Assert-True (-not $bindings.Contains($key)) 'D308 duplicate Compose binding.'
+            $bindings[$key] = @([ordered]@{ HostIp=[string]$port.host_ip; HostPort=[string]$port.published })
+            $exposed[$key] = [ordered]@{}
+        }
+    }
+    $defaults.ReadonlyRootfs = ((Get-D308Optional $Definition 'read_only') -eq $true)
+    foreach ($pair in @(@('CapAdd','cap_add'),@('CapDrop','cap_drop'),@('SecurityOpt','security_opt'))) {
+        $value = $Definition.PSObject.Properties[$pair[1]]
+        if ($null -ne $value -and $null -ne $value.Value) { $defaults[$pair[0]] = [string[]]@($value.Value) }
+    }
+    $declaredTmpfs = Get-D308Optional $Definition 'tmpfs'
+    if ($null -ne $declaredTmpfs) {
+        $tmpfs = [ordered]@{}
+        foreach ($item in @($declaredTmpfs)) {
+            $entry = [string]$item
+            $separator = $entry.IndexOf(':')
+            $path = if ($separator -lt 0) { $entry } else { $entry.Substring(0, $separator) }
+            Assert-True (-not $tmpfs.Contains($path)) 'D308 duplicate Compose tmpfs.'
+            $tmpfs[$path] = $(if ($separator -lt 0) { '' } else { $entry.Substring($separator + 1) })
+        }
+        $defaults.Tmpfs = $tmpfs
+    }
+    return [pscustomobject]@{ ExposedPorts=$(if ($exposed.Count -eq 0) { $null } else { $exposed })
+        PortBindings=$bindings; Host=$defaults }
+}
+
+function Assert-D308Field($Expected, $Actual, [string]$Service, [string]$Code) {
+    $left = ConvertTo-Json -InputObject $Expected -Compress -Depth 12
+    $right = ConvertTo-Json -InputObject $Actual -Compress -Depth 12
+    if (-not [string]::Equals($left, $right, [System.StringComparison]::Ordinal)) {
+        throw ("D308_CONTRACT_MISMATCH service={0} field={1}" -f $Service,$Code)
+    }
+}
+
+function New-D308CleanCandidate($Definition, $Image) {
+    # Separate inspect-document constructor. It reads Compose and image metadata
+    # again; no value is copied from New-D308ExpectedContract or a candidate.
+    $ports = [ordered]@{}
+    $imagePorts = Get-D308ImageExposed $Image
+    if ($null -ne $imagePorts) {
+        foreach ($property in $imagePorts.PSObject.Properties) { $ports[$property.Name] = [ordered]@{} }
+    }
+    $declared = Get-D308Optional $Definition 'expose'
+    if ($null -ne $declared) {
+        foreach ($entry in @($declared)) {
+            $key = [string]$entry
+            if ($key.IndexOf('/') -lt 0) { $key = $key + '/tcp' }
+            $ports[$key] = [ordered]@{}
+        }
+    }
+    $published = [ordered]@{}
+    $mappings = Get-D308Optional $Definition 'ports'
+    if ($null -ne $mappings) {
+        foreach ($mapping in @($mappings)) {
+            $key = ('{0}/{1}' -f $mapping.target,$mapping.protocol)
+            $ports[$key] = [ordered]@{}
+            $published[$key] = @([ordered]@{ HostIp=[string]$mapping.host_ip; HostPort=[string]$mapping.published })
+        }
+    }
+    $candidateHost = [ordered]@{ PortBindings=$published; PublishAllPorts=$false; Privileged=$false
+        ReadonlyRootfs=((Get-D308Optional $Definition 'read_only') -eq $true)
+        CapAdd=$null; CapDrop=$null; SecurityOpt=$null; Devices=@(); DeviceRequests=$null
+        PidMode=''; IpcMode='private'; UTSMode=''; UsernsMode=''; CgroupnsMode='private'
+        ExtraHosts=$null; Tmpfs=$null; GroupAdd=$null; Init=$null; AutoRemove=$false }
+    foreach ($pair in @(@('CapAdd','cap_add'),@('CapDrop','cap_drop'),@('SecurityOpt','security_opt'))) {
+        $declared = Get-D308Optional $Definition $pair[1]
+        if ($null -ne $declared) { $candidateHost[$pair[0]] = [string[]]@($declared) }
+    }
+    $declared = Get-D308Optional $Definition 'tmpfs'
+    if ($null -ne $declared) {
+        $mounts = [ordered]@{}
+        foreach ($entry in @($declared)) {
+            $split = ([string]$entry).IndexOf(':')
+            if ($split -lt 0) { $mounts[[string]$entry] = '' }
+            else { $mounts[([string]$entry).Substring(0,$split)] = ([string]$entry).Substring($split+1) }
+        }
+        $candidateHost.Tmpfs = $mounts
+    }
+    return [ordered]@{ Config=[ordered]@{ ExposedPorts=$(if ($ports.Count -eq 0) { $null } else { $ports }) }
+        HostConfig=$candidateHost }
+}
+
+function New-D308OracleWorld($Receipt, $Sources) {
+    $world = New-D294World -Receipt $Receipt
+    $world.ContractJson = ConvertTo-Json -InputObject $Sources.Config -Compress -Depth 20
+    $world.ImageJson.Clear()
+    foreach ($name in $Sources.Services) {
+        $definition = $Sources.Config.services.PSObject.Properties[$name].Value
+        $reference = [string]$definition.image
+        if ($world.ImageJson.ContainsKey($reference)) { continue }
+        $image = Get-D308ImageSource $Sources $name
+        $config = [ordered]@{ ExposedPorts=(Get-D308ImageExposed $image); Labels=(Get-D308ImageLabels $image) }
+        if ($name -in @('backend','ai-service','external-risk-mock','alertmanager-webhook')) {
+            $role = if ($name -ceq 'backend') { 'backend' } else { 'ai-service' }
+            $config.Labels = New-D308OwnershipLabels $Receipt $role
+        }
+        $world.ImageJson[$reference] = ConvertTo-Json -InputObject ([ordered]@{ Id=$image.Id; Config=$config }) -Compress -Depth 20
+    }
+    $world.Containers[0].ImageId = (Get-D308ImageSource $Sources 'backend').Id
+    $world.Containers[1].ImageId = (Get-D308ImageSource $Sources 'ai-service').Id
+    $uiNetworkId = 'f3' * 32
+    $world.Containers[0].Networks[($world.Project + '_prometheus-ui')] = $uiNetworkId
+    $uiMembers = [System.Collections.Generic.List[string]]::new()
+    $uiMembers.Add($world.Containers[0].Id)
+    $world.Networks.Add([pscustomobject]@{ Name='prometheus-ui'; Id=$uiNetworkId; Present=$true
+        Members=$uiMembers; AnswerTwice=$false; RawContainers=$null })
+    return $world
+}
+
+function Assert-D308OracleMutationRefused($World, $Dirty, [string]$Code) {
+    $World.InspectMutation = {
+        param($document)
+        if ($Dirty.Config.Contains('ExposedPorts')) {
+            $document.Config.ExposedPorts = $Dirty.Config.ExposedPorts
+        }
+        else { $document.Config.Remove('ExposedPorts') }
+        foreach ($key in @('PortBindings','PublishAllPorts','Privileged','ReadonlyRootfs','CapAdd','CapDrop',
+            'SecurityOpt','Devices','DeviceRequests','PidMode','IpcMode','UTSMode','UsernsMode',
+            'CgroupnsMode','ExtraHosts','Tmpfs','GroupAdd','Init','AutoRemove')) {
+            if ($Dirty.HostConfig.Contains($key)) { $document.HostConfig[$key] = $Dirty.HostConfig[$key] }
+            else { $document.HostConfig.Remove($key) }
+        }
+    }.GetNewClosure()
+    Invoke-D294WithFake $World {
+        param($fixtureRoot)
+        Assert-D294CleanupRefused $World (Invoke-D294FullCleanup $World $fixtureRoot) @() `
+            ('D308-oracle-' + $Code)
+    }
+}
+
+function Invoke-D308Oracle {
+    $receipt = New-TestReceipt
+    $sources = Get-D308RawSources $receipt
+    $world = New-D308OracleWorld $receipt $sources
+    $mutationCases = [System.Collections.Generic.List[object]]::new()
+    Invoke-D294WithFake $world {
+        param($fixtureRoot)
+        $contracts = & $script:E2EModule {
+            param($project, $value, $services)
+            Get-E2EComposeOwnershipContract -Project $project -Receipt $value -PresentServices $services
+        } $sources.Project $receipt $sources.Services
+        Assert-Equal $sources.Services.Count @($contracts.Keys).Count 'D308 production contract service count differs.'
+        foreach ($name in $sources.Services) {
+            $definition = $sources.Config.services.PSObject.Properties[$name].Value
+            $image = Get-D308ImageSource $sources $name
+            $expected = New-D308ExpectedContract $definition $image
+            $contract = $contracts[$name]
+            Assert-True ($null -ne $contract) ("D308 missing production service {0}" -f $name)
+            Assert-D308Field $definition $contract.Definition $name 'compose-definition'
+            $imageExposed = Get-D308ImageExposed $image
+            $imagePorts = if ($null -eq $imageExposed) { @() } else { @($imageExposed.PSObject.Properties.Name) }
+            Assert-D308Field @($imagePorts | Sort-Object -CaseSensitive) `
+                @($contract.ImageExposedPorts | Sort-Object -CaseSensitive) $name 'image-exposed'
+            $candidate = New-D308CleanCandidate $definition $image
+            foreach ($field in @('PublishAllPorts','Privileged','ReadonlyRootfs','CapAdd','CapDrop','SecurityOpt',
+                'Devices','DeviceRequests','PidMode','IpcMode','UTSMode','UsernsMode','CgroupnsMode',
+                'ExtraHosts','Tmpfs','GroupAdd','Init','AutoRemove')) {
+                Assert-D308Field $expected.Host[$field] $candidate.HostConfig[$field] $name $field
+            }
+            Assert-D308Field $expected.ExposedPorts $candidate.Config.ExposedPorts $name 'ExposedPorts'
+            Assert-D308Field $expected.PortBindings $candidate.HostConfig.PortBindings $name 'PortBindings'
+            $failure = Get-CapturedException {
+                & $script:E2EModule { param($document,$record) Assert-E2EComposePortSecurityContract $document $record } `
+                    $candidate $contract
+            }
+            Assert-True ($null -eq $failure) ("D308 clean contract refused service={0}" -f $name)
+            if ($name -ceq 'backend') {
+                $reordered = New-D308CleanCandidate $definition $image
+                $reversePorts = [ordered]@{}
+                foreach ($key in @($reordered.Config.ExposedPorts.Keys | Sort-Object -Descending -CaseSensitive)) {
+                    $reversePorts[$key] = $reordered.Config.ExposedPorts[$key]
+                }
+                $reordered.Config.ExposedPorts = $reversePorts
+                $reorderFailure = Get-CapturedException {
+                    & $script:E2EModule { param($document,$record) Assert-E2EComposePortSecurityContract $document $record } `
+                        $reordered $contract
+                }
+                Assert-True ($null -eq $reorderFailure) 'D308 harmless port key order was refused.'
+                $mutationCount = 0
+                foreach ($case in (Get-D299Contaminations)) {
+                    if ($case.Name -ceq 'network-mode') { break }
+                    $dirty = New-D308CleanCandidate $definition $image
+                    & $case.Change $dirty
+                    $refused = Get-CapturedException {
+                        & $script:E2EModule { param($document,$record) Assert-E2EComposePortSecurityContract $document $record } `
+                            $dirty $contract
+                    }
+                    Assert-True ($null -ne $refused -and $refused.Message -ceq 'RESOURCE_CLEANUP_FAILED') `
+                        ("D308_METAMORPHIC_FAILED field={0}" -f $case.Name)
+                    $mutationCases.Add([pscustomobject]@{ Code=$case.Name; Dirty=$dirty })
+                    $mutationCount++
+                }
+                Assert-True ($mutationCount -ge 30) 'D308 metamorphic case count is too small.'
+                $shapeCount = 0
+                foreach ($location in @('Config','HostConfig')) {
+                    $fields = if ($location -ceq 'Config') { @('ExposedPorts') } else {
+                        @('PortBindings','PublishAllPorts','Privileged','ReadonlyRootfs','CapAdd','CapDrop',
+                            'SecurityOpt','Devices','DeviceRequests','PidMode','IpcMode','UTSMode','UsernsMode',
+                            'CgroupnsMode','ExtraHosts','Tmpfs','GroupAdd','Init','AutoRemove') }
+                    foreach ($field in $fields) {
+                        foreach ($variant in @('missing','null','wrong-type')) {
+                            if ($variant -ceq 'null' -and $field -in @('CapAdd','CapDrop','DeviceRequests',
+                                'ExtraHosts','GroupAdd','Init')) { continue }
+                            $dirty = New-D308CleanCandidate $definition $image
+                            if ($variant -ceq 'missing') { $dirty[$location].Remove($field) }
+                            elseif ($variant -ceq 'null') { $dirty[$location][$field] = $null }
+                            else { $dirty[$location][$field] = 'wrong-type' }
+                            $refused = Get-CapturedException {
+                                & $script:E2EModule { param($document,$record) Assert-E2EComposePortSecurityContract $document $record } `
+                                    $dirty $contract
+                            }
+                            Assert-True ($null -ne $refused -and $refused.Message -ceq 'RESOURCE_CLEANUP_FAILED') `
+                                ("D308_SHAPE_FAILED field={0}.{1}.{2}" -f $location,$field,$variant)
+                            $mutationCases.Add([pscustomobject]@{ Code=("{0}.{1}.{2}" -f $location,$field,$variant)
+                                Dirty=$dirty })
+                            $shapeCount++
+                        }
+                    }
+                }
+                Assert-Equal @() @(Get-D294Mutations $world.Events.ToArray()) 'D308 oracle mutated fake resources.'
+                Write-Output ("D308 ORACLE metamorphic={0} shape={1} mutation=0" -f $mutationCount,$shapeCount)
+            }
+            Write-Output ("D308 ORACLE service={0} clean=pass" -f $name)
+        }
+    }
+    $cleanWorld = New-D308OracleWorld $receipt $sources
+    Invoke-D294WithFake $cleanWorld {
+        param($fixtureRoot)
+        $cleanResult = Invoke-D294FullCleanup $cleanWorld $fixtureRoot
+        Assert-D294CleanupSucceeded $cleanWorld $cleanResult `
+            (Get-D294FullSequence $cleanWorld) 'D308 oracle clean full cleanup'
+    }
+    foreach ($entry in $mutationCases) {
+        Assert-D308OracleMutationRefused $world $entry.Dirty $entry.Code
+    }
+    Write-Output ("D308 oracle full-cleanup refusals={0} mutation=0 image=0 audit=0 receipt-delete=0" -f $mutationCases.Count)
+    Write-Output ("D308 oracle passed services={0} engine-api=1.55" -f $sources.Services.Count)
+}
+
+function Invoke-D299TargetedTests {
+    Invoke-D294Preflight
+    $script:Failures = [System.Collections.Generic.List[string]]::new()
+    $receipt = New-TestReceipt
+    Invoke-TestCase 'D299 clean production inventory accepts both service contracts and active state' {
+        $world = New-D294World -Receipt $receipt
+        Invoke-D294WithFake $world {
+            param($fixtureRoot)
+            $failure = Get-D294InventoryFailure $world
+            Assert-True ($null -eq $failure) 'Clean backend/ai-service contract was refused.'
+        }
+    }
+    Invoke-TestCase 'D299 every port, security and state contamination fails before mutation with canonical receipt retained' {
+        foreach ($case in (Get-D299Contaminations)) {
+            $world = New-D294World -Receipt $receipt
+            Invoke-D294WithFake $world {
+                param($fixtureRoot)
+                if ($null -ne $case.Change) { $world.InspectMutation = $case.Change }
+                if ($null -ne $case.PSObject.Properties['Documents']) { $world.InspectDocumentCount = $case.Documents }
+                Assert-D294CleanupRefused $world (Invoke-D294FullCleanup $world $fixtureRoot) @() $case.Name
+            }
+        }
+    }
+    Invoke-TestCase 'D299 missing, null and type-mismatched port/security members fail closed' {
+        foreach ($location in @('Config','HostConfig')) {
+            $fields = if ($location -ceq 'Config') { @('ExposedPorts') } else {
+                @('PortBindings','PublishAllPorts','NetworkMode','Privileged','ReadonlyRootfs','CapAdd','CapDrop',
+                    'SecurityOpt','Devices','DeviceRequests','PidMode','IpcMode','UTSMode','UsernsMode',
+                    'CgroupnsMode','ExtraHosts','Tmpfs','GroupAdd','Init','AutoRemove') }
+            foreach ($field in $fields) {
+                foreach ($variant in @('missing','null','wrong-type')) {
+                    if ($variant -ceq 'null' -and $field -in @('CapAdd','CapDrop','DeviceRequests',
+                        'ExtraHosts','GroupAdd','Init')) { continue }
+                    $world = New-D294World -Receipt $receipt
+                    $fieldName = $field
+                    $locationName = $location
+                    $variantName = $variant
+                    $world.InspectMutation = {
+                        param($d)
+                        $part = $d[$locationName]
+                        if ($variantName -ceq 'missing') { $part.Remove($fieldName) }
+                        elseif ($variantName -ceq 'null') { $part[$fieldName] = $null }
+                        else { $part[$fieldName] = 'wrong-type' }
+                    }.GetNewClosure()
+                    Invoke-D294WithFake $world {
+                        param($fixtureRoot)
+                        Assert-D294CleanupRefused $world (Invoke-D294FullCleanup $world $fixtureRoot) @() `
+                            "$locationName.$fieldName.$variantName"
+                    }
+                }
+            }
+        }
+    }
+    Invoke-TestCase 'D299 raw duplicate port keys are refused before mutation' {
+        foreach ($kind in @('exact','case-variant')) {
+            $world = New-D294World -Receipt $receipt
+            if ($kind -ceq 'exact') { $world.InspectRawDuplicate = $true }
+            else { $world.InspectRawCaseVariant = $true }
+            Invoke-D294WithFake $world {
+                param($fixtureRoot)
+                Assert-D294CleanupRefused $world (Invoke-D294FullCleanup $world $fixtureRoot) @() `
+                    ('raw-duplicate-port-key-' + $kind)
+            }
+        }
+    }
+    Invoke-TestCase 'D299 exact created/exited inactive states retain stopped network semantics' {
+        foreach ($status in @('created','exited')) {
+            $world = New-D294World -Receipt $receipt
+            Invoke-D294WithFake $world {
+                param($fixtureRoot)
+                Set-D294Stopped $world $world.Containers[0]
+                $world.Containers[0].Status = $status
+                $failure = Get-D294InventoryFailure $world
+                Assert-True ($null -eq $failure) "Inactive $status was refused."
+                Assert-D294CleanupSucceeded $world (Invoke-D294FullCleanup $world $fixtureRoot) `
+                    (Get-D294FullSequence $world @($world.Containers[0].Id)) "inactive-$status"
+            }
+        }
+    }
+    Invoke-TestCase 'D308 independent all-service Compose, image and Engine default oracle' {
+        Invoke-D308Oracle
+    }
+    Invoke-TestCase 'D308 executable legacy and canonical receipt boundary' {
+        Invoke-D308RedC
+    }
+    if ($script:Failures.Count -ne 0) {
+        foreach ($failure in $script:Failures) { Write-Output $failure }
+        exit 1
+    }
+    Write-Output 'D299 targeted passed'
+}
+
 function Invoke-FormalTests {
     Invoke-SessionStateTargetedTests
     Invoke-WaitBrowserTargetedTests
@@ -5740,6 +7209,31 @@ if ($Mode -eq 'D273Targeted') {
 
 if ($Mode -eq 'D281Targeted') {
     Invoke-D281TargetedTests
+    exit 0
+}
+
+if ($Mode -eq 'D294Preflight') {
+    Invoke-D294Preflight
+    exit 0
+}
+
+if ($Mode -eq 'D294Targeted') {
+    Invoke-D294TargetedTests
+    exit 0
+}
+
+if ($Mode -eq 'D299Red') {
+    Invoke-D299Red
+    exit 0
+}
+
+if ($Mode -eq 'D299Targeted') {
+    Invoke-D299TargetedTests
+    exit 0
+}
+
+if ($Mode -eq 'D308Oracle') {
+    Invoke-D308Oracle
     exit 0
 }
 
