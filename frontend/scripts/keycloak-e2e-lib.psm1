@@ -3614,7 +3614,11 @@ function Assert-E2EComposePortSecurityContract($Document, $Contract) {
         }
     }
     if ($tmpfs.Count -eq 0) {
-        Assert-E2EExactContractValue $null (Get-E2EExactMember $host 'Tmpfs')
+        foreach ($key in @(Get-E2EExactKeys $host)) {
+            if ([string]::Equals($key, 'Tmpfs', [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw 'RESOURCE_CLEANUP_FAILED'
+            }
+        }
     }
     else { Assert-E2EExactContractValue $tmpfs (Get-E2EExactMember $host 'Tmpfs') }
 }
