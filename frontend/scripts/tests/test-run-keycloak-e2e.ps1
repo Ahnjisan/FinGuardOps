@@ -6616,8 +6616,9 @@ function New-D308CleanCandidate($Definition, $Image) {
         }
         $candidateHost.Tmpfs = $mounts
     }
-    return [ordered]@{ Config=[ordered]@{ ExposedPorts=$(if ($ports.Count -eq 0) { $null } else { $ports }) }
-        HostConfig=$candidateHost }
+    $candidateConfig = [ordered]@{}
+    if ($ports.Count -ne 0) { $candidateConfig.ExposedPorts = $ports }
+    return [ordered]@{ Config=$candidateConfig; HostConfig=$candidateHost }
 }
 
 function New-D308OracleWorld($Receipt, $Sources) {
@@ -6697,7 +6698,7 @@ function Invoke-D308Oracle {
                 'ExtraHosts','Tmpfs','GroupAdd','Init','AutoRemove')) {
                 Assert-D308Field $expected.Host[$field] $candidate.HostConfig[$field] $name $field
             }
-            Assert-D308Field $expected.ExposedPorts $candidate.Config.ExposedPorts $name 'ExposedPorts'
+            Assert-D308Field $expected.ExposedPorts $candidate.Config['ExposedPorts'] $name 'ExposedPorts'
             Assert-D308Field $expected.PortBindings $candidate.HostConfig.PortBindings $name 'PortBindings'
             $failure = Get-CapturedException {
                 & $script:E2EModule { param($document,$record) Assert-E2EComposePortSecurityContract $document $record } `
@@ -6739,7 +6740,9 @@ function Invoke-D308Oracle {
                             'CgroupnsMode','ExtraHosts','Tmpfs','GroupAdd','Init','AutoRemove') }
                     foreach ($field in $fields) {
                         foreach ($variant in @('missing','null','wrong-type')) {
-                            if ($variant -ceq 'missing' -and ($field -ceq 'Init' -or
+                            if ($variant -ceq 'missing' -and (
+                                ($field -ceq 'ExposedPorts' -and $null -eq $expected.ExposedPorts) -or
+                                $field -ceq 'Init' -or
                                 ($field -ceq 'Tmpfs' -and $null -eq (Get-D308Optional $definition 'tmpfs')))) { continue }
                             if ($variant -ceq 'null' -and $field -in @('CapAdd','CapDrop','Devices',
                                 'DeviceRequests','GroupAdd')) { continue }

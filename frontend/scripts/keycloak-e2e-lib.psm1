@@ -3576,7 +3576,14 @@ function Assert-E2EComposePortSecurityContract($Document, $Contract) {
         }
     }
     $expectedExposed = if ($exposed.Count -eq 0) { $null } else { $exposed }
-    Assert-E2EExactContractValue $expectedExposed (Get-E2EExactMember $config 'ExposedPorts')
+    if ($null -eq $expectedExposed) {
+        foreach ($key in @(Get-E2EExactKeys $config)) {
+            if ([string]::Equals($key, 'ExposedPorts', [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw 'RESOURCE_CLEANUP_FAILED'
+            }
+        }
+    }
+    else { Assert-E2EExactContractValue $expectedExposed (Get-E2EExactMember $config 'ExposedPorts') }
     Assert-E2EExactContractValue $bindings (Get-E2EExactMember $host 'PortBindings')
     foreach ($pair in @(
         @('PublishAllPorts', $false), @('Privileged', $false),
