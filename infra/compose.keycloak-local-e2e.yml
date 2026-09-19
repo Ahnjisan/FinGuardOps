@@ -1,5 +1,13 @@
 services:
   ai-service:
+    image: ${FINGUARDOPS_E2E_AI_SERVICE_IMAGE:?FINGUARDOPS_E2E_AI_SERVICE_IMAGE is required}
+    build:
+      labels:
+        org.opencontainers.image.revision: ${FINGUARDOPS_E2E_REVISION:?FINGUARDOPS_E2E_REVISION is required}
+        com.finguardops.e2e.source-tree: ${FINGUARDOPS_E2E_SOURCE_TREE:?FINGUARDOPS_E2E_SOURCE_TREE is required}
+        com.finguardops.e2e.run-id: ${FINGUARDOPS_E2E_RUN_ID:?FINGUARDOPS_E2E_RUN_ID is required}
+        com.finguardops.e2e.repository-id: ${FINGUARDOPS_E2E_REPOSITORY_ID:?FINGUARDOPS_E2E_REPOSITORY_ID is required}
+        com.finguardops.e2e.image-role: ai-service
     command:
       - --host
       - 0.0.0.0
@@ -8,6 +16,14 @@ services:
       - --access-log
 
   backend:
+    image: ${FINGUARDOPS_E2E_BACKEND_IMAGE:?FINGUARDOPS_E2E_BACKEND_IMAGE is required}
+    build:
+      labels:
+        org.opencontainers.image.revision: ${FINGUARDOPS_E2E_REVISION:?FINGUARDOPS_E2E_REVISION is required}
+        com.finguardops.e2e.source-tree: ${FINGUARDOPS_E2E_SOURCE_TREE:?FINGUARDOPS_E2E_SOURCE_TREE is required}
+        com.finguardops.e2e.run-id: ${FINGUARDOPS_E2E_RUN_ID:?FINGUARDOPS_E2E_RUN_ID is required}
+        com.finguardops.e2e.repository-id: ${FINGUARDOPS_E2E_REPOSITORY_ID:?FINGUARDOPS_E2E_REPOSITORY_ID is required}
+        com.finguardops.e2e.image-role: backend
     environment:
       FINGUARDOPS_SECURITY_ISSUER: https://localhost:8443/realms/finguardops-local
       FINGUARDOPS_SECURITY_JWK_SET_URI: http://127.0.0.1:8082/realms/finguardops-local/protocol/openid-connect/certs
@@ -18,6 +34,26 @@ services:
       - "127.0.0.1:8443:8443"
     networks:
       - prometheus-ui
+
+  external-risk-mock:
+    image: ${FINGUARDOPS_E2E_AI_SERVICE_IMAGE:?FINGUARDOPS_E2E_AI_SERVICE_IMAGE is required}
+    build:
+      labels:
+        org.opencontainers.image.revision: ${FINGUARDOPS_E2E_REVISION:?FINGUARDOPS_E2E_REVISION is required}
+        com.finguardops.e2e.source-tree: ${FINGUARDOPS_E2E_SOURCE_TREE:?FINGUARDOPS_E2E_SOURCE_TREE is required}
+        com.finguardops.e2e.run-id: ${FINGUARDOPS_E2E_RUN_ID:?FINGUARDOPS_E2E_RUN_ID is required}
+        com.finguardops.e2e.repository-id: ${FINGUARDOPS_E2E_REPOSITORY_ID:?FINGUARDOPS_E2E_REPOSITORY_ID is required}
+        com.finguardops.e2e.image-role: ai-service
+
+  alertmanager-webhook:
+    image: ${FINGUARDOPS_E2E_AI_SERVICE_IMAGE:?FINGUARDOPS_E2E_AI_SERVICE_IMAGE is required}
+    build:
+      labels:
+        org.opencontainers.image.revision: ${FINGUARDOPS_E2E_REVISION:?FINGUARDOPS_E2E_REVISION is required}
+        com.finguardops.e2e.source-tree: ${FINGUARDOPS_E2E_SOURCE_TREE:?FINGUARDOPS_E2E_SOURCE_TREE is required}
+        com.finguardops.e2e.run-id: ${FINGUARDOPS_E2E_RUN_ID:?FINGUARDOPS_E2E_RUN_ID is required}
+        com.finguardops.e2e.repository-id: ${FINGUARDOPS_E2E_REPOSITORY_ID:?FINGUARDOPS_E2E_REPOSITORY_ID is required}
+        com.finguardops.e2e.image-role: ai-service
 
   keycloak:
     image: quay.io/keycloak/keycloak:26.7.3@sha256:ff4257d0d64efbe99ed1ddfaf07765cc3c36dc7518bf8324d41961327f441c54

@@ -34,21 +34,24 @@ Authorization Code + PKCE S256만 유지하고 `use.refresh.tokens=false`, direc
 비활성화, `offline_access` 미부여를 exact desired state로 reconcile한다. Phase 1은 browser login,
 Frontend callback, Playwright와 Windows CurrentUser Root 인증서 import를 수행하거나 완료로 보지 않는다.
 
-Issue #239 Phase 3의 [`run-keycloak-e2e.ps1`](../frontend/scripts/run-keycloak-e2e.ps1)은 Phase 1
-artifact를 변경하지 않고 exact localhost leaf를 Windows 현재 사용자 Root에 한시적으로 신뢰시킨다.
-전용 Compose project와 실제 Chromium으로 USER Authorization Code + PKCE, refresh-token fail-closed,
-token claim과 Backend 200·401·403을 검증한 뒤 자신이 추가한 exact certificate와 전용 Docker resource,
-임시 Playwright output만 정리한다. pre-existing exact certificate와 `.local` artifact는 유지한다.
+[`run-keycloak-e2e.ps1`](../frontend/scripts/run-keycloak-e2e.ps1)은 `Prepare`, `Service`, `Run`,
+`Validate`, `Cleanup`과 receipt를 소유하는 유일한 lifecycle owner다. 모든 mode는 첫 receipt I/O 전에
+같은 global mutex를 fail-fast로 획득한다. 공식 순서는 `Prepare → Service → Run`이며 raw overlay
+Compose와 raw `--build`는 사용하지 않는다.
 
-Issue #241 SERVICE ingestion 검증은 별도 경계다. `python -B infra/keycloak/verify_e2e.py all`이
-실제 두 SERVICE token으로 거래·행동 신규/재생/충돌과 401·403을 호출하고, PostgreSQL row
-global delta·거래별 cardinality, External Risk 고정 marker와 Rule v2 exact Uvicorn access line이
-최초 거래에서만 각각 1회 증가하는지 검사한다. Backend outcome metric은 실제 hit와 분리해
-보조 검증한다. fresh와
-동일 `keycloak-data` existing-volume 재실행 후 전용 project의 container·network·volume을 모두
-정리한다. 이 명령은 USER password를 verifier·Backend·AI Service에 전달하지 않고 Windows 인증서
-저장소, Chromium, Playwright와 Frontend production 파일을 사용하지 않는다. 공용 local Docker
-image는 자동 삭제하거나 cleanup 실패 대상으로 분류하지 않는다.
+Prepare는 clean committed tree의 commit/tree/repository identity를 build 전후에 검증하고
+`e2e-<commit12>-<runId32>` unique tag와 다섯 ownership label을 사용한다. 기존
+`finguardops-backend:local`, `finguardops-ai-service:local`, `finguardops-playwright-e2e:local`은
+build, tag, remove하지 않는다. Prepared `e2e-image-manifest.json`과 Recovery
+`e2e-image-cleanup-required.json`은 immutable five-field canonical receipt의 파일명으로 상태를
+표현한다.
+
+Issue #241 SERVICE ingestion은 `-Mode Service`가 Python verifier를 child로 실행한다. PowerShell이
+검증한 Backend/AI image reference, commit SHA, tree SHA, run ID와 repository ID만 전달한다. Python은
+Git, receipt, mutex, build와 cleanup을 수행하지 않고 Compose를 `--no-build --pull never`로 실행해
+두 SERVICE token, PostgreSQL delta, External Risk·Rule v2 hit와 Backend outcome metric을 검증한다.
+PowerShell은 성공 후 resource를 정리하고 Prepared receipt를 복원한다. 실패 시 primary error를
+보존하면서 owned resource/image를 정리하며 불완전하면 Recovery receipt를 유지한다.
 
 Keycloak wrapper는 외부 argument를 받지 않고 내부의 exact `kc.sh start --import-realm` 배열만
 `exec`한다. Static verifier는 merged long-syntax mount, entrypoint/command, 승인된 `KC_*`, privilege,

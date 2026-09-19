@@ -259,6 +259,46 @@ def fail(code: str) -> None:
     raise VerificationError(code)
 
 
+@dataclass(frozen=True)
+class OwnerContract:
+    backend_image: str
+    ai_service_image: str
+    commit_sha: str
+    tree_sha: str
+    run_id: str
+    repository_id: str
+
+
+def load_owner_contract(environment: dict[str, str]) -> OwnerContract:
+    names = {
+        "backend_image": "FINGUARDOPS_E2E_BACKEND_IMAGE",
+        "ai_service_image": "FINGUARDOPS_E2E_AI_SERVICE_IMAGE",
+        "commit_sha": "FINGUARDOPS_E2E_REVISION",
+        "tree_sha": "FINGUARDOPS_E2E_SOURCE_TREE",
+        "run_id": "FINGUARDOPS_E2E_RUN_ID",
+        "repository_id": "FINGUARDOPS_E2E_REPOSITORY_ID",
+    }
+    try:
+        values = {field_name: environment[name] for field_name, name in names.items()}
+    except (KeyError, TypeError):
+        fail("OWNER_CONTRACT_INVALID")
+    object_id = r"(?:[0-9a-f]{40}|[0-9a-f]{64})"
+    if (
+        re.fullmatch(object_id, values["commit_sha"]) is None
+        or re.fullmatch(object_id, values["tree_sha"]) is None
+        or re.fullmatch(r"[0-9a-f]{32}", values["run_id"]) is None
+        or re.fullmatch(r"[0-9a-f]{64}", values["repository_id"]) is None
+    ):
+        fail("OWNER_CONTRACT_INVALID")
+    suffix = "e2e-" + values["commit_sha"][:12] + "-" + values["run_id"]
+    if (
+        values["backend_image"] != "finguardops-backend:" + suffix
+        or values["ai_service_image"] != "finguardops-ai-service:" + suffix
+    ):
+        fail("OWNER_CONTRACT_INVALID")
+    return OwnerContract(**values)
+
+
 def environment(service: dict[str, Any]) -> dict[str, str]:
     raw = service.get("environment", {})
     if isinstance(raw, dict):
@@ -772,6 +812,24 @@ def validate_static(config: dict[str, Any], realm: dict[str, Any] | None = None)
         validate_realm(realm)
 
 
+def validate_owner_images(config: dict[str, Any], contract: OwnerContract) -> None:
+    services = config.get("services")
+    if not isinstance(services, dict):
+        fail("OWNER_IMAGE_CONTRACT_INVALID")
+    expected = {
+        "backend": contract.backend_image,
+        "ai-service": contract.ai_service_image,
+        "external-risk-mock": contract.ai_service_image,
+        "alertmanager-webhook": contract.ai_service_image,
+    }
+    if any(
+        not isinstance(services.get(name), dict)
+        or services[name].get("image") != image
+        for name, image in expected.items()
+    ):
+        fail("OWNER_IMAGE_CONTRACT_INVALID")
+
+
 def read_secret(path: Path) -> str:
     try:
         if path.is_symlink() or not path.is_file():
@@ -1279,14 +1337,6 @@ def ingestion_runtime(step: str) -> None:
     print("ingestion step completed: " + step)
 
 
-def validate_cleanup_target(project_name: str, expected_project_name: str) -> None:
-    if (
-        project_name != expected_project_name
-        or re.fullmatch(r"[a-z0-9][a-z0-9_-]{2,62}", project_name) is None
-    ):
-        fail("CLEANUP_TARGET_INVALID")
-
-
 def run_command(
     argv: list[str],
     *,
@@ -1332,10 +1382,12 @@ class HostContext:
         project: str,
         cli_timeout: float,
         deadline_seconds: float,
+        contract: OwnerContract,
     ) -> None:
         self.repo = repo.resolve()
         self.project = project
         self.cli_timeout = cli_timeout
+        self.contract = contract
         self.deadline = time.monotonic() + deadline_seconds
         self.compose = [
             "docker",
@@ -1351,6 +1403,12 @@ class HostContext:
             "POSTGRES_PASSWORD": "local-kc241-placeholder-not-production",
             "GRAFANA_ADMIN_USER": "local-kc241-admin",
             "GRAFANA_ADMIN_PASSWORD": "local-kc241-placeholder-not-production",
+            "FINGUARDOPS_E2E_BACKEND_IMAGE": contract.backend_image,
+            "FINGUARDOPS_E2E_AI_SERVICE_IMAGE": contract.ai_service_image,
+            "FINGUARDOPS_E2E_REVISION": contract.commit_sha,
+            "FINGUARDOPS_E2E_SOURCE_TREE": contract.tree_sha,
+            "FINGUARDOPS_E2E_RUN_ID": contract.run_id,
+            "FINGUARDOPS_E2E_REPOSITORY_ID": contract.repository_id,
         }
 
     def remaining(self) -> float:
@@ -1470,7 +1528,7 @@ def publish_rules(ctx: HostContext) -> None:
     ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     ctx.execute(
         [
-            "run", "--rm", "--no-deps", "-T",
+            "run", "--rm", "--no-deps", "--pull", "never", "-T",
             "-e", "SPRING_PROFILES_ACTIVE=local,rule-v1-default-publication",
             "-e", "FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED=false",
             "backend", "--spring.main.web-application-type=none",
@@ -1670,7 +1728,7 @@ def dependency_hit_counts(ctx: HostContext) -> tuple[int, int]:
 
 def backend_metric_totals(ctx: HostContext) -> tuple[float, float]:
     output = ctx.execute(
-        ["run", "--rm", "--no-deps", "-T", "keycloak-verify", "metric-runtime"],
+        ["run", "--rm", "--no-deps", "--pull", "never", "-T", "keycloak-verify", "metric-runtime"],
         timeout=60,
     )
     try:
@@ -1740,7 +1798,7 @@ def run_ingestion_step(
     before_metrics = backend_metric_totals(ctx)
     output = ctx.execute(
         [
-            "run", "--rm", "--no-deps", "-T", "keycloak-verify",
+            "run", "--rm", "--no-deps", "--pull", "never", "-T", "keycloak-verify",
             "ingestion-runtime", "--step", step,
         ],
         input_bytes=json.dumps(plan, separators=(",", ":")).encode("utf-8"),
@@ -1837,47 +1895,25 @@ def run_ingestion_phase(ctx: HostContext) -> dict[str, str]:
 
 def existing_volume_phase(ctx: HostContext) -> None:
     print("stage: existing-volume-restart")
-    ctx.execute(["up", "-d", "--no-deps", "--force-recreate", "keycloak"], timeout=240)
+    ctx.execute(
+        [
+            "up", "-d", "--no-build", "--pull", "never", "--no-deps",
+            "--force-recreate", "keycloak",
+        ],
+        timeout=240,
+    )
     wait_container(ctx, "keycloak", "healthy")
     ctx.execute(
-        ["run", "--rm", "--no-deps", "-T", "keycloak-bootstrap", "reconcile"],
+        [
+            "run", "--rm", "--no-deps", "--pull", "never", "-T",
+            "keycloak-bootstrap", "reconcile",
+        ],
         timeout=120,
     )
     host_runtime(ctx.repo / "infra" / "keycloak" / ".local" / "tls" / "localhost.crt")
     publish_rules(ctx)
     run_ingestion_phase(ctx)
     print("stage: existing-volume-ingestion-complete")
-
-
-def cleanup_project(ctx: HostContext, original: BaseException | None) -> None:
-    cleanup_error: BaseException | None = None
-    try:
-        run_command(
-            ctx.compose + ["down", "--volumes", "--remove-orphans", "--timeout", "20"],
-            timeout=240,
-            cwd=ctx.repo,
-            environment=ctx.environment,
-        )
-    except BaseException:
-        # A Docker CLI timeout/non-zero result is not residual state evidence.
-        # The exact postcondition inventory below remains authoritative.
-        pass
-    try:
-        resources = project_resources(
-            ctx.project,
-            timeout=max(10, ctx.cli_timeout),
-            repo=ctx.repo,
-            environment=ctx.environment,
-        )
-        assert_resources_empty(resources)
-    except BaseException as error:
-        cleanup_error = error
-    if original is not None:
-        if cleanup_error is not None and hasattr(original, "add_note"):
-            original.add_note("dedicated resource cleanup also failed")
-        raise original
-    if cleanup_error is not None:
-        raise cleanup_error
 
 
 def all_runtime(ctx: HostContext) -> None:
@@ -1891,26 +1927,25 @@ def all_runtime(ctx: HostContext) -> None:
     config = json.loads(ctx.execute(["config", "--format", "json"]))
     realm_path = ctx.repo / "infra" / "keycloak" / "realm" / "finguardops-local-realm.json"
     validate_static(config, json.loads(realm_path.read_text(encoding="utf-8")))
+    validate_owner_images(config, ctx.contract)
     print("stage: static-complete")
-    original: BaseException | None = None
-    try:
-        ctx.execute(
-            ["up", "-d", "--build", "external-risk-mock", "keycloak-bootstrap"],
-            timeout=900,
-        )
-        wait_container(ctx, "external-risk-mock", "healthy")
-        wait_container(ctx, "keycloak-bootstrap", "completed")
-        print("stage: fresh-runtime-ready")
-        host_runtime(ctx.repo / "infra" / "keycloak" / ".local" / "tls" / "localhost.crt")
-        publish_rules(ctx)
-        print("stage: rules-active")
-        run_ingestion_phase(ctx)
-        print("stage: fresh-ingestion-complete")
-        existing_volume_phase(ctx)
-    except BaseException as error:
-        original = error
-    cleanup_project(ctx, original)
-    print("all verification completed: fresh=passed existing-volume=passed cleanup=complete")
+    ctx.execute(
+        [
+            "up", "-d", "--no-build", "--pull", "never",
+            "external-risk-mock", "keycloak-bootstrap",
+        ],
+        timeout=900,
+    )
+    wait_container(ctx, "external-risk-mock", "healthy")
+    wait_container(ctx, "keycloak-bootstrap", "completed")
+    print("stage: fresh-runtime-ready")
+    host_runtime(ctx.repo / "infra" / "keycloak" / ".local" / "tls" / "localhost.crt")
+    publish_rules(ctx)
+    print("stage: rules-active")
+    run_ingestion_phase(ctx)
+    print("stage: fresh-ingestion-complete")
+    existing_volume_phase(ctx)
+    print("all verification completed: fresh=passed existing-volume=passed")
 
 
 class RejectRedirect(urllib.request.HTTPRedirectHandler):
@@ -2069,19 +2104,19 @@ def main(argv: list[str]) -> int:
             repo = args.repo_root.resolve()
             if (
                 not repo.is_absolute()
-                or not (repo / ".git").exists()
                 or PROJECT_PATTERN.fullmatch(args.project) is None
                 or args.cli_timeout <= 0
                 or args.deadline_seconds <= 0
             ):
                 fail("HOST_ARGUMENT_INVALID")
-            validate_cleanup_target(args.project, args.project)
+            contract = load_owner_contract(dict(os.environ))
             all_runtime(
                 HostContext(
                     repo,
                     args.project,
                     args.cli_timeout,
                     args.deadline_seconds,
+                    contract,
                 )
             )
         return 0

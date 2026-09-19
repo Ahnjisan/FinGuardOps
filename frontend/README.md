@@ -1827,8 +1827,10 @@ refresh-token, state, 저장 nonce 삭제·blank·불일치, ID token nonce 누�
 callback 재사용 반례를 각각 실행한다. 정상 경로는 authorize URL과 저장 transaction의 nonce가
 동일하고 256-bit base64url인지, authorize/transaction scope가 exact `openid profile`인지와 stock
 `profile`의 `preferred_username` claim이 실제 발급되는지도 확인한다. repository root의
-`frontend/scripts/run-keycloak-e2e.ps1`이 격리 Chromium container와 전용 Compose project 수명주기를
-함께 관리한다.
+`frontend/scripts/run-keycloak-e2e.ps1`이 유일한 lifecycle owner로서 격리 Chromium container,
+전용 Compose project와 receipt를 함께 관리한다. 공식 순서는 `Prepare → Service → Run`이며 복구에는
+`Cleanup`을 사용한다. 모든 mode는 첫 receipt I/O 전에 같은 global mutex를 fail-fast로 획득한다.
+Python verifier는 `Service`의 child이고 Git, receipt, mutex, build와 cleanup을 수행하지 않는다.
 
 브라우저는 host 브라우저가 아니다. Chromium은 `@playwright/test` 버전과 정확히 일치하고 immutable
 digest로 고정한 공식 Playwright Linux image에서 `frontend/Dockerfile.playwright-e2e`로 빌드한 전용
@@ -1837,10 +1839,12 @@ image 안에서 실행되고, 실행별 NSS database에 검증된 `localhost` le
 `ignoreHTTPSErrors`·`--ignore-certificate-errors`·SPKI allowlist·hostname 우회도 쓰지 않으므로
 strict TLS와 `localhost` 이름 검증이 그대로 성립한다.
 
-준비와 실행은 분리되어 있다. `-Mode Prepare`만 registry와 package archive에 접근해 Compose image를
-pull·build하고 browser image를 빌드하며, `apt`도 그 image build 안에서만 exact version으로 실행되고
-같은 layer에서 cache가 제거된다. 공식 `-Mode Run`은 필요한 모든 image가 local에 있는지 먼저 확인하고,
-어긋나면 registry에 접근하지 않고 고정 오류로 끝난다.
+`-Mode Prepare`만 registry와 package archive에 접근한다. clean committed worktree의 commit/tree와
+repository identity를 build 전후에 확인하고 normal working tree를 build context로 사용한다. 세 image는
+공통 `e2e-<commit12>-<runId32>` suffix와 다섯 ownership label을 사용한다. 기존
+`finguardops-backend:local`, `finguardops-ai-service:local`, `finguardops-playwright-e2e:local`은 build,
+tag, remove하지 않는다. `Service`와 `Run`은 필요한 image를 local inspect로 확인하고 어긋나면 registry에
+접근하지 않고 고정 오류로 끝난다.
 
 browser image 판정은 label에 두지 않는다. label은 누구나 복제할 수 있으므로 Run은 label을 조기 중단
 용도로만 읽고, local 검사만으로 고정 digest base가 local에 있는지, base와 준비 image가 모두
@@ -1865,13 +1869,17 @@ Docker socket·repository working tree·credential·private key mount는 target�
 시작되기 전에 끝난다. bind source는 repository 안의 link 없는 physical 경로로 먼저 해석하므로
 junction이나 prefix만 같은 경로도 다른 값으로 거부된다.
 
-Compose는 `--no-build --pull never`, browser는 `--pull never`로 시작하며 대상은 tag가
+Compose는 `--no-build --pull never`, browser는 `--pull never`로 시작하며 raw Compose `--build`는
+공식 경로에서 금지한다. 대상은 tag가
 아니라 시작 전에 확인한 exact image ID이고, 시작 직후 container가 그 image로 돌고 있는지 한 번 더
 확인한다. 종료 경로의 `finally`는 이번 실행이 만든 exact container ID만 제거한다. Run 경로에는 npm과 npx 실행이 없다. runner는 설치된 `node_modules/@playwright/test/cli.js`를
 현재 Node executable에 argument vector로 넘겨 직접 실행하고, web server는 `frontend`를 cwd로 삼아
 `node node_modules/vite/bin/vite.js`를 실행한다. 둘 다 package 이름이 아니라 설치된 파일 경로라서
 registry fallback 자체가 없고, entry point가 없거나 package version이 다르면 container를 하나도 만들기
-전에 고정 오류로 끝난다. Run 단계의 build·pull·`apt`·npm/npx 다운로드는 0회다.
+전에 고정 오류로 끝난다. Run 단계의 build·pull·`apt`·npm/npx 다운로드는 0회다. Prepared receipt
+`e2e-image-manifest.json`과 Recovery receipt `e2e-image-cleanup-required.json`은 동일한 immutable
+five-field canonical JSON을 파일명으로 전이하며, Run 성공·실패 후 owned resource, unique tag와 receipt를
+정리한다. moved tag, ownership mismatch와 사용 중 image는 삭제하지 않고 Recovery receipt를 유지한다.
 
 container loopback의 5173·8443만 host loopback으로 TCP 중계하며 TLS를 종료하지 않는다. 중계 목록은
 code에 고정되어 있고 relay는 인자를 받지 않으므로 CLI argument·환경 변수·임의 host/port로 넓힐 수

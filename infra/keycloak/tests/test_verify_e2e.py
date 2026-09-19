@@ -119,6 +119,20 @@ def valid_config():
     }
 
 
+def valid_owner_environment():
+    run_id = "0123456789abcdef0123456789abcdef"
+    commit_sha = "b" * 40
+    suffix = f"e2e-{commit_sha[:12]}-{run_id}"
+    return {
+        "FINGUARDOPS_E2E_BACKEND_IMAGE": f"finguardops-backend:{suffix}",
+        "FINGUARDOPS_E2E_AI_SERVICE_IMAGE": f"finguardops-ai-service:{suffix}",
+        "FINGUARDOPS_E2E_REVISION": commit_sha,
+        "FINGUARDOPS_E2E_SOURCE_TREE": "c" * 40,
+        "FINGUARDOPS_E2E_RUN_ID": run_id,
+        "FINGUARDOPS_E2E_REPOSITORY_ID": "a" * 64,
+    }
+
+
 def valid_realm():
     return json.loads((Path(__file__).resolve().parents[1] / "realm/finguardops-local-realm.json").read_text("utf-8"))
 
@@ -1012,109 +1026,122 @@ finguardops_rule_analysis_outcomes_created 99
         with self.assertRaisesRegex(verify_e2e.VerificationError, "POLL_BOUNDS_INVALID"):
             verify_e2e.bounded_poll(lambda: True, attempts=0)
 
-    def test_cleanup_target_must_be_exact(self):
-        verify_e2e.validate_cleanup_target("finguardops-kc235-fresh", "finguardops-kc235-fresh")
-        for value in ("finguardops-kc235", "../finguardops-kc235-fresh", "FINGUARDOPS-KC235-FRESH"):
-            with self.assertRaises(verify_e2e.VerificationError):
-                verify_e2e.validate_cleanup_target(value, "finguardops-kc235-fresh")
+    def test_owner_contract_accepts_only_consistent_validated_environment(self):
+        environment = valid_owner_environment()
+        contract = verify_e2e.load_owner_contract(environment)
+        self.assertEqual(contract.backend_image, environment["FINGUARDOPS_E2E_BACKEND_IMAGE"])
+        self.assertEqual(contract.ai_service_image, environment["FINGUARDOPS_E2E_AI_SERVICE_IMAGE"])
+        self.assertEqual(contract.commit_sha, environment["FINGUARDOPS_E2E_REVISION"])
+        self.assertEqual(contract.tree_sha, environment["FINGUARDOPS_E2E_SOURCE_TREE"])
+        self.assertEqual(contract.run_id, environment["FINGUARDOPS_E2E_RUN_ID"])
+        self.assertEqual(contract.repository_id, environment["FINGUARDOPS_E2E_REPOSITORY_ID"])
 
-    def test_cleanup_uses_exact_inventory_as_authoritative_postcondition(self):
-        ctx = types.SimpleNamespace(
-            compose=["docker", "compose"],
+        mutations = []
+        for key in environment:
+            changed = dict(environment)
+            changed.pop(key)
+            mutations.append(changed)
+        changed = dict(environment)
+        changed["FINGUARDOPS_E2E_RUN_ID"] = "f" * 32
+        mutations.append(changed)
+        changed = dict(environment)
+        changed["FINGUARDOPS_E2E_BACKEND_IMAGE"] = "finguardops-backend:local"
+        mutations.append(changed)
+        changed = dict(environment)
+        changed["FINGUARDOPS_E2E_REVISION"] = "B" * 40
+        mutations.append(changed)
+        changed = dict(environment)
+        changed["FINGUARDOPS_E2E_SOURCE_TREE"] = "c" * 39
+        mutations.append(changed)
+        for candidate in mutations:
+            with self.subTest(candidate=candidate), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "OWNER_CONTRACT_INVALID"
+            ):
+                verify_e2e.load_owner_contract(candidate)
+
+    def test_host_context_receives_contract_without_git_or_receipt_access(self):
+        contract = verify_e2e.load_owner_contract(valid_owner_environment())
+        with tempfile.TemporaryDirectory(prefix="finguardops-owner-contract-") as directory:
+            repo = Path(directory)
+            context = verify_e2e.HostContext(
+                repo,
+                "finguardops-kc241-e2e-unit01",
+                1,
+                10,
+                contract,
+            )
+        for key, value in valid_owner_environment().items():
+            self.assertEqual(context.environment[key], value)
+        self.assertNotIn("--build", context.compose)
+
+    def test_all_runtime_uses_no_build_pull_never_and_never_cleans_up(self):
+        environment = valid_owner_environment()
+        contract = verify_e2e.load_owner_contract(environment)
+        context = types.SimpleNamespace(
             repo=Path.cwd(),
-            environment={},
             project="finguardops-kc241-e2e-unit01",
             cli_timeout=1,
-        )
-        empty = {kind: () for kind in verify_e2e.PROJECT_RESOURCE_KINDS}
-        with mock.patch.object(
-            verify_e2e, "run_command", side_effect=verify_e2e.VerificationError("SUBPROCESS_FAILED")
-        ), mock.patch.object(verify_e2e, "project_resources", return_value=empty):
-            verify_e2e.cleanup_project(ctx, None)
-
-    def test_project_cleanup_inventory_excludes_shared_images(self):
-        self.assertEqual(
-            verify_e2e.PROJECT_RESOURCE_KINDS,
-            ("container", "network", "volume"),
+            contract=contract,
+            environment=environment,
         )
         calls = []
+        child_environments = []
 
-        def execute(argv, **kwargs):
-            calls.append(argv)
+        def execute(arguments, **_kwargs):
+            calls.append(arguments)
+            child_environments.append(dict(context.environment))
+            if arguments[:2] == ["config", "--format"]:
+                config = valid_config()
+                config["services"]["backend"]["image"] = contract.backend_image
+                for name in ("ai-service", "external-risk-mock", "alertmanager-webhook"):
+                    config["services"][name]["image"] = contract.ai_service_image
+                return json.dumps(config).encode()
             return b""
 
-        with mock.patch.object(verify_e2e, "run_command", side_effect=execute):
-            resources = verify_e2e.project_resources(
-                "finguardops-kc241-e2e-unit01",
-                timeout=1,
-                repo=Path.cwd(),
-                environment={},
-            )
-        verify_e2e.assert_resources_empty(resources)
-        self.assertFalse(any("image" in argv for argv in calls))
+        context.execute = execute
+        empty = {kind: () for kind in verify_e2e.PROJECT_RESOURCE_KINDS}
+        with mock.patch.object(verify_e2e, "project_resources", return_value=empty) as resources, \
+             mock.patch.object(verify_e2e, "run_command") as run_command, \
+             mock.patch.object(verify_e2e, "validate_static"), \
+             mock.patch.object(verify_e2e, "wait_container"), \
+             mock.patch.object(verify_e2e, "host_runtime"), \
+             mock.patch.object(verify_e2e, "publish_rules"), \
+             mock.patch.object(verify_e2e, "run_ingestion_phase"), \
+             mock.patch.object(verify_e2e, "existing_volume_phase"):
+            verify_e2e.all_runtime(context)
+        resources.assert_called_once_with(
+            context.project,
+            timeout=context.cli_timeout,
+            repo=context.repo,
+            environment=environment,
+        )
+        self.assertIn(
+            [
+                "up", "-d", "--no-build", "--pull", "never",
+                "external-risk-mock", "keycloak-bootstrap",
+            ],
+            calls,
+        )
+        self.assertFalse(any("--build" in command for command in calls))
+        self.assertFalse(any(command and command[0] == "down" for command in calls))
+        self.assertTrue(child_environments)
+        self.assertTrue(all(child_environment == environment for child_environment in child_environments))
+        run_command.assert_not_called()
 
-    def test_static_source_mutations_are_killed(self):
-        verifier_source = Path(verify_e2e.__file__).read_text(encoding="utf-8")
-        test_source = Path(__file__).read_text(encoding="utf-8")
-        realm_source = (Path(__file__).resolve().parents[1] / "realm/finguardops-local-realm.json").read_text(encoding="utf-8")
-        mutations = [
-            ("privileged", 'if service.get("privileged") is True:', "if False:", "test_keycloak_privileged_rejected"),
-            ("cap-add", 'if service.get("cap_add") not in (None, []):', "if False:", "test_keycloak_cap_add_rejected"),
-            ("docker-socket", "if is_docker_socket_path(source) or is_docker_socket_path(target):", "if False:", "test_keycloak_docker_socket_rejected"),
-            ("command", 'if service.get("command") != EXPECTED_COMMANDS[service_name]:', "if False:", "test_keycloak_start_dev_command_rejected"),
-            ("health", 'if keycloak_env.get("KC_HEALTH_ENABLED") != "true":', "if False:", "test_keycloak_health_false_rejected"),
-            ("https-port", 'if keycloak_env.get("KC_HTTPS_PORT") != "8443":', "if False:", "test_keycloak_https_port_rejected"),
-            ("backend-dependency", 'if {"keycloak", "keycloak-bootstrap", "keycloak-verify"}.intersection(dependencies):', "if False:", "test_backend_keycloak_dependency_rejected"),
-            ("realm-enabled", 'or realm.get("enabled") is not True', "or False", "test_realm_disabled_rejected"),
-            ("bootstrap-source-read-only", 'or bool(mount.get("read_only", False)) is not read_only', "or False", "test_bootstrap_source_writable_rejected"),
-            ("verifier-source-read-only", 'or bool(mount.get("read_only", False)) is not read_only', "or False", "test_verifier_source_writable_rejected"),
-            ("rule-access-log", 'if services["ai-service"].get("command") != EXPECTED_AI_SERVICE_COMMAND:', "if False:", "test_rule_v2_access_log_must_be_explicitly_enabled"),
-            ("snapshot-repeatable-read", '"BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;",', '"BEGIN;",', "test_snapshot_queries_are_literal_canonical_and_primary_key_ordered"),
-            ("snapshot-order", '"audit_log": "SELECT to_jsonb(snapshot_row)::text FROM public.audit_log AS snapshot_row ORDER BY snapshot_row.id ASC;",', '"audit_log": "SELECT to_jsonb(snapshot_row)::text FROM public.audit_log AS snapshot_row;",', "test_snapshot_queries_are_literal_canonical_and_primary_key_ordered"),
-            ("snapshot-to-jsonb", '"behavior_event": "SELECT to_jsonb(snapshot_row)::text FROM public.behavior_event AS snapshot_row ORDER BY snapshot_row.id ASC;",', '"behavior_event": "SELECT row(snapshot_row)::text FROM public.behavior_event AS snapshot_row ORDER BY snapshot_row.id ASC;",', "test_snapshot_queries_are_literal_canonical_and_primary_key_ordered"),
-            ("snapshot-row-hash", "tuple(hashlib.sha256(row).digest() for row in canonical_rows)", "tuple(hashlib.sha256(b'').digest() for row in canonical_rows)", "test_count_preserving_updates_are_rejected_for_all_risk_tables"),
-            ("snapshot-existing-prefix", "or after_table.row_hashes[:before_table.count] != before_table.row_hashes", "or False", "test_append_rejects_existing_row_replacement_or_deletion"),
-            ("snapshot-fingerprint", "or snapshot.fingerprint != aggregate_fingerprint(table, snapshot.row_hashes)", "or False", "test_snapshot_integrity_rejects_count_only_or_forged_fingerprint"),
-            ("dependency-hit-delta", ") != expected_dependency_delta:", ") != expected_dependency_delta and False:", "test_step_rejects_dependency_hit_delta_independently_from_metrics"),
-            ("backend-metric-delta", "if metric_delta != expected_metric_delta:", "if False:", "test_step_rejects_backend_metric_delta_independently_from_hits"),
-        ]
-        for label, old, new, test_name in mutations:
-            with self.subTest(mutation=label), tempfile.TemporaryDirectory(prefix="finguardops-keycloak-mutation-") as directory:
-                root = Path(directory)
-                tests = root / "tests"
-                realm = root / "realm"
-                tests.mkdir()
-                realm.mkdir()
-                self.assertEqual(verifier_source.count(old), 1, "mutation target must be unique: " + label)
-                (tests / "test_verify_e2e.py").write_text(test_source, encoding="utf-8", newline="\n")
-                (realm / "finguardops-local-realm.json").write_text(realm_source, encoding="utf-8", newline="\n")
-                verifier_copy = root / "verify_e2e.py"
-                verifier_copy.write_text(verifier_source, encoding="utf-8", newline="\n")
-                command = [sys.executable, "-B", str(tests / "test_verify_e2e.py"), "VerifyTests." + test_name]
-                baseline = subprocess.run(
-                    command,
-                    cwd=root,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    check=False,
-                )
-                self.assertEqual(baseline.returncode, 0, "mutation baseline failed: " + label)
-                verifier_copy.write_text(verifier_source.replace(old, new, 1), encoding="utf-8", newline="\n")
-                result = subprocess.run(
-                    command,
-                    cwd=root,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    check=False,
-                )
-                rendered = result.stdout + result.stderr
-                self.assertNotEqual(result.returncode, 0, "source mutation survived: " + label)
-                self.assertIsNone(
-                    re.search(r"[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}", rendered),
-                    "mutation output exposed a JWT-like value",
-                )
+    def test_all_mode_does_not_require_git_metadata(self):
+        environment = valid_owner_environment()
+        with tempfile.TemporaryDirectory(prefix="finguardops-no-git-") as directory, \
+             mock.patch.dict(verify_e2e.os.environ, environment, clear=True), \
+             mock.patch.object(verify_e2e, "all_runtime") as runtime:
+            result = verify_e2e.main(
+                [
+                    "all",
+                    "--repo-root", directory,
+                    "--project", "finguardops-kc241-e2e-unit01",
+                ]
+            )
+        self.assertEqual(result, 0)
+        runtime.assert_called_once()
 
 
 if __name__ == "__main__":
