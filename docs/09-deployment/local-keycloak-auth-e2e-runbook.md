@@ -54,6 +54,24 @@ bash infra/keycloak/setup-local-secrets.sh
 bash infra/keycloak/setup-local-tls.sh
 ```
 
+The directory/file fallback can be `UNAVAILABLE` only when the source and destination inspections both
+succeed and both are empty (or, for a file, the bytes match exactly). Native probe stdout/stderr is not
+forwarded; failures use fixed identities. Unexpected inspection, command, or cleanup results fail the test.
+Windows records exactly five deferred symlink cases, while Linux/WSL requires five actual symlinks and
+records zero deferred or skipped cases.
+
+Certificate subject의 단일 source는 TLS script가 생성하는 OpenSSL config이며 `[subject]`의
+`CN=localhost`로 고정한다. Windows Git Bash는 native OpenSSL에 전달하는 slash-leading subject
+argument를 Windows path로 변환할 수 있으므로 별도 slash-leading `-subj` argument를 사용하지 않는다.
+공식 실행 명령은 위와 같이 변경 없이 `bash infra/keycloak/setup-local-tls.sh`이다.
+TLS shell test의 Windows Git Bash directory/file probe는 선조건, `ln -s` 종료값, object type,
+`test -L`, reparse 여부와 cleanup·residue를 확인한다. `ln -s`가 0이지만 symbolic link와 reparse가
+아니고, directory는 source/destination이 모두 비어 있거나 file은 byte가 정확히 같은 검증된
+copy-style fallback일 때만 capability unavailable로 판정해 symlink 전용 fixture 5건을 deferred한다.
+선조건·명령·type·reparse·fallback 내용·cleanup에서 예상 밖이거나 모순된 결과는 test failure이며
+deferred로 바꾸지 않는다. Junction fixture와 나머지 검증은 계속 실행한다. Linux/WSL에서는
+directory/file probe가 모두 실제 symbolic link를 만들어야 하며 deferred/skip 수는 0이어야 한다.
+
 TLS script는 certificate/key 중 하나라도 있으면 overwrite하지 않고 실패한다. Secret script는 fresh
 상태에서 admin·SERVICE 3개와 USER password를 만들며, 기존 3개가 모두 유효하고 USER password만 없을
 때에는 기존 값을 유지한 채 USER password 하나만 추가한다. 그 밖의 partial 상태와 4개가 이미 있는

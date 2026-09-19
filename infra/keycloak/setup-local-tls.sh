@@ -152,7 +152,6 @@ printf '%s\n' \
 
 openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 30 \
   -config "$temporary_config" \
-  -subj '/CN=localhost' \
   -addext 'basicConstraints=critical,CA:FALSE' \
   -addext 'keyUsage=critical,digitalSignature,keyEncipherment' \
   -addext 'extendedKeyUsage=serverAuth' \
