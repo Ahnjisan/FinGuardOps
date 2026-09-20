@@ -92,6 +92,27 @@ def valid_config():
         "KEYCLOAK_INTERNAL_BASE_URL": verify_e2e.INTERNAL_BASE_URL,
         "KEYCLOAK_MANAGEMENT_BASE_URL": verify_e2e.MANAGEMENT_BASE_URL,
     }
+    run_fixture = service(
+        verify_e2e.HELPER_IMAGE,
+        secrets=verify_e2e.EXPECTED_SECRETS["keycloak-run-fixture"],
+    )
+    run_fixture["entrypoint"] = ["python", "-B", "/opt/finguardops/verify_e2e.py"]
+    run_fixture["command"] = ["run-fixture"]
+    run_fixture["volumes"] = [
+        {"type": "bind", "source": "infra/keycloak/verify_e2e.py", "target": "/opt/finguardops/verify_e2e.py", "read_only": True},
+        {"type": "bind", "source": "C:/Temp/finguardops-keycloak-e2e-fixture-" + "0" * 32, "target": "/finguardops/fixture", "read_only": False},
+    ]
+    run_fixture["environment"] = {
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "KEYCLOAK_INTERNAL_BASE_URL": verify_e2e.INTERNAL_BASE_URL,
+        "KEYCLOAK_MANAGEMENT_BASE_URL": verify_e2e.MANAGEMENT_BASE_URL,
+        "FINGUARDOPS_E2E_RUN_ID": "0" * 32,
+        "FINGUARDOPS_E2E_REPOSITORY_ID": "a" * 64,
+        "FINGUARDOPS_E2E_REVISION": "b" * 40,
+        "FINGUARDOPS_E2E_SOURCE_TREE": "c" * 40,
+        verify_e2e.FIXTURE_PLAN_ENVIRONMENT: "",
+    }
+    run_fixture["depends_on"] = {"backend": {"condition": "service_started"}}
     keycloak["volumes"] = [
         {"type": "volume", "source": "keycloak-data", "target": "/opt/keycloak/data"},
         {"type": "bind", "source": "infra/keycloak/realm/finguardops-local-realm.json", "target": "/opt/keycloak/data/import/finguardops-local-realm.json", "read_only": True},
@@ -102,6 +123,7 @@ def valid_config():
         "keycloak": keycloak,
         "keycloak-bootstrap": bootstrap,
         "keycloak-verify": verifier,
+        "keycloak-run-fixture": run_fixture,
     }
     for name in verify_e2e.EXPECTED_KEYCLOAK_SERVICES - set(services):
         services[name] = {}
@@ -173,11 +195,43 @@ def valid_plan():
     }
 
 
+def valid_fixture_identity():
+    owner = valid_owner_environment()
+    return {
+        "schemaVersion": 1,
+        "runId": owner["FINGUARDOPS_E2E_RUN_ID"],
+        "repositoryId": owner["FINGUARDOPS_E2E_REPOSITORY_ID"],
+        "commitSha": owner["FINGUARDOPS_E2E_REVISION"],
+        "treeSha": owner["FINGUARDOPS_E2E_SOURCE_TREE"],
+        "transactionId": valid_plan()["transactionId"],
+        "caseId": "d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703",
+        "expectedRiskLevel": "HIGH",
+        "expectedResponseOutcome": "ADDITIONAL_AUTH_REQUIRED",
+        "expectedInitialCaseStatus": "OPEN",
+    }
+
+
 def snapshot_fixture(rows_by_table=None):
     rows_by_table = rows_by_table or {}
     return {
         table: verify_e2e.table_snapshot(table, tuple(rows_by_table.get(table, ())))
         for table in verify_e2e.BUSINESS_TABLES
+    }
+
+
+def valid_run_fixture_state():
+    owner = valid_owner_environment()
+    return {
+        "schemaVersion": 1,
+        "runId": owner["FINGUARDOPS_E2E_RUN_ID"],
+        "repositoryId": owner["FINGUARDOPS_E2E_REPOSITORY_ID"],
+        "commitSha": owner["FINGUARDOPS_E2E_REVISION"],
+        "treeSha": owner["FINGUARDOPS_E2E_SOURCE_TREE"],
+        "composeProject": "finguardops-kc241-e2e-unit01",
+        "plan": valid_plan(),
+        "database": verify_e2e.snapshot_to_state(snapshot_fixture()),
+        "dependencies": [0, 0],
+        "metrics": [0.0, 0.0],
     }
 
 
@@ -1142,6 +1196,258 @@ finguardops_rule_analysis_outcomes_created 99
             )
         self.assertEqual(result, 0)
         runtime.assert_called_once()
+
+    def test_run_fixture_manifest_canonical_round_trip_and_schema_rejections(self):
+        identity = valid_fixture_identity()
+        canonical = verify_e2e.fixture_manifest_bytes(identity)
+        self.assertLessEqual(len(canonical), 1024)
+        self.assertFalse(canonical.startswith(b"\xef\xbb\xbf"))
+        self.assertTrue(canonical.endswith(b"\n"))
+        self.assertNotIn(b"\r", canonical)
+        self.assertEqual(verify_e2e.parse_fixture_manifest_bytes(canonical), identity)
+        text = canonical.decode("utf-8")
+        malformed = {
+            "duplicate": text.replace('"schemaVersion":1,', '"schemaVersion":1,"schemaVersion":1,', 1),
+            "unknown": text[:-2] + ',"extra":"x"}\n',
+            "reordered": text.replace('{"schemaVersion":1,"runId":', '{"runId":').replace(
+                ',"repositoryId":', ',"schemaVersion":1,"repositoryId":', 1
+            ),
+            "missing": text.replace(',"caseId":"' + identity["caseId"] + '"', "", 1),
+            "schema-float": text.replace('"schemaVersion":1,', '"schemaVersion":1.0,', 1),
+            "wrong-risk": text.replace('"HIGH"', '"LOW"'),
+            "wrong-status": text.replace('"OPEN"', '"IN_REVIEW"'),
+            "uppercase-uuid": text.replace(identity["transactionId"], identity["transactionId"].upper()),
+        }
+        for name, candidate in malformed.items():
+            with self.subTest(name=name), self.assertRaises(verify_e2e.VerificationError):
+                verify_e2e.parse_fixture_manifest_bytes(candidate.encode("utf-8"))
+
+    def test_run_fixture_manifest_atomic_write_and_collision_boundaries(self):
+        identity = valid_fixture_identity()
+        with tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory:
+            root = Path(directory)
+            path = verify_e2e.write_fixture_manifest(root, identity)
+            self.assertEqual(path.name, verify_e2e.FIXTURE_MANIFEST_NAME)
+            self.assertEqual(tuple(item.name for item in root.iterdir()), (verify_e2e.FIXTURE_MANIFEST_NAME,))
+            self.assertEqual(path.read_bytes(), verify_e2e.fixture_manifest_bytes(identity))
+            with self.assertRaisesRegex(verify_e2e.VerificationError, "FIXTURE_MANIFEST_FINAL_EXISTS"):
+                verify_e2e.write_fixture_manifest(root, identity)
+        with tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory, \
+             mock.patch.object(verify_e2e, "rename_noreplace", side_effect=verify_e2e.VerificationError("FIXTURE_MANIFEST_RENAME_FAILED")):
+            with self.assertRaisesRegex(verify_e2e.VerificationError, "FIXTURE_MANIFEST_RENAME_FAILED"):
+                verify_e2e.write_fixture_manifest(Path(directory), identity)
+            self.assertEqual(tuple(Path(directory).iterdir()), ())
+
+    def test_run_fixture_manifest_create_write_and_flush_failures_are_fixed_and_clean(self):
+        identity = valid_fixture_identity()
+        with tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory, \
+             mock.patch.object(verify_e2e.os, "open", side_effect=OSError("NeverReflect secret path")):
+            with self.assertRaisesRegex(verify_e2e.VerificationError, "FIXTURE_MANIFEST_TEMP_CREATE_FAILED"):
+                verify_e2e.write_fixture_manifest(Path(directory), identity)
+            self.assertEqual(tuple(Path(directory).iterdir()), ())
+
+        class BrokenStream:
+            def __init__(self, descriptor, fail_at):
+                self.descriptor = descriptor
+                self.fail_at = fail_at
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                verify_e2e.os.close(self.descriptor)
+            def write(self, _value):
+                if self.fail_at == "write":
+                    raise OSError("NeverReflect token")
+            def flush(self):
+                if self.fail_at == "flush":
+                    raise OSError("NeverReflect credential")
+            def fileno(self):
+                return self.descriptor
+
+        real_fdopen = verify_e2e.os.fdopen
+        for stage in ("write", "flush"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory, \
+                 mock.patch.object(verify_e2e.os, "fdopen", side_effect=lambda descriptor, *_args, value=stage, **_kwargs: BrokenStream(descriptor, value)):
+                with self.assertRaisesRegex(verify_e2e.VerificationError, "FIXTURE_MANIFEST_WRITE_FAILED") as error:
+                    verify_e2e.write_fixture_manifest(Path(directory), identity)
+                self.assertNotIn("NeverReflect", str(error.exception))
+                self.assertEqual(tuple(Path(directory).iterdir()), ())
+        self.assertTrue(callable(real_fdopen))
+
+    def test_run_fixture_public_api_flow_uses_exact_response_identity(self):
+        plan = valid_plan()
+        transaction_response = {
+            "transactionId": plan["transactionId"],
+            "processingStatus": "ADDITIONAL_AUTH_REQUIRED",
+            "riskLevel": "HIGH",
+            "riskResponseOutcome": "ADDITIONAL_AUTH_REQUIRED",
+            "adoptedDetectionResultId": "b81ade9f-d451-43e2-b97b-d7b24e9a0988",
+            "caseId": valid_fixture_identity()["caseId"],
+            "createdAt": "2026-09-20T00:00:00Z",
+            "traceId": "not-exported",
+        }
+        responses = [
+            {"eventId": plan["passwordEventId"]},
+            {"eventId": plan["transferLimitEventId"]},
+            transaction_response,
+        ]
+        with mock.patch.object(verify_e2e, "service_tokens", return_value=("tx-token", "behavior-token")), \
+             mock.patch.object(verify_e2e, "request_backend", side_effect=responses) as request:
+            result = verify_e2e.create_run_fixture(plan)
+        self.assertEqual(result, {"transactionId": plan["transactionId"], "caseId": transaction_response["caseId"]})
+        self.assertEqual(request.call_count, 3)
+        for field, value in (("transactionId", valid_fixture_identity()["caseId"]), ("caseId", "not-a-uuid"), ("riskLevel", "LOW"), ("riskResponseOutcome", "ALLOW"), ("processingStatus", "COMPLETED"), ("createdAt", None), ("traceId", [])):
+            broken = dict(transaction_response)
+            broken[field] = value
+            with self.subTest(field=field), \
+                 mock.patch.object(verify_e2e, "service_tokens", return_value=("tx-token", "behavior-token")), \
+                 mock.patch.object(verify_e2e, "request_backend", side_effect=[responses[0], responses[1], broken]), \
+                 self.assertRaisesRegex(verify_e2e.VerificationError, "RUN_FIXTURE_TRANSACTION_RESPONSE_INVALID"):
+                verify_e2e.create_run_fixture(plan)
+        with mock.patch.object(verify_e2e, "service_tokens", side_effect=verify_e2e.VerificationError("SERVICE_AUTH_FAILED")), \
+             self.assertRaisesRegex(verify_e2e.VerificationError, "SERVICE_AUTH_FAILED"):
+            verify_e2e.create_run_fixture(plan)
+
+    def test_run_fixture_before_after_preserve_authoritative_exact_validation(self):
+        environment = valid_owner_environment()
+        contract = verify_e2e.load_owner_contract(environment)
+        plan = valid_plan()
+        with tempfile.TemporaryDirectory(prefix="fixture-host-") as parent:
+            directory = Path(parent) / ("finguardops-keycloak-e2e-fixture-" + contract.run_id)
+            directory.mkdir()
+            identity = valid_fixture_identity()
+            context = types.SimpleNamespace(
+                contract=contract,
+                environment=environment,
+                project="finguardops-kc241-e2e-unit01",
+            )
+            before_snapshot = snapshot_fixture()
+            with mock.patch.object(verify_e2e, "create_plan", return_value=plan), \
+                 mock.patch.object(verify_e2e, "publish_rules") as publish, \
+                 mock.patch.object(verify_e2e, "transaction_cardinality", return_value=verify_e2e.expected_transaction_cardinality(False, False, False)), \
+                 mock.patch.object(verify_e2e, "database_snapshot", return_value=before_snapshot), \
+                 mock.patch.object(verify_e2e, "dependency_hit_counts", return_value=(0, 0)), \
+                 mock.patch.object(verify_e2e, "backend_metric_totals", return_value=(0.0, 0.0)):
+                state = verify_e2e.run_fixture_before(context, directory)
+            publish.assert_called_once_with(context)
+            encoded = verify_e2e.run_fixture_state_bytes(state)
+            self.assertEqual(verify_e2e.parse_run_fixture_state(encoded), state)
+            (directory / verify_e2e.FIXTURE_MANIFEST_NAME).write_bytes(
+                verify_e2e.fixture_manifest_bytes(identity)
+            )
+            with mock.patch.object(verify_e2e, "transaction_cardinality", return_value=verify_e2e.expected_transaction_cardinality(True, True, False)), \
+                 mock.patch.object(verify_e2e, "database_snapshot", return_value=snapshot_fixture()), \
+                 mock.patch.object(verify_e2e, "assert_global_delta") as delta, \
+                 mock.patch.object(verify_e2e, "dependency_hit_counts", return_value=(1, 1)), \
+                 mock.patch.object(verify_e2e, "backend_metric_totals", return_value=(1.0, 1.0)), \
+                 mock.patch.object(verify_e2e, "transaction_case_id", return_value=identity["caseId"]):
+                verify_e2e.run_fixture_after(context, directory, state)
+            delta.assert_called_once()
+
+    def test_run_fixture_worker_writes_authoritative_identity_and_never_reflects_raw_failure(self):
+        plan = valid_plan()
+        response = {"transactionId": plan["transactionId"], "caseId": valid_fixture_identity()["caseId"]}
+        plan_value = base64.b64encode(json.dumps(plan, separators=(",", ":")).encode("utf-8")).decode("ascii")
+        output = io.StringIO()
+        environment = valid_owner_environment() | {verify_e2e.FIXTURE_PLAN_ENVIRONMENT: plan_value}
+        with mock.patch.dict(verify_e2e.os.environ, environment, clear=True), \
+             mock.patch.object(verify_e2e, "create_run_fixture", return_value=response), \
+             mock.patch.object(verify_e2e, "write_fixture_manifest") as writer, \
+             contextlib.redirect_stdout(output):
+            verify_e2e.run_fixture_worker()
+        identity = writer.call_args.args[1]
+        self.assertEqual(identity["transactionId"], plan["transactionId"])
+        self.assertEqual(identity["caseId"], response["caseId"])
+        self.assertNotIn("traceId", identity)
+        self.assertEqual(output.getvalue(), "run fixture completed: risk=HIGH outcome=ADDITIONAL_AUTH_REQUIRED case=OPEN\n")
+
+        stderr = io.StringIO()
+        with mock.patch.dict(verify_e2e.os.environ, {verify_e2e.FIXTURE_PLAN_ENVIRONMENT: plan_value}, clear=True), \
+             mock.patch.object(verify_e2e, "create_run_fixture", side_effect=RuntimeError("NeverReflectRawToken")), \
+             contextlib.redirect_stderr(stderr):
+            result = verify_e2e.main(["run-fixture"])
+        self.assertEqual(result, 1)
+        self.assertEqual(stderr.getvalue(), "verification failed: UNEXPECTED_ERROR\n")
+
+    def test_run_fixture_before_after_cli_uses_canonical_stdin_state(self):
+        state = valid_run_fixture_state()
+        environment = valid_owner_environment()
+        encoded = base64.b64encode(verify_e2e.run_fixture_state_bytes(state)).decode("ascii")
+        with tempfile.TemporaryDirectory(prefix="finguardops-keycloak-e2e-fixture-") as parent:
+            directory = Path(parent) / ("finguardops-keycloak-e2e-fixture-" + environment["FINGUARDOPS_E2E_RUN_ID"])
+            directory.mkdir()
+            before_output = io.StringIO()
+            with mock.patch.dict(verify_e2e.os.environ, environment, clear=True), \
+                 mock.patch.object(verify_e2e, "run_fixture_before", return_value=state) as before, \
+                 contextlib.redirect_stdout(before_output):
+                result = verify_e2e.main([
+                    "run-fixture-before", "--repo-root", parent,
+                    "--project", "finguardops-kc241-e2e-unit01",
+                    "--fixture-directory", str(directory),
+                ])
+            self.assertEqual(result, 0)
+            self.assertEqual(before_output.getvalue(), encoded + "\n")
+            before.assert_called_once()
+
+            stdin = types.SimpleNamespace(buffer=io.BytesIO((encoded + "\r\n").encode("ascii")))
+            after_output = io.StringIO()
+            with mock.patch.dict(verify_e2e.os.environ, environment, clear=True), \
+                 mock.patch.object(verify_e2e.sys, "stdin", stdin), \
+                 mock.patch.object(verify_e2e, "run_fixture_after") as after, \
+                 contextlib.redirect_stdout(after_output):
+                result = verify_e2e.main([
+                    "run-fixture-after", "--repo-root", parent,
+                    "--project", "finguardops-kc241-e2e-unit01",
+                    "--fixture-directory", str(directory),
+                ])
+            self.assertEqual(result, 0)
+            self.assertEqual(after_output.getvalue(), "")
+            after.assert_called_once()
+
+    def test_run_fixture_state_binds_every_owner_identity_before_after(self):
+        state = valid_run_fixture_state()
+        canonical = verify_e2e.run_fixture_state_bytes(state)
+        self.assertEqual(verify_e2e.parse_run_fixture_state(canonical), state)
+        context = types.SimpleNamespace(
+            contract=verify_e2e.load_owner_contract(valid_owner_environment()),
+            environment=valid_owner_environment(),
+            project=state["composeProject"],
+        )
+        for key, replacement in (
+            ("runId", "f" * 32),
+            ("repositoryId", "f" * 64),
+            ("commitSha", "d" * 40),
+            ("treeSha", "e" * 40),
+            ("composeProject", "finguardops-kc241-e2e-foreign01"),
+        ):
+            candidate = dict(state)
+            candidate[key] = replacement
+            parsed = verify_e2e.parse_run_fixture_state(
+                verify_e2e.run_fixture_state_bytes(candidate)
+            )
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as parent:
+                directory = Path(parent) / (
+                    "finguardops-keycloak-e2e-fixture-" + context.contract.run_id
+                )
+                directory.mkdir()
+                with self.assertRaisesRegex(
+                    verify_e2e.VerificationError, "RUN_FIXTURE_STATE_IDENTITY_INVALID"
+                ), mock.patch.object(verify_e2e, "database_snapshot") as database:
+                    verify_e2e.run_fixture_after(context, directory, parsed)
+                database.assert_not_called()
+
+    def test_run_fixture_state_rejects_noncanonical_duplicate_and_control_identity(self):
+        state = valid_run_fixture_state()
+        canonical = verify_e2e.run_fixture_state_bytes(state)
+        candidates = (
+            canonical.replace(b'{"schemaVersion":1,', b'{ "schemaVersion":1,', 1),
+            canonical.replace(b'{"schemaVersion":1,', b'{"schemaVersion":1,"schemaVersion":1,', 1),
+            canonical.replace(b'{"schemaVersion":1,', b'{"schemaVersion":1.0,', 1),
+            canonical.replace(state["composeProject"].encode(), (state["composeProject"] + "\u200b").encode()),
+            b"\xef\xbb\xbf" + canonical,
+        )
+        for candidate in candidates:
+            with self.assertRaises(verify_e2e.VerificationError):
+                verify_e2e.parse_run_fixture_state(candidate)
 
 
 if __name__ == "__main__":

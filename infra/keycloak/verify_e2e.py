@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import datetime as dt
+import errno
 import hashlib
 import json
+import math
 import os
 import re
 import socket
@@ -19,6 +22,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -135,6 +139,43 @@ INGESTION_STEPS = (
     "duplicate-first",
     "duplicate-replay",
 )
+FIXTURE_MANIFEST_NAME = "fixture-identity.json"
+FIXTURE_MANIFEST_DIRECTORY = Path("/finguardops/fixture")
+FIXTURE_PLAN_ENVIRONMENT = "FINGUARDOPS_E2E_FIXTURE_PLAN"
+FIXTURE_MANIFEST_KEYS = (
+    "schemaVersion",
+    "runId",
+    "repositoryId",
+    "commitSha",
+    "treeSha",
+    "transactionId",
+    "caseId",
+    "expectedRiskLevel",
+    "expectedResponseOutcome",
+    "expectedInitialCaseStatus",
+)
+RUN_FIXTURE_GLOBAL_DELTA = {
+    "audit_log": 4,
+    "behavior_event": 2,
+    "case_transaction": 1,
+    "detection_evidence": 2,
+    "detection_result": 1,
+    "financial_transaction": 1,
+    "fraud_case": 1,
+    "idempotency_record": 1,
+}
+RUN_FIXTURE_STATE_KEYS = (
+    "schemaVersion",
+    "runId",
+    "repositoryId",
+    "commitSha",
+    "treeSha",
+    "composeProject",
+    "plan",
+    "database",
+    "dependencies",
+    "metrics",
+)
 
 
 @dataclass(frozen=True)
@@ -172,6 +213,10 @@ EXPECTED_SECRETS = {
         "behavior_service_client_secret",
         "keycloak_tls_certificate",
     },
+    "keycloak-run-fixture": {
+        "transaction_service_client_secret",
+        "behavior_service_client_secret",
+    },
 }
 EXPECTED_SECRET_FILES = {
     "keycloak_bootstrap_admin_secret": "infra/keycloak/.local/secrets/bootstrap-admin-client-secret",
@@ -195,6 +240,7 @@ EXPECTED_KEYCLOAK_SERVICES = {
     "keycloak",
     "keycloak-bootstrap",
     "keycloak-verify",
+    "keycloak-run-fixture",
     "postgresql",
     "prometheus",
 }
@@ -222,11 +268,13 @@ EXPECTED_ENTRYPOINTS = {
     "keycloak": ["bash", "/opt/finguardops/start-keycloak.sh"],
     "keycloak-bootstrap": ["python", "-B", "/opt/finguardops/bootstrap.py"],
     "keycloak-verify": ["python", "-B", "/opt/finguardops/verify_e2e.py"],
+    "keycloak-run-fixture": ["python", "-B", "/opt/finguardops/verify_e2e.py"],
 }
 EXPECTED_COMMANDS = {
     "keycloak": [],
     "keycloak-bootstrap": ["reconcile"],
     "keycloak-verify": ["runtime"],
+    "keycloak-run-fixture": ["run-fixture"],
 }
 EXPECTED_VOLUME_MOUNTS = {
     "keycloak": {
@@ -247,6 +295,10 @@ EXPECTED_VOLUME_MOUNTS = {
     },
     "keycloak-verify": {
         "/opt/finguardops/verify_e2e.py": ("bind", "infra/keycloak/verify_e2e.py", True),
+    },
+    "keycloak-run-fixture": {
+        "/opt/finguardops/verify_e2e.py": ("bind", "infra/keycloak/verify_e2e.py", True),
+        "/finguardops/fixture": ("bind", None, False),
     },
 }
 
@@ -398,10 +450,19 @@ def validate_no_privilege_escape(service: dict[str, Any], code: str) -> None:
             fail(code + "_DOCKER_SOCKET")
 
 
-def source_matches(actual: Any, expected: str, mount_type: str) -> bool:
+def source_matches(actual: Any, expected: str | None, mount_type: str) -> bool:
     if mount_type == "volume":
         return actual == expected
     path = normalized_path(actual)
+    if expected is None:
+        return (
+            bool(path)
+            and (path.startswith("/") or re.match(r"^[a-z]:/", path) is not None)
+            and re.search(
+                r"/finguardops-keycloak-e2e-fixture-[0-9a-f]{32}$", path
+            )
+            is not None
+        )
     suffix = normalized_path(expected)
     return path == suffix or path.endswith("/" + suffix)
 
@@ -455,7 +516,7 @@ def validate_backend_dependencies(backend: dict[str, Any]) -> None:
     dependencies = backend.get("depends_on", {})
     if not isinstance(dependencies, dict):
         fail("STATIC_BACKEND_DEPENDENCY")
-    if {"keycloak", "keycloak-bootstrap", "keycloak-verify"}.intersection(dependencies):
+    if {"keycloak", "keycloak-bootstrap", "keycloak-verify", "keycloak-run-fixture"}.intersection(dependencies):
         fail("STATIC_BACKEND_DEPENDENCY")
 
 
@@ -713,7 +774,9 @@ def validate_static(config: dict[str, Any], realm: dict[str, Any] | None = None)
         if issuer != FIXTURE_ISSUER or jwk != FIXTURE_JWK:
             fail("STATIC_ISSUER_JWK_MIXED")
         return
-    if not has_keycloak or not {"keycloak-bootstrap", "keycloak-verify"}.issubset(services):
+    if not has_keycloak or not {
+        "keycloak-bootstrap", "keycloak-verify", "keycloak-run-fixture"
+    }.issubset(services):
         fail("STATIC_SERVICE_SET")
     if set(services) != EXPECTED_KEYCLOAK_SERVICES:
         fail("STATIC_SERVICE_SET")
@@ -726,7 +789,7 @@ def validate_static(config: dict[str, Any], realm: dict[str, Any] | None = None)
     validate_backend_dependencies(services["backend"])
     if services["keycloak"].get("image") != KEYCLOAK_IMAGE:
         fail("STATIC_KEYCLOAK_IMAGE")
-    for name in ("keycloak-bootstrap", "keycloak-verify"):
+    for name in ("keycloak-bootstrap", "keycloak-verify", "keycloak-run-fixture"):
         service = services[name]
         if service.get("image") != HELPER_IMAGE:
             fail("STATIC_HELPER_IMAGE")
@@ -785,12 +848,18 @@ def validate_static(config: dict[str, Any], realm: dict[str, Any] | None = None)
         fail("STATIC_KEYCLOAK_NAMED_VOLUME")
     bootstrap = services["keycloak-bootstrap"]
     verifier = services["keycloak-verify"]
-    if named_volume_sources(bootstrap) or named_volume_sources(verifier):
+    run_fixture = services["keycloak-run-fixture"]
+    if (
+        named_volume_sources(bootstrap)
+        or named_volume_sources(verifier)
+        or named_volume_sources(run_fixture)
+    ):
         fail("STATIC_HELPER_NAMED_VOLUME")
     if mount_sources(bootstrap).intersection(mount_sources(verifier)):
         fail("STATIC_HELPER_SHARED_STORAGE")
     bootstrap_env = environment(bootstrap)
     verifier_env = environment(verifier)
+    run_fixture_env = environment(run_fixture)
     if bootstrap_env.get("KEYCLOAK_ADMIN_BASE_URL") != INTERNAL_BASE_URL:
         fail("STATIC_ADMIN_BASE_URL")
     if (
@@ -798,6 +867,21 @@ def validate_static(config: dict[str, Any], realm: dict[str, Any] | None = None)
         or verifier_env.get("KEYCLOAK_MANAGEMENT_BASE_URL") != MANAGEMENT_BASE_URL
     ):
         fail("STATIC_VERIFIER_BASE_URL")
+    if set(run_fixture_env) != {
+        "PYTHONDONTWRITEBYTECODE",
+        "KEYCLOAK_INTERNAL_BASE_URL",
+        "KEYCLOAK_MANAGEMENT_BASE_URL",
+        "FINGUARDOPS_E2E_RUN_ID",
+        "FINGUARDOPS_E2E_REPOSITORY_ID",
+        "FINGUARDOPS_E2E_REVISION",
+        "FINGUARDOPS_E2E_SOURCE_TREE",
+        FIXTURE_PLAN_ENVIRONMENT,
+    } or (
+        run_fixture_env.get("KEYCLOAK_INTERNAL_BASE_URL") != INTERNAL_BASE_URL
+        or run_fixture_env.get("KEYCLOAK_MANAGEMENT_BASE_URL") != MANAGEMENT_BASE_URL
+    ):
+        fail("STATIC_RUN_FIXTURE_ENVIRONMENT")
+    fixture_identity_from_environment(run_fixture_env)
     if dependency_condition(keycloak, "backend") != "service_healthy":
         fail("STATIC_DEPENDENCY")
     if dependency_condition(services["keycloak-bootstrap"], "keycloak") != "service_healthy":
@@ -805,6 +889,13 @@ def validate_static(config: dict[str, Any], realm: dict[str, Any] | None = None)
     if dependency_condition(services["keycloak-verify"], "keycloak-bootstrap") != "service_completed_successfully":
         fail("STATIC_DEPENDENCY")
     if dependency_condition(services["keycloak-verify"], "external-risk-mock") != "service_healthy":
+        fail("STATIC_DEPENDENCY")
+    run_fixture_dependencies = services["keycloak-run-fixture"].get("depends_on")
+    if (
+        not isinstance(run_fixture_dependencies, dict)
+        or set(run_fixture_dependencies) != {"backend"}
+        or dependency_condition(services["keycloak-run-fixture"], "backend") != "service_started"
+    ):
         fail("STATIC_DEPENDENCY")
     for service_name, expected in EXPECTED_SECRETS.items():
         validate_secret_mounts(services[service_name], expected)
@@ -1230,21 +1321,7 @@ def ingestion_runtime(step: str) -> None:
     except (UnicodeDecodeError, json.JSONDecodeError):
         fail("INGESTION_PLAN_INVALID")
 
-    transaction_secret = read_secret(TRANSACTION_SECRET)
-    behavior_secret = read_secret(BEHAVIOR_SECRET)
-    if transaction_secret == behavior_secret:
-        fail("SERVICE_SECRETS_NOT_DISTINCT")
-    transaction_token = token_for(
-        "finguardops-transaction-ingestor", transaction_secret
-    )
-    behavior_token = token_for("finguardops-behavior-ingestor", behavior_secret)
-    validate_actual_service_tokens(transaction_token, behavior_token)
-    assert_cross_secret_rejected(
-        "finguardops-transaction-ingestor", behavior_secret
-    )
-    assert_cross_secret_rejected(
-        "finguardops-behavior-ingestor", transaction_secret
-    )
+    transaction_token, behavior_token = service_tokens()
 
     transaction, password_event, transfer_limit_event = ingestion_payloads(plan)
     if step == "auth-denial":
@@ -1563,6 +1640,232 @@ def create_plan() -> dict[str, str]:
     }
 
 
+def fixture_identity_from_environment(environment: dict[str, str]) -> dict[str, Any]:
+    names = (
+        ("runId", "FINGUARDOPS_E2E_RUN_ID", r"[0-9a-f]{32}"),
+        ("repositoryId", "FINGUARDOPS_E2E_REPOSITORY_ID", r"[0-9a-f]{64}"),
+        ("commitSha", "FINGUARDOPS_E2E_REVISION", r"(?:[0-9a-f]{40}|[0-9a-f]{64})"),
+        ("treeSha", "FINGUARDOPS_E2E_SOURCE_TREE", r"(?:[0-9a-f]{40}|[0-9a-f]{64})"),
+    )
+    identity: dict[str, Any] = {"schemaVersion": 1}
+    for key, variable, pattern in names:
+        value = environment.get(variable)
+        if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
+            fail("FIXTURE_OWNER_IDENTITY_INVALID")
+        identity[key] = value
+    return identity
+
+
+def validate_fixture_manifest_object(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict) or tuple(raw) != FIXTURE_MANIFEST_KEYS:
+        fail("FIXTURE_MANIFEST_SCHEMA_INVALID")
+    if type(raw.get("schemaVersion")) is not int or raw.get("schemaVersion") != 1:
+        fail("FIXTURE_MANIFEST_SCHEMA_INVALID")
+    for key in FIXTURE_MANIFEST_KEYS[1:]:
+        value = raw.get(key)
+        if not isinstance(value, str) or not value:
+            fail("FIXTURE_MANIFEST_SCHEMA_INVALID")
+        if any(ord(character) <= 0x1F or 0x7F <= ord(character) <= 0x9F
+               or unicodedata.category(character) == "Cf" for character in value):
+            fail("FIXTURE_MANIFEST_SCHEMA_INVALID")
+    if (
+        re.fullmatch(r"[0-9a-f]{32}", raw["runId"]) is None
+        or re.fullmatch(r"[0-9a-f]{64}", raw["repositoryId"]) is None
+        or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", raw["commitSha"]) is None
+        or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", raw["treeSha"]) is None
+        or not is_canonical_uuid4(raw["transactionId"])
+        or not is_canonical_uuid4(raw["caseId"])
+        or raw["expectedRiskLevel"] != "HIGH"
+        or raw["expectedResponseOutcome"] != "ADDITIONAL_AUTH_REQUIRED"
+        or raw["expectedInitialCaseStatus"] != "OPEN"
+    ):
+        fail("FIXTURE_MANIFEST_IDENTITY_INVALID")
+    return raw
+
+
+def fixture_manifest_bytes(identity: dict[str, Any]) -> bytes:
+    valid = validate_fixture_manifest_object(identity)
+    encoded = (json.dumps(valid, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+    if len(encoded) > 1024 or encoded.startswith(b"\xef\xbb\xbf") or b"\r" in encoded:
+        fail("FIXTURE_MANIFEST_BYTES_INVALID")
+    return encoded
+
+
+def parse_fixture_manifest_bytes(raw: bytes) -> dict[str, Any]:
+    if len(raw) > 1024 or not raw.endswith(b"\n") or raw.endswith(b"\n\n") or b"\r" in raw:
+        fail("FIXTURE_MANIFEST_BYTES_INVALID")
+    try:
+        text = raw.decode("utf-8", "strict")
+        pairs = json.loads(text, object_pairs_hook=lambda values: values)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail("FIXTURE_MANIFEST_BYTES_INVALID")
+    if not isinstance(pairs, list) or any(
+        not isinstance(pair, tuple) or len(pair) != 2 for pair in pairs
+    ):
+        fail("FIXTURE_MANIFEST_SCHEMA_INVALID")
+    keys = tuple(pair[0] for pair in pairs)
+    if keys != FIXTURE_MANIFEST_KEYS or len(set(keys)) != len(keys):
+        fail("FIXTURE_MANIFEST_SCHEMA_INVALID")
+    identity = validate_fixture_manifest_object(dict(pairs))
+    if fixture_manifest_bytes(identity) != raw:
+        fail("FIXTURE_MANIFEST_BYTES_INVALID")
+    return identity
+
+
+def rename_noreplace(source: Path, destination: Path) -> None:
+    if os.name == "nt":
+        try:
+            os.rename(source, destination)
+        except OSError:
+            fail("FIXTURE_MANIFEST_RENAME_FAILED")
+        return
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameat2 = libc.renameat2
+        renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        renameat2.restype = ctypes.c_int
+        result = renameat2(
+            -100, os.fsencode(source), -100, os.fsencode(destination), 1
+        )
+    except (AttributeError, OSError):
+        fail("FIXTURE_MANIFEST_RENAME_FAILED")
+    if result != 0:
+        error_number = ctypes.get_errno()
+        if error_number == errno.EEXIST:
+            fail("FIXTURE_MANIFEST_FINAL_EXISTS")
+        fail("FIXTURE_MANIFEST_RENAME_FAILED")
+
+
+def write_fixture_manifest(directory: Path, identity: dict[str, Any]) -> Path:
+    final = directory / FIXTURE_MANIFEST_NAME
+    temporary = directory / (FIXTURE_MANIFEST_NAME + ".tmp")
+    created_temporary = False
+    try:
+        if directory.is_symlink() or not directory.is_dir():
+            fail("FIXTURE_DIRECTORY_INVALID")
+        if final.exists() or final.is_symlink():
+            fail("FIXTURE_MANIFEST_FINAL_EXISTS")
+        if tuple(directory.iterdir()):
+            fail("FIXTURE_DIRECTORY_NOT_EMPTY")
+        canonical = fixture_manifest_bytes(identity)
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            created_temporary = True
+        except OSError:
+            fail("FIXTURE_MANIFEST_TEMP_CREATE_FAILED")
+        try:
+            with os.fdopen(descriptor, "wb", closefd=True) as stream:
+                stream.write(canonical)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except OSError:
+            fail("FIXTURE_MANIFEST_WRITE_FAILED")
+        rename_noreplace(temporary, final)
+        created_temporary = False
+        if temporary.exists() or tuple(path.name for path in directory.iterdir()) != (FIXTURE_MANIFEST_NAME,):
+            fail("FIXTURE_MANIFEST_CARDINALITY_INVALID")
+        try:
+            observed = final.read_bytes()
+        except OSError:
+            fail("FIXTURE_MANIFEST_READ_FAILED")
+        if observed != canonical or parse_fixture_manifest_bytes(observed) != identity:
+            fail("FIXTURE_MANIFEST_FINAL_INVALID")
+        return final
+    except VerificationError:
+        if created_temporary:
+            try:
+                if temporary.is_file() and not temporary.is_symlink():
+                    temporary.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def service_tokens() -> tuple[str, str]:
+    transaction_secret = read_secret(TRANSACTION_SECRET)
+    behavior_secret = read_secret(BEHAVIOR_SECRET)
+    if transaction_secret == behavior_secret:
+        fail("SERVICE_SECRETS_NOT_DISTINCT")
+    transaction_token = token_for("finguardops-transaction-ingestor", transaction_secret)
+    behavior_token = token_for("finguardops-behavior-ingestor", behavior_secret)
+    validate_actual_service_tokens(transaction_token, behavior_token)
+    assert_cross_secret_rejected("finguardops-transaction-ingestor", behavior_secret)
+    assert_cross_secret_rejected("finguardops-behavior-ingestor", transaction_secret)
+    return transaction_token, behavior_token
+
+
+def create_run_fixture(plan: dict[str, str]) -> dict[str, str]:
+    valid = validate_plan(plan)
+    transaction_token, behavior_token = service_tokens()
+    transaction, password_event, transfer_limit_event = ingestion_payloads(valid)
+    for payload, identifier in (
+        (password_event, valid["passwordEventId"]),
+        (transfer_limit_event, valid["transferLimitEventId"]),
+    ):
+        response = request_backend(
+            "/api/v1/behavior-events", payload, 201, token=behavior_token,
+            failure_code="RUN_FIXTURE_BEHAVIOR_STATUS",
+        )
+        if response.get("eventId") != identifier:
+            fail("RUN_FIXTURE_BEHAVIOR_RESPONSE_INVALID")
+    response = request_backend(
+        "/api/v1/transactions", transaction, 201, token=transaction_token,
+        idempotency_key=valid["idempotencyKey"],
+        failure_code="RUN_FIXTURE_TRANSACTION_STATUS",
+    )
+    if (
+        set(response) != {
+            "transactionId", "processingStatus", "riskLevel",
+            "riskResponseOutcome", "adoptedDetectionResultId", "caseId",
+            "createdAt", "traceId",
+        }
+        or response.get("transactionId") != valid["transactionId"]
+        or response.get("processingStatus") != "ADDITIONAL_AUTH_REQUIRED"
+        or response.get("riskLevel") != "HIGH"
+        or response.get("riskResponseOutcome") != "ADDITIONAL_AUTH_REQUIRED"
+        or not is_canonical_uuid4(response.get("adoptedDetectionResultId"))
+        or not is_canonical_uuid4(response.get("caseId"))
+        or not isinstance(response.get("createdAt"), str)
+        or not response.get("createdAt")
+        or not isinstance(response.get("traceId"), str)
+        or not response.get("traceId")
+    ):
+        fail("RUN_FIXTURE_TRANSACTION_RESPONSE_INVALID")
+    return {
+        "transactionId": valid["transactionId"],
+        "caseId": response["caseId"],
+    }
+
+
+def run_fixture_worker() -> None:
+    encoded = os.environ.get(FIXTURE_PLAN_ENVIRONMENT)
+    if (
+        not isinstance(encoded, str)
+        or len(encoded) > 10_924
+        or re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", encoded) is None
+    ):
+        fail("RUN_FIXTURE_PLAN_INVALID")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+        if len(raw) > 8192 or raw.startswith(b"\xef\xbb\xbf") or b"\r" in raw:
+            fail("RUN_FIXTURE_PLAN_INVALID")
+        plan = validate_plan(json.loads(raw.decode("utf-8", "strict")))
+        if json.dumps(plan, separators=(",", ":")).encode("utf-8") != raw:
+            fail("RUN_FIXTURE_PLAN_INVALID")
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        fail("RUN_FIXTURE_PLAN_INVALID")
+    response_identity = create_run_fixture(plan)
+    identity = fixture_identity_from_environment(dict(os.environ))
+    identity.update(response_identity)
+    identity.update({
+        "expectedRiskLevel": "HIGH",
+        "expectedResponseOutcome": "ADDITIONAL_AUTH_REQUIRED",
+        "expectedInitialCaseStatus": "OPEN",
+    })
+    write_fixture_manifest(FIXTURE_MANIFEST_DIRECTORY, identity)
+    print("run fixture completed: risk=HIGH outcome=ADDITIONAL_AUTH_REQUIRED case=OPEN")
+
+
 def snapshot_sql() -> bytes:
     if tuple(SNAPSHOT_QUERIES) != BUSINESS_TABLES:
         fail("DATABASE_GLOBAL_SNAPSHOT_INVALID")
@@ -1684,6 +1987,20 @@ def transaction_cardinality(
     if len(raw) != 14 or any(re.fullmatch(r"\d+", value) is None for value in raw):
         fail("DATABASE_TRANSACTION_SNAPSHOT_INVALID")
     return tuple(int(value) for value in raw)
+
+
+def transaction_case_id(ctx: HostContext, plan: dict[str, str]) -> str:
+    transaction_id = validate_plan(plan)["transactionId"]
+    raw = sql_scalar(
+        ctx,
+        "select c.case_id from fraud_case c "
+        "join case_transaction ct on ct.fraud_case_id=c.id "
+        "join financial_transaction f on f.id=ct.financial_transaction_id "
+        "where f.transaction_id='%s' and c.case_status='OPEN'" % transaction_id,
+    )
+    if not is_canonical_uuid4(raw):
+        fail("DATABASE_CASE_IDENTITY_INVALID")
+    return raw
 
 
 def expected_transaction_cardinality(
@@ -1893,6 +2210,227 @@ def run_ingestion_phase(ctx: HostContext) -> dict[str, str]:
     return plan
 
 
+def run_fixture_state_bytes(state: dict[str, Any]) -> bytes:
+    if tuple(state) != RUN_FIXTURE_STATE_KEYS:
+        fail("RUN_FIXTURE_STATE_INVALID")
+    if type(state["schemaVersion"]) is not int or state["schemaVersion"] != 1:
+        fail("RUN_FIXTURE_STATE_INVALID")
+    owner_patterns = {
+        "runId": r"[0-9a-f]{32}",
+        "repositoryId": r"[0-9a-f]{64}",
+        "commitSha": r"(?:[0-9a-f]{40}|[0-9a-f]{64})",
+        "treeSha": r"(?:[0-9a-f]{40}|[0-9a-f]{64})",
+        "composeProject": PROJECT_PATTERN.pattern,
+    }
+    for key, pattern in owner_patterns.items():
+        value = state[key]
+        if (
+            not isinstance(value, str)
+            or re.fullmatch(pattern, value) is None
+            or any(
+                ord(character) <= 0x1F
+                or 0x7F <= ord(character) <= 0x9F
+                or unicodedata.category(character) == "Cf"
+                for character in value
+            )
+        ):
+            fail("RUN_FIXTURE_STATE_IDENTITY_INVALID")
+    plan = validate_plan(state["plan"])
+    if tuple(plan) != (
+        "transactionId", "passwordEventId", "transferLimitEventId", "idempotencyKey",
+        "duplicateIdempotencyKey", "customerRef", "senderRef", "recipientRef",
+        "passwordOccurredAt", "transferLimitOccurredAt", "transactionOccurredAt",
+    ):
+        fail("RUN_FIXTURE_STATE_INVALID")
+    database = state["database"]
+    if not isinstance(database, dict) or tuple(database) != BUSINESS_TABLES:
+        fail("RUN_FIXTURE_STATE_INVALID")
+    for table in BUSINESS_TABLES:
+        value = database[table]
+        if not isinstance(value, dict) or tuple(value) != ("count", "rowHashes", "fingerprint"):
+            fail("RUN_FIXTURE_STATE_INVALID")
+        if (
+            isinstance(value["count"], bool)
+            or not isinstance(value["count"], int)
+            or value["count"] < 0
+            or not isinstance(value["rowHashes"], list)
+            or len(value["rowHashes"]) != value["count"]
+            or any(not isinstance(item, str) or re.fullmatch(r"[0-9a-f]{64}", item) is None for item in value["rowHashes"])
+            or not isinstance(value["fingerprint"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", value["fingerprint"]) is None
+        ):
+            fail("RUN_FIXTURE_STATE_INVALID")
+        snapshot = TableSnapshot(
+            value["count"],
+            tuple(bytes.fromhex(item) for item in value["rowHashes"]),
+            bytes.fromhex(value["fingerprint"]),
+        )
+        validate_table_snapshot(table, snapshot)
+    dependencies = state["dependencies"]
+    metrics = state["metrics"]
+    if (
+        not isinstance(dependencies, list)
+        or len(dependencies) != 2
+        or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in dependencies)
+        or not isinstance(metrics, list)
+        or len(metrics) != 2
+        or any(
+            isinstance(item, bool)
+            or not isinstance(item, (int, float))
+            or not math.isfinite(float(item))
+            or item < 0
+            for item in metrics
+        )
+    ):
+        fail("RUN_FIXTURE_STATE_INVALID")
+    encoded = (json.dumps(state, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
+    if len(encoded) > 16_777_216:
+        fail("RUN_FIXTURE_STATE_TOO_LARGE")
+    return encoded
+
+
+def parse_run_fixture_state(raw: bytes) -> dict[str, Any]:
+    if (
+        len(raw) > 16_777_216
+        or raw.startswith(b"\xef\xbb\xbf")
+        or not raw.endswith(b"\n")
+        or raw.endswith(b"\n\n")
+        or b"\r" in raw
+    ):
+        fail("RUN_FIXTURE_STATE_INVALID")
+
+    def exact_object(values: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in values:
+            if key in result:
+                fail("RUN_FIXTURE_STATE_INVALID")
+            result[key] = value
+        return result
+
+    try:
+        state = json.loads(raw.decode("utf-8", "strict"), object_pairs_hook=exact_object)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail("RUN_FIXTURE_STATE_INVALID")
+    canonical = run_fixture_state_bytes(state)
+    if canonical != raw:
+        fail("RUN_FIXTURE_STATE_INVALID")
+    return state
+
+
+def snapshot_to_state(database: dict[str, TableSnapshot]) -> dict[str, Any]:
+    if tuple(database) != BUSINESS_TABLES:
+        fail("RUN_FIXTURE_STATE_INVALID")
+    result: dict[str, Any] = {}
+    for table in BUSINESS_TABLES:
+        snapshot = database[table]
+        validate_table_snapshot(table, snapshot)
+        result[table] = {
+            "count": snapshot.count,
+            "rowHashes": [item.hex() for item in snapshot.row_hashes],
+            "fingerprint": snapshot.fingerprint.hex(),
+        }
+    return result
+
+
+def state_to_snapshot(state: dict[str, Any]) -> dict[str, TableSnapshot]:
+    run_fixture_state_bytes(state)
+    return {
+        table: TableSnapshot(
+            state["database"][table]["count"],
+            tuple(bytes.fromhex(item) for item in state["database"][table]["rowHashes"]),
+            bytes.fromhex(state["database"][table]["fingerprint"]),
+        )
+        for table in BUSINESS_TABLES
+    }
+
+
+def run_fixture_before(ctx: HostContext, fixture_directory: Path) -> dict[str, Any]:
+    directory = fixture_directory.resolve(strict=True)
+    if (
+        fixture_directory.is_symlink()
+        or not directory.is_dir()
+        or directory.name != "finguardops-keycloak-e2e-fixture-" + ctx.contract.run_id
+        or tuple(directory.iterdir())
+    ):
+        fail("FIXTURE_DIRECTORY_INVALID")
+    publish_rules(ctx)
+    plan = create_plan()
+    if transaction_cardinality(ctx, plan) != expected_transaction_cardinality(False, False, False):
+        fail("DATABASE_TRANSACTION_CARDINALITY_INVALID")
+    before_database = database_snapshot(ctx)
+    before_dependencies = dependency_hit_counts(ctx)
+    before_metrics = backend_metric_totals(ctx)
+    state = {
+        "schemaVersion": 1,
+        "runId": ctx.contract.run_id,
+        "repositoryId": ctx.contract.repository_id,
+        "commitSha": ctx.contract.commit_sha,
+        "treeSha": ctx.contract.tree_sha,
+        "composeProject": ctx.project,
+        "plan": plan,
+        "database": snapshot_to_state(before_database),
+        "dependencies": list(before_dependencies),
+        "metrics": list(before_metrics),
+    }
+    run_fixture_state_bytes(state)
+    return state
+
+
+def run_fixture_after(ctx: HostContext, fixture_directory: Path, state: dict[str, Any]) -> None:
+    directory = fixture_directory.resolve(strict=True)
+    if (
+        fixture_directory.is_symlink()
+        or not directory.is_dir()
+        or directory.name != "finguardops-keycloak-e2e-fixture-" + ctx.contract.run_id
+    ):
+        fail("FIXTURE_DIRECTORY_INVALID")
+    expected_identity = {
+        "runId": ctx.contract.run_id,
+        "repositoryId": ctx.contract.repository_id,
+        "commitSha": ctx.contract.commit_sha,
+        "treeSha": ctx.contract.tree_sha,
+        "composeProject": ctx.project,
+    }
+    run_fixture_state_bytes(state)
+    if any(state[key] != value for key, value in expected_identity.items()):
+        fail("RUN_FIXTURE_STATE_IDENTITY_INVALID")
+    before_database = state_to_snapshot(state)
+    before_dependencies = tuple(state["dependencies"])
+    before_metrics = tuple(float(value) for value in state["metrics"])
+    plan = validate_plan(state["plan"])
+    after_database = database_snapshot(ctx)
+    after_dependencies = dependency_hit_counts(ctx)
+    after_metrics = backend_metric_totals(ctx)
+    assert_global_delta(before_database, after_database, RUN_FIXTURE_GLOBAL_DELTA)
+    if tuple(
+        after_dependencies[index] - before_dependencies[index] for index in range(2)
+    ) != (1, 1):
+        fail("DEPENDENCY_HIT_DELTA_INVALID")
+    if tuple(after_metrics[index] - before_metrics[index] for index in range(2)) != (1.0, 1.0):
+        fail("BACKEND_OUTCOME_METRIC_DELTA_INVALID")
+    if transaction_cardinality(ctx, plan) != expected_transaction_cardinality(True, True, False):
+        fail("DATABASE_TRANSACTION_CARDINALITY_INVALID")
+    case_id = transaction_case_id(ctx, plan)
+    entries = tuple(directory.iterdir())
+    if len(entries) != 1 or entries[0].name != FIXTURE_MANIFEST_NAME or entries[0].is_symlink():
+        fail("FIXTURE_MANIFEST_CARDINALITY_INVALID")
+    try:
+        identity = parse_fixture_manifest_bytes(entries[0].read_bytes())
+    except OSError:
+        fail("FIXTURE_MANIFEST_READ_FAILED")
+    expected = fixture_identity_from_environment(ctx.environment)
+    expected.update({
+        "transactionId": plan["transactionId"],
+        "caseId": case_id,
+        "expectedRiskLevel": "HIGH",
+        "expectedResponseOutcome": "ADDITIONAL_AUTH_REQUIRED",
+        "expectedInitialCaseStatus": "OPEN",
+    })
+    if identity != expected:
+        fail("FIXTURE_MANIFEST_IDENTITY_INVALID")
+    print("run fixture orchestration completed: exact delta and manifest passed")
+
+
 def existing_volume_phase(ctx: HostContext) -> None:
     print("stage: existing-volume-restart")
     ctx.execute(
@@ -2067,6 +2605,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     static_parser.add_argument("--config", required=True, type=Path)
     static_parser.add_argument("--realm", required=True, type=Path)
     subparsers.add_parser("runtime")
+    subparsers.add_parser("run-fixture")
     ingestion_parser = subparsers.add_parser("ingestion-runtime")
     ingestion_parser.add_argument("--step", required=True, choices=INGESTION_STEPS)
     subparsers.add_parser("metric-runtime")
@@ -2081,6 +2620,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     all_parser.add_argument("--cli-timeout", default=30.0, type=float)
     all_parser.add_argument("--deadline-seconds", default=1800.0, type=float)
+    for mode in ("run-fixture-before", "run-fixture-after"):
+        fixture_host_parser = subparsers.add_parser(mode)
+        fixture_host_parser.add_argument(
+            "--repo-root", default=str(Path(__file__).resolve().parents[2]), type=Path
+        )
+        fixture_host_parser.add_argument("--project", required=True)
+        fixture_host_parser.add_argument("--fixture-directory", required=True, type=Path)
+        fixture_host_parser.add_argument("--cli-timeout", default=30.0, type=float)
+        fixture_host_parser.add_argument("--deadline-seconds", default=600.0, type=float)
     return parser.parse_args(argv)
 
 
@@ -2094,13 +2642,15 @@ def main(argv: list[str]) -> int:
             print("static verification completed: Compose and realm contracts passed")
         elif args.mode == "runtime":
             runtime()
+        elif args.mode == "run-fixture":
+            run_fixture_worker()
         elif args.mode == "ingestion-runtime":
             ingestion_runtime(args.step)
         elif args.mode == "metric-runtime":
             print(json.dumps(metric_totals(), separators=(",", ":")))
         elif args.mode == "host":
             host_runtime(args.certificate)
-        else:
+        elif args.mode in {"all", "run-fixture-before", "run-fixture-after"}:
             repo = args.repo_root.resolve()
             if (
                 not repo.is_absolute()
@@ -2110,15 +2660,35 @@ def main(argv: list[str]) -> int:
             ):
                 fail("HOST_ARGUMENT_INVALID")
             contract = load_owner_contract(dict(os.environ))
-            all_runtime(
-                HostContext(
-                    repo,
-                    args.project,
-                    args.cli_timeout,
-                    args.deadline_seconds,
-                    contract,
-                )
+            context = HostContext(
+                repo,
+                args.project,
+                args.cli_timeout,
+                args.deadline_seconds,
+                contract,
             )
+            if args.mode == "all":
+                all_runtime(context)
+            elif args.mode == "run-fixture-before":
+                if not args.fixture_directory.is_absolute():
+                    fail("FIXTURE_DIRECTORY_INVALID")
+                state = run_fixture_before(context, args.fixture_directory)
+                sys.stdout.write(base64.b64encode(run_fixture_state_bytes(state)).decode("ascii") + "\n")
+            else:
+                if not args.fixture_directory.is_absolute():
+                    fail("FIXTURE_DIRECTORY_INVALID")
+                try:
+                    encoded = sys.stdin.buffer.read(22_369_625).strip()
+                    if len(encoded) > 22_369_624:
+                        fail("RUN_FIXTURE_STATE_TOO_LARGE")
+                    raw_state = base64.b64decode(encoded, validate=True)
+                except (OSError, ValueError):
+                    fail("RUN_FIXTURE_STATE_INVALID")
+                run_fixture_after(
+                    context, args.fixture_directory, parse_run_fixture_state(raw_state)
+                )
+        else:
+            fail("COMMAND_INVALID")
         return 0
     except VerificationError as error:
         print("verification failed: " + str(error), file=sys.stderr)

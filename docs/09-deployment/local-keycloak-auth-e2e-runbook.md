@@ -459,3 +459,64 @@ Service 성공 시 PowerShell은 exact Compose project label을 가진 container
 시 primary failure를 보존하면서 resource, 세 owned unique tag와 Recovery receipt를 정리한다. cleanup이
 완전하지 않으면 Recovery receipt를 유지해 Browser Run을 구조적으로 차단한다. 기존 `*:local` image와
 ignored credential·TLS artifact는 자동 삭제하지 않는다.
+
+## 11. Run 전용 high-risk fixture orchestration
+
+`Run`은 기존 `keycloak-verify runtime`의 exit code 0을 확인한 뒤에만 host-side
+`run-fixture-before` verifier를 실행한다. 이 verifier는 기존 deterministic Rule publication helper로 네
+rule version의 active 상태를 확인·준비하고 업무 테이블·External Risk/Rule hit·outcome metric의 전
+상태를 canonical hash snapshot으로 반환한다. snapshot의 exact schema 앞부분은 `schemaVersion`,
+`runId`, `repositoryId`, `commitSha`, `treeSha`, `composeProject`이고, 기대 identity는 Prepared receipt와
+PowerShell의 authoritative Compose project plan에서만 온다. PowerShell은 이 identity와 canonical bytes를
+검증한 뒤 격리된 fixed `keycloak-run-fixture` service를
+`up -d --no-deps --no-build --pull never keycloak-run-fixture`로 시작하고 공식 `compose wait`로 종료를
+기다린다. service에는 검증한 plan만 일시적인 `FINGUARDOPS_E2E_FIXTURE_PLAN`으로 전달하며 환경은 즉시
+복원한다. 종료 container의 authoritative full ID, fixed project/service/name, `oneoff=False`, image,
+label, network, mount, state와 exit code 0을 검증한 뒤, 전 snapshot을 stdin으로만
+`run-fixture-after` verifier에 전달해 후 상태와 비교한다. fixture service는 public transaction/behavior API만 호출하며
+SQL은 snapshot과 cardinality의 read-only 검증에만 사용한다. Service mode의 `all`, fresh-volume,
+existing-volume 동작은 변경하지 않는다.
+
+Run fixture는 `PASSWORD_CHANGED`, `TRANSFER_LIMIT_CHANGED` behavior event와 12,000,000 KRW
+`ACCOUNT_TRANSFER`를 한 세트 생성한다. 기대 delta는 BehaviorEvent 2, FinancialTransaction 1,
+IdempotencyRecord 1, DetectionResult 1, DetectionEvidence 2, FraudCase 1, CaseTransaction 1,
+AuditLog 4이며 risk/outcome/status는 `HIGH` / `ADDITIONAL_AUTH_REQUIRED` / `OPEN`이다. External
+Risk와 Rule v2 hit 및 두 outcome metric도 각각 정확히 1 증가해야 한다.
+
+PowerShell은 receipt의 runId로 다음 repository 외부 OS temp 경로를 결정한다.
+
+```text
+<System temp>\finguardops-keycloak-e2e-fixture-<runId>\fixture-identity.json
+```
+
+경로는 system temp의 exact descendant여야 하며 wildcard, ADS, `..`, symlink, junction 또는 다른
+reparse point를 허용하지 않는다. 기존 directory/file이 있으면 자동 복구하거나 덮어쓰지 않고 Run을
+중단한다. fixture service에는 이 directory만 `/finguardops/fixture`로 writable bind하며 USER password와
+TLS private key를 mount하지 않는다. transaction/behavior SERVICE secret은 이 service에만 read-only
+secret으로 mount한다.
+
+Manifest는 1,024 bytes 이하의 UTF-8 strict/no-BOM compact JSON이고 LF 하나로 끝난다. key 순서는
+`schemaVersion`, `runId`, `repositoryId`, `commitSha`, `treeSha`, `transactionId`, `caseId`,
+`expectedRiskLevel`, `expectedResponseOutcome`, `expectedInitialCaseStatus`로 고정한다. unknown,
+duplicate, missing, reordered key와 null/array/object/boolean/float, C0/C1 control, Unicode format
+character를 거부한다. 두 업무 ID는 lowercase canonical UUID v4이고 receipt identity는 ordinal exact로
+일치해야 한다. writer는 final preexistence와 non-empty directory를 거부하고 same-directory CreateNew
+temp, write/flush/fsync, no-replace atomic rename, final byte 재검증을 수행한다.
+
+Manifest 검증 전에는 Browser `docker create`와 `docker start`가 호출되지 않는다. 최초 검증한 manifest의
+SHA-256과 directory/file identity를 보존하고, Browser readiness 이후 Playwright process 생성 직전에 path,
+reparse, exact cardinality, bounded exclusive read, canonical schema·receipt binding과 최초 hash/identity를
+다시 검증한다. 교체 또는 내용 변경은 `FIXTURE_MANIFEST_CHANGED`로 거부하며 Playwright process를 만들지 않는다. Browser container의
+기존 read-only bind 3개, create argv와 ownership validator는 그대로 유지한다. Windows host의 Playwright
+child에만 `FINGUARDOPS_E2E_FIXTURE_MANIFEST`로 검증된 canonical host path를 전달하고 child 종료 직후
+Process environment를 원래 값으로 복원한다. 기존 값 또는 SERVICE secret/token 환경변수가 있으면
+오염으로 거부한다. Manifest 내용, token, password, client secret과 Secret path는 stdout/stderr에
+출력하지 않는다.
+
+Run과 명시적 Cleanup의 순서는 exact project resource cleanup → owned unique image cleanup → final
+Docker residue audit → exact fixture artifact cleanup → receipt 삭제다. 앞의 세 단계가 실패하면 artifact와
+receipt를 보존한다. Artifact cleanup은 Prepared 또는 Recovery receipt의 runId로 파생한 exact directory가
+없으면 idempotent success이고, safe-path/reparse 검증을 통과한 exact empty directory도 manifest 생성 전
+실패의 owned residue로서 non-recursive exact 삭제한다. directory에 canonical manifest가 정확히 하나 있으면
+receipt binding을 다시 검증한 뒤 exact file과 빈 directory만 삭제한다. partial/temp/extra/foreign artifact는 자동 삭제하지 않고
+receipt를 보존한다. glob, prefix enumeration, label 기반 broad cleanup은 사용하지 않는다.

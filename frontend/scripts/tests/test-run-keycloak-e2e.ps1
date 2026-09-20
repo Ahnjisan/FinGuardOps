@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Preflight', 'MajorFixPreflight', 'MajorFixFixture11', 'MajorFixTargeted', 'OwnerFixPreflight', 'OwnerFixTargeted', 'WaitBrowserPreflight', 'WaitBrowserTargeted', 'SessionStateTargeted', 'D209Preflight', 'D209A', 'D209B', 'D225Service', 'D248Targeted', 'CleanupBrowserTargeted', 'D273Targeted', 'D281Targeted', 'D294Preflight', 'D294Targeted', 'D299Red', 'D299Targeted', 'D308Oracle', 'Formal')]
+    [ValidateSet('Preflight', 'MajorFixPreflight', 'MajorFixFixture11', 'MajorFixTargeted', 'OwnerFixPreflight', 'OwnerFixTargeted', 'WaitBrowserPreflight', 'WaitBrowserTargeted', 'SessionStateTargeted', 'D209Preflight', 'D209A', 'D209B', 'D225Service', 'D248Targeted', 'CleanupBrowserTargeted', 'D273Targeted', 'D281Targeted', 'D294Preflight', 'D294Targeted', 'D299Red', 'D299Targeted', 'D308Oracle', 'D315Targeted', 'Formal')]
     [string]$Mode = 'Formal'
 )
 
@@ -397,6 +397,7 @@ function New-OwnerFixCleanupContext {
             ResourceCleanup = $ResourceCleanup
             ImageCleanup = $ImageCleanup
             FinalAudit = $FinalAudit
+            FixtureCleanup = { param($receipt) }.GetNewClosure()
             DeleteFile = $DeleteFile
         }
     }
@@ -868,6 +869,7 @@ function Invoke-D225ServiceTests {
                 ResourceCleanup = { param($value) $observed.Add('resource-cleanup') }.GetNewClosure()
                 ImageCleanup = { param($value) $observed.Add('image-cleanup') }.GetNewClosure()
                 FinalAudit = { param($value) $observed.Add('audit') }.GetNewClosure()
+                FixtureCleanup = { param($value) }.GetNewClosure()
                 DeleteFile = {
                     param([string]$path)
                     $observed.Add('receipt-delete')
@@ -967,6 +969,7 @@ function Invoke-D225ServiceTests {
                 ResourceCleanup = { param($value) $observed.Add('resource-cleanup'); throw 'NeverReflect C:\sensitive\resource credential' }.GetNewClosure()
                 ImageCleanup = { param($value) $observed.Add('image-cleanup') }.GetNewClosure()
                 FinalAudit = { param($value) $observed.Add('audit') }.GetNewClosure()
+                FixtureCleanup = { param($value) }.GetNewClosure()
                 DeleteFile = { param([string]$path) $observed.Add('receipt-delete'); [System.IO.File]::Delete($path) }.GetNewClosure()
             }
             $boundaries = @{
@@ -1237,6 +1240,7 @@ function Invoke-D248ServiceBoundaryTests {
                 ResourceCleanup = { param($value) $observed.Add('resource-cleanup') }.GetNewClosure()
                 ImageCleanup = { param($value) $observed.Add('image-cleanup') }.GetNewClosure()
                 FinalAudit = { param($value) $observed.Add('audit') }.GetNewClosure()
+                FixtureCleanup = { param($value) }.GetNewClosure()
                 DeleteFile = {
                     param([string]$path)
                     $observed.Add('receipt-delete')
@@ -1581,7 +1585,7 @@ function Invoke-D209BTests {
         $id = 'f' * 64
         $backendId = '7' * 64
         $project = 'finguardops-kc241-e2e-0123456789ab'
-        $sharedServices = @('external-risk-mock', 'keycloak', 'keycloak-bootstrap', 'keycloak-verify')
+        $sharedServices = @('external-risk-mock', 'keycloak', 'keycloak-bootstrap', 'keycloak-verify', 'keycloak-run-fixture')
         $oldPath = $env:PATH
         $scenarioNames = @('FINGUARDOPS_D209_FAIL', 'FINGUARDOPS_D209_SERVICE', 'FINGUARDOPS_D209_PROJECT',
             'FINGUARDOPS_D209_UNRELATED_NETWORK', 'FINGUARDOPS_D209_UNRELATED_VOLUME',
@@ -1643,7 +1647,7 @@ $anonymous = 'a' * 64
 $project = 'finguardops-kc241-e2e-0123456789ab'
 $contract = Get-Content (Join-Path $root 'contract.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $activeService = if ($env:FINGUARDOPS_D209_SERVICE) { $env:FINGUARDOPS_D209_SERVICE } else { 'postgresql' }
-$sharedServices = @('external-risk-mock', 'keycloak', 'keycloak-bootstrap', 'keycloak-verify')
+$sharedServices = @('external-risk-mock', 'keycloak', 'keycloak-bootstrap', 'keycloak-verify', 'keycloak-run-fixture')
 $networkIds = @{ application = ('e' * 64); observability = ('d' * 64); 'prometheus-ui' = ('c' * 64); 'grafana-ui' = ('6' * 64) }
 $replacementNetworkId = '4' * 64
 $activeNetworks = if ($activeService -in $sharedServices -or $activeService -eq 'backend') {
@@ -2033,7 +2037,7 @@ exit 81
             Assert-Equal @('--filter', 'name=^alpha$') @($networkSample) 'Network name filters are not anchored at both ends.'
             $contractNames = @()
             foreach ($service in @('postgresql', 'ai-service', 'external-risk-mock', 'backend', 'prometheus',
-                'grafana', 'alertmanager', 'alertmanager-webhook', 'keycloak', 'keycloak-bootstrap', 'keycloak-verify')) {
+                'grafana', 'alertmanager', 'alertmanager-webhook', 'keycloak', 'keycloak-bootstrap', 'keycloak-verify', 'keycloak-run-fixture')) {
                 $contractNames += ($project + '-' + $service + '-1')
             }
             foreach ($network in @('application', 'observability', 'prometheus-ui', 'grafana-ui')) { $contractNames += ($project + '_' + $network) }
@@ -5468,7 +5472,7 @@ function New-D294World {
     $workingDirectory = [string](& $script:E2EModule { Get-E2EComposeWorkingDirectory })
     $services = [ordered]@{}
     foreach ($service in @('postgresql', 'ai-service', 'external-risk-mock', 'backend', 'prometheus',
-        'grafana', 'alertmanager', 'alertmanager-webhook', 'keycloak', 'keycloak-bootstrap', 'keycloak-verify')) {
+        'grafana', 'alertmanager', 'alertmanager-webhook', 'keycloak', 'keycloak-bootstrap', 'keycloak-verify', 'keycloak-run-fixture')) {
         $services[$service] = [ordered]@{ image = ('fixture/' + $service + '@sha256:' + ('0' * 64)) }
     }
     $services['backend'] = [ordered]@{ image = $images.Backend
@@ -5804,6 +5808,7 @@ function New-D294Leaves([AllowEmptyCollection()][System.Collections.Generic.List
         ResourceCleanup = $resource
         ImageCleanup = { param($value) $Events.Add('@image') }.GetNewClosure()
         FinalAudit = { param($value) $Events.Add('@audit') }.GetNewClosure()
+        FixtureCleanup = { param($value) }.GetNewClosure()
         DeleteFile = { param([string]$value) $Events.Add('@receipt'); if ($null -ne $Trace) { $Trace.Events.Add('remover-called') }; [System.IO.File]::Delete($value) }.GetNewClosure()
     }
 }
@@ -6875,11 +6880,579 @@ function Invoke-D299TargetedTests {
     Write-Output 'D299 targeted passed'
 }
 
+function Invoke-D315TargetedTests {
+    $script:Failures = [System.Collections.Generic.List[string]]::new()
+    Invoke-TestCase 'D315 fixture gate fails before Browser create and start' {
+        $result = & $script:E2EModule {
+            $cases = [System.Collections.Generic.List[object]]::new()
+            foreach ($failure in @('fixture', 'manifest', 'none')) {
+                $events = [System.Collections.Generic.List[string]]::new()
+                $boundaries = @{
+                    CreateFixtureDirectory = { $events.Add('directory'); return 'safe-directory' }.GetNewClosure()
+                    RunFixture = {
+                        param($directory)
+                        $events.Add('fixture')
+                        if ($failure -eq 'fixture') { throw 'FIXTURE_FAILED' }
+                    }.GetNewClosure()
+                    ReadManifest = {
+                        param($directory)
+                        $events.Add('manifest')
+                        if ($failure -eq 'manifest') { throw 'MANIFEST_FAILED' }
+                        return [pscustomobject]@{ Path='manifest.json' }
+                    }.GetNewClosure()
+                    CreateBrowser = { $events.Add('create'); return 'browser-id' }.GetNewClosure()
+                    StartBrowser = { param($browser) $events.Add('start') }.GetNewClosure()
+                }
+                $message = $null
+                try { Invoke-E2EFixtureBrowserGate -Boundaries $boundaries | Out-Null } catch { $message = $_.Exception.Message }
+                $cases.Add([pscustomobject]@{ Failure=$failure; Events=@($events); Message=$message })
+            }
+            return @($cases)
+        }
+        Assert-Equal @('directory','fixture') @($result[0].Events) 'Fixture failure reached Browser mutation.'
+        Assert-Equal 'FIXTURE_FAILED' $result[0].Message 'Fixture failure identity changed.'
+        Assert-Equal @('directory','fixture','manifest') @($result[1].Events) 'Manifest failure reached Browser mutation.'
+        Assert-Equal 'MANIFEST_FAILED' $result[1].Message 'Manifest failure identity changed.'
+        Assert-Equal @('directory','fixture','manifest','create','start') @($result[2].Events) 'Success ordering differs.'
+    }
+    Invoke-TestCase 'D315 fixed fixture service owns start wait exit and interruption boundaries' {
+        $result = & $script:E2EModule {
+            $receipt = New-E2EReceipt -RunId ([guid]::NewGuid().ToString('N')) -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+            $id = 'd' * 64
+            $events = [System.Collections.Generic.List[string]]::new()
+            $boundaries = @{
+                Start={ $events.Add('up') }.GetNewClosure()
+                GetContainer={ $events.Add('id'); return $id }.GetNewClosure()
+                Wait={ $events.Add('wait') }.GetNewClosure()
+                ValidateExit={ param($actual) $events.Add('exit'); if ($actual -cne $id) { throw 'WRONG_ID' } }.GetNewClosure()
+            }
+            Invoke-E2EFixedFixtureService -Receipt $receipt -PlanJson '{"transactionId":"safe"}' -Boundaries $boundaries
+            $success = @($events)
+            $restored = $null -eq [System.Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_FIXTURE_PLAN','Process')
+
+            $startEvents = [System.Collections.Generic.List[string]]::new()
+            $startFailure = $null
+            try {
+                Invoke-E2EFixedFixtureService -Receipt $receipt -PlanJson '{}' -Boundaries @{
+                    Start={ $startEvents.Add('up'); throw 'RUN_FIXTURE_SERVICE_FAILED' }.GetNewClosure()
+                    GetContainer={ $startEvents.Add('id') }.GetNewClosure()
+                    Wait={ $startEvents.Add('wait') }.GetNewClosure()
+                    ValidateExit={ $startEvents.Add('exit') }.GetNewClosure()
+                }
+            } catch { $startFailure = $_.Exception.Message }
+
+            $waitEvents = [System.Collections.Generic.List[string]]::new()
+            $waitFailure = $null
+            try {
+                Invoke-E2EFixedFixtureService -Receipt $receipt -PlanJson '{}' -Boundaries @{
+                    Start={ $waitEvents.Add('up') }.GetNewClosure()
+                    GetContainer={ $waitEvents.Add('id'); return $id }.GetNewClosure()
+                    Wait={ $waitEvents.Add('wait'); throw 'RUN_FIXTURE_WAIT_INTERRUPTED' }.GetNewClosure()
+                    ValidateExit={ $waitEvents.Add('exit') }.GetNewClosure()
+                }
+            } catch { $waitFailure = $_.Exception.Message }
+            return [pscustomobject]@{ Success=$success; Restored=$restored; StartEvents=@($startEvents); StartFailure=$startFailure; WaitEvents=@($waitEvents); WaitFailure=$waitFailure }
+        }
+        Assert-Equal @('up','id','wait','exit') @($result.Success) 'Fixed fixture service lifecycle ordering differs.'
+        Assert-True $result.Restored 'Fixture plan environment was not restored.'
+        Assert-Equal @('up') @($result.StartEvents) 'A failed fixed-service start advanced to another boundary.'
+        Assert-Equal 'RUN_FIXTURE_SERVICE_FAILED' $result.StartFailure 'Fixed-service nonzero exit identity changed.'
+        Assert-Equal @('up','id','wait') @($result.WaitEvents) 'An interrupted fixed-service wait advanced to exit validation.'
+        Assert-Equal 'RUN_FIXTURE_WAIT_INTERRUPTED' $result.WaitFailure 'Fixed-service wait interruption identity changed.'
+    }
+    Invoke-TestCase 'D315 fixture production source excludes one-off and broad deletion operands' {
+        $source = [System.IO.File]::ReadAllText($script:ModulePath)
+        Assert-True ($source.Contains('up -d --no-deps --no-build --pull never keycloak-run-fixture')) 'Fixed fixture service up boundary is missing.'
+        Assert-True ($source.Contains('wait keycloak-run-fixture')) 'Official fixed fixture service wait boundary is missing.'
+        Assert-True (-not ($source -match 'run\s+--rm[^\r\n]*keycloak-run-fixture')) 'Fixture service still uses a one-off container.'
+        Assert-True (-not ($source -match '(docker|Invoke-Native)[^\r\n]*(rm|stop)[^\r\n]*(prefix|label|\*)')) 'Broad cleanup operand was introduced.'
+    }
+    Invoke-TestCase 'D315 exited fixed fixture container is recovered by exact resource cleanup' {
+        $result = & $script:E2EModule {
+            $receipt = New-E2EReceipt -RunId ([guid]::NewGuid().ToString('N')) -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+            $id = 'd' * 64
+            $state = [pscustomobject]@{ Present=$true }
+            $events = [System.Collections.Generic.List[string]]::new()
+            $before = [pscustomobject]@{ Project='finguardops-keycloak-browser-e2e'; Containers=@([pscustomobject]@{
+                    Id=$id; Service='keycloak-run-fixture'; Image=('sha256:' + ('e' * 64)); ImageReference=('fixture@sha256:' + ('f' * 64)); Running=$false
+                }); Networks=@(); Volumes=@() }
+            $originalInventory = (Get-Command Get-E2EProjectResourceInventory -CommandType Function).ScriptBlock
+            $existingDocker = Get-Command docker -CommandType Function -ErrorAction SilentlyContinue
+            try {
+                Set-Item Function:\Get-E2EProjectResourceInventory -Value {
+                    if ($state.Present) { return $before }
+                    return [pscustomobject]@{ Project=$before.Project; Containers=@(); Networks=@(); Volumes=@() }
+                }.GetNewClosure()
+                Set-Item Function:\docker -Value {
+                    $arguments = @($args | ForEach-Object { [string]$_ })
+                    $events.Add(($arguments -join ' '))
+                    if ($arguments.Count -eq 2 -and $arguments[0] -ceq 'rm' -and $arguments[1] -ceq $id) {
+                        $state.Present = $false; $global:LASTEXITCODE = 0; return $id
+                    }
+                    $global:LASTEXITCODE = 81
+                }.GetNewClosure()
+                Invoke-E2EExactResourceCleanup -Before $before -Receipt $receipt
+            }
+            finally {
+                Set-Item Function:\Get-E2EProjectResourceInventory -Value $originalInventory
+                if ($null -eq $existingDocker) { Remove-Item Function:\docker -ErrorAction SilentlyContinue }
+                else { Set-Item Function:\docker -Value $existingDocker.ScriptBlock }
+            }
+            return [pscustomobject]@{ Events=@($events); Present=$state.Present }
+        }
+        Assert-Equal @('rm ' + ('d' * 64)) @($result.Events) 'Exited fixed fixture cleanup did not use its exact full ID.'
+        Assert-True (-not $result.Present) 'Exited fixed fixture container residue remained.'
+    }
+    Invoke-TestCase 'D315 run fixture state binds all authoritative owner identities' {
+        $result = & $script:E2EModule {
+            $receipt = New-E2EReceipt -RunId '0123456789abcdef0123456789abcdef' -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+            $project = 'finguardops-keycloak-browser-e2e'
+            $plan = [ordered]@{
+                transactionId='32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a'; passwordEventId='e54cbf7e-d857-4ca0-bff3-8d4321b7722a'
+                transferLimitEventId='9334da6a-1a03-44fd-a71d-f59a44a94225'; idempotencyKey=('kc241-' + ('a' * 32))
+                duplicateIdempotencyKey=('kc241-' + ('b' * 32)); customerRef='kc241-customer-123456789abc'
+                senderRef='kc241-sender-123456789abc'; recipientRef='kc241-recipient-123456789abc'
+                passwordOccurredAt='2026-09-05T01:00:03Z'; transferLimitOccurredAt='2026-09-05T01:01:03Z'; transactionOccurredAt='2026-09-05T01:02:03Z'
+            }
+            $emptyFingerprints = [ordered]@{
+                audit_log='623b3f65b1be08831829539d504eac0148208007724c44d1d2679bc6ff57d8c2'; behavior_event='9147b74f19f991c1417cefff03b8c718529d33e8ac04df141bf9af1c9bdc1f46'
+                case_transaction='075d9bd0d396dfd9dc763c18dd4c97baabc48040efdc8dcbef7d81feddf764e4'; detection_evidence='22bdc14e802b7e07943c342b2ef0015354e31a661aa31c4406423a2d88561868'
+                detection_result='647790f54708f88b18676769b51c73f219a8a51b8629fbdc5a9a3028fd93b95c'; financial_transaction='ccb1a003cece081a77d968685616e17a152d44a669b32b89dfe6b7890e022ae5'
+                fraud_case='7a853a3b65cc047c92dcd390b2bc42da4240322e613d36ddccce2bed6931d376'; fraud_rule='a73a1ceedacc295bcf34a5393eec504571cc8906ed0cc72a142e947f346d14c4'
+                idempotency_record='08e1628ee817a4a2783f30c85095c05add3f104f91f9ae063e2d611460adaba6'; idempotency_recovery_audit_log='3694db36419968b7ee5fa8daa21252cbc0364e8781fc3d62b83b65eedfe00548'
+                investigation_note='a252800a4664bf6fb7cfa200cc898600d067bbc01eb9fbd2c89eff4c57a02068'; rule_version='7feb843afb21f61f4301ceb95121e59888d3eae1b2afc1823839de1bcd5d2b86'
+            }
+            $database = [ordered]@{}
+            foreach ($table in $emptyFingerprints.Keys) {
+                $database[$table] = [ordered]@{ count=0; rowHashes=@(); fingerprint=$emptyFingerprints[$table] }
+            }
+            $state = [ordered]@{
+                schemaVersion=1; runId=$receipt.runId; repositoryId=$receipt.repositoryId; commitSha=$receipt.commitSha
+                treeSha=$receipt.treeSha; composeProject=$project; plan=$plan; database=$database; dependencies=@(0,0); metrics=@(0,0)
+            }
+            function Encode-State($candidate) {
+                $json = ($candidate | ConvertTo-Json -Compress -Depth 100) + "`n"
+                return [Convert]::ToBase64String([System.Text.UTF8Encoding]::new($false,$true).GetBytes($json))
+            }
+            $accepted = (ConvertFrom-E2ERunFixtureState -EncodedState (Encode-State $state) -Receipt $receipt -Project $project).State.runId -ceq $receipt.runId
+            $rejected = 0
+            $mutationState = [pscustomobject]@{ FixtureMutations=0 }
+            foreach ($change in @(
+                @('runId','1123456789abcdef0123456789abcdef'), @('repositoryId',('d' * 64)),
+                @('commitSha',('e' * 40)), @('treeSha',('f' * 40)), @('composeProject','foreign-project')
+            )) {
+                $candidate = (Encode-State $state | ForEach-Object { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($_)) } | ConvertFrom-Json)
+                $candidate.($change[0]) = $change[1]
+                $currentEncoded = Encode-State $candidate
+                $originalNative = (Get-Command Invoke-NativeStdout -CommandType Function).ScriptBlock
+                $originalFixture = (Get-Command Invoke-E2EFixedFixtureService -CommandType Function).ScriptBlock
+                $message = $null
+                try {
+                    Set-Item Function:\Invoke-NativeStdout -Value { $global:LASTEXITCODE=0; return $currentEncoded }.GetNewClosure()
+                    Set-Item Function:\Invoke-E2EFixedFixtureService -Value { $mutationState.FixtureMutations++ }.GetNewClosure()
+                    Invoke-E2ERunFixtureOrchestration -Receipt $receipt -Directory (Get-E2EFixtureDirectory -Receipt $receipt)
+                }
+                catch { $message = $_.Exception.Message }
+                finally {
+                    Set-Item Function:\Invoke-NativeStdout -Value $originalNative
+                    Set-Item Function:\Invoke-E2EFixedFixtureService -Value $originalFixture
+                }
+                if ($message -eq 'RUN_FIXTURE_STATE_IDENTITY_INVALID') { $rejected++ }
+            }
+            $schemaRejected = 0
+            foreach ($kind in @('schema-float','non-v4','fingerprint','database-order')) {
+                $candidate = (Encode-State $state | ForEach-Object { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($_)) } | ConvertFrom-Json)
+                if ($kind -eq 'schema-float') { $candidate.schemaVersion = [decimal]1.0 }
+                elseif ($kind -eq 'non-v4') { $candidate.plan.transactionId = '32a6a5db-71e4-5e58-8b3f-ec8c2c07b69a' }
+                elseif ($kind -eq 'fingerprint') { $candidate.database.audit_log.fingerprint = '0' * 64 }
+                else {
+                    $reordered = [ordered]@{}
+                    foreach ($name in @($candidate.database.PSObject.Properties.Name | Sort-Object -Descending)) { $reordered[$name] = $candidate.database.$name }
+                    $candidate.database = $reordered
+                }
+                $encodedCandidate = Encode-State $candidate
+                if ($kind -eq 'schema-float') {
+                    $rawCandidate = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encodedCandidate)).Replace('{"schemaVersion":1,','{"schemaVersion":1.0,')
+                    $encodedCandidate = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($rawCandidate))
+                }
+                try { ConvertFrom-E2ERunFixtureState -EncodedState $encodedCandidate -Receipt $receipt -Project $project | Out-Null }
+                catch { if ($_.Exception.Message -eq 'RUN_FIXTURE_STATE_INVALID') { $schemaRejected++ } }
+            }
+            return [pscustomobject]@{ Accepted=$accepted; Rejected=$rejected; SchemaRejected=$schemaRejected; FixtureMutations=$mutationState.FixtureMutations }
+        }
+        Assert-True $result.Accepted 'Canonical owner-bound state was rejected.'
+        Assert-Equal 5 $result.Rejected 'A foreign state owner identity was accepted.'
+        Assert-Equal 0 $result.FixtureMutations 'A foreign state reached fixture service mutation.'
+        Assert-Equal 4 $result.SchemaRejected 'A malformed state schema, type, UUID, fingerprint, or order was accepted.'
+    }
+
+    Invoke-TestCase 'D315 strict path manifest and foreign artifact boundaries' {
+        $result = & $script:E2EModule {
+            $receipt = New-E2EReceipt -RunId ([guid]::NewGuid().ToString('N')) -RepositoryId ('a' * 64) `
+                -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+            $directory = Get-E2EFixtureDirectory -Receipt $receipt
+            $unsafeRejected = $false
+            $existingRejected = $false
+            $existingFileRejected = $false
+            $missingRejected = $false
+            $partialPreserved = $false
+            $foreignPreserved = $false
+            $emptyRemoved = $false
+            $ownerEnvironmentDidNotCreate = $false
+            try {
+                try { Assert-E2EFixturePathSafe -Path ([System.IO.Path]::GetTempPath()) -Receipt $receipt | Out-Null }
+                catch { $unsafeRejected = $_.Exception.Message -eq 'FIXTURE_PATH_INVALID' }
+                $previousOwner = Set-E2EOwnerEnvironment -Receipt $receipt
+                try { $ownerEnvironmentDidNotCreate = -not [System.IO.Directory]::Exists($directory) }
+                finally { Restore-E2EOwnerEnvironment -Previous $previousOwner }
+                New-E2EFixtureDirectory -Receipt $receipt | Out-Null
+                try { Read-E2EFixtureManifest -Receipt $receipt -Directory $directory | Out-Null }
+                catch { $missingRejected = $_.Exception.Message -eq 'FIXTURE_MANIFEST_CARDINALITY_INVALID' }
+                try { New-E2EFixtureDirectory -Receipt $receipt | Out-Null }
+                catch { $existingRejected = $_.Exception.Message -eq 'FIXTURE_PATH_EXISTS' }
+                $manifestPath = Join-Path $directory 'fixture-identity.json'
+                $json = '{"schemaVersion":1,"runId":"' + $receipt.runId + '","repositoryId":"' + $receipt.repositoryId +
+                    '","commitSha":"' + $receipt.commitSha + '","treeSha":"' + $receipt.treeSha +
+                    '","transactionId":"32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a","caseId":"d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703","expectedRiskLevel":"HIGH","expectedResponseOutcome":"ADDITIONAL_AUTH_REQUIRED","expectedInitialCaseStatus":"OPEN"}' + "`n"
+                [System.IO.File]::WriteAllBytes($manifestPath, [System.Text.UTF8Encoding]::new($false, $true).GetBytes($json))
+                $read = Read-E2EFixtureManifest -Receipt $receipt -Directory $directory
+                $identityOk = $read.Identity.transactionId -eq '32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a'
+                Remove-E2EFixtureArtifact -Receipt $receipt
+                $removed = -not [System.IO.Directory]::Exists($directory)
+                New-E2EFixtureDirectory -Receipt $receipt | Out-Null
+                Remove-E2EFixtureArtifact -Receipt $receipt
+                $emptyRemoved = -not [System.IO.Directory]::Exists($directory)
+                New-E2EFixtureDirectory -Receipt $receipt | Out-Null
+                $partial = Join-Path $directory 'fixture-identity.json.tmp'
+                [System.IO.File]::WriteAllText($partial, 'partial')
+                try { Remove-E2EFixtureArtifact -Receipt $receipt } catch { }
+                $partialPreserved = [System.IO.File]::Exists($partial)
+                [System.IO.Directory]::Delete($directory,$true)
+                New-E2EFixtureDirectory -Receipt $receipt | Out-Null
+                $foreign = Join-Path $directory '.foreign'
+                [System.IO.File]::WriteAllBytes($foreign, [byte[]]@())
+                try { Remove-E2EFixtureArtifact -Receipt $receipt } catch { }
+                $foreignPreserved = [System.IO.File]::Exists($foreign)
+                [System.IO.Directory]::Delete($directory,$true)
+                [System.IO.File]::WriteAllText($directory,'occupied')
+                try { New-E2EFixtureDirectory -Receipt $receipt | Out-Null }
+                catch { $existingFileRejected = $_.Exception.Message -eq 'FIXTURE_PATH_EXISTS' }
+                [System.IO.File]::Delete($directory)
+                return [pscustomobject]@{ Unsafe=$unsafeRejected; Existing=$existingRejected; ExistingFile=$existingFileRejected; Missing=$missingRejected; OwnerNoCreate=$ownerEnvironmentDidNotCreate; Identity=$identityOk; Removed=$removed; EmptyRemoved=$emptyRemoved; Partial=$partialPreserved; Foreign=$foreignPreserved }
+            }
+            finally {
+                if ([System.IO.Directory]::Exists($directory)) { [System.IO.Directory]::Delete($directory, $true) }
+                if ([System.IO.File]::Exists($directory)) { [System.IO.File]::Delete($directory) }
+            }
+        }
+        Assert-True $result.Unsafe 'Unsafe temp path was accepted.'
+        Assert-True $result.Existing 'Existing fixture directory was accepted.'
+        Assert-True $result.ExistingFile 'Existing fixture file was accepted.'
+        Assert-True $result.Missing 'Missing manifest was accepted.'
+        Assert-True $result.OwnerNoCreate 'Owner environment setup created the fixture directory.'
+        Assert-True $result.Identity 'Canonical manifest identity was not read.'
+        Assert-True $result.Removed 'Canonical artifact was not removed.'
+        Assert-True $result.EmptyRemoved 'Exact empty owned fixture directory was not removed.'
+        Assert-True $result.Partial 'Foreign partial artifact was deleted.'
+        Assert-True $result.Foreign 'Foreign zero-byte artifact was deleted.'
+    }
+    Invoke-TestCase 'D315 fixture directory reparse point is rejected' {
+        $result = & $script:E2EModule {
+            $receipt = New-E2EReceipt -RunId ([guid]::NewGuid().ToString('N')) -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+            $directory = Get-E2EFixtureDirectory -Receipt $receipt
+            $target = Join-Path ([System.IO.Path]::GetTempPath()) ('d315-target-' + [guid]::NewGuid().ToString('N'))
+            [System.IO.Directory]::CreateDirectory($target) | Out-Null
+            $rejected = $false
+            try {
+                Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $directory -Target $target | Out-Null
+                try { Assert-E2EFixturePathSafe -Path $directory -Receipt $receipt | Out-Null }
+                catch { $rejected = $_.Exception.Message -eq 'FIXTURE_PATH_INVALID' }
+            }
+            finally {
+                if ([System.IO.Directory]::Exists($directory)) { [System.IO.Directory]::Delete($directory,$false) }
+                if ([System.IO.Directory]::Exists($target)) { [System.IO.Directory]::Delete($target,$true) }
+            }
+            return $rejected
+        }
+        Assert-True $result 'Fixture directory junction was accepted.'
+    }
+
+    Invoke-TestCase 'D315 Playwright child receives only manifest path and environment restores' {
+        $result = & $script:E2EModule {
+            $name = 'FINGUARDOPS_E2E_FIXTURE_MANIFEST'
+            [System.Environment]::SetEnvironmentVariable($name, $null, 'Process')
+            [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_FIXTURE_DIR', 'owner-only-directory', 'Process')
+            $seen = [System.Collections.Generic.List[string]]::new()
+            $receipt = New-E2EReceipt -RunId ([guid]::NewGuid().ToString('N')) -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+            $directory = Get-E2EFixtureDirectory -Receipt $receipt
+            try {
+                New-E2EFixtureDirectory -Receipt $receipt | Out-Null
+                $path = Join-Path $directory 'fixture-identity.json'
+                $json = '{"schemaVersion":1,"runId":"' + $receipt.runId + '","repositoryId":"' + $receipt.repositoryId +
+                    '","commitSha":"' + $receipt.commitSha + '","treeSha":"' + $receipt.treeSha +
+                    '","transactionId":"32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a","caseId":"d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703","expectedRiskLevel":"HIGH","expectedResponseOutcome":"ADDITIONAL_AUTH_REQUIRED","expectedInitialCaseStatus":"OPEN"}' + "`n"
+                [System.IO.File]::WriteAllBytes($path, [System.Text.UTF8Encoding]::new($false,$true).GetBytes($json))
+                $initial = Read-E2EFixtureManifest -Receipt $receipt -Directory $directory
+                Invoke-E2EPlaywrightWithFixtureEnvironment -Receipt $receipt -InitialManifest $initial -Body {
+                    $seen.Add([System.Environment]::GetEnvironmentVariable($name, 'Process'))
+                    $seen.Add([string]([System.Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_FIXTURE_DIR', 'Process')))
+                }.GetNewClosure()
+                $restored = $null -eq [System.Environment]::GetEnvironmentVariable($name, 'Process')
+                $directoryRestored = [System.Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_FIXTURE_DIR', 'Process') -eq 'owner-only-directory'
+                $primary = [System.InvalidOperationException]::new('PRIMARY_CHILD_FAILURE')
+                $caught = $null
+                try { Invoke-E2EPlaywrightWithFixtureEnvironment -Receipt $receipt -InitialManifest $initial -Body { throw $primary }.GetNewClosure() }
+                catch { $caught = $_.Exception }
+                return [pscustomobject]@{ Seen=@($seen); Restored=$restored; DirectoryRestored=$directoryRestored; Same=[object]::ReferenceEquals($primary,$caught) }
+            }
+            finally {
+                [System.Environment]::SetEnvironmentVariable($name, $null, 'Process')
+                [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_FIXTURE_DIR', $null, 'Process')
+                if ([System.IO.Directory]::Exists($directory)) { [System.IO.Directory]::Delete($directory,$true) }
+            }
+        }
+        Assert-Equal 2 $result.Seen.Count 'Child environment evidence count differs.'
+        Assert-True ($result.Seen[0] -match 'fixture-identity\.json$') 'Child did not receive the canonical path.'
+        Assert-Equal '' $result.Seen[1] 'Writable fixture directory leaked into the child.'
+        Assert-True $result.Restored 'Manifest environment was not restored.'
+        Assert-True $result.DirectoryRestored 'Fixture directory environment was not restored.'
+        Assert-True $result.Same 'Primary child exception identity changed.'
+    }
+    Invoke-TestCase 'D315 Playwright pre-child revalidation rejects content file and directory replacement' {
+        $result = & $script:E2EModule {
+            $outcomes = [System.Collections.Generic.List[object]]::new()
+            foreach ($mode in @('content','file','directory')) {
+                $receipt = New-E2EReceipt -RunId ([guid]::NewGuid().ToString('N')) -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+                $directory = Get-E2EFixtureDirectory -Receipt $receipt
+                $path = Join-Path $directory 'fixture-identity.json'
+                $childCount = 0
+                try {
+                    New-E2EFixtureDirectory -Receipt $receipt | Out-Null
+                    $json = '{"schemaVersion":1,"runId":"' + $receipt.runId + '","repositoryId":"' + $receipt.repositoryId +
+                        '","commitSha":"' + $receipt.commitSha + '","treeSha":"' + $receipt.treeSha +
+                        '","transactionId":"32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a","caseId":"d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703","expectedRiskLevel":"HIGH","expectedResponseOutcome":"ADDITIONAL_AUTH_REQUIRED","expectedInitialCaseStatus":"OPEN"}' + "`n"
+                    [System.IO.File]::WriteAllBytes($path, [System.Text.UTF8Encoding]::new($false,$true).GetBytes($json))
+                    $initial = Read-E2EFixtureManifest -Receipt $receipt -Directory $directory
+                    $replacement = if ($mode -eq 'file') {
+                        $json.Replace('d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703','a62cb846-b0a6-4f32-a783-b5d891b4dcb6')
+                    } else {
+                        $json.Replace('32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a','aa4dce71-8564-4ccd-9c1e-98f6327481da')
+                    }
+                    if ($mode -eq 'content') {
+                        [System.IO.File]::WriteAllBytes($path, [System.Text.UTF8Encoding]::new($false,$true).GetBytes($replacement))
+                    } elseif ($mode -eq 'file') {
+                        [System.IO.File]::Delete($path)
+                        [System.IO.File]::WriteAllBytes($path, [System.Text.UTF8Encoding]::new($false,$true).GetBytes($replacement))
+                    } else {
+                        [System.IO.Directory]::Delete($directory,$true)
+                        [System.IO.Directory]::CreateDirectory($directory) | Out-Null
+                        [System.IO.File]::WriteAllBytes($path, [System.Text.UTF8Encoding]::new($false,$true).GetBytes($replacement))
+                    }
+                    $message = $null
+                    try {
+                        Invoke-E2EPlaywrightWithFixtureEnvironment -Receipt $receipt -InitialManifest $initial -Body { $childCount++ }.GetNewClosure()
+                    } catch { $message = $_.Exception.Message }
+                    $outcomes.Add([pscustomobject]@{ Mode=$mode; Message=$message; ChildCount=$childCount })
+                }
+                finally { if ([System.IO.Directory]::Exists($directory)) { [System.IO.Directory]::Delete($directory,$true) } }
+            }
+            return @($outcomes)
+        }
+        Assert-Equal 3 $result.Count 'Manifest TOCTOU evidence count differs.'
+        foreach ($case in $result) {
+            Assert-Equal 'FIXTURE_MANIFEST_CHANGED' $case.Message ("{0} replacement error identity changed." -f $case.Mode)
+            Assert-Equal 0 $case.ChildCount ("{0} replacement created Playwright child." -f $case.Mode)
+        }
+    }
+
+    Invoke-TestCase 'D315 manifest parser rejects malformed oversized reordered and mismatched identity' {
+        $result = & $script:E2EModule {
+            $receipt = New-E2EReceipt -RunId '0123456789abcdef0123456789abcdef' -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+            $valid = '{"schemaVersion":1,"runId":"' + $receipt.runId + '","repositoryId":"' + $receipt.repositoryId +
+                '","commitSha":"' + $receipt.commitSha + '","treeSha":"' + $receipt.treeSha +
+                '","transactionId":"32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a","caseId":"d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703","expectedRiskLevel":"HIGH","expectedResponseOutcome":"ADDITIONAL_AUTH_REQUIRED","expectedInitialCaseStatus":"OPEN"}' + "`n"
+            $candidates = @(
+                $valid.Replace('{"schemaVersion":1,"runId":','{"runId":'),
+                $valid.Replace('"expectedRiskLevel":"HIGH"','"unknown":"x","expectedRiskLevel":"HIGH"'),
+                $valid.Replace('"caseId":','"caseId":"d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703","caseId":'),
+                $valid.Replace('32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a','32A6A5DB-71E4-4E58-8B3F-EC8C2C07B69A'),
+                $valid.Replace('32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a','32a6a5db-71e4-5e58-8b3f-ec8c2c07b69a'),
+                ($valid + 'trailing'),
+                ($valid.Replace("`n", "`r`n"))
+            )
+            $rejected = 0
+            foreach ($candidate in $candidates) {
+                try { ConvertFrom-E2EFixtureManifestBytes -Bytes ([System.Text.UTF8Encoding]::new($false,$true).GetBytes($candidate)) | Out-Null }
+                catch { if ($_.Exception.Message -eq 'FIXTURE_MANIFEST_INVALID') { $rejected++ } }
+            }
+            try { ConvertFrom-E2EFixtureManifestBytes -Bytes ([byte[]](0..1024 | ForEach-Object { 65 })) | Out-Null }
+            catch { if ($_.Exception.Message -eq 'FIXTURE_MANIFEST_INVALID') { $rejected++ } }
+            $mismatch = $false
+            $directory = Get-E2EFixtureDirectory -Receipt $receipt
+            try {
+                New-E2EFixtureDirectory -Receipt $receipt | Out-Null
+                [System.IO.File]::WriteAllBytes((Join-Path $directory 'fixture-identity.json'), [System.Text.UTF8Encoding]::new($false,$true).GetBytes($valid.Replace($receipt.repositoryId, ('d' * 64))))
+                try { Read-E2EFixtureManifest -Receipt $receipt -Directory $directory | Out-Null }
+                catch { $mismatch = $_.Exception.Message -eq 'FIXTURE_MANIFEST_RECEIPT_MISMATCH' }
+            }
+            finally { if ([System.IO.Directory]::Exists($directory)) { [System.IO.Directory]::Delete($directory,$true) } }
+            return [pscustomobject]@{ Rejected=$rejected; Mismatch=$mismatch }
+        }
+        Assert-Equal 8 $result.Rejected 'A malformed manifest was accepted.'
+        Assert-True $result.Mismatch 'Receipt identity mismatch was accepted.'
+    }
+
+    Invoke-TestCase 'D315 SERVICE credential environment is rejected before child' {
+        $result = & $script:E2EModule {
+            $name = 'FINGUARDOPS_TRANSACTION_SERVICE_CLIENT_SECRET'
+            $receipt = New-E2EReceipt -RunId ([guid]::NewGuid().ToString('N')) -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+            $directory = Get-E2EFixtureDirectory -Receipt $receipt
+            try {
+                New-E2EFixtureDirectory -Receipt $receipt | Out-Null
+                $json = '{"schemaVersion":1,"runId":"' + $receipt.runId + '","repositoryId":"' + $receipt.repositoryId +
+                    '","commitSha":"' + $receipt.commitSha + '","treeSha":"' + $receipt.treeSha +
+                    '","transactionId":"32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a","caseId":"d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703","expectedRiskLevel":"HIGH","expectedResponseOutcome":"ADDITIONAL_AUTH_REQUIRED","expectedInitialCaseStatus":"OPEN"}' + "`n"
+                [System.IO.File]::WriteAllBytes((Join-Path $directory 'fixture-identity.json'), [System.Text.UTF8Encoding]::new($false,$true).GetBytes($json))
+                $initial = Read-E2EFixtureManifest -Receipt $receipt -Directory $directory
+                [System.Environment]::SetEnvironmentVariable($name, 'NeverReflectCredential', 'Process')
+                $message = $null
+                try { Invoke-E2EPlaywrightWithFixtureEnvironment -Receipt $receipt -InitialManifest $initial -Body { throw 'CHILD_RAN' } }
+                catch { $message = $_.Exception.Message }
+                return $message
+            }
+            finally {
+                [System.Environment]::SetEnvironmentVariable($name, $null, 'Process')
+                if ([System.IO.Directory]::Exists($directory)) { [System.IO.Directory]::Delete($directory,$true) }
+            }
+        }
+        Assert-Equal 'SERVICE_CREDENTIAL_ENVIRONMENT_CONTAMINATED' $result 'SERVICE credential environment reached child.'
+    }
+
+    Invoke-TestCase 'D315 full cleanup gates artifact and receipt after Docker audit' {
+        $result = & $script:E2EModule {
+            $receipt = New-E2EReceipt -RunId ([guid]::NewGuid().ToString('N')) -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+            $root = Join-Path ([System.IO.Path]::GetTempPath()) ('d315-cleanup-' + [guid]::NewGuid().ToString('N'))
+            [System.IO.Directory]::CreateDirectory($root) | Out-Null
+            $receiptPath = Join-Path $root 'receipt.json'
+            New-E2EReceiptFile -Path $receiptPath -Receipt $receipt -RepositoryRoot $root
+            $events = [System.Collections.Generic.List[string]]::new()
+            $leaves = @{
+                ResourceCleanup={ param($v) $events.Add('resource') }.GetNewClosure()
+                ImageCleanup={ param($v) $events.Add('image') }.GetNewClosure()
+                FinalAudit={ param($v) $events.Add('audit') }.GetNewClosure()
+                FixtureCleanup={ param($v) $events.Add('artifact') }.GetNewClosure()
+                DeleteFile={ param($v) $events.Add('receipt'); [System.IO.File]::Delete($v) }.GetNewClosure()
+            }
+            try { Invoke-E2EFullCleanup -Receipt $receipt -ReceiptPath $receiptPath -RepositoryRootPath $root -LeafBoundaries $leaves -RequireLeafBoundaries }
+            finally { if ([System.IO.Directory]::Exists($root)) { [System.IO.Directory]::Delete($root, $true) } }
+            return @($events)
+        }
+        Assert-Equal @('resource','image','audit','artifact','receipt') @($result) 'Full cleanup ordering differs.'
+    }
+    Invoke-TestCase 'D315 cleanup failure preserves artifact receipt and primary identity' {
+        $result = & $script:E2EModule {
+            $receipt = New-E2EReceipt -RunId ([guid]::NewGuid().ToString('N')) -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+            $root = Join-Path ([System.IO.Path]::GetTempPath()) ('d315-cleanup-' + [guid]::NewGuid().ToString('N'))
+            [System.IO.Directory]::CreateDirectory($root) | Out-Null
+            $receiptPath = Join-Path $root 'receipt.json'
+            New-E2EReceiptFile -Path $receiptPath -Receipt $receipt -RepositoryRoot $root
+            $events = [System.Collections.Generic.List[string]]::new()
+            $primary = [System.InvalidOperationException]::new('RESOURCE_PRIMARY')
+            $leaves = @{
+                ResourceCleanup={ param($v) $events.Add('resource'); throw $primary }.GetNewClosure()
+                ImageCleanup={ param($v) $events.Add('image') }.GetNewClosure()
+                FinalAudit={ param($v) $events.Add('audit') }.GetNewClosure()
+                FixtureCleanup={ param($v) $events.Add('artifact') }.GetNewClosure()
+                DeleteFile={ param($v) $events.Add('receipt') }.GetNewClosure()
+            }
+            $caught = $null
+            try { Invoke-E2EFullCleanup -Receipt $receipt -ReceiptPath $receiptPath -RepositoryRootPath $root -LeafBoundaries $leaves -RequireLeafBoundaries }
+            catch { $caught = $_.Exception }
+            $kept = [System.IO.File]::Exists($receiptPath)
+            if ([System.IO.Directory]::Exists($root)) { [System.IO.Directory]::Delete($root,$true) }
+            return [pscustomobject]@{ Events=@($events); Kept=$kept; Same=[object]::ReferenceEquals($primary,$caught) }
+        }
+        Assert-Equal @('resource') @($result.Events) 'Cleanup continued after resource failure.'
+        Assert-True $result.Kept 'Receipt was deleted after resource failure.'
+        Assert-True $result.Same 'Cleanup primary exception identity changed.'
+    }
+    Invoke-TestCase 'D315 artifact cleanup failure skips receipt delete' {
+        $result = & $script:E2EModule {
+            $receipt = New-E2EReceipt -RunId ([guid]::NewGuid().ToString('N')) -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+            $root = Join-Path ([System.IO.Path]::GetTempPath()) ('d315-cleanup-' + [guid]::NewGuid().ToString('N'))
+            [System.IO.Directory]::CreateDirectory($root) | Out-Null
+            $receiptPath = Join-Path $root 'receipt.json'
+            New-E2EReceiptFile -Path $receiptPath -Receipt $receipt -RepositoryRoot $root
+            $events = [System.Collections.Generic.List[string]]::new()
+            $artifactFailure = [System.InvalidOperationException]::new('ARTIFACT_FAILURE')
+            $leaves = @{
+                ResourceCleanup={ param($v) $events.Add('resource') }.GetNewClosure()
+                ImageCleanup={ param($v) $events.Add('image') }.GetNewClosure()
+                FinalAudit={ param($v) $events.Add('audit') }.GetNewClosure()
+                FixtureCleanup={ param($v) $events.Add('artifact'); throw $artifactFailure }.GetNewClosure()
+                DeleteFile={ param($v) $events.Add('receipt') }.GetNewClosure()
+            }
+            $caught = $null
+            try { Invoke-E2EFullCleanup -Receipt $receipt -ReceiptPath $receiptPath -RepositoryRootPath $root -LeafBoundaries $leaves -RequireLeafBoundaries }
+            catch { $caught = $_.Exception }
+            $kept = [System.IO.File]::Exists($receiptPath)
+            if ([System.IO.Directory]::Exists($root)) { [System.IO.Directory]::Delete($root,$true) }
+            return [pscustomobject]@{ Events=@($events); Kept=$kept; Same=[object]::ReferenceEquals($artifactFailure,$caught) }
+        }
+        Assert-Equal @('resource','image','audit','artifact') @($result.Events) 'Receipt delete ran after artifact cleanup failure.'
+        Assert-True $result.Kept 'Receipt was deleted after artifact cleanup failure.'
+        Assert-True $result.Same 'Artifact cleanup exception identity changed.'
+    }
+    Invoke-TestCase 'D315 case registry rejects missing duplicate category and counter drift' {
+        $required = @('state-owner','fixed-service','fixed-residue','empty-directory','foreign-empty-entry','manifest-content','manifest-file','manifest-directory')
+        $categories = @('identity','lifecycle','cleanup','artifact','toctou')
+        $registry = @(
+            [pscustomobject]@{ Id='state-owner'; Category='identity' },
+            [pscustomobject]@{ Id='fixed-service'; Category='lifecycle' },
+            [pscustomobject]@{ Id='fixed-residue'; Category='cleanup' },
+            [pscustomobject]@{ Id='empty-directory'; Category='artifact' },
+            [pscustomobject]@{ Id='foreign-empty-entry'; Category='artifact' },
+            [pscustomobject]@{ Id='manifest-content'; Category='toctou' },
+            [pscustomobject]@{ Id='manifest-file'; Category='toctou' },
+            [pscustomobject]@{ Id='manifest-directory'; Category='toctou' }
+        )
+        $validate = {
+            param($candidate,[int]$counter)
+            $ids = @($candidate | ForEach-Object { $_.Id })
+            if ($counter -ne $candidate.Count -or @($ids | Select-Object -Unique).Count -ne $candidate.Count -or
+                @($required | Where-Object { $_ -cnotin $ids }).Count -ne 0 -or
+                @($candidate | Where-Object { $_.Category -cnotin $categories }).Count -ne 0) {
+                throw 'D315_CASE_REGISTRY_INVALID'
+            }
+        }.GetNewClosure()
+        & $validate $registry $registry.Count
+        $bad = @(
+            @($registry | Select-Object -Skip 1),
+            @($registry + $registry[0]),
+            @($registry | ForEach-Object { if ($_.Id -ceq 'state-owner') { [pscustomobject]@{Id=$_.Id;Category='wrong'} } else { $_ } }),
+            @($registry)
+        )
+        $counters = @(($registry.Count - 1), ($registry.Count + 1), $registry.Count, ($registry.Count + 1))
+        $rejected = 0
+        for ($index=0; $index -lt $bad.Count; $index++) {
+            try { & $validate $bad[$index] $counters[$index] }
+            catch { if ($_.Exception.Message -eq 'D315_CASE_REGISTRY_INVALID') { $rejected++ } }
+        }
+        Assert-Equal 4 $rejected 'A malformed D315 case registry was accepted.'
+    }
+    if ($script:Failures.Count -ne 0) {
+        foreach ($failure in $script:Failures) { Write-Output $failure }
+        exit 1
+    }
+    Write-Output 'D315 targeted passed'
+}
+
 function Invoke-FormalTests {
     Invoke-SessionStateTargetedTests
     Invoke-WaitBrowserTargetedTests
     Invoke-OwnerFixTargetedTests
     Invoke-MajorFixTargetedTests
+    Invoke-D315TargetedTests
     $script:Failures = [System.Collections.Generic.List[string]]::new()
     $receipt = New-TestReceipt
 
@@ -7241,6 +7814,11 @@ if ($Mode -eq 'D299Targeted') {
 
 if ($Mode -eq 'D308Oracle') {
     Invoke-D308Oracle
+    exit 0
+}
+
+if ($Mode -eq 'D315Targeted') {
+    Invoke-D315TargetedTests
     exit 0
 }
 
