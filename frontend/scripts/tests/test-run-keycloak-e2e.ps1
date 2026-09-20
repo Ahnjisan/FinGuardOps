@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Preflight', 'MajorFixPreflight', 'MajorFixFixture11', 'MajorFixTargeted', 'OwnerFixPreflight', 'OwnerFixTargeted', 'WaitBrowserPreflight', 'WaitBrowserTargeted', 'SessionStateTargeted', 'D209Preflight', 'D209A', 'D209B', 'D225Service', 'D248Targeted', 'CleanupBrowserTargeted', 'D273Targeted', 'D281Targeted', 'D294Preflight', 'D294Targeted', 'D299Red', 'D299Targeted', 'D308Oracle', 'D315Targeted', 'Formal')]
+    [ValidateSet('Preflight', 'MajorFixPreflight', 'MajorFixFixture11', 'MajorFixTargeted', 'OwnerFixPreflight', 'OwnerFixTargeted', 'WaitBrowserPreflight', 'WaitBrowserTargeted', 'SessionStateTargeted', 'D209Preflight', 'D209A', 'D209B', 'D225Service', 'D248Targeted', 'CleanupBrowserTargeted', 'D273Targeted', 'D281Targeted', 'D294Preflight', 'D294Targeted', 'D299Red', 'D299Targeted', 'D308Oracle', 'D315LauncherTargeted', 'D315Targeted', 'Formal')]
     [string]$Mode = 'Formal'
 )
 
@@ -6423,8 +6423,11 @@ function Get-D308RawSources($Receipt) {
     $ai = 'finguardops-ai-service:' + $suffix
     $names = @('FINGUARDOPS_E2E_BACKEND_IMAGE','FINGUARDOPS_E2E_AI_SERVICE_IMAGE',
         'FINGUARDOPS_E2E_REVISION','FINGUARDOPS_E2E_SOURCE_TREE','FINGUARDOPS_E2E_RUN_ID',
-        'FINGUARDOPS_E2E_REPOSITORY_ID')
-    $values = @($backend,$ai,$Receipt.commitSha,$Receipt.treeSha,$Receipt.runId,$Receipt.repositoryId)
+        'FINGUARDOPS_E2E_REPOSITORY_ID','FINGUARDOPS_E2E_FIXTURE_DIR')
+    $fixtureDirectory = Join-Path ([System.IO.Path]::GetTempPath()) `
+        ('finguardops-keycloak-e2e-fixture-' + $Receipt.runId)
+    $values = @($backend,$ai,$Receipt.commitSha,$Receipt.treeSha,$Receipt.runId,$Receipt.repositoryId,
+        $fixtureDirectory)
     $saved = @{}
     $oldLocation = Get-Location
     $repository = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
@@ -6878,6 +6881,159 @@ function Invoke-D299TargetedTests {
         exit 1
     }
     Write-Output 'D299 targeted passed'
+}
+
+function Invoke-D315LauncherTargetedTests {
+    $script:Failures = [System.Collections.Generic.List[string]]::new()
+    $unicode = [string]([char]0xAC80) + [char]0xC99D
+    $root = Join-Path ([System.IO.Path]::GetTempPath()) ('finguardops-d315-launcher space-' + $unicode + '-' + [guid]::NewGuid().ToString('N'))
+    $work = Join-Path $root ('working directory-' + $unicode)
+    $fixture = Join-Path $root 'launcher-fixture.py'
+    $previousPath = $env:PATH
+    $descendantId = 0
+    try {
+        [System.IO.Directory]::CreateDirectory($work) | Out-Null
+        $source = @'
+import subprocess
+import sys
+import time
+
+mode = sys.argv[1]
+if mode == "empty":
+    raise SystemExit(0)
+if mode == "stdout":
+    sys.stdout.buffer.write(b"D315_STDOUT\r\n")
+    raise SystemExit(0)
+if mode == "stderr":
+    sys.stderr.buffer.write(b"D315_STDERR\r\n")
+    raise SystemExit(0)
+if mode == "dual":
+    sys.stdout.buffer.write(b"A" * 200000)
+    sys.stderr.buffer.write(b"B" * 200000)
+    raise SystemExit(0)
+if mode == "nonzero":
+    raise SystemExit(23)
+if mode == "argument":
+    if sys.argv[2] != "argument with spaces":
+        raise SystemExit(41)
+    sys.stdout.buffer.write(b"D315_ARGUMENT\r\n")
+    raise SystemExit(0)
+if mode == "timeout":
+    time.sleep(30)
+if mode == "descendant":
+    child = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(30)"])
+    print(child.pid, flush=True)
+    time.sleep(30)
+raise SystemExit(42)
+'@
+        [System.IO.File]::WriteAllText($fixture, $source + "`n", [System.Text.UTF8Encoding]::new($false))
+        $fixtureBytes = [System.IO.File]::ReadAllBytes($fixture)
+        Assert-Equal 0 @($fixtureBytes | Where-Object { $_ -gt 127 }).Count 'Launcher fixture is not ASCII-only.'
+        Assert-True (-not ($fixtureBytes.Length -ge 3 -and $fixtureBytes[0] -eq 239 -and
+            $fixtureBytes[1] -eq 187 -and $fixtureBytes[2] -eq 191)) 'Launcher fixture has a UTF-8 BOM.'
+
+        $pythonCommand = @(Get-Command python -CommandType Application -ErrorAction Stop | Select-Object -First 1)
+        Assert-Equal 1 $pythonCommand.Count 'Approved Python resolution is not scalar.'
+        $python = [System.IO.Path]::GetFullPath($pythonCommand[0].Source)
+        $pythonDirectory = [System.IO.Path]::GetDirectoryName($python)
+        $remainingPath = @($env:PATH -split ';' | Where-Object {
+            $_ -and -not [string]::Equals($_.TrimEnd('\'), $pythonDirectory.TrimEnd('\'),
+                [System.StringComparison]::OrdinalIgnoreCase)
+        })
+        $env:PATH = $pythonDirectory + ';' + ($remainingPath -join ';')
+        Assert-Equal 1 @($env:PATH -split ';' | Where-Object {
+            [string]::Equals($_.TrimEnd('\'), $pythonDirectory.TrimEnd('\'),
+                [System.StringComparison]::OrdinalIgnoreCase)
+        }).Count 'Approved Python directory does not occur exactly once on Process PATH.'
+
+        Invoke-TestCase 'D315 launcher resolves ambiguous bare application to one rooted executable' {
+            $candidates = @(Get-Command python -CommandType Application -ErrorAction Stop)
+            Assert-True ($candidates.Count -gt 1) 'The launcher ambiguity regression precondition is absent.'
+            $oldFailure = $null
+            try { [System.IO.Path]::GetFullPath($candidates.Source) | Out-Null }
+            catch { $oldFailure = 'APPLICATION_RESOLUTION_CARDINALITY_INVALID' }
+            Assert-Equal 'APPLICATION_RESOLUTION_CARDINALITY_INVALID' $oldFailure 'The production defect was not reinjected.'
+            $resolved = & $script:E2EModule { Resolve-E2ENativeExecutable -Executable 'python' }
+            Assert-True ([System.IO.Path]::IsPathRooted($resolved)) 'Resolved executable is not rooted.'
+            Assert-True ([System.IO.File]::Exists($resolved)) 'Resolved executable does not exist.'
+            Assert-True ([string]::Equals($resolved, $python, [System.StringComparison]::OrdinalIgnoreCase)) `
+                'Bare application did not resolve to the approved executable.'
+        }
+
+        Invoke-TestCase 'D315 launcher starts bare and absolute Python in Unicode space working directory' {
+            foreach ($executable in @('python', $python)) {
+                $capture = & $script:E2EModule {
+                    param($exe, $path, $directory)
+                    Invoke-E2EBoundedNativeProcess -Executable $exe -ArgumentList @('-B', $path, 'argument', 'argument with spaces') `
+                        -WorkingDirectory $directory -StdoutLimit 128 -StderrLimit 128 -TimeoutMilliseconds 10000
+                } $executable $fixture $work
+                Assert-True (-not $capture.StartFailed) 'Valid Python child did not start.'
+                Assert-Equal 0 $capture.ExitCode 'Argument-vector fixture failed.'
+                Assert-Equal 'D315_ARGUMENT' ([Text.Encoding]::ASCII.GetString($capture.Stdout).Trim()) 'Spaced argument changed.'
+                Assert-Equal 0 $capture.Stderr.Length 'Argument fixture emitted stderr.'
+                Assert-True (-not $capture.CleanupFailed) 'Valid child cleanup failed.'
+            }
+        }
+
+        Invoke-TestCase 'D315 launcher preserves empty single-stream dual-stream and nonzero results' {
+            $empty = & $script:E2EModule { param($p,$f,$w) Invoke-E2EBoundedNativeProcess $p @('-B',$f,'empty') $w 64 64 10000 } $python $fixture $work
+            $stdout = & $script:E2EModule { param($p,$f,$w) Invoke-E2EBoundedNativeProcess $p @('-B',$f,'stdout') $w 64 64 10000 } $python $fixture $work
+            $stderr = & $script:E2EModule { param($p,$f,$w) Invoke-E2EBoundedNativeProcess $p @('-B',$f,'stderr') $w 64 64 10000 } $python $fixture $work
+            $dual = & $script:E2EModule { param($p,$f,$w) Invoke-E2EBoundedNativeProcess $p @('-B',$f,'dual') $w 1024 1024 10000 } $python $fixture $work
+            $nonzero = & $script:E2EModule { param($p,$f,$w) Invoke-E2EBoundedNativeProcess $p @('-B',$f,'nonzero') $w 64 64 10000 } $python $fixture $work
+            Assert-Equal 0 $empty.Stdout.Length 'Empty fixture emitted stdout.'
+            Assert-Equal 0 $empty.Stderr.Length 'Empty fixture emitted stderr.'
+            Assert-Equal 'D315_STDOUT' ([Text.Encoding]::ASCII.GetString($stdout.Stdout).Trim()) 'stdout marker changed.'
+            Assert-Equal 0 $stdout.Stderr.Length 'stdout-only fixture emitted stderr.'
+            Assert-Equal 0 $stderr.Stdout.Length 'stderr-only fixture emitted stdout.'
+            Assert-Equal 'D315_STDERR' ([Text.Encoding]::ASCII.GetString($stderr.Stderr).Trim()) 'stderr marker changed.'
+            Assert-True ($dual.StdoutOverflow -and $dual.StderrOverflow) 'Simultaneous streams were not bounded.'
+            Assert-True (-not $dual.CaptureFailed) 'Simultaneous drain failed.'
+            Assert-Equal 23 $nonzero.ExitCode 'Authoritative nonzero exit code changed.'
+        }
+
+        Invoke-TestCase 'D315 launcher owns timeout descendant and invalid-start cleanup' {
+            $timeout = & $script:E2EModule { param($p,$f,$w) Invoke-E2EBoundedNativeProcess $p @('-B',$f,'timeout') $w 64 64 50 } $python $fixture $work
+            $tree = & $script:E2EModule { param($p,$f,$w) Invoke-E2EBoundedNativeProcess $p @('-B',$f,'descendant') $w 64 64 500 } $python $fixture $work
+            [int]::TryParse([Text.Encoding]::ASCII.GetString($tree.Stdout).Trim(), [ref]$descendantId) | Out-Null
+            $missing = & $script:E2EModule { param($w) Invoke-E2EBoundedNativeProcess ('missing-'+[guid]::NewGuid().ToString('N')+'.exe') @() $w 64 64 50 } $work
+            $badWork = & $script:E2EModule { param($p,$f,$w) Invoke-E2EBoundedNativeProcess $p @('-B',$f,'empty') $w 64 64 50 } $python $fixture (Join-Path $root 'missing-directory')
+            Assert-True ($timeout.TimedOut -and -not $timeout.CleanupFailed) 'Timeout cleanup failed.'
+            Assert-True ($tree.TimedOut -and -not $tree.CleanupFailed) 'Descendant cleanup failed.'
+            Assert-True ($descendantId -gt 0) 'Descendant identifier was not captured.'
+            Assert-True ($null -eq (Get-Process -Id $descendantId -ErrorAction SilentlyContinue)) 'Descendant remains alive.'
+            Assert-True ($missing.StartFailed -and -not $missing.CleanupFailed) 'Invalid executable boundary changed.'
+            Assert-True ($badWork.StartFailed -and -not $badWork.CleanupFailed) 'Invalid working directory boundary changed.'
+        }
+
+        Invoke-TestCase 'D315 launcher source retains Win32 confinement order and inherited environment' {
+            $moduleSource = [System.IO.File]::ReadAllText($ModulePath)
+            Assert-True ($moduleSource -cmatch 'command\.Add\(Quote\(executable\)\)') 'Command line omits the executable token.'
+            Assert-True ($moduleSource -cmatch 'CreateProcess\(executable, commandLine') 'Application name is no longer explicit.'
+            Assert-True ($moduleSource -cmatch 'true,\s*CREATE_SUSPENDED \| CREATE_NO_WINDOW, IntPtr\.Zero, workingDirectory') `
+                'Handle inheritance, flags, inherited environment, or working directory changed.'
+            Assert-True ($moduleSource -cmatch 'AssignProcessToJobObject\(job, process\.hProcess\)') 'Job assignment is missing.'
+            Assert-True ($moduleSource.IndexOf('AssignProcessToJobObject(job, process.hProcess)', [StringComparison]::Ordinal) -lt
+                $moduleSource.IndexOf('ResumeThread(process.hThread)', [StringComparison]::Ordinal)) 'Process resumes before Job assignment.'
+            Assert-True ($moduleSource -cmatch 'startup\.cb = Marshal\.SizeOf\(typeof\(STARTUPINFO\)\)') 'STARTUPINFO size changed.'
+            Assert-True ($moduleSource -cmatch 'security\.bInheritHandle = true') 'Pipe inheritance changed.'
+            Assert-True ($moduleSource -cmatch 'SetHandleInformation\(stdoutRead, HANDLE_FLAG_INHERIT, 0\)') 'stdout read handle inheritance changed.'
+            Assert-True ($moduleSource -cmatch 'SetHandleInformation\(stderrRead, HANDLE_FLAG_INHERIT, 0\)') 'stderr read handle inheritance changed.'
+        }
+    }
+    finally {
+        $env:PATH = $previousPath
+        if ($descendantId -gt 0 -and $null -ne (Get-Process -Id $descendantId -ErrorAction SilentlyContinue)) {
+            Stop-Process -Id $descendantId -Force -ErrorAction SilentlyContinue
+        }
+        if ([System.IO.Directory]::Exists($root)) { [System.IO.Directory]::Delete($root, $true) }
+    }
+    Assert-True (-not [System.IO.Directory]::Exists($root)) 'Launcher fixture directory remains.'
+    if ($script:Failures.Count -ne 0) {
+        $script:Failures | ForEach-Object { Write-Output $_ }
+        exit 1
+    }
+    Write-Output 'D315 launcher targeted passed'
 }
 
 function Invoke-D315TargetedTests {
@@ -7582,6 +7738,7 @@ function Invoke-FormalTests {
     Invoke-WaitBrowserTargetedTests
     Invoke-OwnerFixTargetedTests
     Invoke-MajorFixTargetedTests
+    Invoke-D315LauncherTargetedTests
     Invoke-D315TargetedTests
     $script:Failures = [System.Collections.Generic.List[string]]::new()
     $receipt = New-TestReceipt
@@ -7949,6 +8106,11 @@ if ($Mode -eq 'D308Oracle') {
 
 if ($Mode -eq 'D315Targeted') {
     Invoke-D315TargetedTests
+    exit 0
+}
+
+if ($Mode -eq 'D315LauncherTargeted') {
+    Invoke-D315LauncherTargetedTests
     exit 0
 }
 

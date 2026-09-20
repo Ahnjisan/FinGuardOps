@@ -1616,6 +1616,34 @@ namespace FinGuardOps {
 '@
 }
 
+function Resolve-E2ENativeExecutable {
+    param([Parameter(Mandatory = $true)][string]$Executable)
+
+    try {
+        $commands = @(Get-Command -Name $Executable -CommandType Application -ErrorAction Stop |
+            Select-Object -First 1)
+        if ($commands.Count -ne 1 -or
+            $commands[0] -isnot [System.Management.Automation.ApplicationInfo]) {
+            throw 'APPLICATION_EXECUTABLE_INVALID'
+        }
+        $source = $commands[0].Source
+        if ($source -isnot [string] -or [string]::IsNullOrWhiteSpace($source) -or
+            -not [System.IO.Path]::IsPathRooted($source)) {
+            throw 'APPLICATION_EXECUTABLE_INVALID'
+        }
+        $resolved = [System.IO.Path]::GetFullPath($source)
+        if (-not [string]::Equals($source, $resolved, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not [System.IO.File]::Exists($resolved) -or
+            (([System.IO.File]::GetAttributes($resolved) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+            throw 'APPLICATION_EXECUTABLE_INVALID'
+        }
+        return $resolved
+    }
+    catch {
+        throw 'APPLICATION_EXECUTABLE_INVALID'
+    }
+}
+
 function Invoke-E2EBoundedNativeProcess {
     param(
         [Parameter(Mandatory = $true)][string]$Executable,
@@ -1628,8 +1656,7 @@ function Invoke-E2EBoundedNativeProcess {
 
     try {
         Initialize-E2EBoundedNativeProcessType
-        $command = Get-Command -Name $Executable -CommandType Application -ErrorAction Stop
-        $resolvedExecutable = [System.IO.Path]::GetFullPath($command.Source)
+        $resolvedExecutable = Resolve-E2ENativeExecutable -Executable $Executable
         return [FinGuardOps.E2EBoundedNativeProcess]::Run(
             $resolvedExecutable, $ArgumentList, [System.IO.Path]::GetFullPath($WorkingDirectory),
             $StdoutLimit, $StderrLimit, $TimeoutMilliseconds)
