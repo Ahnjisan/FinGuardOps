@@ -1403,6 +1403,76 @@ finguardops_rule_analysis_outcomes_created 99
             self.assertEqual(after_output.getvalue(), "")
             after.assert_called_once()
 
+    def test_run_fixture_before_cli_emits_only_fixed_single_line_failures(self):
+        environment = valid_owner_environment()
+        fixed_codes = (
+            "BACKEND_METRIC_SNAPSHOT_INVALID",
+            "DATABASE_GLOBAL_SNAPSHOT_INVALID",
+            "DATABASE_TRANSACTION_CARDINALITY_INVALID",
+            "DATABASE_TRANSACTION_SNAPSHOT_INVALID",
+            "DEPENDENCY_SERVICE_INVALID",
+            "FIXTURE_DIRECTORY_INVALID",
+            "INGESTION_PLAN_INVALID",
+            "OVERALL_DEADLINE_EXCEEDED",
+            "OWNER_CONTRACT_INVALID",
+            "RULE_ACTIVATION_TIMEOUT",
+            "RULE_PUBLICATION_STATE_INVALID",
+            "RUN_FIXTURE_STATE_IDENTITY_INVALID",
+            "RUN_FIXTURE_STATE_INVALID",
+            "RUN_FIXTURE_STATE_TOO_LARGE",
+            "SUBPROCESS_FAILED",
+            "SUBPROCESS_TIMEOUT_INVALID",
+        )
+        with tempfile.TemporaryDirectory(prefix="finguardops-keycloak-e2e-fixture-") as parent:
+            directory = Path(parent) / (
+                "finguardops-keycloak-e2e-fixture-"
+                + environment["FINGUARDOPS_E2E_RUN_ID"]
+            )
+            directory.mkdir()
+            argv = [
+                "run-fixture-before", "--repo-root", parent,
+                "--project", "finguardops-kc241-e2e-unit01",
+                "--fixture-directory", str(directory),
+            ]
+            for code in fixed_codes:
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with self.subTest(code=code), \
+                     mock.patch.dict(verify_e2e.os.environ, environment, clear=True), \
+                     mock.patch.object(
+                         verify_e2e, "run_fixture_before",
+                         side_effect=verify_e2e.VerificationError(code),
+                     ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    result = verify_e2e.main(argv)
+                self.assertEqual(result, 1)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertEqual(stderr.getvalue(), "verification failed: " + code + "\n")
+
+            for failure, expected, exit_code in (
+                (OSError("raw-path-must-not-print"), "INPUT_INVALID", 2),
+                (RuntimeError("raw-token-must-not-print"), "UNEXPECTED_ERROR", 1),
+            ):
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with mock.patch.dict(verify_e2e.os.environ, environment, clear=True), \
+                     mock.patch.object(verify_e2e, "run_fixture_before", side_effect=failure), \
+                     contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    result = verify_e2e.main(argv)
+                self.assertEqual(result, exit_code)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertEqual(stderr.getvalue(), "verification failed: " + expected + "\n")
+                self.assertNotIn("raw-", stderr.getvalue())
+
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch.dict(verify_e2e.os.environ, environment, clear=True), \
+                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = verify_e2e.main([
+                    "run-fixture-before", "--repo-root", parent,
+                    "--project", "finguardops-keycloak-browser-e2e",
+                    "--fixture-directory", str(directory),
+                ])
+            self.assertEqual(result, 1)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertEqual(stderr.getvalue(), "verification failed: HOST_ARGUMENT_INVALID\n")
+
     def test_run_fixture_state_binds_every_owner_identity_before_after(self):
         state = valid_run_fixture_state()
         canonical = verify_e2e.run_fixture_state_bytes(state)

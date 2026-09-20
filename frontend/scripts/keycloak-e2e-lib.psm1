@@ -105,6 +105,45 @@ $FixtureManifestEnvironmentName = 'FINGUARDOPS_E2E_FIXTURE_MANIFEST'
 $FixtureDirectoryEnvironmentName = 'FINGUARDOPS_E2E_FIXTURE_DIR'
 $FixturePlanEnvironmentName = 'FINGUARDOPS_E2E_FIXTURE_PLAN'
 $FixtureManifestName = 'fixture-identity.json'
+$RunFixtureBeforeStdoutLimit = 22369626
+$RunFixtureBeforeStderrLimit = 128
+$RunFixtureBeforeTimeoutMilliseconds = 1830000
+$RunFixtureBeforeSecondaryCodes = @(
+    'BACKEND_METRIC_SNAPSHOT_INVALID',
+    'CHILD_INPUT_INVALID',
+    'CHILD_METRIC_BODY_INVALID',
+    'CHILD_METRIC_BODY_TOO_LARGE',
+    'CHILD_METRIC_STATUS_INVALID',
+    'CHILD_METRIC_TRANSPORT_FAILED',
+    'CHILD_UNEXPECTED_ERROR',
+    'DATABASE_GLOBAL_SNAPSHOT_INVALID',
+    'DATABASE_TRANSACTION_CARDINALITY_INVALID',
+    'DATABASE_TRANSACTION_SNAPSHOT_INVALID',
+    'FIXTURE_DIRECTORY_INVALID',
+    'HOST_ARGUMENT_INVALID',
+    'INGESTION_PLAN_INVALID',
+    'INPUT_INVALID',
+    'OVERALL_DEADLINE_EXCEEDED',
+    'OWNER_CONTRACT_INVALID',
+    'RULE_ACTIVATION_TIMEOUT',
+    'RULE_PUBLICATION_STATE_INVALID',
+    'RUN_FIXTURE_STATE_IDENTITY_INVALID',
+    'RUN_FIXTURE_STATE_INVALID',
+    'RUN_FIXTURE_STATE_TOO_LARGE',
+    'SUBPROCESS_FAILED',
+    'UNEXPECTED_ERROR'
+)
+# DEPENDENCY_SERVICE_INVALID and SUBPROCESS_TIMEOUT_INVALID exist below the
+# call graph, but the before command supplies only the two fixed service names
+# and only positive fixed timeouts. They are intentionally not accepted from
+# candidate stderr.
+$RunFixtureBeforeLocalSecondaryCodes = @(
+    'RUN_FIXTURE_BEFORE_CAPTURE_FAILED',
+    'RUN_FIXTURE_BEFORE_CLEANUP_FAILED',
+    'RUN_FIXTURE_BEFORE_OUTPUT_INVALID',
+    'RUN_FIXTURE_BEFORE_PROCESS_START_FAILED',
+    'RUN_FIXTURE_BEFORE_TIMEOUT'
+)
 $ForbiddenServiceCredentialEnvironment = @(
     'TRANSACTION_SERVICE_CLIENT_SECRET',
     'BEHAVIOR_SERVICE_CLIENT_SECRET',
@@ -1231,6 +1270,505 @@ function Invoke-E2EFixedFixtureService {
     Invoke-E2ECleanupActions -Primary $primary -Actions $actions
 }
 
+function Initialize-E2EBoundedNativeProcessType {
+    if ('FinGuardOps.E2EBoundedNativeProcess' -as [type]) { return }
+
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Win32.SafeHandles;
+
+namespace FinGuardOps {
+    public sealed class E2ECaptureResult {
+        public int ExitCode = -1;
+        public byte[] Stdout = new byte[0];
+        public byte[] Stderr = new byte[0];
+        public bool StdoutOverflow;
+        public bool StderrOverflow;
+        public bool TimedOut;
+        public bool StartFailed;
+        public bool CaptureFailed;
+        public bool CleanupFailed;
+    }
+
+    public static class E2EBoundedNativeProcess {
+        private const uint CREATE_SUSPENDED = 0x00000004;
+        private const uint CREATE_NO_WINDOW = 0x08000000;
+        private const uint STARTF_USESTDHANDLES = 0x00000100;
+        private const uint HANDLE_FLAG_INHERIT = 0x00000001;
+        private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+        private const uint WAIT_OBJECT_0 = 0x00000000;
+        private const uint WAIT_TIMEOUT = 0x00000102;
+        private const int JobObjectBasicAccountingInformation = 1;
+        private const int JobObjectExtendedLimitInformation = 9;
+        private static readonly IntPtr INVALID_HANDLE_VALUE = new IntPtr(-1);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SECURITY_ATTRIBUTES {
+            public int nLength;
+            public IntPtr lpSecurityDescriptor;
+            [MarshalAs(UnmanagedType.Bool)] public bool bInheritHandle;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct STARTUPINFO {
+            public int cb;
+            public string lpReserved;
+            public string lpDesktop;
+            public string lpTitle;
+            public uint dwX;
+            public uint dwY;
+            public uint dwXSize;
+            public uint dwYSize;
+            public uint dwXCountChars;
+            public uint dwYCountChars;
+            public uint dwFillAttribute;
+            public uint dwFlags;
+            public short wShowWindow;
+            public short cbReserved2;
+            public IntPtr lpReserved2;
+            public IntPtr hStdInput;
+            public IntPtr hStdOutput;
+            public IntPtr hStdError;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PROCESS_INFORMATION {
+            public IntPtr hProcess;
+            public IntPtr hThread;
+            public uint dwProcessId;
+            public uint dwThreadId;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+            public long PerProcessUserTimeLimit;
+            public long PerJobUserTimeLimit;
+            public uint LimitFlags;
+            public UIntPtr MinimumWorkingSetSize;
+            public UIntPtr MaximumWorkingSetSize;
+            public uint ActiveProcessLimit;
+            public UIntPtr Affinity;
+            public uint PriorityClass;
+            public uint SchedulingClass;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IO_COUNTERS {
+            public ulong ReadOperationCount;
+            public ulong WriteOperationCount;
+            public ulong OtherOperationCount;
+            public ulong ReadTransferCount;
+            public ulong WriteTransferCount;
+            public ulong OtherTransferCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+            public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+            public IO_COUNTERS IoInfo;
+            public UIntPtr ProcessMemoryLimit;
+            public UIntPtr JobMemoryLimit;
+            public UIntPtr PeakProcessMemoryUsed;
+            public UIntPtr PeakJobMemoryUsed;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_BASIC_ACCOUNTING_INFORMATION {
+            public long TotalUserTime;
+            public long TotalKernelTime;
+            public long ThisPeriodTotalUserTime;
+            public long ThisPeriodTotalKernelTime;
+            public uint TotalPageFaultCount;
+            public uint TotalProcesses;
+            public uint ActiveProcesses;
+            public uint TotalTerminatedProcesses;
+        }
+
+        private sealed class CaptureBuffer {
+            internal byte[] Bytes = new byte[0];
+            internal bool Overflow;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint length);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool QueryInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint length, IntPtr returnLength);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CreatePipe(out IntPtr readPipe, out IntPtr writePipe, ref SECURITY_ATTRIBUTES attributes, uint size);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool CreateProcess(string applicationName, StringBuilder commandLine, IntPtr processAttributes,
+            IntPtr threadAttributes, bool inheritHandles, uint creationFlags, IntPtr environment,
+            string currentDirectory, ref STARTUPINFO startupInfo, out PROCESS_INFORMATION processInformation);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint ResumeThread(IntPtr thread);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetStdHandle(int standardHandle);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        private static string Quote(string value) {
+            if (value.Length > 0 && value.IndexOfAny(new char[] { ' ', '\t', '\n', '\v', '"' }) < 0) return value;
+            StringBuilder builder = new StringBuilder();
+            builder.Append('"');
+            int backslashes = 0;
+            foreach (char character in value) {
+                if (character == '\\') { backslashes++; continue; }
+                if (character == '"') {
+                    builder.Append('\\', (backslashes * 2) + 1);
+                    builder.Append('"');
+                    backslashes = 0;
+                    continue;
+                }
+                if (backslashes != 0) { builder.Append('\\', backslashes); backslashes = 0; }
+                builder.Append(character);
+            }
+            if (backslashes != 0) builder.Append('\\', backslashes * 2);
+            builder.Append('"');
+            return builder.ToString();
+        }
+
+        private static CaptureBuffer Drain(IntPtr readHandle, int limit) {
+            CaptureBuffer result = new CaptureBuffer();
+            using (SafeFileHandle safeHandle = new SafeFileHandle(readHandle, false))
+            using (FileStream stream = new FileStream(safeHandle, FileAccess.Read, 4096, false))
+            using (MemoryStream captured = new MemoryStream()) {
+                byte[] buffer = new byte[8192];
+                int count;
+                while ((count = stream.Read(buffer, 0, buffer.Length)) != 0) {
+                    int remaining = limit - (int)captured.Length;
+                    int writeCount = Math.Min(count, Math.Max(remaining, 0));
+                    if (writeCount != 0) captured.Write(buffer, 0, writeCount);
+                    if (writeCount != count) result.Overflow = true;
+                }
+                result.Bytes = captured.ToArray();
+            }
+            return result;
+        }
+
+        private static bool SetKillOnClose(IntPtr job) {
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            int size = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+            IntPtr pointer = Marshal.AllocHGlobal(size);
+            try {
+                Marshal.StructureToPtr(limits, pointer, false);
+                return SetInformationJobObject(job, JobObjectExtendedLimitInformation, pointer, (uint)size);
+            } finally { Marshal.FreeHGlobal(pointer); }
+        }
+
+        private static bool WaitForEmptyJob(IntPtr job, int milliseconds) {
+            int size = Marshal.SizeOf(typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION));
+            IntPtr pointer = Marshal.AllocHGlobal(size);
+            try {
+                DateTime deadline = DateTime.UtcNow.AddMilliseconds(milliseconds);
+                do {
+                    if (!QueryInformationJobObject(job, JobObjectBasicAccountingInformation, pointer, (uint)size, IntPtr.Zero)) return false;
+                    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting =
+                        (JOBOBJECT_BASIC_ACCOUNTING_INFORMATION)Marshal.PtrToStructure(pointer, typeof(JOBOBJECT_BASIC_ACCOUNTING_INFORMATION));
+                    if (accounting.ActiveProcesses == 0) return true;
+                    Thread.Sleep(10);
+                } while (DateTime.UtcNow < deadline);
+                return false;
+            } finally { Marshal.FreeHGlobal(pointer); }
+        }
+
+        public static E2ECaptureResult Run(string executable, string[] arguments, string workingDirectory,
+            int stdoutLimit, int stderrLimit, int timeoutMilliseconds) {
+            E2ECaptureResult result = new E2ECaptureResult();
+            IntPtr job = IntPtr.Zero;
+            IntPtr stdoutRead = IntPtr.Zero, stdoutWrite = IntPtr.Zero;
+            IntPtr stderrRead = IntPtr.Zero, stderrWrite = IntPtr.Zero;
+            PROCESS_INFORMATION process = new PROCESS_INFORMATION();
+            Task<CaptureBuffer> stdoutTask = null, stderrTask = null;
+            bool created = false, jobConfigured = false, assigned = false;
+            try {
+                job = CreateJobObject(IntPtr.Zero, null);
+                if (job == IntPtr.Zero || !SetKillOnClose(job)) { result.StartFailed = true; return result; }
+                jobConfigured = true;
+                SECURITY_ATTRIBUTES security = new SECURITY_ATTRIBUTES();
+                security.nLength = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES));
+                security.bInheritHandle = true;
+                if (!CreatePipe(out stdoutRead, out stdoutWrite, ref security, 0) ||
+                    !SetHandleInformation(stdoutRead, HANDLE_FLAG_INHERIT, 0) ||
+                    !CreatePipe(out stderrRead, out stderrWrite, ref security, 0) ||
+                    !SetHandleInformation(stderrRead, HANDLE_FLAG_INHERIT, 0)) {
+                    result.StartFailed = true; return result;
+                }
+                STARTUPINFO startup = new STARTUPINFO();
+                startup.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+                startup.dwFlags = STARTF_USESTDHANDLES;
+                startup.hStdInput = GetStdHandle(-10);
+                startup.hStdOutput = stdoutWrite;
+                startup.hStdError = stderrWrite;
+                List<string> command = new List<string>();
+                command.Add(Quote(executable));
+                foreach (string argument in arguments) command.Add(Quote(argument));
+                StringBuilder commandLine = new StringBuilder(String.Join(" ", command.ToArray()));
+                if (!CreateProcess(executable, commandLine, IntPtr.Zero, IntPtr.Zero, true,
+                    CREATE_SUSPENDED | CREATE_NO_WINDOW, IntPtr.Zero, workingDirectory, ref startup, out process)) {
+                    result.StartFailed = true; return result;
+                }
+                created = true;
+                if (!AssignProcessToJobObject(job, process.hProcess)) { result.StartFailed = true; return result; }
+                assigned = true;
+                if (CloseHandle(stdoutWrite)) stdoutWrite = IntPtr.Zero;
+                else result.CleanupFailed = true;
+                if (CloseHandle(stderrWrite)) stderrWrite = IntPtr.Zero;
+                else result.CleanupFailed = true;
+                IntPtr stdoutForTask = stdoutRead;
+                stdoutTask = Task.Factory.StartNew(() => Drain(stdoutForTask, stdoutLimit),
+                    CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+                IntPtr stderrForTask = stderrRead;
+                stderrTask = Task.Factory.StartNew(() => Drain(stderrForTask, stderrLimit),
+                    CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+                if (ResumeThread(process.hThread) == UInt32.MaxValue) { result.StartFailed = true; return result; }
+                uint wait = WaitForSingleObject(process.hProcess, (uint)timeoutMilliseconds);
+                if (wait == WAIT_TIMEOUT) result.TimedOut = true;
+                else if (wait != WAIT_OBJECT_0) result.CaptureFailed = true;
+                else {
+                    uint exitCode;
+                    if (GetExitCodeProcess(process.hProcess, out exitCode)) result.ExitCode = unchecked((int)exitCode);
+                    else result.CaptureFailed = true;
+                }
+            } catch {
+                result.CaptureFailed = created;
+                result.StartFailed = !created;
+            } finally {
+                if (created) {
+                    if (assigned) {
+                        if (job == IntPtr.Zero || !TerminateJobObject(job, 1)) result.CleanupFailed = true;
+                    } else if (!TerminateProcess(process.hProcess, 1)) result.CleanupFailed = true;
+                    if (WaitForSingleObject(process.hProcess, 5000) != WAIT_OBJECT_0) result.CleanupFailed = true;
+                    if (assigned && !WaitForEmptyJob(job, 5000)) result.CleanupFailed = true;
+                }
+                if (stdoutWrite != IntPtr.Zero && !CloseHandle(stdoutWrite)) result.CleanupFailed = true;
+                if (stderrWrite != IntPtr.Zero && !CloseHandle(stderrWrite)) result.CleanupFailed = true;
+                if (stdoutTask != null) {
+                    bool completed = false;
+                    try {
+                        completed = stdoutTask.Wait(5000);
+                        if (completed) { result.Stdout = stdoutTask.Result.Bytes; result.StdoutOverflow = stdoutTask.Result.Overflow; }
+                        else { result.CaptureFailed = true; result.CleanupFailed = true; }
+                    } catch { completed = true; result.CaptureFailed = true; }
+                    if (stdoutRead != IntPtr.Zero) {
+                        if (CloseHandle(stdoutRead)) stdoutRead = IntPtr.Zero;
+                        else result.CleanupFailed = true;
+                    }
+                    if (!completed) {
+                        try { if (!stdoutTask.Wait(5000)) result.CleanupFailed = true; }
+                        catch { result.CaptureFailed = true; }
+                    }
+                } else if (stdoutRead != IntPtr.Zero) {
+                    if (CloseHandle(stdoutRead)) stdoutRead = IntPtr.Zero;
+                    else result.CleanupFailed = true;
+                }
+                if (stderrTask != null) {
+                    bool completed = false;
+                    try {
+                        completed = stderrTask.Wait(5000);
+                        if (completed) { result.Stderr = stderrTask.Result.Bytes; result.StderrOverflow = stderrTask.Result.Overflow; }
+                        else { result.CaptureFailed = true; result.CleanupFailed = true; }
+                    } catch { completed = true; result.CaptureFailed = true; }
+                    if (stderrRead != IntPtr.Zero) {
+                        if (CloseHandle(stderrRead)) stderrRead = IntPtr.Zero;
+                        else result.CleanupFailed = true;
+                    }
+                    if (!completed) {
+                        try { if (!stderrTask.Wait(5000)) result.CleanupFailed = true; }
+                        catch { result.CaptureFailed = true; }
+                    }
+                } else if (stderrRead != IntPtr.Zero) {
+                    if (CloseHandle(stderrRead)) stderrRead = IntPtr.Zero;
+                    else result.CleanupFailed = true;
+                }
+                if (process.hThread != IntPtr.Zero && !CloseHandle(process.hThread)) result.CleanupFailed = true;
+                if (process.hProcess != IntPtr.Zero && !CloseHandle(process.hProcess)) result.CleanupFailed = true;
+                if (job != IntPtr.Zero) {
+                    if (jobConfigured && created && assigned && !WaitForEmptyJob(job, 0)) result.CleanupFailed = true;
+                    if (!CloseHandle(job)) result.CleanupFailed = true;
+                }
+            }
+            return result;
+        }
+    }
+}
+'@
+}
+
+function Invoke-E2EBoundedNativeProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ArgumentList,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 25000000)][int]$StdoutLimit,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 4096)][int]$StderrLimit,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 2000000)][int]$TimeoutMilliseconds
+    )
+
+    try {
+        Initialize-E2EBoundedNativeProcessType
+        $command = Get-Command -Name $Executable -CommandType Application -ErrorAction Stop
+        $resolvedExecutable = [System.IO.Path]::GetFullPath($command.Source)
+        return [FinGuardOps.E2EBoundedNativeProcess]::Run(
+            $resolvedExecutable, $ArgumentList, [System.IO.Path]::GetFullPath($WorkingDirectory),
+            $StdoutLimit, $StderrLimit, $TimeoutMilliseconds)
+    }
+    catch {
+        return [pscustomobject]@{
+            ExitCode = -1; Stdout = [byte[]]::new(0); Stderr = [byte[]]::new(0)
+            StdoutOverflow = $false; StderrOverflow = $false; TimedOut = $false
+            StartFailed = $true; CaptureFailed = $false; CleanupFailed = $false
+        }
+    }
+}
+
+function Test-E2ERunFixtureBeforeSecondaryCode([string]$Code) {
+    foreach ($allowed in $RunFixtureBeforeSecondaryCodes) {
+        if ([string]::Equals($Code, $allowed, [System.StringComparison]::Ordinal)) { return $true }
+    }
+    return $false
+}
+
+function Write-E2ERunFixtureBeforeDiagnostic {
+    param([Parameter(Mandatory = $true)][string]$Secondary, [scriptblock]$Writer)
+
+    $known = (Test-E2ERunFixtureBeforeSecondaryCode $Secondary) -or
+        @($RunFixtureBeforeLocalSecondaryCodes | Where-Object {
+            [string]::Equals($_, $Secondary, [System.StringComparison]::Ordinal)
+        }).Count -eq 1
+    if (-not $known) { $Secondary = 'RUN_FIXTURE_BEFORE_OUTPUT_INVALID' }
+    $record = 'RUN_FIXTURE_BEFORE_SECONDARY=' + $Secondary
+    try {
+        if ($null -ne $Writer) { & $Writer $record | Out-Null }
+        else { Microsoft.PowerShell.Utility\Write-Warning -Message $record -WarningAction Continue }
+    }
+    catch { }
+}
+
+function ConvertFrom-E2ERunFixtureBeforeCapture {
+    param(
+        [Parameter(Mandatory = $true)]$Capture,
+        [Parameter(Mandatory = $true)]$Receipt,
+        [Parameter(Mandatory = $true)][string]$Project
+    )
+
+    foreach ($name in @('ExitCode','Stdout','Stderr','StdoutOverflow','StderrOverflow','TimedOut',
+            'StartFailed','CaptureFailed','CleanupFailed')) {
+        if ($null -eq $Capture.PSObject.Properties[$name]) {
+            return [pscustomobject]@{ Success=$false; Secondary='RUN_FIXTURE_BEFORE_CAPTURE_FAILED'; Value=$null }
+        }
+    }
+    $integerTypes = @([int], [long])
+    if ($null -eq $Capture.ExitCode -or $Capture.ExitCode.GetType() -notin $integerTypes -or
+        @('StdoutOverflow','StderrOverflow','TimedOut','StartFailed','CaptureFailed','CleanupFailed' | Where-Object {
+            $null -eq $Capture.$_ -or $Capture.$_.GetType() -ne [bool]
+        }).Count -ne 0) {
+        return [pscustomobject]@{ Success=$false; Secondary='RUN_FIXTURE_BEFORE_CAPTURE_FAILED'; Value=$null }
+    }
+    if ($Capture.CleanupFailed) { return [pscustomobject]@{ Success=$false; Secondary='RUN_FIXTURE_BEFORE_CLEANUP_FAILED'; Value=$null } }
+    if ($Capture.StartFailed) { return [pscustomobject]@{ Success=$false; Secondary='RUN_FIXTURE_BEFORE_PROCESS_START_FAILED'; Value=$null } }
+    if ($Capture.TimedOut) { return [pscustomobject]@{ Success=$false; Secondary='RUN_FIXTURE_BEFORE_TIMEOUT'; Value=$null } }
+    if ($Capture.CaptureFailed) { return [pscustomobject]@{ Success=$false; Secondary='RUN_FIXTURE_BEFORE_CAPTURE_FAILED'; Value=$null } }
+    if ($Capture.Stdout -isnot [byte[]] -or $Capture.Stderr -isnot [byte[]] -or
+        $Capture.StdoutOverflow -or $Capture.StderrOverflow) {
+        return [pscustomobject]@{ Success=$false; Secondary='RUN_FIXTURE_BEFORE_OUTPUT_INVALID'; Value=$null }
+    }
+
+    if ($Capture.ExitCode -eq 0) {
+        if ($Capture.Stderr.Length -ne 0 -or $Capture.Stdout.Length -lt 3 -or
+            $Capture.Stdout.Length -gt $RunFixtureBeforeStdoutLimit -or
+            $Capture.Stdout[-2] -ne 13 -or $Capture.Stdout[-1] -ne 10) {
+            return [pscustomobject]@{ Success=$false; Secondary='RUN_FIXTURE_BEFORE_OUTPUT_INVALID'; Value=$null }
+        }
+        $body = [byte[]]$Capture.Stdout[0..($Capture.Stdout.Length - 3)]
+        if (($body -contains [byte]10) -or ($body -contains [byte]13) -or
+            @($body | Where-Object { $_ -gt 127 }).Count -ne 0) {
+            return [pscustomobject]@{ Success=$false; Secondary='RUN_FIXTURE_BEFORE_OUTPUT_INVALID'; Value=$null }
+        }
+        try { $encoded = [Text.Encoding]::ASCII.GetString($body) } catch {
+            return [pscustomobject]@{ Success=$false; Secondary='RUN_FIXTURE_BEFORE_OUTPUT_INVALID'; Value=$null }
+        }
+        if ($encoded.Length -eq 0 -or $encoded -cnotmatch '\A[A-Za-z0-9+/]+={0,2}\z') {
+            return [pscustomobject]@{ Success=$false; Secondary='RUN_FIXTURE_BEFORE_OUTPUT_INVALID'; Value=$null }
+        }
+        try { $validated = ConvertFrom-E2ERunFixtureState -EncodedState $encoded -Receipt $Receipt -Project $Project }
+        catch { return [pscustomobject]@{ Success=$false; Secondary='RUN_FIXTURE_BEFORE_OUTPUT_INVALID'; Value=$null } }
+        return [pscustomobject]@{ Success=$true; Secondary=$null; Value=[pscustomobject]@{
+                State=$validated.State; PlanJson=$validated.PlanJson; EncodedState=$encoded
+            } }
+    }
+
+    if ($Capture.ExitCode -lt 1 -or $Capture.Stdout.Length -ne 0 -or
+        $Capture.Stderr.Length -lt 3 -or $Capture.Stderr.Length -gt $RunFixtureBeforeStderrLimit -or
+        $Capture.Stderr[-2] -ne 13 -or $Capture.Stderr[-1] -ne 10) {
+        return [pscustomobject]@{ Success=$false; Secondary='RUN_FIXTURE_BEFORE_OUTPUT_INVALID'; Value=$null }
+    }
+    $body = [byte[]]$Capture.Stderr[0..($Capture.Stderr.Length - 3)]
+    if (($body -contains [byte]10) -or ($body -contains [byte]13)) {
+        return [pscustomobject]@{ Success=$false; Secondary='RUN_FIXTURE_BEFORE_OUTPUT_INVALID'; Value=$null }
+    }
+    try { $line = [Text.UTF8Encoding]::new($false,$true).GetString($body) } catch {
+        return [pscustomobject]@{ Success=$false; Secondary='RUN_FIXTURE_BEFORE_OUTPUT_INVALID'; Value=$null }
+    }
+    if (-not (Test-E2ECleanScalar $line) -or $line -cnotmatch '\Averification failed: ([A-Z][A-Z0-9_]{0,63})\z') {
+        return [pscustomobject]@{ Success=$false; Secondary='RUN_FIXTURE_BEFORE_OUTPUT_INVALID'; Value=$null }
+    }
+    $code = $Matches[1]
+    if (-not (Test-E2ERunFixtureBeforeSecondaryCode $code)) {
+        return [pscustomobject]@{ Success=$false; Secondary='RUN_FIXTURE_BEFORE_OUTPUT_INVALID'; Value=$null }
+    }
+    return [pscustomobject]@{ Success=$false; Secondary=$code; Value=$null }
+}
+
+function Invoke-E2ERunFixtureBeforeChild {
+    param(
+        [Parameter(Mandatory = $true)]$Receipt,
+        [Parameter(Mandatory = $true)][string]$Directory,
+        [scriptblock]$NativeBoundary,
+        [scriptblock]$DiagnosticWriter
+    )
+
+    $primary = [System.InvalidOperationException]::new('RUN_FIXTURE_BEFORE_FAILED')
+    try {
+        if ($null -ne $NativeBoundary) { $capture = & $NativeBoundary }
+        else {
+            $capture = Invoke-E2EBoundedNativeProcess -Executable 'python' -ArgumentList @(
+                '-B', $PythonVerifierPath, 'run-fixture-before', '--repo-root', $RepositoryRoot,
+                '--project', $ProjectName, '--fixture-directory', $Directory
+            ) -WorkingDirectory $RepositoryRoot -StdoutLimit $RunFixtureBeforeStdoutLimit `
+                -StderrLimit $RunFixtureBeforeStderrLimit -TimeoutMilliseconds $RunFixtureBeforeTimeoutMilliseconds
+        }
+        $outcome = ConvertFrom-E2ERunFixtureBeforeCapture -Capture $capture -Receipt $Receipt -Project $ProjectName
+    }
+    catch { $outcome = [pscustomobject]@{ Success=$false; Secondary='RUN_FIXTURE_BEFORE_CAPTURE_FAILED'; Value=$null } }
+    if (-not $outcome.Success) {
+        Write-E2ERunFixtureBeforeDiagnostic -Secondary $outcome.Secondary -Writer $DiagnosticWriter
+        throw $primary
+    }
+    return $outcome.Value
+}
+
 function Invoke-E2EFixtureBrowserGate {
     param([Parameter(Mandatory = $true)]$Boundaries)
 
@@ -1250,15 +1788,8 @@ function Invoke-E2ERunFixtureOrchestration {
 
     $Directory = Assert-E2EFixturePathSafe -Path $Directory -Receipt $Receipt
 
-    $beforeOutput = Invoke-E2EInLocation -Path $RepositoryRoot -Body {
-        Invoke-NativeStdout {
-            & python -B $PythonVerifierPath run-fixture-before --repo-root $RepositoryRoot `
-                --project $ProjectName --fixture-directory $Directory 2>$null
-        }
-    }
-    if ($LASTEXITCODE -ne 0) { throw 'RUN_FIXTURE_BEFORE_FAILED' }
-    $encodedState = $beforeOutput.Trim()
-    $validatedState = ConvertFrom-E2ERunFixtureState -EncodedState $encodedState -Receipt $Receipt -Project $ProjectName
+    $validatedState = Invoke-E2ERunFixtureBeforeChild -Receipt $Receipt -Directory $Directory
+    $encodedState = $validatedState.EncodedState
     Invoke-E2EFixedFixtureService -Receipt $Receipt -PlanJson $validatedState.PlanJson
     $afterOutput = Invoke-E2EInLocation -Path $RepositoryRoot -Body {
         Invoke-NativeStdout {

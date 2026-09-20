@@ -6915,6 +6915,142 @@ function Invoke-D315TargetedTests {
         Assert-Equal 'MANIFEST_FAILED' $result[1].Message 'Manifest failure identity changed.'
         Assert-Equal @('directory','fixture','manifest','create','start') @($result[2].Events) 'Success ordering differs.'
     }
+    Invoke-TestCase 'D315 before child bounded capture and safe diagnostic contract' {
+        $result = & $script:E2EModule {
+            $receipt = New-E2EReceipt -RunId '0123456789abcdef0123456789abcdef' -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+            $plan = [ordered]@{
+                transactionId='32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a'; passwordEventId='e54cbf7e-d857-4ca0-bff3-8d4321b7722a'
+                transferLimitEventId='9334da6a-1a03-44fd-a71d-f59a44a94225'; idempotencyKey=('kc241-' + ('a' * 32))
+                duplicateIdempotencyKey=('kc241-' + ('b' * 32)); customerRef='kc241-customer-123456789abc'
+                senderRef='kc241-sender-123456789abc'; recipientRef='kc241-recipient-123456789abc'
+                passwordOccurredAt='2026-09-05T01:00:03Z'; transferLimitOccurredAt='2026-09-05T01:01:03Z'; transactionOccurredAt='2026-09-05T01:02:03Z'
+            }
+            $fingerprints = [ordered]@{
+                audit_log='623b3f65b1be08831829539d504eac0148208007724c44d1d2679bc6ff57d8c2'; behavior_event='9147b74f19f991c1417cefff03b8c718529d33e8ac04df141bf9af1c9bdc1f46'
+                case_transaction='075d9bd0d396dfd9dc763c18dd4c97baabc48040efdc8dcbef7d81feddf764e4'; detection_evidence='22bdc14e802b7e07943c342b2ef0015354e31a661aa31c4406423a2d88561868'
+                detection_result='647790f54708f88b18676769b51c73f219a8a51b8629fbdc5a9a3028fd93b95c'; financial_transaction='ccb1a003cece081a77d968685616e17a152d44a669b32b89dfe6b7890e022ae5'
+                fraud_case='7a853a3b65cc047c92dcd390b2bc42da4240322e613d36ddccce2bed6931d376'; fraud_rule='a73a1ceedacc295bcf34a5393eec504571cc8906ed0cc72a142e947f346d14c4'
+                idempotency_record='08e1628ee817a4a2783f30c85095c05add3f104f91f9ae063e2d611460adaba6'; idempotency_recovery_audit_log='3694db36419968b7ee5fa8daa21252cbc0364e8781fc3d62b83b65eedfe00548'
+                investigation_note='a252800a4664bf6fb7cfa200cc898600d067bbc01eb9fbd2c89eff4c57a02068'; rule_version='7feb843afb21f61f4301ceb95121e59888d3eae1b2afc1823839de1bcd5d2b86'
+            }
+            $database = [ordered]@{}
+            foreach ($table in $fingerprints.Keys) { $database[$table]=[ordered]@{count=0;rowHashes=@();fingerprint=$fingerprints[$table]} }
+            $state = [ordered]@{schemaVersion=1;runId=$receipt.runId;repositoryId=$receipt.repositoryId;commitSha=$receipt.commitSha
+                treeSha=$receipt.treeSha;composeProject=$ProjectName;plan=$plan;database=$database;dependencies=@(0,0);metrics=@(0,0)}
+            $encoded = [Convert]::ToBase64String([Text.UTF8Encoding]::new($false,$true).GetBytes(($state|ConvertTo-Json -Compress -Depth 100)+"`n"))
+            function Capture([int]$exit,[string]$stdout,[string]$stderr) {
+                return [pscustomobject]@{ExitCode=$exit;Stdout=[Text.Encoding]::UTF8.GetBytes($stdout);Stderr=[Text.Encoding]::UTF8.GetBytes($stderr)
+                    StdoutOverflow=$false;StderrOverflow=$false;TimedOut=$false;StartFailed=$false;CaptureFailed=$false;CleanupFailed=$false}
+            }
+            $diagnostics=[Collections.Generic.List[string]]::new()
+            $successCapture = Capture 0 ($encoded+"`r`n") ''
+            $successOutcome = ConvertFrom-E2ERunFixtureBeforeCapture -Capture $successCapture -Receipt $receipt -Project $ProjectName
+            if (-not $successOutcome.Success) { throw ('SUCCESS_CAPTURE_' + $successOutcome.Secondary) }
+            $success = Invoke-E2ERunFixtureBeforeChild -Receipt $receipt -Directory (Get-E2EFixtureDirectory $receipt) `
+                -NativeBoundary { $successCapture }.GetNewClosure() `
+                -DiagnosticWriter {param($v)$diagnostics.Add($v)}.GetNewClosure()
+            $cases = [ordered]@{
+                allowlisted = Capture 1 '' "verification failed: OWNER_CONTRACT_INVALID`r`n"
+                hostargument = Capture 1 '' "verification failed: HOST_ARGUMENT_INVALID`r`n"
+                unknown = Capture 1 '' "verification failed: NOT_ALLOWLISTED`r`n"
+                empty = Capture 1 '' ''
+                multiple = Capture 1 '' "verification failed: OWNER_CONTRACT_INVALID`r`nraw-path`r`n"
+                duplicate = Capture 1 '' "verification failed: OWNER_CONTRACT_INVALID`r`nverification failed: OWNER_CONTRACT_INVALID`r`n"
+                leading = Capture 1 '' " verification failed: OWNER_CONTRACT_INVALID`r`n"
+                trailing = Capture 1 '' "verification failed: OWNER_CONTRACT_INVALID `r`n"
+                blank = Capture 1 '' "verification failed: OWNER_CONTRACT_INVALID`r`n`r`n"
+                c0 = Capture 1 '' ("verification failed: OWNER_CONTRACT_INVALID"+[char]1+"`r`n")
+                c1 = Capture 1 '' ("verification failed: OWNER_CONTRACT_INVALID"+[char]0x85+"`r`n")
+                cf = Capture 1 '' ("verification failed: OWNER_CONTRACT_INVALID"+[char]0x200B+"`r`n")
+                rawpath = Capture 1 '' "verification failed: OWNER_CONTRACT_INVALID C:\private\secret`r`n"
+                rawsql = Capture 1 '' "verification failed: OWNER_CONTRACT_INVALID select secret from token`r`n"
+                both = Capture 1 ($encoded+"`r`n") "verification failed: OWNER_CONTRACT_INVALID`r`n"
+                successstderr = Capture 0 ($encoded+"`r`n") "verification failed: OWNER_CONTRACT_INVALID`r`n"
+                successnoise = Capture 0 ("noise`r`n"+$encoded+"`r`n") ''
+            }
+            $cases.oversize = Capture 1 '' "verification failed: OWNER_CONTRACT_INVALID`r`n"; $cases.oversize.StderrOverflow=$true
+            $cases.timeout = Capture -1 '' ''; $cases.timeout.TimedOut=$true
+            $cases.start = Capture -1 '' ''; $cases.start.StartFailed=$true
+            $cases.capture = Capture -1 '' ''; $cases.capture.CaptureFailed=$true
+            $cases.cleanup = Capture -1 '' ''; $cases.cleanup.CleanupFailed=$true
+            $observed=[ordered]@{}
+            foreach($name in $cases.Keys){
+                $records=[Collections.Generic.List[string]]::new();$failure=$null
+                try{Invoke-E2ERunFixtureBeforeChild -Receipt $receipt -Directory (Get-E2EFixtureDirectory $receipt) `
+                    -NativeBoundary {$cases[$name]}.GetNewClosure() -DiagnosticWriter {param($v)$records.Add($v)}.GetNewClosure()|Out-Null}catch{$failure=$_.Exception}
+                $observed[$name]=[pscustomobject]@{Message=$(if($null-eq$failure){'NO_FAILURE'}else{$failure.Message});Records=@($records);RawLeak=(@($records)-join' ') -match 'private|select secret|token'}
+            }
+            $primary=[InvalidOperationException]::new('RUN_FIXTURE_BEFORE_FAILED')
+            $cleanupFailure=$null
+            try { Invoke-E2ECleanupActions -Primary $primary -Actions @([pscustomobject]@{
+                    Action={throw 'SAFE_CLEANUP_FAILURE'};ErrorCode='RESOURCE_CLEANUP_FAILED';SkipAfterCleanupFailure=$false
+                }) -DiagnosticWriter {param($v)} }
+            catch { $cleanupFailure=$_.Exception }
+            $previous=$global:WarningPreference;$warningFailure=$null
+            try{$global:WarningPreference='Stop';try{Invoke-E2ERunFixtureBeforeChild -Receipt $receipt -Directory (Get-E2EFixtureDirectory $receipt) `
+                -NativeBoundary {$cases.unknown}.GetNewClosure()|Out-Null}catch{$warningFailure=$_.Exception}}finally{$global:WarningPreference=$previous}
+            return [pscustomobject]@{SuccessRunId=$success.State.runId;SuccessOutcomeSecondary=$successOutcome.Secondary;SuccessDiagnostics=@($diagnostics);Observed=[pscustomobject]$observed;Allowlist=@($RunFixtureBeforeSecondaryCodes)
+                CleanupIdentity=[object]::ReferenceEquals($primary,$cleanupFailure);WarningMessage=$(if($null-eq$warningFailure){'NO_FAILURE'}else{$warningFailure.Message})}
+        }
+        Assert-Equal '0123456789abcdef0123456789abcdef' $result.SuccessRunId 'Canonical before state was not returned.'
+        Assert-True ($null -eq $result.SuccessOutcomeSecondary) ('Canonical capture rejected as '+$result.SuccessOutcomeSecondary)
+        Assert-Equal 0 @($result.SuccessDiagnostics).Count 'Success emitted a diagnostic.'
+        foreach($name in @($result.Observed.PSObject.Properties.Name)){
+            $item=$result.Observed.$name
+            Assert-Equal 'RUN_FIXTURE_BEFORE_FAILED' $item.Message "$name changed the primary identity."
+            Assert-Equal 1 @($item.Records).Count "$name did not emit exactly one diagnostic."
+            Assert-True (-not $item.RawLeak) "$name reflected raw child output."
+        }
+        Assert-Equal 'RUN_FIXTURE_BEFORE_SECONDARY=OWNER_CONTRACT_INVALID' $result.Observed.allowlisted.Records[0] 'Allowlisted secondary changed.'
+        Assert-Equal 'RUN_FIXTURE_BEFORE_SECONDARY=HOST_ARGUMENT_INVALID' $result.Observed.hostargument.Records[0] 'Production project mismatch secondary changed.'
+        Assert-Equal @('BACKEND_METRIC_SNAPSHOT_INVALID','CHILD_INPUT_INVALID','CHILD_METRIC_BODY_INVALID','CHILD_METRIC_BODY_TOO_LARGE',
+            'CHILD_METRIC_STATUS_INVALID','CHILD_METRIC_TRANSPORT_FAILED','CHILD_UNEXPECTED_ERROR','DATABASE_GLOBAL_SNAPSHOT_INVALID',
+            'DATABASE_TRANSACTION_CARDINALITY_INVALID','DATABASE_TRANSACTION_SNAPSHOT_INVALID','FIXTURE_DIRECTORY_INVALID',
+            'HOST_ARGUMENT_INVALID','INGESTION_PLAN_INVALID','INPUT_INVALID','OVERALL_DEADLINE_EXCEEDED','OWNER_CONTRACT_INVALID',
+            'RULE_ACTIVATION_TIMEOUT','RULE_PUBLICATION_STATE_INVALID','RUN_FIXTURE_STATE_IDENTITY_INVALID','RUN_FIXTURE_STATE_INVALID',
+            'RUN_FIXTURE_STATE_TOO_LARGE','SUBPROCESS_FAILED','UNEXPECTED_ERROR') @($result.Allowlist) 'Before secondary allowlist drifted.'
+        foreach($name in @('unknown','empty','multiple','duplicate','leading','trailing','blank','c0','c1','cf','oversize','rawpath','rawsql','both','successstderr','successnoise')){
+            Assert-Equal 'RUN_FIXTURE_BEFORE_SECONDARY=RUN_FIXTURE_BEFORE_OUTPUT_INVALID' $result.Observed.$name.Records[0] "$name did not use output fallback."
+        }
+        Assert-Equal 'RUN_FIXTURE_BEFORE_SECONDARY=RUN_FIXTURE_BEFORE_TIMEOUT' $result.Observed.timeout.Records[0] 'Timeout diagnostic differs.'
+        Assert-Equal 'RUN_FIXTURE_BEFORE_SECONDARY=RUN_FIXTURE_BEFORE_PROCESS_START_FAILED' $result.Observed.start.Records[0] 'Start diagnostic differs.'
+        Assert-Equal 'RUN_FIXTURE_BEFORE_SECONDARY=RUN_FIXTURE_BEFORE_CAPTURE_FAILED' $result.Observed.capture.Records[0] 'Capture diagnostic differs.'
+        Assert-Equal 'RUN_FIXTURE_BEFORE_SECONDARY=RUN_FIXTURE_BEFORE_CLEANUP_FAILED' $result.Observed.cleanup.Records[0] 'Cleanup diagnostic differs.'
+        Assert-True $result.CleanupIdentity 'Cleanup replaced the primary exception object.'
+        Assert-Equal 'RUN_FIXTURE_BEFORE_FAILED' $result.WarningMessage 'WarningPreference Stop replaced primary.'
+    }
+    Invoke-TestCase 'D315 native capture drains both pipes and bounds timeout start and overflow' {
+        $result = & $script:E2EModule {
+            $python=(Get-Command python -CommandType Application|Select-Object -First 1).Source
+            $dual=Invoke-E2EBoundedNativeProcess -Executable $python -ArgumentList @('-c','import sys;sys.stdout.write("A"*200000);sys.stderr.write("B"*200000)') `
+                -WorkingDirectory $RepositoryRoot -StdoutLimit 1024 -StderrLimit 1024 -TimeoutMilliseconds 10000
+            $timeout=Invoke-E2EBoundedNativeProcess -Executable $python -ArgumentList @('-c','import time;time.sleep(2)') `
+                -WorkingDirectory $RepositoryRoot -StdoutLimit 64 -StderrLimit 64 -TimeoutMilliseconds 50
+            $tree=Invoke-E2EBoundedNativeProcess -Executable $python -ArgumentList @('-c','import subprocess,sys,time;p=subprocess.Popen([sys.executable,"-c","import time;time.sleep(30)"]);print(p.pid,flush=True);time.sleep(30)') `
+                -WorkingDirectory $RepositoryRoot -StdoutLimit 64 -StderrLimit 64 -TimeoutMilliseconds 500
+            $childText=[System.Text.Encoding]::ASCII.GetString($tree.Stdout)
+            $childId=0
+            $childAlive=$false
+            if ([int]::TryParse($childText.Trim(), [ref]$childId)) {
+                $childProcess=Get-Process -Id $childId -ErrorAction SilentlyContinue
+                $childAlive=$null -ne $childProcess
+                if ($childAlive) { Stop-Process -Id $childId -Force -ErrorAction SilentlyContinue }
+            }
+            $start=Invoke-E2EBoundedNativeProcess -Executable ('missing-'+[guid]::NewGuid().ToString('N')+'.exe') -ArgumentList @() `
+                -WorkingDirectory $RepositoryRoot -StdoutLimit 64 -StderrLimit 64 -TimeoutMilliseconds 50
+            return [pscustomobject]@{Dual=$dual;Timeout=$timeout;Tree=$tree;ChildId=$childId;ChildAlive=$childAlive;Start=$start}
+        }
+        Assert-Equal 0 $result.Dual.ExitCode 'Dual-pipe fake failed.'
+        Assert-True ($result.Dual.StdoutOverflow -and $result.Dual.StderrOverflow) 'Dual-pipe output was not bounded.'
+        Assert-True (-not $result.Dual.CaptureFailed) 'Dual-pipe capture deadlocked or failed.'
+        Assert-True $result.Timeout.TimedOut 'Timeout fake was not terminated.'
+        Assert-True (-not $result.Timeout.CleanupFailed) 'Timed-out fake left process cleanup uncertain.'
+        Assert-True $result.Tree.TimedOut 'Descendant fake did not reach timeout.'
+        Assert-True (-not $result.Tree.CleanupFailed) 'Descendant job cleanup was uncertain.'
+        Assert-True ($result.ChildId -gt 0) 'Descendant fake did not report a child PID.'
+        Assert-True (-not $result.ChildAlive) 'Timed-out native process left a descendant alive.'
+        Assert-True $result.Start.StartFailed 'Process start failure was not normalized.'
+    }
     Invoke-TestCase 'D315 fixed fixture service owns start wait exit and interruption boundaries' {
         $result = & $script:E2EModule {
             $receipt = New-E2EReceipt -RunId ([guid]::NewGuid().ToString('N')) -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
@@ -7036,6 +7172,7 @@ function Invoke-D315TargetedTests {
             }
             $accepted = (ConvertFrom-E2ERunFixtureState -EncodedState (Encode-State $state) -Receipt $receipt -Project $project).State.runId -ceq $receipt.runId
             $rejected = 0
+            $identityMessages = [System.Collections.Generic.List[string]]::new()
             $mutationState = [pscustomobject]@{ FixtureMutations=0 }
             foreach ($change in @(
                 @('runId','1123456789abcdef0123456789abcdef'), @('repositoryId',('d' * 64)),
@@ -7044,19 +7181,12 @@ function Invoke-D315TargetedTests {
                 $candidate = (Encode-State $state | ForEach-Object { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($_)) } | ConvertFrom-Json)
                 $candidate.($change[0]) = $change[1]
                 $currentEncoded = Encode-State $candidate
-                $originalNative = (Get-Command Invoke-NativeStdout -CommandType Function).ScriptBlock
-                $originalFixture = (Get-Command Invoke-E2EFixedFixtureService -CommandType Function).ScriptBlock
                 $message = $null
                 try {
-                    Set-Item Function:\Invoke-NativeStdout -Value { $global:LASTEXITCODE=0; return $currentEncoded }.GetNewClosure()
-                    Set-Item Function:\Invoke-E2EFixedFixtureService -Value { $mutationState.FixtureMutations++ }.GetNewClosure()
-                    Invoke-E2ERunFixtureOrchestration -Receipt $receipt -Directory (Get-E2EFixtureDirectory -Receipt $receipt)
+                    ConvertFrom-E2ERunFixtureState -EncodedState $currentEncoded -Receipt $receipt -Project $project | Out-Null
                 }
                 catch { $message = $_.Exception.Message }
-                finally {
-                    Set-Item Function:\Invoke-NativeStdout -Value $originalNative
-                    Set-Item Function:\Invoke-E2EFixedFixtureService -Value $originalFixture
-                }
+                $identityMessages.Add([string]$message)
                 if ($message -eq 'RUN_FIXTURE_STATE_IDENTITY_INVALID') { $rejected++ }
             }
             $schemaRejected = 0
@@ -7078,10 +7208,10 @@ function Invoke-D315TargetedTests {
                 try { ConvertFrom-E2ERunFixtureState -EncodedState $encodedCandidate -Receipt $receipt -Project $project | Out-Null }
                 catch { if ($_.Exception.Message -eq 'RUN_FIXTURE_STATE_INVALID') { $schemaRejected++ } }
             }
-            return [pscustomobject]@{ Accepted=$accepted; Rejected=$rejected; SchemaRejected=$schemaRejected; FixtureMutations=$mutationState.FixtureMutations }
+            return [pscustomobject]@{ Accepted=$accepted; Rejected=$rejected; IdentityMessages=@($identityMessages); SchemaRejected=$schemaRejected; FixtureMutations=$mutationState.FixtureMutations }
         }
         Assert-True $result.Accepted 'Canonical owner-bound state was rejected.'
-        Assert-Equal 5 $result.Rejected 'A foreign state owner identity was accepted.'
+        Assert-Equal 5 $result.Rejected ('A foreign state owner identity was accepted. messages=' + (@($result.IdentityMessages) -join ','))
         Assert-Equal 0 $result.FixtureMutations 'A foreign state reached fixture service mutation.'
         Assert-Equal 4 $result.SchemaRejected 'A malformed state schema, type, UUID, fingerprint, or order was accepted.'
     }
