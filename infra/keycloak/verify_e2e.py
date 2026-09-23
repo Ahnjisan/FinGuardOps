@@ -238,14 +238,59 @@ RULE_PUBLICATION_RUNNER_FAILURE_LINES = {
         "java.lang.IllegalArgumentException: Rule v1 default effectiveFrom must be in the future",
         "Caused by: java.lang.IllegalArgumentException: Rule v1 default effectiveFrom must be in the future",
     ),
+    "RULE_PUBLICATION_SERVICE_DEFAULT_SET_INCOMPLETE": (
+        "java.lang.IllegalStateException: The complete V5 default Rule v1 set does not exist",
+        "Caused by: java.lang.IllegalStateException: The complete V5 default Rule v1 set does not exist",
+    ),
+    "RULE_PUBLICATION_SERVICE_IDENTITY_MISMATCH": (
+        "java.lang.IllegalStateException: Default Rule v1 identity does not match the V5 contract",
+        "Caused by: java.lang.IllegalStateException: Default Rule v1 identity does not match the V5 contract",
+    ),
+    "RULE_PUBLICATION_SERVICE_FRAUD_RULE_INACTIVE": (
+        "java.lang.IllegalStateException: Default Rule v1 FraudRules must be ACTIVE",
+        "Caused by: java.lang.IllegalStateException: Default Rule v1 FraudRules must be ACTIVE",
+    ),
+    "RULE_PUBLICATION_SERVICE_VERSION_PERIOD_INVALID": (
+        "java.lang.IllegalStateException: Default Rule v1 versions must be open-ended",
+        "Caused by: java.lang.IllegalStateException: Default Rule v1 versions must be open-ended",
+    ),
+    "RULE_PUBLICATION_SERVICE_VERSION_STATUS_INVALID": (
+        "java.lang.IllegalStateException: Default Rule v1 versions must be all DRAFT or all PUBLISHED",
+        "Caused by: java.lang.IllegalStateException: Default Rule v1 versions must be all DRAFT or all PUBLISHED",
+    ),
+    "RULE_PUBLICATION_SERVICE_DRAFT_METADATA_INVALID": (
+        "java.lang.IllegalStateException: Default Rule v1 DRAFT period metadata must be unset",
+        "Caused by: java.lang.IllegalStateException: Default Rule v1 DRAFT period metadata must be unset",
+    ),
+    "RULE_PUBLICATION_SERVICE_EFFECTIVE_FROM_EXPIRED": (
+        "java.lang.IllegalArgumentException: effectiveFrom must be later than the publication time",
+        "Caused by: java.lang.IllegalArgumentException: effectiveFrom must be later than the publication time",
+    ),
+    "RULE_PUBLICATION_SERVICE_AMOUNT_THRESHOLD_FORMAT_INVALID": (
+        "java.lang.IllegalArgumentException: amountThreshold must be a positive canonical integer string within NUMERIC(19,4) integer range",
+        "Caused by: java.lang.IllegalArgumentException: amountThreshold must be a positive canonical integer string within NUMERIC(19,4) integer range",
+    ),
 }
 RULE_PUBLICATION_RUNNER_EXCEPTION_HEADLINE = re.compile(
-    r'(?:Caused by: |Exception in thread "[^"\r\n]+" )?'
-    r'(?:[A-Za-z_$][A-Za-z0-9_$]*\.)+'
-    r'[A-Za-z_$][A-Za-z0-9_$]*(?::.*)?\Z'
+    r' *(?:(?:Caused by|Suppressed): |Exception in thread "[^"\r\n]+" )?'
+    r'(?:(?:[A-Za-z_$][A-Za-z0-9_$]*\.)+[A-Za-z_$][A-Za-z0-9_$]*'
+    r'|(?:[A-Za-z_$][A-Za-z0-9_$]*)?'
+    r'(?:Exception|Error|Failure|Throwable))(?::.*)?\Z'
+)
+RULE_PUBLICATION_RUNNER_STACK_FRAME = re.compile(
+    r'\tat (?:[A-Za-z0-9_.@-]+/)?[A-Za-z_$][A-Za-z0-9_.$]*\.'
+    r'[A-Za-z_$<>][A-Za-z0-9_$<>]*'
+    r'\((?:[A-Za-z0-9_.$-]+:\d+|Unknown Source|Native Method|<generated>)\)'
+    r'(?: ~\[[A-Za-z0-9_.!/@+-]+:[A-Za-z0-9_.+-]+\])?\Z'
+)
+RULE_PUBLICATION_RUNNER_STACK_ELISION = re.compile(
+    r'\t\.\.\. [0-9]+ (?:more|common frames omitted)\Z'
 )
 RULE_PUBLICATION_RUNNER_NEUTRAL_LINES = (
     "java.lang.IllegalStateException: Failed to execute ApplicationRunner",
+)
+RULE_PUBLICATION_RUNNER_SUCCESS_MARKER = (
+    "event=rule_v1_default_rule_set_publication outcome="
 )
 INGESTION_STEPS = (
     "auth-denial",
@@ -1688,7 +1733,7 @@ def validate_before_native_output(stage: str, output: bytes) -> None:
         return
     if stage == "RULE_PUBLICATION_COMMAND":
         output.decode("utf-8", "strict")
-        if rule_publication_runner_failure_matches(output, b""):
+        if rule_publication_approved_failure_codes(output, b""):
             raise ValueError("runner failure marker on successful exit")
         return
     if stage == "TRANSACTION_CARDINALITY_SNAPSHOT":
@@ -1721,10 +1766,29 @@ def validate_before_native_output(stage: str, output: bytes) -> None:
     raise ValueError("unknown before stage")
 
 
+def rule_publication_approved_failure_codes(
+    stdout: bytes, stderr: bytes
+) -> tuple[str, ...]:
+    approved = {
+        line: code
+        for code, approved_lines in RULE_PUBLICATION_RUNNER_FAILURE_LINES.items()
+        for line in approved_lines
+    }
+    matches: list[str] = []
+    for stream in (stdout, stderr):
+        text = stream.decode("utf-8", "strict")
+        for raw_line in text.split("\n"):
+            line = raw_line[:-1] if raw_line.endswith("\r") else raw_line
+            if line in approved:
+                matches.append(approved[line])
+    return tuple(matches)
+
+
 def rule_publication_runner_failure_matches(
     stdout: bytes, stderr: bytes
 ) -> tuple[str, ...]:
     lines: list[str] = []
+    newline_styles: set[str] = set()
     for stream in (stdout, stderr):
         text = stream.decode("utf-8", "strict")
         if any(
@@ -1733,6 +1797,14 @@ def rule_publication_runner_failure_matches(
             or unicodedata.category(character) == "Cf"
             for character in text
         ):
+            return ()
+        if "\r" in text:
+            if re.search(r"\r(?!\n)", text):
+                return ()
+            newline_styles.add("crlf")
+        if re.search(r"(?<!\r)\n", text):
+            newline_styles.add("lf")
+        if len(newline_styles) > 1:
             return ()
         for raw_line in text.split("\n"):
             lines.append(raw_line[:-1] if raw_line.endswith("\r") else raw_line)
@@ -1743,6 +1815,15 @@ def rule_publication_runner_failure_matches(
         for line in approved_lines
     }
     for line in lines:
+        if "\t" in line:
+            if (
+                RULE_PUBLICATION_RUNNER_STACK_FRAME.fullmatch(line)
+                or RULE_PUBLICATION_RUNNER_STACK_ELISION.fullmatch(line)
+            ):
+                continue
+            return ()
+        if RULE_PUBLICATION_RUNNER_SUCCESS_MARKER in line:
+            return ()
         if line in approved:
             matches.append(approved[line])
             continue

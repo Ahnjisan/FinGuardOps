@@ -1188,13 +1188,59 @@ finguardops_rule_analysis_outcomes_created 99
             lines[0]
             for lines in verify_e2e.RULE_PUBLICATION_RUNNER_FAILURE_LINES.values()
         ]
+        first_direct, first_caused = next(iter(
+            verify_e2e.RULE_PUBLICATION_RUNNER_FAILURE_LINES.values()
+        ))[:2]
+        production_stack = verify_e2e.NativeCommandCapture(
+            1,
+            (
+                verify_e2e.RULE_PUBLICATION_RUNNER_NEUTRAL_LINES[0]
+                + "\n\tat org.springframework.boot.SpringApplication.callRunner(SpringApplication.java:789) ~[spring-boot-3.5.16.jar!/:3.5.16]"
+                + "\n" + first_caused
+                + "\n\tat com.aifds.backend.rule.service.RuleV1DefaultRuleSetPublicationService.publish(RuleV1DefaultRuleSetPublicationService.java:135)"
+                + "\n\tat com.aifds.backend.rule.service.RuleV1DefaultRuleSetPublicationService$$SpringCGLIB$$0.publish(<generated>) ~[!/:0.0.1-SNAPSHOT]"
+                + "\n\t... 12 more\n"
+            ).encode(),
+            b"",
+        )
+        with mock.patch.object(
+            verify_e2e, "capture_native_command", return_value=production_stack
+        ), self.assertRaisesRegex(
+            verify_e2e.VerificationError,
+            "^RULE_PUBLICATION_RUNNER_PRODUCTION_PROFILE_REJECTED$",
+        ):
+            verify_e2e.run_command(
+                ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                before_stage="RULE_PUBLICATION_COMMAND",
+            )
+
         sentinel = "NeverPrintRawPathSqlCommandCredentialToken"
         fallback_cases = {
             "unknown": b"java.lang.IllegalStateException: unknown runner marker\n",
+            "statically-unreachable-threshold-range": (
+                b"java.lang.IllegalArgumentException: amountThreshold exceeds "
+                b"NUMERIC(19,4) integer range\n"
+            ),
+            "statically-unreachable-condition-nesting": (
+                b"java.lang.IllegalArgumentException: conditionDefinition "
+                b"contains an invalid nested value\n"
+            ),
+            "database-rejected-condition-object": (
+                b"java.lang.IllegalArgumentException: conditionDefinition "
+                b"must be a non-empty JSON object\n"
+            ),
             "raw-prefix": (sentinel + first_lines[0] + "\n").encode(),
             "raw-suffix": (first_lines[0] + sentinel + "\n").encode(),
+            "lowercase": (first_lines[0].lower() + "\n").encode(),
+            "case-variant": (first_lines[0].replace("Rule", "rule", 1) + "\n").encode(),
+            "partial": (first_lines[0][:-1] + "\n").encode(),
             "multiple": (first_lines[0] + "\n" + first_lines[1] + "\n").encode(),
             "duplicate": (first_lines[0] + "\n" + first_lines[0] + "\n").encode(),
+            "direct-caused-duplicate": (
+                first_direct + "\n" + first_caused + "\n"
+            ).encode(),
+            "mixed-newline": (first_lines[0] + "\r\nordinary startup\n").encode(),
+            "lone-cr": (first_lines[0] + "\r").encode(),
             "noisy-exception": (
                 first_lines[0]
                 + "\njava.lang.IllegalStateException: unknown runner noise\n"
@@ -1211,11 +1257,56 @@ finguardops_rule_analysis_outcomes_created 99
                 first_lines[0]
                 + "\nCaused by: com.example.PublicationFailure: unknown runner noise\n"
             ).encode(),
+            "noisy-suppressed-exception": (
+                first_lines[0]
+                + "\nSuppressed: com.example.HiddenFailure: unknown runner noise\n"
+            ).encode(),
+            "noisy-spaced-suppressed-exception": (
+                first_lines[0]
+                + "\n  Suppressed: com.example.HiddenFailure: unknown runner noise\n"
+            ).encode(),
+            "noisy-unqualified-failure": (
+                first_lines[0] + "\nPublicationFailure: unknown runner noise\n"
+            ).encode(),
+            "noisy-bare-exception": (
+                first_lines[0] + "\nException: unknown runner noise\n"
+            ).encode(),
+            "noisy-bare-error": (
+                first_lines[0] + "\nError: unknown runner noise\n"
+            ).encode(),
+            "noisy-bare-failure": (
+                first_lines[0] + "\nFailure: unknown runner noise\n"
+            ).encode(),
+            "noisy-bare-throwable": (
+                first_lines[0] + "\nThrowable: unknown runner noise\n"
+            ).encode(),
+            "noisy-caused-bare-exception": (
+                first_lines[0] + "\nCaused by: Exception: unknown runner noise\n"
+            ).encode(),
+            "noisy-suppressed-bare-error": (
+                first_lines[0] + "\nSuppressed: Error: unknown runner noise\n"
+            ).encode(),
+            "noisy-tab-suppressed-exception": (
+                first_lines[0]
+                + "\n\tSuppressed: com.example.HiddenFailure: unknown runner noise\n"
+            ).encode(),
+            "noisy-tab": (first_lines[0] + "\n\tunknown runner noise\n").encode(),
+            "noisy-tab-generated": (
+                first_lines[0] + "\n\tat <generated>\n"
+            ).encode(),
+            "noisy-tab-packaging-data": (
+                first_lines[0]
+                + "\n\tat com.example.Type.method(File.java:1) ~[raw sentinel:path]"
+            ).encode(),
             "noisy-thread-error": (
                 first_lines[0]
                 + '\nException in thread "main" java.lang.AssertionError: unknown runner noise\n'
             ).encode(),
             "success-marker": b"event=rule_v1_default_rule_set_publication outcome=PUBLISHED\n",
+            "success-marker-with-failure": (
+                "event=rule_v1_default_rule_set_publication outcome=PUBLISHED\n"
+                + first_lines[0] + "\n"
+            ).encode(),
             "empty": b"",
             "invalid-utf8": b"\xff",
             "control": (first_lines[0] + "\x01\n").encode(),
@@ -1236,6 +1327,24 @@ finguardops_rule_analysis_outcomes_created 99
                 )
             self.assertEqual(str(raised.exception), fallback)
             self.assertNotIn(sentinel, str(raised.exception))
+
+        stream_ambiguities = {
+            "same-marker": (first_lines[0], first_lines[0]),
+            "different-markers": (first_lines[0], first_lines[1]),
+        }
+        for name, (stdout_line, stderr_line) in stream_ambiguities.items():
+            capture = verify_e2e.NativeCommandCapture(
+                1, (stdout_line + "\n").encode(), (stderr_line + "\n").encode()
+            )
+            with self.subTest(case="stream-" + name), mock.patch.object(
+                verify_e2e, "capture_native_command", return_value=capture
+            ), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "^" + fallback + "$"
+            ):
+                verify_e2e.run_command(
+                    ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                    before_stage="RULE_PUBLICATION_COMMAND",
+                )
 
         overflow = verify_e2e.NativeCommandCapture(
             1, first_lines[0].encode(), b"", stdout_overflow=True
@@ -1261,6 +1370,91 @@ finguardops_rule_analysis_outcomes_created 99
                 ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
                 before_stage="RULE_PUBLICATION_COMMAND",
             )
+
+        for name, output in {
+            "success-plus-failure": (
+                verify_e2e.RULE_PUBLICATION_RUNNER_SUCCESS_MARKER
+                + "PUBLISHED\n" + first_lines[0] + "\n"
+            ),
+            "failure-plus-unknown-exception": (
+                first_lines[0]
+                + "\njava.lang.IllegalStateException: unknown runner noise\n"
+            ),
+            "failure-plus-mixed-newline": (
+                first_lines[0] + "\r\nordinary startup\n"
+            ),
+        }.items():
+            capture = verify_e2e.NativeCommandCapture(0, output.encode(), b"")
+            with self.subTest(case="exit-zero-" + name), mock.patch.object(
+                verify_e2e, "capture_native_command", return_value=capture
+            ), self.assertRaisesRegex(
+                verify_e2e.VerificationError,
+                "^RULE_PUBLICATION_COMMAND_OUTPUT_INVALID$",
+            ):
+                verify_e2e.run_command(
+                    ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                    before_stage="RULE_PUBLICATION_COMMAND",
+                )
+
+        success_only = (
+            verify_e2e.RULE_PUBLICATION_RUNNER_SUCCESS_MARKER + "PUBLISHED\n"
+        ).encode()
+        with mock.patch.object(
+            verify_e2e,
+            "capture_native_command",
+            return_value=verify_e2e.NativeCommandCapture(0, success_only, b""),
+        ):
+            self.assertEqual(
+                verify_e2e.run_command(
+                    ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                    before_stage="RULE_PUBLICATION_COMMAND",
+                ),
+                success_only,
+            )
+
+    def test_rule_publication_service_lines_are_authoritative_and_unique(self):
+        source_root = (
+            Path(__file__).resolve().parents[3]
+            / "backend/src/main/java"
+        )
+        source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in source_root.rglob("*.java")
+        )
+        service_codes = {
+            code: lines
+            for code, lines in verify_e2e.RULE_PUBLICATION_RUNNER_FAILURE_LINES.items()
+            if code.startswith("RULE_PUBLICATION_SERVICE_")
+        }
+        self.assertEqual(
+            set(service_codes),
+            {
+                "RULE_PUBLICATION_SERVICE_DEFAULT_SET_INCOMPLETE",
+                "RULE_PUBLICATION_SERVICE_IDENTITY_MISMATCH",
+                "RULE_PUBLICATION_SERVICE_FRAUD_RULE_INACTIVE",
+                "RULE_PUBLICATION_SERVICE_VERSION_PERIOD_INVALID",
+                "RULE_PUBLICATION_SERVICE_VERSION_STATUS_INVALID",
+                "RULE_PUBLICATION_SERVICE_DRAFT_METADATA_INVALID",
+                "RULE_PUBLICATION_SERVICE_EFFECTIVE_FROM_EXPIRED",
+                "RULE_PUBLICATION_SERVICE_AMOUNT_THRESHOLD_FORMAT_INVALID",
+            },
+        )
+        for code, lines in service_codes.items():
+            with self.subTest(code=code):
+                self.assertEqual(len(lines), 2)
+                direct, caused = lines
+                self.assertTrue(direct.startswith("java.lang."))
+                self.assertEqual(caused, "Caused by: " + direct)
+                message = direct.split(": ", 1)[1]
+                if code == "RULE_PUBLICATION_SERVICE_AMOUNT_THRESHOLD_FORMAT_INVALID":
+                    self.assertEqual(source.count(
+                        '"amountThreshold must be a positive canonical integer "'
+                    ), 1)
+                    self.assertEqual(source.count(
+                        '"string within NUMERIC(19,4) integer range"'
+                    ), 1)
+                else:
+                    self.assertEqual(source.count('"' + message + '"'), 1)
 
     def test_rule_publication_command_contract_flow_and_idempotency(self):
         effective = "2026-09-23T14:00:00Z"

@@ -510,10 +510,10 @@ redact하고 raw command, query, path, exit code, stdout/stderr, credential·tok
 
 `RULE_PUBLICATION_COMMAND_EXIT_NONZERO`는 backend runner의 raw Java exception을 전달하지 않는다.
 Service와 Run은 동일한 `publish_rules` 함수와 동일한 Compose `run --rm --no-deps --pull never -T`
-argument vector를 사용한다. runner source가 고정한 exception line과 exact로 일치하는 line이 bounded
+argument vector를 사용한다. runner/service source가 고정한 exception line과 exact로 일치하는 line이 bounded
 stdout/stderr에 정확히 하나 있을 때만 다음 secondary로 세분한다.
 
-| runner source contract | fixed secondary |
+| runner/service source contract | fixed secondary |
 | --- | --- |
 | production profile 거부 | `RULE_PUBLICATION_RUNNER_PRODUCTION_PROFILE_REJECTED` |
 | publication profile과 local/dev/test profile 조합 누락 | `RULE_PUBLICATION_RUNNER_APPROVED_PROFILE_REQUIRED` |
@@ -521,9 +521,17 @@ stdout/stderr에 정확히 하나 있을 때만 다음 secondary로 세분한다
 | confirmation 불일치 | `RULE_PUBLICATION_RUNNER_CONFIRMATION_REJECTED` |
 | effective-from canonical UTC 형식 거부 | `RULE_PUBLICATION_RUNNER_EFFECTIVE_FROM_FORMAT_REJECTED` |
 | effective-from이 runner 실행 시점의 미래가 아님 | `RULE_PUBLICATION_RUNNER_EFFECTIVE_FROM_NOT_FUTURE` |
+| V5 default Rule v1 set 불완전 | `RULE_PUBLICATION_SERVICE_DEFAULT_SET_INCOMPLETE` |
+| V5 identity 계약 불일치 | `RULE_PUBLICATION_SERVICE_IDENTITY_MISMATCH` |
+| default FraudRule 비활성 | `RULE_PUBLICATION_SERVICE_FRAUD_RULE_INACTIVE` |
+| default RuleVersion period 비정상 | `RULE_PUBLICATION_SERVICE_VERSION_PERIOD_INVALID` |
+| default RuleVersion status 조합 비정상 | `RULE_PUBLICATION_SERVICE_VERSION_STATUS_INVALID` |
+| DRAFT period metadata 비정상 | `RULE_PUBLICATION_SERVICE_DRAFT_METADATA_INVALID` |
+| service publication 시점에 effective-from 만료 | `RULE_PUBLICATION_SERVICE_EFFECTIVE_FROM_EXPIRED` |
+| amountThreshold canonical format 비정상 | `RULE_PUBLICATION_SERVICE_AMOUNT_THRESHOLD_FORMAT_INVALID` |
 
-허용 line은 runner가 던지는 exception class/message 또는 Java cause prefix까지 포함한 fixed literal이다.
-prefix/suffix가 추가된 line, 같은 marker의 중복, 서로 다른 marker의 동시 출현, invalid UTF-8, oversized
+허용 line은 runner/service가 던지는 exception class/message 또는 Java cause prefix까지 포함한 fixed literal이다.
+prefix/suffix가 추가된 line, 같은 marker의 중복, 서로 다른 marker의 동시 출현, mixed CR/LF, invalid UTF-8, oversized
 capture, any unapproved Java exception headline, success marker와 nonzero exit 조합은 기존
 `RULE_PUBLICATION_COMMAND_EXIT_NONZERO`로 안전하게 fallback한다. Exit 0에 failure marker가 있으면
 `RULE_PUBLICATION_COMMAND_OUTPUT_INVALID`로 거부한다. 이 분류는 raw line, command, SQL, path,
