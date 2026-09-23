@@ -7043,8 +7043,15 @@ function Invoke-D315StageDiagnosticTargetedTests {
             'TRANSACTION_CARDINALITY_SNAPSHOT','DATABASE_GLOBAL_SNAPSHOT','EXTERNAL_RISK_LOG_SNAPSHOT',
             'RULE_V2_LOG_SNAPSHOT','BACKEND_METRIC_SNAPSHOT')
         $types=@('PROCESS_START_FAILED','TIMEOUT','EXIT_NONZERO','OUTPUT_INVALID','CLEANUP_FAILED')
+        $runnerCodes=@('RULE_PUBLICATION_RUNNER_PRODUCTION_PROFILE_REJECTED',
+            'RULE_PUBLICATION_RUNNER_APPROVED_PROFILE_REQUIRED','RULE_PUBLICATION_RUNNER_NON_WEB_MODE_REQUIRED',
+            'RULE_PUBLICATION_RUNNER_CONFIRMATION_REJECTED','RULE_PUBLICATION_RUNNER_EFFECTIVE_FROM_FORMAT_REJECTED',
+            'RULE_PUBLICATION_RUNNER_EFFECTIVE_FROM_NOT_FUTURE')
         $expected=[Collections.Generic.List[string]]::new()
-        foreach($stage in $stages){foreach($type in $types){$expected.Add($stage+'_'+$type)}}
+        foreach($stage in $stages){
+            foreach($type in $types){$expected.Add($stage+'_'+$type)}
+            if($stage -ceq 'RULE_PUBLICATION_COMMAND'){foreach($code in $runnerCodes){$expected.Add($code)}}
+        }
         $result = & $script:E2EModule {
             param($codes)
             $accepted=[Collections.Generic.List[string]]::new()
@@ -7246,7 +7253,16 @@ function Invoke-D315TargetedTests {
             'RULE_V2_LOG_SNAPSHOT','BACKEND_METRIC_SNAPSHOT')
         $expectedTypes=@('PROCESS_START_FAILED','TIMEOUT','EXIT_NONZERO','OUTPUT_INVALID','CLEANUP_FAILED')
         $expectedAllowlist=[Collections.Generic.List[string]]::new()
-        foreach($stageName in $expectedStages){foreach($typeName in $expectedTypes){$expectedAllowlist.Add($stageName+'_'+$typeName)}}
+        $expectedRunnerCodes=@('RULE_PUBLICATION_RUNNER_PRODUCTION_PROFILE_REJECTED',
+            'RULE_PUBLICATION_RUNNER_APPROVED_PROFILE_REQUIRED','RULE_PUBLICATION_RUNNER_NON_WEB_MODE_REQUIRED',
+            'RULE_PUBLICATION_RUNNER_CONFIRMATION_REJECTED','RULE_PUBLICATION_RUNNER_EFFECTIVE_FROM_FORMAT_REJECTED',
+            'RULE_PUBLICATION_RUNNER_EFFECTIVE_FROM_NOT_FUTURE')
+        foreach($stageName in $expectedStages){
+            foreach($typeName in $expectedTypes){$expectedAllowlist.Add($stageName+'_'+$typeName)}
+            if($stageName -ceq 'RULE_PUBLICATION_COMMAND'){
+                foreach($code in $expectedRunnerCodes){$expectedAllowlist.Add($code)}
+            }
+        }
         foreach($code in @('DATABASE_TRANSACTION_CARDINALITY_INVALID','FIXTURE_DIRECTORY_INVALID','HOST_ARGUMENT_INVALID',
             'INGESTION_PLAN_INVALID','INPUT_INVALID','OVERALL_DEADLINE_EXCEEDED','OWNER_CONTRACT_INVALID',
             'RULE_ACTIVATION_TIMEOUT','RULE_PUBLICATION_STATE_INVALID','RUN_FIXTURE_STATE_IDENTITY_INVALID',

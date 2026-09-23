@@ -1159,6 +1159,167 @@ finguardops_rule_analysis_outcomes_created 99
                     valid[stage],
                 )
 
+    def test_rule_publication_nonzero_uses_only_exact_controlled_runner_lines(self):
+        fallback = "RULE_PUBLICATION_COMMAND_EXIT_NONZERO"
+        for code, approved_lines in verify_e2e.RULE_PUBLICATION_RUNNER_FAILURE_LINES.items():
+            for approved_line in approved_lines:
+                capture = verify_e2e.NativeCommandCapture(
+                    1,
+                    (
+                        "ordinary startup\n"
+                        + verify_e2e.RULE_PUBLICATION_RUNNER_NEUTRAL_LINES[0]
+                        + "\n" + approved_line + "\n"
+                    ).encode(),
+                    b"",
+                )
+                with self.subTest(code=code, line=approved_line), mock.patch.object(
+                    verify_e2e, "capture_native_command", return_value=capture
+                ), self.assertRaises(verify_e2e.VerificationError) as raised:
+                    verify_e2e.run_command(
+                        ["fixed-executable", "fixed-argument"],
+                        timeout=1,
+                        cwd=Path.cwd(),
+                        environment={},
+                        before_stage="RULE_PUBLICATION_COMMAND",
+                    )
+                self.assertEqual(str(raised.exception), code)
+
+        first_lines = [
+            lines[0]
+            for lines in verify_e2e.RULE_PUBLICATION_RUNNER_FAILURE_LINES.values()
+        ]
+        sentinel = "NeverPrintRawPathSqlCommandCredentialToken"
+        fallback_cases = {
+            "unknown": b"java.lang.IllegalStateException: unknown runner marker\n",
+            "raw-prefix": (sentinel + first_lines[0] + "\n").encode(),
+            "raw-suffix": (first_lines[0] + sentinel + "\n").encode(),
+            "multiple": (first_lines[0] + "\n" + first_lines[1] + "\n").encode(),
+            "duplicate": (first_lines[0] + "\n" + first_lines[0] + "\n").encode(),
+            "noisy-exception": (
+                first_lines[0]
+                + "\njava.lang.IllegalStateException: unknown runner noise\n"
+            ).encode(),
+            "noisy-runtime-exception": (
+                first_lines[0]
+                + "\nCaused by: java.lang.RuntimeException: unknown runner noise\n"
+            ).encode(),
+            "noisy-database-exception": (
+                first_lines[0]
+                + "\nCaused by: org.postgresql.util.PSQLException: unknown runner noise\n"
+            ).encode(),
+            "noisy-custom-exception-class": (
+                first_lines[0]
+                + "\nCaused by: com.example.PublicationFailure: unknown runner noise\n"
+            ).encode(),
+            "noisy-thread-error": (
+                first_lines[0]
+                + '\nException in thread "main" java.lang.AssertionError: unknown runner noise\n'
+            ).encode(),
+            "success-marker": b"event=rule_v1_default_rule_set_publication outcome=PUBLISHED\n",
+            "empty": b"",
+            "invalid-utf8": b"\xff",
+            "control": (first_lines[0] + "\x01\n").encode(),
+            "c1": (first_lines[0] + "\x85\n").encode(),
+            "cf": (first_lines[0] + "\u200b\n").encode(),
+        }
+        for name, output in fallback_cases.items():
+            capture = verify_e2e.NativeCommandCapture(1, output, b"")
+            with self.subTest(case=name), mock.patch.object(
+                verify_e2e, "capture_native_command", return_value=capture
+            ), self.assertRaises(verify_e2e.VerificationError) as raised:
+                verify_e2e.run_command(
+                    ["fixed-executable", "fixed-argument"],
+                    timeout=1,
+                    cwd=Path.cwd(),
+                    environment={},
+                    before_stage="RULE_PUBLICATION_COMMAND",
+                )
+            self.assertEqual(str(raised.exception), fallback)
+            self.assertNotIn(sentinel, str(raised.exception))
+
+        overflow = verify_e2e.NativeCommandCapture(
+            1, first_lines[0].encode(), b"", stdout_overflow=True
+        )
+        with mock.patch.object(
+            verify_e2e, "capture_native_command", return_value=overflow
+        ), self.assertRaisesRegex(verify_e2e.VerificationError, "^" + fallback + "$"):
+            verify_e2e.run_command(
+                ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                before_stage="RULE_PUBLICATION_COMMAND",
+            )
+
+        false_success = verify_e2e.NativeCommandCapture(
+            0, (first_lines[0] + "\n").encode(), b""
+        )
+        with mock.patch.object(
+            verify_e2e, "capture_native_command", return_value=false_success
+        ), self.assertRaisesRegex(
+            verify_e2e.VerificationError,
+            "^RULE_PUBLICATION_COMMAND_OUTPUT_INVALID$",
+        ):
+            verify_e2e.run_command(
+                ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                before_stage="RULE_PUBLICATION_COMMAND",
+            )
+
+    def test_rule_publication_command_contract_flow_and_idempotency(self):
+        effective = "2026-09-23T14:00:00Z"
+        self.assertEqual(
+            verify_e2e.rule_publication_arguments(effective),
+            [
+                "run", "--rm", "--no-deps", "--pull", "never", "-T",
+                "-e", "SPRING_PROFILES_ACTIVE=local,rule-v1-default-publication",
+                "-e", "FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED=false",
+                "backend", "--spring.main.web-application-type=none",
+                "--finguardops.rule-v1-default-publication.enabled=true",
+                "--finguardops.rule-v1-default-publication.confirmation=PUBLISH_RULE_V1_DEFAULT_V1",
+                "--finguardops.rule-v1-default-publication.effective-from=" + effective,
+            ],
+        )
+
+        class Context:
+            def __init__(self, outputs):
+                self.outputs = list(outputs)
+                self.calls = []
+
+            def execute(self, arguments, *, input_bytes=None, timeout=None, before_stage=None):
+                self.calls.append((arguments, timeout, before_stage))
+                return self.outputs.pop(0)
+
+        publication = Context([b"0\n", b"0\n", b"runner output\n", b"4\n"])
+        with mock.patch.object(verify_e2e.time, "sleep") as sleeper:
+            verify_e2e.publish_rules(publication, before_diagnostics=True)
+        self.assertEqual(len(publication.calls), 4)
+        self.assertEqual(
+            [call[2] for call in publication.calls],
+            [
+                "RULE_PUBLISHED_STATE",
+                "RULE_ACTIVE_STATE",
+                "RULE_PUBLICATION_COMMAND",
+                "RULE_ACTIVATION_POLL",
+            ],
+        )
+        command, timeout, _ = publication.calls[2]
+        self.assertEqual(timeout, 240)
+        self.assertEqual(command[:-1], verify_e2e.rule_publication_arguments(effective)[:-1])
+        self.assertRegex(
+            command[-1],
+            r"\A--finguardops\.rule-v1-default-publication\.effective-from="
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z",
+        )
+        sleeper.assert_not_called()
+
+        existing = Context([b"4\n", b"4\n"])
+        verify_e2e.publish_rules(existing, before_diagnostics=True)
+        self.assertEqual(len(existing.calls), 2)
+
+        partial = Context([b"1\n", b"0\n"])
+        with self.assertRaisesRegex(
+            verify_e2e.VerificationError, "^RULE_PUBLICATION_STATE_INVALID$"
+        ):
+            verify_e2e.publish_rules(partial, before_diagnostics=True)
+        self.assertEqual(len(partial.calls), 2)
+
     def test_native_capture_bounds_pipes_timeout_and_start_failure(self):
         success = verify_e2e.capture_native_command(
             [sys.executable, "-c", "import sys;sys.stdout.buffer.write(b'ok')"],

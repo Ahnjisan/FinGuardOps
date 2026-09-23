@@ -211,6 +211,42 @@ BEFORE_NATIVE_OUTPUT_LIMITS = {
     "RULE_V2_LOG_SNAPSHOT": (16_777_216, 4096),
     "BACKEND_METRIC_SNAPSHOT": (4096, 4096),
 }
+RULE_PUBLICATION_RUNNER_FAILURE_LINES = {
+    "RULE_PUBLICATION_RUNNER_PRODUCTION_PROFILE_REJECTED": (
+        "java.lang.IllegalStateException: Rule v1 default publication is forbidden in production",
+        "Caused by: java.lang.IllegalStateException: Rule v1 default publication is forbidden in production",
+    ),
+    "RULE_PUBLICATION_RUNNER_APPROVED_PROFILE_REQUIRED": (
+        "java.lang.IllegalStateException: Rule v1 default publication requires its operation profile and a local, dev, or test profile",
+        "Caused by: java.lang.IllegalStateException: Rule v1 default publication requires its operation profile and a local, dev, or test profile",
+    ),
+    "RULE_PUBLICATION_RUNNER_NON_WEB_MODE_REQUIRED": (
+        "java.lang.IllegalStateException: Rule v1 default publication requires spring.main.web-application-type=none",
+        "Caused by: java.lang.IllegalStateException: Rule v1 default publication requires spring.main.web-application-type=none",
+    ),
+    "RULE_PUBLICATION_RUNNER_CONFIRMATION_REJECTED": (
+        "java.lang.IllegalStateException: Rule v1 default publication confirmation does not match",
+        "Caused by: java.lang.IllegalStateException: Rule v1 default publication confirmation does not match",
+    ),
+    "RULE_PUBLICATION_RUNNER_EFFECTIVE_FROM_FORMAT_REJECTED": (
+        "java.lang.IllegalArgumentException: Rule v1 default effectiveFrom must be a canonical UTC Instant",
+        "Caused by: java.lang.IllegalArgumentException: Rule v1 default effectiveFrom must be a canonical UTC Instant",
+        "java.lang.IllegalArgumentException: Rule v1 default effectiveFrom must be canonical UTC with at most microsecond precision",
+        "Caused by: java.lang.IllegalArgumentException: Rule v1 default effectiveFrom must be canonical UTC with at most microsecond precision",
+    ),
+    "RULE_PUBLICATION_RUNNER_EFFECTIVE_FROM_NOT_FUTURE": (
+        "java.lang.IllegalArgumentException: Rule v1 default effectiveFrom must be in the future",
+        "Caused by: java.lang.IllegalArgumentException: Rule v1 default effectiveFrom must be in the future",
+    ),
+}
+RULE_PUBLICATION_RUNNER_EXCEPTION_HEADLINE = re.compile(
+    r'(?:Caused by: |Exception in thread "[^"\r\n]+" )?'
+    r'(?:[A-Za-z_$][A-Za-z0-9_$]*\.)+'
+    r'[A-Za-z_$][A-Za-z0-9_$]*(?::.*)?\Z'
+)
+RULE_PUBLICATION_RUNNER_NEUTRAL_LINES = (
+    "java.lang.IllegalStateException: Failed to execute ApplicationRunner",
+)
 INGESTION_STEPS = (
     "auth-denial",
     "behavior-create",
@@ -1652,6 +1688,8 @@ def validate_before_native_output(stage: str, output: bytes) -> None:
         return
     if stage == "RULE_PUBLICATION_COMMAND":
         output.decode("utf-8", "strict")
+        if rule_publication_runner_failure_matches(output, b""):
+            raise ValueError("runner failure marker on successful exit")
         return
     if stage == "TRANSACTION_CARDINALITY_SNAPSHOT":
         if re.fullmatch(rb"[0-9]+(?:\|[0-9]+){13}\n?", output) is None:
@@ -1681,6 +1719,51 @@ def validate_before_native_output(stage: str, output: bytes) -> None:
             raise ValueError("invalid metric snapshot")
         return
     raise ValueError("unknown before stage")
+
+
+def rule_publication_runner_failure_matches(
+    stdout: bytes, stderr: bytes
+) -> tuple[str, ...]:
+    lines: list[str] = []
+    for stream in (stdout, stderr):
+        text = stream.decode("utf-8", "strict")
+        if any(
+            (ord(character) < 0x20 and character not in "\t\r\n")
+            or 0x7F <= ord(character) <= 0x9F
+            or unicodedata.category(character) == "Cf"
+            for character in text
+        ):
+            return ()
+        for raw_line in text.split("\n"):
+            lines.append(raw_line[:-1] if raw_line.endswith("\r") else raw_line)
+    matches: list[str] = []
+    approved = {
+        line: code
+        for code, approved_lines in RULE_PUBLICATION_RUNNER_FAILURE_LINES.items()
+        for line in approved_lines
+    }
+    for line in lines:
+        if line in approved:
+            matches.append(approved[line])
+            continue
+        if line in RULE_PUBLICATION_RUNNER_NEUTRAL_LINES:
+            continue
+        if RULE_PUBLICATION_RUNNER_EXCEPTION_HEADLINE.fullmatch(line):
+            return ()
+    return tuple(matches)
+
+
+def classify_rule_publication_nonzero(capture: NativeCommandCapture) -> str:
+    fallback = BEFORE_NATIVE_FAILURE_CODES["RULE_PUBLICATION_COMMAND"]["exit"]
+    if capture.stdout_overflow or capture.stderr_overflow:
+        return fallback
+    try:
+        matches = rule_publication_runner_failure_matches(
+            capture.stdout, capture.stderr
+        )
+    except UnicodeDecodeError:
+        return fallback
+    return matches[0] if len(matches) == 1 else fallback
 
 
 def run_command(
@@ -1715,6 +1798,8 @@ def run_command(
         if capture.timed_out:
             fail(codes["timeout"])
         if capture.returncode != 0:
+            if before_stage == "RULE_PUBLICATION_COMMAND":
+                fail(classify_rule_publication_nonzero(capture))
             fail(codes["exit"])
         if capture.stdout_overflow or capture.stderr_overflow or capture.stderr:
             fail(codes["output"])
@@ -1875,6 +1960,18 @@ def sql_scalar(ctx: HostContext, query: str, before_stage: str | None = None) ->
     return output.decode("utf-8", "strict").strip()
 
 
+def rule_publication_arguments(effective: str) -> list[str]:
+    return [
+        "run", "--rm", "--no-deps", "--pull", "never", "-T",
+        "-e", "SPRING_PROFILES_ACTIVE=local,rule-v1-default-publication",
+        "-e", "FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED=false",
+        "backend", "--spring.main.web-application-type=none",
+        "--finguardops.rule-v1-default-publication.enabled=true",
+        "--finguardops.rule-v1-default-publication.confirmation=PUBLISH_RULE_V1_DEFAULT_V1",
+        "--finguardops.rule-v1-default-publication.effective-from=" + effective,
+    ]
+
+
 def publish_rules(ctx: HostContext, *, before_diagnostics: bool = False) -> None:
     identifiers = ",".join("'%s'" % item for item in RULE_VERSION_IDS)
     published_query = (
@@ -1898,15 +1995,7 @@ def publish_rules(ctx: HostContext, *, before_diagnostics: bool = False) -> None
         dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=60)
     ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     ctx.execute(
-        [
-            "run", "--rm", "--no-deps", "--pull", "never", "-T",
-            "-e", "SPRING_PROFILES_ACTIVE=local,rule-v1-default-publication",
-            "-e", "FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED=false",
-            "backend", "--spring.main.web-application-type=none",
-            "--finguardops.rule-v1-default-publication.enabled=true",
-            "--finguardops.rule-v1-default-publication.confirmation=PUBLISH_RULE_V1_DEFAULT_V1",
-            "--finguardops.rule-v1-default-publication.effective-from=" + effective,
-        ],
+        rule_publication_arguments(effective),
         timeout=240,
         before_stage="RULE_PUBLICATION_COMMAND" if before_diagnostics else None,
     )

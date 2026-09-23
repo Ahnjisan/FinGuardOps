@@ -508,6 +508,27 @@ redact하고 raw command, query, path, exit code, stdout/stderr, credential·tok
 않는다. PowerShell은 이 표에서 도달 가능한 exact literal만 allowlist하고 primary
 `RUN_FIXTURE_BEFORE_FAILED`와 secondary diagnostic 1회 계약을 유지한다.
 
+`RULE_PUBLICATION_COMMAND_EXIT_NONZERO`는 backend runner의 raw Java exception을 전달하지 않는다.
+Service와 Run은 동일한 `publish_rules` 함수와 동일한 Compose `run --rm --no-deps --pull never -T`
+argument vector를 사용한다. runner source가 고정한 exception line과 exact로 일치하는 line이 bounded
+stdout/stderr에 정확히 하나 있을 때만 다음 secondary로 세분한다.
+
+| runner source contract | fixed secondary |
+| --- | --- |
+| production profile 거부 | `RULE_PUBLICATION_RUNNER_PRODUCTION_PROFILE_REJECTED` |
+| publication profile과 local/dev/test profile 조합 누락 | `RULE_PUBLICATION_RUNNER_APPROVED_PROFILE_REQUIRED` |
+| non-web mode 누락 | `RULE_PUBLICATION_RUNNER_NON_WEB_MODE_REQUIRED` |
+| confirmation 불일치 | `RULE_PUBLICATION_RUNNER_CONFIRMATION_REJECTED` |
+| effective-from canonical UTC 형식 거부 | `RULE_PUBLICATION_RUNNER_EFFECTIVE_FROM_FORMAT_REJECTED` |
+| effective-from이 runner 실행 시점의 미래가 아님 | `RULE_PUBLICATION_RUNNER_EFFECTIVE_FROM_NOT_FUTURE` |
+
+허용 line은 runner가 던지는 exception class/message 또는 Java cause prefix까지 포함한 fixed literal이다.
+prefix/suffix가 추가된 line, 같은 marker의 중복, 서로 다른 marker의 동시 출현, invalid UTF-8, oversized
+capture, any unapproved Java exception headline, success marker와 nonzero exit 조합은 기존
+`RULE_PUBLICATION_COMMAND_EXIT_NONZERO`로 안전하게 fallback한다. Exit 0에 failure marker가 있으면
+`RULE_PUBLICATION_COMMAND_OUTPUT_INVALID`로 거부한다. 이 분류는 raw line, command, SQL, path,
+environment 또는 exit code를 외부 diagnostic에 포함하지 않는다.
+
 Run fixture는 `PASSWORD_CHANGED`, `TRANSFER_LIMIT_CHANGED` behavior event와 12,000,000 KRW
 `ACCOUNT_TRANSFER`를 한 세트 생성한다. 기대 delta는 BehaviorEvent 2, FinancialTransaction 1,
 IdempotencyRecord 1, DetectionResult 1, DetectionEvidence 2, FraudCase 1, CaseTransaction 1,
