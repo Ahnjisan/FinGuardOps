@@ -17,6 +17,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -134,6 +135,82 @@ SNAPSHOT_QUERIES = {
 }
 SNAPSHOT_BEGIN_PREFIX = b"FINGUARDOPS_SNAPSHOT_BEGIN:"
 SNAPSHOT_END_PREFIX = b"FINGUARDOPS_SNAPSHOT_END:"
+BEFORE_NATIVE_FAILURE_CODES = {
+    "RULE_PUBLISHED_STATE": {
+        "start": "RULE_PUBLISHED_STATE_PROCESS_START_FAILED",
+        "timeout": "RULE_PUBLISHED_STATE_TIMEOUT",
+        "exit": "RULE_PUBLISHED_STATE_EXIT_NONZERO",
+        "output": "RULE_PUBLISHED_STATE_OUTPUT_INVALID",
+        "cleanup": "RULE_PUBLISHED_STATE_CLEANUP_FAILED",
+    },
+    "RULE_ACTIVE_STATE": {
+        "start": "RULE_ACTIVE_STATE_PROCESS_START_FAILED",
+        "timeout": "RULE_ACTIVE_STATE_TIMEOUT",
+        "exit": "RULE_ACTIVE_STATE_EXIT_NONZERO",
+        "output": "RULE_ACTIVE_STATE_OUTPUT_INVALID",
+        "cleanup": "RULE_ACTIVE_STATE_CLEANUP_FAILED",
+    },
+    "RULE_PUBLICATION_COMMAND": {
+        "start": "RULE_PUBLICATION_COMMAND_PROCESS_START_FAILED",
+        "timeout": "RULE_PUBLICATION_COMMAND_TIMEOUT",
+        "exit": "RULE_PUBLICATION_COMMAND_EXIT_NONZERO",
+        "output": "RULE_PUBLICATION_COMMAND_OUTPUT_INVALID",
+        "cleanup": "RULE_PUBLICATION_COMMAND_CLEANUP_FAILED",
+    },
+    "RULE_ACTIVATION_POLL": {
+        "start": "RULE_ACTIVATION_POLL_PROCESS_START_FAILED",
+        "timeout": "RULE_ACTIVATION_POLL_TIMEOUT",
+        "exit": "RULE_ACTIVATION_POLL_EXIT_NONZERO",
+        "output": "RULE_ACTIVATION_POLL_OUTPUT_INVALID",
+        "cleanup": "RULE_ACTIVATION_POLL_CLEANUP_FAILED",
+    },
+    "TRANSACTION_CARDINALITY_SNAPSHOT": {
+        "start": "TRANSACTION_CARDINALITY_SNAPSHOT_PROCESS_START_FAILED",
+        "timeout": "TRANSACTION_CARDINALITY_SNAPSHOT_TIMEOUT",
+        "exit": "TRANSACTION_CARDINALITY_SNAPSHOT_EXIT_NONZERO",
+        "output": "TRANSACTION_CARDINALITY_SNAPSHOT_OUTPUT_INVALID",
+        "cleanup": "TRANSACTION_CARDINALITY_SNAPSHOT_CLEANUP_FAILED",
+    },
+    "DATABASE_GLOBAL_SNAPSHOT": {
+        "start": "DATABASE_GLOBAL_SNAPSHOT_PROCESS_START_FAILED",
+        "timeout": "DATABASE_GLOBAL_SNAPSHOT_TIMEOUT",
+        "exit": "DATABASE_GLOBAL_SNAPSHOT_EXIT_NONZERO",
+        "output": "DATABASE_GLOBAL_SNAPSHOT_OUTPUT_INVALID",
+        "cleanup": "DATABASE_GLOBAL_SNAPSHOT_CLEANUP_FAILED",
+    },
+    "EXTERNAL_RISK_LOG_SNAPSHOT": {
+        "start": "EXTERNAL_RISK_LOG_SNAPSHOT_PROCESS_START_FAILED",
+        "timeout": "EXTERNAL_RISK_LOG_SNAPSHOT_TIMEOUT",
+        "exit": "EXTERNAL_RISK_LOG_SNAPSHOT_EXIT_NONZERO",
+        "output": "EXTERNAL_RISK_LOG_SNAPSHOT_OUTPUT_INVALID",
+        "cleanup": "EXTERNAL_RISK_LOG_SNAPSHOT_CLEANUP_FAILED",
+    },
+    "RULE_V2_LOG_SNAPSHOT": {
+        "start": "RULE_V2_LOG_SNAPSHOT_PROCESS_START_FAILED",
+        "timeout": "RULE_V2_LOG_SNAPSHOT_TIMEOUT",
+        "exit": "RULE_V2_LOG_SNAPSHOT_EXIT_NONZERO",
+        "output": "RULE_V2_LOG_SNAPSHOT_OUTPUT_INVALID",
+        "cleanup": "RULE_V2_LOG_SNAPSHOT_CLEANUP_FAILED",
+    },
+    "BACKEND_METRIC_SNAPSHOT": {
+        "start": "BACKEND_METRIC_SNAPSHOT_PROCESS_START_FAILED",
+        "timeout": "BACKEND_METRIC_SNAPSHOT_TIMEOUT",
+        "exit": "BACKEND_METRIC_SNAPSHOT_EXIT_NONZERO",
+        "output": "BACKEND_METRIC_SNAPSHOT_OUTPUT_INVALID",
+        "cleanup": "BACKEND_METRIC_SNAPSHOT_CLEANUP_FAILED",
+    },
+}
+BEFORE_NATIVE_OUTPUT_LIMITS = {
+    "RULE_PUBLISHED_STATE": (64, 4096),
+    "RULE_ACTIVE_STATE": (64, 4096),
+    "RULE_PUBLICATION_COMMAND": (4_194_304, 65_536),
+    "RULE_ACTIVATION_POLL": (64, 4096),
+    "TRANSACTION_CARDINALITY_SNAPSHOT": (2048, 4096),
+    "DATABASE_GLOBAL_SNAPSHOT": (16_777_216, 4096),
+    "EXTERNAL_RISK_LOG_SNAPSHOT": (16_777_216, 4096),
+    "RULE_V2_LOG_SNAPSHOT": (16_777_216, 4096),
+    "BACKEND_METRIC_SNAPSHOT": (4096, 4096),
+}
 INGESTION_STEPS = (
     "auth-denial",
     "behavior-create",
@@ -1432,6 +1509,180 @@ def ingestion_runtime(step: str) -> None:
     print("ingestion step completed: " + step)
 
 
+@dataclass(frozen=True)
+class NativeCommandCapture:
+    returncode: int | None
+    stdout: bytes
+    stderr: bytes
+    stdout_overflow: bool = False
+    stderr_overflow: bool = False
+    start_failed: bool = False
+    timed_out: bool = False
+    cleanup_failed: bool = False
+
+
+def capture_native_command(
+    argv: list[str],
+    *,
+    timeout: float,
+    cwd: Path,
+    environment: dict[str, str],
+    input_bytes: bytes | None = None,
+    stdout_limit: int | None = None,
+    stderr_limit: int | None = None,
+) -> NativeCommandCapture:
+    merged = os.environ.copy()
+    merged.update(environment)
+    merged.update({"MSYS_NO_PATHCONV": "1", "MSYS2_ARG_CONV_EXCL": "*"})
+    try:
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=cwd,
+            env=merged,
+            shell=False,
+        )
+    except OSError:
+        return NativeCommandCapture(None, b"", b"", start_failed=True)
+    streams = {
+        "stdout": {"bytes": bytearray(), "overflow": False, "failed": False},
+        "stderr": {"bytes": bytearray(), "overflow": False, "failed": False},
+    }
+
+    def drain(name: str, pipe: Any, limit: int | None) -> None:
+        state = streams[name]
+        try:
+            while True:
+                chunk = pipe.read(65_536)
+                if not chunk:
+                    break
+                if limit is None:
+                    state["bytes"].extend(chunk)
+                else:
+                    remaining = limit + 1 - len(state["bytes"])
+                    if remaining > 0:
+                        state["bytes"].extend(chunk[:remaining])
+                    if len(chunk) > remaining or len(state["bytes"]) > limit:
+                        state["overflow"] = True
+        except (OSError, ValueError):
+            state["failed"] = True
+        finally:
+            try:
+                pipe.close()
+            except (OSError, ValueError):
+                state["failed"] = True
+
+    writer_failed = [False]
+
+    def write_input() -> None:
+        try:
+            if input_bytes is not None and process.stdin is not None:
+                process.stdin.write(input_bytes)
+                process.stdin.flush()
+        except BrokenPipeError:
+            pass
+        except (OSError, ValueError):
+            writer_failed[0] = True
+        finally:
+            if process.stdin is not None:
+                try:
+                    process.stdin.close()
+                except (OSError, ValueError):
+                    writer_failed[0] = True
+
+    threads = [
+        threading.Thread(
+            target=drain, args=("stdout", process.stdout, stdout_limit), daemon=True
+        ),
+        threading.Thread(
+            target=drain, args=("stderr", process.stderr, stderr_limit), daemon=True
+        ),
+    ]
+    if input_bytes is not None:
+        threads.append(threading.Thread(target=write_input, daemon=True))
+    for thread in threads:
+        thread.start()
+    timed_out = False
+    cleanup_failed = False
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            process.kill()
+            process.wait(timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            cleanup_failed = True
+    except BaseException:
+        try:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            cleanup_failed = True
+        for thread in threads:
+            thread.join(10)
+        if cleanup_failed:
+            return NativeCommandCapture(None, b"", b"", cleanup_failed=True)
+        raise
+    for thread in threads:
+        thread.join(10)
+        if thread.is_alive():
+            cleanup_failed = True
+    cleanup_failed = cleanup_failed or writer_failed[0] or any(
+        state["failed"] for state in streams.values()
+    )
+    return NativeCommandCapture(
+        process.returncode,
+        bytes(streams["stdout"]["bytes"]),
+        bytes(streams["stderr"]["bytes"]),
+        stdout_overflow=bool(streams["stdout"]["overflow"]),
+        stderr_overflow=bool(streams["stderr"]["overflow"]),
+        timed_out=timed_out,
+        cleanup_failed=cleanup_failed,
+    )
+
+
+def validate_before_native_output(stage: str, output: bytes) -> None:
+    if stage in {"RULE_PUBLISHED_STATE", "RULE_ACTIVE_STATE", "RULE_ACTIVATION_POLL"}:
+        if re.fullmatch(rb"[0-9]+\n?", output) is None:
+            raise ValueError("invalid rule-state scalar")
+        return
+    if stage == "RULE_PUBLICATION_COMMAND":
+        output.decode("utf-8", "strict")
+        return
+    if stage == "TRANSACTION_CARDINALITY_SNAPSHOT":
+        if re.fullmatch(rb"[0-9]+(?:\|[0-9]+){13}\n?", output) is None:
+            raise ValueError("invalid transaction cardinality")
+        return
+    if stage == "DATABASE_GLOBAL_SNAPSHOT":
+        try:
+            parse_database_snapshot(output)
+        except VerificationError as error:
+            raise ValueError("invalid global snapshot") from error
+        return
+    if stage in {"EXTERNAL_RISK_LOG_SNAPSHOT", "RULE_V2_LOG_SNAPSHOT"}:
+        output.decode("utf-8", "strict")
+        return
+    if stage == "BACKEND_METRIC_SNAPSHOT":
+        parsed = json.loads(output)
+        if (
+            not isinstance(parsed, list)
+            or len(parsed) != 2
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                for value in parsed
+            )
+        ):
+            raise ValueError("invalid metric snapshot")
+        return
+    raise ValueError("unknown before stage")
+
+
 def run_command(
     argv: list[str],
     *,
@@ -1439,35 +1690,50 @@ def run_command(
     cwd: Path,
     environment: dict[str, str],
     input_bytes: bytes | None = None,
+    before_stage: str | None = None,
 ) -> bytes:
     if timeout <= 0:
         fail("SUBPROCESS_TIMEOUT_INVALID")
-    merged = os.environ.copy()
-    merged.update(environment)
-    merged.update({"MSYS_NO_PATHCONV": "1", "MSYS2_ARG_CONV_EXCL": "*"})
-    try:
-        result = subprocess.run(
-            argv,
-            input=input_bytes,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=cwd,
-            env=merged,
-            shell=False,
-            check=False,
-            timeout=timeout,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+    limits = BEFORE_NATIVE_OUTPUT_LIMITS.get(before_stage) if before_stage is not None else None
+    if before_stage is not None and limits is None:
         fail("SUBPROCESS_FAILED")
-    if result.returncode != 0:
+    capture = capture_native_command(
+        argv,
+        timeout=timeout,
+        cwd=cwd,
+        environment=environment,
+        input_bytes=input_bytes,
+        stdout_limit=limits[0] if limits is not None else None,
+        stderr_limit=limits[1] if limits is not None else None,
+    )
+    if before_stage is not None:
+        codes = BEFORE_NATIVE_FAILURE_CODES[before_stage]
+        if capture.cleanup_failed:
+            fail(codes["cleanup"])
+        if capture.start_failed:
+            fail(codes["start"])
+        if capture.timed_out:
+            fail(codes["timeout"])
+        if capture.returncode != 0:
+            fail(codes["exit"])
+        if capture.stdout_overflow or capture.stderr_overflow or capture.stderr:
+            fail(codes["output"])
+        try:
+            validate_before_native_output(before_stage, capture.stdout)
+        except (UnicodeError, json.JSONDecodeError, ValueError):
+            fail(codes["output"])
+        return capture.stdout
+    if capture.cleanup_failed or capture.start_failed or capture.timed_out:
+        fail("SUBPROCESS_FAILED")
+    if capture.returncode != 0:
         safe_child = re.search(
             rb"(?:^|\n)verification failed: ([A-Z][A-Z0-9_]{0,63})(?:\r?\n|$)",
-            result.stderr,
+            capture.stderr,
         )
         if safe_child is not None:
             fail("CHILD_" + safe_child.group(1).decode("ascii"))
         fail("SUBPROCESS_FAILED")
-    return result.stdout
+    return capture.stdout
 
 
 class HostContext:
@@ -1519,6 +1785,7 @@ class HostContext:
         *,
         input_bytes: bytes | None = None,
         timeout: float | None = None,
+        before_stage: str | None = None,
     ) -> bytes:
         limit = self.cli_timeout if timeout is None else timeout
         return run_command(
@@ -1527,6 +1794,7 @@ class HostContext:
             cwd=self.repo,
             environment=self.environment,
             input_bytes=input_bytes,
+            before_stage=before_stage,
         )
 
 
@@ -1596,25 +1864,32 @@ def wait_container(ctx: HostContext, service: str, expected: str) -> None:
     fail("CONTAINER_READINESS_TIMEOUT")
 
 
-def sql_scalar(ctx: HostContext, query: str) -> str:
+def sql_scalar(ctx: HostContext, query: str, before_stage: str | None = None) -> str:
     output = ctx.execute(
         [
             "exec", "-T", "postgresql", "psql", "-X", "-v", "ON_ERROR_STOP=1",
             "-U", "finguardops", "-d", "finguardops", "-tAc", query,
-        ]
+        ],
+        before_stage=before_stage,
     )
     return output.decode("utf-8", "strict").strip()
 
 
-def publish_rules(ctx: HostContext) -> None:
+def publish_rules(ctx: HostContext, *, before_diagnostics: bool = False) -> None:
     identifiers = ",".join("'%s'" % item for item in RULE_VERSION_IDS)
     published_query = (
         "select count(*) from rule_version where status='PUBLISHED' "
         "and rule_version_id in (" + identifiers + ")"
     )
     active_query = published_query + " and effective_from <= current_timestamp"
-    published = sql_scalar(ctx, published_query)
-    active = sql_scalar(ctx, active_query)
+    published = sql_scalar(
+        ctx, published_query,
+        "RULE_PUBLISHED_STATE" if before_diagnostics else None,
+    )
+    active = sql_scalar(
+        ctx, active_query,
+        "RULE_ACTIVE_STATE" if before_diagnostics else None,
+    )
     if published == "4" and active == "4":
         return
     if published != "0":
@@ -1633,9 +1908,13 @@ def publish_rules(ctx: HostContext) -> None:
             "--finguardops.rule-v1-default-publication.effective-from=" + effective,
         ],
         timeout=240,
+        before_stage="RULE_PUBLICATION_COMMAND" if before_diagnostics else None,
     )
     for _ in range(90):
-        if sql_scalar(ctx, active_query) == "4":
+        if sql_scalar(
+            ctx, active_query,
+            "RULE_ACTIVATION_POLL" if before_diagnostics else None,
+        ) == "4":
             return
         time.sleep(1)
     fail("RULE_ACTIVATION_TIMEOUT")
@@ -1969,7 +2248,9 @@ def parse_database_snapshot(output: bytes) -> dict[str, TableSnapshot]:
         fail("DATABASE_GLOBAL_SNAPSHOT_INVALID")
 
 
-def database_snapshot(ctx: HostContext) -> dict[str, TableSnapshot]:
+def database_snapshot(
+    ctx: HostContext, before_stage: str | None = None
+) -> dict[str, TableSnapshot]:
     output = ctx.execute(
         [
             "exec", "-T", "postgresql", "psql", "-X", "-qAt",
@@ -1977,12 +2258,13 @@ def database_snapshot(ctx: HostContext) -> dict[str, TableSnapshot]:
             "-f", "-",
         ],
         input_bytes=snapshot_sql(),
+        before_stage=before_stage,
     )
     return parse_database_snapshot(output)
 
 
 def transaction_cardinality(
-    ctx: HostContext, plan: dict[str, str]
+    ctx: HostContext, plan: dict[str, str], before_stage: str | None = None
 ) -> tuple[int, ...]:
     valid = validate_plan(plan)
     transaction_id = valid["transactionId"]
@@ -2008,7 +2290,7 @@ def transaction_cardinality(
             "(select count(*) from audit_log where transaction_id='%s' and action='TRANSACTION_STATUS_CHANGED')" % transaction_id,
         )
     ) + ")"
-    raw = sql_scalar(ctx, query).split("|")
+    raw = sql_scalar(ctx, query, before_stage).split("|")
     if len(raw) != 14 or any(re.fullmatch(r"\d+", value) is None for value in raw):
         fail("DATABASE_TRANSACTION_SNAPSHOT_INVALID")
     return tuple(int(value) for value in raw)
@@ -2052,26 +2334,37 @@ def expected_transaction_cardinality(
     )
 
 
-def service_logs(ctx: HostContext, service: str) -> str:
+def service_logs(
+    ctx: HostContext, service: str, before_stage: str | None = None
+) -> str:
     if service not in {"external-risk-mock", "ai-service"}:
         fail("DEPENDENCY_SERVICE_INVALID")
     return ctx.execute(
-        ["logs", "--no-color", "--no-log-prefix", service]
+        ["logs", "--no-color", "--no-log-prefix", service],
+        before_stage=before_stage,
     ).decode("utf-8", "strict")
 
 
-def dependency_hit_counts(ctx: HostContext) -> tuple[int, int]:
-    external_lines = service_logs(ctx, "external-risk-mock").splitlines()
-    rule_lines = service_logs(ctx, "ai-service").splitlines()
+def dependency_hit_counts(
+    ctx: HostContext, before_stages: tuple[str, str] | None = None
+) -> tuple[int, int]:
+    external_stage, rule_stage = before_stages or (None, None)
+    external_lines = service_logs(
+        ctx, "external-risk-mock", external_stage
+    ).splitlines()
+    rule_lines = service_logs(ctx, "ai-service", rule_stage).splitlines()
     external = sum(line == EXTERNAL_RISK_MARKER for line in external_lines)
     rule = sum(RULE_V2_ACCESS_PATTERN.fullmatch(line) is not None for line in rule_lines)
     return external, rule
 
 
-def backend_metric_totals(ctx: HostContext) -> tuple[float, float]:
+def backend_metric_totals(
+    ctx: HostContext, before_stage: str | None = None
+) -> tuple[float, float]:
     output = ctx.execute(
         ["run", "--rm", "--no-deps", "--pull", "never", "-T", "keycloak-verify", "metric-runtime"],
         timeout=60,
+        before_stage=before_stage,
     )
     try:
         parsed = json.loads(output)
@@ -2380,13 +2673,17 @@ def run_fixture_before(ctx: HostContext, fixture_directory: Path) -> dict[str, A
         or tuple(directory.iterdir())
     ):
         fail("FIXTURE_DIRECTORY_INVALID")
-    publish_rules(ctx)
+    publish_rules(ctx, before_diagnostics=True)
     plan = create_plan()
-    if transaction_cardinality(ctx, plan) != expected_transaction_cardinality(False, False, False):
+    if transaction_cardinality(
+        ctx, plan, "TRANSACTION_CARDINALITY_SNAPSHOT"
+    ) != expected_transaction_cardinality(False, False, False):
         fail("DATABASE_TRANSACTION_CARDINALITY_INVALID")
-    before_database = database_snapshot(ctx)
-    before_dependencies = dependency_hit_counts(ctx)
-    before_metrics = backend_metric_totals(ctx)
+    before_database = database_snapshot(ctx, "DATABASE_GLOBAL_SNAPSHOT")
+    before_dependencies = dependency_hit_counts(
+        ctx, ("EXTERNAL_RISK_LOG_SNAPSHOT", "RULE_V2_LOG_SNAPSHOT")
+    )
+    before_metrics = backend_metric_totals(ctx, "BACKEND_METRIC_SNAPSHOT")
     state = {
         "schemaVersion": 1,
         "runId": ctx.contract.run_id,

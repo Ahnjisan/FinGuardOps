@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Preflight', 'MajorFixPreflight', 'MajorFixFixture11', 'MajorFixTargeted', 'OwnerFixPreflight', 'OwnerFixTargeted', 'WaitBrowserPreflight', 'WaitBrowserTargeted', 'SessionStateTargeted', 'D209Preflight', 'D209A', 'D209B', 'D225Service', 'D248Targeted', 'CleanupBrowserTargeted', 'D273Targeted', 'D281Targeted', 'D294Preflight', 'D294Targeted', 'D299Red', 'D299Targeted', 'D308Oracle', 'D315LauncherTargeted', 'D315Targeted', 'Formal')]
+    [ValidateSet('Preflight', 'MajorFixPreflight', 'MajorFixFixture11', 'MajorFixTargeted', 'OwnerFixPreflight', 'OwnerFixTargeted', 'WaitBrowserPreflight', 'WaitBrowserTargeted', 'SessionStateTargeted', 'D209Preflight', 'D209A', 'D209B', 'D225Service', 'D248Targeted', 'CleanupBrowserTargeted', 'D273Targeted', 'D281Targeted', 'D294Preflight', 'D294Targeted', 'D299Red', 'D299Targeted', 'D308Oracle', 'D315LauncherTargeted', 'D315StageTargeted', 'D315Targeted', 'Formal')]
     [string]$Mode = 'Formal'
 )
 
@@ -7036,6 +7036,65 @@ raise SystemExit(42)
     Write-Output 'D315 launcher targeted passed'
 }
 
+function Invoke-D315StageDiagnosticTargetedTests {
+    $script:Failures = [System.Collections.Generic.List[string]]::new()
+    Invoke-TestCase 'D315 stage diagnostic allowlist is fixed exact and non-reflective' {
+        $stages=@('RULE_PUBLISHED_STATE','RULE_ACTIVE_STATE','RULE_PUBLICATION_COMMAND','RULE_ACTIVATION_POLL',
+            'TRANSACTION_CARDINALITY_SNAPSHOT','DATABASE_GLOBAL_SNAPSHOT','EXTERNAL_RISK_LOG_SNAPSHOT',
+            'RULE_V2_LOG_SNAPSHOT','BACKEND_METRIC_SNAPSHOT')
+        $types=@('PROCESS_START_FAILED','TIMEOUT','EXIT_NONZERO','OUTPUT_INVALID','CLEANUP_FAILED')
+        $expected=[Collections.Generic.List[string]]::new()
+        foreach($stage in $stages){foreach($type in $types){$expected.Add($stage+'_'+$type)}}
+        $result = & $script:E2EModule {
+            param($codes)
+            $accepted=[Collections.Generic.List[string]]::new()
+            foreach($code in $codes){if(Test-E2ERunFixtureBeforeSecondaryCode $code){$accepted.Add($code)}}
+            $receipt = New-E2EReceipt -RunId '0123456789abcdef0123456789abcdef' `
+                -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+            $propagated=[Collections.Generic.List[object]]::new()
+            foreach($code in $codes){
+                $capture=[pscustomobject]@{ExitCode=1;Stdout=[byte[]]::new(0);Stderr=[Text.Encoding]::ASCII.GetBytes("verification failed: $code`r`n")
+                    StdoutOverflow=$false;StderrOverflow=$false;TimedOut=$false;StartFailed=$false;CaptureFailed=$false;CleanupFailed=$false}
+                $records=[Collections.Generic.List[string]]::new();$failure=$null
+                try{Invoke-E2ERunFixtureBeforeChild -Receipt $receipt -Directory (Get-E2EFixtureDirectory $receipt) `
+                    -NativeBoundary {$capture}.GetNewClosure() -DiagnosticWriter {param($v)$records.Add($v)}.GetNewClosure()|Out-Null}catch{$failure=$_.Exception.Message}
+                $propagated.Add([pscustomobject]@{Code=$code;Primary=$failure;Records=@($records)})
+            }
+            $invalid=@(
+                'SUBPROCESS_FAILED',
+                'RULE_PUBLISHED_STATE_EXIT_NONZERO_RAW',
+                'RULE_PUBLISHED_STATE_EXIT_NONZERO RULE_ACTIVE_STATE_EXIT_NONZERO',
+                'rule_published_state_exit_nonzero',
+                'Rule_PUBLISHED_STATE_EXIT_NONZERO',
+                ' RULE_PUBLISHED_STATE_EXIT_NONZERO',
+                "RULE_PUBLISHED_STATE_EXIT_NONZERO`r`n",
+                ('RULE_PUBLISHED_STATE_EXIT_NONZERO'+[char]1),
+                ('RULE_PUBLISHED_STATE_EXIT_NONZERO'+[char]0x85),
+                ('RULE_PUBLISHED_STATE_EXIT_NONZERO'+[char]0x200B)
+            )
+            $rejected=[Collections.Generic.List[string]]::new()
+            foreach($candidate in $invalid){if(-not(Test-E2ERunFixtureBeforeSecondaryCode $candidate)){$rejected.Add('rejected')}}
+            $records=[Collections.Generic.List[string]]::new()
+            Write-E2ERunFixtureBeforeDiagnostic -Secondary $codes[0] -Writer {param($v)$records.Add($v)}.GetNewClosure()
+            return [pscustomobject]@{Accepted=@($accepted);Propagated=@($propagated);Rejected=$rejected.Count;Records=@($records)}
+        } @($expected)
+        Assert-Equal @($expected) @($result.Accepted) 'A fixed stage diagnostic was not accepted exactly.'
+        foreach($item in @($result.Propagated)){
+            Assert-Equal 'RUN_FIXTURE_BEFORE_FAILED' $item.Primary ("Primary changed for "+$item.Code)
+            Assert-Equal 1 @($item.Records).Count ("Diagnostic cardinality changed for "+$item.Code)
+            Assert-Equal ('RUN_FIXTURE_BEFORE_SECONDARY='+$item.Code) $item.Records[0] ("Secondary changed for "+$item.Code)
+        }
+        Assert-Equal 10 $result.Rejected 'A malformed or generic stage code was accepted.'
+        Assert-Equal @('RUN_FIXTURE_BEFORE_SECONDARY=RULE_PUBLISHED_STATE_PROCESS_START_FAILED') @($result.Records) `
+            'Stage diagnostic writer changed or reflected candidate data.'
+    }
+    if ($script:Failures.Count -ne 0) {
+        $script:Failures | ForEach-Object { Write-Output $_ }
+        exit 1
+    }
+    Write-Output 'D315 stage diagnostic targeted passed'
+}
+
 function Invoke-D315TargetedTests {
     $script:Failures = [System.Collections.Generic.List[string]]::new()
     Invoke-TestCase 'D315 fixture gate fails before Browser create and start' {
@@ -7125,7 +7184,11 @@ function Invoke-D315TargetedTests {
             $cases = [ordered]@{
                 allowlisted = Capture 1 '' "verification failed: OWNER_CONTRACT_INVALID`r`n"
                 hostargument = Capture 1 '' "verification failed: HOST_ARGUMENT_INVALID`r`n"
+                stage = Capture 1 '' "verification failed: RULE_PUBLISHED_STATE_EXIT_NONZERO`r`n"
+                generic = Capture 1 '' "verification failed: SUBPROCESS_FAILED`r`n"
                 unknown = Capture 1 '' "verification failed: NOT_ALLOWLISTED`r`n"
+                lowercase = Capture 1 '' "verification failed: rule_published_state_exit_nonzero`r`n"
+                casevariant = Capture 1 '' "verification failed: Rule_PUBLISHED_STATE_EXIT_NONZERO`r`n"
                 empty = Capture 1 '' ''
                 multiple = Capture 1 '' "verification failed: OWNER_CONTRACT_INVALID`r`nraw-path`r`n"
                 duplicate = Capture 1 '' "verification failed: OWNER_CONTRACT_INVALID`r`nverification failed: OWNER_CONTRACT_INVALID`r`n"
@@ -7138,6 +7201,7 @@ function Invoke-D315TargetedTests {
                 rawpath = Capture 1 '' "verification failed: OWNER_CONTRACT_INVALID C:\private\secret`r`n"
                 rawsql = Capture 1 '' "verification failed: OWNER_CONTRACT_INVALID select secret from token`r`n"
                 both = Capture 1 ($encoded+"`r`n") "verification failed: OWNER_CONTRACT_INVALID`r`n"
+                nonzerosuccess = Capture 1 ($encoded+"`r`n") ''
                 successstderr = Capture 0 ($encoded+"`r`n") "verification failed: OWNER_CONTRACT_INVALID`r`n"
                 successnoise = Capture 0 ("noise`r`n"+$encoded+"`r`n") ''
             }
@@ -7176,13 +7240,19 @@ function Invoke-D315TargetedTests {
         }
         Assert-Equal 'RUN_FIXTURE_BEFORE_SECONDARY=OWNER_CONTRACT_INVALID' $result.Observed.allowlisted.Records[0] 'Allowlisted secondary changed.'
         Assert-Equal 'RUN_FIXTURE_BEFORE_SECONDARY=HOST_ARGUMENT_INVALID' $result.Observed.hostargument.Records[0] 'Safe HOST argument diagnostic changed.'
-        Assert-Equal @('BACKEND_METRIC_SNAPSHOT_INVALID','CHILD_INPUT_INVALID','CHILD_METRIC_BODY_INVALID','CHILD_METRIC_BODY_TOO_LARGE',
-            'CHILD_METRIC_STATUS_INVALID','CHILD_METRIC_TRANSPORT_FAILED','CHILD_UNEXPECTED_ERROR','DATABASE_GLOBAL_SNAPSHOT_INVALID',
-            'DATABASE_TRANSACTION_CARDINALITY_INVALID','DATABASE_TRANSACTION_SNAPSHOT_INVALID','FIXTURE_DIRECTORY_INVALID',
-            'HOST_ARGUMENT_INVALID','INGESTION_PLAN_INVALID','INPUT_INVALID','OVERALL_DEADLINE_EXCEEDED','OWNER_CONTRACT_INVALID',
-            'RULE_ACTIVATION_TIMEOUT','RULE_PUBLICATION_STATE_INVALID','RUN_FIXTURE_STATE_IDENTITY_INVALID','RUN_FIXTURE_STATE_INVALID',
-            'RUN_FIXTURE_STATE_TOO_LARGE','SUBPROCESS_FAILED','UNEXPECTED_ERROR') @($result.Allowlist) 'Before secondary allowlist drifted.'
-        foreach($name in @('unknown','empty','multiple','duplicate','leading','trailing','blank','c0','c1','cf','oversize','rawpath','rawsql','both','successstderr','successnoise')){
+        Assert-Equal 'RUN_FIXTURE_BEFORE_SECONDARY=RULE_PUBLISHED_STATE_EXIT_NONZERO' $result.Observed.stage.Records[0] 'Stage diagnostic changed.'
+        $expectedStages=@('RULE_PUBLISHED_STATE','RULE_ACTIVE_STATE','RULE_PUBLICATION_COMMAND','RULE_ACTIVATION_POLL',
+            'TRANSACTION_CARDINALITY_SNAPSHOT','DATABASE_GLOBAL_SNAPSHOT','EXTERNAL_RISK_LOG_SNAPSHOT',
+            'RULE_V2_LOG_SNAPSHOT','BACKEND_METRIC_SNAPSHOT')
+        $expectedTypes=@('PROCESS_START_FAILED','TIMEOUT','EXIT_NONZERO','OUTPUT_INVALID','CLEANUP_FAILED')
+        $expectedAllowlist=[Collections.Generic.List[string]]::new()
+        foreach($stageName in $expectedStages){foreach($typeName in $expectedTypes){$expectedAllowlist.Add($stageName+'_'+$typeName)}}
+        foreach($code in @('DATABASE_TRANSACTION_CARDINALITY_INVALID','FIXTURE_DIRECTORY_INVALID','HOST_ARGUMENT_INVALID',
+            'INGESTION_PLAN_INVALID','INPUT_INVALID','OVERALL_DEADLINE_EXCEEDED','OWNER_CONTRACT_INVALID',
+            'RULE_ACTIVATION_TIMEOUT','RULE_PUBLICATION_STATE_INVALID','RUN_FIXTURE_STATE_IDENTITY_INVALID',
+            'RUN_FIXTURE_STATE_INVALID','RUN_FIXTURE_STATE_TOO_LARGE','UNEXPECTED_ERROR')){$expectedAllowlist.Add($code)}
+        Assert-Equal @($expectedAllowlist) @($result.Allowlist) 'Before secondary allowlist drifted.'
+        foreach($name in @('generic','unknown','lowercase','casevariant','empty','multiple','duplicate','leading','trailing','blank','c0','c1','cf','oversize','rawpath','rawsql','both','nonzerosuccess','successstderr','successnoise')){
             Assert-Equal 'RUN_FIXTURE_BEFORE_SECONDARY=RUN_FIXTURE_BEFORE_OUTPUT_INVALID' $result.Observed.$name.Records[0] "$name did not use output fallback."
         }
         Assert-Equal 'RUN_FIXTURE_BEFORE_SECONDARY=RUN_FIXTURE_BEFORE_TIMEOUT' $result.Observed.timeout.Records[0] 'Timeout diagnostic differs.'
@@ -8135,6 +8205,11 @@ if ($Mode -eq 'D308Oracle') {
 
 if ($Mode -eq 'D315Targeted') {
     Invoke-D315TargetedTests
+    exit 0
+}
+
+if ($Mode -eq 'D315StageTargeted') {
+    Invoke-D315StageDiagnosticTargetedTests
     exit 0
 }
 

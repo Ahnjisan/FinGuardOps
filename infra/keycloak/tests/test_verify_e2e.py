@@ -1057,25 +1057,212 @@ finguardops_rule_analysis_outcomes_created 99
         self.assertNotIn("NeverPrintSecret", stderr.getvalue())
 
     def test_subprocess_only_propagates_exact_safe_child_code(self):
-        completed = subprocess.CompletedProcess(
-            ["child"], 1, stdout=b"", stderr=b"compose prefix\nverification failed: METRIC_INVALID\ncompose suffix\n"
+        completed = verify_e2e.NativeCommandCapture(
+            1, b"", b"compose prefix\nverification failed: METRIC_INVALID\ncompose suffix\n"
         )
-        with mock.patch("subprocess.run", return_value=completed), self.assertRaisesRegex(
+        with mock.patch.object(verify_e2e, "capture_native_command", return_value=completed), self.assertRaisesRegex(
             verify_e2e.VerificationError, "CHILD_METRIC_INVALID"
         ):
             verify_e2e.run_command(
                 ["child"], timeout=1, cwd=Path.cwd(), environment={}
             )
-        leaked = subprocess.CompletedProcess(
-            ["child"], 1, stdout=b"", stderr=b"verification failed: TOKEN NeverPrintSecret\n"
+        leaked = verify_e2e.NativeCommandCapture(
+            1, b"", b"verification failed: TOKEN NeverPrintSecret\n"
         )
-        with mock.patch("subprocess.run", return_value=leaked), self.assertRaisesRegex(
+        with mock.patch.object(verify_e2e, "capture_native_command", return_value=leaked), self.assertRaisesRegex(
             verify_e2e.VerificationError, "^SUBPROCESS_FAILED$"
         ) as raised:
             verify_e2e.run_command(
                 ["child"], timeout=1, cwd=Path.cwd(), environment={}
             )
         self.assertNotIn("NeverPrintSecret", str(raised.exception))
+
+    def test_before_native_stages_map_every_failure_type_without_reflection(self):
+        empty_snapshot = b"".join(
+            verify_e2e.SNAPSHOT_BEGIN_PREFIX + table.encode("ascii") + b"\n"
+            + verify_e2e.SNAPSHOT_END_PREFIX + table.encode("ascii") + b"\n"
+            for table in verify_e2e.BUSINESS_TABLES
+        )
+        valid = {
+            "RULE_PUBLISHED_STATE": b"4\n",
+            "RULE_ACTIVE_STATE": b"4\n",
+            "RULE_PUBLICATION_COMMAND": b"publication completed\n",
+            "RULE_ACTIVATION_POLL": b"4\n",
+            "TRANSACTION_CARDINALITY_SNAPSHOT": ("|".join(["0"] * 14) + "\n").encode(),
+            "DATABASE_GLOBAL_SNAPSHOT": empty_snapshot,
+            "EXTERNAL_RISK_LOG_SNAPSHOT": b"",
+            "RULE_V2_LOG_SNAPSHOT": b"",
+            "BACKEND_METRIC_SNAPSHOT": b"[0,0]\n",
+        }
+        malformed = {
+            "RULE_PUBLISHED_STATE": b"raw-sentinel",
+            "RULE_ACTIVE_STATE": b"raw-sentinel",
+            "RULE_PUBLICATION_COMMAND": b"\xff",
+            "RULE_ACTIVATION_POLL": b"raw-sentinel",
+            "TRANSACTION_CARDINALITY_SNAPSHOT": b"0|raw-sentinel",
+            "DATABASE_GLOBAL_SNAPSHOT": b"raw-sentinel",
+            "EXTERNAL_RISK_LOG_SNAPSHOT": b"\xff",
+            "RULE_V2_LOG_SNAPSHOT": b"\xff",
+            "BACKEND_METRIC_SNAPSHOT": b'{"raw":"sentinel"}',
+        }
+        sentinel = b"NeverPrintRawPathSqlCommandCredentialToken"
+        for stage, codes in verify_e2e.BEFORE_NATIVE_FAILURE_CODES.items():
+            cases = {
+                "start": verify_e2e.NativeCommandCapture(None, b"", b"", start_failed=True),
+                "timeout": verify_e2e.NativeCommandCapture(None, b"", b"", timed_out=True),
+                "exit": verify_e2e.NativeCommandCapture(23, sentinel, sentinel),
+                "malformed": verify_e2e.NativeCommandCapture(0, malformed[stage], b""),
+                "stderr": verify_e2e.NativeCommandCapture(0, valid[stage], sentinel),
+                "oversize": verify_e2e.NativeCommandCapture(
+                    0, valid[stage], b"", stdout_overflow=True
+                ),
+                "cleanup": verify_e2e.NativeCommandCapture(
+                    None, b"", b"", cleanup_failed=True
+                ),
+            }
+            expected = {
+                "start": codes["start"],
+                "timeout": codes["timeout"],
+                "exit": codes["exit"],
+                "malformed": codes["output"],
+                "stderr": codes["output"],
+                "oversize": codes["output"],
+                "cleanup": codes["cleanup"],
+            }
+            for name, capture in cases.items():
+                with self.subTest(stage=stage, failure=name), mock.patch.object(
+                    verify_e2e, "capture_native_command", return_value=capture
+                ), self.assertRaises(verify_e2e.VerificationError) as raised:
+                    verify_e2e.run_command(
+                        ["fixed-executable", "fixed-argument"],
+                        timeout=1,
+                        cwd=Path.cwd(),
+                        environment={},
+                        before_stage=stage,
+                    )
+                self.assertEqual(str(raised.exception), expected[name])
+                self.assertNotIn("NeverPrint", str(raised.exception))
+                self.assertNotEqual(str(raised.exception), "SUBPROCESS_FAILED")
+            with self.subTest(stage=stage, failure="success"), mock.patch.object(
+                verify_e2e,
+                "capture_native_command",
+                return_value=verify_e2e.NativeCommandCapture(0, valid[stage], b""),
+            ):
+                self.assertEqual(
+                    verify_e2e.run_command(
+                        ["fixed-executable", "fixed-argument"],
+                        timeout=1,
+                        cwd=Path.cwd(),
+                        environment={},
+                        before_stage=stage,
+                    ),
+                    valid[stage],
+                )
+
+    def test_native_capture_bounds_pipes_timeout_and_start_failure(self):
+        success = verify_e2e.capture_native_command(
+            [sys.executable, "-c", "import sys;sys.stdout.buffer.write(b'ok')"],
+            timeout=5,
+            cwd=Path.cwd(),
+            environment={},
+            stdout_limit=16,
+            stderr_limit=16,
+        )
+        self.assertEqual(success.returncode, 0)
+        self.assertEqual(success.stdout, b"ok")
+        self.assertEqual(success.stderr, b"")
+        self.assertFalse(success.cleanup_failed)
+        overflow = verify_e2e.capture_native_command(
+            [
+                sys.executable,
+                "-c",
+                "import sys;sys.stdout.buffer.write(b'A'*200000);sys.stderr.buffer.write(b'B'*200000)",
+            ],
+            timeout=5,
+            cwd=Path.cwd(),
+            environment={},
+            stdout_limit=64,
+            stderr_limit=64,
+        )
+        self.assertEqual(overflow.returncode, 0)
+        self.assertTrue(overflow.stdout_overflow)
+        self.assertTrue(overflow.stderr_overflow)
+        self.assertLessEqual(len(overflow.stdout), 65)
+        self.assertLessEqual(len(overflow.stderr), 65)
+        timeout = verify_e2e.capture_native_command(
+            [sys.executable, "-c", "import time;time.sleep(30)"],
+            timeout=0.05,
+            cwd=Path.cwd(),
+            environment={},
+            stdout_limit=16,
+            stderr_limit=16,
+        )
+        self.assertTrue(timeout.timed_out)
+        self.assertFalse(timeout.cleanup_failed)
+        missing = verify_e2e.capture_native_command(
+            ["missing-" + "a" * 32 + ".exe"],
+            timeout=0.05,
+            cwd=Path.cwd(),
+            environment={},
+            stdout_limit=16,
+            stderr_limit=16,
+        )
+        self.assertTrue(missing.start_failed)
+        self.assertFalse(missing.cleanup_failed)
+
+    def test_run_fixture_before_reaches_each_native_stage_in_exact_order(self):
+        environment = valid_run_fixture_environment()
+        contract = verify_e2e.load_owner_contract(environment)
+        empty_snapshot = b"".join(
+            verify_e2e.SNAPSHOT_BEGIN_PREFIX + table.encode("ascii") + b"\n"
+            + verify_e2e.SNAPSHOT_END_PREFIX + table.encode("ascii") + b"\n"
+            for table in verify_e2e.BUSINESS_TABLES
+        )
+        outputs = {
+            "RULE_PUBLISHED_STATE": b"0\n",
+            "RULE_ACTIVE_STATE": b"0\n",
+            "RULE_PUBLICATION_COMMAND": b"publication completed\n",
+            "RULE_ACTIVATION_POLL": b"4\n",
+            "TRANSACTION_CARDINALITY_SNAPSHOT": ("|".join(["0"] * 14) + "\n").encode(),
+            "DATABASE_GLOBAL_SNAPSHOT": empty_snapshot,
+            "EXTERNAL_RISK_LOG_SNAPSHOT": b"",
+            "RULE_V2_LOG_SNAPSHOT": b"",
+            "BACKEND_METRIC_SNAPSHOT": b"[0,0]\n",
+        }
+
+        class Context:
+            project = verify_e2e.RUN_FIXTURE_PROJECT
+
+            def __init__(self):
+                self.contract = contract
+                self.stages = []
+
+            def execute(self, arguments, *, input_bytes=None, timeout=None, before_stage=None):
+                self.stages.append(before_stage)
+                return outputs[before_stage]
+
+        context = Context()
+        with tempfile.TemporaryDirectory() as parent:
+            directory = Path(parent) / (
+                "finguardops-keycloak-e2e-fixture-" + contract.run_id
+            )
+            directory.mkdir()
+            state = verify_e2e.run_fixture_before(context, directory)
+        self.assertEqual(state["composeProject"], verify_e2e.RUN_FIXTURE_PROJECT)
+        self.assertEqual(
+            context.stages,
+            [
+                "RULE_PUBLISHED_STATE",
+                "RULE_ACTIVE_STATE",
+                "RULE_PUBLICATION_COMMAND",
+                "RULE_ACTIVATION_POLL",
+                "TRANSACTION_CARDINALITY_SNAPSHOT",
+                "DATABASE_GLOBAL_SNAPSHOT",
+                "EXTERNAL_RISK_LOG_SNAPSHOT",
+                "RULE_V2_LOG_SNAPSHOT",
+                "BACKEND_METRIC_SNAPSHOT",
+            ],
+        )
 
     def test_bounded_poll_stops_at_limit(self):
         attempts = []
@@ -1491,7 +1678,7 @@ finguardops_rule_analysis_outcomes_created 99
                  mock.patch.object(verify_e2e, "dependency_hit_counts", return_value=(0, 0)), \
                  mock.patch.object(verify_e2e, "backend_metric_totals", return_value=(0.0, 0.0)):
                 state = verify_e2e.run_fixture_before(context, directory)
-            publish.assert_called_once_with(context)
+            publish.assert_called_once_with(context, before_diagnostics=True)
             encoded = verify_e2e.run_fixture_state_bytes(state)
             self.assertEqual(verify_e2e.parse_run_fixture_state(encoded), state)
             (directory / verify_e2e.FIXTURE_MANIFEST_NAME).write_bytes(
@@ -1571,12 +1758,12 @@ finguardops_rule_analysis_outcomes_created 99
 
     def test_run_fixture_before_cli_emits_only_fixed_single_line_failures(self):
         environment = valid_run_fixture_environment()
-        fixed_codes = (
-            "BACKEND_METRIC_SNAPSHOT_INVALID",
-            "DATABASE_GLOBAL_SNAPSHOT_INVALID",
+        fixed_codes = tuple(
+            code
+            for stage in verify_e2e.BEFORE_NATIVE_FAILURE_CODES.values()
+            for code in stage.values()
+        ) + (
             "DATABASE_TRANSACTION_CARDINALITY_INVALID",
-            "DATABASE_TRANSACTION_SNAPSHOT_INVALID",
-            "DEPENDENCY_SERVICE_INVALID",
             "FIXTURE_DIRECTORY_INVALID",
             "INGESTION_PLAN_INVALID",
             "OVERALL_DEADLINE_EXCEEDED",
@@ -1586,8 +1773,6 @@ finguardops_rule_analysis_outcomes_created 99
             "RUN_FIXTURE_STATE_IDENTITY_INVALID",
             "RUN_FIXTURE_STATE_INVALID",
             "RUN_FIXTURE_STATE_TOO_LARGE",
-            "SUBPROCESS_FAILED",
-            "SUBPROCESS_TIMEOUT_INVALID",
         )
         with tempfile.TemporaryDirectory(prefix="finguardops-keycloak-e2e-fixture-") as parent:
             directory = Path(parent) / (

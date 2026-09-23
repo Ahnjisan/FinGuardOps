@@ -484,6 +484,30 @@ Service verifier는 기존 dynamic pattern
 `finguardops-kc241-e2e-[a-z0-9][a-z0-9-]{5,32}`만 사용한다. Run project는 Service 경계에서,
 dynamic Service project는 Run fixture 경계에서 각각 거부한다.
 
+`run-fixture-before`의 host native subprocess는 다음 순서와 stage로 고정한다. 3·4는 published/active
+precondition이 충족되지 않을 때만 실행하고, 4는 activation 확인까지 bounded polling한다. 모든 argv는
+Python의 고정 list와 해당 함수가 생성한 read-only query에서 오며 `shell`을 사용하지 않는다.
+
+| 순서 | call site | 목적 | executable·argv | exit/stdout/stderr | timeout | stage |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | `publish_rules` → `sql_scalar` | published rule count | `docker compose exec ... psql -tAc <fixed query>` | 0 / decimal scalar / empty | CLI bound | `RULE_PUBLISHED_STATE` |
+| 2 | `publish_rules` → `sql_scalar` | active rule count | 동일 psql 경계와 fixed active query | 0 / decimal scalar / empty | CLI bound | `RULE_ACTIVE_STATE` |
+| 3 | `publish_rules` → `HostContext.execute` | 필요 시 deterministic Rule v1 publication | `docker compose run --rm --no-deps --pull never ... backend <fixed args>` | 0 / bounded UTF-8 / empty | 240s 및 overall bound | `RULE_PUBLICATION_COMMAND` |
+| 4 | `publish_rules` → `sql_scalar` | publication activation poll | psql fixed active query | 0 / decimal scalar / empty | 각 CLI bound 및 overall bound | `RULE_ACTIVATION_POLL` |
+| 5 | `transaction_cardinality` → `sql_scalar` | fixture ID cardinality precondition | psql `concat_ws` read-only query | 0 / 14 decimal fields / empty | CLI bound | `TRANSACTION_CARDINALITY_SNAPSHOT` |
+| 6 | `database_snapshot` | global repeatable-read snapshot | `docker compose exec ... psql -f -`, SQL은 stdin | 0 / canonical bounded snapshot / empty | CLI bound | `DATABASE_GLOBAL_SNAPSHOT` |
+| 7 | `dependency_hit_counts` → `service_logs` | External Risk hit baseline | `docker compose logs --no-color --no-log-prefix external-risk-mock` | 0 / bounded UTF-8 log / empty | CLI bound | `EXTERNAL_RISK_LOG_SNAPSHOT` |
+| 8 | `dependency_hit_counts` → `service_logs` | Rule v2 hit baseline | 동일 logs 경계의 `ai-service` | 0 / bounded UTF-8 log / empty | CLI bound | `RULE_V2_LOG_SNAPSHOT` |
+| 9 | `backend_metric_totals` | outcome metric baseline | `docker compose run --rm --no-deps --pull never -T keycloak-verify metric-runtime` | 0 / finite numeric pair JSON / empty | 60s 및 overall bound | `BACKEND_METRIC_SNAPSHOT` |
+
+각 stage는 candidate output과 무관한 fixed suffix
+`PROCESS_START_FAILED`, `TIMEOUT`, `EXIT_NONZERO`, `OUTPUT_INVALID`, `CLEANUP_FAILED` 중 하나만 결합한
+명시적 literal로 실패한다. before의 열거된 native call site에서는 generic `SUBPROCESS_FAILED`나 child
+stderr code를 전달하지 않는다. unknown stage·unexpected Python exception은 기존 안전 fallback으로
+redact하고 raw command, query, path, exit code, stdout/stderr, credential·token을 diagnostic에 포함하지
+않는다. PowerShell은 이 표에서 도달 가능한 exact literal만 allowlist하고 primary
+`RUN_FIXTURE_BEFORE_FAILED`와 secondary diagnostic 1회 계약을 유지한다.
+
 Run fixture는 `PASSWORD_CHANGED`, `TRANSFER_LIMIT_CHANGED` behavior event와 12,000,000 KRW
 `ACCOUNT_TRANSFER`를 한 세트 생성한다. 기대 delta는 BehaviorEvent 2, FinancialTransaction 1,
 IdempotencyRecord 1, DetectionResult 1, DetectionEvidence 2, FraudCase 1, CaseTransaction 1,
