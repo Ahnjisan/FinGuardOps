@@ -75,7 +75,11 @@ CERTIFICATE = Path("/run/secrets/keycloak_tls_certificate")
 TRANSACTION_SECRET = Path("/run/secrets/transaction_service_client_secret")
 BEHAVIOR_SECRET = Path("/run/secrets/behavior_service_client_secret")
 SECRET_PATTERN = re.compile(rb"[A-Za-z0-9_-]{32,128}\Z")
-PROJECT_PATTERN = re.compile(r"finguardops-kc241-e2e-[a-z0-9][a-z0-9-]{5,32}\Z")
+SERVICE_PROJECT_PATTERN = re.compile(
+    r"finguardops-kc241-e2e-[a-z0-9][a-z0-9-]{5,32}\Z"
+)
+RUN_FIXTURE_PROJECT = "finguardops-keycloak-browser-e2e"
+COMPOSE_PROJECT_ENVIRONMENT = "FINGUARDOPS_E2E_COMPOSE_PROJECT"
 PLAN_KEY_PATTERN = re.compile(r"kc241-[a-f0-9]{32}\Z")
 PLAN_REF_PATTERN = re.compile(r"kc241-[a-z]+-[a-f0-9]{12}\Z")
 PROJECT_RESOURCE_KINDS = ("container", "network", "volume")
@@ -148,6 +152,7 @@ FIXTURE_MANIFEST_KEYS = (
     "repositoryId",
     "commitSha",
     "treeSha",
+    "composeProject",
     "transactionId",
     "caseId",
     "expectedRiskLevel",
@@ -309,6 +314,18 @@ class VerificationError(RuntimeError):
 
 def fail(code: str) -> None:
     raise VerificationError(code)
+
+
+def validate_service_project(project: Any) -> str:
+    if not isinstance(project, str) or SERVICE_PROJECT_PATTERN.fullmatch(project) is None:
+        fail("HOST_ARGUMENT_INVALID")
+    return project
+
+
+def validate_run_fixture_project(project: Any) -> str:
+    if not isinstance(project, str) or project != RUN_FIXTURE_PROJECT:
+        fail("HOST_ARGUMENT_INVALID")
+    return project
 
 
 @dataclass(frozen=True)
@@ -875,6 +892,7 @@ def validate_static(config: dict[str, Any], realm: dict[str, Any] | None = None)
         "FINGUARDOPS_E2E_REPOSITORY_ID",
         "FINGUARDOPS_E2E_REVISION",
         "FINGUARDOPS_E2E_SOURCE_TREE",
+        COMPOSE_PROJECT_ENVIRONMENT,
         FIXTURE_PLAN_ENVIRONMENT,
     } or (
         run_fixture_env.get("KEYCLOAK_INTERNAL_BASE_URL") != INTERNAL_BASE_URL
@@ -1486,6 +1504,7 @@ class HostContext:
             "FINGUARDOPS_E2E_SOURCE_TREE": contract.tree_sha,
             "FINGUARDOPS_E2E_RUN_ID": contract.run_id,
             "FINGUARDOPS_E2E_REPOSITORY_ID": contract.repository_id,
+            COMPOSE_PROJECT_ENVIRONMENT: RUN_FIXTURE_PROJECT,
         }
 
     def remaining(self) -> float:
@@ -1653,6 +1672,10 @@ def fixture_identity_from_environment(environment: dict[str, str]) -> dict[str, 
         if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
             fail("FIXTURE_OWNER_IDENTITY_INVALID")
         identity[key] = value
+    project = environment.get(COMPOSE_PROJECT_ENVIRONMENT)
+    if not isinstance(project, str) or project != RUN_FIXTURE_PROJECT:
+        fail("FIXTURE_OWNER_IDENTITY_INVALID")
+    identity["composeProject"] = RUN_FIXTURE_PROJECT
     return identity
 
 
@@ -1673,6 +1696,7 @@ def validate_fixture_manifest_object(raw: Any) -> dict[str, Any]:
         or re.fullmatch(r"[0-9a-f]{64}", raw["repositoryId"]) is None
         or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", raw["commitSha"]) is None
         or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", raw["treeSha"]) is None
+        or raw["composeProject"] != RUN_FIXTURE_PROJECT
         or not is_canonical_uuid4(raw["transactionId"])
         or not is_canonical_uuid4(raw["caseId"])
         or raw["expectedRiskLevel"] != "HIGH"
@@ -1838,6 +1862,7 @@ def create_run_fixture(plan: dict[str, str]) -> dict[str, str]:
 
 
 def run_fixture_worker() -> None:
+    validate_run_fixture_project(os.environ.get(COMPOSE_PROJECT_ENVIRONMENT))
     encoded = os.environ.get(FIXTURE_PLAN_ENVIRONMENT)
     if (
         not isinstance(encoded, str)
@@ -2220,7 +2245,6 @@ def run_fixture_state_bytes(state: dict[str, Any]) -> bytes:
         "repositoryId": r"[0-9a-f]{64}",
         "commitSha": r"(?:[0-9a-f]{40}|[0-9a-f]{64})",
         "treeSha": r"(?:[0-9a-f]{40}|[0-9a-f]{64})",
-        "composeProject": PROJECT_PATTERN.pattern,
     }
     for key, pattern in owner_patterns.items():
         value = state[key]
@@ -2235,6 +2259,8 @@ def run_fixture_state_bytes(state: dict[str, Any]) -> bytes:
             )
         ):
             fail("RUN_FIXTURE_STATE_IDENTITY_INVALID")
+    if not isinstance(state["composeProject"], str) or state["composeProject"] != RUN_FIXTURE_PROJECT:
+        fail("RUN_FIXTURE_STATE_IDENTITY_INVALID")
     plan = validate_plan(state["plan"])
     if tuple(plan) != (
         "transactionId", "passwordEventId", "transferLimitEventId", "idempotencyKey",
@@ -2345,6 +2371,7 @@ def state_to_snapshot(state: dict[str, Any]) -> dict[str, TableSnapshot]:
 
 
 def run_fixture_before(ctx: HostContext, fixture_directory: Path) -> dict[str, Any]:
+    validate_run_fixture_project(ctx.project)
     directory = fixture_directory.resolve(strict=True)
     if (
         fixture_directory.is_symlink()
@@ -2366,7 +2393,7 @@ def run_fixture_before(ctx: HostContext, fixture_directory: Path) -> dict[str, A
         "repositoryId": ctx.contract.repository_id,
         "commitSha": ctx.contract.commit_sha,
         "treeSha": ctx.contract.tree_sha,
-        "composeProject": ctx.project,
+        "composeProject": RUN_FIXTURE_PROJECT,
         "plan": plan,
         "database": snapshot_to_state(before_database),
         "dependencies": list(before_dependencies),
@@ -2377,6 +2404,7 @@ def run_fixture_before(ctx: HostContext, fixture_directory: Path) -> dict[str, A
 
 
 def run_fixture_after(ctx: HostContext, fixture_directory: Path, state: dict[str, Any]) -> None:
+    validate_run_fixture_project(ctx.project)
     directory = fixture_directory.resolve(strict=True)
     if (
         fixture_directory.is_symlink()
@@ -2389,7 +2417,7 @@ def run_fixture_after(ctx: HostContext, fixture_directory: Path, state: dict[str
         "repositoryId": ctx.contract.repository_id,
         "commitSha": ctx.contract.commit_sha,
         "treeSha": ctx.contract.tree_sha,
-        "composeProject": ctx.project,
+        "composeProject": RUN_FIXTURE_PROJECT,
     }
     run_fixture_state_bytes(state)
     if any(state[key] != value for key, value in expected_identity.items()):
@@ -2654,11 +2682,14 @@ def main(argv: list[str]) -> int:
             repo = args.repo_root.resolve()
             if (
                 not repo.is_absolute()
-                or PROJECT_PATTERN.fullmatch(args.project) is None
                 or args.cli_timeout <= 0
                 or args.deadline_seconds <= 0
             ):
                 fail("HOST_ARGUMENT_INVALID")
+            if args.mode == "all":
+                validate_service_project(args.project)
+            else:
+                validate_run_fixture_project(args.project)
             contract = load_owner_contract(dict(os.environ))
             context = HostContext(
                 repo,

@@ -6423,11 +6423,11 @@ function Get-D308RawSources($Receipt) {
     $ai = 'finguardops-ai-service:' + $suffix
     $names = @('FINGUARDOPS_E2E_BACKEND_IMAGE','FINGUARDOPS_E2E_AI_SERVICE_IMAGE',
         'FINGUARDOPS_E2E_REVISION','FINGUARDOPS_E2E_SOURCE_TREE','FINGUARDOPS_E2E_RUN_ID',
-        'FINGUARDOPS_E2E_REPOSITORY_ID','FINGUARDOPS_E2E_FIXTURE_DIR')
+        'FINGUARDOPS_E2E_REPOSITORY_ID','FINGUARDOPS_E2E_COMPOSE_PROJECT','FINGUARDOPS_E2E_FIXTURE_DIR')
     $fixtureDirectory = Join-Path ([System.IO.Path]::GetTempPath()) `
         ('finguardops-keycloak-e2e-fixture-' + $Receipt.runId)
     $values = @($backend,$ai,$Receipt.commitSha,$Receipt.treeSha,$Receipt.runId,$Receipt.repositoryId,
-        $fixtureDirectory)
+        'finguardops-keycloak-browser-e2e',$fixtureDirectory)
     $saved = @{}
     $oldLocation = Get-Location
     $repository = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
@@ -7071,6 +7071,23 @@ function Invoke-D315TargetedTests {
         Assert-Equal 'MANIFEST_FAILED' $result[1].Message 'Manifest failure identity changed.'
         Assert-Equal @('directory','fixture','manifest','create','start') @($result[2].Events) 'Success ordering differs.'
     }
+    Invoke-TestCase 'D315 owner environment separates fixed Run and dynamic Service projects' {
+        $result = & $script:E2EModule {
+            $receipt = New-E2EReceipt -RunId '0123456789abcdef0123456789abcdef' -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+            $previous = Set-E2EOwnerEnvironment -Receipt $receipt
+            try {
+                return [pscustomobject]@{
+                    Fixed = $ProjectName
+                    Environment = [Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_COMPOSE_PROJECT','Process')
+                    Service = Get-E2EServiceProjectName -Receipt $receipt
+                }
+            }
+            finally { Restore-E2EOwnerEnvironment -Previous $previous }
+        }
+        Assert-Equal 'finguardops-keycloak-browser-e2e' $result.Fixed 'Run project literal drifted.'
+        Assert-Equal $result.Fixed $result.Environment 'Owner environment did not bind the fixed Run project.'
+        Assert-Equal 'finguardops-kc241-e2e-0123456789ab' $result.Service 'Dynamic Service project changed.'
+    }
     Invoke-TestCase 'D315 before child bounded capture and safe diagnostic contract' {
         $result = & $script:E2EModule {
             $receipt = New-E2EReceipt -RunId '0123456789abcdef0123456789abcdef' -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
@@ -7158,7 +7175,7 @@ function Invoke-D315TargetedTests {
             Assert-True (-not $item.RawLeak) "$name reflected raw child output."
         }
         Assert-Equal 'RUN_FIXTURE_BEFORE_SECONDARY=OWNER_CONTRACT_INVALID' $result.Observed.allowlisted.Records[0] 'Allowlisted secondary changed.'
-        Assert-Equal 'RUN_FIXTURE_BEFORE_SECONDARY=HOST_ARGUMENT_INVALID' $result.Observed.hostargument.Records[0] 'Production project mismatch secondary changed.'
+        Assert-Equal 'RUN_FIXTURE_BEFORE_SECONDARY=HOST_ARGUMENT_INVALID' $result.Observed.hostargument.Records[0] 'Safe HOST argument diagnostic changed.'
         Assert-Equal @('BACKEND_METRIC_SNAPSHOT_INVALID','CHILD_INPUT_INVALID','CHILD_METRIC_BODY_INVALID','CHILD_METRIC_BODY_TOO_LARGE',
             'CHILD_METRIC_STATUS_INVALID','CHILD_METRIC_TRANSPORT_FAILED','CHILD_UNEXPECTED_ERROR','DATABASE_GLOBAL_SNAPSHOT_INVALID',
             'DATABASE_TRANSACTION_CARDINALITY_INVALID','DATABASE_TRANSACTION_SNAPSHOT_INVALID','FIXTURE_DIRECTORY_INVALID',
@@ -7332,7 +7349,14 @@ function Invoke-D315TargetedTests {
             $mutationState = [pscustomobject]@{ FixtureMutations=0 }
             foreach ($change in @(
                 @('runId','1123456789abcdef0123456789abcdef'), @('repositoryId',('d' * 64)),
-                @('commitSha',('e' * 40)), @('treeSha',('f' * 40)), @('composeProject','foreign-project')
+                @('commitSha',('e' * 40)), @('treeSha',('f' * 40)),
+                @('composeProject','finguardops-kc241-e2e-unit01'),
+                @('composeProject',($project + '-suffix')), @('composeProject',('prefix-' + $project)),
+                @('composeProject',('F' + $project.Substring(1))), @('composeProject',($project + '-')),
+                @('composeProject',($project + ' ')), @('composeProject',($project + "`r")),
+                @('composeProject',($project + "`n")), @('composeProject',($project + [char]1)),
+                @('composeProject',($project + [char]0x85)), @('composeProject',($project + [char]0x200B)),
+                @('composeProject','finguardops-keycloаk-browser-e2e')
             )) {
                 $candidate = (Encode-State $state | ForEach-Object { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($_)) } | ConvertFrom-Json)
                 $candidate.($change[0]) = $change[1]
@@ -7364,12 +7388,16 @@ function Invoke-D315TargetedTests {
                 try { ConvertFrom-E2ERunFixtureState -EncodedState $encodedCandidate -Receipt $receipt -Project $project | Out-Null }
                 catch { if ($_.Exception.Message -eq 'RUN_FIXTURE_STATE_INVALID') { $schemaRejected++ } }
             }
-            return [pscustomobject]@{ Accepted=$accepted; Rejected=$rejected; IdentityMessages=@($identityMessages); SchemaRejected=$schemaRejected; FixtureMutations=$mutationState.FixtureMutations }
+            $candidateExpectedRejected = $false
+            try { ConvertFrom-E2ERunFixtureState -EncodedState (Encode-State $state) -Receipt $receipt -Project 'finguardops-kc241-e2e-unit01' | Out-Null }
+            catch { $candidateExpectedRejected = $_.Exception.Message -eq 'RUN_FIXTURE_STATE_IDENTITY_INVALID' }
+            return [pscustomobject]@{ Accepted=$accepted; Rejected=$rejected; IdentityMessages=@($identityMessages); SchemaRejected=$schemaRejected; FixtureMutations=$mutationState.FixtureMutations; CandidateExpectedRejected=$candidateExpectedRejected }
         }
         Assert-True $result.Accepted 'Canonical owner-bound state was rejected.'
-        Assert-Equal 5 $result.Rejected ('A foreign state owner identity was accepted. messages=' + (@($result.IdentityMessages) -join ','))
+        Assert-Equal 16 $result.Rejected ('A foreign state owner identity was accepted. messages=' + (@($result.IdentityMessages) -join ','))
         Assert-Equal 0 $result.FixtureMutations 'A foreign state reached fixture service mutation.'
         Assert-Equal 4 $result.SchemaRejected 'A malformed state schema, type, UUID, fingerprint, or order was accepted.'
+        Assert-True $result.CandidateExpectedRejected 'Candidate Project parameter became the expected project.'
     }
 
     Invoke-TestCase 'D315 strict path manifest and foreign artifact boundaries' {
@@ -7399,7 +7427,7 @@ function Invoke-D315TargetedTests {
                 $manifestPath = Join-Path $directory 'fixture-identity.json'
                 $json = '{"schemaVersion":1,"runId":"' + $receipt.runId + '","repositoryId":"' + $receipt.repositoryId +
                     '","commitSha":"' + $receipt.commitSha + '","treeSha":"' + $receipt.treeSha +
-                    '","transactionId":"32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a","caseId":"d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703","expectedRiskLevel":"HIGH","expectedResponseOutcome":"ADDITIONAL_AUTH_REQUIRED","expectedInitialCaseStatus":"OPEN"}' + "`n"
+                    '","composeProject":"' + $ProjectName + '","transactionId":"32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a","caseId":"d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703","expectedRiskLevel":"HIGH","expectedResponseOutcome":"ADDITIONAL_AUTH_REQUIRED","expectedInitialCaseStatus":"OPEN"}' + "`n"
                 [System.IO.File]::WriteAllBytes($manifestPath, [System.Text.UTF8Encoding]::new($false, $true).GetBytes($json))
                 $read = Read-E2EFixtureManifest -Receipt $receipt -Directory $directory
                 $identityOk = $read.Identity.transactionId -eq '32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a'
@@ -7476,7 +7504,7 @@ function Invoke-D315TargetedTests {
                 $path = Join-Path $directory 'fixture-identity.json'
                 $json = '{"schemaVersion":1,"runId":"' + $receipt.runId + '","repositoryId":"' + $receipt.repositoryId +
                     '","commitSha":"' + $receipt.commitSha + '","treeSha":"' + $receipt.treeSha +
-                    '","transactionId":"32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a","caseId":"d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703","expectedRiskLevel":"HIGH","expectedResponseOutcome":"ADDITIONAL_AUTH_REQUIRED","expectedInitialCaseStatus":"OPEN"}' + "`n"
+                    '","composeProject":"' + $ProjectName + '","transactionId":"32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a","caseId":"d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703","expectedRiskLevel":"HIGH","expectedResponseOutcome":"ADDITIONAL_AUTH_REQUIRED","expectedInitialCaseStatus":"OPEN"}' + "`n"
                 [System.IO.File]::WriteAllBytes($path, [System.Text.UTF8Encoding]::new($false,$true).GetBytes($json))
                 $initial = Read-E2EFixtureManifest -Receipt $receipt -Directory $directory
                 Invoke-E2EPlaywrightWithFixtureEnvironment -Receipt $receipt -InitialManifest $initial -Body {
@@ -7516,7 +7544,7 @@ function Invoke-D315TargetedTests {
                     New-E2EFixtureDirectory -Receipt $receipt | Out-Null
                     $json = '{"schemaVersion":1,"runId":"' + $receipt.runId + '","repositoryId":"' + $receipt.repositoryId +
                         '","commitSha":"' + $receipt.commitSha + '","treeSha":"' + $receipt.treeSha +
-                        '","transactionId":"32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a","caseId":"d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703","expectedRiskLevel":"HIGH","expectedResponseOutcome":"ADDITIONAL_AUTH_REQUIRED","expectedInitialCaseStatus":"OPEN"}' + "`n"
+                        '","composeProject":"' + $ProjectName + '","transactionId":"32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a","caseId":"d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703","expectedRiskLevel":"HIGH","expectedResponseOutcome":"ADDITIONAL_AUTH_REQUIRED","expectedInitialCaseStatus":"OPEN"}' + "`n"
                     [System.IO.File]::WriteAllBytes($path, [System.Text.UTF8Encoding]::new($false,$true).GetBytes($json))
                     $initial = Read-E2EFixtureManifest -Receipt $receipt -Directory $directory
                     $replacement = if ($mode -eq 'file') {
@@ -7556,13 +7584,14 @@ function Invoke-D315TargetedTests {
             $receipt = New-E2EReceipt -RunId '0123456789abcdef0123456789abcdef' -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
             $valid = '{"schemaVersion":1,"runId":"' + $receipt.runId + '","repositoryId":"' + $receipt.repositoryId +
                 '","commitSha":"' + $receipt.commitSha + '","treeSha":"' + $receipt.treeSha +
-                '","transactionId":"32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a","caseId":"d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703","expectedRiskLevel":"HIGH","expectedResponseOutcome":"ADDITIONAL_AUTH_REQUIRED","expectedInitialCaseStatus":"OPEN"}' + "`n"
+                '","composeProject":"' + $ProjectName + '","transactionId":"32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a","caseId":"d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703","expectedRiskLevel":"HIGH","expectedResponseOutcome":"ADDITIONAL_AUTH_REQUIRED","expectedInitialCaseStatus":"OPEN"}' + "`n"
             $candidates = @(
                 $valid.Replace('{"schemaVersion":1,"runId":','{"runId":'),
                 $valid.Replace('"expectedRiskLevel":"HIGH"','"unknown":"x","expectedRiskLevel":"HIGH"'),
                 $valid.Replace('"caseId":','"caseId":"d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703","caseId":'),
                 $valid.Replace('32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a','32A6A5DB-71E4-4E58-8B3F-EC8C2C07B69A'),
                 $valid.Replace('32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a','32a6a5db-71e4-5e58-8b3f-ec8c2c07b69a'),
+                $valid.Replace($ProjectName, ($ProjectName + '-foreign')),
                 ($valid + 'trailing'),
                 ($valid.Replace("`n", "`r`n"))
             )
@@ -7584,7 +7613,7 @@ function Invoke-D315TargetedTests {
             finally { if ([System.IO.Directory]::Exists($directory)) { [System.IO.Directory]::Delete($directory,$true) } }
             return [pscustomobject]@{ Rejected=$rejected; Mismatch=$mismatch }
         }
-        Assert-Equal 8 $result.Rejected 'A malformed manifest was accepted.'
+        Assert-Equal 9 $result.Rejected 'A malformed manifest was accepted.'
         Assert-True $result.Mismatch 'Receipt identity mismatch was accepted.'
     }
 
@@ -7597,7 +7626,7 @@ function Invoke-D315TargetedTests {
                 New-E2EFixtureDirectory -Receipt $receipt | Out-Null
                 $json = '{"schemaVersion":1,"runId":"' + $receipt.runId + '","repositoryId":"' + $receipt.repositoryId +
                     '","commitSha":"' + $receipt.commitSha + '","treeSha":"' + $receipt.treeSha +
-                    '","transactionId":"32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a","caseId":"d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703","expectedRiskLevel":"HIGH","expectedResponseOutcome":"ADDITIONAL_AUTH_REQUIRED","expectedInitialCaseStatus":"OPEN"}' + "`n"
+                    '","composeProject":"' + $ProjectName + '","transactionId":"32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a","caseId":"d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703","expectedRiskLevel":"HIGH","expectedResponseOutcome":"ADDITIONAL_AUTH_REQUIRED","expectedInitialCaseStatus":"OPEN"}' + "`n"
                 [System.IO.File]::WriteAllBytes((Join-Path $directory 'fixture-identity.json'), [System.Text.UTF8Encoding]::new($false,$true).GetBytes($json))
                 $initial = Read-E2EFixtureManifest -Receipt $receipt -Directory $directory
                 [System.Environment]::SetEnvironmentVariable($name, 'NeverReflectCredential', 'Process')

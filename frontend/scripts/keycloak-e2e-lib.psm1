@@ -657,7 +657,7 @@ function ConvertFrom-E2EFixtureManifestBytes {
     catch { throw 'FIXTURE_MANIFEST_INVALID' }
     $uuid = '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'
     $object = '(?:[0-9a-f]{40}|[0-9a-f]{64})'
-    $pattern = '\A\{"schemaVersion":1,"runId":"(?<run>[0-9a-f]{32})","repositoryId":"(?<repo>[0-9a-f]{64})","commitSha":"(?<commit>' + $object + ')","treeSha":"(?<tree>' + $object + ')","transactionId":"(?<transaction>' + $uuid + ')","caseId":"(?<case>' + $uuid + ')","expectedRiskLevel":"HIGH","expectedResponseOutcome":"ADDITIONAL_AUTH_REQUIRED","expectedInitialCaseStatus":"OPEN"\}\n\z'
+    $pattern = '\A\{"schemaVersion":1,"runId":"(?<run>[0-9a-f]{32})","repositoryId":"(?<repo>[0-9a-f]{64})","commitSha":"(?<commit>' + $object + ')","treeSha":"(?<tree>' + $object + ')","composeProject":"finguardops-keycloak-browser-e2e","transactionId":"(?<transaction>' + $uuid + ')","caseId":"(?<case>' + $uuid + ')","expectedRiskLevel":"HIGH","expectedResponseOutcome":"ADDITIONAL_AUTH_REQUIRED","expectedInitialCaseStatus":"OPEN"\}\n\z'
     $match = [System.Text.RegularExpressions.Regex]::Match(
         $text, $pattern, [System.Text.RegularExpressions.RegexOptions]::CultureInvariant
     )
@@ -668,6 +668,7 @@ function ConvertFrom-E2EFixtureManifestBytes {
         repositoryId = $match.Groups['repo'].Value
         commitSha = $match.Groups['commit'].Value
         treeSha = $match.Groups['tree'].Value
+        composeProject = $ProjectName
         transactionId = $match.Groups['transaction'].Value
         caseId = $match.Groups['case'].Value
         expectedRiskLevel = 'HIGH'
@@ -732,6 +733,9 @@ function Read-E2EFixtureManifest {
         if (-not [string]::Equals([string]$manifest[$name], [string](Get-E2EReceiptValue $Receipt $name), [System.StringComparison]::Ordinal)) {
             throw 'FIXTURE_MANIFEST_RECEIPT_MISMATCH'
         }
+    }
+    if (-not [string]::Equals([string]$manifest.composeProject, $ProjectName, [System.StringComparison]::Ordinal)) {
+        throw 'FIXTURE_MANIFEST_PROJECT_MISMATCH'
     }
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try { $digest = [System.BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant() }
@@ -1051,6 +1055,9 @@ function ConvertFrom-E2ERunFixtureState {
         [Parameter(Mandatory = $true)][string]$Project
     )
 
+    if (-not [string]::Equals($Project, $ProjectName, [System.StringComparison]::Ordinal)) {
+        throw 'RUN_FIXTURE_STATE_IDENTITY_INVALID'
+    }
     if ($EncodedState -cnotmatch '\A[A-Za-z0-9+/]+={0,2}\z' -or $EncodedState.Length -gt 22369624) {
         throw 'RUN_FIXTURE_STATE_INVALID'
     }
@@ -1096,7 +1103,7 @@ function ConvertFrom-E2ERunFixtureState {
             repositoryId = Get-E2EReceiptValue $Receipt 'repositoryId'
             commitSha = Get-E2EReceiptValue $Receipt 'commitSha'
             treeSha = Get-E2EReceiptValue $Receipt 'treeSha'
-            composeProject = $Project
+            composeProject = $ProjectName
         }
         foreach ($name in $expectedOwner.Keys) {
             if ($state.$name -isnot [string] -or -not (Test-E2ECleanScalar $state.$name) -or
@@ -4197,6 +4204,7 @@ function Set-E2EOwnerEnvironment {
         FINGUARDOPS_E2E_SOURCE_TREE = Get-E2EReceiptValue $Receipt 'treeSha'
         FINGUARDOPS_E2E_RUN_ID = Get-E2EReceiptValue $Receipt 'runId'
         FINGUARDOPS_E2E_REPOSITORY_ID = Get-E2EReceiptValue $Receipt 'repositoryId'
+        FINGUARDOPS_E2E_COMPOSE_PROJECT = $ProjectName
         FINGUARDOPS_E2E_FIXTURE_DIR = Get-E2EFixtureDirectory -Receipt $Receipt
     }
     $previous = [ordered]@{}

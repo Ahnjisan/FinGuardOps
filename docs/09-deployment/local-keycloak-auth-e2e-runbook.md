@@ -477,6 +477,13 @@ label, network, mount, state와 exit code 0을 검증한 뒤, 전 snapshot을 st
 SQL은 snapshot과 cardinality의 read-only 검증에만 사용한다. Service mode의 `all`, fresh-volume,
 existing-volume 동작은 변경하지 않는다.
 
+Run fixture의 canonical Compose project는 exact literal
+`finguardops-keycloak-browser-e2e`이다. `run-fixture-before`, `run-fixture`, `run-fixture-after`는 이 값을
+ordinal/case-sensitive exact로만 허용하며 candidate state나 manifest에서 기대값을 역산하지 않는다.
+Service verifier는 기존 dynamic pattern
+`finguardops-kc241-e2e-[a-z0-9][a-z0-9-]{5,32}`만 사용한다. Run project는 Service 경계에서,
+dynamic Service project는 Run fixture 경계에서 각각 거부한다.
+
 Run fixture는 `PASSWORD_CHANGED`, `TRANSFER_LIMIT_CHANGED` behavior event와 12,000,000 KRW
 `ACCOUNT_TRANSFER`를 한 세트 생성한다. 기대 delta는 BehaviorEvent 2, FinancialTransaction 1,
 IdempotencyRecord 1, DetectionResult 1, DetectionEvidence 2, FraudCase 1, CaseTransaction 1,
@@ -496,11 +503,11 @@ TLS private key를 mount하지 않는다. transaction/behavior SERVICE secret은
 secret으로 mount한다.
 
 Manifest는 1,024 bytes 이하의 UTF-8 strict/no-BOM compact JSON이고 LF 하나로 끝난다. key 순서는
-`schemaVersion`, `runId`, `repositoryId`, `commitSha`, `treeSha`, `transactionId`, `caseId`,
+`schemaVersion`, `runId`, `repositoryId`, `commitSha`, `treeSha`, `composeProject`, `transactionId`, `caseId`,
 `expectedRiskLevel`, `expectedResponseOutcome`, `expectedInitialCaseStatus`로 고정한다. unknown,
 duplicate, missing, reordered key와 null/array/object/boolean/float, C0/C1 control, Unicode format
 character를 거부한다. 두 업무 ID는 lowercase canonical UUID v4이고 receipt identity는 ordinal exact로
-일치해야 한다. writer는 final preexistence와 non-empty directory를 거부하고 same-directory CreateNew
+일치해야 하며 `composeProject`는 위 Run literal과 exact로 일치해야 한다. writer는 final preexistence와 non-empty directory를 거부하고 same-directory CreateNew
 temp, write/flush/fsync, no-replace atomic rename, final byte 재검증을 수행한다.
 
 Manifest 검증 전에는 Browser `docker create`와 `docker start`가 호출되지 않는다. 최초 검증한 manifest의
