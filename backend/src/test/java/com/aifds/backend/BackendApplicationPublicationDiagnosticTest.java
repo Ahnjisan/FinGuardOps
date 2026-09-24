@@ -96,22 +96,102 @@ class BackendApplicationPublicationDiagnosticTest {
     }
 
     @Test
+    void refreshBoundaryEmitsContextMarkerAndRethrowsSameFailure() {
+        RuleV1DefaultRuleSetPublicationDiagnosticBoundary boundary = armed();
+        IllegalStateException failure = new IllegalStateException(
+                "context raw sentinel"
+        );
+        GenericApplicationContext context = new GenericApplicationContext();
+        context.addBeanFactoryPostProcessor(ignored -> {
+            throw failure;
+        });
+        BackendApplication.PublicationDiagnosticSpringApplication application =
+                new BackendApplication.PublicationDiagnosticSpringApplication(
+                        boundary
+                );
+
+        Capture capture = captureError(() -> catchThrowable(() ->
+                BackendApplication.runWithPublicationDiagnosticBoundary(
+                        () -> {
+                            application.refresh(context);
+                            return context;
+                        },
+                        boundary
+                )
+        ));
+
+        assertThat(capture.failure()).isSameAs(failure);
+        assertThat(boundary.state()).isEqualTo(
+                RuleV1DefaultRuleSetPublicationDiagnosticBoundary.State
+                        .CONTEXT_REFRESH
+        );
+        assertThat(capture.stderr()).isEqualTo(
+                RuleV1DefaultRuleSetPublicationDiagnosticBoundary.WIRE_PREFIX
+                        + "RULE_PUBLICATION_CONTEXT_REFRESH_FAILED"
+                        + System.lineSeparator()
+        );
+        assertThat(capture.stderr()).doesNotContain("raw sentinel");
+    }
+
+    @Test
+    void failureAfterRefreshAndBeforeRunnerUsesPreRunnerMarker() {
+        RuleV1DefaultRuleSetPublicationDiagnosticBoundary boundary = armed();
+        GenericApplicationContext context = new GenericApplicationContext();
+        BackendApplication.PublicationDiagnosticSpringApplication application =
+                new BackendApplication.PublicationDiagnosticSpringApplication(
+                        boundary
+                );
+        application.refresh(context);
+        IllegalStateException failure = new IllegalStateException(
+                "pre-runner raw sentinel"
+        );
+
+        try {
+            Capture capture = captureError(() -> catchThrowable(() ->
+                    BackendApplication.runWithPublicationDiagnosticBoundary(
+                            () -> {
+                                throw failure;
+                            },
+                            boundary
+                    )
+            ));
+
+            assertThat(capture.failure()).isSameAs(failure);
+            assertThat(boundary.state()).isEqualTo(
+                    RuleV1DefaultRuleSetPublicationDiagnosticBoundary.State
+                            .CONTEXT_REFRESHED_PRE_RUN
+            );
+            assertThat(capture.stderr()).isEqualTo(
+                    RuleV1DefaultRuleSetPublicationDiagnosticBoundary.WIRE_PREFIX
+                            + "RULE_PUBLICATION_PRE_RUNNER_FAILED"
+                            + System.lineSeparator()
+            );
+            assertThat(capture.stderr()).doesNotContain("raw sentinel");
+        } finally {
+            context.close();
+        }
+    }
+
+    @Test
     void failuresBeforeArmAndAfterRunnerEntryDoNotEmitStartupMarker() {
         assertOuterFailureHasNoMarker(
                 new RuleV1DefaultRuleSetPublicationDiagnosticBoundary()
         );
 
         RuleV1DefaultRuleSetPublicationDiagnosticBoundary entered = armed();
+        enterPreRunner(entered);
         entered.beginRunnerConfiguration();
         assertOuterFailureHasNoMarker(entered);
 
         RuleV1DefaultRuleSetPublicationDiagnosticBoundary committed = armed();
+        enterPreRunner(committed);
         committed.beginRunnerConfiguration();
         committed.beginServiceExecution();
         committed.publicationCommitted();
         assertOuterFailureHasNoMarker(committed);
 
         RuleV1DefaultRuleSetPublicationDiagnosticBoundary succeeded = armed();
+        enterPreRunner(succeeded);
         succeeded.beginRunnerConfiguration();
         succeeded.beginServiceExecution();
         succeeded.publicationCommitted();
@@ -150,6 +230,13 @@ class BackendApplicationPublicationDiagnosticTest {
         );
         assertThat(boundary.tryArm(environment)).isTrue();
         return boundary;
+    }
+
+    private void enterPreRunner(
+            RuleV1DefaultRuleSetPublicationDiagnosticBoundary boundary
+    ) {
+        boundary.beginContextRefresh();
+        boundary.contextRefreshed();
     }
 
     private GenericApplicationContext context(

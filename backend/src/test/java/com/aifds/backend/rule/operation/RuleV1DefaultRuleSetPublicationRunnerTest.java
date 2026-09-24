@@ -481,6 +481,8 @@ class RuleV1DefaultRuleSetPublicationRunnerTest {
                 "true"
         );
         assertThat(boundary.tryArm(environment)).isTrue();
+        boundary.beginContextRefresh();
+        boundary.contextRefreshed();
         return boundary;
     }
 

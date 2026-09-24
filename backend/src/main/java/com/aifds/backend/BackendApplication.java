@@ -22,8 +22,8 @@ public class BackendApplication {
         }
         RuleV1DefaultRuleSetPublicationDiagnosticBoundary boundary =
                 new RuleV1DefaultRuleSetPublicationDiagnosticBoundary();
-        SpringApplication application = new SpringApplication(
-                BackendApplication.class
+        SpringApplication application = new PublicationDiagnosticSpringApplication(
+                boundary
         );
         application.addInitializers(publicationDiagnosticInitializer(boundary));
         runWithPublicationDiagnosticBoundary(
@@ -59,6 +59,26 @@ public class BackendApplication {
         } catch (RuntimeException | Error failure) {
             boundary.emitStartupFailure(failure);
             throw failure;
+        }
+    }
+
+    static final class PublicationDiagnosticSpringApplication
+            extends SpringApplication {
+
+        private final RuleV1DefaultRuleSetPublicationDiagnosticBoundary boundary;
+
+        PublicationDiagnosticSpringApplication(
+                RuleV1DefaultRuleSetPublicationDiagnosticBoundary boundary
+        ) {
+            super(BackendApplication.class);
+            this.boundary = boundary;
+        }
+
+        @Override
+        protected void refresh(ConfigurableApplicationContext context) {
+            boundary.beginContextRefresh();
+            super.refresh(context);
+            boundary.contextRefreshed();
         }
     }
 }

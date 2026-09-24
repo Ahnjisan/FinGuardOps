@@ -66,6 +66,10 @@ class RuleV1DefaultRuleSetPublicationDiagnosticBoundaryTest {
                 new ArrayList<>()
         );
 
+        boundary.beginContextRefresh();
+        assertState(boundary, "CONTEXT_REFRESH");
+        boundary.contextRefreshed();
+        assertState(boundary, "CONTEXT_REFRESHED_PRE_RUN");
         boundary.beginRunnerConfiguration();
         assertState(boundary, "RUNNER_CONFIGURATION");
         boundary.beginServiceExecution();
@@ -88,8 +92,8 @@ class RuleV1DefaultRuleSetPublicationDiagnosticBoundaryTest {
         RuleV1DefaultRuleSetPublicationDiagnosticBoundary duplicate = armed(
                 new ArrayList<>()
         );
-        duplicate.beginRunnerConfiguration();
-        assertThatThrownBy(duplicate::beginRunnerConfiguration)
+        duplicate.beginContextRefresh();
+        assertThatThrownBy(duplicate::beginContextRefresh)
                 .isInstanceOf(IllegalStateException.class);
 
         RuleV1DefaultRuleSetPublicationDiagnosticBoundary duplicateArm = armed(
@@ -109,10 +113,31 @@ class RuleV1DefaultRuleSetPublicationDiagnosticBoundaryTest {
                 PREFIX + "RULE_PUBLICATION_BACKEND_STARTUP_FAILED"
         );
 
+        List<String> refresh = new ArrayList<>();
+        RuleV1DefaultRuleSetPublicationDiagnosticBoundary refreshing = armed(
+                refresh
+        );
+        refreshing.beginContextRefresh();
+        refreshing.emitStartupFailure(new IllegalStateException("raw sentinel"));
+        assertThat(refresh).containsExactly(
+                PREFIX + "RULE_PUBLICATION_CONTEXT_REFRESH_FAILED"
+        );
+
+        List<String> preRunner = new ArrayList<>();
+        RuleV1DefaultRuleSetPublicationDiagnosticBoundary refreshed = armed(
+                preRunner
+        );
+        enterPreRunner(refreshed);
+        refreshed.emitStartupFailure(new IllegalStateException("raw sentinel"));
+        assertThat(preRunner).containsExactly(
+                PREFIX + "RULE_PUBLICATION_PRE_RUNNER_FAILED"
+        );
+
         List<String> afterEntry = new ArrayList<>();
         RuleV1DefaultRuleSetPublicationDiagnosticBoundary entered = armed(
                 afterEntry
         );
+        enterPreRunner(entered);
         entered.beginRunnerConfiguration();
         entered.emitStartupFailure(new IllegalStateException("raw sentinel"));
         assertThat(afterEntry).isEmpty();
@@ -121,6 +146,7 @@ class RuleV1DefaultRuleSetPublicationDiagnosticBoundaryTest {
         RuleV1DefaultRuleSetPublicationDiagnosticBoundary committed = armed(
                 afterCommit
         );
+        enterPreRunner(committed);
         committed.beginRunnerConfiguration();
         committed.beginServiceExecution();
         committed.publicationCommitted();
@@ -158,6 +184,7 @@ class RuleV1DefaultRuleSetPublicationDiagnosticBoundaryTest {
             RuleV1DefaultRuleSetPublicationDiagnosticBoundary boundary = armed(
                     lines
             );
+            enterPreRunner(boundary);
             boundary.beginRunnerConfiguration();
             boundary.emitConfigurationFailure(item.getKey());
             assertThat(lines).containsExactly(PREFIX + item.getValue());
@@ -336,9 +363,45 @@ class RuleV1DefaultRuleSetPublicationDiagnosticBoundaryTest {
         );
     }
 
+    @Test
+    void concurrentTransitionFailsClosed() throws Exception {
+        List<String> lines = Collections.synchronizedList(new ArrayList<>());
+        RuleV1DefaultRuleSetPublicationDiagnosticBoundary boundary = armed(lines);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Throwable> failures = Collections.synchronizedList(
+                new ArrayList<>()
+        );
+        List<Thread> threads = new ArrayList<>();
+        for (int index = 0; index < 2; index++) {
+            Thread thread = new Thread(() -> {
+                ready.countDown();
+                try {
+                    start.await();
+                    boundary.beginContextRefresh();
+                } catch (Throwable failure) {
+                    failures.add(failure);
+                }
+            });
+            thread.start();
+            threads.add(thread);
+        }
+        ready.await();
+        start.countDown();
+        for (Thread thread : threads) {
+            thread.join();
+        }
+
+        assertThat(failures).hasSize(1);
+        assertThat(failures.get(0)).isInstanceOf(IllegalStateException.class);
+        boundary.emitStartupFailure(new IllegalStateException("raw"));
+        assertThat(lines).isEmpty();
+    }
+
     private void assertConfigurationCode(Throwable failure, String code) {
         List<String> lines = new ArrayList<>();
         RuleV1DefaultRuleSetPublicationDiagnosticBoundary boundary = armed(lines);
+        enterPreRunner(boundary);
         boundary.beginRunnerConfiguration();
         boundary.emitConfigurationFailure(failure);
         assertThat(lines).containsExactly(PREFIX + code);
@@ -357,9 +420,17 @@ class RuleV1DefaultRuleSetPublicationDiagnosticBoundaryTest {
             List<String> lines
     ) {
         RuleV1DefaultRuleSetPublicationDiagnosticBoundary boundary = armed(lines);
+        enterPreRunner(boundary);
         boundary.beginRunnerConfiguration();
         boundary.beginServiceExecution();
         return boundary;
+    }
+
+    private void enterPreRunner(
+            RuleV1DefaultRuleSetPublicationDiagnosticBoundary boundary
+    ) {
+        boundary.beginContextRefresh();
+        boundary.contextRefreshed();
     }
 
     private RuleV1DefaultRuleSetPublicationDiagnosticBoundary armed(

@@ -17,6 +17,10 @@ public final class RuleV1DefaultRuleSetPublicationDiagnosticBoundary {
 
     public static final String STARTUP_FAILED =
             "RULE_PUBLICATION_BACKEND_STARTUP_FAILED";
+    public static final String CONTEXT_REFRESH_FAILED =
+            "RULE_PUBLICATION_CONTEXT_REFRESH_FAILED";
+    public static final String PRE_RUNNER_FAILED =
+            "RULE_PUBLICATION_PRE_RUNNER_FAILED";
     public static final String RUNNER_CONFIGURATION_FAILED =
             "RULE_PUBLICATION_RUNNER_CONFIGURATION_FAILED";
     public static final String SERVICE_EXECUTION_FAILED =
@@ -173,8 +177,16 @@ public final class RuleV1DefaultRuleSetPublicationDiagnosticBoundary {
         }
     }
 
+    public void beginContextRefresh() {
+        advance(State.ARMED_PRE_RUN, State.CONTEXT_REFRESH);
+    }
+
+    public void contextRefreshed() {
+        advance(State.CONTEXT_REFRESH, State.CONTEXT_REFRESHED_PRE_RUN);
+    }
+
     public void beginRunnerConfiguration() {
-        advance(State.ARMED_PRE_RUN, State.RUNNER_CONFIGURATION);
+        advance(State.CONTEXT_REFRESHED_PRE_RUN, State.RUNNER_CONFIGURATION);
     }
 
     public void beginServiceExecution() {
@@ -190,7 +202,14 @@ public final class RuleV1DefaultRuleSetPublicationDiagnosticBoundary {
     }
 
     public void emitStartupFailure(Throwable failure) {
-        emitForState(State.ARMED_PRE_RUN, STARTUP_FAILED);
+        State current = state.get();
+        if (current == State.ARMED_PRE_RUN) {
+            emitForState(State.ARMED_PRE_RUN, STARTUP_FAILED);
+        } else if (current == State.CONTEXT_REFRESH) {
+            emitForState(State.CONTEXT_REFRESH, CONTEXT_REFRESH_FAILED);
+        } else if (current == State.CONTEXT_REFRESHED_PRE_RUN) {
+            emitForState(State.CONTEXT_REFRESHED_PRE_RUN, PRE_RUNNER_FAILED);
+        }
     }
 
     public void emitConfigurationFailure(Throwable failure) {
@@ -302,6 +321,8 @@ public final class RuleV1DefaultRuleSetPublicationDiagnosticBoundary {
     public enum State {
         UNARMED,
         ARMED_PRE_RUN,
+        CONTEXT_REFRESH,
+        CONTEXT_REFRESHED_PRE_RUN,
         RUNNER_CONFIGURATION,
         SERVICE_EXECUTION,
         PUBLICATION_COMMITTED,

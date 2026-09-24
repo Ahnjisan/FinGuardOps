@@ -510,16 +510,25 @@ redact하고 raw command, query, path, exit code, stdout/stderr, credential·tok
 
 `RULE_PUBLICATION_COMMAND_EXIT_NONZERO`는 backend runner의 raw Java exception을 전달하지 않는다.
 Service와 Run은 동일한 `publish_rules` 함수와 동일한 Compose `run --rm --no-deps --pull never -T`
-argument vector를 사용한다. 전용 publication profile에서 활성화되는 Backend process-local boundary는 실패 시
+argument vector를 사용한다. 두 project의 startup과 publication one-shot은 canonical
+`infra/.env.example`을 같은 Compose option 위치에 전달하고 host process environment를 그대로 상속한다.
+publication HostContext는 별도 PostgreSQL credential 값을 만들거나 덮어쓰지 않으므로 ambient 변수가 absent,
+present/non-empty, present/empty인 경우 모두 project startup과 같은 Compose interpolation precedence를 따른다.
+credential 값은 state, stdout/stderr, manifest, diagnostic에 기록하지 않는다.
+
+전용 publication profile에서 활성화되는 Backend process-local boundary는 실패 시
 logger를 거치지 않고 stderr에 다음 exact line을 process당 최대 한 번 기록한다.
 
 ```text
 FINGUARDOPS_RULE_PUBLICATION_FAILURE=<FIXED_CODE>
 ```
 
-Boundary는 `UNARMED → ARMED_PRE_RUN → RUNNER_CONFIGURATION → SERVICE_EXECUTION →
-PUBLICATION_COMMITTED → RUNNER_SUCCEEDED` 단방향 상태를 사용한다. startup marker는 runner 진입 전,
-configuration marker는 service 호출 전, service marker는 transactional proxy가 실패한 경우에만 허용한다.
+Boundary는 `UNARMED → ARMED_PRE_RUN → CONTEXT_REFRESH → CONTEXT_REFRESHED_PRE_RUN →
+RUNNER_CONFIGURATION → SERVICE_EXECUTION → PUBLICATION_COMMITTED → RUNNER_SUCCEEDED` 단방향 상태를
+사용한다. app-owned `SpringApplication.refresh(context)` wrapper는 `super.refresh(context)` 호출 직전에
+`CONTEXT_REFRESH`, 정상 반환 직후에 `CONTEXT_REFRESHED_PRE_RUN`으로 전이한다. 따라서 refresh 진입 전,
+refresh 내부, refresh 반환 후 runner callback 첫 문장 전 실패가 각각 고정 marker로 구분된다. configuration
+marker는 service 호출 전, service marker는 transactional proxy가 실패한 경우에만 허용한다.
 Proxy가 정상 반환하면 success log 전에 `PUBLICATION_COMMITTED`가 되므로 이후 logging, Boot ready, shutdown
 failure를 service/rollback failure로 오분류하지 않는다. 정상 Backend profile과 recovery one-shot은
 `UNARMED`이며 marker를 출력하지 않는다.
@@ -530,7 +539,9 @@ Authoritative marker가 없을 때만 runner/service source가 고정한 excepti
 
 | runner/service source contract | fixed secondary |
 | --- | --- |
-| runner 진입 전 Backend context startup failure | `RULE_PUBLICATION_BACKEND_STARTUP_FAILED` |
+| context refresh 진입 전 Backend startup failure | `RULE_PUBLICATION_BACKEND_STARTUP_FAILED` |
+| `SpringApplication.refresh(context)` 내부 failure | `RULE_PUBLICATION_CONTEXT_REFRESH_FAILED` |
+| refresh 정상 반환 후 publication runner callback 진입 전 failure | `RULE_PUBLICATION_PRE_RUNNER_FAILED` |
 | 승인 identity에 해당하지 않는 runner configuration failure | `RULE_PUBLICATION_RUNNER_CONFIGURATION_FAILED` |
 | 승인 identity에 해당하지 않는 transactional service/proxy failure | `RULE_PUBLICATION_SERVICE_EXECUTION_FAILED` |
 | production profile 거부 | `RULE_PUBLICATION_RUNNER_PRODUCTION_PROFILE_REJECTED` |

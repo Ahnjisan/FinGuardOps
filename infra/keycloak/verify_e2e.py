@@ -273,6 +273,8 @@ RULE_PUBLICATION_RUNNER_FAILURE_LINES = {
 }
 RULE_PUBLICATION_AUTHORITATIVE_FAILURE_CODES = frozenset({
     "RULE_PUBLICATION_BACKEND_STARTUP_FAILED",
+    "RULE_PUBLICATION_CONTEXT_REFRESH_FAILED",
+    "RULE_PUBLICATION_PRE_RUNNER_FAILED",
     "RULE_PUBLICATION_RUNNER_CONFIGURATION_FAILED",
     "RULE_PUBLICATION_SERVICE_EXECUTION_FAILED",
     *RULE_PUBLICATION_RUNNER_FAILURE_LINES,
@@ -2007,15 +2009,14 @@ class HostContext:
             "compose",
             "-p",
             project,
+            "--env-file",
+            str(self.repo / "infra" / ".env.example"),
             "-f",
             str(self.repo / "infra" / "compose.yml"),
             "-f",
             str(self.repo / "infra" / "compose.keycloak-local-e2e.yml"),
         ]
         self.environment = {
-            "POSTGRES_PASSWORD": "local-kc241-placeholder-not-production",
-            "GRAFANA_ADMIN_USER": "local-kc241-admin",
-            "GRAFANA_ADMIN_PASSWORD": "local-kc241-placeholder-not-production",
             "FINGUARDOPS_E2E_BACKEND_IMAGE": contract.backend_image,
             "FINGUARDOPS_E2E_AI_SERVICE_IMAGE": contract.ai_service_image,
             "FINGUARDOPS_E2E_REVISION": contract.commit_sha,

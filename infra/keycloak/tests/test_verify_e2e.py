@@ -4,6 +4,7 @@ import copy
 import io
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -1424,6 +1425,8 @@ finguardops_rule_analysis_outcomes_created 99
             verify_e2e.RULE_PUBLICATION_AUTHORITATIVE_FAILURE_CODES,
             frozenset({
                 "RULE_PUBLICATION_BACKEND_STARTUP_FAILED",
+                "RULE_PUBLICATION_CONTEXT_REFRESH_FAILED",
+                "RULE_PUBLICATION_PRE_RUNNER_FAILED",
                 "RULE_PUBLICATION_RUNNER_CONFIGURATION_FAILED",
                 "RULE_PUBLICATION_SERVICE_EXECUTION_FAILED",
                 *verify_e2e.RULE_PUBLICATION_RUNNER_FAILURE_LINES,
@@ -1815,6 +1818,84 @@ finguardops_rule_analysis_outcomes_created 99
             verify_e2e.RUN_FIXTURE_PROJECT,
         )
         self.assertNotIn("--build", context.compose)
+
+    def test_publication_host_context_uses_project_credential_source_contract(self):
+        contract = verify_e2e.load_owner_contract(valid_owner_environment())
+        repo = Path.cwd().resolve()
+        canonical_env_file = str(repo / "infra" / ".env.example")
+        ambient_states = (
+            ("absent", None),
+            ("present-nonempty", "ambient-nonempty"),
+            ("present-empty", ""),
+        )
+        projects = (
+            verify_e2e.RUN_FIXTURE_PROJECT,
+            "finguardops-kc241-e2e-unit01",
+        )
+
+        def is_aligned(context):
+            if "--env-file" not in context.compose:
+                return False
+            env_file_index = context.compose.index("--env-file")
+            return (
+                context.compose[env_file_index + 1] == canonical_env_file
+                and env_file_index < context.compose.index("-f")
+                and "POSTGRES_PASSWORD" not in context.environment
+        )
+
+        for project in projects:
+            for ambient_state, ambient in ambient_states:
+                with self.subTest(project=project, ambient_state=ambient_state):
+                    with mock.patch.dict(os.environ, {}, clear=False):
+                        if ambient is None:
+                            os.environ.pop("POSTGRES_PASSWORD", None)
+                        else:
+                            os.environ["POSTGRES_PASSWORD"] = ambient
+                        context = verify_e2e.HostContext(repo, project, 1, 10, contract)
+                        effective_environment = os.environ.copy()
+                        effective_environment.update(context.environment)
+                        self.assertEqual(
+                            "POSTGRES_PASSWORD" in effective_environment,
+                            ambient is not None,
+                        )
+                        if ambient is not None:
+                            self.assertEqual(
+                                effective_environment["POSTGRES_PASSWORD"] == "",
+                                ambient == "",
+                            )
+                    self.assertTrue(is_aligned(context))
+
+                    head_equivalent = types.SimpleNamespace(
+                        compose=[
+                            item for index, item in enumerate(context.compose)
+                            if item != "--env-file"
+                            and not (
+                                index > 0
+                                and context.compose[index - 1] == "--env-file"
+                            )
+                        ],
+                        environment={**context.environment, "POSTGRES_PASSWORD": object()},
+                    )
+                    self.assertFalse(is_aligned(head_equivalent))
+
+                    without_env_file = types.SimpleNamespace(
+                        compose=head_equivalent.compose,
+                        environment=dict(context.environment),
+                    )
+                    with_fixed_override = types.SimpleNamespace(
+                        compose=list(context.compose),
+                        environment={**context.environment, "POSTGRES_PASSWORD": object()},
+                    )
+                    self.assertFalse(is_aligned(without_env_file))
+                    self.assertFalse(is_aligned(with_fixed_override))
+
+        compose_source = (repo / "infra" / "compose.yml").read_text(encoding="utf-8")
+        self.assertEqual(
+            compose_source.count("${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"),
+            2,
+        )
+        self.assertIn("${POSTGRES_DB:-finguardops}", compose_source)
+        self.assertIn("${POSTGRES_USER:-finguardops}", compose_source)
 
     def test_all_runtime_uses_no_build_pull_never_and_never_cleans_up(self):
         environment = valid_run_fixture_environment()
