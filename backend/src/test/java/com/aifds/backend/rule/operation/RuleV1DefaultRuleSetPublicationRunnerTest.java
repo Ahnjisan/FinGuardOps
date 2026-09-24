@@ -13,11 +13,13 @@ import org.springframework.mock.env.MockEnvironment;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -294,6 +296,133 @@ class RuleV1DefaultRuleSetPublicationRunnerTest {
         verify(failing).publish(EFFECTIVE_FROM_INSTANT);
     }
 
+    @Test
+    void armedRunnerEmitsConfigurationMarkerAndPreservesThrowable() {
+        List<String> lines = new ArrayList<>();
+        RuleV1DefaultRuleSetPublicationDiagnosticBoundary boundary =
+                armedBoundary(lines);
+        RuleV1DefaultRuleSetPublicationRunner runner = newRunner(
+                mock(RuleV1DefaultRuleSetPublicationService.class),
+                approvedEnvironment(),
+                "WRONG",
+                EFFECTIVE_FROM,
+                boundary
+        );
+
+        Throwable failure = catchThrowable(() -> runner.run(arguments()));
+
+        assertThat(failure)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Rule v1 default publication confirmation does not match");
+        assertThat(lines).containsExactly(
+                RuleV1DefaultRuleSetPublicationDiagnosticBoundary.WIRE_PREFIX
+                        + "RULE_PUBLICATION_RUNNER_CONFIRMATION_REJECTED"
+        );
+        assertThat(boundary.state()).isEqualTo(
+                RuleV1DefaultRuleSetPublicationDiagnosticBoundary.State
+                        .RUNNER_CONFIGURATION
+        );
+    }
+
+    @Test
+    void armedRunnerPreservesServiceThrowableAndCauseChain() {
+        List<String> lines = new ArrayList<>();
+        RuleV1DefaultRuleSetPublicationDiagnosticBoundary boundary =
+                armedBoundary(lines);
+        RuleV1DefaultRuleSetPublicationService service = mock(
+                RuleV1DefaultRuleSetPublicationService.class
+        );
+        IllegalArgumentException cause = new IllegalArgumentException(
+                "database raw sentinel"
+        );
+        IllegalStateException failure = new IllegalStateException(
+                "unexpected service failure",
+                cause
+        );
+        when(service.publish(EFFECTIVE_FROM_INSTANT)).thenThrow(failure);
+        RuleV1DefaultRuleSetPublicationRunner runner = newRunner(
+                service,
+                approvedEnvironment(),
+                RuleV1DefaultRuleSetPublicationRunner.REQUIRED_CONFIRMATION,
+                EFFECTIVE_FROM,
+                boundary
+        );
+
+        Throwable observed = catchThrowable(() -> runner.run(arguments()));
+
+        assertThat(observed).isSameAs(failure);
+        assertThat(observed.getCause()).isSameAs(cause);
+        assertThat(lines).containsExactly(
+                RuleV1DefaultRuleSetPublicationDiagnosticBoundary.WIRE_PREFIX
+                        + "RULE_PUBLICATION_SERVICE_EXECUTION_FAILED"
+        );
+        assertThat(lines.get(0)).doesNotContain("raw sentinel");
+    }
+
+    @Test
+    void commitIsRecordedBeforeSuccessReportingAndReportingFailureHasNoMarker() {
+        List<String> lines = new ArrayList<>();
+        RuleV1DefaultRuleSetPublicationDiagnosticBoundary boundary =
+                armedBoundary(lines);
+        RuleV1DefaultRuleSetPublicationService service = mock(
+                RuleV1DefaultRuleSetPublicationService.class
+        );
+        when(service.publish(EFFECTIVE_FROM_INSTANT)).thenReturn(result());
+        IllegalStateException reportingFailure = new IllegalStateException(
+                "reporting raw sentinel"
+        );
+        RuleV1DefaultRuleSetPublicationRunner runner =
+                new RuleV1DefaultRuleSetPublicationRunner(
+                        service,
+                        approvedEnvironment(),
+                        FIXED_CLOCK,
+                        RuleV1DefaultRuleSetPublicationRunner
+                                .REQUIRED_CONFIRMATION,
+                        EFFECTIVE_FROM,
+                        boundary
+                ) {
+                    @Override
+                    protected void reportSuccess(
+                            RuleV1DefaultRuleSetPublicationResult ignored
+                    ) {
+                        throw reportingFailure;
+                    }
+                };
+
+        assertThatThrownBy(() -> runner.run(arguments()))
+                .isSameAs(reportingFailure);
+        assertThat(lines).isEmpty();
+        assertThat(boundary.state()).isEqualTo(
+                RuleV1DefaultRuleSetPublicationDiagnosticBoundary.State
+                        .PUBLICATION_COMMITTED
+        );
+    }
+
+    @Test
+    void successfulRunnerReachesSucceededWithoutFailureMarker() {
+        List<String> lines = new ArrayList<>();
+        RuleV1DefaultRuleSetPublicationDiagnosticBoundary boundary =
+                armedBoundary(lines);
+        RuleV1DefaultRuleSetPublicationService service = mock(
+                RuleV1DefaultRuleSetPublicationService.class
+        );
+        when(service.publish(EFFECTIVE_FROM_INSTANT)).thenReturn(result());
+
+        newRunner(
+                service,
+                approvedEnvironment(),
+                RuleV1DefaultRuleSetPublicationRunner.REQUIRED_CONFIRMATION,
+                EFFECTIVE_FROM,
+                boundary
+        ).run(arguments());
+
+        assertThat(lines).isEmpty();
+        assertThat(boundary.state()).isEqualTo(
+                RuleV1DefaultRuleSetPublicationDiagnosticBoundary.State
+                        .RUNNER_SUCCEEDED
+        );
+    }
+
     private RuleV1DefaultRuleSetPublicationRunner runner(
             RuleV1DefaultRuleSetPublicationService service,
             String confirmation
@@ -319,6 +448,40 @@ class RuleV1DefaultRuleSetPublicationRunnerTest {
                 confirmation,
                 effectiveFrom
         );
+    }
+
+    private RuleV1DefaultRuleSetPublicationRunner newRunner(
+            RuleV1DefaultRuleSetPublicationService service,
+            MockEnvironment environment,
+            String confirmation,
+            String effectiveFrom,
+            RuleV1DefaultRuleSetPublicationDiagnosticBoundary boundary
+    ) {
+        return new RuleV1DefaultRuleSetPublicationRunner(
+                service,
+                environment,
+                FIXED_CLOCK,
+                confirmation,
+                effectiveFrom,
+                boundary
+        );
+    }
+
+    private RuleV1DefaultRuleSetPublicationDiagnosticBoundary armedBoundary(
+            List<String> lines
+    ) {
+        RuleV1DefaultRuleSetPublicationDiagnosticBoundary boundary =
+                new RuleV1DefaultRuleSetPublicationDiagnosticBoundary(
+                        lines::add
+                );
+        MockEnvironment environment = approvedEnvironment();
+        environment.setProperty(
+                RuleV1DefaultRuleSetPublicationRunner.PROPERTY_PREFIX
+                        + ".enabled",
+                "true"
+        );
+        assertThat(boundary.tryArm(environment)).isTrue();
+        return boundary;
     }
 
     private MockEnvironment approvedEnvironment() {

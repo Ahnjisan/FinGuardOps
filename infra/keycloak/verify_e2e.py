@@ -271,6 +271,17 @@ RULE_PUBLICATION_RUNNER_FAILURE_LINES = {
         "Caused by: java.lang.IllegalArgumentException: amountThreshold must be a positive canonical integer string within NUMERIC(19,4) integer range",
     ),
 }
+RULE_PUBLICATION_AUTHORITATIVE_FAILURE_CODES = frozenset({
+    "RULE_PUBLICATION_BACKEND_STARTUP_FAILED",
+    "RULE_PUBLICATION_RUNNER_CONFIGURATION_FAILED",
+    "RULE_PUBLICATION_SERVICE_EXECUTION_FAILED",
+    *RULE_PUBLICATION_RUNNER_FAILURE_LINES,
+})
+RULE_PUBLICATION_FAILURE_WIRE_PREFIX = "FINGUARDOPS_RULE_PUBLICATION_FAILURE="
+RULE_PUBLICATION_AUTHORITATIVE_FAILURE_LINES = {
+    RULE_PUBLICATION_FAILURE_WIRE_PREFIX + code: code
+    for code in RULE_PUBLICATION_AUTHORITATIVE_FAILURE_CODES
+}
 RULE_PUBLICATION_RUNNER_EXCEPTION_HEADLINE = re.compile(
     r' *(?:(?:Caused by|Suppressed): |Exception in thread "[^"\r\n]+" )?'
     r'(?:(?:[A-Za-z_$][A-Za-z0-9_$]*\.)+[A-Za-z_$][A-Za-z0-9_$]*'
@@ -1732,8 +1743,11 @@ def validate_before_native_output(stage: str, output: bytes) -> None:
             raise ValueError("invalid rule-state scalar")
         return
     if stage == "RULE_PUBLICATION_COMMAND":
-        output.decode("utf-8", "strict")
-        if rule_publication_approved_failure_codes(output, b""):
+        text = output.decode("utf-8", "strict")
+        if (
+            RULE_PUBLICATION_FAILURE_WIRE_PREFIX.casefold() in text.casefold()
+            or rule_publication_approved_failure_codes(output, b"")
+        ):
             raise ValueError("runner failure marker on successful exit")
         return
     if stage == "TRANSACTION_CARDINALITY_SNAPSHOT":
@@ -1834,11 +1848,83 @@ def rule_publication_runner_failure_matches(
     return tuple(matches)
 
 
+def authoritative_rule_publication_failure_code(
+    stdout: bytes, stderr: bytes
+) -> tuple[bool, str | None]:
+    decoded: list[tuple[str, str]] = []
+    newline_styles: set[str] = set()
+    marker_like = False
+    invalid_marker = False
+    markers: list[str] = []
+    prefix_folded = RULE_PUBLICATION_FAILURE_WIRE_PREFIX.casefold()
+    for stream_name, stream in (("stdout", stdout), ("stderr", stderr)):
+        text = stream.decode("utf-8", "strict")
+        decoded.append((stream_name, text))
+        if any(
+            (ord(character) < 0x20 and character not in "\t\r\n")
+            or 0x7F <= ord(character) <= 0x9F
+            or unicodedata.category(character) == "Cf"
+            for character in text
+        ):
+            return True, None
+        if "\r" in text:
+            if re.search(r"\r(?!\n)", text):
+                return True, None
+            newline_styles.add("crlf")
+        if re.search(r"(?<!\r)\n", text):
+            newline_styles.add("lf")
+        if len(newline_styles) > 1:
+            return True, None
+        raw_lines = text.split("\n")
+        for line_index, raw_line in enumerate(raw_lines):
+            line = raw_line[:-1] if raw_line.endswith("\r") else raw_line
+            if prefix_folded not in line.casefold():
+                continue
+            marker_like = True
+            if line_index == len(raw_lines) - 1 and not text.endswith("\n"):
+                invalid_marker = True
+                continue
+            if any(
+                ord(character) < 0x20
+                or 0x7F <= ord(character) <= 0x9F
+                or unicodedata.category(character) == "Cf"
+                for character in line
+            ):
+                invalid_marker = True
+                continue
+            if stream_name != "stderr":
+                invalid_marker = True
+                continue
+            code = RULE_PUBLICATION_AUTHORITATIVE_FAILURE_LINES.get(line)
+            if code is None:
+                invalid_marker = True
+                continue
+            markers.append(code)
+    if not marker_like:
+        return False, None
+    if invalid_marker or len(markers) != 1:
+        return True, None
+    if any(
+        RULE_PUBLICATION_RUNNER_SUCCESS_MARKER in text
+        for _, text in decoded
+    ):
+        return True, None
+    legacy = rule_publication_approved_failure_codes(stdout, stderr)
+    if any(code != markers[0] for code in legacy):
+        return True, None
+    return True, markers[0]
+
+
 def classify_rule_publication_nonzero(capture: NativeCommandCapture) -> str:
     fallback = BEFORE_NATIVE_FAILURE_CODES["RULE_PUBLICATION_COMMAND"]["exit"]
     if capture.stdout_overflow or capture.stderr_overflow:
         return fallback
     try:
+        authoritative, code = authoritative_rule_publication_failure_code(
+            capture.stdout, capture.stderr
+        )
+        if authoritative:
+            return code if code is not None else fallback
         matches = rule_publication_runner_failure_matches(
             capture.stdout, capture.stderr
         )

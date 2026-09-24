@@ -510,11 +510,29 @@ redact하고 raw command, query, path, exit code, stdout/stderr, credential·tok
 
 `RULE_PUBLICATION_COMMAND_EXIT_NONZERO`는 backend runner의 raw Java exception을 전달하지 않는다.
 Service와 Run은 동일한 `publish_rules` 함수와 동일한 Compose `run --rm --no-deps --pull never -T`
-argument vector를 사용한다. runner/service source가 고정한 exception line과 exact로 일치하는 line이 bounded
-stdout/stderr에 정확히 하나 있을 때만 다음 secondary로 세분한다.
+argument vector를 사용한다. 전용 publication profile에서 활성화되는 Backend process-local boundary는 실패 시
+logger를 거치지 않고 stderr에 다음 exact line을 process당 최대 한 번 기록한다.
+
+```text
+FINGUARDOPS_RULE_PUBLICATION_FAILURE=<FIXED_CODE>
+```
+
+Boundary는 `UNARMED → ARMED_PRE_RUN → RUNNER_CONFIGURATION → SERVICE_EXECUTION →
+PUBLICATION_COMMITTED → RUNNER_SUCCEEDED` 단방향 상태를 사용한다. startup marker는 runner 진입 전,
+configuration marker는 service 호출 전, service marker는 transactional proxy가 실패한 경우에만 허용한다.
+Proxy가 정상 반환하면 success log 전에 `PUBLICATION_COMMITTED`가 되므로 이후 logging, Boot ready, shutdown
+failure를 service/rollback failure로 오분류하지 않는다. 정상 Backend profile과 recovery one-shot은
+`UNARMED`이며 marker를 출력하지 않는다.
+
+Authoritative marker가 없을 때만 runner/service source가 고정한 exception line의 legacy exact classifier를
+사용한다. Authoritative marker가 정확히 하나 있으면 동일 code의 legacy line은 중복으로 계산하지 않지만,
+서로 충돌하는 recognized identity는 generic fallback으로 처리한다.
 
 | runner/service source contract | fixed secondary |
 | --- | --- |
+| runner 진입 전 Backend context startup failure | `RULE_PUBLICATION_BACKEND_STARTUP_FAILED` |
+| 승인 identity에 해당하지 않는 runner configuration failure | `RULE_PUBLICATION_RUNNER_CONFIGURATION_FAILED` |
+| 승인 identity에 해당하지 않는 transactional service/proxy failure | `RULE_PUBLICATION_SERVICE_EXECUTION_FAILED` |
 | production profile 거부 | `RULE_PUBLICATION_RUNNER_PRODUCTION_PROFILE_REJECTED` |
 | publication profile과 local/dev/test profile 조합 누락 | `RULE_PUBLICATION_RUNNER_APPROVED_PROFILE_REQUIRED` |
 | non-web mode 누락 | `RULE_PUBLICATION_RUNNER_NON_WEB_MODE_REQUIRED` |
@@ -530,9 +548,10 @@ stdout/stderr에 정확히 하나 있을 때만 다음 secondary로 세분한다
 | service publication 시점에 effective-from 만료 | `RULE_PUBLICATION_SERVICE_EFFECTIVE_FROM_EXPIRED` |
 | amountThreshold canonical format 비정상 | `RULE_PUBLICATION_SERVICE_AMOUNT_THRESHOLD_FORMAT_INVALID` |
 
-허용 line은 runner/service가 던지는 exception class/message 또는 Java cause prefix까지 포함한 fixed literal이다.
-prefix/suffix가 추가된 line, 같은 marker의 중복, 서로 다른 marker의 동시 출현, mixed CR/LF, invalid UTF-8, oversized
-capture, any unapproved Java exception headline, success marker와 nonzero exit 조합은 기존
+허용 marker는 Backend source가 소유한 ASCII uppercase/underscore fixed code의 exact wire line이다.
+prefix/suffix가 추가된 line, 같은 marker의 중복, 서로 다른 marker의 동시 출현, valid marker와 malformed marker의
+동시 출현, stdout marker, mixed CR/LF, invalid UTF-8, control/Cf, oversized capture, authoritative marker와
+충돌하는 legacy identity, success marker와 nonzero exit 조합은 기존
 `RULE_PUBLICATION_COMMAND_EXIT_NONZERO`로 안전하게 fallback한다. Exit 0에 failure marker가 있으면
 `RULE_PUBLICATION_COMMAND_OUTPUT_INVALID`로 거부한다. 이 분류는 raw line, command, SQL, path,
 environment 또는 exit code를 외부 diagnostic에 포함하지 않는다.

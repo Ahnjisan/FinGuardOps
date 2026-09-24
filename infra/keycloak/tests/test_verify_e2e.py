@@ -1412,6 +1412,140 @@ finguardops_rule_analysis_outcomes_created 99
                 success_only,
             )
 
+    def test_authoritative_rule_publication_markers_precede_legacy_safely(self):
+        fallback = "RULE_PUBLICATION_COMMAND_EXIT_NONZERO"
+        prefix = verify_e2e.RULE_PUBLICATION_FAILURE_WIRE_PREFIX
+        legacy_by_code = {
+            code: lines[0]
+            for code, lines in
+            verify_e2e.RULE_PUBLICATION_RUNNER_FAILURE_LINES.items()
+        }
+        self.assertEqual(
+            verify_e2e.RULE_PUBLICATION_AUTHORITATIVE_FAILURE_CODES,
+            frozenset({
+                "RULE_PUBLICATION_BACKEND_STARTUP_FAILED",
+                "RULE_PUBLICATION_RUNNER_CONFIGURATION_FAILED",
+                "RULE_PUBLICATION_SERVICE_EXECUTION_FAILED",
+                *verify_e2e.RULE_PUBLICATION_RUNNER_FAILURE_LINES,
+            }),
+        )
+
+        for code in verify_e2e.RULE_PUBLICATION_AUTHORITATIVE_FAILURE_CODES:
+            stdout = b"ordinary startup\n"
+            if code in legacy_by_code:
+                stdout += (legacy_by_code[code] + "\n").encode()
+            capture = verify_e2e.NativeCommandCapture(
+                1, stdout, (prefix + code + "\n").encode()
+            )
+            with self.subTest(code=code):
+                self.assertEqual(
+                    verify_e2e.classify_rule_publication_nonzero(capture),
+                    code,
+                )
+
+        known = "RULE_PUBLICATION_SERVICE_EXECUTION_FAILED"
+        other = "RULE_PUBLICATION_RUNNER_CONFIGURATION_FAILED"
+        first_legacy = next(iter(legacy_by_code.values()))
+        hostile = {
+            "unknown": (b"", (prefix + "UNKNOWN_CODE\n").encode()),
+            "duplicate": (
+                b"", (prefix + known + "\n" + prefix + known + "\n").encode()
+            ),
+            "different": (
+                b"", (prefix + known + "\n" + prefix + other + "\n").encode()
+            ),
+            "valid-malformed": (
+                b"", (prefix + known + "\n" + prefix + known + "-raw\n").encode()
+            ),
+            "conflicting-legacy": (
+                (first_legacy + "\n").encode(), (prefix + known + "\n").encode()
+            ),
+            "prefix": (b"", ("raw" + prefix + known + "\n").encode()),
+            "suffix": (b"", (prefix + known + "raw\n").encode()),
+            "leading-space": (b"", (" " + prefix + known + "\n").encode()),
+            "trailing-space": (b"", (prefix + known + " \n").encode()),
+            "lowercase": (b"", (prefix + known).lower().encode() + b"\n"),
+            "case-variant": (
+                b"", (prefix + known.replace("RULE", "Rule", 1) + "\n").encode()
+            ),
+            "mixed-newline": (
+                b"ordinary\r\n", (prefix + known + "\n").encode()
+            ),
+            "lone-cr": (b"", (prefix + known + "\r").encode()),
+            "c0": (b"", (prefix + known + "\x01\n").encode()),
+            "c1": (b"", (prefix + known + "\x85\n").encode()),
+            "cf": (b"", (prefix + known + "\u200b\n").encode()),
+            "invalid-utf8": (b"", (prefix + known).encode() + b"\xff\n"),
+            "partial": (b"", (prefix + known[:-1]).encode()),
+            "unterminated": (b"", (prefix + known).encode()),
+            "success": (
+                (verify_e2e.RULE_PUBLICATION_RUNNER_SUCCESS_MARKER
+                 + "PUBLISHED\n").encode(),
+                (prefix + known + "\n").encode(),
+            ),
+            "stdout-marker": ((prefix + known + "\n").encode(), b""),
+        }
+        for name, (stdout, stderr) in hostile.items():
+            with self.subTest(case=name):
+                self.assertEqual(
+                    verify_e2e.classify_rule_publication_nonzero(
+                        verify_e2e.NativeCommandCapture(1, stdout, stderr)
+                    ),
+                    fallback,
+                )
+
+        raw = (
+            "raw sentinel path SQL credential token exception body\n"
+        ).encode()
+        observed = verify_e2e.classify_rule_publication_nonzero(
+            verify_e2e.NativeCommandCapture(
+                1, raw, (prefix + known + "\n").encode()
+            )
+        )
+        self.assertEqual(observed, known)
+        self.assertNotIn("sentinel", observed)
+
+        for stream_name in ("stdout", "stderr"):
+            capture = verify_e2e.NativeCommandCapture(
+                1,
+                b"" if stream_name == "stderr" else (prefix + known).encode(),
+                b"" if stream_name == "stdout" else (prefix + known).encode(),
+                stdout_overflow=stream_name == "stdout",
+                stderr_overflow=stream_name == "stderr",
+            )
+            self.assertEqual(
+                verify_e2e.classify_rule_publication_nonzero(capture),
+                fallback,
+            )
+
+        for stream_name in ("stdout", "stderr"):
+            stdout = (prefix + known + "\n").encode() if stream_name == "stdout" else b""
+            stderr = (prefix + known + "\n").encode() if stream_name == "stderr" else b""
+            capture = verify_e2e.NativeCommandCapture(0, stdout, stderr)
+            with self.subTest(exit_zero_stream=stream_name), mock.patch.object(
+                verify_e2e, "capture_native_command", return_value=capture
+            ), self.assertRaisesRegex(
+                verify_e2e.VerificationError,
+                "^RULE_PUBLICATION_COMMAND_OUTPUT_INVALID$",
+            ):
+                verify_e2e.run_command(
+                    ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                    before_stage="RULE_PUBLICATION_COMMAND",
+                )
+
+    def test_backend_authoritative_marker_literals_are_source_owned(self):
+        source = (
+            Path(__file__).resolve().parents[3]
+            / "backend/src/main/java/com/aifds/backend/rule/operation/"
+            "RuleV1DefaultRuleSetPublicationDiagnosticBoundary.java"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(
+            source.count('"FINGUARDOPS_RULE_PUBLICATION_FAILURE="'), 1
+        )
+        for code in verify_e2e.RULE_PUBLICATION_AUTHORITATIVE_FAILURE_CODES:
+            with self.subTest(code=code):
+                self.assertGreaterEqual(source.count('"' + code + '"'), 1)
+
     def test_rule_publication_service_lines_are_authoritative_and_unique(self):
         source_root = (
             Path(__file__).resolve().parents[3]
