@@ -33,6 +33,122 @@ def publication_success_output(newline="\n"):
     ).encode()
 
 
+# A production-equivalent synthetic capture. It is NOT a copy of real Docker
+# output: it is assembled from repository-owned producer contracts only —
+# RuleV1DefaultRuleSetPublicationRunner.reportSuccess's message, the
+# PublicationOutcome.PUBLISHED literal, RuleV1DefaultRuleSetPublicationResult's
+# four UUID ruleVersionIds and 64-hex ruleSetVersion, Spring Boot 3.5.16's
+# CONSOLE_LOG_PATTERN (%5p level, PID, "---", [%15.15t] thread and the
+# %-40.40logger{39} truncation) and application.yml's
+# logging.pattern.correlation field.
+PRODUCTION_LOGGER = ".o.RuleV1DefaultRuleSetPublicationRunner"
+PRODUCTION_CORRELATION = "[traceId=no-trace] "
+PRODUCTION_RULE_VERSION_IDS = (
+    "6c9f1a2b-1111-4111-8111-111111111111",
+    "7a1b2c3d-2222-4222-8222-222222222222",
+    "8c2d3e4f-3333-4333-8333-333333333333",
+    "9e3f4a5b-4444-4444-8444-444444444444",
+)
+PRODUCTION_BANNER = (
+    "\n"
+    "  .   ____          _            __ _ _\n"
+    " /\\\\ / ___'_ __ _ _(_)_ __  __ _ \\ \\ \\ \\\n"
+    "( ( )\\___ | '_ | '_| | '_ \\/ _` | \\ \\ \\ \\\n"
+    " \\\\/  ___)| |_)| | | | | || (_| |  ) ) ) )\n"
+    "  '  |____| .__|_| |_|_| |_\\__, | / / / /\n"
+    " =========|_|==============|___/=/_/_/_/\n"
+    "\n"
+    " :: Spring Boot ::               (v3.5.16)\n"
+    "\n"
+)
+
+
+def production_boot_line(logger, message, level="INFO", timestamp="2026-09-26T12:45:14.512Z"):
+    field = logger if len(logger) >= 40 else logger.ljust(40)
+    return "%s %5s 1 --- [           main] %s%s : %s" % (
+        timestamp, level, PRODUCTION_CORRELATION, field, message
+    )
+
+
+def production_success_message():
+    return (
+        verify_e2e.RULE_PUBLICATION_RUNNER_SUCCESS_EVIDENCE
+        + " ruleVersionIds=[" + ", ".join(PRODUCTION_RULE_VERSION_IDS) + "]"
+        + " effectiveFrom=2026-09-26T12:46:13Z"
+        + " publishedAt=2026-09-26T12:45:14.512345Z"
+        + " ruleSetVersion=" + "a" * 64
+    )
+
+
+def publication_production_success_output(newline="\n"):
+    lines = [
+        production_boot_line(
+            "c.a.backend.BackendApplication",
+            "Starting BackendApplication v0.0.1 using Java 21.0.5 with PID 1"
+            " (/app/backend.jar started by root in /)",
+            timestamp="2026-09-26T12:45:08.001Z",
+        ),
+        production_boot_line(
+            "c.a.backend.BackendApplication",
+            'The following 2 profiles are active: "local",'
+            ' "rule-v1-default-publication"',
+            timestamp="2026-09-26T12:45:08.004Z",
+        ),
+        production_boot_line(
+            "faultConfigurationDelegate$Registrar",
+            "Bootstrapping Spring Data JPA repositories in DEFAULT mode.",
+            timestamp="2026-09-26T12:45:09.512Z",
+        ),
+        production_boot_line(
+            "o.f.c.internal.license.VersionPrinter",
+            "Flyway Community Edition 11.7.2 by Redgate",
+            timestamp="2026-09-26T12:45:10.001Z",
+        ),
+        production_boot_line(
+            "c.i.database.base.BaseDatabaseType",
+            "Database: jdbc:postgresql://postgresql:5432/finguardops"
+            " (PostgreSQL 17.6)",
+            timestamp="2026-09-26T12:45:10.002Z",
+        ),
+        production_boot_line(
+            "com.zaxxer.hikari.HikariDataSource",
+            "HikariPool-1 - Starting...",
+            timestamp="2026-09-26T12:45:10.500Z",
+        ),
+        production_boot_line(
+            "o.hibernate.jpa.internal.util.LogHelper",
+            "HHH000204: Processing PersistenceUnitInfo [name: default]",
+            timestamp="2026-09-26T12:45:11.100Z",
+        ),
+        production_boot_line(
+            "o.s.b.a.orm.jpa.JpaBaseConfiguration",
+            "spring.jpa.open-in-view is disabled",
+            level="WARN",
+            timestamp="2026-09-26T12:45:13.900Z",
+        ),
+        production_boot_line(PRODUCTION_LOGGER, production_success_message()),
+        production_boot_line(
+            "c.a.backend.BackendApplication",
+            "Started BackendApplication in 6.82 seconds (process running for 7.31)",
+            timestamp="2026-09-26T12:45:14.600Z",
+        ),
+        production_boot_line(
+            "com.zaxxer.hikari.HikariDataSource",
+            "HikariPool-1 - Shutdown initiated...",
+            timestamp="2026-09-26T12:45:14.700Z",
+        ),
+        production_boot_line(
+            "com.zaxxer.hikari.HikariDataSource",
+            "HikariPool-1 - Shutdown completed.",
+            timestamp="2026-09-26T12:45:14.760Z",
+        ),
+    ]
+    body = PRODUCTION_BANNER + "".join(line + "\n" for line in lines)
+    if newline != "\n":
+        body = body.replace("\n", newline)
+    return body.encode()
+
+
 def service(image=None, *, secrets=()):
     value = {
         "image": image,
@@ -1216,6 +1332,9 @@ finguardops_rule_analysis_outcomes_created 99
                 "oversize": codes["output"],
                 "cleanup": codes["cleanup"],
             }
+            if stage == "RULE_PUBLICATION_COMMAND":
+                expected["malformed"] = verify_e2e.RULE_PUBLICATION_STDOUT_INVALID
+                expected["stderr"] = verify_e2e.RULE_PUBLICATION_STDERR_INVALID
             for name, capture in cases.items():
                 with self.subTest(stage=stage, failure=name), mock.patch.object(
                     verify_e2e, "capture_native_command", return_value=capture
@@ -1286,51 +1405,68 @@ finguardops_rule_analysis_outcomes_created 99
         prefix = verify_e2e.RULE_PUBLICATION_FAILURE_WIRE_PREFIX
         codes = sorted(verify_e2e.RULE_PUBLICATION_AUTHORITATIVE_FAILURE_CODES)
         approved = next(iter(verify_e2e.RULE_PUBLICATION_RUNNER_FAILURE_LINES.values()))[0]
+        marker = verify_e2e.RULE_PUBLICATION_SUCCESS_MARKER_INVALID
+        evidence = verify_e2e.RULE_PUBLICATION_FAILURE_EVIDENCE_INVALID
+        shape = verify_e2e.RULE_PUBLICATION_STDERR_INVALID
+        overflow_code = "RULE_PUBLICATION_COMMAND_OUTPUT_INVALID"
         hostile = {
-            "missing-success": (b"ordinary Spring Boot output\n", b"", False),
+            "missing-success": (b"ordinary Spring Boot output\n", b"", False, marker),
             "noncanonical-success": (
                 (verify_e2e.RULE_PUBLICATION_RUNNER_SUCCESS_EVIDENCE + "\n").encode(),
                 b"",
                 False,
+                marker,
             ),
-            "duplicate-success": (success + success, b"", False),
-            "authoritative": (success, (prefix + codes[0] + "\n").encode(), False),
-            "approved-java": (success, (approved + "\n").encode(), False),
-            "exception": (success, b"java.lang.IllegalStateException: hidden\n", False),
-            "stack-frame": (success, b"\tat com.example.Type.run(Type.java:1)\n", False),
-            "invalid-utf8": (success, b"\xff\n", False),
-            "bom": (success, b"\xef\xbb\xbfdiagnostic\n", False),
-            "nul": (success, b"diagnostic\x00\n", False),
-            "c0": (success, b"diagnostic\x01\n", False),
-            "c1": (success, "diagnostic\u0085\n".encode(), False),
-            "cf": (success, "diagnostic\u200b\n".encode(), False),
-            "bare-cr": (success, b"diagnostic\r", False),
-            "unterminated": (success, b"diagnostic", False),
-            "mixed-newline": (success, b"first\r\nsecond\n", False),
+            "duplicate-success": (success + success, b"", False, marker),
+            "authoritative": (
+                success, (prefix + codes[0] + "\n").encode(), False, evidence
+            ),
+            "approved-java": (success, (approved + "\n").encode(), False, evidence),
+            "exception": (
+                success, b"java.lang.IllegalStateException: hidden\n", False, evidence
+            ),
+            "stack-frame": (
+                success, b"\tat com.example.Type.run(Type.java:1)\n", False, evidence
+            ),
+            "invalid-utf8": (success, b"\xff\n", False, shape),
+            "bom": (success, b"\xef\xbb\xbfdiagnostic\n", False, shape),
+            "nul": (success, b"diagnostic\x00\n", False, shape),
+            "c0": (success, b"diagnostic\x01\n", False, shape),
+            "c1": (success, "diagnostic\u0085\n".encode(), False, shape),
+            "cf": (success, "diagnostic\u200b\n".encode(), False, shape),
+            "bare-cr": (success, b"diagnostic\r", False, shape),
+            "unterminated": (success, b"diagnostic", False, shape),
+            "mixed-newline": (success, b"first\r\nsecond\n", False, shape),
             "too-many-lines": (
                 success,
                 b"x\n" * (verify_e2e.SEMANTIC_STDERR_MAX_LINES + 1),
                 False,
+                shape,
             ),
             "long-line": (
                 success,
                 ("x" * (verify_e2e.SEMANTIC_STDERR_MAX_LINE_LENGTH + 1) + "\n").encode(),
                 False,
+                shape,
             ),
-            "overflow": (success, b"bounded\n", True),
+            "overflow": (success, b"bounded\n", True, overflow_code),
             "duplicate-marker": (
                 success,
                 ((prefix + codes[0] + "\n") * 2).encode(),
                 False,
+                evidence,
             ),
             "conflicting-marker": (
                 success,
                 (prefix + codes[0] + "\n" + prefix + codes[1] + "\n").encode(),
                 False,
+                evidence,
             ),
-            "malformed-marker": (success, (prefix + "UNKNOWN\n").encode(), False),
+            "malformed-marker": (
+                success, (prefix + "UNKNOWN\n").encode(), False, evidence
+            ),
         }
-        for name, (stdout, stderr, overflow) in hostile.items():
+        for name, (stdout, stderr, overflow, expected_code) in hostile.items():
             capture = verify_e2e.NativeCommandCapture(
                 0, stdout, stderr, stderr_overflow=overflow
             )
@@ -1338,12 +1474,228 @@ finguardops_rule_analysis_outcomes_created 99
                 verify_e2e, "capture_native_command", return_value=capture
             ), self.assertRaisesRegex(
                 verify_e2e.VerificationError,
-                "^RULE_PUBLICATION_COMMAND_OUTPUT_INVALID$",
+                "^" + expected_code + "$",
             ) as raised:
                 verify_e2e.run_command(
                     ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
                     before_stage="RULE_PUBLICATION_COMMAND",
                 )
+            self.assertNotIn("hidden", str(raised.exception))
+
+    def assert_publication_code(self, stdout, stderr, code, **capture_flags):
+        capture = verify_e2e.NativeCommandCapture(0, stdout, stderr, **capture_flags)
+        with mock.patch.object(
+            verify_e2e, "capture_native_command", return_value=capture
+        ), self.assertRaisesRegex(
+            verify_e2e.VerificationError, "^" + code + "$"
+        ) as raised:
+            verify_e2e.run_command(
+                ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                before_stage="RULE_PUBLICATION_COMMAND",
+            )
+        self.assertNotIn("NeverPrint", str(raised.exception))
+        self.assertNotIn("hidden", str(raised.exception))
+
+    def test_publication_production_equivalent_success_is_accepted(self):
+        for newline in ("\n", "\r\n"):
+            stdout = publication_production_success_output(newline)
+            for name, stderr in {
+                "empty": b"",
+                "benign-lf": b" Container fgo-backend-run-x  Created\n",
+                "benign-crlf": b" Container fgo-backend-run-x  Created\r\n",
+                "benign-multi": (
+                    b" Container fgo-backend-run-x  Created\n"
+                    b" Container fgo-backend-run-x  Started\n"
+                ),
+            }.items():
+                capture = verify_e2e.NativeCommandCapture(0, stdout, stderr)
+                with self.subTest(newline=repr(newline), stderr=name), mock.patch.object(
+                    verify_e2e, "capture_native_command", return_value=capture
+                ):
+                    self.assertEqual(
+                        verify_e2e.run_command(
+                            ["fixed-executable"], timeout=1, cwd=Path.cwd(),
+                            environment={}, before_stage="RULE_PUBLICATION_COMMAND",
+                        ),
+                        stdout,
+                    )
+
+    def test_publication_stderr_step_has_its_own_identity(self):
+        success = publication_production_success_output()
+        cases = {
+            "invalid-utf8": b"\xff\n",
+            "unterminated": b"NeverPrintDiagnostic",
+            "bare-cr": b"NeverPrintDiagnostic\r",
+            "mixed-newline": b"first\r\nsecond\n",
+            "nul": b"NeverPrintDiagnostic\x00\n",
+            "c0": b"NeverPrintDiagnostic\x01\n",
+            "c1": "NeverPrintDiagnostic\u0085\n".encode(),
+            "cf": "NeverPrintDiagnostic\u200b\n".encode(),
+            "bom": b"\xef\xbb\xbfNeverPrintDiagnostic\n",
+            "too-many-lines": b"x\n" * (verify_e2e.SEMANTIC_STDERR_MAX_LINES + 1),
+            "long-line": (
+                "x" * (verify_e2e.SEMANTIC_STDERR_MAX_LINE_LENGTH + 1) + "\n"
+            ).encode(),
+        }
+        for name, stderr in cases.items():
+            with self.subTest(case=name):
+                self.assert_publication_code(
+                    success, stderr, verify_e2e.RULE_PUBLICATION_STDERR_INVALID
+                )
+
+    def test_publication_failure_evidence_step_has_its_own_identity(self):
+        success = publication_production_success_output()
+        prefix = verify_e2e.RULE_PUBLICATION_FAILURE_WIRE_PREFIX
+        codes = sorted(verify_e2e.RULE_PUBLICATION_AUTHORITATIVE_FAILURE_CODES)
+        approved = next(
+            iter(verify_e2e.RULE_PUBLICATION_RUNNER_FAILURE_LINES.values())
+        )[0]
+        cases = {
+            "authoritative": (success, (prefix + codes[0] + "\n").encode()),
+            "malformed-marker": (success, (prefix + "UNKNOWN\n").encode()),
+            "duplicate-marker": (success, ((prefix + codes[0] + "\n") * 2).encode()),
+            "conflicting-marker": (
+                success,
+                (prefix + codes[0] + "\n" + prefix + codes[1] + "\n").encode(),
+            ),
+            "stdout-marker": (success + (prefix + codes[0] + "\n").encode(), b""),
+            "legacy-java": (success, (approved + "\n").encode()),
+            "stdout-legacy-java": (success + (approved + "\n").encode(), b""),
+            "exception-headline": (
+                success, b"java.lang.IllegalStateException: hidden\n"
+            ),
+            "stack-frame": (success, b"\tat com.example.Type.run(Type.java:1)\n"),
+        }
+        for name, (stdout, stderr) in cases.items():
+            with self.subTest(case=name):
+                self.assert_publication_code(
+                    stdout,
+                    stderr,
+                    verify_e2e.RULE_PUBLICATION_FAILURE_EVIDENCE_INVALID,
+                )
+
+    def test_publication_stdout_step_has_its_own_identity(self):
+        success = publication_production_success_output()
+        cases = {
+            "invalid-utf8": success + b"\xff\n",
+            "unterminated": success.rstrip(b"\n"),
+            "bare-cr": success + b"NeverPrintTail\r",
+            "mixed-newline": success.replace(b"\n", b"\r\n", 1),
+            "nul": success + b"NeverPrintTail\x00\n",
+            "c0": success + b"NeverPrintTail\x01\n",
+            "c1": success + "NeverPrintTail\u0085\n".encode(),
+            "cf": success + "NeverPrintTail\u200b\n".encode(),
+        }
+        for name, stdout in cases.items():
+            with self.subTest(case=name):
+                self.assert_publication_code(
+                    stdout, b"", verify_e2e.RULE_PUBLICATION_STDOUT_INVALID
+                )
+
+    def test_publication_success_marker_step_has_its_own_identity(self):
+        success = publication_production_success_output()
+        evidence = verify_e2e.RULE_PUBLICATION_RUNNER_SUCCESS_EVIDENCE
+        cases = {
+            "missing": (b"ordinary Spring Boot output\n", b""),
+            "duplicate-stdout": (success + success, b""),
+            "stderr-only": (b"ordinary Spring Boot output\n", (evidence + "\n").encode()),
+            "stdout-and-stderr": (success, (evidence + "\n").encode()),
+            "not-canonical": ((evidence + "\n").encode(), b""),
+            "no-log-prefix": (
+                (production_success_message() + "\n").encode(), b""
+            ),
+        }
+        for name, (stdout, stderr) in cases.items():
+            with self.subTest(case=name):
+                self.assert_publication_code(
+                    stdout, stderr, verify_e2e.RULE_PUBLICATION_SUCCESS_MARKER_INVALID
+                )
+
+    def test_publication_output_invalid_fallback_is_preserved(self):
+        success = publication_production_success_output()
+        fallback = verify_e2e.BEFORE_NATIVE_FAILURE_CODES[
+            "RULE_PUBLICATION_COMMAND"
+        ]["output"]
+        self.assertEqual("RULE_PUBLICATION_COMMAND_OUTPUT_INVALID", fallback)
+        self.assert_publication_code(
+            success, b"", fallback, stdout_overflow=True
+        )
+        self.assert_publication_code(
+            success, b"bounded\n", fallback, stderr_overflow=True
+        )
+        unclassified = {
+            "unknown-literal": ValueError("RULE_PUBLICATION_COMMAND_MADE_UP"),
+            "free-text": ValueError("something unexpected NeverPrint"),
+            "two-args": ValueError(
+                verify_e2e.RULE_PUBLICATION_STDERR_INVALID, "extra"
+            ),
+            "non-string": ValueError(17),
+            "subclass": UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid"),
+        }
+        for name, error in unclassified.items():
+            with self.subTest(case=name), mock.patch.object(
+                verify_e2e,
+                "validate_semantic_compose_run_output",
+                side_effect=error,
+            ):
+                self.assert_publication_code(success, b"", fallback)
+        with mock.patch.object(
+            verify_e2e,
+            "validate_semantic_compose_run_output",
+            side_effect=ValueError(verify_e2e.RULE_PUBLICATION_STDERR_INVALID),
+        ):
+            self.assert_publication_code(
+                success, b"", verify_e2e.RULE_PUBLICATION_STDERR_INVALID
+            )
+
+    def test_publication_semantic_codes_are_fixed_literals(self):
+        self.assertEqual(
+            (
+                "RULE_PUBLICATION_COMMAND_STDERR_INVALID",
+                "RULE_PUBLICATION_COMMAND_FAILURE_EVIDENCE_INVALID",
+                "RULE_PUBLICATION_COMMAND_STDOUT_INVALID",
+                "RULE_PUBLICATION_COMMAND_SUCCESS_MARKER_INVALID",
+            ),
+            verify_e2e.RULE_PUBLICATION_SEMANTIC_FAILURE_CODES,
+        )
+        for stage in sorted(verify_e2e.BEFORE_NATIVE_FAILURE_CODES):
+            if stage == "RULE_PUBLICATION_COMMAND":
+                continue
+            with self.subTest(stage=stage):
+                self.assertEqual(
+                    verify_e2e.BEFORE_NATIVE_FAILURE_CODES[stage]["output"],
+                    verify_e2e.semantic_output_failure_code(
+                        stage,
+                        ValueError(verify_e2e.RULE_PUBLICATION_STDERR_INVALID),
+                    ),
+                )
+
+    def test_backend_metric_semantic_stage_identity_is_unchanged(self):
+        fallback = verify_e2e.BEFORE_NATIVE_FAILURE_CODES[
+            "BACKEND_METRIC_SNAPSHOT"
+        ]["output"]
+        cases = {
+            "stderr-unterminated": (b"[0,0]\n", b"NeverPrintDiagnostic"),
+            "stderr-invalid-utf8": (b"[0,0]\n", b"\xff\n"),
+            "stdout-invalid-utf8": (b"\xff", b""),
+            "stdout-not-json": (b"NeverPrintOutput\n", b""),
+            "stdout-wrong-shape": (b'{"raw":"NeverPrint"}', b""),
+            "failure-evidence": (
+                b"[0,0]\n", b"java.lang.IllegalStateException: hidden\n"
+            ),
+        }
+        for name, (stdout, stderr) in cases.items():
+            capture = verify_e2e.NativeCommandCapture(0, stdout, stderr)
+            with self.subTest(case=name), mock.patch.object(
+                verify_e2e, "capture_native_command", return_value=capture
+            ), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "^" + fallback + "$"
+            ) as raised:
+                verify_e2e.run_command(
+                    ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                    before_stage="BACKEND_METRIC_SNAPSHOT",
+                )
+            self.assertNotIn("NeverPrint", str(raised.exception))
             self.assertNotIn("hidden", str(raised.exception))
 
     def test_backend_metric_compose_run_benign_stderr_is_not_the_result(self):
@@ -1628,7 +1980,7 @@ finguardops_rule_analysis_outcomes_created 99
             verify_e2e, "capture_native_command", return_value=false_success
         ), self.assertRaisesRegex(
             verify_e2e.VerificationError,
-            "^RULE_PUBLICATION_COMMAND_OUTPUT_INVALID$",
+            "^" + verify_e2e.RULE_PUBLICATION_FAILURE_EVIDENCE_INVALID + "$",
         ):
             verify_e2e.run_command(
                 ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
@@ -1653,7 +2005,7 @@ finguardops_rule_analysis_outcomes_created 99
                 verify_e2e, "capture_native_command", return_value=capture
             ), self.assertRaisesRegex(
                 verify_e2e.VerificationError,
-                "^RULE_PUBLICATION_COMMAND_OUTPUT_INVALID$",
+                "^" + verify_e2e.RULE_PUBLICATION_FAILURE_EVIDENCE_INVALID + "$",
             ):
                 verify_e2e.run_command(
                     ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
@@ -1790,7 +2142,7 @@ finguardops_rule_analysis_outcomes_created 99
                 verify_e2e, "capture_native_command", return_value=capture
             ), self.assertRaisesRegex(
                 verify_e2e.VerificationError,
-                "^RULE_PUBLICATION_COMMAND_OUTPUT_INVALID$",
+                "^" + verify_e2e.RULE_PUBLICATION_FAILURE_EVIDENCE_INVALID + "$",
             ):
                 verify_e2e.run_command(
                     ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},

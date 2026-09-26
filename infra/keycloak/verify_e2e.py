@@ -321,6 +321,20 @@ RULE_PUBLICATION_RUNNER_SUCCESS_LOG_LINE = re.compile(
     + re.escape(RULE_PUBLICATION_RUNNER_SUCCESS_EVIDENCE)
     + r"(?: +[^\r\n]+)?\Z"
 )
+RULE_PUBLICATION_STDERR_INVALID = "RULE_PUBLICATION_COMMAND_STDERR_INVALID"
+RULE_PUBLICATION_FAILURE_EVIDENCE_INVALID = (
+    "RULE_PUBLICATION_COMMAND_FAILURE_EVIDENCE_INVALID"
+)
+RULE_PUBLICATION_STDOUT_INVALID = "RULE_PUBLICATION_COMMAND_STDOUT_INVALID"
+RULE_PUBLICATION_SUCCESS_MARKER_INVALID = (
+    "RULE_PUBLICATION_COMMAND_SUCCESS_MARKER_INVALID"
+)
+RULE_PUBLICATION_SEMANTIC_FAILURE_CODES = (
+    RULE_PUBLICATION_STDERR_INVALID,
+    RULE_PUBLICATION_FAILURE_EVIDENCE_INVALID,
+    RULE_PUBLICATION_STDOUT_INVALID,
+    RULE_PUBLICATION_SUCCESS_MARKER_INVALID,
+)
 INGESTION_STEPS = (
     "auth-denial",
     "behavior-create",
@@ -1953,6 +1967,10 @@ def classify_rule_publication_nonzero(capture: NativeCommandCapture) -> str:
     return matches[0] if len(matches) == 1 else fallback
 
 
+def decode_strict_utf8(output: bytes) -> str:
+    return output.decode("utf-8", "strict")
+
+
 def semantic_text_lines(
     output: bytes,
     *,
@@ -2020,14 +2038,83 @@ def has_rule_publication_failure_evidence(stdout: bytes, stderr: bytes) -> bool:
     return False
 
 
+# The publication stage owns four fixed identities, one per validation step, so
+# that a successful exit which still fails output validation says which step
+# rejected it. Only compile-time literals from
+# RULE_PUBLICATION_SEMANTIC_FAILURE_CODES travel outwards; every other
+# rejection keeps the existing OUTPUT_INVALID fallback, and no candidate byte,
+# line, path or exception text is ever reflected.
+# A factory rather than a raiser: every caller spells `raise`, so there is no
+# shape in which a step failure can fall through as a falsy return value.
+def semantic_failure(publication: bool, code: str) -> ValueError:
+    if publication:
+        for approved in RULE_PUBLICATION_SEMANTIC_FAILURE_CODES:
+            if code == approved:
+                return ValueError(approved)
+    return ValueError("semantic compose run output rejected")
+
+
+def run_semantic_step(publication: bool, code: str, step, *arguments):
+    try:
+        return step(*arguments)
+    except (UnicodeError, ValueError) as error:
+        raise semantic_failure(publication, code) from error
+
+
+def semantic_output_failure_code(stage: str, error: BaseException) -> str:
+    fallback = BEFORE_NATIVE_FAILURE_CODES[stage]["output"]
+    if stage != "RULE_PUBLICATION_COMMAND" or type(error) is not ValueError:
+        return fallback
+    if len(error.args) != 1 or not isinstance(error.args[0], str):
+        return fallback
+    for approved in RULE_PUBLICATION_SEMANTIC_FAILURE_CODES:
+        if error.args[0] == approved:
+            return approved
+    return fallback
+
+
 def validate_semantic_compose_run_output(
     stage: str, stdout: bytes, stderr: bytes
 ) -> None:
-    stderr_lines = validate_compose_run_stderr(stderr)
-    if has_rule_publication_failure_evidence(stdout, stderr):
-        raise ValueError("failure evidence on successful compose run")
     if stage == "RULE_PUBLICATION_COMMAND":
-        stdout_text, stdout_lines = semantic_text_lines(stdout)
+        publication = True
+    elif stage == "BACKEND_METRIC_SNAPSHOT":
+        publication = False
+    else:
+        raise ValueError("unknown semantic stderr stage")
+    # Each stream is decoded first, so an undecodable stream is named by its own
+    # identity. Failure evidence is judged next, before the structural line rules,
+    # because an exception headline or stack frame is evidence rather than a shape
+    # violation. Every check HEAD performed still runs, in a superset.
+    run_semantic_step(
+        publication, RULE_PUBLICATION_STDERR_INVALID, decode_strict_utf8, stderr
+    )
+    run_semantic_step(
+        publication, RULE_PUBLICATION_STDOUT_INVALID, decode_strict_utf8, stdout
+    )
+    if run_semantic_step(
+        publication,
+        RULE_PUBLICATION_FAILURE_EVIDENCE_INVALID,
+        has_rule_publication_failure_evidence,
+        stdout,
+        stderr,
+    ):
+        raise semantic_failure(
+            publication, RULE_PUBLICATION_FAILURE_EVIDENCE_INVALID
+        )
+    stderr_lines = run_semantic_step(
+        publication,
+        RULE_PUBLICATION_STDERR_INVALID,
+        validate_compose_run_stderr,
+        stderr,
+    )
+    if publication:
+        stdout_text, stdout_lines = run_semantic_step(
+            publication,
+            RULE_PUBLICATION_STDOUT_INVALID,
+            semantic_text_lines,
+            stdout,
+        )
         marker_count = stdout_text.count(RULE_PUBLICATION_RUNNER_SUCCESS_MARKER)
         marker_count += sum(
             line.count(RULE_PUBLICATION_RUNNER_SUCCESS_MARKER)
@@ -2044,12 +2131,16 @@ def validate_semantic_compose_run_output(
                 matching_lines[0]
             ) is None
         ):
-            raise ValueError("invalid publication success evidence")
-    elif stage == "BACKEND_METRIC_SNAPSHOT":
-        stdout.decode("utf-8", "strict")
-    else:
-        raise ValueError("unknown semantic stderr stage")
-    validate_before_native_output(stage, stdout)
+            raise semantic_failure(
+                publication, RULE_PUBLICATION_SUCCESS_MARKER_INVALID
+            )
+    run_semantic_step(
+        publication,
+        RULE_PUBLICATION_FAILURE_EVIDENCE_INVALID,
+        validate_before_native_output,
+        stage,
+        stdout,
+    )
 
 
 def run_command(
@@ -2098,8 +2189,8 @@ def run_command(
                 if capture.stderr:
                     fail(codes["output"])
                 validate_before_native_output(before_stage, capture.stdout)
-        except (UnicodeError, json.JSONDecodeError, ValueError):
-            fail(codes["output"])
+        except (UnicodeError, json.JSONDecodeError, ValueError) as error:
+            fail(semantic_output_failure_code(before_stage, error))
         return capture.stdout
     if capture.cleanup_failed or capture.start_failed or capture.timed_out:
         fail("SUBPROCESS_FAILED")

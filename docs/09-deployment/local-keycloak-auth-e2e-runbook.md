@@ -585,6 +585,25 @@ prefix/suffix가 추가된 line, 같은 marker의 중복, 서로 다른 marker�
 `RULE_PUBLICATION_COMMAND_OUTPUT_INVALID`로 거부한다. 이 분류는 raw line, command, SQL, path,
 environment 또는 exit code를 외부 diagnostic에 포함하지 않는다.
 
+`RULE_PUBLICATION_COMMAND`의 exit 0 output validation은 네 단계이며 각 단계가 독립된 fixed identity를
+가진다. 두 stream을 먼저 strict UTF-8로 해석하고, failure evidence를 판정한 뒤, stderr와 stdout의 line
+구조를 검사하고, 마지막으로 success marker를 검사한다.
+
+| exit 0 output validation 단계 | fixed secondary |
+| --- | --- |
+| stderr strict UTF-8, final newline, bare CR, CRLF/LF 혼용, C0/C1/Cf/NUL, line 수·길이 상한 | `RULE_PUBLICATION_COMMAND_STDERR_INVALID` |
+| authoritative backend marker, malformed·중복·충돌 marker, legacy approved Java identity, exception headline, stack frame, stdout wire prefix | `RULE_PUBLICATION_COMMAND_FAILURE_EVIDENCE_INVALID` |
+| stdout strict UTF-8, final newline, bare CR, CRLF/LF 혼용, C0/C1/Cf/NUL | `RULE_PUBLICATION_COMMAND_STDOUT_INVALID` |
+| success marker 누락·중복, stderr marker, marker line cardinality, canonical success log-line 불일치 | `RULE_PUBLICATION_COMMAND_SUCCESS_MARKER_INVALID` |
+
+stdout/stderr overflow, 분류할 수 없는 output-validation failure, 승인 literal 외의 candidate는 기존
+`RULE_PUBLICATION_COMMAND_OUTPUT_INVALID`으로 fail-closed fallback한다. 네 code는 compile-time
+literal이며 raw stdout/stderr, line, path, exception, SQL, environment, credential을 반사하지 않는다.
+`BACKEND_METRIC_SNAPSHOT`을 포함한 다른 여덟 native stage의 identity와 stderr 계약, 그리고
+`PROCESS_START_FAILED`·`TIMEOUT`·`EXIT_NONZERO`·`CLEANUP_FAILED` 우선순위는 변하지 않는다. 허용
+범위와 검증 강도도 변하지 않는다. 이 분리는 product root-cause fix가 아니라 실패 단계를 한 번의 공식
+Run에서 식별하기 위한 safe classification 개선이다.
+
 Run fixture는 `PASSWORD_CHANGED`, `TRANSFER_LIMIT_CHANGED` behavior event와 12,000,000 KRW
 `ACCOUNT_TRANSFER`를 한 세트 생성한다. 기대 delta는 BehaviorEvent 2, FinancialTransaction 1,
 IdempotencyRecord 1, DetectionResult 1, DetectionEvidence 2, FraudCase 1, CaseTransaction 1,

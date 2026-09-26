@@ -7043,6 +7043,10 @@ function Invoke-D315StageDiagnosticTargetedTests {
             'TRANSACTION_CARDINALITY_SNAPSHOT','DATABASE_GLOBAL_SNAPSHOT','EXTERNAL_RISK_LOG_SNAPSHOT',
             'RULE_V2_LOG_SNAPSHOT','BACKEND_METRIC_SNAPSHOT')
         $types=@('PROCESS_START_FAILED','TIMEOUT','EXIT_NONZERO','OUTPUT_INVALID','CLEANUP_FAILED')
+        $publicationSemanticCodes=@('RULE_PUBLICATION_COMMAND_STDERR_INVALID',
+            'RULE_PUBLICATION_COMMAND_FAILURE_EVIDENCE_INVALID',
+            'RULE_PUBLICATION_COMMAND_STDOUT_INVALID',
+            'RULE_PUBLICATION_COMMAND_SUCCESS_MARKER_INVALID')
         $runnerCodes=@('RULE_PUBLICATION_BACKEND_STARTUP_FAILED',
             'RULE_PUBLICATION_CONTEXT_REFRESH_FAILED','RULE_PUBLICATION_PRE_RUNNER_FAILED',
             'RULE_PUBLICATION_RUNNER_CONFIGURATION_FAILED','RULE_PUBLICATION_SERVICE_EXECUTION_FAILED',
@@ -7057,7 +7061,10 @@ function Invoke-D315StageDiagnosticTargetedTests {
         $expected=[Collections.Generic.List[string]]::new()
         foreach($stage in $stages){
             foreach($type in $types){$expected.Add($stage+'_'+$type)}
-            if($stage -ceq 'RULE_PUBLICATION_COMMAND'){foreach($code in $runnerCodes){$expected.Add($code)}}
+            if($stage -ceq 'RULE_PUBLICATION_COMMAND'){
+                foreach($code in $publicationSemanticCodes){$expected.Add($code)}
+                foreach($code in $runnerCodes){$expected.Add($code)}
+            }
         }
         $result = & $script:E2EModule {
             param($codes)
@@ -7084,7 +7091,18 @@ function Invoke-D315StageDiagnosticTargetedTests {
                 "RULE_PUBLISHED_STATE_EXIT_NONZERO`r`n",
                 ('RULE_PUBLISHED_STATE_EXIT_NONZERO'+[char]1),
                 ('RULE_PUBLISHED_STATE_EXIT_NONZERO'+[char]0x85),
-                ('RULE_PUBLISHED_STATE_EXIT_NONZERO'+[char]0x200B)
+                ('RULE_PUBLISHED_STATE_EXIT_NONZERO'+[char]0x200B),
+                'RULE_PUBLICATION_COMMAND_STDERR_INVALID_RAW',
+                'RULE_PUBLICATION_COMMAND_STDERR_INVALID RULE_PUBLICATION_COMMAND_STDOUT_INVALID',
+                'rule_publication_command_stderr_invalid',
+                'Rule_PUBLICATION_COMMAND_STDERR_INVALID',
+                ' RULE_PUBLICATION_COMMAND_STDERR_INVALID',
+                'RULE_PUBLICATION_COMMAND_STDERR_INVALID ',
+                "RULE_PUBLICATION_COMMAND_STDERR_INVALID`r`n",
+                ('RULE_PUBLICATION_COMMAND_STDERR_INVALID'+[char]1),
+                ('RULE_PUBLICATION_COMMAND_STDERR_INVALID'+[char]0x85),
+                ('RULE_PUBLICATION_COMMAND_STDERR_INVALID'+[char]0x200B),
+                'RULE_PUBLICATION_COMMAND_MARKER_INVALID'
             )
             $rejected=[Collections.Generic.List[string]]::new()
             foreach($candidate in $invalid){if(-not(Test-E2ERunFixtureBeforeSecondaryCode $candidate)){$rejected.Add('rejected')}}
@@ -7098,7 +7116,7 @@ function Invoke-D315StageDiagnosticTargetedTests {
             Assert-Equal 1 @($item.Records).Count ("Diagnostic cardinality changed for "+$item.Code)
             Assert-Equal ('RUN_FIXTURE_BEFORE_SECONDARY='+$item.Code) $item.Records[0] ("Secondary changed for "+$item.Code)
         }
-        Assert-Equal 10 $result.Rejected 'A malformed or generic stage code was accepted.'
+        Assert-Equal 21 $result.Rejected 'A malformed or generic stage code was accepted.'
         Assert-Equal @('RUN_FIXTURE_BEFORE_SECONDARY=RULE_PUBLISHED_STATE_PROCESS_START_FAILED') @($result.Records) `
             'Stage diagnostic writer changed or reflected candidate data.'
     }
@@ -7259,6 +7277,10 @@ function Invoke-D315TargetedTests {
             'TRANSACTION_CARDINALITY_SNAPSHOT','DATABASE_GLOBAL_SNAPSHOT','EXTERNAL_RISK_LOG_SNAPSHOT',
             'RULE_V2_LOG_SNAPSHOT','BACKEND_METRIC_SNAPSHOT')
         $expectedTypes=@('PROCESS_START_FAILED','TIMEOUT','EXIT_NONZERO','OUTPUT_INVALID','CLEANUP_FAILED')
+        $publicationSemanticCodes=@('RULE_PUBLICATION_COMMAND_STDERR_INVALID',
+            'RULE_PUBLICATION_COMMAND_FAILURE_EVIDENCE_INVALID',
+            'RULE_PUBLICATION_COMMAND_STDOUT_INVALID',
+            'RULE_PUBLICATION_COMMAND_SUCCESS_MARKER_INVALID')
         $expectedAllowlist=[Collections.Generic.List[string]]::new()
         $expectedRunnerCodes=@('RULE_PUBLICATION_BACKEND_STARTUP_FAILED',
             'RULE_PUBLICATION_CONTEXT_REFRESH_FAILED','RULE_PUBLICATION_PRE_RUNNER_FAILED',
@@ -7274,6 +7296,7 @@ function Invoke-D315TargetedTests {
         foreach($stageName in $expectedStages){
             foreach($typeName in $expectedTypes){$expectedAllowlist.Add($stageName+'_'+$typeName)}
             if($stageName -ceq 'RULE_PUBLICATION_COMMAND'){
+                foreach($code in $publicationSemanticCodes){$expectedAllowlist.Add($code)}
                 foreach($code in $expectedRunnerCodes){$expectedAllowlist.Add($code)}
             }
         }
