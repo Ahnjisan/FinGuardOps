@@ -888,18 +888,76 @@ class VerifyTests(unittest.TestCase):
                 )
 
     def test_realm_lifespan_and_verifier_maximum_do_not_drift(self):
-        lifespan = valid_realm()["accessTokenLifespan"]
-        self.assertEqual(900, lifespan)
-        verify_e2e.validate_token(
-            token({"iat": 100, "exp": 100 + lifespan}), "TRANSACTION_INGESTOR",
-            {"kid-1"}, current_time=500,
-        )
+        # Keycloak reads the clock twice while building a token: iat comes from
+        # JsonWebToken.issuedNow() and exp from getTokenExpiration(), so an
+        # issued token measures configured + D seconds where D is the number of
+        # whole-second boundaries crossed between the two reads. The configured
+        # value therefore sits exactly one second below the verifier maximum, so
+        # the ordinary D=1 crossing still lands on the maximum. Nothing here
+        # claims D can never exceed 1; D>=2 must stay a verifier failure.
+        configured = valid_realm()["accessTokenLifespan"]
+        verifier_maximum = 900
+        self.assertEqual(899, configured)
+        self.assertEqual(verifier_maximum, configured + 1)
+        for lifetime in (configured, configured + 1):
+            with self.subTest(lifetime=lifetime):
+                verify_e2e.validate_token(
+                    token({"iat": 100, "exp": 100 + lifetime}),
+                    "TRANSACTION_INGESTOR", {"kid-1"}, current_time=500,
+                )
         with self.assertRaisesRegex(
             verify_e2e.VerificationError, "^TOKEN_TIME_LIFETIME_INVALID$"
         ):
             verify_e2e.validate_token(
-                token({"iat": 100, "exp": 100 + lifespan + 1}),
+                token({"iat": 100, "exp": 100 + configured + 2}),
                 "TRANSACTION_INGESTOR", {"kid-1"}, current_time=500,
+            )
+
+    def test_static_realm_contract_accepts_the_configured_margin(self):
+        configured = valid_realm()["accessTokenLifespan"]
+        self.assertEqual(899, configured)
+        verify_e2e.validate_static(valid_config(), valid_realm())
+        for rejected in (0, 901):
+            realm = valid_realm()
+            realm["accessTokenLifespan"] = rejected
+            with self.subTest(lifespan=rejected), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "^STATIC_REALM_CONTRACT$"
+            ):
+                verify_e2e.validate_static(valid_config(), realm)
+        for accepted in (configured, 900):
+            realm = valid_realm()
+            realm["accessTokenLifespan"] = accepted
+            with self.subTest(lifespan=accepted):
+                verify_e2e.validate_static(valid_config(), realm)
+
+    def test_issued_lifetime_bound_holds_for_the_configured_margin(self):
+        # exp - iat == configured + D, derived from Keycloak 26.7.3:
+        #   iat = floor(M1 / 1000)                       (Time.currentTime())
+        #   exp = floor((M2 + 1000 * L) / 1000)          (Time.currentTimeMillis())
+        # D = floor(M2/1000) - floor(M1/1000) >= 0 and is NOT bounded by source.
+        configured = valid_realm()["accessTokenLifespan"]
+        accepted_boundaries = (0, 1)
+        rejected_boundaries = (2, 3)
+        for boundaries in accepted_boundaries:
+            with self.subTest(accepted_boundaries=boundaries):
+                verify_e2e.validate_token(
+                    token({"iat": 100, "exp": 100 + configured + boundaries}),
+                    "TRANSACTION_INGESTOR", {"kid-1"}, current_time=500,
+                )
+        for boundaries in rejected_boundaries:
+            with self.subTest(rejected_boundaries=boundaries), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "^TOKEN_TIME_LIFETIME_INVALID$"
+            ):
+                verify_e2e.validate_token(
+                    token({"iat": 100, "exp": 100 + configured + boundaries}),
+                    "TRANSACTION_INGESTOR", {"kid-1"}, current_time=500,
+                )
+        with self.assertRaisesRegex(
+            verify_e2e.VerificationError, "^TOKEN_TIME_ORDER_INVALID$"
+        ):
+            verify_e2e.validate_token(
+                token({"iat": 500, "exp": 500}), "TRANSACTION_INGESTOR",
+                {"kid-1"}, current_time=500,
             )
 
     def test_http_error_redacts_body(self):

@@ -391,7 +391,7 @@ class Reconciler:
             "enabled": True,
             "registrationAllowed": False,
             "rememberMe": False,
-            "accessTokenLifespan": 900,
+            "accessTokenLifespan": 899,
             "defaultSignatureAlgorithm": "RS256",
         }
         try:

@@ -346,10 +346,30 @@ name/clientId로 재조회하고 role/client/scope/mapper duplicate를 거부하
 `iat`가 미래로 보일 수 있다. retry·sleep·clock-skew 확장 없이 `iat <= now < exp`, 선택적
 `nbf <= now`, `exp - iat <= 900`을 검사한다.
 
+Keycloak의 configured `accessTokenLifespan`은 **899초**이고 verifier의 실제 JWT lifetime 상한은
+**900초**다. 두 값의 1초 차이는 operational margin이며 근거는 pinned Keycloak 26.7.3의 token 생성
+경로다. `iat`는 `JsonWebToken.issuedNow()`의 `Time.currentTime()`에서, `exp`는
+`TokenManager.getTokenExpiration()`의 `Time.currentTimeMillis()`에서 각각 **별개의 clock read**로
+계산되고 양쪽 모두 초 단위로 floor되므로, 발급된 token은 `exp - iat = configured + D`가 된다. 여기서
+`D`는 두 read 사이에 넘어간 정수초 경계의 개수다. 따라서 configured 899는 통상적인 `D=1` 경계 교차를
+흡수하며, `D <= 1`에서는 900초를 넘지 않는다.
+
+| D | 발급 lifetime | verifier 판정 |
+| --- | --- | --- |
+| 0 | 899초 | 수락 |
+| 1 | 900초 | 수락 |
+| 2 이상 | 901초 이상 | `TOKEN_TIME_LIFETIME_INVALID`로 거부 |
+
+Keycloak 구현은 두 clock read 사이의 최대 실행 시간을 보장하지 않으므로 899가 모든 `D`에서 성공한다고
+주장하지 않는다. `D >= 2`에 해당하는 비정상 장시간 지연은 계속 fail-closed로 거부한다. retry, sleep,
+clock-skew allowance는 추가하지 않으며 verifier의 900초 상한도 완화하지 않는다.
+`STATIC_REALM_CONTRACT`의 유효 범위 `1..900`도 그대로이며 899는 그 범위 안에 있다. authoritative
+runtime realm 값을 admin API로 read-back 검증하는 일은 이 scope에 포함되지 않는 후속 hardening이다.
+
 Token 시간 계약의 두 경계는 각각 독립된 fixed identity를 가진다. `exp <= iat`는
 `TOKEN_TIME_ORDER_INVALID`, `exp - iat > 900`은 `TOKEN_TIME_LIFETIME_INVALID`이며 한 code가 두
-predicate를 겸하지 않는다. 정확히 900초는 허용하고 901초부터 거부한다. 최대 lifetime은 realm
-`accessTokenLifespan`과 같은 900초이며 clock-skew·margin·retry 확장은 없다. 두 판정 모두 실제
+predicate를 겸하지 않는다. 정확히 900초는 허용하고 901초부터 거부한다. verifier의 실제 JWT lifetime
+상한은 900초이며 이 상한은 완화되지 않는다. 두 판정 모두 실제
 `iat`·`exp` 값, 그 차이, JWT 또는 그 어떤 claim 원문도 출력하지 않고 고정 identity만 기록한다.
 
 2026-09-05 correction 실행은 fresh/existing volume, host 검증과 existing verifier 5회를 모두
