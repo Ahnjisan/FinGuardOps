@@ -21,6 +21,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import verify_e2e
 
 
+def publication_success_output(newline="\n"):
+    return (
+        "2026-09-26T07:54:13.123Z  INFO 1 --- [           main] "
+        "c.a.b.r.o.RuleV1DefaultRuleSetPublicationRunner : "
+        + verify_e2e.RULE_PUBLICATION_RUNNER_SUCCESS_EVIDENCE
+        + " ruleVersionIds=[R001, R002, R003, R004] "
+        "effectiveFrom=2026-09-26T07:55:13Z "
+        "publishedAt=2026-09-26T07:54:14Z ruleSetVersion=1"
+        + newline
+    ).encode()
+
+
 def service(image=None, *, secrets=()):
     value = {
         "image": image,
@@ -1087,7 +1099,7 @@ finguardops_rule_analysis_outcomes_created 99
         valid = {
             "RULE_PUBLISHED_STATE": b"4\n",
             "RULE_ACTIVE_STATE": b"4\n",
-            "RULE_PUBLICATION_COMMAND": b"publication completed\n",
+            "RULE_PUBLICATION_COMMAND": publication_success_output(),
             "RULE_ACTIVATION_POLL": b"4\n",
             "TRANSACTION_CARDINALITY_SNAPSHOT": ("|".join(["0"] * 14) + "\n").encode(),
             "DATABASE_GLOBAL_SNAPSHOT": empty_snapshot,
@@ -1158,6 +1170,183 @@ finguardops_rule_analysis_outcomes_created 99
                         before_stage=stage,
                     ),
                     valid[stage],
+                )
+
+    def test_rule_publication_compose_run_benign_stderr_is_not_the_result(self):
+        stdout = publication_success_output()
+        capture = verify_e2e.NativeCommandCapture(
+            0, stdout, b"compose emitted a bounded benign diagnostic\n"
+        )
+        with mock.patch.object(
+            verify_e2e, "capture_native_command", return_value=capture
+        ):
+            self.assertEqual(
+                verify_e2e.run_command(
+                    ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                    before_stage="RULE_PUBLICATION_COMMAND",
+                ),
+                stdout,
+            )
+
+    def test_rule_publication_semantic_stderr_accepts_empty_lf_and_crlf(self):
+        stdout = publication_success_output()
+        for name, stderr in {
+            "empty": b"",
+            "lf": b"compose emitted a bounded benign diagnostic\n",
+            "crlf": b"compose emitted a bounded benign diagnostic\r\n",
+        }.items():
+            capture = verify_e2e.NativeCommandCapture(0, stdout, stderr)
+            with self.subTest(case=name), mock.patch.object(
+                verify_e2e, "capture_native_command", return_value=capture
+            ):
+                self.assertEqual(
+                    verify_e2e.run_command(
+                        ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                        before_stage="RULE_PUBLICATION_COMMAND",
+                    ),
+                    stdout,
+                )
+
+    def test_rule_publication_semantic_output_rejects_hostile_evidence(self):
+        success = publication_success_output()
+        prefix = verify_e2e.RULE_PUBLICATION_FAILURE_WIRE_PREFIX
+        codes = sorted(verify_e2e.RULE_PUBLICATION_AUTHORITATIVE_FAILURE_CODES)
+        approved = next(iter(verify_e2e.RULE_PUBLICATION_RUNNER_FAILURE_LINES.values()))[0]
+        hostile = {
+            "missing-success": (b"ordinary Spring Boot output\n", b"", False),
+            "noncanonical-success": (
+                (verify_e2e.RULE_PUBLICATION_RUNNER_SUCCESS_EVIDENCE + "\n").encode(),
+                b"",
+                False,
+            ),
+            "duplicate-success": (success + success, b"", False),
+            "authoritative": (success, (prefix + codes[0] + "\n").encode(), False),
+            "approved-java": (success, (approved + "\n").encode(), False),
+            "exception": (success, b"java.lang.IllegalStateException: hidden\n", False),
+            "stack-frame": (success, b"\tat com.example.Type.run(Type.java:1)\n", False),
+            "invalid-utf8": (success, b"\xff\n", False),
+            "bom": (success, b"\xef\xbb\xbfdiagnostic\n", False),
+            "nul": (success, b"diagnostic\x00\n", False),
+            "c0": (success, b"diagnostic\x01\n", False),
+            "c1": (success, "diagnostic\u0085\n".encode(), False),
+            "cf": (success, "diagnostic\u200b\n".encode(), False),
+            "bare-cr": (success, b"diagnostic\r", False),
+            "unterminated": (success, b"diagnostic", False),
+            "mixed-newline": (success, b"first\r\nsecond\n", False),
+            "too-many-lines": (
+                success,
+                b"x\n" * (verify_e2e.SEMANTIC_STDERR_MAX_LINES + 1),
+                False,
+            ),
+            "long-line": (
+                success,
+                ("x" * (verify_e2e.SEMANTIC_STDERR_MAX_LINE_LENGTH + 1) + "\n").encode(),
+                False,
+            ),
+            "overflow": (success, b"bounded\n", True),
+            "duplicate-marker": (
+                success,
+                ((prefix + codes[0] + "\n") * 2).encode(),
+                False,
+            ),
+            "conflicting-marker": (
+                success,
+                (prefix + codes[0] + "\n" + prefix + codes[1] + "\n").encode(),
+                False,
+            ),
+            "malformed-marker": (success, (prefix + "UNKNOWN\n").encode(), False),
+        }
+        for name, (stdout, stderr, overflow) in hostile.items():
+            capture = verify_e2e.NativeCommandCapture(
+                0, stdout, stderr, stderr_overflow=overflow
+            )
+            with self.subTest(case=name), mock.patch.object(
+                verify_e2e, "capture_native_command", return_value=capture
+            ), self.assertRaisesRegex(
+                verify_e2e.VerificationError,
+                "^RULE_PUBLICATION_COMMAND_OUTPUT_INVALID$",
+            ) as raised:
+                verify_e2e.run_command(
+                    ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                    before_stage="RULE_PUBLICATION_COMMAND",
+                )
+            self.assertNotIn("hidden", str(raised.exception))
+
+    def test_backend_metric_compose_run_benign_stderr_is_not_the_result(self):
+        stdout = b"[0,0]\n"
+        capture = verify_e2e.NativeCommandCapture(
+            0, stdout, b"compose emitted a bounded benign diagnostic\n"
+        )
+        with mock.patch.object(
+            verify_e2e, "capture_native_command", return_value=capture
+        ):
+            self.assertEqual(
+                verify_e2e.run_command(
+                    ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                    before_stage="BACKEND_METRIC_SNAPSHOT",
+                ),
+                stdout,
+            )
+
+    def test_backend_metric_semantic_output_remains_parser_owned_and_fail_closed(self):
+        prefix = verify_e2e.RULE_PUBLICATION_FAILURE_WIRE_PREFIX
+        code = sorted(verify_e2e.RULE_PUBLICATION_AUTHORITATIVE_FAILURE_CODES)[0]
+        hostile = {
+            "malformed": (b"{", b"benign\n"),
+            "missing-metric": (b"[0]\n", b"benign\n"),
+            "duplicate-metric": (b"[0,0,0]\n", b"benign\n"),
+            "unknown-category": (b'["unknown",0]\n', b"benign\n"),
+            "unknown-counter": (b'{"unknown":0}\n', b"benign\n"),
+            "authoritative": (b"[0,0]\n", (prefix + code + "\n").encode()),
+            "exception": (b"[0,0]\n", b"java.lang.RuntimeException: hidden\n"),
+            "stack": (b"[0,0]\n", b"\tat com.example.Type.run(Type.java:1)\n"),
+            "invalid-utf8": (b"[0,0]\n", b"\xff\n"),
+            "control": (b"[0,0]\n", b"diagnostic\x01\n"),
+            "mixed-newline": (b"[0,0]\n", b"first\r\nsecond\n"),
+        }
+        for name, (stdout, stderr) in hostile.items():
+            capture = verify_e2e.NativeCommandCapture(0, stdout, stderr)
+            with self.subTest(case=name), mock.patch.object(
+                verify_e2e, "capture_native_command", return_value=capture
+            ), self.assertRaisesRegex(
+                verify_e2e.VerificationError,
+                "^BACKEND_METRIC_SNAPSHOT_OUTPUT_INVALID$",
+            ) as raised:
+                verify_e2e.run_command(
+                    ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                    before_stage="BACKEND_METRIC_SNAPSHOT",
+                )
+            self.assertNotIn("hidden", str(raised.exception))
+
+    def test_non_semantic_stages_keep_the_empty_stderr_contract(self):
+        valid = {
+            "RULE_PUBLISHED_STATE": b"4\n",
+            "RULE_ACTIVE_STATE": b"4\n",
+            "RULE_ACTIVATION_POLL": b"4\n",
+            "TRANSACTION_CARDINALITY_SNAPSHOT": ("|".join(["0"] * 14) + "\n").encode(),
+            "DATABASE_GLOBAL_SNAPSHOT": b"".join(
+                verify_e2e.SNAPSHOT_BEGIN_PREFIX + table.encode("ascii") + b"\n"
+                + verify_e2e.SNAPSHOT_END_PREFIX + table.encode("ascii") + b"\n"
+                for table in verify_e2e.BUSINESS_TABLES
+            ),
+            "EXTERNAL_RISK_LOG_SNAPSHOT": b"",
+            "RULE_V2_LOG_SNAPSHOT": b"",
+        }
+        self.assertEqual(
+            set(valid),
+            set(verify_e2e.BEFORE_NATIVE_FAILURE_CODES) - verify_e2e.SEMANTIC_STDERR_STAGES,
+        )
+        for stage, stdout in valid.items():
+            capture = verify_e2e.NativeCommandCapture(0, stdout, b"benign\n")
+            with self.subTest(stage=stage), mock.patch.object(
+                verify_e2e, "capture_native_command", return_value=capture
+            ), self.assertRaisesRegex(
+                verify_e2e.VerificationError,
+                "^" + verify_e2e.BEFORE_NATIVE_FAILURE_CODES[stage]["output"] + "$",
+            ):
+                verify_e2e.run_command(
+                    ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                    before_stage=stage,
                 )
 
     def test_rule_publication_nonzero_uses_only_exact_controlled_runner_lines(self):
@@ -1397,9 +1586,7 @@ finguardops_rule_analysis_outcomes_created 99
                     before_stage="RULE_PUBLICATION_COMMAND",
                 )
 
-        success_only = (
-            verify_e2e.RULE_PUBLICATION_RUNNER_SUCCESS_MARKER + "PUBLISHED\n"
-        ).encode()
+        success_only = publication_success_output()
         with mock.patch.object(
             verify_e2e,
             "capture_native_command",
@@ -1713,7 +1900,7 @@ finguardops_rule_analysis_outcomes_created 99
         outputs = {
             "RULE_PUBLISHED_STATE": b"0\n",
             "RULE_ACTIVE_STATE": b"0\n",
-            "RULE_PUBLICATION_COMMAND": b"publication completed\n",
+            "RULE_PUBLICATION_COMMAND": publication_success_output(),
             "RULE_ACTIVATION_POLL": b"4\n",
             "TRANSACTION_CARDINALITY_SNAPSHOT": ("|".join(["0"] * 14) + "\n").encode(),
             "DATABASE_GLOBAL_SNAPSHOT": empty_snapshot,

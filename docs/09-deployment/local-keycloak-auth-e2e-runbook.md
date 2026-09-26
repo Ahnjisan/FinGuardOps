@@ -492,13 +492,13 @@ Python의 고정 list와 해당 함수가 생성한 read-only query에서 오며
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | `publish_rules` → `sql_scalar` | published rule count | `docker compose exec ... psql -tAc <fixed query>` | 0 / decimal scalar / empty | CLI bound | `RULE_PUBLISHED_STATE` |
 | 2 | `publish_rules` → `sql_scalar` | active rule count | 동일 psql 경계와 fixed active query | 0 / decimal scalar / empty | CLI bound | `RULE_ACTIVE_STATE` |
-| 3 | `publish_rules` → `HostContext.execute` | 필요 시 deterministic Rule v1 publication | `docker compose run --rm --no-deps --pull never ... backend <fixed args>` | 0 / bounded UTF-8 / empty | 240s 및 overall bound | `RULE_PUBLICATION_COMMAND` |
+| 3 | `publish_rules` → `HostContext.execute` | 필요 시 deterministic Rule v1 publication | `docker compose run --rm --no-deps --pull never ... backend <fixed args>` | 0 / bounded UTF-8 success marker 1회 / bounded semantic stderr | 240s 및 overall bound | `RULE_PUBLICATION_COMMAND` |
 | 4 | `publish_rules` → `sql_scalar` | publication activation poll | psql fixed active query | 0 / decimal scalar / empty | 각 CLI bound 및 overall bound | `RULE_ACTIVATION_POLL` |
 | 5 | `transaction_cardinality` → `sql_scalar` | fixture ID cardinality precondition | psql `concat_ws` read-only query | 0 / 14 decimal fields / empty | CLI bound | `TRANSACTION_CARDINALITY_SNAPSHOT` |
 | 6 | `database_snapshot` | global repeatable-read snapshot | `docker compose exec ... psql -f -`, SQL은 stdin | 0 / canonical bounded snapshot / empty | CLI bound | `DATABASE_GLOBAL_SNAPSHOT` |
 | 7 | `dependency_hit_counts` → `service_logs` | External Risk hit baseline | `docker compose logs --no-color --no-log-prefix external-risk-mock` | 0 / bounded UTF-8 log / empty | CLI bound | `EXTERNAL_RISK_LOG_SNAPSHOT` |
 | 8 | `dependency_hit_counts` → `service_logs` | Rule v2 hit baseline | 동일 logs 경계의 `ai-service` | 0 / bounded UTF-8 log / empty | CLI bound | `RULE_V2_LOG_SNAPSHOT` |
-| 9 | `backend_metric_totals` | outcome metric baseline | `docker compose run --rm --no-deps --pull never -T keycloak-verify metric-runtime` | 0 / finite numeric pair JSON / empty | 60s 및 overall bound | `BACKEND_METRIC_SNAPSHOT` |
+| 9 | `backend_metric_totals` | outcome metric baseline | `docker compose run --rm --no-deps --pull never -T keycloak-verify metric-runtime` | 0 / finite numeric pair JSON / bounded semantic stderr | 60s 및 overall bound | `BACKEND_METRIC_SNAPSHOT` |
 
 각 stage는 candidate output과 무관한 fixed suffix
 `PROCESS_START_FAILED`, `TIMEOUT`, `EXIT_NONZERO`, `OUTPUT_INVALID`, `CLEANUP_FAILED` 중 하나만 결합한
@@ -507,6 +507,18 @@ stderr code를 전달하지 않는다. unknown stage·unexpected Python exceptio
 redact하고 raw command, query, path, exit code, stdout/stderr, credential·token을 diagnostic에 포함하지
 않는다. PowerShell은 이 표에서 도달 가능한 exact literal만 allowlist하고 primary
 `RUN_FIXTURE_BEFORE_FAILED`와 secondary diagnostic 1회 계약을 유지한다.
+
+Compose `run`을 사용하는 `RULE_PUBLICATION_COMMAND`와 `BACKEND_METRIC_SNAPSHOT`만 stderr의
+존재 자체를 실패로 간주하지 않는다. 두 stage의 stderr는 strict UTF-8, BOM·NUL·C0/C1·Unicode Cf
+금지, 단일 LF 또는 CRLF style, final newline, line count·line length bound를 통과해야 한다. 또한
+authoritative publication marker, 승인된 publication failure identity, Java exception headline 또는 stack
+frame이 stdout이나 stderr에 있으면 exit 0이어도 해당 stage의 `OUTPUT_INVALID`로 거부한다. Raw stderr는
+외부 diagnostic에 반사하지 않는다. 그 밖의 native stage는 기존 empty-stderr 계약을 그대로 유지한다.
+
+Publication의 positive evidence는 canonical Spring Boot log line 안의
+`RULE_PUBLICATION_RUNNER_SUCCESS_MARKER` 정확히 1회와 뒤따르는 DB activation poll의 published/active
+`4/4` postcondition이다. Metric snapshot의 positive evidence는 기존 authoritative finite numeric pair
+parser가 소유하며, stderr shape 통과만으로 malformed metric stdout을 승인하지 않는다.
 
 `RULE_PUBLICATION_COMMAND_EXIT_NONZERO`는 backend runner의 raw Java exception을 전달하지 않는다.
 Service와 Run은 동일한 `publish_rules` 함수와 동일한 Compose `run --rm --no-deps --pull never -T`

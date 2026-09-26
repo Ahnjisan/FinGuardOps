@@ -211,6 +211,12 @@ BEFORE_NATIVE_OUTPUT_LIMITS = {
     "RULE_V2_LOG_SNAPSHOT": (16_777_216, 4096),
     "BACKEND_METRIC_SNAPSHOT": (4096, 4096),
 }
+SEMANTIC_STDERR_STAGES = frozenset({
+    "RULE_PUBLICATION_COMMAND",
+    "BACKEND_METRIC_SNAPSHOT",
+})
+SEMANTIC_STDERR_MAX_LINES = 128
+SEMANTIC_STDERR_MAX_LINE_LENGTH = 4096
 RULE_PUBLICATION_RUNNER_FAILURE_LINES = {
     "RULE_PUBLICATION_RUNNER_PRODUCTION_PROFILE_REJECTED": (
         "java.lang.IllegalStateException: Rule v1 default publication is forbidden in production",
@@ -304,6 +310,16 @@ RULE_PUBLICATION_RUNNER_NEUTRAL_LINES = (
 )
 RULE_PUBLICATION_RUNNER_SUCCESS_MARKER = (
     "event=rule_v1_default_rule_set_publication outcome="
+)
+RULE_PUBLICATION_RUNNER_SUCCESS_EVIDENCE = (
+    RULE_PUBLICATION_RUNNER_SUCCESS_MARKER + "PUBLISHED"
+)
+RULE_PUBLICATION_RUNNER_SUCCESS_LOG_LINE = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?"
+    r"(?:Z|[+-]\d{2}:\d{2}) +INFO +[0-9]+ +--- +\[[^\r\n]+\] +"
+    r"[^\s\r\n]+ +: +.*"
+    + re.escape(RULE_PUBLICATION_RUNNER_SUCCESS_EVIDENCE)
+    + r"(?: +[^\r\n]+)?\Z"
 )
 INGESTION_STEPS = (
     "auth-denial",
@@ -1935,6 +1951,105 @@ def classify_rule_publication_nonzero(capture: NativeCommandCapture) -> str:
     return matches[0] if len(matches) == 1 else fallback
 
 
+def semantic_text_lines(
+    output: bytes,
+    *,
+    max_lines: int | None = None,
+    max_line_length: int | None = None,
+) -> tuple[str, tuple[str, ...]]:
+    text = output.decode("utf-8", "strict")
+    if text == "":
+        return text, ()
+    if not text.endswith("\n") or re.search(r"\r(?!\n)", text):
+        raise ValueError("invalid semantic output newline")
+    has_crlf = "\r\n" in text
+    has_lf = re.search(r"(?<!\r)\n", text) is not None
+    if has_crlf and has_lf:
+        raise ValueError("mixed semantic output newlines")
+    if any(
+        (ord(character) < 0x20 and character not in "\r\n")
+        or 0x7F <= ord(character) <= 0x9F
+        or unicodedata.category(character) == "Cf"
+        for character in text
+    ):
+        raise ValueError("invalid semantic output character")
+    lines = tuple(
+        raw_line[:-1] if raw_line.endswith("\r") else raw_line
+        for raw_line in text[:-1].split("\n")
+    )
+    if max_lines is not None and len(lines) > max_lines:
+        raise ValueError("too many semantic output lines")
+    if max_line_length is not None and any(
+        len(line) > max_line_length for line in lines
+    ):
+        raise ValueError("semantic output line is too long")
+    return text, lines
+
+
+def validate_compose_run_stderr(stderr: bytes) -> tuple[str, ...]:
+    _, lines = semantic_text_lines(
+        stderr,
+        max_lines=SEMANTIC_STDERR_MAX_LINES,
+        max_line_length=SEMANTIC_STDERR_MAX_LINE_LENGTH,
+    )
+    return lines
+
+
+def has_rule_publication_failure_evidence(stdout: bytes, stderr: bytes) -> bool:
+    prefix = RULE_PUBLICATION_FAILURE_WIRE_PREFIX.casefold()
+    decoded = tuple(stream.decode("utf-8", "strict") for stream in (stdout, stderr))
+    if any(prefix in text.casefold() for text in decoded):
+        authoritative, _ = authoritative_rule_publication_failure_code(stdout, stderr)
+        if authoritative:
+            return True
+    if rule_publication_approved_failure_codes(stdout, stderr):
+        return True
+    for text in decoded:
+        lines = tuple(
+            raw_line[:-1] if raw_line.endswith("\r") else raw_line
+            for raw_line in text.split("\n")
+        )
+        if any(
+            RULE_PUBLICATION_RUNNER_EXCEPTION_HEADLINE.fullmatch(line)
+            or RULE_PUBLICATION_RUNNER_STACK_FRAME.fullmatch(line)
+            for line in lines
+        ):
+            return True
+    return False
+
+
+def validate_semantic_compose_run_output(
+    stage: str, stdout: bytes, stderr: bytes
+) -> None:
+    stderr_lines = validate_compose_run_stderr(stderr)
+    if has_rule_publication_failure_evidence(stdout, stderr):
+        raise ValueError("failure evidence on successful compose run")
+    if stage == "RULE_PUBLICATION_COMMAND":
+        stdout_text, stdout_lines = semantic_text_lines(stdout)
+        marker_count = stdout_text.count(RULE_PUBLICATION_RUNNER_SUCCESS_MARKER)
+        marker_count += sum(
+            line.count(RULE_PUBLICATION_RUNNER_SUCCESS_MARKER)
+            for line in stderr_lines
+        )
+        matching_lines = tuple(
+            line for line in stdout_lines
+            if RULE_PUBLICATION_RUNNER_SUCCESS_MARKER in line
+        )
+        if (
+            marker_count != 1
+            or len(matching_lines) != 1
+            or RULE_PUBLICATION_RUNNER_SUCCESS_LOG_LINE.fullmatch(
+                matching_lines[0]
+            ) is None
+        ):
+            raise ValueError("invalid publication success evidence")
+    elif stage == "BACKEND_METRIC_SNAPSHOT":
+        stdout.decode("utf-8", "strict")
+    else:
+        raise ValueError("unknown semantic stderr stage")
+    validate_before_native_output(stage, stdout)
+
+
 def run_command(
     argv: list[str],
     *,
@@ -1970,10 +2085,17 @@ def run_command(
             if before_stage == "RULE_PUBLICATION_COMMAND":
                 fail(classify_rule_publication_nonzero(capture))
             fail(codes["exit"])
-        if capture.stdout_overflow or capture.stderr_overflow or capture.stderr:
+        if capture.stdout_overflow or capture.stderr_overflow:
             fail(codes["output"])
         try:
-            validate_before_native_output(before_stage, capture.stdout)
+            if before_stage in SEMANTIC_STDERR_STAGES:
+                validate_semantic_compose_run_output(
+                    before_stage, capture.stdout, capture.stderr
+                )
+            else:
+                if capture.stderr:
+                    fail(codes["output"])
+                validate_before_native_output(before_stage, capture.stdout)
         except (UnicodeError, json.JSONDecodeError, ValueError):
             fail(codes["output"])
         return capture.stdout
