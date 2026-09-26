@@ -346,6 +346,12 @@ name/clientId로 재조회하고 role/client/scope/mapper duplicate를 거부하
 `iat`가 미래로 보일 수 있다. retry·sleep·clock-skew 확장 없이 `iat <= now < exp`, 선택적
 `nbf <= now`, `exp - iat <= 900`을 검사한다.
 
+Token 시간 계약의 두 경계는 각각 독립된 fixed identity를 가진다. `exp <= iat`는
+`TOKEN_TIME_ORDER_INVALID`, `exp - iat > 900`은 `TOKEN_TIME_LIFETIME_INVALID`이며 한 code가 두
+predicate를 겸하지 않는다. 정확히 900초는 허용하고 901초부터 거부한다. 최대 lifetime은 realm
+`accessTokenLifespan`과 같은 900초이며 clock-skew·margin·retry 확장은 없다. 두 판정 모두 실제
+`iat`·`exp` 값, 그 차이, JWT 또는 그 어떤 claim 원문도 출력하지 않고 고정 identity만 기록한다.
+
 2026-09-05 correction 실행은 fresh/existing volume, host 검증과 existing verifier 5회를 모두
 첫 시도에 통과했고 시간 오류는 재발하지 않았다.
 

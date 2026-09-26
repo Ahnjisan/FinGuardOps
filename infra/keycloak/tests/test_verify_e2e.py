@@ -686,15 +686,17 @@ class VerifyTests(unittest.TestCase):
 
     def test_uuid_issuer_alg_kid_and_time_counterexamples(self):
         mutations = [
-            ({"sub": "32A6A5DB-71E4-4E58-8B3F-EC8C2C07B69A"}, {}),
-            ({"iss": verify_e2e.ISSUER + "/"}, {}),
-            ({}, {"alg": "HS256"}),
-            ({}, {"kid": ""}),
-            ({"exp": 1001}, {}),
-            ({"iat": True}, {}),
+            ({"sub": "32A6A5DB-71E4-4E58-8B3F-EC8C2C07B69A"}, {}, "TOKEN_SUBJECT_INVALID"),
+            ({"iss": verify_e2e.ISSUER + "/"}, {}, "TOKEN_ISSUER_INVALID"),
+            ({}, {"alg": "HS256"}, "TOKEN_HEADER_INVALID"),
+            ({}, {"kid": ""}, "TOKEN_HEADER_INVALID"),
+            ({"exp": 1001}, {}, "TOKEN_TIME_LIFETIME_INVALID"),
+            ({"iat": True}, {}, "TOKEN_TIME_TYPE_INVALID"),
         ]
-        for payload_change, header_change in mutations:
-            with self.assertRaises(verify_e2e.VerificationError):
+        for payload_change, header_change, code in mutations:
+            with self.subTest(code=code), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "^" + code + "$"
+            ):
                 verify_e2e.validate_token(token(payload_change, header_change), "TRANSACTION_INGESTOR", {"kid-1"}, current_time=500)
 
     def test_token_time_boundaries_and_stale_now_regression(self):
@@ -711,6 +713,78 @@ class VerifyTests(unittest.TestCase):
         with self.assertRaisesRegex(verify_e2e.VerificationError, "TOKEN_TIME_IAT_FUTURE"):
             verify_e2e.validate_token(token({"iat": 101, "exp": 1000}), "TRANSACTION_INGESTOR", {"kid-1"}, current_time=100)
         verify_e2e.validate_token(token({"iat": 101, "exp": 1000}), "TRANSACTION_INGESTOR", {"kid-1"}, current_time=101)
+
+    def test_exp_not_after_iat_is_its_own_fixed_identity(self):
+        for exp in (500, 499, 0):
+            with self.subTest(exp=exp), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "^TOKEN_TIME_ORDER_INVALID$"
+            ):
+                verify_e2e.validate_token(
+                    token({"iat": 500, "exp": exp}), "TRANSACTION_INGESTOR", {"kid-1"},
+                    current_time=500,
+                )
+
+    def test_lifetime_upper_bound_is_exact_and_inclusive(self):
+        with self.assertRaisesRegex(
+            verify_e2e.VerificationError, "^TOKEN_TIME_LIFETIME_INVALID$"
+        ):
+            verify_e2e.validate_token(
+                token({"iat": 100, "exp": 1001}), "TRANSACTION_INGESTOR", {"kid-1"},
+                current_time=500,
+            )
+        for exp in (1000, 999):
+            with self.subTest(exp=exp):
+                verify_e2e.validate_token(
+                    token({"iat": 100, "exp": exp}), "TRANSACTION_INGESTOR", {"kid-1"},
+                    current_time=500,
+                )
+
+    def test_remaining_token_time_identities_are_unchanged(self):
+        type_invalid = (
+            {"iat": None},
+            {"exp": None},
+            {"iat": True},
+            {"exp": False},
+            {"iat": 100.0},
+            {"exp": "1000"},
+        )
+        for payload in type_invalid:
+            with self.subTest(payload=tuple(payload)), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "^TOKEN_TIME_TYPE_INVALID$"
+            ):
+                verify_e2e.validate_token(
+                    token(payload), "TRANSACTION_INGESTOR", {"kid-1"}, current_time=500
+                )
+        preserved = (
+            ({"iat": 501, "exp": 1000}, 500, "TOKEN_TIME_IAT_FUTURE"),
+            ({"iat": 100, "exp": 500}, 500, "TOKEN_TIME_EXPIRED"),
+            ({"iat": 100, "exp": 1000, "nbf": 1001}, 500, "TOKEN_TIME_NBF_INVALID"),
+            ({"iat": 100, "exp": 1000, "nbf": True}, 500, "TOKEN_TIME_NBF_INVALID"),
+            ({"iat": 100, "exp": 1000, "nbf": "100"}, 500, "TOKEN_TIME_NBF_INVALID"),
+            ({"iat": 100, "exp": 1000, "nbf": 501}, 500, "TOKEN_TIME_NBF_FUTURE"),
+        )
+        for payload, now, code in preserved:
+            with self.subTest(code=code), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "^" + code + "$"
+            ):
+                verify_e2e.validate_token(
+                    token(payload), "TRANSACTION_INGESTOR", {"kid-1"}, current_time=now
+                )
+
+    def test_realm_lifespan_and_verifier_maximum_do_not_drift(self):
+        lifespan = valid_realm()["accessTokenLifespan"]
+        self.assertEqual(900, lifespan)
+        verify_e2e.validate_token(
+            token({"iat": 100, "exp": 100 + lifespan}), "TRANSACTION_INGESTOR",
+            {"kid-1"}, current_time=500,
+        )
+        with self.assertRaisesRegex(
+            verify_e2e.VerificationError, "^TOKEN_TIME_LIFETIME_INVALID$"
+        ):
+            verify_e2e.validate_token(
+                token({"iat": 100, "exp": 100 + lifespan + 1}),
+                "TRANSACTION_INGESTOR", {"kid-1"}, current_time=500,
+            )
 
     def test_http_error_redacts_body(self):
         error = urllib.error.HTTPError("http://example.invalid", 401, "bad", {}, io.BytesIO(b'{"token":"NeverPrintToken"}'))

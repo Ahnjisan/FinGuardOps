@@ -1213,7 +1213,9 @@ def validate_token(
     exp = payload.get("exp")
     if isinstance(iat, bool) or isinstance(exp, bool) or not isinstance(iat, int) or not isinstance(exp, int):
         fail("TOKEN_TIME_TYPE_INVALID")
-    if exp <= iat or exp - iat > 900:
+    if exp <= iat:
+        fail("TOKEN_TIME_ORDER_INVALID")
+    if exp - iat > 900:
         fail("TOKEN_TIME_LIFETIME_INVALID")
     if iat > current_time:
         fail("TOKEN_TIME_IAT_FUTURE")
