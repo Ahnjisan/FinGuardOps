@@ -1289,11 +1289,11 @@ function Invoke-E2EFixedFixtureService {
             }
             GetContainer = {
                 $inventory = Get-E2EProjectResourceInventory -Project $ProjectName -Receipt $Receipt
-                $matches = @($inventory.Containers | Where-Object { Test-E2EOrdinalEqual $_.Service 'keycloak-run-fixture' })
-                if ($matches.Count -ne 1 -or $matches[0].Id -cnotmatch '\A[0-9a-f]{64}\z') {
+                $fixtureContainers = @($inventory.Containers | Where-Object { Test-E2EOrdinalEqual $_.Service 'keycloak-run-fixture' })
+                if ($fixtureContainers.Count -ne 1 -or $fixtureContainers[0].Id -cnotmatch '\A[0-9a-f]{64}\z') {
                     throw 'RUN_FIXTURE_CONTAINER_INVALID'
                 }
-                return [string]$matches[0].Id
+                return [string]$fixtureContainers[0].Id
             }
             Wait = {
                 Invoke-E2EInLocation -Path $RepositoryRoot -Body {

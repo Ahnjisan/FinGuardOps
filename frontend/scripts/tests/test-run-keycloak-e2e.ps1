@@ -7425,10 +7425,152 @@ function Invoke-D315TargetedTests {
         Assert-Equal @('up','id','wait') @($result.WaitEvents) 'An interrupted fixed-service wait advanced to exit validation.'
         Assert-Equal 'RUN_FIXTURE_WAIT_INTERRUPTED' $result.WaitFailure 'Fixed-service wait interruption identity changed.'
     }
+    Invoke-TestCase 'D315 production default fixture container boundary survives the automatic Matches variable' {
+        # Every other fixed-service test injects -Boundaries, so the production
+        # default GetContainer and ValidateExit scriptblocks had no coverage at
+        # all. Passing no -Boundaries is what installs the defaults, and the
+        # boundary-shape guard in the function refuses anything else, so these
+        # cases necessarily run the production scriptblocks. Scope, stated
+        # exactly: GetContainer and ValidateExit run in full, while Start and
+        # Wait only enter their outer shell because Invoke-E2EInLocation is
+        # shadowed - the docker call and the $LASTEXITCODE guard inside each of
+        # those two remain uncovered here.
+        $invoke = {
+            param($containers, $document, [bool]$poisonMatches)
+            return & $script:E2EModule {
+                param($injectedContainers, $injectedDocument, $poison)
+                if ($poison) {
+                    # A regex before the call leaves $Matches holding a hashtable.
+                    # The boundary must not depend on that variable in any way.
+                    $null = 'poison' -cmatch '\A(?<sentinel>p+)'
+                }
+                $calls = [System.Collections.Generic.List[string]]::new()
+                function Get-E2EProjectResourceInventory {
+                    param([Parameter(Mandatory = $true)][string]$Project, [Parameter(Mandatory = $true)]$Receipt, $PreviousInventory)
+                    $calls.Add('inventory')
+                    return [pscustomobject]@{ Containers = @($injectedContainers) }
+                }
+                function Get-ContainerDocument([string]$ContainerId) {
+                    $calls.Add('document:' + $ContainerId)
+                    return $injectedDocument
+                }
+                # Start and Wait are not under test here: their bodies are
+                # discarded so the two boundaries under test run for real. Only
+                # the fact that both were entered is recorded.
+                function Invoke-E2EInLocation {
+                    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][scriptblock]$Body)
+                    $calls.Add('location')
+                }
+                $receipt = New-E2EReceipt -RunId ([guid]::NewGuid().ToString('N')) -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+                $failure = $null
+                try { Invoke-E2EFixedFixtureService -Receipt $receipt -PlanJson '{"transactionId":"safe"}' }
+                catch { $failure = $_ }
+                return [pscustomobject]@{
+                    Calls = @($calls)
+                    Failure = if ($null -eq $failure) { $null } else { [string]$failure.Exception.Message }
+                    ErrorId = if ($null -eq $failure) { $null } else { [string]$failure.FullyQualifiedErrorId }
+                }
+            } $containers $document $poisonMatches
+        }
+        $authoritativeId = 'a1b2c3d4e5f6' + ('0' * 52)
+        $newContainer = { param([string]$Id, [string]$Service = 'keycloak-run-fixture', [bool]$Running = $false)
+            [pscustomobject]@{ Service = $Service; Id = $Id; Running = $Running } }
+        $exitedDocument = [pscustomobject]@{
+            Id = $authoritativeId
+            State = [pscustomobject]@{ Status = 'exited'; ExitCode = 0 }
+        }
+
+        # One authoritative container with a valid 64-character lowercase hex id.
+        $accepted = & $invoke @((& $newContainer $authoritativeId)) $exitedDocument $false
+        Assert-Equal $null $accepted.Failure 'Production default fixture boundaries rejected an authoritative container.'
+        Assert-Equal $null $accepted.ErrorId 'Production default fixture boundaries raised a non-fixed error.'
+        # Two inventory reads and one container document read can only come from
+        # the production default GetContainer and ValidateExit scriptblocks.
+        # Three independent facts: both inventory-reading boundaries ran, both
+        # stream boundaries were entered, and exit validation asked about exactly
+        # one container whose id is the authoritative one, compared ordinally.
+        Assert-Equal 2 @($accepted.Calls | Where-Object { $_ -ceq 'inventory' }).Count 'Production default GetContainer or ValidateExit did not run.'
+        Assert-Equal 2 @($accepted.Calls | Where-Object { $_ -ceq 'location' }).Count 'Production default Start or Wait boundary was not entered.'
+        $documentCalls = @($accepted.Calls | Where-Object { $_.StartsWith('document:', [System.StringComparison]::Ordinal) })
+        Assert-Equal 1 $documentCalls.Count 'Exit validation asked about other than exactly one container.'
+        Assert-True ($documentCalls[0].Substring('document:'.Length) -ceq $authoritativeId) 'The returned fixture container id was not the authoritative id.'
+
+        # The collision this fix removed was self-inflicted inside the boundary,
+        # so an ambient $Matches was never what broke it. This axis therefore
+        # kills no mutant that the case above does not already kill; it is kept
+        # as a forward guard that the boundary reads no ambient regex state.
+        $poisoned = & $invoke @((& $newContainer $authoritativeId)) $exitedDocument $true
+        Assert-Equal $null $poisoned.Failure 'A pre-set automatic Matches variable broke the fixture container boundary.'
+        $poisonedDocumentCalls = @($poisoned.Calls | Where-Object { $_.StartsWith('document:', [System.StringComparison]::Ordinal) })
+        Assert-Equal 1 $poisonedDocumentCalls.Count 'A pre-set automatic Matches variable changed how many containers were validated.'
+        Assert-True ($poisonedDocumentCalls[0].Substring('document:'.Length) -ceq $authoritativeId) 'A pre-set automatic Matches variable changed the returned container id.'
+
+        # Fail-closed inputs keep the exact fixed identity.
+        $rejected = [ordered]@{
+            'zero containers'   = @()
+            'two containers'    = @((& $newContainer $authoritativeId), (& $newContainer ('b' * 64)))
+            'uppercase id'      = @((& $newContainer ('A' * 64)))
+            'short id'          = @((& $newContainer ('a' * 63)))
+            'long id'           = @((& $newContainer ('a' * 65)))
+            'non-hex id'        = @((& $newContainer ('g' * 64)))
+            'leading space id'  = @((& $newContainer (' ' + ('a' * 63))))
+            'trailing space id' = @((& $newContainer (('a' * 63) + ' ')))
+            'other service'     = @((& $newContainer $authoritativeId 'keycloak-verify'))
+        }
+        foreach ($name in $rejected.Keys) {
+            $result = & $invoke $rejected[$name] $exitedDocument $false
+            Assert-Equal 'RUN_FIXTURE_CONTAINER_INVALID' $result.Failure ('Fixture container identity changed for ' + $name + '.')
+        }
+    }
+    Invoke-TestCase 'D315 production default fixture exit validation rejects running mismatched and nonzero containers' {
+        # ValidateExit is unchanged by this fix; this pins its production default
+        # so the boundary that GetContainer feeds cannot regress unnoticed.
+        $invoke = {
+            param($containers, $document)
+            return & $script:E2EModule {
+                param($injectedContainers, $injectedDocument)
+                function Get-E2EProjectResourceInventory {
+                    param([Parameter(Mandatory = $true)][string]$Project, [Parameter(Mandatory = $true)]$Receipt, $PreviousInventory)
+                    return [pscustomobject]@{ Containers = @($injectedContainers) }
+                }
+                function Get-ContainerDocument([string]$ContainerId) { return $injectedDocument }
+                function Invoke-E2EInLocation {
+                    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][scriptblock]$Body)
+                }
+                $receipt = New-E2EReceipt -RunId ([guid]::NewGuid().ToString('N')) -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+                $failure = $null
+                try { Invoke-E2EFixedFixtureService -Receipt $receipt -PlanJson '{}' } catch { $failure = [string]$_.Exception.Message }
+                return $failure
+            } $containers $document
+        }
+        $authoritativeId = 'a1b2c3d4e5f6' + ('0' * 52)
+        $container = { param([bool]$Running) [pscustomobject]@{ Service = 'keycloak-run-fixture'; Id = $authoritativeId; Running = $Running } }
+        $document = { param([string]$Id, [string]$Status, [int]$ExitCode)
+            [pscustomobject]@{ Id = $Id; State = [pscustomobject]@{ Status = $Status; ExitCode = $ExitCode } } }
+
+        Assert-Equal $null (& $invoke @((& $container $false)) (& $document $authoritativeId 'exited' 0)) 'An exited authoritative fixture container with exit code 0 was rejected.'
+        Assert-Equal 'RUN_FIXTURE_CONTAINER_INVALID' (& $invoke @((& $container $true)) (& $document $authoritativeId 'exited' 0)) 'A still-running fixture container was accepted.'
+        Assert-Equal 'RUN_FIXTURE_SERVICE_FAILED' (& $invoke @((& $container $false)) (& $document ('e' * 64) 'exited' 0)) 'A container document about another container was accepted.'
+        Assert-Equal 'RUN_FIXTURE_SERVICE_FAILED' (& $invoke @((& $container $false)) (& $document $authoritativeId 'exited' 3)) 'A nonzero fixture exit code was accepted.'
+        Assert-Equal 'RUN_FIXTURE_SERVICE_FAILED' (& $invoke @((& $container $false)) (& $document $authoritativeId 'running' 0)) 'A non-exited fixture status was accepted.'
+    }
     Invoke-TestCase 'D315 fixture production source excludes one-off and broad deletion operands' {
         $source = [System.IO.File]::ReadAllText($script:ModulePath)
         Assert-True ($source.Contains('up -d --no-deps --no-build --pull never keycloak-run-fixture')) 'Fixed fixture service up boundary is missing.'
         Assert-True ($source.Contains('wait keycloak-run-fixture')) 'Official fixed fixture service wait boundary is missing.'
+        # $matches IS the automatic $Matches: a regex operator between the
+        # assignment and the read replaces the collection with a hashtable, so
+        # the fixture container boundary must not use that name. These two pin
+        # this boundary only. Seven other locals in this module still shadow an
+        # automatic variable, all pre-existing and all safe today, for two
+        # different reasons: five named $matches at :1307, :2299, :4973, :4994 and
+        # :5329, safe because no regex operator runs between their assignment and
+        # their read, and two named $host at :4748 and :4891, safe because nothing
+        # in those scopes reads a member of $Host. Closing that class module-wide
+        # needs a static check with its own positive control, so it is separate
+        # follow-up work and is deliberately not attempted here.
+        Assert-True ($source.Contains('$fixtureContainers = @($inventory.Containers')) 'Fixture container boundary no longer uses a non-automatic collection name.'
+        Assert-True (-not ($source.Contains('return [string]$matches[0].Id'))) 'The automatic Matches variable was reintroduced into the fixture container boundary.'
         Assert-True (-not ($source -match 'run\s+--rm[^\r\n]*keycloak-run-fixture')) 'Fixture service still uses a one-off container.'
         Assert-True (-not ($source -match '(docker|Invoke-Native)[^\r\n]*(rm|stop)[^\r\n]*(prefix|label|\*)')) 'Broad cleanup operand was introduced.'
     }
