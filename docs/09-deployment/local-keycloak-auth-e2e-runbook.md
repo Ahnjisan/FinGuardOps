@@ -613,12 +613,37 @@ environment 또는 exit code를 외부 diagnostic에 포함하지 않는다.
 | --- | --- |
 | stderr strict UTF-8, final newline, bare CR, CRLF/LF 혼용, C0/C1/Cf/NUL, line 수·길이 상한 | `RULE_PUBLICATION_COMMAND_STDERR_INVALID` |
 | authoritative backend marker, malformed·중복·충돌 marker, legacy approved Java identity, exception headline, stack frame, stdout wire prefix | `RULE_PUBLICATION_COMMAND_FAILURE_EVIDENCE_INVALID` |
-| stdout strict UTF-8, final newline, bare CR, CRLF/LF 혼용, C0/C1/Cf/NUL | `RULE_PUBLICATION_COMMAND_STDOUT_INVALID` |
+| stdout strict UTF-8, final newline, bare CR, CRLF/LF 혼용, C0/C1/Cf/NUL | 아래 표의 predicate별 fixed code, 이름 붙이지 못한 거부만 `RULE_PUBLICATION_COMMAND_STDOUT_INVALID` |
 | success marker 누락·중복, stderr marker, marker line cardinality, canonical success log-line 불일치 | `RULE_PUBLICATION_COMMAND_SUCCESS_MARKER_INVALID` |
+`RULE_PUBLICATION_COMMAND_STDOUT_INVALID`가 담당하던 stdout 구조 규칙은 각 predicate가 독립된 fixed
+code를 가진다. 한 capture가 여러 규칙을 위반해도 아래 고정 순서의 **첫 identity 하나만** 반환한다.
+
+| 순위 | stdout predicate | fixed secondary |
+| --- | --- | --- |
+| 1 | strict UTF-8 decode 실패 | `RULE_PUBLICATION_COMMAND_STDOUT_ENCODING_INVALID` |
+| 2 | non-empty stdout이 LF로 끝나지 않음 | `RULE_PUBLICATION_COMMAND_STDOUT_FINAL_NEWLINE_INVALID` |
+| 3 | CR 뒤에 LF가 없음 | `RULE_PUBLICATION_COMMAND_STDOUT_BARE_CR_INVALID` |
+| 4 | CRLF와 lone LF 혼용 | `RULE_PUBLICATION_COMMAND_STDOUT_MIXED_NEWLINE_INVALID` |
+| 5 | U+0000 | `RULE_PUBLICATION_COMMAND_STDOUT_NUL_INVALID` |
+| 6 | U+0009 | `RULE_PUBLICATION_COMMAND_STDOUT_TAB_INVALID` |
+| 7 | U+001B | `RULE_PUBLICATION_COMMAND_STDOUT_ESCAPE_INVALID` |
+| 8 | CR·LF·TAB·ESC·NUL을 제외한 U+0001–U+001F | `RULE_PUBLICATION_COMMAND_STDOUT_C0_INVALID` |
+| 9 | U+007F–U+009F | `RULE_PUBLICATION_COMMAND_STDOUT_C1_INVALID` |
+| 10 | Unicode category Cf (BOM U+FEFF 포함) | `RULE_PUBLICATION_COMMAND_STDOUT_FORMAT_INVALID` |
+| 11 | 위 어느 것도 이름 붙이지 못한 `semantic_text_lines` 거부 | `RULE_PUBLICATION_COMMAND_STDOUT_INVALID` (fallback) |
+
+`semantic_text_lines`는 여전히 최종 authority이며, 신규 classifier는 같은 규칙을 같은 강도로 세분화할
+뿐이다. classifier가 이름 붙이지 않은 capture는 `semantic_text_lines`도 수락하는 capture이므로 정상
+출력 허용 범위는 변하지 않는다. 기존 `RULE_PUBLICATION_COMMAND_STDOUT_INVALID`는 예상 밖 내부 상태의
+fail-closed fallback으로 남는다. 거부된 문자, code point, line, candidate, raw stdout/stderr, command,
+argv, SQL, path, environment, exception text, credential은 diagnostic과 PowerShell warning에 포함하지
+않고 compile-time fixed code 하나만 외부로 전달한다. 이번 변경은 진단 분류만 개선하며, actual root
+cause는 다음 공식 Run 전까지 미확정이다.
 
 stdout/stderr overflow, 분류할 수 없는 output-validation failure, 승인 literal 외의 candidate는 기존
-`RULE_PUBLICATION_COMMAND_OUTPUT_INVALID`으로 fail-closed fallback한다. 네 code는 compile-time
-literal이며 raw stdout/stderr, line, path, exception, SQL, environment, credential을 반사하지 않는다.
+`RULE_PUBLICATION_COMMAND_OUTPUT_INVALID`으로 fail-closed fallback한다. 위 두 표의 모든 code는
+compile-time literal이며 raw stdout/stderr, line, path, exception, SQL, environment, credential을
+반사하지 않는다.
 `BACKEND_METRIC_SNAPSHOT`을 포함한 다른 여덟 native stage의 identity와 stderr 계약, 그리고
 `PROCESS_START_FAILED`·`TIMEOUT`·`EXIT_NONZERO`·`CLEANUP_FAILED` 우선순위는 변하지 않는다. 허용
 범위와 검증 강도도 변하지 않는다. 이 분리는 product root-cause fix가 아니라 실패 단계를 한 번의 공식

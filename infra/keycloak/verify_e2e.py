@@ -329,12 +329,48 @@ RULE_PUBLICATION_STDOUT_INVALID = "RULE_PUBLICATION_COMMAND_STDOUT_INVALID"
 RULE_PUBLICATION_SUCCESS_MARKER_INVALID = (
     "RULE_PUBLICATION_COMMAND_SUCCESS_MARKER_INVALID"
 )
+RULE_PUBLICATION_STDOUT_ENCODING_INVALID = (
+    "RULE_PUBLICATION_COMMAND_STDOUT_ENCODING_INVALID"
+)
+RULE_PUBLICATION_STDOUT_FINAL_NEWLINE_INVALID = (
+    "RULE_PUBLICATION_COMMAND_STDOUT_FINAL_NEWLINE_INVALID"
+)
+RULE_PUBLICATION_STDOUT_BARE_CR_INVALID = (
+    "RULE_PUBLICATION_COMMAND_STDOUT_BARE_CR_INVALID"
+)
+RULE_PUBLICATION_STDOUT_MIXED_NEWLINE_INVALID = (
+    "RULE_PUBLICATION_COMMAND_STDOUT_MIXED_NEWLINE_INVALID"
+)
+RULE_PUBLICATION_STDOUT_NUL_INVALID = "RULE_PUBLICATION_COMMAND_STDOUT_NUL_INVALID"
+RULE_PUBLICATION_STDOUT_TAB_INVALID = "RULE_PUBLICATION_COMMAND_STDOUT_TAB_INVALID"
+RULE_PUBLICATION_STDOUT_ESCAPE_INVALID = (
+    "RULE_PUBLICATION_COMMAND_STDOUT_ESCAPE_INVALID"
+)
+RULE_PUBLICATION_STDOUT_C0_INVALID = "RULE_PUBLICATION_COMMAND_STDOUT_C0_INVALID"
+RULE_PUBLICATION_STDOUT_C1_INVALID = "RULE_PUBLICATION_COMMAND_STDOUT_C1_INVALID"
+RULE_PUBLICATION_STDOUT_FORMAT_INVALID = (
+    "RULE_PUBLICATION_COMMAND_STDOUT_FORMAT_INVALID"
+)
+# Fixed evaluation order. A capture that breaks several rules is named by the
+# first entry only, so one capture always yields exactly one identity.
+RULE_PUBLICATION_STDOUT_PREDICATE_CODES = (
+    RULE_PUBLICATION_STDOUT_ENCODING_INVALID,
+    RULE_PUBLICATION_STDOUT_FINAL_NEWLINE_INVALID,
+    RULE_PUBLICATION_STDOUT_BARE_CR_INVALID,
+    RULE_PUBLICATION_STDOUT_MIXED_NEWLINE_INVALID,
+    RULE_PUBLICATION_STDOUT_NUL_INVALID,
+    RULE_PUBLICATION_STDOUT_TAB_INVALID,
+    RULE_PUBLICATION_STDOUT_ESCAPE_INVALID,
+    RULE_PUBLICATION_STDOUT_C0_INVALID,
+    RULE_PUBLICATION_STDOUT_C1_INVALID,
+    RULE_PUBLICATION_STDOUT_FORMAT_INVALID,
+)
 RULE_PUBLICATION_SEMANTIC_FAILURE_CODES = (
     RULE_PUBLICATION_STDERR_INVALID,
     RULE_PUBLICATION_FAILURE_EVIDENCE_INVALID,
     RULE_PUBLICATION_STDOUT_INVALID,
     RULE_PUBLICATION_SUCCESS_MARKER_INVALID,
-)
+) + RULE_PUBLICATION_STDOUT_PREDICATE_CODES
 INGESTION_STEPS = (
     "auth-denial",
     "behavior-create",
@@ -2006,6 +2042,43 @@ def semantic_text_lines(
     return text, lines
 
 
+# Names the first structural violation of a publication stdout capture using the
+# fixed order of RULE_PUBLICATION_STDOUT_PREDICATE_CODES. It subdivides exactly
+# the rules semantic_text_lines already enforces and accepts nothing new: a
+# capture this returns None for is one semantic_text_lines also accepts. The
+# return value is always a compile-time literal, never a rejected character,
+# code point, line or any other part of the candidate.
+def classify_semantic_stdout_violation(stdout: bytes) -> str | None:
+    try:
+        text = decode_strict_utf8(stdout)
+    except UnicodeError:
+        return RULE_PUBLICATION_STDOUT_ENCODING_INVALID
+    if text == "":
+        return None
+    if not text.endswith("\n"):
+        return RULE_PUBLICATION_STDOUT_FINAL_NEWLINE_INVALID
+    if re.search(r"\r(?!\n)", text) is not None:
+        return RULE_PUBLICATION_STDOUT_BARE_CR_INVALID
+    if "\r\n" in text and re.search(r"(?<!\r)\n", text) is not None:
+        return RULE_PUBLICATION_STDOUT_MIXED_NEWLINE_INVALID
+    if "\x00" in text:
+        return RULE_PUBLICATION_STDOUT_NUL_INVALID
+    if "\t" in text:
+        return RULE_PUBLICATION_STDOUT_TAB_INVALID
+    if "\x1b" in text:
+        return RULE_PUBLICATION_STDOUT_ESCAPE_INVALID
+    if any(
+        ord(character) < 0x20 and character not in "\t\n\r\x1b"
+        for character in text
+    ):
+        return RULE_PUBLICATION_STDOUT_C0_INVALID
+    if any(0x7F <= ord(character) <= 0x9F for character in text):
+        return RULE_PUBLICATION_STDOUT_C1_INVALID
+    if any(unicodedata.category(character) == "Cf" for character in text):
+        return RULE_PUBLICATION_STDOUT_FORMAT_INVALID
+    return None
+
+
 def validate_compose_run_stderr(stderr: bytes) -> tuple[str, ...]:
     _, lines = semantic_text_lines(
         stderr,
@@ -2090,7 +2163,10 @@ def validate_semantic_compose_run_output(
         publication, RULE_PUBLICATION_STDERR_INVALID, decode_strict_utf8, stderr
     )
     run_semantic_step(
-        publication, RULE_PUBLICATION_STDOUT_INVALID, decode_strict_utf8, stdout
+        publication,
+        RULE_PUBLICATION_STDOUT_ENCODING_INVALID,
+        decode_strict_utf8,
+        stdout,
     )
     if run_semantic_step(
         publication,
@@ -2109,6 +2185,13 @@ def validate_semantic_compose_run_output(
         stderr,
     )
     if publication:
+        # The named predicate runs first so a rejection says which rule broke.
+        # semantic_text_lines still runs afterwards as the final authority, and
+        # anything it rejects that the classifier did not name keeps the existing
+        # RULE_PUBLICATION_COMMAND_STDOUT_INVALID fail-closed fallback.
+        stdout_violation = classify_semantic_stdout_violation(stdout)
+        if stdout_violation is not None:
+            raise semantic_failure(publication, stdout_violation)
         stdout_text, stdout_lines = run_semantic_step(
             publication,
             RULE_PUBLICATION_STDOUT_INVALID,

@@ -1391,7 +1391,11 @@ finguardops_rule_analysis_outcomes_created 99
                 "cleanup": codes["cleanup"],
             }
             if stage == "RULE_PUBLICATION_COMMAND":
-                expected["malformed"] = verify_e2e.RULE_PUBLICATION_STDOUT_INVALID
+                # The malformed publication capture is invalid UTF-8, which the
+                # stdout predicate classifier names precisely.
+                expected["malformed"] = (
+                    verify_e2e.RULE_PUBLICATION_STDOUT_ENCODING_INVALID
+                )
                 expected["stderr"] = verify_e2e.RULE_PUBLICATION_STDERR_INVALID
             for name, capture in cases.items():
                 with self.subTest(stage=stage, failure=name), mock.patch.object(
@@ -1632,22 +1636,223 @@ finguardops_rule_analysis_outcomes_created 99
                     verify_e2e.RULE_PUBLICATION_FAILURE_EVIDENCE_INVALID,
                 )
 
-    def test_publication_stdout_step_has_its_own_identity(self):
+    def test_publication_stdout_step_names_the_broken_rule(self):
+        # Each capture violates exactly one structural rule, so the identity is
+        # unambiguous. Inputs that break several rules are covered separately by
+        # test_publication_stdout_priority_is_deterministic.
         success = publication_production_success_output()
         cases = {
-            "invalid-utf8": success + b"\xff\n",
-            "unterminated": success.rstrip(b"\n"),
-            "bare-cr": success + b"NeverPrintTail\r",
-            "mixed-newline": success.replace(b"\n", b"\r\n", 1),
-            "nul": success + b"NeverPrintTail\x00\n",
-            "c0": success + b"NeverPrintTail\x01\n",
-            "c1": success + "NeverPrintTail\u0085\n".encode(),
-            "cf": success + "NeverPrintTail\u200b\n".encode(),
+            "invalid-utf8": (
+                success + b"\xff\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_ENCODING_INVALID,
+            ),
+            "unterminated": (
+                success.rstrip(b"\n"),
+                verify_e2e.RULE_PUBLICATION_STDOUT_FINAL_NEWLINE_INVALID,
+            ),
+            "bare-cr": (
+                success + b"NeverPrintTail\rNeverPrintTail\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_BARE_CR_INVALID,
+            ),
+            "mixed-newline": (
+                success.replace(b"\n", b"\r\n", 1),
+                verify_e2e.RULE_PUBLICATION_STDOUT_MIXED_NEWLINE_INVALID,
+            ),
+            "nul": (
+                success + b"NeverPrintTail\x00\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_NUL_INVALID,
+            ),
+            "tab": (
+                success + b"NeverPrintTail\tNeverPrintTail\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_TAB_INVALID,
+            ),
+            "escape": (
+                success + b"NeverPrintTail\x1b[0mNeverPrintTail\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_ESCAPE_INVALID,
+            ),
+            "c0": (
+                success + b"NeverPrintTail\x01\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_C0_INVALID,
+            ),
+            "c1": (
+                success + "NeverPrintTail\u0085\n".encode(),
+                verify_e2e.RULE_PUBLICATION_STDOUT_C1_INVALID,
+            ),
+            "cf": (
+                success + "NeverPrintTail\u200b\n".encode(),
+                verify_e2e.RULE_PUBLICATION_STDOUT_FORMAT_INVALID,
+            ),
+            "bom": (
+                "\ufeff".encode() + success,
+                verify_e2e.RULE_PUBLICATION_STDOUT_FORMAT_INVALID,
+            ),
         }
-        for name, stdout in cases.items():
+        for name, (stdout, expected_code) in cases.items():
             with self.subTest(case=name):
-                self.assert_publication_code(
-                    stdout, b"", verify_e2e.RULE_PUBLICATION_STDOUT_INVALID
+                self.assert_publication_code(stdout, b"", expected_code)
+
+    def test_publication_stdout_priority_is_deterministic(self):
+        # Every capture below breaks the named rule AND every lower-priority rule.
+        # Exactly one identity must come out, and it must be the highest-priority one.
+        success = publication_production_success_output()
+        mixed = success.replace(b"\n", b"\r\n", 1)
+        lower = b"NeverPrintTail\x01" + "\u0085\u200b".encode()
+        cases = {
+            "encoding-beats-all": (
+                b"\xff" + success + b"NeverPrintTail\rx\t\x1b\x00" + lower,
+                verify_e2e.RULE_PUBLICATION_STDOUT_ENCODING_INVALID,
+            ),
+            "final-newline-beats-bare-cr": (
+                success + b"NeverPrintTail\rx\t\x1b\x00" + lower,
+                verify_e2e.RULE_PUBLICATION_STDOUT_FINAL_NEWLINE_INVALID,
+            ),
+            "bare-cr-beats-mixed": (
+                mixed + b"NeverPrintTail\rx\x00\t\x1b" + lower + b"\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_BARE_CR_INVALID,
+            ),
+            "mixed-beats-nul": (
+                mixed + b"NeverPrintTail\x00\t\x1b" + lower + b"\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_MIXED_NEWLINE_INVALID,
+            ),
+            "nul-beats-tab": (
+                success + b"NeverPrintTail\x00\t\x1b" + lower + b"\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_NUL_INVALID,
+            ),
+            "tab-beats-escape": (
+                success + b"NeverPrintTail\t\x1b" + lower + b"\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_TAB_INVALID,
+            ),
+            "escape-beats-c0": (
+                success + b"NeverPrintTail\x1b" + lower + b"\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_ESCAPE_INVALID,
+            ),
+            "c0-beats-c1": (
+                success + lower + b"\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_C0_INVALID,
+            ),
+            "c1-beats-format": (
+                success + "NeverPrintTail\u0085\u200b\n".encode(),
+                verify_e2e.RULE_PUBLICATION_STDOUT_C1_INVALID,
+            ),
+        }
+        for name, (stdout, expected_code) in cases.items():
+            with self.subTest(case=name):
+                self.assert_publication_code(stdout, b"", expected_code)
+
+    def test_publication_stdout_classifier_never_widens_the_accepted_set(self):
+        # A capture the classifier does not name must be one semantic_text_lines,
+        # the final authority, also accepts. The classifier only subdivides.
+        accepted = (
+            b"",
+            publication_production_success_output(),
+            publication_production_success_output("\r\n"),
+            b"ordinary line\n",
+            b"first\r\nsecond\r\n",
+            "accented \u00e9\n".encode(),
+        )
+        for stdout in accepted:
+            with self.subTest(accepted=len(stdout)):
+                self.assertIsNone(
+                    verify_e2e.classify_semantic_stdout_violation(stdout)
+                )
+                verify_e2e.semantic_text_lines(stdout)
+        rejected = (
+            b"\xff\n",
+            b"unterminated",
+            b"bare\rcr\n",
+            b"first\r\nsecond\n",
+            b"nul\x00\n",
+            b"tab\t\n",
+            b"escape\x1b\n",
+            b"c0\x01\n",
+            "c1\u0085\n".encode(),
+            "cf\u200b\n".encode(),
+            "\ufeffbom\n".encode(),
+        )
+        for stdout in rejected:
+            with self.subTest(rejected=len(stdout)):
+                named = verify_e2e.classify_semantic_stdout_violation(stdout)
+                self.assertIn(named, verify_e2e.RULE_PUBLICATION_STDOUT_PREDICATE_CODES)
+                with self.assertRaises((UnicodeError, ValueError)):
+                    verify_e2e.semantic_text_lines(stdout)
+
+    def test_publication_stdout_predicate_boundaries_are_unchanged(self):
+        success = publication_production_success_output()
+        prefix = verify_e2e.RULE_PUBLICATION_FAILURE_WIRE_PREFIX
+        code = sorted(verify_e2e.RULE_PUBLICATION_AUTHORITATIVE_FAILURE_CODES)[0]
+        fallback = verify_e2e.BEFORE_NATIVE_FAILURE_CODES[
+            "RULE_PUBLICATION_COMMAND"
+        ]["output"]
+        # Failure evidence still outranks a broken stdout structure.
+        self.assert_publication_code(
+            success + b"NeverPrintTail\t\n",
+            (prefix + code + "\n").encode(),
+            verify_e2e.RULE_PUBLICATION_FAILURE_EVIDENCE_INVALID,
+        )
+        # A stderr shape violation is still a stderr identity.
+        self.assert_publication_code(
+            success, b"NeverPrintTail\r", verify_e2e.RULE_PUBLICATION_STDERR_INVALID
+        )
+        # A valid structure that carries no marker is still a marker identity.
+        self.assert_publication_code(
+            b"ordinary Spring Boot output\n", b"",
+            verify_e2e.RULE_PUBLICATION_SUCCESS_MARKER_INVALID,
+        )
+        # Empty stdout still reaches the marker identity, not a structure identity.
+        self.assert_publication_code(
+            b"", b"", verify_e2e.RULE_PUBLICATION_SUCCESS_MARKER_INVALID
+        )
+        # Overflow still uses the generic fallback.
+        self.assert_publication_code(success, b"", fallback, stdout_overflow=True)
+        self.assert_publication_code(
+            success, b"bounded\n", fallback, stderr_overflow=True
+        )
+        # A non-zero exit still wins over any output identity.
+        capture = verify_e2e.NativeCommandCapture(
+            3, success + b"NeverPrintTail\t\n", b""
+        )
+        with mock.patch.object(
+            verify_e2e, "capture_native_command", return_value=capture
+        ), self.assertRaisesRegex(
+            verify_e2e.VerificationError,
+            "^RULE_PUBLICATION_COMMAND_EXIT_NONZERO$",
+        ):
+            verify_e2e.run_command(
+                ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                before_stage="RULE_PUBLICATION_COMMAND",
+            )
+        # The generic STDOUT_INVALID fallback stays reachable for an unexpected
+        # internal state that the classifier does not name.
+        authority = verify_e2e.semantic_text_lines
+
+        def only_stdout_fails(output, **keywords):
+            if output == success:
+                raise ValueError("NeverPrintInternal")
+            return authority(output, **keywords)
+
+        with mock.patch.object(
+            verify_e2e, "classify_semantic_stdout_violation", return_value=None
+        ), mock.patch.object(
+            verify_e2e, "semantic_text_lines", side_effect=only_stdout_fails
+        ):
+            self.assert_publication_code(
+                success, b"", verify_e2e.RULE_PUBLICATION_STDOUT_INVALID
+            )
+        # A candidate-shaped literal is never promoted to an external code.
+        for candidate in (
+            "rule_publication_command_stdout_tab_invalid",
+            "Rule_PUBLICATION_COMMAND_STDOUT_TAB_INVALID",
+            " RULE_PUBLICATION_COMMAND_STDOUT_TAB_INVALID",
+            "RULE_PUBLICATION_COMMAND_STDOUT_TAB_INVALID ",
+            "RULE_PUBLICATION_COMMAND_STDOUT_TAB_INVALID_RAW",
+            "RULE_PUBLICATION_COMMAND_STDOUT_TAB_INVALID\nNeverPrintExtra",
+        ):
+            with self.subTest(candidate=len(candidate)):
+                self.assertEqual(
+                    fallback,
+                    verify_e2e.semantic_output_failure_code(
+                        "RULE_PUBLICATION_COMMAND", ValueError(candidate)
+                    ),
                 )
 
     def test_publication_success_marker_step_has_its_own_identity(self):
@@ -1709,11 +1914,26 @@ finguardops_rule_analysis_outcomes_created 99
     def test_publication_semantic_codes_are_fixed_literals(self):
         self.assertEqual(
             (
+                "RULE_PUBLICATION_COMMAND_STDOUT_ENCODING_INVALID",
+                "RULE_PUBLICATION_COMMAND_STDOUT_FINAL_NEWLINE_INVALID",
+                "RULE_PUBLICATION_COMMAND_STDOUT_BARE_CR_INVALID",
+                "RULE_PUBLICATION_COMMAND_STDOUT_MIXED_NEWLINE_INVALID",
+                "RULE_PUBLICATION_COMMAND_STDOUT_NUL_INVALID",
+                "RULE_PUBLICATION_COMMAND_STDOUT_TAB_INVALID",
+                "RULE_PUBLICATION_COMMAND_STDOUT_ESCAPE_INVALID",
+                "RULE_PUBLICATION_COMMAND_STDOUT_C0_INVALID",
+                "RULE_PUBLICATION_COMMAND_STDOUT_C1_INVALID",
+                "RULE_PUBLICATION_COMMAND_STDOUT_FORMAT_INVALID",
+            ),
+            verify_e2e.RULE_PUBLICATION_STDOUT_PREDICATE_CODES,
+        )
+        self.assertEqual(
+            (
                 "RULE_PUBLICATION_COMMAND_STDERR_INVALID",
                 "RULE_PUBLICATION_COMMAND_FAILURE_EVIDENCE_INVALID",
                 "RULE_PUBLICATION_COMMAND_STDOUT_INVALID",
                 "RULE_PUBLICATION_COMMAND_SUCCESS_MARKER_INVALID",
-            ),
+            ) + verify_e2e.RULE_PUBLICATION_STDOUT_PREDICATE_CODES,
             verify_e2e.RULE_PUBLICATION_SEMANTIC_FAILURE_CODES,
         )
         for stage in sorted(verify_e2e.BEFORE_NATIVE_FAILURE_CODES):
