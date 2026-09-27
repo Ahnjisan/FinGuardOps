@@ -80,6 +80,41 @@ def production_success_message():
     )
 
 
+# The logger name Logback prints, fixed by ConnectionInfoLogger.LOGGER_NAME.
+# It is 37 characters, so Spring Boot's default %logger{39} prints it whole.
+HIBERNATE_CONNECTION_INFO_LOGGER = "org.hibernate.orm.connections.pooling"
+HIBERNATE_TAB_LOGGER_PROPERTY = (
+    "--logging.level.org.hibernate.orm.connections.pooling=WARN"
+)
+HIBERNATE_TAB_LOGGER_CONTRACT = re.compile(
+    r"--logging\.level\.org\.hibernate\.orm\.connections\.pooling=WARN"
+)
+
+
+def hibernate_connection_info_block(newline="\n"):
+    # The shape Hibernate ORM 6.6.53.Final emits at INFO from
+    # ConnectionInfoLogger.logConnectionInfoDetails (HHH10001005): one ordinary
+    # Boot console line, then the seven TAB-prefixed continuation lines that
+    # DatabaseConnectionInfoImpl.toInfoString() renders. Values are placeholders;
+    # no real capture is reproduced here.
+    head = production_boot_line(
+        HIBERNATE_CONNECTION_INFO_LOGGER,
+        "HHH10001005: Database info:",
+        timestamp="2026-09-26T12:45:09.001Z",
+    )
+    labels = (
+        "Database JDBC URL [NeverPrintTail]",
+        "Database driver: NeverPrintTail",
+        "Database version: NeverPrintTail",
+        "Autocommit mode: NeverPrintTail",
+        "Isolation level: NeverPrintTail",
+        "Minimum pool size: NeverPrintTail",
+        "Maximum pool size: NeverPrintTail",
+    )
+    lines = [head] + ["\t" + label for label in labels]
+    return newline.join(lines).encode() + newline.encode()
+
+
 def publication_production_success_output(newline="\n"):
     lines = [
         production_boot_line(
@@ -2493,6 +2528,7 @@ finguardops_rule_analysis_outcomes_created 99
                 "-e", "SPRING_PROFILES_ACTIVE=local,rule-v1-default-publication",
                 "-e", "FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED=false",
                 "backend", "--spring.main.web-application-type=none",
+                "--logging.level.org.hibernate.orm.connections.pooling=WARN",
                 "--finguardops.rule-v1-default-publication.enabled=true",
                 "--finguardops.rule-v1-default-publication.confirmation=PUBLISH_RULE_V1_DEFAULT_V1",
                 "--finguardops.rule-v1-default-publication.effective-from=" + effective,
@@ -2541,6 +2577,220 @@ finguardops_rule_analysis_outcomes_created 99
         ):
             verify_e2e.publish_rules(partial, before_diagnostics=True)
         self.assertEqual(len(partial.calls), 2)
+
+    def test_publication_argv_owns_the_hibernate_tab_producer(self):
+        # The TAB in a publication capture comes from Hibernate's own INFO log,
+        # not from repository code, so the argv silences that one logger instead
+        # of the stdout contract relaxing its TAB rule.
+        effective = "2026-09-23T14:00:00Z"
+        argv = verify_e2e.rule_publication_arguments(effective)
+        self.assertEqual(argv.count(HIBERNATE_TAB_LOGGER_PROPERTY), 1)
+        # The property sits in the backend application argument region, after the
+        # service name and before the effective-from argument that stays last.
+        self.assertGreater(
+            argv.index(HIBERNATE_TAB_LOGGER_PROPERTY), argv.index("backend")
+        )
+        self.assertTrue(
+            argv[-1].startswith(
+                "--finguardops.rule-v1-default-publication.effective-from="
+            )
+        )
+        self.assertEqual(argv[-1].split("=", 1)[1], effective)
+        # Exactly one argument mentions a Hibernate logger.
+        hibernate = [item for item in argv if "hibernate" in item.casefold()]
+        self.assertEqual(hibernate, [HIBERNATE_TAB_LOGGER_PROPERTY])
+        # The approved spelling is pinned by an anchored contract rather than by
+        # argv membership, so each rejected candidate below fails on its own: a
+        # loose pattern would admit the padded, suffixed and miscased forms.
+        accepted = [
+            item for item in argv
+            if HIBERNATE_TAB_LOGGER_CONTRACT.fullmatch(item) is not None
+        ]
+        self.assertEqual(accepted, [HIBERNATE_TAB_LOGGER_PROPERTY])
+        rejected = (
+            "--logging.level.org.hibernate.orm.connections.pooling=OFF",
+            "--logging.level.org.hibernate.orm.connections.pooling=ERROR",
+            "--logging.level.org.hibernate.orm.connections.pooling=INFO",
+            "--logging.level.org.hibernate.orm.connections.pooling=DEBUG",
+            "--logging.level.org.hibernate.orm.connections.pooling=TRACE",
+            "--logging.level.org.hibernate.orm.connections.pooling=warn",
+            "--logging.level.org.hibernate.orm.connections.pooling=Warn",
+            "--logging.level.org.hibernate=WARN",
+            "--logging.level.org.hibernate.orm=WARN",
+            "--logging.level.org.hibernate.orm.connections=WARN",
+            "--logging.level.org.hibernate.orm.connections.pooling.extra=WARN",
+            "--logging.level.root=WARN",
+            " --logging.level.org.hibernate.orm.connections.pooling=WARN",
+            "--logging.level.org.hibernate.orm.connections.pooling=WARN ",
+            "LOGGING_LEVEL_ORG_HIBERNATE_ORM_CONNECTIONS_POOLING=WARN",
+        )
+        for candidate in rejected:
+            with self.subTest(candidate=candidate):
+                self.assertIsNone(
+                    HIBERNATE_TAB_LOGGER_CONTRACT.fullmatch(candidate)
+                )
+                self.assertNotIn(candidate, argv)
+        # No other logging level is set, so the global Hibernate level and the
+        # root level are untouched, and no environment variable form is added.
+        self.assertEqual(
+            [item for item in argv if item.startswith("--logging.level.")],
+            [HIBERNATE_TAB_LOGGER_PROPERTY],
+        )
+        environment_arguments = [
+            argv[index + 1]
+            for index, item in enumerate(argv[:-1])
+            if item == "-e"
+        ]
+        self.assertEqual(
+            environment_arguments,
+            [
+                "SPRING_PROFILES_ACTIVE=local,rule-v1-default-publication",
+                "FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED=false",
+            ],
+        )
+
+    def test_publication_argv_builder_is_shared_by_service_and_run(self):
+        # Service passes before_diagnostics=False and Run passes True, which only
+        # selects the before_stage. The argv itself, and therefore the producer
+        # suppression, must be identical in both modes.
+        class Context:
+            def __init__(self, outputs):
+                self.outputs = list(outputs)
+                self.calls = []
+
+            def execute(
+                self, arguments, *, input_bytes=None, timeout=None,
+                before_stage=None,
+            ):
+                self.calls.append((list(arguments), before_stage))
+                return self.outputs.pop(0)
+
+        captured = {}
+        for mode, diagnostics in (("run", True), ("service", False)):
+            context = Context([b"0\n", b"0\n", b"runner output\n", b"4\n"])
+            with mock.patch.object(verify_e2e.time, "sleep"):
+                verify_e2e.publish_rules(context, before_diagnostics=diagnostics)
+            arguments, before_stage = context.calls[2]
+            captured[mode] = arguments
+            self.assertEqual(
+                before_stage,
+                "RULE_PUBLICATION_COMMAND" if diagnostics else None,
+            )
+            self.assertEqual(arguments.count(HIBERNATE_TAB_LOGGER_PROPERTY), 1)
+        self.assertEqual(captured["run"][:-1], captured["service"][:-1])
+
+    def test_publication_stdout_failure_evidence_outranks_the_tab_rule(self):
+        # Silencing the Hibernate producer must not let a real stack trace be
+        # reported as a mere TAB violation. Failure evidence is judged before the
+        # structural stdout rules, and these captures pin that order on stdout,
+        # which is where Boot writes its console appender.
+        success = publication_production_success_output()
+        headline = "java.lang.IllegalStateException: hidden"
+        frame = "\tat com.example.Type.run(Type.java:1)"
+        warning = production_boot_line(
+            "o.s.b.w.s.c.ServletWebServerApplicationContext",
+            "Exception encountered during context initialisation",
+            level="WARN",
+        )
+        caused_by = "Caused by: com.example.PublicationFailure: hidden"
+        suppressed = "Suppressed: com.example.HiddenFailure: hidden"
+        evidence = verify_e2e.RULE_PUBLICATION_FAILURE_EVIDENCE_INVALID
+        # The WARN console line on its own is not evidence, so the "-only" cases
+        # below are decided by the headline alone and the frame-bearing cases by
+        # the frame alone. Both detectors are therefore load-bearing here.
+        self.assertFalse(
+            verify_e2e.has_rule_publication_failure_evidence(
+                success + (warning + "\n").encode(), b""
+            )
+        )
+        cases = {
+            # decided by RULE_PUBLICATION_RUNNER_STACK_FRAME
+            "frame-without-headline": success + (frame + "\n").encode(),
+            "frame-before-marker": (frame + "\n").encode() + success,
+            # decided by RULE_PUBLICATION_RUNNER_EXCEPTION_HEADLINE
+            "headline-only": success + (headline + "\n").encode(),
+            "caused-by-only": success + (caused_by + "\n").encode(),
+            "suppressed-only": success + (suppressed + "\n").encode(),
+            "nonfatal-warn-throwable": (
+                success + (warning + "\n" + headline + "\n").encode()
+            ),
+            # the full shapes a real capture carries: headline plus its frames
+            "headline-and-frame": (
+                success + (headline + "\n" + frame + "\n").encode()
+            ),
+            "caused-by-frame": (
+                success + (caused_by + "\n" + frame + "\n").encode()
+            ),
+            "suppressed-frame": (
+                success + (suppressed + "\n" + frame + "\n").encode()
+            ),
+            "nonfatal-warn-throwable-frame": (
+                success
+                + (warning + "\n" + headline + "\n" + frame + "\n").encode()
+            ),
+        }
+        for name, stdout in cases.items():
+            with self.subTest(case=name):
+                self.assert_publication_code(stdout, b"", evidence)
+
+    def test_publication_stdout_tab_rule_still_rejects_normal_tab_output(self):
+        # The Hibernate connection-info block is ordinary healthy output, not
+        # failure evidence, and the stdout contract still rejects it. The fix owns
+        # the producer through the argv, so this fixture stays red on purpose and
+        # pins that the validator was not relaxed.
+        success = publication_production_success_output()
+        tab = verify_e2e.RULE_PUBLICATION_STDOUT_TAB_INVALID
+        for newline in ("\n", "\r\n"):
+            with self.subTest(newline=newline):
+                stdout = (
+                    hibernate_connection_info_block(newline)
+                    + publication_production_success_output(newline)
+                )
+                self.assertFalse(
+                    verify_e2e.has_rule_publication_failure_evidence(stdout, b"")
+                )
+                self.assert_publication_code(stdout, b"", tab)
+        application_owned = (
+            production_boot_line(
+                "c.a.b.r.o.RuleV1DefaultRuleSetPublicationRunner",
+                "NeverPrintTail summary:",
+            )
+            + "\n\tNeverPrintTail indented detail\n"
+        )
+        self.assert_publication_code(
+            success + application_owned.encode(), b"", tab
+        )
+
+    def test_publication_stdout_tab_backstops_undetected_frame_shapes(self):
+        # RULE_PUBLICATION_RUNNER_STACK_FRAME does not match every real frame
+        # spelling, so the TAB rule is the fail-closed backstop for the rest. The
+        # frame regex is deliberately not widened here; this pins only that those
+        # shapes keep being rejected, which is why TAB is never allowed globally.
+        success = publication_production_success_output()
+        tab = verify_e2e.RULE_PUBLICATION_STDOUT_TAB_INVALID
+        shapes = {
+            "unknown-packaging": "\tat com.example.Type.run(Type.java:1) ~[?:?]",
+            "module-path-qualified": "\tat app//com.example.Type.run(Type.java:1)",
+            "nested-frame": "\t\tat com.example.Type.run(Type.java:1)",
+            "frame-without-line": "\tat com.example.Type.run(Type.java)",
+            "elision-more": "\t... 12 more",
+            "elision-common-frames": "\t... 3 common frames omitted",
+        }
+        for name, line in shapes.items():
+            with self.subTest(case=name):
+                # Neither pattern claims the shape, so it is not failure evidence.
+                self.assertIsNone(
+                    verify_e2e.RULE_PUBLICATION_RUNNER_STACK_FRAME.fullmatch(line)
+                )
+                self.assertFalse(
+                    verify_e2e.has_rule_publication_failure_evidence(
+                        (line + "\n").encode(), b""
+                    )
+                )
+                # The TAB rule refuses it anyway, which is the whole point.
+                self.assert_publication_code(
+                    success + (line + "\n").encode(), b"", tab
+                )
 
     def test_native_capture_bounds_pipes_timeout_and_start_failure(self):
         success = verify_e2e.capture_native_command(

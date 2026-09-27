@@ -637,8 +637,62 @@ code를 가진다. 한 capture가 여러 규칙을 위반해도 아래 고정 �
 출력 허용 범위는 변하지 않는다. 기존 `RULE_PUBLICATION_COMMAND_STDOUT_INVALID`는 예상 밖 내부 상태의
 fail-closed fallback으로 남는다. 거부된 문자, code point, line, candidate, raw stdout/stderr, command,
 argv, SQL, path, environment, exception text, credential은 diagnostic과 PowerShell warning에 포함하지
-않고 compile-time fixed code 하나만 외부로 전달한다. 이번 변경은 진단 분류만 개선하며, actual root
-cause는 다음 공식 Run 전까지 미확정이다.
+않고 compile-time fixed code 하나만 외부로 전달한다.
+
+#### Publication stdout TAB의 무조건적 producer 하나
+
+공식 Run이 `RULE_PUBLICATION_COMMAND_STDOUT_TAB_INVALID`를 보고했고, artifact 수준에서 확인된
+producer는 **Hibernate ORM 6.6.53.Final**의 `org.hibernate.orm.connections.pooling` logger가
+INFO로 emit하는 `ConnectionInfoLogger.logConnectionInfoDetails` (**HHH10001005**,
+`"Database info:"`)이다. payload는 `DatabaseConnectionInfoImpl.toInfoString()`이며 TAB으로
+시작하는 7개 continuation line을 만든다. `JdbcEnvironmentInitiator.initiateService`의 세 분기가
+모두 guard 없는 `logConnectionInfo` 호출로 수렴하고 jar 전체에서 호출자가 하나뿐이므로,
+publication one-shot startup에서 **무조건 실행되는 정상 출력이고 failure evidence가 아니다.**
+repository-owned publication 코드에는 stdout TAB producer가 없다.
+
+> **단일 producer라고 단정하지 않는다.** `classify_semantic_stdout_violation`은 위반된 첫 규칙에서
+> 반환하고 stage는 fail-closed로 종료하므로, capture에 TAB line이 몇 개이든 producer가 몇 개이든
+> 한 Run이 보고할 수 있는 identity는 언제나 하나다. "정확히 1회"는 fail-fast validator의 성질이며
+> producer 유일성의 증거가 아니다. 확립된 것은 HHH10001005가 이 startup 경로의 무조건적 TAB
+> producer라는 사실과, repository-owned 코드가 stdout TAB을 만들지 않는다는 사실이다. 다음 공식
+> Run에서 두 번째 producer가 드러나도 이 변경이 반증되는 것은 아니며, 이 변경은 여전히 필요한
+> 단계다.
+
+따라서 validator를 완화하지 않고 producer를 소유한다. `rule_publication_arguments()`가
+backend application argument 영역에 다음 property를 정확히 1회 전달한다.
+
+```
+--logging.level.org.hibernate.orm.connections.pooling=WARN
+```
+
+| 항목 | 내용 |
+| --- | --- |
+| 억제 대상 | HHH10001005 (INFO) 하나뿐이다. 이 logger의 유일한 INFO message다. |
+| 유지 대상 | 같은 logger의 WARN 4종(HHH10001002·10001006·10001009·10001010). 이 logger는 ERROR-level message를 선언하지 않지만 WARN 이상은 모두 통과한다. |
+| 적용 범위 | `local,rule-v1-default-publication` profile의 publication one-shot 명령 한 개 |
+| Service·Run | 같은 argv builder를 쓰므로 동일하게 적용된다. `before_stage`만 다르다. |
+| Backend global logging | 변경하지 않는다. root level과 `org.hibernate` 전역 level은 그대로다. |
+| 일반 runtime | 영향 없다. publication one-shot 외에는 이 property가 전달되지 않는다. |
+| Image rebuild | 불필요하다. Spring Boot가 command line에서 runtime에 bind한다. |
+| `OFF` | 사용하지 않는다. WARN/ERROR를 잃기 때문이다. |
+| 환경변수 형태 | 사용하지 않는다. argv literal 하나로 유지한다. |
+| banner·ANSI·JPA·Flyway·Hikari | 변경하지 않는다. |
+
+**TAB validator는 완화하지 않는다.** `semantic_text_lines`의 TAB 거부, 10개 stdout predicate,
+`RULE_PUBLICATION_COMMAND_STDOUT_INVALID` fallback, failure-evidence 검사, success marker
+cardinality·fullmatch, activation 4/4, stderr validator, stage 우선순위가 모두 그대로다.
+Hibernate INFO TAB block 모양의 fixture는 계속 `STDOUT_TAB_INVALID`로 거부되며, 그 테스트는
+validator가 완화되지 않았음을 고정하는 것이다.
+
+**Java stack trace fail-closed backstop을 유지한다.** `RULE_PUBLICATION_RUNNER_STACK_FRAME`이
+matching하는 canonical frame은 TAB 검사보다 먼저 `FAILURE_EVIDENCE_INVALID`가 된다. 반면
+packaging suffix `~[?:?]`, `app//` qualified frame, 중첩 `\t\tat`, line number 없는 frame,
+`\t... N more`, `\t... N common frames omitted`는 그 regex가 matching하지 않으므로 **TAB 규칙이
+유일한 차단선이다.** 그래서 TAB을 전역 허용하면 exit 0과 success marker를 갖춘 capture가 이
+shape들을 그대로 통과시킨다. TAB 전역 허용은 금지하고, frame regex 확장은 별도 후속 hardening
+으로 남긴다.
+
+actual Green은 다음 공식 Docker Run에서 확인해야 한다.
 
 stdout/stderr overflow, 분류할 수 없는 output-validation failure, 승인 literal 외의 candidate는 기존
 `RULE_PUBLICATION_COMMAND_OUTPUT_INVALID`으로 fail-closed fallback한다. 위 두 표의 모든 code는

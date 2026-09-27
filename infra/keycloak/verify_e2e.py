@@ -2426,12 +2426,22 @@ def sql_scalar(ctx: HostContext, query: str, before_stage: str | None = None) ->
     return output.decode("utf-8", "strict").strip()
 
 
+# The publication one-shot runs with the Spring Boot default root level, so
+# Hibernate's org.hibernate.orm.connections.pooling logger emits HHH10001005
+# ("Database info:") at INFO, and DatabaseConnectionInfoImpl.toInfoString()
+# renders its seven continuation lines with a leading TAB. That is ordinary
+# healthy output, not failure evidence, but the publication stdout contract
+# rejects TAB because Java stack frames also start with one. The producer is
+# silenced for that single logger only: every WARN and ERROR on it stays
+# visible, the TAB rule and the stack-frame backstop are unchanged, and the
+# property binds at run time so no backend image rebuild is needed.
 def rule_publication_arguments(effective: str) -> list[str]:
     return [
         "run", "--rm", "--no-deps", "--pull", "never", "-T",
         "-e", "SPRING_PROFILES_ACTIVE=local,rule-v1-default-publication",
         "-e", "FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED=false",
         "backend", "--spring.main.web-application-type=none",
+        "--logging.level.org.hibernate.orm.connections.pooling=WARN",
         "--finguardops.rule-v1-default-publication.enabled=true",
         "--finguardops.rule-v1-default-publication.confirmation=PUBLISH_RULE_V1_DEFAULT_V1",
         "--finguardops.rule-v1-default-publication.effective-from=" + effective,
