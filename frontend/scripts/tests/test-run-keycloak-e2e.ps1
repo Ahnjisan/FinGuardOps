@@ -7538,9 +7538,18 @@ function Invoke-D315TargetedTests {
                 function Invoke-E2EInLocation {
                     param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][scriptblock]$Body)
                 }
+                # 이 케이스는 primary 분류만 본다. nonzero 경로의 log 판독이 실제
+                # docker를 부르지 않도록 native 경계를 빈 capture로 대신한다.
+                function Invoke-E2EBoundedNativeProcess {
+                    return [pscustomobject]@{
+                        ExitCode = 0; Stdout = [byte[]]::new(0); Stderr = [byte[]]::new(0)
+                        StdoutOverflow = $false; StderrOverflow = $false; TimedOut = $false
+                        StartFailed = $false; CaptureFailed = $false; CleanupFailed = $false
+                    }
+                }
                 $receipt = New-E2EReceipt -RunId ([guid]::NewGuid().ToString('N')) -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
                 $failure = $null
-                try { Invoke-E2EFixedFixtureService -Receipt $receipt -PlanJson '{}' } catch { $failure = [string]$_.Exception.Message }
+                try { Invoke-E2EFixedFixtureService -Receipt $receipt -PlanJson '{}' 3>$null } catch { $failure = [string]$_.Exception.Message }
                 return $failure
             } $containers $document
         }
@@ -7585,12 +7594,12 @@ function Invoke-D315TargetedTests {
     # 호출, $LASTEXITCODE 판정, Wait 실패 직후 authoritative 문서 1회 조회까지
     # 모두 production 코드가 수행한다.
     $script:D315FixtureStageInvoke = {
-        param([int]$UpExit, [int]$WaitExit, [bool]$InventoryRunning, $Document, [int]$ValidateContainerCount = 1, [string]$InspectMode = '')
+        param([int]$UpExit, [int]$WaitExit, [bool]$InventoryRunning, $Document, [int]$ValidateContainerCount = 1, [string]$InspectMode = '', $LogCapture = $null)
         # InspectMode를 지정하면 Get-ContainerDocument를 가리지 않고 실제
         # production 함수가 fake docker의 inspect 응답을 판독한다.
         $inspectAnswer = & $script:D315FixtureInspectAnswer $InspectMode
         return & $script:E2EModule {
-            param($upExit, $waitExit, $inventoryRunning, $injectedDocument, $validateContainerCount, $inspectMode, $inspectAnswer)
+            param($upExit, $waitExit, $inventoryRunning, $injectedDocument, $validateContainerCount, $inspectMode, $inspectAnswer, $logCapture)
             $inventoryReads = [pscustomobject]@{ Count = 0 }
             $sentinel = 'D315-RAW-SENTINEL-7f3a'
             $authoritativeId = 'a1b2c3d4e5f6' + ('0' * 52)
@@ -7598,6 +7607,20 @@ function Invoke-D315TargetedTests {
             function Invoke-E2EInLocation {
                 param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][scriptblock]$Body)
                 & $Body
+            }
+            # production ReadDiagnostic 경계가 부르는 bounded native 경계만 대신한다.
+            # 실제 docker는 실행되지 않고, 넘어온 argv와 세 상한이 호출 기록에 남는다.
+            # LogCapture가 없으면 stderr가 빈 정상 capture, 'THROW'면 경계 자체가 실패한다.
+            function Invoke-E2EBoundedNativeProcess {
+                param([string]$Executable, [string[]]$ArgumentList, [string]$WorkingDirectory, [int]$StdoutLimit, [int]$StderrLimit, [int]$TimeoutMilliseconds)
+                $calls.Add('logs:' + $Executable + ' ' + ($ArgumentList -join ' ') + '|' + $StdoutLimit + '|' + $StderrLimit + '|' + $TimeoutMilliseconds)
+                if ($logCapture -is [string] -and $logCapture -ceq 'THROW') { throw $sentinel }
+                if ($null -ne $logCapture) { return $logCapture }
+                return [pscustomobject]@{
+                    ExitCode = 0; Stdout = [byte[]]::new(0); Stderr = [byte[]]::new(0)
+                    StdoutOverflow = $false; StderrOverflow = $false; TimedOut = $false
+                    StartFailed = $false; CaptureFailed = $false; CleanupFailed = $false
+                }
             }
             function docker {
                 $arguments = @($args | ForEach-Object { [string]$_ })
@@ -7639,7 +7662,12 @@ function Invoke-D315TargetedTests {
             }
             $receipt = New-E2EReceipt -RunId ([guid]::NewGuid().ToString('N')) -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
             $failure = $null
-            try { Invoke-E2EFixedFixtureService -Receipt $receipt -PlanJson '{"transactionId":"safe"}' }
+            # production writer가 실제로 내보낸 warning record를 호출 기록에 함께 남긴다.
+            try {
+                & { Invoke-E2EFixedFixtureService -Receipt $receipt -PlanJson '{"transactionId":"safe"}' } 3>&1 | ForEach-Object {
+                    if ($_ -is [System.Management.Automation.WarningRecord]) { $calls.Add('warning:' + [string]$_.Message) }
+                }
+            }
             catch { $failure = $_ }
             return [pscustomobject]@{
                 Calls = @($calls)
@@ -7649,14 +7677,14 @@ function Invoke-D315TargetedTests {
                 Sentinel = $sentinel
                 AuthoritativeId = $authoritativeId
             }
-        } $UpExit $WaitExit $InventoryRunning $Document $ValidateContainerCount $InspectMode $inspectAnswer
+        } $UpExit $WaitExit $InventoryRunning $Document $ValidateContainerCount $InspectMode $inspectAnswer $LogCapture
     }
     $script:D315FixtureStageIdentities = @(
         'RUN_FIXTURE_SERVICE_START_FAILED', 'RUN_FIXTURE_CONTAINER_INVALID', 'RUN_FIXTURE_SERVICE_WAIT_FAILED',
         'RUN_FIXTURE_SERVICE_WAIT_EXITED_ZERO', 'RUN_FIXTURE_SERVICE_EXIT_NONZERO', 'RUN_FIXTURE_SERVICE_STATE_INVALID'
     )
     $script:D315AssertFixtureStage = {
-        param($Result, $Expected, [string[]]$ExpectedCalls, [string]$Name)
+        param($Result, $Expected, [string[]]$ExpectedCalls, [string]$Name, [string]$ExpectedSecondary = 'RUN_FIXTURE_SERVICE_MARKER_ABSENT')
         Assert-Equal $Expected $Result.Failure ('Fixture stage identity differs for ' + $Name + '.')
         # 기존 primary 전달 계약: 경계의 literal은 바깥 Invoke-E2ECleanupActions가
         # Exception 객체로 다시 던진다. 이 harness의 Invoke-E2EInLocation은 본문만
@@ -7671,7 +7699,18 @@ function Invoke-D315TargetedTests {
         }
         $expandedCalls = @($ExpectedCalls | ForEach-Object {
             if ($_ -ceq 'document') { 'document:' + $Result.AuthoritativeId + '|RUN_FIXTURE_SERVICE_STATE_INVALID|RUN_FIXTURE_CONTAINER_INVALID' } else { $_ } })
+        # nonzero 종료만 container log를 정확히 1회 읽고 secondary를 정확히 1회 낸다.
+        # 다른 모든 identity와 성공은 아래 exact 비교로 log 판독 0회, warning 0회가 고정된다.
+        if ($Expected -ceq 'RUN_FIXTURE_SERVICE_EXIT_NONZERO') {
+            $expandedCalls += @(
+                ('logs:docker logs ' + $Result.AuthoritativeId + '|4096|128|30000'),
+                ('warning:RUN_FIXTURE_SERVICE_SECONDARY=' + $ExpectedSecondary)
+            )
+        }
         Assert-Equal $expandedCalls @($Result.Calls) ('Fixture stage call order or cardinality differs for ' + $Name + '.')
+        foreach ($call in @($Result.Calls)) {
+            Assert-True ($call.IndexOf($Result.Sentinel, [System.StringComparison]::Ordinal) -lt 0) ('Raw output reached a recorded call for ' + $Name + '.')
+        }
         Assert-True $Result.PlanRestored ('Fixture plan environment was not restored for ' + $Name + '.')
     }
     Invoke-TestCase 'D315 production fixture Start and Wait nonzero map to exclusive stage identities' {
@@ -7787,6 +7826,193 @@ function Invoke-D315TargetedTests {
             $result = & $script:D315FixtureStageInvoke 0 0 $false $null 1 $mode
             & $script:D315AssertFixtureStage $result $validateCases[$mode] $validateCalls ('validate inspect ' + $mode)
         }
+    }
+    Invoke-TestCase 'D315 fixture service nonzero exit forwards exactly one allowlisted container marker' {
+        $aid = 'a1b2c3d4e5f6' + ('0' * 52)
+        $sentinel = 'D315-RAW-SENTINEL-7f3a'
+        $exitedNonzero = [pscustomobject]@{ Id = $aid; State = [pscustomobject]@{ Status = 'exited'; Running = $false; ExitCode = 1 } }
+        $utf8 = [System.Text.UTF8Encoding]::new($false)
+        $capture = {
+            param([int]$ExitCode, [byte[]]$Stderr, [byte[]]$Stdout = [byte[]]::new(0))
+            [pscustomobject]@{
+                ExitCode = $ExitCode; Stdout = $Stdout; Stderr = $Stderr
+                StdoutOverflow = $false; StderrOverflow = $false; TimedOut = $false
+                StartFailed = $false; CaptureFailed = $false; CleanupFailed = $false
+            }
+        }
+        $text = { param([string]$Value) ,$utf8.GetBytes($Value) }
+        $allowed = 'verification failed: RUN_FIXTURE_JWKS_TRANSPORT_FAILED'
+        $flag = { param([string]$Name) $value = & $capture 0 (& $text ($allowed + "`n")); $value.$Name = $true; $value }
+        $cases = [ordered]@{
+            'allowlisted LF' = @('RUN_FIXTURE_JWKS_TRANSPORT_FAILED', (& $capture 0 (& $text ($allowed + "`n"))))
+            'allowlisted CRLF' = @('RUN_FIXTURE_JWKS_TRANSPORT_FAILED', (& $capture 0 (& $text ($allowed + "`r`n"))))
+            'allowlisted status suffix' = @('RUN_FIXTURE_TRANSACTION_STATUS_503', (& $capture 0 (& $text "verification failed: RUN_FIXTURE_TRANSACTION_STATUS_503`n")))
+            'stdout noise beside a valid marker' = @('RUN_FIXTURE_JWKS_TRANSPORT_FAILED', (& $capture 0 (& $text ($allowed + "`n")) (& $text ($sentinel + "`n"))))
+            'marker only on stdout' = @('RUN_FIXTURE_SERVICE_MARKER_ABSENT', (& $capture 0 ([byte[]]::new(0)) (& $text ($allowed + "`n"))))
+            'empty stderr' = @('RUN_FIXTURE_SERVICE_MARKER_ABSENT', (& $capture 0 ([byte[]]::new(0))))
+            'docker logs nonzero with marker-shaped stderr' = @('RUN_FIXTURE_SERVICE_LOG_READ_FAILED', (& $capture 1 (& $text ($allowed + "`n"))))
+            'docker logs nonzero with raw stderr' = @('RUN_FIXTURE_SERVICE_LOG_READ_FAILED', (& $capture 1 (& $text ('Error response from daemon: ' + $sentinel + "`n"))))
+            'docker logs start failed' = @('RUN_FIXTURE_SERVICE_LOG_READ_FAILED', (& $flag 'StartFailed'))
+            'docker logs timed out' = @('RUN_FIXTURE_SERVICE_LOG_READ_FAILED', (& $flag 'TimedOut'))
+            'docker logs capture failed' = @('RUN_FIXTURE_SERVICE_LOG_READ_FAILED', (& $flag 'CaptureFailed'))
+            'docker logs cleanup failed' = @('RUN_FIXTURE_SERVICE_LOG_READ_FAILED', (& $flag 'CleanupFailed'))
+            'native boundary throws' = @('RUN_FIXTURE_SERVICE_LOG_READ_FAILED', 'THROW')
+            'capture without fields' = @('RUN_FIXTURE_SERVICE_LOG_READ_FAILED', ([pscustomobject]@{ ExitCode = 0; Stderr = (& $text ($allowed + "`n")) }))
+            'capture stderr not bytes' = @('RUN_FIXTURE_SERVICE_LOG_READ_FAILED', (& { $value = & $capture 0 ([byte[]]::new(0)); $value.Stderr = ($allowed + "`n"); $value }))
+            'stderr overflow flag' = @('RUN_FIXTURE_SERVICE_MARKER_TOO_LARGE', (& $flag 'StderrOverflow'))
+            'stderr longer than the limit' = @('RUN_FIXTURE_SERVICE_MARKER_TOO_LARGE', (& $capture 0 (& $text (('A' * 128) + "`n"))))
+            'generic http code' = @('RUN_FIXTURE_SERVICE_MARKER_NOT_ALLOWED', (& $capture 0 (& $text "verification failed: HTTP_TRANSPORT_FAILED`n")))
+            'unknown well-formed code' = @('RUN_FIXTURE_SERVICE_MARKER_NOT_ALLOWED', (& $capture 0 (& $text "verification failed: NOT_ALLOWLISTED`n")))
+            'runner local code from the container' = @('RUN_FIXTURE_SERVICE_MARKER_NOT_ALLOWED', (& $capture 0 (& $text "verification failed: RUN_FIXTURE_SERVICE_MARKER_ABSENT`n")))
+            'unlisted status suffix' = @('RUN_FIXTURE_SERVICE_MARKER_NOT_ALLOWED', (& $capture 0 (& $text "verification failed: RUN_FIXTURE_TRANSACTION_STATUS_418`n")))
+            'lowercase code' = @('RUN_FIXTURE_SERVICE_MARKER_INVALID', (& $capture 0 (& $text "verification failed: run_fixture_jwks_transport_failed`n")))
+            'case variant code' = @('RUN_FIXTURE_SERVICE_MARKER_INVALID', (& $capture 0 (& $text "verification failed: Run_FIXTURE_JWKS_TRANSPORT_FAILED`n")))
+            'code longer than 64' = @('RUN_FIXTURE_SERVICE_MARKER_INVALID', (& $capture 0 (& $text ('verification failed: ' + ('A' * 65) + "`n"))))
+            'leading space' = @('RUN_FIXTURE_SERVICE_MARKER_INVALID', (& $capture 0 (& $text (' ' + $allowed + "`n"))))
+            'trailing space' = @('RUN_FIXTURE_SERVICE_MARKER_INVALID', (& $capture 0 (& $text ($allowed + " `n"))))
+            'no terminator' = @('RUN_FIXTURE_SERVICE_MARKER_INVALID', (& $capture 0 (& $text $allowed)))
+            'terminator only' = @('RUN_FIXTURE_SERVICE_MARKER_INVALID', (& $capture 0 (& $text "`n")))
+            'bare CR terminator' = @('RUN_FIXTURE_SERVICE_MARKER_INVALID', (& $capture 0 (& $text ($allowed + "`r"))))
+            'two lines' = @('RUN_FIXTURE_SERVICE_MARKER_INVALID', (& $capture 0 (& $text ($allowed + "`n" + $sentinel + "`n"))))
+            'duplicate marker' = @('RUN_FIXTURE_SERVICE_MARKER_INVALID', (& $capture 0 (& $text ($allowed + "`n" + $allowed + "`n"))))
+            'blank trailing line' = @('RUN_FIXTURE_SERVICE_MARKER_INVALID', (& $capture 0 (& $text ($allowed + "`n`n"))))
+            'embedded CR' = @('RUN_FIXTURE_SERVICE_MARKER_INVALID', (& $capture 0 (& $text ("verification failed: RUN_FIXTURE`r_JWKS_TRANSPORT_FAILED`n"))))
+            'C0 control' = @('RUN_FIXTURE_SERVICE_MARKER_INVALID', (& $capture 0 (& $text ($allowed + [char]1 + "`n"))))
+            'C1 control' = @('RUN_FIXTURE_SERVICE_MARKER_INVALID', (& $capture 0 (& $text ($allowed + [char]0x85 + "`n"))))
+            'Cf format' = @('RUN_FIXTURE_SERVICE_MARKER_INVALID', (& $capture 0 (& $text ($allowed + [char]0x200B + "`n"))))
+            'BOM prefix' = @('RUN_FIXTURE_SERVICE_MARKER_INVALID', (& $capture 0 (& $text ([string][char]0xFEFF + $allowed + "`n"))))
+            'invalid UTF-8' = @('RUN_FIXTURE_SERVICE_MARKER_INVALID', (& $capture 0 ([byte[]](@(0x76, 0xC3, 0x28) + @(10)))))
+            'raw path suffix' = @('RUN_FIXTURE_SERVICE_MARKER_INVALID', (& $capture 0 (& $text ($allowed + ' C:\private\' + $sentinel + "`n"))))
+            'python traceback' = @('RUN_FIXTURE_SERVICE_MARKER_INVALID', (& $capture 0 (& $text ("Traceback (most recent call last):`n  " + $sentinel + "`n"))))
+        }
+        foreach ($name in $cases.Keys) {
+            foreach ($path in @('wait', 'validate')) {
+                if ($path -ceq 'wait') {
+                    $result = & $script:D315FixtureStageInvoke 0 1 $false $exitedNonzero 1 '' $cases[$name][1]
+                    $calls = @('docker:up', 'inventory', 'docker:wait', 'document')
+                }
+                else {
+                    $result = & $script:D315FixtureStageInvoke 0 0 $false $exitedNonzero 1 '' $cases[$name][1]
+                    $calls = @('docker:up', 'inventory', 'docker:wait', 'inventory', 'document')
+                }
+                # primary, 호출 순서, log 판독 1회, warning 1회, 원문 비반사를 한 번에 고정한다.
+                & $script:D315AssertFixtureStage $result 'RUN_FIXTURE_SERVICE_EXIT_NONZERO' $calls ($path + ' ' + $name) $cases[$name][0]
+            }
+        }
+
+        $contract = & $script:E2EModule {
+            $forwarded = [System.Collections.Generic.List[string]]::new()
+            foreach ($code in $RunFixtureServiceSecondaryCodes) {
+                $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes('verification failed: ' + $code + "`n")
+                $forwarded.Add((ConvertFrom-E2ERunFixtureServiceLogCapture -Capture ([pscustomobject]@{
+                    ExitCode = 0; Stdout = [byte[]]::new(0); Stderr = $bytes
+                    StdoutOverflow = $false; StderrOverflow = $false; TimedOut = $false
+                    StartFailed = $false; CaptureFailed = $false; CleanupFailed = $false
+                })))
+            }
+            $records = [System.Collections.Generic.List[string]]::new()
+            $writer = { param($value) $records.Add($value) }.GetNewClosure()
+            Write-E2ERunFixtureServiceDiagnostic -Secondary 'RUN_FIXTURE_JWKS_TRANSPORT_FAILED' -Writer $writer
+            Write-E2ERunFixtureServiceDiagnostic -Secondary 'RUN_FIXTURE_SERVICE_LOG_READ_FAILED' -Writer $writer
+            Write-E2ERunFixtureServiceDiagnostic -Secondary 'D315-RAW-SENTINEL-7f3a' -Writer $writer
+            Write-E2ERunFixtureServiceDiagnostic -Secondary 'HTTP_TRANSPORT_FAILED' -Writer $writer
+            Write-E2ERunFixtureServiceDiagnostic -Secondary 'RUN_FIXTURE_JWKS_TRANSPORT_FAILED' -Writer { throw 'D315-RAW-SENTINEL-7f3a' }
+            # WarningPreference Stop이어도 진단이 primary를 대체하지 않는다.
+            $receipt = New-E2EReceipt -RunId ([guid]::NewGuid().ToString('N')) -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+            $id = 'd' * 64
+            $stopFailure = $null
+            $reads = [System.Collections.Generic.List[string]]::new()
+            $previous = $global:WarningPreference
+            try {
+                $global:WarningPreference = 'Stop'
+                try {
+                    Invoke-E2EFixedFixtureService -Receipt $receipt -PlanJson '{}' -Boundaries @{
+                        Start = { }
+                        GetContainer = { return $id }.GetNewClosure()
+                        Wait = { throw 'RUN_FIXTURE_SERVICE_EXIT_NONZERO' }
+                        ValidateExit = { }
+                        ReadDiagnostic = { param($value) $reads.Add($value); return $null }.GetNewClosure()
+                    }
+                }
+                catch { $stopFailure = $_.Exception.Message }
+            }
+            finally { $global:WarningPreference = $previous }
+            # ReadDiagnostic을 주지 않은 주입 경계와 64-hex가 아닌 ID는 log를 읽지 않는다.
+            $skipped = [System.Collections.Generic.List[string]]::new()
+            foreach ($candidate in @(('d' * 63), ('D' * 64), (('d' * 64) + ' '), $null)) {
+                try {
+                    Invoke-E2EFixedFixtureService -Receipt $receipt -PlanJson '{}' -Boundaries @{
+                        Start = { }
+                        GetContainer = { return $candidate }.GetNewClosure()
+                        Wait = { throw 'RUN_FIXTURE_SERVICE_EXIT_NONZERO' }
+                        ValidateExit = { }
+                        ReadDiagnostic = { param($value) $skipped.Add('read') }.GetNewClosure()
+                        WriteDiagnostic = { param($value) $skipped.Add('write') }.GetNewClosure()
+                    }
+                }
+                catch { }
+            }
+            $writes = [System.Collections.Generic.List[string]]::new()
+            foreach ($primary in @('RUN_FIXTURE_SERVICE_START_FAILED', 'RUN_FIXTURE_SERVICE_WAIT_FAILED', 'RUN_FIXTURE_SERVICE_WAIT_EXITED_ZERO',
+                    'RUN_FIXTURE_SERVICE_STATE_INVALID', 'RUN_FIXTURE_CONTAINER_INVALID', 'run_fixture_service_exit_nonzero')) {
+                try {
+                    Invoke-E2EFixedFixtureService -Receipt $receipt -PlanJson '{}' -Boundaries @{
+                        Start = { }
+                        GetContainer = { return $id }.GetNewClosure()
+                        Wait = { throw $primary }.GetNewClosure()
+                        ValidateExit = { }
+                        ReadDiagnostic = { param($value) $writes.Add('read') }.GetNewClosure()
+                        WriteDiagnostic = { param($value) $writes.Add('write') }.GetNewClosure()
+                    }
+                }
+                catch { }
+            }
+            Invoke-E2EFixedFixtureService -Receipt $receipt -PlanJson '{}' -Boundaries @{
+                Start = { }
+                GetContainer = { return $id }.GetNewClosure()
+                Wait = { }
+                ValidateExit = { }
+                ReadDiagnostic = { param($value) $writes.Add('read') }.GetNewClosure()
+                WriteDiagnostic = { param($value) $writes.Add('write') }.GetNewClosure()
+            }
+            return [pscustomobject]@{
+                Allowlist = @($RunFixtureServiceSecondaryCodes); Local = @($RunFixtureServiceLocalSecondaryCodes)
+                Forwarded = @($forwarded); Records = @($records); StopFailure = $stopFailure; Reads = @($reads)
+                Skipped = @($skipped); Writes = @($writes)
+                StdoutLimit = $RunFixtureServiceLogStdoutLimit; StderrLimit = $RunFixtureServiceLogStderrLimit
+            }
+        }
+        Assert-Equal 96 $contract.Allowlist.Count 'Fixture service secondary allowlist size drifted.'
+        Assert-Equal 96 @($contract.Allowlist | Sort-Object -Unique -CaseSensitive).Count 'Fixture service secondary allowlist has a duplicate.'
+        Assert-Equal @($contract.Allowlist) @($contract.Forwarded) 'An allowlisted fixture marker was not forwarded as itself.'
+        foreach ($code in @($contract.Allowlist) + @($contract.Local)) {
+            Assert-True ($code -cmatch '\A[A-Z][A-Z0-9_]{0,63}\z') 'A fixture service secondary literal breaks the code contract.'
+        }
+        Assert-Equal @('RUN_FIXTURE_SERVICE_LOG_READ_FAILED', 'RUN_FIXTURE_SERVICE_MARKER_ABSENT', 'RUN_FIXTURE_SERVICE_MARKER_INVALID',
+            'RUN_FIXTURE_SERVICE_MARKER_TOO_LARGE', 'RUN_FIXTURE_SERVICE_MARKER_NOT_ALLOWED') @($contract.Local) 'Runner local secondary set differs.'
+        Assert-Equal 0 @($contract.Local | Where-Object { $contract.Allowlist -ccontains $_ }).Count 'A runner local literal is also a container marker.'
+        foreach ($generic in @('HTTP_TRANSPORT_FAILED', 'HTTP_STATUS_UNEXPECTED', 'HTTP_JSON_INVALID', 'SUBPROCESS_FAILED',
+                'RUN_FIXTURE_BEHAVIOR_STATUS', 'RUN_FIXTURE_BEHAVIOR_RESPONSE_INVALID')) {
+            Assert-True (-not ($contract.Allowlist -ccontains $generic)) ('A stage-less identity is allowlisted: ' + $generic)
+        }
+        Assert-Equal 128 $contract.StderrLimit 'Fixture marker stderr limit changed.'
+        Assert-Equal @('RUN_FIXTURE_SERVICE_SECONDARY=RUN_FIXTURE_JWKS_TRANSPORT_FAILED', 'RUN_FIXTURE_SERVICE_SECONDARY=RUN_FIXTURE_SERVICE_LOG_READ_FAILED',
+            'RUN_FIXTURE_SERVICE_SECONDARY=RUN_FIXTURE_SERVICE_MARKER_INVALID', 'RUN_FIXTURE_SERVICE_SECONDARY=RUN_FIXTURE_SERVICE_MARKER_INVALID') @($contract.Records) `
+            'Fixture service diagnostic writer changed or reflected candidate data.'
+        Assert-Equal 'RUN_FIXTURE_SERVICE_EXIT_NONZERO' $contract.StopFailure 'WarningPreference Stop replaced the fixture primary.'
+        Assert-Equal @('d' * 64) @($contract.Reads) 'The diagnostic read did not receive exactly the authoritative id once.'
+        Assert-Equal 0 $contract.Skipped.Count 'A non-authoritative container id reached the diagnostic read.'
+        Assert-Equal 0 $contract.Writes.Count 'A failure other than nonzero exit, or success, reached the diagnostic.'
+
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:ModulePath, [ref]$tokens, [ref]$errors)
+        $service = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Invoke-E2EFixedFixtureService' }, $true))
+        $diagnosticCalls = @($service[0].FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Invoke-E2ERunFixtureServiceDiagnostic' }, $true))
+        Assert-Equal 1 $diagnosticCalls.Count 'The fixed fixture service does not reach the diagnostic from exactly one place.'
+        $nativeCalls = @($service[0].FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Invoke-E2EBoundedNativeProcess' }, $true))
+        Assert-Equal 1 $nativeCalls.Count 'The fixed fixture service reads the container log from other than one bounded boundary.'
+        Assert-True ($nativeCalls[0].Extent.Text.Contains("-ArgumentList @('logs', `$expectedId)")) 'The container log read is not the exact read-only logs argv.'
     }
     Invoke-TestCase 'D315 container document reader keeps its legacy behavior without fixture codes' {
         # 새 선택 인수를 넘기지 않는 기존 caller는 HEAD와 같은 결과를 받아야 한다.

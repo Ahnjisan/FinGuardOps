@@ -212,6 +212,125 @@ $RunFixtureBeforeLocalSecondaryCodes = @(
     'RUN_FIXTURE_BEFORE_PROCESS_START_FAILED',
     'RUN_FIXTURE_BEFORE_TIMEOUT'
 )
+# What the fixed fixture service container may say about its own failure.
+#
+# The container ends on one `verification failed: <CODE>` line on stderr, and
+# until now nothing read it: the run stopped on RUN_FIXTURE_SERVICE_EXIT_NONZERO
+# and the container was removed with its log. The list below is every identity
+# `verify_e2e.py run-fixture` can end on, spelled out as literals and in the
+# same order as RUN_FIXTURE_WORKER_FAILURE_CODES there. A marker is forwarded
+# only when it is ordinally one of these; nothing is accepted because it merely
+# looks like a code.
+$RunFixtureServiceLogStdoutLimit = 4096
+$RunFixtureServiceLogStderrLimit = 128
+$RunFixtureServiceLogTimeoutMilliseconds = 30000
+$RunFixtureServiceSecondaryCodes = @(
+    'HOST_ARGUMENT_INVALID',
+    'RUN_FIXTURE_PLAN_INVALID',
+    'INGESTION_PLAN_INVALID',
+    'RUNTIME_SECRET_FILE',
+    'RUNTIME_SECRET_CONTENT',
+    'SERVICE_SECRETS_NOT_DISTINCT',
+    'SERVICE_REFRESH_TOKEN_PRESENT',
+    'TOKEN_RESPONSE_INVALID',
+    'JWKS_INVALID',
+    'JWKS_SIGNING_KEY_INVALID',
+    'TOKEN_COMPACT_INVALID',
+    'TOKEN_HEADER_INVALID',
+    'TOKEN_ISSUER_INVALID',
+    'TOKEN_AUDIENCE_INVALID',
+    'TOKEN_AUDIENCE_REPRESENTATION',
+    'TOKEN_SUBJECT_INVALID',
+    'TOKEN_PRINCIPAL_INVALID',
+    'TOKEN_ROLES_INVALID',
+    'TOKEN_TIME_TYPE_INVALID',
+    'TOKEN_TIME_ORDER_INVALID',
+    'TOKEN_TIME_LIFETIME_INVALID',
+    'TOKEN_TIME_IAT_FUTURE',
+    'TOKEN_TIME_EXPIRED',
+    'TOKEN_TIME_NBF_INVALID',
+    'TOKEN_TIME_NBF_FUTURE',
+    'RUN_FIXTURE_TRANSACTION_TOKEN_TRANSPORT_FAILED',
+    'RUN_FIXTURE_TRANSACTION_TOKEN_STATUS_UNEXPECTED',
+    'RUN_FIXTURE_TRANSACTION_TOKEN_JSON_INVALID',
+    'RUN_FIXTURE_TRANSACTION_TOKEN_RESPONSE_READ_FAILED',
+    'RUN_FIXTURE_BEHAVIOR_TOKEN_TRANSPORT_FAILED',
+    'RUN_FIXTURE_BEHAVIOR_TOKEN_STATUS_UNEXPECTED',
+    'RUN_FIXTURE_BEHAVIOR_TOKEN_JSON_INVALID',
+    'RUN_FIXTURE_BEHAVIOR_TOKEN_RESPONSE_READ_FAILED',
+    'RUN_FIXTURE_JWKS_TRANSPORT_FAILED',
+    'RUN_FIXTURE_JWKS_STATUS_UNEXPECTED',
+    'RUN_FIXTURE_JWKS_JSON_INVALID',
+    'RUN_FIXTURE_JWKS_RESPONSE_READ_FAILED',
+    'RUN_FIXTURE_CROSS_SECRET_TRANSPORT_FAILED',
+    'RUN_FIXTURE_CROSS_SECRET_STATUS_UNEXPECTED',
+    'RUN_FIXTURE_CROSS_SECRET_JSON_INVALID',
+    'RUN_FIXTURE_CROSS_SECRET_RESPONSE_READ_FAILED',
+    'RUN_FIXTURE_PASSWORD_EVENT_TRANSPORT_FAILED',
+    'RUN_FIXTURE_PASSWORD_EVENT_JSON_INVALID',
+    'RUN_FIXTURE_PASSWORD_EVENT_RESPONSE_READ_FAILED',
+    'RUN_FIXTURE_PASSWORD_EVENT_STATUS',
+    'RUN_FIXTURE_PASSWORD_EVENT_RESPONSE_INVALID',
+    'RUN_FIXTURE_TRANSFER_LIMIT_EVENT_TRANSPORT_FAILED',
+    'RUN_FIXTURE_TRANSFER_LIMIT_EVENT_JSON_INVALID',
+    'RUN_FIXTURE_TRANSFER_LIMIT_EVENT_RESPONSE_READ_FAILED',
+    'RUN_FIXTURE_TRANSFER_LIMIT_EVENT_STATUS',
+    'RUN_FIXTURE_TRANSFER_LIMIT_EVENT_RESPONSE_INVALID',
+    'RUN_FIXTURE_TRANSACTION_TRANSPORT_FAILED',
+    'RUN_FIXTURE_TRANSACTION_JSON_INVALID',
+    'RUN_FIXTURE_TRANSACTION_RESPONSE_READ_FAILED',
+    'RUN_FIXTURE_TRANSACTION_STATUS',
+    'RUN_FIXTURE_TRANSACTION_RESPONSE_INVALID',
+    'RUN_FIXTURE_PASSWORD_EVENT_STATUS_200',
+    'RUN_FIXTURE_PASSWORD_EVENT_STATUS_400',
+    'RUN_FIXTURE_PASSWORD_EVENT_STATUS_401',
+    'RUN_FIXTURE_PASSWORD_EVENT_STATUS_403',
+    'RUN_FIXTURE_PASSWORD_EVENT_STATUS_409',
+    'RUN_FIXTURE_PASSWORD_EVENT_STATUS_422',
+    'RUN_FIXTURE_PASSWORD_EVENT_STATUS_500',
+    'RUN_FIXTURE_PASSWORD_EVENT_STATUS_503',
+    'RUN_FIXTURE_TRANSFER_LIMIT_EVENT_STATUS_200',
+    'RUN_FIXTURE_TRANSFER_LIMIT_EVENT_STATUS_400',
+    'RUN_FIXTURE_TRANSFER_LIMIT_EVENT_STATUS_401',
+    'RUN_FIXTURE_TRANSFER_LIMIT_EVENT_STATUS_403',
+    'RUN_FIXTURE_TRANSFER_LIMIT_EVENT_STATUS_409',
+    'RUN_FIXTURE_TRANSFER_LIMIT_EVENT_STATUS_422',
+    'RUN_FIXTURE_TRANSFER_LIMIT_EVENT_STATUS_500',
+    'RUN_FIXTURE_TRANSFER_LIMIT_EVENT_STATUS_503',
+    'RUN_FIXTURE_TRANSACTION_STATUS_200',
+    'RUN_FIXTURE_TRANSACTION_STATUS_400',
+    'RUN_FIXTURE_TRANSACTION_STATUS_401',
+    'RUN_FIXTURE_TRANSACTION_STATUS_403',
+    'RUN_FIXTURE_TRANSACTION_STATUS_409',
+    'RUN_FIXTURE_TRANSACTION_STATUS_422',
+    'RUN_FIXTURE_TRANSACTION_STATUS_500',
+    'RUN_FIXTURE_TRANSACTION_STATUS_503',
+    'FIXTURE_OWNER_IDENTITY_INVALID',
+    'FIXTURE_DIRECTORY_INVALID',
+    'FIXTURE_DIRECTORY_NOT_EMPTY',
+    'FIXTURE_MANIFEST_DIRECTORY_IO_FAILED',
+    'FIXTURE_MANIFEST_FINAL_EXISTS',
+    'FIXTURE_MANIFEST_SCHEMA_INVALID',
+    'FIXTURE_MANIFEST_IDENTITY_INVALID',
+    'FIXTURE_MANIFEST_BYTES_INVALID',
+    'FIXTURE_MANIFEST_TEMP_CREATE_FAILED',
+    'FIXTURE_MANIFEST_WRITE_FAILED',
+    'FIXTURE_MANIFEST_RENAME_FAILED',
+    'FIXTURE_MANIFEST_CARDINALITY_INVALID',
+    'FIXTURE_MANIFEST_READ_FAILED',
+    'FIXTURE_MANIFEST_FINAL_INVALID',
+    'INPUT_INVALID',
+    'UNEXPECTED_ERROR'
+)
+# What this runner says when it has no marker to forward. Each names why, and
+# none of them carries anything the log or the Docker CLI printed.
+$RunFixtureServiceLocalSecondaryCodes = @(
+    'RUN_FIXTURE_SERVICE_LOG_READ_FAILED',
+    'RUN_FIXTURE_SERVICE_MARKER_ABSENT',
+    'RUN_FIXTURE_SERVICE_MARKER_INVALID',
+    'RUN_FIXTURE_SERVICE_MARKER_TOO_LARGE',
+    'RUN_FIXTURE_SERVICE_MARKER_NOT_ALLOWED'
+)
 $ForbiddenServiceCredentialEnvironment = @(
     'TRANSACTION_SERVICE_CLIENT_SECRET',
     'BEHAVIOR_SERVICE_CLIENT_SECRET',
@@ -1329,6 +1448,100 @@ function Get-E2EFixtureContainerOutcome {
     return 'ExitedNonzero'
 }
 
+function Test-E2ERunFixtureServiceSecondaryCode([string]$Code) {
+    foreach ($allowed in $RunFixtureServiceSecondaryCodes) {
+        if ([string]::Equals($Code, $allowed, [System.StringComparison]::Ordinal)) { return $true }
+    }
+    return $false
+}
+
+# Turns one bounded `docker logs` capture into exactly one fixed literal.
+#
+# Only the container's stderr is a candidate. Its stdout is never read for a
+# marker, and when the Docker CLI itself fails its stderr is the CLI's own
+# message rather than the container's, so a nonzero exit is a read failure and
+# nothing in that capture is parsed. The accepted shape is the one the worker
+# writes: a single strict UTF-8 line, terminated once, that is entirely
+# `verification failed: <CODE>` with an allowlisted code. Anything else becomes
+# the literal for why it was refused, and the bytes are dropped here.
+function ConvertFrom-E2ERunFixtureServiceLogCapture {
+    param($Capture)
+
+    if ($null -eq $Capture -or $Capture -is [array]) { return 'RUN_FIXTURE_SERVICE_LOG_READ_FAILED' }
+    foreach ($name in @('ExitCode','Stderr','StderrOverflow','TimedOut','StartFailed','CaptureFailed','CleanupFailed')) {
+        if ($null -eq $Capture.PSObject.Properties[$name]) { return 'RUN_FIXTURE_SERVICE_LOG_READ_FAILED' }
+    }
+    $integerTypes = @([int], [long])
+    if ($null -eq $Capture.ExitCode -or $Capture.ExitCode.GetType() -notin $integerTypes -or
+        @('StderrOverflow','TimedOut','StartFailed','CaptureFailed','CleanupFailed' | Where-Object {
+            $null -eq $Capture.$_ -or $Capture.$_.GetType() -ne [bool]
+        }).Count -ne 0) {
+        return 'RUN_FIXTURE_SERVICE_LOG_READ_FAILED'
+    }
+    if ($Capture.CleanupFailed -or $Capture.StartFailed -or $Capture.TimedOut -or $Capture.CaptureFailed -or
+        $Capture.ExitCode -ne 0 -or $Capture.Stderr -isnot [byte[]]) {
+        return 'RUN_FIXTURE_SERVICE_LOG_READ_FAILED'
+    }
+    if ($Capture.StderrOverflow -or $Capture.Stderr.Length -gt $RunFixtureServiceLogStderrLimit) {
+        return 'RUN_FIXTURE_SERVICE_MARKER_TOO_LARGE'
+    }
+    $length = $Capture.Stderr.Length
+    if ($length -eq 0) { return 'RUN_FIXTURE_SERVICE_MARKER_ABSENT' }
+    if ($Capture.Stderr[$length - 1] -ne 10) { return 'RUN_FIXTURE_SERVICE_MARKER_INVALID' }
+    $bodyLength = $length - 1
+    if ($bodyLength -ge 1 -and $Capture.Stderr[$bodyLength - 1] -eq 13) { $bodyLength-- }
+    if ($bodyLength -lt 1) { return 'RUN_FIXTURE_SERVICE_MARKER_INVALID' }
+    $body = [byte[]]::new($bodyLength)
+    [System.Array]::Copy($Capture.Stderr, $body, $bodyLength)
+    if (($body -contains [byte]10) -or ($body -contains [byte]13)) { return 'RUN_FIXTURE_SERVICE_MARKER_INVALID' }
+    $line = $null
+    try { $line = [System.Text.UTF8Encoding]::new($false, $true).GetString($body) }
+    catch { return 'RUN_FIXTURE_SERVICE_MARKER_INVALID' }
+    if (-not (Test-E2ECleanScalar $line)) { return 'RUN_FIXTURE_SERVICE_MARKER_INVALID' }
+    $marker = [regex]::Match($line, '\Averification failed: ([A-Z][A-Z0-9_]{0,63})\z')
+    if (-not $marker.Success) { return 'RUN_FIXTURE_SERVICE_MARKER_INVALID' }
+    $code = $marker.Groups[1].Value
+    if (-not (Test-E2ERunFixtureServiceSecondaryCode $code)) { return 'RUN_FIXTURE_SERVICE_MARKER_NOT_ALLOWED' }
+    return $code
+}
+
+function Write-E2ERunFixtureServiceDiagnostic {
+    param([Parameter(Mandatory = $true)][string]$Secondary, [scriptblock]$Writer)
+
+    $known = (Test-E2ERunFixtureServiceSecondaryCode $Secondary) -or
+        @($RunFixtureServiceLocalSecondaryCodes | Where-Object {
+            [string]::Equals($_, $Secondary, [System.StringComparison]::Ordinal)
+        }).Count -eq 1
+    if (-not $known) { $Secondary = 'RUN_FIXTURE_SERVICE_MARKER_INVALID' }
+    $record = 'RUN_FIXTURE_SERVICE_SECONDARY=' + $Secondary
+    try {
+        if ($null -ne $Writer) { & $Writer $record | Out-Null }
+        else { Microsoft.PowerShell.Utility\Write-Warning -Message $record -WarningAction Continue }
+    }
+    catch { }
+}
+
+# Reads the failed fixture container's marker once and says it once.
+#
+# This is a diagnostic and nothing depends on it: it returns nothing, it cannot
+# fail its caller, and whatever happens here the caller still stops on the
+# primary it already holds and still runs the cleanup it already owed.
+function Invoke-E2ERunFixtureServiceDiagnostic {
+    param(
+        [Parameter(Mandatory = $true)][string]$ContainerId,
+        [Parameter(Mandatory = $true)][scriptblock]$Read,
+        [scriptblock]$Writer
+    )
+
+    $secondary = 'RUN_FIXTURE_SERVICE_LOG_READ_FAILED'
+    try {
+        $capture = & $Read $ContainerId
+        $secondary = ConvertFrom-E2ERunFixtureServiceLogCapture -Capture $capture
+    }
+    catch { $secondary = 'RUN_FIXTURE_SERVICE_LOG_READ_FAILED' }
+    Write-E2ERunFixtureServiceDiagnostic -Secondary $secondary -Writer $Writer
+}
+
 function Invoke-E2EFixedFixtureService {
     param(
         [Parameter(Mandatory = $true)]$Receipt,
@@ -1386,6 +1599,13 @@ function Invoke-E2EFixedFixtureService {
                 if (Test-E2EOrdinalEqual $outcome 'ExitedNonzero') { throw 'RUN_FIXTURE_SERVICE_EXIT_NONZERO' }
                 throw 'RUN_FIXTURE_SERVICE_STATE_INVALID'
             }
+            ReadDiagnostic = {
+                param([string]$expectedId)
+                Invoke-E2EBoundedNativeProcess -Executable 'docker' -ArgumentList @('logs', $expectedId) `
+                    -WorkingDirectory $RepositoryRoot -StdoutLimit $RunFixtureServiceLogStdoutLimit `
+                    -StderrLimit $RunFixtureServiceLogStderrLimit `
+                    -TimeoutMilliseconds $RunFixtureServiceLogTimeoutMilliseconds
+            }
         }
     }
     foreach ($name in @('Start','GetContainer','Wait','ValidateExit')) {
@@ -1396,6 +1616,7 @@ function Invoke-E2EFixedFixtureService {
     $planBytes = [System.Text.UTF8Encoding]::new($false, $true).GetBytes($PlanJson)
     $planEncoded = [System.Convert]::ToBase64String($planBytes)
     $primary = $null
+    $containerId = $null
     try {
         [System.Environment]::SetEnvironmentVariable($FixturePlanEnvironmentName, $planEncoded, 'Process')
         & $Boundaries.Start | Out-Null
@@ -1404,6 +1625,22 @@ function Invoke-E2EFixedFixtureService {
         & $Boundaries.ValidateExit $containerId | Out-Null
     }
     catch { $primary = $_.Exception }
+    # The one failure that means "the container ran and said no" is also the one
+    # whose reason is still readable: the container exists, exited, and is about
+    # to be removed with its log. Its marker is read here, once, before that
+    # removal, and only for the exact 64-hex identifier this run resolved. Every
+    # other failure - start, wait, state, identity - has no such marker to read,
+    # so none of them reaches this. An injected boundary set that names no
+    # ReadDiagnostic has no container to read and is left alone.
+    if ($null -ne $primary -and (Test-E2EOrdinalEqual $primary.Message 'RUN_FIXTURE_SERVICE_EXIT_NONZERO') -and
+        $containerId -is [string] -and [regex]::IsMatch($containerId, '\A[0-9a-f]{64}\z') -and
+        $Boundaries['ReadDiagnostic'] -is [scriptblock]) {
+        try {
+            Invoke-E2ERunFixtureServiceDiagnostic -ContainerId $containerId `
+                -Read $Boundaries['ReadDiagnostic'] -Writer $Boundaries['WriteDiagnostic']
+        }
+        catch { }
+    }
     $actions = @([pscustomobject]@{
         Action = {
             [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_FIXTURE_PLAN', $previous, 'Process')

@@ -9,6 +9,7 @@ import ctypes
 import datetime as dt
 import errno
 import hashlib
+import http.client
 import json
 import math
 import os
@@ -417,6 +418,129 @@ RUN_FIXTURE_STATE_KEYS = (
     "database",
     "dependencies",
     "metrics",
+)
+# The three shared HTTP identities say how a call failed but not which call.
+# Inside the run-fixture worker each call site rewrites them to the literal for
+# its own stage; every other mode keeps the shared identity unchanged. Nothing
+# below is assembled from a response, a status, a URL or an exception.
+RUN_FIXTURE_GENERIC_HTTP_FAILURES = (
+    "HTTP_TRANSPORT_FAILED",
+    "HTTP_STATUS_UNEXPECTED",
+    "HTTP_JSON_INVALID",
+)
+RUN_FIXTURE_STAGE_FAILURE_CODES = {
+    "TRANSACTION_TOKEN": {
+        "HTTP_TRANSPORT_FAILED": "RUN_FIXTURE_TRANSACTION_TOKEN_TRANSPORT_FAILED",
+        "HTTP_STATUS_UNEXPECTED": "RUN_FIXTURE_TRANSACTION_TOKEN_STATUS_UNEXPECTED",
+        "HTTP_JSON_INVALID": "RUN_FIXTURE_TRANSACTION_TOKEN_JSON_INVALID",
+        "RESPONSE_READ": "RUN_FIXTURE_TRANSACTION_TOKEN_RESPONSE_READ_FAILED",
+    },
+    "BEHAVIOR_TOKEN": {
+        "HTTP_TRANSPORT_FAILED": "RUN_FIXTURE_BEHAVIOR_TOKEN_TRANSPORT_FAILED",
+        "HTTP_STATUS_UNEXPECTED": "RUN_FIXTURE_BEHAVIOR_TOKEN_STATUS_UNEXPECTED",
+        "HTTP_JSON_INVALID": "RUN_FIXTURE_BEHAVIOR_TOKEN_JSON_INVALID",
+        "RESPONSE_READ": "RUN_FIXTURE_BEHAVIOR_TOKEN_RESPONSE_READ_FAILED",
+    },
+    "JWKS": {
+        "HTTP_TRANSPORT_FAILED": "RUN_FIXTURE_JWKS_TRANSPORT_FAILED",
+        "HTTP_STATUS_UNEXPECTED": "RUN_FIXTURE_JWKS_STATUS_UNEXPECTED",
+        "HTTP_JSON_INVALID": "RUN_FIXTURE_JWKS_JSON_INVALID",
+        "RESPONSE_READ": "RUN_FIXTURE_JWKS_RESPONSE_READ_FAILED",
+    },
+    "CROSS_SECRET": {
+        "HTTP_TRANSPORT_FAILED": "RUN_FIXTURE_CROSS_SECRET_TRANSPORT_FAILED",
+        "HTTP_STATUS_UNEXPECTED": "RUN_FIXTURE_CROSS_SECRET_STATUS_UNEXPECTED",
+        "HTTP_JSON_INVALID": "RUN_FIXTURE_CROSS_SECRET_JSON_INVALID",
+        "RESPONSE_READ": "RUN_FIXTURE_CROSS_SECRET_RESPONSE_READ_FAILED",
+    },
+    # `request_backend` already turns an unexpected status into the caller's
+    # own status literal, so the three ingestion stages carry that literal and
+    # a response literal instead of a generic status entry.
+    "PASSWORD_EVENT": {
+        "HTTP_TRANSPORT_FAILED": "RUN_FIXTURE_PASSWORD_EVENT_TRANSPORT_FAILED",
+        "HTTP_JSON_INVALID": "RUN_FIXTURE_PASSWORD_EVENT_JSON_INVALID",
+        "RESPONSE_READ": "RUN_FIXTURE_PASSWORD_EVENT_RESPONSE_READ_FAILED",
+        "STATUS": "RUN_FIXTURE_PASSWORD_EVENT_STATUS",
+        "RESPONSE_INVALID": "RUN_FIXTURE_PASSWORD_EVENT_RESPONSE_INVALID",
+    },
+    "TRANSFER_LIMIT_EVENT": {
+        "HTTP_TRANSPORT_FAILED": "RUN_FIXTURE_TRANSFER_LIMIT_EVENT_TRANSPORT_FAILED",
+        "HTTP_JSON_INVALID": "RUN_FIXTURE_TRANSFER_LIMIT_EVENT_JSON_INVALID",
+        "RESPONSE_READ": "RUN_FIXTURE_TRANSFER_LIMIT_EVENT_RESPONSE_READ_FAILED",
+        "STATUS": "RUN_FIXTURE_TRANSFER_LIMIT_EVENT_STATUS",
+        "RESPONSE_INVALID": "RUN_FIXTURE_TRANSFER_LIMIT_EVENT_RESPONSE_INVALID",
+    },
+    "TRANSACTION": {
+        "HTTP_TRANSPORT_FAILED": "RUN_FIXTURE_TRANSACTION_TRANSPORT_FAILED",
+        "HTTP_JSON_INVALID": "RUN_FIXTURE_TRANSACTION_JSON_INVALID",
+        "RESPONSE_READ": "RUN_FIXTURE_TRANSACTION_RESPONSE_READ_FAILED",
+        "STATUS": "RUN_FIXTURE_TRANSACTION_STATUS",
+        "RESPONSE_INVALID": "RUN_FIXTURE_TRANSACTION_RESPONSE_INVALID",
+    },
+}
+# The statuses `request_backend` accepts from the Backend other than the 201 a
+# run fixture expects. Each one becomes a `<STATUS literal>_<status>` identity.
+RUN_FIXTURE_BACKEND_REJECTED_STATUSES = (200, 400, 401, 403, 409, 422, 500, 503)
+# Every identity the run-fixture worker can end on. The PowerShell runner
+# forwards a container marker only when it is one of these, so this tuple and
+# the runner allowlist are the same set and a test holds them together.
+RUN_FIXTURE_WORKER_FAILURE_CODES = tuple(
+    [
+        "HOST_ARGUMENT_INVALID",
+        "RUN_FIXTURE_PLAN_INVALID",
+        "INGESTION_PLAN_INVALID",
+        "RUNTIME_SECRET_FILE",
+        "RUNTIME_SECRET_CONTENT",
+        "SERVICE_SECRETS_NOT_DISTINCT",
+        "SERVICE_REFRESH_TOKEN_PRESENT",
+        "TOKEN_RESPONSE_INVALID",
+        "JWKS_INVALID",
+        "JWKS_SIGNING_KEY_INVALID",
+        "TOKEN_COMPACT_INVALID",
+        "TOKEN_HEADER_INVALID",
+        "TOKEN_ISSUER_INVALID",
+        "TOKEN_AUDIENCE_INVALID",
+        "TOKEN_AUDIENCE_REPRESENTATION",
+        "TOKEN_SUBJECT_INVALID",
+        "TOKEN_PRINCIPAL_INVALID",
+        "TOKEN_ROLES_INVALID",
+        "TOKEN_TIME_TYPE_INVALID",
+        "TOKEN_TIME_ORDER_INVALID",
+        "TOKEN_TIME_LIFETIME_INVALID",
+        "TOKEN_TIME_IAT_FUTURE",
+        "TOKEN_TIME_EXPIRED",
+        "TOKEN_TIME_NBF_INVALID",
+        "TOKEN_TIME_NBF_FUTURE",
+    ]
+    + [
+        code
+        for stage in RUN_FIXTURE_STAGE_FAILURE_CODES.values()
+        for code in stage.values()
+    ]
+    + [
+        stage["STATUS"] + "_" + str(status)
+        for stage in RUN_FIXTURE_STAGE_FAILURE_CODES.values()
+        if "STATUS" in stage
+        for status in RUN_FIXTURE_BACKEND_REJECTED_STATUSES
+    ]
+    + [
+        "FIXTURE_OWNER_IDENTITY_INVALID",
+        "FIXTURE_DIRECTORY_INVALID",
+        "FIXTURE_DIRECTORY_NOT_EMPTY",
+        "FIXTURE_MANIFEST_DIRECTORY_IO_FAILED",
+        "FIXTURE_MANIFEST_FINAL_EXISTS",
+        "FIXTURE_MANIFEST_SCHEMA_INVALID",
+        "FIXTURE_MANIFEST_IDENTITY_INVALID",
+        "FIXTURE_MANIFEST_BYTES_INVALID",
+        "FIXTURE_MANIFEST_TEMP_CREATE_FAILED",
+        "FIXTURE_MANIFEST_WRITE_FAILED",
+        "FIXTURE_MANIFEST_RENAME_FAILED",
+        "FIXTURE_MANIFEST_CARDINALITY_INVALID",
+        "FIXTURE_MANIFEST_READ_FAILED",
+        "FIXTURE_MANIFEST_FINAL_INVALID",
+        "INPUT_INVALID",
+        "UNEXPECTED_ERROR",
+    ]
 )
 
 
@@ -2609,12 +2733,15 @@ def write_fixture_manifest(directory: Path, identity: dict[str, Any]) -> Path:
     temporary = directory / (FIXTURE_MANIFEST_NAME + ".tmp")
     created_temporary = False
     try:
-        if directory.is_symlink() or not directory.is_dir():
-            fail("FIXTURE_DIRECTORY_INVALID")
-        if final.exists() or final.is_symlink():
-            fail("FIXTURE_MANIFEST_FINAL_EXISTS")
-        if tuple(directory.iterdir()):
-            fail("FIXTURE_DIRECTORY_NOT_EMPTY")
+        try:
+            if directory.is_symlink() or not directory.is_dir():
+                fail("FIXTURE_DIRECTORY_INVALID")
+            if final.exists() or final.is_symlink():
+                fail("FIXTURE_MANIFEST_FINAL_EXISTS")
+            if tuple(directory.iterdir()):
+                fail("FIXTURE_DIRECTORY_NOT_EMPTY")
+        except OSError:
+            fail("FIXTURE_MANIFEST_DIRECTORY_IO_FAILED")
         canonical = fixture_manifest_bytes(identity)
         try:
             descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -2630,7 +2757,13 @@ def write_fixture_manifest(directory: Path, identity: dict[str, Any]) -> Path:
             fail("FIXTURE_MANIFEST_WRITE_FAILED")
         rename_noreplace(temporary, final)
         created_temporary = False
-        if temporary.exists() or tuple(path.name for path in directory.iterdir()) != (FIXTURE_MANIFEST_NAME,):
+        try:
+            cardinality_invalid = temporary.exists() or tuple(
+                path.name for path in directory.iterdir()
+            ) != (FIXTURE_MANIFEST_NAME,)
+        except OSError:
+            fail("FIXTURE_MANIFEST_DIRECTORY_IO_FAILED")
+        if cardinality_invalid:
             fail("FIXTURE_MANIFEST_CARDINALITY_INVALID")
         try:
             observed = final.read_bytes()
@@ -2649,37 +2782,84 @@ def write_fixture_manifest(directory: Path, identity: dict[str, Any]) -> Path:
         raise
 
 
-def service_tokens() -> tuple[str, str]:
+def service_tokens(
+    stage: Callable[[str, Callable[[], Any]], Any] | None = None,
+) -> tuple[str, str]:
+    # `stage` is how the run-fixture worker names each call. Every other caller
+    # passes nothing, and then each call below runs exactly as it always did.
+    def staged(name: str, call: Callable[[], Any]) -> Any:
+        return call() if stage is None else stage(name, call)
+
     transaction_secret = read_secret(TRANSACTION_SECRET)
     behavior_secret = read_secret(BEHAVIOR_SECRET)
     if transaction_secret == behavior_secret:
         fail("SERVICE_SECRETS_NOT_DISTINCT")
-    transaction_token = token_for("finguardops-transaction-ingestor", transaction_secret)
-    behavior_token = token_for("finguardops-behavior-ingestor", behavior_secret)
-    validate_actual_service_tokens(transaction_token, behavior_token)
-    assert_cross_secret_rejected("finguardops-transaction-ingestor", behavior_secret)
-    assert_cross_secret_rejected("finguardops-behavior-ingestor", transaction_secret)
+    transaction_token = staged(
+        "TRANSACTION_TOKEN",
+        lambda: token_for("finguardops-transaction-ingestor", transaction_secret),
+    )
+    behavior_token = staged(
+        "BEHAVIOR_TOKEN",
+        lambda: token_for("finguardops-behavior-ingestor", behavior_secret),
+    )
+    staged(
+        "JWKS",
+        lambda: validate_actual_service_tokens(transaction_token, behavior_token),
+    )
+    staged(
+        "CROSS_SECRET",
+        lambda: assert_cross_secret_rejected("finguardops-transaction-ingestor", behavior_secret),
+    )
+    staged(
+        "CROSS_SECRET",
+        lambda: assert_cross_secret_rejected("finguardops-behavior-ingestor", transaction_secret),
+    )
     return transaction_token, behavior_token
+
+
+def run_fixture_stage(stage: str, call: Callable[[], Any]) -> Any:
+    # One run-fixture HTTP call, failing as its own stage. Only the three shared
+    # HTTP identities are rewritten; every other identity the call raises is
+    # already specific and passes through untouched. A response whose body
+    # cannot be read - the error body of an HTTP error included - never reached
+    # a fixed identity before and ended as a generic input failure.
+    codes = RUN_FIXTURE_STAGE_FAILURE_CODES[stage]
+    try:
+        return call()
+    except VerificationError as error:
+        code = str(error)
+        if code not in RUN_FIXTURE_GENERIC_HTTP_FAILURES or code not in codes:
+            raise
+        fail(codes[code])
+    except (OSError, http.client.HTTPException):
+        fail(codes["RESPONSE_READ"])
 
 
 def create_run_fixture(plan: dict[str, str]) -> dict[str, str]:
     valid = validate_plan(plan)
-    transaction_token, behavior_token = service_tokens()
+    transaction_token, behavior_token = service_tokens(run_fixture_stage)
     transaction, password_event, transfer_limit_event = ingestion_payloads(valid)
-    for payload, identifier in (
-        (password_event, valid["passwordEventId"]),
-        (transfer_limit_event, valid["transferLimitEventId"]),
+    for payload, identifier, stage in (
+        (password_event, valid["passwordEventId"], "PASSWORD_EVENT"),
+        (transfer_limit_event, valid["transferLimitEventId"], "TRANSFER_LIMIT_EVENT"),
     ):
-        response = request_backend(
-            "/api/v1/behavior-events", payload, 201, token=behavior_token,
-            failure_code="RUN_FIXTURE_BEHAVIOR_STATUS",
+        codes = RUN_FIXTURE_STAGE_FAILURE_CODES[stage]
+        response = run_fixture_stage(
+            stage,
+            lambda: request_backend(
+                "/api/v1/behavior-events", payload, 201, token=behavior_token,
+                failure_code=codes["STATUS"],
+            ),
         )
         if response.get("eventId") != identifier:
-            fail("RUN_FIXTURE_BEHAVIOR_RESPONSE_INVALID")
-    response = request_backend(
-        "/api/v1/transactions", transaction, 201, token=transaction_token,
-        idempotency_key=valid["idempotencyKey"],
-        failure_code="RUN_FIXTURE_TRANSACTION_STATUS",
+            fail(codes["RESPONSE_INVALID"])
+    response = run_fixture_stage(
+        "TRANSACTION",
+        lambda: request_backend(
+            "/api/v1/transactions", transaction, 201, token=transaction_token,
+            idempotency_key=valid["idempotencyKey"],
+            failure_code=RUN_FIXTURE_STAGE_FAILURE_CODES["TRANSACTION"]["STATUS"],
+        ),
     )
     if (
         set(response) != {

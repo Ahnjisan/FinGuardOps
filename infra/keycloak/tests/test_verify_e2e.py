@@ -1,6 +1,8 @@
+import ast
 import base64
 import contextlib
 import copy
+import http.client
 import io
 import importlib.util
 import json
@@ -3431,6 +3433,278 @@ finguardops_rule_analysis_outcomes_created 99
             result = verify_e2e.main(["run-fixture"])
         self.assertEqual(result, 1)
         self.assertEqual(stderr.getvalue(), "verification failed: UNEXPECTED_ERROR\n")
+
+    def drive_run_fixture_http(self, plan, failure_index=None, failure=None, override=None):
+        # The eight HTTP calls one run fixture makes, answered in order by a
+        # stand-in for `http_json`. Nothing reaches a socket.
+        responses = [
+            (200, {"access_token": "unit-transaction-token"}),
+            (200, {"access_token": "unit-behavior-token"}),
+            (200, {"keys": [{"kty": "RSA", "alg": "RS256", "use": "sig", "kid": "unit-key"}]}),
+            (400, {}),
+            (401, {}),
+            (201, {"eventId": plan["passwordEventId"]}),
+            (201, {"eventId": plan["transferLimitEventId"]}),
+            (201, {
+                "transactionId": plan["transactionId"],
+                "processingStatus": "ADDITIONAL_AUTH_REQUIRED",
+                "riskLevel": "HIGH",
+                "riskResponseOutcome": "ADDITIONAL_AUTH_REQUIRED",
+                "adoptedDetectionResultId": "b81ade9f-d451-43e2-b97b-d7b24e9a0988",
+                "caseId": valid_fixture_identity()["caseId"],
+                "createdAt": "2026-09-20T00:00:00Z",
+                "traceId": "not-exported",
+            }),
+        ]
+        calls = []
+
+        def answer(url, **keywords):
+            index = len(calls)
+            calls.append((url, keywords.get("method", "GET")))
+            if index == failure_index and failure is not None:
+                raise failure
+            if index == failure_index and override is not None:
+                return override
+            return responses[index]
+
+        result, code = None, None
+        with mock.patch.object(verify_e2e, "read_secret", side_effect=["unit-a" * 8, "unit-b" * 8]), \
+             mock.patch.object(verify_e2e, "validate_token"), \
+             mock.patch.object(verify_e2e, "http_json", side_effect=answer):
+            try:
+                result = verify_e2e.create_run_fixture(plan)
+            except verify_e2e.VerificationError as error:
+                code = str(error)
+        return result, code, calls
+
+    def test_run_fixture_http_stage_failures_map_to_exclusive_fixed_codes(self):
+        plan = valid_plan()
+        token_url = "http://127.0.0.1:8082/realms/finguardops-local/protocol/openid-connect/token"
+        expected_calls = [
+            (token_url, "POST"),
+            (token_url, "POST"),
+            (verify_e2e.JWK_SET_URI, "GET"),
+            (token_url, "POST"),
+            (token_url, "POST"),
+            ("http://127.0.0.1:8080/api/v1/behavior-events", "POST"),
+            ("http://127.0.0.1:8080/api/v1/behavior-events", "POST"),
+            ("http://127.0.0.1:8080/api/v1/transactions", "POST"),
+        ]
+        result, code, calls = self.drive_run_fixture_http(plan)
+        self.assertIsNone(code)
+        self.assertEqual(result, {"transactionId": plan["transactionId"], "caseId": valid_fixture_identity()["caseId"]})
+        self.assertEqual(calls, expected_calls)
+
+        stages = (
+            "TRANSACTION_TOKEN", "BEHAVIOR_TOKEN", "JWKS", "CROSS_SECRET", "CROSS_SECRET",
+            "PASSWORD_EVENT", "TRANSFER_LIMIT_EVENT", "TRANSACTION",
+        )
+        table = verify_e2e.RUN_FIXTURE_STAGE_FAILURE_CODES
+        observed = {}
+        for index, stage in enumerate(stages):
+            failures = {
+                "transport": (verify_e2e.VerificationError("HTTP_TRANSPORT_FAILED"), table[stage]["HTTP_TRANSPORT_FAILED"]),
+                "status": (
+                    verify_e2e.VerificationError("HTTP_STATUS_UNEXPECTED"),
+                    table[stage]["HTTP_STATUS_UNEXPECTED"] if index < 5 else table[stage]["STATUS"],
+                ),
+                "json": (verify_e2e.VerificationError("HTTP_JSON_INVALID"), table[stage]["HTTP_JSON_INVALID"]),
+                "error-body": (OSError("NeverReflect body path"), table[stage]["RESPONSE_READ"]),
+                "incomplete": (http.client.IncompleteRead(b"NeverReflect"), table[stage]["RESPONSE_READ"]),
+            }
+            for kind, (failure, expected) in failures.items():
+                with self.subTest(index=index, stage=stage, kind=kind):
+                    result, code, calls = self.drive_run_fixture_http(plan, index, failure)
+                    self.assertIsNone(result)
+                    self.assertEqual(code, expected)
+                    self.assertIn(code, verify_e2e.RUN_FIXTURE_WORKER_FAILURE_CODES)
+                    self.assertNotIn("NeverReflect", code)
+                    # No retry and no reordering: the failing call is the last one.
+                    self.assertEqual(calls, expected_calls[: index + 1])
+                    observed.setdefault(code, set()).add(stage)
+        # A code names one stage and nothing else.
+        self.assertTrue(all(len(owners) == 1 for owners in observed.values()))
+        self.assertEqual(len(observed), 7 * 4)
+        self.assertFalse(set(observed) & set(verify_e2e.RUN_FIXTURE_GENERIC_HTTP_FAILURES))
+
+        # An identity that is already specific is not rewritten.
+        _, code, _ = self.drive_run_fixture_http(plan, 0, verify_e2e.VerificationError("TOKEN_RESPONSE_INVALID"))
+        self.assertEqual(code, "TOKEN_RESPONSE_INVALID")
+
+    def test_run_fixture_backend_statuses_and_event_responses_are_separated(self):
+        plan = valid_plan()
+        table = verify_e2e.RUN_FIXTURE_STAGE_FAILURE_CODES
+        self.assertEqual(verify_e2e.RUN_FIXTURE_BACKEND_REJECTED_STATUSES, (200, 400, 401, 403, 409, 422, 500, 503))
+        seen = set()
+        for index, stage in ((5, "PASSWORD_EVENT"), (6, "TRANSFER_LIMIT_EVENT"), (7, "TRANSACTION")):
+            for status in verify_e2e.RUN_FIXTURE_BACKEND_REJECTED_STATUSES:
+                with self.subTest(stage=stage, status=status):
+                    _, code, calls = self.drive_run_fixture_http(plan, index, override=(status, {"code": "NeverReflect"}))
+                    self.assertEqual(code, table[stage]["STATUS"] + "_" + str(status))
+                    self.assertIn(code, verify_e2e.RUN_FIXTURE_WORKER_FAILURE_CODES)
+                    self.assertEqual(len(calls), index + 1)
+                    seen.add(code)
+        self.assertEqual(len(seen), 24)
+        for index, stage in ((5, "PASSWORD_EVENT"), (6, "TRANSFER_LIMIT_EVENT")):
+            with self.subTest(stage=stage):
+                _, code, calls = self.drive_run_fixture_http(plan, index, override=(201, {"eventId": plan["transactionId"]}))
+                self.assertEqual(code, table[stage]["RESPONSE_INVALID"])
+                self.assertEqual(len(calls), index + 1)
+        self.assertNotEqual(table["PASSWORD_EVENT"]["RESPONSE_INVALID"], table["TRANSFER_LIMIT_EVENT"]["RESPONSE_INVALID"])
+        _, code, _ = self.drive_run_fixture_http(plan, 7, override=(201, {"transactionId": plan["transactionId"]}))
+        self.assertEqual(code, "RUN_FIXTURE_TRANSACTION_RESPONSE_INVALID")
+
+    def test_run_fixture_http_error_body_read_failure_is_fixed_only_inside_the_fixture(self):
+        class BrokenBody(io.BytesIO):
+            def read(self, *_args):
+                raise OSError("NeverReflect body path")
+
+        def raise_http_error(*_args, **_keywords):
+            raise urllib.error.HTTPError(
+                "http://127.0.0.1:8082/unit", 500, "NeverReflect", {}, BrokenBody()
+            )
+
+        secrets = ["unit-a" * 8, "unit-b" * 8]
+        with mock.patch("urllib.request.urlopen", side_effect=raise_http_error):
+            # Every other mode keeps what it always did with this failure.
+            with self.assertRaises(OSError):
+                verify_e2e.http_json("http://127.0.0.1:8082/unit")
+            with mock.patch.object(verify_e2e, "read_secret", side_effect=list(secrets)), \
+                 self.assertRaises(OSError):
+                verify_e2e.service_tokens()
+            with mock.patch.object(verify_e2e, "read_secret", side_effect=list(secrets)), \
+                 self.assertRaisesRegex(
+                     verify_e2e.VerificationError,
+                     "^RUN_FIXTURE_TRANSACTION_TOKEN_RESPONSE_READ_FAILED$",
+                 ):
+                verify_e2e.create_run_fixture(valid_plan())
+
+            plan_value = base64.b64encode(
+                json.dumps(valid_plan(), separators=(",", ":")).encode("utf-8")
+            ).decode("ascii")
+            environment = valid_run_fixture_environment() | {
+                verify_e2e.FIXTURE_PLAN_ENVIRONMENT: plan_value
+            }
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch.dict(verify_e2e.os.environ, environment, clear=True), \
+                 mock.patch.object(verify_e2e, "read_secret", side_effect=list(secrets)), \
+                 mock.patch.object(verify_e2e, "write_fixture_manifest") as writer, \
+                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = verify_e2e.main(["run-fixture"])
+        self.assertEqual(result, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(
+            stderr.getvalue(),
+            "verification failed: RUN_FIXTURE_TRANSACTION_TOKEN_RESPONSE_READ_FAILED\n",
+        )
+        writer.assert_not_called()
+
+        # The shared identities are unchanged for a caller that names no stage.
+        with mock.patch.object(verify_e2e, "read_secret", side_effect=list(secrets)), \
+             mock.patch.object(verify_e2e, "http_json", side_effect=verify_e2e.VerificationError("HTTP_TRANSPORT_FAILED")), \
+             self.assertRaisesRegex(verify_e2e.VerificationError, "^HTTP_TRANSPORT_FAILED$"):
+            verify_e2e.service_tokens()
+
+    def test_run_fixture_manifest_directory_io_failures_are_fixed(self):
+        identity = valid_fixture_identity()
+        canonical = verify_e2e.fixture_manifest_bytes(identity)
+        with tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory:
+            with mock.patch.object(verify_e2e.Path, "iterdir", side_effect=PermissionError("NeverReflect path")), \
+                 self.assertRaisesRegex(verify_e2e.VerificationError, "^FIXTURE_MANIFEST_DIRECTORY_IO_FAILED$"):
+                verify_e2e.write_fixture_manifest(Path(directory), identity)
+            self.assertEqual(tuple(Path(directory).iterdir()), ())
+        with tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory:
+            with mock.patch.object(verify_e2e.Path, "exists", side_effect=PermissionError("NeverReflect path")), \
+                 self.assertRaisesRegex(verify_e2e.VerificationError, "^FIXTURE_MANIFEST_DIRECTORY_IO_FAILED$"):
+                verify_e2e.write_fixture_manifest(Path(directory), identity)
+            self.assertEqual(tuple(Path(directory).iterdir()), ())
+        with tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory:
+            # The directory listing fails only after the atomic rename.
+            with mock.patch.object(verify_e2e.Path, "iterdir", side_effect=[iter(()), PermissionError("NeverReflect path")]), \
+                 self.assertRaisesRegex(verify_e2e.VerificationError, "^FIXTURE_MANIFEST_DIRECTORY_IO_FAILED$"):
+                verify_e2e.write_fixture_manifest(Path(directory), identity)
+            self.assertEqual(
+                tuple(item.name for item in Path(directory).iterdir()),
+                (verify_e2e.FIXTURE_MANIFEST_NAME,),
+            )
+            self.assertEqual((Path(directory) / verify_e2e.FIXTURE_MANIFEST_NAME).read_bytes(), canonical)
+
+        plan = valid_plan()
+        plan_value = base64.b64encode(json.dumps(plan, separators=(",", ":")).encode("utf-8")).decode("ascii")
+        environment = valid_run_fixture_environment() | {verify_e2e.FIXTURE_PLAN_ENVIRONMENT: plan_value}
+        response = {"transactionId": plan["transactionId"], "caseId": identity["caseId"]}
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory:
+            with mock.patch.dict(verify_e2e.os.environ, environment, clear=True), \
+                 mock.patch.object(verify_e2e, "create_run_fixture", return_value=response), \
+                 mock.patch.object(verify_e2e, "FIXTURE_MANIFEST_DIRECTORY", Path(directory)), \
+                 mock.patch.object(verify_e2e.Path, "iterdir", side_effect=PermissionError("NeverReflect path")), \
+                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = verify_e2e.main(["run-fixture"])
+        self.assertEqual(result, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "verification failed: FIXTURE_MANIFEST_DIRECTORY_IO_FAILED\n")
+
+    def test_run_fixture_worker_codes_match_the_runner_allowlist(self):
+        codes = verify_e2e.RUN_FIXTURE_WORKER_FAILURE_CODES
+        self.assertEqual(len(codes), len(set(codes)))
+        for code in codes:
+            self.assertIsNotNone(re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code), code)
+        self.assertFalse(set(codes) & set(verify_e2e.RUN_FIXTURE_GENERIC_HTTP_FAILURES))
+
+        repository = Path(__file__).resolve().parents[3]
+        module = repository / "frontend" / "scripts" / "keycloak-e2e-lib.psm1"
+        source = module.read_text(encoding="utf-8-sig")
+        block = re.search(
+            r"^\$RunFixtureServiceSecondaryCodes = @\(\r?\n(.*?)^\)", source, re.S | re.M
+        )
+        self.assertIsNotNone(block)
+        lines = [line.strip() for line in block.group(1).splitlines() if line.strip()]
+        literals = []
+        for line in lines:
+            match = re.fullmatch(r"'([A-Z][A-Z0-9_]{0,63})',?", line)
+            self.assertIsNotNone(match, "the runner allowlist holds something other than a literal")
+            literals.append(match.group(1))
+        self.assertEqual(tuple(literals), codes)
+
+        # What the worker's own call graph can raise, read from the source, is
+        # the declared set: neither side names an identity the other lacks.
+        tree = ast.parse(Path(verify_e2e.__file__).read_text(encoding="utf-8"))
+        graph = {
+            "run_fixture_worker", "validate_run_fixture_project", "validate_plan",
+            "create_run_fixture", "service_tokens", "read_secret", "token_for",
+            "validate_actual_service_tokens", "validate_token", "decode_token",
+            "decode_segment", "normalize_audience", "assert_cross_secret_rejected",
+            "fixture_identity_from_environment", "write_fixture_manifest",
+            "fixture_manifest_bytes", "validate_fixture_manifest_object",
+            "parse_fixture_manifest_bytes", "rename_noreplace",
+        }
+        raised = set()
+        found = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name in graph:
+                found.add(node.name)
+                for call in ast.walk(node):
+                    if (
+                        isinstance(call, ast.Call)
+                        and isinstance(call.func, ast.Name)
+                        and call.func.id == "fail"
+                        and len(call.args) == 1
+                        and isinstance(call.args[0], ast.Constant)
+                    ):
+                        raised.add(call.args[0].value)
+        self.assertEqual(found, graph)
+        staged = {
+            code
+            for stage in verify_e2e.RUN_FIXTURE_STAGE_FAILURE_CODES.values()
+            for code in stage.values()
+        } | {
+            stage["STATUS"] + "_" + str(status)
+            for stage in verify_e2e.RUN_FIXTURE_STAGE_FAILURE_CODES.values()
+            if "STATUS" in stage
+            for status in verify_e2e.RUN_FIXTURE_BACKEND_REJECTED_STATUSES
+        }
+        self.assertEqual(raised | staged | {"INPUT_INVALID", "UNEXPECTED_ERROR"}, set(codes))
 
     def test_run_fixture_before_after_cli_uses_canonical_stdin_state(self):
         state = valid_run_fixture_state()

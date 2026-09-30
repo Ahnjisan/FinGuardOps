@@ -503,6 +503,33 @@ label, network, mount, state와 exit code 0을 검증한 뒤, 전 snapshot을 st
 SQL은 snapshot과 cardinality의 read-only 검증에만 사용한다. Service mode의 `all`, fresh-volume,
 existing-volume 동작은 변경하지 않는다.
 
+fixture service 실패의 primary는 `RUN_FIXTURE_SERVICE_START_FAILED`, `RUN_FIXTURE_SERVICE_WAIT_FAILED`,
+`RUN_FIXTURE_SERVICE_WAIT_EXITED_ZERO`, `RUN_FIXTURE_SERVICE_EXIT_NONZERO`,
+`RUN_FIXTURE_SERVICE_STATE_INVALID`, `RUN_FIXTURE_CONTAINER_INVALID` 중 하나다. 이 가운데 container가 0이 아닌
+exit code로 종료한 `RUN_FIXTURE_SERVICE_EXIT_NONZERO`에서만, 그리고 이번 Run이 확정한 exact 64-hex
+container ID가 있을 때만 PowerShell이 cleanup 전에 `docker logs <id>`를 bounded native process로 정확히
+1회 읽는다. 판정 대상은 container의 stderr뿐이며 stdout과 Docker CLI 자체의 오류 출력은 marker로 취급하지
+않는다. stderr가 128 bytes 이하의 strict UTF-8 한 줄이고 전체가 `verification failed: <CODE>`이며 `<CODE>`가
+runner에 literal로 열거된 allowlist와 ordinal exact로 일치할 때만 다음 경고를 Run당 정확히 1회 출력한다.
+
+```text
+RUN_FIXTURE_SERVICE_SECONDARY=<CODE>
+```
+
+그 밖의 경우는 원문을 반사하지 않는 고정 literal로 대체한다. log 읽기 실패는
+`RUN_FIXTURE_SERVICE_LOG_READ_FAILED`, 빈 stderr는 `RUN_FIXTURE_SERVICE_MARKER_ABSENT`, 형식 불일치는
+`RUN_FIXTURE_SERVICE_MARKER_INVALID`, 상한 초과는 `RUN_FIXTURE_SERVICE_MARKER_TOO_LARGE`, allowlist 밖 code는
+`RUN_FIXTURE_SERVICE_MARKER_NOT_ALLOWED`다. allowlist는 `verify_e2e.py`의 `RUN_FIXTURE_WORKER_FAILURE_CODES`와
+같은 집합이고 테스트가 두 쪽의 일치를 고정한다. `run-fixture` worker 안에서는 공유 HTTP identity 세 개를
+transaction token, behavior token, JWKS, cross-secret, password event, transfer-limit event, transaction
+ingestion 단계별 literal로 바꾸어 기록하며, Service mode를 포함한 다른 mode의 identity는 그대로다. secondary에는
+secret, token, HTTP body, URL, 업무 payload, container log 원문이 포함되지 않는다.
+
+secondary는 진단일 뿐이다. primary `RUN_FIXTURE_SERVICE_EXIT_NONZERO`와 Run 실패는 그대로이고, log 읽기가
+실패해도 resource cleanup, image cleanup, residue audit, fixture artifact와 receipt 처리 순서는 바뀌지 않는다.
+나머지 다섯 primary와 성공 경로에서는 log를 읽지 않고 secondary도 출력하지 않는다. 이 진단 경로는 단위
+테스트로만 검증했고 공식 Docker Gate에서는 아직 확인되지 않았다.
+
 Run fixture의 canonical Compose project는 exact literal
 `finguardops-keycloak-browser-e2e`이다. `run-fixture-before`, `run-fixture`, `run-fixture-after`는 이 값을
 ordinal/case-sensitive exact로만 허용하며 candidate state나 manifest에서 기대값을 역산하지 않는다.
