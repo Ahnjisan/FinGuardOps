@@ -1272,6 +1272,63 @@ function ConvertFrom-E2ERunFixtureState {
     return [pscustomobject]@{ State=$state; PlanJson=$planJson }
 }
 
+# fixture container 문서 하나를 정확히 하나의 내부 토큰으로 분류한다.
+#
+# 이 함수는 어떤 문서에도 throw하지 않는다. 알아볼 수 없는 형태는 전부
+# 'Invalid' 하나로 모이고, 토큰은 모듈 밖으로 나가지 않는다. 호출하는 두
+# 경계(Wait 실패 직후, Wait 성공 뒤 ValidateExit)가 각자 토큰을 자기 fixed
+# identity literal로 옮기므로, 문서의 값은 어떤 식별자에도 반사되지 않는다.
+# Running은 Docker가 항상 싣는 값이지만 없을 때는 Status만으로 판단하고,
+# 있을 때는 bool이면서 Status와 모순이 없어야 한다. ExitCode는 정수만 받는다.
+function Get-E2EFixtureContainerOutcome {
+    param($Document, [string]$ExpectedId)
+
+    $read = {
+        param($Object, [string]$Name)
+        if ($null -eq $Object -or $Object -is [array] -or $Object -is [string] -or $Object -is [System.ValueType]) {
+            return [pscustomobject]@{ Found = $false; Value = $null }
+        }
+        $found = @()
+        if ($Object -is [System.Collections.IDictionary]) {
+            foreach ($key in $Object.Keys) {
+                if (Test-E2EOrdinalEqual $key $Name) { $found += ,[pscustomobject]@{ Found = $true; Value = $Object[$key] } }
+            }
+        }
+        else {
+            foreach ($property in $Object.PSObject.Properties) {
+                if (Test-E2EOrdinalEqual $property.Name $Name) { $found += ,[pscustomobject]@{ Found = $true; Value = $property.Value } }
+            }
+        }
+        if ($found.Count -ne 1) { return [pscustomobject]@{ Found = $false; Value = $null } }
+        return $found[0]
+    }
+
+    if ($null -eq $Document -or $Document -is [array] -or $Document -is [string] -or $Document -is [System.ValueType]) {
+        return 'Invalid'
+    }
+    $id = & $read $Document 'Id'
+    if (-not $id.Found -or $id.Value -isnot [string]) { return 'Invalid' }
+    if (-not (Test-E2EOrdinalEqual $id.Value $ExpectedId)) { return 'IdentityMismatch' }
+    $state = & $read $Document 'State'
+    if (-not $state.Found) { return 'Invalid' }
+    $status = & $read $state.Value 'Status'
+    $running = & $read $state.Value 'Running'
+    $exitCode = & $read $state.Value 'ExitCode'
+    if (-not $status.Found -or $status.Value -isnot [string] -or
+        -not $exitCode.Found -or ($exitCode.Value -isnot [int] -and $exitCode.Value -isnot [long]) -or
+        ($running.Found -and $running.Value -isnot [bool])) {
+        return 'Invalid'
+    }
+    $isRunning = $running.Found -and $running.Value
+    if (Test-E2EOrdinalEqual $status.Value 'running') {
+        if ($running.Found -and -not $running.Value) { return 'Invalid' }
+        return 'Running'
+    }
+    if ($isRunning -or -not (Test-E2EOrdinalEqual $status.Value 'exited')) { return 'Invalid' }
+    if ($exitCode.Value -eq 0) { return 'ExitedZero' }
+    return 'ExitedNonzero'
+}
+
 function Invoke-E2EFixedFixtureService {
     param(
         [Parameter(Mandatory = $true)]$Receipt,
@@ -1284,7 +1341,7 @@ function Invoke-E2EFixedFixtureService {
             Start = {
                 Invoke-E2EInLocation -Path $RepositoryRoot -Body {
                     Invoke-Native { & docker @ComposeArguments up -d --no-deps --no-build --pull never keycloak-run-fixture 2>$null | Out-Null }
-                    if ($LASTEXITCODE -ne 0) { throw 'RUN_FIXTURE_SERVICE_FAILED' }
+                    if ($LASTEXITCODE -ne 0) { throw 'RUN_FIXTURE_SERVICE_START_FAILED' }
                 }
             }
             GetContainer = {
@@ -1296,9 +1353,21 @@ function Invoke-E2EFixedFixtureService {
                 return [string]$fixtureContainers[0].Id
             }
             Wait = {
+                param([string]$expectedId)
                 Invoke-E2EInLocation -Path $RepositoryRoot -Body {
                     Invoke-Native { & docker @ComposeArguments wait keycloak-run-fixture 2>$null | Out-Null }
-                    if ($LASTEXITCODE -ne 0) { throw 'RUN_FIXTURE_SERVICE_FAILED' }
+                    if ($LASTEXITCODE -ne 0) {
+                        # wait 실패는 어떤 문서 상태에서도 성공이 되지 않는다. 실패 직후
+                        # authoritative 문서를 정확히 한 번 읽어, 실패가 어느 상태에서
+                        # 일어났는지만 서로 배타적인 fixed identity로 남긴다.
+                        $document = Get-ContainerDocument $expectedId -InspectFailureCode 'RUN_FIXTURE_SERVICE_STATE_INVALID' -IdentityFailureCode 'RUN_FIXTURE_CONTAINER_INVALID'
+                        $outcome = Get-E2EFixtureContainerOutcome -Document $document -ExpectedId $expectedId
+                        if (Test-E2EOrdinalEqual $outcome 'IdentityMismatch') { throw 'RUN_FIXTURE_CONTAINER_INVALID' }
+                        if (Test-E2EOrdinalEqual $outcome 'Running') { throw 'RUN_FIXTURE_SERVICE_WAIT_FAILED' }
+                        if (Test-E2EOrdinalEqual $outcome 'ExitedZero') { throw 'RUN_FIXTURE_SERVICE_WAIT_EXITED_ZERO' }
+                        if (Test-E2EOrdinalEqual $outcome 'ExitedNonzero') { throw 'RUN_FIXTURE_SERVICE_EXIT_NONZERO' }
+                        throw 'RUN_FIXTURE_SERVICE_STATE_INVALID'
+                    }
                 }
             }
             ValidateExit = {
@@ -1308,14 +1377,14 @@ function Invoke-E2EFixedFixtureService {
                     (Test-E2EOrdinalEqual $_.Service 'keycloak-run-fixture') -and
                     (Test-E2EOrdinalEqual $_.Id $expectedId)
                 })
-                if ($matches.Count -ne 1 -or $matches[0].Running) { throw 'RUN_FIXTURE_CONTAINER_INVALID' }
-                $document = Get-ContainerDocument $expectedId
-                $state = Get-E2EExactMember $document 'State'
-                if (-not (Test-E2EOrdinalEqual (Get-JsonMember $document 'Id') $expectedId) -or
-                    -not (Test-E2EOrdinalEqual (Get-E2EExactMember $state 'Status') 'exited') -or
-                    (Get-E2EExactMember $state 'ExitCode') -ne 0) {
-                    throw 'RUN_FIXTURE_SERVICE_FAILED'
-                }
+                if ($matches.Count -ne 1) { throw 'RUN_FIXTURE_CONTAINER_INVALID' }
+                if ($matches[0].Running) { throw 'RUN_FIXTURE_SERVICE_STATE_INVALID' }
+                $document = Get-ContainerDocument $expectedId -InspectFailureCode 'RUN_FIXTURE_SERVICE_STATE_INVALID' -IdentityFailureCode 'RUN_FIXTURE_CONTAINER_INVALID'
+                $outcome = Get-E2EFixtureContainerOutcome -Document $document -ExpectedId $expectedId
+                if (Test-E2EOrdinalEqual $outcome 'ExitedZero') { return }
+                if (Test-E2EOrdinalEqual $outcome 'IdentityMismatch') { throw 'RUN_FIXTURE_CONTAINER_INVALID' }
+                if (Test-E2EOrdinalEqual $outcome 'ExitedNonzero') { throw 'RUN_FIXTURE_SERVICE_EXIT_NONZERO' }
+                throw 'RUN_FIXTURE_SERVICE_STATE_INVALID'
             }
         }
     }
@@ -1331,7 +1400,7 @@ function Invoke-E2EFixedFixtureService {
         [System.Environment]::SetEnvironmentVariable($FixturePlanEnvironmentName, $planEncoded, 'Process')
         & $Boundaries.Start | Out-Null
         $containerId = & $Boundaries.GetContainer
-        & $Boundaries.Wait | Out-Null
+        & $Boundaries.Wait $containerId | Out-Null
         & $Boundaries.ValidateExit $containerId | Out-Null
     }
     catch { $primary = $_.Exception }
@@ -3303,38 +3372,69 @@ function Assert-E2ENoDuplicateJsonKeys([string]$Encoded) {
     if ($frames.Count -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
 }
 
-function Get-ContainerDocument([string]$ContainerId) {
+function Get-ContainerDocument {
+    param(
+        [string]$ContainerId,
+        # fixture lifecycle 경계만 넘기는 선택 인수다. 각 인수는 대소문자까지
+        # 일치하는 literal 하나만 받으므로, 값이 식별자를 만드는 것이 아니라
+        # 아래의 compile-time literal throw를 고르는 표시로만 쓰인다. 넘기지 않는
+        # 기존 caller는 이전과 같은 문장과 같은 예외를 그대로 받는다.
+        [ValidateSet('RUN_FIXTURE_SERVICE_STATE_INVALID', IgnoreCase = $false)][string]$InspectFailureCode,
+        [ValidateSet('RUN_FIXTURE_CONTAINER_INVALID', IgnoreCase = $false)][string]$IdentityFailureCode
+    )
     # The operand is a full 64-character identifier or nothing is asked at all.
     # An abbreviated identifier is a prefix query, which the daemon is free to
     # answer with whichever container happens to match it, so it is never what
     # this script inspects - and the answer is required to name the identifier
     # that was asked for, so a document about another container is refused
     # rather than read.
+    $inspectFailed = {
+        if (-not [string]::IsNullOrEmpty($InspectFailureCode)) { throw 'RUN_FIXTURE_SERVICE_STATE_INVALID' }
+        throw 'A container this run created could not be inspected.'
+    }
+    $identityFailed = {
+        if (-not [string]::IsNullOrEmpty($IdentityFailureCode)) { throw 'RUN_FIXTURE_CONTAINER_INVALID' }
+        throw 'A container this run created could not be inspected.'
+    }
     if ($ContainerId -cnotmatch '\A[0-9a-f]{64}\z') {
-        throw 'A container this run created could not be inspected.'
+        & $inspectFailed
     }
-    $encoded = Invoke-NativeStdout { & docker container inspect --format '{{json .}}' $ContainerId }
+    # 아래 두 호출은 자체 예외를 던질 수 있다. fixture 경계가 아니면 원래 예외를
+    # 그대로 다시 던지므로 기존 caller의 동작은 변하지 않는다.
+    try { $encoded = Invoke-NativeStdout { & docker container inspect --format '{{json .}}' $ContainerId } }
+    catch {
+        if (-not [string]::IsNullOrEmpty($InspectFailureCode)) { throw 'RUN_FIXTURE_SERVICE_STATE_INVALID' }
+        throw
+    }
     if ($LASTEXITCODE -ne 0) {
-        throw 'A container this run created could not be inspected.'
+        & $inspectFailed
     }
-    Assert-E2ENoDuplicateJsonKeys $encoded
+    try { Assert-E2ENoDuplicateJsonKeys $encoded }
+    catch {
+        if (-not [string]::IsNullOrEmpty($InspectFailureCode)) { throw 'RUN_FIXTURE_SERVICE_STATE_INVALID' }
+        throw
+    }
     try {
         $document = $encoded | ConvertFrom-Json
     }
     catch {
-        throw 'A container this run created could not be inspected.'
+        & $inspectFailed
     }
     if ($document -is [array]) {
         if ($document.Count -ne 1) {
-            throw 'A container this run created could not be inspected.'
+            & $inspectFailed
         }
         $document = $document[0]
     }
     if ($null -eq $document) {
-        throw 'A container this run created could not be inspected.'
+        & $inspectFailed
     }
-    if (-not (Test-E2EOrdinalEqual (Get-JsonMember $document 'Id') $ContainerId)) {
-        throw 'A container this run created could not be inspected.'
+    $documentId = Get-JsonMember $document 'Id'
+    if ($documentId -isnot [string]) {
+        & $inspectFailed
+    }
+    if (-not (Test-E2EOrdinalEqual $documentId $ContainerId)) {
+        & $identityFailed
     }
     return $document
 }

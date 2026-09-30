@@ -7450,7 +7450,7 @@ function Invoke-D315TargetedTests {
                     $calls.Add('inventory')
                     return [pscustomobject]@{ Containers = @($injectedContainers) }
                 }
-                function Get-ContainerDocument([string]$ContainerId) {
+                function Get-ContainerDocument([string]$ContainerId, [string]$InspectFailureCode, [string]$IdentityFailureCode) {
                     $calls.Add('document:' + $ContainerId)
                     return $injectedDocument
                 }
@@ -7523,8 +7523,9 @@ function Invoke-D315TargetedTests {
         }
     }
     Invoke-TestCase 'D315 production default fixture exit validation rejects running mismatched and nonzero containers' {
-        # ValidateExit is unchanged by this fix; this pins its production default
-        # so the boundary that GetContainer feeds cannot regress unnoticed.
+        # ValidateExit의 production 기본 경계를 고정한다. 문서 판독과 상태별
+        # fixed identity는 fixture Wait diagnostic에서 나뉘었고, 이 케이스는
+        # GetContainer가 넘긴 경계가 그 분류대로 동작하는지 확인한다.
         $invoke = {
             param($containers, $document)
             return & $script:E2EModule {
@@ -7533,7 +7534,7 @@ function Invoke-D315TargetedTests {
                     param([Parameter(Mandatory = $true)][string]$Project, [Parameter(Mandatory = $true)]$Receipt, $PreviousInventory)
                     return [pscustomobject]@{ Containers = @($injectedContainers) }
                 }
-                function Get-ContainerDocument([string]$ContainerId) { return $injectedDocument }
+                function Get-ContainerDocument([string]$ContainerId, [string]$InspectFailureCode, [string]$IdentityFailureCode) { return $injectedDocument }
                 function Invoke-E2EInLocation {
                     param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][scriptblock]$Body)
                 }
@@ -7549,10 +7550,371 @@ function Invoke-D315TargetedTests {
             [pscustomobject]@{ Id = $Id; State = [pscustomobject]@{ Status = $Status; ExitCode = $ExitCode } } }
 
         Assert-Equal $null (& $invoke @((& $container $false)) (& $document $authoritativeId 'exited' 0)) 'An exited authoritative fixture container with exit code 0 was rejected.'
-        Assert-Equal 'RUN_FIXTURE_CONTAINER_INVALID' (& $invoke @((& $container $true)) (& $document $authoritativeId 'exited' 0)) 'A still-running fixture container was accepted.'
-        Assert-Equal 'RUN_FIXTURE_SERVICE_FAILED' (& $invoke @((& $container $false)) (& $document ('e' * 64) 'exited' 0)) 'A container document about another container was accepted.'
-        Assert-Equal 'RUN_FIXTURE_SERVICE_FAILED' (& $invoke @((& $container $false)) (& $document $authoritativeId 'exited' 3)) 'A nonzero fixture exit code was accepted.'
-        Assert-Equal 'RUN_FIXTURE_SERVICE_FAILED' (& $invoke @((& $container $false)) (& $document $authoritativeId 'running' 0)) 'A non-exited fixture status was accepted.'
+        Assert-Equal 'RUN_FIXTURE_SERVICE_STATE_INVALID' (& $invoke @((& $container $true)) (& $document $authoritativeId 'exited' 0)) 'A still-running fixture container was accepted.'
+        Assert-Equal 'RUN_FIXTURE_CONTAINER_INVALID' (& $invoke @((& $container $false)) (& $document ('e' * 64) 'exited' 0)) 'A container document about another container was accepted.'
+        Assert-Equal 'RUN_FIXTURE_SERVICE_EXIT_NONZERO' (& $invoke @((& $container $false)) (& $document $authoritativeId 'exited' 3)) 'A nonzero fixture exit code was accepted.'
+        Assert-Equal 'RUN_FIXTURE_SERVICE_STATE_INVALID' (& $invoke @((& $container $false)) (& $document $authoritativeId 'running' 0)) 'A non-exited fixture status was accepted.'
+    }
+    # fake `docker container inspect`의 응답. 문서에는 raw sentinel을 싣는다.
+    $script:D315FixtureInspectAnswer = {
+        param([string]$Mode)
+        $aid = 'a1b2c3d4e5f6' + ('0' * 52)
+        $sentinel = 'D315-RAW-SENTINEL-7f3a'
+        $exited = { param([string]$Id, [int]$ExitCode)
+            '{"Id":"' + $Id + '","Name":"/' + $sentinel + '","State":{"Status":"exited","Running":false,"ExitCode":' + $ExitCode + '}}' }
+        switch -CaseSensitive -Exact ($Mode) {
+            '' { return [pscustomobject]@{ Output = $null; ExitCode = 97 } }
+            'fail' { return [pscustomobject]@{ Output = $sentinel; ExitCode = 1 } }
+            'empty' { return [pscustomobject]@{ Output = $null; ExitCode = 0 } }
+            'truncated' { return [pscustomobject]@{ Output = ('{"Id":"' + $aid); ExitCode = 0 } }
+            'duplicate' { return [pscustomobject]@{ Output = ('{"Id":"' + $aid + '","Id":"' + $aid + '","State":{"Status":"exited","Running":false,"ExitCode":0}}'); ExitCode = 0 } }
+            'null' { return [pscustomobject]@{ Output = 'null'; ExitCode = 0 } }
+            'array2' { $one = & $exited $aid 0; return [pscustomobject]@{ Output = ('[' + $one + ',' + $one + ']'); ExitCode = 0 } }
+            'string' { return [pscustomobject]@{ Output = ('"' + $sentinel + '"'); ExitCode = 0 } }
+            'missing-id' { return [pscustomobject]@{ Output = ('{"Name":"/' + $sentinel + '","State":{"Status":"exited","Running":false,"ExitCode":0}}'); ExitCode = 0 } }
+            'numeric-id' { return [pscustomobject]@{ Output = ('{"Id":5,"State":{"Status":"exited","Running":false,"ExitCode":0}}'); ExitCode = 0 } }
+            'other-id' { return [pscustomobject]@{ Output = (& $exited ('e' * 64) 0); ExitCode = 0 } }
+            'exited-zero' { return [pscustomobject]@{ Output = (& $exited $aid 0); ExitCode = 0 } }
+            'exited-nonzero' { return [pscustomobject]@{ Output = (& $exited $aid 3); ExitCode = 0 } }
+        }
+        throw 'D315_INSPECT_MODE_INVALID'
+    }
+    # 이하 두 케이스는 Start와 Wait의 production 기본 본문까지 실제로 실행한다.
+    # Invoke-E2EInLocation은 본문을 그대로 실행하고, 모듈 범위의 docker 함수가
+    # native 명령을 대신해 케이스마다 지정된 exit code만 남긴다. 따라서 up/wait
+    # 호출, $LASTEXITCODE 판정, Wait 실패 직후 authoritative 문서 1회 조회까지
+    # 모두 production 코드가 수행한다.
+    $script:D315FixtureStageInvoke = {
+        param([int]$UpExit, [int]$WaitExit, [bool]$InventoryRunning, $Document, [int]$ValidateContainerCount = 1, [string]$InspectMode = '')
+        # InspectMode를 지정하면 Get-ContainerDocument를 가리지 않고 실제
+        # production 함수가 fake docker의 inspect 응답을 판독한다.
+        $inspectAnswer = & $script:D315FixtureInspectAnswer $InspectMode
+        return & $script:E2EModule {
+            param($upExit, $waitExit, $inventoryRunning, $injectedDocument, $validateContainerCount, $inspectMode, $inspectAnswer)
+            $inventoryReads = [pscustomobject]@{ Count = 0 }
+            $sentinel = 'D315-RAW-SENTINEL-7f3a'
+            $authoritativeId = 'a1b2c3d4e5f6' + ('0' * 52)
+            $calls = [System.Collections.Generic.List[string]]::new()
+            function Invoke-E2EInLocation {
+                param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][scriptblock]$Body)
+                & $Body
+            }
+            function docker {
+                $arguments = @($args | ForEach-Object { [string]$_ })
+                $verb = 'other'
+                foreach ($argument in $arguments) {
+                    if ([string]::Equals($argument, 'up', [System.StringComparison]::Ordinal)) { $verb = 'up' }
+                    elseif ([string]::Equals($argument, 'wait', [System.StringComparison]::Ordinal)) { $verb = 'wait' }
+                    elseif ([string]::Equals($argument, 'inspect', [System.StringComparison]::Ordinal)) { $verb = 'inspect' }
+                }
+                $calls.Add('docker:' + $verb)
+                if ($verb -ceq 'inspect') {
+                    if ($null -ne $inspectAnswer.Output) { Write-Output $inspectAnswer.Output }
+                    $global:LASTEXITCODE = $inspectAnswer.ExitCode
+                    return
+                }
+                # 원문 출력은 어떤 경로로도 fixed identity에 섞이면 안 된다.
+                Write-Output $sentinel
+                Write-Error $sentinel
+                if ($verb -ceq 'up') { $global:LASTEXITCODE = $upExit }
+                elseif ($verb -ceq 'wait') { $global:LASTEXITCODE = $waitExit }
+                else { $global:LASTEXITCODE = 97 }
+            }
+            function Get-E2EProjectResourceInventory {
+                param([Parameter(Mandatory = $true)][string]$Project, [Parameter(Mandatory = $true)]$Receipt, $PreviousInventory)
+                $calls.Add('inventory')
+                $inventoryReads.Count++
+                $container = [pscustomobject]@{ Service = 'keycloak-run-fixture'; Id = $authoritativeId; Running = $inventoryRunning }
+                # 첫 조회는 GetContainer, 두 번째 조회는 ValidateExit다. 두 번째에만
+                # 지정한 개수의 authoritative container를 돌려준다.
+                if ($inventoryReads.Count -ge 2) { return [pscustomobject]@{ Containers = @(for ($i = 0; $i -lt $validateContainerCount; $i++) { $container }) } }
+                return [pscustomobject]@{ Containers = @($container) }
+            }
+            if ([string]::IsNullOrEmpty($inspectMode)) {
+                function Get-ContainerDocument([string]$ContainerId, [string]$InspectFailureCode, [string]$IdentityFailureCode) {
+                    # fixture caller가 넘긴 두 fixed code까지 호출 기록에 남긴다.
+                    $calls.Add('document:' + $ContainerId + '|' + $InspectFailureCode + '|' + $IdentityFailureCode)
+                    return $injectedDocument
+                }
+            }
+            $receipt = New-E2EReceipt -RunId ([guid]::NewGuid().ToString('N')) -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+            $failure = $null
+            try { Invoke-E2EFixedFixtureService -Receipt $receipt -PlanJson '{"transactionId":"safe"}' }
+            catch { $failure = $_ }
+            return [pscustomobject]@{
+                Calls = @($calls)
+                Failure = if ($null -eq $failure) { $null } else { [string]$failure.Exception.Message }
+                ErrorId = if ($null -eq $failure) { $null } else { [string]$failure.FullyQualifiedErrorId }
+                PlanRestored = $null -eq [System.Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_FIXTURE_PLAN', 'Process')
+                Sentinel = $sentinel
+                AuthoritativeId = $authoritativeId
+            }
+        } $UpExit $WaitExit $InventoryRunning $Document $ValidateContainerCount $InspectMode $inspectAnswer
+    }
+    $script:D315FixtureStageIdentities = @(
+        'RUN_FIXTURE_SERVICE_START_FAILED', 'RUN_FIXTURE_CONTAINER_INVALID', 'RUN_FIXTURE_SERVICE_WAIT_FAILED',
+        'RUN_FIXTURE_SERVICE_WAIT_EXITED_ZERO', 'RUN_FIXTURE_SERVICE_EXIT_NONZERO', 'RUN_FIXTURE_SERVICE_STATE_INVALID'
+    )
+    $script:D315AssertFixtureStage = {
+        param($Result, $Expected, [string[]]$ExpectedCalls, [string]$Name)
+        Assert-Equal $Expected $Result.Failure ('Fixture stage identity differs for ' + $Name + '.')
+        # 기존 primary 전달 계약: 경계의 literal은 바깥 Invoke-E2ECleanupActions가
+        # Exception 객체로 다시 던진다. 이 harness의 Invoke-E2EInLocation은 본문만
+        # 실행하는 대역이므로, 실제 Pop-Location 경유는 여기서 실행되지 않는다.
+        if ($null -eq $Expected) { Assert-Equal $null $Result.ErrorId ('Fixture stage success raised an error for ' + $Name + '.') }
+        else { Assert-Equal 'RuntimeException' $Result.ErrorId ('Fixture stage primary transport changed for ' + $Name + '.') }
+        if ($null -ne $Expected) {
+            $hits = @($script:D315FixtureStageIdentities | Where-Object { [string]::Equals($_, $Result.Failure, [System.StringComparison]::Ordinal) })
+            Assert-Equal 1 $hits.Count ('Fixture stage failure is not exactly one fixed identity for ' + $Name + '.')
+            Assert-True ($Result.Failure.IndexOf($Result.Sentinel, [System.StringComparison]::Ordinal) -lt 0) ('Raw native output was reflected for ' + $Name + '.')
+            Assert-True ($Result.Failure.IndexOf($Result.AuthoritativeId, [System.StringComparison]::Ordinal) -lt 0) ('The container id was reflected for ' + $Name + '.')
+        }
+        $expandedCalls = @($ExpectedCalls | ForEach-Object {
+            if ($_ -ceq 'document') { 'document:' + $Result.AuthoritativeId + '|RUN_FIXTURE_SERVICE_STATE_INVALID|RUN_FIXTURE_CONTAINER_INVALID' } else { $_ } })
+        Assert-Equal $expandedCalls @($Result.Calls) ('Fixture stage call order or cardinality differs for ' + $Name + '.')
+        Assert-True $Result.PlanRestored ('Fixture plan environment was not restored for ' + $Name + '.')
+    }
+    Invoke-TestCase 'D315 production fixture Start and Wait nonzero map to exclusive stage identities' {
+        $aid = 'a1b2c3d4e5f6' + ('0' * 52)
+        $state = { param($Status, $Running, $ExitCode) [pscustomobject]@{ Status = $Status; Running = $Running; ExitCode = $ExitCode } }
+        $doc = { param($Id, $State) [pscustomobject]@{ Id = $Id; State = $State } }
+        $waitFailedCalls = @('docker:up', 'inventory', 'docker:wait', 'document')
+
+        $start = & $script:D315FixtureStageInvoke 7 0 $false (& $doc $aid (& $state 'exited' $false 0))
+        & $script:D315AssertFixtureStage $start 'RUN_FIXTURE_SERVICE_START_FAILED' @('docker:up') 'start nonzero'
+
+        $cases = [ordered]@{
+            'wait nonzero exited zero' = @('RUN_FIXTURE_SERVICE_WAIT_EXITED_ZERO', (& $doc $aid (& $state 'exited' $false 0)))
+            'wait nonzero exited zero without Running' = @('RUN_FIXTURE_SERVICE_WAIT_EXITED_ZERO', (& $doc $aid ([pscustomobject]@{ Status = 'exited'; ExitCode = 0 })))
+            'wait nonzero exited nonzero' = @('RUN_FIXTURE_SERVICE_EXIT_NONZERO', (& $doc $aid (& $state 'exited' $false 3)))
+            'wait nonzero exited negative' = @('RUN_FIXTURE_SERVICE_EXIT_NONZERO', (& $doc $aid (& $state 'exited' $false ([int](-1)))))
+            'wait nonzero exited int64 nonzero' = @('RUN_FIXTURE_SERVICE_EXIT_NONZERO', (& $doc $aid (& $state 'exited' $false ([long]137))))
+            'wait nonzero running' = @('RUN_FIXTURE_SERVICE_WAIT_FAILED', (& $doc $aid (& $state 'running' $true 0)))
+            'wait nonzero running without Running' = @('RUN_FIXTURE_SERVICE_WAIT_FAILED', (& $doc $aid ([pscustomobject]@{ Status = 'running'; ExitCode = 0 })))
+            'wait nonzero document id mismatch' = @('RUN_FIXTURE_CONTAINER_INVALID', (& $doc ('e' * 64) (& $state 'exited' $false 0)))
+            'wait nonzero document id missing' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', ([pscustomobject]@{ State = (& $state 'exited' $false 0) }))
+            'wait nonzero document id numeric' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', (& $doc 5 (& $state 'exited' $false 0)))
+            'wait nonzero document id uppercase' = @('RUN_FIXTURE_CONTAINER_INVALID', (& $doc $aid.ToUpperInvariant() (& $state 'exited' $false 0)))
+            'wait nonzero null document' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', $null)
+            'wait nonzero string document' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', 'D315-RAW-SENTINEL-7f3a')
+            'wait nonzero missing State' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', ([pscustomobject]@{ Id = $aid }))
+            'wait nonzero State string' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', (& $doc $aid 'exited'))
+            'wait nonzero missing Status' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', (& $doc $aid ([pscustomobject]@{ Running = $false; ExitCode = 0 })))
+            'wait nonzero missing ExitCode' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', (& $doc $aid ([pscustomobject]@{ Status = 'exited'; Running = $false })))
+            'wait nonzero ExitCode string' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', (& $doc $aid (& $state 'exited' $false '0')))
+            'wait nonzero ExitCode boolean' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', (& $doc $aid (& $state 'exited' $false $false)))
+            'wait nonzero ExitCode double' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', (& $doc $aid (& $state 'exited' $false ([double]0))))
+            'wait nonzero ExitCode null' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', (& $doc $aid (& $state 'exited' $false $null)))
+            'wait nonzero Status non-string' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', (& $doc $aid (& $state 1 $false 0)))
+            'wait nonzero Status case variant' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', (& $doc $aid (& $state 'Exited' $false 0)))
+            'wait nonzero Status raw sentinel' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', (& $doc $aid (& $state 'D315-RAW-SENTINEL-7f3a' $false 0)))
+            'wait nonzero Running non-boolean' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', (& $doc $aid (& $state 'exited' 'false' 0)))
+            'wait nonzero exited but Running' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', (& $doc $aid (& $state 'exited' $true 0)))
+            'wait nonzero running but not Running' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', (& $doc $aid (& $state 'running' $false 0)))
+            'wait nonzero paused' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', (& $doc $aid (& $state 'paused' $true 0)))
+            'wait nonzero created' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', (& $doc $aid (& $state 'created' $false 0)))
+        }
+        foreach ($name in $cases.Keys) {
+            $result = & $script:D315FixtureStageInvoke 0 1 $false $cases[$name][1]
+            & $script:D315AssertFixtureStage $result $cases[$name][0] $waitFailedCalls $name
+        }
+    }
+    Invoke-TestCase 'D315 production fixture ValidateExit after Wait success maps each state to one identity' {
+        $aid = 'a1b2c3d4e5f6' + ('0' * 52)
+        $state = { param($Status, $Running, $ExitCode) [pscustomobject]@{ Status = $Status; Running = $Running; ExitCode = $ExitCode } }
+        $doc = { param($Id, $State) [pscustomobject]@{ Id = $Id; State = $State } }
+        $validatedCalls = @('docker:up', 'inventory', 'docker:wait', 'inventory', 'document')
+
+        $success = & $script:D315FixtureStageInvoke 0 0 $false (& $doc $aid (& $state 'exited' $false 0))
+        & $script:D315AssertFixtureStage $success $null $validatedCalls 'exited zero success'
+
+        $running = & $script:D315FixtureStageInvoke 0 0 $true (& $doc $aid (& $state 'exited' $false 0))
+        & $script:D315AssertFixtureStage $running 'RUN_FIXTURE_SERVICE_STATE_INVALID' @('docker:up', 'inventory', 'docker:wait', 'inventory') 'inventory Running'
+
+        foreach ($count in @(0, 2)) {
+            $cardinality = & $script:D315FixtureStageInvoke 0 0 $false (& $doc $aid (& $state 'exited' $false 0)) $count
+            & $script:D315AssertFixtureStage $cardinality 'RUN_FIXTURE_CONTAINER_INVALID' @('docker:up', 'inventory', 'docker:wait', 'inventory') ('validate inventory count ' + $count)
+        }
+
+        $cases = [ordered]@{
+            'document id mismatch' = @('RUN_FIXTURE_CONTAINER_INVALID', (& $doc ('e' * 64) (& $state 'exited' $false 0)))
+            'document running' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', (& $doc $aid (& $state 'running' $true 0)))
+            'document created' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', (& $doc $aid (& $state 'created' $false 0)))
+            'document exited but Running' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', (& $doc $aid (& $state 'exited' $true 0)))
+            'document missing State' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', ([pscustomobject]@{ Id = $aid }))
+            'document ExitCode string' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', (& $doc $aid (& $state 'exited' $false '0')))
+            'document ExitCode double' = @('RUN_FIXTURE_SERVICE_STATE_INVALID', (& $doc $aid (& $state 'exited' $false ([double]0))))
+            'document ExitCode nonzero' = @('RUN_FIXTURE_SERVICE_EXIT_NONZERO', (& $doc $aid (& $state 'exited' $false 3)))
+        }
+        foreach ($name in $cases.Keys) {
+            $result = & $script:D315FixtureStageInvoke 0 0 $false $cases[$name][1]
+            & $script:D315AssertFixtureStage $result $cases[$name][0] $validatedCalls $name
+        }
+    }
+    Invoke-TestCase 'D315 production fixture document read failures map to fixed identities at Wait and ValidateExit' {
+        # Get-ContainerDocument를 가리지 않는다. 실제 판독 함수가 fake inspect
+        # 응답을 읽고, fixture 경계가 넘긴 literal로만 실패를 분류해야 한다.
+        $waitCalls = @('docker:up', 'inventory', 'docker:wait', 'docker:inspect')
+        $waitCases = [ordered]@{
+            'fail' = 'RUN_FIXTURE_SERVICE_STATE_INVALID'
+            'empty' = 'RUN_FIXTURE_SERVICE_STATE_INVALID'
+            'truncated' = 'RUN_FIXTURE_SERVICE_STATE_INVALID'
+            'duplicate' = 'RUN_FIXTURE_SERVICE_STATE_INVALID'
+            'null' = 'RUN_FIXTURE_SERVICE_STATE_INVALID'
+            'array2' = 'RUN_FIXTURE_SERVICE_STATE_INVALID'
+            'string' = 'RUN_FIXTURE_SERVICE_STATE_INVALID'
+            'missing-id' = 'RUN_FIXTURE_SERVICE_STATE_INVALID'
+            'numeric-id' = 'RUN_FIXTURE_SERVICE_STATE_INVALID'
+            'other-id' = 'RUN_FIXTURE_CONTAINER_INVALID'
+            'exited-zero' = 'RUN_FIXTURE_SERVICE_WAIT_EXITED_ZERO'
+            'exited-nonzero' = 'RUN_FIXTURE_SERVICE_EXIT_NONZERO'
+        }
+        foreach ($mode in $waitCases.Keys) {
+            $result = & $script:D315FixtureStageInvoke 0 1 $false $null 1 $mode
+            & $script:D315AssertFixtureStage $result $waitCases[$mode] $waitCalls ('wait nonzero inspect ' + $mode)
+        }
+        $validateCalls = @('docker:up', 'inventory', 'docker:wait', 'inventory', 'docker:inspect')
+        $validateCases = [ordered]@{
+            'fail' = 'RUN_FIXTURE_SERVICE_STATE_INVALID'
+            'duplicate' = 'RUN_FIXTURE_SERVICE_STATE_INVALID'
+            'null' = 'RUN_FIXTURE_SERVICE_STATE_INVALID'
+            'missing-id' = 'RUN_FIXTURE_SERVICE_STATE_INVALID'
+            'other-id' = 'RUN_FIXTURE_CONTAINER_INVALID'
+            'exited-nonzero' = 'RUN_FIXTURE_SERVICE_EXIT_NONZERO'
+            'exited-zero' = $null
+        }
+        foreach ($mode in $validateCases.Keys) {
+            $result = & $script:D315FixtureStageInvoke 0 0 $false $null 1 $mode
+            & $script:D315AssertFixtureStage $result $validateCases[$mode] $validateCalls ('validate inspect ' + $mode)
+        }
+    }
+    Invoke-TestCase 'D315 container document reader keeps its legacy behavior without fixture codes' {
+        # 새 선택 인수를 넘기지 않는 기존 caller는 HEAD와 같은 결과를 받아야 한다.
+        $invoke = {
+            param([string]$Mode, [string]$RequestedId, [hashtable]$Extra)
+            $answer = & $script:D315FixtureInspectAnswer $Mode
+            return & $script:E2EModule {
+                param($answer, $requestedId, $extra)
+                $calls = [System.Collections.Generic.List[string]]::new()
+                function docker {
+                    $calls.Add('docker')
+                    if ($null -ne $answer.Output) { Write-Output $answer.Output }
+                    $global:LASTEXITCODE = $answer.ExitCode
+                }
+                $failure = $null
+                $document = $null
+                try { $document = Get-ContainerDocument $requestedId @extra } catch { $failure = $_ }
+                return [pscustomobject]@{
+                    Calls = $calls.Count
+                    Failure = if ($null -eq $failure) { $null } else { [string]$failure.Exception.Message }
+                    FailureType = if ($null -eq $failure) { $null } else { $failure.Exception.GetType().Name }
+                    DocumentId = if ($null -eq $document) { $null } else { [string]$document.Id }
+                }
+            } $answer $RequestedId $Extra
+        }
+        $aid = 'a1b2c3d4e5f6' + ('0' * 52)
+        $sentence = 'A container this run created could not be inspected.'
+        $legacy = [ordered]@{
+            'fail' = $sentence; 'empty' = $sentence; 'truncated' = 'RESOURCE_CLEANUP_FAILED'; 'duplicate' = 'RESOURCE_CLEANUP_FAILED'
+            'null' = $sentence; 'array2' = $sentence; 'string' = $sentence; 'missing-id' = $sentence
+            'numeric-id' = $sentence; 'other-id' = $sentence
+        }
+        foreach ($mode in $legacy.Keys) {
+            $result = & $invoke $mode $aid @{}
+            Assert-Equal $legacy[$mode] $result.Failure ('Legacy container document failure changed for ' + $mode + '.')
+            Assert-Equal 1 $result.Calls ('Legacy container document inspect count changed for ' + $mode + '.')
+        }
+        $accepted = & $invoke 'exited-zero' $aid @{}
+        Assert-Equal $null $accepted.Failure 'Legacy container document read rejected a valid document.'
+        Assert-Equal $aid $accepted.DocumentId 'Legacy container document read returned another document.'
+        $short = & $invoke 'exited-zero' ('a' * 63) @{}
+        Assert-Equal $sentence $short.Failure 'Legacy container document operand refusal changed.'
+        Assert-Equal 0 $short.Calls 'Legacy container document refusal still inspected.'
+        foreach ($extra in @(@{ InspectFailureCode = 'run_fixture_service_state_invalid' }, @{ IdentityFailureCode = 'RUN_FIXTURE_SERVICE_STATE_INVALID' })) {
+            $refused = & $invoke 'exited-zero' $aid $extra
+            Assert-Equal 'ParameterBindingValidationException' $refused.FailureType 'A non-literal fixture failure code was accepted.'
+            Assert-Equal 0 $refused.Calls 'A refused fixture failure code still inspected.'
+        }
+    }
+    Invoke-TestCase 'D315 fixture stage identities are exclusive compile-time literals' {
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:ModulePath, [ref]$tokens, [ref]$errors)
+        Assert-Equal 0 $errors.Count 'Module parse failed.'
+        $functions = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true))
+        $service = @($functions | Where-Object { $_.Name -ceq 'Invoke-E2EFixedFixtureService' })
+        $outcome = @($functions | Where-Object { $_.Name -ceq 'Get-E2EFixtureContainerOutcome' })
+        Assert-Equal 1 $service.Count 'Fixed fixture service function is not unique.'
+        Assert-Equal 1 $outcome.Count 'Fixture container outcome reader is not unique.'
+        $throws = @($service[0].FindAll({ param($node) $node -is [System.Management.Automation.Language.ThrowStatementAst] }, $true))
+        $literals = [System.Collections.Generic.List[string]]::new()
+        foreach ($throw in $throws) {
+            Assert-True ($null -ne $throw.Pipeline) 'Fixed fixture service rethrows without a fixed identity.'
+            $expression = $throw.Pipeline.PipelineElements[0].Expression
+            Assert-True ($throw.Pipeline.PipelineElements.Count -eq 1 -and $expression -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+                $expression.StringConstantType -eq [System.Management.Automation.Language.StringConstantType]::SingleQuoted) 'Fixed fixture service throws a non-literal identity.'
+            $literals.Add([string]$expression.Value)
+        }
+        $expected = @('FIXTURE_PLAN_ENVIRONMENT_CONTAMINATED', 'RUN_FIXTURE_BOUNDARY_INVALID', 'RUN_FIXTURE_CONTAINER_INVALID',
+            'RUN_FIXTURE_SERVICE_EXIT_NONZERO', 'RUN_FIXTURE_SERVICE_START_FAILED', 'RUN_FIXTURE_SERVICE_STATE_INVALID',
+            'RUN_FIXTURE_SERVICE_WAIT_EXITED_ZERO', 'RUN_FIXTURE_SERVICE_WAIT_FAILED')
+        $distinct = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::Ordinal)
+        foreach ($literal in $literals) { $distinct.Add($literal) | Out-Null }
+        Assert-Equal $expected @($distinct) 'Fixed fixture service identity set differs.'
+        Assert-True (-not $literals.Contains('RUN_FIXTURE_SERVICE_FAILED')) 'The generic fixture service identity is still thrown.'
+        $readerThrows = @($outcome[0].FindAll({ param($node) $node -is [System.Management.Automation.Language.ThrowStatementAst] }, $true))
+        Assert-Equal 0 $readerThrows.Count 'The fixture container outcome reader throws instead of classifying.'
+        # helper 본문에 직접 속한 return은 전부 single-quoted literal 토큰이어야 한다.
+        # 중첩 $read scriptblock의 return만 제외한다.
+        $readerReturns = @($outcome[0].FindAll({ param($node) $node -is [System.Management.Automation.Language.ReturnStatementAst] }, $true) | Where-Object {
+            $scope = $_.Parent
+            while ($scope -isnot [System.Management.Automation.Language.ScriptBlockAst]) { $scope = $scope.Parent }
+            [object]::ReferenceEquals($scope.Parent, $outcome[0]) })
+        $tokenSet = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::Ordinal)
+        foreach ($return in $readerReturns) {
+            $value = if ($null -ne $return.Pipeline -and $return.Pipeline.PipelineElements.Count -eq 1) { $return.Pipeline.PipelineElements[0].Expression } else { $null }
+            Assert-True ($value -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+                $value.StringConstantType -eq [System.Management.Automation.Language.StringConstantType]::SingleQuoted) 'The fixture container outcome reader returns a non-literal value.'
+            $tokenSet.Add([string]$value.Value) | Out-Null
+        }
+        Assert-Equal @('ExitedNonzero', 'ExitedZero', 'IdentityMismatch', 'Invalid', 'Running') @($tokenSet) 'Fixture container outcome token set differs.'
+
+        # 선택 fixed-code 전달 계약: fixture 경계의 두 Get-ContainerDocument 호출만
+        # 두 literal을 넘기고, 함수는 대소문자까지 일치하는 그 literal 하나씩만 받는다.
+        $documentCalls = @($service[0].FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Get-ContainerDocument' }, $true))
+        Assert-Equal 2 $documentCalls.Count 'Fixture boundaries do not read the container document exactly twice.'
+        foreach ($call in $documentCalls) {
+            $passed = @{}
+            $elements = @($call.CommandElements)
+            for ($index = 0; $index -lt $elements.Count - 1; $index++) {
+                if ($elements[$index] -is [System.Management.Automation.Language.CommandParameterAst] -and
+                    $elements[$index + 1] -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+                    $elements[$index + 1].StringConstantType -eq [System.Management.Automation.Language.StringConstantType]::SingleQuoted) {
+                    $passed[[string]$elements[$index].ParameterName] = [string]$elements[$index + 1].Value
+                }
+            }
+            Assert-True ($passed.ContainsKey('InspectFailureCode') -and $passed['InspectFailureCode'] -ceq 'RUN_FIXTURE_SERVICE_STATE_INVALID') 'A fixture document read does not pass the inspect failure literal.'
+            Assert-True ($passed.ContainsKey('IdentityFailureCode') -and $passed['IdentityFailureCode'] -ceq 'RUN_FIXTURE_CONTAINER_INVALID') 'A fixture document read does not pass the identity failure literal.'
+        }
+        $reader = @($functions | Where-Object { $_.Name -ceq 'Get-ContainerDocument' })
+        Assert-Equal 1 $reader.Count 'Container document reader is not unique.'
+        $parameters = @{}
+        foreach ($parameter in @($reader[0].Body.ParamBlock.Parameters)) { $parameters[$parameter.Name.VariablePath.UserPath] = $parameter }
+        Assert-True ($parameters.ContainsKey('InspectFailureCode') -and
+            @($parameters['InspectFailureCode'].Attributes | Where-Object { $_.Extent.Text -ceq "[ValidateSet('RUN_FIXTURE_SERVICE_STATE_INVALID', IgnoreCase = `$false)]" }).Count -eq 1) 'Inspect failure code is not restricted to its exact literal.'
+        Assert-True ($parameters.ContainsKey('IdentityFailureCode') -and
+            @($parameters['IdentityFailureCode'].Attributes | Where-Object { $_.Extent.Text -ceq "[ValidateSet('RUN_FIXTURE_CONTAINER_INVALID', IgnoreCase = `$false)]" }).Count -eq 1) 'Identity failure code is not restricted to its exact literal.'
+        $readerLiteralThrows = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::Ordinal)
+        $bareRethrows = 0
+        foreach ($throw in @($reader[0].FindAll({ param($node) $node -is [System.Management.Automation.Language.ThrowStatementAst] }, $true))) {
+            if ($null -eq $throw.Pipeline) { $bareRethrows++; continue }
+            $expression = $throw.Pipeline.PipelineElements[0].Expression
+            Assert-True ($expression -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+                $expression.StringConstantType -eq [System.Management.Automation.Language.StringConstantType]::SingleQuoted) 'Container document reader throws a non-literal value.'
+            $readerLiteralThrows.Add([string]$expression.Value) | Out-Null
+        }
+        Assert-Equal @('A container this run created could not be inspected.', 'RUN_FIXTURE_CONTAINER_INVALID', 'RUN_FIXTURE_SERVICE_STATE_INVALID') @($readerLiteralThrows) 'Container document reader identity set differs.'
+        Assert-Equal 2 $bareRethrows 'Container document reader legacy rethrow count differs.'
     }
     Invoke-TestCase 'D315 fixture production source excludes one-off and broad deletion operands' {
         $source = [System.IO.File]::ReadAllText($script:ModulePath)
@@ -7563,9 +7925,9 @@ function Invoke-D315TargetedTests {
         # the fixture container boundary must not use that name. These two pin
         # this boundary only. Seven other locals in this module still shadow an
         # automatic variable, all pre-existing and all safe today, for two
-        # different reasons: five named $matches at :1307, :2299, :4973, :4994 and
-        # :5329, safe because no regex operator runs between their assignment and
-        # their read, and two named $host at :4748 and :4891, safe because nothing
+        # different reasons: five named $matches at :1376, :2368, :5073, :5094 and
+        # :5429, safe because no regex operator runs between their assignment and
+        # their read, and two named $host at :4848 and :4991, safe because nothing
         # in those scopes reads a member of $Host. Closing that class module-wide
         # needs a static check with its own positive control, so it is separate
         # follow-up work and is deliberately not attempted here.
