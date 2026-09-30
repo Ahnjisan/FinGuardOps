@@ -2,6 +2,7 @@ import ast
 import base64
 import contextlib
 import copy
+import errno as errno_module
 import http.client
 import io
 import importlib.util
@@ -3645,6 +3646,235 @@ finguardops_rule_analysis_outcomes_created 99
         self.assertEqual(stdout.getvalue(), "")
         self.assertEqual(stderr.getvalue(), "verification failed: FIXTURE_MANIFEST_DIRECTORY_IO_FAILED\n")
 
+    @contextlib.contextmanager
+    def fake_renameat2(self, outcome):
+        # Runs the Linux publication branch on any host. `outcome` is 0 for a
+        # rename that really happens, an errno for a rename the kernel refuses,
+        # or "missing" for a libc without the symbol.
+        calls = []
+
+        class Renameat2:
+            argtypes = None
+            restype = None
+
+            def __call__(self, _olddir, source, _newdir, destination, flags):
+                calls.append(flags)
+                if outcome == 0:
+                    os.rename(os.fsdecode(source), os.fsdecode(destination))
+                    return 0
+                return -1
+
+        class Libc:
+            pass
+
+        libc = Libc()
+        if outcome != "missing":
+            libc.renameat2 = Renameat2()
+        with mock.patch.object(verify_e2e.ctypes, "CDLL", return_value=libc), \
+             mock.patch.object(verify_e2e.ctypes, "get_errno", return_value=outcome if isinstance(outcome, int) else 0):
+            yield calls
+
+    def test_manifest_publication_fallback_errno_sets_are_fixed(self):
+        self.assertEqual(
+            verify_e2e.RENAME_NOREPLACE_UNSUPPORTED_ERRNOS,
+            frozenset({errno_module.EINVAL, errno_module.ENOSYS, errno_module.EOPNOTSUPP, errno_module.ENOTSUP}),
+        )
+        self.assertEqual(
+            verify_e2e.MANIFEST_PUBLISH_DENIED_ERRNOS,
+            frozenset({errno_module.EACCES, errno_module.EPERM, errno_module.EROFS}),
+        )
+        self.assertEqual(
+            verify_e2e.MANIFEST_PUBLISH_IO_ERRNOS,
+            frozenset({errno_module.EIO, errno_module.ENOSPC, errno_module.EDQUOT}),
+        )
+        blocked = verify_e2e.MANIFEST_PUBLISH_DENIED_ERRNOS | verify_e2e.MANIFEST_PUBLISH_IO_ERRNOS | {errno_module.EEXIST}
+        self.assertFalse(verify_e2e.RENAME_NOREPLACE_UNSUPPORTED_ERRNOS & blocked)
+
+    def test_manifest_publication_posix_branch_renames_or_falls_back_only_when_unsupported(self):
+        identity = valid_fixture_identity()
+        canonical = verify_e2e.fixture_manifest_bytes(identity)
+        name = verify_e2e.FIXTURE_MANIFEST_NAME
+
+        def publish(outcome, link=None, unlink=None, existing=None):
+            with tempfile.TemporaryDirectory(prefix="fixture-publish-") as directory:
+                root = Path(directory)
+                source, destination = root / (name + ".tmp"), root / name
+                source.write_bytes(canonical)
+                if existing is not None:
+                    destination.write_bytes(existing)
+                real_link, real_unlink = os.link, os.unlink
+                links, code = [], None
+
+                def linking(*arguments, **keywords):
+                    links.append("link")
+                    if link is not None:
+                        raise link
+                    return real_link(*arguments, **keywords)
+
+                def unlinking(path, *arguments, **keywords):
+                    if unlink is not None and str(path).endswith(".tmp"):
+                        raise unlink
+                    return real_unlink(path, *arguments, **keywords)
+
+                with self.fake_renameat2(outcome) as renames, \
+                     mock.patch.object(verify_e2e.os, "link", side_effect=linking), \
+                     mock.patch.object(verify_e2e.os, "unlink", side_effect=unlinking):
+                    try:
+                        verify_e2e.rename_noreplace_posix(source, destination)
+                    except verify_e2e.VerificationError as error:
+                        code = str(error)
+                names = sorted(item.name for item in root.iterdir())
+                final = destination.read_bytes() if destination.exists() else None
+                return code, names, final, len(links), list(renames)
+
+        # The normal path: one rename, no link.
+        self.assertEqual(publish(0), (None, [name], canonical, 0, [1]))
+        # An existing final name is never a reason to fall back, and is never replaced.
+        self.assertEqual(
+            publish(errno_module.EEXIST, existing=b"prior"),
+            ("FIXTURE_MANIFEST_FINAL_EXISTS", [name, name + ".tmp"], b"prior", 0, [1]),
+        )
+        # Only the documented "not supported" values reach the link.
+        for value in sorted(verify_e2e.RENAME_NOREPLACE_UNSUPPORTED_ERRNOS):
+            with self.subTest(unsupported=value):
+                self.assertEqual(publish(value), (None, [name], canonical, 1, [1]))
+        # A fallback never replaces a final name that appeared meanwhile.
+        self.assertEqual(
+            publish(errno_module.EINVAL, existing=b"prior"),
+            ("FIXTURE_MANIFEST_FINAL_EXISTS", [name, name + ".tmp"], b"prior", 1, [1]),
+        )
+        # A refusal, an I/O failure and an unknown errno are answers, not fallbacks.
+        refused = {
+            errno_module.EACCES: "FIXTURE_MANIFEST_RENAME_DENIED",
+            errno_module.EPERM: "FIXTURE_MANIFEST_RENAME_DENIED",
+            errno_module.EROFS: "FIXTURE_MANIFEST_RENAME_DENIED",
+            errno_module.EIO: "FIXTURE_MANIFEST_RENAME_IO_FAILED",
+            errno_module.ENOSPC: "FIXTURE_MANIFEST_RENAME_IO_FAILED",
+            errno_module.EDQUOT: "FIXTURE_MANIFEST_RENAME_IO_FAILED",
+            errno_module.EXDEV: "FIXTURE_MANIFEST_RENAME_FAILED",
+            errno_module.ENOENT: "FIXTURE_MANIFEST_RENAME_FAILED",
+            0: "FIXTURE_MANIFEST_RENAME_FAILED",
+        }
+        for value, expected in refused.items():
+            with self.subTest(refused=value):
+                outcome = value if value != 0 else 99999
+                self.assertEqual(publish(outcome), (expected, [name + ".tmp"], None, 0, [1]))
+        # No symbol: a fixed identity and no link.
+        self.assertEqual(
+            publish("missing"),
+            ("FIXTURE_MANIFEST_RENAME_UNAVAILABLE", [name + ".tmp"], None, 0, []),
+        )
+        # The link itself fails.
+        self.assertEqual(
+            publish(errno_module.EINVAL, link=PermissionError(errno_module.EPERM, "NeverReflect path")),
+            ("FIXTURE_MANIFEST_LINK_DENIED", [name + ".tmp"], None, 1, [1]),
+        )
+        self.assertEqual(
+            publish(errno_module.EINVAL, link=OSError(errno_module.EMLINK, "NeverReflect path")),
+            ("FIXTURE_MANIFEST_LINK_FAILED", [name + ".tmp"], None, 1, [1]),
+        )
+        self.assertEqual(
+            publish(errno_module.EINVAL, link=FileExistsError(errno_module.EEXIST, "NeverReflect path")),
+            ("FIXTURE_MANIFEST_FINAL_EXISTS", [name + ".tmp"], None, 1, [1]),
+        )
+        # The link succeeded but the temporary name could not be removed: not a
+        # success, and the final name this call created is withdrawn.
+        self.assertEqual(
+            publish(errno_module.EINVAL, unlink=PermissionError(errno_module.EACCES, "NeverReflect path")),
+            ("FIXTURE_MANIFEST_TEMP_UNLINK_FAILED", [name + ".tmp"], None, 1, [1]),
+        )
+
+    def test_manifest_publication_unlink_failure_never_removes_a_foreign_final(self):
+        name = verify_e2e.FIXTURE_MANIFEST_NAME
+        with tempfile.TemporaryDirectory(prefix="fixture-publish-") as directory:
+            root = Path(directory)
+            source, destination = root / (name + ".tmp"), root / name
+            source.write_bytes(b"temporary")
+            real_unlink = os.unlink
+
+            def linking(_source, target, *_arguments, **_keywords):
+                # The final name ends up being some other file, not this run's link.
+                Path(target).write_bytes(b"foreign")
+
+            def unlinking(path, *arguments, **keywords):
+                if str(path).endswith(".tmp"):
+                    raise PermissionError(errno_module.EACCES, "NeverReflect path")
+                return real_unlink(path, *arguments, **keywords)
+
+            with self.fake_renameat2(errno_module.EINVAL), \
+                 mock.patch.object(verify_e2e.os, "link", side_effect=linking), \
+                 mock.patch.object(verify_e2e.os, "unlink", side_effect=unlinking), \
+                 self.assertRaisesRegex(verify_e2e.VerificationError, "^FIXTURE_MANIFEST_TEMP_UNLINK_FAILED$"):
+                verify_e2e.rename_noreplace_posix(source, destination)
+            self.assertEqual(destination.read_bytes(), b"foreign")
+            self.assertEqual(source.read_bytes(), b"temporary")
+
+    def test_manifest_writer_through_the_posix_branch_keeps_bytes_and_cleanup(self):
+        identity = valid_fixture_identity()
+        canonical = verify_e2e.fixture_manifest_bytes(identity)
+        name = verify_e2e.FIXTURE_MANIFEST_NAME
+        posix = verify_e2e.rename_noreplace_posix
+        for outcome in (0, errno_module.EINVAL):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory, \
+                 self.fake_renameat2(outcome), \
+                 mock.patch.object(verify_e2e, "rename_noreplace", side_effect=posix):
+                path = verify_e2e.write_fixture_manifest(Path(directory), identity)
+                self.assertEqual(path.read_bytes(), canonical)
+                self.assertEqual(tuple(item.name for item in Path(directory).iterdir()), (name,))
+        failures = {
+            errno_module.EACCES: "FIXTURE_MANIFEST_RENAME_DENIED",
+            errno_module.EIO: "FIXTURE_MANIFEST_RENAME_IO_FAILED",
+            errno_module.EXDEV: "FIXTURE_MANIFEST_RENAME_FAILED",
+            "missing": "FIXTURE_MANIFEST_RENAME_UNAVAILABLE",
+        }
+        for outcome, expected in failures.items():
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory, \
+                 self.fake_renameat2(outcome), \
+                 mock.patch.object(verify_e2e, "rename_noreplace", side_effect=posix):
+                with self.assertRaisesRegex(verify_e2e.VerificationError, "^" + expected + "$") as error:
+                    verify_e2e.write_fixture_manifest(Path(directory), identity)
+                self.assertIn(str(error.exception), verify_e2e.RUN_FIXTURE_WORKER_FAILURE_CODES)
+                # The writer's own failure cleanup removed the temporary file.
+                self.assertEqual(tuple(Path(directory).iterdir()), ())
+        with tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory, \
+             self.fake_renameat2(errno_module.EINVAL), \
+             mock.patch.object(verify_e2e, "rename_noreplace", side_effect=posix), \
+             mock.patch.object(verify_e2e.os, "link", side_effect=OSError(errno_module.EMLINK, "NeverReflect path")):
+            with self.assertRaisesRegex(verify_e2e.VerificationError, "^FIXTURE_MANIFEST_LINK_FAILED$") as error:
+                verify_e2e.write_fixture_manifest(Path(directory), identity)
+            self.assertNotIn("NeverReflect", str(error.exception))
+            self.assertEqual(tuple(Path(directory).iterdir()), ())
+        # Link succeeded, temporary unlink refused: the writer fails, and with a
+        # mount that refuses every unlink it still fails on the same identity.
+        real_unlink = os.unlink
+        for refuse_all in (False, True):
+            refused = []
+
+            def unlinking(path, *arguments, refuse_all=refuse_all, refused=refused, **keywords):
+                if refuse_all or (str(path).endswith(".tmp") and not refused):
+                    refused.append("refused")
+                    raise PermissionError(errno_module.EACCES, "NeverReflect path")
+                return real_unlink(path, *arguments, **keywords)
+
+            with self.subTest(refuse_all=refuse_all), tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory:
+                with self.fake_renameat2(errno_module.EINVAL), \
+                     mock.patch.object(verify_e2e, "rename_noreplace", side_effect=posix), \
+                     mock.patch.object(verify_e2e.os, "unlink", side_effect=unlinking), \
+                     self.assertRaisesRegex(verify_e2e.VerificationError, "^FIXTURE_MANIFEST_TEMP_UNLINK_FAILED$"):
+                    verify_e2e.write_fixture_manifest(Path(directory), identity)
+                remaining = sorted(item.name for item in Path(directory).iterdir())
+                # One refusal: the final name is withdrawn and the writer's own
+                # cleanup then removes the temporary file. Every unlink refused:
+                # both names remain, and the result is still a failure.
+                self.assertEqual(remaining, [name, name + ".tmp"] if refuse_all else [])
+        # The dispatcher still sends every non-Windows host to the posix branch.
+        with mock.patch.object(verify_e2e.os, "name", "posix"), \
+             mock.patch.object(verify_e2e, "rename_noreplace_posix") as branch, \
+             mock.patch.object(verify_e2e.os, "rename") as plain:
+            verify_e2e.rename_noreplace("source", "destination")
+        branch.assert_called_once_with("source", "destination")
+        plain.assert_not_called()
+
     def test_run_fixture_worker_codes_match_the_runner_allowlist(self):
         codes = verify_e2e.RUN_FIXTURE_WORKER_FAILURE_CODES
         self.assertEqual(len(codes), len(set(codes)))
@@ -3678,6 +3908,7 @@ finguardops_rule_analysis_outcomes_created 99
             "fixture_identity_from_environment", "write_fixture_manifest",
             "fixture_manifest_bytes", "validate_fixture_manifest_object",
             "parse_fixture_manifest_bytes", "rename_noreplace",
+            "rename_noreplace_posix", "link_noreplace",
         }
         raised = set()
         found = set()

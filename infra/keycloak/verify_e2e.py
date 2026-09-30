@@ -535,6 +535,12 @@ RUN_FIXTURE_WORKER_FAILURE_CODES = tuple(
         "FIXTURE_MANIFEST_TEMP_CREATE_FAILED",
         "FIXTURE_MANIFEST_WRITE_FAILED",
         "FIXTURE_MANIFEST_RENAME_FAILED",
+        "FIXTURE_MANIFEST_RENAME_UNAVAILABLE",
+        "FIXTURE_MANIFEST_RENAME_DENIED",
+        "FIXTURE_MANIFEST_RENAME_IO_FAILED",
+        "FIXTURE_MANIFEST_LINK_DENIED",
+        "FIXTURE_MANIFEST_LINK_FAILED",
+        "FIXTURE_MANIFEST_TEMP_UNLINK_FAILED",
         "FIXTURE_MANIFEST_CARDINALITY_INVALID",
         "FIXTURE_MANIFEST_READ_FAILED",
         "FIXTURE_MANIFEST_FINAL_INVALID",
@@ -2704,13 +2710,51 @@ def parse_fixture_manifest_bytes(raw: bytes) -> dict[str, Any]:
     return identity
 
 
-def rename_noreplace(source: Path, destination: Path) -> None:
-    if os.name == "nt":
+# The only errno values that mean "this filesystem or kernel cannot do a
+# no-replace rename", as renameat2(2) documents them: EINVAL when the filesystem
+# does not support a flag that was passed, ENOSYS when the kernel has no such
+# call, and EOPNOTSUPP/ENOTSUP, which some filesystems answer instead. The call
+# below passes one flag and two names in the same directory, so EINVAL has no
+# other documented cause here. Nothing outside this set reaches the link
+# fallback: an existing final name, a refusal and an I/O failure are answers
+# about this file, not about whether the operation exists.
+RENAME_NOREPLACE_UNSUPPORTED_ERRNOS = frozenset(
+    {errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOTSUP}
+)
+MANIFEST_PUBLISH_DENIED_ERRNOS = frozenset({errno.EACCES, errno.EPERM, errno.EROFS})
+MANIFEST_PUBLISH_IO_ERRNOS = frozenset({errno.EIO, errno.ENOSPC, errno.EDQUOT})
+
+
+def link_noreplace(source: Path, destination: Path) -> None:
+    # Publication without renameat2: create the final name as a second link to
+    # the temporary file, then remove the temporary name. `link` never replaces
+    # an existing name, so the final name appears atomically and only if it was
+    # absent. The two steps together are not one atomic rename: between them
+    # both names exist, and a failure of the second step is a failure.
+    try:
+        os.link(source, destination)
+    except FileExistsError:
+        fail("FIXTURE_MANIFEST_FINAL_EXISTS")
+    except OSError as error:
+        if error.errno in MANIFEST_PUBLISH_DENIED_ERRNOS:
+            fail("FIXTURE_MANIFEST_LINK_DENIED")
+        fail("FIXTURE_MANIFEST_LINK_FAILED")
+    try:
+        os.unlink(source)
+    except OSError:
+        # The final name was created a moment ago by the link above. It is
+        # withdrawn only while it still is that same file, so a name that is no
+        # longer this run's link is never removed. The caller's own cleanup
+        # then deals with the temporary name.
         try:
-            os.rename(source, destination)
+            if os.path.samestat(os.lstat(source), os.lstat(destination)):
+                os.unlink(destination)
         except OSError:
-            fail("FIXTURE_MANIFEST_RENAME_FAILED")
-        return
+            pass
+        fail("FIXTURE_MANIFEST_TEMP_UNLINK_FAILED")
+
+
+def rename_noreplace_posix(source: Path, destination: Path) -> None:
     try:
         libc = ctypes.CDLL(None, use_errno=True)
         renameat2 = libc.renameat2
@@ -2720,12 +2764,30 @@ def rename_noreplace(source: Path, destination: Path) -> None:
             -100, os.fsencode(source), -100, os.fsencode(destination), 1
         )
     except (AttributeError, OSError):
-        fail("FIXTURE_MANIFEST_RENAME_FAILED")
-    if result != 0:
-        error_number = ctypes.get_errno()
-        if error_number == errno.EEXIST:
-            fail("FIXTURE_MANIFEST_FINAL_EXISTS")
-        fail("FIXTURE_MANIFEST_RENAME_FAILED")
+        fail("FIXTURE_MANIFEST_RENAME_UNAVAILABLE")
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        fail("FIXTURE_MANIFEST_FINAL_EXISTS")
+    if error_number in RENAME_NOREPLACE_UNSUPPORTED_ERRNOS:
+        link_noreplace(source, destination)
+        return
+    if error_number in MANIFEST_PUBLISH_DENIED_ERRNOS:
+        fail("FIXTURE_MANIFEST_RENAME_DENIED")
+    if error_number in MANIFEST_PUBLISH_IO_ERRNOS:
+        fail("FIXTURE_MANIFEST_RENAME_IO_FAILED")
+    fail("FIXTURE_MANIFEST_RENAME_FAILED")
+
+
+def rename_noreplace(source: Path, destination: Path) -> None:
+    if os.name == "nt":
+        try:
+            os.rename(source, destination)
+        except OSError:
+            fail("FIXTURE_MANIFEST_RENAME_FAILED")
+        return
+    rename_noreplace_posix(source, destination)
 
 
 def write_fixture_manifest(directory: Path, identity: dict[str, Any]) -> Path:

@@ -7982,8 +7982,13 @@ function Invoke-D315TargetedTests {
                 StdoutLimit = $RunFixtureServiceLogStdoutLimit; StderrLimit = $RunFixtureServiceLogStderrLimit
             }
         }
-        Assert-Equal 96 $contract.Allowlist.Count 'Fixture service secondary allowlist size drifted.'
-        Assert-Equal 96 @($contract.Allowlist | Sort-Object -Unique -CaseSensitive).Count 'Fixture service secondary allowlist has a duplicate.'
+        Assert-Equal 102 $contract.Allowlist.Count 'Fixture service secondary allowlist size drifted.'
+        Assert-Equal 102 @($contract.Allowlist | Sort-Object -Unique -CaseSensitive).Count 'Fixture service secondary allowlist has a duplicate.'
+        foreach ($publication in @('FIXTURE_MANIFEST_RENAME_FAILED', 'FIXTURE_MANIFEST_RENAME_UNAVAILABLE', 'FIXTURE_MANIFEST_RENAME_DENIED',
+                'FIXTURE_MANIFEST_RENAME_IO_FAILED', 'FIXTURE_MANIFEST_LINK_DENIED', 'FIXTURE_MANIFEST_LINK_FAILED',
+                'FIXTURE_MANIFEST_TEMP_UNLINK_FAILED', 'FIXTURE_MANIFEST_FINAL_EXISTS')) {
+            Assert-True ($contract.Allowlist -ccontains $publication) ('A manifest publication identity is not allowlisted: ' + $publication)
+        }
         Assert-Equal @($contract.Allowlist) @($contract.Forwarded) 'An allowlisted fixture marker was not forwarded as itself.'
         foreach ($code in @($contract.Allowlist) + @($contract.Local)) {
             Assert-True ($code -cmatch '\A[A-Z][A-Z0-9_]{0,63}\z') 'A fixture service secondary literal breaks the code contract.'

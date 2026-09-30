@@ -754,7 +754,41 @@ Manifest는 1,024 bytes 이하의 UTF-8 strict/no-BOM compact JSON이고 LF 하�
 duplicate, missing, reordered key와 null/array/object/boolean/float, C0/C1 control, Unicode format
 character를 거부한다. 두 업무 ID는 lowercase canonical UUID v4이고 receipt identity는 ordinal exact로
 일치해야 하며 `composeProject`는 위 Run literal과 exact로 일치해야 한다. writer는 final preexistence와 non-empty directory를 거부하고 same-directory CreateNew
-temp, write/flush/fsync, no-replace atomic rename, final byte 재검증을 수행한다.
+temp, write/flush/fsync, no-replace publication, final byte 재검증을 수행한다.
+
+최종 이름의 no-replace publication에는 구현 경로가 둘 있다. 어느 경로도 기존 최종 파일을 덮어쓰지 않는다.
+
+1. 기본 경로는 `renameat2`에 `RENAME_NOREPLACE`만 지정한 단일 atomic rename이다. 성공하면 temp 이름이
+   사라지고 최종 이름만 남는다.
+2. `renameat2`가 errno `EINVAL`, `ENOSYS`, `EOPNOTSUPP`/`ENOTSUP` 중 하나로 실패한 경우에만 link 경로로
+   넘어간다. 이 값들은 renameat2(2)가 "filesystem 또는 kernel이 해당 flag나 call을 지원하지 않음"으로
+   문서화한 값이고, 이 호출은 flag 하나와 같은 directory의 두 이름만 넘기므로 `EINVAL`의 다른 문서화된
+   원인은 해당하지 않는다. link 경로는 `link(temp, final)`로 최종 이름을 만든 뒤 temp 이름을 `unlink`한다.
+   최종 이름의 생성 자체는 atomic하고 기존 이름이 있으면 실패하지만, link와 unlink 두 단계 전체는 단일
+   atomic rename이 아니다. 두 단계 사이에는 두 이름이 함께 존재한다.
+
+`EEXIST`, 권한·소유권 거부, I/O 오류, 분류되지 않은 errno, libc symbol 부재에서는 link 경로로 넘어가지 않는다.
+실패는 errno·예외 문장·경로 없이 다음 고정 code 하나로만 기록하며 runner는 이를 secondary로 전달한다.
+
+| 경계 | fixed code |
+| --- | --- |
+| 최종 이름이 이미 존재 (`renameat2` 또는 `link`) | `FIXTURE_MANIFEST_FINAL_EXISTS` |
+| libc 로드 실패, `renameat2` symbol 부재, 호출 자체의 예외 | `FIXTURE_MANIFEST_RENAME_UNAVAILABLE` |
+| `renameat2`가 `EACCES`·`EPERM`·`EROFS` | `FIXTURE_MANIFEST_RENAME_DENIED` |
+| `renameat2`가 `EIO`·`ENOSPC`·`EDQUOT` | `FIXTURE_MANIFEST_RENAME_IO_FAILED` |
+| `renameat2`의 그 밖의 errno (원인 구분 불가) | `FIXTURE_MANIFEST_RENAME_FAILED` |
+| link 경로의 `link`가 `EACCES`·`EPERM`·`EROFS` | `FIXTURE_MANIFEST_LINK_DENIED` |
+| link 경로의 `link`가 그 밖의 오류 | `FIXTURE_MANIFEST_LINK_FAILED` |
+| link 성공 후 temp `unlink` 실패 | `FIXTURE_MANIFEST_TEMP_UNLINK_FAILED` |
+
+temp `unlink`가 실패하면 성공으로 처리하지 않는다. 방금 만든 최종 이름이 여전히 temp와 같은 파일일 때에만 그
+최종 이름을 회수하고, 이후 temp는 writer의 기존 실패 정리가 best effort로 제거한다. 회수도 best effort이므로 mount가
+unlink를 모두 거부하면 두 이름이 남을 수 있고, 그 경우에도 결과는 실패이며 runner의 기존 artifact cleanup 계약이
+남은 파일을 판정한다. `FIXTURE_MANIFEST_LINK_DENIED`는 권한 거부뿐 아니라 mount가 hard link 자체를 지원하지 않아
+`EPERM`을 돌려준 경우일 수도 있다. 어느 경로로 성공했든 뒤따르는
+cardinality 확인과 final byte 재검증은 동일하다. primary identity와 runner의 cleanup·receipt 계약은 바뀌지 않는다.
+link 경로가 Docker Desktop의 host 공유 mount에서 실제로 동작하는지는 단위 테스트로 확인할 수 없고, 공식 Docker
+Gate에서 아직 검증되지 않았다.
 
 Manifest 검증 전에는 Browser `docker create`와 `docker start`가 호출되지 않는다. 최초 검증한 manifest의
 SHA-256과 directory/file identity를 보존하고, Browser readiness 이후 Playwright process 생성 직전에 path,
