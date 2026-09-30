@@ -1574,7 +1574,11 @@ function Invoke-E2EFixedFixtureService {
             Wait = {
                 param([string]$expectedId)
                 Invoke-E2EInLocation -Path $RepositoryRoot -Body {
-                    Invoke-Native { & docker @ComposeArguments wait keycloak-run-fixture 2>$null | Out-Null }
+                    # `compose wait`는 실행 중인 container만 나열하므로, 먼저 끝난
+                    # fixture를 놓치고 nonzero가 될 수 있다. GetContainer가 확정한
+                    # exact ID를 Engine wait에 직접 넘긴다. 이 CLI의 성공은 종료
+                    # 사실일 뿐이고, 성공 판정은 아래 ValidateExit의 inspect가 한다.
+                    Invoke-Native { & docker wait $expectedId 2>$null | Out-Null }
                     if ($LASTEXITCODE -ne 0) {
                         # wait 실패는 어떤 문서 상태에서도 성공이 되지 않는다. 실패 직후
                         # authoritative 문서를 정확히 한 번 읽어, 실패가 어느 상태에서

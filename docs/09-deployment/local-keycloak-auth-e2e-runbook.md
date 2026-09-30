@@ -495,8 +495,12 @@ rule version의 active 상태를 확인·준비하고 업무 테이블·External
 `runId`, `repositoryId`, `commitSha`, `treeSha`, `composeProject`이고, 기대 identity는 Prepared receipt와
 PowerShell의 authoritative Compose project plan에서만 온다. PowerShell은 이 identity와 canonical bytes를
 검증한 뒤 격리된 fixed `keycloak-run-fixture` service를
-`up -d --no-deps --no-build --pull never keycloak-run-fixture`로 시작하고 공식 `compose wait`로 종료를
-기다린다. service에는 검증한 plan만 일시적인 `FINGUARDOPS_E2E_FIXTURE_PLAN`으로 전달하며 환경은 즉시
+`up -d --no-deps --no-build --pull never keycloak-run-fixture`로 시작하고, project inventory로 확정한
+fixture container의 exact 64-hex ID 하나만 `docker wait <id>`에 넘겨 종료를 기다린다. `compose wait`는 실행
+중인 container만 나열하므로 먼저 끝난 fixture를 놓칠 수 있어 쓰지 않는다. `docker wait`의 성공은 종료
+사실일 뿐 성공 판정이 아니며, 그 뒤 authoritative inspect가 같은 container의 exited / exit code 0을 확인해야
+다음 단계로 간다. `docker wait`가 실패하면 inspect 상태가 exited / exit code 0이어도
+`RUN_FIXTURE_SERVICE_WAIT_EXITED_ZERO`로 실패한다. service에는 검증한 plan만 일시적인 `FINGUARDOPS_E2E_FIXTURE_PLAN`으로 전달하며 환경은 즉시
 복원한다. 종료 container의 authoritative full ID, fixed project/service/name, `oneoff=False`, image,
 label, network, mount, state와 exit code 0을 검증한 뒤, 전 snapshot을 stdin으로만
 `run-fixture-after` verifier에 전달해 후 상태와 비교한다. fixture service는 public transaction/behavior API만 호출하며

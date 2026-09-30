@@ -7594,16 +7594,20 @@ function Invoke-D315TargetedTests {
     # 호출, $LASTEXITCODE 판정, Wait 실패 직후 authoritative 문서 1회 조회까지
     # 모두 production 코드가 수행한다.
     $script:D315FixtureStageInvoke = {
-        param([int]$UpExit, [int]$WaitExit, [bool]$InventoryRunning, $Document, [int]$ValidateContainerCount = 1, [string]$InspectMode = '', $LogCapture = $null)
+        param([int]$UpExit, [int]$WaitExit, [bool]$InventoryRunning, $Document, [int]$ValidateContainerCount = 1, [string]$InspectMode = '', $LogCapture = $null, $InventoryId = 'AUTHORITATIVE')
         # InspectMode를 지정하면 Get-ContainerDocument를 가리지 않고 실제
         # production 함수가 fake docker의 inspect 응답을 판독한다.
+        # InventoryId를 지정하면 GetContainer가 읽는 inventory의 ID만 바뀐다.
         $inspectAnswer = & $script:D315FixtureInspectAnswer $InspectMode
         return & $script:E2EModule {
-            param($upExit, $waitExit, $inventoryRunning, $injectedDocument, $validateContainerCount, $inspectMode, $inspectAnswer, $logCapture)
+            param($upExit, $waitExit, $inventoryRunning, $injectedDocument, $validateContainerCount, $inspectMode, $inspectAnswer, $logCapture, $inventoryId)
             $inventoryReads = [pscustomobject]@{ Count = 0 }
             $sentinel = 'D315-RAW-SENTINEL-7f3a'
             $authoritativeId = 'a1b2c3d4e5f6' + ('0' * 52)
+            if ($inventoryId -is [string] -and $inventoryId -ceq 'AUTHORITATIVE') { $inventoryId = $authoritativeId }
             $calls = [System.Collections.Generic.List[string]]::new()
+            # wait로 넘어온 argv 전체를 그대로 남긴다.
+            $waitArgv = [System.Collections.Generic.List[string]]::new()
             function Invoke-E2EInLocation {
                 param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][scriptblock]$Body)
                 & $Body
@@ -7631,6 +7635,7 @@ function Invoke-D315TargetedTests {
                     elseif ([string]::Equals($argument, 'inspect', [System.StringComparison]::Ordinal)) { $verb = 'inspect' }
                 }
                 $calls.Add('docker:' + $verb)
+                if ($verb -ceq 'wait') { $waitArgv.Add($arguments -join ' ') }
                 if ($verb -ceq 'inspect') {
                     if ($null -ne $inspectAnswer.Output) { Write-Output $inspectAnswer.Output }
                     $global:LASTEXITCODE = $inspectAnswer.ExitCode
@@ -7647,7 +7652,7 @@ function Invoke-D315TargetedTests {
                 param([Parameter(Mandatory = $true)][string]$Project, [Parameter(Mandatory = $true)]$Receipt, $PreviousInventory)
                 $calls.Add('inventory')
                 $inventoryReads.Count++
-                $container = [pscustomobject]@{ Service = 'keycloak-run-fixture'; Id = $authoritativeId; Running = $inventoryRunning }
+                $container = [pscustomobject]@{ Service = 'keycloak-run-fixture'; Id = $inventoryId; Running = $inventoryRunning }
                 # 첫 조회는 GetContainer, 두 번째 조회는 ValidateExit다. 두 번째에만
                 # 지정한 개수의 authoritative container를 돌려준다.
                 if ($inventoryReads.Count -ge 2) { return [pscustomobject]@{ Containers = @(for ($i = 0; $i -lt $validateContainerCount; $i++) { $container }) } }
@@ -7676,8 +7681,9 @@ function Invoke-D315TargetedTests {
                 PlanRestored = $null -eq [System.Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_FIXTURE_PLAN', 'Process')
                 Sentinel = $sentinel
                 AuthoritativeId = $authoritativeId
+                WaitArgv = @($waitArgv)
             }
-        } $UpExit $WaitExit $InventoryRunning $Document $ValidateContainerCount $InspectMode $inspectAnswer $LogCapture
+        } $UpExit $WaitExit $InventoryRunning $Document $ValidateContainerCount $InspectMode $inspectAnswer $LogCapture $InventoryId
     }
     $script:D315FixtureStageIdentities = @(
         'RUN_FIXTURE_SERVICE_START_FAILED', 'RUN_FIXTURE_CONTAINER_INVALID', 'RUN_FIXTURE_SERVICE_WAIT_FAILED',
@@ -7708,6 +7714,11 @@ function Invoke-D315TargetedTests {
             )
         }
         Assert-Equal $expandedCalls @($Result.Calls) ('Fixture stage call order or cardinality differs for ' + $Name + '.')
+        # wait는 호출될 때마다 GetContainer가 확정한 exact ID 하나만 받는다.
+        Assert-Equal @($Result.Calls | Where-Object { $_ -ceq 'docker:wait' }).Count @($Result.WaitArgv).Count ('Fixture wait argv was not recorded once per call for ' + $Name + '.')
+        foreach ($argv in @($Result.WaitArgv)) {
+            Assert-Equal ('wait ' + $Result.AuthoritativeId) $argv ('Fixture wait argv is not the exact authoritative id for ' + $Name + '.')
+        }
         foreach ($call in @($Result.Calls)) {
             Assert-True ($call.IndexOf($Result.Sentinel, [System.StringComparison]::Ordinal) -lt 0) ('Raw output reached a recorded call for ' + $Name + '.')
         }
@@ -7789,6 +7800,54 @@ function Invoke-D315TargetedTests {
             $result = & $script:D315FixtureStageInvoke 0 0 $false $cases[$name][1]
             & $script:D315AssertFixtureStage $result $cases[$name][0] $validatedCalls $name
         }
+    }
+    Invoke-TestCase 'D315 production fixture Wait targets only the exact authoritative container id' {
+        # compose wait는 실행 중인 container만 나열해 먼저 끝난 fixture를 놓칠 수
+        # 있었다. Engine wait는 exact ID로 이미 종료된 container도 기다리며, 그
+        # CLI 성공만으로는 통과하지 않고 ValidateExit의 inspect가 판정한다.
+        $aid = 'a1b2c3d4e5f6' + ('0' * 52)
+        $state = { param($Status, $Running, $ExitCode) [pscustomobject]@{ Status = $Status; Running = $Running; ExitCode = $ExitCode } }
+        $doc = { param($Id, $State) [pscustomobject]@{ Id = $Id; State = $State } }
+        $validatedCalls = @('docker:up', 'inventory', 'docker:wait', 'inventory', 'document')
+        $waitFailedCalls = @('docker:up', 'inventory', 'docker:wait', 'document')
+
+        # 이미 종료된 container: CLI 성공 + authoritative exited/0이면 다음 단계로 간다.
+        $exited = & $script:D315FixtureStageInvoke 0 0 $false (& $doc $aid (& $state 'exited' $false 0))
+        & $script:D315AssertFixtureStage $exited $null $validatedCalls 'exact wait already exited zero'
+        Assert-Equal @(('wait ' + $aid)) @($exited.WaitArgv) 'Fixture wait argv is not exactly docker wait <expectedId>.'
+        foreach ($forbidden in @('compose', '-p', '--env-file', '-f', 'keycloak-run-fixture')) {
+            Assert-True (-not (@($exited.WaitArgv[0] -split ' ') -ccontains $forbidden)) ('Fixture wait argv still carries a Compose operand: ' + $forbidden)
+        }
+
+        # CLI 성공은 container exit code를 뜻하지 않는다. nonzero는 기존 primary와
+        # secondary 1회 조건을 그대로 따른다.
+        foreach ($code in @(3, ([long]137))) {
+            $nonzero = & $script:D315FixtureStageInvoke 0 0 $false (& $doc $aid (& $state 'exited' $false $code))
+            & $script:D315AssertFixtureStage $nonzero 'RUN_FIXTURE_SERVICE_EXIT_NONZERO' $validatedCalls ('exact wait success exited ' + $code)
+        }
+
+        # CLI 실패는 authoritative 상태가 exited/0이어도 성공이 되지 않는다.
+        foreach ($cliExit in @(1, 42, 125)) {
+            $failed = & $script:D315FixtureStageInvoke 0 $cliExit $false (& $doc $aid (& $state 'exited' $false 0))
+            & $script:D315AssertFixtureStage $failed 'RUN_FIXTURE_SERVICE_WAIT_EXITED_ZERO' $waitFailedCalls ('exact wait cli ' + $cliExit + ' exited zero')
+        }
+        $running = & $script:D315FixtureStageInvoke 0 1 $false (& $doc $aid (& $state 'running' $true 0))
+        & $script:D315AssertFixtureStage $running 'RUN_FIXTURE_SERVICE_WAIT_FAILED' $waitFailedCalls 'exact wait cli failure running'
+
+        # 확정되지 않은 ID는 wait에 도달하지 않는다.
+        foreach ($badId in @(('A' * 64), ('a' * 63), (('a' * 64) + ' '), $null)) {
+            $rejected = & $script:D315FixtureStageInvoke 0 0 $false (& $doc $aid (& $state 'exited' $false 0)) 1 '' $null $badId
+            & $script:D315AssertFixtureStage $rejected 'RUN_FIXTURE_CONTAINER_INVALID' @('docker:up', 'inventory') 'exact wait unresolved id'
+            Assert-Equal 0 @($rejected.WaitArgv).Count 'An unresolved container id reached docker wait.'
+        }
+
+        # wait 이후 다른 container 문서나 사라진 container는 fail-closed다.
+        $mismatch = & $script:D315FixtureStageInvoke 0 0 $false (& $doc ('e' * 64) (& $state 'exited' $false 0))
+        & $script:D315AssertFixtureStage $mismatch 'RUN_FIXTURE_CONTAINER_INVALID' $validatedCalls 'exact wait success document mismatch'
+        $mismatchFailed = & $script:D315FixtureStageInvoke 0 1 $false (& $doc ('e' * 64) (& $state 'exited' $false 0))
+        & $script:D315AssertFixtureStage $mismatchFailed 'RUN_FIXTURE_CONTAINER_INVALID' $waitFailedCalls 'exact wait failure document mismatch'
+        $vanished = & $script:D315FixtureStageInvoke 0 0 $false (& $doc $aid (& $state 'exited' $false 0)) 0
+        & $script:D315AssertFixtureStage $vanished 'RUN_FIXTURE_CONTAINER_INVALID' @('docker:up', 'inventory', 'docker:wait', 'inventory') 'exact wait success container vanished'
     }
     Invoke-TestCase 'D315 production fixture document read failures map to fixed identities at Wait and ValidateExit' {
         # Get-ContainerDocument를 가리지 않는다. 실제 판독 함수가 fake inspect
@@ -8150,7 +8209,8 @@ function Invoke-D315TargetedTests {
     Invoke-TestCase 'D315 fixture production source excludes one-off and broad deletion operands' {
         $source = [System.IO.File]::ReadAllText($script:ModulePath)
         Assert-True ($source.Contains('up -d --no-deps --no-build --pull never keycloak-run-fixture')) 'Fixed fixture service up boundary is missing.'
-        Assert-True ($source.Contains('wait keycloak-run-fixture')) 'Official fixed fixture service wait boundary is missing.'
+        Assert-True ($source.Contains('Invoke-Native { & docker wait $expectedId 2>$null | Out-Null }')) 'Exact-id fixture container wait boundary is missing.'
+        Assert-True (-not ($source -match '[^\r\n]*\bwait\s+keycloak-run-fixture')) 'The service-name Compose wait boundary was reintroduced.'
         # $matches IS the automatic $Matches: a regex operator between the
         # assignment and the read replaces the collection with a hashtable, so
         # the fixture container boundary must not use that name. These two pin
