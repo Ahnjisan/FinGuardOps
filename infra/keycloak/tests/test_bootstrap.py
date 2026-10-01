@@ -367,6 +367,81 @@ class BootstrapTests(unittest.TestCase):
             ), self.assertRaisesRegex(bootstrap.ReconcileError, "USER_PASSWORD_CREDENTIAL_INVALID"):
                 reconciler.reconcile_user("x" * 64)
 
+    def test_three_user_contract_has_distinct_fixed_subjects_and_single_roles(self):
+        self.assertEqual(bootstrap.USER_FIXTURES[0][:3], (bootstrap.USER_NAME, bootstrap.USER_ROLE, "Analyst"))
+        self.assertEqual(len({item[0] for item in bootstrap.USER_FIXTURES}), 3)
+        self.assertEqual(len({item[3] for item in bootstrap.USER_FIXTURES}), 3)
+        for name, role, last_name, subject in bootstrap.USER_FIXTURES:
+            with self.subTest(name=name):
+                self.assertTrue(bootstrap.is_canonical_uuid4(subject))
+                self.assertEqual(name, "local-fds-" + last_name.lower())
+                self.assertIn(role, bootstrap.USER_ROLES)
+
+    def test_user_role_reconcile_rejects_duplicate_or_leaked_final_roles(self):
+        for final in (
+            [{"id": "one", "name": "FDS_VIEWER"}, {"id": "two", "name": "FDS_VIEWER"}],
+            [{"id": "one", "name": "FDS_VIEWER"}, {"id": "two", "name": "FDS_APPROVER"}],
+        ):
+            admin = RecordingAdmin([[], None, final])
+            reconciler = bootstrap.Reconciler(admin)
+            with self.subTest(final=final), mock.patch.object(
+                reconciler, "exact_roles", return_value={"FDS_VIEWER": {"id": "one", "name": "FDS_VIEWER"}}
+            ), self.assertRaisesRegex(bootstrap.ReconcileError, "USER_ROLE_RECONCILE_INCOMPLETE"):
+                reconciler.reconcile_user_roles("viewer-id", ("FDS_VIEWER",))
+
+    def test_each_existing_user_reconcile_is_idempotent_and_reuses_shared_password(self):
+        password = "x" * 64
+        for fixture in bootstrap.USER_FIXTURES:
+            name, role, last_name, subject = fixture
+            role_record = {"id": role.lower(), "name": role}
+            responses = []
+            for _ in range(2):
+                responses.extend((
+                    [{"id": subject, "username": name}], None, [], None,
+                    [role_record], [role_record], [{"id": "password-id", "type": "password"}],
+                ))
+            admin = RecordingAdmin(responses)
+            reconciler = bootstrap.Reconciler(admin)
+            with self.subTest(name=name), mock.patch.object(reconciler, "exact_roles", return_value={role: role_record}):
+                self.assertEqual(reconciler.reconcile_user(password, fixture), subject)
+                self.assertEqual(reconciler.reconcile_user(password, fixture), subject)
+            self.assertFalse(any(call[0] == "POST" and call[1].endswith("/users") for call in admin.calls))
+            resets = [call for call in admin.calls if call[1].endswith("/reset-password")]
+            self.assertEqual(len(resets), 2)
+            self.assertTrue(all(call[2]["value"] == password for call in resets))
+            updates = [call[2] for call in admin.calls if call[0] == "PUT" and call[1].endswith("/users/" + subject)]
+            self.assertEqual([item["lastName"] for item in updates], [last_name, last_name])
+
+    def test_user_reconcile_rejects_subject_swap_before_password_change(self):
+        viewer = bootstrap.USER_FIXTURES[1]
+        admin = RecordingAdmin([[{"id": bootstrap.USER_FIXTURES[0][3], "username": viewer[0]}]])
+        with self.assertRaisesRegex(bootstrap.ReconcileError, "USER_UUID_INVALID"):
+            bootstrap.Reconciler(admin).reconcile_user("x" * 64, viewer)
+        self.assertEqual(len(admin.calls), 1)
+
+    def test_run_reconciles_each_user_with_one_shared_password(self):
+        reconciler = bootstrap.Reconciler(mock.Mock())
+        password = "x" * 64
+        with mock.patch.object(reconciler, "reconcile_realm"), mock.patch.object(
+            reconciler, "reconcile_roles", return_value={}
+        ), mock.patch.object(reconciler, "reconcile_scope", return_value="scope-id"), mock.patch.object(
+            reconciler, "reconcile_scope_roles"
+        ), mock.patch.object(reconciler, "reconcile_client", return_value="client-id"), mock.patch.object(
+            reconciler, "service_account_id", return_value="service-id"
+        ), mock.patch.object(reconciler, "validate_service_token_subject"), mock.patch.object(
+            reconciler, "reconcile_user"
+        ) as users, mock.patch.object(reconciler, "list_scopes", return_value=[
+            {"name": name} for name in bootstrap.SCOPES
+        ]), mock.patch.object(reconciler, "list_clients", return_value=[
+            {"clientId": "finguardops-frontend"},
+            *({"clientId": name} for name in bootstrap.SERVICE_CLIENTS),
+        ]):
+            reconciler.run({name: "s" * 64 for name in bootstrap.SERVICE_CLIENTS}, password)
+        self.assertEqual(
+            users.call_args_list,
+            [mock.call(password, fixture) for fixture in bootstrap.USER_FIXTURES],
+        )
+
     def test_main_reads_user_password_once_and_does_not_report_credentials(self):
         credentials = {
             bootstrap.ADMIN_SECRET: "a" * 64,

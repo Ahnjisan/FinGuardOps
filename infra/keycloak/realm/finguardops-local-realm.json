@@ -475,6 +475,30 @@
       "requiredActions": [],
       "credentials": [],
       "realmRoles": ["FDS_ANALYST"]
+    },
+    {
+      "id": "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69b",
+      "username": "local-fds-viewer",
+      "firstName": "Local",
+      "lastName": "Viewer",
+      "email": "local-fds-viewer@finguardops.invalid",
+      "enabled": true,
+      "emailVerified": false,
+      "requiredActions": [],
+      "credentials": [],
+      "realmRoles": ["FDS_VIEWER"]
+    },
+    {
+      "id": "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69c",
+      "username": "local-fds-approver",
+      "firstName": "Local",
+      "lastName": "Approver",
+      "email": "local-fds-approver@finguardops.invalid",
+      "enabled": true,
+      "emailVerified": false,
+      "requiredActions": [],
+      "credentials": [],
+      "realmRoles": ["FDS_APPROVER"]
     }
   ]
 }

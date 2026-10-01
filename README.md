@@ -288,14 +288,12 @@ capability로 보호되는 조회 전용 사건 상세 `/cases/{caseId}`와 목�
 Investigation notes 조회·inline 작성과 read-only Audit history 조회가 구현되어 있다. note 작성은
 사건 상세의 예외적인 mutation으로, 조회한 `concurrencyVersion`을 exact
 `{content, expectedVersion}` POST body에 사용하고 성공 후 notes·detail·audit을 다시 조회한다.
-별도 notes route와 메모 개별 상세·수정·삭제, 사건 workflow·담당자 변경·최종 판정·연관 거래·
-Detection·Rule Evidence·AI 사건 리포트 UI 및 그 밖의 mutation UI는 아직 구현되지 않았다.
-Frontend component·API tests는 note POST 계약을 검증한다. Issue #314에서는 Run fixture의 현재 사건으로
-실제 로그인·금지 전이 409 불변·`OPEN → IN_REVIEW`·note POST/GET·`ADDITIONAL_INFORMATION_REQUIRED`·
-populated Audit UI를 검증하는 browser E2E test 1개를 작성했다. 다만 공식 Docker `Prepare → Service → Run`
-실행 결과는 아직 없으므로 통과를 주장하지 않는다
-([runbook §12](docs/09-deployment/local-keycloak-auth-e2e-runbook.md)).
-콘솔 전체의 최종 시각적 리뉴얼도 후속 작업으로 남아 있다.
+별도 note 상세·수정·삭제 route와 관련 거래·Detection·Rule Evidence·AI 리포트 UI는 구현되지 않았다.
+사건 상세에는 capability에 따른 상태·담당자·note·최종 판정 control이 구현되어 있다.
+Issue #314의 공식 Docker Gate는 Prepare·Service·Run 각 1회 성공했고 Browser 23/23이 통과했다.
+Run fixture의 OPEN 사건, 금지 전이 409 이후 업무 상태 불변, Analyst workflow·note 작성과 채워진 Audit UI를 검증했다.
+#315 당시의 래퍼 exit 관찰 한계는 #314의 후속 성공 Gate와 구분한다. Issue #318의 Viewer·Approver 권한 거부
+Browser 검증은 구현했으며 Docker Gate는 아직 실행하지 않았다. 콘솔 전체 시각적 리뉴얼은 후속 작업이다.
 Issue #225의 Local JWT fixture는 production Authorization
 Server나 브라우저 OIDC Provider가 아닌 Backend 회귀·장애 검증용 local/manual E2E이며,
 Keycloak과 같은 Backend issuer 설정에서 동시에 사용하지 않는다. 상세 결정은
@@ -540,11 +538,9 @@ strict-TLS E2E 검증 여부는 별도로 적는다. local Keycloak·Docker 검�
   public `GET /api/health`와 SERVICE ingestion·management·AI·관측·외부 origin에는 credential을
   전달하지 않음. 이 transport Issue 자체에는 query pagination과 업무 화면을 포함하지 않았고,
   후속 Issue에서 현재 업무 화면을 구현
-* 사건 상세에 독립적인 Investigation notes와 Audit history 조회 section 구현. notes는
-  `createdAt,asc`, audit은 `changedAt,desc`의 독립 pagination·오류 경계를 사용하고, 승인된
-  `case:note-write` capability에서는 exact `{content, expectedVersion}` inline note composer를 제공.
-  note 수정·삭제·별도 route는 없음. 실제 note POST browser E2E는 Issue #314 test로 작성됐으나
-  공식 Docker Run 미검증 상태이므로 완료를 주장하지 않음
+* 사건 상세의 Investigation notes와 Audit history는 독립 pagination을 사용한다. `case:note-write`에서
+  `{content, expectedVersion}` note composer를 제공하며 note 수정·삭제·별도 route는 없다. 실제 note POST와
+  workflow Browser E2E는 #314 공식 Docker Gate에서 23/23 통과했다. #318 권한 거부 검증의 Gate는 별도다.
 * ADR-011에서 local/dev Authorization Server를 Keycloak으로 선정하고 USER public client의
   Authorization Code + PKCE `S256`, 분리된 SERVICE confidential client의 Client Credentials,
   Backend access token exact claim, USER access/ID token의 동일 subject·role 집합과 일반 refresh

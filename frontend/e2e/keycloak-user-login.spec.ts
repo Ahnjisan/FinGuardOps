@@ -126,6 +126,9 @@ const CASE_NOTES_PATH = new RegExp(
 const CASE_STATUS_PATH = new RegExp(
   `^${CASE_LIST_PATH}/${CANONICAL_UUID_V4_PATTERN}/status$`,
 );
+const CASE_ASSIGNEE_PATH = new RegExp(
+  `^${CASE_LIST_PATH}/${CANONICAL_UUID_V4_PATTERN}/assignee$`,
+);
 
 function acceptsAuditQuery(query: URLSearchParams): boolean {
   const page = query.get("page");
@@ -255,14 +258,13 @@ const RELAYABLE_WRITE_PROBES: readonly RelayableEndpoint[] = [
   {
     name: "case-resolution-probe",
     method: "POST",
-    matches: (pathname) => CASE_RESOLUTION_PROBE_PATH.test(pathname),
+    matches: (pathname) => pathname === CASE_RESOLUTION_PATH,
     queryNames: null,
   },
 ];
 
 /**
- * The two case workflow writes the Run fixture E2E (Issue #314) makes, and the
- * only shapes in which either can reach the Backend socket.
+ * The four mutation shapes used by the Run fixture E2E (#314 and #318).
  *
  * Neither is a standing permission. A descriptor here only says which address a
  * write *could* be at; the relay forwards one only while the test has armed
@@ -270,9 +272,8 @@ const RELAYABLE_WRITE_PROBES: readonly RelayableEndpoint[] = [
  * case, no query, and one exact body - and the arming is consumed by the first
  * request that matches it. An unarmed write, a second copy of an armed one, a
  * different case identifier, any query, any other suffix and any other body
- * are refused before a process is spawned. The assignee write, the resolution
- * write (other than the 403 probe above) and every audit-log write remain
- * undeclared.
+ * are refused before a process is spawned. A live Run also disables the older
+ * synthetic resolution probe; every live write must be armed for its case.
  */
 const RELAYABLE_WORKFLOW_WRITES: readonly RelayableEndpoint[] = [
   {
@@ -285,6 +286,18 @@ const RELAYABLE_WORKFLOW_WRITES: readonly RelayableEndpoint[] = [
     name: "case-note-create",
     method: "POST",
     matches: (pathname) => CASE_NOTES_PATH.test(pathname),
+    queryNames: null,
+  },
+  {
+    name: "case-assignee-change",
+    method: "PATCH",
+    matches: (pathname) => CASE_ASSIGNEE_PATH.test(pathname),
+    queryNames: null,
+  },
+  {
+    name: "case-resolution-create",
+    method: "POST",
+    matches: (pathname) => CASE_RESOLUTION_PROBE_PATH.test(pathname),
     queryNames: null,
   },
 ];
@@ -305,12 +318,17 @@ interface ArmedWorkflowWrite {
  * write, always for its own manifest case, and always disarms in `finally`.
  */
 let armedWorkflowWrite: ArmedWorkflowWrite | null = null;
+let activeRunCaseId: string | null = null;
 
 const WORKFLOW_WRITE_NOT_ARMED = "A Backend workflow write was not the one armed for this request.";
 const WORKFLOW_WRITE_BODY_MISMATCH = "A Backend workflow write body was not the armed body.";
 
 function armWorkflowWrite(write: ArmedWorkflowWrite): void {
   requireCondition(armedWorkflowWrite === null, "A workflow write was armed while another was pending.");
+  requireCondition(
+    activeRunCaseId === null || write.pathname.startsWith(`${CASE_LIST_PATH}/${activeRunCaseId}/`),
+    "A workflow write was armed for a different Run case.",
+  );
   requireCondition(
     RELAYABLE_WORKFLOW_WRITES.some(
       (candidate) => candidate.method === write.method && candidate.matches(write.pathname),
@@ -679,7 +697,11 @@ function parseTokenResponse(value: unknown): TokenMaterial {
   return { accessToken: response.access_token, idToken: response.id_token };
 }
 
-function requireTokenClaims(tokens: TokenMaterial): void {
+function requireTokenClaims(
+  tokens: TokenMaterial,
+  username: string = USERNAME,
+  role: string = "FDS_ANALYST",
+): void {
   const accessHeader = decodeJwtHeader(tokens.accessToken);
   const access = decodeJwtPayload(tokens.accessToken);
   const identity = decodeJwtPayload(tokens.idToken);
@@ -710,10 +732,12 @@ function requireTokenClaims(tokens: TokenMaterial): void {
     accessScopes.length === 2 && new Set(accessScopes).size === 2 && accessScopes.includes("openid") && accessScopes.includes("profile"),
     "The access token did not contain the exact requested scopes.",
   );
-  requireCondition(identity.preferred_username === USERNAME, "The stock profile claim was not issued.");
+  requireCondition(identity.preferred_username === username, "The stock profile claim was not issued.");
   requireCondition(identity.given_name === "Local", "The stock given-name claim was not issued.");
-  requireCondition(identity.family_name === "Analyst", "The stock family-name claim was not issued.");
-  requireCondition(identity.name === "Local Analyst", "The stock full-name claim was not issued.");
+  const lastName = username.slice("local-fds-".length);
+  const displayName = lastName.charAt(0).toUpperCase() + lastName.slice(1);
+  requireCondition(identity.family_name === displayName, "The stock family-name claim was not issued.");
+  requireCondition(identity.name === `Local ${displayName}`, "The stock full-name claim was not issued.");
 
   // 검증한 roles 값을 지역 상수로 고정해 callback 안에서도 같은 narrowing이 유지되게 한다.
   const accessRoles = access.roles;
@@ -725,7 +749,7 @@ function requireTokenClaims(tokens: TokenMaterial): void {
       accessRoles.every((role) => identityRoles.includes(role)),
     "The access and ID token roles differed.",
   );
-  requireCondition(accessRoles.length === 1 && accessRoles[0] === "FDS_ANALYST", "The USER role set was invalid.");
+  requireCondition(accessRoles.length === 1 && accessRoles[0] === role, "The USER role set was invalid.");
 
   const audience = access.aud;
   requireCondition(
@@ -978,7 +1002,7 @@ function resolveRelayTarget(request: PlaywrightRequest): string {
   // through on the accident of carrying none, and the negative tests below say
   // so.
   if (method !== "GET") {
-    const probe = RELAYABLE_WRITE_PROBES.find(
+    const probe = (activeRunCaseId === null ? RELAYABLE_WRITE_PROBES : []).find(
       (candidate) => candidate.method === method && candidate.matches(url.pathname),
     );
     if (probe !== undefined) {
@@ -4845,6 +4869,7 @@ const RELAY_REFUSALS: readonly string[] = [
   "A Backend request target carried a character this relay will not write.",
   WORKFLOW_WRITE_NOT_ARMED,
   WORKFLOW_WRITE_BODY_MISMATCH,
+  "A workflow write was armed for a different Run case.",
 ];
 
 /** A canonical lowercase UUID v4 that names no case. */
@@ -5940,6 +5965,52 @@ test("the Backend relay still admits the real reads and the one declared write p
   );
 });
 
+test("the USER resolution probe crosses the relay exactly once", () => {
+  const caseId = randomUUID();
+  const pathname = `${CASE_LIST_PATH}/${caseId}/resolution`;
+  const body = JSON.stringify({
+    finalDisposition: "NORMAL",
+    reasonCode: "CASE_RESOLUTION_COMPLETED",
+    expectedVersion: 0,
+  });
+  const spawnsBefore = relaySpawnCount;
+  const observationsBefore = relayObservationCount;
+  const request = relayCandidate("POST", `${BACKEND_ORIGIN}${pathname}`, "Bearer resolution-probe-oracle", body);
+  const refused = (candidate: PlaywrightRequest, expected: string): void => {
+    let message: string | null = null;
+    try {
+      buildRelayRequestBytes(candidate);
+    } catch (error: unknown) {
+      message = error instanceof Error ? error.message : "unknown";
+    }
+    requireCondition(message === expected, "The USER resolution probe admitted or misnamed a refused request.");
+  };
+  try {
+    refused(request, WORKFLOW_WRITE_NOT_ARMED);
+    armWorkflowWrite({ method: "POST", pathname, body });
+    refused(relayCandidate("POST", `${BACKEND_ORIGIN}${pathname}?page=0`, "", body), "A Backend write probe carried a query.");
+    refused(relayCandidate("POST", `${BACKEND_ORIGIN}${pathname}/`, "", body), "A Backend request used a method this relay will not write.");
+    refused(relayCandidate("POST", `${BACKEND_ORIGIN}${pathname}`, "", body + " "), WORKFLOW_WRITE_BODY_MISMATCH);
+    const built = buildRelayRequestBytes(request);
+    requireCondition(built.target === pathname && armedWorkflowWrite === null,
+      "The USER resolution probe did not cross and consume the exact relay boundary.");
+    refused(request, WORKFLOW_WRITE_NOT_ARMED);
+    requireCondition(
+      relaySpawnCount === spawnsBefore && relayObservationCount === observationsBefore,
+      "The USER resolution probe oracle reached the Backend.",
+    );
+  } finally {
+    disarmWorkflowWrite();
+  }
+});
+
+test("the role and core workflow write relay oracles retain their boundaries", () => {
+  requireRoleWriteRelayOracle();
+  requireWorkflowWriteRelayOracle();
+  requireCondition(activeRunCaseId === null && armedWorkflowWrite === null,
+    "A relay oracle leaked its case or write arming into another test.");
+});
+
 test("real USER login enforces PKCE, token claims, and Backend boundaries", async ({ page }) => {
   const password = readUserPassword();
   const consoleMessages: string[] = [];
@@ -6039,7 +6110,17 @@ test("real USER login enforces PKCE, token claims, and Backend boundaries", asyn
   });
   requireCondition(damagedStatus === 401, "The damaged-token boundary did not return 401.");
 
-  const resolutionResult = await page.evaluate(async (caseId) => {
+  const resolutionCaseId = randomUUID();
+  const resolutionPath = `${CASE_LIST_PATH}/${resolutionCaseId}/resolution`;
+  const resolutionBody = {
+    finalDisposition: "NORMAL",
+    reasonCode: "CASE_RESOLUTION_COMPLETED",
+    expectedVersion: 0,
+  } as const;
+  armWorkflowWrite({ method: "POST", pathname: resolutionPath, body: JSON.stringify(resolutionBody) });
+  let resolutionResult: string;
+  try {
+    resolutionResult = await page.evaluate(async ({ caseId, body }) => {
     const [{ getOidcAuthClient }, { sendAuthorizedBackendRequest }] = await Promise.all([
       import("/src/auth/oidcAuthClient.ts"),
       import("/src/api/authorizedClient.ts"),
@@ -6048,11 +6129,7 @@ test("real USER login enforces PKCE, token claims, and Backend boundaries", asyn
       await sendAuthorizedBackendRequest(getOidcAuthClient(), {
         endpoint: "case-resolution-create",
         params: { caseId },
-        body: {
-          finalDisposition: "NORMAL",
-          reasonCode: "CASE_RESOLUTION_COMPLETED",
-          expectedVersion: 0,
-        },
+        body,
         expectedStatus: 200,
         // 이 요청은 403이 기대 결과이므로 어떤 body도 성공으로 받아들이지 않는다.
         validate: (body: unknown): body is never => {
@@ -6065,7 +6142,12 @@ test("real USER login enforces PKCE, token claims, and Backend boundaries", asyn
     } catch (error: unknown) {
       return error instanceof Error ? error.name : "unknown";
     }
-  }, randomUUID());
+    }, { caseId: resolutionCaseId, body: resolutionBody });
+  } finally {
+    const consumed = armedWorkflowWrite === null;
+    disarmWorkflowWrite();
+    requireCondition(consumed, "The USER resolution probe was not consumed once.");
+  }
   requireCondition(resolutionResult === "ForbiddenError", "The analyst resolution boundary did not return 403.");
   await expect(page.getByLabel("Authentication status")).toContainText("Signed in as");
   requireCondition((await publicationCount(page)) === 1, "A 403 invalidated the application session.");
@@ -6075,8 +6157,11 @@ test("real USER login enforces PKCE, token claims, and Backend boundaries", asyn
     "The real USER case-list request did not return 200.",
   );
   requireCondition(backend.filter((entry) => entry.status === 401).length === 2, "The 401 boundary count differed.");
+  const resolutionWrites = backend.filter((entry) => entry.method === "POST" && entry.pathname.endsWith("/resolution"));
   requireCondition(
-    backend.filter((entry) => entry.method === "POST" && entry.pathname.endsWith("/resolution") && entry.status === 403).length === 1,
+    resolutionWrites.length === 1 && resolutionWrites[0].pathname === resolutionPath &&
+      resolutionWrites[0].target === resolutionPath && resolutionWrites[0].status === 403 &&
+      resolutionWrites[0].requestBodyByteLength === Buffer.byteLength(JSON.stringify(resolutionBody), "utf8"),
     "The resolution request count differed.",
   );
   requireCondition(
@@ -8179,7 +8264,7 @@ function requireWorkflowWriteRelayOracle(): void {
       "A workflow write was armed for an undeclared address.",
     );
     refuseArming(
-      { method: "PATCH", pathname: `${CASE_LIST_PATH}/${caseId}/assignee`, body: writes[0].body },
+      { method: "PATCH", pathname: `${CASE_LIST_PATH}/${caseId}/audit-logs`, body: writes[0].body },
       "A workflow write was armed for an undeclared address.",
     );
     refuseArming(
@@ -8246,6 +8331,55 @@ function requireWorkflowWriteRelayOracle(): void {
     );
   } finally {
     disarmWorkflowWrite();
+  }
+}
+
+function requireRoleWriteRelayOracle(): void {
+  const caseId = "c0ffee00-0000-4000-8000-00000000c318";
+  const otherCaseId = "c0ffee00-0000-4000-9000-00000000c318";
+  const credential = "Bearer role-relay-oracle";
+  const writes = [
+    { method: "POST", path: `${CASE_LIST_PATH}/${caseId}/notes`, body: '{"content":"role oracle","expectedVersion":0}' },
+    { method: "PATCH", path: `${CASE_LIST_PATH}/${caseId}/status`, body: '{"targetStatus":"IN_REVIEW","assigneeRef":"c0ffee00-0000-4000-a000-00000000a318","reasonCode":"CASE_REVIEW_STARTED","expectedVersion":0}' },
+    { method: "PATCH", path: `${CASE_LIST_PATH}/${caseId}/assignee`, body: '{"assigneeRef":"c0ffee00-0000-4000-a000-00000000a318","reasonCode":"CASE_ASSIGNEE_ASSIGNED","expectedVersion":0}' },
+    { method: "POST", path: `${CASE_LIST_PATH}/${caseId}/resolution`, body: '{"finalDisposition":"NORMAL","reasonCode":"CASE_RESOLUTION_COMPLETED","expectedVersion":0}' },
+  ] as const;
+  const before = relaySpawnCount;
+  activeRunCaseId = caseId;
+  const reject = (method: string, path: string, body: string | null): void => {
+    let failed = false;
+    try {
+      buildRelayRequestBytes(relayCandidate(method, `${BACKEND_ORIGIN}${path}`, credential, body));
+    } catch (error: unknown) {
+      failed = error instanceof Error && RELAY_REFUSALS.includes(error.message);
+    }
+    requireCondition(failed, "The role relay admitted a non-exact or duplicate write.");
+  };
+  try {
+    for (const write of writes) {
+      reject(write.method, write.path, write.body);
+      let wrongCaseArmingFailed = false;
+      try {
+        armWorkflowWrite({ method: write.method, pathname: write.path.replace(caseId, otherCaseId), body: write.body });
+      } catch (error: unknown) {
+        wrongCaseArmingFailed = error instanceof Error && error.message === "A workflow write was armed for a different Run case.";
+      }
+      requireCondition(wrongCaseArmingFailed && armedWorkflowWrite === null, "The role relay armed a different Run case.");
+      armWorkflowWrite({ method: write.method, pathname: write.path, body: write.body });
+      reject(write.method, write.path.replace(caseId, otherCaseId), write.body);
+      reject(write.method, `${write.path}?expectedVersion=0`, write.body);
+      reject(write.method, `${write.path}/`, write.body);
+      reject(write.method, write.path, write.body + " ");
+      requireCondition(armedWorkflowWrite !== null, "A rejected role write consumed its arming.");
+      const built = buildRelayRequestBytes(relayCandidate(write.method, `${BACKEND_ORIGIN}${write.path}`, credential, write.body));
+      requireCondition(built.target === write.path && built.bodyByteLength === Buffer.byteLength(write.body, "utf8"), "The armed role write was not exact.");
+      requireCondition(armedWorkflowWrite === null, "The role write arming was not consumed.");
+      reject(write.method, write.path, write.body);
+    }
+    requireCondition(relaySpawnCount === before, "The role relay oracle spawned a Backend process.");
+  } finally {
+    disarmWorkflowWrite();
+    activeRunCaseId = null;
   }
 }
 
@@ -8353,6 +8487,8 @@ async function signInFromGuard(
   password: string,
   route: string,
   allowSingleSignOn: boolean,
+  username: string = USERNAME,
+  role: string = "FDS_ANALYST",
 ): Promise<TokenMaterial> {
   const tokenResponsePromise = page.waitForResponse(
     (response) => response.url() === TOKEN_URL && response.request().method() === "POST",
@@ -8378,16 +8514,218 @@ async function signInFromGuard(
     "The sign-in did not reach the credential form or an authenticated session.",
   );
   if (outcome === "form") {
-    await page.locator("#username").fill(USERNAME);
+    await page.locator("#username").fill(username);
     await page.locator("#password").fill(password);
     await submitLogin(page);
   }
   const tokens = parseTokenResponse(await (await tokenResponsePromise).json());
-  requireTokenClaims(tokens);
+  requireTokenClaims(tokens, username, role);
   await page.waitForFunction((expected) => window.location.href === expected, `${APP_ORIGIN}${route}`);
   await expect(page.getByLabel("Authentication status")).toContainText("Signed in as");
   return tokens;
 }
+
+/** All public pages, with per-request trace IDs excluded from the business snapshot. */
+async function readRoleCaseSnapshot(page: Page, caseId: string) {
+  return page.evaluate(async (id) => {
+    const [{ getOidcAuthClient }, { sendAuthorizedBackendRequest }] = await Promise.all([
+      import("/src/auth/oidcAuthClient.ts"),
+      import("/src/api/authorizedClient.ts"),
+    ]);
+    const client = getOidcAuthClient();
+    const read = async (endpoint: string, query?: { page: string; size: string; sort: string }) => {
+      const result = await sendAuthorizedBackendRequest(client, {
+        endpoint, params: { caseId: id }, query, expectedStatus: 200,
+        validate: (body: unknown): body is Record<string, unknown> =>
+          typeof body === "object" && body !== null && !Array.isArray(body),
+      });
+      return result.data;
+    };
+    const detail = await read("case-detail");
+    const record = detail.case as Record<string, unknown>;
+    if (typeof record !== "object" || record === null || record.caseId !== id) {
+      throw new Error("The role snapshot case identity was invalid.");
+    }
+    const allPages = async (endpoint: string, sort: string, key: "items" | "content") => {
+      const values: unknown[] = [];
+      for (let number = 0; number < 100; number += 1) {
+        const body = await read(endpoint, { page: String(number), size: "100", sort });
+        const metadata = body.page as Record<string, unknown>;
+        const entries = body[key];
+        if ((key === "content" && body.caseId !== id) || typeof metadata !== "object" || metadata === null ||
+          metadata.number !== number || !Array.isArray(entries) ||
+          typeof metadata.totalPages !== "number" || typeof metadata.totalElements !== "number" ||
+          metadata.totalPages < 0 || metadata.totalPages > 100 || metadata.totalElements < 0) {
+          throw new Error("A role snapshot page was invalid.");
+        }
+        values.push(...entries);
+        if (number + 1 >= metadata.totalPages) {
+          if (values.length !== metadata.totalElements) throw new Error("The role snapshot page count changed.");
+          return values;
+        }
+      }
+      throw new Error("The role snapshot exceeded the bounded page count.");
+    };
+    return {
+      caseStatus: record.caseStatus,
+      concurrencyVersion: record.concurrencyVersion,
+      assigneeRef: record.assigneeRef,
+      finalDisposition: record.finalDisposition,
+      notes: await allPages("case-note-list", "createdAt,asc", "items"),
+      audit: await allPages("case-audit-list", "changedAt,desc", "content"),
+    };
+  }, caseId);
+}
+
+/** #318 runs first while the one #315 fixture case is still OPEN. #314 then mutates it. */
+test.afterEach(() => {
+  activeRunCaseId = null;
+  disarmWorkflowWrite();
+});
+
+test("real Viewer Analyst and Approver enforce case write denials before the core workflow", async ({ browser, page: fixturePage }) => {
+  test.setTimeout(420_000);
+  requireRoleWriteRelayOracle();
+  const fixture = readRunFixtureManifest(env[RUN_FIXTURE_MANIFEST_ENVIRONMENT]);
+  activeRunCaseId = fixture.caseId;
+  const password = readUserPassword();
+  const casePath = `${CASE_LIST_PATH}/${fixture.caseId}`;
+  const route = `/cases/${fixture.caseId}`;
+  const names = [
+    { username: "local-fds-viewer", role: "FDS_VIEWER", subject: "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69b", denied: ["note", "status", "assignee", "resolution"] },
+    { username: USERNAME, role: "FDS_ANALYST", subject: "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a", denied: ["resolution"] },
+    { username: "local-fds-approver", role: "FDS_APPROVER", subject: "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69c", denied: ["note", "status", "assignee"] },
+  ] as const;
+  const subjects = new Set<string>();
+  for (const [index, account] of names.entries()) {
+    const context = index === 0 ? null : await browser.newContext();
+    const page = context === null ? fixturePage : await context.newPage();
+    const consoleMessages: string[] = [];
+    page.on("console", (message) => consoleMessages.push(message.text()));
+    let backend: BackendRelay;
+    try {
+      backend = await installBackendRelay(page, {
+        captureBodyOf: [casePath, `${casePath}/notes`, `${casePath}/audit-logs`,
+          `${casePath}/status`, `${casePath}/assignee`, `${casePath}/resolution`],
+      });
+    } catch {
+      await context?.close();
+      throw new Error("The role Backend relay could not be installed.");
+    }
+    try {
+      await page.goto(`${APP_ORIGIN}${route}`);
+      await expect(page.getByRole("heading", { name: "Sign in required" })).toBeVisible();
+      const tokens = await signInFromGuard(page, password, route, false, account.username, account.role);
+      const subject = decodeJwtPayload(tokens.accessToken).sub;
+      if (typeof subject !== "string") throw new Error("The USER subject was invalid.");
+      requireCondition(subject === account.subject && !subjects.has(subject), "The USER subject did not match its distinct fixture identity.");
+      subjects.add(subject);
+      await expect(page.locator("#case-detail-heading")).toContainText(fixture.caseId);
+      await expect(factValue(page.getByRole("main").locator(".detail__record"), "Case status")).toHaveText("Open");
+      const first = await readRoleCaseSnapshot(page, fixture.caseId);
+      requireCondition(first.caseStatus === "OPEN" && first.concurrencyVersion === 0 &&
+        first.assigneeRef === null && first.finalDisposition === null &&
+        first.notes.length === 0 && first.audit.length === 2,
+      "The role denial scenario did not start from the Run fixture OPEN case.");
+      requireCondition(backend.some((entry) => entry.pathname === casePath && entry.status === 200) &&
+        backend.some((entry) => entry.pathname === `${casePath}/notes` && entry.status === 200) &&
+        backend.some((entry) => entry.pathname === `${casePath}/audit-logs` && entry.status === 200),
+      "A USER could not read the common case, notes and audit endpoints.");
+      const startReview = page.getByRole("button", { name: "Start review", exact: true });
+      const addNote = page.getByRole("button", { name: "Add note", exact: true });
+      const workflowControls = page.locator(".case-workflow__controls");
+      const resolutionNotice = page.locator(".case-workflow__unavailable");
+      if (account.role === "FDS_ANALYST") {
+        await expect(startReview).toBeVisible();
+        await expect(workflowControls).toBeVisible();
+        await expect(page.locator(".investigation-note-composer__locked")).toBeVisible();
+        await expect(resolutionNotice).toHaveCount(0);
+      } else {
+        await expect(startReview).toHaveCount(0);
+        await expect(workflowControls).toHaveCount(0);
+        await expect(addNote).toHaveCount(0);
+        if (account.role === "FDS_APPROVER") await expect(resolutionNotice).toBeVisible();
+        else await expect(resolutionNotice).toHaveCount(0);
+      }
+      await expect(page.getByRole("button", { name: "Resolve case", exact: true })).toHaveCount(0);
+
+      const bodies = {
+        note: { content: "role denial probe", expectedVersion: 0 },
+        status: { targetStatus: "IN_REVIEW", assigneeRef: "c0ffee00-0000-4000-a000-00000000a318", reasonCode: "CASE_REVIEW_STARTED", expectedVersion: 0 },
+        assignee: { assigneeRef: "c0ffee00-0000-4000-a000-00000000a318", reasonCode: "CASE_ASSIGNEE_ASSIGNED", expectedVersion: 0 },
+        resolution: { finalDisposition: "NORMAL", reasonCode: "CASE_RESOLUTION_COMPLETED", expectedVersion: 0 },
+      } as const;
+      const writes = {
+        note: { endpoint: "case-note-create", method: "POST", path: `${casePath}/notes` },
+        status: { endpoint: "case-status-change", method: "PATCH", path: `${casePath}/status` },
+        assignee: { endpoint: "case-assignee-change", method: "PATCH", path: `${casePath}/assignee` },
+        resolution: { endpoint: "case-resolution-create", method: "POST", path: `${casePath}/resolution` },
+      } as const;
+      const attempt = async (kind: keyof typeof writes, expectedStatus: number, expectedCode: string) => {
+        const before = await readRoleCaseSnapshot(page, fixture.caseId);
+        const write = writes[kind];
+        const body = bodies[kind];
+        const previous = backend.length;
+        armWorkflowWrite({ method: write.method, pathname: write.path, body: JSON.stringify(body) });
+        const outcome = await page.evaluate(async ({ caseId, endpoint, body }) => {
+          const [{ getOidcAuthClient }, { sendAuthorizedBackendRequest }] = await Promise.all([
+            import("/src/auth/oidcAuthClient.ts"), import("/src/api/authorizedClient.ts"),
+          ]);
+          try {
+            await sendAuthorizedBackendRequest(getOidcAuthClient(), {
+              endpoint, params: { caseId }, body, expectedStatus: 200,
+              validate: (data: unknown): data is never => { void data; return false; },
+            });
+            return { name: "unexpected-success", status: 0 };
+          } catch (error: unknown) {
+            return { name: error instanceof Error ? error.name : "unknown",
+              status: typeof error === "object" && error !== null && "status" in error &&
+                typeof error.status === "number" ? error.status : 0 };
+          }
+        }, { caseId: fixture.caseId, endpoint: write.endpoint, body });
+        requireCondition(armedWorkflowWrite === null, "A role write was not consumed once.");
+        requireCondition(
+          expectedStatus === 403
+            ? outcome.name === "ForbiddenError" && outcome.status === 0
+            : outcome.name === "HttpError" && outcome.status === 409,
+        "The role write returned an unexpected status.");
+        const observed = backend.slice(previous).filter((entry) => entry.method !== "GET");
+        requireCondition(observed.length === 1 && observed[0].method === write.method &&
+          observed[0].pathname === write.path && observed[0].target === write.path &&
+          observed[0].status === expectedStatus &&
+          observed[0].requestBodyByteLength === Buffer.byteLength(JSON.stringify(body), "utf8"),
+        "The denied role write was not relayed exactly once.");
+        const errorFields = readBackendErrorFields(observed[0].body);
+        requireCondition(errorFields.code === expectedCode,
+          "The denied role write carried an unexpected safe error code.");
+        for (const value of [errorFields.code, errorFields.message, errorFields.traceId]) {
+          requireCondition(!(await documentExposes(page, value)) &&
+            !consoleMessages.some((message) => message.includes(value)),
+          "A Backend refusal field reached the page or browser console.");
+        }
+        const after = await readRoleCaseSnapshot(page, fixture.caseId);
+        requireCondition(isDeepStrictEqual(after, before), "A denied role write changed case, notes or business audit.");
+      };
+      for (const kind of account.denied) await attempt(kind, 403, "ACCESS_DENIED");
+      if (account.role === "FDS_APPROVER") await attempt("resolution", 409, "CASE_STATUS_CONFLICT");
+      requireCondition(backend.filter((entry) => entry.method !== "GET").length ===
+        account.denied.length + (account.role === "FDS_APPROVER" ? 1 : 0),
+      "The role scenario sent an unexpected number of writes.");
+      const sensitive = [password, tokens.accessToken, tokens.idToken];
+      requireCondition(!(await browserContainsAny(page, sensitive)) &&
+        !consoleMessages.some((message) => sensitive.some((value) => message.includes(value))),
+      "A USER credential reached the page or browser console.");
+    } finally {
+      disarmWorkflowWrite();
+      try {
+        await backend.dispose();
+      } finally {
+        await context?.close();
+      }
+    }
+  }
+  requireCondition(subjects.size === 3, "The USER subject set was incomplete.");
+});
 
 /**
  * The core incident flow over the current Run's own fixture (Issues #314, #315).
@@ -8424,6 +8762,7 @@ test("a real USER works the Run fixture case through review, a note and the audi
   requireRunFixtureManifestOracle();
   requireWorkflowWriteRelayOracle();
   const fixture = readRunFixtureManifest(env[RUN_FIXTURE_MANIFEST_ENVIRONMENT]);
+  activeRunCaseId = fixture.caseId;
 
   const password = readUserPassword();
   const consoleMessages: string[] = [];

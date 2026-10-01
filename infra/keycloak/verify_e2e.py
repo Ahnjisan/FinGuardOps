@@ -1114,23 +1114,28 @@ def validate_realm(realm: dict[str, Any]) -> None:
         if "offline_access" in scopes or "offline" in scopes or "roles" in scopes:
             fail("STATIC_FORBIDDEN_SCOPE")
     users = realm.get("users")
-    if not isinstance(users, list) or len(users) != 1:
+    if not isinstance(users, list) or len(users) != 3:
         fail("STATIC_USER_CONTRACT")
-    user = users[0]
-    if (
-        not isinstance(user, dict)
-        or user.get("id") != "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a"
-        or user.get("username") != "local-fds-analyst"
-        or user.get("firstName") != "Local"
-        or user.get("lastName") != "Analyst"
-        or user.get("email") != "local-fds-analyst@finguardops.invalid"
-        or user.get("enabled") is not True
-        or user.get("emailVerified") is not False
-        or user.get("requiredActions") != []
-        or user.get("credentials") != []
-        or user.get("realmRoles") != ["FDS_ANALYST"]
-    ):
-        fail("STATIC_USER_CONTRACT")
+    expected_users = (
+        ("local-fds-analyst", "FDS_ANALYST", "Analyst", "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a"),
+        ("local-fds-viewer", "FDS_VIEWER", "Viewer", "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69b"),
+        ("local-fds-approver", "FDS_APPROVER", "Approver", "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69c"),
+    )
+    for user, (username, role, last_name, subject) in zip(users, expected_users, strict=True):
+        if (
+            not isinstance(user, dict)
+            or user.get("id") != subject
+            or user.get("username") != username
+            or user.get("firstName") != "Local"
+            or user.get("lastName") != last_name
+            or user.get("email") != username + "@finguardops.invalid"
+            or user.get("enabled") is not True
+            or user.get("emailVerified") is not False
+            or user.get("requiredActions") != []
+            or user.get("credentials") != []
+            or user.get("realmRoles") != [role]
+        ):
+            fail("STATIC_USER_CONTRACT")
 
 
 def validate_secret_definitions(config: dict[str, Any]) -> None:
