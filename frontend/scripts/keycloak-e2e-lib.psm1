@@ -104,6 +104,22 @@ $PythonVerifierPath = Join-Path $RepositoryRoot 'infra/keycloak/verify_e2e.py'
 $FixtureManifestEnvironmentName = 'FINGUARDOPS_E2E_FIXTURE_MANIFEST'
 $FixtureDirectoryEnvironmentName = 'FINGUARDOPS_E2E_FIXTURE_DIR'
 $FixturePlanEnvironmentName = 'FINGUARDOPS_E2E_FIXTURE_PLAN'
+# The fixed-field Playwright failure records (`frontend/e2e/safe-failure-reporter.ts`).
+# A record is accepted only as one whole string: the prefix, this run's nonce
+# and one record from the closed grammar below, every field a literal or a
+# bounded decimal. Everything else the Playwright process writes is dropped.
+$PlaywrightReporterNonceEnvironmentName = 'FINGUARDOPS_E2E_REPORTER_NONCE'
+$PlaywrightDiagnosticPrefix = 'FINGUARDOPS_E2E_PW_V1'
+$PlaywrightDiagnosticCandidateLengthLimit = 160
+$PlaywrightDiagnosticLineLimit = 40
+$PlaywrightDiagnosticRecordPattern = '\A(?:' +
+    'TEST line=(?:[1-9][0-9]{0,4}|none) n=[1-9][0-9]{0,2} status=(?:failed|timedOut|interrupted) ' +
+        'kind=(?:REQUIRE_CONDITION|EXPECT|TIMEOUT|INTERRUPTED|OTHER) at=(?:[1-9][0-9]{0,4}|none)' +
+    '|GLOBAL kind=(?:WEBSERVER|OTHER)' +
+    '|SUMMARY status=(?:passed|failed|timedout|interrupted) passed=(?:0|[1-9][0-9]{0,3}) ' +
+        'failed=(?:0|[1-9][0-9]{0,3}) skipped=(?:0|[1-9][0-9]{0,3})' +
+    '|OVERFLOW' +
+    ')\z'
 $FixtureManifestName = 'fixture-identity.json'
 $RunFixtureBeforeStdoutLimit = 22369626
 $RunFixtureBeforeStderrLimit = 128
@@ -1265,11 +1281,79 @@ function Invoke-E2ERunCoreCleanup {
     Invoke-E2ECleanupActions -Primary $Primary -Actions $actions.ToArray()
 }
 
+function New-E2EPlaywrightDiagnosticNonce {
+    try {
+        $bytes = [byte[]]::new(16)
+        $generator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        try { $generator.GetBytes($bytes) }
+        finally { $generator.Dispose() }
+        return ([System.BitConverter]::ToString($bytes)).Replace('-', '').ToLowerInvariant()
+    }
+    catch {
+        # No nonce means no record is ever accepted; the run itself is unchanged.
+        return $null
+    }
+}
+
+# The record a candidate line carries, or $null. A candidate is accepted only
+# as a whole string: anything that is not a string, is too long, lacks this
+# run's exact prefix and nonce, or whose record is not one whole match of the
+# closed grammar is refused, and nothing about it is kept.
+function ConvertFrom-E2EPlaywrightDiagnosticLine {
+    param($Candidate, $Nonce)
+
+    if ($Candidate -isnot [string] -or $Nonce -isnot [string]) { return $null }
+    if ($Nonce -cnotmatch '\A[0-9a-f]{32}\z') { return $null }
+    if ($Candidate.Length -gt $PlaywrightDiagnosticCandidateLengthLimit) { return $null }
+    $prefix = $PlaywrightDiagnosticPrefix + ' ' + $Nonce + ' '
+    if (-not $Candidate.StartsWith($prefix, [System.StringComparison]::Ordinal)) { return $null }
+    $record = $Candidate.Substring($prefix.Length)
+    if (-not [regex]::IsMatch($record, $PlaywrightDiagnosticRecordPattern, [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)) {
+        return $null
+    }
+    return $record
+}
+
+function Write-E2EPlaywrightDiagnostic {
+    param([Parameter(Mandatory = $true)][string]$Record, [scriptblock]$Writer)
+
+    $line = 'PLAYWRIGHT_DIAGNOSTIC=' + $Record
+    try {
+        if ($null -ne $Writer) { & $Writer $line | Out-Null }
+        else { Microsoft.PowerShell.Utility\Write-Warning -Message $line -WarningAction Continue }
+    }
+    catch { }
+}
+
+# One object from the Playwright process's merged output. Accepted records are
+# forwarded up to the line limit, then a single fixed overflow code replaces
+# the rest. Never throws: a diagnostic cannot become, or replace, the failure.
+function Submit-E2EPlaywrightDiagnosticCandidate {
+    param($Candidate, [Parameter(Mandatory = $true)]$State, [scriptblock]$Writer)
+
+    try {
+        $record = ConvertFrom-E2EPlaywrightDiagnosticLine -Candidate $Candidate -Nonce $State.Nonce
+        if ($null -eq $record) { return }
+        if ($record.StartsWith('SUMMARY ', [System.StringComparison]::Ordinal)) { $State.SummarySeen = $true }
+        if ($State.Forwarded -ge $PlaywrightDiagnosticLineLimit) {
+            if (-not $State.Overflowed) {
+                $State.Overflowed = $true
+                Write-E2EPlaywrightDiagnostic -Record 'RUNNER_OVERFLOW' -Writer $Writer
+            }
+            return
+        }
+        $State.Forwarded++
+        Write-E2EPlaywrightDiagnostic -Record $record -Writer $Writer
+    }
+    catch { }
+}
+
 function Invoke-E2EPlaywrightWithFixtureEnvironment {
     param(
         [Parameter(Mandatory = $true)]$Receipt,
         [Parameter(Mandatory = $true)]$InitialManifest,
-        [Parameter(Mandatory = $true)][scriptblock]$Body
+        [Parameter(Mandatory = $true)][scriptblock]$Body,
+        [scriptblock]$DiagnosticWriter
     )
 
     $verifiedManifest = Assert-E2EFixtureManifestUnchanged -Receipt $Receipt -InitialManifest $InitialManifest
@@ -1282,13 +1366,27 @@ function Invoke-E2EPlaywrightWithFixtureEnvironment {
             throw 'SERVICE_CREDENTIAL_ENVIRONMENT_CONTAMINATED'
         }
     }
+    $previousReporterNonce = [System.Environment]::GetEnvironmentVariable($PlaywrightReporterNonceEnvironmentName, 'Process')
+    $diagnostic = [pscustomobject]@{ Nonce = $null; Forwarded = 0; Overflowed = $false; SummarySeen = $false }
     $primary = $null
     try {
         [System.Environment]::SetEnvironmentVariable($FixtureManifestEnvironmentName, $ManifestPath, 'Process')
         [System.Environment]::SetEnvironmentVariable($FixtureDirectoryEnvironmentName, $null, 'Process')
-        & $Body | Out-Null
+        $diagnostic.Nonce = New-E2EPlaywrightDiagnosticNonce
+        [System.Environment]::SetEnvironmentVariable($PlaywrightReporterNonceEnvironmentName, $diagnostic.Nonce, 'Process')
+        # stdout and stderr both arrive here, stderr as ErrorRecord objects. The
+        # line reporter, test output and web server output are dropped with
+        # them; only this run's fixed-field records are forwarded. The exit
+        # code, checked inside the body, stays the only verdict.
+        & $Body 2>&1 | ForEach-Object {
+            Submit-E2EPlaywrightDiagnosticCandidate -Candidate $_ -State $diagnostic -Writer $DiagnosticWriter
+        } | Out-Null
     }
     catch { $primary = $_.Exception }
+    if ($null -ne $primary -and -not $diagnostic.SummarySeen) {
+        $absent = if ($null -eq $diagnostic.Nonce) { 'NONCE_UNAVAILABLE' } else { 'SUMMARY_ABSENT' }
+        Write-E2EPlaywrightDiagnostic -Record $absent -Writer $DiagnosticWriter
+    }
     $actions = @(
         [pscustomobject]@{
             Action = {
@@ -1300,6 +1398,13 @@ function Invoke-E2EPlaywrightWithFixtureEnvironment {
         [pscustomobject]@{
             Action = {
                 [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_FIXTURE_DIR', $fixtureDirectory, 'Process')
+            }.GetNewClosure()
+            ErrorCode = 'ENVIRONMENT_RESTORE_FAILED'
+            SkipAfterCleanupFailure = $false
+        },
+        [pscustomobject]@{
+            Action = {
+                [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_REPORTER_NONCE', $previousReporterNonce, 'Process')
             }.GetNewClosure()
             ErrorCode = 'ENVIRONMENT_RESTORE_FAILED'
             SkipAfterCleanupFailure = $false

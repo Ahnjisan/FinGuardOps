@@ -871,6 +871,48 @@ Process environment를 원래 값으로 복원한다. 기존 값 또는 SERVICE 
 오염으로 거부한다. Manifest 내용, token, password, client secret과 Secret path는 stdout/stderr에
 출력하지 않는다.
 
+#### Playwright 실패의 고정 필드 진단
+
+Playwright child의 stdout과 stderr는 모두 runner가 받아 버린다. `line` reporter 원문, test·web server
+출력, stderr `ErrorRecord`, 문자열이 아닌 객체는 Run 로그에 남지 않는다. Runner는 child마다 32자리
+lowercase hex nonce를 새로 만들어 `FINGUARDOPS_E2E_REPORTER_NONCE`로 Playwright 주 process에만
+전달한다. `playwright.config.ts`는 이 값이 형식에 맞을 때만 `e2e/safe-failure-reporter.ts`를 `line`
+reporter 옆에 추가하고, web server 환경에서는 제외한다. Reporter는 생성 즉시 값을 process 환경에서
+지운다. 그래서 그 뒤에 시작되는 worker와 web server는 nonce를 모른다. Child가 끝나면 runner가 이전
+값을 복원한다. Nonce는 test 출력이 우연히 record 모양을 띠더라도 진짜로 받아들여지지 않게 하는
+장치일 뿐이다. 악의적인 test code에 대한 보안 경계는 아니다.
+
+Reporter는 아래 record만 stdout에 쓴다. Runner는 `FINGUARDOPS_E2E_PW_V1 <nonce> <record>` 한 줄
+전체가 아래 문법과 정확히 일치할 때만 nonce를 뺀 `PLAYWRIGHT_DIAGNOSTIC=<record>`를 warning으로
+전달한다. 160자 초과, 앞뒤 공백, CR/LF, 대소문자 변형, field 추가·누락·순서 변경, 범위 밖 숫자,
+선행 0, 비ASCII 숫자, 다른 nonce는 모두 버린다.
+
+| record | 의미 |
+| --- | --- |
+| `TEST line=<1-99999\|none> n=<1-999> status=<failed\|timedOut\|interrupted> kind=<REQUIRE_CONDITION\|EXPECT\|TIMEOUT\|INTERRUPTED\|OTHER> at=<1-99999\|none>` | `line`은 test 선언 줄, `n`은 같은 줄에서 선언된 test 중 순번, `at`은 `requireCondition` helper frame을 건너뛴 첫 spec frame 줄 |
+| `GLOBAL kind=<WEBSERVER\|OTHER>` | test 밖 오류. `config.webServer` 오류만 `WEBSERVER` |
+| `SUMMARY status=<passed\|failed\|timedout\|interrupted> passed=<0-9999> failed=<0-9999> skipped=<0-9999>` | 실행 종료 요약 |
+| `OVERFLOW` | reporter 상한(TEST 32, GLOBAL 4) 초과 |
+
+Runner가 직접 만드는 고정 code는 셋이다. 전달 상한 40줄을 넘으면 `RUNNER_OVERFLOW`를 한 번만 남기고
+나머지를 버린다. Child가 실패했는데 SUMMARY가 없으면 `SUMMARY_ABSENT`, nonce 생성에 실패했으면
+`NONCE_UNAVAILABLE`을 남긴다. Test title, error message, stack, URL, DOM text, screenshot, trace,
+credential과 token은 출력하지 않는다. Error 원문은 reporter 안에서 `kind`를 고르는 데만 읽는다.
+
+판정은 기존 그대로 Playwright exit code 하나다. `SUMMARY status=passed`가 있어도 exit code가 0이
+아니면 `Playwright Keycloak E2E failed.`로 실패한다. 반대로 실패 record가 있어도 exit code가 0이면
+성공이다. 진단 writer가 실패해도 예외를 던지거나 primary failure를 대체하지 않는다. 환경변수 복원,
+Browser·project·output cleanup 순서, receipt 계약도 바뀌지 않는다. 이 진단은 다음 Gate에서 실패한
+test 위치와 종류를 식별하기 위한 것이다. 이번 변경으로 실제 실패 원인이 확인된 것은 아니다.
+
+사건 목록 E2E의 populated 분기는 #255 이후 제품 계약인 행당 링크 1개를 검증한다. 각 링크는
+`/cases/<canonical lowercase UUID v4>` exact href여야 하고 query·fragment가 없어야 한다. 표시 text는
+같은 ID여야 하고, `aria-label`은 `View case details for <ID>`여야 하며, 행 사이에 ID가 중복되면 안 된다.
+기존 "링크 없음" 단언은 #255의 링크 계약과 충돌했다. 빈 DB에서는 empty 분기만 실행되어 이 충돌이
+드러나지 않았는데, Run fixture가 사건을 만들면서 populated 분기가 실행되게 되었다. 이 충돌은
+정적 분석으로 찾은 별도 결함이다. 직전 Gate 실패의 원인으로 확인된 것은 아니다. Oracle의 반례
+20개는 공식 test 수를 늘리지 않도록 같은 사건 목록 test 안에서 먼저 검증한다.
+
 Run과 명시적 Cleanup의 순서는 exact project resource cleanup → owned unique image cleanup → final
 Docker residue audit → exact fixture artifact cleanup → receipt 삭제다. 앞의 세 단계가 실패하면 artifact와
 receipt를 보존한다. Artifact cleanup은 Prepared 또는 Recovery receipt의 runId로 파생한 exact directory가

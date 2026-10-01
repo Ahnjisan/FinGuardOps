@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Preflight', 'MajorFixPreflight', 'MajorFixFixture11', 'MajorFixTargeted', 'OwnerFixPreflight', 'OwnerFixTargeted', 'WaitBrowserPreflight', 'WaitBrowserTargeted', 'SessionStateTargeted', 'D209Preflight', 'D209A', 'D209B', 'D225Service', 'D248Targeted', 'CleanupBrowserTargeted', 'D273Targeted', 'D281Targeted', 'D294Preflight', 'D294Targeted', 'D299Red', 'D299Targeted', 'D308Oracle', 'D315LauncherTargeted', 'D315StageTargeted', 'D315Targeted', 'D315AfterTargeted', 'Formal')]
+    [ValidateSet('Preflight', 'MajorFixPreflight', 'MajorFixFixture11', 'MajorFixTargeted', 'OwnerFixPreflight', 'OwnerFixTargeted', 'WaitBrowserPreflight', 'WaitBrowserTargeted', 'SessionStateTargeted', 'D209Preflight', 'D209A', 'D209B', 'D225Service', 'D248Targeted', 'CleanupBrowserTargeted', 'D273Targeted', 'D281Targeted', 'D294Preflight', 'D294Targeted', 'D299Red', 'D299Targeted', 'D308Oracle', 'D315LauncherTargeted', 'D315StageTargeted', 'D315Targeted', 'D315AfterTargeted', 'D315PlaywrightTargeted', 'Formal')]
     [string]$Mode = 'Formal'
 )
 
@@ -9322,6 +9322,416 @@ exit 0
     Write-Output 'D315 after diagnostic targeted passed'
 }
 
+# Issue #315 Playwright failure diagnostics. The wrapper forwards only this
+# run's exact fixed-field reporter records; every other object the Playwright
+# process produces is dropped, and the exit code stays the only verdict.
+#
+# The fixture harness is created inside the module with [scriptblock]::Create,
+# so the fixture helpers and $ProjectName resolve in the module's own session
+# state. Playwright bodies are deliberately not closures: a closure is bound to
+# a new dynamic module and could not reach Invoke-Native or Assert-Success.
+# They read the scenario's `$d315*` variables through the call chain instead,
+# named so that none collides with a local of the wrapper they run inside.
+$script:D315PlaywrightManifestHarnessSource = @'
+    param([Parameter(Mandatory = $true)][scriptblock]$Scenario)
+
+    $receipt = New-E2EReceipt -RunId ([guid]::NewGuid().ToString('N')) -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+    $directory = Get-E2EFixtureDirectory -Receipt $receipt
+    try {
+        New-E2EFixtureDirectory -Receipt $receipt | Out-Null
+        $json = '{"schemaVersion":1,"runId":"' + $receipt.runId + '","repositoryId":"' + $receipt.repositoryId +
+            '","commitSha":"' + $receipt.commitSha + '","treeSha":"' + $receipt.treeSha +
+            '","composeProject":"' + $ProjectName + '","transactionId":"32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a","caseId":"d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703","expectedRiskLevel":"HIGH","expectedResponseOutcome":"ADDITIONAL_AUTH_REQUIRED","expectedInitialCaseStatus":"OPEN"}' + "`n"
+        [System.IO.File]::WriteAllBytes((Join-Path $directory 'fixture-identity.json'), [System.Text.UTF8Encoding]::new($false,$true).GetBytes($json))
+        $initial = Read-E2EFixtureManifest -Receipt $receipt -Directory $directory
+        return (& $Scenario $receipt $initial)
+    }
+    finally {
+        [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_FIXTURE_MANIFEST', $null, 'Process')
+        [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_REPORTER_NONCE', $null, 'Process')
+        if ([System.IO.Directory]::Exists($directory)) { [System.IO.Directory]::Delete($directory, $true) }
+    }
+'@
+
+function Invoke-D315PlaywrightDiagnosticTargetedTests {
+    $script:Failures = [System.Collections.Generic.List[string]]::new()
+
+    Invoke-TestCase 'D315 Playwright diagnostics forward only exact fixed records' {
+        $result = & $script:E2EModule {
+            param($harnessSource)
+            & ([scriptblock]::Create($harnessSource)) {
+                param($receipt, $initial)
+                $d315Records = [System.Collections.Generic.List[string]]::new()
+                $d315SeenNonce = [System.Collections.Generic.List[string]]::new()
+                $d315Valid = @(
+                    'TEST line=6899 n=1 status=failed kind=REQUIRE_CONDITION at=6905',
+                    'TEST line=6017 n=3 status=timedOut kind=TIMEOUT at=none',
+                    'TEST line=none n=999 status=interrupted kind=INTERRUPTED at=99999',
+                    'TEST line=1 n=1 status=failed kind=EXPECT at=1',
+                    'TEST line=5826 n=1 status=failed kind=OTHER at=none',
+                    'GLOBAL kind=WEBSERVER',
+                    'GLOBAL kind=OTHER',
+                    'OVERFLOW',
+                    'SUMMARY status=failed passed=0 failed=9999 skipped=0'
+                )
+                [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_REPORTER_NONCE', 'previous-owner-value', 'Process')
+                $d315Body = {
+                    $nonce = [System.Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_REPORTER_NONCE', 'Process')
+                    $d315SeenNonce.Add([string]$nonce)
+                    $p = 'FINGUARDOPS_E2E_PW_V1 ' + $nonce + ' '
+                    $other = if ($nonce.EndsWith('0')) { $nonce.Substring(0, 31) + '1' } else { $nonce.Substring(0, 31) + '0' }
+                    $rejected = @(
+                        '[1/22] [chromium] > e2e\keycloak-user-login.spec.ts:5826:1 > real USER login',
+                        '  1) [chromium] > keycloak-user-login.spec.ts:6834:1 > a real USER reaches the case console',
+                        '    Error: The case sheet offered a link this Issue does not implement.',
+                        '    at C:\dev\FinGuardOps\frontend\e2e\keycloak-user-login.spec.ts:6899:5',
+                        'access_token=eyJhbGciOiJSUzI1NiJ9.D315_SENTINEL_TOKEN',
+                        'http://localhost:5173/auth/callback?code=D315_SENTINEL_CODE&state=D315_SENTINEL_STATE',
+                        '<td class="cell-ref">D315_SENTINEL_DOM</td>',
+                        'password=D315_SENTINEL_PASSWORD',
+                        'PLAYWRIGHT_DIAGNOSTIC=OVERFLOW',
+                        'FINGUARDOPS_E2E_PW_V1 OVERFLOW',
+                        ('FINGUARDOPS_E2E_PW_V1 ' + $other + ' OVERFLOW'),
+                        ('FINGUARDOPS_E2E_PW_V1 ' + $nonce.Substring(1) + ' OVERFLOW'),
+                        ('FINGUARDOPS_E2E_PW_V1 ' + $nonce + '0 OVERFLOW'),
+                        ('finguardops_e2e_pw_v1 ' + $nonce + ' OVERFLOW'),
+                        ('FINGUARDOPS_E2E_PW_V2 ' + $nonce + ' OVERFLOW'),
+                        ('FINGUARDOPS_E2E_PW_V1  ' + $nonce + ' OVERFLOW'),
+                        ("FINGUARDOPS_E2E_PW_V1`t" + $nonce + ' OVERFLOW'),
+                        (' ' + $p + 'OVERFLOW'),
+                        ($p + 'OVERFLOW '),
+                        ($p + ' OVERFLOW'),
+                        ($p + "OVERFLOW`r"),
+                        ($p + "OVERFLOW`n"),
+                        ($p + "GLOBAL kind=OTHER`r`n"),
+                        ($p + "OVERFLOW`nOVERFLOW"),
+                        ($p + 'OVERFLOW' + [char]0x200B),
+                        ($p + 'OVERFLOW' + [char]0),
+                        ($p + 'OVERFLOWX'),
+                        ($p + 'overflow'),
+                        ($p + 'RUNNER_OVERFLOW'),
+                        ($p + 'SUMMARY_ABSENT'),
+                        ($p + 'TEST n=1 line=1 status=failed kind=OTHER at=none'),
+                        ($p + 'TEST line=1 n=1 status=failed kind=OTHER at=none extra=1'),
+                        ($p + 'TEST line=1 n=1 status=failed kind=OTHER'),
+                        ($p + 'TEST line=1 n=1 status=failed kind=UNKNOWN at=none'),
+                        ($p + 'TEST line=1 n=1 status=passed kind=OTHER at=none'),
+                        ($p + 'TEST line=1 n=1 status=FAILED kind=OTHER at=none'),
+                        ($p + 'TEST line=0 n=1 status=failed kind=OTHER at=none'),
+                        ($p + 'TEST line=100000 n=1 status=failed kind=OTHER at=none'),
+                        ($p + 'TEST line=01 n=1 status=failed kind=OTHER at=none'),
+                        ($p + 'TEST line=-1 n=1 status=failed kind=OTHER at=none'),
+                        ($p + 'TEST line=' + [char]0x0661 + ' n=1 status=failed kind=OTHER at=none'),
+                        ($p + 'TEST line=' + [char]0xFF11 + ' n=1 status=failed kind=OTHER at=none'),
+                        ($p + 'TEST line=1 n=0 status=failed kind=OTHER at=none'),
+                        ($p + 'TEST line=1 n=1000 status=failed kind=OTHER at=none'),
+                        ($p + 'TEST line=1 n=1 status=failed kind=OTHER at=0'),
+                        ($p + 'TEST line=1 n=1 status=failed kind=OTHER at=https://localhost'),
+                        ($p + 'TEST line=1 n=1 status=failed kind=OTHER at=none title=real USER login'),
+                        ($p + 'GLOBAL kind=webserver'),
+                        ($p + 'GLOBAL kind=WEBSERVER message=D315_SENTINEL_MESSAGE'),
+                        ($p + 'SUMMARY status=failed passed=1 failed=1'),
+                        ($p + 'SUMMARY status=failed passed=10000 failed=1 skipped=0'),
+                        ($p + 'SUMMARY status=failed passed=01 failed=1 skipped=0'),
+                        ($p + 'SUMMARY status=timedOut passed=1 failed=1 skipped=0'),
+                        ($p + 'SUMMARY status=failed passed=1 failed=1 skipped=0' + (' ' * 200))
+                    )
+                    foreach ($line in $rejected) { Write-Output $line }
+                    foreach ($record in $d315Valid) { Write-Output ($p + $record) }
+                    Write-Output 42
+                    Write-Output $null
+                    Write-Output @{ Line = $p + 'OVERFLOW' }
+                    Write-Output ([pscustomobject]@{ Line = $p + 'OVERFLOW' })
+                    Write-Output ([System.Management.Automation.ErrorRecord]::new(
+                        [System.Exception]::new($p + 'OVERFLOW'), 'D315', [System.Management.Automation.ErrorCategory]::NotSpecified, $null))
+                    Invoke-Native { & cmd.exe /d /c "echo D315_SENTINEL_NATIVE_STDERR 1>&2" }
+                    $stderrMarker = 'echo ' + $p + 'GLOBAL kind=OTHER 1>&2'
+                    Invoke-Native { & cmd.exe /d /c $stderrMarker }
+                    Assert-Success 'Playwright Keycloak E2E'
+                }
+                $d315Writer = { param($value) $d315Records.Add($value) }.GetNewClosure()
+                Invoke-E2EPlaywrightWithFixtureEnvironment -Receipt $receipt -InitialManifest $initial -Body $d315Body -DiagnosticWriter $d315Writer
+                return [pscustomobject]@{
+                    Records = @($d315Records)
+                    Expected = @($d315Valid | ForEach-Object { 'PLAYWRIGHT_DIAGNOSTIC=' + $_ })
+                    Nonce = $d315SeenNonce[0]
+                    NonceRestored = [System.Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_REPORTER_NONCE', 'Process')
+                    ManifestRestored = $null -eq [System.Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_FIXTURE_MANIFEST', 'Process')
+                }
+            }
+        } $script:D315PlaywrightManifestHarnessSource
+        Assert-Equal @($result.Expected) @($result.Records) 'Forwarded Playwright diagnostics differ from the exact allowed records.'
+        foreach ($record in @($result.Records)) {
+            foreach ($forbidden in @('SENTINEL', 'eyJ', 'http', 'password', 'FINGUARDOPS_E2E_PW_V1', $result.Nonce)) {
+                Assert-True (-not $record.Contains($forbidden)) 'A forwarded diagnostic reflected raw or sensitive output.'
+            }
+        }
+        Assert-True ($result.Nonce -cmatch '\A[0-9a-f]{32}\z') 'The reporter nonce was not 32 lowercase hexadecimal characters.'
+        Assert-Equal 'previous-owner-value' $result.NonceRestored 'The reporter nonce environment was not restored.'
+        Assert-True $result.ManifestRestored 'The manifest environment was not restored.'
+    }
+
+    Invoke-TestCase 'D315 Playwright diagnostics bound forwarded lines with one overflow code' {
+        $result = & $script:E2EModule {
+            param($harnessSource)
+            & ([scriptblock]::Create($harnessSource)) {
+                param($receipt, $initial)
+                $d315Records = [System.Collections.Generic.List[string]]::new()
+                $d315Primary = [System.InvalidOperationException]::new('PRIMARY_PLAYWRIGHT_FAILURE')
+                $d315Body = {
+                    $p = 'FINGUARDOPS_E2E_PW_V1 ' + [System.Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_REPORTER_NONCE', 'Process') + ' '
+                    foreach ($index in 1..45) { Write-Output ($p + 'TEST line=' + $index + ' n=1 status=failed kind=OTHER at=none') }
+                    Write-Output ($p + 'SUMMARY status=failed passed=0 failed=45 skipped=0')
+                    throw $d315Primary
+                }
+                $d315Caught = $null
+                try {
+                    Invoke-E2EPlaywrightWithFixtureEnvironment -Receipt $receipt -InitialManifest $initial -Body $d315Body `
+                        -DiagnosticWriter { param($value) $d315Records.Add($value) }.GetNewClosure()
+                }
+                catch { $d315Caught = $_.Exception }
+                return [pscustomobject]@{ Records = @($d315Records); Same = [object]::ReferenceEquals($d315Primary, $d315Caught) }
+            }
+        } $script:D315PlaywrightManifestHarnessSource
+        $expected = @(1..40 | ForEach-Object { 'PLAYWRIGHT_DIAGNOSTIC=TEST line=' + $_ + ' n=1 status=failed kind=OTHER at=none' }) +
+            @('PLAYWRIGHT_DIAGNOSTIC=RUNNER_OVERFLOW')
+        Assert-Equal $expected @($result.Records) 'Playwright diagnostic line bound or overflow code differs.'
+        Assert-True $result.Same 'Primary Playwright exception identity changed under overflow.'
+    }
+
+    Invoke-TestCase 'D315 Playwright exit code stays the only verdict' {
+        $result = & $script:E2EModule {
+            param($harnessSource)
+            & ([scriptblock]::Create($harnessSource)) {
+                param($receipt, $initial)
+                $d315Outcomes = [System.Collections.Generic.List[object]]::new()
+                foreach ($d315Case in @(
+                    [pscustomobject]@{ Name = 'summary-passed-exit-1'; Exit = 1; Record = 'SUMMARY status=passed passed=22 failed=0 skipped=0' },
+                    [pscustomobject]@{ Name = 'failures-exit-0'; Exit = 0; Record = 'TEST line=6834 n=1 status=failed kind=EXPECT at=6900' },
+                    [pscustomobject]@{ Name = 'nothing-exit-1'; Exit = 1; Record = $null }
+                )) {
+                    $d315Records = [System.Collections.Generic.List[string]]::new()
+                    $d315Body = {
+                        if ($null -ne $d315Case.Record) {
+                            $marker = 'echo FINGUARDOPS_E2E_PW_V1 ' +
+                                [System.Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_REPORTER_NONCE', 'Process') + ' ' + $d315Case.Record
+                            Invoke-Native { & cmd.exe /d /c $marker }
+                        }
+                        $exit = 'exit ' + $d315Case.Exit
+                        Invoke-Native { & cmd.exe /d /c $exit }
+                        Assert-Success 'Playwright Keycloak E2E'
+                    }
+                    $d315Message = $null
+                    try {
+                        Invoke-E2EPlaywrightWithFixtureEnvironment -Receipt $receipt -InitialManifest $initial -Body $d315Body `
+                            -DiagnosticWriter { param($value) $d315Records.Add($value) }.GetNewClosure()
+                    }
+                    catch { $d315Message = $_.Exception.Message }
+                    $d315Outcomes.Add([pscustomobject]@{ Name = $d315Case.Name; Message = $d315Message; Records = @($d315Records) })
+                }
+                return @($d315Outcomes)
+            }
+        } $script:D315PlaywrightManifestHarnessSource
+        Assert-Equal 3 @($result).Count 'Exit-code verdict case count differs.'
+        Assert-Equal 'Playwright Keycloak E2E failed.' $result[0].Message 'A passed SUMMARY hid a nonzero Playwright exit.'
+        Assert-Equal @('PLAYWRIGHT_DIAGNOSTIC=SUMMARY status=passed passed=22 failed=0 skipped=0') @($result[0].Records) 'Native SUMMARY record was not forwarded exactly.'
+        Assert-Equal $null $result[1].Message 'A failure record turned a zero Playwright exit into a failure.'
+        Assert-Equal @('PLAYWRIGHT_DIAGNOSTIC=TEST line=6834 n=1 status=failed kind=EXPECT at=6900') @($result[1].Records) 'Native TEST record was not forwarded exactly.'
+        Assert-Equal 'Playwright Keycloak E2E failed.' $result[2].Message 'A nonzero Playwright exit without records was not a failure.'
+        Assert-Equal @('PLAYWRIGHT_DIAGNOSTIC=SUMMARY_ABSENT') @($result[2].Records) 'Missing SUMMARY was not named with its fixed code.'
+    }
+
+    Invoke-TestCase 'D315 Playwright diagnostic writer failure preserves primary and success' {
+        $result = & $script:E2EModule {
+            param($harnessSource)
+            & ([scriptblock]::Create($harnessSource)) {
+                param($receipt, $initial)
+                $d315Primary = [System.InvalidOperationException]::new('PRIMARY_PLAYWRIGHT_FAILURE')
+                $d315Writer = { param($value) throw 'NeverReflect diagnostic writer credential' }
+                $d315Failed = $null
+                try {
+                    Invoke-E2EPlaywrightWithFixtureEnvironment -Receipt $receipt -InitialManifest $initial -DiagnosticWriter $d315Writer -Body {
+                        Write-Output ('FINGUARDOPS_E2E_PW_V1 ' + [System.Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_REPORTER_NONCE', 'Process') + ' OVERFLOW')
+                        throw $d315Primary
+                    }
+                }
+                catch { $d315Failed = $_.Exception }
+                $d315Succeeded = $true
+                try {
+                    Invoke-E2EPlaywrightWithFixtureEnvironment -Receipt $receipt -InitialManifest $initial -DiagnosticWriter $d315Writer -Body {
+                        Write-Output ('FINGUARDOPS_E2E_PW_V1 ' + [System.Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_REPORTER_NONCE', 'Process') + ' OVERFLOW')
+                    }
+                }
+                catch { $d315Succeeded = $false }
+                return [pscustomobject]@{
+                    Same = [object]::ReferenceEquals($d315Primary, $d315Failed)
+                    Succeeded = $d315Succeeded
+                    NonceRestored = $null -eq [System.Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_REPORTER_NONCE', 'Process')
+                }
+            }
+        } $script:D315PlaywrightManifestHarnessSource
+        Assert-True $result.Same 'A failing diagnostic writer replaced the primary Playwright failure.'
+        Assert-True $result.Succeeded 'A failing diagnostic writer turned a successful run into a failure.'
+        Assert-True $result.NonceRestored 'The reporter nonce environment leaked after the run.'
+    }
+
+    Invoke-TestCase 'D315 Playwright failure keeps run cleanup and receipt order' {
+        $result = & $script:E2EModule {
+            param($harnessSource)
+            & ([scriptblock]::Create($harnessSource)) {
+                param($receipt, $initial)
+                $d315Records = [System.Collections.Generic.List[string]]::new()
+                $d315Primary = $null
+                try {
+                    Invoke-E2EPlaywrightWithFixtureEnvironment -Receipt $receipt -InitialManifest $initial `
+                        -DiagnosticWriter { param($value) $d315Records.Add($value) }.GetNewClosure() -Body {
+                        Write-Output ('FINGUARDOPS_E2E_PW_V1 ' + [System.Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_REPORTER_NONCE', 'Process') +
+                            ' SUMMARY status=passed passed=1 failed=0 skipped=0')
+                        Invoke-Native { & cmd.exe /d /c 'exit 1' }
+                        Assert-Success 'Playwright Keycloak E2E'
+                    }
+                }
+                catch { $d315Primary = $_.Exception }
+                $d315Order = [System.Collections.Generic.List[string]]::new()
+                $d315Boundaries = @{}
+                foreach ($name in @('RestoreOutputEnvironment','RestoreProjectEnvironment','RestoreBrowserEnvironment','RemoveBrowser',
+                    'RemoveProjectResources','RemoveOutput','DisposeCertificate','ReleaseRunMutex','DisposeRunMutex')) {
+                    $label = $name
+                    $d315Boundaries[$name] = { $d315Order.Add($label) }.GetNewClosure()
+                }
+                $d315Core = $null
+                try { Invoke-E2ERunCoreCleanup -Primary $d315Primary -Boundaries $d315Boundaries }
+                catch { $d315Core = $_.Exception }
+                $d315Lifecycle = [System.Collections.Generic.List[string]]::new()
+                $d315RunBoundaries = @{
+                    ReadPrepared = { $receipt }.GetNewClosure()
+                    RenamePreparedToRecovery = { $d315Lifecycle.Add('to-recovery') }.GetNewClosure()
+                    AssertImages = { param($value) $d315Lifecycle.Add('images') }.GetNewClosure()
+                    RunBrowser = { param($value) $d315Lifecycle.Add('browser'); throw $d315Core }.GetNewClosure()
+                    Cleanup = { param($value) $d315Lifecycle.Add('receipt-cleanup') }.GetNewClosure()
+                }
+                $d315Run = $null
+                try { Invoke-E2ERunLifecycle -Boundaries $d315RunBoundaries }
+                catch { $d315Run = $_.Exception }
+                return [pscustomobject]@{
+                    Message = $d315Primary.Message
+                    Records = @($d315Records)
+                    Order = @($d315Order)
+                    CoreSame = [object]::ReferenceEquals($d315Primary, $d315Core)
+                    RunSame = [object]::ReferenceEquals($d315Primary, $d315Run)
+                    Lifecycle = @($d315Lifecycle)
+                }
+            }
+        } $script:D315PlaywrightManifestHarnessSource
+        Assert-Equal 'Playwright Keycloak E2E failed.' $result.Message 'Playwright primary failure changed.'
+        Assert-Equal @('PLAYWRIGHT_DIAGNOSTIC=SUMMARY status=passed passed=1 failed=0 skipped=0') @($result.Records) 'Cleanup-order diagnostic differs.'
+        Assert-Equal @('RestoreOutputEnvironment','RestoreProjectEnvironment','RestoreBrowserEnvironment','RemoveBrowser',
+            'RemoveProjectResources','RemoveOutput','DisposeCertificate','ReleaseRunMutex','DisposeRunMutex') @($result.Order) 'Run core cleanup order changed.'
+        Assert-True $result.CoreSame 'Run core cleanup replaced the Playwright primary.'
+        Assert-True $result.RunSame 'Run lifecycle replaced the Playwright primary.'
+        Assert-Equal @('to-recovery','images','browser','receipt-cleanup') @($result.Lifecycle) 'Run receipt lifecycle order changed.'
+    }
+
+    Invoke-TestCase 'D315 Playwright native stderr and raw stdout never reach the run output' {
+        $root = Join-Path ([System.IO.Path]::GetTempPath()) ('finguardops-d315-playwright-' + [guid]::NewGuid().ToString('N'))
+        $child = Join-Path $root 'child.ps1'
+        [System.IO.Directory]::CreateDirectory($root) | Out-Null
+        try {
+            $source = @'
+[CmdletBinding()]
+param([Parameter(Mandatory = $true)][string]$ModulePath)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$module = Import-Module $ModulePath -Force -PassThru
+& $module {
+    $receipt = New-E2EReceipt -RunId ([guid]::NewGuid().ToString('N')) -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+    $directory = Get-E2EFixtureDirectory -Receipt $receipt
+    $message = $null
+    try {
+        New-E2EFixtureDirectory -Receipt $receipt | Out-Null
+        $json = '{"schemaVersion":1,"runId":"' + $receipt.runId + '","repositoryId":"' + $receipt.repositoryId +
+            '","commitSha":"' + $receipt.commitSha + '","treeSha":"' + $receipt.treeSha +
+            '","composeProject":"' + $ProjectName + '","transactionId":"32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a","caseId":"d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703","expectedRiskLevel":"HIGH","expectedResponseOutcome":"ADDITIONAL_AUTH_REQUIRED","expectedInitialCaseStatus":"OPEN"}' + "`n"
+        [System.IO.File]::WriteAllBytes((Join-Path $directory 'fixture-identity.json'), [System.Text.UTF8Encoding]::new($false,$true).GetBytes($json))
+        $initial = Read-E2EFixtureManifest -Receipt $receipt -Directory $directory
+        try {
+            Invoke-E2EPlaywrightWithFixtureEnvironment -Receipt $receipt -InitialManifest $initial -Body {
+                $nonce = [System.Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_REPORTER_NONCE', 'Process')
+                Invoke-Native { & cmd.exe /d /c "echo D315_CHILD_STDERR_SENTINEL 1>&2" }
+                Invoke-Native { & cmd.exe /d /c "echo D315_CHILD_STDOUT_SENTINEL" }
+                $marker = 'echo FINGUARDOPS_E2E_PW_V1 ' + $nonce + ' TEST line=6899 n=1 status=failed kind=REQUIRE_CONDITION at=6905'
+                Invoke-Native { & cmd.exe /d /c $marker }
+                Invoke-Native { & cmd.exe /d /c 'exit 1' }
+                Assert-Success 'Playwright Keycloak E2E'
+            }
+        }
+        catch { $message = $_.Exception.Message }
+    }
+    finally {
+        if ([System.IO.Directory]::Exists($directory)) { [System.IO.Directory]::Delete($directory, $true) }
+    }
+    [Console]::Out.WriteLine('D315_CHILD_PRIMARY=' + $message)
+}
+'@
+            [System.IO.File]::WriteAllText($child, ($source -replace "(?<!`r)`n", "`r`n") + "`r`n", [System.Text.UTF8Encoding]::new($false))
+            Assert-Parsed $child
+            $start = [System.Diagnostics.ProcessStartInfo]::new('powershell.exe')
+            $start.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $child + '" -ModulePath "' + $ModulePath + '"'
+            $start.UseShellExecute = $false
+            $start.RedirectStandardOutput = $true
+            $start.RedirectStandardError = $true
+            $start.CreateNoWindow = $true
+            $process = [System.Diagnostics.Process]::Start($start)
+            try {
+                $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+                $stderrTask = $process.StandardError.ReadToEndAsync()
+                if (-not $process.WaitForExit(120000)) { $process.Kill(); throw 'D315 Playwright child timed out.' }
+                $stdout = $stdoutTask.Result
+                $stderr = $stderrTask.Result
+            }
+            finally { $process.Dispose() }
+        }
+        finally {
+            if ([System.IO.Directory]::Exists($root)) { [System.IO.Directory]::Delete($root, $true) }
+        }
+        $combined = $stdout + "`n" + $stderr
+        Assert-True ($stdout.Contains('D315_CHILD_PRIMARY=Playwright Keycloak E2E failed.')) 'Child Playwright primary failure differs.'
+        Assert-True ($combined.Contains('PLAYWRIGHT_DIAGNOSTIC=TEST line=6899 n=1 status=failed kind=REQUIRE_CONDITION at=6905')) 'Child fixed record was not forwarded.'
+        Assert-True ($combined.Contains('PLAYWRIGHT_DIAGNOSTIC=SUMMARY_ABSENT')) 'Child missing SUMMARY code was not forwarded.'
+        foreach ($forbidden in @('D315_CHILD_STDERR_SENTINEL', 'D315_CHILD_STDOUT_SENTINEL', 'FINGUARDOPS_E2E_PW_V1')) {
+            Assert-True (-not $combined.Contains($forbidden)) 'Raw Playwright process output reached the run output.'
+        }
+        Assert-True (-not [System.IO.Directory]::Exists($root)) 'D315 Playwright child fixture remains.'
+    }
+
+    Invoke-TestCase 'D315 Playwright reporter and config share the fixed record contract' {
+        $frontend = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+        $reporter = [System.IO.File]::ReadAllText((Join-Path $frontend 'e2e\safe-failure-reporter.ts'), [System.Text.UTF8Encoding]::new($false, $true))
+        $config = [System.IO.File]::ReadAllText((Join-Path $frontend 'playwright.config.ts'), [System.Text.UTF8Encoding]::new($false, $true))
+        $contract = & $script:E2EModule {
+            [pscustomobject]@{
+                Prefix = $PlaywrightDiagnosticPrefix
+                Nonce = $PlaywrightReporterNonceEnvironmentName
+            }
+        }
+        Assert-True ($reporter.Contains('export const SAFE_FAILURE_MARKER_PREFIX = "' + $contract.Prefix + '";')) 'Reporter prefix differs from the runner prefix.'
+        Assert-True ($reporter.Contains('const REPORTER_NONCE_ENVIRONMENT = "' + $contract.Nonce + '";')) 'Reporter nonce environment differs from the runner.'
+        Assert-True ($config.Contains('const REPORTER_NONCE_ENVIRONMENT = "' + $contract.Nonce + '";')) 'Config nonce environment differs from the runner.'
+        Assert-True ($config.Contains('[["line"], ["./e2e/safe-failure-reporter.ts", { nonce: reporterNonce }]]')) 'Config does not pair the line reporter with the fixed-field reporter.'
+        Assert-True ($config.Contains('delete webServerEnvironment[REPORTER_NONCE_ENVIRONMENT];')) 'Config passes the reporter nonce to the web server.'
+        Assert-True ($reporter.Contains('delete process.env[REPORTER_NONCE_ENVIRONMENT];')) 'Reporter does not remove the nonce before workers start.'
+        foreach ($forbidden in @('error.message}', 'test.title', 'titlePath', 'error.stack}', 'snippet', 'attachments')) {
+            Assert-True (-not $reporter.Contains($forbidden)) 'Reporter source writes a raw title, message, stack or attachment.'
+        }
+    }
+
+    if ($script:Failures.Count -ne 0) {
+        $script:Failures | ForEach-Object { Write-Output $_ }
+        exit 1
+    }
+    Write-Output 'D315 Playwright diagnostic targeted passed'
+}
+
 function Invoke-FormalTests {
     Invoke-SessionStateTargetedTests
     Invoke-WaitBrowserTargetedTests
@@ -9330,6 +9740,7 @@ function Invoke-FormalTests {
     Invoke-D315LauncherTargetedTests
     Invoke-D315TargetedTests
     Invoke-D315AfterTargetedTests
+    Invoke-D315PlaywrightDiagnosticTargetedTests
     $script:Failures = [System.Collections.Generic.List[string]]::new()
     $receipt = New-TestReceipt
 
@@ -9711,6 +10122,11 @@ if ($Mode -eq 'D315LauncherTargeted') {
 
 if ($Mode -eq 'D315AfterTargeted') {
     Invoke-D315AfterTargetedTests
+    exit 0
+}
+
+if ($Mode -eq 'D315PlaywrightTargeted') {
+    Invoke-D315PlaywrightDiagnosticTargetedTests
     exit 0
 }
 
