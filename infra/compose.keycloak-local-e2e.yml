@@ -196,6 +196,45 @@ services:
       - no-new-privileges:true
     restart: "no"
 
+  keycloak-run-fixture:
+    image: python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7
+    entrypoint:
+      - python
+      - -B
+      - /opt/finguardops/verify_e2e.py
+    command:
+      - run-fixture
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      KEYCLOAK_INTERNAL_BASE_URL: http://127.0.0.1:8082
+      KEYCLOAK_MANAGEMENT_BASE_URL: http://127.0.0.1:9000
+      FINGUARDOPS_E2E_RUN_ID: ${FINGUARDOPS_E2E_RUN_ID:?FINGUARDOPS_E2E_RUN_ID is required}
+      FINGUARDOPS_E2E_REPOSITORY_ID: ${FINGUARDOPS_E2E_REPOSITORY_ID:?FINGUARDOPS_E2E_REPOSITORY_ID is required}
+      FINGUARDOPS_E2E_REVISION: ${FINGUARDOPS_E2E_REVISION:?FINGUARDOPS_E2E_REVISION is required}
+      FINGUARDOPS_E2E_SOURCE_TREE: ${FINGUARDOPS_E2E_SOURCE_TREE:?FINGUARDOPS_E2E_SOURCE_TREE is required}
+      FINGUARDOPS_E2E_COMPOSE_PROJECT: ${FINGUARDOPS_E2E_COMPOSE_PROJECT:?FINGUARDOPS_E2E_COMPOSE_PROJECT is required}
+      FINGUARDOPS_E2E_FIXTURE_PLAN: ${FINGUARDOPS_E2E_FIXTURE_PLAN:-}
+    volumes:
+      - ./keycloak/verify_e2e.py:/opt/finguardops/verify_e2e.py:ro
+      - ${FINGUARDOPS_E2E_FIXTURE_DIR:?FINGUARDOPS_E2E_FIXTURE_DIR is required}:/finguardops/fixture:rw
+    secrets:
+      - source: transaction_service_client_secret
+        target: transaction_service_client_secret
+        mode: 0400
+      - source: behavior_service_client_secret
+        target: behavior_service_client_secret
+        mode: 0400
+    network_mode: "service:backend"
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=8m,mode=0700,uid=10001,gid=10001
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
 secrets:
   keycloak_bootstrap_admin_secret:
     file: ./keycloak/.local/secrets/bootstrap-admin-client-secret

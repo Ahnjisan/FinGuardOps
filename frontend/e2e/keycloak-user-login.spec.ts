@@ -6816,6 +6816,114 @@ test("a real USER opens a transaction detail address and meets the real Backend 
 });
 
 /**
+ * The one address a case row may lead to: the canonical detail route of a
+ * canonical lowercase UUID v4 (`CaseTable`, Issue #255). No origin, no query, no
+ * fragment and no trailing slash.
+ */
+const CASE_DETAIL_HREF = new RegExp(`^/cases/(${CANONICAL_UUID_V4_PATTERN})$`);
+const CASE_DETAIL_LINK_LABEL_PREFIX = "View case details for ";
+
+/** The anchors one rendered case row carries, read as attributes and text. */
+interface CaseRowLinkSnapshot {
+  readonly href: string | null;
+  readonly text: string;
+  readonly ariaLabel: string | null;
+}
+
+interface CaseRowSnapshot {
+  readonly links: readonly CaseRowLinkSnapshot[];
+}
+
+/** Every refusal is a fixed sentence: no identifier or address is reflected. */
+const CASE_ROW_LINK_REFUSALS = {
+  noRows: "The populated case sheet rendered no rows.",
+  linkCount: "A case row did not carry exactly one link.",
+  queryOrFragment: "A case row link carried a query or a fragment.",
+  route: "A case row link was not the canonical case detail route.",
+  text: "A case row link did not show the identifier it leads to.",
+  label: "A case row link was not named for the identifier it leads to.",
+  duplicate: "Two case rows led to the same case.",
+} as const;
+
+/**
+ * The populated case sheet's link contract: each row has exactly one link, to
+ * its own case's canonical detail route, showing that identifier as its whole
+ * text and named for it by `aria-label`.
+ */
+function requireCaseRowLinks(rows: readonly CaseRowSnapshot[]): void {
+  requireCondition(rows.length > 0, CASE_ROW_LINK_REFUSALS.noRows);
+  const seen = new Set<string>();
+  for (const row of rows) {
+    requireCondition(row.links.length === 1, CASE_ROW_LINK_REFUSALS.linkCount);
+    const link = row.links[0];
+    const href = link.href ?? "";
+    requireCondition(!href.includes("?") && !href.includes("#"), CASE_ROW_LINK_REFUSALS.queryOrFragment);
+    const route = CASE_DETAIL_HREF.exec(href);
+    requireCondition(route !== null, CASE_ROW_LINK_REFUSALS.route);
+    const caseId = route[1];
+    requireCondition(link.text === caseId, CASE_ROW_LINK_REFUSALS.text);
+    requireCondition(
+      link.ariaLabel === `${CASE_DETAIL_LINK_LABEL_PREFIX}${caseId}`,
+      CASE_ROW_LINK_REFUSALS.label,
+    );
+    requireCondition(!seen.has(caseId), CASE_ROW_LINK_REFUSALS.duplicate);
+    seen.add(caseId);
+  }
+}
+
+/**
+ * The oracle above, proved against its counterexamples before it judges a live
+ * sheet. Runs whether or not this runtime holds case rows, inside the existing
+ * case test rather than as a test of its own, so the official test count is
+ * unchanged. The identifiers are synthetic.
+ */
+function requireCaseRowLinkOracle(): void {
+  const first = "c0ffee00-0000-4000-8000-000000000001";
+  const second = "c0ffee00-0000-4000-9000-000000000002";
+  const link = (caseId: string): CaseRowLinkSnapshot => ({
+    href: `/cases/${caseId}`,
+    text: caseId,
+    ariaLabel: `${CASE_DETAIL_LINK_LABEL_PREFIX}${caseId}`,
+  });
+  const row = (...links: CaseRowLinkSnapshot[]): CaseRowSnapshot => ({ links });
+
+  requireCaseRowLinks([row(link(first))]);
+  requireCaseRowLinks([row(link(first)), row(link(second))]);
+
+  const refused: readonly (readonly [readonly CaseRowSnapshot[], string])[] = [
+    [[], CASE_ROW_LINK_REFUSALS.noRows],
+    [[row()], CASE_ROW_LINK_REFUSALS.linkCount],
+    [[row(link(first), link(first))], CASE_ROW_LINK_REFUSALS.linkCount],
+    [[row(link(first)), row()], CASE_ROW_LINK_REFUSALS.linkCount],
+    [[row({ ...link(first), href: null })], CASE_ROW_LINK_REFUSALS.route],
+    [[row({ ...link(first), href: `${APP_ORIGIN}/cases/${first}` })], CASE_ROW_LINK_REFUSALS.route],
+    [[row({ ...link(first), href: `/cases/${first}/` })], CASE_ROW_LINK_REFUSALS.route],
+    [[row({ ...link(first), href: `/transactions/${first}` })], CASE_ROW_LINK_REFUSALS.route],
+    [[row(link(first.toUpperCase()))], CASE_ROW_LINK_REFUSALS.route],
+    [[row(link("c0ffee00-0000-5000-8000-000000000001"))], CASE_ROW_LINK_REFUSALS.route],
+    [[row({ ...link(first), href: `/cases/${first}?view=1` })], CASE_ROW_LINK_REFUSALS.queryOrFragment],
+    [[row({ ...link(first), href: `/cases/${first}?` })], CASE_ROW_LINK_REFUSALS.queryOrFragment],
+    [[row({ ...link(first), href: `/cases/${first}#notes` })], CASE_ROW_LINK_REFUSALS.queryOrFragment],
+    [[row({ ...link(first), text: second })], CASE_ROW_LINK_REFUSALS.text],
+    [[row({ ...link(first), text: ` ${first}` })], CASE_ROW_LINK_REFUSALS.text],
+    [[row({ ...link(first), text: "" })], CASE_ROW_LINK_REFUSALS.text],
+    [[row({ ...link(first), ariaLabel: null })], CASE_ROW_LINK_REFUSALS.label],
+    [[row({ ...link(first), ariaLabel: `${CASE_DETAIL_LINK_LABEL_PREFIX}${second}` })], CASE_ROW_LINK_REFUSALS.label],
+    [[row({ ...link(first), ariaLabel: first })], CASE_ROW_LINK_REFUSALS.label],
+    [[row(link(first)), row(link(first))], CASE_ROW_LINK_REFUSALS.duplicate],
+  ];
+  for (const [rows, expected] of refused) {
+    let message: string | null = null;
+    try {
+      requireCaseRowLinks(rows);
+    } catch (error: unknown) {
+      message = error instanceof Error ? error.message : "unknown";
+    }
+    requireCondition(message === expected, "The case row link oracle accepted or misnamed a counterexample.");
+  }
+}
+
+/**
  * The case list, over the same real Keycloak session and the same real Spring
  * Boot as the ledger screens.
  *
@@ -6825,11 +6933,11 @@ test("a real USER opens a transaction detail address and meets the real Backend 
  * the transaction test above. No API or authentication test double is used,
  * so what the screen shows is what Spring Boot answered after real login.
  *
- * This runtime holds no seeded case rows, so the screen is allowed to settle on
- * a deterministic empty state. That is a real 200 from a real endpoint, and it
- * is the honest evidence available here; the populated table is proved by the
- * component and hook tests against the typed API contract, and no fixture is
- * injected to manufacture one.
+ * Whether this runtime holds case rows depends on the run: the browser Run
+ * fixture (Issue #315) publishes one case before this suite starts, and without
+ * it the screen settles on a deterministic empty state. Both are a real 200 from
+ * a real endpoint. A populated sheet is held to the row link contract above; no
+ * API double is injected to manufacture rows.
  */
 test("a real USER reaches the case console over the real Backend", async ({ page }) => {
   const password = readUserPassword();
@@ -6884,6 +6992,7 @@ test("a real USER reaches the case console over the real Backend", async ({ page
     showingRows || emptyResult,
     `The case screen did not settle on a result state: ${summary.trim()}`,
   );
+  requireCaseRowLinkOracle();
   if (showingRows) {
     await expect(page.getByRole("table")).toBeVisible();
     // Every displayed instant states its zone and carries the untouched UTC
@@ -6895,10 +7004,20 @@ test("a real USER reaches the case console over the real Backend", async ({ page
       machineReadable !== null && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/.test(machineReadable),
       "A rendered case time carried no UTC machine-readable value.",
     );
-    // No detail affordance in this Issue: the identifier is text, not a link.
+    // Each row's one way out is its own case's canonical detail route (#255).
+    const rows = await page.locator("tbody > tr").evaluateAll((elements) =>
+      elements.map((element) => ({
+        links: Array.from(element.querySelectorAll("a"), (anchor) => ({
+          href: anchor.getAttribute("href"),
+          text: anchor.textContent ?? "",
+          ariaLabel: anchor.getAttribute("aria-label"),
+        })),
+      })),
+    );
+    requireCaseRowLinks(rows);
     requireCondition(
-      (await page.locator("tbody a").count()) === 0,
-      "The case sheet offered a link this Issue does not implement.",
+      (await page.locator("tbody a").count()) === rows.length,
+      CASE_ROW_LINK_REFUSALS.linkCount,
     );
   } else {
     await expect(page.getByText("There are no cases to show yet.")).toBeVisible();

@@ -76,6 +76,42 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(methods.count("PUT"), 1)
         self.assertEqual(methods.count("POST"), 7)
 
+    def test_realm_reconcile_pins_the_configured_token_lifetime_margin(self):
+        # The desired lifespan sits one second below the verifier maximum so the
+        # ordinary whole-second boundary crossing between Keycloak's two clock
+        # reads still produces an accepted token. Longer stalls stay failures.
+        current = {"realm": bootstrap.REALM, "someExistingKey": "preserved"}
+        admin = RecordingAdmin([current, None])
+        bootstrap.Reconciler(admin).reconcile_realm()
+        self.assertEqual(len(admin.calls), 2)
+        self.assertEqual(admin.calls[0][0], "GET")
+        method, path, payload, keywords = admin.calls[1]
+        self.assertEqual(method, "PUT")
+        self.assertEqual(payload["accessTokenLifespan"], 899)
+        self.assertEqual(payload["realm"], bootstrap.REALM)
+        self.assertIs(payload["enabled"], True)
+        self.assertIs(payload["registrationAllowed"], False)
+        self.assertIs(payload["rememberMe"], False)
+        self.assertEqual(payload["defaultSignatureAlgorithm"], "RS256")
+        self.assertEqual(payload["someExistingKey"], "preserved")
+        self.assertEqual(keywords.get("expected"), (204,))
+
+    def test_realm_reconcile_creates_absent_realm_with_the_same_margin(self):
+        admin = RecordingAdmin([bootstrap.ReconcileError("ADMIN_HTTP_NOT_FOUND"), None])
+        bootstrap.Reconciler(admin).reconcile_realm()
+        self.assertEqual(len(admin.calls), 2)
+        method, path, payload, keywords = admin.calls[1]
+        self.assertEqual((method, path), ("POST", "/admin/realms"))
+        self.assertEqual(payload["accessTokenLifespan"], 899)
+        self.assertEqual(payload["realm"], bootstrap.REALM)
+        self.assertEqual(keywords.get("expected"), (201, 204))
+
+    def test_realm_reconcile_propagates_other_admin_failures(self):
+        admin = RecordingAdmin([bootstrap.ReconcileError("ADMIN_HTTP_STATUS")])
+        with self.assertRaisesRegex(bootstrap.ReconcileError, "ADMIN_HTTP_STATUS"):
+            bootstrap.Reconciler(admin).reconcile_realm()
+        self.assertEqual(len(admin.calls), 1)
+
     def test_mapper_update_uses_existing_mapper_id(self):
         desired = bootstrap.principal_mapper("mapper-name", "SERVICE", False)
         admin = RecordingAdmin(

@@ -1,9 +1,13 @@
+import ast
 import base64
 import contextlib
 import copy
+import errno as errno_module
+import http.client
 import io
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -18,6 +22,169 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import verify_e2e
+
+
+def publication_success_output(newline="\n"):
+    return (
+        "2026-09-26T07:54:13.123Z  INFO 1 --- [           main] "
+        "c.a.b.r.o.RuleV1DefaultRuleSetPublicationRunner : "
+        + verify_e2e.RULE_PUBLICATION_RUNNER_SUCCESS_EVIDENCE
+        + " ruleVersionIds=[R001, R002, R003, R004] "
+        "effectiveFrom=2026-09-26T07:55:13Z "
+        "publishedAt=2026-09-26T07:54:14Z ruleSetVersion=1"
+        + newline
+    ).encode()
+
+
+# A production-equivalent synthetic capture. It is NOT a copy of real Docker
+# output: it is assembled from repository-owned producer contracts only —
+# RuleV1DefaultRuleSetPublicationRunner.reportSuccess's message, the
+# PublicationOutcome.PUBLISHED literal, RuleV1DefaultRuleSetPublicationResult's
+# four UUID ruleVersionIds and 64-hex ruleSetVersion, Spring Boot 3.5.16's
+# CONSOLE_LOG_PATTERN (%5p level, PID, "---", [%15.15t] thread and the
+# %-40.40logger{39} truncation) and application.yml's
+# logging.pattern.correlation field.
+PRODUCTION_LOGGER = ".o.RuleV1DefaultRuleSetPublicationRunner"
+PRODUCTION_CORRELATION = "[traceId=no-trace] "
+PRODUCTION_RULE_VERSION_IDS = (
+    "6c9f1a2b-1111-4111-8111-111111111111",
+    "7a1b2c3d-2222-4222-8222-222222222222",
+    "8c2d3e4f-3333-4333-8333-333333333333",
+    "9e3f4a5b-4444-4444-8444-444444444444",
+)
+PRODUCTION_BANNER = (
+    "\n"
+    "  .   ____          _            __ _ _\n"
+    " /\\\\ / ___'_ __ _ _(_)_ __  __ _ \\ \\ \\ \\\n"
+    "( ( )\\___ | '_ | '_| | '_ \\/ _` | \\ \\ \\ \\\n"
+    " \\\\/  ___)| |_)| | | | | || (_| |  ) ) ) )\n"
+    "  '  |____| .__|_| |_|_| |_\\__, | / / / /\n"
+    " =========|_|==============|___/=/_/_/_/\n"
+    "\n"
+    " :: Spring Boot ::               (v3.5.16)\n"
+    "\n"
+)
+
+
+def production_boot_line(logger, message, level="INFO", timestamp="2026-09-26T12:45:14.512Z"):
+    field = logger if len(logger) >= 40 else logger.ljust(40)
+    return "%s %5s 1 --- [           main] %s%s : %s" % (
+        timestamp, level, PRODUCTION_CORRELATION, field, message
+    )
+
+
+def production_success_message():
+    return (
+        verify_e2e.RULE_PUBLICATION_RUNNER_SUCCESS_EVIDENCE
+        + " ruleVersionIds=[" + ", ".join(PRODUCTION_RULE_VERSION_IDS) + "]"
+        + " effectiveFrom=2026-09-26T12:46:13Z"
+        + " publishedAt=2026-09-26T12:45:14.512345Z"
+        + " ruleSetVersion=" + "a" * 64
+    )
+
+
+# The logger name Logback prints, fixed by ConnectionInfoLogger.LOGGER_NAME.
+# It is 37 characters, so Spring Boot's default %logger{39} prints it whole.
+HIBERNATE_CONNECTION_INFO_LOGGER = "org.hibernate.orm.connections.pooling"
+HIBERNATE_TAB_LOGGER_PROPERTY = (
+    "--logging.level.org.hibernate.orm.connections.pooling=WARN"
+)
+HIBERNATE_TAB_LOGGER_CONTRACT = re.compile(
+    r"--logging\.level\.org\.hibernate\.orm\.connections\.pooling=WARN"
+)
+
+
+def hibernate_connection_info_block(newline="\n"):
+    # The shape Hibernate ORM 6.6.53.Final emits at INFO from
+    # ConnectionInfoLogger.logConnectionInfoDetails (HHH10001005): one ordinary
+    # Boot console line, then the seven TAB-prefixed continuation lines that
+    # DatabaseConnectionInfoImpl.toInfoString() renders. Values are placeholders;
+    # no real capture is reproduced here.
+    head = production_boot_line(
+        HIBERNATE_CONNECTION_INFO_LOGGER,
+        "HHH10001005: Database info:",
+        timestamp="2026-09-26T12:45:09.001Z",
+    )
+    labels = (
+        "Database JDBC URL [NeverPrintTail]",
+        "Database driver: NeverPrintTail",
+        "Database version: NeverPrintTail",
+        "Autocommit mode: NeverPrintTail",
+        "Isolation level: NeverPrintTail",
+        "Minimum pool size: NeverPrintTail",
+        "Maximum pool size: NeverPrintTail",
+    )
+    lines = [head] + ["\t" + label for label in labels]
+    return newline.join(lines).encode() + newline.encode()
+
+
+def publication_production_success_output(newline="\n"):
+    lines = [
+        production_boot_line(
+            "c.a.backend.BackendApplication",
+            "Starting BackendApplication v0.0.1 using Java 21.0.5 with PID 1"
+            " (/app/backend.jar started by root in /)",
+            timestamp="2026-09-26T12:45:08.001Z",
+        ),
+        production_boot_line(
+            "c.a.backend.BackendApplication",
+            'The following 2 profiles are active: "local",'
+            ' "rule-v1-default-publication"',
+            timestamp="2026-09-26T12:45:08.004Z",
+        ),
+        production_boot_line(
+            "faultConfigurationDelegate$Registrar",
+            "Bootstrapping Spring Data JPA repositories in DEFAULT mode.",
+            timestamp="2026-09-26T12:45:09.512Z",
+        ),
+        production_boot_line(
+            "o.f.c.internal.license.VersionPrinter",
+            "Flyway Community Edition 11.7.2 by Redgate",
+            timestamp="2026-09-26T12:45:10.001Z",
+        ),
+        production_boot_line(
+            "c.i.database.base.BaseDatabaseType",
+            "Database: jdbc:postgresql://postgresql:5432/finguardops"
+            " (PostgreSQL 17.6)",
+            timestamp="2026-09-26T12:45:10.002Z",
+        ),
+        production_boot_line(
+            "com.zaxxer.hikari.HikariDataSource",
+            "HikariPool-1 - Starting...",
+            timestamp="2026-09-26T12:45:10.500Z",
+        ),
+        production_boot_line(
+            "o.hibernate.jpa.internal.util.LogHelper",
+            "HHH000204: Processing PersistenceUnitInfo [name: default]",
+            timestamp="2026-09-26T12:45:11.100Z",
+        ),
+        production_boot_line(
+            "o.s.b.a.orm.jpa.JpaBaseConfiguration",
+            "spring.jpa.open-in-view is disabled",
+            level="WARN",
+            timestamp="2026-09-26T12:45:13.900Z",
+        ),
+        production_boot_line(PRODUCTION_LOGGER, production_success_message()),
+        production_boot_line(
+            "c.a.backend.BackendApplication",
+            "Started BackendApplication in 6.82 seconds (process running for 7.31)",
+            timestamp="2026-09-26T12:45:14.600Z",
+        ),
+        production_boot_line(
+            "com.zaxxer.hikari.HikariDataSource",
+            "HikariPool-1 - Shutdown initiated...",
+            timestamp="2026-09-26T12:45:14.700Z",
+        ),
+        production_boot_line(
+            "com.zaxxer.hikari.HikariDataSource",
+            "HikariPool-1 - Shutdown completed.",
+            timestamp="2026-09-26T12:45:14.760Z",
+        ),
+    ]
+    body = PRODUCTION_BANNER + "".join(line + "\n" for line in lines)
+    if newline != "\n":
+        body = body.replace("\n", newline)
+    return body.encode()
 
 
 def service(image=None, *, secrets=()):
@@ -92,6 +259,28 @@ def valid_config():
         "KEYCLOAK_INTERNAL_BASE_URL": verify_e2e.INTERNAL_BASE_URL,
         "KEYCLOAK_MANAGEMENT_BASE_URL": verify_e2e.MANAGEMENT_BASE_URL,
     }
+    run_fixture = service(
+        verify_e2e.HELPER_IMAGE,
+        secrets=verify_e2e.EXPECTED_SECRETS["keycloak-run-fixture"],
+    )
+    run_fixture["entrypoint"] = ["python", "-B", "/opt/finguardops/verify_e2e.py"]
+    run_fixture["command"] = ["run-fixture"]
+    run_fixture["volumes"] = [
+        {"type": "bind", "source": "infra/keycloak/verify_e2e.py", "target": "/opt/finguardops/verify_e2e.py", "read_only": True},
+        {"type": "bind", "source": "C:/Temp/finguardops-keycloak-e2e-fixture-" + "0" * 32, "target": "/finguardops/fixture", "read_only": False},
+    ]
+    run_fixture["environment"] = {
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "KEYCLOAK_INTERNAL_BASE_URL": verify_e2e.INTERNAL_BASE_URL,
+        "KEYCLOAK_MANAGEMENT_BASE_URL": verify_e2e.MANAGEMENT_BASE_URL,
+        "FINGUARDOPS_E2E_RUN_ID": "0" * 32,
+        "FINGUARDOPS_E2E_REPOSITORY_ID": "a" * 64,
+        "FINGUARDOPS_E2E_REVISION": "b" * 40,
+        "FINGUARDOPS_E2E_SOURCE_TREE": "c" * 40,
+        verify_e2e.COMPOSE_PROJECT_ENVIRONMENT: verify_e2e.RUN_FIXTURE_PROJECT,
+        verify_e2e.FIXTURE_PLAN_ENVIRONMENT: "",
+    }
+    run_fixture["depends_on"] = {"backend": {"condition": "service_started"}}
     keycloak["volumes"] = [
         {"type": "volume", "source": "keycloak-data", "target": "/opt/keycloak/data"},
         {"type": "bind", "source": "infra/keycloak/realm/finguardops-local-realm.json", "target": "/opt/keycloak/data/import/finguardops-local-realm.json", "read_only": True},
@@ -102,6 +291,7 @@ def valid_config():
         "keycloak": keycloak,
         "keycloak-bootstrap": bootstrap,
         "keycloak-verify": verifier,
+        "keycloak-run-fixture": run_fixture,
     }
     for name in verify_e2e.EXPECTED_KEYCLOAK_SERVICES - set(services):
         services[name] = {}
@@ -130,6 +320,12 @@ def valid_owner_environment():
         "FINGUARDOPS_E2E_SOURCE_TREE": "c" * 40,
         "FINGUARDOPS_E2E_RUN_ID": run_id,
         "FINGUARDOPS_E2E_REPOSITORY_ID": "a" * 64,
+    }
+
+
+def valid_run_fixture_environment():
+    return valid_owner_environment() | {
+        verify_e2e.COMPOSE_PROJECT_ENVIRONMENT: verify_e2e.RUN_FIXTURE_PROJECT,
     }
 
 
@@ -173,11 +369,44 @@ def valid_plan():
     }
 
 
+def valid_fixture_identity():
+    owner = valid_owner_environment()
+    return {
+        "schemaVersion": 1,
+        "runId": owner["FINGUARDOPS_E2E_RUN_ID"],
+        "repositoryId": owner["FINGUARDOPS_E2E_REPOSITORY_ID"],
+        "commitSha": owner["FINGUARDOPS_E2E_REVISION"],
+        "treeSha": owner["FINGUARDOPS_E2E_SOURCE_TREE"],
+        "composeProject": verify_e2e.RUN_FIXTURE_PROJECT,
+        "transactionId": valid_plan()["transactionId"],
+        "caseId": "d20a2f8d-7b67-4cdd-8b73-a8fc4b1f2703",
+        "expectedRiskLevel": "HIGH",
+        "expectedResponseOutcome": "ADDITIONAL_AUTH_REQUIRED",
+        "expectedInitialCaseStatus": "OPEN",
+    }
+
+
 def snapshot_fixture(rows_by_table=None):
     rows_by_table = rows_by_table or {}
     return {
         table: verify_e2e.table_snapshot(table, tuple(rows_by_table.get(table, ())))
         for table in verify_e2e.BUSINESS_TABLES
+    }
+
+
+def valid_run_fixture_state():
+    owner = valid_owner_environment()
+    return {
+        "schemaVersion": 1,
+        "runId": owner["FINGUARDOPS_E2E_RUN_ID"],
+        "repositoryId": owner["FINGUARDOPS_E2E_REPOSITORY_ID"],
+        "commitSha": owner["FINGUARDOPS_E2E_REVISION"],
+        "treeSha": owner["FINGUARDOPS_E2E_SOURCE_TREE"],
+        "composeProject": verify_e2e.RUN_FIXTURE_PROJECT,
+        "plan": valid_plan(),
+        "database": verify_e2e.snapshot_to_state(snapshot_fixture()),
+        "dependencies": [0, 0],
+        "metrics": [0.0, 0.0],
     }
 
 
@@ -611,15 +840,17 @@ class VerifyTests(unittest.TestCase):
 
     def test_uuid_issuer_alg_kid_and_time_counterexamples(self):
         mutations = [
-            ({"sub": "32A6A5DB-71E4-4E58-8B3F-EC8C2C07B69A"}, {}),
-            ({"iss": verify_e2e.ISSUER + "/"}, {}),
-            ({}, {"alg": "HS256"}),
-            ({}, {"kid": ""}),
-            ({"exp": 1001}, {}),
-            ({"iat": True}, {}),
+            ({"sub": "32A6A5DB-71E4-4E58-8B3F-EC8C2C07B69A"}, {}, "TOKEN_SUBJECT_INVALID"),
+            ({"iss": verify_e2e.ISSUER + "/"}, {}, "TOKEN_ISSUER_INVALID"),
+            ({}, {"alg": "HS256"}, "TOKEN_HEADER_INVALID"),
+            ({}, {"kid": ""}, "TOKEN_HEADER_INVALID"),
+            ({"exp": 1001}, {}, "TOKEN_TIME_LIFETIME_INVALID"),
+            ({"iat": True}, {}, "TOKEN_TIME_TYPE_INVALID"),
         ]
-        for payload_change, header_change in mutations:
-            with self.assertRaises(verify_e2e.VerificationError):
+        for payload_change, header_change, code in mutations:
+            with self.subTest(code=code), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "^" + code + "$"
+            ):
                 verify_e2e.validate_token(token(payload_change, header_change), "TRANSACTION_INGESTOR", {"kid-1"}, current_time=500)
 
     def test_token_time_boundaries_and_stale_now_regression(self):
@@ -636,6 +867,136 @@ class VerifyTests(unittest.TestCase):
         with self.assertRaisesRegex(verify_e2e.VerificationError, "TOKEN_TIME_IAT_FUTURE"):
             verify_e2e.validate_token(token({"iat": 101, "exp": 1000}), "TRANSACTION_INGESTOR", {"kid-1"}, current_time=100)
         verify_e2e.validate_token(token({"iat": 101, "exp": 1000}), "TRANSACTION_INGESTOR", {"kid-1"}, current_time=101)
+
+    def test_exp_not_after_iat_is_its_own_fixed_identity(self):
+        for exp in (500, 499, 0):
+            with self.subTest(exp=exp), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "^TOKEN_TIME_ORDER_INVALID$"
+            ):
+                verify_e2e.validate_token(
+                    token({"iat": 500, "exp": exp}), "TRANSACTION_INGESTOR", {"kid-1"},
+                    current_time=500,
+                )
+
+    def test_lifetime_upper_bound_is_exact_and_inclusive(self):
+        with self.assertRaisesRegex(
+            verify_e2e.VerificationError, "^TOKEN_TIME_LIFETIME_INVALID$"
+        ):
+            verify_e2e.validate_token(
+                token({"iat": 100, "exp": 1001}), "TRANSACTION_INGESTOR", {"kid-1"},
+                current_time=500,
+            )
+        for exp in (1000, 999):
+            with self.subTest(exp=exp):
+                verify_e2e.validate_token(
+                    token({"iat": 100, "exp": exp}), "TRANSACTION_INGESTOR", {"kid-1"},
+                    current_time=500,
+                )
+
+    def test_remaining_token_time_identities_are_unchanged(self):
+        type_invalid = (
+            {"iat": None},
+            {"exp": None},
+            {"iat": True},
+            {"exp": False},
+            {"iat": 100.0},
+            {"exp": "1000"},
+        )
+        for payload in type_invalid:
+            with self.subTest(payload=tuple(payload)), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "^TOKEN_TIME_TYPE_INVALID$"
+            ):
+                verify_e2e.validate_token(
+                    token(payload), "TRANSACTION_INGESTOR", {"kid-1"}, current_time=500
+                )
+        preserved = (
+            ({"iat": 501, "exp": 1000}, 500, "TOKEN_TIME_IAT_FUTURE"),
+            ({"iat": 100, "exp": 500}, 500, "TOKEN_TIME_EXPIRED"),
+            ({"iat": 100, "exp": 1000, "nbf": 1001}, 500, "TOKEN_TIME_NBF_INVALID"),
+            ({"iat": 100, "exp": 1000, "nbf": True}, 500, "TOKEN_TIME_NBF_INVALID"),
+            ({"iat": 100, "exp": 1000, "nbf": "100"}, 500, "TOKEN_TIME_NBF_INVALID"),
+            ({"iat": 100, "exp": 1000, "nbf": 501}, 500, "TOKEN_TIME_NBF_FUTURE"),
+        )
+        for payload, now, code in preserved:
+            with self.subTest(code=code), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "^" + code + "$"
+            ):
+                verify_e2e.validate_token(
+                    token(payload), "TRANSACTION_INGESTOR", {"kid-1"}, current_time=now
+                )
+
+    def test_realm_lifespan_and_verifier_maximum_do_not_drift(self):
+        # Keycloak reads the clock twice while building a token: iat comes from
+        # JsonWebToken.issuedNow() and exp from getTokenExpiration(), so an
+        # issued token measures configured + D seconds where D is the number of
+        # whole-second boundaries crossed between the two reads. The configured
+        # value therefore sits exactly one second below the verifier maximum, so
+        # the ordinary D=1 crossing still lands on the maximum. Nothing here
+        # claims D can never exceed 1; D>=2 must stay a verifier failure.
+        configured = valid_realm()["accessTokenLifespan"]
+        verifier_maximum = 900
+        self.assertEqual(899, configured)
+        self.assertEqual(verifier_maximum, configured + 1)
+        for lifetime in (configured, configured + 1):
+            with self.subTest(lifetime=lifetime):
+                verify_e2e.validate_token(
+                    token({"iat": 100, "exp": 100 + lifetime}),
+                    "TRANSACTION_INGESTOR", {"kid-1"}, current_time=500,
+                )
+        with self.assertRaisesRegex(
+            verify_e2e.VerificationError, "^TOKEN_TIME_LIFETIME_INVALID$"
+        ):
+            verify_e2e.validate_token(
+                token({"iat": 100, "exp": 100 + configured + 2}),
+                "TRANSACTION_INGESTOR", {"kid-1"}, current_time=500,
+            )
+
+    def test_static_realm_contract_accepts_the_configured_margin(self):
+        configured = valid_realm()["accessTokenLifespan"]
+        self.assertEqual(899, configured)
+        verify_e2e.validate_static(valid_config(), valid_realm())
+        for rejected in (0, 901):
+            realm = valid_realm()
+            realm["accessTokenLifespan"] = rejected
+            with self.subTest(lifespan=rejected), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "^STATIC_REALM_CONTRACT$"
+            ):
+                verify_e2e.validate_static(valid_config(), realm)
+        for accepted in (configured, 900):
+            realm = valid_realm()
+            realm["accessTokenLifespan"] = accepted
+            with self.subTest(lifespan=accepted):
+                verify_e2e.validate_static(valid_config(), realm)
+
+    def test_issued_lifetime_bound_holds_for_the_configured_margin(self):
+        # exp - iat == configured + D, derived from Keycloak 26.7.3:
+        #   iat = floor(M1 / 1000)                       (Time.currentTime())
+        #   exp = floor((M2 + 1000 * L) / 1000)          (Time.currentTimeMillis())
+        # D = floor(M2/1000) - floor(M1/1000) >= 0 and is NOT bounded by source.
+        configured = valid_realm()["accessTokenLifespan"]
+        accepted_boundaries = (0, 1)
+        rejected_boundaries = (2, 3)
+        for boundaries in accepted_boundaries:
+            with self.subTest(accepted_boundaries=boundaries):
+                verify_e2e.validate_token(
+                    token({"iat": 100, "exp": 100 + configured + boundaries}),
+                    "TRANSACTION_INGESTOR", {"kid-1"}, current_time=500,
+                )
+        for boundaries in rejected_boundaries:
+            with self.subTest(rejected_boundaries=boundaries), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "^TOKEN_TIME_LIFETIME_INVALID$"
+            ):
+                verify_e2e.validate_token(
+                    token({"iat": 100, "exp": 100 + configured + boundaries}),
+                    "TRANSACTION_INGESTOR", {"kid-1"}, current_time=500,
+                )
+        with self.assertRaisesRegex(
+            verify_e2e.VerificationError, "^TOKEN_TIME_ORDER_INVALID$"
+        ):
+            verify_e2e.validate_token(
+                token({"iat": 500, "exp": 500}), "TRANSACTION_INGESTOR",
+                {"kid-1"}, current_time=500,
+            )
 
     def test_http_error_redacts_body(self):
         error = urllib.error.HTTPError("http://example.invalid", 401, "bad", {}, io.BytesIO(b'{"token":"NeverPrintToken"}'))
@@ -995,25 +1356,1549 @@ finguardops_rule_analysis_outcomes_created 99
         self.assertNotIn("NeverPrintSecret", stderr.getvalue())
 
     def test_subprocess_only_propagates_exact_safe_child_code(self):
-        completed = subprocess.CompletedProcess(
-            ["child"], 1, stdout=b"", stderr=b"compose prefix\nverification failed: METRIC_INVALID\ncompose suffix\n"
+        completed = verify_e2e.NativeCommandCapture(
+            1, b"", b"compose prefix\nverification failed: METRIC_INVALID\ncompose suffix\n"
         )
-        with mock.patch("subprocess.run", return_value=completed), self.assertRaisesRegex(
+        with mock.patch.object(verify_e2e, "capture_native_command", return_value=completed), self.assertRaisesRegex(
             verify_e2e.VerificationError, "CHILD_METRIC_INVALID"
         ):
             verify_e2e.run_command(
                 ["child"], timeout=1, cwd=Path.cwd(), environment={}
             )
-        leaked = subprocess.CompletedProcess(
-            ["child"], 1, stdout=b"", stderr=b"verification failed: TOKEN NeverPrintSecret\n"
+        leaked = verify_e2e.NativeCommandCapture(
+            1, b"", b"verification failed: TOKEN NeverPrintSecret\n"
         )
-        with mock.patch("subprocess.run", return_value=leaked), self.assertRaisesRegex(
+        with mock.patch.object(verify_e2e, "capture_native_command", return_value=leaked), self.assertRaisesRegex(
             verify_e2e.VerificationError, "^SUBPROCESS_FAILED$"
         ) as raised:
             verify_e2e.run_command(
                 ["child"], timeout=1, cwd=Path.cwd(), environment={}
             )
         self.assertNotIn("NeverPrintSecret", str(raised.exception))
+
+    def test_before_native_stages_map_every_failure_type_without_reflection(self):
+        empty_snapshot = b"".join(
+            verify_e2e.SNAPSHOT_BEGIN_PREFIX + table.encode("ascii") + b"\n"
+            + verify_e2e.SNAPSHOT_END_PREFIX + table.encode("ascii") + b"\n"
+            for table in verify_e2e.BUSINESS_TABLES
+        )
+        valid = {
+            "RULE_PUBLISHED_STATE": b"4\n",
+            "RULE_ACTIVE_STATE": b"4\n",
+            "RULE_PUBLICATION_COMMAND": publication_success_output(),
+            "RULE_ACTIVATION_POLL": b"4\n",
+            "TRANSACTION_CARDINALITY_SNAPSHOT": ("|".join(["0"] * 14) + "\n").encode(),
+            "DATABASE_GLOBAL_SNAPSHOT": empty_snapshot,
+            "EXTERNAL_RISK_LOG_SNAPSHOT": b"",
+            "RULE_V2_LOG_SNAPSHOT": b"",
+            "BACKEND_METRIC_SNAPSHOT": b"[0,0]\n",
+        }
+        malformed = {
+            "RULE_PUBLISHED_STATE": b"raw-sentinel",
+            "RULE_ACTIVE_STATE": b"raw-sentinel",
+            "RULE_PUBLICATION_COMMAND": b"\xff",
+            "RULE_ACTIVATION_POLL": b"raw-sentinel",
+            "TRANSACTION_CARDINALITY_SNAPSHOT": b"0|raw-sentinel",
+            "DATABASE_GLOBAL_SNAPSHOT": b"raw-sentinel",
+            "EXTERNAL_RISK_LOG_SNAPSHOT": b"\xff",
+            "RULE_V2_LOG_SNAPSHOT": b"\xff",
+            "BACKEND_METRIC_SNAPSHOT": b'{"raw":"sentinel"}',
+        }
+        sentinel = b"NeverPrintRawPathSqlCommandCredentialToken"
+        for stage, codes in verify_e2e.BEFORE_NATIVE_FAILURE_CODES.items():
+            cases = {
+                "start": verify_e2e.NativeCommandCapture(None, b"", b"", start_failed=True),
+                "timeout": verify_e2e.NativeCommandCapture(None, b"", b"", timed_out=True),
+                "exit": verify_e2e.NativeCommandCapture(23, sentinel, sentinel),
+                "malformed": verify_e2e.NativeCommandCapture(0, malformed[stage], b""),
+                "stderr": verify_e2e.NativeCommandCapture(0, valid[stage], sentinel),
+                "oversize": verify_e2e.NativeCommandCapture(
+                    0, valid[stage], b"", stdout_overflow=True
+                ),
+                "cleanup": verify_e2e.NativeCommandCapture(
+                    None, b"", b"", cleanup_failed=True
+                ),
+            }
+            expected = {
+                "start": codes["start"],
+                "timeout": codes["timeout"],
+                "exit": codes["exit"],
+                "malformed": codes["output"],
+                "stderr": codes["output"],
+                "oversize": codes["output"],
+                "cleanup": codes["cleanup"],
+            }
+            if stage == "RULE_PUBLICATION_COMMAND":
+                # The malformed publication capture is invalid UTF-8, which the
+                # stdout predicate classifier names precisely.
+                expected["malformed"] = (
+                    verify_e2e.RULE_PUBLICATION_STDOUT_ENCODING_INVALID
+                )
+                expected["stderr"] = verify_e2e.RULE_PUBLICATION_STDERR_INVALID
+            for name, capture in cases.items():
+                with self.subTest(stage=stage, failure=name), mock.patch.object(
+                    verify_e2e, "capture_native_command", return_value=capture
+                ), self.assertRaises(verify_e2e.VerificationError) as raised:
+                    verify_e2e.run_command(
+                        ["fixed-executable", "fixed-argument"],
+                        timeout=1,
+                        cwd=Path.cwd(),
+                        environment={},
+                        before_stage=stage,
+                    )
+                self.assertEqual(str(raised.exception), expected[name])
+                self.assertNotIn("NeverPrint", str(raised.exception))
+                self.assertNotEqual(str(raised.exception), "SUBPROCESS_FAILED")
+            with self.subTest(stage=stage, failure="success"), mock.patch.object(
+                verify_e2e,
+                "capture_native_command",
+                return_value=verify_e2e.NativeCommandCapture(0, valid[stage], b""),
+            ):
+                self.assertEqual(
+                    verify_e2e.run_command(
+                        ["fixed-executable", "fixed-argument"],
+                        timeout=1,
+                        cwd=Path.cwd(),
+                        environment={},
+                        before_stage=stage,
+                    ),
+                    valid[stage],
+                )
+
+    def test_rule_publication_compose_run_benign_stderr_is_not_the_result(self):
+        stdout = publication_success_output()
+        capture = verify_e2e.NativeCommandCapture(
+            0, stdout, b"compose emitted a bounded benign diagnostic\n"
+        )
+        with mock.patch.object(
+            verify_e2e, "capture_native_command", return_value=capture
+        ):
+            self.assertEqual(
+                verify_e2e.run_command(
+                    ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                    before_stage="RULE_PUBLICATION_COMMAND",
+                ),
+                stdout,
+            )
+
+    def test_rule_publication_semantic_stderr_accepts_empty_lf_and_crlf(self):
+        stdout = publication_success_output()
+        for name, stderr in {
+            "empty": b"",
+            "lf": b"compose emitted a bounded benign diagnostic\n",
+            "crlf": b"compose emitted a bounded benign diagnostic\r\n",
+        }.items():
+            capture = verify_e2e.NativeCommandCapture(0, stdout, stderr)
+            with self.subTest(case=name), mock.patch.object(
+                verify_e2e, "capture_native_command", return_value=capture
+            ):
+                self.assertEqual(
+                    verify_e2e.run_command(
+                        ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                        before_stage="RULE_PUBLICATION_COMMAND",
+                    ),
+                    stdout,
+                )
+
+    def test_rule_publication_semantic_output_rejects_hostile_evidence(self):
+        success = publication_success_output()
+        prefix = verify_e2e.RULE_PUBLICATION_FAILURE_WIRE_PREFIX
+        codes = sorted(verify_e2e.RULE_PUBLICATION_AUTHORITATIVE_FAILURE_CODES)
+        approved = next(iter(verify_e2e.RULE_PUBLICATION_RUNNER_FAILURE_LINES.values()))[0]
+        marker = verify_e2e.RULE_PUBLICATION_SUCCESS_MARKER_INVALID
+        evidence = verify_e2e.RULE_PUBLICATION_FAILURE_EVIDENCE_INVALID
+        shape = verify_e2e.RULE_PUBLICATION_STDERR_INVALID
+        overflow_code = "RULE_PUBLICATION_COMMAND_OUTPUT_INVALID"
+        hostile = {
+            "missing-success": (b"ordinary Spring Boot output\n", b"", False, marker),
+            "noncanonical-success": (
+                (verify_e2e.RULE_PUBLICATION_RUNNER_SUCCESS_EVIDENCE + "\n").encode(),
+                b"",
+                False,
+                marker,
+            ),
+            "duplicate-success": (success + success, b"", False, marker),
+            "authoritative": (
+                success, (prefix + codes[0] + "\n").encode(), False, evidence
+            ),
+            "approved-java": (success, (approved + "\n").encode(), False, evidence),
+            "exception": (
+                success, b"java.lang.IllegalStateException: hidden\n", False, evidence
+            ),
+            "stack-frame": (
+                success, b"\tat com.example.Type.run(Type.java:1)\n", False, evidence
+            ),
+            "invalid-utf8": (success, b"\xff\n", False, shape),
+            "bom": (success, b"\xef\xbb\xbfdiagnostic\n", False, shape),
+            "nul": (success, b"diagnostic\x00\n", False, shape),
+            "c0": (success, b"diagnostic\x01\n", False, shape),
+            "c1": (success, "diagnostic\u0085\n".encode(), False, shape),
+            "cf": (success, "diagnostic\u200b\n".encode(), False, shape),
+            "bare-cr": (success, b"diagnostic\r", False, shape),
+            "unterminated": (success, b"diagnostic", False, shape),
+            "mixed-newline": (success, b"first\r\nsecond\n", False, shape),
+            "too-many-lines": (
+                success,
+                b"x\n" * (verify_e2e.SEMANTIC_STDERR_MAX_LINES + 1),
+                False,
+                shape,
+            ),
+            "long-line": (
+                success,
+                ("x" * (verify_e2e.SEMANTIC_STDERR_MAX_LINE_LENGTH + 1) + "\n").encode(),
+                False,
+                shape,
+            ),
+            "overflow": (success, b"bounded\n", True, overflow_code),
+            "duplicate-marker": (
+                success,
+                ((prefix + codes[0] + "\n") * 2).encode(),
+                False,
+                evidence,
+            ),
+            "conflicting-marker": (
+                success,
+                (prefix + codes[0] + "\n" + prefix + codes[1] + "\n").encode(),
+                False,
+                evidence,
+            ),
+            "malformed-marker": (
+                success, (prefix + "UNKNOWN\n").encode(), False, evidence
+            ),
+        }
+        for name, (stdout, stderr, overflow, expected_code) in hostile.items():
+            capture = verify_e2e.NativeCommandCapture(
+                0, stdout, stderr, stderr_overflow=overflow
+            )
+            with self.subTest(case=name), mock.patch.object(
+                verify_e2e, "capture_native_command", return_value=capture
+            ), self.assertRaisesRegex(
+                verify_e2e.VerificationError,
+                "^" + expected_code + "$",
+            ) as raised:
+                verify_e2e.run_command(
+                    ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                    before_stage="RULE_PUBLICATION_COMMAND",
+                )
+            self.assertNotIn("hidden", str(raised.exception))
+
+    def assert_publication_code(self, stdout, stderr, code, **capture_flags):
+        capture = verify_e2e.NativeCommandCapture(0, stdout, stderr, **capture_flags)
+        with mock.patch.object(
+            verify_e2e, "capture_native_command", return_value=capture
+        ), self.assertRaisesRegex(
+            verify_e2e.VerificationError, "^" + code + "$"
+        ) as raised:
+            verify_e2e.run_command(
+                ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                before_stage="RULE_PUBLICATION_COMMAND",
+            )
+        self.assertNotIn("NeverPrint", str(raised.exception))
+        self.assertNotIn("hidden", str(raised.exception))
+
+    def test_publication_production_equivalent_success_is_accepted(self):
+        for newline in ("\n", "\r\n"):
+            stdout = publication_production_success_output(newline)
+            for name, stderr in {
+                "empty": b"",
+                "benign-lf": b" Container fgo-backend-run-x  Created\n",
+                "benign-crlf": b" Container fgo-backend-run-x  Created\r\n",
+                "benign-multi": (
+                    b" Container fgo-backend-run-x  Created\n"
+                    b" Container fgo-backend-run-x  Started\n"
+                ),
+            }.items():
+                capture = verify_e2e.NativeCommandCapture(0, stdout, stderr)
+                with self.subTest(newline=repr(newline), stderr=name), mock.patch.object(
+                    verify_e2e, "capture_native_command", return_value=capture
+                ):
+                    self.assertEqual(
+                        verify_e2e.run_command(
+                            ["fixed-executable"], timeout=1, cwd=Path.cwd(),
+                            environment={}, before_stage="RULE_PUBLICATION_COMMAND",
+                        ),
+                        stdout,
+                    )
+
+    def test_publication_stderr_step_has_its_own_identity(self):
+        success = publication_production_success_output()
+        cases = {
+            "invalid-utf8": b"\xff\n",
+            "unterminated": b"NeverPrintDiagnostic",
+            "bare-cr": b"NeverPrintDiagnostic\r",
+            "mixed-newline": b"first\r\nsecond\n",
+            "nul": b"NeverPrintDiagnostic\x00\n",
+            "c0": b"NeverPrintDiagnostic\x01\n",
+            "c1": "NeverPrintDiagnostic\u0085\n".encode(),
+            "cf": "NeverPrintDiagnostic\u200b\n".encode(),
+            "bom": b"\xef\xbb\xbfNeverPrintDiagnostic\n",
+            "too-many-lines": b"x\n" * (verify_e2e.SEMANTIC_STDERR_MAX_LINES + 1),
+            "long-line": (
+                "x" * (verify_e2e.SEMANTIC_STDERR_MAX_LINE_LENGTH + 1) + "\n"
+            ).encode(),
+        }
+        for name, stderr in cases.items():
+            with self.subTest(case=name):
+                self.assert_publication_code(
+                    success, stderr, verify_e2e.RULE_PUBLICATION_STDERR_INVALID
+                )
+
+    def test_publication_failure_evidence_step_has_its_own_identity(self):
+        success = publication_production_success_output()
+        prefix = verify_e2e.RULE_PUBLICATION_FAILURE_WIRE_PREFIX
+        codes = sorted(verify_e2e.RULE_PUBLICATION_AUTHORITATIVE_FAILURE_CODES)
+        approved = next(
+            iter(verify_e2e.RULE_PUBLICATION_RUNNER_FAILURE_LINES.values())
+        )[0]
+        cases = {
+            "authoritative": (success, (prefix + codes[0] + "\n").encode()),
+            "malformed-marker": (success, (prefix + "UNKNOWN\n").encode()),
+            "duplicate-marker": (success, ((prefix + codes[0] + "\n") * 2).encode()),
+            "conflicting-marker": (
+                success,
+                (prefix + codes[0] + "\n" + prefix + codes[1] + "\n").encode(),
+            ),
+            "stdout-marker": (success + (prefix + codes[0] + "\n").encode(), b""),
+            "legacy-java": (success, (approved + "\n").encode()),
+            "stdout-legacy-java": (success + (approved + "\n").encode(), b""),
+            "exception-headline": (
+                success, b"java.lang.IllegalStateException: hidden\n"
+            ),
+            "stack-frame": (success, b"\tat com.example.Type.run(Type.java:1)\n"),
+        }
+        for name, (stdout, stderr) in cases.items():
+            with self.subTest(case=name):
+                self.assert_publication_code(
+                    stdout,
+                    stderr,
+                    verify_e2e.RULE_PUBLICATION_FAILURE_EVIDENCE_INVALID,
+                )
+
+    def test_publication_stdout_step_names_the_broken_rule(self):
+        # Each capture violates exactly one structural rule, so the identity is
+        # unambiguous. Inputs that break several rules are covered separately by
+        # test_publication_stdout_priority_is_deterministic.
+        success = publication_production_success_output()
+        cases = {
+            "invalid-utf8": (
+                success + b"\xff\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_ENCODING_INVALID,
+            ),
+            "unterminated": (
+                success.rstrip(b"\n"),
+                verify_e2e.RULE_PUBLICATION_STDOUT_FINAL_NEWLINE_INVALID,
+            ),
+            "bare-cr": (
+                success + b"NeverPrintTail\rNeverPrintTail\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_BARE_CR_INVALID,
+            ),
+            "mixed-newline": (
+                success.replace(b"\n", b"\r\n", 1),
+                verify_e2e.RULE_PUBLICATION_STDOUT_MIXED_NEWLINE_INVALID,
+            ),
+            "nul": (
+                success + b"NeverPrintTail\x00\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_NUL_INVALID,
+            ),
+            "tab": (
+                success + b"NeverPrintTail\tNeverPrintTail\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_TAB_INVALID,
+            ),
+            "escape": (
+                success + b"NeverPrintTail\x1b[0mNeverPrintTail\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_ESCAPE_INVALID,
+            ),
+            "c0": (
+                success + b"NeverPrintTail\x01\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_C0_INVALID,
+            ),
+            "c1": (
+                success + "NeverPrintTail\u0085\n".encode(),
+                verify_e2e.RULE_PUBLICATION_STDOUT_C1_INVALID,
+            ),
+            "cf": (
+                success + "NeverPrintTail\u200b\n".encode(),
+                verify_e2e.RULE_PUBLICATION_STDOUT_FORMAT_INVALID,
+            ),
+            "bom": (
+                "\ufeff".encode() + success,
+                verify_e2e.RULE_PUBLICATION_STDOUT_FORMAT_INVALID,
+            ),
+        }
+        for name, (stdout, expected_code) in cases.items():
+            with self.subTest(case=name):
+                self.assert_publication_code(stdout, b"", expected_code)
+
+    def test_publication_stdout_priority_is_deterministic(self):
+        # Every capture below breaks the named rule AND every lower-priority rule.
+        # Exactly one identity must come out, and it must be the highest-priority one.
+        success = publication_production_success_output()
+        mixed = success.replace(b"\n", b"\r\n", 1)
+        lower = b"NeverPrintTail\x01" + "\u0085\u200b".encode()
+        cases = {
+            "encoding-beats-all": (
+                b"\xff" + success + b"NeverPrintTail\rx\t\x1b\x00" + lower,
+                verify_e2e.RULE_PUBLICATION_STDOUT_ENCODING_INVALID,
+            ),
+            "final-newline-beats-bare-cr": (
+                success + b"NeverPrintTail\rx\t\x1b\x00" + lower,
+                verify_e2e.RULE_PUBLICATION_STDOUT_FINAL_NEWLINE_INVALID,
+            ),
+            "bare-cr-beats-mixed": (
+                mixed + b"NeverPrintTail\rx\x00\t\x1b" + lower + b"\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_BARE_CR_INVALID,
+            ),
+            "mixed-beats-nul": (
+                mixed + b"NeverPrintTail\x00\t\x1b" + lower + b"\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_MIXED_NEWLINE_INVALID,
+            ),
+            "nul-beats-tab": (
+                success + b"NeverPrintTail\x00\t\x1b" + lower + b"\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_NUL_INVALID,
+            ),
+            "tab-beats-escape": (
+                success + b"NeverPrintTail\t\x1b" + lower + b"\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_TAB_INVALID,
+            ),
+            "escape-beats-c0": (
+                success + b"NeverPrintTail\x1b" + lower + b"\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_ESCAPE_INVALID,
+            ),
+            "c0-beats-c1": (
+                success + lower + b"\n",
+                verify_e2e.RULE_PUBLICATION_STDOUT_C0_INVALID,
+            ),
+            "c1-beats-format": (
+                success + "NeverPrintTail\u0085\u200b\n".encode(),
+                verify_e2e.RULE_PUBLICATION_STDOUT_C1_INVALID,
+            ),
+        }
+        for name, (stdout, expected_code) in cases.items():
+            with self.subTest(case=name):
+                self.assert_publication_code(stdout, b"", expected_code)
+
+    def test_publication_stdout_classifier_never_widens_the_accepted_set(self):
+        # A capture the classifier does not name must be one semantic_text_lines,
+        # the final authority, also accepts. The classifier only subdivides.
+        accepted = (
+            b"",
+            publication_production_success_output(),
+            publication_production_success_output("\r\n"),
+            b"ordinary line\n",
+            b"first\r\nsecond\r\n",
+            "accented \u00e9\n".encode(),
+        )
+        for stdout in accepted:
+            with self.subTest(accepted=len(stdout)):
+                self.assertIsNone(
+                    verify_e2e.classify_semantic_stdout_violation(stdout)
+                )
+                verify_e2e.semantic_text_lines(stdout)
+        rejected = (
+            b"\xff\n",
+            b"unterminated",
+            b"bare\rcr\n",
+            b"first\r\nsecond\n",
+            b"nul\x00\n",
+            b"tab\t\n",
+            b"escape\x1b\n",
+            b"c0\x01\n",
+            "c1\u0085\n".encode(),
+            "cf\u200b\n".encode(),
+            "\ufeffbom\n".encode(),
+        )
+        for stdout in rejected:
+            with self.subTest(rejected=len(stdout)):
+                named = verify_e2e.classify_semantic_stdout_violation(stdout)
+                self.assertIn(named, verify_e2e.RULE_PUBLICATION_STDOUT_PREDICATE_CODES)
+                with self.assertRaises((UnicodeError, ValueError)):
+                    verify_e2e.semantic_text_lines(stdout)
+
+    def test_publication_stdout_predicate_boundaries_are_unchanged(self):
+        success = publication_production_success_output()
+        prefix = verify_e2e.RULE_PUBLICATION_FAILURE_WIRE_PREFIX
+        code = sorted(verify_e2e.RULE_PUBLICATION_AUTHORITATIVE_FAILURE_CODES)[0]
+        fallback = verify_e2e.BEFORE_NATIVE_FAILURE_CODES[
+            "RULE_PUBLICATION_COMMAND"
+        ]["output"]
+        # Failure evidence still outranks a broken stdout structure.
+        self.assert_publication_code(
+            success + b"NeverPrintTail\t\n",
+            (prefix + code + "\n").encode(),
+            verify_e2e.RULE_PUBLICATION_FAILURE_EVIDENCE_INVALID,
+        )
+        # A stderr shape violation is still a stderr identity.
+        self.assert_publication_code(
+            success, b"NeverPrintTail\r", verify_e2e.RULE_PUBLICATION_STDERR_INVALID
+        )
+        # A valid structure that carries no marker is still a marker identity.
+        self.assert_publication_code(
+            b"ordinary Spring Boot output\n", b"",
+            verify_e2e.RULE_PUBLICATION_SUCCESS_MARKER_INVALID,
+        )
+        # Empty stdout still reaches the marker identity, not a structure identity.
+        self.assert_publication_code(
+            b"", b"", verify_e2e.RULE_PUBLICATION_SUCCESS_MARKER_INVALID
+        )
+        # Overflow still uses the generic fallback.
+        self.assert_publication_code(success, b"", fallback, stdout_overflow=True)
+        self.assert_publication_code(
+            success, b"bounded\n", fallback, stderr_overflow=True
+        )
+        # A non-zero exit still wins over any output identity.
+        capture = verify_e2e.NativeCommandCapture(
+            3, success + b"NeverPrintTail\t\n", b""
+        )
+        with mock.patch.object(
+            verify_e2e, "capture_native_command", return_value=capture
+        ), self.assertRaisesRegex(
+            verify_e2e.VerificationError,
+            "^RULE_PUBLICATION_COMMAND_EXIT_NONZERO$",
+        ):
+            verify_e2e.run_command(
+                ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                before_stage="RULE_PUBLICATION_COMMAND",
+            )
+        # The generic STDOUT_INVALID fallback stays reachable for an unexpected
+        # internal state that the classifier does not name.
+        authority = verify_e2e.semantic_text_lines
+
+        def only_stdout_fails(output, **keywords):
+            if output == success:
+                raise ValueError("NeverPrintInternal")
+            return authority(output, **keywords)
+
+        with mock.patch.object(
+            verify_e2e, "classify_semantic_stdout_violation", return_value=None
+        ), mock.patch.object(
+            verify_e2e, "semantic_text_lines", side_effect=only_stdout_fails
+        ):
+            self.assert_publication_code(
+                success, b"", verify_e2e.RULE_PUBLICATION_STDOUT_INVALID
+            )
+        # A candidate-shaped literal is never promoted to an external code.
+        for candidate in (
+            "rule_publication_command_stdout_tab_invalid",
+            "Rule_PUBLICATION_COMMAND_STDOUT_TAB_INVALID",
+            " RULE_PUBLICATION_COMMAND_STDOUT_TAB_INVALID",
+            "RULE_PUBLICATION_COMMAND_STDOUT_TAB_INVALID ",
+            "RULE_PUBLICATION_COMMAND_STDOUT_TAB_INVALID_RAW",
+            "RULE_PUBLICATION_COMMAND_STDOUT_TAB_INVALID\nNeverPrintExtra",
+        ):
+            with self.subTest(candidate=len(candidate)):
+                self.assertEqual(
+                    fallback,
+                    verify_e2e.semantic_output_failure_code(
+                        "RULE_PUBLICATION_COMMAND", ValueError(candidate)
+                    ),
+                )
+
+    def test_publication_success_marker_step_has_its_own_identity(self):
+        success = publication_production_success_output()
+        evidence = verify_e2e.RULE_PUBLICATION_RUNNER_SUCCESS_EVIDENCE
+        cases = {
+            "missing": (b"ordinary Spring Boot output\n", b""),
+            "duplicate-stdout": (success + success, b""),
+            "stderr-only": (b"ordinary Spring Boot output\n", (evidence + "\n").encode()),
+            "stdout-and-stderr": (success, (evidence + "\n").encode()),
+            "not-canonical": ((evidence + "\n").encode(), b""),
+            "no-log-prefix": (
+                (production_success_message() + "\n").encode(), b""
+            ),
+        }
+        for name, (stdout, stderr) in cases.items():
+            with self.subTest(case=name):
+                self.assert_publication_code(
+                    stdout, stderr, verify_e2e.RULE_PUBLICATION_SUCCESS_MARKER_INVALID
+                )
+
+    def test_publication_output_invalid_fallback_is_preserved(self):
+        success = publication_production_success_output()
+        fallback = verify_e2e.BEFORE_NATIVE_FAILURE_CODES[
+            "RULE_PUBLICATION_COMMAND"
+        ]["output"]
+        self.assertEqual("RULE_PUBLICATION_COMMAND_OUTPUT_INVALID", fallback)
+        self.assert_publication_code(
+            success, b"", fallback, stdout_overflow=True
+        )
+        self.assert_publication_code(
+            success, b"bounded\n", fallback, stderr_overflow=True
+        )
+        unclassified = {
+            "unknown-literal": ValueError("RULE_PUBLICATION_COMMAND_MADE_UP"),
+            "free-text": ValueError("something unexpected NeverPrint"),
+            "two-args": ValueError(
+                verify_e2e.RULE_PUBLICATION_STDERR_INVALID, "extra"
+            ),
+            "non-string": ValueError(17),
+            "subclass": UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid"),
+        }
+        for name, error in unclassified.items():
+            with self.subTest(case=name), mock.patch.object(
+                verify_e2e,
+                "validate_semantic_compose_run_output",
+                side_effect=error,
+            ):
+                self.assert_publication_code(success, b"", fallback)
+        with mock.patch.object(
+            verify_e2e,
+            "validate_semantic_compose_run_output",
+            side_effect=ValueError(verify_e2e.RULE_PUBLICATION_STDERR_INVALID),
+        ):
+            self.assert_publication_code(
+                success, b"", verify_e2e.RULE_PUBLICATION_STDERR_INVALID
+            )
+
+    def test_publication_semantic_codes_are_fixed_literals(self):
+        self.assertEqual(
+            (
+                "RULE_PUBLICATION_COMMAND_STDOUT_ENCODING_INVALID",
+                "RULE_PUBLICATION_COMMAND_STDOUT_FINAL_NEWLINE_INVALID",
+                "RULE_PUBLICATION_COMMAND_STDOUT_BARE_CR_INVALID",
+                "RULE_PUBLICATION_COMMAND_STDOUT_MIXED_NEWLINE_INVALID",
+                "RULE_PUBLICATION_COMMAND_STDOUT_NUL_INVALID",
+                "RULE_PUBLICATION_COMMAND_STDOUT_TAB_INVALID",
+                "RULE_PUBLICATION_COMMAND_STDOUT_ESCAPE_INVALID",
+                "RULE_PUBLICATION_COMMAND_STDOUT_C0_INVALID",
+                "RULE_PUBLICATION_COMMAND_STDOUT_C1_INVALID",
+                "RULE_PUBLICATION_COMMAND_STDOUT_FORMAT_INVALID",
+            ),
+            verify_e2e.RULE_PUBLICATION_STDOUT_PREDICATE_CODES,
+        )
+        self.assertEqual(
+            (
+                "RULE_PUBLICATION_COMMAND_STDERR_INVALID",
+                "RULE_PUBLICATION_COMMAND_FAILURE_EVIDENCE_INVALID",
+                "RULE_PUBLICATION_COMMAND_STDOUT_INVALID",
+                "RULE_PUBLICATION_COMMAND_SUCCESS_MARKER_INVALID",
+            ) + verify_e2e.RULE_PUBLICATION_STDOUT_PREDICATE_CODES,
+            verify_e2e.RULE_PUBLICATION_SEMANTIC_FAILURE_CODES,
+        )
+        for stage in sorted(verify_e2e.BEFORE_NATIVE_FAILURE_CODES):
+            if stage == "RULE_PUBLICATION_COMMAND":
+                continue
+            with self.subTest(stage=stage):
+                self.assertEqual(
+                    verify_e2e.BEFORE_NATIVE_FAILURE_CODES[stage]["output"],
+                    verify_e2e.semantic_output_failure_code(
+                        stage,
+                        ValueError(verify_e2e.RULE_PUBLICATION_STDERR_INVALID),
+                    ),
+                )
+
+    def test_backend_metric_semantic_stage_identity_is_unchanged(self):
+        fallback = verify_e2e.BEFORE_NATIVE_FAILURE_CODES[
+            "BACKEND_METRIC_SNAPSHOT"
+        ]["output"]
+        cases = {
+            "stderr-unterminated": (b"[0,0]\n", b"NeverPrintDiagnostic"),
+            "stderr-invalid-utf8": (b"[0,0]\n", b"\xff\n"),
+            "stdout-invalid-utf8": (b"\xff", b""),
+            "stdout-not-json": (b"NeverPrintOutput\n", b""),
+            "stdout-wrong-shape": (b'{"raw":"NeverPrint"}', b""),
+            "failure-evidence": (
+                b"[0,0]\n", b"java.lang.IllegalStateException: hidden\n"
+            ),
+        }
+        for name, (stdout, stderr) in cases.items():
+            capture = verify_e2e.NativeCommandCapture(0, stdout, stderr)
+            with self.subTest(case=name), mock.patch.object(
+                verify_e2e, "capture_native_command", return_value=capture
+            ), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "^" + fallback + "$"
+            ) as raised:
+                verify_e2e.run_command(
+                    ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                    before_stage="BACKEND_METRIC_SNAPSHOT",
+                )
+            self.assertNotIn("NeverPrint", str(raised.exception))
+            self.assertNotIn("hidden", str(raised.exception))
+
+    def test_backend_metric_compose_run_benign_stderr_is_not_the_result(self):
+        stdout = b"[0,0]\n"
+        capture = verify_e2e.NativeCommandCapture(
+            0, stdout, b"compose emitted a bounded benign diagnostic\n"
+        )
+        with mock.patch.object(
+            verify_e2e, "capture_native_command", return_value=capture
+        ):
+            self.assertEqual(
+                verify_e2e.run_command(
+                    ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                    before_stage="BACKEND_METRIC_SNAPSHOT",
+                ),
+                stdout,
+            )
+
+    def test_backend_metric_semantic_output_remains_parser_owned_and_fail_closed(self):
+        prefix = verify_e2e.RULE_PUBLICATION_FAILURE_WIRE_PREFIX
+        code = sorted(verify_e2e.RULE_PUBLICATION_AUTHORITATIVE_FAILURE_CODES)[0]
+        hostile = {
+            "malformed": (b"{", b"benign\n"),
+            "missing-metric": (b"[0]\n", b"benign\n"),
+            "duplicate-metric": (b"[0,0,0]\n", b"benign\n"),
+            "unknown-category": (b'["unknown",0]\n', b"benign\n"),
+            "unknown-counter": (b'{"unknown":0}\n', b"benign\n"),
+            "authoritative": (b"[0,0]\n", (prefix + code + "\n").encode()),
+            "exception": (b"[0,0]\n", b"java.lang.RuntimeException: hidden\n"),
+            "stack": (b"[0,0]\n", b"\tat com.example.Type.run(Type.java:1)\n"),
+            "invalid-utf8": (b"[0,0]\n", b"\xff\n"),
+            "control": (b"[0,0]\n", b"diagnostic\x01\n"),
+            "mixed-newline": (b"[0,0]\n", b"first\r\nsecond\n"),
+        }
+        for name, (stdout, stderr) in hostile.items():
+            capture = verify_e2e.NativeCommandCapture(0, stdout, stderr)
+            with self.subTest(case=name), mock.patch.object(
+                verify_e2e, "capture_native_command", return_value=capture
+            ), self.assertRaisesRegex(
+                verify_e2e.VerificationError,
+                "^BACKEND_METRIC_SNAPSHOT_OUTPUT_INVALID$",
+            ) as raised:
+                verify_e2e.run_command(
+                    ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                    before_stage="BACKEND_METRIC_SNAPSHOT",
+                )
+            self.assertNotIn("hidden", str(raised.exception))
+
+    def test_non_semantic_stages_keep_the_empty_stderr_contract(self):
+        valid = {
+            "RULE_PUBLISHED_STATE": b"4\n",
+            "RULE_ACTIVE_STATE": b"4\n",
+            "RULE_ACTIVATION_POLL": b"4\n",
+            "TRANSACTION_CARDINALITY_SNAPSHOT": ("|".join(["0"] * 14) + "\n").encode(),
+            "DATABASE_GLOBAL_SNAPSHOT": b"".join(
+                verify_e2e.SNAPSHOT_BEGIN_PREFIX + table.encode("ascii") + b"\n"
+                + verify_e2e.SNAPSHOT_END_PREFIX + table.encode("ascii") + b"\n"
+                for table in verify_e2e.BUSINESS_TABLES
+            ),
+            "EXTERNAL_RISK_LOG_SNAPSHOT": b"",
+            "RULE_V2_LOG_SNAPSHOT": b"",
+        }
+        self.assertEqual(
+            set(valid),
+            set(verify_e2e.BEFORE_NATIVE_FAILURE_CODES) - verify_e2e.SEMANTIC_STDERR_STAGES,
+        )
+        for stage, stdout in valid.items():
+            capture = verify_e2e.NativeCommandCapture(0, stdout, b"benign\n")
+            with self.subTest(stage=stage), mock.patch.object(
+                verify_e2e, "capture_native_command", return_value=capture
+            ), self.assertRaisesRegex(
+                verify_e2e.VerificationError,
+                "^" + verify_e2e.BEFORE_NATIVE_FAILURE_CODES[stage]["output"] + "$",
+            ):
+                verify_e2e.run_command(
+                    ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                    before_stage=stage,
+                )
+
+    def test_rule_publication_nonzero_uses_only_exact_controlled_runner_lines(self):
+        fallback = "RULE_PUBLICATION_COMMAND_EXIT_NONZERO"
+        for code, approved_lines in verify_e2e.RULE_PUBLICATION_RUNNER_FAILURE_LINES.items():
+            for approved_line in approved_lines:
+                capture = verify_e2e.NativeCommandCapture(
+                    1,
+                    (
+                        "ordinary startup\n"
+                        + verify_e2e.RULE_PUBLICATION_RUNNER_NEUTRAL_LINES[0]
+                        + "\n" + approved_line + "\n"
+                    ).encode(),
+                    b"",
+                )
+                with self.subTest(code=code, line=approved_line), mock.patch.object(
+                    verify_e2e, "capture_native_command", return_value=capture
+                ), self.assertRaises(verify_e2e.VerificationError) as raised:
+                    verify_e2e.run_command(
+                        ["fixed-executable", "fixed-argument"],
+                        timeout=1,
+                        cwd=Path.cwd(),
+                        environment={},
+                        before_stage="RULE_PUBLICATION_COMMAND",
+                    )
+                self.assertEqual(str(raised.exception), code)
+
+        first_lines = [
+            lines[0]
+            for lines in verify_e2e.RULE_PUBLICATION_RUNNER_FAILURE_LINES.values()
+        ]
+        first_direct, first_caused = next(iter(
+            verify_e2e.RULE_PUBLICATION_RUNNER_FAILURE_LINES.values()
+        ))[:2]
+        production_stack = verify_e2e.NativeCommandCapture(
+            1,
+            (
+                verify_e2e.RULE_PUBLICATION_RUNNER_NEUTRAL_LINES[0]
+                + "\n\tat org.springframework.boot.SpringApplication.callRunner(SpringApplication.java:789) ~[spring-boot-3.5.16.jar!/:3.5.16]"
+                + "\n" + first_caused
+                + "\n\tat com.aifds.backend.rule.service.RuleV1DefaultRuleSetPublicationService.publish(RuleV1DefaultRuleSetPublicationService.java:135)"
+                + "\n\tat com.aifds.backend.rule.service.RuleV1DefaultRuleSetPublicationService$$SpringCGLIB$$0.publish(<generated>) ~[!/:0.0.1-SNAPSHOT]"
+                + "\n\t... 12 more\n"
+            ).encode(),
+            b"",
+        )
+        with mock.patch.object(
+            verify_e2e, "capture_native_command", return_value=production_stack
+        ), self.assertRaisesRegex(
+            verify_e2e.VerificationError,
+            "^RULE_PUBLICATION_RUNNER_PRODUCTION_PROFILE_REJECTED$",
+        ):
+            verify_e2e.run_command(
+                ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                before_stage="RULE_PUBLICATION_COMMAND",
+            )
+
+        sentinel = "NeverPrintRawPathSqlCommandCredentialToken"
+        fallback_cases = {
+            "unknown": b"java.lang.IllegalStateException: unknown runner marker\n",
+            "statically-unreachable-threshold-range": (
+                b"java.lang.IllegalArgumentException: amountThreshold exceeds "
+                b"NUMERIC(19,4) integer range\n"
+            ),
+            "statically-unreachable-condition-nesting": (
+                b"java.lang.IllegalArgumentException: conditionDefinition "
+                b"contains an invalid nested value\n"
+            ),
+            "database-rejected-condition-object": (
+                b"java.lang.IllegalArgumentException: conditionDefinition "
+                b"must be a non-empty JSON object\n"
+            ),
+            "raw-prefix": (sentinel + first_lines[0] + "\n").encode(),
+            "raw-suffix": (first_lines[0] + sentinel + "\n").encode(),
+            "lowercase": (first_lines[0].lower() + "\n").encode(),
+            "case-variant": (first_lines[0].replace("Rule", "rule", 1) + "\n").encode(),
+            "partial": (first_lines[0][:-1] + "\n").encode(),
+            "multiple": (first_lines[0] + "\n" + first_lines[1] + "\n").encode(),
+            "duplicate": (first_lines[0] + "\n" + first_lines[0] + "\n").encode(),
+            "direct-caused-duplicate": (
+                first_direct + "\n" + first_caused + "\n"
+            ).encode(),
+            "mixed-newline": (first_lines[0] + "\r\nordinary startup\n").encode(),
+            "lone-cr": (first_lines[0] + "\r").encode(),
+            "noisy-exception": (
+                first_lines[0]
+                + "\njava.lang.IllegalStateException: unknown runner noise\n"
+            ).encode(),
+            "noisy-runtime-exception": (
+                first_lines[0]
+                + "\nCaused by: java.lang.RuntimeException: unknown runner noise\n"
+            ).encode(),
+            "noisy-database-exception": (
+                first_lines[0]
+                + "\nCaused by: org.postgresql.util.PSQLException: unknown runner noise\n"
+            ).encode(),
+            "noisy-custom-exception-class": (
+                first_lines[0]
+                + "\nCaused by: com.example.PublicationFailure: unknown runner noise\n"
+            ).encode(),
+            "noisy-suppressed-exception": (
+                first_lines[0]
+                + "\nSuppressed: com.example.HiddenFailure: unknown runner noise\n"
+            ).encode(),
+            "noisy-spaced-suppressed-exception": (
+                first_lines[0]
+                + "\n  Suppressed: com.example.HiddenFailure: unknown runner noise\n"
+            ).encode(),
+            "noisy-unqualified-failure": (
+                first_lines[0] + "\nPublicationFailure: unknown runner noise\n"
+            ).encode(),
+            "noisy-bare-exception": (
+                first_lines[0] + "\nException: unknown runner noise\n"
+            ).encode(),
+            "noisy-bare-error": (
+                first_lines[0] + "\nError: unknown runner noise\n"
+            ).encode(),
+            "noisy-bare-failure": (
+                first_lines[0] + "\nFailure: unknown runner noise\n"
+            ).encode(),
+            "noisy-bare-throwable": (
+                first_lines[0] + "\nThrowable: unknown runner noise\n"
+            ).encode(),
+            "noisy-caused-bare-exception": (
+                first_lines[0] + "\nCaused by: Exception: unknown runner noise\n"
+            ).encode(),
+            "noisy-suppressed-bare-error": (
+                first_lines[0] + "\nSuppressed: Error: unknown runner noise\n"
+            ).encode(),
+            "noisy-tab-suppressed-exception": (
+                first_lines[0]
+                + "\n\tSuppressed: com.example.HiddenFailure: unknown runner noise\n"
+            ).encode(),
+            "noisy-tab": (first_lines[0] + "\n\tunknown runner noise\n").encode(),
+            "noisy-tab-generated": (
+                first_lines[0] + "\n\tat <generated>\n"
+            ).encode(),
+            "noisy-tab-packaging-data": (
+                first_lines[0]
+                + "\n\tat com.example.Type.method(File.java:1) ~[raw sentinel:path]"
+            ).encode(),
+            "noisy-thread-error": (
+                first_lines[0]
+                + '\nException in thread "main" java.lang.AssertionError: unknown runner noise\n'
+            ).encode(),
+            "success-marker": b"event=rule_v1_default_rule_set_publication outcome=PUBLISHED\n",
+            "success-marker-with-failure": (
+                "event=rule_v1_default_rule_set_publication outcome=PUBLISHED\n"
+                + first_lines[0] + "\n"
+            ).encode(),
+            "empty": b"",
+            "invalid-utf8": b"\xff",
+            "control": (first_lines[0] + "\x01\n").encode(),
+            "c1": (first_lines[0] + "\x85\n").encode(),
+            "cf": (first_lines[0] + "\u200b\n").encode(),
+        }
+        for name, output in fallback_cases.items():
+            capture = verify_e2e.NativeCommandCapture(1, output, b"")
+            with self.subTest(case=name), mock.patch.object(
+                verify_e2e, "capture_native_command", return_value=capture
+            ), self.assertRaises(verify_e2e.VerificationError) as raised:
+                verify_e2e.run_command(
+                    ["fixed-executable", "fixed-argument"],
+                    timeout=1,
+                    cwd=Path.cwd(),
+                    environment={},
+                    before_stage="RULE_PUBLICATION_COMMAND",
+                )
+            self.assertEqual(str(raised.exception), fallback)
+            self.assertNotIn(sentinel, str(raised.exception))
+
+        stream_ambiguities = {
+            "same-marker": (first_lines[0], first_lines[0]),
+            "different-markers": (first_lines[0], first_lines[1]),
+        }
+        for name, (stdout_line, stderr_line) in stream_ambiguities.items():
+            capture = verify_e2e.NativeCommandCapture(
+                1, (stdout_line + "\n").encode(), (stderr_line + "\n").encode()
+            )
+            with self.subTest(case="stream-" + name), mock.patch.object(
+                verify_e2e, "capture_native_command", return_value=capture
+            ), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "^" + fallback + "$"
+            ):
+                verify_e2e.run_command(
+                    ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                    before_stage="RULE_PUBLICATION_COMMAND",
+                )
+
+        overflow = verify_e2e.NativeCommandCapture(
+            1, first_lines[0].encode(), b"", stdout_overflow=True
+        )
+        with mock.patch.object(
+            verify_e2e, "capture_native_command", return_value=overflow
+        ), self.assertRaisesRegex(verify_e2e.VerificationError, "^" + fallback + "$"):
+            verify_e2e.run_command(
+                ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                before_stage="RULE_PUBLICATION_COMMAND",
+            )
+
+        false_success = verify_e2e.NativeCommandCapture(
+            0, (first_lines[0] + "\n").encode(), b""
+        )
+        with mock.patch.object(
+            verify_e2e, "capture_native_command", return_value=false_success
+        ), self.assertRaisesRegex(
+            verify_e2e.VerificationError,
+            "^" + verify_e2e.RULE_PUBLICATION_FAILURE_EVIDENCE_INVALID + "$",
+        ):
+            verify_e2e.run_command(
+                ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                before_stage="RULE_PUBLICATION_COMMAND",
+            )
+
+        for name, output in {
+            "success-plus-failure": (
+                verify_e2e.RULE_PUBLICATION_RUNNER_SUCCESS_MARKER
+                + "PUBLISHED\n" + first_lines[0] + "\n"
+            ),
+            "failure-plus-unknown-exception": (
+                first_lines[0]
+                + "\njava.lang.IllegalStateException: unknown runner noise\n"
+            ),
+            "failure-plus-mixed-newline": (
+                first_lines[0] + "\r\nordinary startup\n"
+            ),
+        }.items():
+            capture = verify_e2e.NativeCommandCapture(0, output.encode(), b"")
+            with self.subTest(case="exit-zero-" + name), mock.patch.object(
+                verify_e2e, "capture_native_command", return_value=capture
+            ), self.assertRaisesRegex(
+                verify_e2e.VerificationError,
+                "^" + verify_e2e.RULE_PUBLICATION_FAILURE_EVIDENCE_INVALID + "$",
+            ):
+                verify_e2e.run_command(
+                    ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                    before_stage="RULE_PUBLICATION_COMMAND",
+                )
+
+        success_only = publication_success_output()
+        with mock.patch.object(
+            verify_e2e,
+            "capture_native_command",
+            return_value=verify_e2e.NativeCommandCapture(0, success_only, b""),
+        ):
+            self.assertEqual(
+                verify_e2e.run_command(
+                    ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                    before_stage="RULE_PUBLICATION_COMMAND",
+                ),
+                success_only,
+            )
+
+    def test_authoritative_rule_publication_markers_precede_legacy_safely(self):
+        fallback = "RULE_PUBLICATION_COMMAND_EXIT_NONZERO"
+        prefix = verify_e2e.RULE_PUBLICATION_FAILURE_WIRE_PREFIX
+        legacy_by_code = {
+            code: lines[0]
+            for code, lines in
+            verify_e2e.RULE_PUBLICATION_RUNNER_FAILURE_LINES.items()
+        }
+        self.assertEqual(
+            verify_e2e.RULE_PUBLICATION_AUTHORITATIVE_FAILURE_CODES,
+            frozenset({
+                "RULE_PUBLICATION_BACKEND_STARTUP_FAILED",
+                "RULE_PUBLICATION_CONTEXT_REFRESH_FAILED",
+                "RULE_PUBLICATION_PRE_RUNNER_FAILED",
+                "RULE_PUBLICATION_RUNNER_CONFIGURATION_FAILED",
+                "RULE_PUBLICATION_SERVICE_EXECUTION_FAILED",
+                *verify_e2e.RULE_PUBLICATION_RUNNER_FAILURE_LINES,
+            }),
+        )
+
+        for code in verify_e2e.RULE_PUBLICATION_AUTHORITATIVE_FAILURE_CODES:
+            stdout = b"ordinary startup\n"
+            if code in legacy_by_code:
+                stdout += (legacy_by_code[code] + "\n").encode()
+            capture = verify_e2e.NativeCommandCapture(
+                1, stdout, (prefix + code + "\n").encode()
+            )
+            with self.subTest(code=code):
+                self.assertEqual(
+                    verify_e2e.classify_rule_publication_nonzero(capture),
+                    code,
+                )
+
+        known = "RULE_PUBLICATION_SERVICE_EXECUTION_FAILED"
+        other = "RULE_PUBLICATION_RUNNER_CONFIGURATION_FAILED"
+        first_legacy = next(iter(legacy_by_code.values()))
+        hostile = {
+            "unknown": (b"", (prefix + "UNKNOWN_CODE\n").encode()),
+            "duplicate": (
+                b"", (prefix + known + "\n" + prefix + known + "\n").encode()
+            ),
+            "different": (
+                b"", (prefix + known + "\n" + prefix + other + "\n").encode()
+            ),
+            "valid-malformed": (
+                b"", (prefix + known + "\n" + prefix + known + "-raw\n").encode()
+            ),
+            "conflicting-legacy": (
+                (first_legacy + "\n").encode(), (prefix + known + "\n").encode()
+            ),
+            "prefix": (b"", ("raw" + prefix + known + "\n").encode()),
+            "suffix": (b"", (prefix + known + "raw\n").encode()),
+            "leading-space": (b"", (" " + prefix + known + "\n").encode()),
+            "trailing-space": (b"", (prefix + known + " \n").encode()),
+            "lowercase": (b"", (prefix + known).lower().encode() + b"\n"),
+            "case-variant": (
+                b"", (prefix + known.replace("RULE", "Rule", 1) + "\n").encode()
+            ),
+            "mixed-newline": (
+                b"ordinary\r\n", (prefix + known + "\n").encode()
+            ),
+            "lone-cr": (b"", (prefix + known + "\r").encode()),
+            "c0": (b"", (prefix + known + "\x01\n").encode()),
+            "c1": (b"", (prefix + known + "\x85\n").encode()),
+            "cf": (b"", (prefix + known + "\u200b\n").encode()),
+            "invalid-utf8": (b"", (prefix + known).encode() + b"\xff\n"),
+            "partial": (b"", (prefix + known[:-1]).encode()),
+            "unterminated": (b"", (prefix + known).encode()),
+            "success": (
+                (verify_e2e.RULE_PUBLICATION_RUNNER_SUCCESS_MARKER
+                 + "PUBLISHED\n").encode(),
+                (prefix + known + "\n").encode(),
+            ),
+            "stdout-marker": ((prefix + known + "\n").encode(), b""),
+        }
+        for name, (stdout, stderr) in hostile.items():
+            with self.subTest(case=name):
+                self.assertEqual(
+                    verify_e2e.classify_rule_publication_nonzero(
+                        verify_e2e.NativeCommandCapture(1, stdout, stderr)
+                    ),
+                    fallback,
+                )
+
+        raw = (
+            "raw sentinel path SQL credential token exception body\n"
+        ).encode()
+        observed = verify_e2e.classify_rule_publication_nonzero(
+            verify_e2e.NativeCommandCapture(
+                1, raw, (prefix + known + "\n").encode()
+            )
+        )
+        self.assertEqual(observed, known)
+        self.assertNotIn("sentinel", observed)
+
+        for stream_name in ("stdout", "stderr"):
+            capture = verify_e2e.NativeCommandCapture(
+                1,
+                b"" if stream_name == "stderr" else (prefix + known).encode(),
+                b"" if stream_name == "stdout" else (prefix + known).encode(),
+                stdout_overflow=stream_name == "stdout",
+                stderr_overflow=stream_name == "stderr",
+            )
+            self.assertEqual(
+                verify_e2e.classify_rule_publication_nonzero(capture),
+                fallback,
+            )
+
+        for stream_name in ("stdout", "stderr"):
+            stdout = (prefix + known + "\n").encode() if stream_name == "stdout" else b""
+            stderr = (prefix + known + "\n").encode() if stream_name == "stderr" else b""
+            capture = verify_e2e.NativeCommandCapture(0, stdout, stderr)
+            with self.subTest(exit_zero_stream=stream_name), mock.patch.object(
+                verify_e2e, "capture_native_command", return_value=capture
+            ), self.assertRaisesRegex(
+                verify_e2e.VerificationError,
+                "^" + verify_e2e.RULE_PUBLICATION_FAILURE_EVIDENCE_INVALID + "$",
+            ):
+                verify_e2e.run_command(
+                    ["fixed-executable"], timeout=1, cwd=Path.cwd(), environment={},
+                    before_stage="RULE_PUBLICATION_COMMAND",
+                )
+
+    def test_backend_authoritative_marker_literals_are_source_owned(self):
+        source = (
+            Path(__file__).resolve().parents[3]
+            / "backend/src/main/java/com/aifds/backend/rule/operation/"
+            "RuleV1DefaultRuleSetPublicationDiagnosticBoundary.java"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(
+            source.count('"FINGUARDOPS_RULE_PUBLICATION_FAILURE="'), 1
+        )
+        for code in verify_e2e.RULE_PUBLICATION_AUTHORITATIVE_FAILURE_CODES:
+            with self.subTest(code=code):
+                self.assertGreaterEqual(source.count('"' + code + '"'), 1)
+
+    def test_rule_publication_service_lines_are_authoritative_and_unique(self):
+        source_root = (
+            Path(__file__).resolve().parents[3]
+            / "backend/src/main/java"
+        )
+        source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in source_root.rglob("*.java")
+        )
+        service_codes = {
+            code: lines
+            for code, lines in verify_e2e.RULE_PUBLICATION_RUNNER_FAILURE_LINES.items()
+            if code.startswith("RULE_PUBLICATION_SERVICE_")
+        }
+        self.assertEqual(
+            set(service_codes),
+            {
+                "RULE_PUBLICATION_SERVICE_DEFAULT_SET_INCOMPLETE",
+                "RULE_PUBLICATION_SERVICE_IDENTITY_MISMATCH",
+                "RULE_PUBLICATION_SERVICE_FRAUD_RULE_INACTIVE",
+                "RULE_PUBLICATION_SERVICE_VERSION_PERIOD_INVALID",
+                "RULE_PUBLICATION_SERVICE_VERSION_STATUS_INVALID",
+                "RULE_PUBLICATION_SERVICE_DRAFT_METADATA_INVALID",
+                "RULE_PUBLICATION_SERVICE_EFFECTIVE_FROM_EXPIRED",
+                "RULE_PUBLICATION_SERVICE_AMOUNT_THRESHOLD_FORMAT_INVALID",
+            },
+        )
+        for code, lines in service_codes.items():
+            with self.subTest(code=code):
+                self.assertEqual(len(lines), 2)
+                direct, caused = lines
+                self.assertTrue(direct.startswith("java.lang."))
+                self.assertEqual(caused, "Caused by: " + direct)
+                message = direct.split(": ", 1)[1]
+                if code == "RULE_PUBLICATION_SERVICE_AMOUNT_THRESHOLD_FORMAT_INVALID":
+                    self.assertEqual(source.count(
+                        '"amountThreshold must be a positive canonical integer "'
+                    ), 1)
+                    self.assertEqual(source.count(
+                        '"string within NUMERIC(19,4) integer range"'
+                    ), 1)
+                else:
+                    self.assertEqual(source.count('"' + message + '"'), 1)
+
+    def test_rule_publication_command_contract_flow_and_idempotency(self):
+        effective = "2026-09-23T14:00:00Z"
+        self.assertEqual(
+            verify_e2e.rule_publication_arguments(effective),
+            [
+                "run", "--rm", "--no-deps", "--pull", "never", "-T",
+                "-e", "SPRING_PROFILES_ACTIVE=local,rule-v1-default-publication",
+                "-e", "FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED=false",
+                "backend", "--spring.main.web-application-type=none",
+                "--logging.level.org.hibernate.orm.connections.pooling=WARN",
+                "--finguardops.rule-v1-default-publication.enabled=true",
+                "--finguardops.rule-v1-default-publication.confirmation=PUBLISH_RULE_V1_DEFAULT_V1",
+                "--finguardops.rule-v1-default-publication.effective-from=" + effective,
+            ],
+        )
+
+        class Context:
+            def __init__(self, outputs):
+                self.outputs = list(outputs)
+                self.calls = []
+
+            def execute(self, arguments, *, input_bytes=None, timeout=None, before_stage=None):
+                self.calls.append((arguments, timeout, before_stage))
+                return self.outputs.pop(0)
+
+        publication = Context([b"0\n", b"0\n", b"runner output\n", b"4\n"])
+        with mock.patch.object(verify_e2e.time, "sleep") as sleeper:
+            verify_e2e.publish_rules(publication, before_diagnostics=True)
+        self.assertEqual(len(publication.calls), 4)
+        self.assertEqual(
+            [call[2] for call in publication.calls],
+            [
+                "RULE_PUBLISHED_STATE",
+                "RULE_ACTIVE_STATE",
+                "RULE_PUBLICATION_COMMAND",
+                "RULE_ACTIVATION_POLL",
+            ],
+        )
+        command, timeout, _ = publication.calls[2]
+        self.assertEqual(timeout, 240)
+        self.assertEqual(command[:-1], verify_e2e.rule_publication_arguments(effective)[:-1])
+        self.assertRegex(
+            command[-1],
+            r"\A--finguardops\.rule-v1-default-publication\.effective-from="
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z",
+        )
+        sleeper.assert_not_called()
+
+        existing = Context([b"4\n", b"4\n"])
+        verify_e2e.publish_rules(existing, before_diagnostics=True)
+        self.assertEqual(len(existing.calls), 2)
+
+        partial = Context([b"1\n", b"0\n"])
+        with self.assertRaisesRegex(
+            verify_e2e.VerificationError, "^RULE_PUBLICATION_STATE_INVALID$"
+        ):
+            verify_e2e.publish_rules(partial, before_diagnostics=True)
+        self.assertEqual(len(partial.calls), 2)
+
+    def test_publication_argv_owns_the_hibernate_tab_producer(self):
+        # The TAB in a publication capture comes from Hibernate's own INFO log,
+        # not from repository code, so the argv silences that one logger instead
+        # of the stdout contract relaxing its TAB rule.
+        effective = "2026-09-23T14:00:00Z"
+        argv = verify_e2e.rule_publication_arguments(effective)
+        self.assertEqual(argv.count(HIBERNATE_TAB_LOGGER_PROPERTY), 1)
+        # The property sits in the backend application argument region, after the
+        # service name and before the effective-from argument that stays last.
+        self.assertGreater(
+            argv.index(HIBERNATE_TAB_LOGGER_PROPERTY), argv.index("backend")
+        )
+        self.assertTrue(
+            argv[-1].startswith(
+                "--finguardops.rule-v1-default-publication.effective-from="
+            )
+        )
+        self.assertEqual(argv[-1].split("=", 1)[1], effective)
+        # Exactly one argument mentions a Hibernate logger.
+        hibernate = [item for item in argv if "hibernate" in item.casefold()]
+        self.assertEqual(hibernate, [HIBERNATE_TAB_LOGGER_PROPERTY])
+        # The approved spelling is pinned by an anchored contract rather than by
+        # argv membership, so each rejected candidate below fails on its own: a
+        # loose pattern would admit the padded, suffixed and miscased forms.
+        accepted = [
+            item for item in argv
+            if HIBERNATE_TAB_LOGGER_CONTRACT.fullmatch(item) is not None
+        ]
+        self.assertEqual(accepted, [HIBERNATE_TAB_LOGGER_PROPERTY])
+        rejected = (
+            "--logging.level.org.hibernate.orm.connections.pooling=OFF",
+            "--logging.level.org.hibernate.orm.connections.pooling=ERROR",
+            "--logging.level.org.hibernate.orm.connections.pooling=INFO",
+            "--logging.level.org.hibernate.orm.connections.pooling=DEBUG",
+            "--logging.level.org.hibernate.orm.connections.pooling=TRACE",
+            "--logging.level.org.hibernate.orm.connections.pooling=warn",
+            "--logging.level.org.hibernate.orm.connections.pooling=Warn",
+            "--logging.level.org.hibernate=WARN",
+            "--logging.level.org.hibernate.orm=WARN",
+            "--logging.level.org.hibernate.orm.connections=WARN",
+            "--logging.level.org.hibernate.orm.connections.pooling.extra=WARN",
+            "--logging.level.root=WARN",
+            " --logging.level.org.hibernate.orm.connections.pooling=WARN",
+            "--logging.level.org.hibernate.orm.connections.pooling=WARN ",
+            "LOGGING_LEVEL_ORG_HIBERNATE_ORM_CONNECTIONS_POOLING=WARN",
+        )
+        for candidate in rejected:
+            with self.subTest(candidate=candidate):
+                self.assertIsNone(
+                    HIBERNATE_TAB_LOGGER_CONTRACT.fullmatch(candidate)
+                )
+                self.assertNotIn(candidate, argv)
+        # No other logging level is set, so the global Hibernate level and the
+        # root level are untouched, and no environment variable form is added.
+        self.assertEqual(
+            [item for item in argv if item.startswith("--logging.level.")],
+            [HIBERNATE_TAB_LOGGER_PROPERTY],
+        )
+        environment_arguments = [
+            argv[index + 1]
+            for index, item in enumerate(argv[:-1])
+            if item == "-e"
+        ]
+        self.assertEqual(
+            environment_arguments,
+            [
+                "SPRING_PROFILES_ACTIVE=local,rule-v1-default-publication",
+                "FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED=false",
+            ],
+        )
+
+    def test_publication_argv_builder_is_shared_by_service_and_run(self):
+        # Service passes before_diagnostics=False and Run passes True, which only
+        # selects the before_stage. The argv itself, and therefore the producer
+        # suppression, must be identical in both modes.
+        class Context:
+            def __init__(self, outputs):
+                self.outputs = list(outputs)
+                self.calls = []
+
+            def execute(
+                self, arguments, *, input_bytes=None, timeout=None,
+                before_stage=None,
+            ):
+                self.calls.append((list(arguments), before_stage))
+                return self.outputs.pop(0)
+
+        captured = {}
+        for mode, diagnostics in (("run", True), ("service", False)):
+            context = Context([b"0\n", b"0\n", b"runner output\n", b"4\n"])
+            with mock.patch.object(verify_e2e.time, "sleep"):
+                verify_e2e.publish_rules(context, before_diagnostics=diagnostics)
+            arguments, before_stage = context.calls[2]
+            captured[mode] = arguments
+            self.assertEqual(
+                before_stage,
+                "RULE_PUBLICATION_COMMAND" if diagnostics else None,
+            )
+            self.assertEqual(arguments.count(HIBERNATE_TAB_LOGGER_PROPERTY), 1)
+        self.assertEqual(captured["run"][:-1], captured["service"][:-1])
+
+    def test_publication_stdout_failure_evidence_outranks_the_tab_rule(self):
+        # Silencing the Hibernate producer must not let a real stack trace be
+        # reported as a mere TAB violation. Failure evidence is judged before the
+        # structural stdout rules, and these captures pin that order on stdout,
+        # which is where Boot writes its console appender.
+        success = publication_production_success_output()
+        headline = "java.lang.IllegalStateException: hidden"
+        frame = "\tat com.example.Type.run(Type.java:1)"
+        warning = production_boot_line(
+            "o.s.b.w.s.c.ServletWebServerApplicationContext",
+            "Exception encountered during context initialisation",
+            level="WARN",
+        )
+        caused_by = "Caused by: com.example.PublicationFailure: hidden"
+        suppressed = "Suppressed: com.example.HiddenFailure: hidden"
+        evidence = verify_e2e.RULE_PUBLICATION_FAILURE_EVIDENCE_INVALID
+        # The WARN console line on its own is not evidence, so the "-only" cases
+        # below are decided by the headline alone and the frame-bearing cases by
+        # the frame alone. Both detectors are therefore load-bearing here.
+        self.assertFalse(
+            verify_e2e.has_rule_publication_failure_evidence(
+                success + (warning + "\n").encode(), b""
+            )
+        )
+        cases = {
+            # decided by RULE_PUBLICATION_RUNNER_STACK_FRAME
+            "frame-without-headline": success + (frame + "\n").encode(),
+            "frame-before-marker": (frame + "\n").encode() + success,
+            # decided by RULE_PUBLICATION_RUNNER_EXCEPTION_HEADLINE
+            "headline-only": success + (headline + "\n").encode(),
+            "caused-by-only": success + (caused_by + "\n").encode(),
+            "suppressed-only": success + (suppressed + "\n").encode(),
+            "nonfatal-warn-throwable": (
+                success + (warning + "\n" + headline + "\n").encode()
+            ),
+            # the full shapes a real capture carries: headline plus its frames
+            "headline-and-frame": (
+                success + (headline + "\n" + frame + "\n").encode()
+            ),
+            "caused-by-frame": (
+                success + (caused_by + "\n" + frame + "\n").encode()
+            ),
+            "suppressed-frame": (
+                success + (suppressed + "\n" + frame + "\n").encode()
+            ),
+            "nonfatal-warn-throwable-frame": (
+                success
+                + (warning + "\n" + headline + "\n" + frame + "\n").encode()
+            ),
+        }
+        for name, stdout in cases.items():
+            with self.subTest(case=name):
+                self.assert_publication_code(stdout, b"", evidence)
+
+    def test_publication_stdout_tab_rule_still_rejects_normal_tab_output(self):
+        # The Hibernate connection-info block is ordinary healthy output, not
+        # failure evidence, and the stdout contract still rejects it. The fix owns
+        # the producer through the argv, so this fixture stays red on purpose and
+        # pins that the validator was not relaxed.
+        success = publication_production_success_output()
+        tab = verify_e2e.RULE_PUBLICATION_STDOUT_TAB_INVALID
+        for newline in ("\n", "\r\n"):
+            with self.subTest(newline=newline):
+                stdout = (
+                    hibernate_connection_info_block(newline)
+                    + publication_production_success_output(newline)
+                )
+                self.assertFalse(
+                    verify_e2e.has_rule_publication_failure_evidence(stdout, b"")
+                )
+                self.assert_publication_code(stdout, b"", tab)
+        application_owned = (
+            production_boot_line(
+                "c.a.b.r.o.RuleV1DefaultRuleSetPublicationRunner",
+                "NeverPrintTail summary:",
+            )
+            + "\n\tNeverPrintTail indented detail\n"
+        )
+        self.assert_publication_code(
+            success + application_owned.encode(), b"", tab
+        )
+
+    def test_publication_stdout_tab_backstops_undetected_frame_shapes(self):
+        # RULE_PUBLICATION_RUNNER_STACK_FRAME does not match every real frame
+        # spelling, so the TAB rule is the fail-closed backstop for the rest. The
+        # frame regex is deliberately not widened here; this pins only that those
+        # shapes keep being rejected, which is why TAB is never allowed globally.
+        success = publication_production_success_output()
+        tab = verify_e2e.RULE_PUBLICATION_STDOUT_TAB_INVALID
+        shapes = {
+            "unknown-packaging": "\tat com.example.Type.run(Type.java:1) ~[?:?]",
+            "module-path-qualified": "\tat app//com.example.Type.run(Type.java:1)",
+            "nested-frame": "\t\tat com.example.Type.run(Type.java:1)",
+            "frame-without-line": "\tat com.example.Type.run(Type.java)",
+            "elision-more": "\t... 12 more",
+            "elision-common-frames": "\t... 3 common frames omitted",
+        }
+        for name, line in shapes.items():
+            with self.subTest(case=name):
+                # Neither pattern claims the shape, so it is not failure evidence.
+                self.assertIsNone(
+                    verify_e2e.RULE_PUBLICATION_RUNNER_STACK_FRAME.fullmatch(line)
+                )
+                self.assertFalse(
+                    verify_e2e.has_rule_publication_failure_evidence(
+                        (line + "\n").encode(), b""
+                    )
+                )
+                # The TAB rule refuses it anyway, which is the whole point.
+                self.assert_publication_code(
+                    success + (line + "\n").encode(), b"", tab
+                )
+
+    def test_native_capture_bounds_pipes_timeout_and_start_failure(self):
+        success = verify_e2e.capture_native_command(
+            [sys.executable, "-c", "import sys;sys.stdout.buffer.write(b'ok')"],
+            timeout=5,
+            cwd=Path.cwd(),
+            environment={},
+            stdout_limit=16,
+            stderr_limit=16,
+        )
+        self.assertEqual(success.returncode, 0)
+        self.assertEqual(success.stdout, b"ok")
+        self.assertEqual(success.stderr, b"")
+        self.assertFalse(success.cleanup_failed)
+        overflow = verify_e2e.capture_native_command(
+            [
+                sys.executable,
+                "-c",
+                "import sys;sys.stdout.buffer.write(b'A'*200000);sys.stderr.buffer.write(b'B'*200000)",
+            ],
+            timeout=5,
+            cwd=Path.cwd(),
+            environment={},
+            stdout_limit=64,
+            stderr_limit=64,
+        )
+        self.assertEqual(overflow.returncode, 0)
+        self.assertTrue(overflow.stdout_overflow)
+        self.assertTrue(overflow.stderr_overflow)
+        self.assertLessEqual(len(overflow.stdout), 65)
+        self.assertLessEqual(len(overflow.stderr), 65)
+        timeout = verify_e2e.capture_native_command(
+            [sys.executable, "-c", "import time;time.sleep(30)"],
+            timeout=0.05,
+            cwd=Path.cwd(),
+            environment={},
+            stdout_limit=16,
+            stderr_limit=16,
+        )
+        self.assertTrue(timeout.timed_out)
+        self.assertFalse(timeout.cleanup_failed)
+        missing = verify_e2e.capture_native_command(
+            ["missing-" + "a" * 32 + ".exe"],
+            timeout=0.05,
+            cwd=Path.cwd(),
+            environment={},
+            stdout_limit=16,
+            stderr_limit=16,
+        )
+        self.assertTrue(missing.start_failed)
+        self.assertFalse(missing.cleanup_failed)
+
+    def test_run_fixture_before_reaches_each_native_stage_in_exact_order(self):
+        environment = valid_run_fixture_environment()
+        contract = verify_e2e.load_owner_contract(environment)
+        empty_snapshot = b"".join(
+            verify_e2e.SNAPSHOT_BEGIN_PREFIX + table.encode("ascii") + b"\n"
+            + verify_e2e.SNAPSHOT_END_PREFIX + table.encode("ascii") + b"\n"
+            for table in verify_e2e.BUSINESS_TABLES
+        )
+        outputs = {
+            "RULE_PUBLISHED_STATE": b"0\n",
+            "RULE_ACTIVE_STATE": b"0\n",
+            "RULE_PUBLICATION_COMMAND": publication_success_output(),
+            "RULE_ACTIVATION_POLL": b"4\n",
+            "TRANSACTION_CARDINALITY_SNAPSHOT": ("|".join(["0"] * 14) + "\n").encode(),
+            "DATABASE_GLOBAL_SNAPSHOT": empty_snapshot,
+            "EXTERNAL_RISK_LOG_SNAPSHOT": b"",
+            "RULE_V2_LOG_SNAPSHOT": b"",
+            "BACKEND_METRIC_SNAPSHOT": b"[0,0]\n",
+        }
+
+        class Context:
+            project = verify_e2e.RUN_FIXTURE_PROJECT
+
+            def __init__(self):
+                self.contract = contract
+                self.stages = []
+
+            def execute(self, arguments, *, input_bytes=None, timeout=None, before_stage=None):
+                self.stages.append(before_stage)
+                return outputs[before_stage]
+
+        context = Context()
+        with tempfile.TemporaryDirectory() as parent:
+            directory = Path(parent) / (
+                "finguardops-keycloak-e2e-fixture-" + contract.run_id
+            )
+            directory.mkdir()
+            state = verify_e2e.run_fixture_before(context, directory)
+        self.assertEqual(state["composeProject"], verify_e2e.RUN_FIXTURE_PROJECT)
+        self.assertEqual(
+            context.stages,
+            [
+                "RULE_PUBLISHED_STATE",
+                "RULE_ACTIVE_STATE",
+                "RULE_PUBLICATION_COMMAND",
+                "RULE_ACTIVATION_POLL",
+                "TRANSACTION_CARDINALITY_SNAPSHOT",
+                "DATABASE_GLOBAL_SNAPSHOT",
+                "EXTERNAL_RISK_LOG_SNAPSHOT",
+                "RULE_V2_LOG_SNAPSHOT",
+                "BACKEND_METRIC_SNAPSHOT",
+            ],
+        )
 
     def test_bounded_poll_stops_at_limit(self):
         attempts = []
@@ -1072,10 +2957,92 @@ finguardops_rule_analysis_outcomes_created 99
             )
         for key, value in valid_owner_environment().items():
             self.assertEqual(context.environment[key], value)
+        self.assertEqual(
+            context.environment[verify_e2e.COMPOSE_PROJECT_ENVIRONMENT],
+            verify_e2e.RUN_FIXTURE_PROJECT,
+        )
         self.assertNotIn("--build", context.compose)
 
+    def test_publication_host_context_uses_project_credential_source_contract(self):
+        contract = verify_e2e.load_owner_contract(valid_owner_environment())
+        repo = Path.cwd().resolve()
+        canonical_env_file = str(repo / "infra" / ".env.example")
+        ambient_states = (
+            ("absent", None),
+            ("present-nonempty", "ambient-nonempty"),
+            ("present-empty", ""),
+        )
+        projects = (
+            verify_e2e.RUN_FIXTURE_PROJECT,
+            "finguardops-kc241-e2e-unit01",
+        )
+
+        def is_aligned(context):
+            if "--env-file" not in context.compose:
+                return False
+            env_file_index = context.compose.index("--env-file")
+            return (
+                context.compose[env_file_index + 1] == canonical_env_file
+                and env_file_index < context.compose.index("-f")
+                and "POSTGRES_PASSWORD" not in context.environment
+        )
+
+        for project in projects:
+            for ambient_state, ambient in ambient_states:
+                with self.subTest(project=project, ambient_state=ambient_state):
+                    with mock.patch.dict(os.environ, {}, clear=False):
+                        if ambient is None:
+                            os.environ.pop("POSTGRES_PASSWORD", None)
+                        else:
+                            os.environ["POSTGRES_PASSWORD"] = ambient
+                        context = verify_e2e.HostContext(repo, project, 1, 10, contract)
+                        effective_environment = os.environ.copy()
+                        effective_environment.update(context.environment)
+                        self.assertEqual(
+                            "POSTGRES_PASSWORD" in effective_environment,
+                            ambient is not None,
+                        )
+                        if ambient is not None:
+                            self.assertEqual(
+                                effective_environment["POSTGRES_PASSWORD"] == "",
+                                ambient == "",
+                            )
+                    self.assertTrue(is_aligned(context))
+
+                    head_equivalent = types.SimpleNamespace(
+                        compose=[
+                            item for index, item in enumerate(context.compose)
+                            if item != "--env-file"
+                            and not (
+                                index > 0
+                                and context.compose[index - 1] == "--env-file"
+                            )
+                        ],
+                        environment={**context.environment, "POSTGRES_PASSWORD": object()},
+                    )
+                    self.assertFalse(is_aligned(head_equivalent))
+
+                    without_env_file = types.SimpleNamespace(
+                        compose=head_equivalent.compose,
+                        environment=dict(context.environment),
+                    )
+                    with_fixed_override = types.SimpleNamespace(
+                        compose=list(context.compose),
+                        environment={**context.environment, "POSTGRES_PASSWORD": object()},
+                    )
+                    self.assertFalse(is_aligned(without_env_file))
+                    self.assertFalse(is_aligned(with_fixed_override))
+
+        compose_source = (repo / "infra" / "compose.yml").read_text(encoding="utf-8")
+        self.assertEqual(
+            compose_source.count("${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"),
+            2,
+        )
+        self.assertIn("${POSTGRES_DB:-finguardops}", compose_source)
+        self.assertIn("${POSTGRES_USER:-finguardops}", compose_source)
+
     def test_all_runtime_uses_no_build_pull_never_and_never_cleans_up(self):
-        environment = valid_owner_environment()
+        environment = valid_run_fixture_environment()
         contract = verify_e2e.load_owner_contract(environment)
         context = types.SimpleNamespace(
             repo=Path.cwd(),
@@ -1142,6 +3109,976 @@ finguardops_rule_analysis_outcomes_created 99
             )
         self.assertEqual(result, 0)
         runtime.assert_called_once()
+
+    def test_service_project_contract_remains_dynamic_and_rejects_run_project(self):
+        valid = "finguardops-kc241-e2e-unit01"
+        self.assertEqual(verify_e2e.validate_service_project(valid), valid)
+        invalid = (
+            verify_e2e.RUN_FIXTURE_PROJECT,
+            "finguardops-kc241-e2e-short",
+            "finguardops-kc241-e2e-" + "a" * 34,
+            "finguardops-kc241-e2e-Unit01",
+            "finguardops-kc241-e2e--unit01",
+            "finguardops-kc241-e2e-unit01\n",
+            "finguardops-kc241-e2e-unit\u200b01",
+        )
+        for project in invalid:
+            with self.subTest(project=repr(project)), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "HOST_ARGUMENT_INVALID"
+            ):
+                verify_e2e.validate_service_project(project)
+        with tempfile.TemporaryDirectory(prefix="service-project-") as directory:
+            for project in invalid:
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with self.subTest(cli_project=repr(project)), \
+                     mock.patch.dict(verify_e2e.os.environ, valid_owner_environment(), clear=True), \
+                     mock.patch.object(verify_e2e, "all_runtime") as runtime, \
+                     contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    result = verify_e2e.main([
+                        "all", "--repo-root", directory, "--project", project
+                    ])
+                self.assertEqual(result, 1)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertEqual(stderr.getvalue(), "verification failed: HOST_ARGUMENT_INVALID\n")
+                runtime.assert_not_called()
+        for project in (None, 1, b"finguardops-kc241-e2e-unit01"):
+            with self.subTest(project=repr(project)), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "HOST_ARGUMENT_INVALID"
+            ):
+                verify_e2e.validate_service_project(project)
+
+    def test_run_fixture_project_contract_is_fixed_exact_literal(self):
+        fixed = verify_e2e.RUN_FIXTURE_PROJECT
+        self.assertEqual(verify_e2e.validate_run_fixture_project(fixed), fixed)
+        invalid = (
+            "x" + fixed,
+            fixed + "-x",
+            fixed.swapcase(),
+            " " + fixed,
+            fixed + " ",
+            fixed + "\r",
+            fixed + "\n",
+            fixed + "\x00",
+            fixed + "\x85",
+            fixed + "\u200b",
+            "finguardops-kc241-e2e-unit01",
+            "finguardops-keycloаk-browser-e2e",
+            "",
+        )
+        for project in invalid:
+            with self.subTest(project=repr(project)), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "HOST_ARGUMENT_INVALID"
+            ):
+                verify_e2e.validate_run_fixture_project(project)
+        for project in (None, 1, [fixed]):
+            with self.subTest(project=repr(project)), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "HOST_ARGUMENT_INVALID"
+            ):
+                verify_e2e.validate_run_fixture_project(project)
+
+    def test_run_fixture_project_fail_fast_prevents_all_fixture_mutation(self):
+        environment = valid_run_fixture_environment()
+        fixed = verify_e2e.RUN_FIXTURE_PROJECT
+        invalid = (
+            fixed + "-suffix",
+            fixed + "-",
+            "prefix-" + fixed,
+            "F" + fixed[1:],
+            fixed + " ",
+            fixed + "\n",
+            fixed + "\u200b",
+            "finguardops-kc241-e2e-unit01",
+        )
+        with tempfile.TemporaryDirectory(prefix="finguardops-keycloak-e2e-fixture-") as parent:
+            directory = Path(parent) / (
+                "finguardops-keycloak-e2e-fixture-"
+                + environment["FINGUARDOPS_E2E_RUN_ID"]
+            )
+            directory.mkdir()
+            for mode in ("run-fixture-before", "run-fixture-after"):
+                for project in invalid:
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    stdin = types.SimpleNamespace(buffer=io.BytesIO(b"candidate-state-must-not-read"))
+                    with self.subTest(mode=mode, project=repr(project)), \
+                         mock.patch.dict(verify_e2e.os.environ, environment, clear=True), \
+                         mock.patch.object(verify_e2e.sys, "stdin", stdin), \
+                         mock.patch.object(verify_e2e, "run_fixture_before") as before, \
+                         mock.patch.object(verify_e2e, "run_fixture_after") as after, \
+                         contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                        result = verify_e2e.main([
+                            mode, "--repo-root", parent,
+                            "--project", project,
+                            "--fixture-directory", str(directory),
+                        ])
+                    self.assertEqual(result, 1)
+                    self.assertEqual(stdout.getvalue(), "")
+                    self.assertEqual(
+                        stderr.getvalue(), "verification failed: HOST_ARGUMENT_INVALID\n"
+                    )
+                    before.assert_not_called()
+                    after.assert_not_called()
+                    self.assertEqual(tuple(directory.iterdir()), ())
+
+    def test_run_fixture_worker_rejects_noncanonical_project_before_api_or_manifest(self):
+        plan_value = base64.b64encode(
+            json.dumps(valid_plan(), separators=(",", ":")).encode("utf-8")
+        ).decode("ascii")
+        for project in (
+            "finguardops-kc241-e2e-unit01",
+            verify_e2e.RUN_FIXTURE_PROJECT + "-x",
+            verify_e2e.RUN_FIXTURE_PROJECT + "\u200b",
+            None,
+        ):
+            environment = valid_owner_environment() | {
+                verify_e2e.FIXTURE_PLAN_ENVIRONMENT: plan_value,
+            }
+            if project is not None:
+                environment[verify_e2e.COMPOSE_PROJECT_ENVIRONMENT] = project
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with self.subTest(project=repr(project)), \
+                 mock.patch.dict(verify_e2e.os.environ, environment, clear=True), \
+                 mock.patch.object(verify_e2e, "create_run_fixture") as create, \
+                 mock.patch.object(verify_e2e, "write_fixture_manifest") as writer, \
+                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = verify_e2e.main(["run-fixture"])
+            self.assertEqual(result, 1)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertEqual(stderr.getvalue(), "verification failed: HOST_ARGUMENT_INVALID\n")
+            create.assert_not_called()
+            writer.assert_not_called()
+
+    def test_run_fixture_manifest_canonical_round_trip_and_schema_rejections(self):
+        identity = valid_fixture_identity()
+        canonical = verify_e2e.fixture_manifest_bytes(identity)
+        self.assertLessEqual(len(canonical), 1024)
+        self.assertFalse(canonical.startswith(b"\xef\xbb\xbf"))
+        self.assertTrue(canonical.endswith(b"\n"))
+        self.assertNotIn(b"\r", canonical)
+        self.assertEqual(verify_e2e.parse_fixture_manifest_bytes(canonical), identity)
+        self.assertEqual(identity["composeProject"], verify_e2e.RUN_FIXTURE_PROJECT)
+        foreign = dict(identity)
+        foreign["composeProject"] = "finguardops-kc241-e2e-unit01"
+        with self.assertRaisesRegex(
+            verify_e2e.VerificationError, "FIXTURE_MANIFEST_IDENTITY_INVALID"
+        ):
+            verify_e2e.fixture_manifest_bytes(foreign)
+        with self.assertRaises(verify_e2e.VerificationError):
+            verify_e2e.parse_fixture_manifest_bytes(
+                canonical.replace(
+                    verify_e2e.RUN_FIXTURE_PROJECT.encode(),
+                    b"finguardops-keycloak-browser-e2x",
+                )
+            )
+        text = canonical.decode("utf-8")
+        malformed = {
+            "duplicate": text.replace('"schemaVersion":1,', '"schemaVersion":1,"schemaVersion":1,', 1),
+            "unknown": text[:-2] + ',"extra":"x"}\n',
+            "reordered": text.replace('{"schemaVersion":1,"runId":', '{"runId":').replace(
+                ',"repositoryId":', ',"schemaVersion":1,"repositoryId":', 1
+            ),
+            "missing": text.replace(',"caseId":"' + identity["caseId"] + '"', "", 1),
+            "schema-float": text.replace('"schemaVersion":1,', '"schemaVersion":1.0,', 1),
+            "wrong-risk": text.replace('"HIGH"', '"LOW"'),
+            "wrong-status": text.replace('"OPEN"', '"IN_REVIEW"'),
+            "uppercase-uuid": text.replace(identity["transactionId"], identity["transactionId"].upper()),
+        }
+        for name, candidate in malformed.items():
+            with self.subTest(name=name), self.assertRaises(verify_e2e.VerificationError):
+                verify_e2e.parse_fixture_manifest_bytes(candidate.encode("utf-8"))
+
+    def test_run_fixture_manifest_atomic_write_and_collision_boundaries(self):
+        identity = valid_fixture_identity()
+        with tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory:
+            root = Path(directory)
+            path = verify_e2e.write_fixture_manifest(root, identity)
+            self.assertEqual(path.name, verify_e2e.FIXTURE_MANIFEST_NAME)
+            self.assertEqual(tuple(item.name for item in root.iterdir()), (verify_e2e.FIXTURE_MANIFEST_NAME,))
+            self.assertEqual(path.read_bytes(), verify_e2e.fixture_manifest_bytes(identity))
+            with self.assertRaisesRegex(verify_e2e.VerificationError, "FIXTURE_MANIFEST_FINAL_EXISTS"):
+                verify_e2e.write_fixture_manifest(root, identity)
+        with tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory, \
+             mock.patch.object(verify_e2e, "rename_noreplace", side_effect=verify_e2e.VerificationError("FIXTURE_MANIFEST_RENAME_FAILED")):
+            with self.assertRaisesRegex(verify_e2e.VerificationError, "FIXTURE_MANIFEST_RENAME_FAILED"):
+                verify_e2e.write_fixture_manifest(Path(directory), identity)
+            self.assertEqual(tuple(Path(directory).iterdir()), ())
+
+    def test_run_fixture_manifest_create_write_and_flush_failures_are_fixed_and_clean(self):
+        identity = valid_fixture_identity()
+        with tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory, \
+             mock.patch.object(verify_e2e.os, "open", side_effect=OSError("NeverReflect secret path")):
+            with self.assertRaisesRegex(verify_e2e.VerificationError, "FIXTURE_MANIFEST_TEMP_CREATE_FAILED"):
+                verify_e2e.write_fixture_manifest(Path(directory), identity)
+            self.assertEqual(tuple(Path(directory).iterdir()), ())
+
+        class BrokenStream:
+            def __init__(self, descriptor, fail_at):
+                self.descriptor = descriptor
+                self.fail_at = fail_at
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                verify_e2e.os.close(self.descriptor)
+            def write(self, _value):
+                if self.fail_at == "write":
+                    raise OSError("NeverReflect token")
+            def flush(self):
+                if self.fail_at == "flush":
+                    raise OSError("NeverReflect credential")
+            def fileno(self):
+                return self.descriptor
+
+        real_fdopen = verify_e2e.os.fdopen
+        for stage in ("write", "flush"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory, \
+                 mock.patch.object(verify_e2e.os, "fdopen", side_effect=lambda descriptor, *_args, value=stage, **_kwargs: BrokenStream(descriptor, value)):
+                with self.assertRaisesRegex(verify_e2e.VerificationError, "FIXTURE_MANIFEST_WRITE_FAILED") as error:
+                    verify_e2e.write_fixture_manifest(Path(directory), identity)
+                self.assertNotIn("NeverReflect", str(error.exception))
+                self.assertEqual(tuple(Path(directory).iterdir()), ())
+        self.assertTrue(callable(real_fdopen))
+
+    def test_run_fixture_public_api_flow_uses_exact_response_identity(self):
+        plan = valid_plan()
+        transaction_response = {
+            "transactionId": plan["transactionId"],
+            "processingStatus": "ADDITIONAL_AUTH_REQUIRED",
+            "riskLevel": "HIGH",
+            "riskResponseOutcome": "ADDITIONAL_AUTH_REQUIRED",
+            "adoptedDetectionResultId": "b81ade9f-d451-43e2-b97b-d7b24e9a0988",
+            "caseId": valid_fixture_identity()["caseId"],
+            "createdAt": "2026-09-20T00:00:00Z",
+            "traceId": "not-exported",
+        }
+        responses = [
+            {"eventId": plan["passwordEventId"]},
+            {"eventId": plan["transferLimitEventId"]},
+            transaction_response,
+        ]
+        with mock.patch.object(verify_e2e, "service_tokens", return_value=("tx-token", "behavior-token")), \
+             mock.patch.object(verify_e2e, "request_backend", side_effect=responses) as request:
+            result = verify_e2e.create_run_fixture(plan)
+        self.assertEqual(result, {"transactionId": plan["transactionId"], "caseId": transaction_response["caseId"]})
+        self.assertEqual(request.call_count, 3)
+        for field, value in (("transactionId", valid_fixture_identity()["caseId"]), ("caseId", "not-a-uuid"), ("riskLevel", "LOW"), ("riskResponseOutcome", "ALLOW"), ("processingStatus", "COMPLETED"), ("createdAt", None), ("traceId", [])):
+            broken = dict(transaction_response)
+            broken[field] = value
+            with self.subTest(field=field), \
+                 mock.patch.object(verify_e2e, "service_tokens", return_value=("tx-token", "behavior-token")), \
+                 mock.patch.object(verify_e2e, "request_backend", side_effect=[responses[0], responses[1], broken]), \
+                 self.assertRaisesRegex(verify_e2e.VerificationError, "RUN_FIXTURE_TRANSACTION_RESPONSE_INVALID"):
+                verify_e2e.create_run_fixture(plan)
+        with mock.patch.object(verify_e2e, "service_tokens", side_effect=verify_e2e.VerificationError("SERVICE_AUTH_FAILED")), \
+             self.assertRaisesRegex(verify_e2e.VerificationError, "SERVICE_AUTH_FAILED"):
+            verify_e2e.create_run_fixture(plan)
+
+    def test_run_fixture_before_after_preserve_authoritative_exact_validation(self):
+        environment = valid_run_fixture_environment()
+        contract = verify_e2e.load_owner_contract(environment)
+        plan = valid_plan()
+        with tempfile.TemporaryDirectory(prefix="fixture-host-") as parent:
+            directory = Path(parent) / ("finguardops-keycloak-e2e-fixture-" + contract.run_id)
+            directory.mkdir()
+            identity = valid_fixture_identity()
+            context = types.SimpleNamespace(
+                contract=contract,
+                environment=environment,
+                project=verify_e2e.RUN_FIXTURE_PROJECT,
+            )
+            before_snapshot = snapshot_fixture()
+            with mock.patch.object(verify_e2e, "create_plan", return_value=plan), \
+                 mock.patch.object(verify_e2e, "publish_rules") as publish, \
+                 mock.patch.object(verify_e2e, "transaction_cardinality", return_value=verify_e2e.expected_transaction_cardinality(False, False, False)), \
+                 mock.patch.object(verify_e2e, "database_snapshot", return_value=before_snapshot), \
+                 mock.patch.object(verify_e2e, "dependency_hit_counts", return_value=(0, 0)), \
+                 mock.patch.object(verify_e2e, "backend_metric_totals", return_value=(0.0, 0.0)):
+                state = verify_e2e.run_fixture_before(context, directory)
+            publish.assert_called_once_with(context, before_diagnostics=True)
+            encoded = verify_e2e.run_fixture_state_bytes(state)
+            self.assertEqual(verify_e2e.parse_run_fixture_state(encoded), state)
+            (directory / verify_e2e.FIXTURE_MANIFEST_NAME).write_bytes(
+                verify_e2e.fixture_manifest_bytes(identity)
+            )
+            with mock.patch.object(verify_e2e, "transaction_cardinality", return_value=verify_e2e.expected_transaction_cardinality(True, True, False)), \
+                 mock.patch.object(verify_e2e, "database_snapshot", return_value=snapshot_fixture()), \
+                 mock.patch.object(verify_e2e, "assert_global_delta") as delta, \
+                 mock.patch.object(verify_e2e, "dependency_hit_counts", return_value=(1, 1)), \
+                 mock.patch.object(verify_e2e, "backend_metric_totals", return_value=(1.0, 1.0)), \
+                 mock.patch.object(verify_e2e, "transaction_case_id", return_value=identity["caseId"]):
+                verify_e2e.run_fixture_after(context, directory, state)
+            delta.assert_called_once()
+
+    def test_run_fixture_worker_writes_authoritative_identity_and_never_reflects_raw_failure(self):
+        plan = valid_plan()
+        response = {"transactionId": plan["transactionId"], "caseId": valid_fixture_identity()["caseId"]}
+        plan_value = base64.b64encode(json.dumps(plan, separators=(",", ":")).encode("utf-8")).decode("ascii")
+        output = io.StringIO()
+        environment = valid_run_fixture_environment() | {
+            verify_e2e.FIXTURE_PLAN_ENVIRONMENT: plan_value
+        }
+        with mock.patch.dict(verify_e2e.os.environ, environment, clear=True), \
+             mock.patch.object(verify_e2e, "create_run_fixture", return_value=response), \
+             mock.patch.object(verify_e2e, "write_fixture_manifest") as writer, \
+             contextlib.redirect_stdout(output):
+            verify_e2e.run_fixture_worker()
+        identity = writer.call_args.args[1]
+        self.assertEqual(identity["transactionId"], plan["transactionId"])
+        self.assertEqual(identity["caseId"], response["caseId"])
+        self.assertEqual(identity["composeProject"], verify_e2e.RUN_FIXTURE_PROJECT)
+        self.assertNotIn("traceId", identity)
+        self.assertEqual(output.getvalue(), "run fixture completed: risk=HIGH outcome=ADDITIONAL_AUTH_REQUIRED case=OPEN\n")
+
+        stderr = io.StringIO()
+        with mock.patch.dict(verify_e2e.os.environ, environment, clear=True), \
+             mock.patch.object(verify_e2e, "create_run_fixture", side_effect=RuntimeError("NeverReflectRawToken")), \
+             contextlib.redirect_stderr(stderr):
+            result = verify_e2e.main(["run-fixture"])
+        self.assertEqual(result, 1)
+        self.assertEqual(stderr.getvalue(), "verification failed: UNEXPECTED_ERROR\n")
+
+    def drive_run_fixture_http(self, plan, failure_index=None, failure=None, override=None):
+        # The eight HTTP calls one run fixture makes, answered in order by a
+        # stand-in for `http_json`. Nothing reaches a socket.
+        responses = [
+            (200, {"access_token": "unit-transaction-token"}),
+            (200, {"access_token": "unit-behavior-token"}),
+            (200, {"keys": [{"kty": "RSA", "alg": "RS256", "use": "sig", "kid": "unit-key"}]}),
+            (400, {}),
+            (401, {}),
+            (201, {"eventId": plan["passwordEventId"]}),
+            (201, {"eventId": plan["transferLimitEventId"]}),
+            (201, {
+                "transactionId": plan["transactionId"],
+                "processingStatus": "ADDITIONAL_AUTH_REQUIRED",
+                "riskLevel": "HIGH",
+                "riskResponseOutcome": "ADDITIONAL_AUTH_REQUIRED",
+                "adoptedDetectionResultId": "b81ade9f-d451-43e2-b97b-d7b24e9a0988",
+                "caseId": valid_fixture_identity()["caseId"],
+                "createdAt": "2026-09-20T00:00:00Z",
+                "traceId": "not-exported",
+            }),
+        ]
+        calls = []
+
+        def answer(url, **keywords):
+            index = len(calls)
+            calls.append((url, keywords.get("method", "GET")))
+            if index == failure_index and failure is not None:
+                raise failure
+            if index == failure_index and override is not None:
+                return override
+            return responses[index]
+
+        result, code = None, None
+        with mock.patch.object(verify_e2e, "read_secret", side_effect=["unit-a" * 8, "unit-b" * 8]), \
+             mock.patch.object(verify_e2e, "validate_token"), \
+             mock.patch.object(verify_e2e, "http_json", side_effect=answer):
+            try:
+                result = verify_e2e.create_run_fixture(plan)
+            except verify_e2e.VerificationError as error:
+                code = str(error)
+        return result, code, calls
+
+    def test_run_fixture_http_stage_failures_map_to_exclusive_fixed_codes(self):
+        plan = valid_plan()
+        token_url = "http://127.0.0.1:8082/realms/finguardops-local/protocol/openid-connect/token"
+        expected_calls = [
+            (token_url, "POST"),
+            (token_url, "POST"),
+            (verify_e2e.JWK_SET_URI, "GET"),
+            (token_url, "POST"),
+            (token_url, "POST"),
+            ("http://127.0.0.1:8080/api/v1/behavior-events", "POST"),
+            ("http://127.0.0.1:8080/api/v1/behavior-events", "POST"),
+            ("http://127.0.0.1:8080/api/v1/transactions", "POST"),
+        ]
+        result, code, calls = self.drive_run_fixture_http(plan)
+        self.assertIsNone(code)
+        self.assertEqual(result, {"transactionId": plan["transactionId"], "caseId": valid_fixture_identity()["caseId"]})
+        self.assertEqual(calls, expected_calls)
+
+        stages = (
+            "TRANSACTION_TOKEN", "BEHAVIOR_TOKEN", "JWKS", "CROSS_SECRET", "CROSS_SECRET",
+            "PASSWORD_EVENT", "TRANSFER_LIMIT_EVENT", "TRANSACTION",
+        )
+        table = verify_e2e.RUN_FIXTURE_STAGE_FAILURE_CODES
+        observed = {}
+        for index, stage in enumerate(stages):
+            failures = {
+                "transport": (verify_e2e.VerificationError("HTTP_TRANSPORT_FAILED"), table[stage]["HTTP_TRANSPORT_FAILED"]),
+                "status": (
+                    verify_e2e.VerificationError("HTTP_STATUS_UNEXPECTED"),
+                    table[stage]["HTTP_STATUS_UNEXPECTED"] if index < 5 else table[stage]["STATUS"],
+                ),
+                "json": (verify_e2e.VerificationError("HTTP_JSON_INVALID"), table[stage]["HTTP_JSON_INVALID"]),
+                "error-body": (OSError("NeverReflect body path"), table[stage]["RESPONSE_READ"]),
+                "incomplete": (http.client.IncompleteRead(b"NeverReflect"), table[stage]["RESPONSE_READ"]),
+            }
+            for kind, (failure, expected) in failures.items():
+                with self.subTest(index=index, stage=stage, kind=kind):
+                    result, code, calls = self.drive_run_fixture_http(plan, index, failure)
+                    self.assertIsNone(result)
+                    self.assertEqual(code, expected)
+                    self.assertIn(code, verify_e2e.RUN_FIXTURE_WORKER_FAILURE_CODES)
+                    self.assertNotIn("NeverReflect", code)
+                    # No retry and no reordering: the failing call is the last one.
+                    self.assertEqual(calls, expected_calls[: index + 1])
+                    observed.setdefault(code, set()).add(stage)
+        # A code names one stage and nothing else.
+        self.assertTrue(all(len(owners) == 1 for owners in observed.values()))
+        self.assertEqual(len(observed), 7 * 4)
+        self.assertFalse(set(observed) & set(verify_e2e.RUN_FIXTURE_GENERIC_HTTP_FAILURES))
+
+        # An identity that is already specific is not rewritten.
+        _, code, _ = self.drive_run_fixture_http(plan, 0, verify_e2e.VerificationError("TOKEN_RESPONSE_INVALID"))
+        self.assertEqual(code, "TOKEN_RESPONSE_INVALID")
+
+    def test_run_fixture_backend_statuses_and_event_responses_are_separated(self):
+        plan = valid_plan()
+        table = verify_e2e.RUN_FIXTURE_STAGE_FAILURE_CODES
+        self.assertEqual(verify_e2e.RUN_FIXTURE_BACKEND_REJECTED_STATUSES, (200, 400, 401, 403, 409, 422, 500, 503))
+        seen = set()
+        for index, stage in ((5, "PASSWORD_EVENT"), (6, "TRANSFER_LIMIT_EVENT"), (7, "TRANSACTION")):
+            for status in verify_e2e.RUN_FIXTURE_BACKEND_REJECTED_STATUSES:
+                with self.subTest(stage=stage, status=status):
+                    _, code, calls = self.drive_run_fixture_http(plan, index, override=(status, {"code": "NeverReflect"}))
+                    self.assertEqual(code, table[stage]["STATUS"] + "_" + str(status))
+                    self.assertIn(code, verify_e2e.RUN_FIXTURE_WORKER_FAILURE_CODES)
+                    self.assertEqual(len(calls), index + 1)
+                    seen.add(code)
+        self.assertEqual(len(seen), 24)
+        for index, stage in ((5, "PASSWORD_EVENT"), (6, "TRANSFER_LIMIT_EVENT")):
+            with self.subTest(stage=stage):
+                _, code, calls = self.drive_run_fixture_http(plan, index, override=(201, {"eventId": plan["transactionId"]}))
+                self.assertEqual(code, table[stage]["RESPONSE_INVALID"])
+                self.assertEqual(len(calls), index + 1)
+        self.assertNotEqual(table["PASSWORD_EVENT"]["RESPONSE_INVALID"], table["TRANSFER_LIMIT_EVENT"]["RESPONSE_INVALID"])
+        _, code, _ = self.drive_run_fixture_http(plan, 7, override=(201, {"transactionId": plan["transactionId"]}))
+        self.assertEqual(code, "RUN_FIXTURE_TRANSACTION_RESPONSE_INVALID")
+
+    def test_run_fixture_http_error_body_read_failure_is_fixed_only_inside_the_fixture(self):
+        class BrokenBody(io.BytesIO):
+            def read(self, *_args):
+                raise OSError("NeverReflect body path")
+
+        def raise_http_error(*_args, **_keywords):
+            raise urllib.error.HTTPError(
+                "http://127.0.0.1:8082/unit", 500, "NeverReflect", {}, BrokenBody()
+            )
+
+        secrets = ["unit-a" * 8, "unit-b" * 8]
+        with mock.patch("urllib.request.urlopen", side_effect=raise_http_error):
+            # Every other mode keeps what it always did with this failure.
+            with self.assertRaises(OSError):
+                verify_e2e.http_json("http://127.0.0.1:8082/unit")
+            with mock.patch.object(verify_e2e, "read_secret", side_effect=list(secrets)), \
+                 self.assertRaises(OSError):
+                verify_e2e.service_tokens()
+            with mock.patch.object(verify_e2e, "read_secret", side_effect=list(secrets)), \
+                 self.assertRaisesRegex(
+                     verify_e2e.VerificationError,
+                     "^RUN_FIXTURE_TRANSACTION_TOKEN_RESPONSE_READ_FAILED$",
+                 ):
+                verify_e2e.create_run_fixture(valid_plan())
+
+            plan_value = base64.b64encode(
+                json.dumps(valid_plan(), separators=(",", ":")).encode("utf-8")
+            ).decode("ascii")
+            environment = valid_run_fixture_environment() | {
+                verify_e2e.FIXTURE_PLAN_ENVIRONMENT: plan_value
+            }
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch.dict(verify_e2e.os.environ, environment, clear=True), \
+                 mock.patch.object(verify_e2e, "read_secret", side_effect=list(secrets)), \
+                 mock.patch.object(verify_e2e, "write_fixture_manifest") as writer, \
+                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = verify_e2e.main(["run-fixture"])
+        self.assertEqual(result, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(
+            stderr.getvalue(),
+            "verification failed: RUN_FIXTURE_TRANSACTION_TOKEN_RESPONSE_READ_FAILED\n",
+        )
+        writer.assert_not_called()
+
+        # The shared identities are unchanged for a caller that names no stage.
+        with mock.patch.object(verify_e2e, "read_secret", side_effect=list(secrets)), \
+             mock.patch.object(verify_e2e, "http_json", side_effect=verify_e2e.VerificationError("HTTP_TRANSPORT_FAILED")), \
+             self.assertRaisesRegex(verify_e2e.VerificationError, "^HTTP_TRANSPORT_FAILED$"):
+            verify_e2e.service_tokens()
+
+    def test_run_fixture_manifest_directory_io_failures_are_fixed(self):
+        identity = valid_fixture_identity()
+        canonical = verify_e2e.fixture_manifest_bytes(identity)
+        with tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory:
+            with mock.patch.object(verify_e2e.Path, "iterdir", side_effect=PermissionError("NeverReflect path")), \
+                 self.assertRaisesRegex(verify_e2e.VerificationError, "^FIXTURE_MANIFEST_DIRECTORY_IO_FAILED$"):
+                verify_e2e.write_fixture_manifest(Path(directory), identity)
+            self.assertEqual(tuple(Path(directory).iterdir()), ())
+        with tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory:
+            with mock.patch.object(verify_e2e.Path, "exists", side_effect=PermissionError("NeverReflect path")), \
+                 self.assertRaisesRegex(verify_e2e.VerificationError, "^FIXTURE_MANIFEST_DIRECTORY_IO_FAILED$"):
+                verify_e2e.write_fixture_manifest(Path(directory), identity)
+            self.assertEqual(tuple(Path(directory).iterdir()), ())
+        with tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory:
+            # The directory listing fails only after the atomic rename.
+            with mock.patch.object(verify_e2e.Path, "iterdir", side_effect=[iter(()), PermissionError("NeverReflect path")]), \
+                 self.assertRaisesRegex(verify_e2e.VerificationError, "^FIXTURE_MANIFEST_DIRECTORY_IO_FAILED$"):
+                verify_e2e.write_fixture_manifest(Path(directory), identity)
+            self.assertEqual(
+                tuple(item.name for item in Path(directory).iterdir()),
+                (verify_e2e.FIXTURE_MANIFEST_NAME,),
+            )
+            self.assertEqual((Path(directory) / verify_e2e.FIXTURE_MANIFEST_NAME).read_bytes(), canonical)
+
+        plan = valid_plan()
+        plan_value = base64.b64encode(json.dumps(plan, separators=(",", ":")).encode("utf-8")).decode("ascii")
+        environment = valid_run_fixture_environment() | {verify_e2e.FIXTURE_PLAN_ENVIRONMENT: plan_value}
+        response = {"transactionId": plan["transactionId"], "caseId": identity["caseId"]}
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory:
+            with mock.patch.dict(verify_e2e.os.environ, environment, clear=True), \
+                 mock.patch.object(verify_e2e, "create_run_fixture", return_value=response), \
+                 mock.patch.object(verify_e2e, "FIXTURE_MANIFEST_DIRECTORY", Path(directory)), \
+                 mock.patch.object(verify_e2e.Path, "iterdir", side_effect=PermissionError("NeverReflect path")), \
+                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = verify_e2e.main(["run-fixture"])
+        self.assertEqual(result, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "verification failed: FIXTURE_MANIFEST_DIRECTORY_IO_FAILED\n")
+
+    @contextlib.contextmanager
+    def fake_renameat2(self, outcome):
+        # Runs the Linux publication branch on any host. `outcome` is 0 for a
+        # rename that really happens, an errno for a rename the kernel refuses,
+        # or "missing" for a libc without the symbol.
+        calls = []
+
+        class Renameat2:
+            argtypes = None
+            restype = None
+
+            def __call__(self, _olddir, source, _newdir, destination, flags):
+                calls.append(flags)
+                if outcome == 0:
+                    os.rename(os.fsdecode(source), os.fsdecode(destination))
+                    return 0
+                return -1
+
+        class Libc:
+            pass
+
+        libc = Libc()
+        if outcome != "missing":
+            libc.renameat2 = Renameat2()
+        with mock.patch.object(verify_e2e.ctypes, "CDLL", return_value=libc), \
+             mock.patch.object(verify_e2e.ctypes, "get_errno", return_value=outcome if isinstance(outcome, int) else 0):
+            yield calls
+
+    def test_manifest_publication_fallback_errno_sets_are_fixed(self):
+        self.assertEqual(
+            verify_e2e.RENAME_NOREPLACE_UNSUPPORTED_ERRNOS,
+            frozenset({errno_module.EINVAL, errno_module.ENOSYS, errno_module.EOPNOTSUPP, errno_module.ENOTSUP}),
+        )
+        self.assertEqual(
+            verify_e2e.MANIFEST_PUBLISH_DENIED_ERRNOS,
+            frozenset({errno_module.EACCES, errno_module.EPERM, errno_module.EROFS}),
+        )
+        self.assertEqual(
+            verify_e2e.MANIFEST_PUBLISH_IO_ERRNOS,
+            frozenset({errno_module.EIO, errno_module.ENOSPC, errno_module.EDQUOT}),
+        )
+        blocked = verify_e2e.MANIFEST_PUBLISH_DENIED_ERRNOS | verify_e2e.MANIFEST_PUBLISH_IO_ERRNOS | {errno_module.EEXIST}
+        self.assertFalse(verify_e2e.RENAME_NOREPLACE_UNSUPPORTED_ERRNOS & blocked)
+
+    def test_manifest_publication_posix_branch_renames_or_falls_back_only_when_unsupported(self):
+        identity = valid_fixture_identity()
+        canonical = verify_e2e.fixture_manifest_bytes(identity)
+        name = verify_e2e.FIXTURE_MANIFEST_NAME
+
+        def publish(outcome, link=None, unlink=None, existing=None):
+            with tempfile.TemporaryDirectory(prefix="fixture-publish-") as directory:
+                root = Path(directory)
+                source, destination = root / (name + ".tmp"), root / name
+                source.write_bytes(canonical)
+                if existing is not None:
+                    destination.write_bytes(existing)
+                real_link, real_unlink = os.link, os.unlink
+                links, code = [], None
+
+                def linking(*arguments, **keywords):
+                    links.append("link")
+                    if link is not None:
+                        raise link
+                    return real_link(*arguments, **keywords)
+
+                def unlinking(path, *arguments, **keywords):
+                    if unlink is not None and str(path).endswith(".tmp"):
+                        raise unlink
+                    return real_unlink(path, *arguments, **keywords)
+
+                with self.fake_renameat2(outcome) as renames, \
+                     mock.patch.object(verify_e2e.os, "link", side_effect=linking), \
+                     mock.patch.object(verify_e2e.os, "unlink", side_effect=unlinking):
+                    try:
+                        verify_e2e.rename_noreplace_posix(source, destination)
+                    except verify_e2e.VerificationError as error:
+                        code = str(error)
+                names = sorted(item.name for item in root.iterdir())
+                final = destination.read_bytes() if destination.exists() else None
+                return code, names, final, len(links), list(renames)
+
+        # The normal path: one rename, no link.
+        self.assertEqual(publish(0), (None, [name], canonical, 0, [1]))
+        # An existing final name is never a reason to fall back, and is never replaced.
+        self.assertEqual(
+            publish(errno_module.EEXIST, existing=b"prior"),
+            ("FIXTURE_MANIFEST_FINAL_EXISTS", [name, name + ".tmp"], b"prior", 0, [1]),
+        )
+        # Only the documented "not supported" values reach the link.
+        for value in sorted(verify_e2e.RENAME_NOREPLACE_UNSUPPORTED_ERRNOS):
+            with self.subTest(unsupported=value):
+                self.assertEqual(publish(value), (None, [name], canonical, 1, [1]))
+        # A fallback never replaces a final name that appeared meanwhile.
+        self.assertEqual(
+            publish(errno_module.EINVAL, existing=b"prior"),
+            ("FIXTURE_MANIFEST_FINAL_EXISTS", [name, name + ".tmp"], b"prior", 1, [1]),
+        )
+        # A refusal, an I/O failure and an unknown errno are answers, not fallbacks.
+        refused = {
+            errno_module.EACCES: "FIXTURE_MANIFEST_RENAME_DENIED",
+            errno_module.EPERM: "FIXTURE_MANIFEST_RENAME_DENIED",
+            errno_module.EROFS: "FIXTURE_MANIFEST_RENAME_DENIED",
+            errno_module.EIO: "FIXTURE_MANIFEST_RENAME_IO_FAILED",
+            errno_module.ENOSPC: "FIXTURE_MANIFEST_RENAME_IO_FAILED",
+            errno_module.EDQUOT: "FIXTURE_MANIFEST_RENAME_IO_FAILED",
+            errno_module.EXDEV: "FIXTURE_MANIFEST_RENAME_FAILED",
+            errno_module.ENOENT: "FIXTURE_MANIFEST_RENAME_FAILED",
+            0: "FIXTURE_MANIFEST_RENAME_FAILED",
+        }
+        for value, expected in refused.items():
+            with self.subTest(refused=value):
+                outcome = value if value != 0 else 99999
+                self.assertEqual(publish(outcome), (expected, [name + ".tmp"], None, 0, [1]))
+        # No symbol: a fixed identity and no link.
+        self.assertEqual(
+            publish("missing"),
+            ("FIXTURE_MANIFEST_RENAME_UNAVAILABLE", [name + ".tmp"], None, 0, []),
+        )
+        # The link itself fails.
+        self.assertEqual(
+            publish(errno_module.EINVAL, link=PermissionError(errno_module.EPERM, "NeverReflect path")),
+            ("FIXTURE_MANIFEST_LINK_DENIED", [name + ".tmp"], None, 1, [1]),
+        )
+        self.assertEqual(
+            publish(errno_module.EINVAL, link=OSError(errno_module.EMLINK, "NeverReflect path")),
+            ("FIXTURE_MANIFEST_LINK_FAILED", [name + ".tmp"], None, 1, [1]),
+        )
+        self.assertEqual(
+            publish(errno_module.EINVAL, link=FileExistsError(errno_module.EEXIST, "NeverReflect path")),
+            ("FIXTURE_MANIFEST_FINAL_EXISTS", [name + ".tmp"], None, 1, [1]),
+        )
+        # The link succeeded but the temporary name could not be removed: not a
+        # success, and the final name this call created is withdrawn.
+        self.assertEqual(
+            publish(errno_module.EINVAL, unlink=PermissionError(errno_module.EACCES, "NeverReflect path")),
+            ("FIXTURE_MANIFEST_TEMP_UNLINK_FAILED", [name + ".tmp"], None, 1, [1]),
+        )
+
+    def test_manifest_publication_unlink_failure_never_removes_a_foreign_final(self):
+        name = verify_e2e.FIXTURE_MANIFEST_NAME
+        with tempfile.TemporaryDirectory(prefix="fixture-publish-") as directory:
+            root = Path(directory)
+            source, destination = root / (name + ".tmp"), root / name
+            source.write_bytes(b"temporary")
+            real_unlink = os.unlink
+
+            def linking(_source, target, *_arguments, **_keywords):
+                # The final name ends up being some other file, not this run's link.
+                Path(target).write_bytes(b"foreign")
+
+            def unlinking(path, *arguments, **keywords):
+                if str(path).endswith(".tmp"):
+                    raise PermissionError(errno_module.EACCES, "NeverReflect path")
+                return real_unlink(path, *arguments, **keywords)
+
+            with self.fake_renameat2(errno_module.EINVAL), \
+                 mock.patch.object(verify_e2e.os, "link", side_effect=linking), \
+                 mock.patch.object(verify_e2e.os, "unlink", side_effect=unlinking), \
+                 self.assertRaisesRegex(verify_e2e.VerificationError, "^FIXTURE_MANIFEST_TEMP_UNLINK_FAILED$"):
+                verify_e2e.rename_noreplace_posix(source, destination)
+            self.assertEqual(destination.read_bytes(), b"foreign")
+            self.assertEqual(source.read_bytes(), b"temporary")
+
+    def test_manifest_writer_through_the_posix_branch_keeps_bytes_and_cleanup(self):
+        identity = valid_fixture_identity()
+        canonical = verify_e2e.fixture_manifest_bytes(identity)
+        name = verify_e2e.FIXTURE_MANIFEST_NAME
+        posix = verify_e2e.rename_noreplace_posix
+        for outcome in (0, errno_module.EINVAL):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory, \
+                 self.fake_renameat2(outcome), \
+                 mock.patch.object(verify_e2e, "rename_noreplace", side_effect=posix):
+                path = verify_e2e.write_fixture_manifest(Path(directory), identity)
+                self.assertEqual(path.read_bytes(), canonical)
+                self.assertEqual(tuple(item.name for item in Path(directory).iterdir()), (name,))
+        failures = {
+            errno_module.EACCES: "FIXTURE_MANIFEST_RENAME_DENIED",
+            errno_module.EIO: "FIXTURE_MANIFEST_RENAME_IO_FAILED",
+            errno_module.EXDEV: "FIXTURE_MANIFEST_RENAME_FAILED",
+            "missing": "FIXTURE_MANIFEST_RENAME_UNAVAILABLE",
+        }
+        for outcome, expected in failures.items():
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory, \
+                 self.fake_renameat2(outcome), \
+                 mock.patch.object(verify_e2e, "rename_noreplace", side_effect=posix):
+                with self.assertRaisesRegex(verify_e2e.VerificationError, "^" + expected + "$") as error:
+                    verify_e2e.write_fixture_manifest(Path(directory), identity)
+                self.assertIn(str(error.exception), verify_e2e.RUN_FIXTURE_WORKER_FAILURE_CODES)
+                # The writer's own failure cleanup removed the temporary file.
+                self.assertEqual(tuple(Path(directory).iterdir()), ())
+        with tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory, \
+             self.fake_renameat2(errno_module.EINVAL), \
+             mock.patch.object(verify_e2e, "rename_noreplace", side_effect=posix), \
+             mock.patch.object(verify_e2e.os, "link", side_effect=OSError(errno_module.EMLINK, "NeverReflect path")):
+            with self.assertRaisesRegex(verify_e2e.VerificationError, "^FIXTURE_MANIFEST_LINK_FAILED$") as error:
+                verify_e2e.write_fixture_manifest(Path(directory), identity)
+            self.assertNotIn("NeverReflect", str(error.exception))
+            self.assertEqual(tuple(Path(directory).iterdir()), ())
+        # Link succeeded, temporary unlink refused: the writer fails, and with a
+        # mount that refuses every unlink it still fails on the same identity.
+        real_unlink = os.unlink
+        for refuse_all in (False, True):
+            refused = []
+
+            def unlinking(path, *arguments, refuse_all=refuse_all, refused=refused, **keywords):
+                if refuse_all or (str(path).endswith(".tmp") and not refused):
+                    refused.append("refused")
+                    raise PermissionError(errno_module.EACCES, "NeverReflect path")
+                return real_unlink(path, *arguments, **keywords)
+
+            with self.subTest(refuse_all=refuse_all), tempfile.TemporaryDirectory(prefix="fixture-writer-") as directory:
+                with self.fake_renameat2(errno_module.EINVAL), \
+                     mock.patch.object(verify_e2e, "rename_noreplace", side_effect=posix), \
+                     mock.patch.object(verify_e2e.os, "unlink", side_effect=unlinking), \
+                     self.assertRaisesRegex(verify_e2e.VerificationError, "^FIXTURE_MANIFEST_TEMP_UNLINK_FAILED$"):
+                    verify_e2e.write_fixture_manifest(Path(directory), identity)
+                remaining = sorted(item.name for item in Path(directory).iterdir())
+                # One refusal: the final name is withdrawn and the writer's own
+                # cleanup then removes the temporary file. Every unlink refused:
+                # both names remain, and the result is still a failure.
+                self.assertEqual(remaining, [name, name + ".tmp"] if refuse_all else [])
+        # The dispatcher still sends every non-Windows host to the posix branch.
+        with mock.patch.object(verify_e2e.os, "name", "posix"), \
+             mock.patch.object(verify_e2e, "rename_noreplace_posix") as branch, \
+             mock.patch.object(verify_e2e.os, "rename") as plain:
+            verify_e2e.rename_noreplace("source", "destination")
+        branch.assert_called_once_with("source", "destination")
+        plain.assert_not_called()
+
+    def test_run_fixture_worker_codes_match_the_runner_allowlist(self):
+        codes = verify_e2e.RUN_FIXTURE_WORKER_FAILURE_CODES
+        self.assertEqual(len(codes), len(set(codes)))
+        for code in codes:
+            self.assertIsNotNone(re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code), code)
+        self.assertFalse(set(codes) & set(verify_e2e.RUN_FIXTURE_GENERIC_HTTP_FAILURES))
+
+        repository = Path(__file__).resolve().parents[3]
+        module = repository / "frontend" / "scripts" / "keycloak-e2e-lib.psm1"
+        source = module.read_text(encoding="utf-8-sig")
+        block = re.search(
+            r"^\$RunFixtureServiceSecondaryCodes = @\(\r?\n(.*?)^\)", source, re.S | re.M
+        )
+        self.assertIsNotNone(block)
+        lines = [line.strip() for line in block.group(1).splitlines() if line.strip()]
+        literals = []
+        for line in lines:
+            match = re.fullmatch(r"'([A-Z][A-Z0-9_]{0,63})',?", line)
+            self.assertIsNotNone(match, "the runner allowlist holds something other than a literal")
+            literals.append(match.group(1))
+        self.assertEqual(tuple(literals), codes)
+
+        # What the worker's own call graph can raise, read from the source, is
+        # the declared set: neither side names an identity the other lacks.
+        tree = ast.parse(Path(verify_e2e.__file__).read_text(encoding="utf-8"))
+        graph = {
+            "run_fixture_worker", "validate_run_fixture_project", "validate_plan",
+            "create_run_fixture", "service_tokens", "read_secret", "token_for",
+            "validate_actual_service_tokens", "validate_token", "decode_token",
+            "decode_segment", "normalize_audience", "assert_cross_secret_rejected",
+            "fixture_identity_from_environment", "write_fixture_manifest",
+            "fixture_manifest_bytes", "validate_fixture_manifest_object",
+            "parse_fixture_manifest_bytes", "rename_noreplace",
+            "rename_noreplace_posix", "link_noreplace",
+        }
+        raised = set()
+        found = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name in graph:
+                found.add(node.name)
+                for call in ast.walk(node):
+                    if (
+                        isinstance(call, ast.Call)
+                        and isinstance(call.func, ast.Name)
+                        and call.func.id == "fail"
+                        and len(call.args) == 1
+                        and isinstance(call.args[0], ast.Constant)
+                    ):
+                        raised.add(call.args[0].value)
+        self.assertEqual(found, graph)
+        staged = {
+            code
+            for stage in verify_e2e.RUN_FIXTURE_STAGE_FAILURE_CODES.values()
+            for code in stage.values()
+        } | {
+            stage["STATUS"] + "_" + str(status)
+            for stage in verify_e2e.RUN_FIXTURE_STAGE_FAILURE_CODES.values()
+            if "STATUS" in stage
+            for status in verify_e2e.RUN_FIXTURE_BACKEND_REJECTED_STATUSES
+        }
+        self.assertEqual(raised | staged | {"INPUT_INVALID", "UNEXPECTED_ERROR"}, set(codes))
+
+    def test_run_fixture_before_after_cli_uses_canonical_stdin_state(self):
+        state = valid_run_fixture_state()
+        environment = valid_run_fixture_environment()
+        encoded = base64.b64encode(verify_e2e.run_fixture_state_bytes(state)).decode("ascii")
+        with tempfile.TemporaryDirectory(prefix="finguardops-keycloak-e2e-fixture-") as parent:
+            directory = Path(parent) / ("finguardops-keycloak-e2e-fixture-" + environment["FINGUARDOPS_E2E_RUN_ID"])
+            directory.mkdir()
+            before_output = io.StringIO()
+            with mock.patch.dict(verify_e2e.os.environ, environment, clear=True), \
+                 mock.patch.object(verify_e2e, "run_fixture_before", return_value=state) as before, \
+                 contextlib.redirect_stdout(before_output):
+                result = verify_e2e.main([
+                    "run-fixture-before", "--repo-root", parent,
+                    "--project", verify_e2e.RUN_FIXTURE_PROJECT,
+                    "--fixture-directory", str(directory),
+                ])
+            self.assertEqual(result, 0)
+            self.assertEqual(before_output.getvalue(), encoded + "\n")
+            before.assert_called_once()
+
+            stdin = types.SimpleNamespace(buffer=io.BytesIO((encoded + "\r\n").encode("ascii")))
+            after_output = io.StringIO()
+            with mock.patch.dict(verify_e2e.os.environ, environment, clear=True), \
+                 mock.patch.object(verify_e2e.sys, "stdin", stdin), \
+                 mock.patch.object(verify_e2e, "run_fixture_after") as after, \
+                 contextlib.redirect_stdout(after_output):
+                result = verify_e2e.main([
+                    "run-fixture-after", "--repo-root", parent,
+                    "--project", verify_e2e.RUN_FIXTURE_PROJECT,
+                    "--fixture-directory", str(directory),
+                ])
+            self.assertEqual(result, 0)
+            self.assertEqual(after_output.getvalue(), "")
+            after.assert_called_once()
+
+    def test_run_fixture_before_cli_emits_only_fixed_single_line_failures(self):
+        environment = valid_run_fixture_environment()
+        fixed_codes = tuple(
+            code
+            for stage in verify_e2e.BEFORE_NATIVE_FAILURE_CODES.values()
+            for code in stage.values()
+        ) + (
+            "DATABASE_TRANSACTION_CARDINALITY_INVALID",
+            "FIXTURE_DIRECTORY_INVALID",
+            "INGESTION_PLAN_INVALID",
+            "OVERALL_DEADLINE_EXCEEDED",
+            "OWNER_CONTRACT_INVALID",
+            "RULE_ACTIVATION_TIMEOUT",
+            "RULE_PUBLICATION_STATE_INVALID",
+            "RUN_FIXTURE_STATE_IDENTITY_INVALID",
+            "RUN_FIXTURE_STATE_INVALID",
+            "RUN_FIXTURE_STATE_TOO_LARGE",
+        )
+        with tempfile.TemporaryDirectory(prefix="finguardops-keycloak-e2e-fixture-") as parent:
+            directory = Path(parent) / (
+                "finguardops-keycloak-e2e-fixture-"
+                + environment["FINGUARDOPS_E2E_RUN_ID"]
+            )
+            directory.mkdir()
+            argv = [
+                "run-fixture-before", "--repo-root", parent,
+                "--project", verify_e2e.RUN_FIXTURE_PROJECT,
+                "--fixture-directory", str(directory),
+            ]
+            for code in fixed_codes:
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with self.subTest(code=code), \
+                     mock.patch.dict(verify_e2e.os.environ, environment, clear=True), \
+                     mock.patch.object(
+                         verify_e2e, "run_fixture_before",
+                         side_effect=verify_e2e.VerificationError(code),
+                     ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    result = verify_e2e.main(argv)
+                self.assertEqual(result, 1)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertEqual(stderr.getvalue(), "verification failed: " + code + "\n")
+
+            for failure, expected, exit_code in (
+                (OSError("raw-path-must-not-print"), "INPUT_INVALID", 2),
+                (RuntimeError("raw-token-must-not-print"), "UNEXPECTED_ERROR", 1),
+            ):
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with mock.patch.dict(verify_e2e.os.environ, environment, clear=True), \
+                     mock.patch.object(verify_e2e, "run_fixture_before", side_effect=failure), \
+                     contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    result = verify_e2e.main(argv)
+                self.assertEqual(result, exit_code)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertEqual(stderr.getvalue(), "verification failed: " + expected + "\n")
+                self.assertNotIn("raw-", stderr.getvalue())
+
+    def test_run_fixture_state_binds_every_owner_identity_before_after(self):
+        state = valid_run_fixture_state()
+        canonical = verify_e2e.run_fixture_state_bytes(state)
+        self.assertEqual(verify_e2e.parse_run_fixture_state(canonical), state)
+        context = types.SimpleNamespace(
+            contract=verify_e2e.load_owner_contract(valid_owner_environment()),
+            environment=valid_run_fixture_environment(),
+            project=state["composeProject"],
+        )
+        for key, replacement in (
+            ("runId", "f" * 32),
+            ("repositoryId", "f" * 64),
+            ("commitSha", "d" * 40),
+            ("treeSha", "e" * 40),
+        ):
+            candidate = dict(state)
+            candidate[key] = replacement
+            parsed = verify_e2e.parse_run_fixture_state(
+                verify_e2e.run_fixture_state_bytes(candidate)
+            )
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as parent:
+                directory = Path(parent) / (
+                    "finguardops-keycloak-e2e-fixture-" + context.contract.run_id
+                )
+                directory.mkdir()
+                with self.assertRaisesRegex(
+                    verify_e2e.VerificationError, "RUN_FIXTURE_STATE_IDENTITY_INVALID"
+                ), mock.patch.object(verify_e2e, "database_snapshot") as database:
+                    verify_e2e.run_fixture_after(context, directory, parsed)
+                database.assert_not_called()
+
+        candidate = dict(state)
+        candidate["composeProject"] = "finguardops-kc241-e2e-unit01"
+        with self.assertRaisesRegex(
+            verify_e2e.VerificationError, "RUN_FIXTURE_STATE_IDENTITY_INVALID"
+        ):
+            verify_e2e.run_fixture_state_bytes(candidate)
+
+    def test_run_fixture_state_rejects_noncanonical_duplicate_and_control_identity(self):
+        state = valid_run_fixture_state()
+        canonical = verify_e2e.run_fixture_state_bytes(state)
+        candidates = (
+            canonical.replace(b'{"schemaVersion":1,', b'{ "schemaVersion":1,', 1),
+            canonical.replace(b'{"schemaVersion":1,', b'{"schemaVersion":1,"schemaVersion":1,', 1),
+            canonical.replace(b'{"schemaVersion":1,', b'{"schemaVersion":1.0,', 1),
+            canonical.replace(state["composeProject"].encode(), (state["composeProject"] + "\u200b").encode()),
+            b"\xef\xbb\xbf" + canonical,
+        )
+        for candidate in candidates:
+            with self.assertRaises(verify_e2e.VerificationError):
+                verify_e2e.parse_run_fixture_state(candidate)
 
 
 if __name__ == "__main__":

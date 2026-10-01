@@ -346,6 +346,32 @@ name/clientId로 재조회하고 role/client/scope/mapper duplicate를 거부하
 `iat`가 미래로 보일 수 있다. retry·sleep·clock-skew 확장 없이 `iat <= now < exp`, 선택적
 `nbf <= now`, `exp - iat <= 900`을 검사한다.
 
+Keycloak의 configured `accessTokenLifespan`은 **899초**이고 verifier의 실제 JWT lifetime 상한은
+**900초**다. 두 값의 1초 차이는 operational margin이며 근거는 pinned Keycloak 26.7.3의 token 생성
+경로다. `iat`는 `JsonWebToken.issuedNow()`의 `Time.currentTime()`에서, `exp`는
+`TokenManager.getTokenExpiration()`의 `Time.currentTimeMillis()`에서 각각 **별개의 clock read**로
+계산되고 양쪽 모두 초 단위로 floor되므로, 발급된 token은 `exp - iat = configured + D`가 된다. 여기서
+`D`는 두 read 사이에 넘어간 정수초 경계의 개수다. 따라서 configured 899는 통상적인 `D=1` 경계 교차를
+흡수하며, `D <= 1`에서는 900초를 넘지 않는다.
+
+| D | 발급 lifetime | verifier 판정 |
+| --- | --- | --- |
+| 0 | 899초 | 수락 |
+| 1 | 900초 | 수락 |
+| 2 이상 | 901초 이상 | `TOKEN_TIME_LIFETIME_INVALID`로 거부 |
+
+Keycloak 구현은 두 clock read 사이의 최대 실행 시간을 보장하지 않으므로 899가 모든 `D`에서 성공한다고
+주장하지 않는다. `D >= 2`에 해당하는 비정상 장시간 지연은 계속 fail-closed로 거부한다. retry, sleep,
+clock-skew allowance는 추가하지 않으며 verifier의 900초 상한도 완화하지 않는다.
+`STATIC_REALM_CONTRACT`의 유효 범위 `1..900`도 그대로이며 899는 그 범위 안에 있다. authoritative
+runtime realm 값을 admin API로 read-back 검증하는 일은 이 scope에 포함되지 않는 후속 hardening이다.
+
+Token 시간 계약의 두 경계는 각각 독립된 fixed identity를 가진다. `exp <= iat`는
+`TOKEN_TIME_ORDER_INVALID`, `exp - iat > 900`은 `TOKEN_TIME_LIFETIME_INVALID`이며 한 code가 두
+predicate를 겸하지 않는다. 정확히 900초는 허용하고 901초부터 거부한다. verifier의 실제 JWT lifetime
+상한은 900초이며 이 상한은 완화되지 않는다. 두 판정 모두 실제
+`iat`·`exp` 값, 그 차이, JWT 또는 그 어떤 claim 원문도 출력하지 않고 고정 identity만 기록한다.
+
 2026-09-05 correction 실행은 fresh/existing volume, host 검증과 existing verifier 5회를 모두
 첫 시도에 통과했고 시간 오류는 재발하지 않았다.
 
@@ -459,3 +485,438 @@ Service 성공 시 PowerShell은 exact Compose project label을 가진 container
 시 primary failure를 보존하면서 resource, 세 owned unique tag와 Recovery receipt를 정리한다. cleanup이
 완전하지 않으면 Recovery receipt를 유지해 Browser Run을 구조적으로 차단한다. 기존 `*:local` image와
 ignored credential·TLS artifact는 자동 삭제하지 않는다.
+
+## 11. Run 전용 high-risk fixture orchestration
+
+`Run`은 기존 `keycloak-verify runtime`의 exit code 0을 확인한 뒤에만 host-side
+`run-fixture-before` verifier를 실행한다. 이 verifier는 기존 deterministic Rule publication helper로 네
+rule version의 active 상태를 확인·준비하고 업무 테이블·External Risk/Rule hit·outcome metric의 전
+상태를 canonical hash snapshot으로 반환한다. snapshot의 exact schema 앞부분은 `schemaVersion`,
+`runId`, `repositoryId`, `commitSha`, `treeSha`, `composeProject`이고, 기대 identity는 Prepared receipt와
+PowerShell의 authoritative Compose project plan에서만 온다. PowerShell은 이 identity와 canonical bytes를
+검증한 뒤 격리된 fixed `keycloak-run-fixture` service를
+`up -d --no-deps --no-build --pull never keycloak-run-fixture`로 시작하고, project inventory로 확정한
+fixture container의 exact 64-hex ID 하나만 `docker wait <id>`에 넘겨 종료를 기다린다. `compose wait`는 실행
+중인 container만 나열하므로 먼저 끝난 fixture를 놓칠 수 있어 쓰지 않는다. `docker wait`의 성공은 종료
+사실일 뿐 성공 판정이 아니며, 그 뒤 authoritative inspect가 같은 container의 exited / exit code 0을 확인해야
+다음 단계로 간다. `docker wait`가 실패하면 inspect 상태가 exited / exit code 0이어도
+`RUN_FIXTURE_SERVICE_WAIT_EXITED_ZERO`로 실패한다. service에는 검증한 plan만 일시적인 `FINGUARDOPS_E2E_FIXTURE_PLAN`으로 전달하며 환경은 즉시
+복원한다. 종료 container의 authoritative full ID, fixed project/service/name, `oneoff=False`, image,
+label, network, mount, state와 exit code 0을 검증한 뒤, 전 snapshot을 stdin으로만
+`run-fixture-after` verifier에 전달해 후 상태와 비교한다. fixture service는 public transaction/behavior API만 호출하며
+SQL은 snapshot과 cardinality의 read-only 검증에만 사용한다. Service mode의 `all`, fresh-volume,
+existing-volume 동작은 변경하지 않는다.
+
+fixture service 실패의 primary는 `RUN_FIXTURE_SERVICE_START_FAILED`, `RUN_FIXTURE_SERVICE_WAIT_FAILED`,
+`RUN_FIXTURE_SERVICE_WAIT_EXITED_ZERO`, `RUN_FIXTURE_SERVICE_EXIT_NONZERO`,
+`RUN_FIXTURE_SERVICE_STATE_INVALID`, `RUN_FIXTURE_CONTAINER_INVALID` 중 하나다. 이 가운데 container가 0이 아닌
+exit code로 종료한 `RUN_FIXTURE_SERVICE_EXIT_NONZERO`에서만, 그리고 이번 Run이 확정한 exact 64-hex
+container ID가 있을 때만 PowerShell이 cleanup 전에 `docker logs <id>`를 bounded native process로 정확히
+1회 읽는다. 판정 대상은 container의 stderr뿐이며 stdout과 Docker CLI 자체의 오류 출력은 marker로 취급하지
+않는다. stderr가 128 bytes 이하의 strict UTF-8 한 줄이고 전체가 `verification failed: <CODE>`이며 `<CODE>`가
+runner에 literal로 열거된 allowlist와 ordinal exact로 일치할 때만 다음 경고를 Run당 정확히 1회 출력한다.
+
+```text
+RUN_FIXTURE_SERVICE_SECONDARY=<CODE>
+```
+
+그 밖의 경우는 원문을 반사하지 않는 고정 literal로 대체한다. log 읽기 실패는
+`RUN_FIXTURE_SERVICE_LOG_READ_FAILED`, 빈 stderr는 `RUN_FIXTURE_SERVICE_MARKER_ABSENT`, 형식 불일치는
+`RUN_FIXTURE_SERVICE_MARKER_INVALID`, 상한 초과는 `RUN_FIXTURE_SERVICE_MARKER_TOO_LARGE`, allowlist 밖 code는
+`RUN_FIXTURE_SERVICE_MARKER_NOT_ALLOWED`다. allowlist는 `verify_e2e.py`의 `RUN_FIXTURE_WORKER_FAILURE_CODES`와
+같은 집합이고 테스트가 두 쪽의 일치를 고정한다. `run-fixture` worker 안에서는 공유 HTTP identity 세 개를
+transaction token, behavior token, JWKS, cross-secret, password event, transfer-limit event, transaction
+ingestion 단계별 literal로 바꾸어 기록하며, Service mode를 포함한 다른 mode의 identity는 그대로다. secondary에는
+secret, token, HTTP body, URL, 업무 payload, container log 원문이 포함되지 않는다.
+
+secondary는 진단일 뿐이다. primary `RUN_FIXTURE_SERVICE_EXIT_NONZERO`와 Run 실패는 그대로이고, log 읽기가
+실패해도 resource cleanup, image cleanup, residue audit, fixture artifact와 receipt 처리 순서는 바뀌지 않는다.
+나머지 다섯 primary와 성공 경로에서는 log를 읽지 않고 secondary도 출력하지 않는다. 이 진단 경로는 단위
+테스트로만 검증했고 공식 Docker Gate에서는 아직 확인되지 않았다.
+
+`run-fixture-after` verifier는 PowerShell의 bounded native process로 정확히 1회 실행한다. argv는 기존과
+같은 `-B <verify_e2e.py> run-fixture-after --repo-root <repo> --project <fixed project> --fixture-directory <dir>`
+이고, 검증된 전 snapshot의 base64는 끝에 LF 하나를 붙여 stdin으로만 전달한다. stdin은 child만 읽기 끝을
+상속하는 전용 pipe이며 쓰기 끝은 PowerShell만 가진다. 별도 writer가 payload 전체를 쓴 뒤 handle을 닫고,
+child가 읽지 않고 종료하거나 timeout으로 Job이 종료되면 막힌 write는 실패로 끝나므로 교착하지 않는다.
+stdout 4096 bytes, stderr 128 bytes, timeout 630초(verifier 자체 overall deadline 600초 + 여유)로
+제한하고 timeout·실패 시 기존과 같이 process와 descendant를 Job 단위로 정리한다. stdin overload를 쓰지 않는
+기존 호출은 상속 stdin과 기존 동작을 그대로 유지한다.
+
+성공 조건은 기존과 같다. exit code 0이고 stdout을 strict UTF-8로 해석해 앞뒤 공백을 제거한 값이 고정 문장
+`run fixture orchestration completed: exact delta and manifest passed`와 ordinal로 같아야 한다. 성공 판정에
+stderr는 사용하지 않으며 성공 시 경고도 출력하지 않는다. 다만 stdin 전체 전달 실패는 exit 0이어도 성공으로
+보지 않는다.
+
+실패하면 primary는 언제나 `RUN_FIXTURE_AFTER_FAILED`이고, 다음 경고를 Run당 정확히 1회 출력한다.
+
+```text
+RUN_FIXTURE_AFTER_SECONDARY=<CODE>
+```
+
+exit 1 또는 2일 때만 stderr를 판독한다. stderr가 128 bytes 이하의 strict UTF-8 한 줄이고 LF 또는 CRLF로
+한 번 끝나며, 전체가 `verification failed: <CODE>`이고 `<CODE>`가 아래 allowlist와 ordinal exact로 일치할
+때만 그 code를 secondary로 쓴다. 접두어 pattern이나 `CHILD_*` 전체 허용은 없다. allowlist 30개는
+`run-fixture-after` 호출 그래프에서 도달 가능한 fixed literal이다.
+
+| 구분 | code |
+| --- | --- |
+| 인자·owner·state | `HOST_ARGUMENT_INVALID`, `OWNER_CONTRACT_INVALID`, `FIXTURE_DIRECTORY_INVALID`, `RUN_FIXTURE_STATE_TOO_LARGE`, `RUN_FIXTURE_STATE_INVALID`, `RUN_FIXTURE_STATE_IDENTITY_INVALID`, `INGESTION_PLAN_INVALID` |
+| host native 호출 | `OVERALL_DEADLINE_EXCEEDED`, `SUBPROCESS_FAILED`, `DATABASE_GLOBAL_SNAPSHOT_INVALID`, `BACKEND_METRIC_SNAPSHOT_INVALID`, `DATABASE_TRANSACTION_SNAPSHOT_INVALID`, `DATABASE_CASE_IDENTITY_INVALID` |
+| metric-runtime child | `CHILD_METRIC_STATUS_INVALID`, `CHILD_METRIC_TRANSPORT_FAILED`, `CHILD_METRIC_BODY_TOO_LARGE`, `CHILD_METRIC_BODY_INVALID`, `CHILD_INPUT_INVALID`, `CHILD_UNEXPECTED_ERROR` |
+| delta·cardinality | `DATABASE_GLOBAL_DELTA_INVALID`, `DEPENDENCY_HIT_DELTA_INVALID`, `BACKEND_OUTCOME_METRIC_DELTA_INVALID`, `DATABASE_TRANSACTION_CARDINALITY_INVALID` |
+| manifest | `FIXTURE_MANIFEST_CARDINALITY_INVALID`, `FIXTURE_MANIFEST_READ_FAILED`, `FIXTURE_MANIFEST_BYTES_INVALID`, `FIXTURE_MANIFEST_SCHEMA_INVALID`, `FIXTURE_MANIFEST_IDENTITY_INVALID` |
+| process fallback | `INPUT_INVALID`, `UNEXPECTED_ERROR` |
+
+after의 host native 호출은 before stage를 넘기지 않으므로 generic `SUBPROCESS_FAILED`와 child marker
+forwarding이 적용된다. 그중 자기 marker를 출력하는 child는 `keycloak-verify metric-runtime`뿐이어서 그
+여섯 identity만 `CHILD_` 접두로 허용한다. 호출 그래프에 있지만 고정 after 인자로는 도달하지 않는
+`SUBPROCESS_TIMEOUT_INVALID`, `DEPENDENCY_SERVICE_INVALID`, `DATABASE_GLOBAL_EXPECTATION_INVALID`,
+`FIXTURE_OWNER_IDENTITY_INVALID`, `COMMAND_INVALID`는 허용하지 않는다. PowerShell 테스트는
+`verify_e2e.py`를 읽어 같은 집합을 도출하고 allowlist와 비교하며, 호출 그래프가 바뀌면 실패한다.
+
+그 밖의 경우는 원문 대신 고정 local code 11개 중 하나로 보고한다. 판정 순서는 다음과 같다.
+
+| 순위 | 조건 | secondary |
+| --- | --- | --- |
+| 1 | capture 형태 불일치, native 경계 예외 | `RUN_FIXTURE_AFTER_CAPTURE_FAILED` |
+| 2 | process·pipe·Job cleanup 불확실 | `RUN_FIXTURE_AFTER_CLEANUP_FAILED` |
+| 3 | 실행 파일 해석·process 시작 실패 | `RUN_FIXTURE_AFTER_PROCESS_START_FAILED` |
+| 4 | timeout | `RUN_FIXTURE_AFTER_TIMEOUT` |
+| 5 | wait·exit code·stream capture 실패 | `RUN_FIXTURE_AFTER_CAPTURE_FAILED` |
+| 6 | exit 0이지만 stdin 전체 전달 실패 | `RUN_FIXTURE_AFTER_STDIN_WRITE_FAILED` |
+| 7 | exit 0이지만 stdout 성공 문장 불일치·초과·invalid UTF-8 | `RUN_FIXTURE_AFTER_SUCCESS_OUTPUT_INVALID` |
+| 8 | exit 1/2와 allowlist marker | 해당 verifier code (stdin 전달 실패보다 우선) |
+| 9 | exit 1/2 외 nonzero, 또는 marker가 유효하지 않으면서 stdin 전달 실패 | `RUN_FIXTURE_AFTER_STDIN_WRITE_FAILED` |
+| 10 | exit 1/2 외 nonzero | `RUN_FIXTURE_AFTER_EXIT_CODE_INVALID` |
+| 11 | 128 bytes 초과 | `RUN_FIXTURE_AFTER_MARKER_TOO_LARGE` |
+| 12 | 빈 stderr | `RUN_FIXTURE_AFTER_MARKER_ABSENT` |
+| 13 | BOM, 복수 행, 종결 누락, bare CR, invalid UTF-8, control/Cf, 형식 불일치 | `RUN_FIXTURE_AFTER_MARKER_INVALID` |
+| 14 | 형식은 맞지만 allowlist 밖 code | `RUN_FIXTURE_AFTER_MARKER_NOT_ALLOWED` |
+
+유효한 verifier marker가 stdin 전달 실패보다 우선하는 이유는, verifier가 stdin을 읽기 전에 실패하면
+(예: `OWNER_CONTRACT_INVALID`) 읽는 쪽이 사라진 pipe에 대한 write가 실패하는 것이 결과일 뿐 원인이 아니기
+때문이다. 어느 경우에도 primary, 기존 production cleanup, receipt, ownership 처리 순서는 바뀌지 않으며
+`verify_e2e.py`의 업무 검증 조건과 동작도 바뀌지 않는다. state 원문, base64, argv, raw stdout/stderr,
+예외 문장과 경로는 경고·메시지에 포함하지 않는다. 이 진단 경로는 단위 테스트와 실제 bounded child의
+stdin round-trip으로 검증했고 공식 Docker Gate에서는 아직 확인되지 않았다.
+
+Run fixture의 canonical Compose project는 exact literal
+`finguardops-keycloak-browser-e2e`이다. `run-fixture-before`, `run-fixture`, `run-fixture-after`는 이 값을
+ordinal/case-sensitive exact로만 허용하며 candidate state나 manifest에서 기대값을 역산하지 않는다.
+Service verifier는 기존 dynamic pattern
+`finguardops-kc241-e2e-[a-z0-9][a-z0-9-]{5,32}`만 사용한다. Run project는 Service 경계에서,
+dynamic Service project는 Run fixture 경계에서 각각 거부한다.
+
+`run-fixture-before`의 host native subprocess는 다음 순서와 stage로 고정한다. 3·4는 published/active
+precondition이 충족되지 않을 때만 실행하고, 4는 activation 확인까지 bounded polling한다. 모든 argv는
+Python의 고정 list와 해당 함수가 생성한 read-only query에서 오며 `shell`을 사용하지 않는다.
+
+| 순서 | call site | 목적 | executable·argv | exit/stdout/stderr | timeout | stage |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | `publish_rules` → `sql_scalar` | published rule count | `docker compose exec ... psql -tAc <fixed query>` | 0 / decimal scalar / empty | CLI bound | `RULE_PUBLISHED_STATE` |
+| 2 | `publish_rules` → `sql_scalar` | active rule count | 동일 psql 경계와 fixed active query | 0 / decimal scalar / empty | CLI bound | `RULE_ACTIVE_STATE` |
+| 3 | `publish_rules` → `HostContext.execute` | 필요 시 deterministic Rule v1 publication | `docker compose run --rm --no-deps --pull never ... backend <fixed args>` | 0 / bounded UTF-8 success marker 1회 / bounded semantic stderr | 240s 및 overall bound | `RULE_PUBLICATION_COMMAND` |
+| 4 | `publish_rules` → `sql_scalar` | publication activation poll | psql fixed active query | 0 / decimal scalar / empty | 각 CLI bound 및 overall bound | `RULE_ACTIVATION_POLL` |
+| 5 | `transaction_cardinality` → `sql_scalar` | fixture ID cardinality precondition | psql `concat_ws` read-only query | 0 / 14 decimal fields / empty | CLI bound | `TRANSACTION_CARDINALITY_SNAPSHOT` |
+| 6 | `database_snapshot` | global repeatable-read snapshot | `docker compose exec ... psql -f -`, SQL은 stdin | 0 / canonical bounded snapshot / empty | CLI bound | `DATABASE_GLOBAL_SNAPSHOT` |
+| 7 | `dependency_hit_counts` → `service_logs` | External Risk hit baseline | `docker compose logs --no-color --no-log-prefix external-risk-mock` | 0 / bounded UTF-8 log / empty | CLI bound | `EXTERNAL_RISK_LOG_SNAPSHOT` |
+| 8 | `dependency_hit_counts` → `service_logs` | Rule v2 hit baseline | 동일 logs 경계의 `ai-service` | 0 / bounded UTF-8 log / empty | CLI bound | `RULE_V2_LOG_SNAPSHOT` |
+| 9 | `backend_metric_totals` | outcome metric baseline | `docker compose run --rm --no-deps --pull never -T keycloak-verify metric-runtime` | 0 / finite numeric pair JSON / bounded semantic stderr | 60s 및 overall bound | `BACKEND_METRIC_SNAPSHOT` |
+
+각 stage는 candidate output과 무관한 fixed suffix
+`PROCESS_START_FAILED`, `TIMEOUT`, `EXIT_NONZERO`, `OUTPUT_INVALID`, `CLEANUP_FAILED` 중 하나만 결합한
+명시적 literal로 실패한다. before의 열거된 native call site에서는 generic `SUBPROCESS_FAILED`나 child
+stderr code를 전달하지 않는다. unknown stage·unexpected Python exception은 기존 안전 fallback으로
+redact하고 raw command, query, path, exit code, stdout/stderr, credential·token을 diagnostic에 포함하지
+않는다. PowerShell은 이 표에서 도달 가능한 exact literal만 allowlist하고 primary
+`RUN_FIXTURE_BEFORE_FAILED`와 secondary diagnostic 1회 계약을 유지한다.
+
+Compose `run`을 사용하는 `RULE_PUBLICATION_COMMAND`와 `BACKEND_METRIC_SNAPSHOT`만 stderr의
+존재 자체를 실패로 간주하지 않는다. 두 stage의 stderr는 strict UTF-8, BOM·NUL·C0/C1·Unicode Cf
+금지, 단일 LF 또는 CRLF style, final newline, line count·line length bound를 통과해야 한다. 또한
+authoritative publication marker, 승인된 publication failure identity, Java exception headline 또는 stack
+frame이 stdout이나 stderr에 있으면 exit 0이어도 해당 stage의 `OUTPUT_INVALID`로 거부한다. Raw stderr는
+외부 diagnostic에 반사하지 않는다. 그 밖의 native stage는 기존 empty-stderr 계약을 그대로 유지한다.
+
+Publication의 positive evidence는 canonical Spring Boot log line 안의
+`RULE_PUBLICATION_RUNNER_SUCCESS_MARKER` 정확히 1회와 뒤따르는 DB activation poll의 published/active
+`4/4` postcondition이다. Metric snapshot의 positive evidence는 기존 authoritative finite numeric pair
+parser가 소유하며, stderr shape 통과만으로 malformed metric stdout을 승인하지 않는다.
+
+`RULE_PUBLICATION_COMMAND_EXIT_NONZERO`는 backend runner의 raw Java exception을 전달하지 않는다.
+Service와 Run은 동일한 `publish_rules` 함수와 동일한 Compose `run --rm --no-deps --pull never -T`
+argument vector를 사용한다. 두 project의 startup과 publication one-shot은 canonical
+`infra/.env.example`을 같은 Compose option 위치에 전달하고 host process environment를 그대로 상속한다.
+publication HostContext는 별도 PostgreSQL credential 값을 만들거나 덮어쓰지 않으므로 ambient 변수가 absent,
+present/non-empty, present/empty인 경우 모두 project startup과 같은 Compose interpolation precedence를 따른다.
+credential 값은 state, stdout/stderr, manifest, diagnostic에 기록하지 않는다.
+
+전용 publication profile에서 활성화되는 Backend process-local boundary는 실패 시
+logger를 거치지 않고 stderr에 다음 exact line을 process당 최대 한 번 기록한다.
+
+```text
+FINGUARDOPS_RULE_PUBLICATION_FAILURE=<FIXED_CODE>
+```
+
+Boundary는 `UNARMED → ARMED_PRE_RUN → CONTEXT_REFRESH → CONTEXT_REFRESHED_PRE_RUN →
+RUNNER_CONFIGURATION → SERVICE_EXECUTION → PUBLICATION_COMMITTED → RUNNER_SUCCEEDED` 단방향 상태를
+사용한다. app-owned `SpringApplication.refresh(context)` wrapper는 `super.refresh(context)` 호출 직전에
+`CONTEXT_REFRESH`, 정상 반환 직후에 `CONTEXT_REFRESHED_PRE_RUN`으로 전이한다. 따라서 refresh 진입 전,
+refresh 내부, refresh 반환 후 runner callback 첫 문장 전 실패가 각각 고정 marker로 구분된다. configuration
+marker는 service 호출 전, service marker는 transactional proxy가 실패한 경우에만 허용한다.
+Proxy가 정상 반환하면 success log 전에 `PUBLICATION_COMMITTED`가 되므로 이후 logging, Boot ready, shutdown
+failure를 service/rollback failure로 오분류하지 않는다. 정상 Backend profile과 recovery one-shot은
+`UNARMED`이며 marker를 출력하지 않는다.
+
+Authoritative marker가 없을 때만 runner/service source가 고정한 exception line의 legacy exact classifier를
+사용한다. Authoritative marker가 정확히 하나 있으면 동일 code의 legacy line은 중복으로 계산하지 않지만,
+서로 충돌하는 recognized identity는 generic fallback으로 처리한다.
+
+| runner/service source contract | fixed secondary |
+| --- | --- |
+| context refresh 진입 전 Backend startup failure | `RULE_PUBLICATION_BACKEND_STARTUP_FAILED` |
+| `SpringApplication.refresh(context)` 내부 failure | `RULE_PUBLICATION_CONTEXT_REFRESH_FAILED` |
+| refresh 정상 반환 후 publication runner callback 진입 전 failure | `RULE_PUBLICATION_PRE_RUNNER_FAILED` |
+| 승인 identity에 해당하지 않는 runner configuration failure | `RULE_PUBLICATION_RUNNER_CONFIGURATION_FAILED` |
+| 승인 identity에 해당하지 않는 transactional service/proxy failure | `RULE_PUBLICATION_SERVICE_EXECUTION_FAILED` |
+| production profile 거부 | `RULE_PUBLICATION_RUNNER_PRODUCTION_PROFILE_REJECTED` |
+| publication profile과 local/dev/test profile 조합 누락 | `RULE_PUBLICATION_RUNNER_APPROVED_PROFILE_REQUIRED` |
+| non-web mode 누락 | `RULE_PUBLICATION_RUNNER_NON_WEB_MODE_REQUIRED` |
+| confirmation 불일치 | `RULE_PUBLICATION_RUNNER_CONFIRMATION_REJECTED` |
+| effective-from canonical UTC 형식 거부 | `RULE_PUBLICATION_RUNNER_EFFECTIVE_FROM_FORMAT_REJECTED` |
+| effective-from이 runner 실행 시점의 미래가 아님 | `RULE_PUBLICATION_RUNNER_EFFECTIVE_FROM_NOT_FUTURE` |
+| V5 default Rule v1 set 불완전 | `RULE_PUBLICATION_SERVICE_DEFAULT_SET_INCOMPLETE` |
+| V5 identity 계약 불일치 | `RULE_PUBLICATION_SERVICE_IDENTITY_MISMATCH` |
+| default FraudRule 비활성 | `RULE_PUBLICATION_SERVICE_FRAUD_RULE_INACTIVE` |
+| default RuleVersion period 비정상 | `RULE_PUBLICATION_SERVICE_VERSION_PERIOD_INVALID` |
+| default RuleVersion status 조합 비정상 | `RULE_PUBLICATION_SERVICE_VERSION_STATUS_INVALID` |
+| DRAFT period metadata 비정상 | `RULE_PUBLICATION_SERVICE_DRAFT_METADATA_INVALID` |
+| service publication 시점에 effective-from 만료 | `RULE_PUBLICATION_SERVICE_EFFECTIVE_FROM_EXPIRED` |
+| amountThreshold canonical format 비정상 | `RULE_PUBLICATION_SERVICE_AMOUNT_THRESHOLD_FORMAT_INVALID` |
+
+허용 marker는 Backend source가 소유한 ASCII uppercase/underscore fixed code의 exact wire line이다.
+prefix/suffix가 추가된 line, 같은 marker의 중복, 서로 다른 marker의 동시 출현, valid marker와 malformed marker의
+동시 출현, stdout marker, mixed CR/LF, invalid UTF-8, control/Cf, oversized capture, authoritative marker와
+충돌하는 legacy identity, success marker와 nonzero exit 조합은 기존
+`RULE_PUBLICATION_COMMAND_EXIT_NONZERO`로 안전하게 fallback한다. Exit 0에 failure marker가 있으면
+`RULE_PUBLICATION_COMMAND_OUTPUT_INVALID`로 거부한다. 이 분류는 raw line, command, SQL, path,
+environment 또는 exit code를 외부 diagnostic에 포함하지 않는다.
+
+`RULE_PUBLICATION_COMMAND`의 exit 0 output validation은 네 단계이며 각 단계가 독립된 fixed identity를
+가진다. 두 stream을 먼저 strict UTF-8로 해석하고, failure evidence를 판정한 뒤, stderr와 stdout의 line
+구조를 검사하고, 마지막으로 success marker를 검사한다.
+
+| exit 0 output validation 단계 | fixed secondary |
+| --- | --- |
+| stderr strict UTF-8, final newline, bare CR, CRLF/LF 혼용, C0/C1/Cf/NUL, line 수·길이 상한 | `RULE_PUBLICATION_COMMAND_STDERR_INVALID` |
+| authoritative backend marker, malformed·중복·충돌 marker, legacy approved Java identity, exception headline, stack frame, stdout wire prefix | `RULE_PUBLICATION_COMMAND_FAILURE_EVIDENCE_INVALID` |
+| stdout strict UTF-8, final newline, bare CR, CRLF/LF 혼용, C0/C1/Cf/NUL | 아래 표의 predicate별 fixed code, 이름 붙이지 못한 거부만 `RULE_PUBLICATION_COMMAND_STDOUT_INVALID` |
+| success marker 누락·중복, stderr marker, marker line cardinality, canonical success log-line 불일치 | `RULE_PUBLICATION_COMMAND_SUCCESS_MARKER_INVALID` |
+`RULE_PUBLICATION_COMMAND_STDOUT_INVALID`가 담당하던 stdout 구조 규칙은 각 predicate가 독립된 fixed
+code를 가진다. 한 capture가 여러 규칙을 위반해도 아래 고정 순서의 **첫 identity 하나만** 반환한다.
+
+| 순위 | stdout predicate | fixed secondary |
+| --- | --- | --- |
+| 1 | strict UTF-8 decode 실패 | `RULE_PUBLICATION_COMMAND_STDOUT_ENCODING_INVALID` |
+| 2 | non-empty stdout이 LF로 끝나지 않음 | `RULE_PUBLICATION_COMMAND_STDOUT_FINAL_NEWLINE_INVALID` |
+| 3 | CR 뒤에 LF가 없음 | `RULE_PUBLICATION_COMMAND_STDOUT_BARE_CR_INVALID` |
+| 4 | CRLF와 lone LF 혼용 | `RULE_PUBLICATION_COMMAND_STDOUT_MIXED_NEWLINE_INVALID` |
+| 5 | U+0000 | `RULE_PUBLICATION_COMMAND_STDOUT_NUL_INVALID` |
+| 6 | U+0009 | `RULE_PUBLICATION_COMMAND_STDOUT_TAB_INVALID` |
+| 7 | U+001B | `RULE_PUBLICATION_COMMAND_STDOUT_ESCAPE_INVALID` |
+| 8 | CR·LF·TAB·ESC·NUL을 제외한 U+0001–U+001F | `RULE_PUBLICATION_COMMAND_STDOUT_C0_INVALID` |
+| 9 | U+007F–U+009F | `RULE_PUBLICATION_COMMAND_STDOUT_C1_INVALID` |
+| 10 | Unicode category Cf (BOM U+FEFF 포함) | `RULE_PUBLICATION_COMMAND_STDOUT_FORMAT_INVALID` |
+| 11 | 위 어느 것도 이름 붙이지 못한 `semantic_text_lines` 거부 | `RULE_PUBLICATION_COMMAND_STDOUT_INVALID` (fallback) |
+
+`semantic_text_lines`는 여전히 최종 authority이며, 신규 classifier는 같은 규칙을 같은 강도로 세분화할
+뿐이다. classifier가 이름 붙이지 않은 capture는 `semantic_text_lines`도 수락하는 capture이므로 정상
+출력 허용 범위는 변하지 않는다. 기존 `RULE_PUBLICATION_COMMAND_STDOUT_INVALID`는 예상 밖 내부 상태의
+fail-closed fallback으로 남는다. 거부된 문자, code point, line, candidate, raw stdout/stderr, command,
+argv, SQL, path, environment, exception text, credential은 diagnostic과 PowerShell warning에 포함하지
+않고 compile-time fixed code 하나만 외부로 전달한다.
+
+#### Publication stdout TAB의 무조건적 producer 하나
+
+공식 Run이 `RULE_PUBLICATION_COMMAND_STDOUT_TAB_INVALID`를 보고했고, artifact 수준에서 확인된
+producer는 **Hibernate ORM 6.6.53.Final**의 `org.hibernate.orm.connections.pooling` logger가
+INFO로 emit하는 `ConnectionInfoLogger.logConnectionInfoDetails` (**HHH10001005**,
+`"Database info:"`)이다. payload는 `DatabaseConnectionInfoImpl.toInfoString()`이며 TAB으로
+시작하는 7개 continuation line을 만든다. `JdbcEnvironmentInitiator.initiateService`의 세 분기가
+모두 guard 없는 `logConnectionInfo` 호출로 수렴하고 jar 전체에서 호출자가 하나뿐이므로,
+publication one-shot startup에서 **무조건 실행되는 정상 출력이고 failure evidence가 아니다.**
+repository-owned publication 코드에는 stdout TAB producer가 없다.
+
+> **단일 producer라고 단정하지 않는다.** `classify_semantic_stdout_violation`은 위반된 첫 규칙에서
+> 반환하고 stage는 fail-closed로 종료하므로, capture에 TAB line이 몇 개이든 producer가 몇 개이든
+> 한 Run이 보고할 수 있는 identity는 언제나 하나다. "정확히 1회"는 fail-fast validator의 성질이며
+> producer 유일성의 증거가 아니다. 확립된 것은 HHH10001005가 이 startup 경로의 무조건적 TAB
+> producer라는 사실과, repository-owned 코드가 stdout TAB을 만들지 않는다는 사실이다. 다음 공식
+> Run에서 두 번째 producer가 드러나도 이 변경이 반증되는 것은 아니며, 이 변경은 여전히 필요한
+> 단계다.
+
+따라서 validator를 완화하지 않고 producer를 소유한다. `rule_publication_arguments()`가
+backend application argument 영역에 다음 property를 정확히 1회 전달한다.
+
+```
+--logging.level.org.hibernate.orm.connections.pooling=WARN
+```
+
+| 항목 | 내용 |
+| --- | --- |
+| 억제 대상 | HHH10001005 (INFO) 하나뿐이다. 이 logger의 유일한 INFO message다. |
+| 유지 대상 | 같은 logger의 WARN 4종(HHH10001002·10001006·10001009·10001010). 이 logger는 ERROR-level message를 선언하지 않지만 WARN 이상은 모두 통과한다. |
+| 적용 범위 | `local,rule-v1-default-publication` profile의 publication one-shot 명령 한 개 |
+| Service·Run | 같은 argv builder를 쓰므로 동일하게 적용된다. `before_stage`만 다르다. |
+| Backend global logging | 변경하지 않는다. root level과 `org.hibernate` 전역 level은 그대로다. |
+| 일반 runtime | 영향 없다. publication one-shot 외에는 이 property가 전달되지 않는다. |
+| Image rebuild | 불필요하다. Spring Boot가 command line에서 runtime에 bind한다. |
+| `OFF` | 사용하지 않는다. WARN/ERROR를 잃기 때문이다. |
+| 환경변수 형태 | 사용하지 않는다. argv literal 하나로 유지한다. |
+| banner·ANSI·JPA·Flyway·Hikari | 변경하지 않는다. |
+
+**TAB validator는 완화하지 않는다.** `semantic_text_lines`의 TAB 거부, 10개 stdout predicate,
+`RULE_PUBLICATION_COMMAND_STDOUT_INVALID` fallback, failure-evidence 검사, success marker
+cardinality·fullmatch, activation 4/4, stderr validator, stage 우선순위가 모두 그대로다.
+Hibernate INFO TAB block 모양의 fixture는 계속 `STDOUT_TAB_INVALID`로 거부되며, 그 테스트는
+validator가 완화되지 않았음을 고정하는 것이다.
+
+**Java stack trace fail-closed backstop을 유지한다.** `RULE_PUBLICATION_RUNNER_STACK_FRAME`이
+matching하는 canonical frame은 TAB 검사보다 먼저 `FAILURE_EVIDENCE_INVALID`가 된다. 반면
+packaging suffix `~[?:?]`, `app//` qualified frame, 중첩 `\t\tat`, line number 없는 frame,
+`\t... N more`, `\t... N common frames omitted`는 그 regex가 matching하지 않으므로 **TAB 규칙이
+유일한 차단선이다.** 그래서 TAB을 전역 허용하면 exit 0과 success marker를 갖춘 capture가 이
+shape들을 그대로 통과시킨다. TAB 전역 허용은 금지하고, frame regex 확장은 별도 후속 hardening
+으로 남긴다.
+
+actual Green은 다음 공식 Docker Run에서 확인해야 한다.
+
+stdout/stderr overflow, 분류할 수 없는 output-validation failure, 승인 literal 외의 candidate는 기존
+`RULE_PUBLICATION_COMMAND_OUTPUT_INVALID`으로 fail-closed fallback한다. 위 두 표의 모든 code는
+compile-time literal이며 raw stdout/stderr, line, path, exception, SQL, environment, credential을
+반사하지 않는다.
+`BACKEND_METRIC_SNAPSHOT`을 포함한 다른 여덟 native stage의 identity와 stderr 계약, 그리고
+`PROCESS_START_FAILED`·`TIMEOUT`·`EXIT_NONZERO`·`CLEANUP_FAILED` 우선순위는 변하지 않는다. 허용
+범위와 검증 강도도 변하지 않는다. 이 분리는 product root-cause fix가 아니라 실패 단계를 한 번의 공식
+Run에서 식별하기 위한 safe classification 개선이다.
+
+Run fixture는 `PASSWORD_CHANGED`, `TRANSFER_LIMIT_CHANGED` behavior event와 12,000,000 KRW
+`ACCOUNT_TRANSFER`를 한 세트 생성한다. 기대 delta는 BehaviorEvent 2, FinancialTransaction 1,
+IdempotencyRecord 1, DetectionResult 1, DetectionEvidence 2, FraudCase 1, CaseTransaction 1,
+AuditLog 4이며 risk/outcome/status는 `HIGH` / `ADDITIONAL_AUTH_REQUIRED` / `OPEN`이다. External
+Risk와 Rule v2 hit 및 두 outcome metric도 각각 정확히 1 증가해야 한다.
+
+PowerShell은 receipt의 runId로 다음 repository 외부 OS temp 경로를 결정한다.
+
+```text
+<System temp>\finguardops-keycloak-e2e-fixture-<runId>\fixture-identity.json
+```
+
+경로는 system temp의 exact descendant여야 하며 wildcard, ADS, `..`, symlink, junction 또는 다른
+reparse point를 허용하지 않는다. 기존 directory/file이 있으면 자동 복구하거나 덮어쓰지 않고 Run을
+중단한다. fixture service에는 이 directory만 `/finguardops/fixture`로 writable bind하며 USER password와
+TLS private key를 mount하지 않는다. transaction/behavior SERVICE secret은 이 service에만 read-only
+secret으로 mount한다.
+
+Manifest는 1,024 bytes 이하의 UTF-8 strict/no-BOM compact JSON이고 LF 하나로 끝난다. key 순서는
+`schemaVersion`, `runId`, `repositoryId`, `commitSha`, `treeSha`, `composeProject`, `transactionId`, `caseId`,
+`expectedRiskLevel`, `expectedResponseOutcome`, `expectedInitialCaseStatus`로 고정한다. unknown,
+duplicate, missing, reordered key와 null/array/object/boolean/float, C0/C1 control, Unicode format
+character를 거부한다. 두 업무 ID는 lowercase canonical UUID v4이고 receipt identity는 ordinal exact로
+일치해야 하며 `composeProject`는 위 Run literal과 exact로 일치해야 한다. writer는 final preexistence와 non-empty directory를 거부하고 same-directory CreateNew
+temp, write/flush/fsync, no-replace publication, final byte 재검증을 수행한다.
+
+최종 이름의 no-replace publication에는 구현 경로가 둘 있다. 어느 경로도 기존 최종 파일을 덮어쓰지 않는다.
+
+1. 기본 경로는 `renameat2`에 `RENAME_NOREPLACE`만 지정한 단일 atomic rename이다. 성공하면 temp 이름이
+   사라지고 최종 이름만 남는다.
+2. `renameat2`가 errno `EINVAL`, `ENOSYS`, `EOPNOTSUPP`/`ENOTSUP` 중 하나로 실패한 경우에만 link 경로로
+   넘어간다. 이 값들은 renameat2(2)가 "filesystem 또는 kernel이 해당 flag나 call을 지원하지 않음"으로
+   문서화한 값이고, 이 호출은 flag 하나와 같은 directory의 두 이름만 넘기므로 `EINVAL`의 다른 문서화된
+   원인은 해당하지 않는다. link 경로는 `link(temp, final)`로 최종 이름을 만든 뒤 temp 이름을 `unlink`한다.
+   최종 이름의 생성 자체는 atomic하고 기존 이름이 있으면 실패하지만, link와 unlink 두 단계 전체는 단일
+   atomic rename이 아니다. 두 단계 사이에는 두 이름이 함께 존재한다.
+
+`EEXIST`, 권한·소유권 거부, I/O 오류, 분류되지 않은 errno, libc symbol 부재에서는 link 경로로 넘어가지 않는다.
+실패는 errno·예외 문장·경로 없이 다음 고정 code 하나로만 기록하며 runner는 이를 secondary로 전달한다.
+
+| 경계 | fixed code |
+| --- | --- |
+| 최종 이름이 이미 존재 (`renameat2` 또는 `link`) | `FIXTURE_MANIFEST_FINAL_EXISTS` |
+| libc 로드 실패, `renameat2` symbol 부재, 호출 자체의 예외 | `FIXTURE_MANIFEST_RENAME_UNAVAILABLE` |
+| `renameat2`가 `EACCES`·`EPERM`·`EROFS` | `FIXTURE_MANIFEST_RENAME_DENIED` |
+| `renameat2`가 `EIO`·`ENOSPC`·`EDQUOT` | `FIXTURE_MANIFEST_RENAME_IO_FAILED` |
+| `renameat2`의 그 밖의 errno (원인 구분 불가) | `FIXTURE_MANIFEST_RENAME_FAILED` |
+| link 경로의 `link`가 `EACCES`·`EPERM`·`EROFS` | `FIXTURE_MANIFEST_LINK_DENIED` |
+| link 경로의 `link`가 그 밖의 오류 | `FIXTURE_MANIFEST_LINK_FAILED` |
+| link 성공 후 temp `unlink` 실패 | `FIXTURE_MANIFEST_TEMP_UNLINK_FAILED` |
+
+temp `unlink`가 실패하면 성공으로 처리하지 않는다. 방금 만든 최종 이름이 여전히 temp와 같은 파일일 때에만 그
+최종 이름을 회수하고, 이후 temp는 writer의 기존 실패 정리가 best effort로 제거한다. 회수도 best effort이므로 mount가
+unlink를 모두 거부하면 두 이름이 남을 수 있고, 그 경우에도 결과는 실패이며 runner의 기존 artifact cleanup 계약이
+남은 파일을 판정한다. `FIXTURE_MANIFEST_LINK_DENIED`는 권한 거부뿐 아니라 mount가 hard link 자체를 지원하지 않아
+`EPERM`을 돌려준 경우일 수도 있다. 어느 경로로 성공했든 뒤따르는
+cardinality 확인과 final byte 재검증은 동일하다. primary identity와 runner의 cleanup·receipt 계약은 바뀌지 않는다.
+link 경로가 Docker Desktop의 host 공유 mount에서 실제로 동작하는지는 단위 테스트로 확인할 수 없고, 공식 Docker
+Gate에서 아직 검증되지 않았다.
+
+Manifest 검증 전에는 Browser `docker create`와 `docker start`가 호출되지 않는다. 최초 검증한 manifest의
+SHA-256과 directory/file identity를 보존하고, Browser readiness 이후 Playwright process 생성 직전에 path,
+reparse, exact cardinality, bounded exclusive read, canonical schema·receipt binding과 최초 hash/identity를
+다시 검증한다. 교체 또는 내용 변경은 `FIXTURE_MANIFEST_CHANGED`로 거부하며 Playwright process를 만들지 않는다. Browser container의
+기존 read-only bind 3개, create argv와 ownership validator는 그대로 유지한다. Windows host의 Playwright
+child에만 `FINGUARDOPS_E2E_FIXTURE_MANIFEST`로 검증된 canonical host path를 전달하고 child 종료 직후
+Process environment를 원래 값으로 복원한다. 기존 값 또는 SERVICE secret/token 환경변수가 있으면
+오염으로 거부한다. Manifest 내용, token, password, client secret과 Secret path는 stdout/stderr에
+출력하지 않는다.
+
+#### Playwright 실패의 고정 필드 진단
+
+Playwright child의 stdout과 stderr는 모두 runner가 받아 버린다. `line` reporter 원문, test·web server
+출력, stderr `ErrorRecord`, 문자열이 아닌 객체는 Run 로그에 남지 않는다. Runner는 child마다 32자리
+lowercase hex nonce를 새로 만들어 `FINGUARDOPS_E2E_REPORTER_NONCE`로 Playwright 주 process에만
+전달한다. `playwright.config.ts`는 이 값이 형식에 맞을 때만 `e2e/safe-failure-reporter.ts`를 `line`
+reporter 옆에 추가하고, web server 환경에서는 제외한다. Reporter는 생성 즉시 값을 process 환경에서
+지운다. 그래서 그 뒤에 시작되는 worker와 web server는 nonce를 모른다. Child가 끝나면 runner가 이전
+값을 복원한다. Nonce는 test 출력이 우연히 record 모양을 띠더라도 진짜로 받아들여지지 않게 하는
+장치일 뿐이다. 악의적인 test code에 대한 보안 경계는 아니다.
+
+Reporter는 아래 record만 stdout에 쓴다. Runner는 `FINGUARDOPS_E2E_PW_V1 <nonce> <record>` 한 줄
+전체가 아래 문법과 정확히 일치할 때만 nonce를 뺀 `PLAYWRIGHT_DIAGNOSTIC=<record>`를 warning으로
+전달한다. 160자 초과, 앞뒤 공백, CR/LF, 대소문자 변형, field 추가·누락·순서 변경, 범위 밖 숫자,
+선행 0, 비ASCII 숫자, 다른 nonce는 모두 버린다.
+
+| record | 의미 |
+| --- | --- |
+| `TEST line=<1-99999\|none> n=<1-999> status=<failed\|timedOut\|interrupted> kind=<REQUIRE_CONDITION\|EXPECT\|TIMEOUT\|INTERRUPTED\|OTHER> at=<1-99999\|none>` | `line`은 test 선언 줄, `n`은 같은 줄에서 선언된 test 중 순번, `at`은 `requireCondition` helper frame을 건너뛴 첫 spec frame 줄 |
+| `GLOBAL kind=<WEBSERVER\|OTHER>` | test 밖 오류. `config.webServer` 오류만 `WEBSERVER` |
+| `SUMMARY status=<passed\|failed\|timedout\|interrupted> passed=<0-9999> failed=<0-9999> skipped=<0-9999>` | 실행 종료 요약 |
+| `OVERFLOW` | reporter 상한(TEST 32, GLOBAL 4) 초과 |
+
+Runner가 직접 만드는 고정 code는 셋이다. 전달 상한 40줄을 넘으면 `RUNNER_OVERFLOW`를 한 번만 남기고
+나머지를 버린다. Child가 실패했는데 SUMMARY가 없으면 `SUMMARY_ABSENT`, nonce 생성에 실패했으면
+`NONCE_UNAVAILABLE`을 남긴다. Test title, error message, stack, URL, DOM text, screenshot, trace,
+credential과 token은 출력하지 않는다. Error 원문은 reporter 안에서 `kind`를 고르는 데만 읽는다.
+
+판정은 기존 그대로 Playwright exit code 하나다. `SUMMARY status=passed`가 있어도 exit code가 0이
+아니면 `Playwright Keycloak E2E failed.`로 실패한다. 반대로 실패 record가 있어도 exit code가 0이면
+성공이다. 진단 writer가 실패해도 예외를 던지거나 primary failure를 대체하지 않는다. 환경변수 복원,
+Browser·project·output cleanup 순서, receipt 계약도 바뀌지 않는다. 이 진단은 다음 Gate에서 실패한
+test 위치와 종류를 식별하기 위한 것이다. 이번 변경으로 실제 실패 원인이 확인된 것은 아니다.
+
+사건 목록 E2E의 populated 분기는 #255 이후 제품 계약인 행당 링크 1개를 검증한다. 각 링크는
+`/cases/<canonical lowercase UUID v4>` exact href여야 하고 query·fragment가 없어야 한다. 표시 text는
+같은 ID여야 하고, `aria-label`은 `View case details for <ID>`여야 하며, 행 사이에 ID가 중복되면 안 된다.
+기존 "링크 없음" 단언은 #255의 링크 계약과 충돌했다. 빈 DB에서는 empty 분기만 실행되어 이 충돌이
+드러나지 않았는데, Run fixture가 사건을 만들면서 populated 분기가 실행되게 되었다. 이 충돌은
+정적 분석으로 찾은 별도 결함이다. 직전 Gate 실패의 원인으로 확인된 것은 아니다. Oracle의 반례
+20개는 공식 test 수를 늘리지 않도록 같은 사건 목록 test 안에서 먼저 검증한다.
+
+Run과 명시적 Cleanup의 순서는 exact project resource cleanup → owned unique image cleanup → final
+Docker residue audit → exact fixture artifact cleanup → receipt 삭제다. 앞의 세 단계가 실패하면 artifact와
+receipt를 보존한다. Artifact cleanup은 Prepared 또는 Recovery receipt의 runId로 파생한 exact directory가
+없으면 idempotent success이고, safe-path/reparse 검증을 통과한 exact empty directory도 manifest 생성 전
+실패의 owned residue로서 non-recursive exact 삭제한다. directory에 canonical manifest가 정확히 하나 있으면
+receipt binding을 다시 검증한 뒤 exact file과 빈 directory만 삭제한다. partial/temp/extra/foreign artifact는 자동 삭제하지 않고
+receipt를 보존한다. glob, prefix enumeration, label 기반 broad cleanup은 사용하지 않는다.

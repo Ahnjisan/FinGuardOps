@@ -43,6 +43,24 @@ if (!browserWsEndpoint || !/^ws:\/\/127\.0\.0\.1:[0-9]{1,5}\/$/.test(browserWsEn
 const frontendRoot = import.meta.dirname;
 
 /**
+ * The per-run nonce that authenticates the fixed-field failure reporter.
+ *
+ * Set by the runner for this process only. Without a well-formed value the
+ * reporter is not configured at all, so a direct run prints exactly what it
+ * did before. The value is kept out of the web server's environment here, and
+ * the reporter removes it from this process before any worker is started.
+ * The name is deliberately repeated in `e2e/safe-failure-reporter.ts`.
+ */
+const REPORTER_NONCE_ENVIRONMENT = "FINGUARDOPS_E2E_REPORTER_NONCE";
+const reporterNonceCandidate = env[REPORTER_NONCE_ENVIRONMENT];
+const reporterNonce =
+  reporterNonceCandidate !== undefined && /^[0-9a-f]{32}$/.test(reporterNonceCandidate)
+    ? reporterNonceCandidate
+    : undefined;
+const webServerEnvironment: NodeJS.ProcessEnv = { ...env };
+delete webServerEnvironment[REPORTER_NONCE_ENVIRONMENT];
+
+/**
  * The Vite this checkout installs. Pinned here as well as in `package.json`
  * because the web server below is started from an installed file rather than
  * from a package name, and a file is only the right file if the package around
@@ -127,7 +145,12 @@ export default defineConfig({
   timeout: 60_000,
   workers: 1,
   retries: 0,
-  reporter: [["line"]],
+  // The line reporter is what a person running this directly reads. The runner
+  // discards it and forwards only the fixed-field records of the second one.
+  reporter:
+    reporterNonce === undefined
+      ? [["line"]]
+      : [["line"], ["./e2e/safe-failure-reporter.ts", { nonce: reporterNonce }]],
   outputDir: ownedOutputDirectory,
   preserveOutput: "never",
   use: {
@@ -172,7 +195,7 @@ export default defineConfig({
     stdout: "ignore",
     stderr: "pipe",
     env: {
-      ...env,
+      ...webServerEnvironment,
       VITE_API_BASE_URL: "http://localhost:8080",
       VITE_OIDC_AUTHORITY: "https://localhost:8443/realms/finguardops-local",
       VITE_OIDC_CLIENT_ID: "finguardops-frontend",

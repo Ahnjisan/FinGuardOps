@@ -4,6 +4,7 @@ import com.aifds.backend.rule.service.RuleV1DefaultRuleSetPublicationResult;
 import com.aifds.backend.rule.service.RuleV1DefaultRuleSetPublicationService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
@@ -16,6 +17,7 @@ import org.springframework.stereotype.Component;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
+import java.util.Optional;
 
 /**
  * The profile and enabled property are only the bean-creation gate.
@@ -54,7 +56,10 @@ public class RuleV1DefaultRuleSetPublicationRunner implements ApplicationRunner 
     private final Clock clock;
     private final String confirmation;
     private final String effectiveFromValue;
+    private final RuleV1DefaultRuleSetPublicationDiagnosticBoundary
+            diagnosticBoundary;
 
+    @Autowired
     public RuleV1DefaultRuleSetPublicationRunner(
             RuleV1DefaultRuleSetPublicationService publicationService,
             Environment environment,
@@ -62,33 +67,94 @@ public class RuleV1DefaultRuleSetPublicationRunner implements ApplicationRunner 
             @Value("${" + PROPERTY_PREFIX + ".confirmation:}")
             String confirmation,
             @Value("${" + PROPERTY_PREFIX + ".effective-from:}")
-            String effectiveFromValue
+            String effectiveFromValue,
+            Optional<RuleV1DefaultRuleSetPublicationDiagnosticBoundary>
+                    diagnosticBoundary
     ) {
         this.publicationService = publicationService;
         this.environment = environment;
         this.clock = clock;
         this.confirmation = confirmation;
         this.effectiveFromValue = effectiveFromValue;
+        this.diagnosticBoundary = diagnosticBoundary.orElseGet(
+                RuleV1DefaultRuleSetPublicationDiagnosticBoundary::new
+        );
+    }
+
+    RuleV1DefaultRuleSetPublicationRunner(
+            RuleV1DefaultRuleSetPublicationService publicationService,
+            Environment environment,
+            Clock clock,
+            String confirmation,
+            String effectiveFromValue
+    ) {
+        this(
+                publicationService,
+                environment,
+                clock,
+                confirmation,
+                effectiveFromValue,
+                Optional.empty()
+        );
+    }
+
+    RuleV1DefaultRuleSetPublicationRunner(
+            RuleV1DefaultRuleSetPublicationService publicationService,
+            Environment environment,
+            Clock clock,
+            String confirmation,
+            String effectiveFromValue,
+            RuleV1DefaultRuleSetPublicationDiagnosticBoundary diagnosticBoundary
+    ) {
+        this(
+                publicationService,
+                environment,
+                clock,
+                confirmation,
+                effectiveFromValue,
+                Optional.of(diagnosticBoundary)
+        );
     }
 
     @Override
     public void run(ApplicationArguments args) {
-        validateEnvironment();
-        if (!REQUIRED_CONFIRMATION.equals(confirmation)) {
-            throw new IllegalStateException(
-                    "Rule v1 default publication confirmation does not match"
-            );
-        }
-        Instant effectiveFrom = parseEffectiveFrom(effectiveFromValue);
-        Instant validationTime = clock.instant();
-        if (!effectiveFrom.isAfter(validationTime)) {
-            throw new IllegalArgumentException(
-                    "Rule v1 default effectiveFrom must be in the future"
-            );
+        diagnosticBoundary.beginRunnerConfiguration();
+        Instant effectiveFrom;
+        try {
+            validateEnvironment();
+            if (!REQUIRED_CONFIRMATION.equals(confirmation)) {
+                throw new IllegalStateException(
+                        "Rule v1 default publication confirmation does not match"
+                );
+            }
+            effectiveFrom = parseEffectiveFrom(effectiveFromValue);
+            Instant validationTime = clock.instant();
+            if (!effectiveFrom.isAfter(validationTime)) {
+                throw new IllegalArgumentException(
+                        "Rule v1 default effectiveFrom must be in the future"
+                );
+            }
+            diagnosticBoundary.beginServiceExecution();
+        } catch (RuntimeException | Error failure) {
+            diagnosticBoundary.emitConfigurationFailure(failure);
+            throw failure;
         }
 
-        RuleV1DefaultRuleSetPublicationResult result =
-                publicationService.publish(effectiveFrom);
+        RuleV1DefaultRuleSetPublicationResult result;
+        try {
+            result = publicationService.publish(effectiveFrom);
+        } catch (RuntimeException | Error failure) {
+            diagnosticBoundary.emitServiceFailure(failure);
+            throw failure;
+        }
+        diagnosticBoundary.publicationCommitted();
+        reportSuccess(result);
+        diagnosticBoundary.runnerSucceeded();
+    }
+
+    protected void reportSuccess(
+            RuleV1DefaultRuleSetPublicationResult result
+    ) {
         log.info(
                 "event=rule_v1_default_rule_set_publication "
                         + "outcome={} ruleVersionIds={} effectiveFrom={} "

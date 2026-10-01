@@ -4,7 +4,7 @@
   "enabled": true,
   "registrationAllowed": false,
   "rememberMe": false,
-  "accessTokenLifespan": 900,
+  "accessTokenLifespan": 899,
   "defaultSignatureAlgorithm": "RS256",
   "roles": {
     "realm": [
