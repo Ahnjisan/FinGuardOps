@@ -920,3 +920,104 @@ receipt를 보존한다. Artifact cleanup은 Prepared 또는 Recovery receipt의
 실패의 owned residue로서 non-recursive exact 삭제한다. directory에 canonical manifest가 정확히 하나 있으면
 receipt binding을 다시 검증한 뒤 exact file과 빈 directory만 삭제한다. partial/temp/extra/foreign artifact는 자동 삭제하지 않고
 receipt를 보존한다. glob, prefix enumeration, label 기반 broad cleanup은 사용하지 않는다.
+
+## 12. Run fixture 사건 처리·감사 Browser E2E (#314)
+
+`a real USER works the Run fixture case through review, a note and the audit trail` test는 §11의 Run
+fixture가 만든 현재 Run의 거래·사건으로 핵심 사건 처리 흐름을 검증한다. 기존 FDS_ANALYST USER
+(`local-fds-analyst`)의 실제 Keycloak 로그인과 실제 Spring Boot만 사용한다. production, API, DB,
+Keycloak, Compose, runner와 verifier는 바꾸지 않았다. 별도 실행 명령도 없으며 §3.1의 공식
+`Prepare → Service → Run`에서 함께 실행된다.
+
+### 12.1 Fixture identity 사용
+
+test는 Playwright child에 전달된 `FINGUARDOPS_E2E_FIXTURE_MANIFEST`를 직접 다시 검증한다. 검증 조건은 다음과 같다.
+
+- 절대 경로이면서 정규화된 경로다.
+- 정확히 `finguardops-keycloak-e2e-fixture-<runId>/fixture-identity.json` 위치다.
+- 파일에서 root까지 symbolic link나 junction이 없다.
+- 1,024 bytes 이하의 regular file 하나다.
+- §11의 canonical compact JSON bytes와 정확히 일치한다.
+- manifest의 `runId`가 directory 이름과 일치한다.
+
+실패하면 path, ID, bytes를 반사하지 않는 고정 문장으로 끝난다. 사용하는 값은 `transactionId`,
+`caseId`와 기대 초기 상태뿐이다. 반례 oracle은 같은 test 안에서 먼저 실행한다. bytes 반례는 22개이고,
+가짜 file system 위의 path·symlink·junction·크기·읽기 실패·binding 반례는 20개다.
+
+`expectedRiskLevel=HIGH`와 `expectedResponseOutcome=ADDITIONAL_AUTH_REQUIRED`는 `run-fixture-after`가
+DB 기준으로 검증한 계약이다. 공개 거래 상세와 사건 상세에는 위험 등급과 대응 결과 필드가 없다. 그래서
+Browser는 거래의 공개 `processingStatus=ADDITIONAL_AUTH_REQUIRED`(화면 `Auth required`)만 확인하며,
+화면이 위험 등급을 보여 준다고 주장하지 않는다.
+
+### 12.2 검증 흐름
+
+1. 거래 상세 주소에서 실제 로그인을 한다. 응답이 manifest의 `transactionId`이고 `processingStatus`가
+   위와 같은지 확인한다. 응답에 `riskLevel`, `riskResponseOutcome`, `caseId`가 없는지도 확인한다.
+2. 사건 목록에서 공개 필터 `Related transaction ID`(`transactionId`)에 manifest 거래 ID를 넣는다. 확인 항목은 다음과 같다.
+   - 요청 target이 `?transactionId=<id>&page=0&size=20&sort=lastChangedAt%2Cdesc`와 정확히 같다.
+   - 결과가 정확히 1건이다.
+   - 그 행이 manifest의 `caseId`, `OPEN`, 미배정, 연관 거래 1건이다.
+
+   첫 행을 임의로 고르지 않는다. 이 필터는 공개 목록 계약이며, 사건별 거래 목록이나 거래 상세의
+   사건 연결을 주장하지 않는다.
+3. 행 링크로 사건 상세에 들어간다. 확인 항목은 다음과 같다.
+   - 공개 10개 필드와 `OPEN`, `concurrencyVersion` v0
+   - note 0건과 OPEN 작성 잠금 문구
+   - 초기 Audit 2건: 최신순 `CASE_TRANSACTION_LINKED`, `CASE_CREATED`. 둘 다
+     `CASE_REQUIRED_BY_RISK_POLICY`·`SYSTEM`이다.
+4. 금지 전이 `OPEN → ADDITIONAL_INFORMATION_REQUIRED` status PATCH를 production authorized client로 한 번
+   보낸다. 확인 항목은 다음과 같다.
+   - 응답이 409와 `CASE_STATUS_CONFLICT`, 빈 `fieldErrors`다.
+   - 공개 API 재조회 결과, detail(status·version), notes, 업무 Audit가 trace를 제외하고 거부 전과 같다.
+   - 오류 code·message·trace가 DOM과 console에 나오지 않는다.
+5. 화면에서 `Start review`로 `OPEN → IN_REVIEW`를 수행한다. 결과는 v0+1이고
+   Audit `CASE_STATUS_CHANGED/CASE_REVIEW_STARTED/USER`가 추가된다.
+6. 화면에서 note를 작성한다. 확인 항목은 다음과 같다.
+   - POST 201
+   - 응답과 GET의 note가 같다.
+   - 화면 Note ID와 원문 표시
+   - v0+2
+   - Audit `CASE_NOTE_CREATED/CASE_INVESTIGATION_NOTE_ADDED/USER`, metadata `{noteId}`
+7. 새로고침하면 in-memory session이 사라져 `Sign in required`가 된다. 이 동안 Backend 요청은 0건이다.
+   같은 browser context에서 다시 로그인하면 Keycloak 화면 또는 살아 있는 SSO session을 거쳐 실제
+   code exchange가 일어난다. 같은 USER subject인지 확인하고, Backend에서 note를 다시 읽어 표시하는지 확인한다.
+8. 화면에서 `Request additional information`으로 `IN_REVIEW → ADDITIONAL_INFORMATION_REQUIRED`를
+   수행한다. 결과는 v0+3이고 Audit `CASE_ADDITIONAL_INFORMATION_REQUESTED`가 추가된다.
+9. 채워진 Audit UI 5건을 확인한다. 각 항목의 action, reason, actorType, KST 표시와 API의 `changedAt`,
+   before/after summary, note의 Note ID를 대조한다. Audit 영역에 actorId(로그인 subject), targetId(caseId),
+   transactionId, traceId, raw JSON이 없는지도 확인한다.
+10. 업무 write가 순서대로 정확히 `PATCH status 409`, `PATCH status 200`, `POST notes 201`,
+    `PATCH status 200` 네 건이고 모두 manifest 사건 주소인지 확인한다. Backend 요청 전체가 이 거래와
+    사건의 주소만 사용했는지도 확인한다.
+
+assignee는 실행마다 새로 만든 canonical lowercase UUID v4다. 현재 production 계약
+(`FraudCaseWorkflowValidator`)은 이 형식만 검사하고 담당자 디렉터리나 허용 목록은 구현되어 있지 않다.
+따라서 이 값은 실제 사용자나 유효한 담당자를 뜻하지 않으며, 로그인 subject와 다른 값이다.
+
+### 12.3 Relay write 경계
+
+test relay가 새로 받아들이는 write는 `PATCH /api/v1/cases/{id}/status`와 `POST /api/v1/cases/{id}/notes`
+두 형태뿐이다. 둘 다 test가 직전에 arm한 exact method, path, body와 일치할 때만 한 번 전달하고,
+전달하는 순간 arm을 소비한다. 다음 요청은 process를 만들기 전에 고정 문장으로 거부한다.
+
+- arm하지 않은 write와 중복 요청
+- 다른 caseId
+- query
+- trailing slash와 추가 segment
+- 대문자 ID
+- PUT·DELETE
+- 다른 body와 재서식 body
+- 중복 key와 빈 body
+
+assignee write, resolution(기존 403 probe 제외), audit-log write는 계속 선언되지 않는다. 기존 query·endpoint
+반례 matrix 64개와 70개는 그대로 유지한다.
+
+### 12.4 검증 상태와 test 수
+
+정적 수집 기준 공식 test 수는 23개다. 기존 22개에 이 test 1개가 추가됐다
+(`playwright test --list`). lint·typecheck와 비-Docker oracle 검증은 통과했다. 실제 Keycloak·Backend
+위에서의 pass 수는 공식 Docker `Prepare → Service → Run`을 실행해야 확정된다. 이번 변경에서는 그
+lifecycle을 실행하지 않았다.
+
+실패하면 §11의 cleanup·Recovery receipt 계약을 그대로 따른다. 수동 DB row 삭제는 하지 않는다.
+Run project의 database volume은 기존 exact cleanup으로 함께 제거된다.

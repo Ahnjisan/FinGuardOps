@@ -1566,7 +1566,9 @@ intent가 항상 우선한다. obsolete refresh는 abort/release하고 stale suc
   상태·담당자 workflow와 최종 판정 form은 사건 상세 section 안에 구현됐고, 조사 메모는 사건 상세 내부의
   별도 route 없는 조회 section과 `case:note-write` 전용 inline 생성 form만 구현됐으며, 수정·삭제
   route·navigation·mutation은 구현되지 않았다.
-- 실제 Backend 상태·담당자·최종 판정 mutation 성공 browser E2E, 최종 판정 수정·취소와 CLOSED 사건 재개방 UI.
+- 실제 Backend 담당자 변경·최종 판정 mutation 성공 browser E2E, 최종 판정 수정·취소와 CLOSED 사건 재개방 UI.
+  상태 변경(`OPEN → IN_REVIEW → ADDITIONAL_INFORMATION_REQUIRED`)과 note 생성 성공 browser E2E는 Issue #314
+  test로 작성됐지만 공식 Docker Run에서는 아직 검증하지 않았다 (아래 Issue #314 절).
 - 담당자 directory·search·profile API/UI와 production 담당자 allowlist. 현재 담당자 입력은 사용자가
   이미 알고 있는 canonical lowercase UUID v4를 직접 입력하는 경계다.
 - 행 전체 클릭 navigation과 상세 drawer·modal (상세는 별도 route이며 행은 계속 기록이다)
@@ -2395,3 +2397,60 @@ strict TLS 그대로다.
 실제 Backend Resolution 성공 write browser E2E는 추가하지 않았다. relay write allowlist는 기존 Analyst 403 resolution
 authorization probe 1개 그대로이며, 성공 경로는 API client·Hook·component·CaseDetailPage unit test와 기존 Backend test가
 담당한다. Backend·API wire 계약·DB·Auth·capability mapping·router·E2E runner/config는 변경하지 않았다.
+
+## Run fixture 사건 처리·감사 Browser E2E (Issue #314)
+
+`e2e/keycloak-user-login.spec.ts`에 업무 흐름 test 1개
+(`a real USER works the Run fixture case through review, a note and the audit trail`)를 추가했다. 이 test는
+Issue #315의 Run fixture가 public intake API로 만든 현재 Run의 거래·사건을 대상으로 한다. 기존
+`local-fds-analyst`(FDS_ANALYST) USER의 실제 Keycloak 로그인과 실제 Spring Boot를 사용한다. production code,
+API·DB·Keycloak·Compose 계약, runner·config·package는 변경하지 않았다.
+
+- **Fixture 선택**: test는 `FINGUARDOPS_E2E_FIXTURE_MANIFEST`를 다시 검증하고 `transactionId`·`caseId`·기대 초기
+  상태만 사용한다. 검증 항목은 다음과 같다.
+  - 절대·정규화 경로
+  - exact Run directory와 파일 이름
+  - root까지 symlink·junction 없음
+  - 1,024 bytes 이하 regular file
+  - canonical bytes
+  - directory와 `runId`의 binding
+
+  사건은 사건 목록의 공개 `Related transaction ID` 필터로 좁힌다. 결과가 정확히 1건이고 그 행 링크가
+  manifest의 `caseId`일 때만 상세로 들어간다. 첫 행은 고르지 않는다.
+- **공개 정보만 주장**: Browser는 거래 상세의 `processingStatus`(`Auth required`)만 확인한다. `HIGH`와
+  `ADDITIONAL_AUTH_REQUIRED` outcome은 `run-fixture-after`가 검증한 계약이다. 거래·사건 화면에는 해당 필드가 없다.
+  사건별 거래 목록, 거래 상세의 사건 연결, Audit의 actorId·targetId·traceId·raw JSON은 표시하거나 주장하지 않는다.
+- **흐름**: 사건 상세에서 다음 순서로 검증한다.
+  1. OPEN·version v0·note 0건·초기 Audit 2건(`CASE_TRANSACTION_LINKED`, `CASE_CREATED`)
+  2. 금지 `OPEN → ADDITIONAL_INFORMATION_REQUIRED` PATCH가 409 `CASE_STATUS_CONFLICT`로 거부되고, 공개 API
+     재조회로 detail·notes·Audit가 그대로임을 확인
+  3. 화면 `Start review`(v0+1)
+  4. note POST·GET·표시(v0+2)
+  5. 새로고침 후 재로그인과 note 재표시
+  6. 화면 `Request additional information`(v0+3)
+  7. Audit UI 5건의 action·reason·actorType·KST 시각·before/after summary·Note ID
+- **Assignee**: 실행마다 새로 만든 canonical lowercase UUID v4를 쓴다. 현재 production 계약이 검사하는 것은
+  이 형식뿐이므로, 이 값이 실제 담당자나 로그인 사용자를 뜻하지는 않는다.
+- **Relay write 경계**: `RELAYABLE_WORKFLOW_WRITES`는 `PATCH .../status`와 `POST .../notes` 두 가지다. 둘 다 test가
+  arm한 exact method·path·body만 한 번 전달하고, 전달 즉시 arm을 소비한다. 다음 요청은 spawn 전에 고정 문장으로
+  거부한다.
+  - arm하지 않은 write와 중복 요청
+  - 다른 caseId
+  - query와 추가 path
+  - 대문자 ID
+  - PUT·DELETE
+  - 다른 body
+  - 빈 body
+
+  write는 순서대로 정확히 `409 PATCH`, `200 PATCH`, `201 POST`, `200 PATCH` 네 건이어야 한다. 기존 refusal
+  matrix 64·70개와 positive 13개는 그대로다.
+- **반례 oracle**: test 시작 시 같은 test 안에서 먼저 실행한다.
+  - manifest bytes 22개
+  - path 20개(가짜 file system)
+  - relay workflow write arming과 반례
+
+공식 browser 분해는 실제 Keycloak·Backend 통합 17개, relay contract 3개, geometry 3개를 더한 **23개**다
+(`playwright test --list` 정적 수집 기준). worker 1, retries 0, strict TLS는 그대로이고, 이 test만
+`test.setTimeout(240_000)`을 쓴다. lint와 `typecheck:e2e`는 통과했다. 비-Docker scratch harness에서는
+oracle, 실제 Windows 임시 경로의 manifest 읽기, junction 거부와 기존 relay matrix 회귀가 통과했다. 실제
+Docker `Prepare → Service → Run`의 pass 수와 cleanup 결과는 아직 검증하지 않았다.

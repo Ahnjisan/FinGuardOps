@@ -3,12 +3,14 @@ import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { request as httpsRequest } from "node:https";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { env } from "node:process";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import {
   expect,
   test,
+  type Locator,
   type Page,
   type Request as PlaywrightRequest,
   type Route,
@@ -68,6 +70,8 @@ const SYNTHETIC_TRANSACTION_ID = "e2e00000-0000-4000-8000-000000000e2e";
  * related transactions, its current AI report, a `GET` of its resolution, any
  * other unapproved suffix, a case status or assignee write, a note create, an
  * endpoint that does not exist yet - is refused here rather than relayed. The
+ * one exception is `RELAYABLE_WORKFLOW_WRITES` below: a status or note write is
+ * forwarded only while the Run fixture test has armed that exact write. The
  * list grows when a screen's E2E really needs an address and not before: an
  * endpoint admitted ahead of the test that needs it is an address this suite
  * can reach for no stated reason.
@@ -116,6 +120,11 @@ const CASE_AUDIT_PATH = new RegExp(
 /** `/api/v1/cases/{canonical lowercase UUID v4}/notes`, exactly. */
 const CASE_NOTES_PATH = new RegExp(
   `^${CASE_LIST_PATH}/${CANONICAL_UUID_V4_PATTERN}/notes$`,
+);
+
+/** `/api/v1/cases/{canonical lowercase UUID v4}/status`, exactly. */
+const CASE_STATUS_PATH = new RegExp(
+  `^${CASE_LIST_PATH}/${CANONICAL_UUID_V4_PATTERN}/status$`,
 );
 
 function acceptsAuditQuery(query: URLSearchParams): boolean {
@@ -236,10 +245,11 @@ const RELAYABLE_READ_PATHS: readonly RelayableEndpoint[] = [
  * method, nor stretched to another suffix under the same case identifier, nor
  * given a query.
  *
- * Everything else is a read. `POST /api/v1/cases`, `PATCH /api/v1/cases`,
- * `POST /api/v1/transactions`, and every status, assignee or note write on a
- * case are refused here, with or without a query, before a process is spawned
- * or a socket is opened.
+ * Everything else is a read or an armed workflow write. `POST /api/v1/cases`,
+ * `PATCH /api/v1/cases`, `POST /api/v1/transactions`, every assignee write, and
+ * every status or note write that is not the one currently armed are refused
+ * here, with or without a query, before a process is spawned or a socket is
+ * opened.
  */
 const RELAYABLE_WRITE_PROBES: readonly RelayableEndpoint[] = [
   {
@@ -249,6 +259,76 @@ const RELAYABLE_WRITE_PROBES: readonly RelayableEndpoint[] = [
     queryNames: null,
   },
 ];
+
+/**
+ * The two case workflow writes the Run fixture E2E (Issue #314) makes, and the
+ * only shapes in which either can reach the Backend socket.
+ *
+ * Neither is a standing permission. A descriptor here only says which address a
+ * write *could* be at; the relay forwards one only while the test has armed
+ * exactly that write - one method, one exact path naming the current Run's
+ * case, no query, and one exact body - and the arming is consumed by the first
+ * request that matches it. An unarmed write, a second copy of an armed one, a
+ * different case identifier, any query, any other suffix and any other body
+ * are refused before a process is spawned. The assignee write, the resolution
+ * write (other than the 403 probe above) and every audit-log write remain
+ * undeclared.
+ */
+const RELAYABLE_WORKFLOW_WRITES: readonly RelayableEndpoint[] = [
+  {
+    name: "case-status-change",
+    method: "PATCH",
+    matches: (pathname) => CASE_STATUS_PATH.test(pathname),
+    queryNames: null,
+  },
+  {
+    name: "case-note-create",
+    method: "POST",
+    matches: (pathname) => CASE_NOTES_PATH.test(pathname),
+    queryNames: null,
+  },
+];
+
+/** One armed workflow write: the exact method, path and body the relay may forward once. */
+interface ArmedWorkflowWrite {
+  readonly method: string;
+  readonly pathname: string;
+  readonly body: string;
+}
+
+/**
+ * The single pending workflow write, or `null` when none is armed.
+ *
+ * Module state rather than relay state on purpose: the refusal matrices above
+ * resolve requests without installing a relay, and they must see the same
+ * "nothing armed" default the live relay sees. Only the Run fixture test arms a
+ * write, always for its own manifest case, and always disarms in `finally`.
+ */
+let armedWorkflowWrite: ArmedWorkflowWrite | null = null;
+
+const WORKFLOW_WRITE_NOT_ARMED = "A Backend workflow write was not the one armed for this request.";
+const WORKFLOW_WRITE_BODY_MISMATCH = "A Backend workflow write body was not the armed body.";
+
+function armWorkflowWrite(write: ArmedWorkflowWrite): void {
+  requireCondition(armedWorkflowWrite === null, "A workflow write was armed while another was pending.");
+  requireCondition(
+    RELAYABLE_WORKFLOW_WRITES.some(
+      (candidate) => candidate.method === write.method && candidate.matches(write.pathname),
+    ),
+    "A workflow write was armed for an undeclared address.",
+  );
+  requireCondition(
+    write.body !== "" &&
+      !write.body.includes("\u0000") &&
+      Buffer.byteLength(write.body, "utf8") <= MAX_RELAY_REQUEST_BODY_BYTES,
+    "A workflow write was armed with an unsafe body.",
+  );
+  armedWorkflowWrite = write;
+}
+
+function disarmWorkflowWrite(): void {
+  armedWorkflowWrite = null;
+}
 
 /**
  * The synthetic customer reference this suite types into the filter.
@@ -901,17 +981,38 @@ function resolveRelayTarget(request: PlaywrightRequest): string {
     const probe = RELAYABLE_WRITE_PROBES.find(
       (candidate) => candidate.method === method && candidate.matches(url.pathname),
     );
+    if (probe !== undefined) {
+      // A declared write probe is a fixed request to a fixed address. It
+      // declares `queryNames: null`, and that it carries none is checked rather
+      // than assumed - there is no query allowlist to consult here and none to
+      // bypass.
+      requireCondition(
+        probe.queryNames === null && url.search === "",
+        "A Backend write probe carried a query.",
+      );
+      return url.pathname;
+    }
+    const workflow = RELAYABLE_WORKFLOW_WRITES.find(
+      (candidate) => candidate.method === method && candidate.matches(url.pathname),
+    );
     requireCondition(
-      probe !== undefined,
+      workflow !== undefined,
       "A Backend request used a method this relay will not write.",
     );
-    // A declared write probe is a fixed request to a fixed address. It declares
-    // `queryNames: null`, and that it carries none is checked rather than
-    // assumed - there is no query allowlist to consult here and none to bypass.
     requireCondition(
-      probe.queryNames === null && url.search === "",
+      workflow.queryNames === null && url.search === "",
       "A Backend write probe carried a query.",
     );
+    // Declared is not armed. The exact method and path are compared first, so
+    // another case, another write or a second copy of a consumed one is refused
+    // for that reason; the body is compared byte for byte only for the one
+    // write that is armed, and neither refusal reflects what was sent.
+    const armed = armedWorkflowWrite;
+    requireCondition(
+      armed !== null && armed.method === method && armed.pathname === url.pathname,
+      WORKFLOW_WRITE_NOT_ARMED,
+    );
+    requireCondition((request.postData() ?? "") === armed.body, WORKFLOW_WRITE_BODY_MISMATCH);
     return url.pathname;
   }
 
@@ -1724,7 +1825,10 @@ const MAX_RELAY_REQUEST_BODY_BYTES = 64 * 1024;
 function buildRelayRequestBytes(request: PlaywrightRequest): BuiltRelayRequest {
   const method = request.method();
   requireCondition(/^[A-Z]+$/.test(method), "An invalid Backend method was requested.");
-  requireCondition(method === "GET" || method === "POST", "A Backend request used a method this relay will not write.");
+  requireCondition(
+    method === "GET" || method === "POST" || method === "PATCH",
+    "A Backend request used a method this relay will not write.",
+  );
 
   const target = resolveRelayTarget(request);
   requireCondition(
@@ -1737,7 +1841,7 @@ function buildRelayRequestBytes(request: PlaywrightRequest): BuiltRelayRequest {
   const body = Buffer.from(bodyText, "utf8");
   requireCondition(
     body.byteLength <= MAX_RELAY_REQUEST_BODY_BYTES &&
-      ((method === "GET" && body.byteLength === 0) || (method === "POST" && body.byteLength > 0)),
+      ((method === "GET" && body.byteLength === 0) || (method !== "GET" && body.byteLength > 0)),
     "An invalid Backend request body was refused.",
   );
 
@@ -1753,7 +1857,7 @@ function buildRelayRequestBytes(request: PlaywrightRequest): BuiltRelayRequest {
     "Connection: close",
     ...(credential === "" ? [] : [`Authorization: ${credential}`]),
     `Content-Length: ${String(body.byteLength)}`,
-    ...(method === "POST" ? ["Content-Type: application/json"] : []),
+    ...(method !== "GET" ? ["Content-Type: application/json"] : []),
   ];
   requireCondition(
     headerLines.every((line) => !line.includes("\u0000") && !line.includes("\r") && !line.includes("\n")),
@@ -1765,6 +1869,17 @@ function buildRelayRequestBytes(request: PlaywrightRequest): BuiltRelayRequest {
     bytes.subarray(head.byteLength).byteLength === body.byteLength && bytes.byteLength === head.byteLength + body.byteLength,
     "The Backend request bytes were not exact.",
   );
+  // An armed workflow write is forwarded once. It is consumed here, after every
+  // check has passed and before any process exists, so a repeat of the same
+  // request - a retry, a double submit - meets the unarmed refusal above.
+  if (
+    method !== "GET" &&
+    RELAYABLE_WORKFLOW_WRITES.some(
+      (candidate) => candidate.method === method && candidate.matches(target),
+    )
+  ) {
+    disarmWorkflowWrite();
+  }
   return { method, target, bodyByteLength: body.byteLength, bytes };
 }
 
@@ -4728,6 +4843,8 @@ const RELAY_REFUSALS: readonly string[] = [
   "A Backend query was not canonically encoded.",
   "A Backend query carried a value this endpoint does not accept.",
   "A Backend request target carried a character this relay will not write.",
+  WORKFLOW_WRITE_NOT_ARMED,
+  WORKFLOW_WRITE_BODY_MISMATCH,
 ];
 
 /** A canonical lowercase UUID v4 that names no case. */
@@ -7630,6 +7747,1490 @@ async function requireNoCaseWorkflowDom(page: Page): Promise<void> {
     );
   }
 }
+
+/**
+ * The Run fixture identity (Issue #315), as the runner hands it to this process.
+ *
+ * The runner verifies the manifest before the browser starts and again right
+ * before Playwright, then names its canonical host path in this one variable.
+ * This suite reads it once more under its own rules rather than trusting the
+ * name: an absolute normalised path, the exact file name inside the exact
+ * `finguardops-keycloak-e2e-fixture-<runId>` directory, no symbolic link or
+ * junction anywhere from the file up to the root, one regular file of at most
+ * 1,024 bytes, and bytes that are exactly the canonical compact JSON the
+ * writer produces. Every refusal is a fixed sentence: no path, identifier or
+ * byte of the manifest is reflected.
+ *
+ * Only the non-sensitive public identity is used: the current Run's
+ * `transactionId` and `caseId`, and the expected initial values. The
+ * `HIGH` / `ADDITIONAL_AUTH_REQUIRED` pair is the contract `run-fixture-after`
+ * already verified against the database; neither public detail endpoint carries
+ * a risk level or an outcome, so this suite checks only that the manifest states
+ * them and never claims a screen shows them.
+ */
+const RUN_FIXTURE_MANIFEST_ENVIRONMENT = "FINGUARDOPS_E2E_FIXTURE_MANIFEST";
+const RUN_FIXTURE_MANIFEST_NAME = "fixture-identity.json";
+const RUN_FIXTURE_DIRECTORY = /^finguardops-keycloak-e2e-fixture-([0-9a-f]{32})$/;
+const RUN_FIXTURE_MANIFEST_MAX_BYTES = 1024;
+const RUN_FIXTURE_MANIFEST_KEYS = [
+  "schemaVersion",
+  "runId",
+  "repositoryId",
+  "commitSha",
+  "treeSha",
+  "composeProject",
+  "transactionId",
+  "caseId",
+  "expectedRiskLevel",
+  "expectedResponseOutcome",
+  "expectedInitialCaseStatus",
+] as const;
+
+/** The writer's canonical bytes: compact, fixed key order, one trailing LF, nothing else. */
+const RUN_FIXTURE_MANIFEST_BYTES = new RegExp(
+  "^\\{" +
+    '"schemaVersion":1,' +
+    '"runId":"([0-9a-f]{32})",' +
+    '"repositoryId":"[0-9a-f]{64}",' +
+    '"commitSha":"(?:[0-9a-f]{40}|[0-9a-f]{64})",' +
+    '"treeSha":"(?:[0-9a-f]{40}|[0-9a-f]{64})",' +
+    `"composeProject":"${EXPECTED_COMPOSE_PROJECT}",` +
+    `"transactionId":"(${CANONICAL_UUID_V4_PATTERN})",` +
+    `"caseId":"(${CANONICAL_UUID_V4_PATTERN})",` +
+    '"expectedRiskLevel":"HIGH",' +
+    '"expectedResponseOutcome":"ADDITIONAL_AUTH_REQUIRED",' +
+    '"expectedInitialCaseStatus":"OPEN"' +
+    "\\}\\n$",
+);
+
+const RUN_FIXTURE_REFUSALS = {
+  bytes: "The Run fixture manifest was not the canonical identity bytes.",
+  schema: "The Run fixture manifest did not carry the approved identity schema.",
+  path: "The Run fixture manifest path was not the approved absolute path.",
+  link: "The Run fixture manifest path crossed a symbolic link or junction.",
+  kind: "The Run fixture manifest was not one regular file inside real directories.",
+  size: "The Run fixture manifest size was outside its bound.",
+  read: "The Run fixture manifest could not be read.",
+  binding: "The Run fixture manifest did not belong to its Run directory.",
+} as const;
+
+interface RunFixtureIdentity {
+  readonly runId: string;
+  readonly transactionId: string;
+  readonly caseId: string;
+  readonly expectedRiskLevel: "HIGH";
+  readonly expectedResponseOutcome: "ADDITIONAL_AUTH_REQUIRED";
+  readonly expectedInitialCaseStatus: "OPEN";
+}
+
+function parseRunFixtureManifestBytes(bytes: Uint8Array): RunFixtureIdentity {
+  requireCondition(
+    bytes.byteLength > 0 && bytes.byteLength <= RUN_FIXTURE_MANIFEST_MAX_BYTES,
+    RUN_FIXTURE_REFUSALS.bytes,
+  );
+  let text: string;
+  try {
+    // `ignoreBOM` keeps a byte-order mark in the text, so the pattern refuses it.
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw new Error(RUN_FIXTURE_REFUSALS.bytes);
+  }
+  const match = RUN_FIXTURE_MANIFEST_BYTES.exec(text);
+  requireCondition(match !== null, RUN_FIXTURE_REFUSALS.bytes);
+  // The pattern decides; the parse confirms it read the same object a JSON
+  // reader would, so a pattern edit cannot silently admit a different shape.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(RUN_FIXTURE_REFUSALS.schema);
+  }
+  requireCondition(
+    typeof parsed === "object" && parsed !== null && !Array.isArray(parsed),
+    RUN_FIXTURE_REFUSALS.schema,
+  );
+  const record = parsed as Record<string, unknown>;
+  requireCondition(
+    isDeepStrictEqual(Object.keys(record), [...RUN_FIXTURE_MANIFEST_KEYS]) &&
+      record.schemaVersion === 1 &&
+      record.runId === match[1] &&
+      record.composeProject === EXPECTED_COMPOSE_PROJECT &&
+      record.transactionId === match[2] &&
+      record.caseId === match[3] &&
+      record.expectedRiskLevel === "HIGH" &&
+      record.expectedResponseOutcome === "ADDITIONAL_AUTH_REQUIRED" &&
+      record.expectedInitialCaseStatus === "OPEN",
+    RUN_FIXTURE_REFUSALS.schema,
+  );
+  return {
+    runId: match[1],
+    transactionId: match[2],
+    caseId: match[3],
+    expectedRiskLevel: "HIGH",
+    expectedResponseOutcome: "ADDITIONAL_AUTH_REQUIRED",
+    expectedInitialCaseStatus: "OPEN",
+  };
+}
+
+interface RunFixtureFileStatus {
+  isFile(): boolean;
+  isDirectory(): boolean;
+  isSymbolicLink(): boolean;
+  readonly size: number;
+}
+
+/** The two file-system reads the manifest reader makes; a seam for its oracle. */
+interface RunFixtureFileSystem {
+  lstat(path: string): RunFixtureFileStatus;
+  read(path: string): Uint8Array;
+}
+
+const NODE_RUN_FIXTURE_FILE_SYSTEM: RunFixtureFileSystem = {
+  lstat: (path) => lstatSync(path),
+  read: (path) => readFileSync(path),
+};
+
+function readRunFixtureManifest(
+  candidate: string | undefined,
+  fileSystem: RunFixtureFileSystem = NODE_RUN_FIXTURE_FILE_SYSTEM,
+): RunFixtureIdentity {
+  requireCondition(
+    typeof candidate === "string" &&
+      candidate !== "" &&
+      !candidate.includes("\u0000") &&
+      isAbsolute(candidate) &&
+      resolve(candidate) === candidate &&
+      basename(candidate) === RUN_FIXTURE_MANIFEST_NAME,
+    RUN_FIXTURE_REFUSALS.path,
+  );
+  const directory = dirname(candidate);
+  const directoryMatch = RUN_FIXTURE_DIRECTORY.exec(basename(directory));
+  requireCondition(directoryMatch !== null, RUN_FIXTURE_REFUSALS.path);
+  const lstatOrRefuse = (path: string): RunFixtureFileStatus => {
+    try {
+      return fileSystem.lstat(path);
+    } catch {
+      throw new Error(RUN_FIXTURE_REFUSALS.read);
+    }
+  };
+  const file = lstatOrRefuse(candidate);
+  requireCondition(!file.isSymbolicLink(), RUN_FIXTURE_REFUSALS.link);
+  requireCondition(file.isFile(), RUN_FIXTURE_REFUSALS.kind);
+  // The runner refuses a reparse point anywhere on this path; Node reports a
+  // Windows junction or directory link as a symbolic link, so the same rule is
+  // applied here to every ancestor up to the root.
+  for (let current = directory; ; current = dirname(current)) {
+    const status = lstatOrRefuse(current);
+    requireCondition(!status.isSymbolicLink(), RUN_FIXTURE_REFUSALS.link);
+    requireCondition(status.isDirectory(), RUN_FIXTURE_REFUSALS.kind);
+    if (dirname(current) === current) {
+      break;
+    }
+  }
+  requireCondition(
+    Number.isSafeInteger(file.size) && file.size > 0 && file.size <= RUN_FIXTURE_MANIFEST_MAX_BYTES,
+    RUN_FIXTURE_REFUSALS.size,
+  );
+  let bytes: Uint8Array;
+  try {
+    bytes = fileSystem.read(candidate);
+  } catch {
+    throw new Error(RUN_FIXTURE_REFUSALS.read);
+  }
+  requireCondition(bytes.byteLength === file.size, RUN_FIXTURE_REFUSALS.size);
+  const identity = parseRunFixtureManifestBytes(bytes);
+  requireCondition(identity.runId === directoryMatch[1], RUN_FIXTURE_REFUSALS.binding);
+  return identity;
+}
+
+/**
+ * The manifest reader, proved against its counterexamples before it reads the
+ * real manifest. Runs inside the Run fixture test so the official test count
+ * grows by that one test only. Every value here is synthetic.
+ */
+function requireRunFixtureManifestOracle(): void {
+  const runId = "0123456789abcdef0123456789abcdef";
+  const transactionId = "c0ffee00-0000-4000-8000-000000000314";
+  const caseId = "c0ffee00-0000-4000-9000-000000000315";
+  const fields = (): [string, string][] => [
+    ["schemaVersion", "1"],
+    ["runId", `"${runId}"`],
+    ["repositoryId", `"${"ab".repeat(32)}"`],
+    ["commitSha", `"${"c".repeat(40)}"`],
+    ["treeSha", `"${"d".repeat(64)}"`],
+    ["composeProject", `"${EXPECTED_COMPOSE_PROJECT}"`],
+    ["transactionId", `"${transactionId}"`],
+    ["caseId", `"${caseId}"`],
+    ["expectedRiskLevel", '"HIGH"'],
+    ["expectedResponseOutcome", '"ADDITIONAL_AUTH_REQUIRED"'],
+    ["expectedInitialCaseStatus", '"OPEN"'],
+  ];
+  const render = (entries: readonly (readonly [string, string])[]): string =>
+    `{${entries.map(([key, value]) => `"${key}":${value}`).join(",")}}\n`;
+  const replaced = (key: string, value: string): string =>
+    render(fields().map(([name, current]) => [name, name === key ? value : current] as const));
+  const canonical = render(fields());
+  const utf8 = (text: string): Uint8Array => Buffer.from(text, "utf8");
+
+  const accepted = parseRunFixtureManifestBytes(utf8(canonical));
+  requireCondition(
+    isDeepStrictEqual(accepted, {
+      runId,
+      transactionId,
+      caseId,
+      expectedRiskLevel: "HIGH",
+      expectedResponseOutcome: "ADDITIONAL_AUTH_REQUIRED",
+      expectedInitialCaseStatus: "OPEN",
+    }),
+    "The Run fixture manifest oracle did not accept the canonical identity.",
+  );
+
+  const withoutTree = fields().filter(([key]) => key !== "treeSha");
+  const reordered = fields();
+  [reordered[6], reordered[7]] = [reordered[7], reordered[6]];
+  const refusedBytes: readonly Uint8Array[] = [
+    new Uint8Array(0),
+    new Uint8Array(RUN_FIXTURE_MANIFEST_MAX_BYTES + 1).fill(0x20),
+    utf8(render(withoutTree)),
+    utf8(render([...fields(), ["actorId", `"${caseId}"`]])),
+    utf8(render(reordered)),
+    utf8(render([...fields().slice(0, 2), ["runId", `"${runId}"`], ...fields().slice(2)])),
+    utf8(replaced("transactionId", `"${transactionId.toUpperCase()}"`)),
+    utf8(replaced("caseId", '"c0ffee00-0000-1000-9000-000000000315"')),
+    utf8(replaced("caseId", "null")),
+    utf8(replaced("expectedRiskLevel", '"CRITICAL"')),
+    utf8(replaced("expectedResponseOutcome", '"HELD"')),
+    utf8(replaced("expectedInitialCaseStatus", '"IN_REVIEW"')),
+    utf8(replaced("composeProject", '"another-project"')),
+    utf8(replaced("schemaVersion", '"1"')),
+    utf8(replaced("schemaVersion", "2")),
+    Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), utf8(canonical)]),
+    utf8(`${canonical.slice(0, -1)}\r\n`),
+    utf8(canonical.slice(0, -1)),
+    utf8(`${canonical}\n`),
+    utf8(` ${canonical}`),
+    utf8(canonical.replaceAll('":', '": ')),
+    Buffer.concat([Buffer.from(canonical.slice(0, -2), "utf8"), Buffer.from([0xff]), Buffer.from("}\n")]),
+  ];
+  for (const bytes of refusedBytes) {
+    let message: string | null = null;
+    try {
+      parseRunFixtureManifestBytes(bytes);
+    } catch (error: unknown) {
+      message = error instanceof Error ? error.message : "unknown";
+    }
+    requireCondition(
+      message === RUN_FIXTURE_REFUSALS.bytes,
+      "The Run fixture manifest oracle accepted or misnamed non-canonical bytes.",
+    );
+  }
+
+  // The path rules, against a synthetic file system: no file is created.
+  const root = resolve("/run-fixture-manifest-oracle");
+  const directory = resolve(root, `finguardops-keycloak-e2e-fixture-${runId}`);
+  const manifest = resolve(directory, RUN_FIXTURE_MANIFEST_NAME);
+  const bytes = utf8(canonical);
+  const status = (kind: "file" | "directory" | "link", size = 0): RunFixtureFileStatus => ({
+    isFile: () => kind === "file",
+    isDirectory: () => kind === "directory",
+    isSymbolicLink: () => kind === "link",
+    size,
+  });
+  const fakeFileSystem = (
+    overrides: ReadonlyMap<string, RunFixtureFileStatus | "missing">,
+    read: (path: string) => Uint8Array = () => bytes,
+  ): RunFixtureFileSystem => ({
+    lstat: (path) => {
+      const override = overrides.get(path);
+      if (override === "missing") {
+        throw new Error("synthetic missing entry");
+      }
+      if (override !== undefined) {
+        return override;
+      }
+      return path === manifest ? status("file", bytes.byteLength) : status("directory");
+    },
+    read,
+  });
+  const none = new Map<string, RunFixtureFileStatus | "missing">();
+  requireCondition(
+    isDeepStrictEqual(readRunFixtureManifest(manifest, fakeFileSystem(none)), accepted),
+    "The Run fixture manifest oracle did not accept the canonical path.",
+  );
+  const otherRun = resolve(root, `finguardops-keycloak-e2e-fixture-${"f".repeat(32)}`);
+  const otherRunManifest = resolve(otherRun, RUN_FIXTURE_MANIFEST_NAME);
+  const refusedPaths: readonly (readonly [string | undefined, RunFixtureFileSystem, string])[] = [
+    [undefined, fakeFileSystem(none), RUN_FIXTURE_REFUSALS.path],
+    ["", fakeFileSystem(none), RUN_FIXTURE_REFUSALS.path],
+    [RUN_FIXTURE_MANIFEST_NAME, fakeFileSystem(none), RUN_FIXTURE_REFUSALS.path],
+    [`${directory}/./${RUN_FIXTURE_MANIFEST_NAME}`, fakeFileSystem(none), RUN_FIXTURE_REFUSALS.path],
+    [`${manifest}\u0000`, fakeFileSystem(none), RUN_FIXTURE_REFUSALS.path],
+    [resolve(directory, "fixture-identity.json.tmp"), fakeFileSystem(none), RUN_FIXTURE_REFUSALS.path],
+    [
+      resolve(root, "finguardops-keycloak-e2e-fixture-latest", RUN_FIXTURE_MANIFEST_NAME),
+      fakeFileSystem(none),
+      RUN_FIXTURE_REFUSALS.path,
+    ],
+    [manifest, fakeFileSystem(new Map([[manifest, status("link", bytes.byteLength)]])), RUN_FIXTURE_REFUSALS.link],
+    [manifest, fakeFileSystem(new Map([[directory, status("link")]])), RUN_FIXTURE_REFUSALS.link],
+    [manifest, fakeFileSystem(new Map([[root, status("link")]])), RUN_FIXTURE_REFUSALS.link],
+    [manifest, fakeFileSystem(new Map([[manifest, status("directory")]])), RUN_FIXTURE_REFUSALS.kind],
+    [manifest, fakeFileSystem(new Map([[directory, status("file", 1)]])), RUN_FIXTURE_REFUSALS.kind],
+    [manifest, fakeFileSystem(new Map([[manifest, status("file", 0)]])), RUN_FIXTURE_REFUSALS.size],
+    [
+      manifest,
+      fakeFileSystem(new Map([[manifest, status("file", RUN_FIXTURE_MANIFEST_MAX_BYTES + 1)]])),
+      RUN_FIXTURE_REFUSALS.size,
+    ],
+    [manifest, fakeFileSystem(none, () => bytes.subarray(1)), RUN_FIXTURE_REFUSALS.size],
+    [manifest, fakeFileSystem(new Map([[manifest, "missing"]])), RUN_FIXTURE_REFUSALS.read],
+    [manifest, fakeFileSystem(new Map([[directory, "missing"]])), RUN_FIXTURE_REFUSALS.read],
+    [
+      manifest,
+      fakeFileSystem(none, () => {
+        throw new Error("synthetic read failure");
+      }),
+      RUN_FIXTURE_REFUSALS.read,
+    ],
+    [
+      manifest,
+      fakeFileSystem(new Map([[manifest, status("file", bytes.byteLength - 1)]]), () => bytes.subarray(1)),
+      RUN_FIXTURE_REFUSALS.bytes,
+    ],
+    [otherRunManifest, fakeFileSystem(new Map([[otherRunManifest, status("file", bytes.byteLength)]])), RUN_FIXTURE_REFUSALS.binding],
+  ];
+  for (const [candidate, fileSystem, expected] of refusedPaths) {
+    let message: string | null = null;
+    try {
+      readRunFixtureManifest(candidate, fileSystem);
+    } catch (error: unknown) {
+      message = error instanceof Error ? error.message : "unknown";
+    }
+    requireCondition(
+      message === expected,
+      "The Run fixture manifest oracle accepted or misnamed an unsafe path.",
+    );
+  }
+}
+
+/**
+ * The armed workflow-write boundary, proved before the live test arms anything.
+ *
+ * No browser and no Backend: the byte builder is called directly, which is the
+ * step that decides and consumes an armed write, and the spawn and observation
+ * counters show that every refusal happened before a process existed. Every
+ * refusal is one of the relay's fixed sentences and none reflects the body or
+ * the case identifier. The identifiers are synthetic.
+ */
+function requireWorkflowWriteRelayOracle(): void {
+  requireCondition(armedWorkflowWrite === null, "A workflow write was armed before the relay oracle ran.");
+  const caseId = "c0ffee00-0000-4000-8000-00000000c314";
+  const otherCaseId = "c0ffee00-0000-4000-9000-00000000c315";
+  const credential = "Bearer workflow-relay-oracle";
+  const writes = [
+    {
+      method: "PATCH",
+      path: `${CASE_LIST_PATH}/${caseId}/status`,
+      body:
+        '{"targetStatus":"IN_REVIEW","assigneeRef":"c0ffee00-0000-4000-a000-00000000a314",' +
+        '"reasonCode":"CASE_REVIEW_STARTED","expectedVersion":0}',
+    },
+    {
+      method: "POST",
+      path: `${CASE_LIST_PATH}/${caseId}/notes`,
+      body: '{"content":"workflow relay oracle note","expectedVersion":1}',
+    },
+  ] as const;
+  const methodRefusal = "A Backend request used a method this relay will not write.";
+  const spawnsBefore = relaySpawnCount;
+  const observationsBefore = relayObservationCount;
+  const refuse = (method: string, path: string, body: string | null, expected: string): void => {
+    let message: string | null = null;
+    try {
+      buildRelayRequestBytes(relayCandidate(method, `${BACKEND_ORIGIN}${path}`, credential, body));
+    } catch (error: unknown) {
+      message = error instanceof Error ? error.message : "unknown";
+    }
+    requireCondition(
+      message === expected && RELAY_REFUSALS.includes(message),
+      "The workflow relay oracle accepted or misnamed a refused write.",
+    );
+    requireCondition(
+      !message.includes(caseId) && (body === null || body === "" || !message.includes(body)),
+      "The workflow relay oracle reflected a refused write.",
+    );
+  };
+  const refuseArming = (write: ArmedWorkflowWrite, expected: string): void => {
+    let message: string | null = null;
+    try {
+      armWorkflowWrite(write);
+    } catch (error: unknown) {
+      message = error instanceof Error ? error.message : "unknown";
+    }
+    requireCondition(message === expected, "The workflow relay oracle armed an unsafe write.");
+  };
+
+  try {
+    for (const write of writes) {
+      refuse(write.method, write.path, write.body, WORKFLOW_WRITE_NOT_ARMED);
+    }
+    refuseArming(
+      { method: "GET", pathname: writes[0].path, body: writes[0].body },
+      "A workflow write was armed for an undeclared address.",
+    );
+    refuseArming(
+      { method: "PATCH", pathname: `${CASE_LIST_PATH}/${caseId}/assignee`, body: writes[0].body },
+      "A workflow write was armed for an undeclared address.",
+    );
+    refuseArming(
+      { method: "PATCH", pathname: writes[0].path, body: "" },
+      "A workflow write was armed with an unsafe body.",
+    );
+    refuseArming(
+      { method: "PATCH", pathname: writes[0].path, body: "{\u0000}" },
+      "A workflow write was armed with an unsafe body.",
+    );
+    requireCondition(armedWorkflowWrite === null, "A refused arming left a workflow write armed.");
+
+    for (const [index, write] of writes.entries()) {
+      const other = writes[1 - index];
+      armWorkflowWrite({ method: write.method, pathname: write.path, body: write.body });
+      refuseArming(
+        { method: write.method, pathname: write.path, body: write.body },
+        "A workflow write was armed while another was pending.",
+      );
+      refuse(write.method, write.path.replace(caseId, otherCaseId), write.body, WORKFLOW_WRITE_NOT_ARMED);
+      refuse(other.method, other.path, other.body, WORKFLOW_WRITE_NOT_ARMED);
+      refuse(write.method, `${write.path}?expectedVersion=0`, write.body, "A Backend write probe carried a query.");
+      refuse(write.method, `${write.path}/`, write.body, methodRefusal);
+      refuse(write.method, `${write.path}/extra`, write.body, methodRefusal);
+      refuse(
+        write.method,
+        write.path.replace(caseId, caseId.toUpperCase()),
+        write.body,
+        "An invalid Backend path was requested.",
+      );
+      refuse("PUT", write.path, write.body, methodRefusal);
+      refuse("DELETE", write.path, write.body, methodRefusal);
+      refuse(write.method, write.path, write.body.replace(/:(\d+)\}$/, ":9$1}"), WORKFLOW_WRITE_BODY_MISMATCH);
+      refuse(write.method, write.path, write.body.replaceAll(",", ", "), WORKFLOW_WRITE_BODY_MISMATCH);
+      refuse(
+        write.method,
+        write.path,
+        `${write.body.slice(0, -1)},"expectedVersion":0}`,
+        WORKFLOW_WRITE_BODY_MISMATCH,
+      );
+      refuse(write.method, write.path, null, WORKFLOW_WRITE_BODY_MISMATCH);
+      requireCondition(armedWorkflowWrite !== null, "A refused workflow write consumed the arming.");
+
+      const built = buildRelayRequestBytes(
+        relayCandidate(write.method, `${BACKEND_ORIGIN}${write.path}`, credential, write.body),
+      );
+      const separator = built.bytes.indexOf("\r\n\r\n", 0, "latin1");
+      const head = built.bytes.toString("ascii", 0, separator + 4);
+      requireCondition(
+        built.method === write.method &&
+          built.target === write.path &&
+          built.bodyByteLength === Buffer.byteLength(write.body, "utf8") &&
+          head.startsWith(`${write.method} ${write.path} HTTP/1.1\r\n`) &&
+          (head.match(/Content-Type: application\/json\r\n/g) ?? []).length === 1 &&
+          built.bytes.subarray(separator + 4).equals(Buffer.from(write.body, "utf8")),
+        "The armed workflow write was not forwarded byte for byte.",
+      );
+      requireCondition(armedWorkflowWrite === null, "An admitted workflow write was not consumed.");
+      refuse(write.method, write.path, write.body, WORKFLOW_WRITE_NOT_ARMED);
+    }
+    requireCondition(
+      relaySpawnCount === spawnsBefore && relayObservationCount === observationsBefore,
+      "The workflow relay oracle spawned a relay process or recorded an observation.",
+    );
+  } finally {
+    disarmWorkflowWrite();
+  }
+}
+
+/** One expected case audit entry, as the public projection carries it. */
+interface ExpectedCaseAuditEntry {
+  readonly action: string;
+  readonly reasonCode: string;
+  readonly actorType: "SYSTEM" | "USER";
+  readonly beforeSummary: Readonly<Record<string, unknown>> | null;
+  readonly afterSummary: Readonly<Record<string, unknown>> | null;
+  readonly metadata: Readonly<Record<string, unknown>>;
+}
+
+const UTC_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
+
+function sortedKeys(value: Readonly<Record<string, unknown>>): string[] {
+  return Object.keys(value).sort();
+}
+
+function requireJsonRecord(value: unknown, message: string): Record<string, unknown> {
+  requireCondition(typeof value === "object" && value !== null && !Array.isArray(value), message);
+  return value as Record<string, unknown>;
+}
+
+/** The first page of a case audit response, held to the exact expected entries. */
+function requireCaseAuditPage(
+  raw: string | undefined,
+  caseId: string,
+  expected: readonly ExpectedCaseAuditEntry[],
+): Record<string, unknown>[] {
+  const body = parseJsonObject(
+    raw,
+    "The case audit response body was not observed.",
+    "The case audit response body was not a JSON object.",
+  );
+  requireCondition(
+    isDeepStrictEqual(sortedKeys(body), ["caseId", "content", "page", "traceId"]) && body.caseId === caseId,
+    "The case audit response did not carry its public envelope for this case.",
+  );
+  const page = requireJsonRecord(body.page, "The case audit page envelope was invalid.");
+  requireCondition(
+    Array.isArray(body.content) &&
+      body.content.length === expected.length &&
+      page.number === 0 &&
+      page.totalElements === expected.length,
+    "The case audit trail did not hold exactly the expected entries.",
+  );
+  const content = body.content.map((entry) =>
+    requireJsonRecord(entry, "A case audit entry was not a JSON object."),
+  );
+  for (const [index, entry] of content.entries()) {
+    const want = expected[index];
+    requireCondition(
+      isDeepStrictEqual(sortedKeys(entry), [
+        "action",
+        "actorType",
+        "afterSummary",
+        "beforeSummary",
+        "changedAt",
+        "metadata",
+        "reasonCode",
+      ]) &&
+        entry.action === want.action &&
+        entry.reasonCode === want.reasonCode &&
+        entry.actorType === want.actorType &&
+        isDeepStrictEqual(entry.beforeSummary, want.beforeSummary) &&
+        isDeepStrictEqual(entry.afterSummary, want.afterSummary) &&
+        isDeepStrictEqual(entry.metadata, want.metadata) &&
+        typeof entry.changedAt === "string" &&
+        UTC_INSTANT.test(entry.changedAt),
+      `Case audit entry ${String(index + 1)} was not the expected public projection.`,
+    );
+  }
+  return content;
+}
+
+/** A response object without its per-request `traceId`, for before/after comparison. */
+function withoutTraceId(raw: string | undefined, label: string): Record<string, unknown> {
+  const body = parseJsonObject(
+    raw,
+    `The ${label} response body was not observed.`,
+    `The ${label} response body was not a JSON object.`,
+  );
+  requireCondition(typeof body.traceId === "string" && body.traceId !== "", `The ${label} response carried no trace.`);
+  const { traceId, ...rest } = body;
+  void traceId;
+  return rest;
+}
+
+/** The `<dd>` that follows a `<dt>` with exactly this text, inside one record. */
+function factValue(scope: Locator, term: string): Locator {
+  return scope.locator(`xpath=.//dt[normalize-space(.)=${JSON.stringify(term)}]/following-sibling::dd[1]`);
+}
+
+/**
+ * Signs in from the guard screen of `route` and returns the token material.
+ *
+ * The first sign-in of a context must meet the credential form. A later one -
+ * after a reload discarded the in-memory session - may instead be answered by
+ * the Keycloak SSO session that is still live in the same browser context; both
+ * end in a real authorization-code exchange that is observed and checked.
+ */
+async function signInFromGuard(
+  page: Page,
+  password: string,
+  route: string,
+  allowSingleSignOn: boolean,
+): Promise<TokenMaterial> {
+  const tokenResponsePromise = page.waitForResponse(
+    (response) => response.url() === TOKEN_URL && response.request().method() === "POST",
+    { timeout: 30_000 },
+  );
+  const signedIn = page.getByLabel("Authentication status").filter({ hasText: "Signed in as" });
+  await page.getByRole("button", { name: "Sign in" }).click();
+  const outcome = await Promise.race([
+    page
+      .locator("#username")
+      .waitFor({ state: "visible", timeout: 30_000 })
+      .then(
+        () => "form" as const,
+        () => "none" as const,
+      ),
+    signedIn.waitFor({ state: "visible", timeout: 30_000 }).then(
+      () => "session" as const,
+      () => "none" as const,
+    ),
+  ]);
+  requireCondition(
+    outcome === "form" || (allowSingleSignOn && outcome === "session"),
+    "The sign-in did not reach the credential form or an authenticated session.",
+  );
+  if (outcome === "form") {
+    await page.locator("#username").fill(USERNAME);
+    await page.locator("#password").fill(password);
+    await submitLogin(page);
+  }
+  const tokens = parseTokenResponse(await (await tokenResponsePromise).json());
+  requireTokenClaims(tokens);
+  await page.waitForFunction((expected) => window.location.href === expected, `${APP_ORIGIN}${route}`);
+  await expect(page.getByLabel("Authentication status")).toContainText("Signed in as");
+  return tokens;
+}
+
+/**
+ * The core incident flow over the current Run's own fixture (Issues #314, #315).
+ *
+ * Real Keycloak login as the existing FDS_ANALYST user, real Spring Boot, and
+ * the transaction and case the Run fixture created through the public intake
+ * API. The case is selected by the manifest identity and the public
+ * `transactionId` case filter - never by taking a first row - and must be
+ * exactly one row naming the manifest case.
+ *
+ * What it proves, in order: the public transaction detail and its
+ * `processingStatus`; the selected case's OPEN record, empty notes and initial
+ * audit trail; that a forbidden OPEN -> ADDITIONAL_INFORMATION_REQUIRED status
+ * write is refused with 409 `CASE_STATUS_CONFLICT` and changes no status,
+ * version, note or business audit row; OPEN -> IN_REVIEW from the screen; a
+ * note written, read back, shown, and shown again after a reload; IN_REVIEW ->
+ * ADDITIONAL_INFORMATION_REQUIRED from the screen; and the populated audit
+ * history as its public projection only. Every write is armed in the relay as
+ * one exact method, path and body for this case and is forwarded once.
+ *
+ * What it does not claim: a risk level or outcome on screen (the public detail
+ * endpoints carry neither; `run-fixture-after` verified them), a case-to-
+ * transaction link beyond the public filter, or any audit actor, target or
+ * trace identifier. The assignee is a fresh canonical UUID v4 because that is
+ * all the current production contract checks; it names no user or directory
+ * entry.
+ */
+test("a real USER works the Run fixture case through review, a note and the audit trail", async ({
+  page,
+}) => {
+  // Two real sign-ins, four writes and their reconciling reads, each relayed
+  // through `docker exec`, do not fit the suite's 60-second default.
+  test.setTimeout(240_000);
+  requireRunFixtureManifestOracle();
+  requireWorkflowWriteRelayOracle();
+  const fixture = readRunFixtureManifest(env[RUN_FIXTURE_MANIFEST_ENVIRONMENT]);
+
+  const password = readUserPassword();
+  const consoleMessages: string[] = [];
+  page.on("console", (message) => consoleMessages.push(message.text()));
+
+  const waitMs = 15_000;
+  const transactionPath = `${TRANSACTION_LIST_PATH}/${fixture.transactionId}`;
+  const casePath = `${CASE_LIST_PATH}/${fixture.caseId}`;
+  const notesPath = `${casePath}/notes`;
+  const auditPath = `${casePath}/audit-logs`;
+  const statusPath = `${casePath}/status`;
+  const transactionRoute = `/transactions/${fixture.transactionId}`;
+  const caseRoute = `/cases/${fixture.caseId}`;
+  const filteredCaseTarget =
+    `${CASE_LIST_PATH}?transactionId=${fixture.transactionId}&page=0&size=20&sort=lastChangedAt%2Cdesc`;
+  const screenNotesTarget = `${notesPath}?page=0&size=20&sort=createdAt%2Casc`;
+  const screenAuditTarget = `${auditPath}?page=0&size=20&sort=changedAt%2Cdesc`;
+  const allowedPaths = new Set([
+    transactionPath,
+    CASE_LIST_PATH,
+    casePath,
+    notesPath,
+    auditPath,
+    statusPath,
+  ]);
+
+  const backend = await installBackendRelay(page, {
+    captureBodyOf: [transactionPath, CASE_LIST_PATH, casePath, notesPath, auditPath, statusPath],
+  });
+  const reads = (pathname: string, target?: string) =>
+    backend.filter(
+      (entry) =>
+        entry.method === "GET" &&
+        entry.pathname === pathname &&
+        (target === undefined || entry.target === target),
+    );
+  const writes = () => backend.filter((entry) => entry.method !== "GET");
+  const latest = (pathname: string, target?: string) => {
+    const found = reads(pathname, target);
+    return found.length === 0 ? undefined : found[found.length - 1];
+  };
+  const latestCaseVersion = (): number | null => {
+    const observed = latest(casePath);
+    if (observed === undefined || observed.status !== 200 || observed.body === undefined) {
+      return null;
+    }
+    const parsed = parseJsonOrNull(observed.body);
+    const record = typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
+    const detail = record.case;
+    return typeof detail === "object" && detail !== null &&
+      typeof (detail as Record<string, unknown>).concurrencyVersion === "number"
+      ? ((detail as Record<string, unknown>).concurrencyVersion as number)
+      : null;
+  };
+  const latestAuditLength = (): number | null => {
+    const observed = latest(auditPath, screenAuditTarget);
+    if (observed === undefined || observed.status !== 200 || observed.body === undefined) {
+      return null;
+    }
+    const parsed = parseJsonOrNull(observed.body);
+    const content =
+      typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>).content : null;
+    return Array.isArray(content) ? content.length : null;
+  };
+  const record = page.getByRole("main").locator(".detail__record");
+  const auditSection = page.locator('section[aria-labelledby="case-audit-heading"]');
+  const notesSection = page.locator('section[aria-labelledby="case-notes-heading"]');
+  const workflowResult = page.getByRole("status", { name: "Case workflow result", exact: true });
+
+  try {
+    // 1. A real sign-in from the current Run's transaction address.
+    await page.goto(`${APP_ORIGIN}${transactionRoute}`);
+    await expect(page.getByRole("heading", { name: "Sign in required" })).toBeVisible();
+    requireCondition(backend.length === 0, "An unauthenticated fixture address reached the Backend.");
+    const tokens = await signInFromGuard(page, password, transactionRoute, false);
+    const subject = decodeJwtPayload(tokens.accessToken).sub;
+    requireNonBlankString(subject, "The access token subject was invalid.");
+
+    // 2. The public transaction detail: identity and processing status, nothing more.
+    await expect
+      .poll(() => reads(transactionPath).length, { timeout: waitMs })
+      .toBe(1);
+    const transactionRead = reads(transactionPath)[0];
+    requireCondition(
+      transactionRead.target === transactionPath && transactionRead.status === 200,
+      "The fixture transaction detail was not read exactly once with 200.",
+    );
+    const transactionBody = parseJsonObject(
+      transactionRead.body,
+      "The fixture transaction response body was not observed.",
+      "The fixture transaction response body was not a JSON object.",
+    );
+    const transaction = requireJsonRecord(
+      transactionBody.transaction,
+      "The fixture transaction response carried no transaction.",
+    );
+    requireCondition(
+      transaction.transactionId === fixture.transactionId &&
+        transaction.processingStatus === "ADDITIONAL_AUTH_REQUIRED",
+      "The fixture transaction was not the manifest transaction in ADDITIONAL_AUTH_REQUIRED.",
+    );
+    requireCondition(
+      !["riskLevel", "riskResponseOutcome", "caseId", "adoptedDetectionResultId"].some((name) =>
+        Object.prototype.hasOwnProperty.call(transaction, name),
+      ),
+      "The transaction detail carried a field its public contract does not declare.",
+    );
+    await expect(
+      page.getByRole("heading", { name: `Transaction ${fixture.transactionId}`, level: 2 }),
+    ).toBeVisible();
+    const transactionMain = page.getByRole("main");
+    await expect(factValue(transactionMain, "Transaction ID")).toHaveText(fixture.transactionId);
+    await expect(factValue(transactionMain, "Processing status")).toHaveText("Auth required");
+    const transactionScreen = (await transactionMain.textContent()) ?? "";
+    for (const unclaimed of ["HIGH", "Risk level", "risk level", fixture.caseId]) {
+      requireCondition(
+        !transactionScreen.includes(unclaimed),
+        "The transaction screen claimed a risk level or a case link it has no public field for.",
+      );
+    }
+
+    // 3. The case selected by the public transaction filter: exactly one row,
+    // and it is the manifest case.
+    const casesLink = page.getByRole("link", { name: "Cases", exact: true });
+    await casesLink.click();
+    await page.waitForFunction((expected) => window.location.href === expected, `${APP_ORIGIN}/cases`);
+    const results = page.getByRole("main").getByRole("status");
+    await expect(results).not.toContainText("Loading cases", { timeout: waitMs });
+    await expect.poll(() => reads(CASE_LIST_PATH).length, { timeout: waitMs }).toBe(1);
+    requireCondition(
+      reads(CASE_LIST_PATH)[0].target === INITIAL_CASE_TARGET && reads(CASE_LIST_PATH)[0].status === 200,
+      "The opening case list was not the exact default read.",
+    );
+    await page.getByLabel("Related transaction ID").fill(fixture.transactionId);
+    await page.getByRole("button", { name: "Apply filters" }).click();
+    await expect.poll(() => reads(CASE_LIST_PATH).length, { timeout: waitMs }).toBe(2);
+    const filteredRead = reads(CASE_LIST_PATH)[1];
+    requireCondition(
+      filteredRead.target === filteredCaseTarget && filteredRead.status === 200,
+      "The transaction-filtered case read was not the exact public filter query.",
+    );
+    const filteredBody = parseJsonObject(
+      filteredRead.body,
+      "The filtered case list body was not observed.",
+      "The filtered case list body was not a JSON object.",
+    );
+    const filteredPage = requireJsonRecord(filteredBody.page, "The filtered case page was invalid.");
+    requireCondition(
+      Array.isArray(filteredBody.content) &&
+        filteredBody.content.length === 1 &&
+        filteredPage.totalElements === 1,
+      "The public transaction filter did not narrow the cases to exactly one.",
+    );
+    const listed = requireJsonRecord(filteredBody.content[0], "The filtered case row was invalid.");
+    requireCondition(
+      listed.caseId === fixture.caseId &&
+        listed.caseStatus === fixture.expectedInitialCaseStatus &&
+        listed.finalDisposition === null &&
+        listed.assigneeRef === null &&
+        listed.relatedTransactionCount === 1,
+      "The one filtered case was not the manifest case in its initial state.",
+    );
+    await expect(results).toHaveText("Showing 1-1 of 1 cases.", { timeout: waitMs });
+    const rows = await page.locator("tbody > tr").evaluateAll((elements) =>
+      elements.map((element) => ({
+        links: Array.from(element.querySelectorAll("a"), (anchor) => ({
+          href: anchor.getAttribute("href"),
+          text: anchor.textContent ?? "",
+          ariaLabel: anchor.getAttribute("aria-label"),
+        })),
+      })),
+    );
+    requireCaseRowLinks(rows);
+    requireCondition(
+      rows.length === 1 && rows[0].links[0].href === caseRoute,
+      "The one filtered row did not lead to the manifest case.",
+    );
+    await page.getByRole("link", { name: `${CASE_DETAIL_LINK_LABEL_PREFIX}${fixture.caseId}`, exact: true }).click();
+    await page.waitForFunction((expected) => window.location.href === expected, `${APP_ORIGIN}${caseRoute}`);
+
+    // 4. The initial case record, notes and audit trail.
+    await expect.poll(() => reads(casePath).length, { timeout: waitMs }).toBe(1);
+    await expect.poll(() => reads(notesPath, screenNotesTarget).length, { timeout: waitMs }).toBe(1);
+    await expect.poll(() => reads(auditPath, screenAuditTarget).length, { timeout: waitMs }).toBe(1);
+    const initialDetailRead = reads(casePath)[0];
+    const initialNotesRead = reads(notesPath, screenNotesTarget)[0];
+    const initialAuditRead = reads(auditPath, screenAuditTarget)[0];
+    requireCondition(
+      initialDetailRead.target === casePath &&
+        initialDetailRead.status === 200 &&
+        initialNotesRead.status === 200 &&
+        initialAuditRead.status === 200,
+      "The case detail, notes and audit reads did not each return 200.",
+    );
+    const initialDetailBody = parseJsonObject(
+      initialDetailRead.body,
+      "The case detail body was not observed.",
+      "The case detail body was not a JSON object.",
+    );
+    requireCondition(
+      isDeepStrictEqual(sortedKeys(initialDetailBody), ["case", "traceId"]),
+      "The case detail response did not carry its public envelope.",
+    );
+    const initialCase = requireJsonRecord(initialDetailBody.case, "The case detail carried no case.");
+    requireCondition(
+      isDeepStrictEqual(sortedKeys(initialCase), [
+        "assigneeRef",
+        "caseId",
+        "caseStatus",
+        "closedAt",
+        "concurrencyVersion",
+        "createdAt",
+        "finalDisposition",
+        "lastChangedAt",
+        "relatedTransactionCount",
+        "reviewStartedAt",
+      ]),
+      "The case detail carried fields outside its public contract.",
+    );
+    const v0 = initialCase.concurrencyVersion;
+    requireCondition(
+      typeof v0 === "number" && Number.isSafeInteger(v0) && v0 >= 0,
+      "The case concurrency version was not a non-negative integer.",
+    );
+    requireCondition(
+      initialCase.caseId === fixture.caseId &&
+        initialCase.caseStatus === "OPEN" &&
+        initialCase.finalDisposition === null &&
+        initialCase.assigneeRef === null &&
+        initialCase.reviewStartedAt === null &&
+        initialCase.closedAt === null &&
+        initialCase.relatedTransactionCount === 1,
+      "The manifest case was not in its initial OPEN state.",
+    );
+    const initialNotes = withoutTraceId(initialNotesRead.body, "initial notes");
+    requireCondition(
+      Array.isArray(initialNotes.items) &&
+        initialNotes.items.length === 0 &&
+        requireJsonRecord(initialNotes.page, "The notes page envelope was invalid.").totalElements === 0,
+      "The new case already held an investigation note.",
+    );
+    const systemEntries: readonly ExpectedCaseAuditEntry[] = [
+      {
+        action: "CASE_TRANSACTION_LINKED",
+        reasonCode: "CASE_REQUIRED_BY_RISK_POLICY",
+        actorType: "SYSTEM",
+        beforeSummary: null,
+        afterSummary: { linked: true },
+        metadata: {},
+      },
+      {
+        action: "CASE_CREATED",
+        reasonCode: "CASE_REQUIRED_BY_RISK_POLICY",
+        actorType: "SYSTEM",
+        beforeSummary: null,
+        afterSummary: { caseStatus: "OPEN" },
+        metadata: {},
+      },
+    ];
+    requireCaseAuditPage(initialAuditRead.body, fixture.caseId, systemEntries);
+    await expect(page.getByRole("status", { name: "Case record status" })).toHaveText(
+      "Showing the full case record.",
+      { timeout: waitMs },
+    );
+    await expect(factValue(record, "Case ID")).toHaveText(fixture.caseId);
+    await expect(factValue(record, "Case status")).toHaveText("Open");
+    await expect(factValue(record, "Assignee")).toHaveText("Unassigned");
+    await expect(factValue(record, "Concurrency version")).toHaveText(String(v0));
+    await expect(
+      notesSection.getByText("Investigation notes cannot be added while this case is open.", { exact: true }),
+    ).toBeVisible();
+    // The live region and the empty notice both say this, so the region is named.
+    await expect(
+      notesSection.getByRole("status", { name: "Investigation notes status", exact: true }),
+    ).toHaveText("No investigation notes.");
+    await expect(notesSection.locator("li.investigation-notes__item")).toHaveCount(0);
+    await expect(auditSection.locator("article.audit__entry")).toHaveCount(2, { timeout: waitMs });
+
+    // 5. The forbidden transition: OPEN -> ADDITIONAL_INFORMATION_REQUIRED.
+    const forbiddenBody = JSON.stringify({
+      targetStatus: "ADDITIONAL_INFORMATION_REQUIRED",
+      reasonCode: "CASE_ADDITIONAL_INFORMATION_REQUESTED",
+      expectedVersion: v0,
+    });
+    armWorkflowWrite({ method: "PATCH", pathname: statusPath, body: forbiddenBody });
+    const forbidden = await page.evaluate(
+      async ({ caseId, expectedVersion }) => {
+        const [{ getOidcAuthClient }, { sendAuthorizedBackendRequest }] = await Promise.all([
+          import("/src/auth/oidcAuthClient.ts"),
+          import("/src/api/authorizedClient.ts"),
+        ]);
+        try {
+          await sendAuthorizedBackendRequest(getOidcAuthClient(), {
+            endpoint: "case-status-change",
+            params: { caseId },
+            body: {
+              targetStatus: "ADDITIONAL_INFORMATION_REQUIRED",
+              reasonCode: "CASE_ADDITIONAL_INFORMATION_REQUESTED",
+              expectedVersion,
+            },
+            expectedStatus: 200,
+            // 409가 기대 결과이므로 어떤 body도 성공으로 받아들이지 않는다.
+            validate: (body: unknown): body is never => {
+              void body;
+              return false;
+            },
+          });
+          return { name: "unexpected-success", status: 0 };
+        } catch (error: unknown) {
+          const status =
+            typeof error === "object" &&
+            error !== null &&
+            "status" in error &&
+            typeof (error as { status: unknown }).status === "number"
+              ? (error as { status: number }).status
+              : 0;
+          return { name: error instanceof Error ? error.name : "unknown", status };
+        }
+      },
+      { caseId: fixture.caseId, expectedVersion: v0 },
+    );
+    requireCondition(
+      forbidden.name === "HttpError" && forbidden.status === 409,
+      "The forbidden status transition was not refused with 409.",
+    );
+    requireCondition(armedWorkflowWrite === null, "The forbidden status write was not forwarded exactly once.");
+    requireCondition(writes().length === 1, "The forbidden transition sent more than one write.");
+    const forbiddenWrite = writes()[0];
+    requireCondition(
+      forbiddenWrite.method === "PATCH" &&
+        forbiddenWrite.pathname === statusPath &&
+        forbiddenWrite.target === statusPath &&
+        forbiddenWrite.status === 409 &&
+        forbiddenWrite.requestBodyByteLength === Buffer.byteLength(forbiddenBody, "utf8"),
+      "The forbidden status write was not the exact armed request answered with 409.",
+    );
+    const conflict = readBackendErrorFields(forbiddenWrite.body);
+    const conflictBody = parseJsonObject(
+      forbiddenWrite.body,
+      "The conflict body was not observed.",
+      "The conflict body was not a JSON object.",
+    );
+    requireCondition(
+      conflict.code === "CASE_STATUS_CONFLICT" &&
+        isDeepStrictEqual(sortedKeys(conflictBody), ["code", "fieldErrors", "message", "traceId"]) &&
+        isDeepStrictEqual(conflictBody.fieldErrors, []),
+      "The forbidden transition did not answer with the safe CASE_STATUS_CONFLICT error.",
+    );
+    for (const value of [conflict.code, conflict.message, conflict.traceId]) {
+      requireCondition(!(await documentExposes(page, value)), "A Backend conflict field reached the page.");
+      requireCondition(
+        !consoleMessages.some((entry) => entry.includes(value)),
+        "A Backend conflict field reached the browser console.",
+      );
+    }
+
+    // Re-read through the public API: status, version, notes and the business
+    // audit trail are exactly what they were before the refusal.
+    const reread = await page.evaluate(async (caseId) => {
+      const [{ getOidcAuthClient }, { sendAuthorizedBackendRequest }] = await Promise.all([
+        import("/src/auth/oidcAuthClient.ts"),
+        import("/src/api/authorizedClient.ts"),
+      ]);
+      const outcomes: string[] = [];
+      for (const endpoint of ["case-detail", "case-note-list", "case-audit-list"] as const) {
+        try {
+          await sendAuthorizedBackendRequest(getOidcAuthClient(), {
+            endpoint,
+            params: { caseId },
+            expectedStatus: 200,
+            validate: (body: unknown): body is Record<string, unknown> =>
+              typeof body === "object" && body !== null,
+          });
+          outcomes.push("ok");
+        } catch (error: unknown) {
+          outcomes.push(error instanceof Error ? error.name : "unknown");
+        }
+      }
+      return outcomes;
+    }, fixture.caseId);
+    requireCondition(
+      isDeepStrictEqual(reread, ["ok", "ok", "ok"]),
+      "The post-refusal case, notes and audit re-reads did not all succeed.",
+    );
+    const rereadDetail = latest(casePath);
+    const rereadNotes = latest(notesPath, notesPath);
+    const rereadAudit = latest(auditPath, auditPath);
+    requireCondition(
+      rereadDetail !== undefined &&
+        rereadDetail !== initialDetailRead &&
+        rereadNotes !== undefined &&
+        rereadAudit !== undefined,
+      "The post-refusal re-reads were not observed.",
+    );
+    requireCondition(
+      isDeepStrictEqual(withoutTraceId(rereadDetail.body, "re-read detail"), withoutTraceId(initialDetailRead.body, "initial detail")),
+      "The refused transition changed the case status or version.",
+    );
+    requireCondition(
+      isDeepStrictEqual(withoutTraceId(rereadNotes.body, "re-read notes"), initialNotes),
+      "The refused transition changed the investigation notes.",
+    );
+    requireCondition(
+      isDeepStrictEqual(
+        withoutTraceId(rereadAudit.body, "re-read audit"),
+        withoutTraceId(initialAuditRead.body, "initial audit"),
+      ),
+      "The refused transition changed the business audit trail.",
+    );
+    await expect(factValue(record, "Case status")).toHaveText("Open");
+    await expect(factValue(record, "Concurrency version")).toHaveText(String(v0));
+
+    // 6. OPEN -> IN_REVIEW from the screen. The assignee is a fresh canonical
+    // UUID v4: the production contract checks that shape and nothing else, so
+    // the value names no user and is not the signed-in subject.
+    const assigneeRef = randomUUID();
+    requireCondition(
+      CANONICAL_UUID_V4.test(assigneeRef) && assigneeRef !== subject,
+      "The test assignee reference was not a fresh canonical UUID v4.",
+    );
+    const startBody = JSON.stringify({
+      targetStatus: "IN_REVIEW",
+      assigneeRef,
+      reasonCode: "CASE_REVIEW_STARTED",
+      expectedVersion: v0,
+    });
+    armWorkflowWrite({ method: "PATCH", pathname: statusPath, body: startBody });
+    await page.getByRole("textbox", { name: "Assignee UUID", exact: true }).fill(assigneeRef);
+    await page.getByRole("button", { name: "Start review", exact: true }).click();
+    await expect(workflowResult).toHaveText("Review started from authoritative case information.", {
+      timeout: waitMs,
+    });
+    requireCondition(armedWorkflowWrite === null, "The start-review write was not forwarded exactly once.");
+    const startWrite = writes()[1];
+    requireCondition(
+      writes().length === 2 &&
+        startWrite.method === "PATCH" &&
+        startWrite.target === statusPath &&
+        startWrite.status === 200 &&
+        startWrite.requestBodyByteLength === Buffer.byteLength(startBody, "utf8"),
+      "The start-review write was not the exact armed request answered with 200.",
+    );
+    const started = parseJsonObject(
+      startWrite.body,
+      "The start-review response was not observed.",
+      "The start-review response was not a JSON object.",
+    );
+    requireCondition(
+      started.caseId === fixture.caseId &&
+        started.caseStatus === "IN_REVIEW" &&
+        started.assigneeRef === assigneeRef &&
+        started.finalDisposition === null &&
+        started.closedAt === null &&
+        started.concurrencyVersion === v0 + 1,
+      "The start-review response was not the IN_REVIEW case at the next version.",
+    );
+    await expect.poll(latestCaseVersion, { timeout: waitMs }).toBe(v0 + 1);
+    await expect.poll(latestAuditLength, { timeout: waitMs }).toBe(3);
+    const reviewEntry: ExpectedCaseAuditEntry = {
+      action: "CASE_STATUS_CHANGED",
+      reasonCode: "CASE_REVIEW_STARTED",
+      actorType: "USER",
+      beforeSummary: { caseStatus: "OPEN", assigneeRef: null },
+      afterSummary: { caseStatus: "IN_REVIEW", assigneeRef },
+      metadata: {},
+    };
+    requireCaseAuditPage(latest(auditPath, screenAuditTarget)?.body, fixture.caseId, [
+      reviewEntry,
+      ...systemEntries,
+    ]);
+    await expect(factValue(record, "Case status")).toHaveText("In review");
+    await expect(factValue(record, "Assignee")).toHaveText(assigneeRef);
+    await expect(factValue(record, "Concurrency version")).toHaveText(String(v0 + 1));
+
+    // 7. A note: POST, GET, shown.
+    const noteContent = `Run fixture review note ${randomUUID()}`;
+    const noteBody = JSON.stringify({ content: noteContent, expectedVersion: v0 + 1 });
+    armWorkflowWrite({ method: "POST", pathname: notesPath, body: noteBody });
+    const notesBeforeCreate = reads(notesPath, screenNotesTarget).length;
+    await page.getByRole("textbox", { name: "Investigation note", exact: true }).fill(noteContent);
+    await page.getByRole("button", { name: "Add note", exact: true }).click();
+    await expect(notesSection.getByText("Investigation note added.", { exact: true })).toBeVisible({
+      timeout: waitMs,
+    });
+    requireCondition(armedWorkflowWrite === null, "The note write was not forwarded exactly once.");
+    const noteWrite = writes()[2];
+    requireCondition(
+      writes().length === 3 &&
+        noteWrite.method === "POST" &&
+        noteWrite.target === notesPath &&
+        noteWrite.status === 201 &&
+        noteWrite.requestBodyByteLength === Buffer.byteLength(noteBody, "utf8"),
+      "The note write was not the exact armed request answered with 201.",
+    );
+    const created = parseJsonObject(
+      noteWrite.body,
+      "The note creation response was not observed.",
+      "The note creation response was not a JSON object.",
+    );
+    const noteId = created.noteId;
+    requireCondition(
+      typeof noteId === "string" &&
+        CANONICAL_UUID_V4.test(noteId) &&
+        created.caseId === fixture.caseId &&
+        created.authorType === "USER" &&
+        created.authorRef === subject &&
+        created.content === noteContent &&
+        created.concurrencyVersion === v0 + 2,
+      "The note creation response was not this note at the next case version.",
+    );
+    await expect
+      .poll(() => reads(notesPath, screenNotesTarget).length, { timeout: waitMs })
+      .toBeGreaterThan(notesBeforeCreate);
+    const expectedNote = {
+      noteId,
+      caseId: fixture.caseId,
+      authorType: "USER",
+      authorRef: subject,
+      content: noteContent,
+    };
+    const requireOneNote = (raw: string | undefined, label: string): void => {
+      const body = withoutTraceId(raw, label);
+      requireCondition(
+        Array.isArray(body.items) &&
+          body.items.length === 1 &&
+          requireJsonRecord(body.page, "The notes page envelope was invalid.").totalElements === 1,
+        `The ${label} did not hold exactly the one note.`,
+      );
+      const item = requireJsonRecord(body.items[0], "A note item was not a JSON object.");
+      const { createdAt, ...rest } = item;
+      requireCondition(
+        isDeepStrictEqual(rest, expectedNote) &&
+          typeof createdAt === "string" &&
+          createdAt === created.createdAt,
+        `The ${label} did not return the created note unchanged.`,
+      );
+    };
+    requireOneNote(latest(notesPath, screenNotesTarget)?.body, "notes read after creation");
+    await expect.poll(latestCaseVersion, { timeout: waitMs }).toBe(v0 + 2);
+    await expect.poll(latestAuditLength, { timeout: waitMs }).toBe(4);
+    const noteEntry: ExpectedCaseAuditEntry = {
+      action: "CASE_NOTE_CREATED",
+      reasonCode: "CASE_INVESTIGATION_NOTE_ADDED",
+      actorType: "USER",
+      beforeSummary: null,
+      afterSummary: null,
+      metadata: { noteId },
+    };
+    requireCaseAuditPage(latest(auditPath, screenAuditTarget)?.body, fixture.caseId, [
+      noteEntry,
+      reviewEntry,
+      ...systemEntries,
+    ]);
+    const shownNote = notesSection.locator("li.investigation-notes__item");
+    await expect(shownNote).toHaveCount(1, { timeout: waitMs });
+    await expect(factValue(shownNote, "Note ID")).toHaveText(noteId);
+    await expect(factValue(shownNote, "Content")).toHaveText(noteContent);
+    await expect(factValue(record, "Concurrency version")).toHaveText(String(v0 + 2));
+
+    // 8. A reload: the in-memory session is gone, a real sign-in follows, and the
+    // note is read and shown again from the Backend.
+    const observationsBeforeReload = backend.length;
+    const notesReadsBeforeReload = reads(notesPath, screenNotesTarget).length;
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "Sign in required" })).toBeVisible();
+    requireCondition(
+      backend.length === observationsBeforeReload,
+      "A reloaded page without a session reached the Backend.",
+    );
+    const reloadTokens = await signInFromGuard(page, password, caseRoute, true);
+    requireCondition(
+      decodeJwtPayload(reloadTokens.accessToken).sub === subject,
+      "The second sign-in was not the same FDS_ANALYST user.",
+    );
+    await expect
+      .poll(() => reads(notesPath, screenNotesTarget).length, { timeout: waitMs })
+      .toBeGreaterThan(notesReadsBeforeReload);
+    requireOneNote(latest(notesPath, screenNotesTarget)?.body, "notes read after reload");
+    await expect(shownNote).toHaveCount(1, { timeout: waitMs });
+    await expect(factValue(shownNote, "Note ID")).toHaveText(noteId);
+    await expect(factValue(shownNote, "Content")).toHaveText(noteContent);
+    await expect(factValue(record, "Case status")).toHaveText("In review");
+    await expect(factValue(record, "Concurrency version")).toHaveText(String(v0 + 2));
+
+    // 9. IN_REVIEW -> ADDITIONAL_INFORMATION_REQUIRED from the screen.
+    const requestInformationBody = JSON.stringify({
+      targetStatus: "ADDITIONAL_INFORMATION_REQUIRED",
+      reasonCode: "CASE_ADDITIONAL_INFORMATION_REQUESTED",
+      expectedVersion: v0 + 2,
+    });
+    armWorkflowWrite({ method: "PATCH", pathname: statusPath, body: requestInformationBody });
+    await page.getByRole("button", { name: "Request additional information", exact: true }).click();
+    await expect(workflowResult).toHaveText(
+      "Additional information requested from authoritative case information.",
+      { timeout: waitMs },
+    );
+    requireCondition(
+      armedWorkflowWrite === null,
+      "The additional-information write was not forwarded exactly once.",
+    );
+    const informationWrite = writes()[3];
+    requireCondition(
+      writes().length === 4 &&
+        informationWrite.method === "PATCH" &&
+        informationWrite.target === statusPath &&
+        informationWrite.status === 200 &&
+        informationWrite.requestBodyByteLength === Buffer.byteLength(requestInformationBody, "utf8"),
+      "The additional-information write was not the exact armed request answered with 200.",
+    );
+    const requested = parseJsonObject(
+      informationWrite.body,
+      "The additional-information response was not observed.",
+      "The additional-information response was not a JSON object.",
+    );
+    requireCondition(
+      requested.caseId === fixture.caseId &&
+        requested.caseStatus === "ADDITIONAL_INFORMATION_REQUIRED" &&
+        requested.assigneeRef === assigneeRef &&
+        requested.finalDisposition === null &&
+        requested.closedAt === null &&
+        requested.concurrencyVersion === v0 + 3,
+      "The additional-information response was not the expected case at the next version.",
+    );
+    await expect.poll(latestCaseVersion, { timeout: waitMs }).toBe(v0 + 3);
+    await expect.poll(latestAuditLength, { timeout: waitMs }).toBe(5);
+    const informationEntry: ExpectedCaseAuditEntry = {
+      action: "CASE_STATUS_CHANGED",
+      reasonCode: "CASE_ADDITIONAL_INFORMATION_REQUESTED",
+      actorType: "USER",
+      beforeSummary: { caseStatus: "IN_REVIEW", assigneeRef },
+      afterSummary: { caseStatus: "ADDITIONAL_INFORMATION_REQUIRED", assigneeRef },
+      metadata: {},
+    };
+    const finalEntries = [informationEntry, noteEntry, reviewEntry, ...systemEntries];
+    const finalAudit = requireCaseAuditPage(
+      latest(auditPath, screenAuditTarget)?.body,
+      fixture.caseId,
+      finalEntries,
+    );
+    await expect(factValue(record, "Case status")).toHaveText("Information required");
+    await expect(factValue(record, "Concurrency version")).toHaveText(String(v0 + 3));
+
+    // 10. The populated audit history, as its public projection and nothing else.
+    const auditArticles = auditSection.locator("article.audit__entry");
+    await expect(auditArticles).toHaveCount(finalEntries.length, { timeout: waitMs });
+    const shownAudit = await auditArticles.evaluateAll((articles) =>
+      articles.map((article) => {
+        const value = (term: string): Element | null => {
+          const terms = Array.from(article.querySelectorAll("dt"));
+          const match = terms.find((dt) => (dt.textContent ?? "").trim() === term);
+          const next = match?.nextElementSibling ?? null;
+          return next !== null && next.tagName === "DD" ? next : null;
+        };
+        const summary = (term: string) => {
+          const dd = value(term);
+          if (dd === null) {
+            return null;
+          }
+          const fields = Array.from(dd.querySelectorAll("li.audit__summary-field"));
+          return fields.length === 0
+            ? { absent: (dd.textContent ?? "").trim() }
+            : {
+                fields: fields.map((field) => [
+                  (field.querySelector(".audit__summary-name")?.textContent ?? "").trim(),
+                  (field.lastElementChild?.textContent ?? "").trim(),
+                ]),
+              };
+        };
+        const time = value("Changed")?.querySelector("time") ?? null;
+        return {
+          action: (article.querySelector("h4")?.textContent ?? "").trim(),
+          reasonCode: (value("Reason code")?.textContent ?? "").trim(),
+          actorType: (value("Actor type")?.textContent ?? "").trim(),
+          changedAt: time?.getAttribute("datetime") ?? null,
+          changedText: (time?.textContent ?? "").trim(),
+          before: summary("Before"),
+          after: summary("After"),
+          noteId: value("Note ID") === null ? null : (value("Note ID")?.textContent ?? "").trim(),
+          terms: Array.from(article.querySelectorAll("dt"), (dt) => (dt.textContent ?? "").trim()),
+        };
+      }),
+    );
+    const describeSummary = (summary: Readonly<Record<string, unknown>> | null) => {
+      if (summary === null) {
+        return { absent: "Not applicable" };
+      }
+      if ("linked" in summary) {
+        return { fields: [["Linked", String(summary.linked)]] };
+      }
+      const fields = [["Case status", String(summary.caseStatus)]];
+      if ("assigneeRef" in summary) {
+        fields.push([
+          "Assignee",
+          summary.assigneeRef === null ? "Unassigned" : String(summary.assigneeRef),
+        ]);
+      }
+      return { fields };
+    };
+    for (const [index, want] of finalEntries.entries()) {
+      const shown = shownAudit[index];
+      const terms = ["Reason code", "Actor type", "Changed", "Before", "After"];
+      if (want.action === "CASE_NOTE_CREATED") {
+        terms.push("Note ID");
+      }
+      requireCondition(
+        shown.action === want.action &&
+          shown.reasonCode === want.reasonCode &&
+          shown.actorType === want.actorType &&
+          shown.changedAt === finalAudit[index].changedAt &&
+          shown.changedText.endsWith(" KST") &&
+          isDeepStrictEqual(shown.before, describeSummary(want.beforeSummary)) &&
+          isDeepStrictEqual(shown.after, describeSummary(want.afterSummary)) &&
+          shown.noteId === (want.action === "CASE_NOTE_CREATED" ? noteId : null) &&
+          isDeepStrictEqual(shown.terms, terms),
+        `Audit history entry ${String(index + 1)} did not show exactly its public projection.`,
+      );
+    }
+    // No actor, target or trace identifier, and no raw JSON, in the audit
+    // history. The signed-in subject is the internal actor of the three USER
+    // entries; it may appear as the public note author reference above, never
+    // here.
+    const auditText = (await auditSection.textContent()) ?? "";
+    const auditMarkup = await auditSection.innerHTML();
+    const traceIds = backend
+      .map((entry) => parseJsonOrNull(entry.body ?? ""))
+      .map((parsed) =>
+        typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>).traceId : null,
+      )
+      .filter((value): value is string => typeof value === "string" && value !== "");
+    requireCondition(traceIds.length > 0, "No Backend trace identifier was observed to check against.");
+    for (const forbiddenValue of [
+      subject,
+      fixture.caseId,
+      fixture.transactionId,
+      "actorId",
+      "targetId",
+      "traceId",
+      ...traceIds,
+    ]) {
+      requireCondition(
+        !auditText.includes(forbiddenValue) && !auditMarkup.includes(forbiddenValue),
+        "The audit history exposed an actor, target or trace identifier.",
+      );
+    }
+    requireCondition(
+      !auditText.includes('{"') && !auditText.includes('":'),
+      "The audit history showed raw JSON.",
+    );
+
+    // 11. Exactly four writes, all on this Run's case, in order; nothing outside
+    // the fixture's own addresses was reached.
+    requireCondition(
+      isDeepStrictEqual(
+        writes().map((entry) => [entry.method, entry.target, entry.status]),
+        [
+          ["PATCH", statusPath, 409],
+          ["PATCH", statusPath, 200],
+          ["POST", notesPath, 201],
+          ["PATCH", statusPath, 200],
+        ],
+      ),
+      "The business writes were not exactly the four armed writes on the manifest case.",
+    );
+    requireCondition(
+      backend.every((entry) => allowedPaths.has(entry.pathname)),
+      "The flow reached an address outside the Run fixture's transaction and case.",
+    );
+    requireCondition(
+      backend.relayFailureCount() === 0 &&
+        backend.routeAbortCount() === 0 &&
+        backend.routeActionFailureCount() === 0 &&
+        backend.routeActionStallCount() === 0,
+      "A fixture relay failed, aborted, or did not settle its route action.",
+    );
+
+    // No credential reached a browser surface or the console.
+    const cookieValues = (await page.context().cookies(AUTHORITY))
+      .map((cookie) => cookie.value)
+      .filter((value) => value !== "");
+    const sensitive = [
+      password,
+      tokens.accessToken,
+      tokens.idToken,
+      reloadTokens.accessToken,
+      reloadTokens.idToken,
+      ...cookieValues,
+    ];
+    requireCondition(!(await browserContainsAny(page, sensitive)), "A credential reached DOM, URL, or Web Storage.");
+    requireCondition(
+      !consoleMessages.some((message) => sensitive.some((value) => value !== "" && message.includes(value))),
+      "A credential reached the browser console.",
+    );
+
+    await expect
+      .poll(() => backend.activeHandlerCount(), { timeout: BACKEND_OBSERVATION_WAIT_TIMEOUT_MS })
+      .toBe(0);
+    await backend.dispose();
+    requireCondition(
+      backend.cleanupState() === "clean" &&
+        backend.openProcessCount() === 0 &&
+        backend.activeHandlerCount() === 0,
+      "The fixture relay did not reach host and container process-zero.",
+    );
+  } finally {
+    disarmWorkflowWrite();
+  }
+});
 
 /**
  * The address of the test-only geometry fixture, served by the same Vite dev
