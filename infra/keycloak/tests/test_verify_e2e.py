@@ -649,6 +649,30 @@ class VerifyTests(unittest.TestCase):
             ):
                 verify_e2e.validate_static(valid_config(), realm)
 
+    def test_each_user_rejects_duplicate_roles_identity_and_imported_credentials(self):
+        for index in range(3):
+            for field, value in (
+                ("realmRoles", ["FDS_VIEWER", "FDS_VIEWER"]),
+                ("realmRoles", ["FDS_VIEWER", "FDS_APPROVER"]),
+                ("credentials", [{"type": "password"}]),
+                ("id", "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69d"),
+            ):
+                realm = valid_realm()
+                realm["users"][index][field] = value
+                with self.subTest(index=index, field=field, value=value), self.assertRaisesRegex(
+                    verify_e2e.VerificationError, "STATIC_USER_CONTRACT"
+                ):
+                    verify_e2e.validate_static(valid_config(), realm)
+
+    def test_realm_user_cardinality_and_order_are_exact(self):
+        for change in (lambda users: users.pop(), lambda users: users.reverse(), lambda users: users.append(dict(users[0]))):
+            realm = valid_realm()
+            change(realm["users"])
+            with self.subTest(change=change), self.assertRaisesRegex(
+                verify_e2e.VerificationError, "STATIC_USER_CONTRACT"
+            ):
+                verify_e2e.validate_static(valid_config(), realm)
+
     def test_bootstrap_source_writable_rejected(self):
         self.assert_static_failure(lambda c: c["services"]["keycloak-bootstrap"]["volumes"][0].update({"read_only": False}), "STATIC_KEYCLOAK_BOOTSTRAP_MOUNT")
 

@@ -20,6 +20,11 @@ REALM = "finguardops-local"
 ADMIN_CLIENT_ID = "temp-admin"
 USER_NAME = "local-fds-analyst"
 USER_ROLE = "FDS_ANALYST"
+USER_FIXTURES = (
+    ("local-fds-analyst", "FDS_ANALYST", "Analyst", "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a"),
+    ("local-fds-viewer", "FDS_VIEWER", "Viewer", "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69b"),
+    ("local-fds-approver", "FDS_APPROVER", "Approver", "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69c"),
+)
 AUDIENCE = "finguardops-backend-api"
 SECRET_PATTERN = re.compile(rb"[A-Za-z0-9_-]{32,128}\Z")
 UUID4_PATTERN = re.compile(
@@ -512,25 +517,26 @@ class Reconciler:
         self.admin.request("PUT", self.root + "/clients/" + q(client_uuid), updated, expected=(204,))
         return client_uuid
 
-    def list_users(self) -> list[dict[str, Any]]:
-        return self.admin.request("GET", self.root + "/users?username=" + q(USER_NAME) + "&exact=true")
+    def list_users(self, username: str = USER_NAME) -> list[dict[str, Any]]:
+        return self.admin.request("GET", self.root + "/users?username=" + q(username) + "&exact=true")
 
-    def reconcile_user(self, password: str) -> str:
-        current = exact_one(self.list_users(), "username", USER_NAME, "USER")
+    def reconcile_user(self, password: str, fixture: tuple[str, str, str, str] = USER_FIXTURES[0]) -> str:
+        username, role, last_name, expected_id = fixture
+        current = exact_one(self.list_users(username), "username", username, "USER")
         desired = {
-            "username": USER_NAME,
+            "username": username,
             "firstName": "Local",
-            "lastName": "Analyst",
-            "email": "local-fds-analyst@finguardops.invalid",
+            "lastName": last_name,
+            "email": username + "@finguardops.invalid",
             "enabled": True,
             "emailVerified": False,
             "requiredActions": [],
         }
         if current is None:
-            desired["id"] = str(uuid.uuid4())
+            desired["id"] = expected_id
             self.admin.request("POST", self.root + "/users", desired, expected=(201,))
-            current = exact_one(self.list_users(), "username", USER_NAME, "USER")
-        if current is None or not is_canonical_uuid4(current.get("id")):
+            current = exact_one(self.list_users(username), "username", username, "USER")
+        if current is None or current.get("id") != expected_id or not is_canonical_uuid4(current.get("id")):
             fail("USER_UUID_INVALID")
         user_id = current["id"]
         updated = dict(current)
@@ -557,7 +563,7 @@ class Reconciler:
             {"type": "password", "value": password, "temporary": False},
             expected=(204,),
         )
-        self.reconcile_user_roles(user_id, (USER_ROLE,))
+        self.reconcile_user_roles(user_id, (role,))
         credential_metadata = self.admin.request(
             "GET", self.root + "/users/" + q(user_id) + "/credentials"
         )
@@ -584,8 +590,7 @@ class Reconciler:
         if missing:
             self.admin.request("POST", path, missing, expected=(204,))
         after = self.admin.request("GET", path)
-        final_names = {item.get("name") for item in after}
-        if final_names != set(desired_names):
+        if not isinstance(after, list) or [item.get("name") for item in after if isinstance(item, dict)] != list(desired_names) or len(after) != len(desired_names):
             fail("USER_ROLE_RECONCILE_INCOMPLETE")
 
     def service_account_id(self, client_uuid: str, role: str) -> str:
@@ -626,7 +631,8 @@ class Reconciler:
             client_uuid = self.reconcile_client(client_id, secrets[client_id])
             service_account_id = self.service_account_id(client_uuid, spec["role"])
             self.validate_service_token_subject(client_id, secrets[client_id], service_account_id)
-        self.reconcile_user(user_password)
+        for fixture in USER_FIXTURES:
+            self.reconcile_user(user_password, fixture)
 
         # Re-query exact names so a duplicate or incomplete result cannot produce a completion marker.
         self.reconcile_roles()

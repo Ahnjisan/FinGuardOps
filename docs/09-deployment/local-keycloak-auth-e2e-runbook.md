@@ -996,6 +996,8 @@ assignee는 실행마다 새로 만든 canonical lowercase UUID v4다. 현재 pr
 
 ### 12.3 Relay write 경계
 
+Issue #318 extends the armed live-Run write descriptors to assignee PATCH and resolution POST. During a live Run, the older synthetic resolution probe is disabled. Each of the four live mutation paths requires one exact arm for the manifest case ID, method, path, and body; a successful relay build consumes that arm. The #314 status/note flow below remains the earlier subset.
+
 test relay가 새로 받아들이는 write는 `PATCH /api/v1/cases/{id}/status`와 `POST /api/v1/cases/{id}/notes`
 두 형태뿐이다. 둘 다 test가 직전에 arm한 exact method, path, body와 일치할 때만 한 번 전달하고,
 전달하는 순간 arm을 소비한다. 다음 요청은 process를 만들기 전에 고정 문장으로 거부한다.
@@ -1012,12 +1014,16 @@ test relay가 새로 받아들이는 write는 `PATCH /api/v1/cases/{id}/status`�
 assignee write, resolution(기존 403 probe 제외), audit-log write는 계속 선언되지 않는다. 기존 query·endpoint
 반례 matrix 64개와 70개는 그대로 유지한다.
 
-### 12.4 검증 상태와 test 수
+### 12.4 Verified gate for Issue #314
 
-정적 수집 기준 공식 test 수는 23개다. 기존 22개에 이 test 1개가 추가됐다
-(`playwright test --list`). lint·typecheck와 비-Docker oracle 검증은 통과했다. 실제 Keycloak·Backend
-위에서의 pass 수는 공식 Docker `Prepare → Service → Run`을 실행해야 확정된다. 이번 변경에서는 그
-lifecycle을 실행하지 않았다.
+The official Docker Prepare, Service, and Run modes each succeeded once after the #315 fixture work. The #314 Browser suite passed 23/23, including the seeded case workflow, note, denied status transition, and populated Audit UI. The #315 gate had a separate wrapper exit-code observation limit even though its Browser 22/22 passed; do not attribute that limit to the later #314 gate. The #314 cleanup left zero owned resources, fixture artifacts, and receipts.
 
-실패하면 §11의 cleanup·Recovery receipt 계약을 그대로 따른다. 수동 DB row 삭제는 하지 않는다.
-Run project의 database volume은 기존 exact cleanup으로 함께 제거된다.
+## 13. Real case-role denial Browser E2E (Issue #318)
+
+Run creates one manifest-bound OPEN case. The #318 test runs before the #314 mutating workflow test in this file, with workers=1 and retries=0. It signs in separately as local-fds-viewer, local-fds-analyst, and local-fds-approver, using the existing ignored user-password Secret. All three must issue matching USER access/ID subjects and exactly one expected role, with the Backend singleton audience. The Browser and host Playwright receive no SERVICE credential.
+
+Each USER can read the case, all note pages, and all business Audit pages. The Browser checks capability controls separately from the Backend response. Viewer sends note/status/assignee/resolution writes once each and receives 403. Analyst sends resolution once and receives 403. Approver sends note/status/assignee once each and receives 403; an additional OPEN resolution receives CASE_STATUS_CONFLICT 409. No resolution succeeds and the case remains OPEN throughout this test. The relay arms one exact current-run caseId/method/path/body and consumes it once. Wrong caseId, query, trailing slash, changed body, and duplicate writes are rejected before a Backend process starts.
+
+For each denied write, the same USER reads case status, concurrencyVersion, assigneeRef, finalDisposition, every note page, and every public business Audit page before and after. The comparison excludes per-request trace IDs. Application/security logs are not business Audit rows. The following #314 test then performs its approved successful mutations on the same Run fixture.
+
+Issue #318 has only non-Docker validation at this stage. After review and an approved clean commit, run the official Prepare -> Service -> Run gate and verify the expanded Browser pass count, exact write matrix, cleanup, owned resource/manifest/receipt residue zero, and protected inventory unchanged. Do not report #318 as Docker-verified until that gate passes.
