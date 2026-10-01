@@ -9707,7 +9707,8 @@ test("the populated case sheet scrolls inside its container and never the docume
   // here rather than read back from `CASE_FINAL_DISPOSITION_LABELS`: reusing
   // the production map as the expectation would make this assertion agree with
   // any renaming, including one that showed a resolved-normal case as a
-  // confirmed fraud. The third column is "Final disposition".
+  // confirmed fraud. The fourth column is "Final disposition" after the
+  // case link moved to the start of each row.
   const dispositions: readonly string[] = [
     "Not resolved",
     "Confirmed fraud",
@@ -9716,7 +9717,7 @@ test("the populated case sheet scrolls inside its container and never the docume
     "Normal",
   ];
   for (const [index, expected] of dispositions.entries()) {
-    await expect(rows.nth(index).locator("td").nth(2)).toHaveText(expected);
+    await expect(rows.nth(index).locator("td").nth(3)).toHaveText(expected);
   }
 
   // The two values that decide the width of the two widest columns are in
@@ -9753,7 +9754,7 @@ test("the populated case sheet scrolls inside its container and never the docume
     "The fixture did not render an assignee reference at Backend's 128-character bound.",
   );
 
-  for (const viewport of CONSOLE_VIEWPORTS) {
+  for (const viewport of [...CONSOLE_VIEWPORTS, { width: 390, height: 844 }]) {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     const geometry = await measureCaseSheet(page);
     const at = `${String(viewport.width)}px`;
@@ -9798,19 +9799,16 @@ test("the populated case sheet scrolls inside its container and never the docume
       `The case table was narrower than its own minimum at ${at}.`,
     );
 
-    if (viewport.width === 1024) {
-      // The width the sheet is designed to outgrow. Here, and only here, the
-      // container must actually be scrollable and must actually have content
-      // wider than itself - which is what makes the two document assertions
-      // above a statement about a real overflow rather than about a table that
-      // happened to fit.
+    if (viewport.width === 1024 || viewport.width === 390) {
+      // At both narrow widths the container must actually be scrollable and
+      // have content wider than itself; no column disappears from the record.
       requireCondition(
         geometry.tableScrollWidth > geometry.containerClientWidth,
-        "The case table did not exceed its container at 1024px, so nothing was being contained.",
+        `The case table did not exceed its container at ${at}.`,
       );
       requireCondition(
         geometry.overflowX === "auto" || geometry.overflowX === "scroll",
-        "The case sheet container was not scrollable at 1024px.",
+        `The case sheet container was not scrollable at ${at}.`,
       );
     }
   }

@@ -6,37 +6,32 @@
  * system already has, because this console has to render identically on a
  * locked-down analyst workstation with no outbound network route.
  *
- * The design is a ledger, not a dashboard. A navy rail carries identity,
- * navigation and session; the working area is a warm stone canvas holding two
- * white surfaces - the filter panel and the transaction sheet - and nothing
- * else. Surfaces are never nested inside surfaces, there is one shadow token
- * and it is spent on the rail edge alone, and the only motion is a 120ms colour
- * change that answers a pointer or a key.
+ * Light work surface shared by navigation and the case queue. Design decisions
+ * and responsive rules are recorded in frontend/DESIGN.md.
  */
 
 :root {
-  /* Warm stone working ground. Low chroma on purpose: the badges and the
-     amount column are the only saturated things on the page. */
-  --canvas: #edebe4;
+  /* Quiet ground keeps the case state and record links easy to scan. */
+  --canvas: #f6f8fb;
   --surface: #ffffff;
-  --surface-muted: #f7f6f2;
-  --surface-sunken: #e5e2d9;
+  --surface-muted: #f8faff;
+  --surface-sunken: #eef2f8;
 
-  /* Navy ink, from the same family as the rail, so type and chrome agree. */
-  --text: #16202e;
-  --text-strong: #0d1725;
-  --muted: #5a6270;
+  /* Slate ink shared by the shell and work surfaces. */
+  --text: #25334a;
+  --text-strong: #17243b;
+  --muted: #59677b;
 
-  --border: #d8d5cb;
-  --border-strong: #c3bfb2;
-  --rule: #e6e3da;
+  --border: #dce3ed;
+  --border-strong: #b9c7d8;
+  --rule: #e9edf3;
 
   /* Institutional blue: the primary action, links, and the sort affordance. */
-  --primary: #1f5fa8;
-  --primary-strong: #17497f;
-  --primary-wash: #e8f0f9;
+  --primary: #2457b5;
+  --primary-strong: #183f8c;
+  --primary-wash: #eaf1ff;
 
-  --focus: #1f5fa8;
+  --focus: #2457b5;
 
   --success: #1e6b4f;
   --success-wash: #e3f0e9;
@@ -49,11 +44,11 @@
   --neutral: #4c5462;
   --neutral-wash: #eceae4;
 
-  --rail: #12203a;
-  --rail-raised: #1b2c4a;
-  --rail-line: #263a5c;
-  --rail-text: #e7ecf4;
-  --rail-muted: #9fb0c9;
+  --rail: #ffffff;
+  --rail-raised: #eaf1ff;
+  --rail-line: #e2e8f0;
+  --rail-text: #17243b;
+  --rail-muted: #59677b;
 
   --space-1: 4px;
   --space-2: 8px;
@@ -63,11 +58,11 @@
   --space-6: 32px;
   --space-7: 48px;
 
-  --radius-sm: 3px;
-  --radius: 5px;
-  --radius-lg: 8px;
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-lg: 12px;
 
-  --shadow: 1px 0 0 rgb(18 32 58 / 18%);
+  --shadow: 1px 0 0 var(--rail-line);
 
   --font-sans: "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", ui-sans-serif,
     system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -75,7 +70,7 @@
     "Roboto Mono", Menlo, Consolas, monospace;
 
   --rail-width: 0px;
-  --content-max: 1360px;
+  --content-max: 1440px;
 
   color-scheme: light;
 }
@@ -165,11 +160,10 @@ a:hover {
 }
 
 .rail {
-  --focus: #9cc6f0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-5);
-  padding: var(--space-5) var(--space-4);
+  gap: var(--space-6);
+  padding: var(--space-6) var(--space-4);
   background: var(--rail);
   color: var(--rail-text);
   box-shadow: var(--shadow);
@@ -177,12 +171,26 @@ a:hover {
 
 .rail__identity {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.rail__brand-mark {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 19px;
+  font-weight: 700;
 }
 
 .rail__wordmark {
-  color: #ffffff;
+  color: var(--text-strong);
   font-size: 17px;
   font-weight: 640;
   letter-spacing: -0.015em;
@@ -198,6 +206,15 @@ a:hover {
   flex: 1 1 auto;
 }
 
+.rail__nav-label {
+  margin: 0 0 var(--space-2) var(--space-3);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
 .rail__list {
   display: flex;
   flex-direction: column;
@@ -210,8 +227,8 @@ a:hover {
 .rail__link {
   display: block;
   padding: 7px var(--space-3);
-  border-left: 2px solid transparent;
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  border-left: 3px solid transparent;
+  border-radius: var(--radius-sm);
   color: var(--rail-muted);
   font-size: 14px;
   font-weight: 500;
@@ -225,9 +242,9 @@ a:hover {
 }
 
 .rail__link[aria-current="page"] {
-  border-left-color: #6fa8e0;
+  border-left-color: var(--primary);
   background: var(--rail-raised);
-  color: #ffffff;
+  color: var(--primary-strong);
   font-weight: 600;
 }
 
@@ -295,13 +312,13 @@ a:hover {
 
 .button--rail {
   border-color: var(--rail-line);
-  background: var(--rail-raised);
+  background: var(--surface);
   color: var(--rail-text);
   width: 100%;
 }
 
 .button--rail:hover {
-  background: #24395e;
+  background: var(--rail-raised);
 }
 
 .button--quiet {
@@ -371,7 +388,7 @@ main section:not([class]) h2 {
 }
 
 .page-head h2 {
-  font-size: 26px;
+  font-size: 30px;
 }
 
 .page-head p {
@@ -379,15 +396,28 @@ main section:not([class]) h2 {
   font-size: 14px;
 }
 
+.page-head p.page-head__eyebrow {
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+
 /* Filter panel
    ------------------------------------------------------------------------- */
 
 .filters {
   margin: 0 0 var(--space-4);
-  padding: var(--space-4) var(--space-5) var(--space-5);
+  padding: var(--space-5);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--surface);
+}
+
+.filters__title {
+  margin-bottom: var(--space-5);
+  font-size: 17px;
 }
 
 .filters__grid {
@@ -530,6 +560,23 @@ ul.notice__body li + li {
   font-size: 13px;
 }
 
+.case-results-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-4);
+  margin: var(--space-3) 0 var(--space-3);
+}
+
+.case-results-head h3 {
+  font-size: 17px;
+}
+
+.case-results-head .result-line {
+  margin: 0;
+}
+
 .result-line__count {
   color: var(--text-strong);
   font-weight: 600;
@@ -564,8 +611,8 @@ ul.notice__body li + li {
   position: sticky;
   top: 0;
   padding: 0;
-  background: #22334f;
-  color: #ffffff;
+  background: #f1f5fa;
+  color: #40516b;
   font-weight: 600;
   text-align: left;
   white-space: nowrap;
@@ -583,7 +630,6 @@ ul.notice__body li + li {
 }
 
 .sheet__sort {
-  --focus: #9cc6f0;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -601,23 +647,27 @@ ul.notice__body li + li {
 }
 
 .sheet__sort:hover {
-  background: #2b4166;
+  background: #e5ecf7;
 }
 
 .sheet__sort-mark {
-  color: #a8c6e8;
+  color: var(--primary);
   font-size: 10px;
   line-height: 1;
 }
 
 .sheet tbody td {
-  padding: 9px var(--space-4);
+  padding: 12px var(--space-4);
   border-top: 1px solid var(--rule);
   vertical-align: top;
 }
 
 .sheet tbody tr:hover td {
-  background: var(--surface-muted);
+  background: #f2f6fd;
+}
+
+.sheet tbody tr:focus-within td {
+  background: var(--primary-wash);
 }
 
 .cell-time {
@@ -637,6 +687,15 @@ ul.notice__body li + li {
    document itself never scrolls. */
 .sheet--cases table {
   min-width: 980px;
+}
+
+.sheet--cases tbody td:first-child {
+  background: #fbfcff;
+}
+
+.sheet--cases tbody tr:hover td:first-child,
+.sheet--cases tbody tr:focus-within td:first-child {
+  background: var(--primary-wash);
 }
 
 .cell-amount {
@@ -713,7 +772,7 @@ ul.notice__body li + li {
   align-items: center;
   gap: 6px;
   padding: 2px 9px 2px 7px;
-  border: 1px solid currentColor;
+  border: 1px solid transparent;
   border-radius: 999px;
   font-size: 12px;
   font-weight: 600;
@@ -1468,6 +1527,7 @@ ul.notice__body li + li {
 @media (max-width: 1023px) {
   .app {
     grid-template-columns: minmax(0, 1fr);
+    align-content: start;
   }
 
   .rail {
@@ -1476,7 +1536,11 @@ ul.notice__body li + li {
     gap: var(--space-4);
     align-items: center;
     padding: var(--space-3) var(--space-4);
-    box-shadow: 0 1px 0 rgb(18 32 58 / 18%);
+    box-shadow: 0 1px 0 var(--rail-line);
+  }
+
+  .rail__nav-label {
+    display: none;
   }
 
   .rail__nav {
@@ -1495,7 +1559,7 @@ ul.notice__body li + li {
   }
 
   .rail__link[aria-current="page"] {
-    border-bottom-color: #6fa8e0;
+    border-bottom-color: var(--primary);
   }
 
   .rail__session {
@@ -1516,6 +1580,45 @@ ul.notice__body li + li {
 }
 
 @media (max-width: 479px) {
+  .rail {
+    align-items: stretch;
+  }
+
+  .rail__identity,
+  .rail__nav,
+  .rail__session {
+    flex-basis: 100%;
+  }
+
+  .rail__list {
+    flex-wrap: wrap;
+  }
+
+  .rail__session {
+    justify-content: space-between;
+  }
+
+  .main {
+    padding: var(--space-5) var(--space-3) var(--space-6);
+  }
+
+  .filters {
+    padding: var(--space-4);
+  }
+
+  .filters__actions .button {
+    flex: 1 1 auto;
+  }
+
+  .filters__note {
+    flex-basis: 100%;
+    margin-left: 0;
+  }
+
+  .cases .pager__size {
+    flex-basis: 100%;
+    margin-left: 0;
+  }
   .investigation-note-composer {
     padding: var(--space-3);
   }

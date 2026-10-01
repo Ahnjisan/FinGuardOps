@@ -38,9 +38,7 @@ export function CaseFilters({
         onApply();
       }}
     >
-      <h3 id="case-filters-heading" className="visually-hidden">
-        Case filters
-      </h3>
+      <h3 id="case-filters-heading" className="filters__title">Search and filter</h3>
       <div className="filters__grid">
         {/*
           Two independent ranges, in two fieldsets rather than one. Backend

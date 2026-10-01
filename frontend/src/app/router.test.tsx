@@ -109,7 +109,7 @@ describe("app router", () => {
     await renderAt("/", { settled: "signed-out" });
 
     expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: /finguardops frontend/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "FinGuardOps", level: 2 })).toBeInTheDocument();
   });
 
   it("renders HealthPage at /health", async () => {
@@ -220,7 +220,7 @@ describe("public route boundary", () => {
     });
 
     expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: /finguardops frontend/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "FinGuardOps", level: 2 })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Health" })).toBeInTheDocument();
   });
 });

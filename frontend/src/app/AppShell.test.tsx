@@ -755,7 +755,7 @@ describe("AppShell authentication controls", () => {
     });
     await user.click(screen.getByRole("button", { name: "Sign out" }));
 
-    expect(screen.getByRole("heading", { name: /finguardops frontend/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "FinGuardOps", level: 2 })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Home" })).toBeInTheDocument();
   });
 
@@ -795,7 +795,7 @@ describe("AppShell public boundary", () => {
     await waitFor(() => {
       expect(authStatus()).toHaveTextContent(safeAuthErrorMessage("configuration"));
     });
-    expect(screen.getByRole("heading", { name: /finguardops frontend/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "FinGuardOps", level: 2 })).toBeInTheDocument();
   });
 
   it("keeps the health outlet reachable while unauthenticated", async () => {

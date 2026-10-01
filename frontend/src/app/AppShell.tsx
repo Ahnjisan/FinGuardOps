@@ -102,10 +102,14 @@ export function AppShell() {
       </a>
       <header className="rail">
         <div className="rail__identity">
-          <h1 className="rail__wordmark">FinGuardOps</h1>
-          <p className="rail__tagline">Fraud operations console</p>
+          <span className="rail__brand-mark" aria-hidden="true">F</span>
+          <div>
+            <h1 className="rail__wordmark">FinGuardOps</h1>
+            <p className="rail__tagline">Fraud operations</p>
+          </div>
         </div>
         <nav className="rail__nav" aria-label="Primary">
+          <p className="rail__nav-label" aria-hidden="true">Workspace</p>
           <ul className="rail__list">
             <li>
               <NavLink className="rail__link" to="/" end>

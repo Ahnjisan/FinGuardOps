@@ -226,13 +226,13 @@ describe("CaseListPage data", () => {
     const cells = within(row).getAllByRole("cell");
 
     expect(cells).toHaveLength(7);
-    expect(cells[0]).toHaveTextContent("2026-07-24 11:20:40 KST");
-    expect(cells[1]).toHaveTextContent("In review");
-    expect(cells[2]).toHaveTextContent("Not resolved");
-    expect(cells[3]).toHaveTextContent(ASSIGNEE_REF);
-    expect(cells[4]).toHaveTextContent("3");
-    expect(cells[5]).toHaveTextContent("2026-07-23 10:15:30 KST");
-    expect(cells[6]).toHaveTextContent(CASE_ID);
+    expect(cells[0]).toHaveTextContent(CASE_ID);
+    expect(cells[1]).toHaveTextContent("2026-07-24 11:20:40 KST");
+    expect(cells[2]).toHaveTextContent("In review");
+    expect(cells[3]).toHaveTextContent("Not resolved");
+    expect(cells[4]).toHaveTextContent(ASSIGNEE_REF);
+    expect(cells[5]).toHaveTextContent("3");
+    expect(cells[6]).toHaveTextContent("2026-07-23 10:15:30 KST");
   });
 
   it("gives both instants a machine-readable UTC value", async () => {
@@ -356,7 +356,7 @@ describe("CaseListPage data", () => {
     await answerWith(calls[0], listBody([listItem({ assigneeRef: LONG_ASSIGNEE_REF })]));
 
     const row = await screen.findByRole("row", { name: /in review/i });
-    const cell = within(row).getAllByRole("cell")[3];
+    const cell = within(row).getAllByRole("cell")[4];
     expect(cell).toHaveTextContent(LONG_ASSIGNEE_REF);
     expect(cell.className).toContain("cell-ref--long");
     // Nothing repeats the value where it could be read out of the DOM twice.
@@ -377,7 +377,7 @@ describe("CaseListPage data", () => {
     expect(table.innerHTML.split(CASE_ID).length - 1).toBe(3);
     const idCell = within(screen.getByRole("row", { name: /in review/i })).getAllByRole(
       "cell",
-    )[6];
+    )[0];
     expect(idCell.className).toContain("cell-ref--id");
     // The visible text of the cell is the identifier and nothing else: no
     // visually hidden prefix sits inside the anchor or beside it.

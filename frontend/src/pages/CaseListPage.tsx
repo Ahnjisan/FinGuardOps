@@ -396,6 +396,7 @@ export function CaseListPage() {
   return (
     <section className="cases" aria-labelledby="cases-heading">
       <div className="page-head">
+        <p className="page-head__eyebrow">Investigation workspace</p>
         <h2 id="cases-heading">Cases</h2>
         <p>
           Search fraud cases and review where each one has reached in investigation. Times
@@ -411,8 +412,11 @@ export function CaseListPage() {
         hasPendingEdits={hasPendingEdits}
       />
 
-      <div className="result-line" role="status" aria-live="polite">
-        <ResultSummary state={state} />
+      <div className="case-results-head">
+        <h3>Case results</h3>
+        <div className="result-line" role="status" aria-live="polite">
+          <ResultSummary state={state} />
+        </div>
       </div>
 
       {problems.length > 0 && (

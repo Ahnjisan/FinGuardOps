@@ -108,7 +108,7 @@ describe("application entry (bootstrap)", () => {
       await import("./main");
     });
 
-    expect(screen.getByRole("heading", { name: /finguardops frontend/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "FinGuardOps", level: 2 })).toBeInTheDocument();
   });
 
   it("mounts the authentication boundary around the router", async () => {
@@ -131,7 +131,7 @@ describe("application entry (bootstrap)", () => {
       await import("./main");
     });
 
-    expect(screen.getByRole("heading", { name: /finguardops frontend/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "FinGuardOps", level: 2 })).toBeInTheDocument();
     expect(getEnvSpy).toHaveBeenCalledTimes(1);
     // The auth client asks for the same configuration when it is built, so what
     // matters is that validation itself ran once: every call hands back the one
@@ -215,7 +215,7 @@ describe("application entry with unusable Web Storage", () => {
 
     await bootAt("/");
 
-    expect(screen.getByRole("heading", { name: /finguardops frontend/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "FinGuardOps", level: 2 })).toBeInTheDocument();
     expect(screen.getByRole("navigation", { name: /primary/i })).toBeInTheDocument();
     expect(spies.error).not.toHaveBeenCalled();
     expect(spies.warn).not.toHaveBeenCalled();
@@ -289,7 +289,7 @@ describe("application entry with unusable Web Storage", () => {
     // And nothing was authenticated on the way.
     expect(screen.getByRole("heading", { name: /signing in/i })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Sign out" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: /finguardops frontend/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "FinGuardOps", level: 2 })).not.toBeInTheDocument();
 
     const rendered = document.body.textContent ?? "";
     expect(rendered).toContain("Sign-in could not be completed.");

@@ -7,7 +7,8 @@ describe("HomePage", () => {
   it("renders the home heading", () => {
     renderWithRouter([{ path: "/", element: <HomePage /> }]);
 
-    expect(screen.getByRole("heading", { name: /finguardops frontend/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "FinGuardOps" })).toBeInTheDocument();
+    expect(screen.queryByText(/Business screens are not implemented yet/i)).not.toBeInTheDocument();
   });
 
   it("provides an accessible link to the health page", () => {

@@ -62,6 +62,9 @@ export function CaseTable({ items, sort, onSortChange }: CaseTableProps) {
           </caption>
           <thead>
             <tr>
+              <th scope="col">
+                <span className="sheet__heading">Case ID</span>
+              </th>
               <th scope="col" aria-sort={descending ? "descending" : "ascending"}>
                 <button
                   className="sheet__sort"
@@ -96,9 +99,6 @@ export function CaseTable({ items, sort, onSortChange }: CaseTableProps) {
               <th scope="col">
                 <span className="sheet__heading">Opened (KST)</span>
               </th>
-              <th scope="col">
-                <span className="sheet__heading">Case ID</span>
-              </th>
             </tr>
           </thead>
           <tbody>
@@ -120,6 +120,15 @@ function CaseRow({ item }: { readonly item: CaseListItem }) {
 
   return (
     <tr>
+      <td className="cell-ref cell-ref--id">
+        <Link
+          className="cell-ref__link"
+          to={`/cases/${item.caseId}`}
+          aria-label={`View case details for ${item.caseId}`}
+        >
+          {item.caseId}
+        </Link>
+      </td>
       <td className="cell-time">
         {/*
           The machine-readable value is the untouched UTC instant the Backend
@@ -159,38 +168,6 @@ function CaseRow({ item }: { readonly item: CaseListItem }) {
           duplicated instant is a financial value the DOM would carry twice.
         */}
         <time dateTime={item.createdAt}>{opened} KST</time>
-      </td>
-      <td className="cell-ref cell-ref--id">
-        {/*
-          An ordinary anchor produced by `Link`: no `state`, no `onClick` of our
-          own, and no `preventDefault`, so Ctrl-click, middle click,
-          Shift-click and "Open in new tab" all behave exactly as the browser
-          intends. The target is the canonical detail route built from the
-          identifier the response validator already admitted as a canonical
-          lowercase UUID v4 - no query, no fragment, no trailing slash, and
-          never a transaction identifier.
-
-          The identifier is the whole of the link's visible text; what the link
-          is for is supplied by its `aria-label`, so a reader hears "View case
-          details for <identifier>" rather than a bare UUID with no stated
-          purpose. That name lives on the attribute rather than in a visually
-          hidden prefix inside the anchor: `.visually-hidden` is absolutely
-          positioned, and neither `.sheet` nor `.sheet__scroll` is a positioned
-          element, so such a prefix would not be clipped by the scroll container
-          it appears to sit in - at the console's narrowest width this sheet
-          really does scroll sideways, the last column's static position is past
-          the viewport, and the escaped box would widen the document instead of
-          the sheet. The `aria-label` is the only place besides the text and the
-          `href` that carries the identifier: no `title`, no `data-` attribute
-          and no hidden mirror adds a fourth.
-        */}
-        <Link
-          className="cell-ref__link"
-          to={`/cases/${item.caseId}`}
-          aria-label={`View case details for ${item.caseId}`}
-        >
-          {item.caseId}
-        </Link>
       </td>
     </tr>
   );
