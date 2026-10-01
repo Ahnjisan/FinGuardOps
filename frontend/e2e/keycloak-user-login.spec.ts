@@ -5965,6 +5965,52 @@ test("the Backend relay still admits the real reads and the one declared write p
   );
 });
 
+test("the USER resolution probe crosses the relay exactly once", () => {
+  const caseId = randomUUID();
+  const pathname = `${CASE_LIST_PATH}/${caseId}/resolution`;
+  const body = JSON.stringify({
+    finalDisposition: "NORMAL",
+    reasonCode: "CASE_RESOLUTION_COMPLETED",
+    expectedVersion: 0,
+  });
+  const spawnsBefore = relaySpawnCount;
+  const observationsBefore = relayObservationCount;
+  const request = relayCandidate("POST", `${BACKEND_ORIGIN}${pathname}`, "Bearer resolution-probe-oracle", body);
+  const refused = (candidate: PlaywrightRequest, expected: string): void => {
+    let message: string | null = null;
+    try {
+      buildRelayRequestBytes(candidate);
+    } catch (error: unknown) {
+      message = error instanceof Error ? error.message : "unknown";
+    }
+    requireCondition(message === expected, "The USER resolution probe admitted or misnamed a refused request.");
+  };
+  try {
+    refused(request, WORKFLOW_WRITE_NOT_ARMED);
+    armWorkflowWrite({ method: "POST", pathname, body });
+    refused(relayCandidate("POST", `${BACKEND_ORIGIN}${pathname}?page=0`, "", body), "A Backend write probe carried a query.");
+    refused(relayCandidate("POST", `${BACKEND_ORIGIN}${pathname}/`, "", body), "A Backend request used a method this relay will not write.");
+    refused(relayCandidate("POST", `${BACKEND_ORIGIN}${pathname}`, "", body + " "), WORKFLOW_WRITE_BODY_MISMATCH);
+    const built = buildRelayRequestBytes(request);
+    requireCondition(built.target === pathname && armedWorkflowWrite === null,
+      "The USER resolution probe did not cross and consume the exact relay boundary.");
+    refused(request, WORKFLOW_WRITE_NOT_ARMED);
+    requireCondition(
+      relaySpawnCount === spawnsBefore && relayObservationCount === observationsBefore,
+      "The USER resolution probe oracle reached the Backend.",
+    );
+  } finally {
+    disarmWorkflowWrite();
+  }
+});
+
+test("the role and core workflow write relay oracles retain their boundaries", () => {
+  requireRoleWriteRelayOracle();
+  requireWorkflowWriteRelayOracle();
+  requireCondition(activeRunCaseId === null && armedWorkflowWrite === null,
+    "A relay oracle leaked its case or write arming into another test.");
+});
+
 test("real USER login enforces PKCE, token claims, and Backend boundaries", async ({ page }) => {
   const password = readUserPassword();
   const consoleMessages: string[] = [];
@@ -6064,7 +6110,17 @@ test("real USER login enforces PKCE, token claims, and Backend boundaries", asyn
   });
   requireCondition(damagedStatus === 401, "The damaged-token boundary did not return 401.");
 
-  const resolutionResult = await page.evaluate(async (caseId) => {
+  const resolutionCaseId = randomUUID();
+  const resolutionPath = `${CASE_LIST_PATH}/${resolutionCaseId}/resolution`;
+  const resolutionBody = {
+    finalDisposition: "NORMAL",
+    reasonCode: "CASE_RESOLUTION_COMPLETED",
+    expectedVersion: 0,
+  } as const;
+  armWorkflowWrite({ method: "POST", pathname: resolutionPath, body: JSON.stringify(resolutionBody) });
+  let resolutionResult: string;
+  try {
+    resolutionResult = await page.evaluate(async ({ caseId, body }) => {
     const [{ getOidcAuthClient }, { sendAuthorizedBackendRequest }] = await Promise.all([
       import("/src/auth/oidcAuthClient.ts"),
       import("/src/api/authorizedClient.ts"),
@@ -6073,11 +6129,7 @@ test("real USER login enforces PKCE, token claims, and Backend boundaries", asyn
       await sendAuthorizedBackendRequest(getOidcAuthClient(), {
         endpoint: "case-resolution-create",
         params: { caseId },
-        body: {
-          finalDisposition: "NORMAL",
-          reasonCode: "CASE_RESOLUTION_COMPLETED",
-          expectedVersion: 0,
-        },
+        body,
         expectedStatus: 200,
         // 이 요청은 403이 기대 결과이므로 어떤 body도 성공으로 받아들이지 않는다.
         validate: (body: unknown): body is never => {
@@ -6090,7 +6142,12 @@ test("real USER login enforces PKCE, token claims, and Backend boundaries", asyn
     } catch (error: unknown) {
       return error instanceof Error ? error.name : "unknown";
     }
-  }, randomUUID());
+    }, { caseId: resolutionCaseId, body: resolutionBody });
+  } finally {
+    const consumed = armedWorkflowWrite === null;
+    disarmWorkflowWrite();
+    requireCondition(consumed, "The USER resolution probe was not consumed once.");
+  }
   requireCondition(resolutionResult === "ForbiddenError", "The analyst resolution boundary did not return 403.");
   await expect(page.getByLabel("Authentication status")).toContainText("Signed in as");
   requireCondition((await publicationCount(page)) === 1, "A 403 invalidated the application session.");
@@ -6100,8 +6157,11 @@ test("real USER login enforces PKCE, token claims, and Backend boundaries", asyn
     "The real USER case-list request did not return 200.",
   );
   requireCondition(backend.filter((entry) => entry.status === 401).length === 2, "The 401 boundary count differed.");
+  const resolutionWrites = backend.filter((entry) => entry.method === "POST" && entry.pathname.endsWith("/resolution"));
   requireCondition(
-    backend.filter((entry) => entry.method === "POST" && entry.pathname.endsWith("/resolution") && entry.status === 403).length === 1,
+    resolutionWrites.length === 1 && resolutionWrites[0].pathname === resolutionPath &&
+      resolutionWrites[0].target === resolutionPath && resolutionWrites[0].status === 403 &&
+      resolutionWrites[0].requestBodyByteLength === Buffer.byteLength(JSON.stringify(resolutionBody), "utf8"),
     "The resolution request count differed.",
   );
   requireCondition(
