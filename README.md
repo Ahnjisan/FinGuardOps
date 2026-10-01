@@ -290,8 +290,12 @@ Investigation notes 조회·inline 작성과 read-only Audit history 조회가 �
 `{content, expectedVersion}` POST body에 사용하고 성공 후 notes·detail·audit을 다시 조회한다.
 별도 notes route와 메모 개별 상세·수정·삭제, 사건 workflow·담당자 변경·최종 판정·연관 거래·
 Detection·Rule Evidence·AI 사건 리포트 UI 및 그 밖의 mutation UI는 아직 구현되지 않았다.
-Frontend component·API tests는 note POST 계약을 검증하지만 실제 인증 browser E2E로 note POST를
-검증했다고 주장하지 않는다. 콘솔 전체의 최종 시각적 리뉴얼도 후속 작업으로 남아 있다.
+Frontend component·API tests는 note POST 계약을 검증한다. Issue #314에서는 Run fixture의 현재 사건으로
+실제 로그인·금지 전이 409 불변·`OPEN → IN_REVIEW`·note POST/GET·`ADDITIONAL_INFORMATION_REQUIRED`·
+populated Audit UI를 검증하는 browser E2E test 1개를 작성했다. 다만 공식 Docker `Prepare → Service → Run`
+실행 결과는 아직 없으므로 통과를 주장하지 않는다
+([runbook §12](docs/09-deployment/local-keycloak-auth-e2e-runbook.md)).
+콘솔 전체의 최종 시각적 리뉴얼도 후속 작업으로 남아 있다.
 Issue #225의 Local JWT fixture는 production Authorization
 Server나 브라우저 OIDC Provider가 아닌 Backend 회귀·장애 검증용 local/manual E2E이며,
 Keycloak과 같은 Backend issuer 설정에서 동시에 사용하지 않는다. 상세 결정은
@@ -539,7 +543,8 @@ strict-TLS E2E 검증 여부는 별도로 적는다. local Keycloak·Docker 검�
 * 사건 상세에 독립적인 Investigation notes와 Audit history 조회 section 구현. notes는
   `createdAt,asc`, audit은 `changedAt,desc`의 독립 pagination·오류 경계를 사용하고, 승인된
   `case:note-write` capability에서는 exact `{content, expectedVersion}` inline note composer를 제공.
-  note 수정·삭제·별도 route는 없으며 실제 note POST browser E2E 완료를 주장하지 않음
+  note 수정·삭제·별도 route는 없음. 실제 note POST browser E2E는 Issue #314 test로 작성됐으나
+  공식 Docker Run 미검증 상태이므로 완료를 주장하지 않음
 * ADR-011에서 local/dev Authorization Server를 Keycloak으로 선정하고 USER public client의
   Authorization Code + PKCE `S256`, 분리된 SERVICE confidential client의 Client Credentials,
   Backend access token exact claim, USER access/ID token의 동일 subject·role 집합과 일반 refresh
