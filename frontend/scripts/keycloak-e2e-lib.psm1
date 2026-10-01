@@ -212,6 +212,73 @@ $RunFixtureBeforeLocalSecondaryCodes = @(
     'RUN_FIXTURE_BEFORE_PROCESS_START_FAILED',
     'RUN_FIXTURE_BEFORE_TIMEOUT'
 )
+# What `verify_e2e.py run-fixture-after` may say about its own failure.
+#
+# The after verifier ends a failure on one `verification failed: <CODE>` line on
+# stderr, and until now that line was discarded. The list below is every fixed
+# identity that the after call graph can end on, spelled out as literals. The
+# host-side native calls of after pass no before stage, so the generic
+# SUBPROCESS_FAILED applies there, and the only child that itself prints a
+# verifier marker is `keycloak-verify metric-runtime`, whose six identities are
+# listed with the CHILD_ prefix run_command gives them. psql and `compose logs`
+# print no such marker, so no other CHILD_* identity is accepted. Codes that sit
+# in the call graph but cannot be reached with the fixed after arguments
+# (SUBPROCESS_TIMEOUT_INVALID, DEPENDENCY_SERVICE_INVALID,
+# DATABASE_GLOBAL_EXPECTATION_INVALID, FIXTURE_OWNER_IDENTITY_INVALID,
+# COMMAND_INVALID) are intentionally not accepted from candidate stderr. The
+# PowerShell tests derive the same set from the Python source and compare.
+$RunFixtureAfterStdoutLimit = 4096
+$RunFixtureAfterStderrLimit = 128
+# The verifier's own default overall deadline is 600 seconds.
+$RunFixtureAfterTimeoutMilliseconds = 630000
+$RunFixtureAfterSuccessLine = 'run fixture orchestration completed: exact delta and manifest passed'
+$RunFixtureAfterSecondaryCodes = @(
+    'HOST_ARGUMENT_INVALID',
+    'OWNER_CONTRACT_INVALID',
+    'FIXTURE_DIRECTORY_INVALID',
+    'RUN_FIXTURE_STATE_TOO_LARGE',
+    'RUN_FIXTURE_STATE_INVALID',
+    'RUN_FIXTURE_STATE_IDENTITY_INVALID',
+    'INGESTION_PLAN_INVALID',
+    'OVERALL_DEADLINE_EXCEEDED',
+    'SUBPROCESS_FAILED',
+    'DATABASE_GLOBAL_SNAPSHOT_INVALID',
+    'BACKEND_METRIC_SNAPSHOT_INVALID',
+    'CHILD_METRIC_STATUS_INVALID',
+    'CHILD_METRIC_TRANSPORT_FAILED',
+    'CHILD_METRIC_BODY_TOO_LARGE',
+    'CHILD_METRIC_BODY_INVALID',
+    'CHILD_INPUT_INVALID',
+    'CHILD_UNEXPECTED_ERROR',
+    'DATABASE_GLOBAL_DELTA_INVALID',
+    'DEPENDENCY_HIT_DELTA_INVALID',
+    'BACKEND_OUTCOME_METRIC_DELTA_INVALID',
+    'DATABASE_TRANSACTION_SNAPSHOT_INVALID',
+    'DATABASE_TRANSACTION_CARDINALITY_INVALID',
+    'DATABASE_CASE_IDENTITY_INVALID',
+    'FIXTURE_MANIFEST_CARDINALITY_INVALID',
+    'FIXTURE_MANIFEST_READ_FAILED',
+    'FIXTURE_MANIFEST_BYTES_INVALID',
+    'FIXTURE_MANIFEST_SCHEMA_INVALID',
+    'FIXTURE_MANIFEST_IDENTITY_INVALID',
+    'INPUT_INVALID',
+    'UNEXPECTED_ERROR'
+)
+# What this runner says when it has no verifier marker to forward. Each names
+# why, and none carries anything the child wrote.
+$RunFixtureAfterLocalSecondaryCodes = @(
+    'RUN_FIXTURE_AFTER_PROCESS_START_FAILED',
+    'RUN_FIXTURE_AFTER_TIMEOUT',
+    'RUN_FIXTURE_AFTER_CAPTURE_FAILED',
+    'RUN_FIXTURE_AFTER_CLEANUP_FAILED',
+    'RUN_FIXTURE_AFTER_STDIN_WRITE_FAILED',
+    'RUN_FIXTURE_AFTER_EXIT_CODE_INVALID',
+    'RUN_FIXTURE_AFTER_SUCCESS_OUTPUT_INVALID',
+    'RUN_FIXTURE_AFTER_MARKER_ABSENT',
+    'RUN_FIXTURE_AFTER_MARKER_INVALID',
+    'RUN_FIXTURE_AFTER_MARKER_TOO_LARGE',
+    'RUN_FIXTURE_AFTER_MARKER_NOT_ALLOWED'
+)
 # What the fixed fixture service container may say about its own failure.
 #
 # The container ends on one `verification failed: <CODE>` line on stderr, and
@@ -1661,8 +1728,12 @@ function Invoke-E2EFixedFixtureService {
     Invoke-E2ECleanupActions -Primary $primary -Actions $actions
 }
 
+# An Add-Type type lives as long as the PowerShell session, and the runbook runs
+# every mode in the operator's own session. The namespace therefore carries the
+# shape version: a session that loaded the earlier shape, without the stdin
+# overload, compiles this one beside it instead of reusing the old type.
 function Initialize-E2EBoundedNativeProcessType {
-    if ('FinGuardOps.E2EBoundedNativeProcess' -as [type]) { return }
+    if ('FinGuardOps.E2ENativeV2.E2EBoundedNativeProcess' -as [type]) { return }
 
     Add-Type -TypeDefinition @'
 using System;
@@ -1675,7 +1746,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
 
-namespace FinGuardOps {
+namespace FinGuardOps.E2ENativeV2 {
     public sealed class E2ECaptureResult {
         public int ExitCode = -1;
         public byte[] Stdout = new byte[0];
@@ -1686,6 +1757,7 @@ namespace FinGuardOps {
         public bool StartFailed;
         public bool CaptureFailed;
         public bool CleanupFailed;
+        public bool StdinWriteFailed;
     }
 
     public static class E2EBoundedNativeProcess {
@@ -1857,6 +1929,26 @@ namespace FinGuardOps {
             return result;
         }
 
+        // Writes the whole payload and then closes the handle, which is the
+        // child's end of input. The task owns the handle from the moment it is
+        // started. When the child exits or is terminated without reading, the
+        // pipe has no reader and the blocked write fails instead of hanging.
+        private static bool Feed(IntPtr writeHandle, byte[] payload) {
+            try {
+                using (SafeFileHandle safeHandle = new SafeFileHandle(writeHandle, true))
+                using (FileStream stream = new FileStream(safeHandle, FileAccess.Write, 1, false)) {
+                    int offset = 0;
+                    while (offset < payload.Length) {
+                        int count = Math.Min(65536, payload.Length - offset);
+                        stream.Write(payload, offset, count);
+                        offset += count;
+                    }
+                    stream.Flush();
+                }
+                return true;
+            } catch { return false; }
+        }
+
         private static bool SetKillOnClose(IntPtr job) {
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
             limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -1886,12 +1978,25 @@ namespace FinGuardOps {
 
         public static E2ECaptureResult Run(string executable, string[] arguments, string workingDirectory,
             int stdoutLimit, int stderrLimit, int timeoutMilliseconds) {
+            return Run(executable, arguments, workingDirectory, stdoutLimit, stderrLimit, timeoutMilliseconds, null);
+        }
+
+        // A null stdinBytes keeps the inherited standard input exactly as the
+        // six-argument form always had it. A non-null payload, empty included,
+        // gets its own pipe whose write end only the parent holds; it is fed by
+        // one task and closed once, and StdinWriteFailed stays false only when
+        // every byte was written and the handle closed.
+        public static E2ECaptureResult Run(string executable, string[] arguments, string workingDirectory,
+            int stdoutLimit, int stderrLimit, int timeoutMilliseconds, byte[] stdinBytes) {
             E2ECaptureResult result = new E2ECaptureResult();
+            bool feedStdin = stdinBytes != null;
             IntPtr job = IntPtr.Zero;
+            IntPtr stdinRead = IntPtr.Zero, stdinWrite = IntPtr.Zero;
             IntPtr stdoutRead = IntPtr.Zero, stdoutWrite = IntPtr.Zero;
             IntPtr stderrRead = IntPtr.Zero, stderrWrite = IntPtr.Zero;
             PROCESS_INFORMATION process = new PROCESS_INFORMATION();
             Task<CaptureBuffer> stdoutTask = null, stderrTask = null;
+            Task<bool> stdinTask = null;
             bool created = false, jobConfigured = false, assigned = false;
             try {
                 job = CreateJobObject(IntPtr.Zero, null);
@@ -1906,10 +2011,14 @@ namespace FinGuardOps {
                     !SetHandleInformation(stderrRead, HANDLE_FLAG_INHERIT, 0)) {
                     result.StartFailed = true; return result;
                 }
+                if (feedStdin && (!CreatePipe(out stdinRead, out stdinWrite, ref security, 0) ||
+                    !SetHandleInformation(stdinWrite, HANDLE_FLAG_INHERIT, 0))) {
+                    result.StartFailed = true; return result;
+                }
                 STARTUPINFO startup = new STARTUPINFO();
                 startup.cb = Marshal.SizeOf(typeof(STARTUPINFO));
                 startup.dwFlags = STARTF_USESTDHANDLES;
-                startup.hStdInput = GetStdHandle(-10);
+                startup.hStdInput = feedStdin ? stdinRead : GetStdHandle(-10);
                 startup.hStdOutput = stdoutWrite;
                 startup.hStdError = stderrWrite;
                 List<string> command = new List<string>();
@@ -1927,6 +2036,10 @@ namespace FinGuardOps {
                 else result.CleanupFailed = true;
                 if (CloseHandle(stderrWrite)) stderrWrite = IntPtr.Zero;
                 else result.CleanupFailed = true;
+                if (stdinRead != IntPtr.Zero) {
+                    if (CloseHandle(stdinRead)) stdinRead = IntPtr.Zero;
+                    else result.CleanupFailed = true;
+                }
                 IntPtr stdoutForTask = stdoutRead;
                 stdoutTask = Task.Factory.StartNew(() => Drain(stdoutForTask, stdoutLimit),
                     CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
@@ -1934,6 +2047,13 @@ namespace FinGuardOps {
                 stderrTask = Task.Factory.StartNew(() => Drain(stderrForTask, stderrLimit),
                     CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
                 if (ResumeThread(process.hThread) == UInt32.MaxValue) { result.StartFailed = true; return result; }
+                if (feedStdin) {
+                    IntPtr stdinForTask = stdinWrite;
+                    byte[] payload = stdinBytes;
+                    stdinTask = Task.Factory.StartNew(() => Feed(stdinForTask, payload),
+                        CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+                    stdinWrite = IntPtr.Zero;
+                }
                 uint wait = WaitForSingleObject(process.hProcess, (uint)timeoutMilliseconds);
                 if (wait == WAIT_TIMEOUT) result.TimedOut = true;
                 else if (wait != WAIT_OBJECT_0) result.CaptureFailed = true;
@@ -1953,6 +2073,21 @@ namespace FinGuardOps {
                     if (WaitForSingleObject(process.hProcess, 5000) != WAIT_OBJECT_0) result.CleanupFailed = true;
                     if (assigned && !WaitForEmptyJob(job, 5000)) result.CleanupFailed = true;
                 }
+                // The child is gone before this wait, so a write it never read
+                // has already failed. The writer's outcome never replaces the
+                // exit, timeout or capture facts above; it is one more flag.
+                if (feedStdin) {
+                    bool delivered = false;
+                    if (stdinTask != null) {
+                        try {
+                            if (stdinTask.Wait(5000)) delivered = stdinTask.Result;
+                            else result.CleanupFailed = true;
+                        } catch { delivered = false; }
+                    }
+                    if (!delivered) result.StdinWriteFailed = true;
+                }
+                if (stdinWrite != IntPtr.Zero && !CloseHandle(stdinWrite)) result.CleanupFailed = true;
+                if (stdinRead != IntPtr.Zero && !CloseHandle(stdinRead)) result.CleanupFailed = true;
                 if (stdoutWrite != IntPtr.Zero && !CloseHandle(stdoutWrite)) result.CleanupFailed = true;
                 if (stderrWrite != IntPtr.Zero && !CloseHandle(stderrWrite)) result.CleanupFailed = true;
                 if (stdoutTask != null) {
@@ -2042,13 +2177,23 @@ function Invoke-E2EBoundedNativeProcess {
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
         [Parameter(Mandatory = $true)][ValidateRange(1, 25000000)][int]$StdoutLimit,
         [Parameter(Mandatory = $true)][ValidateRange(1, 4096)][int]$StderrLimit,
-        [Parameter(Mandatory = $true)][ValidateRange(1, 2000000)][int]$TimeoutMilliseconds
+        [Parameter(Mandatory = $true)][ValidateRange(1, 2000000)][int]$TimeoutMilliseconds,
+        # Present only when the caller hands the child its input. Left out, the
+        # child inherits standard input exactly as before.
+        [AllowEmptyCollection()][byte[]]$StdinBytes
     )
 
+    $feedStdin = $PSBoundParameters.ContainsKey('StdinBytes')
     try {
         Initialize-E2EBoundedNativeProcessType
         $resolvedExecutable = Resolve-E2ENativeExecutable -Executable $Executable
-        return [FinGuardOps.E2EBoundedNativeProcess]::Run(
+        if ($feedStdin) {
+            if ($null -eq $StdinBytes) { throw 'STDIN_BYTES_INVALID' }
+            return [FinGuardOps.E2ENativeV2.E2EBoundedNativeProcess]::Run(
+                $resolvedExecutable, $ArgumentList, [System.IO.Path]::GetFullPath($WorkingDirectory),
+                $StdoutLimit, $StderrLimit, $TimeoutMilliseconds, $StdinBytes)
+        }
+        return [FinGuardOps.E2ENativeV2.E2EBoundedNativeProcess]::Run(
             $resolvedExecutable, $ArgumentList, [System.IO.Path]::GetFullPath($WorkingDirectory),
             $StdoutLimit, $StderrLimit, $TimeoutMilliseconds)
     }
@@ -2057,6 +2202,7 @@ function Invoke-E2EBoundedNativeProcess {
             ExitCode = -1; Stdout = [byte[]]::new(0); Stderr = [byte[]]::new(0)
             StdoutOverflow = $false; StderrOverflow = $false; TimedOut = $false
             StartFailed = $true; CaptureFailed = $false; CleanupFailed = $false
+            StdinWriteFailed = $feedStdin
         }
     }
 }
@@ -2207,16 +2353,139 @@ function Invoke-E2ERunFixtureOrchestration {
     $Directory = Assert-E2EFixturePathSafe -Path $Directory -Receipt $Receipt
 
     $validatedState = Invoke-E2ERunFixtureBeforeChild -Receipt $Receipt -Directory $Directory
-    $encodedState = $validatedState.EncodedState
     Invoke-E2EFixedFixtureService -Receipt $Receipt -PlanJson $validatedState.PlanJson
-    $afterOutput = Invoke-E2EInLocation -Path $RepositoryRoot -Body {
-        Invoke-NativeStdout {
-            $encodedState | & python -B $PythonVerifierPath run-fixture-after --repo-root $RepositoryRoot `
-                --project $ProjectName --fixture-directory $Directory 2>$null
-        }
+    Invoke-E2ERunFixtureAfterChild -Directory $Directory -EncodedState $validatedState.EncodedState
+}
+
+function Test-E2ERunFixtureAfterSecondaryCode([string]$Code) {
+    foreach ($allowed in $RunFixtureAfterSecondaryCodes) {
+        if ([string]::Equals($Code, $allowed, [System.StringComparison]::Ordinal)) { return $true }
     }
-    if ($LASTEXITCODE -ne 0 -or
-        $afterOutput.Trim() -cne 'run fixture orchestration completed: exact delta and manifest passed') {
+    return $false
+}
+
+function Write-E2ERunFixtureAfterDiagnostic {
+    param([Parameter(Mandatory = $true)][string]$Secondary, [scriptblock]$Writer)
+
+    $known = (Test-E2ERunFixtureAfterSecondaryCode $Secondary) -or
+        @($RunFixtureAfterLocalSecondaryCodes | Where-Object {
+            [string]::Equals($_, $Secondary, [System.StringComparison]::Ordinal)
+        }).Count -eq 1
+    if (-not $known) { $Secondary = 'RUN_FIXTURE_AFTER_MARKER_INVALID' }
+    $record = 'RUN_FIXTURE_AFTER_SECONDARY=' + $Secondary
+    try {
+        if ($null -ne $Writer) { & $Writer $record | Out-Null }
+        else { Microsoft.PowerShell.Utility\Write-Warning -Message $record -WarningAction Continue }
+    }
+    catch { }
+}
+
+# Turns the after verifier's stderr into exactly one fixed literal. Read only
+# for a failed run: one strict UTF-8 line, terminated once by LF or CRLF, that is
+# entirely `verification failed: <CODE>` with an allowlisted code. Anything else
+# becomes the literal for why it was refused, and the bytes are dropped here.
+function ConvertFrom-E2ERunFixtureAfterMarker {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]]$Stderr, [bool]$Overflow)
+
+    if ($Overflow -or $Stderr.Length -gt $RunFixtureAfterStderrLimit) { return 'RUN_FIXTURE_AFTER_MARKER_TOO_LARGE' }
+    $length = $Stderr.Length
+    if ($length -eq 0) { return 'RUN_FIXTURE_AFTER_MARKER_ABSENT' }
+    if ($Stderr[$length - 1] -ne 10) { return 'RUN_FIXTURE_AFTER_MARKER_INVALID' }
+    $bodyLength = $length - 1
+    if ($bodyLength -ge 1 -and $Stderr[$bodyLength - 1] -eq 13) { $bodyLength-- }
+    if ($bodyLength -lt 1) { return 'RUN_FIXTURE_AFTER_MARKER_INVALID' }
+    $body = [byte[]]::new($bodyLength)
+    [System.Array]::Copy($Stderr, $body, $bodyLength)
+    if (($body -contains [byte]10) -or ($body -contains [byte]13)) { return 'RUN_FIXTURE_AFTER_MARKER_INVALID' }
+    $line = $null
+    try { $line = [System.Text.UTF8Encoding]::new($false, $true).GetString($body) }
+    catch { return 'RUN_FIXTURE_AFTER_MARKER_INVALID' }
+    if (-not (Test-E2ECleanScalar $line)) { return 'RUN_FIXTURE_AFTER_MARKER_INVALID' }
+    $marker = [regex]::Match($line, '\Averification failed: ([A-Z][A-Z0-9_]{0,63})\z')
+    if (-not $marker.Success) { return 'RUN_FIXTURE_AFTER_MARKER_INVALID' }
+    $code = $marker.Groups[1].Value
+    if (-not (Test-E2ERunFixtureAfterSecondaryCode $code)) { return 'RUN_FIXTURE_AFTER_MARKER_NOT_ALLOWED' }
+    return $code
+}
+
+# Success is what it always was: exit 0 and the fixed sentence on stdout. stderr
+# plays no part in it. A failure is named once, in this order: an unusable
+# capture, cleanup, start, timeout and capture facts first, because nothing the
+# child said can be trusted past them. On exit 0 an undelivered input refuses
+# the success before the sentence is looked at. On exit 1 or 2 a valid verifier
+# marker wins over an undelivered input: a verifier that fails before reading
+# its input leaves the write without a reader, and its marker is the cause.
+function ConvertFrom-E2ERunFixtureAfterCapture {
+    param($Capture)
+
+    $failed = { param([string]$Code) [pscustomobject]@{ Success = $false; Secondary = $Code } }
+    if ($null -eq $Capture -or $Capture -is [array]) { return & $failed 'RUN_FIXTURE_AFTER_CAPTURE_FAILED' }
+    $flags = @('StdoutOverflow','StderrOverflow','TimedOut','StartFailed','CaptureFailed','CleanupFailed','StdinWriteFailed')
+    foreach ($name in @('ExitCode','Stdout','Stderr') + $flags) {
+        if ($null -eq $Capture.PSObject.Properties[$name]) { return & $failed 'RUN_FIXTURE_AFTER_CAPTURE_FAILED' }
+    }
+    $integerTypes = @([int], [long])
+    if ($null -eq $Capture.ExitCode -or $Capture.ExitCode.GetType() -notin $integerTypes -or
+        @($flags | Where-Object { $null -eq $Capture.$_ -or $Capture.$_.GetType() -ne [bool] }).Count -ne 0 -or
+        $Capture.Stdout -isnot [byte[]] -or $Capture.Stderr -isnot [byte[]]) {
+        return & $failed 'RUN_FIXTURE_AFTER_CAPTURE_FAILED'
+    }
+    if ($Capture.CleanupFailed) { return & $failed 'RUN_FIXTURE_AFTER_CLEANUP_FAILED' }
+    if ($Capture.StartFailed) { return & $failed 'RUN_FIXTURE_AFTER_PROCESS_START_FAILED' }
+    if ($Capture.TimedOut) { return & $failed 'RUN_FIXTURE_AFTER_TIMEOUT' }
+    if ($Capture.CaptureFailed) { return & $failed 'RUN_FIXTURE_AFTER_CAPTURE_FAILED' }
+
+    if ($Capture.ExitCode -eq 0) {
+        if ($Capture.StdinWriteFailed) { return & $failed 'RUN_FIXTURE_AFTER_STDIN_WRITE_FAILED' }
+        $text = $null
+        if (-not $Capture.StdoutOverflow -and $Capture.Stdout.Length -le $RunFixtureAfterStdoutLimit) {
+            try { $text = [System.Text.UTF8Encoding]::new($false, $true).GetString($Capture.Stdout) }
+            catch { $text = $null }
+        }
+        if ($null -eq $text -or -not [string]::Equals($text.Trim(), $RunFixtureAfterSuccessLine, [System.StringComparison]::Ordinal)) {
+            return & $failed 'RUN_FIXTURE_AFTER_SUCCESS_OUTPUT_INVALID'
+        }
+        return [pscustomobject]@{ Success = $true; Secondary = $null }
+    }
+    if ($Capture.ExitCode -ne 1 -and $Capture.ExitCode -ne 2) {
+        if ($Capture.StdinWriteFailed) { return & $failed 'RUN_FIXTURE_AFTER_STDIN_WRITE_FAILED' }
+        return & $failed 'RUN_FIXTURE_AFTER_EXIT_CODE_INVALID'
+    }
+    $marker = ConvertFrom-E2ERunFixtureAfterMarker -Stderr $Capture.Stderr -Overflow $Capture.StderrOverflow
+    if (Test-E2ERunFixtureAfterSecondaryCode $marker) { return & $failed $marker }
+    if ($Capture.StdinWriteFailed) { return & $failed 'RUN_FIXTURE_AFTER_STDIN_WRITE_FAILED' }
+    return & $failed $marker
+}
+
+# Runs the after verifier once, handing it the validated before state on stdin
+# only. Its argv carries the same fixed arguments as before; the state, its
+# base64 form and the child's raw output never reach argv, a message or a
+# warning. Every failure stays RUN_FIXTURE_AFTER_FAILED, with one fixed
+# diagnostic beside it.
+function Invoke-E2ERunFixtureAfterChild {
+    param(
+        [Parameter(Mandatory = $true)][string]$Directory,
+        [Parameter(Mandatory = $true)][string]$EncodedState,
+        [scriptblock]$NativeBoundary,
+        [scriptblock]$DiagnosticWriter
+    )
+
+    try {
+        $stdinBytes = [System.Text.UTF8Encoding]::new($false, $true).GetBytes($EncodedState + "`n")
+        if ($null -ne $NativeBoundary) { $capture = & $NativeBoundary $stdinBytes }
+        else {
+            $capture = Invoke-E2EBoundedNativeProcess -Executable 'python' -ArgumentList @(
+                '-B', $PythonVerifierPath, 'run-fixture-after', '--repo-root', $RepositoryRoot,
+                '--project', $ProjectName, '--fixture-directory', $Directory
+            ) -WorkingDirectory $RepositoryRoot -StdoutLimit $RunFixtureAfterStdoutLimit `
+                -StderrLimit $RunFixtureAfterStderrLimit -TimeoutMilliseconds $RunFixtureAfterTimeoutMilliseconds `
+                -StdinBytes $stdinBytes
+        }
+        $outcome = ConvertFrom-E2ERunFixtureAfterCapture -Capture $capture
+    }
+    catch { $outcome = [pscustomobject]@{ Success = $false; Secondary = 'RUN_FIXTURE_AFTER_CAPTURE_FAILED' } }
+    if (-not $outcome.Success) {
+        Write-E2ERunFixtureAfterDiagnostic -Secondary $outcome.Secondary -Writer $DiagnosticWriter
         throw 'RUN_FIXTURE_AFTER_FAILED'
     }
 }

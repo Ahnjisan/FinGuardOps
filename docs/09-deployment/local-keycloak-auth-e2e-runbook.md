@@ -534,6 +534,73 @@ secondary는 진단일 뿐이다. primary `RUN_FIXTURE_SERVICE_EXIT_NONZERO`와 
 나머지 다섯 primary와 성공 경로에서는 log를 읽지 않고 secondary도 출력하지 않는다. 이 진단 경로는 단위
 테스트로만 검증했고 공식 Docker Gate에서는 아직 확인되지 않았다.
 
+`run-fixture-after` verifier는 PowerShell의 bounded native process로 정확히 1회 실행한다. argv는 기존과
+같은 `-B <verify_e2e.py> run-fixture-after --repo-root <repo> --project <fixed project> --fixture-directory <dir>`
+이고, 검증된 전 snapshot의 base64는 끝에 LF 하나를 붙여 stdin으로만 전달한다. stdin은 child만 읽기 끝을
+상속하는 전용 pipe이며 쓰기 끝은 PowerShell만 가진다. 별도 writer가 payload 전체를 쓴 뒤 handle을 닫고,
+child가 읽지 않고 종료하거나 timeout으로 Job이 종료되면 막힌 write는 실패로 끝나므로 교착하지 않는다.
+stdout 4096 bytes, stderr 128 bytes, timeout 630초(verifier 자체 overall deadline 600초 + 여유)로
+제한하고 timeout·실패 시 기존과 같이 process와 descendant를 Job 단위로 정리한다. stdin overload를 쓰지 않는
+기존 호출은 상속 stdin과 기존 동작을 그대로 유지한다.
+
+성공 조건은 기존과 같다. exit code 0이고 stdout을 strict UTF-8로 해석해 앞뒤 공백을 제거한 값이 고정 문장
+`run fixture orchestration completed: exact delta and manifest passed`와 ordinal로 같아야 한다. 성공 판정에
+stderr는 사용하지 않으며 성공 시 경고도 출력하지 않는다. 다만 stdin 전체 전달 실패는 exit 0이어도 성공으로
+보지 않는다.
+
+실패하면 primary는 언제나 `RUN_FIXTURE_AFTER_FAILED`이고, 다음 경고를 Run당 정확히 1회 출력한다.
+
+```text
+RUN_FIXTURE_AFTER_SECONDARY=<CODE>
+```
+
+exit 1 또는 2일 때만 stderr를 판독한다. stderr가 128 bytes 이하의 strict UTF-8 한 줄이고 LF 또는 CRLF로
+한 번 끝나며, 전체가 `verification failed: <CODE>`이고 `<CODE>`가 아래 allowlist와 ordinal exact로 일치할
+때만 그 code를 secondary로 쓴다. 접두어 pattern이나 `CHILD_*` 전체 허용은 없다. allowlist 30개는
+`run-fixture-after` 호출 그래프에서 도달 가능한 fixed literal이다.
+
+| 구분 | code |
+| --- | --- |
+| 인자·owner·state | `HOST_ARGUMENT_INVALID`, `OWNER_CONTRACT_INVALID`, `FIXTURE_DIRECTORY_INVALID`, `RUN_FIXTURE_STATE_TOO_LARGE`, `RUN_FIXTURE_STATE_INVALID`, `RUN_FIXTURE_STATE_IDENTITY_INVALID`, `INGESTION_PLAN_INVALID` |
+| host native 호출 | `OVERALL_DEADLINE_EXCEEDED`, `SUBPROCESS_FAILED`, `DATABASE_GLOBAL_SNAPSHOT_INVALID`, `BACKEND_METRIC_SNAPSHOT_INVALID`, `DATABASE_TRANSACTION_SNAPSHOT_INVALID`, `DATABASE_CASE_IDENTITY_INVALID` |
+| metric-runtime child | `CHILD_METRIC_STATUS_INVALID`, `CHILD_METRIC_TRANSPORT_FAILED`, `CHILD_METRIC_BODY_TOO_LARGE`, `CHILD_METRIC_BODY_INVALID`, `CHILD_INPUT_INVALID`, `CHILD_UNEXPECTED_ERROR` |
+| delta·cardinality | `DATABASE_GLOBAL_DELTA_INVALID`, `DEPENDENCY_HIT_DELTA_INVALID`, `BACKEND_OUTCOME_METRIC_DELTA_INVALID`, `DATABASE_TRANSACTION_CARDINALITY_INVALID` |
+| manifest | `FIXTURE_MANIFEST_CARDINALITY_INVALID`, `FIXTURE_MANIFEST_READ_FAILED`, `FIXTURE_MANIFEST_BYTES_INVALID`, `FIXTURE_MANIFEST_SCHEMA_INVALID`, `FIXTURE_MANIFEST_IDENTITY_INVALID` |
+| process fallback | `INPUT_INVALID`, `UNEXPECTED_ERROR` |
+
+after의 host native 호출은 before stage를 넘기지 않으므로 generic `SUBPROCESS_FAILED`와 child marker
+forwarding이 적용된다. 그중 자기 marker를 출력하는 child는 `keycloak-verify metric-runtime`뿐이어서 그
+여섯 identity만 `CHILD_` 접두로 허용한다. 호출 그래프에 있지만 고정 after 인자로는 도달하지 않는
+`SUBPROCESS_TIMEOUT_INVALID`, `DEPENDENCY_SERVICE_INVALID`, `DATABASE_GLOBAL_EXPECTATION_INVALID`,
+`FIXTURE_OWNER_IDENTITY_INVALID`, `COMMAND_INVALID`는 허용하지 않는다. PowerShell 테스트는
+`verify_e2e.py`를 읽어 같은 집합을 도출하고 allowlist와 비교하며, 호출 그래프가 바뀌면 실패한다.
+
+그 밖의 경우는 원문 대신 고정 local code 11개 중 하나로 보고한다. 판정 순서는 다음과 같다.
+
+| 순위 | 조건 | secondary |
+| --- | --- | --- |
+| 1 | capture 형태 불일치, native 경계 예외 | `RUN_FIXTURE_AFTER_CAPTURE_FAILED` |
+| 2 | process·pipe·Job cleanup 불확실 | `RUN_FIXTURE_AFTER_CLEANUP_FAILED` |
+| 3 | 실행 파일 해석·process 시작 실패 | `RUN_FIXTURE_AFTER_PROCESS_START_FAILED` |
+| 4 | timeout | `RUN_FIXTURE_AFTER_TIMEOUT` |
+| 5 | wait·exit code·stream capture 실패 | `RUN_FIXTURE_AFTER_CAPTURE_FAILED` |
+| 6 | exit 0이지만 stdin 전체 전달 실패 | `RUN_FIXTURE_AFTER_STDIN_WRITE_FAILED` |
+| 7 | exit 0이지만 stdout 성공 문장 불일치·초과·invalid UTF-8 | `RUN_FIXTURE_AFTER_SUCCESS_OUTPUT_INVALID` |
+| 8 | exit 1/2와 allowlist marker | 해당 verifier code (stdin 전달 실패보다 우선) |
+| 9 | exit 1/2 외 nonzero, 또는 marker가 유효하지 않으면서 stdin 전달 실패 | `RUN_FIXTURE_AFTER_STDIN_WRITE_FAILED` |
+| 10 | exit 1/2 외 nonzero | `RUN_FIXTURE_AFTER_EXIT_CODE_INVALID` |
+| 11 | 128 bytes 초과 | `RUN_FIXTURE_AFTER_MARKER_TOO_LARGE` |
+| 12 | 빈 stderr | `RUN_FIXTURE_AFTER_MARKER_ABSENT` |
+| 13 | BOM, 복수 행, 종결 누락, bare CR, invalid UTF-8, control/Cf, 형식 불일치 | `RUN_FIXTURE_AFTER_MARKER_INVALID` |
+| 14 | 형식은 맞지만 allowlist 밖 code | `RUN_FIXTURE_AFTER_MARKER_NOT_ALLOWED` |
+
+유효한 verifier marker가 stdin 전달 실패보다 우선하는 이유는, verifier가 stdin을 읽기 전에 실패하면
+(예: `OWNER_CONTRACT_INVALID`) 읽는 쪽이 사라진 pipe에 대한 write가 실패하는 것이 결과일 뿐 원인이 아니기
+때문이다. 어느 경우에도 primary, 기존 production cleanup, receipt, ownership 처리 순서는 바뀌지 않으며
+`verify_e2e.py`의 업무 검증 조건과 동작도 바뀌지 않는다. state 원문, base64, argv, raw stdout/stderr,
+예외 문장과 경로는 경고·메시지에 포함하지 않는다. 이 진단 경로는 단위 테스트와 실제 bounded child의
+stdin round-trip으로 검증했고 공식 Docker Gate에서는 아직 확인되지 않았다.
+
 Run fixture의 canonical Compose project는 exact literal
 `finguardops-keycloak-browser-e2e`이다. `run-fixture-before`, `run-fixture`, `run-fixture-after`는 이 값을
 ordinal/case-sensitive exact로만 허용하며 candidate state나 manifest에서 기대값을 역산하지 않는다.

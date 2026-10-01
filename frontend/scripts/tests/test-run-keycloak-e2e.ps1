@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Preflight', 'MajorFixPreflight', 'MajorFixFixture11', 'MajorFixTargeted', 'OwnerFixPreflight', 'OwnerFixTargeted', 'WaitBrowserPreflight', 'WaitBrowserTargeted', 'SessionStateTargeted', 'D209Preflight', 'D209A', 'D209B', 'D225Service', 'D248Targeted', 'CleanupBrowserTargeted', 'D273Targeted', 'D281Targeted', 'D294Preflight', 'D294Targeted', 'D299Red', 'D299Targeted', 'D308Oracle', 'D315LauncherTargeted', 'D315StageTargeted', 'D315Targeted', 'Formal')]
+    [ValidateSet('Preflight', 'MajorFixPreflight', 'MajorFixFixture11', 'MajorFixTargeted', 'OwnerFixPreflight', 'OwnerFixTargeted', 'WaitBrowserPreflight', 'WaitBrowserTargeted', 'SessionStateTargeted', 'D209Preflight', 'D209A', 'D209B', 'D225Service', 'D248Targeted', 'CleanupBrowserTargeted', 'D273Targeted', 'D281Targeted', 'D294Preflight', 'D294Targeted', 'D299Red', 'D299Targeted', 'D308Oracle', 'D315LauncherTargeted', 'D315StageTargeted', 'D315Targeted', 'D315AfterTargeted', 'Formal')]
     [string]$Mode = 'Formal'
 )
 
@@ -8713,6 +8713,615 @@ function Invoke-D315TargetedTests {
     Write-Output 'D315 targeted passed'
 }
 
+# Reads verify_e2e.py as top-level units (one `def` or `class` and its indented
+# body) so the after allowlist can be compared against the Python source.
+function Get-D315AfterPythonUnits([string]$Path) {
+    $lines = ([System.IO.File]::ReadAllText($Path) -replace "`r`n", "`n") -split "`n"
+    $units = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::Ordinal)
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        $match = [regex]::Match($lines[$index], '\A(?:def|class) ([A-Za-z_]\w*)\b')
+        if (-not $match.Success) { continue }
+        $end = $index + 1
+        while ($end -lt $lines.Count -and -not [regex]::IsMatch($lines[$end], '\A[^\s)]')) { $end++ }
+        if ($units.ContainsKey($match.Groups[1].Value)) { throw 'D315_AFTER_PYTHON_UNIT_DUPLICATE' }
+        $units.Add($match.Groups[1].Value, ($lines[$index..($end - 1)] -join "`n"))
+    }
+    return $units
+}
+
+function Get-D315AfterPythonClosure($Units, [string[]]$Roots, [string[]]$Excluded) {
+    $seen = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::Ordinal)
+    $queue = [System.Collections.Generic.Queue[string]]::new()
+    foreach ($root in $Roots) { if (-not $Units.ContainsKey($root)) { throw ('D315_AFTER_PYTHON_ROOT_MISSING ' + $root) }; $queue.Enqueue($root) }
+    while ($queue.Count -ne 0) {
+        $name = $queue.Dequeue()
+        if (-not $seen.Add($name)) { continue }
+        foreach ($call in [regex]::Matches($Units[$name], '(?<![\w.])([A-Za-z_]\w*)\(')) {
+            $callee = $call.Groups[1].Value
+            if ($callee -ceq 'fail' -or $callee -cin $Excluded -or -not $Units.ContainsKey($callee)) { continue }
+            $queue.Enqueue($callee)
+        }
+    }
+    return @($seen)
+}
+
+function Get-D315AfterFailLiterals([string]$Body) {
+    return @([regex]::Matches($Body, '(?<![\w.])fail\(\s*"([A-Z][A-Z0-9_]*)"\s*\)') | ForEach-Object { $_.Groups[1].Value })
+}
+
+function Invoke-D315AfterTargetedTests {
+    $script:Failures = [System.Collections.Generic.List[string]]::new()
+    $repositoryRoot = Split-Path (Split-Path (Split-Path $ModulePath))
+    $verifierPath = Join-Path $repositoryRoot 'infra\keycloak\verify_e2e.py'
+    $success = 'run fixture orchestration completed: exact delta and manifest passed'
+    $rawSentinel = 'D315-AFTER-RAW-SENTINEL-5c1e'
+    $stateSentinel = 'D315-AFTER-STATE-SENTINEL-9b27'
+    $utf8 = [System.Text.UTF8Encoding]::new($false, $true)
+    $encodedState = [Convert]::ToBase64String($utf8.GetBytes('{"secret":"' + $stateSentinel + '"}' + "`n"))
+    $newCapture = {
+        param([int]$Exit, $Stdout, $Stderr)
+        $toBytes = { param($value) if ($value -is [byte[]]) { return ,$value }; return ,([System.Text.UTF8Encoding]::new($false).GetBytes([string]$value)) }
+        return [pscustomobject]@{
+            ExitCode = $Exit; Stdout = (& $toBytes $Stdout); Stderr = (& $toBytes $Stderr)
+            StdoutOverflow = $false; StderrOverflow = $false; TimedOut = $false
+            StartFailed = $false; CaptureFailed = $false; CleanupFailed = $false; StdinWriteFailed = $false
+        }
+    }
+    $expectedAllowlist = @(
+        'HOST_ARGUMENT_INVALID','OWNER_CONTRACT_INVALID','FIXTURE_DIRECTORY_INVALID','RUN_FIXTURE_STATE_TOO_LARGE',
+        'RUN_FIXTURE_STATE_INVALID','RUN_FIXTURE_STATE_IDENTITY_INVALID','INGESTION_PLAN_INVALID','OVERALL_DEADLINE_EXCEEDED',
+        'SUBPROCESS_FAILED','DATABASE_GLOBAL_SNAPSHOT_INVALID','BACKEND_METRIC_SNAPSHOT_INVALID','CHILD_METRIC_STATUS_INVALID',
+        'CHILD_METRIC_TRANSPORT_FAILED','CHILD_METRIC_BODY_TOO_LARGE','CHILD_METRIC_BODY_INVALID','CHILD_INPUT_INVALID',
+        'CHILD_UNEXPECTED_ERROR','DATABASE_GLOBAL_DELTA_INVALID','DEPENDENCY_HIT_DELTA_INVALID','BACKEND_OUTCOME_METRIC_DELTA_INVALID',
+        'DATABASE_TRANSACTION_SNAPSHOT_INVALID','DATABASE_TRANSACTION_CARDINALITY_INVALID','DATABASE_CASE_IDENTITY_INVALID',
+        'FIXTURE_MANIFEST_CARDINALITY_INVALID','FIXTURE_MANIFEST_READ_FAILED','FIXTURE_MANIFEST_BYTES_INVALID',
+        'FIXTURE_MANIFEST_SCHEMA_INVALID','FIXTURE_MANIFEST_IDENTITY_INVALID','INPUT_INVALID','UNEXPECTED_ERROR'
+    )
+    $expectedLocal = @(
+        'RUN_FIXTURE_AFTER_PROCESS_START_FAILED','RUN_FIXTURE_AFTER_TIMEOUT','RUN_FIXTURE_AFTER_CAPTURE_FAILED',
+        'RUN_FIXTURE_AFTER_CLEANUP_FAILED','RUN_FIXTURE_AFTER_STDIN_WRITE_FAILED','RUN_FIXTURE_AFTER_EXIT_CODE_INVALID',
+        'RUN_FIXTURE_AFTER_SUCCESS_OUTPUT_INVALID','RUN_FIXTURE_AFTER_MARKER_ABSENT','RUN_FIXTURE_AFTER_MARKER_INVALID',
+        'RUN_FIXTURE_AFTER_MARKER_TOO_LARGE','RUN_FIXTURE_AFTER_MARKER_NOT_ALLOWED'
+    )
+
+    Invoke-TestCase 'D315 after allowlist is exact literal and fixed' {
+        $module = & $script:E2EModule {
+            return [pscustomobject]@{
+                Allowlist = @($RunFixtureAfterSecondaryCodes); Local = @($RunFixtureAfterLocalSecondaryCodes)
+                Success = $RunFixtureAfterSuccessLine; Stdout = $RunFixtureAfterStdoutLimit
+                Stderr = $RunFixtureAfterStderrLimit; Timeout = $RunFixtureAfterTimeoutMilliseconds
+            }
+        }
+        Assert-Equal $expectedAllowlist @($module.Allowlist) 'After allowlist drifted.'
+        Assert-Equal 30 @($module.Allowlist).Count 'After allowlist count changed.'
+        Assert-Equal $expectedLocal @($module.Local) 'After local codes drifted.'
+        Assert-Equal 11 @($module.Local).Count 'After local code count changed.'
+        Assert-Equal $success $module.Success 'Fixed success sentence changed.'
+        Assert-Equal 128 $module.Stderr 'After stderr bound changed.'
+        Assert-Equal 4096 $module.Stdout 'After stdout bound changed.'
+        Assert-Equal 630000 $module.Timeout 'After timeout changed.'
+        Assert-Equal 30 @($module.Allowlist | Select-Object -Unique).Count 'After allowlist has duplicates.'
+        foreach ($code in @($module.Allowlist) + @($module.Local)) {
+            Assert-True ($code -cmatch '\A[A-Z][A-Z0-9_]{0,63}\z') ('Code shape invalid: ' + $code)
+            Assert-True ([System.Text.Encoding]::ASCII.GetByteCount("verification failed: $code`r`n") -le 128) ('Code exceeds the 128-byte line: ' + $code)
+            Assert-True (-not ($code -cmatch '\A(?:CHILD_)?\z')) 'Prefix-only code accepted.'
+        }
+        foreach ($code in @($module.Local)) { Assert-True ($code -cnotin @($module.Allowlist)) ('Local code is also a verifier code: ' + $code) }
+        $moduleSource = [System.IO.File]::ReadAllText($ModulePath)
+        Assert-True (-not ($moduleSource -cmatch "StartsWith\('CHILD_'")) 'A CHILD_ prefix test entered the module.'
+    }
+
+    Invoke-TestCase 'D315 after allowlist matches the run-fixture-after Python call graph' {
+        $units = Get-D315AfterPythonUnits $verifierPath
+        $beforeOnly = @('classify_rule_publication_nonzero','validate_semantic_compose_run_output',
+            'validate_before_native_output','semantic_output_failure_code')
+        $closure = Get-D315AfterPythonClosure $units @('run_fixture_after','parse_run_fixture_state','validate_run_fixture_project',
+            'load_owner_contract','HostContext','parse_args') $beforeOnly
+        Assert-Equal @('HostContext','NativeCommandCapture','OwnerContract','TableSnapshot','aggregate_fingerprint','assert_global_delta',
+            'backend_metric_totals','capture_native_command','database_snapshot','dependency_hit_counts',
+            'expected_transaction_cardinality','fixture_identity_from_environment','fixture_manifest_bytes',
+            'is_canonical_uuid4','load_owner_contract','parse_args','parse_database_snapshot','parse_fixture_manifest_bytes',
+            'parse_run_fixture_state','run_command','run_fixture_after','run_fixture_state_bytes','service_logs',
+            'snapshot_sql','sql_scalar','state_to_snapshot','table_snapshot','transaction_cardinality','transaction_case_id',
+            'validate_fixture_manifest_object','validate_plan','validate_run_fixture_project','validate_table_snapshot') `
+            @($closure) 'The run-fixture-after call graph changed; re-derive the after allowlist.'
+        $literals = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::Ordinal)
+        foreach ($name in $closure) {
+            $body = $units[$name]
+            $found = @(Get-D315AfterFailLiterals $body)
+            foreach ($code in $found) { $literals.Add($code) | Out-Null }
+            $dynamic = [regex]::Matches($body, '(?<![\w.])fail\(').Count - $found.Count
+            $expectedDynamic = if ($name -ceq 'run_command') { 9 } else { 0 }
+            Assert-Equal $expectedDynamic $dynamic ('Non-literal failure identity count changed in ' + $name)
+        }
+        # Every non-literal identity in run_command is a before-stage code or the
+        # one CHILD_ concatenation; the before ones sit inside the before branch.
+        $runCommand = $units['run_command']
+        $beforeStart = $runCommand.IndexOf('if before_stage is not None:' + "`n" + '        codes =', [StringComparison]::Ordinal)
+        $genericStart = $runCommand.IndexOf('if capture.cleanup_failed or capture.start_failed or capture.timed_out:', [StringComparison]::Ordinal)
+        Assert-True ($beforeStart -gt 0 -and $genericStart -gt $beforeStart) 'run_command before/generic branches moved.'
+        foreach ($match in [regex]::Matches($runCommand, '(?<![\w.])fail\((?!\s*")')) {
+            Assert-True ($match.Index -gt $beforeStart -and $match.Index -lt $genericStart) 'A computed identity escaped the before branch.'
+        }
+        foreach ($name in $beforeOnly) {
+            $index = $runCommand.IndexOf($name + '(', [StringComparison]::Ordinal)
+            Assert-True ($index -gt $beforeStart -and $index -lt $genericStart) ('Before-only helper escaped the before branch: ' + $name)
+        }
+        Assert-Equal 1 ([regex]::Matches($runCommand, 'fail\("CHILD_" \+ safe_child\.group\(1\)\.decode\("ascii"\)\)').Count) 'CHILD_ forwarding changed.'
+        Assert-True ($runCommand.IndexOf('fail("CHILD_"', [StringComparison]::Ordinal) -gt $genericStart) 'CHILD_ forwarding moved into the before branch.'
+        $after = $units['run_fixture_after']
+        Assert-True (-not $after.Contains('before_stage')) 'run-fixture-after now passes a before stage.'
+        foreach ($call in @('database_snapshot(ctx)','dependency_hit_counts(ctx)','backend_metric_totals(ctx)',
+                'transaction_cardinality(ctx, plan)','transaction_case_id(ctx, plan)')) {
+            Assert-True $after.Contains($call) ('run-fixture-after native call changed: ' + $call)
+        }
+        Assert-True (-not $units['transaction_case_id'].Contains('before_stage')) 'transaction_case_id now passes a before stage.'
+        $metric = $units['backend_metric_totals']
+        Assert-True $metric.Contains('"keycloak-verify", "metric-runtime"') 'Metric child command changed.'
+        # The only child that prints a verifier marker is metric-runtime.
+        $metricClosure = Get-D315AfterPythonClosure $units @('metric_totals') @()
+        Assert-Equal @('http_text','metric_totals') @($metricClosure) 'metric-runtime call graph changed.'
+        $childCodes = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::Ordinal)
+        foreach ($name in $metricClosure) { foreach ($code in @(Get-D315AfterFailLiterals $units[$name])) { $childCodes.Add($code) | Out-Null } }
+        $main = $units['main']
+        Assert-True $main.Contains('elif args.mode == "metric-runtime":' + "`n" + '            print(json.dumps(metric_totals()') 'metric-runtime dispatch changed.'
+        foreach ($text in @(('print("verification failed: " + str(error), file=sys.stderr)' + "`n" + '        return 1'),
+                ('print("verification failed: INPUT_INVALID", file=sys.stderr)' + "`n" + '        return 2'),
+                ('print("verification failed: UNEXPECTED_ERROR", file=sys.stderr)' + "`n" + '        return 1'),
+                'validate_run_fixture_project(args.project)','contract = load_owner_contract(dict(os.environ))',
+                'parse_run_fixture_state(raw_state)','run_fixture_after(')) {
+            Assert-True $main.Contains($text) ('main after contract changed: ' + $text)
+        }
+        $mainLiterals = @(Get-D315AfterFailLiterals $main | Sort-Object -Unique -CaseSensitive)
+        Assert-Equal @('COMMAND_INVALID','FIXTURE_DIRECTORY_INVALID','HOST_ARGUMENT_INVALID','RUN_FIXTURE_STATE_INVALID','RUN_FIXTURE_STATE_TOO_LARGE') `
+            @($mainLiterals) 'main fixed identities changed.'
+        $unreachable = @('DATABASE_GLOBAL_EXPECTATION_INVALID','DEPENDENCY_SERVICE_INVALID','FIXTURE_OWNER_IDENTITY_INVALID','SUBPROCESS_TIMEOUT_INVALID')
+        foreach ($code in $unreachable) { Assert-True $literals.Contains($code) ('Documented unreachable code left the call graph: ' + $code) }
+        $derived = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::Ordinal)
+        foreach ($code in $literals) { if ($code -cnotin $unreachable) { $derived.Add($code) | Out-Null } }
+        foreach ($code in $mainLiterals) { if ($code -cne 'COMMAND_INVALID') { $derived.Add($code) | Out-Null } }
+        foreach ($code in @('INPUT_INVALID','UNEXPECTED_ERROR')) { $derived.Add($code) | Out-Null; $childCodes.Add($code) | Out-Null }
+        foreach ($code in $childCodes) { $derived.Add('CHILD_' + $code) | Out-Null }
+        $moduleAllowlist = & $script:E2EModule { @($RunFixtureAfterSecondaryCodes) }
+        $sortedModule = [System.Collections.Generic.SortedSet[string]]::new([string[]]@($moduleAllowlist), [System.StringComparer]::Ordinal)
+        Assert-Equal @($derived) @($sortedModule) 'PowerShell after allowlist and Python after call graph differ.'
+    }
+
+    Invoke-TestCase 'D315 after child classifies every capture to one fixed diagnostic' {
+        $marker = { param([string]$Code, [string]$End = "`r`n") "verification failed: $Code$End" }
+        $cases = [ordered]@{}
+        $cases['success crlf'] = @((& $newCapture 0 "$success`r`n" ''), 'SUCCESS')
+        $cases['success lf'] = @((& $newCapture 0 "$success`n" ''), 'SUCCESS')
+        $cases['success ignores stderr marker'] = @((& $newCapture 0 "$success`r`n" (& $marker 'OWNER_CONTRACT_INVALID')), 'SUCCESS')
+        $c = & $newCapture 0 "$success`r`n" $rawSentinel; $c.StderrOverflow = $true
+        $cases['success ignores stderr overflow'] = @($c, 'SUCCESS')
+        $cases['exit 1 lf marker'] = @((& $newCapture 1 '' (& $marker 'DATABASE_GLOBAL_DELTA_INVALID' "`n")), 'DATABASE_GLOBAL_DELTA_INVALID')
+        $cases['exit 1 crlf marker'] = @((& $newCapture 1 '' (& $marker 'FIXTURE_MANIFEST_IDENTITY_INVALID')), 'FIXTURE_MANIFEST_IDENTITY_INVALID')
+        $cases['exit 2 crlf marker'] = @((& $newCapture 2 '' (& $marker 'INPUT_INVALID')), 'INPUT_INVALID')
+        $cases['exit 2 lf marker'] = @((& $newCapture 2 '' (& $marker 'INPUT_INVALID' "`n")), 'INPUT_INVALID')
+        $cases['exit 1 child marker'] = @((& $newCapture 1 $rawSentinel (& $marker 'CHILD_METRIC_TRANSPORT_FAILED')), 'CHILD_METRIC_TRANSPORT_FAILED')
+        $cases['empty'] = @((& $newCapture 1 '' ''), 'RUN_FIXTURE_AFTER_MARKER_ABSENT')
+        $cases['bom'] = @((& $newCapture 1 '' ([byte[]](@(239,187,191) + [System.Text.Encoding]::ASCII.GetBytes((& $marker 'OWNER_CONTRACT_INVALID'))))), 'RUN_FIXTURE_AFTER_MARKER_INVALID')
+        $cases['two markers'] = @((& $newCapture 1 '' ((& $marker 'OWNER_CONTRACT_INVALID') + (& $marker 'OWNER_CONTRACT_INVALID'))), 'RUN_FIXTURE_AFTER_MARKER_INVALID')
+        $cases['marker then raw'] = @((& $newCapture 1 '' ((& $marker 'OWNER_CONTRACT_INVALID') + "$rawSentinel`r`n")), 'RUN_FIXTURE_AFTER_MARKER_INVALID')
+        $cases['blank line'] = @((& $newCapture 1 '' ((& $marker 'OWNER_CONTRACT_INVALID') + "`r`n")), 'RUN_FIXTURE_AFTER_MARKER_INVALID')
+        $c = & $newCapture 1 '' (& $marker 'OWNER_CONTRACT_INVALID'); $c.StderrOverflow = $true
+        $cases['overflow flag'] = @($c, 'RUN_FIXTURE_AFTER_MARKER_TOO_LARGE')
+        $cases['129 bytes'] = @((& $newCapture 1 '' ('verification failed: ' + ('A' * 106) + "`r`n")), 'RUN_FIXTURE_AFTER_MARKER_TOO_LARGE')
+        $cases['no terminator'] = @((& $newCapture 1 '' 'verification failed: OWNER_CONTRACT_INVALID'), 'RUN_FIXTURE_AFTER_MARKER_INVALID')
+        $cases['bare cr'] = @((& $newCapture 1 '' "verification failed: OWNER_CONTRACT_INVALID`r"), 'RUN_FIXTURE_AFTER_MARKER_INVALID')
+        $cases['cr cr lf'] = @((& $newCapture 1 '' "verification failed: OWNER_CONTRACT_INVALID`r`r`n"), 'RUN_FIXTURE_AFTER_MARKER_INVALID')
+        $cases['terminator only'] = @((& $newCapture 1 '' "`r`n"), 'RUN_FIXTURE_AFTER_MARKER_INVALID')
+        $cases['lowercase'] = @((& $newCapture 1 '' (& $marker 'owner_contract_invalid')), 'RUN_FIXTURE_AFTER_MARKER_INVALID')
+        $cases['leading space'] = @((& $newCapture 1 '' (' ' + (& $marker 'OWNER_CONTRACT_INVALID'))), 'RUN_FIXTURE_AFTER_MARKER_INVALID')
+        $cases['trailing space'] = @((& $newCapture 1 '' (& $marker 'OWNER_CONTRACT_INVALID ')), 'RUN_FIXTURE_AFTER_MARKER_INVALID')
+        $cases['raw suffix'] = @((& $newCapture 1 '' (& $marker ('OWNER_CONTRACT_INVALID ' + $rawSentinel))), 'RUN_FIXTURE_AFTER_MARKER_INVALID')
+        $cases['c1'] = @((& $newCapture 1 '' (& $marker ('OWNER_CONTRACT_INVALID' + [char]0x85))), 'RUN_FIXTURE_AFTER_MARKER_INVALID')
+        $cases['cf'] = @((& $newCapture 1 '' (& $marker ('OWNER_CONTRACT_INVALID' + [char]0x200B))), 'RUN_FIXTURE_AFTER_MARKER_INVALID')
+        $cases['invalid utf8'] = @((& $newCapture 1 '' ([byte[]](@(0xC3,0x28) + [System.Text.Encoding]::ASCII.GetBytes("`r`n")))), 'RUN_FIXTURE_AFTER_MARKER_INVALID')
+        foreach ($code in @('COMMAND_INVALID','SUBPROCESS_TIMEOUT_INVALID','DEPENDENCY_SERVICE_INVALID','FIXTURE_OWNER_IDENTITY_INVALID',
+                'CHILD_OWNER_CONTRACT_INVALID','CHILD_SUBPROCESS_FAILED','CHILD_','RULE_PUBLISHED_STATE_EXIT_NONZERO',
+                'RUN_FIXTURE_AFTER_TIMEOUT','D315_AFTER_RAW_SENTINEL_5C1E')) {
+            $cases["not allowed $code"] = @((& $newCapture 1 '' (& $marker $code)), 'RUN_FIXTURE_AFTER_MARKER_NOT_ALLOWED')
+        }
+        $cases['success sentence mismatch'] = @((& $newCapture 0 "$rawSentinel`r`n" ''), 'RUN_FIXTURE_AFTER_SUCCESS_OUTPUT_INVALID')
+        $cases['success empty stdout'] = @((& $newCapture 0 '' ''), 'RUN_FIXTURE_AFTER_SUCCESS_OUTPUT_INVALID')
+        $cases['success with noise'] = @((& $newCapture 0 "noise`r`n$success`r`n" ''), 'RUN_FIXTURE_AFTER_SUCCESS_OUTPUT_INVALID')
+        $cases['success case variant'] = @((& $newCapture 0 ($success.ToUpperInvariant() + "`r`n") ''), 'RUN_FIXTURE_AFTER_SUCCESS_OUTPUT_INVALID')
+        $cases['success invalid utf8'] = @((& $newCapture 0 ([byte[]]@(0xC3,0x28)) ''), 'RUN_FIXTURE_AFTER_SUCCESS_OUTPUT_INVALID')
+        $c = & $newCapture 0 "$success`r`n" ''; $c.StdoutOverflow = $true
+        $cases['success stdout overflow'] = @($c, 'RUN_FIXTURE_AFTER_SUCCESS_OUTPUT_INVALID')
+        $cases['exit 3 with marker'] = @((& $newCapture 3 '' (& $marker 'OWNER_CONTRACT_INVALID')), 'RUN_FIXTURE_AFTER_EXIT_CODE_INVALID')
+        $cases['exit -1'] = @((& $newCapture -1 '' ''), 'RUN_FIXTURE_AFTER_EXIT_CODE_INVALID')
+        foreach ($flag in @('StartFailed','TimedOut','CaptureFailed','CleanupFailed')) {
+            $c = & $newCapture -1 '' (& $marker 'OWNER_CONTRACT_INVALID'); $c.$flag = $true; $c.StdinWriteFailed = $true
+            $expected = @{ StartFailed='RUN_FIXTURE_AFTER_PROCESS_START_FAILED'; TimedOut='RUN_FIXTURE_AFTER_TIMEOUT'
+                CaptureFailed='RUN_FIXTURE_AFTER_CAPTURE_FAILED'; CleanupFailed='RUN_FIXTURE_AFTER_CLEANUP_FAILED' }[$flag]
+            $cases["flag $flag"] = @($c, $expected)
+        }
+        $c = & $newCapture 1 '' ''; $c.TimedOut = $true; $c.CleanupFailed = $true
+        $cases['cleanup outranks timeout'] = @($c, 'RUN_FIXTURE_AFTER_CLEANUP_FAILED')
+        $c = & $newCapture 0 "$success`r`n" ''; $c.StdinWriteFailed = $true
+        $cases['stdin failure refuses success'] = @($c, 'RUN_FIXTURE_AFTER_STDIN_WRITE_FAILED')
+        $c = & $newCapture 1 '' (& $marker 'OWNER_CONTRACT_INVALID'); $c.StdinWriteFailed = $true
+        $cases['valid marker outranks stdin failure'] = @($c, 'OWNER_CONTRACT_INVALID')
+        $c = & $newCapture 2 '' (& $marker 'INPUT_INVALID' "`n"); $c.StdinWriteFailed = $true
+        $cases['valid exit 2 marker outranks stdin failure'] = @($c, 'INPUT_INVALID')
+        $c = & $newCapture 1 '' (& $marker 'COMMAND_INVALID'); $c.StdinWriteFailed = $true
+        $cases['stdin failure outranks refused marker'] = @($c, 'RUN_FIXTURE_AFTER_STDIN_WRITE_FAILED')
+        $c = & $newCapture 1 '' ''; $c.StdinWriteFailed = $true
+        $cases['stdin failure outranks absent marker'] = @($c, 'RUN_FIXTURE_AFTER_STDIN_WRITE_FAILED')
+        $c = & $newCapture 9 '' ''; $c.StdinWriteFailed = $true
+        $cases['stdin failure outranks exit code'] = @($c, 'RUN_FIXTURE_AFTER_STDIN_WRITE_FAILED')
+        $c = & $newCapture 1 '' (& $marker 'OWNER_CONTRACT_INVALID'); $c.PSObject.Properties.Remove('StdinWriteFailed')
+        $cases['missing stdin flag'] = @($c, 'RUN_FIXTURE_AFTER_CAPTURE_FAILED')
+        $c = & $newCapture 1 '' (& $marker 'OWNER_CONTRACT_INVALID'); $c.ExitCode = '1'
+        $cases['string exit code'] = @($c, 'RUN_FIXTURE_AFTER_CAPTURE_FAILED')
+        $c = & $newCapture 1 '' ''; $c.Stderr = (& $marker 'OWNER_CONTRACT_INVALID')
+        $cases['string stderr'] = @($c, 'RUN_FIXTURE_AFTER_CAPTURE_FAILED')
+        $c = & $newCapture 1 '' ''; $c.StdinWriteFailed = 'false'
+        $cases['string flag'] = @($c, 'RUN_FIXTURE_AFTER_CAPTURE_FAILED')
+        $cases['null capture'] = @('NULL', 'RUN_FIXTURE_AFTER_CAPTURE_FAILED')
+        $cases['array capture'] = @('ARRAY', 'RUN_FIXTURE_AFTER_CAPTURE_FAILED')
+        $cases['boundary throws'] = @('THROW', 'RUN_FIXTURE_AFTER_CAPTURE_FAILED')
+
+        $observed = & $script:E2EModule {
+            param($cases, $encoded, $sentinel)
+            $result = [ordered]@{}
+            foreach ($name in @($cases.Keys)) {
+                $capture = $cases[$name][0]
+                $records = [System.Collections.Generic.List[string]]::new()
+                $stdin = [System.Collections.Generic.List[object]]::new()
+                $boundary = {
+                    param($bytes)
+                    $stdin.Add($bytes)
+                    if ($capture -is [string] -and $capture -ceq 'NULL') { return $null }
+                    if ($capture -is [string] -and $capture -ceq 'ARRAY') { return @($capture, $capture) }
+                    if ($capture -is [string] -and $capture -ceq 'THROW') { throw $sentinel }
+                    return $capture
+                }.GetNewClosure()
+                $failure = $null
+                try {
+                    Invoke-E2ERunFixtureAfterChild -Directory 'C:\fixture-directory' -EncodedState $encoded `
+                        -NativeBoundary $boundary -DiagnosticWriter { param($value) $records.Add($value) }.GetNewClosure()
+                }
+                catch { $failure = $_ }
+                $result[$name] = [pscustomobject]@{
+                    Message = if ($null -eq $failure) { 'NO_FAILURE' } else { [string]$failure.Exception.Message }
+                    ErrorId = if ($null -eq $failure) { $null } else { [string]$failure.FullyQualifiedErrorId }
+                    Records = @($records)
+                    StdinCount = $stdin.Count
+                    Stdin = if ($stdin.Count -eq 1) { [System.Text.Encoding]::ASCII.GetString([byte[]]$stdin[0]) } else { $null }
+                }
+            }
+            return [pscustomobject]$result
+        } $cases $encodedState $rawSentinel
+        foreach ($name in @($cases.Keys)) {
+            $expected = $cases[$name][1]
+            $item = $observed.$name
+            Assert-Equal 1 $item.StdinCount ("$name did not call the native boundary exactly once.")
+            Assert-Equal ($encodedState + "`n") $item.Stdin ("$name did not hand the state on stdin.")
+            if ($expected -ceq 'SUCCESS') {
+                Assert-Equal 'NO_FAILURE' $item.Message ("$name was refused.")
+                Assert-Equal 0 @($item.Records).Count ("$name emitted a diagnostic on success.")
+                continue
+            }
+            Assert-Equal 'RUN_FIXTURE_AFTER_FAILED' $item.Message ("$name changed the primary identity.")
+            Assert-Equal 'RUN_FIXTURE_AFTER_FAILED' $item.ErrorId ("$name changed the primary error identity.")
+            Assert-Equal 1 @($item.Records).Count ("$name did not emit exactly one diagnostic.")
+            Assert-Equal ('RUN_FIXTURE_AFTER_SECONDARY=' + $expected) $item.Records[0] ("$name diagnostic differs.")
+            foreach ($forbidden in @($rawSentinel, $stateSentinel, $encodedState, 'fixture-directory', 'D315_AFTER_RAW')) {
+                Assert-True (-not $item.Records[0].Contains($forbidden)) ("$name reflected raw input.")
+            }
+        }
+    }
+
+    Invoke-TestCase 'D315 after every allowlisted code propagates once and unknown writer input falls back' {
+        $result = & $script:E2EModule {
+            param($encoded)
+            $out = [System.Collections.Generic.List[object]]::new()
+            foreach ($code in @($RunFixtureAfterSecondaryCodes)) {
+                foreach ($exit in @(1, 2)) {
+                    $capture = [pscustomobject]@{ ExitCode = $exit; Stdout = [byte[]]::new(0)
+                        Stderr = [System.Text.Encoding]::ASCII.GetBytes("verification failed: $code`r`n")
+                        StdoutOverflow = $false; StderrOverflow = $false; TimedOut = $false; StartFailed = $false
+                        CaptureFailed = $false; CleanupFailed = $false; StdinWriteFailed = $false }
+                    $records = [System.Collections.Generic.List[string]]::new(); $failure = $null
+                    try { Invoke-E2ERunFixtureAfterChild -Directory 'C:\d' -EncodedState $encoded -NativeBoundary { $capture }.GetNewClosure() `
+                            -DiagnosticWriter { param($v) $records.Add($v) }.GetNewClosure() }
+                    catch { $failure = $_.Exception.Message }
+                    $out.Add([pscustomobject]@{ Code = $code; Primary = $failure; Records = @($records) })
+                }
+            }
+            $fallback = [System.Collections.Generic.List[string]]::new()
+            Write-E2ERunFixtureAfterDiagnostic -Secondary 'D315-AFTER-RAW-SENTINEL-5c1e' -Writer { param($v) $fallback.Add($v) }.GetNewClosure()
+            Write-E2ERunFixtureAfterDiagnostic -Secondary 'RUN_FIXTURE_BEFORE_TIMEOUT' -Writer { param($v) $fallback.Add($v) }.GetNewClosure()
+            Write-E2ERunFixtureAfterDiagnostic -Secondary 'RUN_FIXTURE_AFTER_TIMEOUT' -Writer { param($v) throw 'D315-AFTER-RAW-SENTINEL-5c1e' }
+            return [pscustomobject]@{ Items = @($out); Fallback = @($fallback) }
+        } $encodedState
+        Assert-Equal 60 @($result.Items).Count 'Not every allowlisted code was exercised for exit 1 and 2.'
+        foreach ($item in @($result.Items)) {
+            Assert-Equal 'RUN_FIXTURE_AFTER_FAILED' $item.Primary ('Primary changed for ' + $item.Code)
+            Assert-Equal @('RUN_FIXTURE_AFTER_SECONDARY=' + $item.Code) @($item.Records) ('Secondary changed for ' + $item.Code)
+        }
+        Assert-Equal @('RUN_FIXTURE_AFTER_SECONDARY=RUN_FIXTURE_AFTER_MARKER_INVALID','RUN_FIXTURE_AFTER_SECONDARY=RUN_FIXTURE_AFTER_MARKER_INVALID') `
+            @($result.Fallback) 'An unknown secondary reached the writer.'
+    }
+
+    Invoke-TestCase 'D315 after default writer warns exactly once and WarningPreference Stop keeps the primary' {
+        $result = & $script:E2EModule {
+            param($encoded)
+            $capture = [pscustomobject]@{ ExitCode = 1; Stdout = [byte[]]::new(0)
+                Stderr = [System.Text.Encoding]::ASCII.GetBytes("verification failed: DATABASE_CASE_IDENTITY_INVALID`n")
+                StdoutOverflow = $false; StderrOverflow = $false; TimedOut = $false; StartFailed = $false
+                CaptureFailed = $false; CleanupFailed = $false; StdinWriteFailed = $false }
+            $warnings = [System.Collections.Generic.List[string]]::new(); $failure = $null
+            $boundary = { $capture }.GetNewClosure()
+            try {
+                & { Invoke-E2ERunFixtureAfterChild -Directory 'C:\d' -EncodedState $encoded -NativeBoundary $boundary } 3>&1 |
+                    ForEach-Object { if ($_ -is [System.Management.Automation.WarningRecord]) { $warnings.Add([string]$_.Message) } }
+            }
+            catch { $failure = $_.Exception.Message }
+            $previous = $global:WarningPreference; $stopFailure = $null
+            try {
+                $global:WarningPreference = 'Stop'
+                try { Invoke-E2ERunFixtureAfterChild -Directory 'C:\d' -EncodedState $encoded -NativeBoundary $boundary 3>$null }
+                catch { $stopFailure = $_.Exception.Message }
+            }
+            finally { $global:WarningPreference = $previous }
+            return [pscustomobject]@{ Warnings = @($warnings); Failure = $failure; StopFailure = $stopFailure }
+        } $encodedState
+        Assert-Equal @('RUN_FIXTURE_AFTER_SECONDARY=DATABASE_CASE_IDENTITY_INVALID') @($result.Warnings) 'Default warning differs.'
+        Assert-Equal 'RUN_FIXTURE_AFTER_FAILED' $result.Failure 'Default writer changed the primary.'
+        Assert-Equal 'RUN_FIXTURE_AFTER_FAILED' $result.StopFailure 'WarningPreference Stop replaced the primary.'
+    }
+
+    Invoke-TestCase 'D315 after production path keeps state off argv and routes orchestration through the after child' {
+        $result = & $script:E2EModule {
+            param($encoded, $sentinel)
+            $calls = [System.Collections.Generic.List[object]]::new()
+            $events = [System.Collections.Generic.List[string]]::new()
+            function Invoke-E2EBoundedNativeProcess {
+                param([string]$Executable, [string[]]$ArgumentList, [string]$WorkingDirectory, [int]$StdoutLimit,
+                    [int]$StderrLimit, [int]$TimeoutMilliseconds, [byte[]]$StdinBytes)
+                $events.Add('after')
+                $calls.Add([pscustomobject]@{ Executable = $Executable; ArgumentList = @($ArgumentList); WorkingDirectory = $WorkingDirectory
+                    StdoutLimit = $StdoutLimit; StderrLimit = $StderrLimit; Timeout = $TimeoutMilliseconds
+                    HasStdin = $PSBoundParameters.ContainsKey('StdinBytes'); Stdin = [System.Text.Encoding]::ASCII.GetString($StdinBytes) })
+                return [pscustomobject]@{ ExitCode = 1; Stdout = [System.Text.Encoding]::ASCII.GetBytes($sentinel)
+                    Stderr = [System.Text.Encoding]::ASCII.GetBytes("verification failed: FIXTURE_MANIFEST_READ_FAILED`r`n")
+                    StdoutOverflow = $false; StderrOverflow = $false; TimedOut = $false; StartFailed = $false
+                    CaptureFailed = $false; CleanupFailed = $false; StdinWriteFailed = $false }
+            }
+            function Assert-E2EFixturePathSafe { param([string]$Path, $Receipt) $events.Add('path'); return $Path }
+            function Invoke-E2ERunFixtureBeforeChild { param($Receipt, [string]$Directory) $events.Add('before'); return [pscustomobject]@{ EncodedState = $encoded; PlanJson = '{}' } }
+            function Invoke-E2EFixedFixtureService { param($Receipt, [string]$PlanJson) $events.Add('service') }
+            $receipt = New-E2EReceipt -RunId '0123456789abcdef0123456789abcdef' -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+            $warnings = [System.Collections.Generic.List[string]]::new(); $failure = $null
+            try {
+                & { Invoke-E2ERunFixtureOrchestration -Receipt $receipt -Directory 'C:\fixture dir' } 3>&1 |
+                    ForEach-Object { if ($_ -is [System.Management.Automation.WarningRecord]) { $warnings.Add([string]$_.Message) } }
+            }
+            catch { $failure = $_ }
+            return [pscustomobject]@{ Calls = @($calls); Events = @($events); Warnings = @($warnings)
+                Failure = [string]$failure.Exception.Message; ErrorId = [string]$failure.FullyQualifiedErrorId
+                Verifier = $PythonVerifierPath; Root = $RepositoryRoot; Project = $ProjectName }
+        } $encodedState $rawSentinel
+        Assert-Equal @('path','before','service','after') @($result.Events) 'Orchestration order changed.'
+        Assert-Equal 1 @($result.Calls).Count 'After verifier did not run exactly once.'
+        $call = $result.Calls[0]
+        Assert-Equal 'python' $call.Executable 'After executable changed.'
+        Assert-Equal @('-B', $result.Verifier, 'run-fixture-after', '--repo-root', $result.Root, '--project', $result.Project,
+            '--fixture-directory', 'C:\fixture dir') @($call.ArgumentList) 'After argv changed.'
+        foreach ($argument in @($call.ArgumentList)) {
+            Assert-True (-not $argument.Contains($encodedState) -and -not $argument.Contains($stateSentinel)) 'State reached argv.'
+        }
+        Assert-Equal $result.Root $call.WorkingDirectory 'After working directory changed.'
+        Assert-Equal 4096 $call.StdoutLimit 'After stdout limit not passed.'
+        Assert-Equal 128 $call.StderrLimit 'After stderr limit not passed.'
+        Assert-Equal 630000 $call.Timeout 'After timeout not passed.'
+        Assert-True $call.HasStdin 'State was not handed on stdin.'
+        Assert-Equal ($encodedState + "`n") $call.Stdin 'Stdin bytes differ from the validated state.'
+        Assert-Equal 'RUN_FIXTURE_AFTER_FAILED' $result.Failure 'Orchestration primary changed.'
+        Assert-Equal 'RUN_FIXTURE_AFTER_FAILED' $result.ErrorId 'Orchestration primary error identity changed.'
+        Assert-Equal @('RUN_FIXTURE_AFTER_SECONDARY=FIXTURE_MANIFEST_READ_FAILED') @($result.Warnings) 'Orchestration diagnostic differs.'
+    }
+
+    $root = Join-Path ([System.IO.Path]::GetTempPath()) ('finguardops-d315-after-' + [guid]::NewGuid().ToString('N'))
+    $fake = Join-Path $root 'after-fake.py'
+    $previousMode = [System.Environment]::GetEnvironmentVariable('D315_AFTER_FAKE_MODE', 'Process')
+    $previousDigest = [System.Environment]::GetEnvironmentVariable('D315_AFTER_FAKE_DIGEST', 'Process')
+    $previousProbe = [System.Environment]::GetEnvironmentVariable('D315_AFTER_FAKE_PROBE', 'Process')
+    try {
+        [System.IO.Directory]::CreateDirectory($root) | Out-Null
+        $source = @'
+import hashlib
+import os
+import sys
+import time
+
+mode = os.environ.get("D315_AFTER_FAKE_MODE", "")
+if sys.argv[1:2] != ["run-fixture-after"] or any(os.environ.get("D315_AFTER_FAKE_PROBE", "\0") in value for value in sys.argv):
+    sys.stderr.write("verification failed: HOST_ARGUMENT_INVALID\n")
+    raise SystemExit(1)
+if mode == "success":
+    data = sys.stdin.buffer.read()
+    if hashlib.sha256(data).hexdigest() != os.environ.get("D315_AFTER_FAKE_DIGEST"):
+        sys.stderr.write("verification failed: RUN_FIXTURE_STATE_INVALID\n")
+        raise SystemExit(1)
+    print("run fixture orchestration completed: exact delta and manifest passed")
+    raise SystemExit(0)
+if mode == "marker":
+    sys.stdin.buffer.read()
+    sys.stderr.write("verification failed: DATABASE_GLOBAL_DELTA_INVALID\n")
+    raise SystemExit(1)
+if mode == "raw":
+    sys.stdin.buffer.read()
+    sys.stdout.write("D315-AFTER-RAW-SENTINEL-5c1e\n")
+    sys.stderr.write("Traceback D315-AFTER-RAW-SENTINEL-5c1e\nverification failed: UNEXPECTED_ERROR\n")
+    raise SystemExit(1)
+if mode == "early":
+    sys.stderr.buffer.write(b"verification failed: OWNER_CONTRACT_INVALID\r\n")
+    sys.stderr.flush()
+    os._exit(1)
+if mode == "noread":
+    time.sleep(30)
+raise SystemExit(42)
+'@
+        [System.IO.File]::WriteAllText($fake, $source + "`n", [System.Text.UTF8Encoding]::new($false))
+        $random = [byte[]]::new(1572864)
+        [System.Random]::new(315).NextBytes($random)
+        $largeState = [Convert]::ToBase64String($random)
+        $largeBytes = [System.Text.Encoding]::ASCII.GetBytes($largeState + "`n")
+        $digest = -join ([System.Security.Cryptography.SHA256]::Create().ComputeHash($largeBytes) | ForEach-Object { $_.ToString('x2') })
+        [System.Environment]::SetEnvironmentVariable('D315_AFTER_FAKE_DIGEST', $digest, 'Process')
+        [System.Environment]::SetEnvironmentVariable('D315_AFTER_FAKE_PROBE', $largeState.Substring(0, 64), 'Process')
+        $runAfter = {
+            param([string]$Mode, [int]$Timeout = 630000)
+            [System.Environment]::SetEnvironmentVariable('D315_AFTER_FAKE_MODE', $Mode, 'Process')
+            $watch = [System.Diagnostics.Stopwatch]::StartNew()
+            $observed = & $script:E2EModule {
+                param($verifier, $state, $timeout)
+                $PythonVerifierPath = $verifier
+                $RunFixtureAfterTimeoutMilliseconds = $timeout
+                $records = [System.Collections.Generic.List[string]]::new(); $failure = $null
+                try { Invoke-E2ERunFixtureAfterChild -Directory 'C:\fixture dir' -EncodedState $state -DiagnosticWriter { param($v) $records.Add($v) }.GetNewClosure() }
+                catch { $failure = $_.Exception.Message }
+                return [pscustomobject]@{ Failure = $failure; Records = @($records) }
+            } $fake $largeState $Timeout
+            $observed | Add-Member -NotePropertyName Seconds -NotePropertyValue $watch.Elapsed.TotalSeconds
+            return $observed
+        }
+
+        Invoke-TestCase 'D315 after real child receives the exact state on stdin and succeeds' {
+            $observed = & $runAfter 'success'
+            Assert-Equal $null $observed.Failure 'Real stdin round-trip was refused.'
+            Assert-Equal 0 @($observed.Records).Count 'Real success emitted a diagnostic.'
+        }
+        Invoke-TestCase 'D315 after real child LF marker after reading stdin propagates once' {
+            $observed = & $runAfter 'marker'
+            Assert-Equal 'RUN_FIXTURE_AFTER_FAILED' $observed.Failure 'Real marker changed the primary.'
+            Assert-Equal @('RUN_FIXTURE_AFTER_SECONDARY=DATABASE_GLOBAL_DELTA_INVALID') @($observed.Records) 'Real marker differs.'
+        }
+        Invoke-TestCase 'D315 after real child raw stderr and stdout are not reflected' {
+            $observed = & $runAfter 'raw'
+            Assert-Equal 'RUN_FIXTURE_AFTER_FAILED' $observed.Failure 'Raw child changed the primary.'
+            Assert-Equal @('RUN_FIXTURE_AFTER_SECONDARY=RUN_FIXTURE_AFTER_MARKER_INVALID') @($observed.Records) 'Raw child diagnostic differs.'
+        }
+        Invoke-TestCase 'D315 after real child failing before reading stdin keeps its marker' {
+            $observed = & $runAfter 'early'
+            Assert-Equal 'RUN_FIXTURE_AFTER_FAILED' $observed.Failure 'Early child changed the primary.'
+            Assert-Equal @('RUN_FIXTURE_AFTER_SECONDARY=OWNER_CONTRACT_INVALID') @($observed.Records) 'Early child marker was replaced.'
+            Assert-True ($observed.Seconds -lt 30) 'Early exit with unread stdin did not return promptly.'
+        }
+        Invoke-TestCase 'D315 after real child that never reads stdin times out and is cleaned up' {
+            $observed = & $runAfter 'noread' 1500
+            Assert-Equal 'RUN_FIXTURE_AFTER_FAILED' $observed.Failure 'Stalled child changed the primary.'
+            Assert-Equal @('RUN_FIXTURE_AFTER_SECONDARY=RUN_FIXTURE_AFTER_TIMEOUT') @($observed.Records) 'Stalled child diagnostic differs.'
+            Assert-True ($observed.Seconds -lt 30) 'Stalled stdin write blocked past the timeout.'
+        }
+        Invoke-TestCase 'D315 bounded native stdin overload bounds writes and keeps the six-argument form' {
+            $result = & $script:E2EModule {
+                param($payload)
+                $python = (Get-Command python -CommandType Application | Select-Object -First 1).Source
+                $echo = 'import hashlib,sys;d=sys.stdin.buffer.read();sys.stdout.write(str(len(d))+" "+hashlib.sha256(d).hexdigest())'
+                $round = Invoke-E2EBoundedNativeProcess -Executable $python -ArgumentList @('-c', $echo) -WorkingDirectory $RepositoryRoot `
+                    -StdoutLimit 256 -StderrLimit 128 -TimeoutMilliseconds 30000 -StdinBytes $payload
+                $empty = Invoke-E2EBoundedNativeProcess -Executable $python -ArgumentList @('-c', $echo) -WorkingDirectory $RepositoryRoot `
+                    -StdoutLimit 256 -StderrLimit 128 -TimeoutMilliseconds 30000 -StdinBytes ([byte[]]::new(0))
+                $watch = [System.Diagnostics.Stopwatch]::StartNew()
+                $stalled = Invoke-E2EBoundedNativeProcess -Executable $python -ArgumentList @('-c', 'import time;time.sleep(30)') -WorkingDirectory $RepositoryRoot `
+                    -StdoutLimit 64 -StderrLimit 64 -TimeoutMilliseconds 500 -StdinBytes $payload
+                $stalledSeconds = $watch.Elapsed.TotalSeconds
+                $tree = Invoke-E2EBoundedNativeProcess -Executable $python -ArgumentList @('-c', 'import subprocess,sys,time;p=subprocess.Popen([sys.executable,"-c","import time;time.sleep(30)"]);print(p.pid,flush=True);time.sleep(30)') `
+                    -WorkingDirectory $RepositoryRoot -StdoutLimit 64 -StderrLimit 64 -TimeoutMilliseconds 1500 -StdinBytes $payload
+                $childId = 0; $childAlive = $false
+                if ([int]::TryParse([System.Text.Encoding]::ASCII.GetString($tree.Stdout).Trim(), [ref]$childId)) {
+                    $childAlive = $null -ne (Get-Process -Id $childId -ErrorAction SilentlyContinue)
+                    if ($childAlive) { Stop-Process -Id $childId -Force -ErrorAction SilentlyContinue }
+                }
+                $unread = Invoke-E2EBoundedNativeProcess -Executable $python -ArgumentList @('-c', 'pass') -WorkingDirectory $RepositoryRoot `
+                    -StdoutLimit 64 -StderrLimit 64 -TimeoutMilliseconds 30000 -StdinBytes $payload
+                $six = Invoke-E2EBoundedNativeProcess -Executable $python -ArgumentList @('-c', 'print(7)') -WorkingDirectory $RepositoryRoot `
+                    -StdoutLimit 64 -StderrLimit 64 -TimeoutMilliseconds 30000
+                $missing = Invoke-E2EBoundedNativeProcess -Executable ('missing-' + [guid]::NewGuid().ToString('N') + '.exe') -ArgumentList @() `
+                    -WorkingDirectory $RepositoryRoot -StdoutLimit 64 -StderrLimit 64 -TimeoutMilliseconds 50 -StdinBytes $payload
+                $nullStdin = Invoke-E2EBoundedNativeProcess -Executable $python -ArgumentList @('-c', 'pass') -WorkingDirectory $RepositoryRoot `
+                    -StdoutLimit 64 -StderrLimit 64 -TimeoutMilliseconds 30000 -StdinBytes $null
+                return [pscustomobject]@{ Round = $round; Empty = $empty; Stalled = $stalled; StalledSeconds = $stalledSeconds; Tree = $tree
+                    ChildId = $childId; ChildAlive = $childAlive; Unread = $unread; Six = $six; Missing = $missing; NullStdin = $nullStdin }
+            } $largeBytes
+            Assert-Equal 0 $result.Round.ExitCode 'Round-trip child failed.'
+            Assert-Equal ("{0} {1}" -f $largeBytes.Length, $digest) ([System.Text.Encoding]::ASCII.GetString($result.Round.Stdout)) 'Round-trip bytes differ.'
+            Assert-True (-not $result.Round.StdinWriteFailed -and -not $result.Round.CleanupFailed) 'Round-trip write or cleanup failed.'
+            Assert-Equal ('0 ' + 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855') ([System.Text.Encoding]::ASCII.GetString($result.Empty.Stdout)) 'Empty stdin did not reach EOF.'
+            Assert-True (-not $result.Empty.StdinWriteFailed) 'Empty stdin was reported as a write failure.'
+            Assert-True ($result.Stalled.TimedOut -and $result.Stalled.StdinWriteFailed -and -not $result.Stalled.CleanupFailed) 'Stalled reader was not bounded and cleaned up.'
+            Assert-True ($result.StalledSeconds -lt 15) 'Stalled stdin write blocked past the timeout.'
+            Assert-True ($result.Tree.TimedOut -and -not $result.Tree.CleanupFailed) 'Descendant with stdin was not cleaned up.'
+            Assert-True ($result.ChildId -gt 0 -and -not $result.ChildAlive) 'A descendant survived the stdin overload.'
+            Assert-Equal 0 $result.Unread.ExitCode 'Unread-stdin child exit changed.'
+            Assert-True ($result.Unread.StdinWriteFailed -and -not $result.Unread.CleanupFailed) 'Unread stdin was not reported as undelivered.'
+            Assert-Equal '7' ([System.Text.Encoding]::ASCII.GetString($result.Six.Stdout).Trim()) 'Six-argument form changed.'
+            Assert-True (-not $result.Six.StdinWriteFailed -and -not $result.Six.CleanupFailed) 'Six-argument form reported a stdin failure.'
+            Assert-True ($result.Missing.StartFailed -and $result.Missing.StdinWriteFailed) 'Start failure with stdin changed.'
+            Assert-True ($result.NullStdin.StartFailed) 'A null stdin payload was accepted.'
+        }
+        Invoke-TestCase 'D315 bounded native stdin survives a session that loaded the earlier type shape' {
+            # The runbook runs every mode in one operator session. A type of the
+            # earlier shape, without the stdin overload, loaded first in a fresh
+            # session must not be reused by the module loaded after it.
+            $child = Join-Path $root 'stale-session.ps1'
+            $childSource = @'
+param([Parameter(Mandatory = $true)][string]$ModulePath)
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @"
+namespace FinGuardOps {
+    public sealed class E2ECaptureResult { public int ExitCode = -1; }
+    public static class E2EBoundedNativeProcess {
+        public static E2ECaptureResult Run(string executable, string[] arguments, string workingDirectory,
+            int stdoutLimit, int stderrLimit, int timeoutMilliseconds) { return new E2ECaptureResult(); }
+    }
+}
+"@
+$module = Import-Module $ModulePath -Force -PassThru
+$result = & $module {
+    $python = (Get-Command python -CommandType Application | Select-Object -First 1).Source
+    Invoke-E2EBoundedNativeProcess -Executable $python -ArgumentList @('-c', 'import sys;sys.stdout.write(sys.stdin.read())') `
+        -WorkingDirectory $RepositoryRoot -StdoutLimit 64 -StderrLimit 64 -TimeoutMilliseconds 30000 `
+        -StdinBytes ([System.Text.Encoding]::ASCII.GetBytes('D315-STDIN'))
+}
+if ($result.StartFailed -or $result.StdinWriteFailed -or [System.Text.Encoding]::ASCII.GetString($result.Stdout) -cne 'D315-STDIN') { exit 3 }
+exit 0
+'@
+            [System.IO.File]::WriteAllText($child, $childSource, [System.Text.UTF8Encoding]::new($false))
+            & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $child -ModulePath $ModulePath | Out-Null
+            Assert-Equal 0 $LASTEXITCODE 'A session that loaded the earlier type shape lost the stdin overload.'
+        }
+        Invoke-TestCase 'D315 bounded native stdin source keeps the write end private' {
+            $moduleSource = [System.IO.File]::ReadAllText($ModulePath)
+            Assert-True ($moduleSource -cmatch 'SetHandleInformation\(stdinWrite, HANDLE_FLAG_INHERIT, 0\)') 'stdin write handle is inheritable.'
+            Assert-True ($moduleSource -cmatch 'startup\.hStdInput = feedStdin \? stdinRead : GetStdHandle\(-10\);') 'stdin handle selection changed.'
+            Assert-True ($moduleSource -cmatch 'return Run\(executable, arguments, workingDirectory, stdoutLimit, stderrLimit, timeoutMilliseconds, null\);') `
+                'Six-argument form no longer delegates with inherited stdin.'
+            Assert-True ($moduleSource.IndexOf('if (stdinRead != IntPtr.Zero) {', [StringComparison]::Ordinal) -lt
+                $moduleSource.IndexOf('ResumeThread(process.hThread)', [StringComparison]::Ordinal)) 'Parent keeps the child stdin read end past resume.'
+        }
+    }
+    finally {
+        [System.Environment]::SetEnvironmentVariable('D315_AFTER_FAKE_MODE', $previousMode, 'Process')
+        [System.Environment]::SetEnvironmentVariable('D315_AFTER_FAKE_DIGEST', $previousDigest, 'Process')
+        [System.Environment]::SetEnvironmentVariable('D315_AFTER_FAKE_PROBE', $previousProbe, 'Process')
+        if ([System.IO.Directory]::Exists($root)) { [System.IO.Directory]::Delete($root, $true) }
+    }
+    Assert-True (-not [System.IO.Directory]::Exists($root)) 'After fixture directory remains.'
+    if ($script:Failures.Count -ne 0) {
+        foreach ($failure in $script:Failures) { Write-Output $failure }
+        exit 1
+    }
+    Write-Output 'D315 after diagnostic targeted passed'
+}
+
 function Invoke-FormalTests {
     Invoke-SessionStateTargetedTests
     Invoke-WaitBrowserTargetedTests
@@ -8720,6 +9329,7 @@ function Invoke-FormalTests {
     Invoke-MajorFixTargetedTests
     Invoke-D315LauncherTargetedTests
     Invoke-D315TargetedTests
+    Invoke-D315AfterTargetedTests
     $script:Failures = [System.Collections.Generic.List[string]]::new()
     $receipt = New-TestReceipt
 
@@ -9096,6 +9706,11 @@ if ($Mode -eq 'D315StageTargeted') {
 
 if ($Mode -eq 'D315LauncherTargeted') {
     Invoke-D315LauncherTargetedTests
+    exit 0
+}
+
+if ($Mode -eq 'D315AfterTargeted') {
+    Invoke-D315AfterTargetedTests
     exit 0
 }
 
