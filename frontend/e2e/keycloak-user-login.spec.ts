@@ -8879,7 +8879,10 @@ test("a real USER works the Run fixture case through review, a note and the audi
     ).toBeVisible();
     const transactionMain = page.getByRole("main");
     await expect(factValue(transactionMain, "거래 ID")).toHaveText(fixture.transactionId);
-    await expect(factValue(transactionMain, "처리 상태")).toHaveText("인증 필요");
+    const transactionRecord = transactionMain.locator(".transaction-detail__record");
+    const transactionGlance = transactionMain.locator('dl[aria-label="거래 요약"]');
+    await expect(factValue(transactionRecord, "처리 상태")).toHaveText("인증 필요");
+    await expect(factValue(transactionGlance, "처리 상태")).toHaveText("인증 필요");
     const transactionScreen = (await transactionMain.textContent()) ?? "";
     for (const unclaimed of ["HIGH", "위험 수준", "risk level", fixture.caseId]) {
       requireCondition(
@@ -9597,6 +9600,66 @@ const CASE_NOTES_GEOMETRY_URL =
 const CASE_RESOLUTION_GEOMETRY_URL = `${APP_ORIGIN}/e2e/case-resolution-geometry.html`;
 const CASE_DETAIL_GEOMETRY_URL = `${APP_ORIGIN}/e2e/case-detail-geometry.html`;
 const TRANSACTION_LIST_GEOMETRY_URL = `${APP_ORIGIN}/e2e/transaction-list-geometry.html`;
+const TRANSACTION_DETAIL_GEOMETRY_URL = `${APP_ORIGIN}/e2e/transaction-detail-geometry.html`;
+
+test("synthetic transaction detail preserves record order and fits every design width", async ({ page }) => {
+  const offOrigin: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).origin !== APP_ORIGIN) offOrigin.push(request.url());
+  });
+  await page.goto(TRANSACTION_DETAIL_GEOMETRY_URL);
+  await expect(page.getByText("합성 데이터 배치 검증 · 인증된 Backend 화면이 아닙니다.")).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^거래 2f4c0a4e/ })).toBeVisible();
+  await expect(page.locator(".transaction-detail__record dt")).toHaveCount(12);
+  await expect(page.locator(".transaction-detail__record dd")).toHaveCount(12);
+  await expect(page.locator(".transaction-detail__glance")).toContainText("999,999,999,999,999");
+  await expect(page.locator(".transaction-detail__glance .badge__mark")).toHaveCount(1);
+  await expect(page.locator(".transaction-detail__glance time")).toHaveAttribute("datetime", "2026-01-02T03:04:05Z");
+  const back = page.getByRole("link", { name: "거래 목록으로" });
+  await expect(back).toHaveAttribute("href", "/transactions");
+  await page.keyboard.press("Tab");
+  await expect(back).toBeFocused();
+  await expect(page.getByRole("button")).toHaveCount(0);
+  await expect(page.locator(".transaction-detail__record")).toContainText("기록 없음");
+  const longReference = "geometry-reference-".repeat(6).slice(0, 128);
+  await expect(page.locator(".transaction-detail__record")).toContainText(longReference);
+  for (const viewport of NOTES_GEOMETRY_VIEWPORTS) {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    const layout = await page.evaluate(() => {
+      const panels = [...document.querySelectorAll<HTMLElement>(".transaction-detail__record > .panel")];
+      const summaryItems = [...document.querySelectorAll<HTMLElement>(".transaction-detail__glance-item")];
+      if (panels.length !== 3 || summaryItems.length !== 3) return null;
+      const boxes = panels.map((panel) => panel.getBoundingClientRect());
+      const summaryBoxes = summaryItems.map((item) => item.getBoundingClientRect());
+      return {
+        documentWidth: document.documentElement.scrollWidth,
+        viewportWidth: document.documentElement.clientWidth,
+        first: { left: boxes[0].left, right: boxes[0].right, bottom: boxes[0].bottom },
+        second: { left: boxes[1].left, right: boxes[1].right, top: boxes[1].top, bottom: boxes[1].bottom },
+        thirdTop: boxes[2].top,
+        headings: panels.map((panel) => panel.querySelector("h3")?.textContent),
+        summarySecond: { left: summaryBoxes[1].left, top: summaryBoxes[1].top },
+        summaryFirst: { right: summaryBoxes[0].right, bottom: summaryBoxes[0].bottom },
+      };
+    });
+    requireCondition(layout !== null, "The synthetic transaction record was absent.");
+    requireCondition(layout.documentWidth <= layout.viewportWidth + 1,
+      `The transaction detail overflowed at ${String(viewport.width)}px.`);
+    requireCondition(layout.headings.join(",") === "거래,고객·계좌·기기,거래 원장 기록",
+      "The transaction record reading order changed.");
+    requireCondition(layout.thirdTop >= Math.max(layout.first.bottom, layout.second.bottom) - 1,
+      "Ledger metadata moved ahead of the record.");
+    requireCondition(viewport.width >= 1200
+      ? layout.second.left >= layout.first.right - 1
+      : layout.second.top >= layout.first.bottom - 1,
+    `The transaction record used the wrong columns at ${String(viewport.width)}px.`);
+    requireCondition(viewport.width >= 1200
+      ? layout.summarySecond.left >= layout.summaryFirst.right - 1
+      : layout.summarySecond.top >= layout.summaryFirst.bottom - 1,
+    `The transaction summary used the wrong columns at ${String(viewport.width)}px.`);
+  }
+  requireCondition(offOrigin.length === 0, "The synthetic transaction detail requested an external origin.");
+});
 
 test("synthetic transaction list keeps its first two columns visible and its disclosure operable", async ({ page }) => {
   const offOrigin: string[] = [];
