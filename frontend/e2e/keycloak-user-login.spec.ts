@@ -10414,32 +10414,68 @@ test("populated investigation notes preserve plain text and case resolution cont
   requireCondition(narrowStatusEvidence !== null, "The narrow workflow status summary was absent.");
   const narrowGeometryTolerance = 1;
   requireCondition(
-    narrowStatusEvidence.text === "Information required" &&
-      narrowStatusEvidence.tag === "STRONG" &&
-      narrowStatusEvidence.parent.tag === "P" &&
-      narrowStatusEvidence.isProductionStatusLabel &&
-      narrowStatusEvidence.displayed &&
-      narrowStatusEvidence.parentDisplayed &&
-      narrowStatusEvidence.lineCount >= 2 &&
-      narrowStatusEvidence.lineRects.length >= narrowStatusEvidence.lineCount &&
-      narrowStatusEvidence.lineRects.every(
-        (rect) =>
-          rect.left >= narrowStatusEvidence.parent.contentLeft - narrowGeometryTolerance &&
-          rect.right <= narrowStatusEvidence.parent.contentRight + narrowGeometryTolerance &&
-          rect.left >= -narrowGeometryTolerance &&
-          rect.right <= narrowStatusEvidence.viewportWidth + narrowGeometryTolerance,
-      ) &&
-      narrowStatusEvidence.labelScrollWidth <=
-        narrowStatusEvidence.labelClientWidth + narrowGeometryTolerance &&
-      narrowStatusEvidence.parentScrollWidth <=
-        narrowStatusEvidence.parentClientWidth + narrowGeometryTolerance &&
-      narrowStatusEvidence.left >=
-        narrowStatusEvidence.parent.contentLeft - narrowGeometryTolerance &&
-      narrowStatusEvidence.right <=
-        narrowStatusEvidence.parent.contentRight + narrowGeometryTolerance &&
-      narrowStatusEvidence.overflowWrap === "anywhere" &&
-      !(await documentOverflowsHorizontally(page)),
-    "The production status label itself did not produce contained multi-line wrapping at 280px.",
+    narrowStatusEvidence.text === "Information required",
+    "The narrow workflow status label text changed.",
+  );
+  requireCondition(narrowStatusEvidence.tag === "STRONG", "The narrow workflow status label was not strong.");
+  requireCondition(narrowStatusEvidence.parent.tag === "P", "The narrow workflow status parent was not a paragraph.");
+  requireCondition(narrowStatusEvidence.isProductionStatusLabel, "The narrow workflow status was not the production label.");
+  requireCondition(narrowStatusEvidence.displayed, "The narrow workflow status label was not displayed.");
+  requireCondition(narrowStatusEvidence.parentDisplayed, "The narrow workflow status parent was not displayed.");
+  requireCondition(narrowStatusEvidence.lineCount >= 2, "The narrow workflow status label did not wrap onto multiple lines.");
+  requireCondition(
+    narrowStatusEvidence.lineRects.length >= narrowStatusEvidence.lineCount,
+    "The narrow workflow status line rectangles were incomplete.",
+  );
+  requireCondition(
+    narrowStatusEvidence.lineRects.every(
+      (rect) => rect.left >= narrowStatusEvidence.parent.contentLeft - narrowGeometryTolerance,
+    ),
+    "A narrow workflow status line escaped the content on the left.",
+  );
+  requireCondition(
+    narrowStatusEvidence.lineRects.every(
+      (rect) => rect.right <= narrowStatusEvidence.parent.contentRight + narrowGeometryTolerance,
+    ),
+    "A narrow workflow status line escaped the content on the right.",
+  );
+  requireCondition(
+    narrowStatusEvidence.lineRects.every((rect) => rect.left >= -narrowGeometryTolerance),
+    "A narrow workflow status line escaped the viewport on the left.",
+  );
+  requireCondition(
+    narrowStatusEvidence.lineRects.every(
+      (rect) => rect.right <= narrowStatusEvidence.viewportWidth + narrowGeometryTolerance,
+    ),
+    "A narrow workflow status line escaped the viewport on the right.",
+  );
+  requireCondition(
+    narrowStatusEvidence.labelScrollWidth <=
+      narrowStatusEvidence.labelClientWidth + narrowGeometryTolerance,
+    "The narrow workflow status label scrolled horizontally.",
+  );
+  requireCondition(
+    narrowStatusEvidence.parentScrollWidth <=
+      narrowStatusEvidence.parentClientWidth + narrowGeometryTolerance,
+    "The narrow workflow status parent scrolled horizontally.",
+  );
+  requireCondition(
+    narrowStatusEvidence.left >=
+      narrowStatusEvidence.parent.contentLeft - narrowGeometryTolerance,
+    "The narrow workflow status label escaped the content on the left.",
+  );
+  requireCondition(
+    narrowStatusEvidence.right <=
+      narrowStatusEvidence.parent.contentRight + narrowGeometryTolerance,
+    "The narrow workflow status label escaped the content on the right.",
+  );
+  requireCondition(
+    narrowStatusEvidence.overflowWrap === "anywhere",
+    "The narrow workflow status label lost anywhere wrapping.",
+  );
+  requireCondition(
+    !(await documentOverflowsHorizontally(page)),
+    "The narrow workflow status widened the document.",
   );
   await page.setViewportSize({ width: 1440, height: 900 });
 
