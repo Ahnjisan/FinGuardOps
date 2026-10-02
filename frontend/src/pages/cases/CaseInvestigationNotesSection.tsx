@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { CaseStatus } from "../../api/caseApi";
+import { Icon } from "../../shared/Icon";
 import {
   useCaseInvestigationNotes,
   type CaseInvestigationNoteItem,
@@ -22,37 +23,37 @@ const INITIAL_SIZE = 20;
 
 const ERROR_COPY = Object.freeze({
   timeout: {
-    title: "The investigation notes took too long to load",
-    body: "The backend did not answer in time. Try loading them again.",
+    title: "조사 메모를 불러오는 데 시간이 오래 걸립니다",
+    body: "백엔드가 제때 응답하지 않았습니다. 다시 불러오세요.",
   },
   "network-error": {
-    title: "The backend could not be reached",
-    body: "Check the connection to the FinGuardOps backend, then try again.",
+    title: "백엔드에 연결할 수 없습니다",
+    body: "FinGuardOps 백엔드 연결을 확인한 뒤 다시 시도하세요.",
   },
   "invalid-response": {
-    title: "The investigation notes could not be read",
+    title: "조사 메모를 읽을 수 없습니다",
     body:
-      "The backend returned data this console will not display. Nothing is shown rather than " +
-      "part of the investigation record. Try again, and report it if it continues.",
+      "백엔드 응답을 표시할 수 없어 " +
+      "일부 메모만 보여주지 않았습니다. 다시 시도하고 문제가 계속되면 알려주세요.",
   },
   "authentication-required": {
-    title: "Your session ended",
-    body: "Sign in again to continue.",
+    title: "세션이 종료되었습니다",
+    body: "계속하려면 다시 로그인하세요.",
   },
   "generic-error": {
-    title: "The investigation notes could not be loaded",
-    body: "The backend could not return these investigation notes. Try again.",
+    title: "조사 메모를 불러올 수 없습니다",
+    body: "백엔드가 조사 메모를 반환하지 않았습니다. 다시 시도하세요.",
   },
 });
 
 const FORBIDDEN_COPY = Object.freeze({
-  title: "Access denied",
-  body: "You do not have permission to view investigation notes.",
+  title: "접근할 수 없습니다",
+  body: "조사 메모를 볼 권한이 없습니다.",
 });
 
 const NOT_FOUND_COPY = Object.freeze({
-  title: "Investigation notes unavailable",
-  body: "Investigation notes are unavailable because this case was not found.",
+  title: "조사 메모를 볼 수 없습니다",
+  body: "사건을 찾을 수 없어 조사 메모를 볼 수 없습니다.",
 });
 
 const RETRYABLE: ReadonlySet<CaseInvestigationNotesState["status"]> = new Set([
@@ -199,23 +200,21 @@ export function CaseInvestigationNotesPanel({
       aria-labelledby="case-notes-heading"
       aria-busy={refreshState === "refreshing" || undefined}
     >
-      <h3 id="case-notes-heading">Investigation notes</h3>
+      <h3 id="case-notes-heading">조사 메모</h3>
       <p className="investigation-notes__note">
-        Read-only notes recorded for this investigation. Times are Korea Standard Time
-        (UTC+09:00).
+        이 사건의 조사 메모를 조회합니다. 시간은 한국 표준시(UTC+09:00)입니다.
       </p>
 
       {composer}
 
       {refreshState === "failed" && (
         <div className="notice notice--error investigation-notes__refresh" role="alert">
-          <h4 className="notice__title">The latest investigation notes could not be loaded</h4>
+          <h4 className="notice__title">최신 조사 메모를 불러올 수 없습니다</h4>
           <p className="notice__body">
-            The note submission result is unchanged. Refresh the investigation notes before relying
-            on this list.
+            메모 등록 결과는 확인되지 않았습니다. 조사 메모를 새로고침하세요.
           </p>
           <button className="button" type="button" onClick={onRefresh}>
-            Refresh investigation notes
+            <Icon name="refresh" />조사 메모 새로고침
           </button>
         </div>
       )}
@@ -224,7 +223,7 @@ export function CaseInvestigationNotesPanel({
         className="result-line"
         role="status"
         aria-live="polite"
-        aria-label="Investigation notes status"
+        aria-label="조사 메모 상태"
       >
         <NotesSummary state={state} />
       </p>
@@ -237,14 +236,14 @@ export function CaseInvestigationNotesPanel({
           <p className="notice__body">{refusal.body}</p>
           {retryable && (
             <button className="button" type="button" onClick={onRetry}>
-              Try loading the investigation notes again
+              <Icon name="refresh" />조사 메모 다시 불러오기
             </button>
           )}
         </div>
       )}
 
       {state.status === "loading" && (
-        <p className="loading-panel">Loading investigation notes...</p>
+        <p className="loading-panel">조사 메모를 불러오고 있습니다…</p>
       )}
 
       {(state.status === "success" || state.status === "empty") && (
@@ -260,10 +259,10 @@ export function CaseInvestigationNotesPanel({
 
 function NotesSummary({ state }: { readonly state: CaseInvestigationNotesState }) {
   if (state.status === "idle") {
-    return <span>No investigation notes requested.</span>;
+    return <span>요청한 조사 메모가 없습니다.</span>;
   }
   if (state.status === "loading") {
-    return <span>Loading investigation notes</span>;
+    return <span>조사 메모를 불러오는 중</span>;
   }
   if (state.status === "success" || state.status === "empty") {
     return (
@@ -275,7 +274,7 @@ function NotesSummary({ state }: { readonly state: CaseInvestigationNotesState }
     );
   }
   const refusal = refusalCopy(state);
-  return refusal === null ? null : <span>No investigation notes shown. {refusal.title}.</span>;
+  return refusal === null ? null : <span>표시할 조사 메모가 없습니다. {refusal.title}.</span>;
 }
 
 function NotesRecord({
@@ -329,23 +328,23 @@ function NoteItem({
   return (
     <li className="investigation-notes__item">
       <article className="investigation-notes__entry" aria-labelledby={id}>
-        <h4 id={id}>Investigation note {ordinal}</h4>
+        <h4 id={id}>조사 메모 {ordinal}</h4>
         <dl className="facts">
-          <dt>Note ID</dt>
+          <dt>메모 ID</dt>
           <dd className="facts__ref">{note.noteId}</dd>
 
-          <dt>Author type</dt>
+          <dt>작성자 유형</dt>
           <dd className="investigation-notes__opaque">{note.authorType}</dd>
 
-          <dt>Author reference</dt>
+          <dt>작성자 참조값</dt>
           <dd className="facts__ref">{note.authorRef}</dd>
 
-          <dt>Created at</dt>
+          <dt>작성 시각</dt>
           <dd>
             <KstInstant utcInstant={note.createdAt} />
           </dd>
 
-          <dt>Content</dt>
+          <dt>내용</dt>
           {/* React text content only: no HTML, Markdown, linkification or truncation. */}
           <dd className="investigation-notes__content">{note.content}</dd>
         </dl>
@@ -364,7 +363,7 @@ function NotesPager({
   readonly onPageSizeChange: (size: number) => void;
 }) {
   return (
-    <nav className="pager" aria-label="Investigation notes pages">
+    <nav className="pager" aria-label="조사 메모 페이지">
       <button
         className="button"
         type="button"
@@ -373,7 +372,7 @@ function NotesPager({
           onPageChange(page.number - 1);
         }}
       >
-        Previous
+        이전
       </button>
       <button
         className="button"
@@ -383,11 +382,11 @@ function NotesPager({
           onPageChange(page.number + 1);
         }}
       >
-        Next
+        다음
       </button>
       <p className="pager__position">{describeInvestigationNotePosition(page)}</p>
       <div className="pager__size">
-        <label htmlFor="case-notes-pager-size">Notes per page</label>
+        <label htmlFor="case-notes-pager-size">페이지당 메모 수</label>
         <select
           id="case-notes-pager-size"
           value={page.size}
@@ -409,7 +408,7 @@ function NotesPager({
 function KstInstant({ utcInstant }: { readonly utcInstant: string }) {
   const shown = formatInvestigationNoteInstant(utcInstant);
   return shown === null ? (
-    <span className="facts__absent">Not a readable time</span>
+    <span className="facts__absent">시간을 표시할 수 없음</span>
   ) : (
     <time dateTime={utcInstant}>{shown} KST</time>
   );

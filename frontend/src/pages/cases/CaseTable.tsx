@@ -52,18 +52,20 @@ export function CaseTable({ items, sort, onSortChange }: CaseTableProps) {
       <div
         className="sheet__scroll"
         role="region"
-        aria-label="Case results, scrollable"
+        aria-label="사건 결과, 가로로 스크롤 가능"
         tabIndex={0}
       >
         <table>
           <caption className="visually-hidden">
-            Fraud cases matching the applied filters, sorted by when each case last
-            changed.
+            적용된 필터에 맞는 사건을 최종 변경 시각순으로 표시합니다.
           </caption>
           <thead>
             <tr>
               <th scope="col">
-                <span className="sheet__heading">Case ID</span>
+                <span className="sheet__heading">사건 ID</span>
+              </th>
+              <th scope="col">
+                <span className="sheet__heading">사건 상태</span>
               </th>
               <th scope="col" aria-sort={descending ? "descending" : "ascending"}>
                 <button
@@ -73,31 +75,28 @@ export function CaseTable({ items, sort, onSortChange }: CaseTableProps) {
                     onSortChange(descending ? "lastChangedAt,asc" : "lastChangedAt,desc");
                   }}
                 >
-                  Last changed (KST)
+                  최종 변경(KST)
                   <span className="sheet__sort-mark" aria-hidden="true">
                     {descending ? "▼" : "▲"}
                   </span>
                   <span className="visually-hidden">
                     {descending
-                      ? ", most recent first. Activate to show least recent first."
-                      : ", least recent first. Activate to show most recent first."}
+                      ? ", 최신순. 오래된순으로 바꾸려면 누르세요."
+                      : ", 오래된순. 최신순으로 바꾸려면 누르세요."}
                   </span>
                 </button>
               </th>
               <th scope="col">
-                <span className="sheet__heading">Case status</span>
+                <span className="sheet__heading">최종 판정</span>
               </th>
               <th scope="col">
-                <span className="sheet__heading">Final disposition</span>
-              </th>
-              <th scope="col">
-                <span className="sheet__heading">Assignee</span>
+                <span className="sheet__heading">담당자</span>
               </th>
               <th scope="col" className="is-numeric">
-                <span className="sheet__heading">Related transactions</span>
+                <span className="sheet__heading">연관 거래</span>
               </th>
               <th scope="col">
-                <span className="sheet__heading">Opened (KST)</span>
+                <span className="sheet__heading">생성(KST)</span>
               </th>
             </tr>
           </thead>
@@ -124,10 +123,16 @@ function CaseRow({ item }: { readonly item: CaseListItem }) {
         <Link
           className="cell-ref__link"
           to={`/cases/${item.caseId}`}
-          aria-label={`View case details for ${item.caseId}`}
+          aria-label={`사건 ${item.caseId} 상세 보기`}
         >
           {item.caseId}
         </Link>
+      </td>
+      <td>
+        <span className={`badge badge--${tone}`}>
+          <span className="badge__mark" aria-hidden="true" />
+          {CASE_STATUS_LABELS[item.caseStatus]}
+        </span>
       </td>
       <td className="cell-time">
         {/*
@@ -136,12 +141,6 @@ function CaseRow({ item }: { readonly item: CaseListItem }) {
           +09:00 offset rather than from whatever zone this workstation is set to.
         */}
         <time dateTime={item.lastChangedAt}>{lastChanged} KST</time>
-      </td>
-      <td>
-        <span className={`badge badge--${tone}`}>
-          <span className="badge__mark" aria-hidden="true" />
-          {CASE_STATUS_LABELS[item.caseStatus]}
-        </span>
       </td>
       <td>
         {item.finalDisposition === null ? (

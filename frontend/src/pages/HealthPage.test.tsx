@@ -50,13 +50,13 @@ describe("HealthPage", () => {
 
     renderHealthPage();
 
-    expect(screen.getByRole("status")).toHaveTextContent(/checking backend health/i);
+    expect(screen.getByRole("status")).toHaveTextContent(/백엔드 상태를 확인하고 있습니다/);
 
     // Settle the request before the test ends so the module-level in-flight
     // registry clears and does not leak into later tests in this file.
     deferred[0].resolve(jsonResponse({ status: "UP", service: "backend" }));
     await waitFor(() => {
-      expect(screen.getByRole("status")).toHaveTextContent(/healthy/i);
+      expect(screen.getByRole("status")).toHaveTextContent(/백엔드가 정상적으로 응답합니다/);
     });
   });
 
@@ -66,7 +66,7 @@ describe("HealthPage", () => {
     renderHealthPage();
 
     await waitFor(() => {
-      expect(screen.getByRole("status")).toHaveTextContent(/healthy/i);
+      expect(screen.getByRole("status")).toHaveTextContent(/백엔드가 정상적으로 응답합니다/);
     });
   });
 
@@ -76,7 +76,7 @@ describe("HealthPage", () => {
     renderHealthPage();
 
     await waitFor(() => {
-      expect(screen.getByRole("status")).toHaveTextContent(/unable to reach the backend/i);
+      expect(screen.getByRole("status")).toHaveTextContent(/백엔드 상태를 확인할 수 없습니다/);
     });
     expect(screen.getByRole("status").textContent).not.toContain("TypeError");
     expect(screen.getByRole("status").textContent).not.toContain("localhost:8080");
@@ -88,7 +88,7 @@ describe("HealthPage", () => {
     renderHealthPage();
 
     await waitFor(() => {
-      expect(screen.getByRole("status")).toHaveTextContent(/unable to reach the backend/i);
+      expect(screen.getByRole("status")).toHaveTextContent(/백엔드 상태를 확인할 수 없습니다/);
     });
 
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -101,7 +101,7 @@ describe("HealthPage", () => {
     renderHealthPage();
 
     await waitFor(() => {
-      expect(screen.getByRole("status")).toHaveTextContent(/unable to reach the backend/i);
+      expect(screen.getByRole("status")).toHaveTextContent(/백엔드 상태를 확인할 수 없습니다/);
     });
 
     vi.stubGlobal(
@@ -109,10 +109,10 @@ describe("HealthPage", () => {
       vi.fn().mockResolvedValueOnce(jsonResponse({ status: "UP", service: "backend" })),
     );
 
-    await user.click(screen.getByRole("button", { name: /retry/i }));
+    await user.click(screen.getByRole("button", { name: /다시 시도/i }));
 
     await waitFor(() => {
-      expect(screen.getByRole("status")).toHaveTextContent(/healthy/i);
+      expect(screen.getByRole("status")).toHaveTextContent(/백엔드가 정상적으로 응답합니다/);
     });
   });
 
@@ -123,12 +123,12 @@ describe("HealthPage", () => {
     renderHealthPage();
 
     await waitFor(() => {
-      expect(screen.getByRole("status")).toHaveTextContent(/unable to reach the backend/i);
+      expect(screen.getByRole("status")).toHaveTextContent(/백엔드 상태를 확인할 수 없습니다/);
     });
     expect(fetch).toHaveBeenCalledTimes(1);
 
     mockFetchRejectOnce(new TypeError("Failed to fetch"));
-    await user.click(screen.getByRole("button", { name: /retry/i }));
+    await user.click(screen.getByRole("button", { name: /다시 시도/i }));
 
     await waitFor(() => {
       // mockFetchRejectOnce stubs a fresh fetch mock, so this call count is
@@ -148,7 +148,7 @@ describe("HealthPage", () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByRole("status")).toHaveTextContent(/healthy/i);
+        expect(screen.getByRole("status")).toHaveTextContent(/백엔드가 정상적으로 응답합니다/);
       });
       expect(fetch).toHaveBeenCalledTimes(1);
     });
@@ -195,7 +195,7 @@ describe("HealthPage", () => {
       mockFetchOnce(async () => jsonResponse({ status: "UP", service: "backend" }));
       const first = render(<HealthPage />);
       await waitFor(() => {
-        expect(screen.getByRole("status")).toHaveTextContent(/healthy/i);
+        expect(screen.getByRole("status")).toHaveTextContent(/백엔드가 정상적으로 응답합니다/);
       });
       first.unmount();
 
@@ -209,7 +209,7 @@ describe("HealthPage", () => {
         expect(fetch).toHaveBeenCalledTimes(1);
       });
       await waitFor(() => {
-        expect(screen.getByRole("status")).toHaveTextContent(/healthy/i);
+        expect(screen.getByRole("status")).toHaveTextContent(/백엔드가 정상적으로 응답합니다/);
       });
     });
 
@@ -228,7 +228,7 @@ describe("HealthPage", () => {
       deferred[0].resolve(jsonResponse({ status: "UP", service: "backend" }));
 
       await waitFor(() => {
-        expect(screen.getByRole("status")).toHaveTextContent(/healthy/i);
+        expect(screen.getByRole("status")).toHaveTextContent(/백엔드가 정상적으로 응답합니다/);
       });
       expect(fetch).toHaveBeenCalledTimes(1);
     });
@@ -241,23 +241,23 @@ describe("HealthPage", () => {
 
       renderHealthPage();
       await waitFor(() => {
-        expect(screen.getByRole("status")).toHaveTextContent(/unable to reach the backend/i);
+        expect(screen.getByRole("status")).toHaveTextContent(/백엔드 상태를 확인할 수 없습니다/);
       });
       expect(fetch).toHaveBeenCalledTimes(1);
 
       const deferred = stubQueuedFetch();
-      await user.click(screen.getByRole("button", { name: /retry/i }));
+      await user.click(screen.getByRole("button", { name: /다시 시도/i }));
       expect(fetch).toHaveBeenCalledTimes(1);
-      expect(screen.getByRole("status")).toHaveTextContent(/checking backend health/i);
+      expect(screen.getByRole("status")).toHaveTextContent(/백엔드 상태를 확인하고 있습니다/);
 
       // The retry button is not rendered while loading, so there is no
       // element to click again — this proves the UI itself blocks the
       // duplicate action, in addition to the hook-level guard.
-      expect(screen.queryByRole("button", { name: /retry/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /다시 시도/i })).not.toBeInTheDocument();
 
       deferred[0].resolve(jsonResponse({ status: "UP", service: "backend" }));
       await waitFor(() => {
-        expect(screen.getByRole("status")).toHaveTextContent(/healthy/i);
+        expect(screen.getByRole("status")).toHaveTextContent(/백엔드가 정상적으로 응답합니다/);
       });
       expect(fetch).toHaveBeenCalledTimes(1);
     });

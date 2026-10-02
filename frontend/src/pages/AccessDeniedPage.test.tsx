@@ -6,15 +6,15 @@ describe("AccessDeniedPage", () => {
   it("names the refusal in a labelled region", () => {
     render(<AccessDeniedPage />);
 
-    const heading = screen.getByRole("heading", { level: 2, name: "Access denied" });
+    const heading = screen.getByRole("heading", { level: 2, name: "접근할 수 없습니다" });
     expect(heading).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Access denied" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "접근할 수 없습니다" })).toBeInTheDocument();
   });
 
   it("states the refusal in fixed wording", () => {
     render(<AccessDeniedPage />);
 
-    expect(screen.getByText("You do not have permission to view this page.")).toBeInTheDocument();
+    expect(screen.getByText("이 화면을 볼 권한이 없습니다.")).toBeInTheDocument();
   });
 
   /**

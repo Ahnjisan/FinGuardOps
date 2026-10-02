@@ -31,7 +31,7 @@ const LONG_ASSIGNEE_REF = "assignee_ref_2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001_des
  * case, which are precisely the three things these tests exist to refuse.
  */
 function caseLinkName(caseId: string): string {
-  return `View case details for ${caseId}`;
+  return `사건 ${caseId} 상세 보기`;
 }
 
 const SESSION: AuthSession = {
@@ -208,10 +208,10 @@ describe("CaseListPage opening query", () => {
     renderPage(signedIn());
     await settle();
 
-    expect(screen.getByRole("heading", { name: "Cases" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Apply filters" })).toBeInTheDocument();
-    expect(screen.getByText("Loading cases...")).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("Loading cases");
+    expect(screen.getByRole("heading", { name: "사건" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "필터 적용" })).toBeInTheDocument();
+    expect(screen.getByText("사건을 불러오고 있습니다…")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("사건을 불러오는 중");
   });
 });
 
@@ -222,14 +222,14 @@ describe("CaseListPage data", () => {
     await settle();
     await answerWith(calls[0], listBody());
 
-    const row = await screen.findByRole("row", { name: /in review/i });
+    const row = await screen.findByRole("row", { name: /검토 중/i });
     const cells = within(row).getAllByRole("cell");
 
     expect(cells).toHaveLength(7);
     expect(cells[0]).toHaveTextContent(CASE_ID);
-    expect(cells[1]).toHaveTextContent("2026-07-24 11:20:40 KST");
-    expect(cells[2]).toHaveTextContent("In review");
-    expect(cells[3]).toHaveTextContent("Not resolved");
+    expect(cells[1]).toHaveTextContent("검토 중");
+    expect(cells[2]).toHaveTextContent("2026-07-24 11:20:40 KST");
+    expect(cells[3]).toHaveTextContent("미결정");
     expect(cells[4]).toHaveTextContent(ASSIGNEE_REF);
     expect(cells[5]).toHaveTextContent("3");
     expect(cells[6]).toHaveTextContent("2026-07-23 10:15:30 KST");
@@ -258,12 +258,12 @@ describe("CaseListPage data", () => {
     await settle();
     await answerWith(calls[0], listBody([listItem({ finalDisposition: null })]));
 
-    const row = await screen.findByRole("row", { name: /in review/i });
-    expect(within(row).getByText("Not resolved")).toBeInTheDocument();
+    const row = await screen.findByRole("row", { name: /검토 중/i });
+    expect(within(row).getByText("미결정")).toBeInTheDocument();
     const text = row.textContent ?? "";
-    expect(text).not.toContain("Normal");
-    expect(text).not.toContain("False positive");
-    expect(text).not.toContain("Confirmed fraud");
+    expect(text).not.toContain("정상");
+    expect(text).not.toContain("오탐");
+    expect(text).not.toContain("사기 확정");
   });
 
   it("says Unassigned for a null assignee", async () => {
@@ -272,8 +272,8 @@ describe("CaseListPage data", () => {
     await settle();
     await answerWith(calls[0], listBody([listItem({ assigneeRef: null })]));
 
-    const row = await screen.findByRole("row", { name: /in review/i });
-    expect(within(row).getByText("Unassigned")).toBeInTheDocument();
+    const row = await screen.findByRole("row", { name: /검토 중/i });
+    expect(within(row).getByText("미배정")).toBeInTheDocument();
   });
 
   it("shows every decided disposition under its own name", async () => {
@@ -298,9 +298,9 @@ describe("CaseListPage data", () => {
     );
 
     const table = await screen.findByRole("table");
-    expect(within(table).getByText("Normal")).toBeInTheDocument();
-    expect(within(table).getByText("False positive")).toBeInTheDocument();
-    expect(within(table).getByText("Confirmed fraud")).toBeInTheDocument();
+    expect(within(table).getByText("정상")).toBeInTheDocument();
+    expect(within(table).getByText("오탐")).toBeInTheDocument();
+    expect(within(table).getByText("사기 확정")).toBeInTheDocument();
   });
 
   it("marks each status with a shape as well as a word, never colour alone", async () => {
@@ -321,9 +321,9 @@ describe("CaseListPage data", () => {
     );
 
     const table = await screen.findByRole("table");
-    const open = within(table).getByText("Open");
-    const waiting = within(table).getByText("Information required");
-    const closed = within(table).getByText("Closed");
+    const open = within(table).getByText("접수");
+    const waiting = within(table).getByText("추가 정보 필요");
+    const closed = within(table).getByText("종결");
     expect(open.className).toContain("badge--neutral");
     expect(waiting.className).toContain("badge--attention");
     expect(closed.className).toContain("badge--success");
@@ -355,7 +355,7 @@ describe("CaseListPage data", () => {
     await settle();
     await answerWith(calls[0], listBody([listItem({ assigneeRef: LONG_ASSIGNEE_REF })]));
 
-    const row = await screen.findByRole("row", { name: /in review/i });
+    const row = await screen.findByRole("row", { name: /검토 중/i });
     const cell = within(row).getAllByRole("cell")[4];
     expect(cell).toHaveTextContent(LONG_ASSIGNEE_REF);
     expect(cell.className).toContain("cell-ref--long");
@@ -375,7 +375,7 @@ describe("CaseListPage data", () => {
     // `aria-label` that states what following it does. Nowhere else - no hidden
     // mirror, no `title`, no `data-` attribute.
     expect(table.innerHTML.split(CASE_ID).length - 1).toBe(3);
-    const idCell = within(screen.getByRole("row", { name: /in review/i })).getAllByRole(
+    const idCell = within(screen.getByRole("row", { name: /검토 중/i })).getAllByRole(
       "cell",
     )[0];
     expect(idCell.className).toContain("cell-ref--id");
@@ -426,7 +426,7 @@ describe("CaseListPage data", () => {
     // The whole contract of the one way out of a row, asserted as exact values.
     const link = screen.getByRole("link", { name: caseLinkName(CASE_ID) });
     expect(link.tagName).toBe("A");
-    expect(link).toHaveAccessibleName(`View case details for ${CASE_ID}`);
+    expect(link).toHaveAccessibleName(`사건 ${CASE_ID} 상세 보기`);
     expect(link.textContent).toBe(CASE_ID);
     expect(link.getAttribute("href")).toBe(`/cases/${CASE_ID}`);
     expect(link.getAttribute("target")).toBeNull();
@@ -438,10 +438,10 @@ describe("CaseListPage data", () => {
     // The purpose is carried by `aria-label`, not by a positioned element that
     // the sheet's sideways scroll could push past the edge of the document.
     expect(link.querySelector(".visually-hidden")).toBeNull();
-    expect(link.getAttribute("aria-label")).toBe(`View case details for ${CASE_ID}`);
+    expect(link.getAttribute("aria-label")).toBe(`사건 ${CASE_ID} 상세 보기`);
 
     // The row around it is still a record: the anchor is the only link in it.
-    const row = screen.getByRole("row", { name: /in review/i });
+    const row = screen.getByRole("row", { name: /검토 중/i });
     expect(row.tagName).toBe("TR");
     expect(row.getAttribute("role")).toBeNull();
     expect(row.querySelectorAll("a")).toHaveLength(1);
@@ -549,7 +549,7 @@ describe("CaseListPage data", () => {
     await settle();
     await answerWith(calls[0], listBody());
 
-    const row = await screen.findByRole("row", { name: /in review/i });
+    const row = await screen.findByRole("row", { name: /검토 중/i });
     expect(row.tagName).toBe("TR");
     expect(row.getAttribute("role")).toBeNull();
     expect(row.getAttribute("tabindex")).toBeNull();
@@ -585,7 +585,7 @@ describe("CaseListPage data", () => {
       "Detection",
       "Resolve",
       "Change status",
-      "Add note",
+      "메모 등록",
       "Copy",
     ]) {
       expect(rendered).not.toContain(forbidden);
@@ -608,7 +608,7 @@ describe("CaseListPage data", () => {
 
     const status = await screen.findByRole("status");
     expect(status).toHaveAttribute("aria-live", "polite");
-    expect(status).toHaveTextContent("Showing 1-20 of 137 cases.");
+    expect(status).toHaveTextContent("전체 137건 중 1~20건 표시");
   });
 
   it("scrolls the sheet sideways instead of dropping columns", async () => {
@@ -617,9 +617,12 @@ describe("CaseListPage data", () => {
     await settle();
     await answerWith(calls[0], listBody());
 
-    const region = await screen.findByRole("region", { name: "Case results, scrollable" });
+    const region = await screen.findByRole("region", { name: "사건 결과, 가로로 스크롤 가능" });
     expect(region).toHaveAttribute("tabindex", "0");
-    expect(within(region).getAllByRole("columnheader")).toHaveLength(7);
+    const headers = within(region).getAllByRole("columnheader");
+    expect(headers).toHaveLength(7);
+    expect(headers.slice(0, 2).map((header) => header.textContent)).toEqual(["사건 ID", "사건 상태"]);
+    expect(within(region).getAllByRole("row")[1].querySelectorAll("td")[1]).toHaveTextContent("검토 중");
   });
 });
 
@@ -632,16 +635,17 @@ describe("CaseListPage draft and committed filters", () => {
     await answerWith(calls[0], listBody());
     await screen.findByRole("table");
 
-    await user.type(screen.getByLabelText("Assignee reference"), "analyst");
-    fireEvent.change(screen.getByLabelText("Opened from (KST)"), {
+    await user.type(screen.getByLabelText("담당자 참조값"), "analyst");
+    fireEvent.change(screen.getByLabelText("생성 시작(KST)"), {
       target: { value: "2026-07-01T00:00" },
     });
-    await user.selectOptions(screen.getByLabelText("Case status"), "OPEN");
+    expect(screen.getByText(/^기간 필터/, { selector: "summary" })).toHaveTextContent("기간 설정됨");
+    await user.selectOptions(screen.getByLabelText("사건 상태"), "OPEN");
     await settle();
 
     expect(spy).toHaveBeenCalledTimes(1);
     expect(
-      screen.getByText("Edits are not applied yet. Apply them to search."),
+      screen.getByText("변경한 조건은 아직 적용되지 않았습니다."),
     ).toBeInTheDocument();
   });
 
@@ -653,7 +657,7 @@ describe("CaseListPage draft and committed filters", () => {
     await answerWith(calls[0], firstOfSevenPages());
     await screen.findByRole("table");
 
-    await user.click(screen.getByRole("button", { name: "Next page" }));
+    await user.click(screen.getByRole("button", { name: "다음 페이지" }));
     await settle();
     expect(queryOf(calls[1]).get("page")).toBe("1");
     await answerWith(
@@ -667,27 +671,27 @@ describe("CaseListPage draft and committed filters", () => {
       }),
     );
 
-    await user.selectOptions(screen.getByLabelText("Case status"), "CLOSED");
-    await user.selectOptions(screen.getByLabelText("Final disposition"), "CONFIRMED_FRAUD");
-    fireEvent.change(screen.getByLabelText("Assignee reference"), {
+    await user.selectOptions(screen.getByLabelText("사건 상태"), "CLOSED");
+    await user.selectOptions(screen.getByLabelText("최종 판정"), "CONFIRMED_FRAUD");
+    fireEvent.change(screen.getByLabelText("담당자 참조값"), {
       target: { value: ASSIGNEE_REF },
     });
-    fireEvent.change(screen.getByLabelText("Related transaction ID"), {
+    fireEvent.change(screen.getByLabelText("연관 거래 ID"), {
       target: { value: TRANSACTION_ID },
     });
-    fireEvent.change(screen.getByLabelText("Opened from (KST)"), {
+    fireEvent.change(screen.getByLabelText("생성 시작(KST)"), {
       target: { value: "2026-07-23T10:15" },
     });
-    fireEvent.change(screen.getByLabelText("Opened to (KST)"), {
+    fireEvent.change(screen.getByLabelText("생성 끝(KST)"), {
       target: { value: "2026-07-24T10:15" },
     });
-    fireEvent.change(screen.getByLabelText("Changed from (KST)"), {
+    fireEvent.change(screen.getByLabelText("변경 시작(KST)"), {
       target: { value: "2026-08-01T09:00" },
     });
-    fireEvent.change(screen.getByLabelText("Changed to (KST)"), {
+    fireEvent.change(screen.getByLabelText("변경 끝(KST)"), {
       target: { value: "2026-08-02T09:00" },
     });
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
 
     const query = queryOf(calls[2]);
@@ -718,10 +722,10 @@ describe("CaseListPage draft and committed filters", () => {
 
     // Only the last-changed range. The opened range must not be filled in on
     // its behalf, and must not be required for it.
-    fireEvent.change(screen.getByLabelText("Changed from (KST)"), {
+    fireEvent.change(screen.getByLabelText("변경 시작(KST)"), {
       target: { value: "2026-08-01T09:00" },
     });
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
 
     const query = queryOf(calls[1]);
@@ -741,21 +745,21 @@ describe("CaseListPage draft and committed filters", () => {
     await screen.findByRole("table");
     const lookupsAfterLoad = client.calls.authorizeRequest;
 
-    fireEvent.change(screen.getByLabelText("Opened from (KST)"), {
+    fireEvent.change(screen.getByLabelText("생성 시작(KST)"), {
       target: { value: "2026-07-31T00:00" },
     });
-    fireEvent.change(screen.getByLabelText("Opened to (KST)"), {
+    fireEvent.change(screen.getByLabelText("생성 끝(KST)"), {
       target: { value: "2026-07-01T00:00" },
     });
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
 
     expect(spy).toHaveBeenCalledTimes(1);
     expect(client.calls.authorizeRequest).toBe(lookupsAfterLoad);
     const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent("These filters cannot be searched");
+    expect(alert).toHaveTextContent("필터 조건을 적용할 수 없습니다");
     expect(alert).toHaveTextContent(
-      "The start of the opened time range must not be later than the end.",
+      "생성 시작 시각은 끝 시각보다 늦을 수 없습니다.",
     );
     // The other range is not implicated.
     expect(alert).not.toHaveTextContent("last-changed time range");
@@ -773,25 +777,25 @@ describe("CaseListPage draft and committed filters", () => {
     // The opened range is valid; only the last-changed one runs backwards. An
     // implementation that checked one range and reused the answer for both
     // would let this through.
-    fireEvent.change(screen.getByLabelText("Opened from (KST)"), {
+    fireEvent.change(screen.getByLabelText("생성 시작(KST)"), {
       target: { value: "2026-07-01T00:00" },
     });
-    fireEvent.change(screen.getByLabelText("Opened to (KST)"), {
+    fireEvent.change(screen.getByLabelText("생성 끝(KST)"), {
       target: { value: "2026-07-31T00:00" },
     });
-    fireEvent.change(screen.getByLabelText("Changed from (KST)"), {
+    fireEvent.change(screen.getByLabelText("변경 시작(KST)"), {
       target: { value: "2026-08-31T00:00" },
     });
-    fireEvent.change(screen.getByLabelText("Changed to (KST)"), {
+    fireEvent.change(screen.getByLabelText("변경 끝(KST)"), {
       target: { value: "2026-08-01T00:00" },
     });
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
 
     expect(spy).toHaveBeenCalledTimes(1);
     const alert = screen.getByRole("alert");
     expect(alert).toHaveTextContent(
-      "The start of the last-changed time range must not be later than the end.",
+      "변경 시작 시각은 끝 시각보다 늦을 수 없습니다.",
     );
     expect(alert).not.toHaveTextContent("opened time range");
   });
@@ -814,17 +818,17 @@ describe("CaseListPage draft and committed filters", () => {
       await screen.findByRole("table");
       const lookupsAfterLoad = client.calls.authorizeRequest;
 
-      fireEvent.change(screen.getByLabelText("Related transaction ID"), {
+      fireEvent.change(screen.getByLabelText("연관 거래 ID"), {
         target: { value },
       });
-      await user.click(screen.getByRole("button", { name: "Apply filters" }));
+      await user.click(screen.getByRole("button", { name: "필터 적용" }));
       await settle();
 
       expect(spy).toHaveBeenCalledTimes(1);
       expect(client.calls.authorizeRequest).toBe(lookupsAfterLoad);
       const alert = screen.getByRole("alert");
       expect(alert).toHaveTextContent(
-        "Enter the related transaction ID as a canonical lowercase UUID",
+        "연관 거래 ID에 소문자 UUID를 입력하거나 비워 두세요.",
       );
       // The refused value is not repeated back into the explanation.
       expect(alert.textContent ?? "").not.toContain(value.trim());
@@ -832,16 +836,16 @@ describe("CaseListPage draft and committed filters", () => {
   );
 
   it.each([
-    ["a blank reference", "   ", "Enter an assignee reference, or leave the field empty."],
+    ["a blank reference", "   ", "담당자 참조값을 입력하거나 비워 두세요."],
     [
       "a padded reference",
       " analyst_ref ",
-      "The assignee reference must not begin or end with a space.",
+      "담당자 참조값의 앞뒤에 공백을 넣을 수 없습니다.",
     ],
     [
       "a 129-character reference",
       "a".repeat(129),
-      "The assignee reference must be 128 characters or fewer.",
+      "담당자 참조값은 128자 이하여야 합니다.",
     ],
   ])("refuses %s without sending anything", async (_label, value, message) => {
     const { calls, spy } = controlledFetch();
@@ -853,8 +857,8 @@ describe("CaseListPage draft and committed filters", () => {
     await screen.findByRole("table");
     const lookupsAfterLoad = client.calls.authorizeRequest;
 
-    fireEvent.change(screen.getByLabelText("Assignee reference"), { target: { value } });
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    fireEvent.change(screen.getByLabelText("담당자 참조값"), { target: { value } });
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
 
     expect(spy).toHaveBeenCalledTimes(1);
@@ -871,10 +875,10 @@ describe("CaseListPage draft and committed filters", () => {
     await screen.findByRole("table");
 
     const boundary = "a".repeat(128);
-    fireEvent.change(screen.getByLabelText("Assignee reference"), {
+    fireEvent.change(screen.getByLabelText("담당자 참조값"), {
       target: { value: boundary },
     });
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
 
     expect(queryOf(calls[1]).get("assigneeRef")).toBe(boundary);
@@ -889,13 +893,13 @@ describe("CaseListPage draft and committed filters", () => {
     await answerWith(calls[0], listBody());
     await screen.findByRole("table");
 
-    await user.selectOptions(screen.getByLabelText("Case status"), "OPEN");
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.selectOptions(screen.getByLabelText("사건 상태"), "OPEN");
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
     expect(queryOf(calls[1]).get("caseStatus")).toBe("OPEN");
     await answerWith(calls[1], listBody());
 
-    await user.click(screen.getByRole("button", { name: "Reset filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 초기화" }));
     await settle();
 
     const query = queryOf(calls[2]);
@@ -906,7 +910,7 @@ describe("CaseListPage draft and committed filters", () => {
       size: "20",
       sort: "lastChangedAt,desc",
     });
-    expect(screen.getByLabelText("Case status")).toHaveValue("");
+    expect(screen.getByLabelText("사건 상태")).toHaveValue("");
   }, 20_000);
 
   it("keeps reference filters out of the address bar and out of web storage", async () => {
@@ -917,13 +921,13 @@ describe("CaseListPage draft and committed filters", () => {
     await answerWith(calls[0], listBody());
     await screen.findByRole("table");
 
-    fireEvent.change(screen.getByLabelText("Assignee reference"), {
+    fireEvent.change(screen.getByLabelText("담당자 참조값"), {
       target: { value: LONG_ASSIGNEE_REF },
     });
-    fireEvent.change(screen.getByLabelText("Related transaction ID"), {
+    fireEvent.change(screen.getByLabelText("연관 거래 ID"), {
       target: { value: TRANSACTION_ID },
     });
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
 
     expect(queryOf(calls[1]).get("assigneeRef")).toBe(LONG_ASSIGNEE_REF);
@@ -946,7 +950,7 @@ describe("CaseListPage sorting and pagination", () => {
     await settle();
     await answerWith(calls[0], listBody());
 
-    const header = await screen.findByRole("columnheader", { name: /last changed/i });
+    const header = await screen.findByRole("columnheader", { name: /최종 변경/i });
     expect(header).toHaveAttribute("aria-sort", "descending");
 
     await user.click(within(header).getByRole("button"));
@@ -955,7 +959,7 @@ describe("CaseListPage sorting and pagination", () => {
     expect(queryOf(calls[1]).get("sort")).toBe("lastChangedAt,asc");
     expect(queryOf(calls[1]).get("page")).toBe("0");
     await answerWith(calls[1], listBody());
-    expect(screen.getByRole("columnheader", { name: /last changed/i })).toHaveAttribute(
+    expect(screen.getByRole("columnheader", { name: /최종 변경/i })).toHaveAttribute(
       "aria-sort",
       "ascending",
     );
@@ -967,9 +971,9 @@ describe("CaseListPage sorting and pagination", () => {
     await settle();
     await answerWith(calls[0], listBody());
 
-    expect(await screen.findByRole("button", { name: "Previous page" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Next page" })).toBeDisabled();
-    expect(screen.getByText("Page 1 of 1")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "이전 페이지" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "다음 페이지" })).toBeDisabled();
+    expect(screen.getByText("페이지 1 / 전체 1")).toBeInTheDocument();
   });
 
   it("returns to page 0 when the page size changes", async () => {
@@ -980,7 +984,7 @@ describe("CaseListPage sorting and pagination", () => {
     await answerWith(calls[0], firstOfSevenPages());
     await screen.findByRole("table");
 
-    await user.click(screen.getByRole("button", { name: "Next page" }));
+    await user.click(screen.getByRole("button", { name: "다음 페이지" }));
     await settle();
     await answerWith(
       calls[1],
@@ -993,7 +997,7 @@ describe("CaseListPage sorting and pagination", () => {
       }),
     );
 
-    await user.selectOptions(screen.getByLabelText("Rows per page"), "50");
+    await user.selectOptions(screen.getByLabelText("페이지당 행 수"), "50");
     await settle();
 
     expect(queryOf(calls[2]).get("size")).toBe("50");
@@ -1010,17 +1014,17 @@ describe("CaseListPage empty and error states", () => {
     await answerWith(calls[0], listBody());
     await screen.findByRole("table");
 
-    await user.selectOptions(screen.getByLabelText("Case status"), "CLOSED");
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.selectOptions(screen.getByLabelText("사건 상태"), "CLOSED");
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
     await answerWith(calls[1], listBody([]));
 
-    expect(await screen.findByText("No cases match these filters")).toBeInTheDocument();
+    expect(await screen.findByText("조건에 맞는 사건이 없습니다")).toBeInTheDocument();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
 
     await user.click(
-      within(screen.getByText("No cases match these filters").parentElement as HTMLElement)
-        .getByRole("button", { name: "Reset filters" }),
+      within(screen.getByText("조건에 맞는 사건이 없습니다").parentElement as HTMLElement)
+        .getByRole("button", { name: "필터 초기화" }),
     );
     await settle();
     expect(queryOf(calls[2]).has("caseStatus")).toBe(false);
@@ -1032,8 +1036,8 @@ describe("CaseListPage empty and error states", () => {
     await settle();
     await answerWith(calls[0], listBody([]));
 
-    expect(await screen.findByText("There are no cases to show yet.")).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("No cases found.");
+    expect(await screen.findByText("표시할 사건이 없습니다.")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("사건이 없습니다.");
   });
 
   it("distinguishes a timeout from a network failure", async () => {
@@ -1050,7 +1054,7 @@ describe("CaseListPage empty and error states", () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
 
-    expect(screen.getByRole("alert")).toHaveTextContent("The search took too long");
+    expect(screen.getByRole("alert")).toHaveTextContent("조회에 시간이 오래 걸립니다");
     vi.useRealTimers();
   });
 
@@ -1065,11 +1069,11 @@ describe("CaseListPage empty and error states", () => {
     });
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("The backend could not be reached");
+    expect(alert).toHaveTextContent("백엔드에 연결할 수 없습니다");
     expect(alert).toHaveFocus();
     expect(spy).toHaveBeenCalledTimes(1);
 
-    await user.click(within(alert).getByRole("button", { name: "Try again" }));
+    await user.click(within(alert).getByRole("button", { name: "다시 시도" }));
     await settle();
     // Exactly one more request, not one and a replay of it.
     expect(spy).toHaveBeenCalledTimes(2);
@@ -1092,7 +1096,7 @@ describe("CaseListPage empty and error states", () => {
       traceId: TRACE_ID,
     });
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("The results could not be read");
+    expect(await screen.findByRole("alert")).toHaveTextContent("조회 결과를 읽을 수 없습니다");
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
     // Not even the row that was well formed. A partial case list is a wrong
     // case list.
@@ -1108,7 +1112,7 @@ describe("CaseListPage empty and error states", () => {
     await answerWith(calls[0], { code: "ACCESS_DENIED", message: "missing case:read" }, 403);
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("Access denied");
+    expect(alert).toHaveTextContent("접근할 수 없습니다");
     expect(within(alert).queryByRole("button")).not.toBeInTheDocument();
     // The session survives a 403: nothing was invalidated and nobody was told.
     expect(client.calls.invalidateIfCurrent).toBe(0);
@@ -1129,7 +1133,7 @@ describe("CaseListPage empty and error states", () => {
       500,
     );
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("The search failed");
+    expect(await screen.findByRole("alert")).toHaveTextContent("조회에 실패했습니다");
     const rendered = document.body.textContent ?? "";
     expect(rendered).not.toContain("500");
     expect(rendered).not.toContain("INTERNAL_ERROR");
@@ -1178,7 +1182,7 @@ describe("CaseListPage accessibility", () => {
     await answerWith(calls[0], listBody());
     await screen.findByRole("table");
 
-    const heading = screen.getByRole("heading", { name: "Cases", level: 2 });
+    const heading = screen.getByRole("heading", { name: "사건", level: 2 });
     expect(heading).toHaveAttribute("id", "cases-heading");
     const section = container.querySelector('[aria-labelledby="cases-heading"]');
     expect(section).not.toBeNull();
@@ -1212,14 +1216,14 @@ describe("CaseListPage accessibility", () => {
     await screen.findByRole("table");
 
     const labels = [
-      "Opened from (KST)",
-      "Opened to (KST)",
-      "Changed from (KST)",
-      "Changed to (KST)",
-      "Case status",
-      "Final disposition",
-      "Assignee reference",
-      "Related transaction ID",
+      "생성 시작(KST)",
+      "생성 끝(KST)",
+      "변경 시작(KST)",
+      "변경 끝(KST)",
+      "사건 상태",
+      "최종 판정",
+      "담당자 참조값",
+      "연관 거래 ID",
     ];
     for (const label of labels) {
       const control = screen.getByLabelText(label);
@@ -1241,17 +1245,22 @@ describe("CaseListPage accessibility", () => {
     await answerWith(calls[0], listBody());
     await screen.findByRole("table");
 
+    const timeRanges = screen.getByText(/^기간 필터/, { selector: "summary" });
+    expect(timeRanges.closest("details")).not.toHaveAttribute("open");
+    await user.click(timeRanges);
+    expect(timeRanges.closest("details")).toHaveAttribute("open");
     const order = [
-      screen.getByLabelText("Opened from (KST)"),
-      screen.getByLabelText("Opened to (KST)"),
-      screen.getByLabelText("Changed from (KST)"),
-      screen.getByLabelText("Changed to (KST)"),
-      screen.getByLabelText("Case status"),
-      screen.getByLabelText("Final disposition"),
-      screen.getByLabelText("Assignee reference"),
-      screen.getByLabelText("Related transaction ID"),
-      screen.getByRole("button", { name: "Apply filters" }),
-      screen.getByRole("button", { name: "Reset filters" }),
+      timeRanges,
+      screen.getByLabelText("생성 시작(KST)"),
+      screen.getByLabelText("생성 끝(KST)"),
+      screen.getByLabelText("변경 시작(KST)"),
+      screen.getByLabelText("변경 끝(KST)"),
+      screen.getByLabelText("사건 상태"),
+      screen.getByLabelText("최종 판정"),
+      screen.getByLabelText("담당자 참조값"),
+      screen.getByLabelText("연관 거래 ID"),
+      screen.getByRole("button", { name: "필터 적용" }),
+      screen.getByRole("button", { name: "필터 초기화" }),
     ];
 
     order[0].focus();
@@ -1270,7 +1279,7 @@ describe("CaseListPage accessibility", () => {
     await answerWith(calls[0], listBody());
     await screen.findByRole("table");
 
-    const field = screen.getByLabelText("Assignee reference");
+    const field = screen.getByLabelText("담당자 참조값");
     await user.click(field);
     await user.keyboard(`${ASSIGNEE_REF}{Enter}`);
     await settle();
@@ -1285,14 +1294,14 @@ describe("CaseListPage accessibility", () => {
     await settle();
     await answerWith(calls[0], firstOfSevenPages());
 
-    const header = await screen.findByRole("columnheader", { name: /last changed/i });
+    const header = await screen.findByRole("columnheader", { name: /최종 변경/i });
     within(header).getByRole("button").focus();
     await user.keyboard("{Enter}");
     await settle();
     expect(queryOf(calls[1]).get("sort")).toBe("lastChangedAt,asc");
     await answerWith(calls[1], firstOfSevenPages());
 
-    screen.getByRole("button", { name: "Next page" }).focus();
+    screen.getByRole("button", { name: "다음 페이지" }).focus();
     await user.keyboard("{Enter}");
     await settle();
     expect(queryOf(calls[2]).get("page")).toBe("1");
@@ -1302,10 +1311,10 @@ describe("CaseListPage accessibility", () => {
 describe("CaseListPage validation refusal focus", () => {
   /** Puts the draft into a state `commitDraft` refuses for exactly one reason. */
   function reverseTheOpenedRange(): void {
-    fireEvent.change(screen.getByLabelText("Opened from (KST)"), {
+    fireEvent.change(screen.getByLabelText("생성 시작(KST)"), {
       target: { value: "2026-07-31T00:00" },
     });
-    fireEvent.change(screen.getByLabelText("Opened to (KST)"), {
+    fireEvent.change(screen.getByLabelText("생성 끝(KST)"), {
       target: { value: "2026-07-01T00:00" },
     });
   }
@@ -1324,7 +1333,7 @@ describe("CaseListPage validation refusal focus", () => {
 
     // A reversed opened range: one problem.
     reverseTheOpenedRange();
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
 
     const first = screen.getByRole("alert");
@@ -1332,7 +1341,7 @@ describe("CaseListPage validation refusal focus", () => {
     // problem that the text assertion below would still be satisfied by.
     expect(within(first).getAllByRole("listitem")).toHaveLength(1);
     expect(first).toHaveTextContent(
-      "The start of the opened time range must not be later than the end.",
+      "생성 시작 시각은 끝 시각보다 늦을 수 없습니다.",
     );
     expect(first).toHaveFocus();
 
@@ -1340,7 +1349,7 @@ describe("CaseListPage validation refusal focus", () => {
     // to genuinely belong to another control before the second Apply: if it
     // were still sitting on the summary, the summary would "have focus" after
     // the second refusal whether or not focus was ever moved there again.
-    const assigneeField = screen.getByLabelText("Assignee reference");
+    const assigneeField = screen.getByLabelText("담당자 참조값");
     await user.click(assigneeField);
     expect(document.activeElement).toBe(assigneeField);
     expect(first).not.toHaveFocus();
@@ -1349,17 +1358,17 @@ describe("CaseListPage validation refusal focus", () => {
     // refusal still carries exactly one entry. A signature built from that
     // count would not change here, and focus would stay where the analyst left
     // it instead of moving to the new explanation.
-    fireEvent.change(screen.getByLabelText("Opened to (KST)"), {
+    fireEvent.change(screen.getByLabelText("생성 끝(KST)"), {
       target: { value: "2026-08-01T00:00" },
     });
     fireEvent.change(assigneeField, { target: { value: "   " } });
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
 
     const second = screen.getByRole("alert");
     expect(second).toBe(first);
     expect(within(second).getAllByRole("listitem")).toHaveLength(1);
-    expect(second).toHaveTextContent("Enter an assignee reference, or leave the field empty.");
+    expect(second).toHaveTextContent("담당자 참조값을 입력하거나 비워 두세요.");
     expect(second).not.toHaveTextContent("opened time range");
     expect(second).toHaveFocus();
 
@@ -1380,16 +1389,16 @@ describe("CaseListPage validation refusal focus", () => {
 
     const lookupsAfterFirstLoad = client.calls.authorizeRequest;
     reverseTheOpenedRange();
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
     expect(screen.getByRole("alert")).toHaveFocus();
 
     // The analyst carries on somewhere else and asks again without changing
     // anything. The same explanation is still the answer, so it is announced
     // again rather than left behind.
-    screen.getByLabelText("Assignee reference").focus();
+    screen.getByLabelText("담당자 참조값").focus();
     expect(screen.getByRole("alert")).not.toHaveFocus();
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
 
     expect(screen.getByRole("alert")).toHaveFocus();
@@ -1406,11 +1415,11 @@ describe("CaseListPage validation refusal focus", () => {
     await screen.findByRole("table");
 
     reverseTheOpenedRange();
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
     expect(screen.getByRole("alert")).toHaveFocus();
 
-    const resetButton = screen.getByRole("button", { name: "Reset filters" });
+    const resetButton = screen.getByRole("button", { name: "필터 초기화" });
     await user.click(resetButton);
     await settle();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
@@ -1419,8 +1428,8 @@ describe("CaseListPage validation refusal focus", () => {
     // asked the Backend for nothing.
     expect(calls).toHaveLength(1);
 
-    await user.selectOptions(screen.getByLabelText("Case status"), "OPEN");
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.selectOptions(screen.getByLabelText("사건 상태"), "OPEN");
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
     expect(queryOf(calls[1]).get("caseStatus")).toBe("OPEN");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
@@ -1429,7 +1438,7 @@ describe("CaseListPage validation refusal focus", () => {
     // And the refusal that follows is announced on its own merits, not skipped
     // because an earlier one looked the same.
     reverseTheOpenedRange();
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
     expect(screen.getByRole("alert")).toHaveFocus();
   }, 30_000);
@@ -1443,13 +1452,13 @@ describe("CaseListPage validation refusal focus", () => {
     await screen.findByRole("table");
 
     reverseTheOpenedRange();
-    fireEvent.change(screen.getByLabelText("Assignee reference"), {
+    fireEvent.change(screen.getByLabelText("담당자 참조값"), {
       target: { value: LONG_ASSIGNEE_REF },
     });
-    fireEvent.change(screen.getByLabelText("Related transaction ID"), {
+    fireEvent.change(screen.getByLabelText("연관 거래 ID"), {
       target: { value: TRANSACTION_ID },
     });
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
 
     const alert = screen.getByRole("alert");
@@ -1461,8 +1470,8 @@ describe("CaseListPage validation refusal focus", () => {
     // Nothing else in the tree - no text node, no title, no data attribute, no
     // hidden input - is allowed to carry them.
     const fields = [
-      screen.getByLabelText("Assignee reference"),
-      screen.getByLabelText("Related transaction ID"),
+      screen.getByLabelText("담당자 참조값"),
+      screen.getByLabelText("연관 거래 ID"),
     ];
     for (const needle of [LONG_ASSIGNEE_REF, TRANSACTION_ID]) {
       const elsewhere = Array.from(container.querySelectorAll("*")).filter((element) => {

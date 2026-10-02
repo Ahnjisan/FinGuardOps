@@ -8,6 +8,7 @@ import {
   type CaseStatus,
 } from "../api/caseApi";
 import { useCaseList, type CaseListErrorKind, type CaseListState } from "../api/useCaseList";
+import { Icon } from "../shared/Icon";
 import { CaseFilters } from "./cases/CaseFilters";
 import { CasePagination } from "./cases/CasePagination";
 import { CaseTable } from "./cases/CaseTable";
@@ -80,34 +81,34 @@ const ERROR_COPY: Readonly<
   Record<CaseListErrorKind, { readonly title: string; readonly body: string }>
 > = Object.freeze({
   timeout: {
-    title: "The search took too long",
-    body: "The backend did not answer in time. Try the search again.",
+    title: "조회에 시간이 오래 걸립니다",
+    body: "백엔드가 제때 응답하지 않았습니다. 다시 조회하세요.",
   },
   network: {
-    title: "The backend could not be reached",
-    body: "Check the connection to the FinGuardOps backend, then try again.",
+    title: "백엔드에 연결할 수 없습니다",
+    body: "FinGuardOps 백엔드 연결을 확인한 뒤 다시 시도하세요.",
   },
   "invalid-response": {
-    title: "The results could not be read",
+    title: "조회 결과를 읽을 수 없습니다",
     body:
-      "The backend returned data this console will not display. Nothing is shown rather than " +
-      "a partial list. Try again, and report it if it continues.",
+      "백엔드 응답을 표시할 수 없어 " +
+      "일부 결과만 보여주지 않았습니다. 다시 시도하고 문제가 계속되면 알려주세요.",
   },
   "access-denied": {
-    title: "Access denied",
-    body: "You do not have permission to read cases.",
+    title: "접근할 수 없습니다",
+    body: "사건을 조회할 권한이 없습니다.",
   },
   "session-lost": {
-    title: "Your session ended",
-    body: "Sign in again to continue.",
+    title: "세션이 종료되었습니다",
+    body: "계속하려면 다시 로그인하세요.",
   },
   "request-rejected": {
-    title: "The search was not sent",
-    body: "These filters are not a search this console will send. Adjust them and try again.",
+    title: "조회 요청을 보내지 않았습니다",
+    body: "필터 조건을 확인하고 다시 조회하세요.",
   },
   unknown: {
-    title: "The search failed",
-    body: "The backend could not complete the search. Try again.",
+    title: "조회에 실패했습니다",
+    body: "백엔드가 조회를 완료하지 못했습니다. 다시 시도하세요.",
   },
 });
 
@@ -212,9 +213,9 @@ function commitDraft(draft: CaseFilterDraft): CommitOutcome {
   } = {};
 
   const opened = commitRange(draft.createdAtFrom, draft.createdAtTo, problems, {
-    badFrom: "Enter the start of the opened time range as a real date and time.",
-    badTo: "Enter the end of the opened time range as a real date and time.",
-    reversed: "The start of the opened time range must not be later than the end.",
+    badFrom: "생성 시작 시각을 올바르게 입력하세요.",
+    badTo: "생성 끝 시각을 올바르게 입력하세요.",
+    reversed: "생성 시작 시각은 끝 시각보다 늦을 수 없습니다.",
   });
   if (opened.from !== undefined) {
     filters.createdAtFrom = opened.from;
@@ -224,9 +225,9 @@ function commitDraft(draft: CaseFilterDraft): CommitOutcome {
   }
 
   const changed = commitRange(draft.lastChangedAtFrom, draft.lastChangedAtTo, problems, {
-    badFrom: "Enter the start of the last-changed time range as a real date and time.",
-    badTo: "Enter the end of the last-changed time range as a real date and time.",
-    reversed: "The start of the last-changed time range must not be later than the end.",
+    badFrom: "변경 시작 시각을 올바르게 입력하세요.",
+    badTo: "변경 끝 시각을 올바르게 입력하세요.",
+    reversed: "변경 시작 시각은 끝 시각보다 늦을 수 없습니다.",
   });
   if (changed.from !== undefined) {
     filters.lastChangedAtFrom = changed.from;
@@ -239,27 +240,27 @@ function commitDraft(draft: CaseFilterDraft): CommitOutcome {
     if (isCaseStatus(draft.caseStatus)) {
       filters.caseStatus = draft.caseStatus;
     } else {
-      problems.push("Choose a case status from the list.");
+      problems.push("목록에서 사건 상태를 선택하세요.");
     }
   }
   if (draft.finalDisposition !== "") {
     if (isFinalDisposition(draft.finalDisposition)) {
       filters.finalDisposition = draft.finalDisposition;
     } else {
-      problems.push("Choose a final disposition from the list.");
+      problems.push("목록에서 최종 판정을 선택하세요.");
     }
   }
 
   if (draft.assigneeRef !== "") {
     const problem = assigneeRefProblem(draft.assigneeRef);
     if (problem === "blank") {
-      problems.push("Enter an assignee reference, or leave the field empty.");
+      problems.push("담당자 참조값을 입력하거나 비워 두세요.");
     } else if (problem === "too-long") {
       problems.push(
-        `The assignee reference must be ${String(MAX_ASSIGNEE_REF_LENGTH)} characters or fewer.`,
+        `담당자 참조값은 ${String(MAX_ASSIGNEE_REF_LENGTH)}자 이하여야 합니다.`,
       );
     } else if (problem === "untrimmed") {
-      problems.push("The assignee reference must not begin or end with a space.");
+      problems.push("담당자 참조값의 앞뒤에 공백을 넣을 수 없습니다.");
     } else {
       filters.assigneeRef = draft.assigneeRef;
     }
@@ -272,7 +273,7 @@ function commitDraft(draft: CaseFilterDraft): CommitOutcome {
       // Says what shape is required and repeats nothing that was typed, so a
       // mistyped identifier cannot be read back out of the refusal.
       problems.push(
-        "Enter the related transaction ID as a canonical lowercase UUID, or leave the field empty.",
+        "연관 거래 ID에 소문자 UUID를 입력하거나 비워 두세요.",
       );
     }
   }
@@ -396,11 +397,10 @@ export function CaseListPage() {
   return (
     <section className="cases" aria-labelledby="cases-heading">
       <div className="page-head">
-        <p className="page-head__eyebrow">Investigation workspace</p>
-        <h2 id="cases-heading">Cases</h2>
+        <p className="page-head__eyebrow">사건 조사</p>
+        <h2 id="cases-heading">사건</h2>
         <p>
-          Search fraud cases and review where each one has reached in investigation. Times
-          are Korea Standard Time (UTC+09:00).
+          사건을 찾고 조사 상태를 확인합니다. 시간은 한국 표준시(UTC+09:00)입니다.
         </p>
       </div>
 
@@ -413,7 +413,7 @@ export function CaseListPage() {
       />
 
       <div className="case-results-head">
-        <h3>Case results</h3>
+        <h3>사건 조회 결과</h3>
         <div className="result-line" role="status" aria-live="polite">
           <ResultSummary state={state} />
         </div>
@@ -421,7 +421,7 @@ export function CaseListPage() {
 
       {problems.length > 0 && (
         <div className="notice notice--error" role="alert" tabIndex={-1} ref={errorRef}>
-          <p className="notice__title">These filters cannot be searched</p>
+          <p className="notice__title">필터 조건을 적용할 수 없습니다</p>
           <ul className="notice__body">
             {problems.map((problem) => (
               <li key={problem}>{problem}</li>
@@ -436,7 +436,7 @@ export function CaseListPage() {
           <p className="notice__body">{ERROR_COPY[state.error].body}</p>
           {RETRYABLE.has(state.error) && (
             <button className="button" type="button" onClick={retry}>
-              Try again
+              <Icon name="refresh" />다시 시도
             </button>
           )}
         </div>
@@ -444,21 +444,21 @@ export function CaseListPage() {
 
       {state.status === "loading" && (
         <p className="loading-panel">
-          {state.phase === "initial" ? "Loading cases..." : "Applying filters..."}
+          {state.phase === "initial" ? "사건을 불러오고 있습니다…" : "필터를 적용하고 있습니다…"}
         </p>
       )}
 
       {state.status === "success" && state.data.content.length === 0 && (
         <div className="notice notice--empty">
-          <p className="notice__title">No cases match these filters</p>
+          <p className="notice__title">조건에 맞는 사건이 없습니다</p>
           <p className="notice__body">
             {hasCommittedFilters
-              ? "Widen the time range or clear the filters to see more."
-              : "There are no cases to show yet."}
+              ? "기간을 넓히거나 필터를 초기화하세요."
+              : "표시할 사건이 없습니다."}
           </p>
           {hasCommittedFilters && (
             <button className="button" type="button" onClick={reset}>
-              Reset filters
+              <Icon name="reset" />필터 초기화
             </button>
           )}
         </div>
@@ -480,10 +480,10 @@ export function CaseListPage() {
 
 function ResultSummary({ state }: { readonly state: CaseListState }) {
   if (state.status === "loading") {
-    return <span>{state.phase === "initial" ? "Loading cases" : "Applying filters"}</span>;
+    return <span>{state.phase === "initial" ? "사건을 불러오는 중" : "필터 적용 중"}</span>;
   }
   if (state.status === "error") {
-    return <span>No results. {ERROR_COPY[state.error].title}.</span>;
+    return <span>결과가 없습니다. {ERROR_COPY[state.error].title}.</span>;
   }
   if (state.status !== "success") {
     return null;
@@ -495,15 +495,14 @@ function ResultSummary({ state }: { readonly state: CaseListState }) {
     state.data.page.totalElements,
   );
   if (window.total === 0) {
-    return <span>No cases found.</span>;
+    return <span>사건이 없습니다.</span>;
   }
   return (
     <span>
-      Showing{" "}
+      전체 <span className="result-line__count">{window.total}</span>건 중{" "}
       <span className="result-line__count">
-        {window.first}-{window.last}
-      </span>{" "}
-      of <span className="result-line__count">{window.total}</span> cases.
+        {window.first}~{window.last}
+      </span>건 표시
     </span>
   );
 }

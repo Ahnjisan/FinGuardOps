@@ -118,7 +118,7 @@ describe("application entry (bootstrap)", () => {
       await import("./main");
     });
 
-    expect(screen.getByRole("status", { name: "Authentication status" })).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "인증 상태" })).toBeInTheDocument();
   });
 
   it("runs environment validation exactly once on a valid start", async () => {
@@ -216,7 +216,7 @@ describe("application entry with unusable Web Storage", () => {
     await bootAt("/");
 
     expect(screen.getByRole("heading", { name: "FinGuardOps", level: 2 })).toBeInTheDocument();
-    expect(screen.getByRole("navigation", { name: /primary/i })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: /주요 탐색/i })).toBeInTheDocument();
     expect(spies.error).not.toHaveBeenCalled();
     expect(spies.warn).not.toHaveBeenCalled();
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -236,7 +236,7 @@ describe("application entry with unusable Web Storage", () => {
 
     await bootAt("/health");
 
-    expect(screen.getByRole("heading", { name: /backend health/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /백엔드 상태/i })).toBeInTheDocument();
     expect(spies.error).not.toHaveBeenCalled();
     // Only the backend health call; nothing reached the Authorization Server.
     for (const call of fetchSpy.mock.calls as Array<[string]>) {
@@ -251,13 +251,13 @@ describe("application entry with unusable Web Storage", () => {
 
     await bootAt("/");
 
-    const authStatus = screen.getByRole("status", { name: "Authentication status" });
+    const authStatus = screen.getByRole("status", { name: "인증 상태" });
     expect(authStatus.textContent).toBe(
-      "Authentication is unavailable right now. Please contact an administrator.",
+      "인증 서비스를 사용할 수 없습니다. 관리자에게 문의하세요.",
     );
     // The user is offered a button; nothing signed in on its own.
-    expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Sign out" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "로그아웃" })).not.toBeInTheDocument();
   });
 
   it("exposes no raw DOMException text anywhere in the document", async () => {
@@ -287,12 +287,12 @@ describe("application entry with unusable Web Storage", () => {
     expect(window.location.hash).toBe("");
 
     // And nothing was authenticated on the way.
-    expect(screen.getByRole("heading", { name: /signing in/i })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Sign out" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /로그인 중/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "로그아웃" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "FinGuardOps", level: 2 })).not.toBeInTheDocument();
 
     const rendered = document.body.textContent ?? "";
-    expect(rendered).toContain("Sign-in could not be completed.");
+    expect(rendered).toContain("로그인을 완료할 수 없습니다.");
     expect(rendered).not.toContain("SECRET_CODE");
     expect(rendered).not.toContain("SECRET_STATE");
     expect(rendered).not.toContain("SECRET_FRAGMENT");
@@ -347,7 +347,7 @@ describe("application entry transaction hygiene", () => {
     expect(getItemSpy.mock.calls.map((call) => String(call[0]))).toContain(stateKey);
     // The callback still ends in its fixed failure, and cleanup still happened.
     expect(window.sessionStorage.getItem(stateKey)).toBeNull();
-    expect(document.body.textContent ?? "").toContain("Sign-in could not be completed.");
+    expect(document.body.textContent ?? "").toContain("로그인을 완료할 수 없습니다.");
   });
 
   it("cleans the transaction record after the callback route settles", async () => {
@@ -362,6 +362,6 @@ describe("application entry transaction hygiene", () => {
     // owns the cleanup, touching nothing outside its own prefix.
     expect(window.sessionStorage.getItem(TRANSACTION_PREFIX + "current")).toBeNull();
     expect(window.sessionStorage.getItem("other-app.key")).toBe("keep");
-    expect(screen.getByRole("heading", { name: /signing in/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /로그인 중/i })).toBeInTheDocument();
   });
 });

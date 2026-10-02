@@ -87,7 +87,7 @@ export function InvestigationNoteComposer({
   if (!isWritableCaseStatus(caseStatus)) {
     return (
       <p className="notice notice--empty investigation-note-composer__locked">
-        Investigation notes cannot be added while this case is {caseStatus === "OPEN" ? "open" : "closed"}.
+        이 사건은 {caseStatus === "OPEN" ? "접수" : "종결"} 상태이므로 메모를 추가할 수 없습니다.
       </p>
     );
   }
@@ -117,9 +117,9 @@ export function InvestigationNoteComposer({
   return (
     <div className="investigation-note-composer">
       <form onSubmit={handleSubmit} aria-busy={pending || undefined} noValidate>
-        <label htmlFor="investigation-note-content">Investigation note</label>
+        <label htmlFor="investigation-note-content">조사 메모</label>
         <p id={HELPER_ID} className="investigation-note-composer__helper">
-          Plain text, 1–4,000 Unicode characters. Ctrl+Enter or Cmd+Enter submits.
+          일반 텍스트 1~4,000자. Ctrl+Enter 또는 Cmd+Enter로 등록합니다.
         </p>
         <textarea
           id="investigation-note-content"
@@ -141,7 +141,7 @@ export function InvestigationNoteComposer({
           }}
         />
         <p id={COUNTER_ID} className="investigation-note-composer__counter" aria-live="off">
-          {count.toLocaleString("en-US")} / 4,000
+          {count.toLocaleString("ko-KR")} / 4,000
         </p>
 
         {invalid && (
@@ -153,7 +153,7 @@ export function InvestigationNoteComposer({
         {failure !== null && (
           <div className="notice notice--error investigation-note-composer__feedback" role="alert">
             <h4 ref={errorHeadingRef} tabIndex={-1} className="notice__title">
-              Note not added
+              메모를 등록하지 못했습니다
             </h4>
             <p className="notice__body">{failure}</p>
           </div>
@@ -182,14 +182,14 @@ export function InvestigationNoteComposer({
               textareaRef.current?.focus();
             }}
           >
-            Cancel
+            취소
           </button>
           <button
             className="button button--primary"
             type="submit"
             disabled={pending || waitingForReconciliation}
           >
-            {pending ? "Adding note…" : "Add note"}
+            {pending ? "메모 등록 중…" : "메모 등록"}
           </button>
         </div>
       </form>

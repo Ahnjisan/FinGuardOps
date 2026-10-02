@@ -28,7 +28,7 @@ export function CasePagination({
   const totalPages = Math.max(page.totalPages, 1);
 
   return (
-    <nav className="pager" aria-label="Case pages">
+    <nav className="pager" aria-label="사건 페이지">
       <button
         className="button"
         type="button"
@@ -37,7 +37,7 @@ export function CasePagination({
           onPageChange(page.number - 1);
         }}
       >
-        Previous page
+        이전 페이지
       </button>
       <button
         className="button"
@@ -47,13 +47,13 @@ export function CasePagination({
           onPageChange(page.number + 1);
         }}
       >
-        Next page
+        다음 페이지
       </button>
       <p className="pager__position">
-        Page {page.number + 1} of {totalPages}
+        페이지 {page.number + 1} / 전체 {totalPages}
       </p>
       <div className="pager__size">
-        <label htmlFor="case-pager-size">Rows per page</label>
+        <label htmlFor="case-pager-size">페이지당 행 수</label>
         <select
           id="case-pager-size"
           value={page.size}

@@ -35,13 +35,13 @@ afterEach(() => {
 });
 
 /** What the shell shows while `AuthProvider` is still in `initializing`. */
-const PREPARING = "Preparing sign-in...";
+const PREPARING = "로그인을 준비하고 있습니다…";
 
 /** What the shell shows while a sign-in or callback is in flight. */
-const SIGNING_IN = "Signing in...";
+const SIGNING_IN = "로그인 중입니다…";
 
 function authStatus(): HTMLElement {
-  return screen.getByRole("status", { name: "Authentication status" });
+  return screen.getByRole("status", { name: "인증 상태" });
 }
 
 interface RenderAtOptions {
@@ -96,7 +96,7 @@ async function renderAt(path: string, options: RenderAtOptions) {
   expect(authStatus()).not.toHaveTextContent(pendingStatus);
   if (settled === "signed-out") {
     expect(authStatus()).toBeEmptyDOMElement();
-    expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
   } else {
     expect(authStatus()).toHaveTextContent(settled.status);
   }
@@ -108,7 +108,7 @@ describe("app router", () => {
   it("renders HomePage at the root path", async () => {
     await renderAt("/", { settled: "signed-out" });
 
-    expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "FinGuardOps", level: 2 })).toBeInTheDocument();
   });
 
@@ -117,10 +117,10 @@ describe("app router", () => {
 
     await renderAt("/health", { settled: "signed-out" });
 
-    expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: /backend health/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /백엔드 상태/i })).toBeInTheDocument();
     await waitFor(() => {
-      expect(within(screen.getByRole("main")).getByRole("status")).toHaveTextContent(/healthy/i);
+      expect(within(screen.getByRole("main")).getByRole("status")).toHaveTextContent(/정상적으로 응답합니다/);
     });
   });
 
@@ -133,38 +133,38 @@ describe("app router", () => {
       settled: { status: safeAuthErrorMessage("callback") },
     });
 
-    expect(screen.getByRole("heading", { name: /signing in/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /로그인 중/i })).toBeInTheDocument();
     expect(client.calls.completeSignIn).toHaveLength(0);
   });
 
   it("renders NotFoundPage for an unmatched path", async () => {
     await renderAt("/does-not-exist", { settled: "signed-out" });
 
-    expect(screen.getByRole("heading", { name: /page not found/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /페이지를 찾을 수 없습니다/i })).toBeInTheDocument();
   });
 
   it("has no logout callback route", async () => {
     await renderAt("/auth/logout/callback", { settled: "signed-out" });
 
-    expect(screen.getByRole("heading", { name: /page not found/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /페이지를 찾을 수 없습니다/i })).toBeInTheDocument();
   });
 
   it("has no dedicated login route", async () => {
     await renderAt("/login", { settled: "signed-out" });
 
-    expect(screen.getByRole("heading", { name: /page not found/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /페이지를 찾을 수 없습니다/i })).toBeInTheDocument();
   });
 
   it("has no silent renew callback route", async () => {
     await renderAt("/auth/silent-renew", { settled: "signed-out" });
 
-    expect(screen.getByRole("heading", { name: /page not found/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /페이지를 찾을 수 없습니다/i })).toBeInTheDocument();
   });
 
   it("renders the primary navigation landmark provided by AppShell", async () => {
     await renderAt("/", { settled: "signed-out" });
 
-    expect(screen.getByRole("navigation", { name: /primary/i })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: /주요 탐색/i })).toBeInTheDocument();
   });
 });
 
@@ -176,7 +176,7 @@ describe("public route boundary", () => {
 
     await renderAt("/", { client, settled: "signed-out" });
 
-    expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(client.calls.signIn).toHaveLength(0);
     expect(client.calls.completeSignIn).toHaveLength(0);
@@ -189,7 +189,7 @@ describe("public route boundary", () => {
 
     await renderAt("/health", { client, settled: "signed-out" });
     await waitFor(() => {
-      expect(within(screen.getByRole("main")).getByRole("status")).toHaveTextContent(/healthy/i);
+      expect(within(screen.getByRole("main")).getByRole("status")).toHaveTextContent(/정상적으로 응답합니다/);
     });
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
@@ -206,7 +206,7 @@ describe("public route boundary", () => {
 
     await renderAt("/does-not-exist", { client, settled: "signed-out" });
 
-    expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
     expect(client.calls.completeSignIn).toHaveLength(0);
   });
 
@@ -219,9 +219,9 @@ describe("public route boundary", () => {
       settled: { status: safeAuthErrorMessage("configuration") },
     });
 
-    expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "FinGuardOps", level: 2 })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Health" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "서비스 상태" })).toBeInTheDocument();
   });
 });
 
@@ -255,9 +255,9 @@ describe("the /transactions production route", () => {
     renderSignedInAt("/transactions", [role]);
 
     expect(
-      await screen.findByRole("heading", { name: "Transactions", level: 2 }),
+      await screen.findByRole("heading", { name: "거래", level: 2 }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Apply filters" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "필터 적용" })).toBeInTheDocument();
   });
 
   it.each(NON_TRANSACTION_ROLES)("refuses direct entry for %s, sending nothing", async (role) => {
@@ -266,9 +266,9 @@ describe("the /transactions production route", () => {
 
     const { client } = renderSignedInAt("/transactions", [role]);
 
-    expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "접근할 수 없습니다" })).toBeInTheDocument();
     expect(
-      screen.queryByRole("heading", { name: "Transactions", level: 2 }),
+      screen.queryByRole("heading", { name: "거래", level: 2 }),
     ).not.toBeInTheDocument();
     // The refusal costs the Backend nothing at all, and takes no credential.
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -287,7 +287,7 @@ describe("the /transactions production route", () => {
 
     renderRoutesWithAuth(routes, { client, initialEntries: ["/transactions"] });
 
-    expect(await screen.findByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "로그인이 필요합니다" })).toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(client.calls.signIn).toHaveLength(0);
     expect(client.calls.authorizeRequest).toBe(0);
@@ -303,10 +303,10 @@ describe("the /transactions production route", () => {
     renderRoutesWithAuth(routes, { client, initialEntries: ["/transactions"] });
 
     expect(authStatus()).toHaveTextContent(PREPARING);
-    expect(screen.getByText("Checking access...")).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Access denied" })).not.toBeInTheDocument();
+    expect(screen.getByText("접근 권한을 확인하고 있습니다…")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "접근할 수 없습니다" })).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("heading", { name: "Transactions", level: 2 }),
+      screen.queryByRole("heading", { name: "거래", level: 2 }),
     ).not.toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
@@ -317,14 +317,14 @@ describe("the /transactions production route", () => {
       vi.fn().mockImplementation(() => new Promise<Response>(() => {})),
     );
     const { client } = renderSignedInAt("/transactions", ["FDS_ANALYST"]);
-    await screen.findByRole("heading", { name: "Transactions", level: 2 });
+    await screen.findByRole("heading", { name: "거래", level: 2 });
 
     act(() => {
       client.emitSessionInvalidated();
     });
 
-    expect(screen.getByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Apply filters" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "로그인이 필요합니다" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "필터 적용" })).not.toBeInTheDocument();
   });
 
   it("returns to exactly /transactions after signing in from it", async () => {
@@ -336,9 +336,9 @@ describe("the /transactions production route", () => {
 
     renderRoutesWithAuth(routes, { client, initialEntries: ["/transactions"] });
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(screen.getByRole("button", { name: "로그인" }));
 
     expect(client.calls.signIn).toEqual(["/transactions"]);
   });
@@ -353,7 +353,7 @@ describe("the /transactions production route", () => {
 
     // Two segments under `/transactions` is no route this application has, so
     // it is a 404 rather than a screen that half exists.
-    expect(await screen.findByRole("heading", { name: "Page not found" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "페이지를 찾을 수 없습니다" })).toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -362,7 +362,7 @@ describe("the /transactions production route", () => {
 
     renderSignedInAt("/transactionsx", ["FDS_ANALYST"]);
 
-    expect(await screen.findByRole("heading", { name: "Page not found" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "페이지를 찾을 수 없습니다" })).toBeInTheDocument();
   });
 
   it("offers the destination in the rail and reaches it by keyboard", async () => {
@@ -373,14 +373,14 @@ describe("the /transactions production route", () => {
     );
     renderSignedInAt("/", ["FDS_VIEWER"]);
 
-    const link = await screen.findByRole("link", { name: "Transactions" });
+    const link = await screen.findByRole("link", { name: "거래" });
     link.focus();
     await user.keyboard("{Enter}");
 
     expect(
-      await screen.findByRole("heading", { name: "Transactions", level: 2 }),
+      await screen.findByRole("heading", { name: "거래", level: 2 }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Transactions" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "거래" })).toHaveAttribute(
       "aria-current",
       "page",
     );
@@ -410,8 +410,8 @@ describe("the /cases production route", () => {
 
     renderSignedInAt("/cases", [role]);
 
-    expect(await screen.findByRole("heading", { name: "Cases", level: 2 })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Apply filters" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "사건", level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "필터 적용" })).toBeInTheDocument();
     // The direct URL entry really did reach the case endpoint, and only it.
     await waitFor(() => {
       expect(fetchSpy).toHaveBeenCalledTimes(1);
@@ -426,8 +426,8 @@ describe("the /cases production route", () => {
 
     const { client } = renderSignedInAt("/cases", [role]);
 
-    expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Cases", level: 2 })).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "접근할 수 없습니다" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "사건", level: 2 })).not.toBeInTheDocument();
     // The refusal costs the Backend nothing at all, and takes no credential.
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(client.calls.authorizeRequest).toBe(0);
@@ -446,7 +446,7 @@ describe("the /cases production route", () => {
 
     renderRoutesWithAuth(routes, { client, initialEntries: ["/cases"] });
 
-    expect(await screen.findByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "로그인이 필요합니다" })).toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(client.calls.signIn).toHaveLength(0);
     expect(client.calls.authorizeRequest).toBe(0);
@@ -462,9 +462,9 @@ describe("the /cases production route", () => {
     renderRoutesWithAuth(routes, { client, initialEntries: ["/cases"] });
 
     expect(authStatus()).toHaveTextContent(PREPARING);
-    expect(screen.getByText("Checking access...")).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Access denied" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Cases", level: 2 })).not.toBeInTheDocument();
+    expect(screen.getByText("접근 권한을 확인하고 있습니다…")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "접근할 수 없습니다" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "사건", level: 2 })).not.toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -480,7 +480,7 @@ describe("the /cases production route", () => {
       settled: { status: safeAuthErrorMessage("configuration") },
     });
 
-    expect(screen.getByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "로그인이 필요합니다" })).toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(client.calls.authorizeRequest).toBe(0);
   });
@@ -491,14 +491,14 @@ describe("the /cases production route", () => {
       vi.fn().mockImplementation(() => new Promise<Response>(() => {})),
     );
     const { client } = renderSignedInAt("/cases", ["FDS_ANALYST"]);
-    await screen.findByRole("heading", { name: "Cases", level: 2 });
+    await screen.findByRole("heading", { name: "사건", level: 2 });
 
     act(() => {
       client.emitSessionInvalidated();
     });
 
-    expect(screen.getByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Apply filters" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "로그인이 필요합니다" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "필터 적용" })).not.toBeInTheDocument();
   });
 
   it("returns to exactly /cases after signing in from it", async () => {
@@ -510,9 +510,9 @@ describe("the /cases production route", () => {
 
     renderRoutesWithAuth(routes, { client, initialEntries: ["/cases"] });
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(screen.getByRole("button", { name: "로그인" }));
 
     expect(client.calls.signIn).toEqual(["/cases"]);
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -533,9 +533,9 @@ describe("the /cases production route", () => {
     // empty - they are no route at all, and they cost the Backend nothing.
     // These are also real Backend endpoints with no screen in this console, so
     // a route that reached them would be one no test asked for.
-    expect(await screen.findByRole("heading", { name: "Page not found" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Cases", level: 2 })).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: /^Case / })).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "페이지를 찾을 수 없습니다" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "사건", level: 2 })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^사건 / })).not.toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -549,11 +549,11 @@ describe("the /cases production route", () => {
     // this application's own code runs, so what renders is the list. The point
     // asserted here is the one this Issue owns: it is not the detail screen,
     // and no case detail request is made for an empty identifier.
-    expect(await screen.findByRole("heading", { name: "Cases", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "사건", level: 2 })).toBeInTheDocument();
     expect(
-      screen.queryByRole("heading", { name: /^Case [0-9a-f-]+$/, level: 2 }),
+      screen.queryByRole("heading", { name: /^사건 [0-9a-f-]+$/, level: 2 }),
     ).not.toBeInTheDocument();
-    expect(screen.queryByText("Loading case...")).not.toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "사건 기록 상태" })).not.toBeInTheDocument();
     await waitFor(() => {
       expect(fetchSpy).toHaveBeenCalledTimes(1);
     });
@@ -565,7 +565,7 @@ describe("the /cases production route", () => {
 
     renderSignedInAt("/casesx", ["FDS_ANALYST"]);
 
-    expect(await screen.findByRole("heading", { name: "Page not found" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "페이지를 찾을 수 없습니다" })).toBeInTheDocument();
   });
 
   it("offers the destination in the rail and reaches it by keyboard", async () => {
@@ -576,13 +576,13 @@ describe("the /cases production route", () => {
     );
     renderSignedInAt("/", ["FDS_VIEWER"]);
 
-    const link = await screen.findByRole("link", { name: "Cases" });
+    const link = await screen.findByRole("link", { name: "사건" });
     link.focus();
     await user.keyboard("{Enter}");
 
-    expect(await screen.findByRole("heading", { name: "Cases", level: 2 })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Cases" })).toHaveAttribute("aria-current", "page");
-    expect(screen.getByRole("link", { name: "Transactions" })).not.toHaveAttribute(
+    expect(await screen.findByRole("heading", { name: "사건", level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "사건" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "거래" })).not.toHaveAttribute(
       "aria-current",
     );
   });
@@ -592,7 +592,7 @@ const CANONICAL_TRANSACTION_ID = "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001";
 const CANONICAL_DETAIL_ROUTE = `/transactions/${CANONICAL_TRANSACTION_ID}`;
 
 /** The fixed refusal a malformed transaction address produces. */
-const INVALID_ADDRESS_HEADING = "This is not a transaction address";
+const INVALID_ADDRESS_HEADING = "올바른 거래 주소가 아닙니다";
 
 /** Any origin: what is being modelled is the path, not where it points. */
 const PARSER_ORIGIN = "https://console.example";
@@ -657,7 +657,7 @@ describe("the browser URL parser boundary", () => {
 
     const { client } = renderSignedInAt(normalized, ["PLATFORM_ADMIN"]);
 
-    expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "접근할 수 없습니다" })).toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(client.calls.authorizeRequest).toBe(0);
   });
@@ -671,7 +671,7 @@ describe("the browser URL parser boundary", () => {
 
     renderRoutesWithAuth(routes, { client, initialEntries: [normalized] });
 
-    expect(await screen.findByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "로그인이 필요합니다" })).toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(client.calls.authorizeRequest).toBe(0);
   });
@@ -685,9 +685,9 @@ describe("the /transactions/:transactionId production route", () => {
     renderSignedInAt(CANONICAL_DETAIL_ROUTE, [role]);
 
     expect(
-      await screen.findByRole("heading", { name: `Transaction ${CANONICAL_TRANSACTION_ID}` }),
+      await screen.findByRole("heading", { name: `거래 ${CANONICAL_TRANSACTION_ID}` }),
     ).toBeInTheDocument();
-    expect(screen.getByText("Loading transaction...")).toBeInTheDocument();
+    expect(screen.getByText("거래를 불러오고 있습니다…")).toBeInTheDocument();
     // The direct URL entry really did reach the Backend, for this transaction
     // and no other.
     await waitFor(() => {
@@ -703,8 +703,8 @@ describe("the /transactions/:transactionId production route", () => {
 
     const { client } = renderSignedInAt(CANONICAL_DETAIL_ROUTE, [role]);
 
-    expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: /^Transaction / })).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "접근할 수 없습니다" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^거래 / })).not.toBeInTheDocument();
     // The refusal costs the Backend nothing at all, and takes no credential.
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(client.calls.authorizeRequest).toBe(0);
@@ -724,7 +724,7 @@ describe("the /transactions/:transactionId production route", () => {
 
     renderRoutesWithAuth(routes, { client, initialEntries: [CANONICAL_DETAIL_ROUTE] });
 
-    expect(await screen.findByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "로그인이 필요합니다" })).toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(client.calls.signIn).toHaveLength(0);
     expect(client.calls.authorizeRequest).toBe(0);
@@ -740,9 +740,9 @@ describe("the /transactions/:transactionId production route", () => {
     renderRoutesWithAuth(routes, { client, initialEntries: [CANONICAL_DETAIL_ROUTE] });
 
     expect(authStatus()).toHaveTextContent(PREPARING);
-    expect(screen.getByText("Checking access...")).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Access denied" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: /^Transaction / })).not.toBeInTheDocument();
+    expect(screen.getByText("접근 권한을 확인하고 있습니다…")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "접근할 수 없습니다" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^거래 / })).not.toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -758,7 +758,7 @@ describe("the /transactions/:transactionId production route", () => {
       settled: { status: safeAuthErrorMessage("configuration") },
     });
 
-    expect(screen.getByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "로그인이 필요합니다" })).toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(client.calls.authorizeRequest).toBe(0);
   });
@@ -769,14 +769,14 @@ describe("the /transactions/:transactionId production route", () => {
       vi.fn().mockImplementation(() => new Promise<Response>(() => {})),
     );
     const { client } = renderSignedInAt(CANONICAL_DETAIL_ROUTE, ["FDS_ANALYST"]);
-    await screen.findByRole("heading", { name: `Transaction ${CANONICAL_TRANSACTION_ID}` });
+    await screen.findByRole("heading", { name: `거래 ${CANONICAL_TRANSACTION_ID}` });
 
     act(() => {
       client.emitSessionInvalidated();
     });
 
-    expect(screen.getByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: /^Transaction / })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "로그인이 필요합니다" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^거래 / })).not.toBeInTheDocument();
   });
 
   it("returns to exactly the detail route after signing in from it", async () => {
@@ -788,9 +788,9 @@ describe("the /transactions/:transactionId production route", () => {
 
     renderRoutesWithAuth(routes, { client, initialEntries: [CANONICAL_DETAIL_ROUTE] });
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(screen.getByRole("button", { name: "로그인" }));
 
     expect(client.calls.signIn).toEqual([CANONICAL_DETAIL_ROUTE]);
   });
@@ -814,9 +814,9 @@ describe("the /transactions/:transactionId production route", () => {
 
     renderRoutesWithAuth(routes, { client, initialEntries: [path] });
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(screen.getByRole("button", { name: "로그인" }));
 
     expect(client.calls.signIn).toEqual(["/"]);
     // Nothing of the address it refused is carried into the sign-in, and
@@ -877,7 +877,7 @@ describe("the /transactions/:transactionId production route", () => {
     expect(refusal).toHaveTextContent(INVALID_ADDRESS_HEADING);
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(client.calls.authorizeRequest).toBe(0);
-    expect(screen.queryByText("Loading transaction...")).not.toBeInTheDocument();
+    expect(screen.queryByText("거래를 불러오고 있습니다…")).not.toBeInTheDocument();
   });
 
   /**
@@ -922,9 +922,9 @@ describe("the /transactions/:transactionId production route", () => {
 
     renderSignedInAt(CANONICAL_DETAIL_ROUTE, ["FDS_VIEWER"]);
 
-    const back = await screen.findByRole("link", { name: "Back to transactions" });
+    const back = await screen.findByRole("link", { name: "거래 목록으로" });
     expect(back).toHaveAttribute("href", "/transactions");
-    expect(screen.getByRole("link", { name: "Transactions" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "거래" })).toBeInTheDocument();
   });
 });
 
@@ -932,7 +932,7 @@ const CANONICAL_CASE_ID = "5c2d1e0f-7a8b-4c9d-9e0f-1a2b3c4d5e60";
 const CANONICAL_CASE_ROUTE = `/cases/${CANONICAL_CASE_ID}`;
 
 /** The fixed refusal a malformed case address produces. */
-const INVALID_CASE_ADDRESS_HEADING = "This is not a case address";
+const INVALID_CASE_ADDRESS_HEADING = "올바른 사건 주소가 아닙니다";
 
 describe("the /cases/:caseId production route", () => {
   it.each(CASE_ROLES)("renders the screen on direct entry for %s", async (role) => {
@@ -952,9 +952,9 @@ describe("the /cases/:caseId production route", () => {
     const { client } = renderSignedInAt(CANONICAL_CASE_ROUTE, [role]);
 
     expect(
-      await screen.findByRole("heading", { name: `Case ${CANONICAL_CASE_ID}` }),
+      await screen.findByRole("heading", { name: `사건 ${CANONICAL_CASE_ID}` }),
     ).toBeInTheDocument();
-    expect(screen.getByText("Loading case...")).toBeInTheDocument();
+    expect(screen.getByText("사건을 불러오고 있습니다…")).toBeInTheDocument();
     // The record, investigation notes and audit history start together. Classify the requests by
     // their complete target rather than by call index: effect scheduling may
     // choose either order, while a missing, duplicated or third endpoint still
@@ -1033,8 +1033,8 @@ describe("the /cases/:caseId production route", () => {
 
     const { client } = renderSignedInAt(CANONICAL_CASE_ROUTE, [role]);
 
-    expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: /^Case / })).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "접근할 수 없습니다" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^사건 / })).not.toBeInTheDocument();
     // The refusal costs the Backend nothing at all, and takes no credential.
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(client.calls.authorizeRequest).toBe(0);
@@ -1055,7 +1055,7 @@ describe("the /cases/:caseId production route", () => {
 
     renderRoutesWithAuth(routes, { client, initialEntries: [CANONICAL_CASE_ROUTE] });
 
-    expect(await screen.findByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "로그인이 필요합니다" })).toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(client.calls.signIn).toHaveLength(0);
     expect(client.calls.authorizeRequest).toBe(0);
@@ -1071,9 +1071,9 @@ describe("the /cases/:caseId production route", () => {
     renderRoutesWithAuth(routes, { client, initialEntries: [CANONICAL_CASE_ROUTE] });
 
     expect(authStatus()).toHaveTextContent(PREPARING);
-    expect(screen.getByText("Checking access...")).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Access denied" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: /^Case / })).not.toBeInTheDocument();
+    expect(screen.getByText("접근 권한을 확인하고 있습니다…")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "접근할 수 없습니다" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^사건 / })).not.toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -1089,7 +1089,7 @@ describe("the /cases/:caseId production route", () => {
       settled: { status: safeAuthErrorMessage("configuration") },
     });
 
-    expect(screen.getByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "로그인이 필요합니다" })).toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(client.calls.authorizeRequest).toBe(0);
   });
@@ -1100,14 +1100,14 @@ describe("the /cases/:caseId production route", () => {
       vi.fn().mockImplementation(() => new Promise<Response>(() => {})),
     );
     const { client } = renderSignedInAt(CANONICAL_CASE_ROUTE, ["FDS_ANALYST"]);
-    await screen.findByRole("heading", { name: `Case ${CANONICAL_CASE_ID}` });
+    await screen.findByRole("heading", { name: `사건 ${CANONICAL_CASE_ID}` });
 
     act(() => {
       client.emitSessionInvalidated();
     });
 
-    expect(screen.getByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: /^Case / })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "로그인이 필요합니다" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^사건 / })).not.toBeInTheDocument();
   });
 
   it("returns to exactly the case detail route after signing in from it", async () => {
@@ -1119,9 +1119,9 @@ describe("the /cases/:caseId production route", () => {
 
     renderRoutesWithAuth(routes, { client, initialEntries: [CANONICAL_CASE_ROUTE] });
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(screen.getByRole("button", { name: "로그인" }));
 
     expect(client.calls.signIn).toEqual([CANONICAL_CASE_ROUTE]);
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -1146,9 +1146,9 @@ describe("the /cases/:caseId production route", () => {
 
     renderRoutesWithAuth(routes, { client, initialEntries: [path] });
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(screen.getByRole("button", { name: "로그인" }));
 
     expect(client.calls.signIn).toEqual(["/"]);
     // Nothing of the address it refused is carried into the sign-in, and
@@ -1208,7 +1208,7 @@ describe("the /cases/:caseId production route", () => {
     expect(refusal).toHaveTextContent(INVALID_CASE_ADDRESS_HEADING);
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(client.calls.authorizeRequest).toBe(0);
-    expect(screen.queryByText("Loading case...")).not.toBeInTheDocument();
+    expect(screen.queryByText("사건을 불러오고 있습니다…")).not.toBeInTheDocument();
   });
 
   it("prints no part of a malformed case address anywhere on the page", async () => {
@@ -1230,14 +1230,14 @@ describe("the /cases/:caseId production route", () => {
 
     renderSignedInAt(CANONICAL_CASE_ROUTE, ["FDS_VIEWER"]);
 
-    const back = await screen.findByRole("link", { name: "Back to cases" });
+    const back = await screen.findByRole("link", { name: "사건 목록으로" });
     expect(back).toHaveAttribute("href", "/cases");
-    const rail = screen.getByRole("link", { name: "Cases" });
+    const rail = screen.getByRole("link", { name: "사건" });
     expect(rail).toHaveAttribute("href", "/cases");
     // The rail announces the case section as the current one here, and says
     // nothing about the ledger.
     expect(rail).toHaveAttribute("aria-current", "page");
-    expect(screen.getByRole("link", { name: "Transactions" })).not.toHaveAttribute(
+    expect(screen.getByRole("link", { name: "거래" })).not.toHaveAttribute(
       "aria-current",
     );
   });
@@ -1275,7 +1275,7 @@ describe("the /cases/:caseId production route", () => {
 
     renderSignedInAt("/cases", ["FDS_ANALYST"]);
     const link = await screen.findByRole("link", {
-      name: `View case details for ${CANONICAL_CASE_ID}`,
+      name: `사건 ${CANONICAL_CASE_ID} 상세 보기`,
     });
     expect(link).toHaveAttribute("href", CANONICAL_CASE_ROUTE);
 
@@ -1284,7 +1284,7 @@ describe("the /cases/:caseId production route", () => {
     // The detail screen, on the exact canonical address, asking the detail
     // endpoint for exactly that case.
     expect(
-      await screen.findByRole("heading", { name: `Case ${CANONICAL_CASE_ID}` }),
+      await screen.findByRole("heading", { name: `사건 ${CANONICAL_CASE_ID}` }),
     ).toBeInTheDocument();
     await waitFor(() => {
       expect(

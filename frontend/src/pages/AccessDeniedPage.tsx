@@ -13,8 +13,8 @@
 export function AccessDeniedPage() {
   return (
     <section aria-labelledby="access-denied-heading">
-      <h2 id="access-denied-heading">Access denied</h2>
-      <p>You do not have permission to view this page.</p>
+      <h2 id="access-denied-heading">접근할 수 없습니다</h2>
+      <p>이 화면을 볼 권한이 없습니다.</p>
     </section>
   );
 }

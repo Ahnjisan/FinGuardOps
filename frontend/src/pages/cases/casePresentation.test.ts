@@ -29,10 +29,10 @@ import {
 
 describe("case status labels", () => {
   it("names every Backend status exactly", () => {
-    expect(CASE_STATUS_LABELS.OPEN).toBe("Open");
-    expect(CASE_STATUS_LABELS.IN_REVIEW).toBe("In review");
-    expect(CASE_STATUS_LABELS.ADDITIONAL_INFORMATION_REQUIRED).toBe("Information required");
-    expect(CASE_STATUS_LABELS.CLOSED).toBe("Closed");
+    expect(CASE_STATUS_LABELS.OPEN).toBe("접수");
+    expect(CASE_STATUS_LABELS.IN_REVIEW).toBe("검토 중");
+    expect(CASE_STATUS_LABELS.ADDITIONAL_INFORMATION_REQUIRED).toBe("추가 정보 필요");
+    expect(CASE_STATUS_LABELS.CLOSED).toBe("종결");
   });
 
   it("covers the enum exactly, with no extra entry and no gap", () => {
@@ -70,9 +70,9 @@ describe("case status labels", () => {
 
 describe("case final disposition labels", () => {
   it("names every Backend disposition exactly", () => {
-    expect(CASE_FINAL_DISPOSITION_LABELS.NORMAL).toBe("Normal");
-    expect(CASE_FINAL_DISPOSITION_LABELS.FALSE_POSITIVE).toBe("False positive");
-    expect(CASE_FINAL_DISPOSITION_LABELS.CONFIRMED_FRAUD).toBe("Confirmed fraud");
+    expect(CASE_FINAL_DISPOSITION_LABELS.NORMAL).toBe("정상");
+    expect(CASE_FINAL_DISPOSITION_LABELS.FALSE_POSITIVE).toBe("오탐");
+    expect(CASE_FINAL_DISPOSITION_LABELS.CONFIRMED_FRAUD).toBe("사기 확정");
   });
 
   it("covers the enum exactly", () => {
@@ -83,7 +83,7 @@ describe("case final disposition labels", () => {
   });
 
   it("says exactly Not resolved for a case with no disposition", () => {
-    expect(UNRESOLVED_DISPOSITION_LABEL).toBe("Not resolved");
+    expect(UNRESOLVED_DISPOSITION_LABEL).toBe("미결정");
     // Not one of the three verdicts. An unresolved case must not read as a
     // decided one.
     expect(Object.values(CASE_FINAL_DISPOSITION_LABELS)).not.toContain(
@@ -92,7 +92,7 @@ describe("case final disposition labels", () => {
   });
 
   it("says exactly Unassigned for a case with no assignee", () => {
-    expect(UNASSIGNED_LABEL).toBe("Unassigned");
+    expect(UNASSIGNED_LABEL).toBe("미배정");
   });
 });
 

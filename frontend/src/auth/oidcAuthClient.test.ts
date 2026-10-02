@@ -2677,7 +2677,7 @@ describe("createOidcAuthClient callback - refresh token fail-closed", () => {
     process.off("unhandledRejection", unhandled);
 
     expect(error).toBeInstanceOf(AuthCallbackError);
-    expect((error as Error).message).toBe("Sign-in could not be completed.");
+    expect((error as Error).message).toBe("로그인을 완료할 수 없습니다.");
     expect(manager.calls.removeUser).toBe(1);
     await expect(client.initialize()).resolves.toEqual({ session: null });
     expect(invalidated).not.toHaveBeenCalled();
@@ -2717,7 +2717,7 @@ describe("createOidcAuthClient callback - refresh token fail-closed", () => {
 
     // Refused with the one fixed error, which carries no payload at all.
     expect(error).toBeInstanceOf(AuthCallbackError);
-    expect((error as Error).message).toBe("Sign-in could not be completed.");
+    expect((error as Error).message).toBe("로그인을 완료할 수 없습니다.");
     const serialized = JSON.stringify(error, Object.getOwnPropertyNames(error));
     expect(serialized).not.toContain(SENTINEL_REFRESH_TOKEN);
     expect((error as Error).stack ?? "").not.toContain(SENTINEL_REFRESH_TOKEN);

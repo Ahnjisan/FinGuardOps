@@ -195,7 +195,7 @@ async function showTrail(
   await settle();
   await answerWith(calls[0], auditBody(content, page));
   await waitFor(() => {
-    expect(screen.queryByText("Loading audit history...")).not.toBeInTheDocument();
+    expect(screen.queryByText("감사 이력을 불러오고 있습니다…")).not.toBeInTheDocument();
   });
   return calls;
 }
@@ -247,11 +247,11 @@ describe("CaseAuditSection request", () => {
     await settle();
 
     expect(
-      screen.getByRole("heading", { name: "Audit history", level: 3 }),
+      screen.getByRole("heading", { name: "감사 이력", level: 3 }),
     ).toBeInTheDocument();
-    expect(screen.getByText("Loading audit history...")).toBeInTheDocument();
-    const status = screen.getByRole("status", { name: "Audit history status" });
-    expect(status).toHaveTextContent("Loading audit history");
+    expect(screen.getByText("감사 이력을 불러오고 있습니다…")).toBeInTheDocument();
+    const status = screen.getByRole("status", { name: "감사 이력 상태" });
+    expect(status).toHaveTextContent("감사 이력을 불러오는 중");
     expect(status).toHaveAttribute("aria-live", "polite");
   });
 
@@ -315,10 +315,10 @@ describe("CaseAuditSection entries", () => {
   it("shows the reason code and the actor type as raw codes", async () => {
     await showTrail();
 
-    expect(valueOf(entryAt(0), "Reason code")).toHaveTextContent("CASE_REQUIRED_BY_RISK_POLICY");
-    expect(valueOf(entryAt(0), "Actor type")).toHaveTextContent("SYSTEM");
-    expect(valueOf(entryAt(2), "Reason code")).toHaveTextContent("CASE_REVIEW_STARTED");
-    expect(valueOf(entryAt(2), "Actor type")).toHaveTextContent("USER");
+    expect(valueOf(entryAt(0), "사유 코드")).toHaveTextContent("CASE_REQUIRED_BY_RISK_POLICY");
+    expect(valueOf(entryAt(0), "행위자 유형")).toHaveTextContent("SYSTEM");
+    expect(valueOf(entryAt(2), "사유 코드")).toHaveTextContent("CASE_REVIEW_STARTED");
+    expect(valueOf(entryAt(2), "행위자 유형")).toHaveTextContent("USER");
   });
 
   it("never translates a status code into the label the record screen uses", async () => {
@@ -326,23 +326,23 @@ describe("CaseAuditSection entries", () => {
 
     // The counterexample for the section's own rule. `IN_REVIEW` reads as "In
     // review" on the case record; here it stays the code.
-    const after = valueOf(entryAt(2), "After");
+    const after = valueOf(entryAt(2), "변경 후");
     expect(after).toHaveTextContent("IN_REVIEW");
     const rendered = document.body.textContent ?? "";
-    expect(rendered).not.toContain("In review");
-    expect(rendered).not.toContain("Confirmed fraud");
+    expect(rendered).not.toContain("검토 중");
+    expect(rendered).not.toContain("사기 확정");
   });
 
   it("states Seoul wall clock and keeps the untouched UTC value for the machine", async () => {
     await showTrail();
 
-    const changed = within(valueOf(entryAt(2), "Changed")).getByText(/KST$/);
+    const changed = within(valueOf(entryAt(2), "변경")).getByText(/KST$/);
     expect(changed.tagName).toBe("TIME");
     expect(changed).toHaveAttribute("datetime", "2026-03-09T00:01:02.000002Z");
     expect(changed).toHaveTextContent("2026-03-09 09:01:02 KST");
     expect(
       within(entryAt(2)).getByRole("heading", {
-        name: "CASE_STATUS_CHANGED, changed 2026-03-09 09:01:02 KST",
+        name: "CASE_STATUS_CHANGED, 변경 시각 2026-03-09 09:01:02 KST",
       }),
     ).toBeInTheDocument();
   });
@@ -351,8 +351,8 @@ describe("CaseAuditSection entries", () => {
     await showTrail();
 
     for (const index of [0, 1, 2, 3, 4, 5]) {
-      expect(within(entryAt(index)).getByText("Before", { selector: "dt" })).toBeInTheDocument();
-      expect(within(entryAt(index)).getByText("After", { selector: "dt" })).toBeInTheDocument();
+      expect(within(entryAt(index)).getByText("변경 전", { selector: "dt" })).toBeInTheDocument();
+      expect(within(entryAt(index)).getByText("변경 후", { selector: "dt" })).toBeInTheDocument();
     }
   });
 
@@ -360,16 +360,16 @@ describe("CaseAuditSection entries", () => {
     await showTrail();
 
     // CaseStatusSummary.
-    expect(valueOf(entryAt(0), "After")).toHaveTextContent("Case status");
-    expect(valueOf(entryAt(0), "After")).toHaveTextContent("OPEN");
+    expect(valueOf(entryAt(0), "변경 후")).toHaveTextContent("사건 상태");
+    expect(valueOf(entryAt(0), "변경 후")).toHaveTextContent("OPEN");
     // LinkedSummary.
-    expect(valueOf(entryAt(1), "After")).toHaveTextContent("Linked");
-    expect(valueOf(entryAt(1), "After")).toHaveTextContent("true");
+    expect(valueOf(entryAt(1), "변경 후")).toHaveTextContent("연결됨");
+    expect(valueOf(entryAt(1), "변경 후")).toHaveTextContent("true");
     // WorkflowSummary on both sides.
-    expect(valueOf(entryAt(2), "Before")).toHaveTextContent("OPEN");
-    expect(valueOf(entryAt(2), "After")).toHaveTextContent(ASSIGNEE_A);
+    expect(valueOf(entryAt(2), "변경 전")).toHaveTextContent("OPEN");
+    expect(valueOf(entryAt(2), "변경 후")).toHaveTextContent(ASSIGNEE_A);
     // ResolutionSummary, the only three-field shape.
-    const resolved = valueOf(entryAt(4), "After");
+    const resolved = valueOf(entryAt(4), "변경 후");
     expect(resolved).toHaveTextContent("CLOSED");
     expect(resolved).toHaveTextContent(ASSIGNEE_A);
     expect(resolved).toHaveTextContent("CONFIRMED_FRAUD");
@@ -378,9 +378,9 @@ describe("CaseAuditSection entries", () => {
   it("names an absent summary rather than leaving it blank", async () => {
     await showTrail();
 
-    expect(valueOf(entryAt(0), "Before")).toHaveTextContent("Not applicable");
-    expect(valueOf(entryAt(5), "Before")).toHaveTextContent("Not applicable");
-    expect(valueOf(entryAt(5), "After")).toHaveTextContent("Not applicable");
+    expect(valueOf(entryAt(0), "변경 전")).toHaveTextContent("해당 없음");
+    expect(valueOf(entryAt(5), "변경 전")).toHaveTextContent("해당 없음");
+    expect(valueOf(entryAt(5), "변경 후")).toHaveTextContent("해당 없음");
   });
 
   it("names an absent assignee differently from an absent summary", async () => {
@@ -388,15 +388,15 @@ describe("CaseAuditSection entries", () => {
 
     // Two absences, two words. Sharing one would say a released assignee and a
     // missing before-state were the same fact.
-    expect(valueOf(entryAt(3), "After")).toHaveTextContent("Unassigned");
-    expect(valueOf(entryAt(3), "After")).not.toHaveTextContent("Not applicable");
-    expect(valueOf(entryAt(2), "Before")).toHaveTextContent("Unassigned");
+    expect(valueOf(entryAt(3), "변경 후")).toHaveTextContent("미배정");
+    expect(valueOf(entryAt(3), "변경 후")).not.toHaveTextContent("해당 없음");
+    expect(valueOf(entryAt(2), "변경 전")).toHaveTextContent("미배정");
   });
 
   it("shows a note identifier as text and never as a link", async () => {
     await showTrail();
 
-    const note = valueOf(entryAt(5), "Note ID");
+    const note = valueOf(entryAt(5), "메모 ID");
     expect(note).toHaveTextContent(NOTE_ID);
     expect(note.querySelector("a")).toBeNull();
     expect(screen.queryAllByRole("link")).toHaveLength(0);
@@ -406,7 +406,7 @@ describe("CaseAuditSection entries", () => {
     await showTrail();
 
     for (const index of [0, 1, 2, 3, 4]) {
-      expect(within(entryAt(index)).queryByText("Note ID")).not.toBeInTheDocument();
+      expect(within(entryAt(index)).queryByText("메모 ID")).not.toBeInTheDocument();
     }
   });
 
@@ -448,9 +448,9 @@ describe("CaseAuditSection entries", () => {
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
     const buttons = screen.getAllByRole("button").map((button) => button.textContent);
-    expect(buttons).toEqual(["Previous", "Next"]);
+    expect(buttons).toEqual(["이전", "다음"]);
     expect(screen.getAllByRole("combobox")).toHaveLength(1);
-    expect(screen.getByRole("combobox")).toHaveAccessibleName("Entries per page");
+    expect(screen.getByRole("combobox")).toHaveAccessibleName("페이지당 항목 수");
   });
 
   it("labels its own headings and articles with ids that exist once", async () => {
@@ -467,10 +467,11 @@ describe("CaseAuditSection empty states", () => {
   it("says a case has no audit history at all", async () => {
     await showTrail([], { totalElements: 0, totalPages: 0, last: true });
 
-    expect(screen.getByText("No audit history recorded.")).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "감사 이력 상태" })).toHaveTextContent("감사 이력이 없습니다.");
+    expect(document.querySelector(".notice--empty")).toHaveTextContent("감사 이력이 없습니다.");
     expect(screen.queryAllByRole("article")).toHaveLength(0);
-    expect(screen.getByRole("status", { name: "Audit history status" })).toHaveTextContent(
-      "No audit entries.",
+    expect(screen.getByRole("status", { name: "감사 이력 상태" })).toHaveTextContent(
+      "감사 이력이 없습니다.",
     );
   });
 
@@ -497,11 +498,11 @@ describe("CaseAuditSection empty states", () => {
       />,
     );
 
-    expect(screen.getByText("No audit entries on this page.")).toBeInTheDocument();
+    expect(screen.getByText("이 페이지에 감사 이력이 없습니다.")).toBeInTheDocument();
     // The counterexample the two sentences exist for.
-    expect(screen.queryByText("No audit history recorded.")).not.toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "Audit history status" })).toHaveTextContent(
-      "No entries on this page of 137.",
+    expect(screen.queryByText("감사 이력이 없습니다.")).not.toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "감사 이력 상태" })).toHaveTextContent(
+      "전체 137건 중 이 페이지에 표시할 감사 이력이 없습니다.",
     );
   });
 });
@@ -524,18 +525,18 @@ describe("CaseAuditSection pagination", () => {
   it("names its pager so it cannot be mistaken for the case list pager", async () => {
     await firstOfSeven();
 
-    const pager = screen.getByRole("navigation", { name: "Audit history pages" });
+    const pager = screen.getByRole("navigation", { name: "감사 이력 페이지" });
     expect(pager).toBeInTheDocument();
-    expect(screen.queryByRole("navigation", { name: "Case pages" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "사건 페이지" })).not.toBeInTheDocument();
   });
 
   it("states the window and the position it is showing", async () => {
     await firstOfSeven();
 
-    expect(screen.getByRole("status", { name: "Audit history status" })).toHaveTextContent(
-      "Showing 1-20 of 137.",
+    expect(screen.getByRole("status", { name: "감사 이력 상태" })).toHaveTextContent(
+      "전체 137건 중 1~20건 표시",
     );
-    expect(screen.getByText("Page 1 of 7")).toBeInTheDocument();
+    expect(screen.getByText("전체 7페이지 중 1페이지")).toBeInTheDocument();
   });
 
   it("disables Previous on the first page and Next on the last", async () => {
@@ -552,11 +553,11 @@ describe("CaseAuditSection pagination", () => {
       expect(screen.getAllByRole("article")).toHaveLength(20);
     });
 
-    expect(screen.getByRole("button", { name: "Previous" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Next" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "이전" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "다음" })).toBeEnabled();
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.click(screen.getByRole("button", { name: "다음" }));
     await settle();
     await answerWith(
       calls[1],
@@ -570,21 +571,21 @@ describe("CaseAuditSection pagination", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "다음" })).toBeDisabled();
     });
-    expect(screen.getByRole("button", { name: "Previous" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "이전" })).toBeEnabled();
   });
 
   it("asks for the next page and shows nothing of the previous one while it loads", async () => {
     const calls = await firstOfSeven();
     const user = userEvent.setup();
 
-    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.click(screen.getByRole("button", { name: "다음" }));
 
     // The counterexample this exists for. Keeping page 1 on screen under the
     // page 2 heading would show entries that are not the ones asked for.
     expect(screen.queryAllByRole("article")).toHaveLength(0);
-    expect(screen.getByText("Loading audit history...")).toBeInTheDocument();
+    expect(screen.getByText("감사 이력을 불러오고 있습니다…")).toBeInTheDocument();
     await settle();
     expect(new URL(calls[1].request.url).search).toBe("?page=1&size=20&sort=changedAt%2Cdesc");
   });
@@ -593,7 +594,7 @@ describe("CaseAuditSection pagination", () => {
     const calls = await firstOfSeven();
     const user = userEvent.setup();
 
-    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.click(screen.getByRole("button", { name: "다음" }));
     await settle();
     await answerWith(
       calls[1],
@@ -606,7 +607,7 @@ describe("CaseAuditSection pagination", () => {
       }),
     );
     await waitFor(() => {
-      expect(screen.getByText("Page 2 of 7")).toBeInTheDocument();
+      expect(screen.getByText("전체 7페이지 중 2페이지")).toBeInTheDocument();
     });
 
     const sizes = within(screen.getByRole("combobox"))
@@ -625,7 +626,7 @@ describe("CaseAuditSection pagination", () => {
     await firstOfSeven();
     const user = userEvent.setup();
 
-    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.click(screen.getByRole("button", { name: "다음" }));
     await settle();
 
     expect(window.location.href).toBe(before);
@@ -648,7 +649,7 @@ describe("CaseAuditSection failures", () => {
     await failWith(404, { code: "CASE_NOT_FOUND", message: "no such case", traceId: TRACE_ID });
 
     const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent("Audit history not found");
+    expect(alert).toHaveTextContent("감사 이력이 없습니다");
     expect(within(alert).queryByRole("button")).not.toBeInTheDocument();
     expect(alert.textContent ?? "").not.toContain("404");
     expect(alert.textContent ?? "").not.toContain("CASE_NOT_FOUND");
@@ -660,7 +661,7 @@ describe("CaseAuditSection failures", () => {
     await failWith(403, { code: "ACCESS_DENIED", message: "case:read required" });
 
     const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent("Access denied");
+    expect(alert).toHaveTextContent("접근할 수 없습니다");
     expect(within(alert).queryByRole("button")).not.toBeInTheDocument();
     expect(alert.textContent ?? "").not.toContain("case:read");
   });
@@ -673,7 +674,7 @@ describe("CaseAuditSection failures", () => {
     await settle();
 
     await waitFor(() => {
-      expect(screen.getByRole("alert")).toHaveTextContent("Your session ended");
+      expect(screen.getByRole("alert")).toHaveTextContent("세션이 종료되었습니다");
     });
     expect(within(screen.getByRole("alert")).queryByRole("button")).not.toBeInTheDocument();
     expect(spy).not.toHaveBeenCalled();
@@ -683,11 +684,11 @@ describe("CaseAuditSection failures", () => {
     await failWith(503, { code: "SERVICE_UNAVAILABLE", message: "upstream down" });
 
     const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent("The audit history could not be loaded");
+    expect(alert).toHaveTextContent("감사 이력을 불러올 수 없습니다");
     expect(alert.textContent ?? "").not.toContain("503");
     expect(alert.textContent ?? "").not.toContain("upstream");
     expect(
-      within(alert).getByRole("button", { name: "Try loading the audit history again" }),
+      within(alert).getByRole("button", { name: "감사 이력 다시 불러오기" }),
     ).toBeInTheDocument();
   });
 
@@ -701,7 +702,7 @@ describe("CaseAuditSection failures", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByRole("alert")).toHaveTextContent("The backend could not be reached");
+      expect(screen.getByRole("alert")).toHaveTextContent("백엔드에 연결할 수 없습니다");
     });
   });
 
@@ -720,7 +721,7 @@ describe("CaseAuditSection failures", () => {
     });
 
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "The audit history took too long to load",
+      "감사 이력을 불러오는 데 시간이 오래 걸립니다",
     );
     vi.useRealTimers();
   });
@@ -736,7 +737,7 @@ describe("CaseAuditSection failures", () => {
 
     await waitFor(() => {
       expect(screen.getByRole("alert")).toHaveTextContent(
-        "The audit history could not be read",
+        "감사 이력을 읽을 수 없습니다",
       );
     });
     expect(screen.queryAllByRole("article")).toHaveLength(0);
@@ -748,7 +749,7 @@ describe("CaseAuditSection failures", () => {
     const user = userEvent.setup();
 
     await user.click(
-      screen.getByRole("button", { name: "Try loading the audit history again" }),
+      screen.getByRole("button", { name: "감사 이력 다시 불러오기" }),
     );
     await settle();
     expect(calls).toHaveLength(2);
@@ -758,7 +759,7 @@ describe("CaseAuditSection failures", () => {
       expect(screen.getByRole("alert")).toBeInTheDocument();
     });
     await user.click(
-      screen.getByRole("button", { name: "Try loading the audit history again" }),
+      screen.getByRole("button", { name: "감사 이력 다시 불러오기" }),
     );
     await settle();
     expect(calls).toHaveLength(3);
@@ -767,13 +768,13 @@ describe("CaseAuditSection failures", () => {
   it("focuses each newly published retryable error heading once", async () => {
     const calls = await failWith(503);
     const heading = screen.getByRole("heading", {
-      name: "The audit history could not be loaded",
+      name: "감사 이력을 불러올 수 없습니다",
       level: 4,
     });
     expect(heading).toHaveFocus();
 
     const user = userEvent.setup();
-    const retry = screen.getByRole("button", { name: "Try loading the audit history again" });
+    const retry = screen.getByRole("button", { name: "감사 이력 다시 불러오기" });
     retry.focus();
     await user.click(retry);
     await settle();
@@ -782,7 +783,7 @@ describe("CaseAuditSection failures", () => {
     await waitFor(() => {
       expect(
         screen.getByRole("heading", {
-          name: "The audit history could not be loaded",
+          name: "감사 이력을 불러올 수 없습니다",
           level: 4,
         }),
       ).toHaveFocus();
@@ -802,7 +803,7 @@ describe("CaseAuditSection failures", () => {
     await failWith(500);
 
     expect(
-      screen.queryByRole("navigation", { name: "Audit history pages" }),
+      screen.queryByRole("navigation", { name: "감사 이력 페이지" }),
     ).not.toBeInTheDocument();
   });
 });
@@ -848,10 +849,10 @@ describe("CaseAuditPanel as the geometry fixture mounts it", () => {
       />,
     );
 
-    expect(screen.getByRole("heading", { name: "Audit history", level: 3 })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "감사 이력", level: 3 })).toBeInTheDocument();
     expect(screen.getAllByRole("article")).toHaveLength(1);
     expect(screen.getByText(NOTE_ID)).toBeInTheDocument();
-    expect(screen.getByRole("navigation", { name: "Audit history pages" })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "감사 이력 페이지" })).toBeInTheDocument();
   });
 
   it("keeps the authoritative audit page beside an isolated refresh failure", async () => {
@@ -882,8 +883,8 @@ describe("CaseAuditPanel as the geometry fixture mounts it", () => {
       />,
     );
     expect(screen.getByRole("article")).toBeVisible();
-    expect(screen.getByRole("alert")).toHaveTextContent("submission result is unchanged");
-    await user.click(screen.getByRole("button", { name: "Refresh audit history" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("메모 등록 결과는 확인되지 않았습니다");
+    await user.click(screen.getByRole("button", { name: "감사 이력 새로고침" }));
     expect(onRefresh).toHaveBeenCalledTimes(1);
   });
 
@@ -897,7 +898,7 @@ describe("CaseAuditPanel as the geometry fixture mounts it", () => {
       />,
     );
 
-    expect(screen.getByRole("alert")).toHaveTextContent("Access denied");
+    expect(screen.getByRole("alert")).toHaveTextContent("접근할 수 없습니다");
     expect(screen.queryAllByRole("article")).toHaveLength(0);
     unmount();
 
@@ -910,8 +911,8 @@ describe("CaseAuditPanel as the geometry fixture mounts it", () => {
       />,
     );
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "Audit history status" })).toHaveTextContent(
-      "No audit history requested.",
+    expect(screen.getByRole("status", { name: "감사 이력 상태" })).toHaveTextContent(
+      "요청한 감사 이력이 없습니다.",
     );
   });
 });

@@ -122,7 +122,7 @@ async function show(items: readonly Record<string, unknown>[] = [note()]): Promi
   await settle();
   await answer(calls[0], notesBody(items));
   await waitFor(() => {
-    expect(screen.queryByText("Loading investigation notes...")).not.toBeInTheDocument();
+    expect(screen.queryByText("조사 메모를 불러오고 있습니다…")).not.toBeInTheDocument();
   });
 }
 
@@ -156,8 +156,8 @@ describe("CaseInvestigationNotesSection request and content", () => {
     expect(calls[0].request.url).toBe(
       `http://localhost:8080/api/v1/cases/${CASE_ID}/notes?page=0&size=20&sort=createdAt%2Casc`,
     );
-    expect(screen.getByRole("heading", { name: "Investigation notes", level: 3 })).toBeVisible();
-    expect(screen.getByText("Loading investigation notes...")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "조사 메모", level: 3 })).toBeVisible();
+    expect(screen.getByText("조사 메모를 불러오고 있습니다…")).toBeVisible();
   });
 
   it("renders SYSTEM and USER notes as ordered articles with raw opaque metadata", async () => {
@@ -170,11 +170,11 @@ describe("CaseInvestigationNotesSection request and content", () => {
     expect(list.tagName).toBe("OL");
     const articles = screen.getAllByRole("article");
     expect(articles).toHaveLength(2);
-    expect(valueOf(articles[0], "Author type")).toHaveTextContent("SYSTEM");
-    expect(valueOf(articles[0], "Author reference")).toHaveTextContent("finguardops-backend");
-    expect(valueOf(articles[1], "Author type")).toHaveTextContent("USER");
-    expect(valueOf(articles[1], "Author reference")).toHaveTextContent(USER_REF);
-    expect(valueOf(articles[0], "Note ID").closest("a")).toBeNull();
+    expect(valueOf(articles[0], "작성자 유형")).toHaveTextContent("SYSTEM");
+    expect(valueOf(articles[0], "작성자 참조값")).toHaveTextContent("finguardops-backend");
+    expect(valueOf(articles[1], "작성자 유형")).toHaveTextContent("USER");
+    expect(valueOf(articles[1], "작성자 참조값")).toHaveTextContent(USER_REF);
+    expect(valueOf(articles[0], "메모 ID").closest("a")).toBeNull();
     const time = within(articles[0]).getByText("2026-09-02 09:00:00 KST");
     expect(time).toHaveAttribute("datetime", "2026-09-02T00:00:00.123456Z");
   });
@@ -184,7 +184,7 @@ describe("CaseInvestigationNotesSection request and content", () => {
     expect(Array.from(long)).toHaveLength(4000);
     await show([note(3, { content: long })]);
 
-    const content = valueOf(screen.getByRole("article"), "Content");
+    const content = valueOf(screen.getByRole("article"), "내용");
     expect(content.textContent).toBe(long);
     expect(content.querySelector("script")).toBeNull();
     expect(content.querySelector("a")).toBeNull();
@@ -211,7 +211,7 @@ describe("CaseInvestigationNotesSection pagination", () => {
     renderSection();
     await settle();
     await answer(first.calls[0], notesBody([]));
-    expect(screen.getByText("No investigation notes.", { selector: ".notice" })).toBeVisible();
+    expect(screen.getByText("조사 메모가 없습니다.", { selector: ".notice" })).toBeVisible();
     expect(first.spy).toHaveBeenCalledTimes(1);
   });
 
@@ -231,16 +231,16 @@ describe("CaseInvestigationNotesSection pagination", () => {
       }),
     );
 
-    const pager = screen.getByRole("navigation", { name: "Investigation notes pages" });
-    expect(within(pager).getByRole("button", { name: "Previous" })).toBeDisabled();
-    expect(within(pager).getByRole("combobox", { name: "Notes per page" })).toHaveValue("20");
+    const pager = screen.getByRole("navigation", { name: "조사 메모 페이지" });
+    expect(within(pager).getByRole("button", { name: "이전" })).toBeDisabled();
+    expect(within(pager).getByRole("combobox", { name: "페이지당 메모 수" })).toHaveValue("20");
     expect(within(pager).getAllByRole("option").map((option) => option.textContent)).toEqual([
       "20",
       "50",
       "100",
     ]);
 
-    await user.click(within(pager).getByRole("button", { name: "Next" }));
+    await user.click(within(pager).getByRole("button", { name: "다음" }));
     expect(screen.queryByRole("article")).not.toBeInTheDocument();
     await settle();
     expect(calls[1].request.url).toContain("page=1&size=20&sort=createdAt%2Casc");
@@ -254,11 +254,11 @@ describe("CaseInvestigationNotesSection pagination", () => {
         last: true,
       }),
     );
-    expect(screen.getByText("No investigation notes on this page.")).toBeVisible();
+    expect(screen.getByText("이 페이지에 조사 메모가 없습니다.")).toBeVisible();
     expect(calls).toHaveLength(2);
 
     await user.selectOptions(
-      screen.getByRole("combobox", { name: "Notes per page" }),
+      screen.getByRole("combobox", { name: "페이지당 메모 수" }),
       "50",
     );
     await settle();
@@ -270,8 +270,8 @@ describe("CaseInvestigationNotesSection pagination", () => {
 
 describe("CaseInvestigationNotesSection failures", () => {
   it.each([
-    [403, "You do not have permission to view investigation notes."],
-    [404, "Investigation notes are unavailable because this case was not found."],
+    [403, "조사 메모를 볼 권한이 없습니다."],
+    [404, "사건을 찾을 수 없어 조사 메모를 볼 수 없습니다."],
   ] as const)("keeps HTTP %s inside the section with no retry", async (status, copy) => {
     const { calls, spy } = controlledFetch();
     renderSection();
@@ -279,7 +279,7 @@ describe("CaseInvestigationNotesSection failures", () => {
     await answer(calls[0], { code: "PRIVATE", message: "hidden", traceId: TRACE_ID }, status);
 
     expect(screen.getByText(copy)).toBeVisible();
-    expect(screen.queryByRole("button", { name: /again/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /다시 불러오기/ })).not.toBeInTheDocument();
     await settle();
     expect(spy).toHaveBeenCalledTimes(1);
     expect(document.body.textContent).not.toMatch(/PRIVATE|hidden|trace_demo/);
@@ -296,12 +296,12 @@ describe("CaseInvestigationNotesSection failures", () => {
     });
 
     const heading = await screen.findByRole("heading", {
-      name: "The backend could not be reached",
+      name: "백엔드에 연결할 수 없습니다",
       level: 4,
     });
     expect(heading).toHaveFocus();
     expect(document.body.textContent).not.toContain("offline private text");
-    await user.click(screen.getByRole("button", { name: /again/i }));
+    await user.click(screen.getByRole("button", { name: /다시 불러오기/ }));
     await settle();
     expect(spy).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("article")).not.toBeInTheDocument();
@@ -373,8 +373,8 @@ describe("CaseInvestigationNotesPanel geometry seam", () => {
       />,
     );
     expect(screen.getByRole("article")).toBeVisible();
-    expect(screen.getByRole("alert")).toHaveTextContent("submission result is unchanged");
-    await user.click(screen.getByRole("button", { name: "Refresh investigation notes" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("메모 등록 결과는 확인되지 않았습니다");
+    await user.click(screen.getByRole("button", { name: "조사 메모 새로고침" }));
     expect(onRefresh).toHaveBeenCalledTimes(1);
   });
 });

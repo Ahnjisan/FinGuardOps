@@ -27,7 +27,7 @@ export function RequireCapability({ capability, children }: RequireCapabilityPro
   if (state.status === "initializing" || state.status === "authenticating") {
     return (
       <div role="status">
-        <p>Checking access...</p>
+        <p>접근 권한을 확인하고 있습니다…</p>
       </div>
     );
   }
@@ -46,8 +46,8 @@ export function RequireCapability({ capability, children }: RequireCapabilityPro
   ) {
     return (
       <section aria-labelledby="sign-in-required-heading">
-        <h2 id="sign-in-required-heading">Sign in required</h2>
-        <p>Sign in to view this page.</p>
+        <h2 id="sign-in-required-heading">로그인이 필요합니다</h2>
+        <p>이 화면을 보려면 로그인하세요.</p>
       </section>
     );
   }

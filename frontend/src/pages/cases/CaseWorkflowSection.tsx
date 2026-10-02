@@ -19,6 +19,7 @@ import {
 } from "../../api/useCaseWorkflowMutations";
 import { useAuth } from "../../auth/useAuth";
 import { useCapabilities } from "../../auth/useCapabilities";
+import { Icon } from "../../shared/Icon";
 import { CASE_FINAL_DISPOSITION_LABELS, CASE_STATUS_LABELS } from "./casePresentation";
 
 const ASSIGNEE_INPUT_ID = "case-workflow-assignee";
@@ -30,13 +31,13 @@ const RESOLUTION_ERROR_ID = "case-resolution-error";
 const RESOLUTION_RADIO_NAME = "case-resolution-disposition";
 
 const SUCCESS_MESSAGES: Readonly<Record<CaseWorkflowActionKind, string>> = Object.freeze({
-  "start-review": "Review started from authoritative case information.",
+  "start-review": "최신 사건 정보에서 검토 시작을 확인했습니다.",
   "request-additional-information":
-    "Additional information requested from authoritative case information.",
-  "resume-review": "Review resumed from authoritative case information.",
-  "change-assignee": "Assignee updated from authoritative case information.",
-  "release-assignee": "Assignee released from authoritative case information.",
-  "resolve-case": "Case resolved from authoritative case information.",
+    "최신 사건 정보에서 추가 정보 요청을 확인했습니다.",
+  "resume-review": "최신 사건 정보에서 검토 재개를 확인했습니다.",
+  "change-assignee": "최신 사건 정보에서 담당자 변경을 확인했습니다.",
+  "release-assignee": "최신 사건 정보에서 담당자 배정 해제를 확인했습니다.",
+  "resolve-case": "최신 사건 정보에서 사건 종결을 확인했습니다.",
 });
 
 export interface CaseWorkflowSectionProps {
@@ -75,53 +76,53 @@ function resolutionFailureCopy(state: CaseWorkflowMutationState): FailureCopy | 
   switch (state.status) {
     case "conflict":
       return {
-        title: "The case changed before the resolution",
-        body: "Review the latest case information, then submit the resolution again.",
+        title: "종결 전 사건 정보가 변경되었습니다",
+        body: "최신 사건 정보를 확인한 뒤 종결을 다시 제출하세요.",
       };
     case "ambiguous":
       return {
-        title: "The resolution result could not be confirmed",
-        body: "The latest case information has been loaded. Review it before submitting a resolution again.",
+        title: "종결 결과를 확인할 수 없습니다",
+        body: "최신 사건 정보를 불러왔습니다. 확인한 뒤 종결을 다시 제출하세요.",
       };
     case "reconciling":
       return state.result === "unconfirmed"
         ? {
-            title: "The resolution is not confirmed by the latest case record",
+            title: "최신 사건 기록에서 종결을 확인할 수 없습니다",
             body:
-              "The latest case record does not show the submitted final disposition. Refresh the " +
-              "case information before taking another action.",
+              "최신 사건 기록에서 제출한 최종 판정을 확인할 수 없습니다. " +
+              "다른 작업 전에 사건 정보를 새로고침하세요.",
           }
         : null;
     case "forbidden":
       return {
-        title: "The resolution was denied",
-        body: "Your session is unchanged. Ask an authorized approver to resolve this case.",
+        title: "사건 종결이 거부되었습니다",
+        body: "세션은 유지됩니다. 권한 있는 담당자에게 사건 종결을 요청하세요.",
       };
     case "not-found":
       return {
-        title: "The case is no longer available",
-        body: "Return to the case list before resolving a case.",
+        title: "사건을 더 이상 사용할 수 없습니다",
+        body: "사건 목록으로 돌아가 상태를 확인하세요.",
       };
     case "authentication-required":
       return {
-        title: "Your session ended",
-        body: "Sign in again before resolving the case.",
+        title: "세션이 종료되었습니다",
+        body: "사건을 종결하려면 다시 로그인하세요.",
       };
     case "request-rejected":
       return {
-        title: "The resolution was not sent",
-        body: "Review the current case and submit the resolution again if it is still available.",
+        title: "종결 요청을 보내지 않았습니다",
+        body: "현재 사건 상태를 확인하고 가능하면 종결을 다시 제출하세요.",
       };
     case "server-error":
       return {
-        title: "The resolution could not be completed",
-        body: "The backend did not complete this resolution. Your selected disposition has been kept.",
+        title: "사건을 종결할 수 없습니다",
+        body: "백엔드가 종결을 완료하지 못했습니다. 선택한 최종 판정은 유지됩니다.",
       };
     case "validation-error":
       return state.field === "action"
         ? {
-            title: "This resolution is no longer available",
-            body: "Review the current case state before resolving it.",
+            title: "이 사건은 종결할 수 없습니다",
+            body: "종결 전 현재 사건 상태를 확인하세요.",
           }
         : null;
     default:
@@ -136,44 +137,44 @@ function failureCopy(state: CaseWorkflowMutationState): FailureCopy | null {
   switch (state.status) {
     case "conflict":
       return {
-        title: "The case changed before this action",
-        body: "Review the latest case information, then submit the action again.",
+        title: "작업 전 사건 정보가 변경되었습니다",
+        body: "최신 사건 정보를 확인한 뒤 작업을 다시 제출하세요.",
       };
     case "ambiguous":
       return {
-        title: "The workflow result could not be confirmed",
-        body: "The latest case information has been loaded. Review it before submitting again.",
+        title: "업무 처리 결과를 확인할 수 없습니다",
+        body: "최신 사건 정보를 불러왔습니다. 확인한 뒤 다시 제출하세요.",
       };
     case "forbidden":
       return {
-        title: "The workflow action was denied",
-        body: "Your session is unchanged. Ask an authorized analyst to continue this workflow.",
+        title: "업무 처리가 거부되었습니다",
+        body: "세션은 유지됩니다. 권한 있는 분석 담당자에게 처리를 요청하세요.",
       };
     case "not-found":
       return {
-        title: "The case is no longer available",
-        body: "Return to the case list before taking another action.",
+        title: "사건을 더 이상 사용할 수 없습니다",
+        body: "다른 작업 전에 사건 목록에서 상태를 확인하세요.",
       };
     case "authentication-required":
       return {
-        title: "Your session ended",
-        body: "Sign in again before taking another workflow action.",
+        title: "세션이 종료되었습니다",
+        body: "다른 작업을 하려면 다시 로그인하세요.",
       };
     case "request-rejected":
       return {
-        title: "The workflow action was not sent",
-        body: "Review the current case and submit an available action again.",
+        title: "업무 처리 요청을 보내지 않았습니다",
+        body: "현재 사건을 확인하고 가능한 작업을 다시 제출하세요.",
       };
     case "server-error":
       return {
-        title: "The workflow action could not be completed",
-        body: "The backend did not complete this action. Your assignee entry has been kept.",
+        title: "업무 처리를 완료할 수 없습니다",
+        body: "백엔드가 작업을 완료하지 못했습니다. 담당자 입력값은 유지됩니다.",
       };
     case "validation-error":
       return state.field === "action"
         ? {
-            title: "This workflow action is no longer available",
-            body: "Review the current case state and choose an available action.",
+            title: "이 작업은 더 이상 사용할 수 없습니다",
+            body: "현재 사건 상태를 확인하고 가능한 작업을 선택하세요.",
           }
         : null;
     default:
@@ -183,9 +184,9 @@ function failureCopy(state: CaseWorkflowMutationState): FailureCopy | null {
 
 function assigneeHelper(detail: CaseDetail): string {
   if (detail.caseStatus === "OPEN") {
-    return "Required to start review. Enter one canonical lowercase UUID v4 exactly as issued.";
+    return "검토를 시작하려면 발급된 소문자 UUID v4를 정확히 입력하세요.";
   }
-  return "Enter a different canonical lowercase UUID v4. Spaces and uppercase letters are not corrected.";
+  return "다른 소문자 UUID v4를 입력하세요. 공백과 대문자는 자동 수정되지 않습니다.";
 }
 
 export function CaseWorkflowSection({
@@ -364,21 +365,21 @@ export function CaseWorkflowSection({
       aria-busy={busy || undefined}
     >
       <h3 id="case-workflow-heading" ref={headingRef} tabIndex={-1}>
-        Case workflow
+        사건 처리
       </h3>
       <p className="case-workflow__summary">
-        Current status: <strong>{CASE_STATUS_LABELS[detail.caseStatus]}</strong>
+        현재 상태: <strong>{CASE_STATUS_LABELS[detail.caseStatus]}</strong>
       </p>
 
       {currentAssignee !== null && (
         <p className="case-workflow__assignee">
-          Current assignee: <code>{currentAssignee}</code>
+          현재 담당자: <code>{currentAssignee}</code>
         </p>
       )}
 
       {detail.caseStatus === "CLOSED" ? (
         <p className="notice notice--empty case-workflow__unavailable">
-          Workflow changes are unavailable for a closed case.
+          종결된 사건은 상태를 변경할 수 없습니다.
         </p>
       ) : (
         <>
@@ -386,9 +387,9 @@ export function CaseWorkflowSection({
             <div className="case-workflow__controls">
               {detail.caseStatus === "IN_REVIEW" && (
                 <fieldset className="case-workflow__group">
-                  <legend>Review status</legend>
+                  <legend>검토 상태</legend>
                   <p className="case-workflow__helper">
-                    Move the case to additional information required. The audit reason is fixed by this action.
+                    추가 정보 필요 상태로 변경합니다. 감사 사유는 작업에 따라 정해집니다.
                   </p>
                   <button
                     className="button"
@@ -397,22 +398,22 @@ export function CaseWorkflowSection({
                     disabled={busy}
                     onClick={() => submit({ kind: "request-additional-information" })}
                   >
-                    Request additional information
+                    추가 정보 요청
                   </button>
                 </fieldset>
               )}
 
               {detail.caseStatus === "ADDITIONAL_INFORMATION_REQUIRED" && (
                 <fieldset className="case-workflow__group">
-                  <legend>Review status</legend>
+                  <legend>검토 상태</legend>
                   {currentAssignee === null ? (
                     <p className="case-workflow__helper">
-                      Assign an analyst before resuming review.
+                      검토를 재개하려면 담당자를 배정하세요.
                     </p>
                   ) : (
                     <>
                       <p className="case-workflow__helper">
-                        Resume review with the current assignee. The audit reason is fixed by this action.
+                        현재 담당자로 검토를 재개합니다. 감사 사유는 작업에 따라 정해집니다.
                       </p>
                       <button
                         className="button"
@@ -421,7 +422,7 @@ export function CaseWorkflowSection({
                         disabled={busy}
                         onClick={() => submit({ kind: "resume-review" })}
                       >
-                        Resume review
+                        검토 재개
                       </button>
                     </>
                   )}
@@ -430,8 +431,8 @@ export function CaseWorkflowSection({
 
               <form className="case-workflow__form" onSubmit={submitAssignee} noValidate>
                 <fieldset className="case-workflow__group" disabled={busy}>
-                  <legend>{detail.caseStatus === "OPEN" ? "Start review" : "Assignee"}</legend>
-                  <label htmlFor={ASSIGNEE_INPUT_ID}>Assignee UUID</label>
+                  <legend>{detail.caseStatus === "OPEN" ? "검토 시작" : "담당자"}</legend>
+                  <label htmlFor={ASSIGNEE_INPUT_ID}>담당자 UUID</label>
                   <p id={ASSIGNEE_HELPER_ID} className="case-workflow__helper">
                     {assigneeHelper(detail)}
                   </p>
@@ -459,7 +460,7 @@ export function CaseWorkflowSection({
                   />
                   {invalidAssignee && (
                     <p id={ASSIGNEE_ERROR_ID} className="form-error">
-                      Enter a different canonical lowercase UUID v4 without leading or trailing whitespace.
+                      앞뒤 공백 없이 다른 소문자 UUID v4를 입력하세요.
                     </p>
                   )}
                   <div className="case-workflow__actions">
@@ -470,10 +471,10 @@ export function CaseWorkflowSection({
                       disabled={busy}
                     >
                       {detail.caseStatus === "OPEN"
-                        ? "Start review"
+                        ? "검토 시작"
                         : currentAssignee === null
-                          ? "Assign analyst"
-                          : "Change assignee"}
+                          ? "담당자 배정"
+                          : "담당자 변경"}
                     </button>
                     {detail.caseStatus === "ADDITIONAL_INFORMATION_REQUIRED" &&
                       currentAssignee !== null && (
@@ -483,7 +484,7 @@ export function CaseWorkflowSection({
                           disabled={busy}
                           onClick={() => submit({ kind: "release-assignee" })}
                         >
-                          Release assignee
+                          담당자 배정 해제
                         </button>
                       )}
                   </div>
@@ -496,10 +497,9 @@ export function CaseWorkflowSection({
             (resolvable ? (
               <form className="case-workflow__form case-resolution" onSubmit={submitResolution} noValidate>
                 <fieldset className="case-workflow__group" disabled={busy}>
-                  <legend>Case resolution</legend>
+                  <legend>사건 종결</legend>
                   <p id={RESOLUTION_HELPER_ID} className="case-workflow__helper">
-                    Choose the final disposition. Resolving closes the case and cannot be undone. The
-                    audit reason is fixed as CASE_RESOLUTION_COMPLETED.
+                    최종 판정을 선택하세요. 사건을 종결하면 되돌릴 수 없습니다. 감사 사유는 CASE_RESOLUTION_COMPLETED로 기록됩니다.
                   </p>
                   <div
                     className="case-resolution__options"
@@ -510,7 +510,7 @@ export function CaseWorkflowSection({
                     aria-invalid={invalidDisposition || undefined}
                   >
                     <p id={RESOLUTION_LABEL_ID} className="case-resolution__label">
-                      Final disposition
+                      최종 판정
                     </p>
                     {CASE_FINAL_DISPOSITIONS.map((disposition, index) => (
                       <label key={disposition} className="case-resolution__option">
@@ -528,19 +528,19 @@ export function CaseWorkflowSection({
                   </div>
                   {invalidDisposition && (
                     <p id={RESOLUTION_ERROR_ID} className="form-error">
-                      Choose a final disposition before resolving the case.
+                      사건을 종결하려면 최종 판정을 선택하세요.
                     </p>
                   )}
                   <div className="case-workflow__actions">
                     <button className="button button--primary" type="submit" disabled={busy}>
-                      Resolve case
+                      사건 종결
                     </button>
                   </div>
                 </fieldset>
               </form>
             ) : (
               <p className="notice notice--empty case-workflow__unavailable">
-                Case resolution is not available for the current case state.
+                현재 사건 상태에서는 종결할 수 없습니다.
               </p>
             ))}
         </>
@@ -548,13 +548,13 @@ export function CaseWorkflowSection({
 
       {state.status === "reconciling" && !unconfirmed && (
         <div className="notice notice--empty case-workflow__reconciling">
-          <p className="notice__title">Refreshing authoritative case information</p>
+          <p className="notice__title">최신 사건 정보를 확인하고 있습니다</p>
           <p className="notice__body">
-            Workflow actions remain unavailable until the latest case record is confirmed.
+            최신 사건 기록이 확인될 때까지 작업할 수 없습니다.
           </p>
           {detailRefreshState === "failed" && (
             <button className="button" type="button" onClick={retryReconciliation}>
-              Refresh workflow information
+              <Icon name="refresh" />사건 처리 정보 새로고침
             </button>
           )}
         </div>
@@ -573,7 +573,7 @@ export function CaseWorkflowSection({
               disabled={detailRefreshState === "refreshing"}
               onClick={retryReconciliation}
             >
-              Refresh workflow information
+              <Icon name="refresh" />사건 처리 정보 새로고침
             </button>
           )}
         </div>
@@ -584,7 +584,7 @@ export function CaseWorkflowSection({
         role="status"
         aria-live="polite"
         aria-atomic="true"
-        aria-label="Case workflow result"
+        aria-label="사건 처리 결과"
       >
         {state.status === "success" ? SUCCESS_MESSAGES[state.notice.action] : ""}
       </p>

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { CaseAuditEntry } from "../../api/caseAuditApi";
+import { Icon } from "../../shared/Icon";
 import {
   useCaseAuditLog,
   type CaseAuditState,
@@ -52,26 +53,26 @@ import {
  */
 const ERROR_COPY = Object.freeze({
   timeout: {
-    title: "The audit history took too long to load",
-    body: "The backend did not answer in time. Try loading it again.",
+    title: "감사 이력을 불러오는 데 시간이 오래 걸립니다",
+    body: "백엔드가 제때 응답하지 않았습니다. 다시 불러오세요.",
   },
   "network-error": {
-    title: "The backend could not be reached",
-    body: "Check the connection to the FinGuardOps backend, then try again.",
+    title: "백엔드에 연결할 수 없습니다",
+    body: "FinGuardOps 백엔드 연결을 확인한 뒤 다시 시도하세요.",
   },
   "invalid-response": {
-    title: "The audit history could not be read",
+    title: "감사 이력을 읽을 수 없습니다",
     body:
-      "The backend returned data this console will not display. Nothing is shown rather than " +
-      "part of a trail. Try again, and report it if it continues.",
+      "백엔드 응답을 표시할 수 없어 " +
+      "일부 이력만 보여주지 않았습니다. 다시 시도하고 문제가 계속되면 알려주세요.",
   },
   "authentication-required": {
-    title: "Your session ended",
-    body: "Sign in again to continue.",
+    title: "세션이 종료되었습니다",
+    body: "계속하려면 다시 로그인하세요.",
   },
   "generic-error": {
-    title: "The audit history could not be loaded",
-    body: "The backend could not return this audit history. Try again.",
+    title: "감사 이력을 불러올 수 없습니다",
+    body: "백엔드가 감사 이력을 반환하지 않았습니다. 다시 시도하세요.",
   },
 });
 
@@ -89,13 +90,13 @@ const RETRYABLE: ReadonlySet<CaseAuditState["status"]> = new Set([
 ]);
 
 const NOT_FOUND_COPY = Object.freeze({
-  title: "Audit history not found",
-  body: "No audit history is available for this case.",
+  title: "감사 이력이 없습니다",
+  body: "이 사건의 감사 이력이 없습니다.",
 });
 
 const FORBIDDEN_COPY = Object.freeze({
-  title: "Access denied",
-  body: "You do not have permission to view this audit history.",
+  title: "접근할 수 없습니다",
+  body: "감사 이력을 볼 권한이 없습니다.",
 });
 
 /** The fixed refusal a settled non-success state shows, or `null` for none. */
@@ -198,21 +199,19 @@ export function CaseAuditPanel({
       aria-labelledby="case-audit-heading"
       aria-busy={refreshState === "refreshing" || undefined}
     >
-      <h3 id="case-audit-heading">Audit history</h3>
+      <h3 id="case-audit-heading">감사 이력</h3>
       <p className="audit__note">
-        Every recorded change to this case, newest first. Times are Korea Standard Time
-        (UTC+09:00).
+        이 사건의 변경 이력을 최신순으로 표시합니다. 시간은 한국 표준시(UTC+09:00)입니다.
       </p>
 
       {refreshState === "failed" && (
         <div className="notice notice--error audit__refresh" role="alert">
-          <h4 className="notice__title">The latest audit history could not be loaded</h4>
+          <h4 className="notice__title">최신 감사 이력을 불러올 수 없습니다</h4>
           <p className="notice__body">
-            The note submission result is unchanged. Refresh the audit history before relying on
-            this trail.
+            메모 등록 결과는 확인되지 않았습니다. 감사 이력을 새로고침하세요.
           </p>
           <button className="button" type="button" onClick={onRefresh}>
-            Refresh audit history
+            <Icon name="refresh" />감사 이력 새로고침
           </button>
         </div>
       )}
@@ -222,7 +221,7 @@ export function CaseAuditPanel({
         case record's. Two unnamed status regions on one screen announce two
         different things under one name, which is worse than announcing neither.
       */}
-      <p className="result-line" role="status" aria-live="polite" aria-label="Audit history status">
+      <p className="result-line" role="status" aria-live="polite" aria-label="감사 이력 상태">
         <AuditSummary state={state} />
       </p>
 
@@ -234,14 +233,14 @@ export function CaseAuditPanel({
           <p className="notice__body">{refusal.body}</p>
           {retryable && (
             <button className="button" type="button" onClick={onRetry}>
-              Try loading the audit history again
+              <Icon name="refresh" />감사 이력 다시 불러오기
             </button>
           )}
         </div>
       )}
 
       {state.status === "loading" && (
-        <p className="loading-panel">Loading audit history...</p>
+        <p className="loading-panel">감사 이력을 불러오고 있습니다…</p>
       )}
 
       {(state.status === "success" || state.status === "empty") && (
@@ -258,10 +257,10 @@ export function CaseAuditPanel({
 /** The one sentence the live region carries, for each state the section has. */
 function AuditSummary({ state }: { readonly state: CaseAuditState }) {
   if (state.status === "idle") {
-    return <span>No audit history requested.</span>;
+    return <span>요청한 감사 이력이 없습니다.</span>;
   }
   if (state.status === "loading") {
-    return <span>Loading audit history</span>;
+    return <span>감사 이력을 불러오는 중</span>;
   }
   if (state.status === "success") {
     const window = describeAuditWindow(state.data.page, state.data.content.length);
@@ -273,7 +272,7 @@ function AuditSummary({ state }: { readonly state: CaseAuditState }) {
   }
   const refusal = refusalCopy(state);
   if (refusal !== null) {
-    return <span>No audit history shown. {refusal.title}.</span>;
+    return <span>표시할 감사 이력이 없습니다. {refusal.title}.</span>;
   }
   return null;
 }
@@ -344,18 +343,18 @@ function AuditItem({ entry, id }: { readonly entry: CaseAuditEntry; readonly id:
         <h4
           className="audit__action"
           id={id}
-          aria-label={`${entry.action}, changed ${changed ?? "at an unreadable time"}${changed === null ? "" : " KST"}`}
+          aria-label={`${entry.action}, 변경 시각 ${changed ?? "시간을 표시할 수 없음"}${changed === null ? "" : " KST"}`}
         >
           {entry.action}
         </h4>
         <dl className="facts">
-          <dt>Reason code</dt>
+          <dt>사유 코드</dt>
           <dd className="audit__code">{entry.reasonCode}</dd>
 
-          <dt>Actor type</dt>
+          <dt>행위자 유형</dt>
           <dd className="audit__code">{entry.actorType}</dd>
 
-          <dt>Changed</dt>
+          <dt>변경</dt>
           <dd>
             <KstInstant utcInstant={entry.changedAt} />
           </dd>
@@ -365,19 +364,19 @@ function AuditItem({ entry, id }: { readonly entry: CaseAuditEntry; readonly id:
             line. A change is two states, and a section that printed only the
             result would be reporting the record rather than the change.
           */}
-          <dt>Before</dt>
+          <dt>변경 전</dt>
           <dd>
             <AuditSummaryValue display={describeAuditSummary(entry.beforeSummary)} />
           </dd>
 
-          <dt>After</dt>
+          <dt>변경 후</dt>
           <dd>
             <AuditSummaryValue display={describeAuditSummary(entry.afterSummary)} />
           </dd>
 
           {noteId !== null && (
             <>
-              <dt>Note ID</dt>
+              <dt>메모 ID</dt>
               {/*
                 Text, not an anchor. There is no investigation note screen in
                 this console, so a link here would lead nowhere.
@@ -439,7 +438,7 @@ function AuditPager({
   readonly onPageSizeChange: (size: number) => void;
 }) {
   return (
-    <nav className="pager" aria-label="Audit history pages">
+    <nav className="pager" aria-label="감사 이력 페이지">
       <button
         className="button"
         type="button"
@@ -448,7 +447,7 @@ function AuditPager({
           onPageChange(page.number - 1);
         }}
       >
-        Previous
+        이전
       </button>
       <button
         className="button"
@@ -458,11 +457,11 @@ function AuditPager({
           onPageChange(page.number + 1);
         }}
       >
-        Next
+        다음
       </button>
       <p className="pager__position">{describeAuditPosition(page)}</p>
       <div className="pager__size">
-        <label htmlFor="case-audit-pager-size">Entries per page</label>
+        <label htmlFor="case-audit-pager-size">페이지당 항목 수</label>
         <select
           id="case-audit-pager-size"
           value={page.size}
@@ -491,7 +490,7 @@ function KstInstant({ utcInstant }: { readonly utcInstant: string }) {
   if (shown === null) {
     // Unreachable through the validated contract, and still not a place to
     // print the raw value: a time that cannot be read is reported as one.
-    return <span className="facts__absent">Not a readable time</span>;
+    return <span className="facts__absent">시간을 표시할 수 없음</span>;
   }
   return <time dateTime={utcInstant}>{shown} KST</time>;
 }

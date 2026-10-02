@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { Link, useLocation } from "react-router-dom";
+import { Icon } from "../shared/Icon";
 import { isCanonicalUuidV4 } from "../api/backendEndpoints";
 import type { TransactionDetail } from "../api/transactionApi";
 import {
@@ -98,38 +99,38 @@ const ERROR_COPY: Readonly<
   Record<TransactionDetailErrorKind, { readonly title: string; readonly body: string }>
 > = Object.freeze({
   timeout: {
-    title: "The transaction took too long to load",
-    body: "The backend did not answer in time. Try loading it again.",
+    title: "거래를 불러오는 데 시간이 오래 걸립니다",
+    body: "백엔드가 제때 응답하지 않았습니다. 다시 불러오세요.",
   },
   network: {
-    title: "The backend could not be reached",
-    body: "Check the connection to the FinGuardOps backend, then try again.",
+    title: "백엔드에 연결할 수 없습니다",
+    body: "FinGuardOps 백엔드 연결을 확인한 뒤 다시 시도하세요.",
   },
   "invalid-response": {
-    title: "The transaction could not be read",
+    title: "거래 정보를 읽을 수 없습니다",
     body:
-      "The backend returned data this console will not display. Nothing is shown rather than " +
-      "part of a record. Try again, and report it if it continues.",
+      "백엔드 응답을 표시할 수 없어 " +
+      "일부 기록만 보여주지 않았습니다. 다시 시도하고 문제가 계속되면 알려주세요.",
   },
   "not-found": {
-    title: "Transaction not found",
-    body: "No transaction with this identifier is available. Return to the transaction list.",
+    title: "거래를 찾을 수 없습니다",
+    body: "이 ID에 해당하는 거래가 없습니다. 거래 목록으로 돌아가세요.",
   },
   "access-denied": {
-    title: "Access denied",
-    body: "You do not have permission to view this transaction.",
+    title: "접근할 수 없습니다",
+    body: "이 거래를 볼 권한이 없습니다.",
   },
   "session-lost": {
-    title: "Your session ended",
-    body: "Sign in again to continue.",
+    title: "세션이 종료되었습니다",
+    body: "계속하려면 다시 로그인하세요.",
   },
   "request-rejected": {
-    title: "The transaction was not requested",
-    body: "This address is not a transaction request this console will send.",
+    title: "거래를 요청하지 않았습니다",
+    body: "이 주소로는 거래를 요청할 수 없습니다.",
   },
   unknown: {
-    title: "The transaction could not be loaded",
-    body: "The backend could not return this transaction. Try again.",
+    title: "거래를 불러올 수 없습니다",
+    body: "백엔드가 거래 정보를 반환하지 않았습니다. 다시 시도하세요.",
   },
 });
 
@@ -142,10 +143,8 @@ const RETRYABLE: ReadonlySet<TransactionDetailErrorKind> = new Set<TransactionDe
 ]);
 
 const INVALID_ROUTE_COPY = Object.freeze({
-  title: "This is not a transaction address",
-  body:
-    "The address does not name a transaction this console can open. Open a transaction from " +
-    "the transaction list instead.",
+  title: "올바른 거래 주소가 아닙니다",
+  body: "이 주소로는 거래를 열 수 없습니다. 거래 목록에서 다시 선택하세요.",
 });
 
 export function TransactionDetailPage() {
@@ -179,10 +178,10 @@ export function TransactionDetailPage() {
     <section className="detail" aria-labelledby="transaction-detail-heading">
       <div className="page-head">
         <p className="detail__back">
-          <Link to="/transactions">Back to transactions</Link>
+          <Link to="/transactions"><Icon name="back" />거래 목록으로</Link>
         </p>
         <h2 id="transaction-detail-heading">
-          Transaction
+          거래
           {transactionId !== null && (
             <>
               {" "}
@@ -191,8 +190,7 @@ export function TransactionDetailPage() {
           )}
         </h2>
         <p>
-          A read-only record from the transaction ledger. Times are Korea Standard Time
-          (UTC+09:00).
+          거래 기록을 조회합니다. 시간은 한국 표준시(UTC+09:00)입니다.
         </p>
       </div>
 
@@ -213,14 +211,14 @@ export function TransactionDetailPage() {
           <p className="notice__body">{ERROR_COPY[state.error].body}</p>
           {RETRYABLE.has(state.error) && (
             <button className="button" type="button" onClick={retry}>
-              Try again
+              <Icon name="refresh" />다시 시도
             </button>
           )}
         </div>
       )}
 
       {transactionId !== null && state.status === "loading" && (
-        <p className="loading-panel">Loading transaction...</p>
+        <p className="loading-panel">거래를 불러오고 있습니다…</p>
       )}
 
       {transactionId !== null && state.status === "success" && (
@@ -241,13 +239,13 @@ function DetailSummary({
     return <span>{INVALID_ROUTE_COPY.title}.</span>;
   }
   if (state.status === "loading") {
-    return <span>Loading transaction</span>;
+    return <span>거래를 불러오는 중</span>;
   }
   if (state.status === "error") {
-    return <span>No record shown. {ERROR_COPY[state.error].title}.</span>;
+    return <span>표시할 기록이 없습니다. {ERROR_COPY[state.error].title}.</span>;
   }
   if (state.status === "success") {
-    return <span>Showing the full transaction record.</span>;
+    return <span>거래 기록 전체를 표시합니다.</span>;
   }
   return null;
 }
@@ -265,18 +263,18 @@ function TransactionRecord({ transaction }: { readonly transaction: TransactionD
   return (
     <div className="detail__record">
       <section className="panel" aria-labelledby="transaction-summary-heading">
-        <h3 id="transaction-summary-heading">Transaction</h3>
+        <h3 id="transaction-summary-heading">거래</h3>
         <dl className="facts">
-          <dt>Transaction ID</dt>
+          <dt>거래 ID</dt>
           <dd className="facts__ref">{transaction.transactionId}</dd>
 
-          <dt>Type</dt>
+          <dt>유형</dt>
           <dd>{TRANSACTION_TYPE_LABELS[transaction.transactionType]}</dd>
 
-          <dt>Channel</dt>
+          <dt>채널</dt>
           <dd>{TRANSACTION_CHANNEL_LABELS[transaction.channel]}</dd>
 
-          <dt>Processing status</dt>
+          <dt>처리 상태</dt>
           <dd>
             {/*
               Shape, word and colour together, exactly as the sheet renders it.
@@ -289,7 +287,7 @@ function TransactionRecord({ transaction }: { readonly transaction: TransactionD
             </span>
           </dd>
 
-          <dt>Amount</dt>
+          <dt>금액</dt>
           <dd className="facts__amount">
             {/*
               Grouped from the decimal string with BigInt. The value never
@@ -299,7 +297,7 @@ function TransactionRecord({ transaction }: { readonly transaction: TransactionD
             <span>{transaction.currencyCode}</span>
           </dd>
 
-          <dt>Occurred</dt>
+          <dt>발생</dt>
           <dd>
             <KstInstant utcInstant={transaction.occurredAt} />
           </dd>
@@ -307,20 +305,20 @@ function TransactionRecord({ transaction }: { readonly transaction: TransactionD
       </section>
 
       <section className="panel" aria-labelledby="transaction-parties-heading">
-        <h3 id="transaction-parties-heading">Customer, accounts and device</h3>
+        <h3 id="transaction-parties-heading">고객·계좌·기기</h3>
         <dl className="facts">
-          <dt>Customer reference</dt>
+          <dt>고객 참조값</dt>
           <dd className="facts__ref">{transaction.externalCustomerRef}</dd>
 
-          <dt>From account</dt>
+          <dt>출금 계좌</dt>
           <dd className="facts__ref">{transaction.senderAccountRef}</dd>
 
-          <dt>To account</dt>
+          <dt>입금 계좌</dt>
           <dd className="facts__ref">
             <Reference value={transaction.recipientAccountRef} />
           </dd>
 
-          <dt>Device</dt>
+          <dt>기기</dt>
           <dd className="facts__ref">
             <Reference value={transaction.deviceRef} />
           </dd>
@@ -328,14 +326,14 @@ function TransactionRecord({ transaction }: { readonly transaction: TransactionD
       </section>
 
       <section className="panel" aria-labelledby="transaction-record-heading">
-        <h3 id="transaction-record-heading">Ledger record</h3>
+        <h3 id="transaction-record-heading">거래 원장 기록</h3>
         <dl className="facts">
-          <dt>Recorded</dt>
+          <dt>기록</dt>
           <dd>
             <KstInstant utcInstant={transaction.createdAt} />
           </dd>
 
-          <dt>Last updated</dt>
+          <dt>최종 수정</dt>
           <dd>
             <KstInstant utcInstant={transaction.updatedAt} />
           </dd>
@@ -355,7 +353,7 @@ function KstInstant({ utcInstant }: { readonly utcInstant: string }) {
   if (shown === null) {
     // Unreachable through the validated contract, and still not a place to
     // print the raw value: a time that cannot be read is reported as one.
-    return <span className="facts__absent">Not a readable time</span>;
+    return <span className="facts__absent">시간을 표시할 수 없음</span>;
   }
   return <time dateTime={utcInstant}>{shown} KST</time>;
 }

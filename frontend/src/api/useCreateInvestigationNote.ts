@@ -17,15 +17,15 @@ import { createInvestigationNote } from "./investigationNoteApi";
 import { isNoteContentString } from "./responseValidation";
 
 export const INVESTIGATION_NOTE_VALIDATION_MESSAGE =
-  "Enter 1–4,000 Unicode characters and include at least one non-whitespace character.";
+  "공백이 아닌 문자를 포함해 1~4,000자를 입력하세요.";
 
-export const INVESTIGATION_NOTE_SUCCESS_MESSAGE = "Investigation note added.";
+export const INVESTIGATION_NOTE_SUCCESS_MESSAGE = "조사 메모를 등록했습니다.";
 
 export const INVESTIGATION_NOTE_FAILURE_MESSAGE =
-  "The investigation note could not be added. Your text has been kept.";
+  "조사 메모를 등록하지 못했습니다. 입력한 내용은 유지됩니다.";
 
 export const INVESTIGATION_NOTE_CONFLICT_MESSAGE =
-  "This case changed. Review the latest case information, then submit again.";
+  "사건 정보가 변경되었습니다. 최신 내용을 확인한 뒤 다시 등록하세요.";
 
 export type CreateInvestigationNoteState =
   | { readonly status: "idle" }
