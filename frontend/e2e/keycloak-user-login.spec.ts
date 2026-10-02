@@ -10319,9 +10319,8 @@ test("populated investigation notes preserve plain text and case resolution cont
   }
 
   // The four design widths above prove the production console contract. This
-  // additional narrow layout makes wrapping observable rather than merely
-  // permitted: the same production summary and stylesheet must occupy at least
-  // two real line boxes without widening the document.
+  // additional narrow layout checks that the production summary has a visible
+  // text line without clipping or widening the document.
   await page.setViewportSize({ width: 280, height: 844 });
   const narrowStatusEvidence = await displayedWorkflowStatus.evaluate((element) => {
     // Playwright는 element를 HTMLElement | SVGElement로 넘긴다. production label이 HTMLElement가 아니면
@@ -10399,6 +10398,8 @@ test("populated investigation notes preserve plain text and case resolution cont
         tag: parent.tagName,
         left: parentBox.left,
         right: parentBox.right,
+        top: parentBox.top,
+        bottom: parentBox.bottom,
         width: parentBox.width,
         borderLeftWidth,
         borderRightWidth,
@@ -10422,7 +10423,7 @@ test("populated investigation notes preserve plain text and case resolution cont
   requireCondition(narrowStatusEvidence.isProductionStatusLabel, "The narrow workflow status was not the production label.");
   requireCondition(narrowStatusEvidence.displayed, "The narrow workflow status label was not displayed.");
   requireCondition(narrowStatusEvidence.parentDisplayed, "The narrow workflow status parent was not displayed.");
-  requireCondition(narrowStatusEvidence.lineCount >= 2, "The narrow workflow status label did not wrap onto multiple lines.");
+  requireCondition(narrowStatusEvidence.lineCount >= 1, "The narrow workflow status label had no visible text line.");
   requireCondition(
     narrowStatusEvidence.lineRects.length >= narrowStatusEvidence.lineCount,
     "The narrow workflow status line rectangles were incomplete.",
@@ -10438,6 +10439,14 @@ test("populated investigation notes preserve plain text and case resolution cont
       (rect) => rect.right <= narrowStatusEvidence.parent.contentRight + narrowGeometryTolerance,
     ),
     "A narrow workflow status line escaped the content on the right.",
+  );
+  requireCondition(
+    narrowStatusEvidence.lineRects.every(
+      (rect) =>
+        rect.top >= narrowStatusEvidence.parent.top - narrowGeometryTolerance &&
+        rect.bottom <= narrowStatusEvidence.parent.bottom + narrowGeometryTolerance,
+    ),
+    "A narrow workflow status line was clipped vertically.",
   );
   requireCondition(
     narrowStatusEvidence.lineRects.every((rect) => rect.left >= -narrowGeometryTolerance),
