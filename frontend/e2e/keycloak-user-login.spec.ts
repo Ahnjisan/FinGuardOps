@@ -9595,6 +9595,7 @@ const CASE_AUDIT_GEOMETRY_URL = `${APP_ORIGIN}/e2e/case-audit-geometry.html`;
 const CASE_NOTES_GEOMETRY_URL =
   `${APP_ORIGIN}/e2e/case-investigation-notes-geometry.html`;
 const CASE_RESOLUTION_GEOMETRY_URL = `${APP_ORIGIN}/e2e/case-resolution-geometry.html`;
+const CASE_DETAIL_GEOMETRY_URL = `${APP_ORIGIN}/e2e/case-detail-geometry.html`;
 
 /** The 128-character assignee reference the fixture renders. Backend's bound. */
 const GEOMETRY_ASSIGNEE_REF =
@@ -10791,4 +10792,73 @@ test("populated investigation notes preserve plain text and case resolution cont
     relaySpawnCount === spawnsBefore && relayObservationCount === observationsBefore,
     "The notes or resolution geometry fixture reached the Backend relay.",
   );
+});
+
+test("synthetic full case detail keeps its reading order, width and role states", async ({ page }) => {
+  const offOrigin: string[] = [];
+  page.on("request", (request) => {
+    if (!request.url().startsWith(APP_ORIGIN)) offOrigin.push(request.url());
+  });
+  for (const viewport of NOTES_GEOMETRY_VIEWPORTS) {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto(`${CASE_DETAIL_GEOMETRY_URL}?mode=analyst`);
+    await expect(page.getByRole("heading", { name: "사건 시각" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "담당자 변경" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "메모 등록" })).toBeVisible();
+    await expect(page.locator(".investigation-notes__content")).toContainText("끊기지않는메모");
+    await expect(page.locator(".audit__summary-value").last()).toContainText("synthetic-assignee-reference");
+    const layout = await page.evaluate(() => {
+      const rect = (selector: string) => {
+        const element = document.querySelector(selector);
+        if (!(element instanceof HTMLElement)) throw new Error(`Missing ${selector}`);
+        const box = element.getBoundingClientRect();
+        return { left: box.left, top: box.top, right: box.right, bottom: box.bottom };
+      };
+      return {
+        documentWidth: document.documentElement.scrollWidth,
+        viewportWidth: document.documentElement.clientWidth,
+        record: rect(".detail__record"),
+        workflow: rect(".case-workflow"),
+        notes: rect(".investigation-notes"),
+        audit: rect(".audit"),
+        order: Array.from(document.querySelectorAll(
+          ".detail__record, .case-workflow, .investigation-notes, .audit",
+        ), (element) => element.matches(".detail__record") ? "record"
+          : element.matches(".case-workflow") ? "workflow"
+          : element.matches(".investigation-notes") ? "notes" : "audit"),
+      };
+    });
+    requireCondition(layout.documentWidth <= layout.viewportWidth + 1,
+      `The synthetic case detail overflowed at ${String(viewport.width)}px.`);
+    requireCondition(layout.order.join(",") === "record,workflow,notes,audit",
+      "The case detail DOM reading order changed.");
+    requireCondition(layout.notes.top >= Math.max(layout.record.bottom, layout.workflow.bottom) - 1 &&
+      layout.audit.top >= layout.notes.bottom - 1,
+    "Notes or audit moved ahead of the case work area.");
+    requireCondition(viewport.width >= 1200
+      ? layout.workflow.left >= layout.record.right - 1
+      : layout.workflow.top >= layout.record.bottom - 1,
+    `The case record and workflow did not use the expected columns at ${String(viewport.width)}px.`);
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  for (const mode of ["viewer", "approver", "empty", "error"] as const) {
+    await page.goto(`${CASE_DETAIL_GEOMETRY_URL}?mode=${mode}`);
+    await expect(page.getByRole("heading", { name: "사건 시각" })).toBeVisible();
+    const width = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    requireCondition(width <= 1, `The synthetic ${mode} state overflowed at 390px.`);
+    if (mode === "viewer") {
+      await expect(page.locator(".case-workflow")).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "메모 등록" })).toHaveCount(0);
+    } else if (mode === "approver") {
+      await expect(page.getByRole("button", { name: "사건 종결" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "담당자 변경" })).toHaveCount(0);
+    } else if (mode === "empty") {
+      await expect(page.locator(".investigation-notes .notice--empty")).toBeVisible();
+      await expect(page.locator(".audit .notice--empty")).toBeVisible();
+    } else {
+      await expect(page.locator(".investigation-notes .notice--error")).toBeVisible();
+      await expect(page.locator(".audit .notice--error")).toBeVisible();
+    }
+  }
+  requireCondition(offOrigin.length === 0, "The synthetic case detail made an external request.");
 });
