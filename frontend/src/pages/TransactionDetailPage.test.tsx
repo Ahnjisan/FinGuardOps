@@ -126,7 +126,9 @@ async function showRecord(overrides: Record<string, unknown> = {}): Promise<void
 
 /** The `<dd>` that follows the named `<dt>`. */
 function valueOf(term: string): HTMLElement {
-  const dt = screen.getByText(term, { selector: "dt" });
+  const record = document.querySelector(".transaction-detail__record");
+  if (!(record instanceof HTMLElement)) throw new Error("Transaction record not found");
+  const dt = within(record).getByText(term, { selector: "dt" });
   const dd = dt.nextElementSibling;
   if (!(dd instanceof HTMLElement) || dd.tagName !== "DD") {
     throw new Error(`No value found for ${term}`);
@@ -198,8 +200,16 @@ describe("TransactionDetailPage record", () => {
     // Twelve names for the thirteen contract fields: `currencyCode` is read
     // beside the amount rather than as a line of its own. A thirteenth name
     // would be a field this console invented.
-    expect(document.querySelectorAll("dt")).toHaveLength(12);
-    expect(document.querySelectorAll("dd")).toHaveLength(12);
+    expect(document.querySelectorAll(".transaction-detail__record dt")).toHaveLength(12);
+    expect(document.querySelectorAll(".transaction-detail__record dd")).toHaveLength(12);
+    const glance = document.querySelector(".transaction-detail__glance");
+    expect(glance).not.toBeNull();
+    expect(within(glance as HTMLElement).getByText("인증 필요")).toBeInTheDocument();
+    expect(within(glance as HTMLElement).getByText("인증 필요").querySelector(".badge__mark")).not.toBeNull();
+    expect(within(glance as HTMLElement).getByText("1,250,000")).toBeInTheDocument();
+    expect(within(glance as HTMLElement).getByText("2026-07-23 10:15:30 KST")).toHaveAttribute(
+      "datetime", "2026-07-23T01:15:30Z",
+    );
   });
 
   it("states Seoul wall clock and keeps the untouched UTC value for the machine", async () => {
@@ -361,6 +371,7 @@ describe("TransactionDetailPage failures", () => {
     expect(within(alert).queryByRole("button")).not.toBeInTheDocument();
     expect(screen.queryByText("거래를 불러오고 있습니다…")).not.toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("표시할 기록이 없습니다.");
+    expect(document.querySelector(".transaction-detail__glance")).toBeNull();
   });
 
   it("reports a 403 as a fixed refusal, and offers no retry", async () => {
@@ -370,6 +381,7 @@ describe("TransactionDetailPage failures", () => {
     expect(alert).toHaveTextContent("접근할 수 없습니다");
     expect(within(alert).queryByRole("button")).not.toBeInTheDocument();
     expect(alert.textContent ?? "").not.toContain("transaction:read");
+    expect(document.querySelector(".transaction-detail__glance")).toBeNull();
   });
 
   it("reports an unmapped Backend status without naming it", async () => {

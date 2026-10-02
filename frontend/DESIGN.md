@@ -26,3 +26,10 @@ The console is a light financial work surface. Navigation, filters, results, and
 - Put the visible search heading and query-specific result count around the filters, table and pager in reading order. The count is `totalElements` for the active query, never an unfiltered metric.
 - Use a native period disclosure. Its summary shows the applied KST start/end values even when closed; draft changes do not claim to be applied. Enter and Space operate the disclosure, while Apply still converts KST to UTC and resets the page.
 - Preserve exact identifiers, references, amount and time. Processing status describes the pipeline, not risk. The list has no case ID, score, evidence, trend or period aggregate.
+
+## Transaction detail (Issue #320, following PR)
+
+- Read in this order: list return link, transaction ID heading, actual processing status/amount/occurrence summary, complete transaction and customer/account/device record, then ledger timestamps. The summary repeats response fields only; the record retains all 13 contracted fields.
+- At 1440px and 1280px, the two record groups sit beside each other and ledger timestamps follow across the full width. At 1024px and 390px, every group stacks in the same DOM and keyboard order. Long IDs and references wrap without truncation or document-wide horizontal scroll.
+- Processing status is a pipeline state, with a written label and mark; it is not a risk decision. Amount retains its decimal-string precision. KST text accompanies the untouched UTC `<time datetime>`. Nullable recipient account and device say `기록 없음`.
+- Loading, 404, 403, other errors and manual retry retain their existing meanings and focus behavior. Only recoverable failures offer retry. The record is read-only; no score, case link, aggregate, chart or business action is implied.

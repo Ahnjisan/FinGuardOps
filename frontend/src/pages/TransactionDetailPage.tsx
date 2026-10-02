@@ -147,10 +147,15 @@ const INVALID_ROUTE_COPY = Object.freeze({
   body: "이 주소로는 거래를 열 수 없습니다. 거래 목록에서 다시 선택하세요.",
 });
 
-export function TransactionDetailPage() {
+interface TransactionDetailPageProps {
+  /** Allows the browser geometry fixture to render this page without credentials or a Backend. */
+  readonly useDetail?: typeof useTransactionDetail;
+}
+
+export function TransactionDetailPage({ useDetail = useTransactionDetail }: TransactionDetailPageProps = {}) {
   const location = useLocation();
   const transactionId = readCanonicalTransactionId(location);
-  const { state, retry } = useTransactionDetail(transactionId);
+  const { state, retry } = useDetail(transactionId);
 
   const errorRef = useRef<HTMLDivElement | null>(null);
 
@@ -222,9 +227,39 @@ export function TransactionDetailPage() {
       )}
 
       {transactionId !== null && state.status === "success" && (
-        <TransactionRecord transaction={state.data} />
+        <>
+          <TransactionAtAGlance transaction={state.data} />
+          <TransactionRecord transaction={state.data} />
+        </>
       )}
     </section>
+  );
+}
+
+function TransactionAtAGlance({ transaction }: { readonly transaction: TransactionDetail }) {
+  return (
+    <dl className="transaction-detail__glance" aria-label="거래 요약">
+      <div className="transaction-detail__glance-item">
+        <dt>처리 상태</dt>
+        <dd>
+          <span className={`badge badge--${processingStatusTone(transaction.processingStatus)}`}>
+            <span className="badge__mark" aria-hidden="true" />
+            {PROCESSING_STATUS_LABELS[transaction.processingStatus]}
+          </span>
+        </dd>
+      </div>
+      <div className="transaction-detail__glance-item">
+        <dt>금액</dt>
+        <dd className="facts__amount">
+          <b>{formatAmountDigits(transaction.amount)}</b>
+          <span>{transaction.currencyCode}</span>
+        </dd>
+      </div>
+      <div className="transaction-detail__glance-item">
+        <dt>발생 시각</dt>
+        <dd><KstInstant utcInstant={transaction.occurredAt} /></dd>
+      </div>
+    </dl>
   );
 }
 
@@ -261,7 +296,7 @@ function TransactionRecord({ transaction }: { readonly transaction: TransactionD
   const tone = processingStatusTone(transaction.processingStatus);
 
   return (
-    <div className="detail__record">
+    <div className="detail__record transaction-detail__record">
       <section className="panel" aria-labelledby="transaction-summary-heading">
         <h3 id="transaction-summary-heading">거래</h3>
         <dl className="facts">
