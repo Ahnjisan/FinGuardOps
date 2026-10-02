@@ -7,6 +7,7 @@ import {
   TRANSACTION_TYPE_LABELS,
   type TransactionFilterDraft,
 } from "./transactionPresentation";
+import { Icon } from "../../shared/Icon";
 
 export interface TransactionFiltersProps {
   readonly draft: TransactionFilterDraft;
@@ -44,15 +45,15 @@ export function TransactionFilters({
       }}
     >
       <h3 id="filters-heading" className="visually-hidden">
-        Transaction filters
+        거래 필터
       </h3>
       <div className="filters__grid">
         <fieldset className="field-group field-group--wide">
-          <legend className="field-group__legend">Occurred between</legend>
+          <legend className="field-group__legend">발생 기간</legend>
           <div className="field-group__fields field-group__fields--pair">
             <div className="field">
               <label className="field__label" htmlFor="filter-occurred-from">
-                From (KST)
+                시작(KST)
               </label>
               <input
                 className="field__control"
@@ -67,7 +68,7 @@ export function TransactionFilters({
             </div>
             <div className="field">
               <label className="field__label" htmlFor="filter-occurred-to">
-                To (KST)
+                끝(KST)
               </label>
               <input
                 className="field__control"
@@ -82,16 +83,16 @@ export function TransactionFilters({
             </div>
           </div>
           <p className="field__hint">
-            Entered and read as Korea Standard Time, UTC+09:00. Sent to the backend as UTC.
+            한국 표준시(UTC+09:00)로 입력하며 서버에는 UTC로 전달합니다.
           </p>
         </fieldset>
 
         <fieldset className="field-group">
-          <legend className="field-group__legend">Classification</legend>
+          <legend className="field-group__legend">분류</legend>
           <div className="field-group__fields">
             <div className="field">
               <label className="field__label" htmlFor="filter-transaction-type">
-                Transaction type
+                거래 유형
               </label>
               <select
                 className="field__control"
@@ -101,7 +102,7 @@ export function TransactionFilters({
                   update("transactionType", event.target.value);
                 }}
               >
-                <option value="">Any type</option>
+                <option value="">모든 유형</option>
                 {TRANSACTION_TYPES.map((type) => (
                   <option key={type} value={type}>
                     {TRANSACTION_TYPE_LABELS[type]}
@@ -111,7 +112,7 @@ export function TransactionFilters({
             </div>
             <div className="field">
               <label className="field__label" htmlFor="filter-processing-status">
-                Processing status
+                처리 상태
               </label>
               <select
                 className="field__control"
@@ -121,7 +122,7 @@ export function TransactionFilters({
                   update("processingStatus", event.target.value);
                 }}
               >
-                <option value="">Any status</option>
+                <option value="">모든 상태</option>
                 {TRANSACTION_PROCESSING_STATUSES.map((status) => (
                   <option key={status} value={status}>
                     {PROCESSING_STATUS_LABELS[status]}
@@ -133,11 +134,11 @@ export function TransactionFilters({
         </fieldset>
 
         <fieldset className="field-group">
-          <legend className="field-group__legend">References</legend>
+          <legend className="field-group__legend">참조값</legend>
           <div className="field-group__fields">
             <div className="field">
               <label className="field__label" htmlFor="filter-customer-ref">
-                Customer reference
+                고객 참조값
               </label>
               <input
                 className="field__control"
@@ -154,7 +155,7 @@ export function TransactionFilters({
             </div>
             <div className="field">
               <label className="field__label" htmlFor="filter-account-ref">
-                Account reference
+                계좌 참조값
               </label>
               <input
                 className="field__control"
@@ -170,7 +171,7 @@ export function TransactionFilters({
               />
             </div>
             <p className="field__hint">
-              Matched exactly, including spaces and capitalisation.
+              공백과 대소문자를 포함해 정확히 일치시킵니다.
             </p>
           </div>
         </fieldset>
@@ -178,15 +179,15 @@ export function TransactionFilters({
 
       <div className="filters__actions">
         <button className="button button--primary" type="submit">
-          Apply filters
+          <Icon name="search" />필터 적용
         </button>
         <button className="button" type="button" onClick={onReset}>
-          Reset filters
+          <Icon name="reset" />필터 초기화
         </button>
         <p className="filters__note">
           {hasPendingEdits
-            ? "Edits are not applied yet. Apply them to search."
-            : "Showing results for the applied filters."}
+            ? "변경한 조건은 아직 적용되지 않았습니다."
+            : "적용된 필터의 결과를 표시합니다."}
         </p>
       </div>
     </form>

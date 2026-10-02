@@ -56,7 +56,7 @@ function CaseActions() {
     <div>
       {capabilities.has("case:workflow") && <button type="button">Change case status</button>}
       {capabilities.has("case:note-write") && <button type="button">Add investigation note</button>}
-      {capabilities.has("case:resolve") && <button type="button">Resolve case</button>}
+      {capabilities.has("case:resolve") && <button type="button">사건 종결</button>}
     </div>
   );
 }
@@ -68,7 +68,7 @@ function SessionProbe() {
     <div>
       <span data-testid="auth-status">{state.status}</span>
       <button type="button" onClick={signOut}>
-        Sign out
+        로그아웃
       </button>
       <button type="button" onClick={notifyCallbackStarted}>
         Start callback
@@ -135,11 +135,11 @@ function authStatus(): string {
 }
 
 function accessDeniedHeading() {
-  return screen.queryByRole("heading", { level: 2, name: "Access denied" });
+  return screen.queryByRole("heading", { level: 2, name: "접근할 수 없습니다" });
 }
 
 function signInRequiredHeading() {
-  return screen.queryByRole("heading", { level: 2, name: "Sign in required" });
+  return screen.queryByRole("heading", { level: 2, name: "로그인이 필요합니다" });
 }
 
 afterEach(() => {
@@ -155,7 +155,7 @@ describe("RequireCapability - not decided yet", () => {
     await waitFor(() => {
       expect(authStatus()).toBe("initializing");
     });
-    expect(screen.getByRole("status")).toHaveTextContent("Checking access...");
+    expect(screen.getByRole("status")).toHaveTextContent("접근 권한을 확인하고 있습니다…");
     expect(screen.queryByText(CASE_CONTENT)).not.toBeInTheDocument();
     expect(accessDeniedHeading()).not.toBeInTheDocument();
     expect(signInRequiredHeading()).not.toBeInTheDocument();
@@ -171,7 +171,7 @@ describe("RequireCapability - not decided yet", () => {
     await user.click(screen.getByRole("button", { name: "Start callback" }));
 
     expect(authStatus()).toBe("authenticating");
-    expect(screen.getByRole("status")).toHaveTextContent("Checking access...");
+    expect(screen.getByRole("status")).toHaveTextContent("접근 권한을 확인하고 있습니다…");
     expect(accessDeniedHeading()).not.toBeInTheDocument();
   });
 
@@ -196,8 +196,8 @@ describe("RequireCapability - no session", () => {
   it("asks an unauthenticated visitor to sign in", async () => {
     renderGuard(createFakeAuthClient());
 
-    expect(await screen.findByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
-    expect(screen.getByText("Sign in to view this page.")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "로그인이 필요합니다" })).toBeInTheDocument();
+    expect(screen.getByText("이 화면을 보려면 로그인하세요.")).toBeInTheDocument();
     expect(screen.queryByText(CASE_CONTENT)).not.toBeInTheDocument();
     expect(accessDeniedHeading()).not.toBeInTheDocument();
   });
@@ -212,7 +212,7 @@ describe("RequireCapability - no session", () => {
     });
     expect(signInRequiredHeading()).toBeInTheDocument();
     expect(screen.queryByText(CASE_CONTENT)).not.toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Sign in required" }).textContent).not.toContain(
+    expect(screen.getByRole("region", { name: "로그인이 필요합니다" }).textContent).not.toContain(
       "configuration",
     );
   });
@@ -245,7 +245,7 @@ describe("RequireCapability - the six USER roles", () => {
       expect(await screen.findByText(CASE_CONTENT)).toBeInTheDocument();
       expect(accessDeniedHeading()).not.toBeInTheDocument();
     } else {
-      expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
+      expect(await screen.findByRole("heading", { name: "접근할 수 없습니다" })).toBeInTheDocument();
       expect(screen.queryByText(CASE_CONTENT)).not.toBeInTheDocument();
     }
   });
@@ -268,7 +268,7 @@ describe("RequireCapability - the six USER roles", () => {
     if (allowed) {
       expect(await screen.findByText(RESOLUTION_CONTENT)).toBeInTheDocument();
     } else {
-      expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
+      expect(await screen.findByRole("heading", { name: "접근할 수 없습니다" })).toBeInTheDocument();
       expect(screen.queryByText(RESOLUTION_CONTENT)).not.toBeInTheDocument();
     }
   });
@@ -282,14 +282,14 @@ describe("RequireCapability - the six USER roles", () => {
   it("refuses a signed-in user holding an empty role set", async () => {
     renderGuard(createFakeAuthClient({ initialSession: unsafeSessionWithRoles([]) }));
 
-    expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "접근할 수 없습니다" })).toBeInTheDocument();
     expect(signInRequiredHeading()).not.toBeInTheDocument();
   });
 
   it("refuses a session that carries no decided role set at all", async () => {
     renderGuard(createFakeAuthClient({ initialSession: unsafeSessionWithRoles(undefined) }));
 
-    expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "접근할 수 없습니다" })).toBeInTheDocument();
     expect(screen.queryByText(CASE_CONTENT)).not.toBeInTheDocument();
   });
 });
@@ -314,7 +314,7 @@ describe("RequireCapability - several roles", () => {
       "/test-only/resolution",
     );
 
-    expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "접근할 수 없습니다" })).toBeInTheDocument();
   });
 
   it("does not depend on the order the roles arrived in", async () => {
@@ -336,14 +336,14 @@ describe("RequireCapability - direct URL entry", () => {
       "/test-only/resolution",
     );
 
-    expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "접근할 수 없습니다" })).toBeInTheDocument();
     expect(screen.queryByText(RESOLUTION_CONTENT)).not.toBeInTheDocument();
   });
 
   it("applies the same sign-in requirement to a direct entry with no session", async () => {
     renderGuard(createFakeAuthClient(), "/test-only/resolution");
 
-    expect(await screen.findByRole("heading", { name: "Sign in required" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "로그인이 필요합니다" })).toBeInTheDocument();
   });
 });
 
@@ -352,7 +352,7 @@ describe("RequireCapability - action exposure", () => {
     return screen
       .queryAllByRole("button")
       .map((button) => button.textContent ?? "")
-      .filter((name) => !["Sign out", "Start callback", "Replace session"].includes(name));
+      .filter((name) => !["로그아웃", "Start callback", "Replace session"].includes(name));
   }
 
   it("gives a viewer no write action at all", async () => {
@@ -369,7 +369,7 @@ describe("RequireCapability - action exposure", () => {
 
     expect(await screen.findByText(CASE_CONTENT)).toBeInTheDocument();
     expect(actionNames()).toEqual(["Change case status", "Add investigation note"]);
-    expect(screen.queryByRole("button", { name: "Resolve case" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "사건 종결" })).not.toBeInTheDocument();
   });
 
   it("gives an approver resolution but not workflow or notes", async () => {
@@ -378,7 +378,7 @@ describe("RequireCapability - action exposure", () => {
     );
 
     expect(await screen.findByText(CASE_CONTENT)).toBeInTheDocument();
-    expect(actionNames()).toEqual(["Resolve case"]);
+    expect(actionNames()).toEqual(["사건 종결"]);
   });
 
   /**
@@ -428,7 +428,7 @@ describe("RequireCapability - the session ending", () => {
     renderGuard(client);
 
     expect(await screen.findByText(CASE_CONTENT)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await user.click(screen.getByRole("button", { name: "로그아웃" }));
 
     expect(screen.queryByText(CASE_CONTENT)).not.toBeInTheDocument();
     expect(signInRequiredHeading()).toBeInTheDocument();
@@ -441,7 +441,7 @@ describe("RequireCapability - the session ending", () => {
     });
     renderGuard(client, "/test-only/resolution");
 
-    expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "접근할 수 없습니다" })).toBeInTheDocument();
     // Invalidation rather than sign-out: a logout redirect ends the document,
     // so a replacement session only ever follows an invalidated one.
     act(() => {
@@ -469,7 +469,7 @@ describe("RequireCapability - the session ending", () => {
 
     expect(await screen.findByText(CASE_CONTENT)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Change case status" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Resolve case" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "사건 종결" })).toBeInTheDocument();
   });
 });
 
@@ -487,8 +487,8 @@ describe("RequireCapability - StrictMode and disclosure", () => {
       createFakeAuthClient({ initialSession: { subject: VIEWER, roles: ["PLATFORM_ADMIN"] } }),
     );
 
-    expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
-    expect(screen.getAllByRole("heading", { name: "Access denied" })).toHaveLength(1);
+    expect(await screen.findByRole("heading", { name: "접근할 수 없습니다" })).toBeInTheDocument();
+    expect(screen.getAllByRole("heading", { name: "접근할 수 없습니다" })).toHaveLength(1);
   });
 
   /**

@@ -336,7 +336,7 @@ describe("channel labels", () => {
 
 describe("absent reference label", () => {
   it("is one fixed word shared by every screen", () => {
-    expect(ABSENT_REFERENCE_LABEL).toBe("None recorded");
+    expect(ABSENT_REFERENCE_LABEL).toBe("기록 없음");
     // A missing reference reads as an absence rather than as a blank a reader
     // could mistake for a rendering fault.
     expect(ABSENT_REFERENCE_LABEL.trim()).not.toBe("");

@@ -4,6 +4,7 @@ import { safeAuthErrorMessage } from "../auth/authErrors";
 import { resolveReturnRoute } from "../auth/returnRoute";
 import { useAuth } from "../auth/useAuth";
 import { useCapabilities } from "../auth/useCapabilities";
+import { Icon } from "../shared/Icon";
 
 /** One path segment under `/cases/`, and nothing else. */
 const CASE_DETAIL_PATH = /^\/cases\/([^/]+)$/;
@@ -77,17 +78,17 @@ export function AppShell() {
 
   let statusMessage: string | null = null;
   if (state.status === "initializing") {
-    statusMessage = "Preparing sign-in...";
+    statusMessage = "로그인을 준비하고 있습니다…";
   } else if (state.status === "authenticating") {
-    statusMessage = "Signing in...";
+    statusMessage = "로그인 중입니다…";
   } else if (state.status === "signing-out") {
-    statusMessage = "Signing out...";
+    statusMessage = "로그아웃 중입니다…";
   } else if (state.status === "error") {
     statusMessage = safeAuthErrorMessage(state.kind);
   } else if (state.status === "authenticated") {
     statusMessage = state.session.displayName
-      ? `Signed in as ${state.session.displayName}.`
-      : "Signed in.";
+      ? `${state.session.displayName}님으로 로그인했습니다.`
+      : "로그인했습니다.";
   }
 
   return (
@@ -98,18 +99,22 @@ export function AppShell() {
         every navigation.
       */}
       <a className="skip-link" href="#main-content">
-        Skip to main content
+        본문으로 건너뛰기
       </a>
       <header className="rail">
         <div className="rail__identity">
-          <h1 className="rail__wordmark">FinGuardOps</h1>
-          <p className="rail__tagline">Fraud operations console</p>
+          <span className="rail__brand-mark" aria-hidden="true">F</span>
+          <div>
+            <h1 className="rail__wordmark">FinGuardOps</h1>
+            <p className="rail__tagline">이상거래 대응 콘솔</p>
+          </div>
         </div>
-        <nav className="rail__nav" aria-label="Primary">
+        <nav className="rail__nav" aria-label="주요 탐색">
+          <p className="rail__nav-label" aria-hidden="true">업무 공간</p>
           <ul className="rail__list">
             <li>
               <NavLink className="rail__link" to="/" end>
-                Home
+                <Icon name="home" />홈
               </NavLink>
             </li>
             {/*
@@ -127,7 +132,7 @@ export function AppShell() {
             {capabilities.has("transaction:view") && (
               <li>
                 <NavLink className="rail__link" to="/transactions">
-                  Transactions
+                  <Icon name="transactions" />거래
                 </NavLink>
               </li>
             )}
@@ -154,19 +159,19 @@ export function AppShell() {
                   to="/cases"
                   aria-current={inCaseSection ? "page" : undefined}
                 >
-                  Cases
+                  <Icon name="cases" />사건
                 </Link>
               </li>
             )}
             <li>
               <NavLink className="rail__link" to="/health">
-                Health
+                <Icon name="health" />서비스 상태
               </NavLink>
             </li>
           </ul>
         </nav>
         <div className="rail__session">
-          <div className="rail__status" role="status" aria-label="Authentication status">
+          <div className="rail__status" role="status" aria-label="인증 상태">
             {statusMessage}
           </div>
           {/*
@@ -183,12 +188,12 @@ export function AppShell() {
                 signIn(returnTo);
               }}
             >
-              Sign in
+              <Icon name="sign-in" />로그인
             </button>
           )}
           {state.status === "authenticated" && (
             <button className="button button--rail" type="button" onClick={signOut}>
-              Sign out
+              <Icon name="sign-out" />로그아웃
             </button>
           )}
         </div>

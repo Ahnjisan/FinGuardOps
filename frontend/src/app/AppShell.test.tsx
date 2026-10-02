@@ -63,7 +63,7 @@ function renderShell(client: FakeAuthClient, path = "/") {
 }
 
 function authStatus(): HTMLElement {
-  return screen.getByRole("status", { name: "Authentication status" });
+  return screen.getByRole("status", { name: "인증 상태" });
 }
 
 beforeEach(() => {
@@ -110,7 +110,7 @@ describe("AppShell navigation", () => {
   it("keeps the primary navigation landmark", async () => {
     renderShell(createFakeAuthClient());
 
-    expect(screen.getByRole("navigation", { name: /primary/i })).toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: /주요 탐색/i })).toBeInTheDocument();
     await waitFor(() => {
       expect(authStatus()).toBeInTheDocument();
     });
@@ -120,17 +120,17 @@ describe("AppShell navigation", () => {
     renderShell(createFakeAuthClient());
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
     });
-    expect(screen.getByRole("link", { name: "Home" })).toHaveAttribute("href", "/");
-    expect(screen.getByRole("link", { name: "Health" })).toHaveAttribute("href", "/health");
+    expect(screen.getByRole("link", { name: "홈" })).toHaveAttribute("href", "/");
+    expect(screen.getByRole("link", { name: "서비스 상태" })).toHaveAttribute("href", "/health");
   });
 
   it("opens with a skip link that reaches the main landmark", async () => {
     const user = userEvent.setup();
     renderShell(createFakeAuthClient());
 
-    const skipLink = screen.getByRole("link", { name: "Skip to main content" });
+    const skipLink = screen.getByRole("link", { name: "본문으로 건너뛰기" });
     expect(skipLink).toHaveAttribute("href", "#main-content");
     expect(screen.getByRole("main")).toHaveAttribute("id", "main-content");
 
@@ -144,13 +144,13 @@ describe("AppShell navigation", () => {
     renderShell(createFakeAuthClient(), "/health");
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
     });
-    expect(screen.getByRole("link", { name: "Health" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "서비스 상태" })).toHaveAttribute(
       "aria-current",
       "page",
     );
-    expect(screen.getByRole("link", { name: "Home" })).not.toHaveAttribute("aria-current");
+    expect(screen.getByRole("link", { name: "홈" })).not.toHaveAttribute("aria-current");
   });
 });
 
@@ -159,9 +159,9 @@ describe("AppShell capability navigation", () => {
     renderShell(createFakeAuthClient({ initialSession: { subject: "sub-1", roles: [role] } }));
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그아웃" })).toBeInTheDocument();
     });
-    expect(screen.getByRole("link", { name: "Transactions" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "거래" })).toHaveAttribute(
       "href",
       "/transactions",
     );
@@ -173,12 +173,12 @@ describe("AppShell capability navigation", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그아웃" })).toBeInTheDocument();
     });
     // Not hidden, not disabled, not `aria-hidden`: absent. A control that is
     // only styled away is still in the accessibility tree and returns with one
     // attribute change.
-    expect(screen.queryByRole("link", { name: "Transactions" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "거래" })).not.toBeInTheDocument();
     expect(container.querySelector('a[href="/transactions"]')).toBeNull();
     expect(container.innerHTML).not.toContain("/transactions");
   });
@@ -191,9 +191,9 @@ describe("AppShell capability navigation", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그아웃" })).toBeInTheDocument();
     });
-    expect(screen.getAllByRole("link", { name: "Transactions" })).toHaveLength(1);
+    expect(screen.getAllByRole("link", { name: "거래" })).toHaveLength(1);
   });
 
   it("does not offer it while authentication is still initializing", () => {
@@ -201,17 +201,17 @@ describe("AppShell capability navigation", () => {
     client.deferInitialize();
     renderShell(client);
 
-    expect(authStatus()).toHaveTextContent("Preparing sign-in...");
-    expect(screen.queryByRole("link", { name: "Transactions" })).not.toBeInTheDocument();
+    expect(authStatus()).toHaveTextContent("로그인을 준비하고 있습니다…");
+    expect(screen.queryByRole("link", { name: "거래" })).not.toBeInTheDocument();
   });
 
   it("does not offer it while unauthenticated", async () => {
     renderShell(createFakeAuthClient());
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
     });
-    expect(screen.queryByRole("link", { name: "Transactions" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "거래" })).not.toBeInTheDocument();
   });
 
   it("withdraws it the moment sign-out starts", async () => {
@@ -221,11 +221,11 @@ describe("AppShell capability navigation", () => {
     renderShell(client);
 
     await waitFor(() => {
-      expect(screen.getByRole("link", { name: "Transactions" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "거래" })).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await user.click(screen.getByRole("button", { name: "로그아웃" }));
 
-    expect(screen.queryByRole("link", { name: "Transactions" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "거래" })).not.toBeInTheDocument();
   });
 
   it("withdraws it when the session is invalidated", async () => {
@@ -233,13 +233,13 @@ describe("AppShell capability navigation", () => {
     renderShell(client);
 
     await waitFor(() => {
-      expect(screen.getByRole("link", { name: "Transactions" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "거래" })).toBeInTheDocument();
     });
     act(() => {
       client.emitSessionInvalidated();
     });
 
-    expect(screen.queryByRole("link", { name: "Transactions" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "거래" })).not.toBeInTheDocument();
   });
 
   it("does not offer it after an authentication error", async () => {
@@ -250,16 +250,16 @@ describe("AppShell capability navigation", () => {
     await waitFor(() => {
       expect(authStatus()).toHaveTextContent(safeAuthErrorMessage("configuration"));
     });
-    expect(screen.queryByRole("link", { name: "Transactions" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "거래" })).not.toBeInTheDocument();
   });
 
   it.each(CASE_ROLES)("offers the cases destination to %s", async (role) => {
     renderShell(createFakeAuthClient({ initialSession: { subject: "sub-1", roles: [role] } }));
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그아웃" })).toBeInTheDocument();
     });
-    expect(screen.getByRole("link", { name: "Cases" })).toHaveAttribute("href", "/cases");
+    expect(screen.getByRole("link", { name: "사건" })).toHaveAttribute("href", "/cases");
   });
 
   it.each(NON_CASE_ROLES)("leaves no trace of the cases destination for %s", async (role) => {
@@ -268,11 +268,11 @@ describe("AppShell capability navigation", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그아웃" })).toBeInTheDocument();
     });
     // Not hidden, not disabled, not `aria-hidden`: absent, and the address
     // itself is nowhere in the markup either.
-    expect(screen.queryByRole("link", { name: "Cases" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "사건" })).not.toBeInTheDocument();
     expect(container.querySelector('a[href="/cases"]')).toBeNull();
     expect(container.innerHTML).not.toContain("/cases");
   });
@@ -285,18 +285,18 @@ describe("AppShell capability navigation", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그아웃" })).toBeInTheDocument();
     });
-    expect(screen.getAllByRole("link", { name: "Cases" })).toHaveLength(1);
+    expect(screen.getAllByRole("link", { name: "사건" })).toHaveLength(1);
   });
 
   it("does not offer the cases destination while unauthenticated", async () => {
     const { container } = renderShell(createFakeAuthClient());
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
     });
-    expect(screen.queryByRole("link", { name: "Cases" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "사건" })).not.toBeInTheDocument();
     expect(container.innerHTML).not.toContain("/cases");
   });
 
@@ -307,8 +307,8 @@ describe("AppShell capability navigation", () => {
     client.deferInitialize();
     const { container } = renderShell(client);
 
-    expect(authStatus()).toHaveTextContent("Preparing sign-in...");
-    expect(screen.queryByRole("link", { name: "Cases" })).not.toBeInTheDocument();
+    expect(authStatus()).toHaveTextContent("로그인을 준비하고 있습니다…");
+    expect(screen.queryByRole("link", { name: "사건" })).not.toBeInTheDocument();
     expect(container.innerHTML).not.toContain("/cases");
   });
 
@@ -321,11 +321,11 @@ describe("AppShell capability navigation", () => {
     const { container } = renderShell(client);
 
     await waitFor(() => {
-      expect(screen.getByRole("link", { name: "Cases" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "사건" })).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await user.click(screen.getByRole("button", { name: "로그아웃" }));
 
-    expect(screen.queryByRole("link", { name: "Cases" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "사건" })).not.toBeInTheDocument();
     expect(container.innerHTML).not.toContain("/cases");
   });
 
@@ -336,13 +336,13 @@ describe("AppShell capability navigation", () => {
     const { container } = renderShell(client);
 
     await waitFor(() => {
-      expect(screen.getByRole("link", { name: "Cases" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "사건" })).toBeInTheDocument();
     });
     act(() => {
       client.emitSessionInvalidated();
     });
 
-    expect(screen.queryByRole("link", { name: "Cases" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "사건" })).not.toBeInTheDocument();
     expect(container.innerHTML).not.toContain("/cases");
   });
 
@@ -354,7 +354,7 @@ describe("AppShell capability navigation", () => {
     await waitFor(() => {
       expect(authStatus()).toHaveTextContent(safeAuthErrorMessage("configuration"));
     });
-    expect(screen.queryByRole("link", { name: "Cases" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "사건" })).not.toBeInTheDocument();
     expect(container.innerHTML).not.toContain("/cases");
   });
 
@@ -370,9 +370,9 @@ describe("AppShell capability navigation", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByRole("link", { name: "Cases" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "사건" })).toBeInTheDocument();
     });
-    const casesLink = screen.getByRole("link", { name: "Cases" });
+    const casesLink = screen.getByRole("link", { name: "사건" });
     expect(casesLink).toHaveAttribute("aria-current", "page");
     // The destination still points at the list itself. Being *inside* the case
     // section is what the marker announces; it is not a second link.
@@ -384,10 +384,10 @@ describe("AppShell capability navigation", () => {
     );
     expect(document.querySelectorAll("[aria-current]")).toHaveLength(1);
     expect(document.querySelectorAll('[aria-current="false"]')).toHaveLength(0);
-    expect(screen.getByRole("link", { name: "Transactions" })).not.toHaveAttribute(
+    expect(screen.getByRole("link", { name: "거래" })).not.toHaveAttribute(
       "aria-current",
     );
-    expect(screen.getByRole("link", { name: "Home" })).not.toHaveAttribute("aria-current");
+    expect(screen.getByRole("link", { name: "홈" })).not.toHaveAttribute("aria-current");
   });
 
   /**
@@ -436,9 +436,9 @@ describe("AppShell capability navigation", () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByRole("link", { name: "Cases" })).toBeInTheDocument();
+        expect(screen.getByRole("link", { name: "사건" })).toBeInTheDocument();
       });
-      const casesLink = screen.getByRole("link", { name: "Cases" });
+      const casesLink = screen.getByRole("link", { name: "사건" });
       // The destination is still offered, and still points at the exact list
       // address: this is about what the shell claims, not about withdrawing a
       // link the session is entitled to.
@@ -460,7 +460,7 @@ describe("AppShell capability navigation", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByRole("link", { name: "Cases" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "사건" })).toBeInTheDocument();
     });
     // Not the case list, not the ledger, not Home, not Health. An address the
     // application does not route is announced as none of its destinations.
@@ -474,7 +474,7 @@ describe("AppShell capability navigation", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByRole("link", { name: "Transactions" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "거래" })).toBeInTheDocument();
     });
     const rendered = document.body.textContent ?? "";
     expect(rendered).not.toContain("FDS_APPROVER");
@@ -491,17 +491,17 @@ describe("AppShell authentication controls", () => {
     client.deferInitialize();
     renderShell(client);
 
-    expect(authStatus()).toHaveTextContent("Preparing sign-in...");
-    expect(screen.queryByRole("button", { name: "Sign in" })).not.toBeInTheDocument();
+    expect(authStatus()).toHaveTextContent("로그인을 준비하고 있습니다…");
+    expect(screen.queryByRole("button", { name: "로그인" })).not.toBeInTheDocument();
   });
 
   it("offers sign-in once unauthenticated", async () => {
     renderShell(createFakeAuthClient());
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
     });
-    expect(screen.queryByRole("button", { name: "Sign out" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "로그아웃" })).not.toBeInTheDocument();
   });
 
   it("starts sign-in with the current public route as the return target", async () => {
@@ -511,9 +511,9 @@ describe("AppShell authentication controls", () => {
     renderShell(client, "/health");
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(screen.getByRole("button", { name: "로그인" }));
 
     expect(client.calls.signIn).toEqual(["/health"]);
   });
@@ -570,9 +570,9 @@ describe("AppShell authentication controls", () => {
       renderShell(client, path);
 
       await waitFor(() => {
-        expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
       });
-      await user.click(screen.getByRole("button", { name: "Sign in" }));
+      await user.click(screen.getByRole("button", { name: "로그인" }));
 
       // An address the allowlist knows returns to itself, exactly; one it does
       // not know returns to the default route, whole.
@@ -621,9 +621,9 @@ describe("AppShell authentication controls", () => {
       renderShell(client, path);
 
       await waitFor(() => {
-        expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
       });
-      await user.click(screen.getByRole("button", { name: "Sign in" }));
+      await user.click(screen.getByRole("button", { name: "로그인" }));
 
       expect(client.calls.signIn).toEqual(["/"]);
       expect(fetchSpy).not.toHaveBeenCalled();
@@ -640,12 +640,12 @@ describe("AppShell authentication controls", () => {
     renderShell(client);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(screen.getByRole("button", { name: "로그인" }));
 
-    expect(authStatus()).toHaveTextContent("Signing in...");
-    expect(screen.queryByRole("button", { name: "Sign in" })).not.toBeInTheDocument();
+    expect(authStatus()).toHaveTextContent("로그인 중입니다…");
+    expect(screen.queryByRole("button", { name: "로그인" })).not.toBeInTheDocument();
   });
 
   it("offers sign-out and a display name once authenticated", async () => {
@@ -655,19 +655,19 @@ describe("AppShell authentication controls", () => {
     renderShell(client);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그아웃" })).toBeInTheDocument();
     });
-    expect(authStatus()).toHaveTextContent("Signed in as Test Analyst.");
-    expect(screen.queryByRole("button", { name: "Sign in" })).not.toBeInTheDocument();
+    expect(authStatus()).toHaveTextContent("Test Analyst님으로 로그인했습니다.");
+    expect(screen.queryByRole("button", { name: "로그인" })).not.toBeInTheDocument();
   });
 
   it("says only that the user is signed in when there is no display name", async () => {
     renderShell(createFakeAuthClient({ initialSession: { subject: "sub-1", roles: SHELL_ROLES } }));
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그아웃" })).toBeInTheDocument();
     });
-    expect(authStatus()).toHaveTextContent("Signed in.");
+    expect(authStatus()).toHaveTextContent("로그인했습니다.");
   });
 
   it("announces the signing-out state and withdraws both controls", async () => {
@@ -677,16 +677,16 @@ describe("AppShell authentication controls", () => {
     renderShell(client);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그아웃" })).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await user.click(screen.getByRole("button", { name: "로그아웃" }));
 
     expect(client.calls.signOut).toBe(1);
-    expect(authStatus()).toHaveTextContent("Signing out...");
+    expect(authStatus()).toHaveTextContent("로그아웃 중입니다…");
     // Neither affordance is offered while the end-session redirect is in
     // flight, so neither can be clicked a second time.
-    expect(screen.queryByRole("button", { name: "Sign out" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Sign in" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "로그아웃" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "로그인" })).not.toBeInTheDocument();
   });
 
   it("shows no signed-in name once sign-out has started", async () => {
@@ -698,9 +698,9 @@ describe("AppShell authentication controls", () => {
     renderShell(client);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그아웃" })).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await user.click(screen.getByRole("button", { name: "로그아웃" }));
 
     expect(authStatus()).not.toHaveTextContent("Test Analyst");
     expect(document.body.textContent ?? "").not.toContain("Test Analyst");
@@ -713,9 +713,9 @@ describe("AppShell authentication controls", () => {
     renderShell(client);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그아웃" })).toBeInTheDocument();
     });
-    const button = screen.getByRole("button", { name: "Sign out" });
+    const button = screen.getByRole("button", { name: "로그아웃" });
     await user.click(button);
     await user.click(button);
     await user.click(button);
@@ -730,17 +730,17 @@ describe("AppShell authentication controls", () => {
     renderShell(client);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그아웃" })).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await user.click(screen.getByRole("button", { name: "로그아웃" }));
 
     await waitFor(() => {
       expect(authStatus()).toHaveTextContent(safeAuthErrorMessage("sign-out"));
     });
     // The local logout is not undone: there is no session to sign out of, and
     // the only thing offered is starting a new sign-in.
-    expect(screen.queryByRole("button", { name: "Sign out" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "로그아웃" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
     expect(client.calls.signIn).toHaveLength(0);
   });
 
@@ -751,12 +751,12 @@ describe("AppShell authentication controls", () => {
     renderShell(client);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그아웃" })).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await user.click(screen.getByRole("button", { name: "로그아웃" }));
 
-    expect(screen.getByRole("heading", { name: /finguardops frontend/i })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Home" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "FinGuardOps", level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "홈" })).toBeInTheDocument();
   });
 
   it("returns to the sign-in control when the session is invalidated", async () => {
@@ -764,13 +764,13 @@ describe("AppShell authentication controls", () => {
     renderShell(client);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그아웃" })).toBeInTheDocument();
     });
     act(() => {
       client.emitSessionInvalidated();
     });
 
-    expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
     expect(client.calls.signIn).toHaveLength(0);
   });
 
@@ -782,7 +782,7 @@ describe("AppShell authentication controls", () => {
     await waitFor(() => {
       expect(authStatus()).toHaveTextContent(safeAuthErrorMessage("configuration"));
     });
-    expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
   });
 });
 
@@ -795,7 +795,7 @@ describe("AppShell public boundary", () => {
     await waitFor(() => {
       expect(authStatus()).toHaveTextContent(safeAuthErrorMessage("configuration"));
     });
-    expect(screen.getByRole("heading", { name: /finguardops frontend/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "FinGuardOps", level: 2 })).toBeInTheDocument();
   });
 
   it("keeps the health outlet reachable while unauthenticated", async () => {
@@ -803,10 +803,10 @@ describe("AppShell public boundary", () => {
     renderShell(createFakeAuthClient(), "/health");
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그인" })).toBeInTheDocument();
     });
     const main = within(screen.getByRole("main"));
-    expect(main.getByRole("heading", { name: /backend health/i })).toBeInTheDocument();
+    expect(main.getByRole("heading", { name: /백엔드 상태/i })).toBeInTheDocument();
     // The page keeps its own status region, distinct from the auth one.
     expect(main.getByRole("status")).toBeInTheDocument();
   });
@@ -824,9 +824,9 @@ describe("AppShell public boundary", () => {
     renderShell(client);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그아웃" })).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await user.click(screen.getByRole("button", { name: "로그아웃" }));
 
     const rendered = document.body.textContent ?? "";
     expect(rendered).not.toContain("11111111-1111-4111-8111-111111111111");
@@ -845,7 +845,7 @@ describe("AppShell public boundary", () => {
     renderShell(client);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "로그아웃" })).toBeInTheDocument();
     });
     const rendered = document.body.textContent ?? "";
     expect(rendered).not.toContain("11111111-1111-4111-8111-111111111111");

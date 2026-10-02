@@ -71,7 +71,7 @@ function workflowResponse(overrides: Record<string, unknown> = {}): Record<strin
 }
 
 /** 종결할 수 없는 사건 상태에서 승인 담당자에게 보이는 고정 안내. */
-const RESOLUTION_UNAVAILABLE = "Case resolution is not available for the current case state.";
+const RESOLUTION_UNAVAILABLE = "현재 사건 상태에서는 종결할 수 없습니다.";
 
 function closedDetail(
   finalDisposition: CaseFinalDisposition = "CONFIRMED_FRAUD",
@@ -100,7 +100,7 @@ function resolutionResponse(overrides: Record<string, unknown> = {}): Record<str
 
 function workflowSection(): HTMLElement {
   const section = screen
-    .getByRole("heading", { name: "Case workflow", level: 3 })
+    .getByRole("heading", { name: "사건 처리", level: 3 })
     .closest("section");
   if (!(section instanceof HTMLElement)) {
     throw new Error("Case workflow section이 렌더되지 않았다.");
@@ -113,7 +113,7 @@ async function chooseAndResolve(
   disposition: string,
 ): Promise<void> {
   await user.click(await screen.findByRole("radio", { name: disposition }));
-  await user.click(screen.getByRole("button", { name: "Resolve case" }));
+  await user.click(screen.getByRole("button", { name: "사건 종결" }));
 }
 
 function controlledFetch(): PendingCall[] {
@@ -226,26 +226,26 @@ describe("CaseWorkflowSection capability and status matrix", () => {
       await waitFor(() => expect(view.client.calls.initialize).toBeGreaterThan(0));
       if (workflow || resolution) {
         expect(
-          await screen.findByRole("heading", { name: "Case workflow", level: 3 }),
+          await screen.findByRole("heading", { name: "사건 처리", level: 3 }),
         ).toBeVisible();
-        expect(screen.getAllByRole("status", { name: "Case workflow result" })).toHaveLength(1);
+        expect(screen.getAllByRole("status", { name: "사건 처리 결과" })).toHaveLength(1);
       } else {
         await act(async () => {
           await Promise.resolve();
         });
-        expect(screen.queryByRole("heading", { name: "Case workflow" })).not.toBeInTheDocument();
-        expect(screen.queryByLabelText("Assignee UUID")).not.toBeInTheDocument();
-        expect(screen.queryByRole("status", { name: "Case workflow result" })).not.toBeInTheDocument();
+        expect(screen.queryByRole("heading", { name: "사건 처리" })).not.toBeInTheDocument();
+        expect(screen.queryByLabelText("담당자 UUID")).not.toBeInTheDocument();
+        expect(screen.queryByRole("status", { name: "사건 처리 결과" })).not.toBeInTheDocument();
       }
-      expect(screen.queryAllByRole("textbox", { name: "Assignee UUID" })).toHaveLength(workflow ? 1 : 0);
+      expect(screen.queryAllByRole("textbox", { name: "담당자 UUID" })).toHaveLength(workflow ? 1 : 0);
       expect(
-        screen.queryAllByRole("button", { name: "Request additional information" }),
+        screen.queryAllByRole("button", { name: "추가 정보 요청" }),
       ).toHaveLength(workflow ? 1 : 0);
-      expect(screen.queryAllByRole("button", { name: "Change assignee" })).toHaveLength(workflow ? 1 : 0);
-      expect(screen.queryAllByRole("group", { name: "Case resolution" })).toHaveLength(resolution ? 1 : 0);
+      expect(screen.queryAllByRole("button", { name: "담당자 변경" })).toHaveLength(workflow ? 1 : 0);
+      expect(screen.queryAllByRole("group", { name: "사건 종결" })).toHaveLength(resolution ? 1 : 0);
       expect(screen.queryAllByRole("radio")).toHaveLength(resolution ? 3 : 0);
-      expect(screen.queryAllByRole("button", { name: "Resolve case" })).toHaveLength(resolution ? 1 : 0);
-      expect(screen.queryAllByText(/cannot be undone/)).toHaveLength(resolution ? 1 : 0);
+      expect(screen.queryAllByRole("button", { name: "사건 종결" })).toHaveLength(resolution ? 1 : 0);
+      expect(screen.queryAllByText(/되돌릴 수 없습니다/)).toHaveLength(resolution ? 1 : 0);
       expect(view.client.calls.authorizeRequest).toBe(0);
       expect(fetch).not.toHaveBeenCalled();
     },
@@ -259,9 +259,9 @@ describe("CaseWorkflowSection capability and status matrix", () => {
     await act(async () => {
       await Promise.resolve();
     });
-    expect(screen.queryByRole("heading", { name: "Case workflow" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "사건 처리" })).not.toBeInTheDocument();
     expect(screen.queryByRole("radio")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Resolve case" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "사건 종결" })).not.toBeInTheDocument();
     expect(screen.queryByText(RESOLUTION_UNAVAILABLE)).not.toBeInTheDocument();
     expect(view.client.calls.authorizeRequest).toBe(0);
     expect(fetch).not.toHaveBeenCalled();
@@ -269,41 +269,41 @@ describe("CaseWorkflowSection capability and status matrix", () => {
 
   it("renders only start review for OPEN", async () => {
     renderSection({ detail: openDetail() });
-    const section = (await screen.findByRole("heading", { name: "Case workflow" })).closest("section");
+    const section = (await screen.findByRole("heading", { name: "사건 처리" })).closest("section");
     expect(section).not.toBeNull();
     const scope = within(section as HTMLElement);
-    expect(scope.getByRole("group", { name: "Start review" })).toBeVisible();
-    expect(scope.getByRole("button", { name: "Start review" })).toBeVisible();
-    expect(scope.getByLabelText("Assignee UUID")).toBeRequired();
-    expect(scope.queryByRole("button", { name: "Change assignee" })).not.toBeInTheDocument();
-    expect(scope.queryByRole("button", { name: "Release assignee" })).not.toBeInTheDocument();
-    expect(scope.queryByRole("button", { name: "Request additional information" })).not.toBeInTheDocument();
+    expect(scope.getByRole("group", { name: "검토 시작" })).toBeVisible();
+    expect(scope.getByRole("button", { name: "검토 시작" })).toBeVisible();
+    expect(scope.getByLabelText("담당자 UUID")).toBeRequired();
+    expect(scope.queryByRole("button", { name: "담당자 변경" })).not.toBeInTheDocument();
+    expect(scope.queryByRole("button", { name: "담당자 배정 해제" })).not.toBeInTheDocument();
+    expect(scope.queryByRole("button", { name: "추가 정보 요청" })).not.toBeInTheDocument();
   });
 
   it("renders request-information and non-null reassignment for IN_REVIEW", async () => {
     renderSection();
-    await screen.findByRole("heading", { name: "Case workflow" });
-    expect(screen.getByRole("button", { name: "Request additional information" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Change assignee" })).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Release assignee" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Resume review" })).not.toBeInTheDocument();
+    await screen.findByRole("heading", { name: "사건 처리" });
+    expect(screen.getByRole("button", { name: "추가 정보 요청" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "담당자 변경" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "담당자 배정 해제" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "검토 재개" })).not.toBeInTheDocument();
   });
 
   it("renders resume, change and explicit release only when additional-information has an assignee", async () => {
     const view = renderSection({ detail: detail({ caseStatus: "ADDITIONAL_INFORMATION_REQUIRED" }) });
-    await screen.findByRole("heading", { name: "Case workflow" });
-    expect(screen.getByRole("button", { name: "Resume review" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Change assignee" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Release assignee" })).toBeVisible();
+    await screen.findByRole("heading", { name: "사건 처리" });
+    expect(screen.getByRole("button", { name: "검토 재개" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "담당자 변경" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "담당자 배정 해제" })).toBeVisible();
 
     view.rerender({
       detail: detail({ caseStatus: "ADDITIONAL_INFORMATION_REQUIRED", assigneeRef: null }),
       generation: 4,
     });
-    expect(screen.getByText("Assign an analyst before resuming review.")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Assign analyst" })).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Resume review" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Release assignee" })).not.toBeInTheDocument();
+    expect(screen.getByText("검토를 재개하려면 담당자를 배정하세요.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "담당자 배정" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "검토 재개" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "담당자 배정 해제" })).not.toBeInTheDocument();
   });
 
   it("renders no mutation control for CLOSED", async () => {
@@ -314,9 +314,9 @@ describe("CaseWorkflowSection capability and status matrix", () => {
         closedAt: "2026-09-01T04:00:00Z",
       }),
     });
-    const heading = await screen.findByRole("heading", { name: "Case workflow" });
+    const heading = await screen.findByRole("heading", { name: "사건 처리" });
     const section = heading.closest("section") as HTMLElement;
-    expect(within(section).getByText("Workflow changes are unavailable for a closed case.")).toBeVisible();
+    expect(within(section).getByText("종결된 사건은 상태를 변경할 수 없습니다.")).toBeVisible();
     expect(within(section).queryByRole("button")).not.toBeInTheDocument();
     expect(within(section).queryByRole("textbox")).not.toBeInTheDocument();
     expect(within(section).queryByRole("group")).not.toBeInTheDocument();
@@ -328,10 +328,10 @@ describe("CaseWorkflowSection validation, keyboard and lifecycle UI", () => {
     controlledFetch();
     const user = userEvent.setup();
     const view = renderSection();
-    const input = await screen.findByRole("textbox", { name: "Assignee UUID" });
+    const input = await screen.findByRole("textbox", { name: "담당자 UUID" });
     const invalid = ` ${NEXT_ASSIGNEE.toUpperCase()} `;
     await user.type(input, invalid);
-    await user.click(screen.getByRole("button", { name: "Change assignee" }));
+    await user.click(screen.getByRole("button", { name: "담당자 변경" }));
 
     expect(input).toHaveValue(invalid);
     expect(input).toHaveAttribute("aria-invalid", "true");
@@ -349,7 +349,7 @@ describe("CaseWorkflowSection validation, keyboard and lifecycle UI", () => {
     const calls = controlledFetch();
     const user = userEvent.setup();
     renderSection();
-    const input = await screen.findByRole("textbox", { name: "Assignee UUID" });
+    const input = await screen.findByRole("textbox", { name: "담당자 UUID" });
     await user.type(input, NEXT_ASSIGNEE);
     fireEvent.compositionStart(input);
     fireEvent.keyDown(input, { key: "Enter", code: "Enter", isComposing: true });
@@ -357,7 +357,7 @@ describe("CaseWorkflowSection validation, keyboard and lifecycle UI", () => {
     fireEvent.keyDown(input, { key: "Enter", code: "Enter", repeat: true });
     expect(calls).toHaveLength(0);
 
-    await user.dblClick(screen.getByRole("button", { name: "Change assignee" }));
+    await user.dblClick(screen.getByRole("button", { name: "담당자 변경" }));
     await waitFor(() => expect(calls).toHaveLength(1));
     expect(JSON.parse(await calls[0].request.clone().text())).toEqual({
       assigneeRef: NEXT_ASSIGNEE,
@@ -370,12 +370,12 @@ describe("CaseWorkflowSection validation, keyboard and lifecycle UI", () => {
     const calls = controlledFetch();
     const user = userEvent.setup();
     renderSection({ detail: detail({ caseStatus: "ADDITIONAL_INFORMATION_REQUIRED" }) });
-    await screen.findByRole("heading", { name: "Case workflow" });
-    await user.click(screen.getByRole("button", { name: "Change assignee" }));
+    await screen.findByRole("heading", { name: "사건 처리" });
+    await user.click(screen.getByRole("button", { name: "담당자 변경" }));
     expect(calls).toHaveLength(0);
-    expect(screen.getByRole("textbox", { name: "Assignee UUID" })).toHaveFocus();
+    expect(screen.getByRole("textbox", { name: "담당자 UUID" })).toHaveFocus();
 
-    await user.click(screen.getByRole("button", { name: "Release assignee" }));
+    await user.click(screen.getByRole("button", { name: "담당자 배정 해제" }));
     await waitFor(() => expect(calls).toHaveLength(1));
     expect(JSON.parse(await calls[0].request.clone().text())).toEqual({
       assigneeRef: null,
@@ -389,11 +389,11 @@ describe("CaseWorkflowSection validation, keyboard and lifecycle UI", () => {
     const user = userEvent.setup();
     const reconcile = vi.fn();
     renderSection({ reconcile });
-    const input = await screen.findByRole("textbox", { name: "Assignee UUID" });
+    const input = await screen.findByRole("textbox", { name: "담당자 UUID" });
     await user.type(input, NEXT_ASSIGNEE);
-    await user.click(screen.getByRole("button", { name: "Change assignee" }));
+    await user.click(screen.getByRole("button", { name: "담당자 변경" }));
     await waitFor(() => expect(calls).toHaveLength(1));
-    const section = screen.getByRole("heading", { name: "Case workflow" }).closest("section") as HTMLElement;
+    const section = screen.getByRole("heading", { name: "사건 처리" }).closest("section") as HTMLElement;
     expect(section).toHaveAttribute("aria-busy", "true");
     for (const control of within(section).getAllByRole("button")) {
       expect(control).toBeDisabled();
@@ -402,7 +402,7 @@ describe("CaseWorkflowSection validation, keyboard and lifecycle UI", () => {
 
     await answer(calls[0], jsonResponse(workflowResponse()));
     expect(section).toHaveAttribute("aria-busy", "true");
-    expect(screen.getByText("Refreshing authoritative case information")).toBeVisible();
+    expect(screen.getByText("최신 사건 정보를 확인하고 있습니다")).toBeVisible();
     expect(reconcile).toHaveBeenCalledWith("detail-audit", 7);
     expect(calls).toHaveLength(1);
   });
@@ -411,9 +411,9 @@ describe("CaseWorkflowSection validation, keyboard and lifecycle UI", () => {
     const calls = controlledFetch();
     const user = userEvent.setup();
     renderSection();
-    const input = await screen.findByRole("textbox", { name: "Assignee UUID" });
+    const input = await screen.findByRole("textbox", { name: "담당자 UUID" });
     await user.type(input, NEXT_ASSIGNEE);
-    await user.click(screen.getByRole("button", { name: "Change assignee" }));
+    await user.click(screen.getByRole("button", { name: "담당자 변경" }));
     await waitFor(() => expect(calls).toHaveLength(1));
     await answer(
       calls[0],
@@ -432,7 +432,7 @@ describe("CaseWorkflowSection validation, keyboard and lifecycle UI", () => {
     expect(input).toHaveValue(NEXT_ASSIGNEE);
     const alert = screen.getByRole("alert");
     const heading = within(alert).getByRole("heading", {
-      name: "The workflow action was denied",
+      name: "업무 처리가 거부되었습니다",
       level: 4,
     });
     expect(heading).toHaveAttribute("tabindex", "-1");
@@ -445,9 +445,9 @@ describe("CaseWorkflowSection validation, keyboard and lifecycle UI", () => {
     const user = userEvent.setup();
     const reconcile = vi.fn();
     const view = renderSection({ reconcile });
-    const input = await screen.findByRole("textbox", { name: "Assignee UUID" });
+    const input = await screen.findByRole("textbox", { name: "담당자 UUID" });
     await user.type(input, NEXT_ASSIGNEE);
-    await user.click(screen.getByRole("button", { name: "Change assignee" }));
+    await user.click(screen.getByRole("button", { name: "담당자 변경" }));
     await waitFor(() => expect(calls).toHaveLength(1));
     await answer(calls[0], jsonResponse({ code: "PRIVATE_CONFLICT" }, { status: 409 }));
     expect(input).toHaveValue(NEXT_ASSIGNEE);
@@ -455,9 +455,9 @@ describe("CaseWorkflowSection validation, keyboard and lifecycle UI", () => {
 
     view.rerender({ detail: detail({ concurrencyVersion: 7 }), generation: 4 });
     const alert = await screen.findByRole("alert");
-    expect(within(alert).getByRole("heading", { name: "The case changed before this action" })).toHaveFocus();
+    expect(within(alert).getByRole("heading", { name: "작업 전 사건 정보가 변경되었습니다" })).toHaveFocus();
     expect(calls).toHaveLength(1);
-    await user.click(screen.getByRole("button", { name: "Change assignee" }));
+    await user.click(screen.getByRole("button", { name: "담당자 변경" }));
     await waitFor(() => expect(calls).toHaveLength(2));
   });
 
@@ -465,9 +465,9 @@ describe("CaseWorkflowSection validation, keyboard and lifecycle UI", () => {
     const calls = controlledFetch();
     const user = userEvent.setup();
     const view = renderSection();
-    const input = await screen.findByRole("textbox", { name: "Assignee UUID" });
+    const input = await screen.findByRole("textbox", { name: "담당자 UUID" });
     await user.type(input, NEXT_ASSIGNEE);
-    await user.click(screen.getByRole("button", { name: "Change assignee" }));
+    await user.click(screen.getByRole("button", { name: "담당자 변경" }));
     await waitFor(() => expect(calls).toHaveLength(1));
     await answer(calls[0], jsonResponse(workflowResponse()));
     expect(input).toHaveValue(NEXT_ASSIGNEE);
@@ -477,13 +477,13 @@ describe("CaseWorkflowSection validation, keyboard and lifecycle UI", () => {
       generation: 4,
     });
     await waitFor(() =>
-      expect(screen.getByRole("status", { name: "Case workflow result" })).toHaveTextContent(
-        "Assignee updated from authoritative case information.",
+      expect(screen.getByRole("status", { name: "사건 처리 결과" })).toHaveTextContent(
+        "최신 사건 정보에서 담당자 변경을 확인했습니다.",
       ),
     );
-    expect(screen.getByRole("textbox", { name: "Assignee UUID" })).toHaveValue("");
-    expect(screen.getByRole("button", { name: "Request additional information" })).toHaveFocus();
-    expect(screen.getAllByRole("status", { name: "Case workflow result" })).toHaveLength(1);
+    expect(screen.getByRole("textbox", { name: "담당자 UUID" })).toHaveValue("");
+    expect(screen.getByRole("button", { name: "추가 정보 요청" })).toHaveFocus();
+    expect(screen.getAllByRole("status", { name: "사건 처리 결과" })).toHaveLength(1);
   });
 
   it("clears an assignee draft after an authoritative explicit release", async () => {
@@ -492,9 +492,9 @@ describe("CaseWorkflowSection validation, keyboard and lifecycle UI", () => {
     const view = renderSection({
       detail: detail({ caseStatus: "ADDITIONAL_INFORMATION_REQUIRED" }),
     });
-    const input = await screen.findByRole("textbox", { name: "Assignee UUID" });
+    const input = await screen.findByRole("textbox", { name: "담당자 UUID" });
     await user.type(input, NEXT_ASSIGNEE);
-    await user.click(screen.getByRole("button", { name: "Release assignee" }));
+    await user.click(screen.getByRole("button", { name: "담당자 배정 해제" }));
     await waitFor(() => expect(calls).toHaveLength(1));
     await answer(
       calls[0],
@@ -516,10 +516,10 @@ describe("CaseWorkflowSection validation, keyboard and lifecycle UI", () => {
       generation: 4,
     });
     await waitFor(() => {
-      expect(screen.getByRole("status", { name: "Case workflow result" })).toHaveTextContent(
-        "Assignee released from authoritative case information.",
+      expect(screen.getByRole("status", { name: "사건 처리 결과" })).toHaveTextContent(
+        "최신 사건 정보에서 담당자 배정 해제를 확인했습니다.",
       );
-      expect(screen.getByRole("textbox", { name: "Assignee UUID" })).toHaveValue("");
+      expect(screen.getByRole("textbox", { name: "담당자 UUID" })).toHaveValue("");
     });
   });
 
@@ -527,14 +527,14 @@ describe("CaseWorkflowSection validation, keyboard and lifecycle UI", () => {
     controlledFetch();
     const user = userEvent.setup();
     const view = renderSection();
-    const input = await screen.findByRole("textbox", { name: "Assignee UUID" });
+    const input = await screen.findByRole("textbox", { name: "담당자 UUID" });
     await user.type(input, NEXT_ASSIGNEE);
 
     view.rerender({
       detail: detail({ caseStatus: "ADDITIONAL_INFORMATION_REQUIRED", concurrencyVersion: 7 }),
       generation: 4,
     });
-    expect(screen.getByRole("textbox", { name: "Assignee UUID" })).toHaveValue(NEXT_ASSIGNEE);
+    expect(screen.getByRole("textbox", { name: "담당자 UUID" })).toHaveValue(NEXT_ASSIGNEE);
     expect(fetch).not.toHaveBeenCalled();
 
     view.rerender({
@@ -542,7 +542,7 @@ describe("CaseWorkflowSection validation, keyboard and lifecycle UI", () => {
       generation: 0,
     });
     await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "Assignee UUID" })).toHaveValue(""),
+      expect(screen.getByRole("textbox", { name: "담당자 UUID" })).toHaveValue(""),
     );
     expect(fetch).not.toHaveBeenCalled();
   });
@@ -552,17 +552,17 @@ describe("CaseWorkflowSection validation, keyboard and lifecycle UI", () => {
     const user = userEvent.setup();
     const reconcile = vi.fn();
     const view = renderSection({ reconcile });
-    await screen.findByRole("heading", { name: "Case workflow" });
-    await user.click(screen.getByRole("button", { name: "Request additional information" }));
+    await screen.findByRole("heading", { name: "사건 처리" });
+    await user.click(screen.getByRole("button", { name: "추가 정보 요청" }));
     await waitFor(() => expect(calls).toHaveLength(1));
     await answer(calls[0], jsonResponse({ code: "PRIVATE" }, { status: 409 }));
     view.rerender({ refreshState: "failed" });
 
-    const refresh = screen.getByRole("button", { name: "Refresh workflow information" });
+    const refresh = screen.getByRole("button", { name: "사건 처리 정보 새로고침" });
     expect(refresh).toBeEnabled();
     await user.click(refresh);
     expect(reconcile).toHaveBeenCalledTimes(2);
-    expect(screen.getByRole("button", { name: "Request additional information" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "추가 정보 요청" })).toBeDisabled();
     expect(calls).toHaveLength(1);
   });
 });
@@ -575,28 +575,28 @@ describe("CaseWorkflowSection resolution form", () => {
     const user = userEvent.setup();
     renderSection({ roles: ["FDS_APPROVER"] });
 
-    const group = await screen.findByRole("group", { name: "Case resolution" });
-    const radiogroup = within(group).getByRole("radiogroup", { name: "Final disposition" });
+    const group = await screen.findByRole("group", { name: "사건 종결" });
+    const radiogroup = within(group).getByRole("radiogroup", { name: "최종 판정" });
     const radios = within(radiogroup).getAllByRole("radio");
     expect(radios.map((radio) => radio.getAttribute("value"))).toEqual([
       "NORMAL",
       "FALSE_POSITIVE",
       "CONFIRMED_FRAUD",
     ]);
-    for (const [index, name] of ["Normal", "False positive", "Confirmed fraud"].entries()) {
+    for (const [index, name] of ["정상", "오탐", "사기 확정"].entries()) {
       const radio = within(radiogroup).getByRole("radio", { name });
       expect(radio).toBe(radios[index]);
       expect(radio).toBeInstanceOf(HTMLInputElement);
       expect(radio).toHaveAttribute("type", "radio");
       expect(radio).not.toBeChecked();
     }
-    expect(group).toHaveTextContent("cannot be undone");
+    expect(group).toHaveTextContent("되돌릴 수 없습니다");
     expect(group).toHaveTextContent("CASE_RESOLUTION_COMPLETED");
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Request additional information" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Change assignee" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "추가 정보 요청" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "담당자 변경" })).not.toBeInTheDocument();
 
-    await chooseAndResolve(user, "Confirmed fraud");
+    await chooseAndResolve(user, "사기 확정");
     await waitFor(() => expect(calls).toHaveLength(1));
     expect(calls[0].request.method).toBe("POST");
     expect(new URL(calls[0].request.url).pathname).toBe(`/api/v1/cases/${CASE_ID}/resolution`);
@@ -612,13 +612,13 @@ describe("CaseWorkflowSection resolution form", () => {
     const calls = controlledFetch();
     const user = userEvent.setup();
     renderSection({ roles: ["FDS_APPROVER"] });
-    const first = await screen.findByRole("radio", { name: "Normal" });
+    const first = await screen.findByRole("radio", { name: "정상" });
 
     await user.tab();
     expect(first).toHaveFocus();
     await user.keyboard(" ");
     expect(first).toBeChecked();
-    const submitButton = screen.getByRole("button", { name: "Resolve case" });
+    const submitButton = screen.getByRole("button", { name: "사건 종결" });
     for (let step = 0; step < 4 && document.activeElement !== submitButton; step += 1) {
       await user.tab();
     }
@@ -653,7 +653,7 @@ describe("CaseWorkflowSection resolution form", () => {
     controlledFetch();
     renderSection({ roles: ["FDS_APPROVER"], detail: closedDetail("NORMAL", 6) });
 
-    expect(await screen.findByText("Workflow changes are unavailable for a closed case.")).toBeVisible();
+    expect(await screen.findByText("종결된 사건은 상태를 변경할 수 없습니다.")).toBeVisible();
     const section = workflowSection();
     expect(within(section).queryByText(RESOLUTION_UNAVAILABLE)).not.toBeInTheDocument();
     expect(within(section).queryByRole("radio")).not.toBeInTheDocument();
@@ -670,12 +670,12 @@ describe("CaseWorkflowSection resolution form", () => {
     controlledFetch();
     renderSection({ roles: ["FDS_ANALYST"], detail: baseline });
 
-    await screen.findByRole("heading", { name: "Case workflow", level: 3 });
-    expect(screen.queryByRole("group", { name: "Case resolution" })).not.toBeInTheDocument();
+    await screen.findByRole("heading", { name: "사건 처리", level: 3 });
+    expect(screen.queryByRole("group", { name: "사건 종결" })).not.toBeInTheDocument();
     expect(screen.queryByRole("radio")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Resolve case" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "사건 종결" })).not.toBeInTheDocument();
     expect(screen.queryByText(RESOLUTION_UNAVAILABLE)).not.toBeInTheDocument();
-    expect(screen.queryByText(/cannot be undone/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/되돌릴 수 없습니다/)).not.toBeInTheDocument();
   });
 
   it("focuses the first radio, connects a fixed error and sends nothing when no disposition is selected", async () => {
@@ -683,10 +683,10 @@ describe("CaseWorkflowSection resolution form", () => {
     const user = userEvent.setup();
     const view = renderSection({ roles: ["FDS_APPROVER"] });
 
-    await user.click(await screen.findByRole("button", { name: "Resolve case" }));
+    await user.click(await screen.findByRole("button", { name: "사건 종결" }));
 
-    const radiogroup = screen.getByRole("radiogroup", { name: "Final disposition" });
-    expect(screen.getByRole("radio", { name: "Normal" })).toHaveFocus();
+    const radiogroup = screen.getByRole("radiogroup", { name: "최종 판정" });
+    expect(screen.getByRole("radio", { name: "정상" })).toHaveFocus();
     expect(radiogroup).toHaveAttribute("aria-invalid", "true");
     expect(radiogroup).toHaveAttribute("aria-required", "true");
     const ids = radiogroup.getAttribute("aria-describedby")?.split(" ") ?? [];
@@ -695,13 +695,13 @@ describe("CaseWorkflowSection resolution form", () => {
       expect(document.getElementById(id)).not.toBeNull();
     }
     expect(document.getElementById("case-resolution-error")).toHaveTextContent(
-      "Choose a final disposition before resolving the case.",
+      "사건을 종결하려면 최종 판정을 선택하세요.",
     );
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(view.client.calls.authorizeRequest).toBe(0);
     expect(calls).toHaveLength(0);
 
-    await user.click(screen.getByRole("radio", { name: "False positive" }));
+    await user.click(screen.getByRole("radio", { name: "오탐" }));
     expect(radiogroup).not.toHaveAttribute("aria-invalid");
     expect(radiogroup).toHaveAttribute("aria-describedby", "case-resolution-helper");
     expect(document.getElementById("case-resolution-error")).toBeNull();
@@ -713,21 +713,21 @@ describe("CaseWorkflowSection resolution form", () => {
     const reconcile = vi.fn();
     renderSection({ roles: ["FDS_APPROVER"], reconcile });
 
-    await user.click(await screen.findByRole("radio", { name: "Normal" }));
-    await user.dblClick(screen.getByRole("button", { name: "Resolve case" }));
+    await user.click(await screen.findByRole("radio", { name: "정상" }));
+    await user.dblClick(screen.getByRole("button", { name: "사건 종결" }));
     await waitFor(() => expect(calls).toHaveLength(1));
     const section = workflowSection();
     expect(section).toHaveAttribute("aria-busy", "true");
     for (const radio of screen.getAllByRole("radio")) {
       expect(radio).toBeDisabled();
     }
-    expect(screen.getByRole("button", { name: "Resolve case" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "사건 종결" })).toBeDisabled();
 
     await answer(calls[0], jsonResponse(resolutionResponse({ finalDisposition: "NORMAL" })));
     expect(section).toHaveAttribute("aria-busy", "true");
-    expect(screen.getByText("Refreshing authoritative case information")).toBeVisible();
+    expect(screen.getByText("최신 사건 정보를 확인하고 있습니다")).toBeVisible();
     expect(reconcile).toHaveBeenCalledWith("detail-audit", 7);
-    expect(screen.getByRole("radio", { name: "Normal" })).toBeDisabled();
+    expect(screen.getByRole("radio", { name: "정상" })).toBeDisabled();
     expect(calls).toHaveLength(1);
   });
 
@@ -737,7 +737,7 @@ describe("CaseWorkflowSection resolution form", () => {
     const reconcile = vi.fn();
     renderSection({ roles: ["FDS_APPROVER"], reconcile });
 
-    await chooseAndResolve(user, "Confirmed fraud");
+    await chooseAndResolve(user, "사기 확정");
     await waitFor(() => expect(calls).toHaveLength(1));
     await answer(
       calls[0],
@@ -755,12 +755,12 @@ describe("CaseWorkflowSection resolution form", () => {
 
     expect(screen.getAllByRole("alert")).toHaveLength(1);
     const heading = within(screen.getByRole("alert")).getByRole("heading", {
-      name: "The resolution was denied",
+      name: "사건 종결이 거부되었습니다",
       level: 4,
     });
     expect(heading).toHaveAttribute("tabindex", "-1");
     expect(heading).toHaveFocus();
-    expect(screen.getByRole("radio", { name: "Confirmed fraud" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "사기 확정" })).toBeChecked();
     expect(document.body.innerHTML).not.toMatch(/PRIVATE|traceId|fieldErrors|actorId/);
     expect(reconcile).not.toHaveBeenCalled();
   });
@@ -773,23 +773,23 @@ describe("CaseWorkflowSection resolution form", () => {
       const reconcile = vi.fn();
       renderSection({ roles: ["FDS_APPROVER"], reconcile });
 
-      await chooseAndResolve(user, "False positive");
+      await chooseAndResolve(user, "오탐");
       await waitFor(() => expect(calls).toHaveLength(1));
       await answer(calls[0], jsonResponse({ code: "PRIVATE", message: "PRIVATE" }, { status }));
 
       const alert = screen.getByRole("alert");
       expect(
-        within(alert).getByRole("heading", { name: "The resolution could not be completed", level: 4 }),
+        within(alert).getByRole("heading", { name: "사건을 종결할 수 없습니다", level: 4 }),
       ).toHaveFocus();
-      expect(alert).toHaveTextContent("Your selected disposition has been kept.");
-      expect(screen.getByRole("radio", { name: "False positive" })).toBeChecked();
+      expect(alert).toHaveTextContent("선택한 최종 판정은 유지됩니다.");
+      expect(screen.getByRole("radio", { name: "오탐" })).toBeChecked();
       expect(reconcile).not.toHaveBeenCalled();
       await act(async () => {
         await Promise.resolve();
       });
       expect(calls).toHaveLength(1);
 
-      await user.click(screen.getByRole("button", { name: "Resolve case" }));
+      await user.click(screen.getByRole("button", { name: "사건 종결" }));
       await waitFor(() => expect(calls).toHaveLength(2));
     },
   );
@@ -800,7 +800,7 @@ describe("CaseWorkflowSection resolution form", () => {
     const reconcile = vi.fn();
     const view = renderSection({ roles: ["FDS_APPROVER"], reconcile });
 
-    await chooseAndResolve(user, "Confirmed fraud");
+    await chooseAndResolve(user, "사기 확정");
     await waitFor(() => expect(calls).toHaveLength(1));
     await answer(calls[0], jsonResponse({ code: "PRIVATE_CONFLICT" }, { status: 409 }));
     expect(reconcile).toHaveBeenCalledWith("detail-notes-audit", 6);
@@ -812,12 +812,12 @@ describe("CaseWorkflowSection resolution form", () => {
     });
     const alert = await screen.findByRole("alert");
     expect(
-      within(alert).getByRole("heading", { name: "The case changed before the resolution" }),
+      within(alert).getByRole("heading", { name: "종결 전 사건 정보가 변경되었습니다" }),
     ).toHaveFocus();
-    expect(screen.getByRole("radio", { name: "Confirmed fraud" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "사기 확정" })).toBeChecked();
     expect(calls).toHaveLength(1);
 
-    await user.click(screen.getByRole("button", { name: "Resolve case" }));
+    await user.click(screen.getByRole("button", { name: "사건 종결" }));
     await waitFor(() => expect(calls).toHaveLength(2));
     expect(JSON.parse(await calls[1].request.clone().text())).toMatchObject({ expectedVersion: 7 });
   });
@@ -829,25 +829,25 @@ describe("CaseWorkflowSection resolution form", () => {
       const user = userEvent.setup();
       const view = renderSection({ roles });
 
-      await chooseAndResolve(user, "Confirmed fraud");
+      await chooseAndResolve(user, "사기 확정");
       await waitFor(() => expect(calls).toHaveLength(1));
       await answer(calls[0], jsonResponse(resolutionResponse()));
-      expect(screen.getByRole("status", { name: "Case workflow result" }).textContent).toBe("");
+      expect(screen.getByRole("status", { name: "사건 처리 결과" }).textContent).toBe("");
 
       view.rerender({ detail: closedDetail(), generation: 4 });
       await waitFor(() =>
-        expect(screen.getByRole("status", { name: "Case workflow result" })).toHaveTextContent(
-          "Case resolved from authoritative case information.",
+        expect(screen.getByRole("status", { name: "사건 처리 결과" })).toHaveTextContent(
+          "최신 사건 정보에서 사건 종결을 확인했습니다.",
         ),
       );
       await waitFor(() =>
-        expect(screen.getByRole("heading", { name: "Case workflow", level: 3 })).toHaveFocus(),
+        expect(screen.getByRole("heading", { name: "사건 처리", level: 3 })).toHaveFocus(),
       );
-      expect(screen.getAllByRole("status", { name: "Case workflow result" })).toHaveLength(1);
-      expect(screen.getByText("Workflow changes are unavailable for a closed case.")).toBeVisible();
+      expect(screen.getAllByRole("status", { name: "사건 처리 결과" })).toHaveLength(1);
+      expect(screen.getByText("종결된 사건은 상태를 변경할 수 없습니다.")).toBeVisible();
       expect(screen.queryByRole("radio")).not.toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: "Resolve case" })).not.toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: "Request additional information" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "사건 종결" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "추가 정보 요청" })).not.toBeInTheDocument();
       expect(screen.queryByRole("alert")).not.toBeInTheDocument();
       expect(calls).toHaveLength(1);
     },
@@ -859,7 +859,7 @@ describe("CaseWorkflowSection resolution form", () => {
     const reconcile = vi.fn();
     const view = renderSection({ roles: ["FDS_APPROVER"], reconcile });
 
-    await chooseAndResolve(user, "Confirmed fraud");
+    await chooseAndResolve(user, "사기 확정");
     await waitFor(() => expect(calls).toHaveLength(1));
     await answer(calls[0], jsonResponse(resolutionResponse()));
 
@@ -869,17 +869,17 @@ describe("CaseWorkflowSection resolution form", () => {
     await waitFor(() =>
       expect(
         within(alert).getByRole("heading", {
-          name: "The resolution is not confirmed by the latest case record",
+          name: "최신 사건 기록에서 종결을 확인할 수 없습니다",
           level: 4,
         }),
       ).toHaveFocus(),
     );
     expect(workflowSection()).toHaveAttribute("aria-busy", "true");
-    expect(screen.getByRole("button", { name: "Resolve case" })).toBeDisabled();
-    expect(screen.getByRole("status", { name: "Case workflow result" }).textContent).toBe("");
-    expect(screen.queryByText("Refreshing authoritative case information")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "사건 종결" })).toBeDisabled();
+    expect(screen.getByRole("status", { name: "사건 처리 결과" }).textContent).toBe("");
+    expect(screen.queryByText("최신 사건 정보를 확인하고 있습니다")).not.toBeInTheDocument();
 
-    const refresh = within(alert).getByRole("button", { name: "Refresh workflow information" });
+    const refresh = within(alert).getByRole("button", { name: "사건 처리 정보 새로고침" });
     expect(refresh).toBeEnabled();
     await user.click(refresh);
     expect(reconcile).toHaveBeenCalledTimes(2);
@@ -890,15 +890,15 @@ describe("CaseWorkflowSection resolution form", () => {
     view.rerender({ detail: closedDetail("NORMAL"), generation: 5 });
     expect(
       within(screen.getByRole("alert")).getByRole("heading", {
-        name: "The resolution is not confirmed by the latest case record",
+        name: "최신 사건 기록에서 종결을 확인할 수 없습니다",
       }),
     ).toBeVisible();
-    expect(screen.getByRole("status", { name: "Case workflow result" }).textContent).toBe("");
+    expect(screen.getByRole("status", { name: "사건 처리 결과" }).textContent).toBe("");
 
     view.rerender({ detail: closedDetail("CONFIRMED_FRAUD"), generation: 6 });
     await waitFor(() =>
-      expect(screen.getByRole("status", { name: "Case workflow result" })).toHaveTextContent(
-        "Case resolved from authoritative case information.",
+      expect(screen.getByRole("status", { name: "사건 처리 결과" })).toHaveTextContent(
+        "최신 사건 정보에서 사건 종결을 확인했습니다.",
       ),
     );
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
@@ -910,23 +910,23 @@ describe("CaseWorkflowSection resolution form", () => {
     const user = userEvent.setup();
     const resolving = renderSection({ roles: ["FDS_ANALYST", "FDS_APPROVER"] });
 
-    await chooseAndResolve(user, "Normal");
+    await chooseAndResolve(user, "정상");
     await waitFor(() => expect(resolutionCalls).toHaveLength(1));
-    expect(screen.getByRole("button", { name: "Request additional information" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Change assignee" })).toBeDisabled();
-    expect(screen.getByRole("textbox", { name: "Assignee UUID" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "추가 정보 요청" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "담당자 변경" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "담당자 UUID" })).toBeDisabled();
     resolving.unmount();
     vi.unstubAllGlobals();
 
     const statusCalls = controlledFetch();
     renderSection({ roles: ["FDS_ANALYST", "FDS_APPROVER"] });
-    await user.click(await screen.findByRole("button", { name: "Request additional information" }));
+    await user.click(await screen.findByRole("button", { name: "추가 정보 요청" }));
     await waitFor(() => expect(statusCalls).toHaveLength(1));
     expect(statusCalls[0].request.method).toBe("PATCH");
     for (const radio of screen.getAllByRole("radio")) {
       expect(radio).toBeDisabled();
     }
-    expect(screen.getByRole("button", { name: "Resolve case" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "사건 종결" })).toBeDisabled();
     expect(statusCalls).toHaveLength(1);
   });
 
@@ -935,12 +935,12 @@ describe("CaseWorkflowSection resolution form", () => {
     const user = userEvent.setup();
     const view = renderSection({ roles: ["FDS_APPROVER"] });
 
-    await user.click(await screen.findByRole("radio", { name: "False positive" }));
+    await user.click(await screen.findByRole("radio", { name: "오탐" }));
     view.rerender({
       detail: detail({ concurrencyVersion: 7, assigneeRef: NEXT_ASSIGNEE }),
       generation: 4,
     });
-    expect(screen.getByRole("radio", { name: "False positive" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "오탐" })).toBeChecked();
 
     view.rerender({
       detail: detail({ caseStatus: "ADDITIONAL_INFORMATION_REQUIRED", concurrencyVersion: 8 }),
@@ -955,8 +955,8 @@ describe("CaseWorkflowSection resolution form", () => {
       expect(radio).not.toBeChecked();
     }
 
-    await user.click(screen.getByRole("radio", { name: "Normal" }));
-    expect(screen.getByRole("radio", { name: "Normal" })).toBeChecked();
+    await user.click(screen.getByRole("radio", { name: "정상" }));
+    expect(screen.getByRole("radio", { name: "정상" })).toBeChecked();
     view.rerender({
       detail: detail({ caseId: OTHER_CASE_ID, concurrencyVersion: 1 }),
       generation: 0,

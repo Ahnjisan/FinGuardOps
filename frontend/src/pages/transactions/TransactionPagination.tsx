@@ -24,7 +24,7 @@ export function TransactionPagination({
   const totalPages = Math.max(page.totalPages, 1);
 
   return (
-    <nav className="pager" aria-label="Transaction pages">
+    <nav className="pager" aria-label="거래 페이지">
       <button
         className="button"
         type="button"
@@ -33,7 +33,7 @@ export function TransactionPagination({
           onPageChange(page.number - 1);
         }}
       >
-        Previous page
+        이전 페이지
       </button>
       <button
         className="button"
@@ -43,13 +43,13 @@ export function TransactionPagination({
           onPageChange(page.number + 1);
         }}
       >
-        Next page
+        다음 페이지
       </button>
       <p className="pager__position">
-        Page {page.number + 1} of {totalPages}
+        페이지 {page.number + 1} / 전체 {totalPages}
       </p>
       <div className="pager__size">
-        <label htmlFor="pager-size">Rows per page</label>
+        <label htmlFor="pager-size">페이지당 행 수</label>
         <select
           id="pager-size"
           value={page.size}

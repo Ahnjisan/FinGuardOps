@@ -38,8 +38,8 @@ describe("investigation note presentation", () => {
       0,
     );
 
-    expect(describeInvestigationNoteRange(trulyEmpty)).toBe("No investigation notes.");
-    expect(describeInvestigationNoteRange(outOfRange)).toBe("No notes on this page of 41.");
+    expect(describeInvestigationNoteRange(trulyEmpty)).toBe("조사 메모가 없습니다.");
+    expect(describeInvestigationNoteRange(outOfRange)).toBe("전체 41건 중 이 페이지에 표시할 메모가 없습니다.");
   });
 
   it("states one-based item and page positions without correcting metadata", () => {
@@ -52,8 +52,8 @@ describe("investigation note presentation", () => {
       last: false,
     });
     expect(describeInvestigationNoteRange(describeInvestigationNoteWindow(metadata, 20))).toBe(
-      "Showing 21-40 of 45.",
+      "전체 45건 중 21~40건 표시",
     );
-    expect(describeInvestigationNotePosition(metadata)).toBe("Page 2 of 3");
+    expect(describeInvestigationNotePosition(metadata)).toBe("전체 3페이지 중 2페이지");
   });
 });

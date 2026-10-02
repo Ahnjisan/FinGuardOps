@@ -120,7 +120,7 @@ async function showRecord(overrides: Record<string, unknown> = {}): Promise<void
   await settle();
   await answerWith(calls[0], transactionBody(overrides));
   await waitFor(() => {
-    expect(screen.getByRole("heading", { name: "Transaction", level: 3 })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "거래", level: 3 })).toBeInTheDocument();
   });
 }
 
@@ -165,14 +165,14 @@ describe("TransactionDetailPage request", () => {
     await settle();
 
     expect(
-      screen.getByRole("heading", { name: `Transaction ${TRANSACTION_ID}`, level: 2 }),
+      screen.getByRole("heading", { name: `거래 ${TRANSACTION_ID}`, level: 2 }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Back to transactions" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "거래 목록으로" })).toHaveAttribute(
       "href",
       "/transactions",
     );
-    expect(screen.getByText("Loading transaction...")).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("Loading transaction");
+    expect(screen.getByText("거래를 불러오고 있습니다…")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("거래를 불러오는 중");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
@@ -181,19 +181,19 @@ describe("TransactionDetailPage record", () => {
   it("shows every field the detail contract carries, and only those", async () => {
     await showRecord();
 
-    expect(valueOf("Transaction ID")).toHaveTextContent(TRANSACTION_ID);
-    expect(valueOf("Type")).toHaveTextContent("Account transfer");
-    expect(valueOf("Channel")).toHaveTextContent("Mobile banking");
-    expect(valueOf("Processing status")).toHaveTextContent("Auth required");
-    expect(valueOf("Amount")).toHaveTextContent("1,250,000");
-    expect(valueOf("Amount")).toHaveTextContent("KRW");
-    expect(valueOf("Occurred")).toHaveTextContent("2026-07-23 10:15:30 KST");
-    expect(valueOf("Customer reference")).toHaveTextContent("cust_ref_demo_a7f2");
-    expect(valueOf("From account")).toHaveTextContent("acct_ref_demo_s91c");
-    expect(valueOf("To account")).toHaveTextContent("acct_ref_demo_r44d");
-    expect(valueOf("Device")).toHaveTextContent("device_ref_demo_31aa");
-    expect(valueOf("Recorded")).toHaveTextContent("2026-07-23 10:15:31 KST");
-    expect(valueOf("Last updated")).toHaveTextContent("2026-07-23 11:40:07 KST");
+    expect(valueOf("거래 ID")).toHaveTextContent(TRANSACTION_ID);
+    expect(valueOf("유형")).toHaveTextContent("계좌 이체");
+    expect(valueOf("채널")).toHaveTextContent("모바일뱅킹");
+    expect(valueOf("처리 상태")).toHaveTextContent("인증 필요");
+    expect(valueOf("금액")).toHaveTextContent("1,250,000");
+    expect(valueOf("금액")).toHaveTextContent("KRW");
+    expect(valueOf("발생")).toHaveTextContent("2026-07-23 10:15:30 KST");
+    expect(valueOf("고객 참조값")).toHaveTextContent("cust_ref_demo_a7f2");
+    expect(valueOf("출금 계좌")).toHaveTextContent("acct_ref_demo_s91c");
+    expect(valueOf("입금 계좌")).toHaveTextContent("acct_ref_demo_r44d");
+    expect(valueOf("기기")).toHaveTextContent("device_ref_demo_31aa");
+    expect(valueOf("기록")).toHaveTextContent("2026-07-23 10:15:31 KST");
+    expect(valueOf("최종 수정")).toHaveTextContent("2026-07-23 11:40:07 KST");
 
     // Twelve names for the thirteen contract fields: `currencyCode` is read
     // beside the amount rather than as a line of its own. A thirteenth name
@@ -205,14 +205,14 @@ describe("TransactionDetailPage record", () => {
   it("states Seoul wall clock and keeps the untouched UTC value for the machine", async () => {
     await showRecord();
 
-    const occurred = within(valueOf("Occurred")).getByText(/KST$/);
+    const occurred = within(valueOf("발생")).getByText(/KST$/);
     expect(occurred.tagName).toBe("TIME");
     expect(occurred).toHaveAttribute("datetime", "2026-07-23T01:15:30Z");
-    expect(within(valueOf("Recorded")).getByText(/KST$/)).toHaveAttribute(
+    expect(within(valueOf("기록")).getByText(/KST$/)).toHaveAttribute(
       "datetime",
       "2026-07-23T01:15:31Z",
     );
-    expect(within(valueOf("Last updated")).getByText(/KST$/)).toHaveAttribute(
+    expect(within(valueOf("최종 수정")).getByText(/KST$/)).toHaveAttribute(
       "datetime",
       "2026-07-23T02:40:07Z",
     );
@@ -221,20 +221,20 @@ describe("TransactionDetailPage record", () => {
   it("keeps all fifteen digits of the largest contract amount", async () => {
     await showRecord({ amount: "999999999999999" });
 
-    expect(valueOf("Amount")).toHaveTextContent("999,999,999,999,999");
+    expect(valueOf("금액")).toHaveTextContent("999,999,999,999,999");
   });
 
   it("names the absence of a recipient account and a device rather than leaving a blank", async () => {
     await showRecord({ recipientAccountRef: null, deviceRef: null });
 
-    expect(valueOf("To account")).toHaveTextContent("None recorded");
-    expect(valueOf("Device")).toHaveTextContent("None recorded");
+    expect(valueOf("입금 계좌")).toHaveTextContent("기록 없음");
+    expect(valueOf("기기")).toHaveTextContent("기록 없음");
   });
 
   it("prints a long reference in full, once, and nowhere else in the DOM", async () => {
     await showRecord({ deviceRef: LONG_DEVICE_REF });
 
-    const device = valueOf("Device");
+    const device = valueOf("기기");
     expect(device).toHaveTextContent(LONG_DEVICE_REF);
     expect(device.className).toContain("facts__ref");
 
@@ -252,45 +252,45 @@ describe("TransactionDetailPage record", () => {
   it("shows the processing status as a word and a mark, not as colour alone", async () => {
     await showRecord();
 
-    const badge = within(valueOf("Processing status")).getByText("Auth required");
+    const badge = within(valueOf("처리 상태")).getByText("인증 필요");
     expect(badge.className).toContain("badge--attention");
     expect(badge.querySelector(".badge__mark")).not.toBeNull();
   });
 
   it.each([
-    ["RECEIVED", "Received"],
-    ["ANALYZING", "Analyzing"],
-    ["ANALYZED", "Analyzed"],
-    ["APPROVED", "Approved"],
-    ["ADDITIONAL_AUTH_REQUIRED", "Auth required"],
-    ["HELD", "Held"],
-    ["FAILED", "Failed"],
+    ["RECEIVED", "접수"],
+    ["ANALYZING", "분석 중"],
+    ["ANALYZED", "분석 완료"],
+    ["APPROVED", "승인"],
+    ["ADDITIONAL_AUTH_REQUIRED", "인증 필요"],
+    ["HELD", "보류"],
+    ["FAILED", "실패"],
   ])("labels the %s processing status", async (status, label) => {
     await showRecord({ processingStatus: status });
 
-    expect(valueOf("Processing status")).toHaveTextContent(label);
+    expect(valueOf("처리 상태")).toHaveTextContent(label);
   });
 
   it.each([
-    ["ACCOUNT_TRANSFER", "Account transfer"],
-    ["OPEN_BANKING_TRANSFER", "Open banking transfer"],
-    ["ATM_WITHDRAWAL", "ATM withdrawal"],
-    ["LOAN_DISBURSED", "Loan disbursed"],
+    ["ACCOUNT_TRANSFER", "계좌 이체"],
+    ["OPEN_BANKING_TRANSFER", "오픈뱅킹 이체"],
+    ["ATM_WITHDRAWAL", "ATM 출금"],
+    ["LOAN_DISBURSED", "대출 실행"],
   ])("labels the %s transaction type", async (type, label) => {
     await showRecord({ transactionType: type });
 
-    expect(valueOf("Type")).toHaveTextContent(label);
+    expect(valueOf("유형")).toHaveTextContent(label);
   });
 
   it.each([
-    ["MOBILE_BANKING", "Mobile banking"],
-    ["OPEN_BANKING", "Open banking"],
+    ["MOBILE_BANKING", "모바일뱅킹"],
+    ["OPEN_BANKING", "오픈뱅킹"],
     ["ATM", "ATM"],
-    ["CORE_BANKING", "Core banking"],
+    ["CORE_BANKING", "코어뱅킹"],
   ])("labels the %s channel", async (channel, label) => {
     await showRecord({ channel });
 
-    expect(valueOf("Channel")).toHaveTextContent(label);
+    expect(valueOf("채널")).toHaveTextContent(label);
   });
 
   it("shows no risk, detection, case or business action anywhere", async () => {
@@ -319,7 +319,7 @@ describe("TransactionDetailPage record", () => {
     await showRecord();
 
     const summary = screen.getByRole("status");
-    expect(summary).toHaveTextContent("Showing the full transaction record.");
+    expect(summary).toHaveTextContent("거래 기록 전체를 표시합니다.");
     expect(summary).toHaveAttribute("aria-live", "polite");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
@@ -329,9 +329,9 @@ describe("TransactionDetailPage record", () => {
 
     const sections = screen.getAllByRole("heading", { level: 3 }).map((h) => h.textContent);
     expect(sections).toEqual([
-      "Transaction",
-      "Customer, accounts and device",
-      "Ledger record",
+      "거래",
+      "고객·계좌·기기",
+      "거래 원장 기록",
     ]);
     // Every labelled section really points at a heading that exists once.
     for (const section of Array.from(document.querySelectorAll("[aria-labelledby]"))) {
@@ -357,17 +357,17 @@ describe("TransactionDetailPage failures", () => {
     await failWith(404, { code: "TRANSACTION_NOT_FOUND" });
 
     const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent("Transaction not found");
+    expect(alert).toHaveTextContent("거래를 찾을 수 없습니다");
     expect(within(alert).queryByRole("button")).not.toBeInTheDocument();
-    expect(screen.queryByText("Loading transaction...")).not.toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("No record shown.");
+    expect(screen.queryByText("거래를 불러오고 있습니다…")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("표시할 기록이 없습니다.");
   });
 
   it("reports a 403 as a fixed refusal, and offers no retry", async () => {
     await failWith(403, { code: "ACCESS_DENIED", message: "transaction:read required" });
 
     const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent("Access denied");
+    expect(alert).toHaveTextContent("접근할 수 없습니다");
     expect(within(alert).queryByRole("button")).not.toBeInTheDocument();
     expect(alert.textContent ?? "").not.toContain("transaction:read");
   });
@@ -376,10 +376,10 @@ describe("TransactionDetailPage failures", () => {
     await failWith(503, { code: "SERVICE_UNAVAILABLE", message: "upstream down" });
 
     const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent("The transaction could not be loaded");
+    expect(alert).toHaveTextContent("거래를 불러올 수 없습니다");
     expect(alert.textContent ?? "").not.toContain("503");
     expect(alert.textContent ?? "").not.toContain("upstream");
-    expect(within(alert).getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(within(alert).getByRole("button", { name: "다시 시도" })).toBeInTheDocument();
   });
 
   it("reports a network failure", async () => {
@@ -392,9 +392,9 @@ describe("TransactionDetailPage failures", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByRole("alert")).toHaveTextContent("The backend could not be reached");
+      expect(screen.getByRole("alert")).toHaveTextContent("백엔드에 연결할 수 없습니다");
     });
-    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "다시 시도" })).toBeInTheDocument();
   });
 
   it("reports a timeout separately from a network failure", async () => {
@@ -412,7 +412,7 @@ describe("TransactionDetailPage failures", () => {
     });
 
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "The transaction took too long to load",
+      "거래를 불러오는 데 시간이 오래 걸립니다",
     );
     vi.useRealTimers();
   });
@@ -427,7 +427,7 @@ describe("TransactionDetailPage failures", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByRole("alert")).toHaveTextContent("The transaction could not be read");
+      expect(screen.getByRole("alert")).toHaveTextContent("거래 정보를 읽을 수 없습니다");
     });
     // Not one field of a refused record is displayed.
     expect(document.body.textContent ?? "").not.toContain("cust_ref_demo_a7f2");
@@ -445,22 +445,22 @@ describe("TransactionDetailPage failures", () => {
     const calls = await failWith(500);
     const user = userEvent.setup();
 
-    await user.click(screen.getByRole("button", { name: "Try again" }));
-    expect(screen.getByText("Loading transaction...")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "다시 시도" }));
+    expect(screen.getByText("거래를 불러오고 있습니다…")).toBeInTheDocument();
     expect(calls).toHaveLength(2);
 
     await answerWith(calls[1], transactionBody());
     await waitFor(() => {
       expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     });
-    expect(valueOf("Transaction ID")).toHaveTextContent(TRANSACTION_ID);
+    expect(valueOf("거래 ID")).toHaveTextContent(TRANSACTION_ID);
   });
 
   it("sends exactly one request per press of Try again", async () => {
     const calls = await failWith(500);
     const user = userEvent.setup();
 
-    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await user.click(screen.getByRole("button", { name: "다시 시도" }));
     await settle();
     expect(calls).toHaveLength(2);
 
@@ -468,7 +468,7 @@ describe("TransactionDetailPage failures", () => {
     await waitFor(() => {
       expect(screen.getByRole("alert")).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await user.click(screen.getByRole("button", { name: "다시 시도" }));
     await settle();
     expect(calls).toHaveLength(3);
   });
@@ -488,14 +488,14 @@ describe("TransactionDetailPage failures", () => {
     expect(screen.getByRole("alert")).toHaveFocus();
 
     // The same failure again: focus is left where the analyst put it.
-    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await user.click(screen.getByRole("button", { name: "다시 시도" }));
     await answerWith(calls[1], {}, 500);
     await waitFor(() => {
       expect(screen.getByRole("alert")).toBeInTheDocument();
     });
-    screen.getByRole("button", { name: "Try again" }).focus();
+    screen.getByRole("button", { name: "다시 시도" }).focus();
     await settle();
-    expect(screen.getByRole("button", { name: "Try again" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "다시 시도" })).toHaveFocus();
   });
 });
 
@@ -507,7 +507,7 @@ describe("TransactionDetailPage malformed address", () => {
     await settle();
 
     const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent("This is not a transaction address");
+    expect(alert).toHaveTextContent("올바른 거래 주소가 아닙니다");
     expect(alert).toHaveFocus();
     expect(spy).not.toHaveBeenCalled();
     expect(client.calls.authorizeRequest).toBe(0);
@@ -520,13 +520,13 @@ describe("TransactionDetailPage malformed address", () => {
     renderPage(signedIn(), "/transactions/not-a-uuid");
     await settle();
 
-    expect(screen.getByRole("heading", { name: "Transaction", level: 2 })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Back to transactions" })).toHaveAttribute(
+    expect(screen.getByRole("heading", { name: "거래", level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "거래 목록으로" })).toHaveAttribute(
       "href",
       "/transactions",
     );
     expect(document.body.textContent ?? "").not.toContain("not-a-uuid");
-    expect(screen.getByRole("status")).toHaveTextContent("This is not a transaction address.");
+    expect(screen.getByRole("status")).toHaveTextContent("올바른 거래 주소가 아닙니다.");
   });
 });
 
@@ -535,9 +535,9 @@ describe("TransactionDetailPage navigation back to the list", () => {
     await showRecord();
     const user = userEvent.setup();
 
-    await user.click(screen.getByRole("link", { name: "Back to transactions" }));
+    await user.click(screen.getByRole("link", { name: "거래 목록으로" }));
 
     expect(await screen.findByText("Transaction list stands in here.")).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: /^Transaction / })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^거래 / })).not.toBeInTheDocument();
   });
 });

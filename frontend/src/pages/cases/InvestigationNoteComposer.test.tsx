@@ -105,7 +105,7 @@ describe("InvestigationNoteComposer visibility", () => {
     async (role) => {
       renderComposer({ role });
       await settle();
-      expect(screen.queryByLabelText("Investigation note")).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("조사 메모")).not.toBeInTheDocument();
       expect(screen.queryByText(/cannot be added/i)).not.toBeInTheDocument();
     },
   );
@@ -115,20 +115,20 @@ describe("InvestigationNoteComposer visibility", () => {
     async (status) => {
       renderComposer({ status });
       await settle();
-      expect(screen.getByLabelText("Investigation note")).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "Add note" })).toHaveAttribute("type", "submit");
-      expect(screen.getByRole("button", { name: "Cancel" })).toHaveAttribute("type", "button");
+      expect(screen.getByLabelText("조사 메모")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "메모 등록" })).toHaveAttribute("type", "submit");
+      expect(screen.getByRole("button", { name: "취소" })).toHaveAttribute("type", "button");
     },
   );
 
   it.each([
-    ["OPEN", "open"],
-    ["CLOSED", "closed"],
+    ["OPEN", "접수"],
+    ["CLOSED", "종결"],
   ] as const)("shows fixed status guidance instead of a form for %s", async (status, word) => {
     renderComposer({ status });
     await settle();
-    expect(screen.queryByLabelText("Investigation note")).not.toBeInTheDocument();
-    expect(screen.getByText(`Investigation notes cannot be added while this case is ${word}.`)).toBeVisible();
+    expect(screen.queryByLabelText("조사 메모")).not.toBeInTheDocument();
+    expect(screen.getByText(`이 사건은 ${word} 상태이므로 메모를 추가할 수 없습니다.`)).toBeVisible();
   });
 });
 
@@ -138,7 +138,7 @@ describe("InvestigationNoteComposer interaction", () => {
     const user = userEvent.setup();
     renderComposer();
     await settle();
-    const textarea = screen.getByLabelText("Investigation note");
+    const textarea = screen.getByLabelText("조사 메모");
     expect(textarea).toHaveAttribute("autocomplete", "off");
     expect(textarea).not.toHaveAttribute("maxlength");
 
@@ -157,15 +157,15 @@ describe("InvestigationNoteComposer interaction", () => {
     const user = userEvent.setup();
     renderComposer();
     await settle();
-    const textarea = screen.getByLabelText("Investigation note");
+    const textarea = screen.getByLabelText("조사 메모");
     await user.type(textarea, "   ");
-    await user.click(screen.getByRole("button", { name: "Add note" }));
+    await user.click(screen.getByRole("button", { name: "메모 등록" }));
     expect(textarea).toHaveFocus();
     expect(textarea).toHaveAttribute("aria-invalid", "true");
     expect(textarea).toHaveValue("   ");
     expect(
       screen.getByText(
-        "Enter 1–4,000 Unicode characters and include at least one non-whitespace character.",
+        "공백이 아닌 문자를 포함해 1~4,000자를 입력하세요.",
       ),
     ).toBeVisible();
   });
@@ -175,7 +175,7 @@ describe("InvestigationNoteComposer interaction", () => {
     const user = userEvent.setup();
     renderComposer();
     await settle();
-    const textarea = screen.getByLabelText("Investigation note");
+    const textarea = screen.getByLabelText("조사 메모");
     await user.type(textarea, "one request");
 
     fireEvent.compositionStart(textarea);
@@ -185,7 +185,7 @@ describe("InvestigationNoteComposer interaction", () => {
     fireEvent.keyDown(textarea, { key: "Enter", metaKey: true });
     fireEvent.keyDown(textarea, { key: "Enter", metaKey: true });
     await waitFor(() => expect(calls).toHaveLength(1));
-    expect(screen.getByRole("button", { name: "Adding note…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "메모 등록 중…" })).toBeDisabled();
     expect(textarea).toBeDisabled();
   });
 
@@ -195,10 +195,10 @@ describe("InvestigationNoteComposer interaction", () => {
     const user = userEvent.setup();
     renderComposer({ reconcile });
     await settle();
-    const textarea = screen.getByLabelText("Investigation note");
+    const textarea = screen.getByLabelText("조사 메모");
     const content = "  preserved \n text  ";
     fireEvent.change(textarea, { target: { value: content } });
-    await user.click(screen.getByRole("button", { name: "Add note" }));
+    await user.click(screen.getByRole("button", { name: "메모 등록" }));
     await waitFor(() => expect(calls).toHaveLength(1));
 
     await act(async () => {
@@ -208,9 +208,9 @@ describe("InvestigationNoteComposer interaction", () => {
     });
     await waitFor(() => expect(textarea).toHaveValue(""));
     expect(textarea).toHaveFocus();
-    expect(screen.getByRole("status")).toHaveTextContent("Investigation note added.");
+    expect(screen.getByRole("status")).toHaveTextContent("조사 메모를 등록했습니다.");
     expect(reconcile).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole("button", { name: "Add note" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "메모 등록" })).toBeDisabled();
   });
 
   it.each([403, 404, 409, 422, 500, 503])(
@@ -220,10 +220,10 @@ describe("InvestigationNoteComposer interaction", () => {
       const user = userEvent.setup();
       renderComposer();
       await settle();
-      const textarea = screen.getByLabelText("Investigation note");
+      const textarea = screen.getByLabelText("조사 메모");
       const content = "draft must remain";
       await user.type(textarea, content);
-      await user.click(screen.getByRole("button", { name: "Add note" }));
+      await user.click(screen.getByRole("button", { name: "메모 등록" }));
       await waitFor(() => expect(calls).toHaveLength(1));
       await act(async () => {
         calls[0].resolve(jsonResponse({ code: "PRIVATE", message: content }, { status }));
@@ -231,7 +231,7 @@ describe("InvestigationNoteComposer interaction", () => {
         await Promise.resolve();
       });
       expect(textarea).toHaveValue(content);
-      expect(screen.getByRole("heading", { name: "Note not added" })).toHaveFocus();
+      expect(screen.getByRole("heading", { name: "메모를 등록하지 못했습니다" })).toHaveFocus();
       expect(document.body.textContent?.match(/draft must remain/g)).toHaveLength(1);
     },
   );
@@ -241,15 +241,15 @@ describe("InvestigationNoteComposer interaction", () => {
     const user = userEvent.setup();
     renderComposer();
     await settle();
-    const textarea = screen.getByLabelText("Investigation note");
+    const textarea = screen.getByLabelText("조사 메모");
     await user.type(textarea, "clear me");
-    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByRole("button", { name: "취소" }));
     expect(textarea).toHaveValue("");
 
     await user.type(textarea, "pending draft");
-    await user.click(screen.getByRole("button", { name: "Add note" }));
+    await user.click(screen.getByRole("button", { name: "메모 등록" }));
     await waitFor(() => expect(calls).toHaveLength(1));
-    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "취소" })).toBeDisabled();
     expect(calls[0].request.signal.aborted).toBe(false);
   });
 });

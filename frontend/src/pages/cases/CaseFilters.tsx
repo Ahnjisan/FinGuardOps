@@ -5,6 +5,7 @@ import {
   MAX_ASSIGNEE_REF_LENGTH,
   type CaseFilterDraft,
 } from "./casePresentation";
+import { Icon } from "../../shared/Icon";
 
 export interface CaseFiltersProps {
   readonly draft: CaseFilterDraft;
@@ -22,6 +23,9 @@ export function CaseFilters({
   onReset,
   hasPendingEdits,
 }: CaseFiltersProps) {
+  const hasTimeRange = Boolean(
+    draft.createdAtFrom || draft.createdAtTo || draft.lastChangedAtFrom || draft.lastChangedAtTo,
+  );
   const update = <TKey extends keyof CaseFilterDraft>(key: TKey, value: string): void => {
     onDraftChange({ ...draft, [key]: value });
   };
@@ -38,10 +42,10 @@ export function CaseFilters({
         onApply();
       }}
     >
-      <h3 id="case-filters-heading" className="visually-hidden">
-        Case filters
-      </h3>
-      <div className="filters__grid">
+      <h3 id="case-filters-heading" className="filters__title">검색 및 필터</h3>
+      <details className="filters__advanced">
+        <summary>기간 필터 <span>{hasTimeRange ? "기간 설정됨" : "생성·변경 기간 선택"}</span></summary>
+        <div className="filters__time-grid">
         {/*
           Two independent ranges, in two fieldsets rather than one. Backend
           validates `[createdAtFrom, createdAtTo)` and
@@ -49,11 +53,11 @@ export function CaseFilters({
           filling in one has to be able to see that the other is untouched.
         */}
         <fieldset className="field-group field-group--wide">
-          <legend className="field-group__legend">Opened between</legend>
+          <legend className="field-group__legend">생성 기간</legend>
           <div className="field-group__fields field-group__fields--pair">
             <div className="field">
               <label className="field__label" htmlFor="case-filter-created-from">
-                Opened from (KST)
+                생성 시작(KST)
               </label>
               <input
                 className="field__control"
@@ -68,7 +72,7 @@ export function CaseFilters({
             </div>
             <div className="field">
               <label className="field__label" htmlFor="case-filter-created-to">
-                Opened to (KST)
+                생성 끝(KST)
               </label>
               <input
                 className="field__control"
@@ -83,16 +87,16 @@ export function CaseFilters({
             </div>
           </div>
           <p className="field__hint">
-            Entered and read as Korea Standard Time, UTC+09:00. Sent to the backend as UTC.
+            한국 표준시(UTC+09:00)로 입력하며 서버에는 UTC로 전달합니다.
           </p>
         </fieldset>
 
         <fieldset className="field-group field-group--wide">
-          <legend className="field-group__legend">Last changed between</legend>
+          <legend className="field-group__legend">변경 기간</legend>
           <div className="field-group__fields field-group__fields--pair">
             <div className="field">
               <label className="field__label" htmlFor="case-filter-changed-from">
-                Changed from (KST)
+                변경 시작(KST)
               </label>
               <input
                 className="field__control"
@@ -107,7 +111,7 @@ export function CaseFilters({
             </div>
             <div className="field">
               <label className="field__label" htmlFor="case-filter-changed-to">
-                Changed to (KST)
+                변경 끝(KST)
               </label>
               <input
                 className="field__control"
@@ -122,16 +126,18 @@ export function CaseFilters({
             </div>
           </div>
           <p className="field__hint">
-            Independent of the opened range. Either may be used on its own.
+            생성 기간과 별도로 적용할 수 있습니다.
           </p>
         </fieldset>
-
+        </div>
+      </details>
+      <div className="filters__grid">
         <fieldset className="field-group">
-          <legend className="field-group__legend">Investigation state</legend>
+          <legend className="field-group__legend">조사 상태</legend>
           <div className="field-group__fields">
             <div className="field">
               <label className="field__label" htmlFor="case-filter-status">
-                Case status
+                사건 상태
               </label>
               <select
                 className="field__control"
@@ -141,7 +147,7 @@ export function CaseFilters({
                   update("caseStatus", event.target.value);
                 }}
               >
-                <option value="">Any status</option>
+                <option value="">모든 상태</option>
                 {CASE_STATUSES.map((status) => (
                   <option key={status} value={status}>
                     {CASE_STATUS_LABELS[status]}
@@ -151,7 +157,7 @@ export function CaseFilters({
             </div>
             <div className="field">
               <label className="field__label" htmlFor="case-filter-disposition">
-                Final disposition
+                최종 판정
               </label>
               <select
                 className="field__control"
@@ -161,7 +167,7 @@ export function CaseFilters({
                   update("finalDisposition", event.target.value);
                 }}
               >
-                <option value="">Any disposition</option>
+                <option value="">모든 판정</option>
                 {CASE_FINAL_DISPOSITIONS.map((disposition) => (
                   <option key={disposition} value={disposition}>
                     {CASE_FINAL_DISPOSITION_LABELS[disposition]}
@@ -173,11 +179,11 @@ export function CaseFilters({
         </fieldset>
 
         <fieldset className="field-group">
-          <legend className="field-group__legend">References</legend>
+          <legend className="field-group__legend">참조값</legend>
           <div className="field-group__fields">
             <div className="field">
               <label className="field__label" htmlFor="case-filter-assignee-ref">
-                Assignee reference
+                담당자 참조값
               </label>
               {/*
                 No `maxLength`. Backend's 128-character bound is reported as a
@@ -198,13 +204,12 @@ export function CaseFilters({
                 }}
               />
               <p className="field__hint">
-                Matched exactly. At most {MAX_ASSIGNEE_REF_LENGTH} characters, with no
-                leading or trailing spaces.
+                정확히 일치시킵니다. 최대 {MAX_ASSIGNEE_REF_LENGTH} 자까지 입력하고 앞뒤 공백은 제외하세요.
               </p>
             </div>
             <div className="field">
               <label className="field__label" htmlFor="case-filter-transaction-id">
-                Related transaction ID
+                연관 거래 ID
               </label>
               <input
                 className="field__control"
@@ -219,7 +224,7 @@ export function CaseFilters({
                 }}
               />
               <p className="field__hint">
-                A canonical lowercase UUID, exactly as the ledger records it.
+                거래 기록에 저장된 소문자 UUID를 입력하세요.
               </p>
             </div>
           </div>
@@ -228,15 +233,15 @@ export function CaseFilters({
 
       <div className="filters__actions">
         <button className="button button--primary" type="submit">
-          Apply filters
+          <Icon name="search" />필터 적용
         </button>
         <button className="button" type="button" onClick={onReset}>
-          Reset filters
+          <Icon name="reset" />필터 초기화
         </button>
         <p className="filters__note">
           {hasPendingEdits
-            ? "Edits are not applied yet. Apply them to search."
-            : "Showing results for the applied filters."}
+            ? "변경한 조건은 아직 적용되지 않았습니다."
+            : "적용된 필터의 결과를 표시합니다."}
         </p>
       </div>
     </form>

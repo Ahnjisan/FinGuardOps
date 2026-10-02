@@ -341,7 +341,7 @@ async function showRecord(overrides: Record<string, unknown> = {}): Promise<void
   await settle();
   await answerWith(calls[0], caseBody(overrides));
   await waitFor(() => {
-    expect(screen.getByRole("heading", { name: "Case", level: 3 })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "사건", level: 3 })).toBeInTheDocument();
   });
 }
 
@@ -386,17 +386,17 @@ describe("CaseDetailPage request", () => {
     await settle();
 
     expect(
-      screen.getByRole("heading", { name: `Case ${CASE_ID}`, level: 2 }),
+      screen.getByRole("heading", { name: `사건 ${CASE_ID}`, level: 2 }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Back to cases" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "사건 목록으로" })).toHaveAttribute(
       "href",
       "/cases",
     );
-    expect(screen.getByText("Loading case...")).toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "Case record status" })).toHaveTextContent(
-      "Loading case",
+    expect(screen.getByText("사건을 불러오고 있습니다…")).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "사건 기록 상태" })).toHaveTextContent(
+      "사건을 불러오는 중",
     );
-    expect(screen.getByRole("status", { name: "Case record status" })).toHaveAttribute(
+    expect(screen.getByRole("status", { name: "사건 기록 상태" })).toHaveAttribute(
       "aria-live",
       "polite",
     );
@@ -408,16 +408,16 @@ describe("CaseDetailPage record", () => {
   it("shows every field the detail contract carries, and only those", async () => {
     await showRecord();
 
-    expect(valueOf("Case ID")).toHaveTextContent(CASE_ID);
-    expect(valueOf("Case status")).toHaveTextContent("In review");
-    expect(valueOf("Final disposition")).toHaveTextContent("Not decided");
-    expect(valueOf("Assignee")).toHaveTextContent(ASSIGNEE_REF);
-    expect(valueOf("Related transactions")).toHaveTextContent("3");
-    expect(valueOf("Created")).toHaveTextContent("2026-07-24 10:15:33 KST");
-    expect(valueOf("Review started")).toHaveTextContent("2026-07-24 10:25:00 KST");
-    expect(valueOf("Closed")).toHaveTextContent("Not closed");
-    expect(valueOf("Last changed")).toHaveTextContent("2026-07-24 11:05:10 KST");
-    expect(valueOf("Concurrency version")).toHaveTextContent("4");
+    expect(valueOf("사건 ID")).toHaveTextContent(CASE_ID);
+    expect(valueOf("사건 상태")).toHaveTextContent("검토 중");
+    expect(valueOf("최종 판정")).toHaveTextContent("미결정");
+    expect(valueOf("담당자")).toHaveTextContent(ASSIGNEE_REF);
+    expect(valueOf("연관 거래")).toHaveTextContent("3");
+    expect(valueOf("생성")).toHaveTextContent("2026-07-24 10:15:33 KST");
+    expect(valueOf("검토 시작")).toHaveTextContent("2026-07-24 10:25:00 KST");
+    expect(valueOf("종결")).toHaveTextContent("종결 전");
+    expect(valueOf("최종 변경")).toHaveTextContent("2026-07-24 11:05:10 KST");
+    expect(valueOf("버전")).toHaveTextContent("4");
 
     // Ten names for the ten contract fields. An eleventh would be a field this
     // console invented.
@@ -430,16 +430,16 @@ describe("CaseDetailPage record", () => {
 
     const terms = Array.from(document.querySelectorAll("dt")).map((dt) => dt.textContent);
     expect(terms).toEqual([
-      "Case ID",
-      "Case status",
-      "Final disposition",
-      "Assignee",
-      "Related transactions",
-      "Created",
-      "Review started",
-      "Closed",
-      "Last changed",
-      "Concurrency version",
+      "사건 ID",
+      "사건 상태",
+      "최종 판정",
+      "담당자",
+      "연관 거래",
+      "생성",
+      "검토 시작",
+      "종결",
+      "최종 변경",
+      "버전",
     ]);
     // The change instant is `lastChangedAt`, and it is called that. `Updated`
     // is a name this response does not have.
@@ -451,18 +451,18 @@ describe("CaseDetailPage record", () => {
   it("states Seoul wall clock and keeps the untouched UTC value for the machine", async () => {
     await showRecord({ closedAt: "2026-07-25T03:00:00Z", caseStatus: "CLOSED" });
 
-    const created = within(valueOf("Created")).getByText(/KST$/);
+    const created = within(valueOf("생성")).getByText(/KST$/);
     expect(created.tagName).toBe("TIME");
     expect(created).toHaveAttribute("datetime", "2026-07-24T01:15:33Z");
-    expect(within(valueOf("Review started")).getByText(/KST$/)).toHaveAttribute(
+    expect(within(valueOf("검토 시작")).getByText(/KST$/)).toHaveAttribute(
       "datetime",
       "2026-07-24T01:25:00Z",
     );
-    expect(within(valueOf("Closed")).getByText(/KST$/)).toHaveAttribute(
+    expect(within(valueOf("종결")).getByText(/KST$/)).toHaveAttribute(
       "datetime",
       "2026-07-25T03:00:00Z",
     );
-    expect(within(valueOf("Last changed")).getByText(/KST$/)).toHaveAttribute(
+    expect(within(valueOf("최종 변경")).getByText(/KST$/)).toHaveAttribute(
       "datetime",
       "2026-07-24T02:05:10Z",
     );
@@ -473,16 +473,16 @@ describe("CaseDetailPage record", () => {
     // value is the Backend's own string; the reading beside it is the second.
     await showRecord({ lastChangedAt: "2026-07-24T02:05:10.123456789Z" });
 
-    const changed = within(valueOf("Last changed")).getByText(/KST$/);
+    const changed = within(valueOf("최종 변경")).getByText(/KST$/);
     expect(changed).toHaveAttribute("datetime", "2026-07-24T02:05:10.123456789Z");
-    expect(valueOf("Last changed")).toHaveTextContent("2026-07-24 11:05:10 KST");
+    expect(valueOf("최종 변경")).toHaveTextContent("2026-07-24 11:05:10 KST");
   });
 
   it.each([
-    ["finalDisposition", "Final disposition", "Not decided"],
-    ["assigneeRef", "Assignee", "Unassigned"],
-    ["reviewStartedAt", "Review started", "Not started"],
-    ["closedAt", "Closed", "Not closed"],
+    ["finalDisposition", "최종 판정", "미결정"],
+    ["assigneeRef", "담당자", "미배정"],
+    ["reviewStartedAt", "검토 시작", "시작 전"],
+    ["closedAt", "종결", "종결 전"],
   ])("names the absence of %s rather than leaving a blank", async (field, term, label) => {
     await showRecord({ [field]: null });
 
@@ -500,39 +500,39 @@ describe("CaseDetailPage record", () => {
       closedAt: null,
     });
 
-    expect(valueOf("Final disposition")).toHaveTextContent("Not decided");
-    expect(valueOf("Assignee")).toHaveTextContent("Unassigned");
-    expect(valueOf("Review started")).toHaveTextContent("Not started");
-    expect(valueOf("Closed")).toHaveTextContent("Not closed");
+    expect(valueOf("최종 판정")).toHaveTextContent("미결정");
+    expect(valueOf("담당자")).toHaveTextContent("미배정");
+    expect(valueOf("검토 시작")).toHaveTextContent("시작 전");
+    expect(valueOf("종결")).toHaveTextContent("종결 전");
     // Still ten fields: a null is a value with a name, not a row that vanishes.
     expect(document.querySelectorAll("dd")).toHaveLength(10);
   });
 
   it.each([
-    ["OPEN", "Open"],
-    ["IN_REVIEW", "In review"],
-    ["ADDITIONAL_INFORMATION_REQUIRED", "Information required"],
-    ["CLOSED", "Closed"],
+    ["OPEN", "접수"],
+    ["IN_REVIEW", "검토 중"],
+    ["ADDITIONAL_INFORMATION_REQUIRED", "추가 정보 필요"],
+    ["CLOSED", "종결"],
   ])("labels the %s case status", async (status, label) => {
     await showRecord({ caseStatus: status });
 
-    expect(valueOf("Case status")).toHaveTextContent(label);
+    expect(valueOf("사건 상태")).toHaveTextContent(label);
   });
 
   it.each([
-    ["NORMAL", "Normal"],
-    ["FALSE_POSITIVE", "False positive"],
-    ["CONFIRMED_FRAUD", "Confirmed fraud"],
+    ["NORMAL", "정상"],
+    ["FALSE_POSITIVE", "오탐"],
+    ["CONFIRMED_FRAUD", "사기 확정"],
   ])("labels the %s final disposition", async (disposition, label) => {
     await showRecord({ caseStatus: "CLOSED", finalDisposition: disposition });
 
-    expect(valueOf("Final disposition")).toHaveTextContent(label);
+    expect(valueOf("최종 판정")).toHaveTextContent(label);
   });
 
   it("shows the case status as a word and a mark, not as colour alone", async () => {
     await showRecord();
 
-    const badge = within(valueOf("Case status")).getByText("In review");
+    const badge = within(valueOf("사건 상태")).getByText("검토 중");
     expect(badge.className).toContain("badge--info");
     expect(badge.querySelector(".badge__mark")).not.toBeNull();
   });
@@ -540,8 +540,8 @@ describe("CaseDetailPage record", () => {
   it("shows the final disposition as a word rather than a colour", async () => {
     await showRecord({ caseStatus: "CLOSED", finalDisposition: "CONFIRMED_FRAUD" });
 
-    const disposition = valueOf("Final disposition");
-    expect(disposition).toHaveTextContent("Confirmed fraud");
+    const disposition = valueOf("최종 판정");
+    expect(disposition).toHaveTextContent("사기 확정");
     // No badge, no tone class: a verdict is read, and nothing about it is
     // carried by colour.
     expect(disposition.querySelector(".badge")).toBeNull();
@@ -551,7 +551,7 @@ describe("CaseDetailPage record", () => {
     await showRecord({ assigneeRef: LONG_ASSIGNEE_REF });
 
     expect(LONG_ASSIGNEE_REF).toHaveLength(128);
-    const assignee = valueOf("Assignee");
+    const assignee = valueOf("담당자");
     expect(assignee).toHaveTextContent(LONG_ASSIGNEE_REF);
     // The wrapping class the stylesheet uses to keep a long value inside its
     // own column instead of widening the document.
@@ -571,7 +571,7 @@ describe("CaseDetailPage record", () => {
   it("prints the identifier in a wrapping element in the heading", async () => {
     await showRecord();
 
-    const heading = screen.getByRole("heading", { name: `Case ${CASE_ID}`, level: 2 });
+    const heading = screen.getByRole("heading", { name: `사건 ${CASE_ID}`, level: 2 });
     const id = within(heading).getByText(CASE_ID);
     expect(id.className).toContain("detail__id");
   });
@@ -581,8 +581,8 @@ describe("CaseDetailPage record", () => {
 
     // No grouping separator and no abbreviation: the only thing this line may
     // say is the number.
-    expect(valueOf("Related transactions")).toHaveTextContent("1234567");
-    expect(valueOf("Concurrency version")).toHaveTextContent("0");
+    expect(valueOf("연관 거래")).toHaveTextContent("1234567");
+    expect(valueOf("버전")).toHaveTextContent("0");
   });
 
   it("adds only investigation notes and audit history without inventing case data", async () => {
@@ -609,19 +609,19 @@ describe("CaseDetailPage record", () => {
     // Workflow and note creation are the approved mutations. Resolution
     // remains absent, and pagination controls stay read-only navigation.
     expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual([
-      "Request additional information",
-      "Change assignee",
-      "Cancel",
-      "Add note",
-      "Previous",
-      "Next",
-      "Previous",
-      "Next",
+      "추가 정보 요청",
+      "담당자 변경",
+      "취소",
+      "메모 등록",
+      "이전",
+      "다음",
+      "이전",
+      "다음",
     ]);
     expect(document.querySelectorAll("form")).toHaveLength(2);
-    expect(screen.getByRole("textbox", { name: "Investigation note" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Notes per page" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Entries per page" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "조사 메모" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "페이지당 메모 수" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "페이지당 항목 수" })).toBeInTheDocument();
     expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
     // One link, and it goes to the list.
     const links = screen.getAllByRole("link");
@@ -642,7 +642,7 @@ describe("CaseDetailPage record", () => {
     expect(detail).toHaveLength(1);
     expect(notes).toHaveLength(1);
     expect(audit).toHaveLength(1);
-    expect(screen.getByText("Loading case...")).toBeInTheDocument();
+    expect(screen.getByText("사건을 불러오고 있습니다…")).toBeInTheDocument();
     expect(new URL(notes[0].request.url).pathname).toBe(
       `${DETAIL_ROUTE.replace("/cases", "/api/v1/cases")}/notes`,
     );
@@ -665,12 +665,12 @@ describe("CaseDetailPage record", () => {
     await answerWith(calls[0], caseBody());
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Case", level: 3 })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "사건", level: 3 })).toBeInTheDocument();
       expect(screen.getByRole("alert")).toHaveTextContent(
-        "The audit history could not be loaded",
+        "감사 이력을 불러올 수 없습니다",
       );
     });
-    expect(valueOf("Case ID")).toHaveTextContent(CASE_ID);
+    expect(valueOf("사건 ID")).toHaveTextContent(CASE_ID);
     expect(document.body.textContent ?? "").not.toContain("AUDIT_BACKEND_PRIVATE_CODE");
     expect(document.body.textContent ?? "").not.toContain("audit backend private message");
     expect(document.body.innerHTML).not.toContain("trace_demo_case_audit_private");
@@ -679,8 +679,8 @@ describe("CaseDetailPage record", () => {
   it("announces the result in the live region and raises no alert", async () => {
     await showRecord();
 
-    const summary = screen.getByRole("status", { name: "Case record status" });
-    expect(summary).toHaveTextContent("Showing the full case record.");
+    const summary = screen.getByRole("status", { name: "사건 기록 상태" });
+    expect(summary).toHaveTextContent("사건 기록 전체를 표시합니다.");
     expect(summary).toHaveAttribute("aria-live", "polite");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
@@ -690,12 +690,12 @@ describe("CaseDetailPage record", () => {
 
     const sections = screen.getAllByRole("heading", { level: 3 }).map((h) => h.textContent);
     expect(sections).toEqual([
-      "Case",
-      "Investigation timeline",
-      "Record metadata",
-      "Case workflow",
-      "Investigation notes",
-      "Audit history",
+      "사건",
+      "조사 타임라인",
+      "기록 정보",
+      "사건 처리",
+      "조사 메모",
+      "감사 이력",
     ]);
     expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(1);
     // Every labelled section really points at a heading that exists once.
@@ -723,7 +723,7 @@ describe("CaseDetailPage workflow reconciliation", () => {
     await answerWith(notes[0], notesBody());
     await answerWith(audit[0], auditBody());
 
-    await user.click(screen.getByRole("button", { name: "Request additional information" }));
+    await user.click(screen.getByRole("button", { name: "추가 정보 요청" }));
     await waitFor(() => expect(workflow).toHaveLength(1));
     expect(workflow[0].request.method).toBe("PATCH");
     expect(new URL(workflow[0].request.url).pathname).toBe(
@@ -741,9 +741,9 @@ describe("CaseDetailPage workflow reconciliation", () => {
       expect(audit).toHaveLength(2);
     });
     expect(notes).toHaveLength(1);
-    expect(valueOf("Case status")).toHaveTextContent("In review");
-    expect(valueOf("Concurrency version")).toHaveTextContent("4");
-    expect(screen.getByText("Refreshing authoritative case information")).toBeVisible();
+    expect(valueOf("사건 상태")).toHaveTextContent("검토 중");
+    expect(valueOf("버전")).toHaveTextContent("4");
+    expect(screen.getByText("최신 사건 정보를 확인하고 있습니다")).toBeVisible();
 
     await answerWith(
       detailCalls[1],
@@ -755,10 +755,10 @@ describe("CaseDetailPage workflow reconciliation", () => {
     );
     await answerWith(audit[1], auditBody());
     await waitFor(() => {
-      expect(valueOf("Case status")).toHaveTextContent("Information required");
-      expect(valueOf("Concurrency version")).toHaveTextContent("5");
-      expect(screen.getByRole("status", { name: "Case workflow result" })).toHaveTextContent(
-        "Additional information requested from authoritative case information.",
+      expect(valueOf("사건 상태")).toHaveTextContent("추가 정보 필요");
+      expect(valueOf("버전")).toHaveTextContent("5");
+      expect(screen.getByRole("status", { name: "사건 처리 결과" })).toHaveTextContent(
+        "최신 사건 정보에서 추가 정보 요청을 확인했습니다.",
       );
     });
     expect(notes).toHaveLength(1);
@@ -776,7 +776,7 @@ describe("CaseDetailPage workflow reconciliation", () => {
       await answerWith(notes[0], notesBody());
       await answerWith(audit[0], auditBody());
 
-      await user.click(screen.getByRole("button", { name: "Request additional information" }));
+      await user.click(screen.getByRole("button", { name: "추가 정보 요청" }));
       await waitFor(() => expect(workflow).toHaveLength(1));
       if (outcome === "network") {
         await act(async () => {
@@ -803,15 +803,15 @@ describe("CaseDetailPage workflow reconciliation", () => {
         expect(audit).toHaveLength(2);
       });
       expect(workflow).toHaveLength(1);
-      expect(valueOf("Concurrency version")).toHaveTextContent("4");
+      expect(valueOf("버전")).toHaveTextContent("4");
 
       await answerWith(detailCalls[1], caseBody({ concurrencyVersion: 5 }));
       await answerWith(notes[1], notesBody("authoritative workflow reconciliation note"));
       await answerWith(audit[1], auditBody());
       const title =
         outcome === "conflict"
-          ? "The case changed before this action"
-          : "The workflow result could not be confirmed";
+          ? "작업 전 사건 정보가 변경되었습니다"
+          : "업무 처리 결과를 확인할 수 없습니다";
       await waitFor(() =>
         expect(screen.getByRole("heading", { name: title, level: 4 })).toBeVisible(),
       );
@@ -830,7 +830,7 @@ describe("CaseDetailPage workflow reconciliation", () => {
     await answerWith(notes[0], notesBody());
     await answerWith(audit[0], auditBody());
 
-    await user.click(screen.getByRole("button", { name: "Request additional information" }));
+    await user.click(screen.getByRole("button", { name: "추가 정보 요청" }));
     await waitFor(() => expect(workflow).toHaveLength(1));
     await answerWith(workflow[0], workflowMutationBody());
     await waitFor(() => {
@@ -849,11 +849,11 @@ describe("CaseDetailPage workflow reconciliation", () => {
       500,
     );
     expect(
-      screen.getByRole("heading", { name: "The latest audit history could not be loaded" }),
+      screen.getByRole("heading", { name: "최신 감사 이력을 불러올 수 없습니다" }),
     ).toBeVisible();
-    expect(screen.getByText("Refreshing authoritative case information")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Request additional information" })).toBeDisabled();
-    expect(valueOf("Concurrency version")).toHaveTextContent("4");
+    expect(screen.getByText("최신 사건 정보를 확인하고 있습니다")).toBeVisible();
+    expect(screen.getByRole("button", { name: "추가 정보 요청" })).toBeDisabled();
+    expect(valueOf("버전")).toHaveTextContent("4");
 
     // floor 이상 authoritative detail이 generation을 올리면 audit 실패와 무관하게 성공으로 해제된다.
     await answerWith(
@@ -865,17 +865,17 @@ describe("CaseDetailPage workflow reconciliation", () => {
       }),
     );
     await waitFor(() => {
-      expect(screen.getByRole("status", { name: "Case workflow result" })).toHaveTextContent(
-        "Additional information requested from authoritative case information.",
+      expect(screen.getByRole("status", { name: "사건 처리 결과" })).toHaveTextContent(
+        "최신 사건 정보에서 추가 정보 요청을 확인했습니다.",
       );
     });
-    expect(valueOf("Case status")).toHaveTextContent("Information required");
-    expect(valueOf("Concurrency version")).toHaveTextContent("5");
+    expect(valueOf("사건 상태")).toHaveTextContent("추가 정보 필요");
+    expect(valueOf("버전")).toHaveTextContent("5");
     expect(
-      screen.getByRole("heading", { name: "The latest audit history could not be loaded" }),
+      screen.getByRole("heading", { name: "최신 감사 이력을 불러올 수 없습니다" }),
     ).toBeVisible();
-    expect(screen.queryByText("Refreshing authoritative case information")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Resume review" })).toBeEnabled();
+    expect(screen.queryByText("최신 사건 정보를 확인하고 있습니다")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "검토 재개" })).toBeEnabled();
     expect(notes).toHaveLength(1);
     expect(audit).toHaveLength(2);
     expect(workflow).toHaveLength(1);
@@ -891,7 +891,7 @@ describe("CaseDetailPage workflow reconciliation", () => {
     await answerWith(detailCalls[0], caseBody({ concurrencyVersion: 4 }));
     await answerWith(notes[0], notesBody());
     await answerWith(audit[0], auditBody());
-    await user.click(screen.getByRole("button", { name: "Request additional information" }));
+    await user.click(screen.getByRole("button", { name: "추가 정보 요청" }));
     await waitFor(() => expect(workflow).toHaveLength(1));
     await answerWith(workflow[0], { code: "PRIVATE" }, 409);
     await waitFor(() => {
@@ -907,17 +907,17 @@ describe("CaseDetailPage workflow reconciliation", () => {
       503,
     );
     await answerWith(audit[1], auditBody());
-    expect(valueOf("Concurrency version")).toHaveTextContent("5");
+    expect(valueOf("버전")).toHaveTextContent("5");
     expect(
-      screen.getByRole("heading", { name: "The case changed before this action", level: 4 }),
+      screen.getByRole("heading", { name: "작업 전 사건 정보가 변경되었습니다", level: 4 }),
     ).toBeVisible();
     expect(
       screen.getByRole("heading", {
-        name: "The latest investigation notes could not be loaded",
+        name: "최신 조사 메모를 불러올 수 없습니다",
         level: 4,
       }),
     ).toBeVisible();
-    expect(screen.getByRole("heading", { name: "Audit history", level: 3 })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "감사 이력", level: 3 })).toBeVisible();
     expect(document.body.innerHTML).not.toMatch(/PRIVATE_NOTES/);
   });
 });
@@ -932,7 +932,7 @@ describe("CaseDetailPage resolution reconciliation", () => {
     await answerWith(reads.notes[0], notesBody());
     await answerWith(reads.audit[0], auditBody());
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: "Case workflow", level: 3 })).toBeVisible(),
+      expect(screen.getByRole("heading", { name: "사건 처리", level: 3 })).toBeVisible(),
     );
     return { ...reads, user };
   }
@@ -942,19 +942,19 @@ describe("CaseDetailPage resolution reconciliation", () => {
     disposition: string,
   ): Promise<void> {
     await user.click(screen.getByRole("radio", { name: disposition }));
-    await user.click(screen.getByRole("button", { name: "Resolve case" }));
+    await user.click(screen.getByRole("button", { name: "사건 종결" }));
   }
 
   it("lets an FDS_APPROVER resolve without optimistic merge and refreshes detail plus audit, but zero notes", async () => {
     const { detail: detailCalls, notes, audit, workflow, user } = await showApproverRecord();
 
     // Approver 단독 session에는 Resolution form만 있고 상태·담당자·note 작성 control은 없다.
-    expect(screen.getByRole("group", { name: "Case resolution" })).toBeVisible();
-    expect(screen.queryByRole("textbox", { name: "Assignee UUID" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Request additional information" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("textbox", { name: "Investigation note" })).not.toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "사건 종결" })).toBeVisible();
+    expect(screen.queryByRole("textbox", { name: "담당자 UUID" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "추가 정보 요청" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "조사 메모" })).not.toBeInTheDocument();
 
-    await resolveAs(user, "Confirmed fraud");
+    await resolveAs(user, "사기 확정");
     await waitFor(() => expect(workflow).toHaveLength(1));
     expect(workflow[0].request.method).toBe("POST");
     expect(new URL(workflow[0].request.url).pathname).toBe(`/api/v1/cases/${CASE_ID}/resolution`);
@@ -970,22 +970,22 @@ describe("CaseDetailPage resolution reconciliation", () => {
       expect(audit).toHaveLength(2);
     });
     expect(notes).toHaveLength(1);
-    expect(valueOf("Case status")).toHaveTextContent("In review");
-    expect(valueOf("Final disposition")).toHaveTextContent("Not decided");
-    expect(valueOf("Concurrency version")).toHaveTextContent("4");
-    expect(screen.getByText("Refreshing authoritative case information")).toBeVisible();
+    expect(valueOf("사건 상태")).toHaveTextContent("검토 중");
+    expect(valueOf("최종 판정")).toHaveTextContent("미결정");
+    expect(valueOf("버전")).toHaveTextContent("4");
+    expect(screen.getByText("최신 사건 정보를 확인하고 있습니다")).toBeVisible();
 
     await answerWith(detailCalls[1], closedCaseBody());
     await answerWith(audit[1], auditBody());
     await waitFor(() => {
-      expect(valueOf("Case status")).toHaveTextContent("Closed");
-      expect(valueOf("Final disposition")).toHaveTextContent("Confirmed fraud");
-      expect(screen.getByRole("status", { name: "Case workflow result" })).toHaveTextContent(
-        "Case resolved from authoritative case information.",
+      expect(valueOf("사건 상태")).toHaveTextContent("종결");
+      expect(valueOf("최종 판정")).toHaveTextContent("사기 확정");
+      expect(screen.getByRole("status", { name: "사건 처리 결과" })).toHaveTextContent(
+        "최신 사건 정보에서 사건 종결을 확인했습니다.",
       );
     });
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: "Case workflow", level: 3 })).toHaveFocus(),
+      expect(screen.getByRole("heading", { name: "사건 처리", level: 3 })).toHaveFocus(),
     );
     expect(screen.queryByRole("radio")).not.toBeInTheDocument();
     expect(notes).toHaveLength(1);
@@ -997,7 +997,7 @@ describe("CaseDetailPage resolution reconciliation", () => {
     "refreshes detail, notes and audit after a resolution %s and never retries POST",
     async (outcome) => {
       const { detail: detailCalls, notes, audit, workflow, user } = await showApproverRecord();
-      await resolveAs(user, "Normal");
+      await resolveAs(user, "정상");
       await waitFor(() => expect(workflow).toHaveLength(1));
 
       if (outcome === "network") {
@@ -1021,19 +1021,19 @@ describe("CaseDetailPage resolution reconciliation", () => {
         expect(audit).toHaveLength(2);
       });
       expect(workflow).toHaveLength(1);
-      expect(valueOf("Concurrency version")).toHaveTextContent("4");
+      expect(valueOf("버전")).toHaveTextContent("4");
 
       await answerWith(detailCalls[1], caseBody({ concurrencyVersion: 5 }));
       await answerWith(notes[1], notesBody("authoritative resolution reconciliation note"));
       await answerWith(audit[1], auditBody());
       const title =
         outcome === "conflict"
-          ? "The case changed before the resolution"
-          : "The resolution result could not be confirmed";
+          ? "종결 전 사건 정보가 변경되었습니다"
+          : "종결 결과를 확인할 수 없습니다";
       await waitFor(() =>
         expect(screen.getByRole("heading", { name: title, level: 4 })).toHaveFocus(),
       );
-      expect(screen.getByRole("radio", { name: "Normal" })).toBeChecked();
+      expect(screen.getByRole("radio", { name: "정상" })).toBeChecked();
       expect(screen.getByText("authoritative resolution reconciliation note")).toBeVisible();
       expect(workflow).toHaveLength(1);
       expect(document.body.innerHTML).not.toMatch(/PRIVATE_CONFLICT|PRIVATE_MESSAGE|PRIVATE_TRACE/);
@@ -1042,7 +1042,7 @@ describe("CaseDetailPage resolution reconciliation", () => {
 
   it("keeps the resolution lane blocked when the refreshed detail is below the success floor", async () => {
     const { detail: detailCalls, audit, workflow, user } = await showApproverRecord();
-    await resolveAs(user, "Confirmed fraud");
+    await resolveAs(user, "사기 확정");
     await waitFor(() => expect(workflow).toHaveLength(1));
     await answerWith(workflow[0], resolutionMutationBody());
     await waitFor(() => expect(detailCalls).toHaveLength(2));
@@ -1052,21 +1052,21 @@ describe("CaseDetailPage resolution reconciliation", () => {
     await answerWith(audit[1], auditBody());
     await waitFor(() =>
       expect(
-        screen.getByRole("heading", { name: "The latest case information could not be loaded" }),
+        screen.getByRole("heading", { name: "최신 사건 정보를 불러올 수 없습니다" }),
       ).toBeVisible(),
     );
-    expect(valueOf("Concurrency version")).toHaveTextContent("4");
-    expect(valueOf("Case status")).toHaveTextContent("In review");
-    expect(screen.getByRole("button", { name: "Refresh workflow information" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Resolve case" })).toBeDisabled();
-    expect(screen.getByRole("status", { name: "Case workflow result" }).textContent).toBe("");
+    expect(valueOf("버전")).toHaveTextContent("4");
+    expect(valueOf("사건 상태")).toHaveTextContent("검토 중");
+    expect(screen.getByRole("button", { name: "사건 처리 정보 새로고침" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "사건 종결" })).toBeDisabled();
+    expect(screen.getByRole("status", { name: "사건 처리 결과" }).textContent).toBe("");
     expect(workflow).toHaveLength(1);
     expect(detailCalls).toHaveLength(2);
   });
 
   it("isolates an audit refresh failure from an authoritative resolution success", async () => {
     const { detail: detailCalls, notes, audit, workflow, user } = await showApproverRecord();
-    await resolveAs(user, "Confirmed fraud");
+    await resolveAs(user, "사기 확정");
     await waitFor(() => expect(workflow).toHaveLength(1));
     await answerWith(workflow[0], resolutionMutationBody());
     await waitFor(() => {
@@ -1084,22 +1084,22 @@ describe("CaseDetailPage resolution reconciliation", () => {
       500,
     );
     expect(
-      screen.getByRole("heading", { name: "The latest audit history could not be loaded" }),
+      screen.getByRole("heading", { name: "최신 감사 이력을 불러올 수 없습니다" }),
     ).toBeVisible();
-    expect(screen.getByText("Refreshing authoritative case information")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Resolve case" })).toBeDisabled();
+    expect(screen.getByText("최신 사건 정보를 확인하고 있습니다")).toBeVisible();
+    expect(screen.getByRole("button", { name: "사건 종결" })).toBeDisabled();
 
     await answerWith(detailCalls[1], closedCaseBody());
     await waitFor(() =>
-      expect(screen.getByRole("status", { name: "Case workflow result" })).toHaveTextContent(
-        "Case resolved from authoritative case information.",
+      expect(screen.getByRole("status", { name: "사건 처리 결과" })).toHaveTextContent(
+        "최신 사건 정보에서 사건 종결을 확인했습니다.",
       ),
     );
-    expect(valueOf("Case status")).toHaveTextContent("Closed");
+    expect(valueOf("사건 상태")).toHaveTextContent("종결");
     expect(
-      screen.getByRole("heading", { name: "The latest audit history could not be loaded" }),
+      screen.getByRole("heading", { name: "최신 감사 이력을 불러올 수 없습니다" }),
     ).toBeVisible();
-    expect(screen.queryByText("Refreshing authoritative case information")).not.toBeInTheDocument();
+    expect(screen.queryByText("최신 사건 정보를 확인하고 있습니다")).not.toBeInTheDocument();
     expect(notes).toHaveLength(1);
     expect(audit).toHaveLength(2);
     expect(workflow).toHaveLength(1);
@@ -1120,8 +1120,8 @@ describe("CaseDetailPage note reconciliation", () => {
     await answerWith(audit[0], auditBody());
 
     const submitted = "floor-bound note";
-    await user.type(screen.getByRole("textbox", { name: "Investigation note" }), submitted);
-    await user.click(screen.getByRole("button", { name: "Add note" }));
+    await user.type(screen.getByRole("textbox", { name: "조사 메모" }), submitted);
+    await user.click(screen.getByRole("button", { name: "메모 등록" }));
     await waitFor(() => expect(notes).toHaveLength(2));
     await answerWith(notes[1], createdNoteBody(submitted), 201);
     await waitFor(() => {
@@ -1131,19 +1131,19 @@ describe("CaseDetailPage note reconciliation", () => {
     });
 
     await answerWith(detail[1], caseBody({ concurrencyVersion: 4 }));
-    const add = screen.getByRole("button", { name: "Add note" });
+    const add = screen.getByRole("button", { name: "메모 등록" });
     expect(add).toBeDisabled();
-    expect(valueOf("Concurrency version")).toHaveTextContent("4");
+    expect(valueOf("버전")).toHaveTextContent("4");
     expect(detail).toHaveLength(2);
     expect(notes.filter((call) => call.request.method === "POST")).toHaveLength(1);
     await user.click(add);
     expect(notes.filter((call) => call.request.method === "POST")).toHaveLength(1);
 
-    await user.click(screen.getByRole("button", { name: "Refresh case information" }));
+    await user.click(screen.getByRole("button", { name: "사건 정보 새로고침" }));
     await waitFor(() => expect(detail).toHaveLength(3));
     await answerWith(detail[2], caseBody({ concurrencyVersion: 5 }));
-    expect(screen.getByRole("button", { name: "Add note" })).toBeEnabled();
-    expect(valueOf("Concurrency version")).toHaveTextContent("5");
+    expect(screen.getByRole("button", { name: "메모 등록" })).toBeEnabled();
+    expect(valueOf("버전")).toHaveTextContent("5");
   }, 20_000);
 
   // 인위적 대기 없음: 두 note를 실제 입력·제출하고 요청 도착 조건만 기다린다. 단독 약 1.3초이나
@@ -1158,16 +1158,16 @@ describe("CaseDetailPage note reconciliation", () => {
     await answerWith(audit[0], auditBody());
 
     const first = "first floor note";
-    await user.type(screen.getByRole("textbox", { name: "Investigation note" }), first);
-    await user.click(screen.getByRole("button", { name: "Add note" }));
+    await user.type(screen.getByRole("textbox", { name: "조사 메모" }), first);
+    await user.click(screen.getByRole("button", { name: "메모 등록" }));
     await waitFor(() => expect(notes).toHaveLength(2));
     await answerWith(notes[1], createdNoteBody(first), 201);
     await waitFor(() => expect(detail).toHaveLength(2));
     await answerWith(detail[1], caseBody({ concurrencyVersion: version }));
 
     const second = `next note at version ${String(version)}`;
-    await user.type(screen.getByRole("textbox", { name: "Investigation note" }), second);
-    await user.click(screen.getByRole("button", { name: "Add note" }));
+    await user.type(screen.getByRole("textbox", { name: "조사 메모" }), second);
+    await user.click(screen.getByRole("button", { name: "메모 등록" }));
     await waitFor(() =>
       expect(notes.filter((call) => call.request.method === "POST")).toHaveLength(2),
     );
@@ -1188,8 +1188,8 @@ describe("CaseDetailPage note reconciliation", () => {
     await answerWith(audit[0], auditBody());
 
     const submitted = "note before close";
-    await user.type(screen.getByRole("textbox", { name: "Investigation note" }), submitted);
-    await user.click(screen.getByRole("button", { name: "Add note" }));
+    await user.type(screen.getByRole("textbox", { name: "조사 메모" }), submitted);
+    await user.click(screen.getByRole("button", { name: "메모 등록" }));
     await waitFor(() => expect(notes).toHaveLength(2));
     await answerWith(notes[1], createdNoteBody(submitted), 201);
     await waitFor(() => expect(detail).toHaveLength(2));
@@ -1203,8 +1203,8 @@ describe("CaseDetailPage note reconciliation", () => {
       }),
     );
 
-    expect(screen.queryByRole("textbox", { name: "Investigation note" })).not.toBeInTheDocument();
-    expect(screen.getByText("Investigation notes cannot be added while this case is closed.")).toBeVisible();
+    expect(screen.queryByRole("textbox", { name: "조사 메모" })).not.toBeInTheDocument();
+    expect(screen.getByText("이 사건은 종결 상태이므로 메모를 추가할 수 없습니다.")).toBeVisible();
     expect(notes.filter((call) => call.request.method === "POST")).toHaveLength(1);
   });
 
@@ -1217,10 +1217,10 @@ describe("CaseDetailPage note reconciliation", () => {
     await answerWith(notes[0], notesBody("authoritative old note"));
     await answerWith(audit[0], auditBody());
 
-    const textarea = screen.getByRole("textbox", { name: "Investigation note" });
+    const textarea = screen.getByRole("textbox", { name: "조사 메모" });
     const submitted = "new draft not optimistic";
     await user.type(textarea, submitted);
-    await user.click(screen.getByRole("button", { name: "Add note" }));
+    await user.click(screen.getByRole("button", { name: "메모 등록" }));
     await waitFor(() => expect(notes).toHaveLength(2));
     expect(notes[1].request.method).toBe("POST");
 
@@ -1245,7 +1245,7 @@ describe("CaseDetailPage note reconciliation", () => {
     });
     expect(screen.getByText("authoritative old note")).toBeVisible();
     expect(screen.queryByText(submitted)).not.toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "" })).toHaveTextContent("Investigation note added.");
+    expect(screen.getByRole("status", { name: "" })).toHaveTextContent("조사 메모를 등록했습니다.");
 
     await answerWith(detail[1], caseBody({
       concurrencyVersion: 5,
@@ -1265,7 +1265,7 @@ describe("CaseDetailPage note reconciliation", () => {
       }],
     });
 
-    expect(valueOf("Concurrency version")).toHaveTextContent("5");
+    expect(valueOf("버전")).toHaveTextContent("5");
     expect(screen.getByText("authoritative refreshed note")).toBeVisible();
     expect(screen.getByText("CASE_NOTE_CREATED")).toBeVisible();
   });
@@ -1282,8 +1282,8 @@ describe("CaseDetailPage note reconciliation", () => {
     await answerWith(audit[0], auditBody());
 
     const submitted = "successful create with isolated audit failure";
-    await user.type(screen.getByRole("textbox", { name: "Investigation note" }), submitted);
-    await user.click(screen.getByRole("button", { name: "Add note" }));
+    await user.type(screen.getByRole("textbox", { name: "조사 메모" }), submitted);
+    await user.click(screen.getByRole("button", { name: "메모 등록" }));
     await waitFor(() => expect(notes).toHaveLength(2));
     await answerWith(
       notes[1],
@@ -1317,14 +1317,14 @@ describe("CaseDetailPage note reconciliation", () => {
       500,
     );
 
-    expect(screen.getByRole("status", { name: "" })).toHaveTextContent("Investigation note added.");
-    expect(valueOf("Concurrency version")).toHaveTextContent("5");
+    expect(screen.getByRole("status", { name: "" })).toHaveTextContent("조사 메모를 등록했습니다.");
+    expect(valueOf("버전")).toHaveTextContent("5");
     expect(screen.getByText("authoritative note despite audit failure")).toBeVisible();
     expect(screen.getByText("CASE_CREATED")).toBeVisible();
     expect(
-      screen.getByRole("heading", { name: "The latest audit history could not be loaded" }),
+      screen.getByRole("heading", { name: "최신 감사 이력을 불러올 수 없습니다" }),
     ).toBeVisible();
-    expect(screen.getByRole("button", { name: "Add note" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "메모 등록" })).toBeEnabled();
     expect(document.body.textContent).not.toContain("PRIVATE_AUDIT_REFRESH_CODE");
     expect(document.body.textContent).not.toContain("private-audit-refresh-trace");
   }, 20_000);
@@ -1346,23 +1346,23 @@ describe("CaseDetailPage failures", () => {
     await failWith(404, { code: "CASE_NOT_FOUND", message: "no such case", traceId: TRACE_ID });
 
     const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent("Case not found");
+    expect(alert).toHaveTextContent("사건을 찾을 수 없습니다");
     expect(within(alert).queryByRole("button")).not.toBeInTheDocument();
-    expect(screen.queryByText("Loading case...")).not.toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "Case record status" })).toHaveTextContent(
-      "No record shown.",
+    expect(screen.queryByText("사건을 불러오고 있습니다…")).not.toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "사건 기록 상태" })).toHaveTextContent(
+      "표시할 기록이 없습니다.",
     );
     // Not one field of a case that does not exist.
     expect(document.querySelectorAll("dd")).toHaveLength(0);
     expect(document.body.innerHTML).not.toContain(TRACE_ID);
     expect(alert.textContent ?? "").not.toContain("404");
     expect(alert.textContent ?? "").not.toContain("CASE_NOT_FOUND");
-    expect(screen.queryByRole("heading", { name: "Audit history" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "감사 이력" })).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("heading", { name: "Investigation notes" }),
+      screen.queryByRole("heading", { name: "조사 메모" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("navigation", { name: "Audit history pages" }),
+      screen.queryByRole("navigation", { name: "감사 이력 페이지" }),
     ).not.toBeInTheDocument();
   });
 
@@ -1370,22 +1370,22 @@ describe("CaseDetailPage failures", () => {
     await failWith(403, { code: "ACCESS_DENIED", message: "case:read required" });
 
     const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent("Access denied");
+    expect(alert).toHaveTextContent("접근할 수 없습니다");
     expect(within(alert).queryByRole("button")).not.toBeInTheDocument();
     expect(alert.textContent ?? "").not.toContain("case:read");
     expect(alert.textContent ?? "").not.toContain("ACCESS_DENIED");
     expect(document.querySelectorAll("dd")).toHaveLength(0);
-    expect(screen.queryByRole("heading", { name: "Audit history" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "감사 이력" })).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("heading", { name: "Investigation notes" }),
+      screen.queryByRole("heading", { name: "조사 메모" }),
     ).not.toBeInTheDocument();
   });
 
   it.each([
-    [403, "Access denied", "success"],
-    [403, "Access denied", "failure"],
-    [404, "Case not found", "success"],
-    [404, "Case not found", "failure"],
+    [403, "접근할 수 없습니다", "success"],
+    [403, "접근할 수 없습니다", "failure"],
+    [404, "사건을 찾을 수 없습니다", "success"],
+    [404, "사건을 찾을 수 없습니다", "failure"],
   ] as const)(
     "removes a previously successful page on refresh %i (%s) and blocks late subordinate %s",
     async (detailStatus, refusalTitle, lateOutcome) => {
@@ -1401,15 +1401,15 @@ describe("CaseDetailPage failures", () => {
       await answerWith(detail[0], caseBody({ concurrencyVersion: 4 }));
       await answerWith(notes[0], notesBody("INITIAL_PROTECTED_NOTE"));
       await answerWith(audit[0], auditBody());
-      expect(screen.getByRole("heading", { name: "Case", level: 3 })).toBeVisible();
-      expect(screen.getByRole("heading", { name: "Case workflow", level: 3 })).toBeVisible();
-      expect(screen.getByRole("heading", { name: "Investigation notes", level: 3 })).toBeVisible();
-      expect(screen.getByRole("heading", { name: "Audit history", level: 3 })).toBeVisible();
-      expect(valueOf("Case ID")).toHaveTextContent(CASE_ID);
+      expect(screen.getByRole("heading", { name: "사건", level: 3 })).toBeVisible();
+      expect(screen.getByRole("heading", { name: "사건 처리", level: 3 })).toBeVisible();
+      expect(screen.getByRole("heading", { name: "조사 메모", level: 3 })).toBeVisible();
+      expect(screen.getByRole("heading", { name: "감사 이력", level: 3 })).toBeVisible();
+      expect(valueOf("사건 ID")).toHaveTextContent(CASE_ID);
 
       const submittedNote = "note that starts authoritative refresh";
-      await user.type(screen.getByRole("textbox", { name: "Investigation note" }), submittedNote);
-      await user.click(screen.getByRole("button", { name: "Add note" }));
+      await user.type(screen.getByRole("textbox", { name: "조사 메모" }), submittedNote);
+      await user.click(screen.getByRole("button", { name: "메모 등록" }));
       await waitFor(() => expect(notes).toHaveLength(2));
       await answerWith(notes[1], createdNoteBody(submittedNote), 201);
       await waitFor(() => {
@@ -1421,7 +1421,7 @@ describe("CaseDetailPage failures", () => {
       // Keep all three subordinate lifecycles pending while the detail refresh
       // reaches its authoritative refusal. The workflow request uses the still
       // visible record and must be released when that record disappears.
-      await user.click(screen.getByRole("button", { name: "Request additional information" }));
+      await user.click(screen.getByRole("button", { name: "추가 정보 요청" }));
       await waitFor(() => expect(workflow).toHaveLength(1));
       expect(detail[1].request.signal.aborted).toBe(false);
       expect(notes[2].request.signal.aborted).toBe(false);
@@ -1441,17 +1441,17 @@ describe("CaseDetailPage failures", () => {
         expect(screen.getByRole("alert")).toHaveTextContent(refusalTitle);
       });
 
-      expect(screen.queryByRole("heading", { name: "Case", level: 3 })).not.toBeInTheDocument();
-      expect(screen.queryByRole("heading", { name: "Case workflow", level: 3 })).not.toBeInTheDocument();
-      expect(screen.queryByRole("heading", { name: "Investigation notes", level: 3 })).not.toBeInTheDocument();
-      expect(screen.queryByRole("heading", { name: "Audit history", level: 3 })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "사건", level: 3 })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "사건 처리", level: 3 })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "조사 메모", level: 3 })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "감사 이력", level: 3 })).not.toBeInTheDocument();
       expect(document.querySelectorAll("dd")).toHaveLength(0);
       expect(workflow[0].request.signal.aborted).toBe(true);
       expect(notes[2].request.signal.aborted).toBe(true);
       expect(audit[1].request.signal.aborted).toBe(true);
       expect(client.calls.invalidateIfCurrent).toBe(0);
       expect(client.calls.notified).toBe(0);
-      expect(screen.queryByRole("button", { name: /Try again|Refresh .*information/ })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /다시 시도|Refresh .*information/ })).not.toBeInTheDocument();
       expect(document.body.textContent ?? "").not.toMatch(
         /INITIAL_PROTECTED_NOTE|RAW_REFRESH|private detail refresh|trace_private_detail_refresh/,
       );
@@ -1482,10 +1482,10 @@ describe("CaseDetailPage failures", () => {
       await settle();
 
       expect(screen.getByRole("alert")).toHaveTextContent(refusalTitle);
-      expect(screen.queryByRole("heading", { name: "Case", level: 3 })).not.toBeInTheDocument();
-      expect(screen.queryByRole("heading", { name: "Case workflow", level: 3 })).not.toBeInTheDocument();
-      expect(screen.queryByRole("heading", { name: "Investigation notes", level: 3 })).not.toBeInTheDocument();
-      expect(screen.queryByRole("heading", { name: "Audit history", level: 3 })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "사건", level: 3 })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "사건 처리", level: 3 })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "조사 메모", level: 3 })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "감사 이력", level: 3 })).not.toBeInTheDocument();
       expect(document.body.textContent ?? "").not.toMatch(
         /LATE_REFRESH|LATE_WORKFLOW|LATE_NOTES|LATE_AUDIT|private workflow|private notes|private audit/,
       );
@@ -1536,11 +1536,11 @@ describe("CaseDetailPage failures", () => {
       );
       await waitFor(() => {
         expect(screen.getByRole("alert")).toHaveTextContent(
-          detailStatus === 404 ? "Case not found" : "Access denied",
+          detailStatus === 404 ? "사건을 찾을 수 없습니다" : "접근할 수 없습니다",
         );
       });
-      expect(screen.queryByRole("heading", { name: "Investigation notes" })).not.toBeInTheDocument();
-      expect(screen.queryByRole("heading", { name: "Audit history" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "조사 메모" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "감사 이력" })).not.toBeInTheDocument();
       expect(document.querySelectorAll("dd")).toHaveLength(0);
 
       if (subordinateOutcome === "success") {
@@ -1560,13 +1560,13 @@ describe("CaseDetailPage failures", () => {
       }
       await settle();
 
-      expect(screen.queryByRole("heading", { name: "Investigation notes" })).not.toBeInTheDocument();
-      expect(screen.queryByRole("heading", { name: "Audit history" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "조사 메모" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "감사 이력" })).not.toBeInTheDocument();
       expect(document.body.textContent ?? "").not.toMatch(
         /LATE_NOTES|LATE_AUDIT|private detail payload|late notes private body|late audit private body/,
       );
       expect(document.body.innerHTML).not.toContain("trace_private_detail");
-      expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "다시 시도" })).not.toBeInTheDocument();
       expect(client.calls.notified).toBe(0);
       expect(client.calls.invalidateIfCurrent).toBe(0);
       expect(spy).toHaveBeenCalledTimes(3);
@@ -1604,20 +1604,20 @@ describe("CaseDetailPage failures", () => {
       }
 
       await waitFor(() => {
-        expect(screen.getByRole("heading", { name: "Case", level: 3 })).toBeInTheDocument();
-        expect(screen.getByRole("heading", { name: "Investigation notes" })).toBeInTheDocument();
-        expect(screen.getByRole("heading", { name: "Audit history" })).toBeInTheDocument();
+        expect(screen.getByRole("heading", { name: "사건", level: 3 })).toBeInTheDocument();
+        expect(screen.getByRole("heading", { name: "조사 메모" })).toBeInTheDocument();
+        expect(screen.getByRole("heading", { name: "감사 이력" })).toBeInTheDocument();
       });
-      expect(valueOf("Case ID")).toHaveTextContent(CASE_ID);
+      expect(valueOf("사건 ID")).toHaveTextContent(CASE_ID);
       if (failedSection === "notes") {
         expect(screen.getByText("CASE_CREATED")).toBeInTheDocument();
         expect(screen.getByRole("alert")).toHaveTextContent(
-          "The investigation notes could not be loaded",
+          "조사 메모를 불러올 수 없습니다",
         );
         expect(screen.getByRole("alert")).not.toHaveTextContent("audit history");
       } else {
         expect(screen.getByText("Visible investigation note")).toBeInTheDocument();
-        expect(screen.getByRole("alert")).toHaveTextContent("The audit history could not be loaded");
+        expect(screen.getByRole("alert")).toHaveTextContent("감사 이력을 불러올 수 없습니다");
         expect(screen.getByRole("alert")).not.toHaveTextContent("investigation notes");
       }
       expect(document.body.textContent ?? "").not.toMatch(
@@ -1626,7 +1626,7 @@ describe("CaseDetailPage failures", () => {
 
       await user.click(
         within(screen.getByRole("alert")).getByRole("button", {
-          name: /Try loading .* again/,
+          name: failedSection === "notes" ? "조사 메모 다시 불러오기" : "감사 이력 다시 불러오기",
         }),
       );
       await settle();
@@ -1647,13 +1647,13 @@ describe("CaseDetailPage failures", () => {
     await answerWith(calls[0], caseBody());
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Case", level: 3 })).toBeInTheDocument();
-      expect(screen.getByRole("heading", { name: "Audit history", level: 3 })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "사건", level: 3 })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "감사 이력", level: 3 })).toBeInTheDocument();
       expect(screen.getByRole("alert")).toHaveTextContent(
-        "The investigation notes could not be loaded",
+        "조사 메모를 불러올 수 없습니다",
       );
     });
-    expect(valueOf("Case ID")).toHaveTextContent(CASE_ID);
+    expect(valueOf("사건 ID")).toHaveTextContent(CASE_ID);
     expect(document.body.textContent ?? "").not.toContain("NOTES_BACKEND_PRIVATE_CODE");
     expect(document.body.textContent ?? "").not.toContain("notes backend private message");
     expect(document.body.innerHTML).not.toContain("trace_demo_case_notes_private");
@@ -1663,10 +1663,10 @@ describe("CaseDetailPage failures", () => {
     await failWith(503, { code: "SERVICE_UNAVAILABLE", message: "upstream down" });
 
     const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent("The case could not be loaded");
+    expect(alert).toHaveTextContent("사건을 불러올 수 없습니다");
     expect(alert.textContent ?? "").not.toContain("503");
     expect(alert.textContent ?? "").not.toContain("upstream");
-    expect(within(alert).getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(within(alert).getByRole("button", { name: "다시 시도" })).toBeInTheDocument();
   });
 
   it("reports a network failure", async () => {
@@ -1679,9 +1679,9 @@ describe("CaseDetailPage failures", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByRole("alert")).toHaveTextContent("The backend could not be reached");
+      expect(screen.getByRole("alert")).toHaveTextContent("백엔드에 연결할 수 없습니다");
     });
-    expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "다시 시도" })).toBeInTheDocument();
   });
 
   it("reports a timeout separately from a network failure", async () => {
@@ -1701,7 +1701,7 @@ describe("CaseDetailPage failures", () => {
     expect(
       screen
         .getAllByRole("alert")
-        .some((alert) => alert.textContent?.includes("The case took too long to load")),
+        .some((alert) => alert.textContent?.includes("사건을 불러오는 데 시간이 오래 걸립니다")),
     ).toBe(true);
     vi.useRealTimers();
   });
@@ -1716,7 +1716,7 @@ describe("CaseDetailPage failures", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByRole("alert")).toHaveTextContent("The case could not be read");
+      expect(screen.getByRole("alert")).toHaveTextContent("사건 정보를 읽을 수 없습니다");
     });
     // Not one field of a refused record is displayed.
     expect(document.body.textContent ?? "").not.toContain(ASSIGNEE_REF);
@@ -1728,22 +1728,22 @@ describe("CaseDetailPage failures", () => {
     const calls = await failWith(500);
     const user = userEvent.setup();
 
-    await user.click(screen.getByRole("button", { name: "Try again" }));
-    expect(screen.getByText("Loading case...")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "다시 시도" }));
+    expect(screen.getByText("사건을 불러오고 있습니다…")).toBeInTheDocument();
     expect(calls).toHaveLength(2);
 
     await answerWith(calls[1], caseBody());
     await waitFor(() => {
       expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     });
-    expect(valueOf("Case ID")).toHaveTextContent(CASE_ID);
+    expect(valueOf("사건 ID")).toHaveTextContent(CASE_ID);
   });
 
   it("sends exactly one request per press of Try again", async () => {
     const calls = await failWith(500);
     const user = userEvent.setup();
 
-    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await user.click(screen.getByRole("button", { name: "다시 시도" }));
     await settle();
     expect(calls).toHaveLength(2);
 
@@ -1751,7 +1751,7 @@ describe("CaseDetailPage failures", () => {
     await waitFor(() => {
       expect(screen.getByRole("alert")).toBeInTheDocument();
     });
-    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await user.click(screen.getByRole("button", { name: "다시 시도" }));
     await settle();
     expect(calls).toHaveLength(3);
   });
@@ -1779,7 +1779,7 @@ describe("CaseDetailPage failures", () => {
   it("keeps the way back to the list on every failure", async () => {
     await failWith(404);
 
-    expect(screen.getByRole("link", { name: "Back to cases" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "사건 목록으로" })).toHaveAttribute(
       "href",
       "/cases",
     );
@@ -1792,14 +1792,14 @@ describe("CaseDetailPage failures", () => {
     expect(screen.getByRole("alert")).toHaveFocus();
 
     // The same failure again: focus is left where the analyst put it.
-    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await user.click(screen.getByRole("button", { name: "다시 시도" }));
     await answerWith(calls[1], {}, 500);
     await waitFor(() => {
       expect(screen.getByRole("alert")).toBeInTheDocument();
     });
-    screen.getByRole("button", { name: "Try again" }).focus();
+    screen.getByRole("button", { name: "다시 시도" }).focus();
     await settle();
-    expect(screen.getByRole("button", { name: "Try again" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "다시 시도" })).toHaveFocus();
   });
 
   it("moves focus to the refusal when a case is not found", async () => {
@@ -1837,7 +1837,7 @@ describe("CaseDetailPage malformed address", () => {
       await settle();
 
       const alert = screen.getByRole("alert");
-      expect(alert).toHaveTextContent("This is not a case address");
+      expect(alert).toHaveTextContent("올바른 사건 주소가 아닙니다");
       expect(spy).not.toHaveBeenCalled();
       expect(client.calls.authorizeRequest).toBe(0);
       expect(document.querySelectorAll("dd")).toHaveLength(0);
@@ -1853,13 +1853,13 @@ describe("CaseDetailPage malformed address", () => {
     expect(screen.getByRole("alert")).toHaveFocus();
     expect(spy).not.toHaveBeenCalled();
     expect(document.body.innerHTML).not.toContain("5c2d1e0f");
-    expect(screen.getByRole("heading", { name: "Case", level: 2 })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Back to cases" })).toHaveAttribute(
+    expect(screen.getByRole("heading", { name: "사건", level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "사건 목록으로" })).toHaveAttribute(
       "href",
       "/cases",
     );
-    expect(screen.getByRole("status", { name: "Case record status" })).toHaveTextContent(
-      "This is not a case address.",
+    expect(screen.getByRole("status", { name: "사건 기록 상태" })).toHaveTextContent(
+      "올바른 사건 주소가 아닙니다.",
     );
   });
 });
@@ -1869,9 +1869,9 @@ describe("CaseDetailPage navigation back to the list", () => {
     await showRecord();
     const user = userEvent.setup();
 
-    await user.click(screen.getByRole("link", { name: "Back to cases" }));
+    await user.click(screen.getByRole("link", { name: "사건 목록으로" }));
 
     expect(await screen.findByText("Case list stands in here.")).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: /^Case / })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /^사건 / })).not.toBeInTheDocument();
   });
 });

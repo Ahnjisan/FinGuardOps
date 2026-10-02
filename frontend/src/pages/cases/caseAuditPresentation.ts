@@ -51,7 +51,7 @@ export const formatAuditInstant = formatCaseInstant;
  * the section cannot be read as "the Backend failed to send it" or as "the
  * state was empty".
  */
-export const AUDIT_ABSENT_SUMMARY_LABEL = "Not applicable";
+export const AUDIT_ABSENT_SUMMARY_LABEL = "해당 없음";
 
 /**
  * What an audit summary carrying no assignee is shown as.
@@ -63,7 +63,7 @@ export const AUDIT_ABSENT_SUMMARY_LABEL = "Not applicable";
 export const AUDIT_UNASSIGNED_LABEL = UNASSIGNED_LABEL;
 
 /** The empty state of the whole trail: the case has no audit entry at all. */
-export const NO_AUDIT_HISTORY_MESSAGE = "No audit history recorded.";
+export const NO_AUDIT_HISTORY_MESSAGE = "감사 이력이 없습니다.";
 
 /**
  * The empty state of one page: the trail is not empty, but this page number is
@@ -73,7 +73,7 @@ export const NO_AUDIT_HISTORY_MESSAGE = "No audit history recorded.";
  * and collapsing them would tell an analyst who paged too far that the case has
  * no history at all.
  */
-export const NO_AUDIT_ENTRIES_ON_PAGE_MESSAGE = "No audit entries on this page.";
+export const NO_AUDIT_ENTRIES_ON_PAGE_MESSAGE = "이 페이지에 감사 이력이 없습니다.";
 
 /** One name-and-value line inside a before- or after-summary. */
 export interface AuditSummaryField {
@@ -102,16 +102,16 @@ const ABSENT_SUMMARY: AuditSummaryDisplay = Object.freeze({
 
 function statusField(caseStatus: string): AuditSummaryField {
   // The Backend enum code, not a label. See the module note above.
-  return { name: "Case status", text: caseStatus, absent: false };
+  return { name: "사건 상태", text: caseStatus, absent: false };
 }
 
 function assigneeField(assigneeRef: string | null): AuditSummaryField {
   if (assigneeRef === null) {
-    return { name: "Assignee", text: AUDIT_UNASSIGNED_LABEL, absent: true };
+    return { name: "담당자", text: AUDIT_UNASSIGNED_LABEL, absent: true };
   }
   // An opaque key, printed exactly as Backend stored it. Nothing here trims,
   // case-folds or shortens it: a trimmed reference is a different reference.
-  return { name: "Assignee", text: assigneeRef, absent: false };
+  return { name: "담당자", text: assigneeRef, absent: false };
 }
 
 /**
@@ -133,7 +133,7 @@ export function describeAuditSummary(summary: CaseAuditSummary | null): AuditSum
     // literal it is rather than as a word this module chose for it.
     return {
       present: true,
-      fields: [{ name: "Linked", text: String(summary.linked), absent: false }],
+      fields: [{ name: "연결됨", text: String(summary.linked), absent: false }],
     };
   }
   if ("finalDisposition" in summary) {
@@ -142,7 +142,7 @@ export function describeAuditSummary(summary: CaseAuditSummary | null): AuditSum
       fields: [
         statusField(summary.caseStatus),
         assigneeField(summary.assigneeRef),
-        { name: "Final disposition", text: summary.finalDisposition, absent: false },
+        { name: "최종 판정", text: summary.finalDisposition, absent: false },
       ],
     };
   }
@@ -188,12 +188,12 @@ export function describeAuditWindow(page: PageMetadata, itemCount: number): Resu
  */
 export function describeAuditRange(window: ResultWindow): string {
   if (window.total === 0) {
-    return "No audit entries.";
+    return "감사 이력이 없습니다.";
   }
   if (window.first === 0) {
-    return `No entries on this page of ${String(window.total)}.`;
+    return `전체 ${String(window.total)}건 중 이 페이지에 표시할 감사 이력이 없습니다.`;
   }
-  return `Showing ${String(window.first)}-${String(window.last)} of ${String(window.total)}.`;
+  return `전체 ${String(window.total)}건 중 ${String(window.first)}~${String(window.last)}건 표시`;
 }
 
 /**
@@ -203,5 +203,5 @@ export function describeAuditRange(window: ResultWindow): string {
  * person looking at the screen.
  */
 export function describeAuditPosition(page: PageMetadata): string {
-  return `Page ${String(page.number + 1)} of ${String(Math.max(page.totalPages, 1))}`;
+  return `전체 ${String(Math.max(page.totalPages, 1))}페이지 중 ${String(page.number + 1)}페이지`;
 }

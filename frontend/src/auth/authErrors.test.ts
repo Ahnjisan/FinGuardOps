@@ -62,6 +62,6 @@ describe("auth error classes", () => {
   });
 
   it("never suggests the sign-out did not happen locally", () => {
-    expect(safeAuthErrorMessage("sign-out")).toContain("signed out of this browser");
+    expect(safeAuthErrorMessage("sign-out")).toContain("이 브라우저의 세션은 종료되었습니다");
   });
 });

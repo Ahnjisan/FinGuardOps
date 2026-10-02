@@ -135,7 +135,7 @@ describe("AuthCallbackPage URL handling", () => {
 
     expect(screen.getByRole("status")).toHaveTextContent(safeAuthErrorMessage("callback"));
     expect(client.calls.completeSignIn).toHaveLength(0);
-    expect(screen.queryByRole("heading", { name: /finguardops frontend/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "FinGuardOps", level: 2 })).not.toBeInTheDocument();
   });
 
   it("does not authenticate when the URL cannot be cleared", async () => {
@@ -147,7 +147,7 @@ describe("AuthCallbackPage URL handling", () => {
     await flushCallback();
 
     expect(screen.getByRole("status")).toHaveTextContent(safeAuthErrorMessage("callback"));
-    expect(screen.queryByRole("heading", { name: /backend health/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /백엔드 상태/i })).not.toBeInTheDocument();
   });
 
   it("does not leak the raw DOMException when the URL cannot be cleared", async () => {
@@ -201,8 +201,8 @@ describe("AuthCallbackPage direct entry", () => {
     await flushCallback();
 
     expect(screen.getByRole("status")).toHaveTextContent(safeAuthErrorMessage("callback"));
-    expect(screen.getByRole("link", { name: /return home/i })).toHaveAttribute("href", "/");
-    expect(screen.queryByRole("heading", { name: /finguardops frontend/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /홈으로 돌아가기/i })).toHaveAttribute("href", "/");
+    expect(screen.queryByRole("heading", { name: "FinGuardOps", level: 2 })).not.toBeInTheDocument();
   });
 });
 
@@ -249,9 +249,9 @@ describe("AuthCallbackPage conflicting authorization response", () => {
     renderCallback(client, CONFLICTING);
     await flushCallback();
 
-    expect(screen.getByRole("heading", { name: /signing in/i })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: /finguardops frontend/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: /backend health/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /로그인 중/i })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "FinGuardOps", level: 2 })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /백엔드 상태/i })).not.toBeInTheDocument();
   });
 
   it("leaves no part of the response in the DOM", async () => {
@@ -319,8 +319,8 @@ describe("AuthCallbackPage storage acquisition failure", () => {
     await flushCallback();
 
     expect(screen.getByRole("status")).toHaveTextContent(safeAuthErrorMessage("callback"));
-    expect(screen.getByRole("heading", { name: /signing in/i })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: /finguardops frontend/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /로그인 중/i })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "FinGuardOps", level: 2 })).not.toBeInTheDocument();
   });
 
   it("exposes neither the response nor the raw storage error", async () => {
@@ -349,7 +349,7 @@ describe("AuthCallbackPage completion", () => {
     renderCallback(client);
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: /backend health/i })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: /백엔드 상태/i })).toBeInTheDocument();
     });
   });
 
@@ -363,7 +363,7 @@ describe("AuthCallbackPage completion", () => {
     renderCallback(client);
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: /finguardops frontend/i })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "FinGuardOps", level: 2 })).toBeInTheDocument();
     });
     expect(document.body.textContent).not.toContain("evil.example");
   });
@@ -378,7 +378,7 @@ describe("AuthCallbackPage completion", () => {
     renderCallback(client);
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: /finguardops frontend/i })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "FinGuardOps", level: 2 })).toBeInTheDocument();
     });
     expect(client.calls.completeSignIn).toHaveLength(1);
   });
@@ -395,7 +395,7 @@ describe("AuthCallbackPage completion", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: /finguardops frontend/i })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "FinGuardOps", level: 2 })).toBeInTheDocument();
     });
   });
 
@@ -449,7 +449,7 @@ describe("AuthCallbackPage completion", () => {
     await waitFor(() => {
       expect(screen.getByRole("status")).toHaveTextContent(safeAuthErrorMessage("callback"));
     });
-    expect(screen.getByRole("heading", { name: /signing in/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /로그인 중/i })).toBeInTheDocument();
   });
 
   it("drops a result that settles after the route unmounted", async () => {
@@ -519,7 +519,7 @@ describe("AuthCallbackPage completion", () => {
     await waitFor(() => {
       expect(screen.getByRole("status")).toHaveTextContent(safeAuthErrorMessage("callback"));
     });
-    expect(screen.queryByRole("heading", { name: /finguardops frontend/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "FinGuardOps", level: 2 })).not.toBeInTheDocument();
     expect(document.body.textContent).not.toContain("createFakeAuthClient");
   });
 
@@ -546,7 +546,7 @@ describe("AuthCallbackPage completion", () => {
     // The second callback completed exactly once, undisturbed by the first.
     expect(client.calls.completeSignIn).toHaveLength(2);
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: /finguardops frontend/i })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "FinGuardOps", level: 2 })).toBeInTheDocument();
     });
     second.unmount();
   });

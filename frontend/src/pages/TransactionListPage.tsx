@@ -15,6 +15,7 @@ import {
   type TransactionListState,
 } from "../api/useTransactionList";
 import { TransactionFilters } from "./transactions/TransactionFilters";
+import { Icon } from "../shared/Icon";
 import { TransactionPagination } from "./transactions/TransactionPagination";
 import { TransactionTable } from "./transactions/TransactionTable";
 import {
@@ -78,34 +79,34 @@ const ERROR_COPY: Readonly<
   Record<TransactionListErrorKind, { readonly title: string; readonly body: string }>
 > = Object.freeze({
   timeout: {
-    title: "The search took too long",
-    body: "The backend did not answer in time. Try the search again.",
+    title: "조회에 시간이 오래 걸립니다",
+    body: "백엔드가 제때 응답하지 않았습니다. 다시 조회하세요.",
   },
   network: {
-    title: "The backend could not be reached",
-    body: "Check the connection to the FinGuardOps backend, then try again.",
+    title: "백엔드에 연결할 수 없습니다",
+    body: "FinGuardOps 백엔드 연결을 확인한 뒤 다시 시도하세요.",
   },
   "invalid-response": {
-    title: "The results could not be read",
+    title: "조회 결과를 읽을 수 없습니다",
     body:
-      "The backend returned data this console will not display. Nothing is shown rather than " +
-      "a partial list. Try again, and report it if it continues.",
+      "백엔드 응답을 표시할 수 없어 " +
+      "일부 결과만 보여주지 않았습니다. 다시 시도하고 문제가 계속되면 알려주세요.",
   },
   "access-denied": {
-    title: "Access denied",
-    body: "You do not have permission to read transactions.",
+    title: "접근할 수 없습니다",
+    body: "거래를 조회할 권한이 없습니다.",
   },
   "session-lost": {
-    title: "Your session ended",
-    body: "Sign in again to continue.",
+    title: "세션이 종료되었습니다",
+    body: "계속하려면 다시 로그인하세요.",
   },
   "request-rejected": {
-    title: "The search was not sent",
-    body: "These filters are not a search this console will send. Adjust them and try again.",
+    title: "조회 요청을 보내지 않았습니다",
+    body: "필터 조건을 확인하고 다시 조회하세요.",
   },
   unknown: {
-    title: "The search failed",
-    body: "The backend could not complete the search. Try again.",
+    title: "조회에 실패했습니다",
+    body: "백엔드가 조회를 완료하지 못했습니다. 다시 시도하세요.",
   },
 });
 
@@ -153,7 +154,7 @@ function commitDraft(draft: TransactionFilterDraft): CommitOutcome {
   if (draft.occurredAtFrom !== "") {
     const from = kstInputToUtcInstant(draft.occurredAtFrom);
     if (from === null) {
-      problems.push("Enter the start of the time range as a real date and time.");
+      problems.push("발생 시작 시각을 올바르게 입력하세요.");
     } else {
       filters.occurredAtFrom = from;
     }
@@ -161,27 +162,27 @@ function commitDraft(draft: TransactionFilterDraft): CommitOutcome {
   if (draft.occurredAtTo !== "") {
     const to = kstInputToUtcInstant(draft.occurredAtTo);
     if (to === null) {
-      problems.push("Enter the end of the time range as a real date and time.");
+      problems.push("발생 끝 시각을 올바르게 입력하세요.");
     } else {
       filters.occurredAtTo = to;
     }
   }
   if (isReversedUtcRange(filters.occurredAtFrom ?? null, filters.occurredAtTo ?? null)) {
-    problems.push("The start of the time range must not be later than the end.");
+    problems.push("발생 시작 시각은 끝 시각보다 늦을 수 없습니다.");
   }
 
   if (draft.transactionType !== "") {
     if (isTransactionType(draft.transactionType)) {
       filters.transactionType = draft.transactionType;
     } else {
-      problems.push("Choose a transaction type from the list.");
+      problems.push("목록에서 거래 유형을 선택하세요.");
     }
   }
   if (draft.processingStatus !== "") {
     if (isProcessingStatus(draft.processingStatus)) {
       filters.processingStatus = draft.processingStatus;
     } else {
-      problems.push("Choose a processing status from the list.");
+      problems.push("목록에서 처리 상태를 선택하세요.");
     }
   }
 
@@ -189,14 +190,14 @@ function commitDraft(draft: TransactionFilterDraft): CommitOutcome {
   // filter that would be answered with a 422. It is reported here instead.
   if (draft.externalCustomerRef !== "") {
     if (draft.externalCustomerRef.trim() === "") {
-      problems.push("Enter a customer reference, or leave the field empty.");
+      problems.push("고객 참조값을 입력하거나 비워 두세요.");
     } else {
       filters.externalCustomerRef = draft.externalCustomerRef;
     }
   }
   if (draft.accountRef !== "") {
     if (draft.accountRef.trim() === "") {
-      problems.push("Enter an account reference, or leave the field empty.");
+      problems.push("계좌 참조값을 입력하거나 비워 두세요.");
     } else {
       filters.accountRef = draft.accountRef;
     }
@@ -318,10 +319,9 @@ export function TransactionListPage() {
   return (
     <section className="transactions" aria-labelledby="transactions-heading">
       <div className="page-head">
-        <h2 id="transactions-heading">Transactions</h2>
+        <h2 id="transactions-heading">거래</h2>
         <p>
-          Search the transaction ledger and review where each transaction has reached in
-          processing. Times are Korea Standard Time (UTC+09:00).
+          거래 기록과 처리 상태를 조회합니다. 시간은 한국 표준시(UTC+09:00)입니다.
         </p>
       </div>
 
@@ -339,7 +339,7 @@ export function TransactionListPage() {
 
       {problems.length > 0 && (
         <div className="notice notice--error" role="alert" tabIndex={-1} ref={errorRef}>
-          <p className="notice__title">These filters cannot be searched</p>
+          <p className="notice__title">필터 조건을 적용할 수 없습니다</p>
           <ul className="notice__body">
             {problems.map((problem) => (
               <li key={problem}>{problem}</li>
@@ -354,7 +354,7 @@ export function TransactionListPage() {
           <p className="notice__body">{ERROR_COPY[state.error].body}</p>
           {RETRYABLE.has(state.error) && (
             <button className="button" type="button" onClick={retry}>
-              Try again
+              <Icon name="refresh" />다시 시도
             </button>
           )}
         </div>
@@ -363,22 +363,22 @@ export function TransactionListPage() {
       {state.status === "loading" && (
         <p className="loading-panel">
           {state.phase === "initial"
-            ? "Loading transactions..."
-            : "Applying filters..."}
+            ? "거래를 불러오고 있습니다…"
+            : "필터를 적용하고 있습니다…"}
         </p>
       )}
 
       {state.status === "success" && state.data.content.length === 0 && (
         <div className="notice notice--empty">
-          <p className="notice__title">No transactions match these filters</p>
+          <p className="notice__title">조건에 맞는 거래가 없습니다</p>
           <p className="notice__body">
             {hasCommittedFilters
-              ? "Widen the time range or clear the filters to see more."
-              : "There are no transactions to show yet."}
+              ? "기간을 넓히거나 필터를 초기화하세요."
+              : "표시할 거래가 없습니다."}
           </p>
           {hasCommittedFilters && (
             <button className="button" type="button" onClick={reset}>
-              Reset filters
+              <Icon name="reset" />필터 초기화
             </button>
           )}
         </div>
@@ -404,10 +404,10 @@ export function TransactionListPage() {
 
 function ResultSummary({ state }: { readonly state: TransactionListState }) {
   if (state.status === "loading") {
-    return <span>{state.phase === "initial" ? "Loading transactions" : "Applying filters"}</span>;
+    return <span>{state.phase === "initial" ? "거래를 불러오는 중" : "필터 적용 중"}</span>;
   }
   if (state.status === "error") {
-    return <span>No results. {ERROR_COPY[state.error].title}.</span>;
+    return <span>결과가 없습니다. {ERROR_COPY[state.error].title}.</span>;
   }
   if (state.status !== "success") {
     return null;
@@ -419,15 +419,14 @@ function ResultSummary({ state }: { readonly state: TransactionListState }) {
     state.data.page.totalElements,
   );
   if (window.total === 0) {
-    return <span>No transactions found.</span>;
+    return <span>거래가 없습니다.</span>;
   }
   return (
     <span>
-      Showing{" "}
+      전체 <span className="result-line__count">{window.total}</span>건 중{" "}
       <span className="result-line__count">
-        {window.first}-{window.last}
-      </span>{" "}
-      of <span className="result-line__count">{window.total}</span> transactions.
+        {window.first}~{window.last}
+      </span>건 표시
     </span>
   );
 }

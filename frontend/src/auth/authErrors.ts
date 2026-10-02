@@ -1,10 +1,10 @@
 export type AuthErrorKind = "configuration" | "sign-in" | "callback" | "sign-out";
 
 const SAFE_AUTH_ERROR_MESSAGES: Record<AuthErrorKind, string> = {
-  configuration: "Authentication is unavailable right now. Please contact an administrator.",
-  "sign-in": "Unable to start sign-in right now. Please try again.",
-  callback: "Sign-in could not be completed. Please try signing in again.",
-  "sign-out": "Sign-out could not be completed. You are signed out of this browser.",
+  configuration: "인증 서비스를 사용할 수 없습니다. 관리자에게 문의하세요.",
+  "sign-in": "로그인을 시작할 수 없습니다. 다시 시도하세요.",
+  callback: "로그인을 완료할 수 없습니다. 다시 로그인하세요.",
+  "sign-out": "로그아웃을 완료할 수 없지만 이 브라우저의 세션은 종료되었습니다.",
 };
 
 export function safeAuthErrorMessage(kind: AuthErrorKind): string {
@@ -18,14 +18,14 @@ export function safeAuthErrorMessage(kind: AuthErrorKind): string {
  */
 export class AuthCallbackError extends Error {
   constructor() {
-    super("Sign-in could not be completed.");
+    super("로그인을 완료할 수 없습니다.");
     this.name = "AuthCallbackError";
   }
 }
 
 export class AuthSignInError extends Error {
   constructor() {
-    super("Sign-in could not be started.");
+    super("로그인을 시작할 수 없습니다.");
     this.name = "AuthSignInError";
   }
 }
@@ -44,7 +44,7 @@ export class AuthSignInError extends Error {
  */
 export class AuthSignOutError extends Error {
   constructor() {
-    super("Sign-out could not be completed.");
+    super("로그아웃을 완료할 수 없습니다.");
     this.name = "AuthSignOutError";
   }
 }

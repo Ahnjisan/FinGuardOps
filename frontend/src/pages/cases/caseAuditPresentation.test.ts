@@ -47,9 +47,9 @@ describe("audit summary display", () => {
   it("names the absence of a summary rather than leaving it blank", () => {
     expect(describeAuditSummary(null)).toEqual({
       present: false,
-      label: "Not applicable",
+      label: "해당 없음",
     });
-    expect(AUDIT_ABSENT_SUMMARY_LABEL).toBe("Not applicable");
+    expect(AUDIT_ABSENT_SUMMARY_LABEL).toBe("해당 없음");
   });
 
   it("keeps a missing summary and a missing assignee as different facts", () => {
@@ -67,21 +67,21 @@ describe("audit summary display", () => {
     if (!absentAssignee.present) {
       throw new Error("unreachable");
     }
-    expect(absentAssignee.fields[1].text).toBe("Unassigned");
-    expect(absentAssignee.fields[1].text).not.toBe("Not applicable");
+    expect(absentAssignee.fields[1].text).toBe("미배정");
+    expect(absentAssignee.fields[1].text).not.toBe("해당 없음");
   });
 
   it("shows a case-status summary as the Backend enum code", () => {
     expect(describeAuditSummary({ caseStatus: "OPEN" })).toEqual({
       present: true,
-      fields: [{ name: "Case status", text: "OPEN", absent: false }],
+      fields: [{ name: "사건 상태", text: "OPEN", absent: false }],
     });
   });
 
   it("shows a link summary as the literal the contract carries", () => {
     expect(describeAuditSummary({ linked: true })).toEqual({
       present: true,
-      fields: [{ name: "Linked", text: "true", absent: false }],
+      fields: [{ name: "연결됨", text: "true", absent: false }],
     });
   });
 
@@ -91,8 +91,8 @@ describe("audit summary display", () => {
     ).toEqual({
       present: true,
       fields: [
-        { name: "Case status", text: "IN_REVIEW", absent: false },
-        { name: "Assignee", text: ASSIGNEE_A, absent: false },
+        { name: "사건 상태", text: "IN_REVIEW", absent: false },
+        { name: "담당자", text: ASSIGNEE_A, absent: false },
       ],
     });
   });
@@ -106,8 +106,8 @@ describe("audit summary display", () => {
     expect(display).toEqual({
       present: true,
       fields: [
-        { name: "Case status", text: "ADDITIONAL_INFORMATION_REQUIRED", absent: false },
-        { name: "Assignee", text: "Unassigned", absent: true },
+        { name: "사건 상태", text: "ADDITIONAL_INFORMATION_REQUIRED", absent: false },
+        { name: "담당자", text: "미배정", absent: true },
       ],
     });
     // One word for one absence across three screens. Splitting them would read
@@ -125,9 +125,9 @@ describe("audit summary display", () => {
     ).toEqual({
       present: true,
       fields: [
-        { name: "Case status", text: "CLOSED", absent: false },
-        { name: "Assignee", text: ASSIGNEE_B, absent: false },
-        { name: "Final disposition", text: "CONFIRMED_FRAUD", absent: false },
+        { name: "사건 상태", text: "CLOSED", absent: false },
+        { name: "담당자", text: ASSIGNEE_B, absent: false },
+        { name: "최종 판정", text: "CONFIRMED_FRAUD", absent: false },
       ],
     });
   });
@@ -145,7 +145,7 @@ describe("audit summary display", () => {
     }
     expect(workflow.fields[0].text).toBe("IN_REVIEW");
     expect(workflow.fields[0].text).not.toBe(CASE_STATUS_LABELS.IN_REVIEW);
-    expect(workflow.fields[0].text).not.toBe("In review");
+    expect(workflow.fields[0].text).not.toBe("검토 중");
   });
 
   it("does not normalize an assignee reference on its way to the screen", () => {
@@ -292,46 +292,46 @@ describe("audit page window", () => {
 
 describe("audit result line", () => {
   it("says a trail has nothing in it", () => {
-    expect(describeAuditRange({ first: 0, last: 0, total: 0 })).toBe("No audit entries.");
+    expect(describeAuditRange({ first: 0, last: 0, total: 0 })).toBe("감사 이력이 없습니다.");
   });
 
   it("says a page is past the end without denying the trail exists", () => {
     // The counterexample the two sentences exist for. Collapsing them would
     // tell an analyst who paged too far that the case has no history.
     expect(describeAuditRange({ first: 0, last: 0, total: 137 })).toBe(
-      "No entries on this page of 137.",
+      "전체 137건 중 이 페이지에 표시할 감사 이력이 없습니다.",
     );
   });
 
   it("states the window it is showing", () => {
     expect(describeAuditRange({ first: 61, last: 80, total: 137 })).toBe(
-      "Showing 61-80 of 137.",
+      "전체 137건 중 61~80건 표시",
     );
   });
 
   it("prints large totals without grouping or abbreviation", () => {
     expect(describeAuditRange({ first: 1, last: 20, total: 1234567 })).toBe(
-      "Showing 1-20 of 1234567.",
+      "전체 1234567건 중 1~20건 표시",
     );
   });
 });
 
 describe("audit page position", () => {
   it("counts pages from one for a reader", () => {
-    expect(describeAuditPosition(pageMetadata({ number: 3, totalPages: 7 }))).toBe("Page 4 of 7");
+    expect(describeAuditPosition(pageMetadata({ number: 3, totalPages: 7 }))).toBe("전체 7페이지 중 4페이지");
   });
 
   it("reads an empty result as one page rather than as zero", () => {
     expect(
       describeAuditPosition(pageMetadata({ totalElements: 0, totalPages: 0 })),
-    ).toBe("Page 1 of 1");
+    ).toBe("전체 1페이지 중 1페이지");
   });
 });
 
 describe("audit fixed copy", () => {
   it("distinguishes an empty trail from an empty page", () => {
-    expect(NO_AUDIT_HISTORY_MESSAGE).toBe("No audit history recorded.");
-    expect(NO_AUDIT_ENTRIES_ON_PAGE_MESSAGE).toBe("No audit entries on this page.");
+    expect(NO_AUDIT_HISTORY_MESSAGE).toBe("감사 이력이 없습니다.");
+    expect(NO_AUDIT_ENTRIES_ON_PAGE_MESSAGE).toBe("이 페이지에 감사 이력이 없습니다.");
     expect(NO_AUDIT_HISTORY_MESSAGE).not.toBe(NO_AUDIT_ENTRIES_ON_PAGE_MESSAGE);
   });
 

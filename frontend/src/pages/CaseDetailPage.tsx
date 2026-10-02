@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
+import { Icon } from "../shared/Icon";
 import { isCanonicalUuidV4 } from "../api/backendEndpoints";
 import type { CaseDetail } from "../api/caseApi";
 import {
@@ -112,13 +113,13 @@ function readCanonicalCaseId(location: CaseRouteLocation): string | null {
  * found normal, and not that the field failed to render. The wording is fixed
  * here rather than derived, so the screen cannot drift into implying either.
  */
-const NOT_DECIDED_LABEL = "Not decided";
+const NOT_DECIDED_LABEL = "미결정";
 
 /** What a case whose review has not begun is shown as. */
-const NOT_STARTED_LABEL = "Not started";
+const NOT_STARTED_LABEL = "시작 전";
 
 /** What a case that is still open is shown as. */
-const NOT_CLOSED_LABEL = "Not closed";
+const NOT_CLOSED_LABEL = "종결 전";
 
 /**
  * Fixed messages. Each says what happened and what the analyst can do about it,
@@ -129,30 +130,30 @@ const ERROR_COPY: Readonly<
   Record<CaseDetailErrorKind, { readonly title: string; readonly body: string }>
 > = Object.freeze({
   timeout: {
-    title: "The case took too long to load",
-    body: "The backend did not answer in time. Try loading it again.",
+    title: "사건을 불러오는 데 시간이 오래 걸립니다",
+    body: "백엔드가 제때 응답하지 않았습니다. 다시 불러오세요.",
   },
   network: {
-    title: "The backend could not be reached",
-    body: "Check the connection to the FinGuardOps backend, then try again.",
+    title: "백엔드에 연결할 수 없습니다",
+    body: "FinGuardOps 백엔드 연결을 확인한 뒤 다시 시도하세요.",
   },
   "invalid-response": {
-    title: "The case could not be read",
+    title: "사건 정보를 읽을 수 없습니다",
     body:
-      "The backend returned data this console will not display. Nothing is shown rather than " +
-      "part of a record. Try again, and report it if it continues.",
+      "백엔드 응답을 표시할 수 없어 " +
+      "일부 기록만 보여주지 않았습니다. 다시 시도하고 문제가 계속되면 알려주세요.",
   },
   "session-lost": {
-    title: "Your session ended",
-    body: "Sign in again to continue.",
+    title: "세션이 종료되었습니다",
+    body: "계속하려면 다시 로그인하세요.",
   },
   "request-rejected": {
-    title: "The case was not requested",
-    body: "This address is not a case request this console will send.",
+    title: "사건을 요청하지 않았습니다",
+    body: "이 주소로는 사건을 요청할 수 없습니다.",
   },
   unknown: {
-    title: "The case could not be loaded",
-    body: "The backend could not return this case. Try again.",
+    title: "사건을 불러올 수 없습니다",
+    body: "백엔드가 사건 정보를 반환하지 않았습니다. 다시 시도하세요.",
   },
 });
 
@@ -172,20 +173,18 @@ const RETRYABLE: ReadonlySet<CaseDetailErrorKind> = new Set<CaseDetailErrorKind>
 ]);
 
 const NOT_FOUND_COPY = Object.freeze({
-  title: "Case not found",
-  body: "No case with this identifier is available. Return to the case list.",
+  title: "사건을 찾을 수 없습니다",
+  body: "이 ID에 해당하는 사건이 없습니다. 사건 목록으로 돌아가세요.",
 });
 
 const FORBIDDEN_COPY = Object.freeze({
-  title: "Access denied",
-  body: "You do not have permission to view this case.",
+  title: "접근할 수 없습니다",
+  body: "이 사건을 볼 권한이 없습니다.",
 });
 
 const INVALID_ROUTE_COPY = Object.freeze({
-  title: "This is not a case address",
-  body:
-    "The address does not name a case this console can open. Open a case from the case list " +
-    "instead.",
+  title: "올바른 사건 주소가 아닙니다",
+  body: "이 주소로는 사건을 열 수 없습니다. 사건 목록에서 다시 선택하세요.",
 });
 
 /** The fixed refusal a settled non-success state shows, or `null` for none. */
@@ -263,10 +262,10 @@ export function CaseDetailPage() {
     <section className="detail" aria-labelledby="case-detail-heading">
       <div className="page-head">
         <p className="detail__back">
-          <Link to="/cases">Back to cases</Link>
+          <Link to="/cases"><Icon name="back" />사건 목록으로</Link>
         </p>
         <h2 id="case-detail-heading">
-          Case
+          사건
           {caseId !== null && (
             <>
               {" "}
@@ -275,7 +274,7 @@ export function CaseDetailPage() {
           )}
         </h2>
         <p>
-          A read-only investigation record. Times are Korea Standard Time (UTC+09:00).
+          사건 기록을 조회합니다. 시간은 한국 표준시(UTC+09:00)입니다.
         </p>
       </div>
 
@@ -286,7 +285,7 @@ export function CaseDetailPage() {
         className="result-line"
         role="status"
         aria-live="polite"
-        aria-label="Case record status"
+        aria-label="사건 기록 상태"
       >
         <DetailSummary invalidRoute={caseId === null} state={state} />
       </div>
@@ -297,14 +296,14 @@ export function CaseDetailPage() {
           <p className="notice__body">{refusal.body}</p>
           {retryable && (
             <button className="button" type="button" onClick={retry}>
-              Try again
+              <Icon name="refresh" />다시 시도
             </button>
           )}
         </div>
       )}
 
       {caseId !== null && state.status === "loading" && (
-        <p className="loading-panel">Loading case...</p>
+        <p className="loading-panel">사건을 불러오고 있습니다…</p>
       )}
 
       {caseId !== null && state.status === "success" && <CaseRecord detail={state.data} />}
@@ -320,12 +319,12 @@ export function CaseDetailPage() {
 
       {caseId !== null && state.status === "success" && refreshState === "failed" && (
         <div className="notice notice--error case-detail__refresh" role="alert">
-          <h3 className="notice__title">The latest case information could not be loaded</h3>
+          <h3 className="notice__title">최신 사건 정보를 불러올 수 없습니다</h3>
           <p className="notice__body">
-            The last mutation result is unchanged. Refresh the case before taking another action.
+            직전 변경 결과는 확인되지 않았습니다. 다른 작업 전에 사건 정보를 새로고침하세요.
           </p>
           <button className="button" type="button" onClick={() => refresh()}>
-            Refresh case information
+            <Icon name="refresh" />사건 정보 새로고침
           </button>
         </div>
       )}
@@ -376,14 +375,14 @@ function DetailSummary({
     return <span>{INVALID_ROUTE_COPY.title}.</span>;
   }
   if (state.status === "loading") {
-    return <span>Loading case</span>;
+    return <span>사건을 불러오는 중</span>;
   }
   if (state.status === "success") {
-    return <span>Showing the full case record.</span>;
+    return <span>사건 기록 전체를 표시합니다.</span>;
   }
   const refusal = refusalCopy(state);
   if (refusal !== null) {
-    return <span>No record shown. {refusal.title}.</span>;
+    return <span>표시할 기록이 없습니다. {refusal.title}.</span>;
   }
   return null;
 }
@@ -404,12 +403,12 @@ function CaseRecord({ detail }: { readonly detail: CaseDetail }) {
   return (
     <div className="detail__record">
       <section className="panel" aria-labelledby="case-summary-heading">
-        <h3 id="case-summary-heading">Case</h3>
+        <h3 id="case-summary-heading">사건</h3>
         <dl className="facts">
-          <dt>Case ID</dt>
+          <dt>사건 ID</dt>
           <dd className="facts__ref">{detail.caseId}</dd>
 
-          <dt>Case status</dt>
+          <dt>사건 상태</dt>
           <dd>
             {/*
               Shape, word and colour together, exactly as the sheet renders it.
@@ -422,7 +421,7 @@ function CaseRecord({ detail }: { readonly detail: CaseDetail }) {
             </span>
           </dd>
 
-          <dt>Final disposition</dt>
+          <dt>최종 판정</dt>
           <dd>
             {detail.finalDisposition === null ? (
               // A word rather than an empty cell, and a word that means "not
@@ -433,7 +432,7 @@ function CaseRecord({ detail }: { readonly detail: CaseDetail }) {
             )}
           </dd>
 
-          <dt>Assignee</dt>
+          <dt>담당자</dt>
           <dd className="facts__ref">
             {assignee.absent ? (
               <span className="facts__absent">{UNASSIGNED_LABEL}</span>
@@ -442,7 +441,7 @@ function CaseRecord({ detail }: { readonly detail: CaseDetail }) {
             )}
           </dd>
 
-          <dt>Related transactions</dt>
+          <dt>연관 거래</dt>
           {/*
             The number Backend counted, printed exactly as the validator
             admitted it. The transactions themselves are a separate endpoint
@@ -453,19 +452,19 @@ function CaseRecord({ detail }: { readonly detail: CaseDetail }) {
       </section>
 
       <section className="panel" aria-labelledby="case-timeline-heading">
-        <h3 id="case-timeline-heading">Investigation timeline</h3>
+        <h3 id="case-timeline-heading">조사 타임라인</h3>
         <dl className="facts">
-          <dt>Created</dt>
+          <dt>생성</dt>
           <dd>
             <KstInstant utcInstant={detail.createdAt} />
           </dd>
 
-          <dt>Review started</dt>
+          <dt>검토 시작</dt>
           <dd>
             <NullableInstant utcInstant={detail.reviewStartedAt} absentLabel={NOT_STARTED_LABEL} />
           </dd>
 
-          <dt>Closed</dt>
+          <dt>종결</dt>
           <dd>
             <NullableInstant utcInstant={detail.closedAt} absentLabel={NOT_CLOSED_LABEL} />
           </dd>
@@ -475,7 +474,7 @@ function CaseRecord({ detail }: { readonly detail: CaseDetail }) {
             it is called on screen. There is no `updatedAt` in this response and
             none is invented here.
           */}
-          <dt>Last changed</dt>
+          <dt>최종 변경</dt>
           <dd>
             <KstInstant utcInstant={detail.lastChangedAt} />
           </dd>
@@ -483,9 +482,9 @@ function CaseRecord({ detail }: { readonly detail: CaseDetail }) {
       </section>
 
       <section className="panel" aria-labelledby="case-metadata-heading">
-        <h3 id="case-metadata-heading">Record metadata</h3>
+        <h3 id="case-metadata-heading">기록 정보</h3>
         <dl className="facts">
-          <dt>Concurrency version</dt>
+          <dt>버전</dt>
           <dd>{formatTransactionCount(detail.concurrencyVersion)}</dd>
         </dl>
       </section>
@@ -503,7 +502,7 @@ function KstInstant({ utcInstant }: { readonly utcInstant: string }) {
   if (shown === null) {
     // Unreachable through the validated contract, and still not a place to
     // print the raw value: a time that cannot be read is reported as one.
-    return <span className="facts__absent">Not a readable time</span>;
+    return <span className="facts__absent">시간을 표시할 수 없음</span>;
   }
   return <time dateTime={utcInstant}>{shown} KST</time>;
 }

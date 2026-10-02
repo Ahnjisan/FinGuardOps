@@ -123,17 +123,17 @@ export function AuthCallbackPage() {
 
   return (
     <section aria-labelledby="auth-callback-heading">
-      <h2 id="auth-callback-heading">Signing in</h2>
+      <h2 id="auth-callback-heading">로그인 중</h2>
       <div role="status">
         {ui.status === "pending" ? (
-          <p>Completing sign-in...</p>
+          <p>로그인을 완료하고 있습니다…</p>
         ) : (
           <p>{safeAuthErrorMessage("callback")}</p>
         )}
       </div>
       {ui.status === "failed" && (
         <p>
-          <Link to="/">Return home</Link>
+          <Link to="/">홈으로 돌아가기</Link>
         </p>
       )}
     </section>

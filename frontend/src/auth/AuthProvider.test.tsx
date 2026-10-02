@@ -21,10 +21,10 @@ function AuthProbe() {
           signIn("/health");
         }}
       >
-        Sign in
+        로그인
       </button>
       <button type="button" onClick={signOut}>
-        Sign out
+        로그아웃
       </button>
     </div>
   );
@@ -223,7 +223,7 @@ describe("AuthProvider sign-in", () => {
       expect(status()).toBe("unauthenticated");
     });
 
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(screen.getByRole("button", { name: "로그인" }));
 
     expect(client.calls.signIn).toEqual(["/health"]);
     expect(status()).toBe("authenticating");
@@ -237,7 +237,7 @@ describe("AuthProvider sign-in", () => {
       expect(status()).toBe("unauthenticated");
     });
 
-    const button = screen.getByRole("button", { name: "Sign in" });
+    const button = screen.getByRole("button", { name: "로그인" });
     await user.click(button);
     await user.click(button);
     await user.click(button);
@@ -254,7 +254,7 @@ describe("AuthProvider sign-in", () => {
       expect(status()).toBe("unauthenticated");
     });
 
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(screen.getByRole("button", { name: "로그인" }));
 
     await waitFor(() => {
       expect(status()).toBe("error");
@@ -271,11 +271,11 @@ describe("AuthProvider sign-in", () => {
       expect(status()).toBe("unauthenticated");
     });
 
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(screen.getByRole("button", { name: "로그인" }));
     await waitFor(() => {
       expect(status()).toBe("error");
     });
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(screen.getByRole("button", { name: "로그인" }));
 
     expect(client.calls.signIn).toHaveLength(2);
   });
@@ -298,7 +298,7 @@ describe("AuthProvider redirect cancellation and BFCache restore", () => {
     });
 
     // The redirect started and resolved; the callback was never reached.
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(screen.getByRole("button", { name: "로그인" }));
     expect(status()).toBe("authenticating");
     expect(client.calls.signIn).toHaveLength(1);
 
@@ -306,7 +306,7 @@ describe("AuthProvider redirect cancellation and BFCache restore", () => {
 
     // The Sign in affordance is back, and a second click actually redirects.
     expect(status()).not.toBe("authenticating");
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(screen.getByRole("button", { name: "로그인" }));
     expect(client.calls.signIn).toHaveLength(2);
   });
 
@@ -317,7 +317,7 @@ describe("AuthProvider redirect cancellation and BFCache restore", () => {
     await waitFor(() => {
       expect(status()).toBe("unauthenticated");
     });
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(screen.getByRole("button", { name: "로그인" }));
 
     firePageShow(true);
     await act(async () => {
@@ -336,7 +336,7 @@ describe("AuthProvider redirect cancellation and BFCache restore", () => {
     await waitFor(() => {
       expect(status()).toBe("unauthenticated");
     });
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(screen.getByRole("button", { name: "로그인" }));
 
     firePageShow(true);
 
@@ -351,7 +351,7 @@ describe("AuthProvider redirect cancellation and BFCache restore", () => {
     await waitFor(() => {
       expect(status()).toBe("unauthenticated");
     });
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(screen.getByRole("button", { name: "로그인" }));
 
     firePageShow(false);
 
@@ -416,7 +416,7 @@ describe("AuthProvider redirect cancellation and BFCache restore", () => {
     await waitFor(() => {
       expect(status()).toBe("unauthenticated");
     });
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(screen.getByRole("button", { name: "로그인" }));
     view.unmount();
 
     firePageShow(true);
@@ -440,7 +440,7 @@ describe("AuthProvider sign-out and expiry", () => {
       expect(status()).toBe("authenticated");
     });
 
-    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await user.click(screen.getByRole("button", { name: "로그아웃" }));
 
     expect(status()).toBe("signing-out");
     expect(screen.getByTestId("subject").textContent).toBe("");
@@ -457,7 +457,7 @@ describe("AuthProvider sign-out and expiry", () => {
       expect(status()).toBe("authenticated");
     });
 
-    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await user.click(screen.getByRole("button", { name: "로그아웃" }));
 
     expect(client.calls.notified).toBe(1);
     expect(status()).toBe("signing-out");
@@ -472,7 +472,7 @@ describe("AuthProvider sign-out and expiry", () => {
       expect(status()).toBe("authenticated");
     });
 
-    const button = screen.getByRole("button", { name: "Sign out" });
+    const button = screen.getByRole("button", { name: "로그아웃" });
     await user.click(button);
     await user.click(button);
     await user.click(button);
@@ -490,8 +490,8 @@ describe("AuthProvider sign-out and expiry", () => {
       expect(status()).toBe("authenticated");
     });
 
-    await user.click(screen.getByRole("button", { name: "Sign out" }));
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(screen.getByRole("button", { name: "로그아웃" }));
+    await user.click(screen.getByRole("button", { name: "로그인" }));
 
     expect(client.calls.signIn).toHaveLength(0);
     expect(status()).toBe("signing-out");
@@ -506,7 +506,7 @@ describe("AuthProvider sign-out and expiry", () => {
       expect(status()).toBe("authenticated");
     });
 
-    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await user.click(screen.getByRole("button", { name: "로그아웃" }));
     await waitFor(() => {
       expect(status()).toBe("error");
     });
@@ -525,11 +525,11 @@ describe("AuthProvider sign-out and expiry", () => {
       expect(status()).toBe("authenticated");
     });
 
-    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await user.click(screen.getByRole("button", { name: "로그아웃" }));
     await waitFor(() => {
       expect(status()).toBe("error");
     });
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    await user.click(screen.getByRole("button", { name: "로그인" }));
 
     expect(client.calls.signIn).toEqual(["/health"]);
   });
@@ -542,7 +542,7 @@ describe("AuthProvider sign-out and expiry", () => {
     await waitFor(() => {
       expect(status()).toBe("authenticated");
     });
-    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await user.click(screen.getByRole("button", { name: "로그아웃" }));
 
     act(() => {
       window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
@@ -566,7 +566,7 @@ describe("AuthProvider sign-out and expiry", () => {
     await waitFor(() => {
       expect(status()).toBe("authenticated");
     });
-    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await user.click(screen.getByRole("button", { name: "로그아웃" }));
 
     act(() => {
       window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: false }));

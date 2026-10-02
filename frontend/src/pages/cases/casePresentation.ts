@@ -57,10 +57,10 @@ export const formatCaseInstant = formatKstDateTime;
  * on screen in a state no system defined, so the refusal is left where it is.
  */
 export const CASE_STATUS_LABELS: Readonly<Record<CaseStatus, string>> = Object.freeze({
-  OPEN: "Open",
-  IN_REVIEW: "In review",
-  ADDITIONAL_INFORMATION_REQUIRED: "Information required",
-  CLOSED: "Closed",
+  OPEN: "접수",
+  IN_REVIEW: "검토 중",
+  ADDITIONAL_INFORMATION_REQUIRED: "추가 정보 필요",
+  CLOSED: "종결",
 });
 
 /**
@@ -95,9 +95,9 @@ export function caseStatusTone(status: CaseStatus): StatusTone {
  */
 export const CASE_FINAL_DISPOSITION_LABELS: Readonly<Record<CaseFinalDisposition, string>> =
   Object.freeze({
-    NORMAL: "Normal",
-    FALSE_POSITIVE: "False positive",
-    CONFIRMED_FRAUD: "Confirmed fraud",
+    NORMAL: "정상",
+    FALSE_POSITIVE: "오탐",
+    CONFIRMED_FRAUD: "사기 확정",
   });
 
 /**
@@ -107,10 +107,10 @@ export const CASE_FINAL_DISPOSITION_LABELS: Readonly<Record<CaseFinalDisposition
  * normal, and not that the field failed to render. The exact wording is fixed
  * so the list cannot drift into implying either.
  */
-export const UNRESOLVED_DISPOSITION_LABEL = "Not resolved";
+export const UNRESOLVED_DISPOSITION_LABEL = "미결정";
 
 /** What a case with no assignee is shown as. */
-export const UNASSIGNED_LABEL = "Unassigned";
+export const UNASSIGNED_LABEL = "미배정";
 
 /**
  * The related-transaction count, as text.

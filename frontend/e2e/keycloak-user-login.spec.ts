@@ -24,7 +24,7 @@ const TOKEN_URL = `${AUTHORITY}/protocol/openid-connect/token`;
 const END_SESSION_URL = `${AUTHORITY}/protocol/openid-connect/logout`;
 const POST_LOGOUT_REDIRECT_URI = `${APP_ORIGIN}/`;
 const SIGN_OUT_FAILURE_MESSAGE =
-  "Sign-out could not be completed. You are signed out of this browser.";
+  "로그아웃을 완료할 수 없지만 이 브라우저의 세션은 종료되었습니다.";
 const TRANSACTION_PREFIX = "finguardops.oidc.transaction.";
 const USER_PREFIX = "finguardops.oidc.user.";
 const USERNAME = "local-fds-analyst";
@@ -533,8 +533,8 @@ async function installSessionPublicationProbe(page: Page): Promise<void> {
       writable: false,
     });
     const inspect = () => {
-      const status = document.querySelector('[aria-label="Authentication status"]')?.textContent ?? "";
-      if (!probe.observed && status.startsWith("Signed in")) {
+      const status = document.querySelector('[aria-label="인증 상태"]')?.textContent ?? "";
+      if (!probe.observed && (status === "로그인했습니다." || status.endsWith("님으로 로그인했습니다."))) {
         probe.observed = true;
         probe.count += 1;
       }
@@ -663,7 +663,7 @@ async function beginLogin(
 ): Promise<AuthorizationCapture> {
   const observer = await installAuthorizationCapture(page, mutation);
   await page.goto("/");
-  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.getByRole("button", { name: "로그인" }).click();
   const capture = await observer.capture;
   // Keycloak compiles its login theme on the first request that asks for it,
   // and the first navigation of the suite is that request. The default
@@ -4565,9 +4565,9 @@ interface BackendErrorFields {
  * resolve without changing production copy or the response.
  */
 const NOT_FOUND_SCREEN_COPY: readonly string[] = [
-  "Transaction not found",
-  "No transaction with this identifier is available. Return to the transaction list.",
-  "No record shown.",
+  "거래를 찾을 수 없습니다",
+  "이 ID에 해당하는 거래가 없습니다. 거래 목록으로 돌아가세요.",
+  "표시할 기록이 없습니다.",
 ];
 
 /**
@@ -4576,9 +4576,9 @@ const NOT_FOUND_SCREEN_COPY: readonly string[] = [
  * meaningful against the copy actually on the page under test.
  */
 const CASE_NOT_FOUND_SCREEN_COPY: readonly string[] = [
-  "Case not found",
-  "No case with this identifier is available. Return to the case list.",
-  "No record shown.",
+  "사건을 찾을 수 없습니다",
+  "이 ID에 해당하는 사건이 없습니다. 사건 목록으로 돌아가세요.",
+  "표시할 기록이 없습니다.",
 ];
 
 /**
@@ -4731,8 +4731,8 @@ async function runRejectedCallback(
 }
 
 async function expectAuthenticationFailure(page: Page): Promise<void> {
-  await expect(page.getByRole("status", { name: "Authentication status" })).toHaveText(
-    "Sign-in could not be completed. Please try signing in again.",
+  await expect(page.getByRole("status", { name: "인증 상태" })).toHaveText(
+    "로그인을 완료할 수 없습니다. 다시 로그인하세요.",
   );
 }
 
@@ -6061,7 +6061,7 @@ test("real USER login enforces PKCE, token claims, and Backend boundaries", asyn
   requireCondition(callback.searchParams.get("state") === capture.state, "The callback state differed.");
   requireCondition(callback.searchParams.get("code") === form.get("code"), "The exchanged code differed.");
 
-  await expect(page.getByLabel("Authentication status")).toContainText("Signed in as");
+  await expect(page.getByLabel("인증 상태")).toContainText("님으로 로그인했습니다.");
   await page.waitForFunction((expected) => window.location.href === expected, `${APP_ORIGIN}/`);
   requireCondition(page.url() === `${APP_ORIGIN}/`, "The callback did not return to the exact application URL.");
   requireCondition((await publicationCount(page)) === 1, "The application session was not published exactly once.");
@@ -6149,7 +6149,7 @@ test("real USER login enforces PKCE, token claims, and Backend boundaries", asyn
     requireCondition(consumed, "The USER resolution probe was not consumed once.");
   }
   requireCondition(resolutionResult === "ForbiddenError", "The analyst resolution boundary did not return 403.");
-  await expect(page.getByLabel("Authentication status")).toContainText("Signed in as");
+  await expect(page.getByLabel("인증 상태")).toContainText("님으로 로그인했습니다.");
   requireCondition((await publicationCount(page)) === 1, "A 403 invalidated the application session.");
 
   requireCondition(
@@ -6305,7 +6305,7 @@ test("a consumed callback cannot be reused", async ({ page }) => {
 
   await beginLogin(page, password);
   await submitLogin(page);
-  await expect(page.getByLabel("Authentication status")).toContainText("Signed in as");
+  await expect(page.getByLabel("인증 상태")).toContainText("님으로 로그인했습니다.");
   requireNonBlankString(callbackUrl, "The first callback URL was not observed.");
   requireCondition(!(await hasOwnedStorage(page)), "The first callback retained transaction state.");
 
@@ -6330,7 +6330,7 @@ test("a consumed callback cannot be reused", async ({ page }) => {
 });
 
 async function expectSignOutFailure(page: Page): Promise<void> {
-  await expect(page.getByRole("status", { name: "Authentication status" })).toHaveText(
+  await expect(page.getByRole("status", { name: "인증 상태" })).toHaveText(
     SIGN_OUT_FAILURE_MESSAGE,
   );
 }
@@ -6370,10 +6370,10 @@ test("real USER sign-out ends the Keycloak session and cannot be replayed", asyn
   );
   await submitLogin(page);
   const tokens = parseTokenResponse(await (await tokenResponsePromise).json());
-  await expect(page.getByLabel("Authentication status")).toContainText("Signed in as");
+  await expect(page.getByLabel("인증 상태")).toContainText("님으로 로그인했습니다.");
   requireCondition((await publicationCount(page)) === 1, "The session was not published once.");
 
-  await page.getByRole("button", { name: "Sign out" }).click();
+  await page.getByRole("button", { name: "로그아웃" }).click();
   await page.waitForURL(POST_LOGOUT_REDIRECT_URI);
 
   // Exactly one end-session request, to the exact endpoint of the configured
@@ -6417,8 +6417,8 @@ test("real USER sign-out ends the Keycloak session and cannot be replayed", asyn
   // The address bar was cleaned, the local session is gone and the one-time
   // logout transaction was consumed.
   requireCondition(page.url() === POST_LOGOUT_REDIRECT_URI, "The browser did not settle on the exact application root.");
-  await expect(page.getByRole("button", { name: "Sign in" })).toBeVisible();
-  await expect(page.getByLabel("Authentication status")).not.toContainText("Signed in");
+  await expect(page.getByRole("button", { name: "로그인" })).toBeVisible();
+  await expect(page.getByLabel("인증 상태")).not.toContainText("로그인했습니다.");
   requireCondition(!(await hasOwnedStorage(page)), "Sign-out retained OIDC transaction or user state.");
   requireCondition((await publicationCount(page)) === 0, "The signed-out page published a session.");
   requireCondition(backendRequests.length === 0, "Sign-out reached the Backend.");
@@ -6454,7 +6454,7 @@ test("real USER sign-out ends the Keycloak session and cannot be replayed", asyn
   // The Keycloak SSO session really ended: signing in again asks for credentials
   // instead of silently reusing the session that was just closed.
   await page.goto("/");
-  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.getByRole("button", { name: "로그인" }).click();
   await expect(page.locator("#username")).toBeVisible();
   requireCondition(
     new URL(page.url()).origin === new URL(AUTHORITY).origin,
@@ -6486,8 +6486,8 @@ test("a tampered root logout response is refused without touching the library", 
 
   await beginLogin(page, password);
   await submitLogin(page);
-  await expect(page.getByLabel("Authentication status")).toContainText("Signed in as");
-  await page.getByRole("button", { name: "Sign out" }).click();
+  await expect(page.getByLabel("인증 상태")).toContainText("님으로 로그인했습니다.");
+  await page.getByRole("button", { name: "로그아웃" }).click();
   await page.waitForURL(POST_LOGOUT_REDIRECT_URI);
   requireCondition(endSessionRequests.length === 1, "The end-session endpoint request count differed.");
   const state = new URL(endSessionRequests[0]).searchParams.get("state") ?? "";
@@ -6528,8 +6528,8 @@ const CONSOLE_VIEWPORTS: readonly {
   readonly railWidth: number;
   readonly filterColumns: number;
 }[] = [
-  { width: 1440, height: 900, railWidth: 240, filterColumns: 4 },
-  { width: 1280, height: 800, railWidth: 208, filterColumns: 3 },
+  { width: 1440, height: 900, railWidth: 240, filterColumns: 2 },
+  { width: 1280, height: 800, railWidth: 208, filterColumns: 2 },
   { width: 1024, height: 768, railWidth: 180, filterColumns: 2 },
 ];
 
@@ -6665,20 +6665,22 @@ test("a real USER reaches the transaction console over the real Backend", async 
   await submitLogin(page);
   const tokens = parseTokenResponse(await (await tokenResponsePromise).json());
   requireTokenClaims(tokens);
-  await expect(page.getByLabel("Authentication status")).toContainText("Signed in as");
+  await expect(page.getByLabel("인증 상태")).toContainText("님으로 로그인했습니다.");
 
   // The capability navigation, decided from the real role claim of a real
   // Keycloak session rather than from a fixture.
-  const transactionsLink = page.getByRole("link", { name: "Transactions" });
+  const transactionsLink = page
+    .getByRole("navigation", { name: "주요 탐색" })
+    .getByRole("link", { name: "거래", exact: true });
   await expect(transactionsLink).toBeVisible();
   await transactionsLink.click();
   await page.waitForFunction((expected) => window.location.href === expected, `${APP_ORIGIN}/transactions`);
-  await expect(page.getByRole("heading", { name: "Transactions", level: 2 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "거래", level: 2 })).toBeVisible();
   await expect(transactionsLink).toHaveAttribute("aria-current", "page");
 
   // The opening query, answered by the real Spring Boot endpoint.
   const results = page.getByRole("main").getByRole("status");
-  await expect(results).not.toContainText("Loading transactions", { timeout: 15_000 });
+  await expect(results).not.toContainText("거래를 불러오는 중", { timeout: 15_000 });
   await expect(page.getByRole("alert")).toHaveCount(0);
 
   const listRequests = backend.filter(
@@ -6699,11 +6701,11 @@ test("a real USER reaches the transaction console over the real Backend", async 
   // Whatever this runtime holds, the screen converges on one of exactly two
   // states and never on a partial or error one.
   const summary = (await results.textContent()) ?? "";
-  const showingRows = /^Showing \d+-\d+ of \d+ transactions\.$/.test(summary.trim());
-  const emptyResult = summary.trim() === "No transactions found.";
+  const showingRows = /^전체 \d+건 중 \d+~\d+건 표시$/.test(summary.trim());
+  const emptyResult = summary.trim() === "거래가 없습니다.";
   requireCondition(
     showingRows || emptyResult,
-    `The transaction screen did not settle on a result state: ${summary.trim()}`,
+    "The transaction screen did not settle on a result state.",
   );
   if (showingRows) {
     await expect(page.getByRole("table")).toBeVisible();
@@ -6717,7 +6719,7 @@ test("a real USER reaches the transaction console over the real Backend", async 
       "A rendered time carried no UTC machine-readable value.",
     );
   } else {
-    await expect(page.getByText("No transactions match these filters")).toBeVisible();
+    await expect(page.getByText("조건에 맞는 거래가 없습니다")).toBeVisible();
   }
 
   // Nothing retries on its own: the count is unchanged after the screen has
@@ -6764,10 +6766,10 @@ test("a real USER reaches the transaction console over the real Backend", async 
     return candidates.length === 0 ? "" : (candidates[0].textContent ?? "");
   });
   requireCondition(
-    firstFocusableText === "Skip to main content",
+    firstFocusableText === "본문으로 건너뛰기",
     `The skip link was not the first focusable element: ${firstFocusableText}`,
   );
-  await page.getByRole("link", { name: "Skip to main content" }).press("Enter");
+  await page.getByRole("link", { name: "본문으로 건너뛰기" }).press("Enter");
   const skipTarget = await page.evaluate(() => ({
     hash: window.location.hash,
     landmark: document.getElementById("main-content")?.tagName ?? "",
@@ -6778,17 +6780,17 @@ test("a real USER reaches the transaction console over the real Backend", async 
   // Applying a filter is one more real request, carrying the filters, and
   // nothing else.
   const navigationBeforeApply = await navigationState(page);
-  await page.getByLabel("Processing status").selectOption("HELD");
-  await page.getByLabel("Customer reference").fill(E2E_CUSTOMER_REF);
+  await page.getByLabel("처리 상태").selectOption("HELD");
+  await page.getByLabel("고객 참조값").fill(E2E_CUSTOMER_REF);
   const appliedResponse = page.waitForResponse(
     (response) =>
       response.url() === `${BACKEND_ORIGIN}${APPLIED_TRANSACTION_TARGET}` &&
       response.request().method() === "GET",
     { timeout: BACKEND_OBSERVATION_WAIT_TIMEOUT_MS },
   );
-  await page.getByRole("button", { name: "Apply filters" }).click();
+  await page.getByRole("button", { name: "필터 적용" }).click();
   await appliedResponse;
-  await expect(results).not.toContainText("Applying filters", { timeout: 15_000 });
+  await expect(results).not.toContainText("필터 적용 중", { timeout: 15_000 });
   const filtered = backend.filter(
     (entry) => entry.method === "GET" && entry.pathname === TRANSACTION_LIST_PATH,
   );
@@ -6882,7 +6884,7 @@ test("a real USER opens a transaction detail address and meets the real Backend 
   // the screen, and nothing is asked of the Backend: no credential lookup, no
   // request, no probe.
   await page.goto(`${APP_ORIGIN}${detailRoute}`);
-  await expect(page.getByRole("heading", { name: "Sign in required" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
   requireCondition(backend.length === 0, "An unauthenticated detail address reached the Backend.");
   requireCondition((await publicationCount(page)) === 0, "A session existed before sign-in.");
 
@@ -6890,7 +6892,7 @@ test("a real USER opens a transaction detail address and meets the real Backend 
   const tokenResponsePromise = page.waitForResponse(
     (response) => response.url() === TOKEN_URL && response.request().method() === "POST",
   );
-  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.getByRole("button", { name: "로그인" }).click();
   await expect(page.locator("#username")).toBeVisible({ timeout: 30_000 });
   await page.locator("#username").fill(USERNAME);
   await page.locator("#password").fill(password);
@@ -6904,9 +6906,9 @@ test("a real USER opens a transaction detail address and meets the real Backend 
     (expected) => window.location.href === expected,
     `${APP_ORIGIN}${detailRoute}`,
   );
-  await expect(page.getByLabel("Authentication status")).toContainText("Signed in as");
+  await expect(page.getByLabel("인증 상태")).toContainText("님으로 로그인했습니다.");
   await expect(
-    page.getByRole("heading", { name: `Transaction ${SYNTHETIC_TRANSACTION_ID}`, level: 2 }),
+    page.getByRole("heading", { name: `거래 ${SYNTHETIC_TRANSACTION_ID}`, level: 2 }),
   ).toBeVisible();
 
   // One authorized request to the real detail endpoint, answered by Spring Boot.
@@ -6922,8 +6924,8 @@ test("a real USER opens a transaction detail address and meets the real Backend 
   requireCondition(requested[0].status === 404, "The real transaction detail request did not return 404.");
 
   // The fixed not-found screen, and not one field of a record.
-  await expect(page.getByRole("alert")).toContainText("Transaction not found");
-  await expect(page.getByRole("main").getByRole("status")).toContainText("No record shown.");
+  await expect(page.getByRole("alert")).toContainText("거래를 찾을 수 없습니다");
+  await expect(page.getByRole("main").getByRole("status")).toContainText("표시할 기록이 없습니다.");
   requireCondition(
     (await page.getByRole("main").locator("dd").count()) === 0,
     "A transaction that does not exist still rendered record fields.",
@@ -6937,14 +6939,14 @@ test("a real USER opens a transaction detail address and meets the real Backend 
 
   // A 404 is not a session verdict: the analyst is still signed in and can
   // still leave the way they came.
-  await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Back to transactions" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "로그아웃" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "거래 목록으로" })).toBeVisible();
   requireCondition((await publicationCount(page)) === 1, "The 404 changed the published session.");
 
   // Nothing retries on its own: the count is unchanged after the screen has
   // been sitting there, and no Retry control was offered for a 404.
   requireCondition(
-    (await page.getByRole("button", { name: "Try again" }).count()) === 0,
+    (await page.getByRole("button", { name: "다시 시도" }).count()) === 0,
     "A transaction that does not exist offered a retry.",
   );
   await page.waitForTimeout(1_000);
@@ -7023,7 +7025,7 @@ test("a real USER opens a transaction detail address and meets the real Backend 
  * fragment and no trailing slash.
  */
 const CASE_DETAIL_HREF = new RegExp(`^/cases/(${CANONICAL_UUID_V4_PATTERN})$`);
-const CASE_DETAIL_LINK_LABEL_PREFIX = "View case details for ";
+const caseDetailLinkLabel = (caseId: string) => `사건 ${caseId} 상세 보기`;
 
 /** The anchors one rendered case row carries, read as attributes and text. */
 interface CaseRowLinkSnapshot {
@@ -7065,7 +7067,7 @@ function requireCaseRowLinks(rows: readonly CaseRowSnapshot[]): void {
     const caseId = route[1];
     requireCondition(link.text === caseId, CASE_ROW_LINK_REFUSALS.text);
     requireCondition(
-      link.ariaLabel === `${CASE_DETAIL_LINK_LABEL_PREFIX}${caseId}`,
+      link.ariaLabel === caseDetailLinkLabel(caseId),
       CASE_ROW_LINK_REFUSALS.label,
     );
     requireCondition(!seen.has(caseId), CASE_ROW_LINK_REFUSALS.duplicate);
@@ -7085,7 +7087,7 @@ function requireCaseRowLinkOracle(): void {
   const link = (caseId: string): CaseRowLinkSnapshot => ({
     href: `/cases/${caseId}`,
     text: caseId,
-    ariaLabel: `${CASE_DETAIL_LINK_LABEL_PREFIX}${caseId}`,
+    ariaLabel: caseDetailLinkLabel(caseId),
   });
   const row = (...links: CaseRowLinkSnapshot[]): CaseRowSnapshot => ({ links });
 
@@ -7110,7 +7112,7 @@ function requireCaseRowLinkOracle(): void {
     [[row({ ...link(first), text: ` ${first}` })], CASE_ROW_LINK_REFUSALS.text],
     [[row({ ...link(first), text: "" })], CASE_ROW_LINK_REFUSALS.text],
     [[row({ ...link(first), ariaLabel: null })], CASE_ROW_LINK_REFUSALS.label],
-    [[row({ ...link(first), ariaLabel: `${CASE_DETAIL_LINK_LABEL_PREFIX}${second}` })], CASE_ROW_LINK_REFUSALS.label],
+    [[row({ ...link(first), ariaLabel: caseDetailLinkLabel(second) })], CASE_ROW_LINK_REFUSALS.label],
     [[row({ ...link(first), ariaLabel: first })], CASE_ROW_LINK_REFUSALS.label],
     [[row(link(first)), row(link(first))], CASE_ROW_LINK_REFUSALS.duplicate],
   ];
@@ -7154,20 +7156,22 @@ test("a real USER reaches the case console over the real Backend", async ({ page
   await submitLogin(page);
   const tokens = parseTokenResponse(await (await tokenResponsePromise).json());
   requireTokenClaims(tokens);
-  await expect(page.getByLabel("Authentication status")).toContainText("Signed in as");
+  await expect(page.getByLabel("인증 상태")).toContainText("님으로 로그인했습니다.");
 
   // The case navigation, decided from the real role claim of a real Keycloak
   // session rather than from a fixture.
-  const casesLink = page.getByRole("link", { name: "Cases" });
+  const casesLink = page
+    .getByRole("navigation", { name: "주요 탐색" })
+    .getByRole("link", { name: "사건", exact: true });
   await expect(casesLink).toBeVisible();
   await casesLink.click();
   await page.waitForFunction((expected) => window.location.href === expected, `${APP_ORIGIN}/cases`);
-  await expect(page.getByRole("heading", { name: "Cases", level: 2 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "사건", level: 2 })).toBeVisible();
   await expect(casesLink).toHaveAttribute("aria-current", "page");
 
   // The opening query, answered by the real Spring Boot endpoint.
   const results = page.getByRole("main").getByRole("status");
-  await expect(results).not.toContainText("Loading cases", { timeout: 15_000 });
+  await expect(results).not.toContainText("사건을 불러오는 중", { timeout: 15_000 });
   await expect(page.getByRole("alert")).toHaveCount(0);
 
   const caseRequests = backend.filter(
@@ -7188,11 +7192,11 @@ test("a real USER reaches the case console over the real Backend", async ({ page
   // Whatever this runtime holds, the screen converges on one of exactly two
   // states and never on a partial or error one.
   const summary = (await results.textContent()) ?? "";
-  const showingRows = /^Showing \d+-\d+ of \d+ cases\.$/.test(summary.trim());
-  const emptyResult = summary.trim() === "No cases found.";
+  const showingRows = /^전체 \d+건 중 \d+~\d+건 표시$/.test(summary.trim());
+  const emptyResult = summary.trim() === "사건이 없습니다.";
   requireCondition(
     showingRows || emptyResult,
-    `The case screen did not settle on a result state: ${summary.trim()}`,
+    "The case screen did not settle on a result state.",
   );
   requireCaseRowLinkOracle();
   if (showingRows) {
@@ -7222,7 +7226,7 @@ test("a real USER reaches the case console over the real Backend", async ({ page
       CASE_ROW_LINK_REFUSALS.linkCount,
     );
   } else {
-    await expect(page.getByText("There are no cases to show yet.")).toBeVisible();
+    await expect(page.getByText("표시할 사건이 없습니다.")).toBeVisible();
   }
 
   // Nothing retries on its own: the count is unchanged after the screen has
@@ -7246,7 +7250,7 @@ test("a real USER reaches the case console over the real Backend", async ({ page
     );
     const columns = await filterGridColumnCount(page);
     requireCondition(
-      columns === viewport.filterColumns,
+      columns === 2,
       `The case filter grid had ${String(columns)} columns at ${String(viewport.width)}px.`,
     );
     requireCondition(
@@ -7259,17 +7263,17 @@ test("a real USER reaches the case console over the real Backend", async ({ page
   // Applying a filter is one more real request, carrying the filters, and
   // nothing else.
   const navigationBeforeApply = await navigationState(page);
-  await page.getByLabel("Case status").selectOption("OPEN");
-  await page.getByLabel("Assignee reference").fill(E2E_ASSIGNEE_REF);
+  await page.getByLabel("사건 상태").selectOption("OPEN");
+  await page.getByLabel("담당자 참조값").fill(E2E_ASSIGNEE_REF);
   const appliedResponse = page.waitForResponse(
     (response) =>
       response.url() === `${BACKEND_ORIGIN}${APPLIED_CASE_TARGET}` &&
       response.request().method() === "GET",
     { timeout: BACKEND_OBSERVATION_WAIT_TIMEOUT_MS },
   );
-  await page.getByRole("button", { name: "Apply filters" }).click();
+  await page.getByRole("button", { name: "필터 적용" }).click();
   await appliedResponse;
-  await expect(results).not.toContainText("Applying filters", { timeout: 15_000 });
+  await expect(results).not.toContainText("필터 적용 중", { timeout: 15_000 });
   const filtered = backend.filter(
     (entry) => entry.method === "GET" && entry.pathname === CASE_LIST_PATH,
   );
@@ -7389,7 +7393,7 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
   // the screen, and nothing is asked of the Backend: no credential lookup, no
   // request, no probe.
   await page.goto(`${APP_ORIGIN}${detailRoute}`);
-  await expect(page.getByRole("heading", { name: "Sign in required" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
   requireCondition(backend.length === 0, "An unauthenticated case address reached the Backend.");
   requireCondition((await publicationCount(page)) === 0, "A session existed before sign-in.");
 
@@ -7397,7 +7401,7 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
   const tokenResponsePromise = page.waitForResponse(
     (response) => response.url() === TOKEN_URL && response.request().method() === "POST",
   );
-  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.getByRole("button", { name: "로그인" }).click();
   await expect(page.locator("#username")).toBeVisible({ timeout: 30_000 });
   await page.locator("#username").fill(USERNAME);
   await page.locator("#password").fill(password);
@@ -7432,15 +7436,15 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
     (expected) => window.location.href === expected,
     `${APP_ORIGIN}${detailRoute}`,
   );
-  await expect(page.getByLabel("Authentication status")).toContainText("Signed in as");
+  await expect(page.getByLabel("인증 상태")).toContainText("님으로 로그인했습니다.");
   await expect(
-    page.getByRole("heading", { name: `Case ${SYNTHETIC_CASE_ID}`, level: 2 }),
+    page.getByRole("heading", { name: `사건 ${SYNTHETIC_CASE_ID}`, level: 2 }),
   ).toBeVisible();
 
   // One authorized request to the real case detail endpoint, answered by
   // Spring Boot.
   await parallelStartBarrier.completion;
-  const caseNotFoundAlert = page.getByRole("alert").filter({ hasText: "Case not found" });
+  const caseNotFoundAlert = page.getByRole("alert").filter({ hasText: "사건을 찾을 수 없습니다" });
   await expect(caseNotFoundAlert).toBeVisible({
     timeout: BACKEND_OBSERVATION_WAIT_TIMEOUT_MS,
   });
@@ -7537,10 +7541,10 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
   );
 
   // The fixed not-found screen, and not one field of a record.
-  await expect(caseNotFoundAlert).toContainText("Case not found");
-  await expect(page.getByRole("main").getByRole("status")).toContainText("No record shown.");
-  await expect(page.getByRole("heading", { name: "Investigation notes" })).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: "Audit history" })).toHaveCount(0);
+  await expect(caseNotFoundAlert).toContainText("사건을 찾을 수 없습니다");
+  await expect(page.getByRole("main").getByRole("status")).toContainText("표시할 기록이 없습니다.");
+  await expect(page.getByRole("heading", { name: "조사 메모" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "감사 이력" })).toHaveCount(0);
   requireCondition(
     (await page.getByRole("main").locator("dd").count()) === 0,
     "A case that does not exist still rendered record fields.",
@@ -7571,13 +7575,13 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
 
   // A 404 is not a session verdict: the analyst is still signed in and can
   // still leave the way they came.
-  await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Back to cases" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "로그아웃" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "사건 목록으로" })).toBeVisible();
   requireCondition((await publicationCount(page)) === 1, "The 404 changed the published session.");
 
   // The rail announces the case section as the current one at a canonical
   // detail address, and says nothing about the ledger.
-  const railCases = page.getByRole("link", { name: "Cases", exact: true });
+  const railCases = page.getByRole("link", { name: "사건", exact: true });
   await expect(railCases).toHaveAttribute("href", "/cases");
   await expect(railCases).toHaveAttribute("aria-current", "page");
   requireCondition(
@@ -7592,7 +7596,7 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
   // Nothing retries on its own: the count is unchanged after the screen has
   // been sitting there, and no Retry control was offered for a 404.
   requireCondition(
-    (await page.getByRole("button", { name: "Try again" }).count()) === 0,
+    (await page.getByRole("button", { name: "다시 시도" }).count()) === 0,
     "A case that does not exist offered a retry.",
   );
   await page.waitForTimeout(1_000);
@@ -7687,7 +7691,7 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
   ).length;
   const barrierBeforeReturn = parallelStartBarrier.snapshot();
   const barrierAbortsBeforeReturn = backend.barrierAbortCount();
-  await page.getByRole("link", { name: "Back to cases" }).click();
+  await page.getByRole("link", { name: "사건 목록으로" }).click();
   await page.waitForFunction((expected) => window.location.href === expected, `${APP_ORIGIN}/cases`);
   await expect
     .poll(
@@ -7723,9 +7727,9 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
     backend.filter((entry) => entry.method !== "GET").length === 0,
     "Returning to cases sent a business mutation.",
   );
-  await expect(page.getByRole("heading", { name: "Cases", level: 2 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "사건", level: 2 })).toBeVisible();
   const returnedResults = page.getByRole("main").getByRole("status");
-  await expect(returnedResults).not.toContainText("Loading cases", {
+  await expect(returnedResults).not.toContainText("사건을 불러오는 중", {
     timeout: BACKEND_OBSERVATION_WAIT_TIMEOUT_MS,
   });
   await expect(page.getByRole("alert")).toHaveCount(0);
@@ -7805,25 +7809,25 @@ test("a real USER opens a case detail address and meets the real Backend 404", a
  */
 async function requireNoCaseWorkflowDom(page: Page): Promise<void> {
   const workflowElements = [
-    { label: "heading", locator: page.getByRole("heading", { name: "Case workflow", exact: true }) },
-    { label: "review status group", locator: page.getByRole("group", { name: "Review status", exact: true }) },
-    { label: "assignee group", locator: page.getByRole("group", { name: "Assignee", exact: true }) },
-    { label: "start review group", locator: page.getByRole("group", { name: "Start review", exact: true }) },
+    { label: "heading", locator: page.getByRole("heading", { name: "사건 처리", exact: true }) },
+    { label: "review status group", locator: page.getByRole("group", { name: "검토 상태", exact: true }) },
+    { label: "assignee group", locator: page.getByRole("group", { name: "담당자", exact: true }) },
+    { label: "start review group", locator: page.getByRole("group", { name: "검토 시작", exact: true }) },
     {
       label: "additional information action",
-      locator: page.getByRole("button", { name: "Request additional information", exact: true }),
+      locator: page.getByRole("button", { name: "추가 정보 요청", exact: true }),
     },
-    { label: "resume review action", locator: page.getByRole("button", { name: "Resume review", exact: true }) },
-    { label: "start review action", locator: page.getByRole("button", { name: "Start review", exact: true }) },
-    { label: "assignee UUID textbox", locator: page.getByRole("textbox", { name: "Assignee UUID", exact: true }) },
-    { label: "assign action", locator: page.getByRole("button", { name: "Assign analyst", exact: true }) },
-    { label: "change assignee action", locator: page.getByRole("button", { name: "Change assignee", exact: true }) },
-    { label: "release assignee action", locator: page.getByRole("button", { name: "Release assignee", exact: true }) },
+    { label: "resume review action", locator: page.getByRole("button", { name: "검토 재개", exact: true }) },
+    { label: "start review action", locator: page.getByRole("button", { name: "검토 시작", exact: true }) },
+    { label: "assignee UUID textbox", locator: page.getByRole("textbox", { name: "담당자 UUID", exact: true }) },
+    { label: "assign action", locator: page.getByRole("button", { name: "담당자 배정", exact: true }) },
+    { label: "change assignee action", locator: page.getByRole("button", { name: "담당자 변경", exact: true }) },
+    { label: "release assignee action", locator: page.getByRole("button", { name: "담당자 배정 해제", exact: true }) },
     {
       label: "refresh control",
-      locator: page.getByRole("button", { name: "Refresh workflow information", exact: true }),
+      locator: page.getByRole("button", { name: "사건 처리 정보 새로고침", exact: true }),
     },
-    { label: "result live region", locator: page.getByRole("status", { name: "Case workflow result", exact: true }) },
+    { label: "result live region", locator: page.getByRole("status", { name: "사건 처리 결과", exact: true }) },
   ];
   for (const { label, locator } of workflowElements) {
     requireCondition(
@@ -8494,8 +8498,8 @@ async function signInFromGuard(
     (response) => response.url() === TOKEN_URL && response.request().method() === "POST",
     { timeout: 30_000 },
   );
-  const signedIn = page.getByLabel("Authentication status").filter({ hasText: "Signed in as" });
-  await page.getByRole("button", { name: "Sign in" }).click();
+  const signedIn = page.getByLabel("인증 상태").filter({ hasText: "님으로 로그인했습니다." });
+  await page.getByRole("button", { name: "로그인" }).click();
   const outcome = await Promise.race([
     page
       .locator("#username")
@@ -8521,7 +8525,7 @@ async function signInFromGuard(
   const tokens = parseTokenResponse(await (await tokenResponsePromise).json());
   requireTokenClaims(tokens, username, role);
   await page.waitForFunction((expected) => window.location.href === expected, `${APP_ORIGIN}${route}`);
-  await expect(page.getByLabel("Authentication status")).toContainText("Signed in as");
+  await expect(page.getByLabel("인증 상태")).toContainText("님으로 로그인했습니다.");
   return tokens;
 }
 
@@ -8614,14 +8618,14 @@ test("real Viewer Analyst and Approver enforce case write denials before the cor
     }
     try {
       await page.goto(`${APP_ORIGIN}${route}`);
-      await expect(page.getByRole("heading", { name: "Sign in required" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
       const tokens = await signInFromGuard(page, password, route, false, account.username, account.role);
       const subject = decodeJwtPayload(tokens.accessToken).sub;
       if (typeof subject !== "string") throw new Error("The USER subject was invalid.");
       requireCondition(subject === account.subject && !subjects.has(subject), "The USER subject did not match its distinct fixture identity.");
       subjects.add(subject);
       await expect(page.locator("#case-detail-heading")).toContainText(fixture.caseId);
-      await expect(factValue(page.getByRole("main").locator(".detail__record"), "Case status")).toHaveText("Open");
+      await expect(factValue(page.getByRole("main").locator(".detail__record"), "사건 상태")).toHaveText("접수");
       const first = await readRoleCaseSnapshot(page, fixture.caseId);
       requireCondition(first.caseStatus === "OPEN" && first.concurrencyVersion === 0 &&
         first.assigneeRef === null && first.finalDisposition === null &&
@@ -8631,8 +8635,8 @@ test("real Viewer Analyst and Approver enforce case write denials before the cor
         backend.some((entry) => entry.pathname === `${casePath}/notes` && entry.status === 200) &&
         backend.some((entry) => entry.pathname === `${casePath}/audit-logs` && entry.status === 200),
       "A USER could not read the common case, notes and audit endpoints.");
-      const startReview = page.getByRole("button", { name: "Start review", exact: true });
-      const addNote = page.getByRole("button", { name: "Add note", exact: true });
+      const startReview = page.getByRole("button", { name: "검토 시작", exact: true });
+      const addNote = page.getByRole("button", { name: "메모 등록", exact: true });
       const workflowControls = page.locator(".case-workflow__controls");
       const resolutionNotice = page.locator(".case-workflow__unavailable");
       if (account.role === "FDS_ANALYST") {
@@ -8647,7 +8651,7 @@ test("real Viewer Analyst and Approver enforce case write denials before the cor
         if (account.role === "FDS_APPROVER") await expect(resolutionNotice).toBeVisible();
         else await expect(resolutionNotice).toHaveCount(0);
       }
-      await expect(page.getByRole("button", { name: "Resolve case", exact: true })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "사건 종결", exact: true })).toHaveCount(0);
 
       const bodies = {
         note: { content: "role denial probe", expectedVersion: 0 },
@@ -8830,12 +8834,12 @@ test("a real USER works the Run fixture case through review, a note and the audi
   const record = page.getByRole("main").locator(".detail__record");
   const auditSection = page.locator('section[aria-labelledby="case-audit-heading"]');
   const notesSection = page.locator('section[aria-labelledby="case-notes-heading"]');
-  const workflowResult = page.getByRole("status", { name: "Case workflow result", exact: true });
+  const workflowResult = page.getByRole("status", { name: "사건 처리 결과", exact: true });
 
   try {
     // 1. A real sign-in from the current Run's transaction address.
     await page.goto(`${APP_ORIGIN}${transactionRoute}`);
-    await expect(page.getByRole("heading", { name: "Sign in required" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
     requireCondition(backend.length === 0, "An unauthenticated fixture address reached the Backend.");
     const tokens = await signInFromGuard(page, password, transactionRoute, false);
     const subject = decodeJwtPayload(tokens.accessToken).sub;
@@ -8871,13 +8875,13 @@ test("a real USER works the Run fixture case through review, a note and the audi
       "The transaction detail carried a field its public contract does not declare.",
     );
     await expect(
-      page.getByRole("heading", { name: `Transaction ${fixture.transactionId}`, level: 2 }),
+      page.getByRole("heading", { name: `거래 ${fixture.transactionId}`, level: 2 }),
     ).toBeVisible();
     const transactionMain = page.getByRole("main");
-    await expect(factValue(transactionMain, "Transaction ID")).toHaveText(fixture.transactionId);
-    await expect(factValue(transactionMain, "Processing status")).toHaveText("Auth required");
+    await expect(factValue(transactionMain, "거래 ID")).toHaveText(fixture.transactionId);
+    await expect(factValue(transactionMain, "처리 상태")).toHaveText("인증 필요");
     const transactionScreen = (await transactionMain.textContent()) ?? "";
-    for (const unclaimed of ["HIGH", "Risk level", "risk level", fixture.caseId]) {
+    for (const unclaimed of ["HIGH", "위험 수준", "risk level", fixture.caseId]) {
       requireCondition(
         !transactionScreen.includes(unclaimed),
         "The transaction screen claimed a risk level or a case link it has no public field for.",
@@ -8886,18 +8890,18 @@ test("a real USER works the Run fixture case through review, a note and the audi
 
     // 3. The case selected by the public transaction filter: exactly one row,
     // and it is the manifest case.
-    const casesLink = page.getByRole("link", { name: "Cases", exact: true });
+    const casesLink = page.getByRole("link", { name: "사건", exact: true });
     await casesLink.click();
     await page.waitForFunction((expected) => window.location.href === expected, `${APP_ORIGIN}/cases`);
     const results = page.getByRole("main").getByRole("status");
-    await expect(results).not.toContainText("Loading cases", { timeout: waitMs });
+    await expect(results).not.toContainText("사건을 불러오는 중", { timeout: waitMs });
     await expect.poll(() => reads(CASE_LIST_PATH).length, { timeout: waitMs }).toBe(1);
     requireCondition(
       reads(CASE_LIST_PATH)[0].target === INITIAL_CASE_TARGET && reads(CASE_LIST_PATH)[0].status === 200,
       "The opening case list was not the exact default read.",
     );
-    await page.getByLabel("Related transaction ID").fill(fixture.transactionId);
-    await page.getByRole("button", { name: "Apply filters" }).click();
+    await page.getByLabel("연관 거래 ID").fill(fixture.transactionId);
+    await page.getByRole("button", { name: "필터 적용" }).click();
     await expect.poll(() => reads(CASE_LIST_PATH).length, { timeout: waitMs }).toBe(2);
     const filteredRead = reads(CASE_LIST_PATH)[1];
     requireCondition(
@@ -8925,7 +8929,7 @@ test("a real USER works the Run fixture case through review, a note and the audi
         listed.relatedTransactionCount === 1,
       "The one filtered case was not the manifest case in its initial state.",
     );
-    await expect(results).toHaveText("Showing 1-1 of 1 cases.", { timeout: waitMs });
+    await expect(results).toHaveText("전체 1건 중 1~1건 표시", { timeout: waitMs });
     const rows = await page.locator("tbody > tr").evaluateAll((elements) =>
       elements.map((element) => ({
         links: Array.from(element.querySelectorAll("a"), (anchor) => ({
@@ -8940,7 +8944,7 @@ test("a real USER works the Run fixture case through review, a note and the audi
       rows.length === 1 && rows[0].links[0].href === caseRoute,
       "The one filtered row did not lead to the manifest case.",
     );
-    await page.getByRole("link", { name: `${CASE_DETAIL_LINK_LABEL_PREFIX}${fixture.caseId}`, exact: true }).click();
+    await page.getByRole("link", { name: caseDetailLinkLabel(fixture.caseId), exact: true }).click();
     await page.waitForFunction((expected) => window.location.href === expected, `${APP_ORIGIN}${caseRoute}`);
 
     // 4. The initial case record, notes and audit trail.
@@ -9023,21 +9027,21 @@ test("a real USER works the Run fixture case through review, a note and the audi
       },
     ];
     requireCaseAuditPage(initialAuditRead.body, fixture.caseId, systemEntries);
-    await expect(page.getByRole("status", { name: "Case record status" })).toHaveText(
-      "Showing the full case record.",
+    await expect(page.getByRole("status", { name: "사건 기록 상태" })).toHaveText(
+      "사건 기록 전체를 표시합니다.",
       { timeout: waitMs },
     );
-    await expect(factValue(record, "Case ID")).toHaveText(fixture.caseId);
-    await expect(factValue(record, "Case status")).toHaveText("Open");
-    await expect(factValue(record, "Assignee")).toHaveText("Unassigned");
-    await expect(factValue(record, "Concurrency version")).toHaveText(String(v0));
+    await expect(factValue(record, "사건 ID")).toHaveText(fixture.caseId);
+    await expect(factValue(record, "사건 상태")).toHaveText("접수");
+    await expect(factValue(record, "담당자")).toHaveText("미배정");
+    await expect(factValue(record, "버전")).toHaveText(String(v0));
     await expect(
-      notesSection.getByText("Investigation notes cannot be added while this case is open.", { exact: true }),
+      notesSection.getByText("이 사건은 접수 상태이므로 메모를 추가할 수 없습니다.", { exact: true }),
     ).toBeVisible();
     // The live region and the empty notice both say this, so the region is named.
     await expect(
-      notesSection.getByRole("status", { name: "Investigation notes status", exact: true }),
-    ).toHaveText("No investigation notes.");
+      notesSection.getByRole("status", { name: "조사 메모 상태", exact: true }),
+    ).toHaveText("조사 메모가 없습니다.");
     await expect(notesSection.locator("li.investigation-notes__item")).toHaveCount(0);
     await expect(auditSection.locator("article.audit__entry")).toHaveCount(2, { timeout: waitMs });
 
@@ -9172,8 +9176,8 @@ test("a real USER works the Run fixture case through review, a note and the audi
       ),
       "The refused transition changed the business audit trail.",
     );
-    await expect(factValue(record, "Case status")).toHaveText("Open");
-    await expect(factValue(record, "Concurrency version")).toHaveText(String(v0));
+    await expect(factValue(record, "사건 상태")).toHaveText("접수");
+    await expect(factValue(record, "버전")).toHaveText(String(v0));
 
     // 6. OPEN -> IN_REVIEW from the screen. The assignee is a fresh canonical
     // UUID v4: the production contract checks that shape and nothing else, so
@@ -9190,9 +9194,9 @@ test("a real USER works the Run fixture case through review, a note and the audi
       expectedVersion: v0,
     });
     armWorkflowWrite({ method: "PATCH", pathname: statusPath, body: startBody });
-    await page.getByRole("textbox", { name: "Assignee UUID", exact: true }).fill(assigneeRef);
-    await page.getByRole("button", { name: "Start review", exact: true }).click();
-    await expect(workflowResult).toHaveText("Review started from authoritative case information.", {
+    await page.getByRole("textbox", { name: "담당자 UUID", exact: true }).fill(assigneeRef);
+    await page.getByRole("button", { name: "검토 시작", exact: true }).click();
+    await expect(workflowResult).toHaveText("최신 사건 정보에서 검토 시작을 확인했습니다.", {
       timeout: waitMs,
     });
     requireCondition(armedWorkflowWrite === null, "The start-review write was not forwarded exactly once.");
@@ -9233,18 +9237,18 @@ test("a real USER works the Run fixture case through review, a note and the audi
       reviewEntry,
       ...systemEntries,
     ]);
-    await expect(factValue(record, "Case status")).toHaveText("In review");
-    await expect(factValue(record, "Assignee")).toHaveText(assigneeRef);
-    await expect(factValue(record, "Concurrency version")).toHaveText(String(v0 + 1));
+    await expect(factValue(record, "사건 상태")).toHaveText("검토 중");
+    await expect(factValue(record, "담당자")).toHaveText(assigneeRef);
+    await expect(factValue(record, "버전")).toHaveText(String(v0 + 1));
 
     // 7. A note: POST, GET, shown.
     const noteContent = `Run fixture review note ${randomUUID()}`;
     const noteBody = JSON.stringify({ content: noteContent, expectedVersion: v0 + 1 });
     armWorkflowWrite({ method: "POST", pathname: notesPath, body: noteBody });
     const notesBeforeCreate = reads(notesPath, screenNotesTarget).length;
-    await page.getByRole("textbox", { name: "Investigation note", exact: true }).fill(noteContent);
-    await page.getByRole("button", { name: "Add note", exact: true }).click();
-    await expect(notesSection.getByText("Investigation note added.", { exact: true })).toBeVisible({
+    await page.getByRole("textbox", { name: "조사 메모", exact: true }).fill(noteContent);
+    await page.getByRole("button", { name: "메모 등록", exact: true }).click();
+    await expect(notesSection.getByText("조사 메모를 등록했습니다.", { exact: true })).toBeVisible({
       timeout: waitMs,
     });
     requireCondition(armedWorkflowWrite === null, "The note write was not forwarded exactly once.");
@@ -9318,16 +9322,16 @@ test("a real USER works the Run fixture case through review, a note and the audi
     ]);
     const shownNote = notesSection.locator("li.investigation-notes__item");
     await expect(shownNote).toHaveCount(1, { timeout: waitMs });
-    await expect(factValue(shownNote, "Note ID")).toHaveText(noteId);
-    await expect(factValue(shownNote, "Content")).toHaveText(noteContent);
-    await expect(factValue(record, "Concurrency version")).toHaveText(String(v0 + 2));
+    await expect(factValue(shownNote, "메모 ID")).toHaveText(noteId);
+    await expect(factValue(shownNote, "내용")).toHaveText(noteContent);
+    await expect(factValue(record, "버전")).toHaveText(String(v0 + 2));
 
     // 8. A reload: the in-memory session is gone, a real sign-in follows, and the
     // note is read and shown again from the Backend.
     const observationsBeforeReload = backend.length;
     const notesReadsBeforeReload = reads(notesPath, screenNotesTarget).length;
     await page.reload();
-    await expect(page.getByRole("heading", { name: "Sign in required" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
     requireCondition(
       backend.length === observationsBeforeReload,
       "A reloaded page without a session reached the Backend.",
@@ -9342,10 +9346,10 @@ test("a real USER works the Run fixture case through review, a note and the audi
       .toBeGreaterThan(notesReadsBeforeReload);
     requireOneNote(latest(notesPath, screenNotesTarget)?.body, "notes read after reload");
     await expect(shownNote).toHaveCount(1, { timeout: waitMs });
-    await expect(factValue(shownNote, "Note ID")).toHaveText(noteId);
-    await expect(factValue(shownNote, "Content")).toHaveText(noteContent);
-    await expect(factValue(record, "Case status")).toHaveText("In review");
-    await expect(factValue(record, "Concurrency version")).toHaveText(String(v0 + 2));
+    await expect(factValue(shownNote, "메모 ID")).toHaveText(noteId);
+    await expect(factValue(shownNote, "내용")).toHaveText(noteContent);
+    await expect(factValue(record, "사건 상태")).toHaveText("검토 중");
+    await expect(factValue(record, "버전")).toHaveText(String(v0 + 2));
 
     // 9. IN_REVIEW -> ADDITIONAL_INFORMATION_REQUIRED from the screen.
     const requestInformationBody = JSON.stringify({
@@ -9354,9 +9358,9 @@ test("a real USER works the Run fixture case through review, a note and the audi
       expectedVersion: v0 + 2,
     });
     armWorkflowWrite({ method: "PATCH", pathname: statusPath, body: requestInformationBody });
-    await page.getByRole("button", { name: "Request additional information", exact: true }).click();
+    await page.getByRole("button", { name: "추가 정보 요청", exact: true }).click();
     await expect(workflowResult).toHaveText(
-      "Additional information requested from authoritative case information.",
+      "최신 사건 정보에서 추가 정보 요청을 확인했습니다.",
       { timeout: waitMs },
     );
     requireCondition(
@@ -9402,8 +9406,8 @@ test("a real USER works the Run fixture case through review, a note and the audi
       fixture.caseId,
       finalEntries,
     );
-    await expect(factValue(record, "Case status")).toHaveText("Information required");
-    await expect(factValue(record, "Concurrency version")).toHaveText(String(v0 + 3));
+    await expect(factValue(record, "사건 상태")).toHaveText("추가 정보 필요");
+    await expect(factValue(record, "버전")).toHaveText(String(v0 + 3));
 
     // 10. The populated audit history, as its public projection and nothing else.
     const auditArticles = auditSection.locator("article.audit__entry");
@@ -9431,41 +9435,41 @@ test("a real USER works the Run fixture case through review, a note and the audi
                 ]),
               };
         };
-        const time = value("Changed")?.querySelector("time") ?? null;
+        const time = value("변경")?.querySelector("time") ?? null;
         return {
           action: (article.querySelector("h4")?.textContent ?? "").trim(),
-          reasonCode: (value("Reason code")?.textContent ?? "").trim(),
-          actorType: (value("Actor type")?.textContent ?? "").trim(),
+          reasonCode: (value("사유 코드")?.textContent ?? "").trim(),
+          actorType: (value("행위자 유형")?.textContent ?? "").trim(),
           changedAt: time?.getAttribute("datetime") ?? null,
           changedText: (time?.textContent ?? "").trim(),
-          before: summary("Before"),
-          after: summary("After"),
-          noteId: value("Note ID") === null ? null : (value("Note ID")?.textContent ?? "").trim(),
+          before: summary("변경 전"),
+          after: summary("변경 후"),
+          noteId: value("메모 ID") === null ? null : (value("메모 ID")?.textContent ?? "").trim(),
           terms: Array.from(article.querySelectorAll("dt"), (dt) => (dt.textContent ?? "").trim()),
         };
       }),
     );
     const describeSummary = (summary: Readonly<Record<string, unknown>> | null) => {
       if (summary === null) {
-        return { absent: "Not applicable" };
+        return { absent: "해당 없음" };
       }
       if ("linked" in summary) {
-        return { fields: [["Linked", String(summary.linked)]] };
+        return { fields: [["연결됨", String(summary.linked)]] };
       }
-      const fields = [["Case status", String(summary.caseStatus)]];
+      const fields = [["사건 상태", String(summary.caseStatus)]];
       if ("assigneeRef" in summary) {
         fields.push([
-          "Assignee",
-          summary.assigneeRef === null ? "Unassigned" : String(summary.assigneeRef),
+          "담당자",
+          summary.assigneeRef === null ? "미배정" : String(summary.assigneeRef),
         ]);
       }
       return { fields };
     };
     for (const [index, want] of finalEntries.entries()) {
       const shown = shownAudit[index];
-      const terms = ["Reason code", "Actor type", "Changed", "Before", "After"];
+      const terms = ["사유 코드", "행위자 유형", "변경", "변경 전", "변경 후"];
       if (want.action === "CASE_NOTE_CREATED") {
-        terms.push("Note ID");
+        terms.push("메모 ID");
       }
       requireCondition(
         shown.action === want.action &&
@@ -9707,16 +9711,17 @@ test("the populated case sheet scrolls inside its container and never the docume
   // here rather than read back from `CASE_FINAL_DISPOSITION_LABELS`: reusing
   // the production map as the expectation would make this assertion agree with
   // any renaming, including one that showed a resolved-normal case as a
-  // confirmed fraud. The third column is "Final disposition".
+  // confirmed fraud. The fourth column is "Final disposition" after the
+  // case link moved to the start of each row.
   const dispositions: readonly string[] = [
-    "Not resolved",
-    "Confirmed fraud",
-    "Not resolved",
-    "False positive",
-    "Normal",
+    "미결정",
+    "사기 확정",
+    "미결정",
+    "오탐",
+    "정상",
   ];
   for (const [index, expected] of dispositions.entries()) {
-    await expect(rows.nth(index).locator("td").nth(2)).toHaveText(expected);
+    await expect(rows.nth(index).locator("td").nth(3)).toHaveText(expected);
   }
 
   // The two values that decide the width of the two widest columns are in
@@ -9728,7 +9733,7 @@ test("the populated case sheet scrolls inside its container and never the docume
   const identifierLink = identifierCell.locator("a");
   await expect(identifierLink).toHaveAttribute("href", `/cases/${GEOMETRY_CASE_ID}`);
   await expect(identifierLink).toHaveAccessibleName(
-    `View case details for ${GEOMETRY_CASE_ID}`,
+    `사건 ${GEOMETRY_CASE_ID} 상세 보기`,
   );
   // The identifier is in the cell once and only once, and the cell's text is
   // the identifier alone: the anchor's purpose is carried by `aria-label`, not
@@ -9753,7 +9758,7 @@ test("the populated case sheet scrolls inside its container and never the docume
     "The fixture did not render an assignee reference at Backend's 128-character bound.",
   );
 
-  for (const viewport of CONSOLE_VIEWPORTS) {
+  for (const viewport of [...CONSOLE_VIEWPORTS, { width: 390, height: 844 }]) {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     const geometry = await measureCaseSheet(page);
     const at = `${String(viewport.width)}px`;
@@ -9798,19 +9803,16 @@ test("the populated case sheet scrolls inside its container and never the docume
       `The case table was narrower than its own minimum at ${at}.`,
     );
 
-    if (viewport.width === 1024) {
-      // The width the sheet is designed to outgrow. Here, and only here, the
-      // container must actually be scrollable and must actually have content
-      // wider than itself - which is what makes the two document assertions
-      // above a statement about a real overflow rather than about a table that
-      // happened to fit.
+    if (viewport.width === 1024 || viewport.width === 390) {
+      // At both narrow widths the container must actually be scrollable and
+      // have content wider than itself; no column disappears from the record.
       requireCondition(
         geometry.tableScrollWidth > geometry.containerClientWidth,
-        "The case table did not exceed its container at 1024px, so nothing was being contained.",
+        `The case table did not exceed its container at ${at}.`,
       );
       requireCondition(
         geometry.overflowX === "auto" || geometry.overflowX === "scroll",
-        "The case sheet container was not scrollable at 1024px.",
+        `The case sheet container was not scrollable at ${at}.`,
       );
     }
   }
@@ -9841,7 +9843,7 @@ test("the populated case audit history wraps inside the document at every design
   const observationsBefore = relayObservationCount;
 
   await page.goto(CASE_AUDIT_GEOMETRY_URL);
-  await expect(page.getByRole("heading", { name: "Audit history", level: 3 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "감사 이력", level: 3 })).toBeVisible();
   const articles = page.getByRole("article");
   await expect(articles).toHaveCount(6);
 
@@ -9854,13 +9856,13 @@ test("the populated case audit history wraps inside the document at every design
     "CASE_NOTE_CREATED",
   ] as const;
   for (const [index, action] of actions.entries()) {
-    await expect(articles.nth(index).getByRole("heading", { name: new RegExp(`^${action}, changed`) }))
+    await expect(articles.nth(index).getByRole("heading", { name: new RegExp(`^${action}, 변경 시각`) }))
       .toBeVisible();
   }
 
   await expect(page.getByText("CASE_ADDITIONAL_INFORMATION_REQUESTED")).toBeVisible();
-  await expect(page.getByText("Not applicable")).toHaveCount(4);
-  await expect(page.getByText("Unassigned")).toBeVisible();
+  await expect(page.getByText("해당 없음")).toHaveCount(4);
+  await expect(page.getByText("미배정")).toBeVisible();
   const noteId = page.getByText("8d2e3f40-5b6c-4d7e-9f01-1b2c3d4e5f60");
   await expect(noteId).toBeVisible();
   requireCondition((await noteId.evaluate((element) => element.closest("a"))) === null, "The note ID became a link.");
@@ -9905,16 +9907,16 @@ test("populated investigation notes preserve plain text and case resolution cont
   const observationsBefore = relayObservationCount;
 
   await page.goto(CASE_NOTES_GEOMETRY_URL);
-  await expect(page.getByRole("heading", { name: "Case workflow", level: 3 })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Resume review" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Change assignee" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Release assignee" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "사건 처리", level: 3 })).toBeVisible();
+  await expect(page.getByRole("button", { name: "검토 재개" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "담당자 변경" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "담당자 배정 해제" })).toBeVisible();
   const displayedWorkflowStatus = page
     .locator("section.case-workflow > p.case-workflow__summary > strong")
-    .filter({ hasText: /^Information required$/ });
+    .filter({ hasText: /^추가 정보 필요$/ });
   await expect(displayedWorkflowStatus).toHaveCount(1);
   await expect(displayedWorkflowStatus).toBeVisible();
-  await expect(displayedWorkflowStatus).toHaveText("Information required");
+  await expect(displayedWorkflowStatus).toHaveText("추가 정보 필요");
   const workflowAssignee = page.locator(".case-workflow__assignee code");
   // Deliberately independent from the fixture source: this literal is not
   // imported or shared, so a fixture edit cannot silently rewrite the oracle.
@@ -9937,12 +9939,12 @@ test("populated investigation notes preserve plain text and case resolution cont
       ),
     "The workflow DOM did not contain the independently expected 36-code-point ASCII UUID v4.",
   );
-  await expect(page.getByRole("heading", { name: "Investigation notes", level: 3 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "조사 메모", level: 3 })).toBeVisible();
   const articles = page.getByRole("article");
   await expect(articles).toHaveCount(3);
   await expect(page.getByText("SYSTEM", { exact: true })).toBeVisible();
   await expect(page.getByText("USER", { exact: true })).toHaveCount(2);
-  await expect(page.getByRole("navigation", { name: "Investigation notes pages" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "조사 메모 페이지" })).toBeVisible();
 
   const longNoteId = "note-id-unbroken-".padEnd(128, "n");
   const longAuthorRef = "author-reference-unbroken-".padEnd(128, "a");
@@ -10168,7 +10170,7 @@ test("populated investigation notes preserve plain text and case resolution cont
     const workflowStatus = workflowGeometry.status;
     requireCondition(workflowStatus !== null, "The workflow status label was absent.");
     requireCondition(
-      workflowStatus.text === "Information required" &&
+      workflowStatus.text === "추가 정보 필요" &&
         workflowStatus.tag === "STRONG" &&
         workflowStatus.displayed &&
         workflowStatus.parent.tag === "P" &&
@@ -10225,7 +10227,7 @@ test("populated investigation notes preserve plain text and case resolution cont
       }
     }
     const composer = page.locator(".investigation-note-composer");
-    const textarea = page.getByRole("textbox", { name: "Investigation note" });
+    const textarea = page.getByRole("textbox", { name: "조사 메모" });
     await expect(composer).toBeVisible();
     await expect(textarea).toBeVisible();
     const measured = await textarea.evaluate((element) => {
@@ -10321,9 +10323,8 @@ test("populated investigation notes preserve plain text and case resolution cont
   }
 
   // The four design widths above prove the production console contract. This
-  // additional narrow layout makes wrapping observable rather than merely
-  // permitted: the same production summary and stylesheet must occupy at least
-  // two real line boxes without widening the document.
+  // additional narrow layout checks that the production summary has a visible
+  // text line without clipping or widening the document.
   await page.setViewportSize({ width: 280, height: 844 });
   const narrowStatusEvidence = await displayedWorkflowStatus.evaluate((element) => {
     // Playwright는 element를 HTMLElement | SVGElement로 넘긴다. production label이 HTMLElement가 아니면
@@ -10401,6 +10402,8 @@ test("populated investigation notes preserve plain text and case resolution cont
         tag: parent.tagName,
         left: parentBox.left,
         right: parentBox.right,
+        top: parentBox.top,
+        bottom: parentBox.bottom,
         width: parentBox.width,
         borderLeftWidth,
         borderRightWidth,
@@ -10416,32 +10419,76 @@ test("populated investigation notes preserve plain text and case resolution cont
   requireCondition(narrowStatusEvidence !== null, "The narrow workflow status summary was absent.");
   const narrowGeometryTolerance = 1;
   requireCondition(
-    narrowStatusEvidence.text === "Information required" &&
-      narrowStatusEvidence.tag === "STRONG" &&
-      narrowStatusEvidence.parent.tag === "P" &&
-      narrowStatusEvidence.isProductionStatusLabel &&
-      narrowStatusEvidence.displayed &&
-      narrowStatusEvidence.parentDisplayed &&
-      narrowStatusEvidence.lineCount >= 2 &&
-      narrowStatusEvidence.lineRects.length >= narrowStatusEvidence.lineCount &&
-      narrowStatusEvidence.lineRects.every(
-        (rect) =>
-          rect.left >= narrowStatusEvidence.parent.contentLeft - narrowGeometryTolerance &&
-          rect.right <= narrowStatusEvidence.parent.contentRight + narrowGeometryTolerance &&
-          rect.left >= -narrowGeometryTolerance &&
-          rect.right <= narrowStatusEvidence.viewportWidth + narrowGeometryTolerance,
-      ) &&
-      narrowStatusEvidence.labelScrollWidth <=
-        narrowStatusEvidence.labelClientWidth + narrowGeometryTolerance &&
-      narrowStatusEvidence.parentScrollWidth <=
-        narrowStatusEvidence.parentClientWidth + narrowGeometryTolerance &&
-      narrowStatusEvidence.left >=
-        narrowStatusEvidence.parent.contentLeft - narrowGeometryTolerance &&
-      narrowStatusEvidence.right <=
-        narrowStatusEvidence.parent.contentRight + narrowGeometryTolerance &&
-      narrowStatusEvidence.overflowWrap === "anywhere" &&
-      !(await documentOverflowsHorizontally(page)),
-    "The production status label itself did not produce contained multi-line wrapping at 280px.",
+    narrowStatusEvidence.text === "추가 정보 필요",
+    "The narrow workflow status label text changed.",
+  );
+  requireCondition(narrowStatusEvidence.tag === "STRONG", "The narrow workflow status label was not strong.");
+  requireCondition(narrowStatusEvidence.parent.tag === "P", "The narrow workflow status parent was not a paragraph.");
+  requireCondition(narrowStatusEvidence.isProductionStatusLabel, "The narrow workflow status was not the production label.");
+  requireCondition(narrowStatusEvidence.displayed, "The narrow workflow status label was not displayed.");
+  requireCondition(narrowStatusEvidence.parentDisplayed, "The narrow workflow status parent was not displayed.");
+  requireCondition(narrowStatusEvidence.lineCount >= 1, "The narrow workflow status label had no visible text line.");
+  requireCondition(
+    narrowStatusEvidence.lineRects.length >= narrowStatusEvidence.lineCount,
+    "The narrow workflow status line rectangles were incomplete.",
+  );
+  requireCondition(
+    narrowStatusEvidence.lineRects.every(
+      (rect) => rect.left >= narrowStatusEvidence.parent.contentLeft - narrowGeometryTolerance,
+    ),
+    "A narrow workflow status line escaped the content on the left.",
+  );
+  requireCondition(
+    narrowStatusEvidence.lineRects.every(
+      (rect) => rect.right <= narrowStatusEvidence.parent.contentRight + narrowGeometryTolerance,
+    ),
+    "A narrow workflow status line escaped the content on the right.",
+  );
+  requireCondition(
+    narrowStatusEvidence.lineRects.every(
+      (rect) =>
+        rect.top >= narrowStatusEvidence.parent.top - narrowGeometryTolerance &&
+        rect.bottom <= narrowStatusEvidence.parent.bottom + narrowGeometryTolerance,
+    ),
+    "A narrow workflow status line was clipped vertically.",
+  );
+  requireCondition(
+    narrowStatusEvidence.lineRects.every((rect) => rect.left >= -narrowGeometryTolerance),
+    "A narrow workflow status line escaped the viewport on the left.",
+  );
+  requireCondition(
+    narrowStatusEvidence.lineRects.every(
+      (rect) => rect.right <= narrowStatusEvidence.viewportWidth + narrowGeometryTolerance,
+    ),
+    "A narrow workflow status line escaped the viewport on the right.",
+  );
+  requireCondition(
+    narrowStatusEvidence.labelScrollWidth <=
+      narrowStatusEvidence.labelClientWidth + narrowGeometryTolerance,
+    "The narrow workflow status label scrolled horizontally.",
+  );
+  requireCondition(
+    narrowStatusEvidence.parentScrollWidth <=
+      narrowStatusEvidence.parentClientWidth + narrowGeometryTolerance,
+    "The narrow workflow status parent scrolled horizontally.",
+  );
+  requireCondition(
+    narrowStatusEvidence.left >=
+      narrowStatusEvidence.parent.contentLeft - narrowGeometryTolerance,
+    "The narrow workflow status label escaped the content on the left.",
+  );
+  requireCondition(
+    narrowStatusEvidence.right <=
+      narrowStatusEvidence.parent.contentRight + narrowGeometryTolerance,
+    "The narrow workflow status label escaped the content on the right.",
+  );
+  requireCondition(
+    narrowStatusEvidence.overflowWrap === "anywhere",
+    "The narrow workflow status label lost anywhere wrapping.",
+  );
+  requireCondition(
+    !(await documentOverflowsHorizontally(page)),
+    "The narrow workflow status widened the document.",
   );
   await page.setViewportSize({ width: 1440, height: 900 });
 
@@ -10449,23 +10496,23 @@ test("populated investigation notes preserve plain text and case resolution cont
   // 늘리지 않도록 같은 test 안에서 네 design width를 측정한다. radio 선택과 제출을 하지 않으므로
   // 어떤 API 요청도 만들지 않으며, 마지막 off-origin·relay 검사가 두 fixture를 함께 확인한다.
   await page.goto(CASE_RESOLUTION_GEOMETRY_URL);
-  await expect(page.getByRole("heading", { name: "Case workflow", level: 3 })).toBeVisible();
-  const resolutionGroup = page.getByRole("group", { name: "Case resolution", exact: true });
+  await expect(page.getByRole("heading", { name: "사건 처리", level: 3 })).toBeVisible();
+  const resolutionGroup = page.getByRole("group", { name: "사건 종결", exact: true });
   await expect(resolutionGroup).toBeVisible();
   await expect(
-    resolutionGroup.getByRole("radiogroup", { name: "Final disposition", exact: true }),
+    resolutionGroup.getByRole("radiogroup", { name: "최종 판정", exact: true }),
   ).toBeVisible();
   await expect(resolutionGroup.getByRole("radio")).toHaveCount(3);
-  const resolutionLabels = ["Normal", "False positive", "Confirmed fraud"];
+  const resolutionLabels = ["정상", "오탐", "사기 확정"];
   for (const name of resolutionLabels) {
     await expect(resolutionGroup.getByRole("radio", { name, exact: true })).not.toBeChecked();
   }
   await expect(
-    resolutionGroup.getByRole("button", { name: "Resolve case", exact: true }),
+    resolutionGroup.getByRole("button", { name: "사건 종결", exact: true }),
   ).toBeVisible();
-  await expect(resolutionGroup.getByText(/cannot be undone/)).toBeVisible();
+  await expect(resolutionGroup.getByText(/되돌릴 수 없습니다/)).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Request additional information", exact: true }),
+    page.getByRole("button", { name: "추가 정보 요청", exact: true }),
   ).toBeVisible();
 
   for (const viewport of NOTES_GEOMETRY_VIEWPORTS) {
@@ -10637,7 +10684,7 @@ test("populated investigation notes preserve plain text and case resolution cont
     const resolutionSubmit = resolution.submit;
     requireCondition(
       resolutionSubmit !== null &&
-        resolutionSubmit.text === "Resolve case" &&
+        resolutionSubmit.text === "사건 종결" &&
         resolutionSubmit.whiteSpace === "normal" &&
         resolutionSubmit.overflowWrap === "anywhere" &&
         resolutionSubmit.left >= resolutionFieldset.contentLeft - resolutionTolerance &&
@@ -10706,13 +10753,13 @@ test("populated investigation notes preserve plain text and case resolution cont
         outlineWidth: style.outlineWidth,
       };
     });
-  await resolutionGroup.getByRole("radio", { name: "Normal", exact: true }).focus();
+  await resolutionGroup.getByRole("radio", { name: "정상", exact: true }).focus();
   await page.keyboard.press("Tab");
   const actionFocus = await readResolutionFocus();
   requireCondition(
     actionFocus !== null &&
       actionFocus.tag === "BUTTON" &&
-      actionFocus.text === "Resolve case" &&
+      actionFocus.text === "사건 종결" &&
       actionFocus.inResolution &&
       actionFocus.focusVisible &&
       actionFocus.outlineStyle === "solid" &&

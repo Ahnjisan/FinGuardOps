@@ -193,10 +193,10 @@ describe("TransactionListPage opening query", () => {
     renderPage(signedIn());
     await settle();
 
-    expect(screen.getByRole("heading", { name: "Transactions" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Apply filters" })).toBeInTheDocument();
-    expect(screen.getByText("Loading transactions...")).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("Loading transactions");
+    expect(screen.getByRole("heading", { name: "거래" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "필터 적용" })).toBeInTheDocument();
+    expect(screen.getByText("거래를 불러오고 있습니다…")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("거래를 불러오는 중");
   });
 });
 
@@ -207,15 +207,15 @@ describe("TransactionListPage data", () => {
     await settle();
     await answerWith(calls[0], listBody());
 
-    const row = await screen.findByRole("row", { name: /account transfer/i });
+    const row = await screen.findByRole("row", { name: /계좌 이체/i });
     const cells = within(row).getAllByRole("cell");
 
     expect(cells[0]).toHaveTextContent("2026-07-23 10:15:30 KST");
-    expect(cells[0]).toHaveTextContent("Recorded 2026-07-23 10:15");
-    expect(cells[1]).toHaveTextContent("Account transfer");
+    expect(cells[0]).toHaveTextContent("기록 2026-07-23 10:15");
+    expect(cells[1]).toHaveTextContent("계좌 이체");
     expect(cells[2]).toHaveTextContent("1,250,000");
     expect(cells[2]).toHaveTextContent("KRW");
-    expect(cells[3]).toHaveTextContent("Auth required");
+    expect(cells[3]).toHaveTextContent("인증 필요");
     expect(cells[4]).toHaveTextContent(TRANSACTION_ID);
     expect(cells[5]).toHaveTextContent("cust_ref_demo_a7f2");
     expect(cells[6]).toHaveTextContent("acct_ref_demo_s91c");
@@ -242,7 +242,7 @@ describe("TransactionListPage data", () => {
     await settle();
     await answerWith(calls[0], listBody([listItem({ amount: "999999999999999" })]));
 
-    const row = await screen.findByRole("row", { name: /account transfer/i });
+    const row = await screen.findByRole("row", { name: /계좌 이체/i });
     expect(within(row).getByText("999,999,999,999,999")).toBeInTheDocument();
   });
 
@@ -252,8 +252,8 @@ describe("TransactionListPage data", () => {
     await settle();
     await answerWith(calls[0], listBody([listItem({ recipientAccountRef: null })]));
 
-    const row = await screen.findByRole("row", { name: /account transfer/i });
-    expect(within(row).getByText("None recorded")).toBeInTheDocument();
+    const row = await screen.findByRole("row", { name: /계좌 이체/i });
+    expect(within(row).getByText("기록 없음")).toBeInTheDocument();
   });
 
   it("shows a long reference in full and never duplicates it into an attribute", async () => {
@@ -265,7 +265,7 @@ describe("TransactionListPage data", () => {
       listBody([listItem({ externalCustomerRef: LONG_CUSTOMER_REF })]),
     );
 
-    const row = await screen.findByRole("row", { name: /account transfer/i });
+    const row = await screen.findByRole("row", { name: /계좌 이체/i });
     const cell = within(row).getAllByRole("cell")[5];
     expect(cell).toHaveTextContent(LONG_CUSTOMER_REF);
     expect(cell.className).toContain("cell-ref--long");
@@ -288,8 +288,8 @@ describe("TransactionListPage data", () => {
 
     await screen.findByRole("table");
     const table = screen.getByRole("table");
-    const approved = within(table).getByText("Approved");
-    const failed = within(table).getByText("Failed");
+    const approved = within(table).getByText("승인");
+    const failed = within(table).getByText("실패");
     expect(approved.className).toContain("badge--success");
     expect(failed.className).toContain("badge--danger");
     expect(approved.querySelector(".badge__mark")).not.toBeNull();
@@ -304,7 +304,7 @@ describe("TransactionListPage data", () => {
 
     const status = await screen.findByRole("status");
     expect(status).toHaveAttribute("aria-live", "polite");
-    expect(status).toHaveTextContent("Showing 1-20 of 137 transactions.");
+    expect(status).toHaveTextContent("전체 137건 중 1~20건 표시");
   });
 
   it("scrolls the sheet sideways instead of dropping columns", async () => {
@@ -314,7 +314,7 @@ describe("TransactionListPage data", () => {
     await answerWith(calls[0], listBody());
 
     const region = await screen.findByRole("region", {
-      name: "Transaction results, scrollable",
+      name: "거래 결과, 가로로 스크롤 가능",
     });
     expect(region).toHaveAttribute("tabindex", "0");
     expect(within(region).getAllByRole("columnheader")).toHaveLength(8);
@@ -330,15 +330,15 @@ describe("TransactionListPage draft and committed filters", () => {
     await answerWith(calls[0], listBody());
     await screen.findByRole("table");
 
-    await user.type(screen.getByLabelText("Customer reference"), "cust");
-    fireEvent.change(screen.getByLabelText("From (KST)"), {
+    await user.type(screen.getByLabelText("고객 참조값"), "cust");
+    fireEvent.change(screen.getByLabelText("시작(KST)"), {
       target: { value: "2026-07-01T00:00" },
     });
-    await user.selectOptions(screen.getByLabelText("Processing status"), "HELD");
+    await user.selectOptions(screen.getByLabelText("처리 상태"), "HELD");
     await settle();
 
     expect(spy).toHaveBeenCalledTimes(1);
-    expect(screen.getByText("Edits are not applied yet. Apply them to search.")).toBeInTheDocument();
+    expect(screen.getByText("변경한 조건은 아직 적용되지 않았습니다.")).toBeInTheDocument();
   });
 
   it("commits the draft on Apply, converting KST to UTC and resetting to page 0", async () => {
@@ -349,7 +349,7 @@ describe("TransactionListPage draft and committed filters", () => {
     await answerWith(calls[0], firstOfSevenPages());
     await screen.findByRole("table");
 
-    await user.click(screen.getByRole("button", { name: "Next page" }));
+    await user.click(screen.getByRole("button", { name: "다음 페이지" }));
     await settle();
     expect(queryOf(calls[1]).get("page")).toBe("1");
     await answerWith(
@@ -363,17 +363,17 @@ describe("TransactionListPage draft and committed filters", () => {
       }),
     );
 
-    fireEvent.change(screen.getByLabelText("From (KST)"), {
+    fireEvent.change(screen.getByLabelText("시작(KST)"), {
       target: { value: "2026-07-23T10:15" },
     });
-    fireEvent.change(screen.getByLabelText("To (KST)"), {
+    fireEvent.change(screen.getByLabelText("끝(KST)"), {
       target: { value: "2026-07-24T10:15" },
     });
-    await user.selectOptions(screen.getByLabelText("Transaction type"), "ATM_WITHDRAWAL");
-    fireEvent.change(screen.getByLabelText("Account reference"), {
+    await user.selectOptions(screen.getByLabelText("거래 유형"), "ATM_WITHDRAWAL");
+    fireEvent.change(screen.getByLabelText("계좌 참조값"), {
       target: { value: " acct with spaces " },
     });
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
 
     const query = queryOf(calls[2]);
@@ -393,19 +393,19 @@ describe("TransactionListPage draft and committed filters", () => {
     await answerWith(calls[0], listBody());
     await screen.findByRole("table");
 
-    fireEvent.change(screen.getByLabelText("From (KST)"), {
+    fireEvent.change(screen.getByLabelText("시작(KST)"), {
       target: { value: "2026-07-31T00:00" },
     });
-    fireEvent.change(screen.getByLabelText("To (KST)"), {
+    fireEvent.change(screen.getByLabelText("끝(KST)"), {
       target: { value: "2026-07-01T00:00" },
     });
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
 
     expect(spy).toHaveBeenCalledTimes(1);
     const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent("These filters cannot be searched");
-    expect(alert).toHaveTextContent("The start of the time range must not be later than the end.");
+    expect(alert).toHaveTextContent("필터 조건을 적용할 수 없습니다");
+    expect(alert).toHaveTextContent("발생 시작 시각은 끝 시각보다 늦을 수 없습니다.");
     expect(alert).toHaveFocus();
   });
 
@@ -417,13 +417,13 @@ describe("TransactionListPage draft and committed filters", () => {
     await answerWith(calls[0], listBody());
     await screen.findByRole("table");
 
-    await user.type(screen.getByLabelText("Customer reference"), "   ");
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.type(screen.getByLabelText("고객 참조값"), "   ");
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
 
     expect(spy).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "Enter a customer reference, or leave the field empty.",
+      "고객 참조값을 입력하거나 비워 두세요.",
     );
   });
 
@@ -435,13 +435,13 @@ describe("TransactionListPage draft and committed filters", () => {
     await answerWith(calls[0], listBody());
     await screen.findByRole("table");
 
-    await user.selectOptions(screen.getByLabelText("Processing status"), "HELD");
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.selectOptions(screen.getByLabelText("처리 상태"), "HELD");
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
     expect(queryOf(calls[1]).get("processingStatus")).toBe("HELD");
     await answerWith(calls[1], listBody());
 
-    await user.click(screen.getByRole("button", { name: "Reset filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 초기화" }));
     await settle();
 
     const query = queryOf(calls[2]);
@@ -449,7 +449,7 @@ describe("TransactionListPage draft and committed filters", () => {
     expect(query.get("page")).toBe("0");
     expect(query.get("size")).toBe("20");
     expect(query.get("sort")).toBe("occurredAt,desc");
-    expect(screen.getByLabelText("Processing status")).toHaveValue("");
+    expect(screen.getByLabelText("처리 상태")).toHaveValue("");
   });
 
   it("keeps reference filters out of the address bar and out of web storage", async () => {
@@ -460,10 +460,10 @@ describe("TransactionListPage draft and committed filters", () => {
     await answerWith(calls[0], listBody());
     await screen.findByRole("table");
 
-    fireEvent.change(screen.getByLabelText("Customer reference"), {
+    fireEvent.change(screen.getByLabelText("고객 참조값"), {
       target: { value: LONG_CUSTOMER_REF },
     });
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
 
     expect(queryOf(calls[1]).get("externalCustomerRef")).toBe(LONG_CUSTOMER_REF);
@@ -482,7 +482,7 @@ describe("TransactionListPage sorting and pagination", () => {
     await settle();
     await answerWith(calls[0], listBody());
 
-    const header = await screen.findByRole("columnheader", { name: /occurred/i });
+    const header = await screen.findByRole("columnheader", { name: /발생/i });
     expect(header).toHaveAttribute("aria-sort", "descending");
 
     await user.click(within(header).getByRole("button"));
@@ -492,7 +492,7 @@ describe("TransactionListPage sorting and pagination", () => {
     expect(queryOf(calls[1]).get("page")).toBe("0");
     await answerWith(calls[1], listBody());
     expect(
-      screen.getByRole("columnheader", { name: /occurred/i }),
+      screen.getByRole("columnheader", { name: /발생/i }),
     ).toHaveAttribute("aria-sort", "ascending");
   });
 
@@ -502,9 +502,9 @@ describe("TransactionListPage sorting and pagination", () => {
     await settle();
     await answerWith(calls[0], listBody());
 
-    expect(await screen.findByRole("button", { name: "Previous page" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Next page" })).toBeDisabled();
-    expect(screen.getByText("Page 1 of 1")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "이전 페이지" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "다음 페이지" })).toBeDisabled();
+    expect(screen.getByText("페이지 1 / 전체 1")).toBeInTheDocument();
   });
 
   it("returns to page 0 when the page size changes", async () => {
@@ -515,7 +515,7 @@ describe("TransactionListPage sorting and pagination", () => {
     await answerWith(calls[0], firstOfSevenPages());
     await screen.findByRole("table");
 
-    await user.click(screen.getByRole("button", { name: "Next page" }));
+    await user.click(screen.getByRole("button", { name: "다음 페이지" }));
     await settle();
     await answerWith(
       calls[1],
@@ -528,7 +528,7 @@ describe("TransactionListPage sorting and pagination", () => {
       }),
     );
 
-    await user.selectOptions(screen.getByLabelText("Rows per page"), "50");
+    await user.selectOptions(screen.getByLabelText("페이지당 행 수"), "50");
     await settle();
 
     expect(queryOf(calls[2]).get("size")).toBe("50");
@@ -545,19 +545,19 @@ describe("TransactionListPage empty and error states", () => {
     await answerWith(calls[0], listBody());
     await screen.findByRole("table");
 
-    await user.selectOptions(screen.getByLabelText("Processing status"), "HELD");
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.selectOptions(screen.getByLabelText("처리 상태"), "HELD");
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
     await answerWith(calls[1], listBody([]));
 
     expect(
-      await screen.findByText("No transactions match these filters"),
+      await screen.findByText("조건에 맞는 거래가 없습니다"),
     ).toBeInTheDocument();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
 
     await user.click(
-      within(screen.getByText("No transactions match these filters").parentElement as HTMLElement)
-        .getByRole("button", { name: "Reset filters" }),
+      within(screen.getByText("조건에 맞는 거래가 없습니다").parentElement as HTMLElement)
+        .getByRole("button", { name: "필터 초기화" }),
     );
     await settle();
     expect(queryOf(calls[2]).has("processingStatus")).toBe(false);
@@ -569,7 +569,7 @@ describe("TransactionListPage empty and error states", () => {
     await settle();
     await answerWith(calls[0], listBody([]));
 
-    expect(await screen.findByText("There are no transactions to show yet.")).toBeInTheDocument();
+    expect(await screen.findByText("표시할 거래가 없습니다.")).toBeInTheDocument();
   });
 
   it("distinguishes a timeout from a network failure", async () => {
@@ -586,7 +586,7 @@ describe("TransactionListPage empty and error states", () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
 
-    expect(screen.getByRole("alert")).toHaveTextContent("The search took too long");
+    expect(screen.getByRole("alert")).toHaveTextContent("조회에 시간이 오래 걸립니다");
     vi.useRealTimers();
   });
 
@@ -601,11 +601,11 @@ describe("TransactionListPage empty and error states", () => {
     });
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("The backend could not be reached");
+    expect(alert).toHaveTextContent("백엔드에 연결할 수 없습니다");
     expect(alert).toHaveFocus();
     expect(spy).toHaveBeenCalledTimes(1);
 
-    await user.click(within(alert).getByRole("button", { name: "Try again" }));
+    await user.click(within(alert).getByRole("button", { name: "다시 시도" }));
     await settle();
     expect(spy).toHaveBeenCalledTimes(2);
   });
@@ -630,7 +630,7 @@ describe("TransactionListPage empty and error states", () => {
       },
     );
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("The results could not be read");
+    expect(await screen.findByRole("alert")).toHaveTextContent("조회 결과를 읽을 수 없습니다");
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
     expect(screen.queryByText("cust_ref_demo_a7f2")).not.toBeInTheDocument();
   });
@@ -647,7 +647,7 @@ describe("TransactionListPage empty and error states", () => {
     );
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("Access denied");
+    expect(alert).toHaveTextContent("접근할 수 없습니다");
     expect(within(alert).queryByRole("button")).not.toBeInTheDocument();
     expect(client.calls.notified).toBe(0);
     expect(document.body.textContent ?? "").not.toContain("transaction:read");
@@ -695,14 +695,14 @@ describe("TransactionListPage keyboard use", () => {
     await screen.findByRole("table");
 
     const order = [
-      screen.getByLabelText("From (KST)"),
-      screen.getByLabelText("To (KST)"),
-      screen.getByLabelText("Transaction type"),
-      screen.getByLabelText("Processing status"),
-      screen.getByLabelText("Customer reference"),
-      screen.getByLabelText("Account reference"),
-      screen.getByRole("button", { name: "Apply filters" }),
-      screen.getByRole("button", { name: "Reset filters" }),
+      screen.getByLabelText("시작(KST)"),
+      screen.getByLabelText("끝(KST)"),
+      screen.getByLabelText("거래 유형"),
+      screen.getByLabelText("처리 상태"),
+      screen.getByLabelText("고객 참조값"),
+      screen.getByLabelText("계좌 참조값"),
+      screen.getByRole("button", { name: "필터 적용" }),
+      screen.getByRole("button", { name: "필터 초기화" }),
     ];
 
     order[0].focus();
@@ -721,7 +721,7 @@ describe("TransactionListPage keyboard use", () => {
     await answerWith(calls[0], listBody());
     await screen.findByRole("table");
 
-    const field = screen.getByLabelText("Customer reference");
+    const field = screen.getByLabelText("고객 참조값");
     await user.click(field);
     await user.keyboard("cust{Enter}");
     await settle();
@@ -736,7 +736,7 @@ describe("TransactionListPage keyboard use", () => {
     await settle();
     await answerWith(calls[0], listBody());
 
-    const header = await screen.findByRole("columnheader", { name: /occurred/i });
+    const header = await screen.findByRole("columnheader", { name: /발생/i });
     within(header).getByRole("button").focus();
     await user.keyboard("{Enter}");
     await settle();
@@ -748,10 +748,10 @@ describe("TransactionListPage keyboard use", () => {
 describe("TransactionListPage validation refusal focus", () => {
   /** Puts the draft into a state `commitDraft` refuses for exactly one reason. */
   function reverseTheRange(): void {
-    fireEvent.change(screen.getByLabelText("From (KST)"), {
+    fireEvent.change(screen.getByLabelText("시작(KST)"), {
       target: { value: "2026-07-31T00:00" },
     });
-    fireEvent.change(screen.getByLabelText("To (KST)"), {
+    fireEvent.change(screen.getByLabelText("끝(KST)"), {
       target: { value: "2026-07-01T00:00" },
     });
   }
@@ -770,7 +770,7 @@ describe("TransactionListPage validation refusal focus", () => {
 
     // A reversed time range: one problem.
     reverseTheRange();
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
 
     const first = screen.getByRole("alert");
@@ -779,9 +779,9 @@ describe("TransactionListPage validation refusal focus", () => {
     const firstProblems = within(first).getAllByRole("listitem");
     expect(firstProblems).toHaveLength(1);
     expect(firstProblems[0]).toHaveTextContent(
-      "The start of the time range must not be later than the end.",
+      "발생 시작 시각은 끝 시각보다 늦을 수 없습니다.",
     );
-    expect(first).toHaveTextContent("The start of the time range must not be later than the end.");
+    expect(first).toHaveTextContent("발생 시작 시각은 끝 시각보다 늦을 수 없습니다.");
     expect(first).toHaveFocus();
     expect(spy).toHaveBeenCalledTimes(1);
     expect(client.calls.authorizeRequest).toBe(lookupsAfterFirstLoad);
@@ -790,7 +790,7 @@ describe("TransactionListPage validation refusal focus", () => {
     // to genuinely belong to another control before the second Apply: if it
     // were still sitting on the summary, the summary would "have focus" after
     // the second refusal whether or not focus was ever moved there again.
-    const customerRef = screen.getByLabelText("Customer reference");
+    const customerRef = screen.getByLabelText("고객 참조값");
     await user.click(customerRef);
     expect(document.activeElement).toBe(customerRef);
     expect(first).not.toHaveFocus();
@@ -799,11 +799,11 @@ describe("TransactionListPage validation refusal focus", () => {
     // refusal still carries exactly one entry. A signature built from that
     // count would not change here, and focus would stay where the analyst left
     // it instead of moving to the new explanation.
-    fireEvent.change(screen.getByLabelText("To (KST)"), {
+    fireEvent.change(screen.getByLabelText("끝(KST)"), {
       target: { value: "2026-08-01T00:00" },
     });
     await user.type(customerRef, "   ");
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
 
     // Applying put focus on the Apply button, and the summary is the very same
@@ -814,9 +814,9 @@ describe("TransactionListPage validation refusal focus", () => {
     const secondProblems = within(second).getAllByRole("listitem");
     expect(secondProblems).toHaveLength(1);
     expect(secondProblems[0]).toHaveTextContent(
-      "Enter a customer reference, or leave the field empty.",
+      "고객 참조값을 입력하거나 비워 두세요.",
     );
-    expect(second).toHaveTextContent("Enter a customer reference, or leave the field empty.");
+    expect(second).toHaveTextContent("고객 참조값을 입력하거나 비워 두세요.");
     expect(second).not.toHaveTextContent("The start of the time range");
     expect(within(second).getAllByRole("listitem")).toHaveLength(1);
     expect(second).toHaveFocus();
@@ -838,16 +838,16 @@ describe("TransactionListPage validation refusal focus", () => {
 
     const lookupsAfterFirstLoad = client.calls.authorizeRequest;
     reverseTheRange();
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
     expect(screen.getByRole("alert")).toHaveFocus();
 
     // The analyst carries on somewhere else and asks again without changing
     // anything. The same explanation is still the answer, so it is announced
     // again rather than left behind.
-    screen.getByLabelText("Customer reference").focus();
+    screen.getByLabelText("고객 참조값").focus();
     expect(screen.getByRole("alert")).not.toHaveFocus();
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
 
     expect(screen.getByRole("alert")).toHaveFocus();
@@ -864,13 +864,13 @@ describe("TransactionListPage validation refusal focus", () => {
     await screen.findByRole("table");
 
     reverseTheRange();
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
     expect(screen.getByRole("alert")).toHaveFocus();
 
     // A search that is accepted clears the refusal and moves focus nowhere: it
     // stays on the control the analyst just used.
-    const resetButton = screen.getByRole("button", { name: "Reset filters" });
+    const resetButton = screen.getByRole("button", { name: "필터 초기화" });
     await user.click(resetButton);
     await settle();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
@@ -879,18 +879,18 @@ describe("TransactionListPage validation refusal focus", () => {
     // asked the Backend for nothing.
     expect(calls).toHaveLength(1);
 
-    await user.selectOptions(screen.getByLabelText("Processing status"), "HELD");
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.selectOptions(screen.getByLabelText("처리 상태"), "HELD");
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
     expect(queryOf(calls[1]).get("processingStatus")).toBe("HELD");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Apply filters" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "필터 적용" })).toHaveFocus();
     await answerWith(calls[1], listBody());
 
     // And the refusal that follows is announced on its own merits, not skipped
     // because an earlier one looked the same.
     reverseTheRange();
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
     expect(screen.getByRole("alert")).toHaveFocus();
   }, 30_000);
@@ -904,10 +904,10 @@ describe("TransactionListPage validation refusal focus", () => {
     await screen.findByRole("table");
 
     reverseTheRange();
-    fireEvent.change(screen.getByLabelText("Customer reference"), {
+    fireEvent.change(screen.getByLabelText("고객 참조값"), {
       target: { value: LONG_CUSTOMER_REF },
     });
-    await user.click(screen.getByRole("button", { name: "Apply filters" }));
+    await user.click(screen.getByRole("button", { name: "필터 적용" }));
     await settle();
 
     const alert = screen.getByRole("alert");
@@ -917,7 +917,7 @@ describe("TransactionListPage validation refusal focus", () => {
     // The field the analyst typed into is the one place the value belongs. It
     // is excluded here, and nothing else in the tree - no text node, no title,
     // no data attribute, no hidden input - is allowed to carry it.
-    const field = screen.getByLabelText("Customer reference");
+    const field = screen.getByLabelText("고객 참조값");
     const elsewhere = Array.from(container.querySelectorAll("*")).filter((element) => {
       if (element === field) {
         return false;
@@ -947,7 +947,7 @@ describe("TransactionListPage validation refusal focus", () => {
  * destination's location does and does not hold.
  */
 describe("TransactionListPage detail navigation", () => {
-  const detailLinkName = `View details for transaction ${TRANSACTION_ID}`;
+  const detailLinkName = `거래 상세 보기 ${TRANSACTION_ID}`;
 
   async function showRows(
     content: readonly Record<string, unknown>[] = [listItem()],
@@ -970,7 +970,7 @@ describe("TransactionListPage detail navigation", () => {
     expect(links[0]).toHaveAccessibleName(detailLinkName);
     expect(links[0]).toHaveAttribute("href", `/transactions/${TRANSACTION_ID}`);
     expect(links[1]).toHaveAccessibleName(
-      `View details for transaction ${SECOND_TRANSACTION_ID}`,
+      `거래 상세 보기 ${SECOND_TRANSACTION_ID}`,
     );
     expect(links[1]).toHaveAttribute("href", `/transactions/${SECOND_TRANSACTION_ID}`);
   });
@@ -1010,7 +1010,7 @@ describe("TransactionListPage detail navigation", () => {
     // hidden element or an attribute.
     const sheet = screen.getByRole("table");
     expect(sheet.innerHTML.split(TRANSACTION_ID).length - 1).toBe(2);
-    const idCell = within(screen.getByRole("row", { name: /account transfer/i })).getAllByRole(
+    const idCell = within(screen.getByRole("row", { name: /계좌 이체/i })).getAllByRole(
       "cell",
     )[4];
     expect(idCell.className).toContain("cell-ref--id");
@@ -1067,7 +1067,7 @@ describe("TransactionListPage detail navigation", () => {
   it("keeps the row a record rather than a control", async () => {
     await showRows();
 
-    const row = screen.getByRole("row", { name: /account transfer/i });
+    const row = screen.getByRole("row", { name: /계좌 이체/i });
     expect(row.tagName).toBe("TR");
     expect(row.getAttribute("role")).toBeNull();
     expect(row.getAttribute("tabindex")).toBeNull();
@@ -1083,7 +1083,7 @@ describe("TransactionListPage detail navigation", () => {
     const user = userEvent.setup();
     await showRows();
 
-    const row = screen.getByRole("row", { name: /account transfer/i });
+    const row = screen.getByRole("row", { name: /계좌 이체/i });
     await user.click(within(row).getAllByRole("cell")[1]);
 
     expect(screen.queryByText("Detail probe")).not.toBeInTheDocument();

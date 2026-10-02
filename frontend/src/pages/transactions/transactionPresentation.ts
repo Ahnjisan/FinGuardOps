@@ -252,7 +252,7 @@ export const WRAPPING_REFERENCE_LENGTH = 20;
  * detail screen have to say the same thing about the same absence, and a word
  * that drifts between them would read as two different states of the record.
  */
-export const ABSENT_REFERENCE_LABEL = "None recorded";
+export const ABSENT_REFERENCE_LABEL = "기록 없음";
 
 export function describeReference(value: string | null): ReferenceDisplay {
   if (value === null) {
@@ -268,10 +268,10 @@ export function describeReference(value: string | null): ReferenceDisplay {
 /** Plain-language names for the Backend transaction types. */
 export const TRANSACTION_TYPE_LABELS: Readonly<Record<TransactionType, string>> =
   Object.freeze({
-    ACCOUNT_TRANSFER: "Account transfer",
-    OPEN_BANKING_TRANSFER: "Open banking transfer",
-    ATM_WITHDRAWAL: "ATM withdrawal",
-    LOAN_DISBURSED: "Loan disbursed",
+    ACCOUNT_TRANSFER: "계좌 이체",
+    OPEN_BANKING_TRANSFER: "오픈뱅킹 이체",
+    ATM_WITHDRAWAL: "ATM 출금",
+    LOAN_DISBURSED: "대출 실행",
   });
 
 /**
@@ -284,10 +284,10 @@ export const TRANSACTION_TYPE_LABELS: Readonly<Record<TransactionType, string>> 
  */
 export const TRANSACTION_CHANNEL_LABELS: Readonly<Record<TransactionChannel, string>> =
   Object.freeze({
-    MOBILE_BANKING: "Mobile banking",
-    OPEN_BANKING: "Open banking",
+    MOBILE_BANKING: "모바일뱅킹",
+    OPEN_BANKING: "오픈뱅킹",
     ATM: "ATM",
-    CORE_BANKING: "Core banking",
+    CORE_BANKING: "코어뱅킹",
   });
 
 /**
@@ -301,13 +301,13 @@ export const TRANSACTION_CHANNEL_LABELS: Readonly<Record<TransactionChannel, str
 export const PROCESSING_STATUS_LABELS: Readonly<
   Record<TransactionProcessingStatus, string>
 > = Object.freeze({
-  RECEIVED: "Received",
-  ANALYZING: "Analyzing",
-  ANALYZED: "Analyzed",
-  APPROVED: "Approved",
-  ADDITIONAL_AUTH_REQUIRED: "Auth required",
-  HELD: "Held",
-  FAILED: "Failed",
+  RECEIVED: "접수",
+  ANALYZING: "분석 중",
+  ANALYZED: "분석 완료",
+  APPROVED: "승인",
+  ADDITIONAL_AUTH_REQUIRED: "인증 필요",
+  HELD: "보류",
+  FAILED: "실패",
 });
 
 /**

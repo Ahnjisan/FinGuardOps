@@ -55,12 +55,12 @@ export function TransactionTable({ items, sort, onSortChange }: TransactionTable
       <div
         className="sheet__scroll"
         role="region"
-        aria-label="Transaction results, scrollable"
+        aria-label="거래 결과, 가로로 스크롤 가능"
         tabIndex={0}
       >
         <table>
           <caption className="visually-hidden">
-            Transactions matching the applied filters, sorted by occurrence time.
+            적용된 필터에 맞는 거래를 발생 시각순으로 표시합니다.
           </caption>
           <thead>
             <tr>
@@ -72,37 +72,37 @@ export function TransactionTable({ items, sort, onSortChange }: TransactionTable
                     onSortChange(descending ? "occurredAt,asc" : "occurredAt,desc");
                   }}
                 >
-                  Occurred (KST)
+                  발생(KST)
                   <span className="sheet__sort-mark" aria-hidden="true">
                     {descending ? "▼" : "▲"}
                   </span>
                   <span className="visually-hidden">
                     {descending
-                      ? ", newest first. Activate to show oldest first."
-                      : ", oldest first. Activate to show newest first."}
+                      ? ", 최신순. 오래된순으로 바꾸려면 누르세요."
+                      : ", 오래된순. 최신순으로 바꾸려면 누르세요."}
                   </span>
                 </button>
               </th>
               <th scope="col">
-                <span className="sheet__heading">Type</span>
+                <span className="sheet__heading">유형</span>
               </th>
               <th scope="col" className="is-numeric">
-                <span className="sheet__heading">Amount</span>
+                <span className="sheet__heading">금액</span>
               </th>
               <th scope="col">
-                <span className="sheet__heading">Processing status</span>
+                <span className="sheet__heading">처리 상태</span>
               </th>
               <th scope="col">
-                <span className="sheet__heading">Transaction ID</span>
+                <span className="sheet__heading">거래 ID</span>
               </th>
               <th scope="col">
-                <span className="sheet__heading">Customer</span>
+                <span className="sheet__heading">고객</span>
               </th>
               <th scope="col">
-                <span className="sheet__heading">From account</span>
+                <span className="sheet__heading">출금 계좌</span>
               </th>
               <th scope="col">
-                <span className="sheet__heading">To account</span>
+                <span className="sheet__heading">입금 계좌</span>
               </th>
             </tr>
           </thead>
@@ -132,7 +132,7 @@ function TransactionRow({ item }: { readonly item: TransactionListItem }) {
         */}
         <time dateTime={item.occurredAt}>{occurred} KST</time>
         <small>
-          Recorded <time dateTime={item.createdAt}>{recorded}</time>
+          기록 <time dateTime={item.createdAt}>{recorded}</time>
         </small>
       </td>
       <td>{TRANSACTION_TYPE_LABELS[item.transactionType]}</td>
@@ -155,7 +155,7 @@ function TransactionRow({ item }: { readonly item: TransactionListItem }) {
           identifier; it repeats no value, so the id is still in the DOM once.
         */}
         <Link className="cell-ref__link" to={`/transactions/${item.transactionId}`}>
-          <span className="visually-hidden">View details for transaction</span>{" "}
+          <span className="visually-hidden">거래 상세 보기</span>{" "}
           {item.transactionId}
         </Link>
       </td>
