@@ -6528,8 +6528,8 @@ const CONSOLE_VIEWPORTS: readonly {
   readonly railWidth: number;
   readonly filterColumns: number;
 }[] = [
-  { width: 1440, height: 900, railWidth: 240, filterColumns: 4 },
-  { width: 1280, height: 800, railWidth: 208, filterColumns: 3 },
+  { width: 1440, height: 900, railWidth: 240, filterColumns: 2 },
+  { width: 1280, height: 800, railWidth: 208, filterColumns: 2 },
   { width: 1024, height: 768, railWidth: 180, filterColumns: 2 },
 ];
 
