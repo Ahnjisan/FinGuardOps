@@ -278,6 +278,10 @@ export function CaseDetailPage() {
         </p>
       </div>
 
+      {caseId !== null && state.status === "success" && (
+        <CaseAtAGlance detail={state.data} />
+      )}
+
       {/*
         Named, because both subordinate sections have live regions of their own.
       */}
@@ -306,26 +310,28 @@ export function CaseDetailPage() {
         <p className="loading-panel">사건을 불러오고 있습니다…</p>
       )}
 
-      {caseId !== null && state.status === "success" && <CaseRecord detail={state.data} />}
-
       {caseId !== null && state.status === "success" && (
-        <CaseWorkflowSection
-          detail={state.data}
-          reconciliationGeneration={reconciliationGeneration}
-          detailRefreshState={refreshState}
-          onReconcile={reconcileWorkflowMutation}
-        />
-      )}
-
-      {caseId !== null && state.status === "success" && refreshState === "failed" && (
-        <div className="notice notice--error case-detail__refresh" role="alert">
-          <h3 className="notice__title">최신 사건 정보를 불러올 수 없습니다</h3>
-          <p className="notice__body">
-            직전 변경 결과는 확인되지 않았습니다. 다른 작업 전에 사건 정보를 새로고침하세요.
-          </p>
-          <button className="button" type="button" onClick={() => refresh()}>
-            <Icon name="refresh" />사건 정보 새로고침
-          </button>
+        <div className="case-detail__workspace">
+          <CaseRecord detail={state.data} />
+          <div className="case-detail__work-area">
+            <CaseWorkflowSection
+              detail={state.data}
+              reconciliationGeneration={reconciliationGeneration}
+              detailRefreshState={refreshState}
+              onReconcile={reconcileWorkflowMutation}
+            />
+            {refreshState === "failed" && (
+              <div className="notice notice--error case-detail__refresh" role="alert">
+                <h3 className="notice__title">최신 사건 정보를 불러올 수 없습니다</h3>
+                <p className="notice__body">
+                  직전 변경 결과는 확인되지 않았습니다. 다른 작업 전에 사건 정보를 새로고침하세요.
+                </p>
+                <button className="button" type="button" onClick={() => refresh()}>
+                  <Icon name="refresh" />사건 정보 새로고침
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -387,6 +393,37 @@ function DetailSummary({
   return null;
 }
 
+/** The three contracted facts that orient a reader before the full record. */
+export function CaseAtAGlance({ detail }: { readonly detail: CaseDetail }) {
+  const assignee = describeReference(detail.assigneeRef);
+
+  return (
+    <dl className="case-detail__glance" aria-label="사건 요약">
+      <div className="case-detail__glance-item">
+        <dt>사건 상태</dt>
+        <dd>
+          <span className={`badge badge--${caseStatusTone(detail.caseStatus)}`}>
+            <span className="badge__mark" aria-hidden="true" />
+            {CASE_STATUS_LABELS[detail.caseStatus]}
+          </span>
+        </dd>
+      </div>
+      <div className="case-detail__glance-item">
+        <dt>최종 판정</dt>
+        <dd>{detail.finalDisposition === null
+          ? <span className="facts__absent">{NOT_DECIDED_LABEL}</span>
+          : CASE_FINAL_DISPOSITION_LABELS[detail.finalDisposition]}</dd>
+      </div>
+      <div className="case-detail__glance-item">
+        <dt>담당자</dt>
+        <dd className="facts__ref">{assignee.absent
+          ? <span className="facts__absent">{UNASSIGNED_LABEL}</span>
+          : assignee.text}</dd>
+      </div>
+    </dl>
+  );
+}
+
 /**
  * The record itself, as three sections of definitions.
  *
@@ -396,7 +433,7 @@ function DetailSummary({
  * one value, and wrapping each pair in its own bordered surface would add
  * decoration without adding a single fact.
  */
-function CaseRecord({ detail }: { readonly detail: CaseDetail }) {
+export function CaseRecord({ detail }: { readonly detail: CaseDetail }) {
   const tone = caseStatusTone(detail.caseStatus);
   const assignee = describeReference(detail.assigneeRef);
 
@@ -452,7 +489,7 @@ function CaseRecord({ detail }: { readonly detail: CaseDetail }) {
       </section>
 
       <section className="panel" aria-labelledby="case-timeline-heading">
-        <h3 id="case-timeline-heading">조사 타임라인</h3>
+        <h3 id="case-timeline-heading">사건 시각</h3>
         <dl className="facts">
           <dt>생성</dt>
           <dd>

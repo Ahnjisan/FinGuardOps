@@ -347,7 +347,11 @@ async function showRecord(overrides: Record<string, unknown> = {}): Promise<void
 
 /** The `<dd>` that follows the named `<dt>`. */
 function valueOf(term: string): HTMLElement {
-  const dt = screen.getByText(term, { selector: "dt" });
+  const record = document.querySelector(".detail__record");
+  if (!(record instanceof HTMLElement)) {
+    throw new Error("No case record found");
+  }
+  const dt = within(record).getByText(term, { selector: "dt" });
   const dd = dt.nextElementSibling;
   if (!(dd instanceof HTMLElement) || dd.tagName !== "DD") {
     throw new Error(`No value found for ${term}`);
@@ -405,6 +409,21 @@ describe("CaseDetailPage request", () => {
 });
 
 describe("CaseDetailPage record", () => {
+  it("places only the current status, disposition and assignee below the title", async () => {
+    await showRecord({ finalDisposition: null, assigneeRef: null });
+
+    const summary = document.querySelector(".case-detail__glance");
+    if (!(summary instanceof HTMLElement)) throw new Error("No case summary found");
+    expect(Array.from(summary.querySelectorAll("dt"), (term) => term.textContent)).toEqual([
+      "사건 상태", "최종 판정", "담당자",
+    ]);
+    expect(summary).toHaveTextContent("미결정");
+    expect(summary).toHaveTextContent("미배정");
+    const workspace = document.querySelector(".case-detail__workspace");
+    expect(workspace?.firstElementChild).toHaveClass("detail__record");
+    expect(workspace?.lastElementChild).toHaveClass("case-detail__work-area");
+  });
+
   it("shows every field the detail contract carries, and only those", async () => {
     await showRecord();
 
@@ -421,14 +440,14 @@ describe("CaseDetailPage record", () => {
 
     // Ten names for the ten contract fields. An eleventh would be a field this
     // console invented.
-    expect(document.querySelectorAll("dt")).toHaveLength(10);
-    expect(document.querySelectorAll("dd")).toHaveLength(10);
+    expect(document.querySelectorAll(".detail__record dt")).toHaveLength(10);
+    expect(document.querySelectorAll(".detail__record dd")).toHaveLength(10);
   });
 
   it("never names a field the contract does not carry", async () => {
     await showRecord();
 
-    const terms = Array.from(document.querySelectorAll("dt")).map((dt) => dt.textContent);
+    const terms = Array.from(document.querySelectorAll(".detail__record dt")).map((dt) => dt.textContent);
     expect(terms).toEqual([
       "사건 ID",
       "사건 상태",
@@ -505,7 +524,7 @@ describe("CaseDetailPage record", () => {
     expect(valueOf("검토 시작")).toHaveTextContent("시작 전");
     expect(valueOf("종결")).toHaveTextContent("종결 전");
     // Still ten fields: a null is a value with a name, not a row that vanishes.
-    expect(document.querySelectorAll("dd")).toHaveLength(10);
+    expect(document.querySelectorAll(".detail__record dd")).toHaveLength(10);
   });
 
   it.each([
@@ -547,7 +566,7 @@ describe("CaseDetailPage record", () => {
     expect(disposition.querySelector(".badge")).toBeNull();
   });
 
-  it("prints a 128-character assignee reference in full in the record and workflow, and nowhere else", async () => {
+  it("prints a 128-character assignee reference in the summary, record and workflow, and nowhere else", async () => {
     await showRecord({ assigneeRef: LONG_ASSIGNEE_REF });
 
     expect(LONG_ASSIGNEE_REF).toHaveLength(128);
@@ -557,10 +576,10 @@ describe("CaseDetailPage record", () => {
     // own column instead of widening the document.
     expect(assignee.className).toContain("facts__ref");
 
-    // Once as text, and not repeated into a title, an aria-label, a hidden
-    // element or a data attribute.
+    // Once in each visible location, and not in a title, aria-label, hidden
+    // element or data attribute.
     const occurrences = document.body.innerHTML.split(LONG_ASSIGNEE_REF).length - 1;
-    expect(occurrences).toBe(2);
+    expect(occurrences).toBe(3);
     for (const element of Array.from(document.querySelectorAll("*"))) {
       for (const attribute of Array.from(element.attributes)) {
         expect(attribute.value).not.toContain(LONG_ASSIGNEE_REF);
@@ -691,7 +710,7 @@ describe("CaseDetailPage record", () => {
     const sections = screen.getAllByRole("heading", { level: 3 }).map((h) => h.textContent);
     expect(sections).toEqual([
       "사건",
-      "조사 타임라인",
+      "사건 시각",
       "기록 정보",
       "사건 처리",
       "조사 메모",

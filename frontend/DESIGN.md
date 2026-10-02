@@ -11,3 +11,11 @@ The console is a light financial work surface. Navigation, filters, results, and
 - **Language and icons:** use concise Korean for navigation, controls, states, and accessible names. Preserve IDs, user content, Backend codes, and audit identifiers as recorded. A small local SVG set supports navigation and primary actions; visible text remains beside every icon.
 - **Metrics:** the current list APIs return `totalElements` for the active query and Health returns service status. Neither is a period series or an unfiltered dashboard measure. Do not present a page of rows as an overall count or draw a trend without a contracted aggregate endpoint.
 - **Responsive:** desktop keeps a persistent side navigation. Below 1024px it becomes a wrapping top navigation. Filters stack progressively; the document itself stays within the viewport at 1440, 1280, 1024, and 390px. On phones, case ID and state are visible before horizontal table scrolling; all remaining columns stay accessible inside the labelled table region.
+
+## Case detail (Issue #320, second PR)
+
+- The page heading names the case ID. A compact summary immediately below it repeats only the actual case status, final disposition and assignee. Nullable values say `미결정` or `미배정`; status retains its written label and mark.
+- At 1440px and 1280px, case record and authorized case actions occupy two columns. At 1024px and 390px they stack. The document and keyboard order remain record, actions, investigation notes, audit history. A viewer with no case actions gets the full record width.
+- The record keeps every contracted field. Its four date fields are headed `사건 시각`; they do not represent a behavior timeline. The related transaction count stays a count, not a link to an unimplemented list.
+- Notes and audit history each use a full-width panel with their own loading, empty, error, retry and paging states. Long IDs, note text and audit summaries wrap in place without truncation or whole-document horizontal scrolling.
+- Existing role capabilities, write eligibility, mutation reconciliation, focus behavior and accessible control names remain authoritative. No score, AI report, chart or invented transaction detail is displayed.
