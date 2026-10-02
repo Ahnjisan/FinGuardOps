@@ -46,7 +46,7 @@ export function TransactionTable({ items, sort, onSortChange }: TransactionTable
   const descending = sort === "occurredAt,desc";
 
   return (
-    <div className="sheet">
+    <div className="sheet sheet--transactions">
       {/*
         A scroll container that the keyboard can reach. Below the console's
         design width the sheet scrolls sideways rather than dropping columns:
@@ -64,6 +64,8 @@ export function TransactionTable({ items, sort, onSortChange }: TransactionTable
           </caption>
           <thead>
             <tr>
+              <th scope="col"><span className="sheet__heading">거래 ID</span></th>
+              <th scope="col"><span className="sheet__heading">처리 상태</span></th>
               <th scope="col" aria-sort={descending ? "descending" : "ascending"}>
                 <button
                   className="sheet__sort"
@@ -88,12 +90,6 @@ export function TransactionTable({ items, sort, onSortChange }: TransactionTable
               </th>
               <th scope="col" className="is-numeric">
                 <span className="sheet__heading">금액</span>
-              </th>
-              <th scope="col">
-                <span className="sheet__heading">처리 상태</span>
-              </th>
-              <th scope="col">
-                <span className="sheet__heading">거래 ID</span>
               </th>
               <th scope="col">
                 <span className="sheet__heading">고객</span>
@@ -124,6 +120,18 @@ function TransactionRow({ item }: { readonly item: TransactionListItem }) {
 
   return (
     <tr>
+      <td className="cell-ref cell-ref--id">
+        <Link className="cell-ref__link" to={`/transactions/${item.transactionId}`}>
+          <span className="visually-hidden">거래 상세 보기</span>{" "}
+          {item.transactionId}
+        </Link>
+      </td>
+      <td>
+        <span className={`badge badge--${tone}`}>
+          <span className="badge__mark" aria-hidden="true" />
+          {PROCESSING_STATUS_LABELS[item.processingStatus]}
+        </span>
+      </td>
       <td className="cell-time">
         {/*
           The machine-readable value is the untouched UTC instant the Backend
@@ -139,25 +147,6 @@ function TransactionRow({ item }: { readonly item: TransactionListItem }) {
       <td className="cell-amount">
         <b>{formatAmountDigits(item.amount)}</b>
         <span>{item.currencyCode}</span>
-      </td>
-      <td>
-        <span className={`badge badge--${tone}`}>
-          <span className="badge__mark" aria-hidden="true" />
-          {PROCESSING_STATUS_LABELS[item.processingStatus]}
-        </span>
-      </td>
-      <td className="cell-ref cell-ref--id">
-        {/*
-          An ordinary anchor produced by `Link`: no `state`, no `onClick` of our
-          own, and no `preventDefault`, so Ctrl-click, middle click, Shift-click
-          and "Open in new tab" all behave exactly as the browser intends. The
-          visually hidden prefix is what a screen reader announces before the
-          identifier; it repeats no value, so the id is still in the DOM once.
-        */}
-        <Link className="cell-ref__link" to={`/transactions/${item.transactionId}`}>
-          <span className="visually-hidden">거래 상세 보기</span>{" "}
-          {item.transactionId}
-        </Link>
       </td>
       <ReferenceCell value={item.externalCustomerRef} />
       <ReferenceCell value={item.senderAccountRef} />

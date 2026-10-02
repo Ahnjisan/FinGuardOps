@@ -777,7 +777,8 @@ ul.notice__body li + li {
   font-size: 14px;
 }
 
-.case-results-head {
+.case-results-head,
+.transaction-results-head {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
@@ -786,11 +787,13 @@ ul.notice__body li + li {
   margin: var(--space-3) 0 var(--space-4);
 }
 
-.case-results-head h3 {
+.case-results-head h3,
+.transaction-results-head h3 {
   font-size: 21px;
 }
 
-.case-results-head .result-line {
+.case-results-head .result-line,
+.transaction-results-head .result-line {
   margin: 0;
 }
 
@@ -905,6 +908,26 @@ ul.notice__body li + li {
    document itself never scrolls. */
 .sheet--cases table {
   min-width: 980px;
+}
+
+/* A transaction remains identifiable before the narrow sheet is scrolled. */
+.sheet--transactions th:first-child,
+.sheet--transactions td:first-child {
+  min-width: 162px;
+}
+
+.sheet--transactions th:nth-child(2),
+.sheet--transactions td:nth-child(2) {
+  min-width: 142px;
+}
+
+.sheet--transactions tbody td:first-child {
+  background: #fbfcff;
+}
+
+.sheet--transactions tbody tr:hover td:first-child,
+.sheet--transactions tbody tr:focus-within td:first-child {
+  background: var(--primary-wash);
 }
 
 .sheet--cases th:first-child,
@@ -1997,7 +2020,8 @@ ul.notice__body li + li {
     gap: 18px;
   }
 
-  .case-results-head {
+  .case-results-head,
+  .transaction-results-head {
     align-items: flex-start;
     flex-direction: column;
     gap: 4px;

@@ -11,6 +11,7 @@ import { Icon } from "../../shared/Icon";
 
 export interface TransactionFiltersProps {
   readonly draft: TransactionFilterDraft;
+  readonly appliedDraft: TransactionFilterDraft;
   readonly onDraftChange: (draft: TransactionFilterDraft) => void;
   readonly onApply: () => void;
   readonly onReset: () => void;
@@ -20,11 +21,13 @@ export interface TransactionFiltersProps {
 
 export function TransactionFilters({
   draft,
+  appliedDraft,
   onDraftChange,
   onApply,
   onReset,
   hasPendingEdits,
 }: TransactionFiltersProps) {
+  const hasAppliedTimeRange = Boolean(appliedDraft.occurredAtFrom || appliedDraft.occurredAtTo);
   const update = <TKey extends keyof TransactionFilterDraft>(
     key: TKey,
     value: string,
@@ -44,10 +47,14 @@ export function TransactionFilters({
         onApply();
       }}
     >
-      <h3 id="filters-heading" className="visually-hidden">
-        거래 필터
-      </h3>
-      <div className="filters__grid">
+      <h3 id="filters-heading" className="filters__title">검색 및 필터</h3>
+      <details className="filters__advanced">
+        <summary>
+          기간 필터 <span>{hasAppliedTimeRange
+            ? `적용됨: ${appliedDraft.occurredAtFrom ? `${appliedDraft.occurredAtFrom.replace("T", " ")}부터` : "시작 제한 없음"} · ${appliedDraft.occurredAtTo ? `${appliedDraft.occurredAtTo.replace("T", " ")} 전까지` : "끝 제한 없음"} (KST)`
+            : "발생 기간 선택"}</span>
+        </summary>
+        <div className="filters__time-grid">
         <fieldset className="field-group field-group--wide">
           <legend className="field-group__legend">발생 기간</legend>
           <div className="field-group__fields field-group__fields--pair">
@@ -86,6 +93,9 @@ export function TransactionFilters({
             한국 표준시(UTC+09:00)로 입력하며 서버에는 UTC로 전달합니다.
           </p>
         </fieldset>
+        </div>
+      </details>
+      <div className="filters__grid">
 
         <fieldset className="field-group">
           <legend className="field-group__legend">분류</legend>

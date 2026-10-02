@@ -9596,6 +9596,78 @@ const CASE_NOTES_GEOMETRY_URL =
   `${APP_ORIGIN}/e2e/case-investigation-notes-geometry.html`;
 const CASE_RESOLUTION_GEOMETRY_URL = `${APP_ORIGIN}/e2e/case-resolution-geometry.html`;
 const CASE_DETAIL_GEOMETRY_URL = `${APP_ORIGIN}/e2e/case-detail-geometry.html`;
+const TRANSACTION_LIST_GEOMETRY_URL = `${APP_ORIGIN}/e2e/transaction-list-geometry.html`;
+
+test("synthetic transaction list keeps its first two columns visible and its disclosure operable", async ({ page }) => {
+  const offOrigin: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).origin !== APP_ORIGIN) offOrigin.push(request.url());
+  });
+  await page.goto(TRANSACTION_LIST_GEOMETRY_URL);
+  const region = page.getByRole("region", { name: "거래 결과, 가로로 스크롤 가능" });
+  const table = region.getByRole("table");
+  await expect(table).toBeVisible();
+  await expect(table.getByRole("columnheader")).toHaveCount(8);
+  await expect(table.getByRole("columnheader").nth(0)).toHaveText("거래 ID");
+  await expect(table.getByRole("columnheader").nth(1)).toHaveText("처리 상태");
+  await expect(table.locator("tbody tr:first-child td")).toHaveCount(8);
+  await expect(table.locator("tbody tr:first-child td").nth(1)).toHaveText("인증 필요");
+  const longReference = "geometry-reference-".repeat(6).slice(0, 128);
+  for (const index of [5, 6, 7]) {
+    await expect(table.locator("tbody tr:first-child td").nth(index)).toHaveText(longReference);
+  }
+  const summary = page.locator(".filters__advanced summary");
+  await expect(summary).toContainText("발생 기간 선택");
+  await summary.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".filters__advanced")).toHaveAttribute("open", "");
+  await page.getByLabel("시작(KST)").fill("2026-01-01T00:00");
+  await page.getByRole("button", { name: "필터 적용" }).click();
+  await summary.focus();
+  await page.keyboard.press("Space");
+  await expect(page.locator(".filters__advanced")).not.toHaveAttribute("open", "");
+  await expect(summary).toContainText("적용됨: 2026-01-01 00:00부터 · 끝 제한 없음 (KST)");
+  for (const viewport of [...CONSOLE_VIEWPORTS, { width: 390, height: 844 }]) {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    const geometry = await page.evaluate(() => {
+      const scroll = document.querySelector<HTMLElement>(".sheet--transactions .sheet__scroll");
+      const cells = document.querySelectorAll<HTMLElement>(".sheet--transactions tbody tr:first-child td");
+      if (!scroll || cells.length !== 8) return null;
+      return {
+        documentWidth: document.documentElement.scrollWidth,
+        viewportWidth: document.documentElement.clientWidth,
+        scrollWidth: scroll.scrollWidth,
+        scrollClientWidth: scroll.clientWidth,
+        firstLeft: cells[0].getBoundingClientRect().left,
+        secondRight: cells[1].getBoundingClientRect().right,
+        containerLeft: scroll.getBoundingClientRect().left,
+        containerRight: scroll.getBoundingClientRect().right,
+        hiddenCells: [...cells].filter((cell) => getComputedStyle(cell).display === "none").length,
+      };
+    });
+    requireCondition(geometry !== null, "The transaction table was absent.");
+    requireCondition(geometry.documentWidth <= geometry.viewportWidth + 1,
+      `The transaction document overflowed at ${String(viewport.width)}px.`);
+    requireCondition(geometry.hiddenCells === 0,
+      `A transaction column was hidden at ${String(viewport.width)}px.`);
+    requireCondition(geometry.firstLeft >= geometry.containerLeft - 1 &&
+      geometry.secondRight <= geometry.containerRight + 1,
+    `Transaction ID or status required scrolling at ${String(viewport.width)}px.`);
+    if (viewport.width <= 1024) {
+      requireCondition(geometry.scrollWidth > geometry.scrollClientWidth,
+        `The transaction table did not scroll internally at ${String(viewport.width)}px.`);
+    }
+  }
+  await region.evaluate((scroll) => { scroll.scrollLeft = scroll.scrollWidth; });
+  const lastColumnVisible = await region.evaluate((scroll) => {
+    const last = scroll.querySelector("tbody tr:first-child td:last-child");
+    return last !== null && last.getBoundingClientRect().right <= scroll.getBoundingClientRect().right + 1;
+  });
+  requireCondition(lastColumnVisible, "The last transaction column stayed outside the scroll region.");
+  await region.focus();
+  await expect(region).toBeFocused();
+  requireCondition(offOrigin.length === 0, "The synthetic transaction fixture made an external request.");
+});
 
 /** The 128-character assignee reference the fixture renders. Backend's bound. */
 const GEOMETRY_ASSIGNEE_REF =

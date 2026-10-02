@@ -19,3 +19,10 @@ The console is a light financial work surface. Navigation, filters, results, and
 - The record keeps every contracted field. Its four date fields are headed `사건 시각`; they do not represent a behavior timeline. The related transaction count stays a count, not a link to an unimplemented list.
 - Notes and audit history each use a full-width panel with their own loading, empty, error, retry and paging states. Long IDs, note text and audit summaries wrap in place without truncation or whole-document horizontal scrolling.
 - Existing role capabilities, write eligibility, mutation reconciliation, focus behavior and accessible control names remain authoritative. No score, AI report, chart or invented transaction detail is displayed.
+
+## Transaction list (Issue #320, next PR)
+
+- Keep the existing eight transaction columns and values. Place transaction ID and written processing status first so both are visible before scrolling at 390px. The remaining columns stay available in a labelled, keyboard-reachable horizontal scroll region.
+- Put the visible search heading and query-specific result count around the filters, table and pager in reading order. The count is `totalElements` for the active query, never an unfiltered metric.
+- Use a native period disclosure. Its summary shows the applied KST start/end values even when closed; draft changes do not claim to be applied. Enter and Space operate the disclosure, while Apply still converts KST to UTC and resets the page.
+- Preserve exact identifiers, references, amount and time. Processing status describes the pipeline, not risk. The list has no case ID, score, evidence, trend or period aggregate.
