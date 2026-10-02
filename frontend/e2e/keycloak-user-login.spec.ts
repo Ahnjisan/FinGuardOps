@@ -8879,7 +8879,10 @@ test("a real USER works the Run fixture case through review, a note and the audi
     ).toBeVisible();
     const transactionMain = page.getByRole("main");
     await expect(factValue(transactionMain, "거래 ID")).toHaveText(fixture.transactionId);
-    await expect(factValue(transactionMain, "처리 상태")).toHaveText("인증 필요");
+    const transactionRecord = transactionMain.locator(".transaction-detail__record");
+    const transactionGlance = transactionMain.locator('dl[aria-label="거래 요약"]');
+    await expect(factValue(transactionRecord, "처리 상태")).toHaveText("인증 필요");
+    await expect(factValue(transactionGlance, "처리 상태")).toHaveText("인증 필요");
     const transactionScreen = (await transactionMain.textContent()) ?? "";
     for (const unclaimed of ["HIGH", "위험 수준", "risk level", fixture.caseId]) {
       requireCondition(
