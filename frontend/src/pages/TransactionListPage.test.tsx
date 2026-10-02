@@ -210,13 +210,14 @@ describe("TransactionListPage data", () => {
     const row = await screen.findByRole("row", { name: /계좌 이체/i });
     const cells = within(row).getAllByRole("cell");
 
-    expect(cells[0]).toHaveTextContent("2026-07-23 10:15:30 KST");
-    expect(cells[0]).toHaveTextContent("기록 2026-07-23 10:15");
-    expect(cells[1]).toHaveTextContent("계좌 이체");
-    expect(cells[2]).toHaveTextContent("1,250,000");
-    expect(cells[2]).toHaveTextContent("KRW");
-    expect(cells[3]).toHaveTextContent("인증 필요");
-    expect(cells[4]).toHaveTextContent(TRANSACTION_ID);
+    expect(cells).toHaveLength(8);
+    expect(cells[0]).toHaveTextContent(TRANSACTION_ID);
+    expect(cells[1]).toHaveTextContent("인증 필요");
+    expect(cells[2]).toHaveTextContent("2026-07-23 10:15:30 KST");
+    expect(cells[2]).toHaveTextContent("기록 2026-07-23 10:15");
+    expect(cells[3]).toHaveTextContent("계좌 이체");
+    expect(cells[4]).toHaveTextContent("1,250,000");
+    expect(cells[4]).toHaveTextContent("KRW");
     expect(cells[5]).toHaveTextContent("cust_ref_demo_a7f2");
     expect(cells[6]).toHaveTextContent("acct_ref_demo_s91c");
     expect(cells[7]).toHaveTextContent("acct_ref_demo_r44d");
@@ -383,6 +384,12 @@ describe("TransactionListPage draft and committed filters", () => {
     // Sent exactly as typed: not trimmed, not case folded.
     expect(query.get("accountRef")).toBe(" acct with spaces ");
     expect(query.get("page")).toBe("0");
+    const summary = screen.getByText(/기간 필터/).closest("summary");
+    expect(summary).toHaveTextContent("적용됨: 2026-07-23 10:15부터 · 2026-07-24 10:15 전까지 (KST)");
+    fireEvent.change(screen.getByLabelText("시작(KST)"), {
+      target: { value: "2026-07-22T10:15" },
+    });
+    expect(summary).toHaveTextContent("적용됨: 2026-07-23 10:15부터");
   }, 20_000);
 
   it("refuses a reversed time range without sending anything", async () => {
@@ -1012,7 +1019,7 @@ describe("TransactionListPage detail navigation", () => {
     expect(sheet.innerHTML.split(TRANSACTION_ID).length - 1).toBe(2);
     const idCell = within(screen.getByRole("row", { name: /계좌 이체/i })).getAllByRole(
       "cell",
-    )[4];
+    )[0];
     expect(idCell.className).toContain("cell-ref--id");
     expect(within(idCell).getByRole("link")).toHaveAttribute(
       "href",

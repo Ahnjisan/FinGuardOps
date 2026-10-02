@@ -327,14 +327,18 @@ export function TransactionListPage() {
 
       <TransactionFilters
         draft={draft}
+        appliedDraft={appliedDraft}
         onDraftChange={setDraft}
         onApply={apply}
         onReset={reset}
         hasPendingEdits={hasPendingEdits}
       />
 
-      <div className="result-line" role="status" aria-live="polite">
-        <ResultSummary state={state} />
+      <div className="transaction-results-head">
+        <h3>거래 조회 결과</h3>
+        <div className="result-line" role="status" aria-live="polite">
+          <ResultSummary state={state} />
+        </div>
       </div>
 
       {problems.length > 0 && (
