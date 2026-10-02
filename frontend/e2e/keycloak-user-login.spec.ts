@@ -6669,7 +6669,9 @@ test("a real USER reaches the transaction console over the real Backend", async 
 
   // The capability navigation, decided from the real role claim of a real
   // Keycloak session rather than from a fixture.
-  const transactionsLink = page.getByRole("link", { name: "거래" });
+  const transactionsLink = page
+    .getByRole("navigation", { name: "주요 탐색" })
+    .getByRole("link", { name: "거래", exact: true });
   await expect(transactionsLink).toBeVisible();
   await transactionsLink.click();
   await page.waitForFunction((expected) => window.location.href === expected, `${APP_ORIGIN}/transactions`);
@@ -7158,7 +7160,9 @@ test("a real USER reaches the case console over the real Backend", async ({ page
 
   // The case navigation, decided from the real role claim of a real Keycloak
   // session rather than from a fixture.
-  const casesLink = page.getByRole("link", { name: "사건" });
+  const casesLink = page
+    .getByRole("navigation", { name: "주요 탐색" })
+    .getByRole("link", { name: "사건", exact: true });
   await expect(casesLink).toBeVisible();
   await casesLink.click();
   await page.waitForFunction((expected) => window.location.href === expected, `${APP_ORIGIN}/cases`);
@@ -9030,7 +9034,7 @@ test("a real USER works the Run fixture case through review, a note and the audi
     await expect(factValue(record, "사건 ID")).toHaveText(fixture.caseId);
     await expect(factValue(record, "사건 상태")).toHaveText("접수");
     await expect(factValue(record, "담당자")).toHaveText("미배정");
-    await expect(factValue(record, "동시성 버전")).toHaveText(String(v0));
+    await expect(factValue(record, "버전")).toHaveText(String(v0));
     await expect(
       notesSection.getByText("이 사건은 접수 상태이므로 메모를 추가할 수 없습니다.", { exact: true }),
     ).toBeVisible();
@@ -9173,7 +9177,7 @@ test("a real USER works the Run fixture case through review, a note and the audi
       "The refused transition changed the business audit trail.",
     );
     await expect(factValue(record, "사건 상태")).toHaveText("접수");
-    await expect(factValue(record, "동시성 버전")).toHaveText(String(v0));
+    await expect(factValue(record, "버전")).toHaveText(String(v0));
 
     // 6. OPEN -> IN_REVIEW from the screen. The assignee is a fresh canonical
     // UUID v4: the production contract checks that shape and nothing else, so
@@ -9235,7 +9239,7 @@ test("a real USER works the Run fixture case through review, a note and the audi
     ]);
     await expect(factValue(record, "사건 상태")).toHaveText("검토 중");
     await expect(factValue(record, "담당자")).toHaveText(assigneeRef);
-    await expect(factValue(record, "동시성 버전")).toHaveText(String(v0 + 1));
+    await expect(factValue(record, "버전")).toHaveText(String(v0 + 1));
 
     // 7. A note: POST, GET, shown.
     const noteContent = `Run fixture review note ${randomUUID()}`;
@@ -9320,7 +9324,7 @@ test("a real USER works the Run fixture case through review, a note and the audi
     await expect(shownNote).toHaveCount(1, { timeout: waitMs });
     await expect(factValue(shownNote, "메모 ID")).toHaveText(noteId);
     await expect(factValue(shownNote, "내용")).toHaveText(noteContent);
-    await expect(factValue(record, "동시성 버전")).toHaveText(String(v0 + 2));
+    await expect(factValue(record, "버전")).toHaveText(String(v0 + 2));
 
     // 8. A reload: the in-memory session is gone, a real sign-in follows, and the
     // note is read and shown again from the Backend.
@@ -9345,7 +9349,7 @@ test("a real USER works the Run fixture case through review, a note and the audi
     await expect(factValue(shownNote, "메모 ID")).toHaveText(noteId);
     await expect(factValue(shownNote, "내용")).toHaveText(noteContent);
     await expect(factValue(record, "사건 상태")).toHaveText("검토 중");
-    await expect(factValue(record, "동시성 버전")).toHaveText(String(v0 + 2));
+    await expect(factValue(record, "버전")).toHaveText(String(v0 + 2));
 
     // 9. IN_REVIEW -> ADDITIONAL_INFORMATION_REQUIRED from the screen.
     const requestInformationBody = JSON.stringify({
@@ -9403,7 +9407,7 @@ test("a real USER works the Run fixture case through review, a note and the audi
       finalEntries,
     );
     await expect(factValue(record, "사건 상태")).toHaveText("추가 정보 필요");
-    await expect(factValue(record, "동시성 버전")).toHaveText(String(v0 + 3));
+    await expect(factValue(record, "버전")).toHaveText(String(v0 + 3));
 
     // 10. The populated audit history, as its public projection and nothing else.
     const auditArticles = auditSection.locator("article.audit__entry");
@@ -9729,7 +9733,7 @@ test("the populated case sheet scrolls inside its container and never the docume
   const identifierLink = identifierCell.locator("a");
   await expect(identifierLink).toHaveAttribute("href", `/cases/${GEOMETRY_CASE_ID}`);
   await expect(identifierLink).toHaveAccessibleName(
-    `View case details for ${GEOMETRY_CASE_ID}`,
+    `사건 ${GEOMETRY_CASE_ID} 상세 보기`,
   );
   // The identifier is in the cell once and only once, and the cell's text is
   // the identifier alone: the anchor's purpose is carried by `aria-label`, not
