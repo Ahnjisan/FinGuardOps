@@ -39,4 +39,7 @@ public interface DetectionResultRepository
     findAllByFinancialTransaction_TransactionIdOrderByDetectionResultVersionDesc(
             UUID transactionId
     );
+
+    Optional<DetectionResult>
+    findFirstByFinancialTransaction_IdOrderByDetectionResultVersionDesc(Long transactionPk);
 }

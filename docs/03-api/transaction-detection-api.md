@@ -1054,6 +1054,18 @@ Timeout 실패와 늦은 성공 응답은 같은 거래·DetectionResult 잠금 
 | `422 Unprocessable Entity` | 의미상 처리할 수 없는 페이지·정렬 조건 |
 | `503 Service Unavailable` | 필수 저장소 등 조회 의존성이 일시적으로 사용 불가 |
 
+## 10A. 거래의 채택된 탐지 결과 조회 (Issue #335 구현)
+
+`GET /api/v1/transactions/{transactionId}/adopted-detection-result`는 canonical lowercase UUID v4 거래 ID 하나를 받으며 query와 request body를 받지 않는다. 인증된 USER에게 `transaction:read`와 `detection:read`가 모두 있어야 한다. 사건 연결 여부는 권한 조건이 아니다. 결과 ID만으로 조회하는 공개 경로는 이 기능에 없다.
+
+서버는 거래의 `adopted_detection_result_id`를 기준으로 **같은 거래의 COMPLETED 결과**만 투영한다. 최신 결과 버전은 채택 결과의 대체 근거가 아니다. 응답의 정확한 최상위 필드는 `transactionId`, `availability`, `latestDetectionResultVersion`, `latestAnalysisStatus`, `adoptedResult`이다. `availability`는 `NO_HISTORY`, `PENDING`, `IN_PROGRESS`, `FAILED`, `COMPLETED_NOT_ADOPTED`, `AVAILABLE` 중 하나다. 앞의 다섯 값에서는 `adoptedResult=null`이고, `latestDetectionResultVersion`·`latestAnalysisStatus`는 이력 없음일 때만 null이다. `AVAILABLE`에서는 채택 결과가 존재하며 최신 버전 상태는 별도로 반환한다. 최신 버전 번호가 채택 버전보다 크면 재분석 이력이 있음을 알 수 있으나, 현재 진행 여부는 반드시 `latestAnalysisStatus`로만 표현한다.
+
+`adoptedResult`의 정확한 필드는 `detectionResultId`, `detectionResultVersion`, `riskLevel`, `riskScore`, `analysisCompletedAt`, `ruleSetVersion`, `scoringPolicyVersion`, `ruleEvidence`이다. `ruleEvidence` 항목은 `ruleCode`, `ruleVersion`, `reasonCode`, `scoreContribution`만 포함하며 채택 결과 소속 `RULE` 근거만 저장 순서로 반환한다. 0건도 정상이다. 개별 `scoreContribution`의 합은 그룹 상한 적용 전 값이라 최종 `riskScore`와 다를 수 있다. `analysisCompletedAt`은 탐지 분석 완료 시각이며 사건 최종 판정 시각이 아니다. 위험 등급은 사기 확정률이나 사건 최종 판정이 아니다.
+
+설명 원문, `observationSummary`, provider 응답, 내부 PK, `failureCode`, 원문 JSON, token, trace ID는 이 성공 응답 본문에 포함하지 않는다. 공통 추적 필터의 `X-Trace-Id` 헤더는 유지한다. 이 본문은 기존 조회 응답의 `traceId` 관례보다 Issue #335의 명시적 최소 투영을 우선한다.
+
+성공은 채택 여부와 관계없이 `200`이다. 잘못된 거래 ID는 `400`, 거래 부재는 `404`, 인증 부재는 `401`, 두 권한 중 하나라도 없으면 `403`, 저장소 timeout·일시 장애는 `503`, 저장 정합성 위반은 내부 상세를 숨긴 `500`이다. 인증·인가를 입력 검증과 존재 조회보다 먼저 수행한다.
+
 ## 11. 탐지 결과 상세 조회
 
 이 절은 후속 API 후보이다. DetectionResult·DetectionEvidence 물리

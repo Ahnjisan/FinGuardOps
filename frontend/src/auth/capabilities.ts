@@ -9,6 +9,7 @@ import type { UserRole } from "./userRoles";
  * `docs/02-architecture/security-architecture.md` section 5:
  *
  * - `transaction:view`  -> transaction-list, transaction-detail
+ * - `detection:view`    -> adopted-detection-result (also needs transaction:view)
  * - `case:view`         -> case-list, case-detail, case-transaction-list,
  *                          case-note-list, case-audit-list
  * - `case:workflow`     -> case-status-change, case-assignee-change
@@ -17,13 +18,14 @@ import type { UserRole } from "./userRoles";
  *
  * Backend authorities with no reachable endpoint get no capability at all.
  * `rule-version:*`, `recovery:*`, `platform:*`, `ai-operations:*`,
- * `ai-usage:*`, `ai-report:*`, `behavior-event:read` and `detection:read` are
+ * `ai-usage:*`, `ai-report:*` and `behavior-event:read` are
  * therefore absent: some have no Spring controller, the rest have no endpoint
  * key in this client. Inventing a capability for them would describe an
  * unimplemented screen as if it existed.
  */
 export type UiCapability =
   | "transaction:view"
+  | "detection:view"
   | "case:view"
   | "case:workflow"
   | "case:note-write"
@@ -36,6 +38,7 @@ export type UiCapability =
  */
 export const UI_CAPABILITIES: readonly UiCapability[] = Object.freeze<UiCapability[]>([
   "transaction:view",
+  "detection:view",
   "case:view",
   "case:workflow",
   "case:note-write",
@@ -56,11 +59,12 @@ const ROLE_CAPABILITIES: ReadonlyMap<UserRole, readonly UiCapability[]> = new Ma
   UserRole,
   readonly UiCapability[]
 >([
-  ["FDS_VIEWER", Object.freeze<UiCapability[]>(["transaction:view", "case:view"])],
+  ["FDS_VIEWER", Object.freeze<UiCapability[]>(["transaction:view", "detection:view", "case:view"])],
   [
     "FDS_ANALYST",
     Object.freeze<UiCapability[]>([
       "transaction:view",
+      "detection:view",
       "case:view",
       "case:workflow",
       "case:note-write",
@@ -68,7 +72,7 @@ const ROLE_CAPABILITIES: ReadonlyMap<UserRole, readonly UiCapability[]> = new Ma
   ],
   [
     "FDS_APPROVER",
-    Object.freeze<UiCapability[]>(["transaction:view", "case:view", "case:resolve"]),
+    Object.freeze<UiCapability[]>(["transaction:view", "detection:view", "case:view", "case:resolve"]),
   ],
   ["RULE_OPERATOR", Object.freeze<UiCapability[]>([])],
   ["RECOVERY_OPERATOR", Object.freeze<UiCapability[]>([])],

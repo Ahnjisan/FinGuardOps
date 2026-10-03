@@ -16,7 +16,7 @@ import { isUserRole, resolveUserRoles, USER_ROLES, type UserRole } from "./userR
  * of a permission UI is something being granted that should not have been.
  */
 
-const VIEWER_CAPABILITIES: readonly UiCapability[] = ["transaction:view", "case:view"];
+const VIEWER_CAPABILITIES: readonly UiCapability[] = ["transaction:view", "detection:view", "case:view"];
 
 describe("resolveUserRoles - principal type", () => {
   it("accepts exactly USER", () => {
@@ -158,8 +158,8 @@ describe("isUserRole", () => {
 describe("resolveCapabilities - one role at a time", () => {
   const PER_ROLE: ReadonlyArray<[UserRole, readonly UiCapability[]]> = [
     ["FDS_VIEWER", VIEWER_CAPABILITIES],
-    ["FDS_ANALYST", ["transaction:view", "case:view", "case:workflow", "case:note-write"]],
-    ["FDS_APPROVER", ["transaction:view", "case:view", "case:resolve"]],
+    ["FDS_ANALYST", ["transaction:view", "detection:view", "case:view", "case:workflow", "case:note-write"]],
+    ["FDS_APPROVER", ["transaction:view", "detection:view", "case:view", "case:resolve"]],
     ["RULE_OPERATOR", []],
     ["RECOVERY_OPERATOR", []],
     ["PLATFORM_ADMIN", []],
@@ -210,6 +210,7 @@ describe("resolveCapabilities - several roles", () => {
   it("takes the union", () => {
     expect(resolveCapabilities(["FDS_ANALYST", "FDS_APPROVER"]).granted).toEqual([
       "transaction:view",
+      "detection:view",
       "case:view",
       "case:workflow",
       "case:note-write",
@@ -317,8 +318,8 @@ describe("CapabilitySet", () => {
 });
 
 describe("the capability table as a whole", () => {
-  it("declares five capabilities", () => {
-    expect(UI_CAPABILITIES).toHaveLength(5);
+  it("declares six capabilities", () => {
+    expect(UI_CAPABILITIES).toHaveLength(6);
     expect(Object.isFrozen(UI_CAPABILITIES)).toBe(true);
   });
 

@@ -1,6 +1,7 @@
 package com.aifds.backend.detection.repository;
 
 import com.aifds.backend.detection.entity.DetectionEvidence;
+import com.aifds.backend.detection.entity.DetectionEvidenceType;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.List;
@@ -15,5 +16,11 @@ public interface DetectionEvidenceRepository
     List<DetectionEvidence>
     findAllByDetectionResult_DetectionResultIdOrderBySortOrderAscIdAsc(
             UUID detectionResultId
+    );
+
+    List<DetectionEvidence>
+    findAllByDetectionResult_IdAndEvidenceTypeOrderBySortOrderAscIdAsc(
+            Long resultPk,
+            DetectionEvidenceType evidenceType
     );
 }

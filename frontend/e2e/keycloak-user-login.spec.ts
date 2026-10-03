@@ -61,8 +61,8 @@ const SYNTHETIC_TRANSACTION_ID = "e2e00000-0000-4000-8000-000000000e2e";
  *
  * A closed list of exact endpoints, and deliberately not a path syntax. That
  * `/api/v1/...` is well-formed says nothing about whether this suite may read
- * it: the console's screens reach exactly six read addresses and one
- * authorization probe. The six are the two collections, `/api/v1/transactions`
+ * it: the console's screens reach eight read address kinds and one
+ * authorization probe. These include the two collections, `/api/v1/transactions`
  * and `/api/v1/cases`; transaction and case detail at one canonical lowercase
  * UUID v4 segment; and that case's notes and audit log. The two detail reads
  * carry no query. Notes and audit each carry their own closed page/size/sort
@@ -107,6 +107,9 @@ interface RelayableEndpoint {
 /** `/api/v1/transactions/{canonical lowercase UUID v4}`, and nothing after it. */
 const TRANSACTION_DETAIL_PATH = new RegExp(
   `^${TRANSACTION_LIST_PATH}/${CANONICAL_UUID_V4_PATTERN}$`,
+);
+const ADOPTED_DETECTION_PATH = new RegExp(
+  `^${TRANSACTION_LIST_PATH}/${CANONICAL_UUID_V4_PATTERN}/adopted-detection-result$`,
 );
 
 /** `/api/v1/cases/{canonical lowercase UUID v4}`, and nothing after it. */
@@ -163,7 +166,7 @@ const CASE_RESOLUTION_PROBE_PATH = new RegExp(
 );
 
 /**
- * The six read addresses this suite relays, and only these six.
+ * The eight read address kinds this suite relays.
  *
  * A `GET` carrying no query is not a lesser request. It opens the same socket
  * and reaches the same Spring Boot handler as one carrying a query, so it
@@ -196,6 +199,12 @@ const RELAYABLE_READ_PATHS: readonly RelayableEndpoint[] = [
     name: "transaction-detail",
     method: "GET",
     matches: (pathname) => TRANSACTION_DETAIL_PATH.test(pathname),
+    queryNames: null,
+  },
+  {
+    name: "adopted-detection-result",
+    method: "GET",
+    matches: (pathname) => ADOPTED_DETECTION_PATH.test(pathname),
     queryNames: null,
   },
   {
@@ -950,8 +959,8 @@ function parseRelayedResponse(raw: Buffer): Omit<RelayedResponse, "target"> {
  *    shape this suite parses? This is syntax, and syntax is not approval. A
  *    path can be perfectly well-formed and still be an endpoint this suite has
  *    no business reaching;
- * 2. is this method at this exact address one of the six approved endpoint
- *    kinds declared above - six reads plus one write probe? Method and address are
+ * 2. is this method at this exact address one of the approved endpoint
+ *    kinds declared above - eight reads plus one write probe? Method and address are
  *    decided together, so `POST` to a read address and `GET` to the write probe
  *    are both refused here;
  * 3. the declared write probe carries no query, which is checked rather than
@@ -5876,9 +5885,9 @@ test("the Backend relay refuses every endpoint it was not approved to reach", ()
  */
 test("the Backend relay still admits the real reads and the one declared write probe", () => {
   requireCondition(
-    RELAYABLE_READ_PATHS.length === 7 &&
-      new Set(RELAYABLE_READ_PATHS.map(({ name }) => name)).size === 7,
-    "The seven read relay descriptors were not unique.",
+    RELAYABLE_READ_PATHS.length === 8 &&
+      new Set(RELAYABLE_READ_PATHS.map(({ name }) => name)).size === 8,
+    "The eight read relay descriptors were not unique.",
   );
   requireCondition(
     RELAYABLE_WRITE_PROBES.length === 1 &&
@@ -5916,6 +5925,11 @@ test("the Backend relay still admits the real reads and the one declared write p
       method: "GET",
       url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}/${SYNTHETIC_TRANSACTION_ID}`,
       target: `${TRANSACTION_LIST_PATH}/${SYNTHETIC_TRANSACTION_ID}`,
+    },
+    {
+      method: "GET",
+      url: `${BACKEND_ORIGIN}${TRANSACTION_LIST_PATH}/${SYNTHETIC_TRANSACTION_ID}/adopted-detection-result`,
+      target: `${TRANSACTION_LIST_PATH}/${SYNTHETIC_TRANSACTION_ID}/adopted-detection-result`,
     },
     {
       // The identified case address, in exactly the form the detail screen
@@ -5958,7 +5972,7 @@ test("the Backend relay still admits the real reads and the one declared write p
     },
   ];
 
-  requireCondition(admitted.length === 14, "The relay positive admission matrix drifted.");
+  requireCondition(admitted.length === 15, "The relay positive admission matrix drifted.");
   requireCondition(
     new Set(admitted.map((entry) => `${entry.method}\u0000${entry.url}`)).size === admitted.length,
     "The relay positive admission matrix contains a duplicate method and URL.",
@@ -8967,6 +8981,7 @@ test("a real USER works the Run fixture case through review, a note and the audi
 
   const waitMs = 15_000;
   const transactionPath = `${TRANSACTION_LIST_PATH}/${fixture.transactionId}`;
+  const adoptedPath = `${transactionPath}/adopted-detection-result`;
   const casePath = `${CASE_LIST_PATH}/${fixture.caseId}`;
   const notesPath = `${casePath}/notes`;
   const auditPath = `${casePath}/audit-logs`;
@@ -8981,6 +8996,7 @@ test("a real USER works the Run fixture case through review, a note and the audi
   const screenLinkedTarget = `${linkedPath}?page=0&size=20`;
   const allowedPaths = new Set([
     transactionPath,
+    adoptedPath,
     CASE_LIST_PATH,
     casePath,
     notesPath,
@@ -8990,7 +9006,7 @@ test("a real USER works the Run fixture case through review, a note and the audi
   ]);
 
   const backend = await installBackendRelay(page, {
-    captureBodyOf: [transactionPath, CASE_LIST_PATH, casePath, notesPath, auditPath, linkedPath, statusPath],
+    captureBodyOf: [transactionPath, adoptedPath, CASE_LIST_PATH, casePath, notesPath, auditPath, linkedPath, statusPath],
   });
   const reads = (pathname: string, target?: string) =>
     backend.filter(
@@ -9079,26 +9095,59 @@ test("a real USER works the Run fixture case through review, a note and the audi
     const transactionGlance = transactionMain.locator('dl[aria-label="거래 요약"]');
     await expect(factValue(transactionRecord, "처리 상태")).toHaveText("인증 필요");
     await expect(factValue(transactionGlance, "처리 상태")).toHaveText("인증 필요");
-    const transactionScreen = (await transactionMain.textContent()) ?? "";
     for (const unclaimed of ["HIGH", "위험 수준", "risk level", fixture.caseId]) {
       requireCondition(
-        !transactionScreen.includes(unclaimed),
-        "The transaction screen claimed a risk level or a case link it has no public field for.",
+        !((await transactionRecord.textContent()) ?? "").includes(unclaimed),
+        "The transaction record claimed a risk level or a case link it has no public field for.",
       );
     }
+    await expect.poll(() => reads(adoptedPath).length, { timeout: waitMs }).toBe(1);
+    requireCondition(latest(adoptedPath)?.status === 200,
+      "The adopted detection result was not read with 200.");
+    const adoptedBody = parseJsonObject(latest(adoptedPath)?.body,
+      "The adopted response body was not observed.",
+      "The adopted response body was not a JSON object.");
+    requireCondition(adoptedBody.transactionId === fixture.transactionId &&
+      adoptedBody.availability === "AVAILABLE" &&
+      typeof adoptedBody.adoptedResult === "object" && adoptedBody.adoptedResult !== null,
+      "The manifest transaction had no adopted completed result.");
+    const adoptedResult = requireJsonRecord(adoptedBody.adoptedResult,
+      "The adopted result was absent.");
+    requireCondition(adoptedResult.riskLevel === fixture.expectedRiskLevel &&
+      Array.isArray(adoptedResult.ruleEvidence) && adoptedResult.ruleEvidence.length > 0,
+      "The adopted result did not match the manifest risk or RULE projection.");
+    requireCondition(isDeepStrictEqual(Object.keys(adoptedBody).sort(),
+      ["transactionId", "availability", "latestDetectionResultVersion",
+        "latestAnalysisStatus", "adoptedResult"].sort()) &&
+      isDeepStrictEqual(Object.keys(adoptedResult).sort(), ["detectionResultId",
+        "detectionResultVersion", "riskLevel", "riskScore", "analysisCompletedAt",
+        "ruleSetVersion", "scoringPolicyVersion", "ruleEvidence"].sort()),
+      "The adopted response exposed fields outside the approved projection.");
+    await expect(factValue(page.locator(".adopted-detection"), "위험 등급"))
+      .toHaveText(fixture.expectedRiskLevel);
+    const firstRule = requireJsonRecord(adoptedResult.ruleEvidence[0],
+      "The fixture had no readable RULE evidence.");
+    requireCondition(typeof firstRule.ruleCode === "string",
+      "The fixture RULE code was absent.");
+    await expect(page.locator(".adopted-detection__rules")).toContainText(firstRule.ruleCode);
 
     // 3. The case selected by the public transaction filter: exactly one row,
     // and it is the manifest case.
     const casesLink = page.getByRole("link", { name: "사건", exact: true });
     await casesLink.click();
     await page.waitForFunction((expected) => window.location.href === expected, `${APP_ORIGIN}/cases`);
-    const results = page.getByRole("main").getByRole("status");
-    await expect(results).not.toContainText("사건을 불러오는 중", { timeout: waitMs });
+    // Fixed, non-sensitive checkpoints distinguish route rendering, relay completion,
+    // and the list's loading state when the safe Gate reporter gives only a line.
+    await expect(page.getByRole("heading", { name: "사건 조회 결과" })).toBeVisible({ timeout: waitMs });
     await expect.poll(() => reads(CASE_LIST_PATH).length, { timeout: waitMs }).toBe(1);
     requireCondition(
       reads(CASE_LIST_PATH)[0].target === INITIAL_CASE_TARGET && reads(CASE_LIST_PATH)[0].status === 200,
       "The opening case list was not the exact default read.",
     );
+    const results = page.getByRole("main").getByRole("status");
+    await expect(results).toHaveCount(1, { timeout: waitMs });
+    await expect(results).not.toContainText("사건을 불러오는 중", { timeout: waitMs });
+    await expect(results).toContainText("건 표시", { timeout: waitMs });
     await page.getByLabel("연관 거래 ID").fill(fixture.transactionId);
     await page.getByRole("button", { name: "필터 적용" }).click();
     await expect.poll(() => reads(CASE_LIST_PATH).length, { timeout: waitMs }).toBe(2);
@@ -9754,6 +9803,7 @@ test("a real USER works the Run fixture case through review, a note and the audi
     });
     await expect(transactionLink).toHaveAttribute("href", transactionRoute);
     const detailReadsBeforeLink = reads(transactionPath).length;
+    const adoptedReadsBeforeLink = reads(adoptedPath).length;
     await transactionLink.click();
     await page.waitForFunction((expected) => window.location.href === expected,
       `${APP_ORIGIN}${transactionRoute}`);
@@ -9761,7 +9811,15 @@ test("a real USER works the Run fixture case through review, a note and the audi
       .toBe(detailReadsBeforeLink + 1);
     requireCondition(latest(transactionPath)?.status === 200,
       "The case transaction link did not reach the real transaction detail.");
+    await expect.poll(() => reads(adoptedPath).length, { timeout: waitMs })
+      .toBe(adoptedReadsBeforeLink + 1);
+    await expect(page.getByRole("heading", { name: "채택된 탐지 결과", level: 3 })).toBeVisible();
     await expect(page.getByRole("heading", { name: `거래 ${fixture.transactionId}`, level: 2 }))
+      .toBeVisible();
+    const returnLink = page.getByRole("link", { name: "사건으로 돌아가기" });
+    await expect(returnLink).toHaveAttribute("href", caseRoute);
+    await returnLink.click();
+    await expect(page.getByRole("heading", { name: `사건 ${fixture.caseId}`, level: 2 }))
       .toBeVisible();
     requireCondition(
       backend.relayFailureCount() === 0 &&
@@ -9838,6 +9896,10 @@ test("synthetic transaction detail preserves record order and fits every design 
   await expect(page.getByRole("heading", { name: /^거래 2f4c0a4e/ })).toBeVisible();
   await expect(page.locator(".transaction-detail__record dt")).toHaveCount(12);
   await expect(page.locator(".transaction-detail__record dd")).toHaveCount(12);
+  await expect(page.getByRole("heading", { name: "채택된 탐지 결과", level: 3 })).toBeVisible();
+  await expect(page.locator(".adopted-detection")).toContainText("HIGH");
+  await expect(page.locator(".adopted-detection time"))
+    .toHaveAttribute("datetime", "2026-01-02T03:05:08Z");
   await expect(page.locator(".transaction-detail__glance")).toContainText("999,999,999,999,999");
   await expect(page.locator(".transaction-detail__glance .badge__mark")).toHaveCount(1);
   await expect(page.locator(".transaction-detail__glance time")).toHaveAttribute("datetime", "2026-01-02T03:04:05Z");
@@ -9871,6 +9933,10 @@ test("synthetic transaction detail preserves record order and fits every design 
     requireCondition(layout !== null, "The synthetic transaction record was absent.");
     requireCondition(layout.documentWidth <= layout.viewportWidth + 1,
       `The transaction detail overflowed at ${String(viewport.width)}px.`);
+    const detectionWidth = await page.locator(".adopted-detection").evaluate(
+      (element) => element.getBoundingClientRect().width);
+    requireCondition(detectionWidth <= viewport.width + 1,
+      `The adopted detection panel overflowed at ${String(viewport.width)}px.`);
     requireCondition(layout.headings.join(",") === "거래,고객·계좌·기기,거래 원장 기록",
       "The transaction record reading order changed.");
     requireCondition(layout.thirdTop >= Math.max(layout.first.bottom, layout.second.bottom) - 1,

@@ -10,6 +10,7 @@ import com.aifds.backend.detection.entity.RuleEvidenceObservationSummary;
 import com.aifds.backend.detection.repository.DetectionEvidenceRepository;
 import com.aifds.backend.detection.repository.DetectionResultRepository;
 import com.aifds.backend.detection.service.DetectionResultPersistenceService;
+import com.aifds.backend.detection.service.AdoptedDetectionResultQueryService;
 import com.aifds.backend.detection.service.RuleAnalysisPersistenceService;
 import com.aifds.backend.detection.service.RuleEvidenceDraft;
 import com.aifds.backend.detection.service.StartedRuleAnalysis;
@@ -97,6 +98,9 @@ class DetectionPersistenceIntegrationTest
 
     @Autowired
     private DetectionResultPersistenceService persistenceService;
+
+    @Autowired
+    private AdoptedDetectionResultQueryService adoptedQueryService;
 
     @Autowired
     private RuleAnalysisPersistenceService ruleAnalysisPersistenceService;
@@ -1844,6 +1848,40 @@ class DetectionPersistenceIntegrationTest
         assertThat(transaction.getProcessingStatus())
                 .isEqualTo(transactionStatus);
         assertThat(result.getAnalysisStatus()).isEqualTo(resultStatus);
+    }
+
+    @Test
+    void adoptedQueryUsesTransactionFkInsteadOfNewestVersionOrAnotherTransactionsEvidence() {
+        FinancialTransaction first = saveTransaction(UUID.randomUUID());
+        FinancialTransaction other = saveTransaction(UUID.randomUUID());
+        assertThat(adoptedQueryService.find(first.getTransactionId().toString()).availability())
+                .isEqualTo("NO_HISTORY");
+
+        first.startAnalysis();
+        transactionRepository.saveAndFlush(first);
+        DetectionResult adopted = completedResult(first);
+        new TransactionTemplate(transactionManager).execute(status -> {
+            FinancialTransaction managed = transactionRepository
+                    .findByTransactionId(first.getTransactionId()).orElseThrow();
+            DetectionResult managedResult = resultRepository
+                    .findByDetectionResultId(adopted.getDetectionResultId()).orElseThrow();
+            managed.adoptDetectionResult(managedResult);
+            transactionRepository.saveAndFlush(managed);
+            return null;
+        });
+        DetectionResult newer = createPending(first, "trace_detection_reanalysis");
+        completedResult(other);
+        entityManager.clear();
+
+        var response = adoptedQueryService.find(first.getTransactionId().toString());
+        assertThat(response.availability()).isEqualTo("AVAILABLE");
+        assertThat(response.latestDetectionResultVersion()).isEqualTo(newer.getDetectionResultVersion());
+        assertThat(response.latestAnalysisStatus()).isEqualTo("PENDING");
+        assertThat(response.adoptedResult().detectionResultId()).isEqualTo(adopted.getDetectionResultId());
+        assertThat(response.adoptedResult().detectionResultVersion()).isEqualTo(1);
+        assertThat(response.adoptedResult().ruleEvidence()).hasSize(1);
+        assertThat(adoptedQueryService.find(other.getTransactionId().toString()).availability())
+                .isEqualTo("COMPLETED_NOT_ADOPTED");
     }
 
     private DetectionResult completedResult(
