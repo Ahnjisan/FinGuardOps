@@ -258,22 +258,35 @@ authentication proxy는 필요 시 적용할 후속 운영 결정이며 manageme
 표현하거나 Prometheus에 업무 USER·SERVICE JWT를 요구하지 않는다. network 격리는
 authentication·TLS와 동일하지 않다.
 
-### 5.2 문서에만 있는 미구현 후보 endpoint
+### 5.2 문서에만 있는 미구현 endpoint
 
-다음 endpoint는 공식 API 문서 후보이지만 현재 Spring Controller가 없다. 목표 matrix에
-예약하되 구현됐다고 표현하지 않는다.
+다음 endpoint는 현재 Spring Controller가 없다. 사건별 연관 거래 ID 목록은 Issue #329에서
+후속 구현 계약으로 확정했고, 나머지는 각 문서의 후보·계약 상태를 따른다. 이 표의
+목표 권한은 현재 인가 matcher가 구현됐다는 뜻이 아니다.
 
 | Method·path | 목표 principal·role | 목표 authority | 현재 상태 |
 | --- | --- | --- | --- |
 | `GET /api/v1/behavior-events` | USER · viewer authority 보유 role | `behavior-event:read` | 문서 후보, 미구현 |
 | `GET /api/v1/transactions/{transactionId}/detection-results` | USER · viewer authority 보유 role | `detection:read` | 문서 후보, 미구현 |
 | `GET /api/v1/detection-results/{detectionResultId}` | USER · viewer authority 보유 role | `detection:read` | 문서 후보, 미구현 |
-| `GET /api/v1/cases/{caseId}/transactions` | USER · viewer authority 보유 role | `case:read` | 문서 후보, 미구현 |
+| `GET /api/v1/cases/{caseId}/transactions` | USER · viewer authority 보유 role | `case:read` | Issue #329 확정 후속 구현 계약, Controller·matcher 미구현 |
 | `POST /api/v1/cases/{caseId}/ai-reports` | USER · `FDS_ANALYST` | `ai-report:create` | 문서 계약, 미구현 |
 | `GET /api/v1/cases/{caseId}/ai-reports/current` | USER · viewer authority 보유 role | `ai-report:read` | 문서 계약, 미구현 |
 | `GET /api/v1/ai-report-requests/{aiRequestId}` | USER · `PLATFORM_ADMIN` | `ai-operations:read` | 문서 계약, 미구현 |
 | `GET /api/v1/ai-report-usage` | USER · `PLATFORM_ADMIN` | `ai-usage:read` | 문서 계약, 미구현 |
 | `GET /api/v1/ai-report-usage/summary` | USER · `PLATFORM_ADMIN` | `ai-usage:read` | 문서 계약, 미구현 |
+
+사건별 연관 거래 ID 목록의 인증·인가 목표는 기존 사건 조회와 같다. credential·claim이
+유효하지 않으면 401 `UNAUTHORIZED`, 유효한 USER에게 `case:read`가 없으면 사건 존재나
+요청 입력을 공개하지 않고 403 `ACCESS_DENIED`이다. 이 두 판정 뒤에만 canonical `caseId`와
+query를 검증하고 사건 존재를 확인한다. 현재 `FDS_VIEWER`, `FDS_ANALYST`, `FDS_APPROVER`는
+`case:read`와 `transaction:read`를 모두 보유하지만, 두 authority는 독립적이다.
+사건 관계에서 거래 ID를 조회해도 `GET /api/v1/transactions/{transactionId}`의
+`transaction:read`를 얻지 않는다. 후속 Frontend는 `case:view`와 `transaction:view`를
+모두 가진 세션에서만 거래 상세 링크를 제공하고, Backend 거래 상세는 직접 URL 접근도
+독립적으로 인가한다. 세션이 바뀌면 이전 세션의 거래 ID를 게시하지 않는다.
+현재 미등록 endpoint의 HTTP 동작을 이 목표 계약의 401·403·404로 설명하지 않는다.
+인가 matcher, Controller와 CORS 대상의 추가는 후속 Backend 구현 범위다.
 
 RuleVersion 조회·발행 HTTP endpoint는 현재 없다. Rule v1 기본 발행과 idempotency 복구는
 profile·confirmation·non-web process 실행 경계이며 JWT endpoint로 표현하지 않는다.
