@@ -12,15 +12,14 @@ PostgreSQL 낙관적 동시성·감사 원자성 경계를 구현했다. Issue #
 구현했다. Issue #215는 사건 감사 로그 조회 API와 명시적 비노출 projection을
 구현했다. Issue #221은 아래 실제 사건·메모·감사 endpoint RBAC와 네 high-risk write
 method security를 구현했고 Issue #223은 네 write의 USER actor와 조사 메모 USER author를
-구현했다. 연관 거래 목록은 구현되지 않았다. 사건 영속 계약은
+구현했다. Issue #329는 연관 거래 ID 목록을 후속 구현 계약으로 확정하지만
+Controller, 인가 matcher와 Frontend 조회는 아직 구현되지 않았다. 사건 영속 계약은
 [`../04-database/fraud-case-schema.md`](../04-database/fraud-case-schema.md)를 따른다.
 구현 인증·인가와 USER Audit actor 계약은
 [`security-architecture.md`](../02-architecture/security-architecture.md)와
 [`ADR-008`](../07-decisions/ADR-008-oauth2-resource-server-rbac-user-audit-actor.md)을
 따른다. Spring Security·RBAC와 USER writer가 구현되었다.
 실제 `caseId`와 `auditId`는 UUID v4를 사용한다.
-Issue #207 범위 밖의 후속 API 절에 남아 있는 `case_demo_...` 값은 읽기 쉬운
-미구현 예시일 뿐 실제 식별자 형식이 아니다.
 
 ## 2. 범위와 책임 경계
 
@@ -143,7 +142,8 @@ IN_REVIEW 사건
 
 ### 3.5 페이지네이션
 
-목록 API는 공통 규칙에 따라 다음 쿼리 파라미터를 사용한다.
+현재 구현된 사건 목록 `GET /api/v1/cases`는 공통 규칙에 따라 다음 쿼리
+파라미터를 사용한다. 7절의 후속 연관 거래 ID 목록은 서버 고정 순서이므로 `sort`를 받지 않는다.
 
 ```text
 page
@@ -200,8 +200,9 @@ GET   /api/v1/cases/{caseId}/audit-logs
 
 실제 구현 endpoint 중 사건 목록·상세는 `case:read`, 상태·담당자 변경은
 `case:workflow:write`, 종결은 `case:resolution:write`, 메모 생성·조회는 각각
-`case-note:write`·`case-note:read`, 감사 조회는 `case-audit:read`를 요구한다. 문서 후보인
-`GET /api/v1/cases/{caseId}/transactions`에는 matcher가 없다. write 네 개는 URL matcher와
+`case-note:write`·`case-note:read`, 감사 조회는 `case-audit:read`를 요구한다. 확정된 후속 구현
+계약인 `GET /api/v1/cases/{caseId}/transactions`는 `case:read`를 요구하지만 현재 Controller와
+인가 matcher가 없다. write 네 개는 URL matcher와
 production Service proxy의 method security로 이중 보호한다.
 
 ## 5. 사건 목록 조회
@@ -373,38 +374,73 @@ nullable 필드는 JSON에 명시적으로 `null`을 반환한다. 내부 PK·FK
 
 ## 7. 사건 연관 거래 조회
 
+이 절은 Issue #329에서 확정한 **후속 구현 계약**이다. 현재 Spring Controller, 인가 matcher와
+Frontend 조회·링크는 없다. 사건에 실제 저장된 `case_transaction` 관계의 거래 업무 ID만
+페이지로 조회한다. 이 API는 사건 또는 거래의 상태를 변경하지 않는다.
+
 ### 7.1 요청
 
 ```http
 GET /api/v1/cases/{caseId}/transactions
 ```
 
+`caseId`는 사건 상세와 같은 canonical lowercase UUID v4·RFC 4122 variant 한 개만 허용한다.
+문자열을 trim하거나 대소문자를 변환하지 않는다. 요청 query는 `page`, `size`만 허용하고
+각각 최대 한 번만 받을 수 있다. `sort`, 알 수 없는 이름, 중복 이름과 빈 값은 허용하지 않는다.
+
+| 쿼리 파라미터 | 기본값 | 허용 범위 |
+| --- | --- | --- |
+| `page` | `0` | 0 이상 Java `int` 범위의 정수 |
+| `size` | `20` | 1~100의 정수 |
+
+`page × size <= 2147483647`이어야 한다. 이 입력 검증은 현재 총건수나 마지막 페이지와
+독립적이다. 초과하면 `422 VALIDATION_ERROR`, field `page`, field code `PAGE_OUT_OF_RANGE`로
+거부하며 page를 자동 보정하거나 size를 축소하지 않는다.
+
 요청 예:
 
 ```http
-GET /api/v1/cases/case_demo_20260724_0031/transactions?page=0&size=20&sort=occurredAt,desc
+GET /api/v1/cases/20000000-0000-4000-9000-000000000003/transactions?page=0&size=20
 ```
 
-### 7.2 응답 항목
+### 7.2 대상, 정렬과 페이지 경계
 
-| 필드 | 설명 |
-| --- | --- |
-| `transactionId` | 거래 업무 식별자 |
-| `transactionType` | 거래 유형 |
-| `amount` | 소수점 문자열 형식의 거래 금액 |
-| `currencyCode` | 통화 코드 |
-| `occurredAt` | 거래 발생 시각 |
-| `processingStatus` | 거래 처리 상태 |
-| `riskLevel` | 현재 채택된 탐지 결과의 위험 등급 |
-| `riskResponseOutcome` | Spring Boot가 적용한 Mock 위험 대응 결과 |
-| `adoptedDetectionResultId` | 채택된 탐지 결과 업무 식별자 |
-| `representative` | 사건의 대표 거래 여부 후보 |
-| `linkReason` | 사건 연결 사유 또는 제한된 Reason Code 후보 |
-| `linkedAt` | 사건 연결 시각 |
+인증·인가와 입력 검증 후 사건의 존재를 확인하고 해당 사건의 `case_transaction` 행만 조회한다. 존재하는 사건에
+관계가 0건이면 `200 OK`와 빈 `content`, `totalElements=0`, `totalPages=0`을 반환한다.
+사건 자체가 없으면 `404`이다. `totalElements`는 해당 사건의 관계 총건수이며 현재 페이지의
+`content` 길이가 아니다. 한 사건에 여러 거래가 있으면 각 거래를 한 번씩 페이지에 싣는다.
+`UNIQUE(fraud_case_id, financial_transaction_id)`가 같은 사건·거래 관계의 중복 저장을 막는다.
+응답에서 관계를 임의로 복제하거나 중복 거래 ID를 별개 거래처럼 세지 않는다.
 
-실제 고객번호, 실제 계좌번호, 원문 IP와 인증정보는 반환하지 않는다.
+서버는 해당 사건의 내부 `case_transaction.financial_transaction_id ASC`로 고정 정렬한다.
+동일 사건 안에서 이 값은 unique이므로 동률 보조 정렬키나 클라이언트 `sort`가 필요 없다.
+이 내부 FK는 요청·응답에 노출하지 않는다. 이 순서는 거래 발생 시각, 사건 연결 시각,
+긴급도 또는 처리 우선순위를 뜻하지 않는다.
 
-### 7.3 성공 응답 예시
+`page.number`는 요청한 페이지 번호이며 `page.last=false`인 경우 다음 번호를 요청해
+나머지 관계를 탐색한다. 실제 마지막 페이지를 넘는 유효한 요청은 page를 바꾸지 않고
+빈 `content`와 실제 `totalElements`, `totalPages`를 반환한다. 각 요청은 그 시점의 조회이며
+여러 페이지 사이에 동일 시점 스냅샷을 보장하지 않는다. 관계가 변경되면 페이지 내용과
+총건수가 달라질 수 있다. 현재 기존 사건에 다른 거래를 추가하는 일반 기능은 구현되지
+않았지만 이를 영구적인 불변식으로 간주하지 않는다.
+
+### 7.3 응답 범위와 권한
+
+최상위 응답 필드는 `caseId`, `content`, `page`, `traceId`이며 `content` 항목은 canonical
+`transactionId` 한 필드만 포함한다. `page`는 3.5절의 `number`, `size`, `totalElements`,
+`totalPages`, `first`, `last` 형식을 따른다. 내부 PK·FK, 관계 시각, 거래 세부 정보와
+민감한 원문은 반환하지 않는다.
+
+이 목록의 조회 권한은 USER `case:read`이다. 거래 ID를 받았다는 사실은 거래 상세 조회
+권한을 부여하지 않는다. `GET /api/v1/transactions/{transactionId}`는 별도의
+`transaction:read`를 요구한다. Frontend 후속 구현은 `case:view`와 `transaction:view`를
+모두 가진 세션에서만 거래 상세 링크를 제공하며, 직접 주소 접근의 최종 권한 판정은
+Backend 거래 상세 endpoint가 한다. 현재 `FDS_VIEWER`, `FDS_ANALYST`, `FDS_APPROVER`는 두
+read authority를 모두 보유한다. 인증 전·세션 변경 후에는 이전 세션의 거래 ID를 표시하지
+않는다. 목록 일부 조회 실패를 0건으로 표시하거나 성공한 일부 ID만 전체 결과처럼
+게시하지 않는다.
+
+### 7.4 성공 응답 예시
 
 ```http
 HTTP/1.1 200 OK
@@ -413,21 +449,10 @@ Content-Type: application/json
 
 ```json
 {
-  "caseId": "case_demo_20260724_0031",
+  "caseId": "20000000-0000-4000-9000-000000000003",
   "content": [
     {
-      "transactionId": "91a2b3c4-d5e6-47f8-9a0b-1c2d3e4f5003",
-      "transactionType": "ACCOUNT_TRANSFER",
-      "amount": "1250000",
-      "currencyCode": "KRW",
-      "occurredAt": "2026-07-24T01:15:30Z",
-      "processingStatus": "ADDITIONAL_AUTH_REQUIRED",
-      "riskLevel": "HIGH",
-      "riskResponseOutcome": "ADDITIONAL_AUTH_REQUIRED",
-      "adoptedDetectionResultId": "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430101",
-      "representative": true,
-      "linkReason": "NEW_DEVICE_HIGH_AMOUNT",
-      "linkedAt": "2026-07-24T01:15:33Z"
+      "transactionId": "91a2b3c4-d5e6-47f8-9a0b-1c2d3e4f5003"
     }
   ],
   "page": {
@@ -442,15 +467,43 @@ Content-Type: application/json
 }
 ```
 
-### 7.4 상태 코드
+빈 관계의 성공 응답은 같은 최상위 필드와 `content: []`, `page.totalElements: 0`,
+`page.totalPages: 0`을 사용한다. 정상적인 마지막 페이지 뒤의 빈 `content`는 총건수를
+0으로 바꾸지 않는다. `traceId`는 저장 시점 값이 아니라 현재 요청의 값이다.
+
+### 7.5 상태 코드와 오류 경계
 
 | 상태 코드 | 사용 기준 |
 | --- | --- |
-| `200 OK` | 조회 성공. 연관 거래가 없으면 빈 `content` 반환 |
-| `400 Bad Request` | 식별자, 페이지 또는 정렬 형식 오류 |
-| `404 Not Found` | 해당 사건이 없음 |
-| `422 Unprocessable Entity` | 의미상 처리할 수 없는 페이지 또는 정렬 조건 |
-| `500 Internal Server Error` | 공개할 수 없는 예기치 않은 서버 오류 |
+| `200 OK` | 조회 성공. 존재하는 사건의 관계가 0건이면 빈 `content` 반환 |
+| `401 Unauthorized` | credential이 없거나 Bearer JWT·필수 claim이 유효하지 않음; `UNAUTHORIZED` |
+| `403 Forbidden` | 유효한 principal에 `case:read`가 없음; `ACCESS_DENIED` |
+| `400 Bad Request` | `caseId`의 비정규 형식·버전·variant, `page`·`size` 형식, 빈 값·중복·미지원 query; `VALIDATION_ERROR` |
+| `404 Not Found` | 유효한 `caseId`에 해당하는 사건이 없음; `RESOURCE_NOT_FOUND` |
+| `422 Unprocessable Entity` | 음수 page, 1~100 밖의 size 또는 `page × size` 초과; `VALIDATION_ERROR` |
+| `503 Service Unavailable` | 명확한 조회 timeout은 `DEPENDENCY_TIMEOUT`, 저장소 연결·가용성 장애는 `DEPENDENCY_UNAVAILABLE` |
+| `500 Internal Server Error` | 그 밖의 DataAccess 오류·예기치 않은 서버 오류는 `INTERNAL_ERROR`로 축약 |
+
+인증·authority 판정은 식별자와 query 검증보다 먼저 적용한다. 권한 없는 호출에는 사건
+존재 여부, 요청 ID 또는 입력한 query를 공개하지 않는다. 인증과 권한을 통과한 뒤에는
+`caseId`·query 형식과 범위를 검증하고 사건 존재를 판정한다. 따라서 정상 형식의 없는
+사건은 관계 수가 0인 사건과 구분한다. `400`·`422`의 공개 `fieldErrors`에는 해당 필드와
+안전한 코드·사유만 포함하고 입력 원문은 반사하지 않는다. 모든 성공·오류에는 현재
+요청의 `traceId`를 사용하며 공통 오류 형식과 Security 응답은 `api-conventions.md`를
+따른다. 미승인 path·method, trailing slash와 container 선거부는
+`api-conventions.md` 7.3절의 실제 구현 경계를 따른다. 이 endpoint는 아직 등록되지
+않았으므로 이 표를 현재 HTTP 동작으로 해석하지 않는다.
+
+### 7.6 저장·조회 비용과 후속 구현 경계
+
+`fraud_case.case_id` unique로 사건을 찾고 `case_transaction`의
+`UNIQUE(fraud_case_id, financial_transaction_id)` 색인으로 해당 관계를 조회·정렬할 수
+있다. 거래의 공개 UUID는 `financial_transaction` 관계에서 읽는다. 관계 전체 건수 계산과
+깊은 offset 페이지의 비용은 실제 사건당 관계 수와 DB 실행 계획에 따라 달라진다.
+현재 데이터량·지연시간은 측정되지 않았고 성능 보장이나 색인 추가를 이번 계약으로
+확정하지 않는다. 후속 Backend PR에서 실제 조회 계획과 대량 페이지를 검증한다.
+Backend 조회 API, 인가 matcher와 Frontend 거래 상세 링크는 각각 후속 Issue/PR에서
+구현한다. 이 계약은 DB 구조나 사건 업무 전이를 변경하지 않는다.
 
 ## 8. 사건 상태 변경
 
