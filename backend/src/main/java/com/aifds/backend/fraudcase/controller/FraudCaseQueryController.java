@@ -5,7 +5,14 @@ import com.aifds.backend.fraudcase.dto.FraudCaseDetailResponse;
 import com.aifds.backend.fraudcase.dto.FraudCaseListRequest;
 import com.aifds.backend.fraudcase.dto.FraudCaseListResponse;
 import com.aifds.backend.fraudcase.service.FraudCaseQueryService;
+import com.aifds.backend.fraudcase.service.FraudCaseTransactionQueryService;
+import com.aifds.backend.fraudcase.dto.FraudCaseTransactionListResponse;
+import com.aifds.backend.fraudcase.query.FraudCaseTransactionQuery;
 import jakarta.servlet.http.HttpServletRequest;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -19,11 +26,14 @@ import org.springframework.web.bind.annotation.RestController;
 public class FraudCaseQueryController {
 
     private final FraudCaseQueryService fraudCaseQueryService;
+    private final FraudCaseTransactionQueryService transactionQueryService;
 
     public FraudCaseQueryController(
-            FraudCaseQueryService fraudCaseQueryService
+            FraudCaseQueryService fraudCaseQueryService,
+            FraudCaseTransactionQueryService transactionQueryService
     ) {
         this.fraudCaseQueryService = fraudCaseQueryService;
+        this.transactionQueryService = transactionQueryService;
     }
 
     @GetMapping
@@ -82,6 +92,22 @@ public class FraudCaseQueryController {
         return ResponseEntity.ok(fraudCaseQueryService.findByCaseId(
                 caseId,
                 traceId
+        ));
+    }
+
+    @GetMapping("/{caseId}/transactions")
+    public ResponseEntity<FraudCaseTransactionListResponse> transactions(
+            @PathVariable String caseId,
+            @RequestAttribute(TraceIdFilter.TRACE_ID_REQUEST_ATTRIBUTE) String traceId,
+            HttpServletRequest servletRequest
+    ) {
+        Map<String, List<String>> parameters = servletRequest.getParameterMap()
+                .entrySet().stream().collect(Collectors.toUnmodifiableMap(
+                        Map.Entry::getKey,
+                        entry -> List.copyOf(Arrays.asList(entry.getValue().clone()))
+                ));
+        return ResponseEntity.ok(transactionQueryService.findAll(
+                new FraudCaseTransactionQuery.Request(caseId, parameters), traceId
         ));
     }
 

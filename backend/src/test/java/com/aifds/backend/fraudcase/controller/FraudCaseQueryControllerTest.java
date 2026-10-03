@@ -8,6 +8,7 @@ import com.aifds.backend.fraudcase.repository.CaseTransactionRepository;
 import com.aifds.backend.fraudcase.repository.FraudCaseRepository;
 import com.aifds.backend.fraudcase.service.FraudCaseQueryMapper;
 import com.aifds.backend.fraudcase.service.FraudCaseQueryService;
+import com.aifds.backend.fraudcase.service.FraudCaseTransactionQueryService;
 import com.aifds.backend.fraudcase.validation.FraudCaseQueryValidator;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -91,6 +92,9 @@ class FraudCaseQueryControllerTest {
 
     @MockitoBean
     private CaseTransactionRepository caseTransactionRepository;
+
+    @MockitoBean
+    private FraudCaseTransactionQueryService transactionQueryService;
 
     @BeforeEach
     void resetRepositories() {

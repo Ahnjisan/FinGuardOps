@@ -4,6 +4,7 @@ import com.aifds.backend.behavior.service.BehaviorEventIntakeService;
 import com.aifds.backend.common.trace.TraceIdFilter;
 import com.aifds.backend.fraudcase.service.FraudCaseAuditLogService;
 import com.aifds.backend.fraudcase.service.FraudCaseQueryService;
+import com.aifds.backend.fraudcase.service.FraudCaseTransactionQueryService;
 import com.aifds.backend.fraudcase.service.FraudCaseWorkflowService;
 import com.aifds.backend.fraudcase.service.InvestigationNoteService;
 import com.aifds.backend.security.support.EphemeralRsaJwtFixture;
@@ -173,6 +174,12 @@ class EndpointRbacSecurityIntegrationTest {
                     "/api/v1/cases/" + CASE_ID + "/notes",
                     "FDS_ANALYST",
                     CASE_NOTE_WRITE
+            ),
+            endpoint(
+                    HttpMethod.GET,
+                    "/api/v1/cases/" + CASE_ID + "/transactions",
+                    "FDS_VIEWER",
+                    CASE_READ
             )
     );
     private static final List<CorsProbe> APPROVED_PREFLIGHTS = Stream.concat(
@@ -281,6 +288,9 @@ class EndpointRbacSecurityIntegrationTest {
     private FraudCaseQueryService fraudCaseQueryService;
 
     @MockitoBean
+    private FraudCaseTransactionQueryService fraudCaseTransactionQueryService;
+
+    @MockitoBean
     private FraudCaseWorkflowService fraudCaseWorkflowService;
 
     @MockitoBean
@@ -319,6 +329,7 @@ class EndpointRbacSecurityIntegrationTest {
                 behaviorEventIntakeService,
                 transactionQueryService,
                 fraudCaseQueryService,
+                fraudCaseTransactionQueryService,
                 fraudCaseWorkflowService,
                 investigationNoteService,
                 fraudCaseAuditLogService
@@ -326,9 +337,9 @@ class EndpointRbacSecurityIntegrationTest {
     }
 
     @Test
-    void coversExactlyThirteenProductionEndpointsAndMinimumRoles()
+    void coversExactlyFourteenProductionEndpointsAndMinimumRoles()
             throws Exception {
-        assertThat(ENDPOINTS).hasSize(13);
+        assertThat(ENDPOINTS).hasSize(14);
         assertThat(ENDPOINTS.stream().map(Endpoint::signature))
                 .doesNotHaveDuplicates();
         Set<String> actualMappings = requestMappingHandlerMapping
@@ -582,8 +593,8 @@ class EndpointRbacSecurityIntegrationTest {
 
     @Test
     void permitsEveryApprovedCorsPathAndMethodExactly() {
-        assertThat(APPROVED_PREFLIGHTS).hasSize(14);
-        assertThat(APPROVED_PREFLIGHTS.subList(0, 13))
+        assertThat(APPROVED_PREFLIGHTS).hasSize(15);
+        assertThat(APPROVED_PREFLIGHTS.subList(0, 14))
                 .extracting(CorsProbe::signature)
                 .containsExactlyElementsOf(ENDPOINTS.stream()
                         .map(Endpoint::signature)
@@ -927,6 +938,7 @@ class EndpointRbacSecurityIntegrationTest {
                 behaviorEventIntakeService,
                 transactionQueryService,
                 fraudCaseQueryService,
+                fraudCaseTransactionQueryService,
                 fraudCaseWorkflowService,
                 investigationNoteService,
                 fraudCaseAuditLogService
