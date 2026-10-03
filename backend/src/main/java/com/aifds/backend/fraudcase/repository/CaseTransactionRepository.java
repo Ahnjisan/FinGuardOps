@@ -4,6 +4,8 @@ import com.aifds.backend.fraudcase.entity.CaseTransaction;
 import com.aifds.backend.fraudcase.entity.FraudCaseStatus;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -14,6 +16,22 @@ import java.util.UUID;
 
 public interface CaseTransactionRepository
         extends JpaRepository<CaseTransaction, Long> {
+
+    @Query(value = """
+            SELECT transaction.transactionId
+            FROM CaseTransaction caseTransaction
+            JOIN caseTransaction.financialTransaction transaction
+            WHERE caseTransaction.fraudCase.id = :fraudCasePk
+            ORDER BY transaction.id ASC
+            """, countQuery = """
+            SELECT COUNT(caseTransaction.id)
+            FROM CaseTransaction caseTransaction
+            WHERE caseTransaction.fraudCase.id = :fraudCasePk
+            """)
+    Page<UUID> findTransactionIdsByFraudCasePk(
+            @Param("fraudCasePk") long fraudCasePk,
+            Pageable pageable
+    );
 
     interface FraudCaseTransactionCount {
 

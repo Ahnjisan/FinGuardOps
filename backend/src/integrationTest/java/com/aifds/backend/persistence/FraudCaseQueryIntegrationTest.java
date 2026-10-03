@@ -7,6 +7,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.math.BigDecimal;
@@ -51,6 +52,9 @@ class FraudCaseQueryIntegrationTest
     private static final UUID TRANSACTION_C = UUID.fromString(
             "30000000-0000-4000-9000-000000000003"
     );
+    private static final UUID TRANSACTION_LATE_PK_LOW_UUID = UUID.fromString(
+            "10000000-0000-4000-9000-000000000004"
+    );
     private static final Instant T0 = Instant.parse("2026-08-01T00:00:00Z");
     private static final Instant T1 = Instant.parse("2026-08-01T01:00:00Z");
     private static final Instant T2 = Instant.parse("2026-08-01T02:00:00Z");
@@ -94,6 +98,45 @@ class FraudCaseQueryIntegrationTest
         link(1L, 1L, T0);
         link(1L, 2L, T1);
         link(3L, 3L, T2);
+    }
+
+    @Test
+    void pagesCaseTransactionIdsByInternalForeignKeyWithExactCount() throws Exception {
+        insertTransaction(TRANSACTION_LATE_PK_LOW_UUID, T3);
+        link(1L, 4L, T3);
+
+        for (int page = 0; page < 3; page++) {
+            UUID expected = switch (page) {
+                case 0 -> TRANSACTION_A;
+                case 1 -> TRANSACTION_B;
+                default -> TRANSACTION_LATE_PK_LOW_UUID;
+            };
+            mockMvc.perform(get(PATH + "/" + CASE_A + "/transactions")
+                            .queryParam("page", Integer.toString(page))
+                            .queryParam("size", "1"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.content.length()").value(1))
+                    .andExpect(jsonPath("$.content[0].transactionId").value(expected.toString()))
+                    .andExpect(jsonPath("$.page.number").value(page))
+                    .andExpect(jsonPath("$.page.totalElements").value(3))
+                    .andExpect(jsonPath("$.page.totalPages").value(3));
+        }
+        mockMvc.perform(get(PATH + "/" + CASE_A + "/transactions?page=3&size=1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content").isEmpty())
+                .andExpect(jsonPath("$.page.number").value(3))
+                .andExpect(jsonPath("$.page.totalElements").value(3));
+        mockMvc.perform(get(PATH + "/" + CASE_B + "/transactions"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content").isEmpty())
+                .andExpect(jsonPath("$.page.totalElements").value(0));
+        mockMvc.perform(get(PATH + "/" + CASE_C + "/transactions"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content[0].transactionId").value(TRANSACTION_C.toString()))
+                .andExpect(jsonPath("$.page.totalElements").value(1));
+        assertThat(org.assertj.core.api.Assertions.catchThrowable(
+                () -> link(1L, 4L, T3)
+        )).isInstanceOf(DataIntegrityViolationException.class);
     }
 
     @Test

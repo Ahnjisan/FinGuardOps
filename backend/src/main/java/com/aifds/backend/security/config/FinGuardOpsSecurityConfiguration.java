@@ -73,6 +73,7 @@ public class FinGuardOpsSecurityConfiguration {
             new CorsEndpoint(HttpMethod.POST, "/api/v1/behavior-events"),
             new CorsEndpoint(HttpMethod.GET, "/api/v1/cases"),
             new CorsEndpoint(HttpMethod.GET, "/api/v1/cases/{caseId}"),
+            new CorsEndpoint(HttpMethod.GET, "/api/v1/cases/{caseId}/transactions"),
             new CorsEndpoint(
                     HttpMethod.PATCH,
                     "/api/v1/cases/{caseId}/status"
@@ -175,6 +176,9 @@ public class FinGuardOpsSecurityConfiguration {
                         ), paths.matcher(
                                 HttpMethod.GET,
                                 "/api/v1/cases/{caseId}"
+                        ), paths.matcher(
+                                HttpMethod.GET,
+                                "/api/v1/cases/{caseId}/transactions"
                         )).hasAuthority(CASE_READ)
                         .requestMatchers(paths.matcher(
                                 HttpMethod.GET,
