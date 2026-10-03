@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   CASE_FINAL_DISPOSITIONS,
   CASE_STATUSES,
@@ -8,6 +9,7 @@ import {
   type CaseStatus,
 } from "../api/caseApi";
 import { useCaseList, type CaseListErrorKind, type CaseListState } from "../api/useCaseList";
+import { INFORMATION_CASE_LIST_ROUTE, OPEN_CASE_LIST_ROUTE } from "../auth/returnRoute";
 import { Icon } from "../shared/Icon";
 import { CaseFilters } from "./cases/CaseFilters";
 import { CasePagination } from "./cases/CasePagination";
@@ -306,15 +308,74 @@ function draftMatches(draft: CaseFilterDraft, applied: CaseFilterDraft): boolean
   );
 }
 
+function routeStatus(search: string, hash: string): CaseStatus | null | "invalid" {
+  if (hash !== "") return "invalid";
+  if (search === "") return null;
+  if (`/cases${search}` === OPEN_CASE_LIST_ROUTE) return "OPEN";
+  if (`/cases${search}` === INFORMATION_CASE_LIST_ROUTE) {
+    return "ADDITIONAL_INFORMATION_REQUIRED";
+  }
+  return "invalid";
+}
+
+function routeDraft(status: CaseStatus | null): CaseFilterDraft {
+  return status === null ? EMPTY_CASE_FILTER_DRAFT : { ...EMPTY_CASE_FILTER_DRAFT, caseStatus: status };
+}
+
+function routeFilters(status: CaseStatus | null): CommittedFilters {
+  return status === null ? NO_FILTERS : { caseStatus: status };
+}
+
 export function CaseListPage() {
-  const [draft, setDraft] = useState<CaseFilterDraft>(EMPTY_CASE_FILTER_DRAFT);
-  const [appliedDraft, setAppliedDraft] = useState<CaseFilterDraft>(EMPTY_CASE_FILTER_DRAFT);
-  const [committed, setCommitted] = useState<CommittedFilters>(NO_FILTERS);
+  const location = useLocation();
+  const status = routeStatus(location.search, location.hash);
+  if (status === "invalid") {
+    return (
+      <section className="cases" aria-labelledby="cases-heading">
+        <h2 id="cases-heading">사건</h2>
+        <div className="notice notice--error" role="alert">
+          <p className="notice__title">이 사건 목록 주소를 열 수 없습니다</p>
+          <p className="notice__body">사건 목록에서 다시 조회하세요.</p>
+          <Link to="/cases">사건 목록으로</Link>
+        </div>
+      </section>
+    );
+  }
+  return <CaseListContent routeSearch={location.search} initialStatus={status} />;
+}
+
+function CaseListContent({ routeSearch, initialStatus }: {
+  readonly routeSearch: string;
+  readonly initialStatus: CaseStatus | null;
+}) {
+  const navigate = useNavigate();
+  const [previousSearch, setPreviousSearch] = useState(routeSearch);
+  const [skipLocalNavigation, setSkipLocalNavigation] = useState(false);
+  const [draft, setDraft] = useState<CaseFilterDraft>(() => routeDraft(initialStatus));
+  const [appliedDraft, setAppliedDraft] = useState<CaseFilterDraft>(() => routeDraft(initialStatus));
+  const [committed, setCommitted] = useState<CommittedFilters>(() => routeFilters(initialStatus));
   const [pageNumber, setPageNumber] = useState(DEFAULT_PAGE);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [sort, setSort] = useState<CaseListSort>(DEFAULT_SORT);
   const [refusal, setRefusal] = useState<FilterRefusal>(NO_REFUSAL);
   const problems = refusal.problems;
+
+  // Browser history can reuse this route component. Clear the previous query's
+  // rows during render, before an effect or a network response can paint them.
+  if (previousSearch !== routeSearch) {
+    setPreviousSearch(routeSearch);
+    if (skipLocalNavigation) {
+      setSkipLocalNavigation(false);
+    } else {
+      setDraft(routeDraft(initialStatus));
+      setAppliedDraft(routeDraft(initialStatus));
+      setCommitted(routeFilters(initialStatus));
+      setPageNumber(DEFAULT_PAGE);
+      setPageSize(DEFAULT_PAGE_SIZE);
+      setSort(DEFAULT_SORT);
+      setRefusal(NO_REFUSAL);
+    }
+  }
 
   const errorRef = useRef<HTMLDivElement | null>(null);
 
@@ -347,7 +408,11 @@ export function CaseListPage() {
     // A new filter set is a new result set, so the page index cannot survive it:
     // page 4 of the old search is not page 4 of the new one.
     setPageNumber(DEFAULT_PAGE);
-  }, [draft]);
+    if (routeSearch !== "" && outcome.filters.caseStatus !== initialStatus) {
+      setSkipLocalNavigation(true);
+      navigate("/cases", { replace: true });
+    }
+  }, [draft, initialStatus, navigate, routeSearch]);
 
   const reset = useCallback(() => {
     setRefusal(clearProblems);
@@ -357,7 +422,11 @@ export function CaseListPage() {
     setPageNumber(DEFAULT_PAGE);
     setPageSize(DEFAULT_PAGE_SIZE);
     setSort(DEFAULT_SORT);
-  }, []);
+    if (routeSearch !== "") {
+      setSkipLocalNavigation(true);
+      navigate("/cases", { replace: true });
+    }
+  }, [navigate, routeSearch]);
 
   const changeSort = useCallback((next: CaseListSort) => {
     setSort(next);

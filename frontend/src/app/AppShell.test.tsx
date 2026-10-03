@@ -360,6 +360,8 @@ describe("AppShell capability navigation", () => {
 
   it.each([
     ["the case list", "/cases"],
+    ["the OPEN case list", "/cases?caseStatus=OPEN"],
+    ["the information-required case list", "/cases?caseStatus=ADDITIONAL_INFORMATION_REQUIRED"],
     ["a canonical case detail address", `/cases/${CANONICAL_CASE_ID}`],
     ["a case detail address with the lowest canonical identifier", "/cases/00000000-0000-4000-8000-000000000000"],
     ["a case detail address with the highest canonical identifier", "/cases/ffffffff-ffff-4fff-bfff-ffffffffffff"],
@@ -397,9 +399,8 @@ describe("AppShell capability navigation", () => {
    * `aria-current="page"` tells a screen-reader user "this link is where you
    * are". React Router decides that by prefix, so a `NavLink` to `/cases` calls
    * itself current at every unrouted address beneath it, and `end` narrows that
-   * only to the pathname - `/cases?caseStatus=OPEN` and `/cases#content` would
-   * still claim it. The section is exactly two addresses: the list, and one
-   * case's detail named by a canonical lowercase UUID v4.
+   * only to the pathname. The section includes the list, its two exact status
+   * query variants, and one case's detail named by a canonical lowercase UUID v4.
    *
    * The near-miss identifiers are the interesting half. An uppercase UUID, a
    * UUID v1 and an invalid RFC variant each match the *route pattern* - one
@@ -414,7 +415,8 @@ describe("AppShell capability navigation", () => {
   const nonCurrentCaseAddresses: readonly [string, string][] = [
     ["the case list with a trailing slash", "/cases/"],
     ["an address that merely starts with the same characters", "/casesx"],
-    ["the case list carrying a query", "/cases?caseStatus=OPEN"],
+    ["the case list carrying a duplicate query", "/cases?caseStatus=OPEN&caseStatus=CLOSED"],
+    ["the case list carrying an unknown query", "/cases?caseStatus=OPEN&unknown=1"],
     ["the case list carrying a fragment", "/cases#content"],
     ["a case detail address carrying a query", `/cases/${CANONICAL_CASE_ID}?tab=raw`],
     ["a case detail address carrying a fragment", `/cases/${CANONICAL_CASE_ID}#assignee`],
@@ -540,6 +542,8 @@ describe("AppShell authentication controls", () => {
     ],
     ["the transaction list", "/transactions", null],
     ["the case list", "/cases", null],
+    ["the OPEN case list", "/cases?caseStatus=OPEN", null],
+    ["the information-required case list", "/cases?caseStatus=ADDITIONAL_INFORMATION_REQUIRED", null],
     ["a case list carrying a query", "/cases?status=OPEN", "status=OPEN"],
     ["a case list carrying a fragment", "/cases#content", "#content"],
     ["a case list carrying both", "/cases?status=OPEN#content", "status=OPEN"],

@@ -8,11 +8,10 @@ import { isCanonicalUuidV4 } from "../api/responseValidation";
  *
  * There are two kinds of allowed value, and only two.
  *
- * The four literal routes below are compared with `===` against a string
- * literal, so `/transactions` is listed as itself and only as itself, and
- * `/cases` likewise. A literal admits itself and nothing beneath it:
- * `/cases/`, `/casesx` and `/cases?status=OPEN` are none of them the literal,
- * and none of them is repaired into it.
+ * The four base routes and two exact status-filtered case routes are compared
+ * with `===`. A literal admits itself and nothing beneath it: `/cases/`,
+ * `/casesx` and `/cases?status=OPEN` are none of them allowed, and none is
+ * repaired into an allowed address.
  *
  * The two detail routes are the parameterized destinations, and neither is
  * admitted by a prefix test. `startsWith("/transactions/")`,
@@ -28,6 +27,8 @@ import { isCanonicalUuidV4 } from "../api/responseValidation";
  * characters of `[0-9a-f-]`.
  */
 export const ALLOWED_RETURN_ROUTES = ["/", "/health", "/transactions", "/cases"] as const;
+export const OPEN_CASE_LIST_ROUTE = "/cases?caseStatus=OPEN" as const;
+export const INFORMATION_CASE_LIST_ROUTE = "/cases?caseStatus=ADDITIONAL_INFORMATION_REQUIRED" as const;
 
 export type LiteralReturnRoute = (typeof ALLOWED_RETURN_ROUTES)[number];
 
@@ -39,6 +40,8 @@ export type CaseDetailReturnRoute = `/cases/${string}`;
 
 export type AllowedReturnRoute =
   | LiteralReturnRoute
+  | typeof OPEN_CASE_LIST_ROUTE
+  | typeof INFORMATION_CASE_LIST_ROUTE
   | TransactionDetailReturnRoute
   | CaseDetailReturnRoute;
 
@@ -88,6 +91,8 @@ export function resolveReturnRoute(value: unknown): AllowedReturnRoute {
   if (value === "/cases") {
     return "/cases";
   }
+  if (value === OPEN_CASE_LIST_ROUTE) return OPEN_CASE_LIST_ROUTE;
+  if (value === INFORMATION_CASE_LIST_ROUTE) return INFORMATION_CASE_LIST_ROUTE;
   // `typeof` rather than `instanceof String`: a `String` object wrapping an
   // allowed route is not an allowed route, and neither is anything else that
   // merely stringifies into one.

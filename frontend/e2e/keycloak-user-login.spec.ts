@@ -386,6 +386,14 @@ const E2E_ASSIGNEE_REF = "E2E Assignee 01";
 
 /** `page`, `size` and `sort`, in the order and encoding the builder emits. */
 const INITIAL_CASE_TARGET = `${CASE_LIST_PATH}?page=0&size=20&sort=lastChangedAt%2Cdesc`;
+const HOME_OPEN_CASE_TARGET = `${CASE_LIST_PATH}?caseStatus=OPEN&page=0&size=5&sort=lastChangedAt%2Cdesc`;
+const HOME_INFORMATION_CASE_TARGET =
+  `${CASE_LIST_PATH}?caseStatus=ADDITIONAL_INFORMATION_REQUIRED&page=0&size=1&sort=lastChangedAt%2Cdesc`;
+const OPEN_CASE_ROUTE = "/cases?caseStatus=OPEN";
+const INFORMATION_CASE_ROUTE = "/cases?caseStatus=ADDITIONAL_INFORMATION_REQUIRED";
+const OPEN_CASE_LIST_TARGET = `${CASE_LIST_PATH}?caseStatus=OPEN&page=0&size=20&sort=lastChangedAt%2Cdesc`;
+const INFORMATION_CASE_LIST_TARGET =
+  `${CASE_LIST_PATH}?caseStatus=ADDITIONAL_INFORMATION_REQUIRED&page=0&size=20&sort=lastChangedAt%2Cdesc`;
 
 /**
  * The same three, plus the two filters the analyst applies, in the registry's
@@ -6373,6 +6381,14 @@ test("real USER sign-out ends the Keycloak session and cannot be replayed", asyn
   await expect(page.getByLabel("인증 상태")).toContainText("님으로 로그인했습니다.");
   requireCondition((await publicationCount(page)) === 1, "The session was not published once.");
 
+  // Home now starts two legitimate case reads as soon as this session is
+  // published. Let both cards leave loading, then record the request count
+  // immediately before sign-out. A later increase is still a failure.
+  await expect(page.locator(".home-work__card")).toHaveCount(2);
+  await expect(page.locator(".home-work__card [role='status']")).toHaveCount(0);
+  const backendRequestsBeforeSignOut = backendRequests.length;
+  requireCondition(backendRequestsBeforeSignOut > 0, "The authenticated Home made no Backend request.");
+
   await page.getByRole("button", { name: "로그아웃" }).click();
   await page.waitForURL(POST_LOGOUT_REDIRECT_URI);
 
@@ -6419,9 +6435,10 @@ test("real USER sign-out ends the Keycloak session and cannot be replayed", asyn
   requireCondition(page.url() === POST_LOGOUT_REDIRECT_URI, "The browser did not settle on the exact application root.");
   await expect(page.getByRole("button", { name: "로그인" })).toBeVisible();
   await expect(page.getByLabel("인증 상태")).not.toContainText("로그인했습니다.");
+  await expect(page.locator(".home-work")).toHaveCount(0);
   requireCondition(!(await hasOwnedStorage(page)), "Sign-out retained OIDC transaction or user state.");
   requireCondition((await publicationCount(page)) === 0, "The signed-out page published a session.");
-  requireCondition(backendRequests.length === 0, "Sign-out reached the Backend.");
+  requireCondition(backendRequests.length === backendRequestsBeforeSignOut, "Sign-out reached the Backend.");
   requireCondition(
     tokenGrantTypes.length === 1 && tokenGrantTypes[0] === "authorization_code",
     "Sign-out attempted a refresh grant or a silent renewal.",
@@ -6442,7 +6459,7 @@ test("real USER sign-out ends the Keycloak session and cannot be replayed", asyn
   requireCondition(!(await hasOwnedStorage(page)), "A replayed logout callback restored OIDC storage.");
   requireCondition(endSessionRequests.length === 1, "A replayed logout callback started another end-session request.");
   requireCondition(tokenGrantTypes.length === 1, "A replayed logout callback exchanged a grant.");
-  requireCondition(backendRequests.length === 0, "A replayed logout callback reached the Backend.");
+  requireCondition(backendRequests.length === backendRequestsBeforeSignOut, "A replayed logout callback reached the Backend.");
   requireCondition(!(await browserContainsAny(page, sensitive)), "A replayed logout callback exposed a credential or state.");
   // Rendered text, not `documentElement.textContent`. The dev server injects the
   // application stylesheet as a `<style>` element, whose text content is CSS
@@ -7160,6 +7177,25 @@ test("a real USER reaches the case console over the real Backend", async ({ page
 
   // The case navigation, decided from the real role claim of a real Keycloak
   // session rather than from a fixture.
+  await expect(page.locator(".home-work__card strong")).toHaveCount(2);
+  const homeCaseRequests = backend.filter((entry) =>
+    entry.method === "GET" &&
+    [HOME_OPEN_CASE_TARGET, HOME_INFORMATION_CASE_TARGET].includes(entry.target));
+  requireCondition(homeCaseRequests.length === 2,
+    "The authenticated Home did not make exactly its two independent case reads.");
+  requireCondition(homeCaseRequests.every((entry) => entry.status === 200),
+    "A real Home case read did not return 200.");
+  const openCountLabel = (await page.locator(".home-work__card").first().locator("strong").textContent()) ?? "";
+  requireCondition(/^\d+건$/.test(openCountLabel), "The OPEN Home count was not a current-state count.");
+  const openCount = Number(openCountLabel.slice(0, -1));
+  const previewLinks = await page.locator(".home-work__row a").evaluateAll((links) =>
+    links.map((link) => ({ href: link.getAttribute("href"), label: link.getAttribute("aria-label") })));
+  requireCondition(previewLinks.length === Math.min(openCount, 5),
+    "The OPEN Home response did not supply its count and bounded preview together.");
+  requireCondition(previewLinks.every((link) =>
+    link.href !== null && /^\/cases\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(link.href) &&
+    link.label === `사건 ${link.href.slice("/cases/".length)} 상세 보기`),
+  "An OPEN Home preview row did not link to its case detail.");
   const casesLink = page
     .getByRole("navigation", { name: "주요 탐색" })
     .getByRole("link", { name: "사건", exact: true });
@@ -7175,7 +7211,7 @@ test("a real USER reaches the case console over the real Backend", async ({ page
   await expect(page.getByRole("alert")).toHaveCount(0);
 
   const caseRequests = backend.filter(
-    (entry) => entry.method === "GET" && entry.pathname === CASE_LIST_PATH,
+    (entry) => entry.method === "GET" && entry.target === INITIAL_CASE_TARGET,
   );
   requireCondition(caseRequests.length === 1, "The case list was not requested exactly once.");
   requireCondition(caseRequests[0].status === 200, "The real case list request did not return 200.");
@@ -7233,7 +7269,7 @@ test("a real USER reaches the case console over the real Backend", async ({ page
   // been sitting there.
   await page.waitForTimeout(1_000);
   requireCondition(
-    backend.filter((entry) => entry.method === "GET" && entry.pathname === CASE_LIST_PATH)
+    backend.filter((entry) => entry.method === "GET" && entry.target === INITIAL_CASE_TARGET)
       .length === 1,
     "The case screen retried or polled on its own.",
   );
@@ -7275,7 +7311,8 @@ test("a real USER reaches the case console over the real Backend", async ({ page
   await appliedResponse;
   await expect(results).not.toContainText("필터 적용 중", { timeout: 15_000 });
   const filtered = backend.filter(
-    (entry) => entry.method === "GET" && entry.pathname === CASE_LIST_PATH,
+    (entry) => entry.method === "GET" &&
+      [INITIAL_CASE_TARGET, APPLIED_CASE_TARGET].includes(entry.target),
   );
   requireCondition(filtered.length === 2, "Applying a case filter did not send exactly one request.");
   requireCondition(filtered[1].status === 200, "The filtered case request did not return 200.");
@@ -7293,7 +7330,8 @@ test("a real USER reaches the case console over the real Backend", async ({ page
   // a repeat of it.
   await page.waitForTimeout(1_000);
   requireCondition(
-    backend.filter((entry) => entry.method === "GET" && entry.pathname === CASE_LIST_PATH)
+    backend.filter((entry) => entry.method === "GET" &&
+      [INITIAL_CASE_TARGET, APPLIED_CASE_TARGET].includes(entry.target))
       .length === 2,
     "The case screen retried the filtered query on its own.",
   );
@@ -7338,6 +7376,145 @@ test("a real USER reaches the case console over the real Backend", async ({ page
     backend.filter((entry) => entry.method !== "GET").length === 0,
     "The case screen sent a business mutation.",
   );
+
+});
+
+/** Complete login from the exact guarded URL, allowing either a credential form or existing SSO. */
+async function signInFromCaseGuard(page: Page, password: string): Promise<void> {
+  const tokenResponse = page.waitForResponse(
+    (response) => response.url() === TOKEN_URL && response.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "로그인" }).click();
+  const credentialForm = page.locator("#username");
+  const needsCredentials = await Promise.race([
+    credentialForm.waitFor({ state: "visible", timeout: 15_000 }).then(() => true, () => false),
+    tokenResponse.then(() => false, () => false),
+  ]);
+  if (needsCredentials) {
+    await credentialForm.fill(USERNAME);
+    await page.locator("#password").fill(password);
+    await submitLogin(page);
+  }
+  requireCondition((await tokenResponse).status() === 200, "The guarded case login did not exchange a code.");
+  await expect(page.getByLabel("인증 상태")).toContainText("님으로 로그인했습니다.");
+}
+
+test("real USER follows the OPEN Home card and browser Back and Forward", async ({ page }) => {
+  const password = readUserPassword();
+  const backend = await installBackendRelay(page);
+  await beginLogin(page, password);
+  await submitLogin(page);
+  await expect(page.locator(".home-work__card strong")).toHaveCount(2);
+
+  const openResponse = page.waitForResponse((response) =>
+    response.url() === `${BACKEND_ORIGIN}${OPEN_CASE_LIST_TARGET}` && response.request().method() === "GET");
+  await page.getByRole("link", { name: "OPEN 사건 목록", exact: true }).click();
+  await openResponse;
+  requireCondition(page.url() === `${APP_ORIGIN}${OPEN_CASE_ROUTE}`, "The OPEN card did not open its exact route.");
+  await expect(page.getByLabel("사건 상태")).toHaveValue("OPEN");
+  requireCondition(backend.filter((entry) => entry.method === "GET" && entry.target === OPEN_CASE_LIST_TARGET).length === 1,
+    "The OPEN card did not apply its exact case-list query once.");
+
+  await page.goBack();
+  requireCondition(page.url() === `${APP_ORIGIN}/`, "Back did not return to Home.");
+  await expect(page.locator(".home-work__card strong")).toHaveCount(2);
+  const forwardResponse = page.waitForResponse((response) =>
+    response.url() === `${BACKEND_ORIGIN}${OPEN_CASE_LIST_TARGET}` && response.request().method() === "GET");
+  await page.goForward();
+  await forwardResponse;
+  requireCondition(page.url() === `${APP_ORIGIN}${OPEN_CASE_ROUTE}`, "Forward did not restore the OPEN route.");
+  await expect(page.getByLabel("사건 상태")).toHaveValue("OPEN");
+  requireCondition(backend.filter((entry) => entry.method === "GET" && entry.target === OPEN_CASE_LIST_TARGET).length === 2,
+    "Forward did not restore the applied OPEN request exactly once.");
+});
+
+test("real USER follows the information-required Home card, resets, and rejects ambiguous queries", async ({ page }) => {
+  const password = readUserPassword();
+  const backend = await installBackendRelay(page);
+  await beginLogin(page, password);
+  await submitLogin(page);
+  await expect(page.locator(".home-work__card strong")).toHaveCount(2);
+
+  const informationResponse = page.waitForResponse((response) =>
+    response.url() === `${BACKEND_ORIGIN}${INFORMATION_CASE_LIST_TARGET}` && response.request().method() === "GET");
+  await page.getByRole("link", { name: "추가 정보 필요 사건 목록", exact: true }).click();
+  await informationResponse;
+  requireCondition(page.url() === `${APP_ORIGIN}${INFORMATION_CASE_ROUTE}`,
+    "The information-required card did not open its exact route.");
+  await expect(page.getByLabel("사건 상태")).toHaveValue("ADDITIONAL_INFORMATION_REQUIRED");
+
+  const resetResponse = page.waitForResponse((response) =>
+    response.url() === `${BACKEND_ORIGIN}${INITIAL_CASE_TARGET}` && response.request().method() === "GET");
+  const filterReset = page.locator("form.filters").getByRole("button", { name: "필터 초기화", exact: true });
+  await expect(filterReset).toHaveCount(1);
+  await filterReset.click();
+  await resetResponse;
+  requireCondition(page.url() === `${APP_ORIGIN}/cases`, "Reset did not clear the status URL.");
+  await expect(page.getByLabel("사건 상태")).toHaveValue("");
+
+  // No application link advertises a malformed query. Ask the application's
+  // own router to navigate there in this negative test, without a document reload.
+  const beforeInvalid = backend.filter((entry) => entry.method === "GET" && entry.pathname === CASE_LIST_PATH).length;
+  for (const invalidRoute of [`${OPEN_CASE_ROUTE}&caseStatus=CLOSED`, `${OPEN_CASE_ROUTE}&unknown=1`]) {
+    await page.evaluate(async (route) => {
+      const { router } = await import("../src/app/router.tsx");
+      await router.navigate(route);
+    }, invalidRoute);
+    requireCondition(page.url() === `${APP_ORIGIN}${invalidRoute}`, "An invalid case route was rewritten.");
+    await expect(page.getByRole("alert")).toBeVisible();
+    requireCondition(backend.filter((entry) => entry.method === "GET" && entry.pathname === CASE_LIST_PATH).length === beforeInvalid,
+      "An ambiguous case route silently produced a Backend request.");
+  }
+});
+
+for (const [status, route, target] of [
+  ["OPEN", OPEN_CASE_ROUTE, OPEN_CASE_LIST_TARGET],
+  ["ADDITIONAL_INFORMATION_REQUIRED", INFORMATION_CASE_ROUTE, INFORMATION_CASE_LIST_TARGET],
+] as const) {
+  test(`real USER signs in from a fresh ${status} case address and returns to its filter`, async ({ page }) => {
+    const password = readUserPassword();
+    const backend = await installBackendRelay(page);
+    await page.goto(`${APP_ORIGIN}${route}`);
+    await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
+    requireCondition(backend.length === 0, "An unauthenticated case address reached the Backend.");
+    const listResponse = page.waitForResponse((response) =>
+      response.url() === `${BACKEND_ORIGIN}${target}` && response.request().method() === "GET");
+    await signInFromCaseGuard(page, password);
+    await listResponse;
+    requireCondition(page.url() === `${APP_ORIGIN}${route}`, "Login did not return to the exact case-status route.");
+    await expect(page.getByLabel("사건 상태")).toHaveValue(status);
+    requireCondition(backend.filter((entry) => entry.method === "GET" && entry.target === target).length === 1,
+      "The returned case route did not apply its filter exactly once.");
+  });
+}
+
+test("real USER refreshes an OPEN case address, signs in again, and restores its filter", async ({ page }) => {
+  const password = readUserPassword();
+  const backend = await installBackendRelay(page);
+  await beginLogin(page, password);
+  await submitLogin(page);
+  await expect(page.locator(".home-work__card strong")).toHaveCount(2);
+  const initialResponse = page.waitForResponse((response) =>
+    response.url() === `${BACKEND_ORIGIN}${OPEN_CASE_LIST_TARGET}` && response.request().method() === "GET");
+  await page.getByRole("link", { name: "OPEN 사건 목록", exact: true }).click();
+  await initialResponse;
+  await expect(page.getByLabel("사건 상태")).toHaveValue("OPEN");
+  const beforeReload = backend.filter((entry) => entry.method === "GET" && entry.pathname === CASE_LIST_PATH).length;
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
+  await expect(page.locator(".home-work")).toHaveCount(0);
+  requireCondition(backend.filter((entry) => entry.method === "GET" && entry.pathname === CASE_LIST_PATH).length === beforeReload,
+    "An unauthenticated refresh reached the Backend.");
+
+  const returnedResponse = page.waitForResponse((response) =>
+    response.url() === `${BACKEND_ORIGIN}${OPEN_CASE_LIST_TARGET}` && response.request().method() === "GET");
+  await signInFromCaseGuard(page, password);
+  await returnedResponse;
+  requireCondition(page.url() === `${APP_ORIGIN}${OPEN_CASE_ROUTE}`, "Re-login did not restore the exact OPEN route.");
+  await expect(page.getByLabel("사건 상태")).toHaveValue("OPEN");
+  requireCondition(backend.filter((entry) => entry.method === "GET" && entry.target === OPEN_CASE_LIST_TARGET).length === 2,
+    "Re-login did not restore the applied OPEN request exactly once.");
 });
 
 /**
@@ -10996,4 +11173,42 @@ test("synthetic full case detail keeps its reading order, width and role states"
     }
   }
   requireCondition(offOrigin.length === 0, "The synthetic case detail made an external request.");
+});
+
+test("synthetic Home case overview fits 1440, 1280, 1024 and 390px", async ({ page }) => {
+  const offOrigin: string[] = [];
+  page.on("request", (request) => {
+    if (!request.url().startsWith(APP_ORIGIN)) offOrigin.push(request.url());
+  });
+  for (const width of [1440, 1280, 1024, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`${APP_ORIGIN}/e2e/home-case-geometry.html`);
+    await expect(page.locator(".home-work__card")).toHaveCount(2);
+    await expect(page.locator(".home-work__row")).toHaveCount(5);
+    const layout = await page.evaluate(() => {
+      const cards = Array.from(document.querySelectorAll(".home-work__card"),
+        (element) => element.getBoundingClientRect());
+      const preview = document.querySelector(".home-work__preview")?.getBoundingClientRect();
+      return {
+        documentWidth: document.documentElement.scrollWidth,
+        viewportWidth: document.documentElement.clientWidth,
+        cardCount: cards.length,
+        sameRow: Math.abs(cards[0].top - cards[1].top) < 1,
+        previewBelow: preview !== undefined && preview.top >= Math.max(...cards.map((card) => card.bottom)) - 1,
+      };
+    });
+    requireCondition(layout.documentWidth <= layout.viewportWidth + 1,
+      `Synthetic Home overview overflowed at ${String(width)}px.`);
+    requireCondition(layout.cardCount === 2 && layout.previewBelow,
+      `Synthetic Home overview lost its reading order at ${String(width)}px.`);
+    requireCondition(layout.sameRow === (width !== 390),
+      `Synthetic Home cards used the wrong layout at ${String(width)}px.`);
+  }
+  await page.keyboard.press("Tab");
+  await expect(page.locator(".home-work__card a").first()).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(page.locator(".home-work__card a").last()).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(page.locator(".home-work__row a").first()).toBeFocused();
+  requireCondition(offOrigin.length === 0, "Synthetic Home overview made an external request.");
 });

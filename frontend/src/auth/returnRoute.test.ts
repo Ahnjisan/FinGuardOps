@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_RETURN_ROUTE, resolveReturnRoute } from "./returnRoute";
+import { DEFAULT_RETURN_ROUTE, INFORMATION_CASE_LIST_ROUTE, OPEN_CASE_LIST_ROUTE, resolveReturnRoute } from "./returnRoute";
 
 describe("resolveReturnRoute", () => {
   it("allows the root route", () => {
@@ -16,6 +16,20 @@ describe("resolveReturnRoute", () => {
 
   it("allows the cases route", () => {
     expect(resolveReturnRoute("/cases")).toBe("/cases");
+  });
+
+  it("allows only the two exact status-filtered case return routes", () => {
+    expect(resolveReturnRoute(OPEN_CASE_LIST_ROUTE)).toBe(OPEN_CASE_LIST_ROUTE);
+    expect(resolveReturnRoute(INFORMATION_CASE_LIST_ROUTE)).toBe(INFORMATION_CASE_LIST_ROUTE);
+    for (const address of [
+      "/cases?caseStatus=CLOSED",
+      "/cases?caseStatus=OPEN&caseStatus=CLOSED",
+      "/cases?caseStatus=OPEN&unknown=1",
+      "/cases?caseStatus=%4fPEN",
+      "/cases?caseStatus=OPEN#fragment",
+    ]) {
+      expect(resolveReturnRoute(address)).toBe("/");
+    }
   });
 
   const rejected: Array<[string, unknown]> = [

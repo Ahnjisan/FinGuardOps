@@ -1,9 +1,13 @@
 import { Link } from "react-router-dom";
 import { useCapabilities } from "../auth/useCapabilities";
+import { useAuth } from "../auth/useAuth";
 import { Icon } from "../shared/Icon";
+import { CaseWorkOverview } from "./home/CaseWorkOverview";
 
 export function HomePage() {
   const capabilities = useCapabilities();
+  const { state } = useAuth();
+  const canReadCases = state.status === "authenticated" && capabilities.has("case:view");
 
   return (
     <section className="home" aria-labelledby="home-heading">
@@ -11,15 +15,17 @@ export function HomePage() {
         <p className="home__eyebrow">이상거래 대응 업무 공간</p>
         <h2 id="home-heading">FinGuardOps</h2>
         <p className="home__lede">
-          금융거래와 사건을 살펴보고 서비스 상태를 확인하는 업무 공간입니다.
+          현재 사건을 확인하고 조사할 사건으로 이동하는 업무 공간입니다.
         </p>
         <div className="home__hero-actions">
-          {capabilities.has("case:view") && (
+          {canReadCases && (
             <Link className="button button--hero" to="/cases"><Icon name="cases" />사건 대기열 열기</Link>
           )}
           <Link className="home__hero-link" to="/health"><Icon name="health" />서비스 상태 확인</Link>
         </div>
       </div>
+
+      {canReadCases && <CaseWorkOverview />}
 
       <div className="home__section-head">
         <p className="home__section-label">업무 공간</p>
