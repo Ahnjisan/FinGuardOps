@@ -1,6 +1,7 @@
 package com.aifds.backend.security.web;
 
 import com.aifds.backend.behavior.service.BehaviorEventIntakeService;
+import com.aifds.backend.detection.service.AdoptedDetectionResultQueryService;
 import com.aifds.backend.common.trace.TraceIdFilter;
 import com.aifds.backend.fraudcase.service.FraudCaseAuditLogService;
 import com.aifds.backend.fraudcase.service.FraudCaseQueryService;
@@ -56,6 +57,7 @@ import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_AUD
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_NOTE_READ;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_NOTE_WRITE;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_READ;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.DETECTION_READ;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_RESOLUTION_WRITE;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_WORKFLOW_WRITE;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.TRANSACTION_INTAKE;
@@ -180,6 +182,12 @@ class EndpointRbacSecurityIntegrationTest {
                     "/api/v1/cases/" + CASE_ID + "/transactions",
                     "FDS_VIEWER",
                     CASE_READ
+            ),
+            endpoint(
+                    HttpMethod.GET,
+                    "/api/v1/transactions/" + TRANSACTION_ID + "/adopted-detection-result",
+                    "FDS_VIEWER",
+                    TRANSACTION_READ + "+" + DETECTION_READ
             )
     );
     private static final List<CorsProbe> APPROVED_PREFLIGHTS = Stream.concat(
@@ -285,6 +293,9 @@ class EndpointRbacSecurityIntegrationTest {
     private TransactionQueryService transactionQueryService;
 
     @MockitoBean
+    private AdoptedDetectionResultQueryService adoptedDetectionResultQueryService;
+
+    @MockitoBean
     private FraudCaseQueryService fraudCaseQueryService;
 
     @MockitoBean
@@ -328,6 +339,7 @@ class EndpointRbacSecurityIntegrationTest {
                 transactionIntakeService,
                 behaviorEventIntakeService,
                 transactionQueryService,
+                adoptedDetectionResultQueryService,
                 fraudCaseQueryService,
                 fraudCaseTransactionQueryService,
                 fraudCaseWorkflowService,
@@ -337,9 +349,9 @@ class EndpointRbacSecurityIntegrationTest {
     }
 
     @Test
-    void coversExactlyFourteenProductionEndpointsAndMinimumRoles()
+    void coversExactlyFifteenProductionEndpointsAndMinimumRoles()
             throws Exception {
-        assertThat(ENDPOINTS).hasSize(14);
+        assertThat(ENDPOINTS).hasSize(15);
         assertThat(ENDPOINTS.stream().map(Endpoint::signature))
                 .doesNotHaveDuplicates();
         Set<String> actualMappings = requestMappingHandlerMapping
@@ -593,8 +605,8 @@ class EndpointRbacSecurityIntegrationTest {
 
     @Test
     void permitsEveryApprovedCorsPathAndMethodExactly() {
-        assertThat(APPROVED_PREFLIGHTS).hasSize(15);
-        assertThat(APPROVED_PREFLIGHTS.subList(0, 14))
+        assertThat(APPROVED_PREFLIGHTS).hasSize(16);
+        assertThat(APPROVED_PREFLIGHTS.subList(0, 15))
                 .extracting(CorsProbe::signature)
                 .containsExactlyElementsOf(ENDPOINTS.stream()
                         .map(Endpoint::signature)
@@ -937,6 +949,7 @@ class EndpointRbacSecurityIntegrationTest {
                 transactionIntakeService,
                 behaviorEventIntakeService,
                 transactionQueryService,
+                adoptedDetectionResultQueryService,
                 fraudCaseQueryService,
                 fraudCaseTransactionQueryService,
                 fraudCaseWorkflowService,

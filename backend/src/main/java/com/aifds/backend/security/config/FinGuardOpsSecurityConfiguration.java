@@ -29,6 +29,7 @@ import org.springframework.security.oauth2.jwt.JwtException;
 import org.springframework.security.oauth2.jwt.MappedJwtClaimSetConverter;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.security.oauth2.server.resource.web.DefaultBearerTokenResolver;
+import org.springframework.security.authorization.AuthorizationDecision;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.context.NullSecurityContextRepository;
 import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
@@ -52,6 +53,7 @@ import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_AUD
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_NOTE_READ;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_NOTE_WRITE;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_READ;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.DETECTION_READ;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_RESOLUTION_WRITE;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_WORKFLOW_WRITE;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.TRANSACTION_INTAKE;
@@ -66,6 +68,7 @@ public class FinGuardOpsSecurityConfiguration {
             new CorsEndpoint(HttpMethod.GET, "/api/health"),
             new CorsEndpoint(HttpMethod.POST, "/api/v1/transactions"),
             new CorsEndpoint(HttpMethod.GET, "/api/v1/transactions"),
+            new CorsEndpoint(HttpMethod.GET, "/api/v1/transactions/{transactionId}/adopted-detection-result"),
             new CorsEndpoint(
                     HttpMethod.GET,
                     "/api/v1/transactions/{transactionId}"
@@ -163,6 +166,16 @@ public class FinGuardOpsSecurityConfiguration {
                                 HttpMethod.POST,
                                 "/api/v1/behavior-events"
                         )).hasAuthority(BEHAVIOR_EVENT_INTAKE)
+                        .requestMatchers(paths.matcher(
+                                HttpMethod.GET,
+                                "/api/v1/transactions/{transactionId}/adopted-detection-result"
+                        )).access((authentication, request) -> {
+                            var granted = authentication.get().getAuthorities();
+                            return new AuthorizationDecision(
+                                    granted.stream().anyMatch(a -> TRANSACTION_READ.equals(a.getAuthority()))
+                                            && granted.stream().anyMatch(a -> DETECTION_READ.equals(a.getAuthority()))
+                            );
+                        })
                         .requestMatchers(paths.matcher(
                                 HttpMethod.GET,
                                 "/api/v1/transactions"

@@ -1,7 +1,9 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { Icon } from "../shared/Icon";
 import { isCanonicalUuidV4 } from "../api/backendEndpoints";
+import { useCapabilities } from "../auth/useCapabilities";
+import { AdoptedDetectionSection } from "./transactions/AdoptedDetectionSection";
 import type { TransactionDetail } from "../api/transactionApi";
 import {
   useTransactionDetail,
@@ -22,12 +24,9 @@ import {
 /**
  * One transaction, read only.
  *
- * Everything on this screen comes from the `TransactionDetail` contract and
- * nothing else. There is no risk score, no risk level, no fraud probability, no
- * detection result, no evidence and no case link, because the endpoint carries
- * none of them and a console that infers one puts a number on screen that no
- * system ever computed. `processingStatus` is where the transaction has reached
- * in the pipeline; it is not a verdict about the transaction.
+ * The transaction record comes from `TransactionDetail`; the separate
+ * adopted-detection read owns risk and RULE evidence. `processingStatus` is
+ * where processing has reached and is never used as a risk grade.
  *
  * There is also no action. No edit, no reprocess, no case creation, no
  * clipboard copy: the analyst reads the record and navigates away.
@@ -150,10 +149,17 @@ const INVALID_ROUTE_COPY = Object.freeze({
 interface TransactionDetailPageProps {
   /** Allows the browser geometry fixture to render this page without credentials or a Backend. */
   readonly useDetail?: typeof useTransactionDetail;
+  readonly renderDetection?: (transactionId: string) => ReactNode;
 }
 
-export function TransactionDetailPage({ useDetail = useTransactionDetail }: TransactionDetailPageProps = {}) {
+export function TransactionDetailPage({ useDetail = useTransactionDetail,
+  renderDetection = (id) => <AdoptedDetectionSection transactionId={id} /> }: TransactionDetailPageProps = {}) {
   const location = useLocation();
+  const capabilities = useCapabilities();
+  const fromCaseId = typeof location.state === "object" && location.state !== null &&
+    "fromCaseId" in location.state && typeof location.state.fromCaseId === "string" &&
+    isCanonicalUuidV4(location.state.fromCaseId) && capabilities.has("case:view")
+    ? location.state.fromCaseId : null;
   const transactionId = readCanonicalTransactionId(location);
   const { state, retry } = useDetail(transactionId);
 
@@ -185,6 +191,8 @@ export function TransactionDetailPage({ useDetail = useTransactionDetail }: Tran
         <p className="detail__back">
           <Link to="/transactions"><Icon name="back" />거래 목록으로</Link>
         </p>
+        {fromCaseId !== null && <p className="detail__back"><Link to={`/cases/${fromCaseId}`}>
+          <Icon name="back" />사건으로 돌아가기</Link></p>}
         <h2 id="transaction-detail-heading">
           거래
           {transactionId !== null && (
@@ -230,6 +238,7 @@ export function TransactionDetailPage({ useDetail = useTransactionDetail }: Tran
         <>
           <TransactionAtAGlance transaction={state.data} />
           <TransactionRecord transaction={state.data} />
+          {capabilities.has("detection:view") && renderDetection(state.data.transactionId)}
         </>
       )}
     </section>

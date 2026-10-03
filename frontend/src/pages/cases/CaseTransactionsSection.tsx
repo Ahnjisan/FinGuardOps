@@ -13,12 +13,13 @@ const ERROR_TEXT = {
 export function CaseTransactionsSection({ caseId }: { readonly caseId: string }) {
   const { state, page, setPage, retry } = useCaseTransactions(caseId);
   const mayViewTransaction = useCapabilities().has("transaction:view");
-  return <CaseTransactionsPanel state={state} pageNumber={page} onPageChange={setPage}
+  return <CaseTransactionsPanel caseId={caseId} state={state} pageNumber={page} onPageChange={setPage}
     onRetry={retry} mayViewTransaction={mayViewTransaction} />;
 }
 
-export function CaseTransactionsPanel({ state, pageNumber, onPageChange, onRetry,
+export function CaseTransactionsPanel({ caseId, state, pageNumber, onPageChange, onRetry,
   mayViewTransaction }: {
+  readonly caseId?: string;
   readonly state: CaseTransactionsState;
   readonly pageNumber: number;
   readonly onPageChange: (number: number) => void;
@@ -42,7 +43,8 @@ export function CaseTransactionsPanel({ state, pageNumber, onPageChange, onRetry
     {state.status === "success" && state.ids.length > 0 && <ol className="case-transactions__list"
       start={state.page.number * state.page.size + 1}>
       {state.ids.map((id) => <li key={id} className="case-transactions__item">
-        {mayViewTransaction ? <Link to={`/transactions/${id}`} aria-label={`거래 ${id} 상세 보기`}>{id}</Link>
+        {mayViewTransaction ? <Link to={`/transactions/${id}`} state={caseId ? { fromCaseId: caseId } : undefined}
+          aria-label={`거래 ${id} 상세 보기`}>{id}</Link>
           : <span>{id}</span>}
       </li>)}
     </ol>}

@@ -328,7 +328,7 @@ describe("TransactionDetailPage record", () => {
   it("announces the result in the live region and raises no alert", async () => {
     await showRecord();
 
-    const summary = screen.getByRole("status");
+    const summary = screen.getAllByRole("status")[0];
     expect(summary).toHaveTextContent("거래 기록 전체를 표시합니다.");
     expect(summary).toHaveAttribute("aria-live", "polite");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
@@ -342,6 +342,7 @@ describe("TransactionDetailPage record", () => {
       "거래",
       "고객·계좌·기기",
       "거래 원장 기록",
+      "채택된 탐지 결과",
     ]);
     // Every labelled section really points at a heading that exists once.
     for (const section of Array.from(document.querySelectorAll("[aria-labelledby]"))) {

@@ -107,7 +107,7 @@ createRoot(root).render(
             <CaseAuditPanel state={auditState} onPageChange={() => undefined}
               onPageSizeChange={() => undefined} onRetry={() => undefined} />
             {/* All three production fixture roles include transaction:view. */}
-            <MemoryRouter><CaseTransactionsPanel state={mode === "empty"
+            <MemoryRouter><CaseTransactionsPanel caseId={caseId} state={mode === "empty"
               ? { status: "success", ids: [], page: emptyPage }
               : mode === "error" ? { status: "error", kind: "network" }
                 : { status: "success", ids: [

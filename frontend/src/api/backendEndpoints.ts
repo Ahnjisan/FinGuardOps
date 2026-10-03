@@ -42,6 +42,7 @@ export { isCanonicalUuidV4 };
 export type BackendEndpointKey =
   | "transaction-list"
   | "transaction-detail"
+  | "adopted-detection-result"
   | "case-list"
   | "case-detail"
   | "case-transaction-list"
@@ -460,6 +461,11 @@ const REGISTRY: Readonly<Record<BackendEndpointKey, BackendEndpointDescriptor>> 
     "transaction-detail",
     "GET",
     "/api/v1/transactions/{transactionId}",
+  ),
+  "adopted-detection-result": describe(
+    "adopted-detection-result",
+    "GET",
+    "/api/v1/transactions/{transactionId}/adopted-detection-result",
   ),
   "case-list": describe(
     "case-list",

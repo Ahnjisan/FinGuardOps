@@ -201,6 +201,7 @@ method·path는 표의 authority를 강제한다. 문서 후보 endpoint에는 m
 | `POST /api/v1/transactions` | `TransactionIntakeController`, 거래 접수 | W | SERVICE · `TRANSACTION_INGESTOR` | `transaction:intake` | 아니오 | authority 강제 | 조건부 SYSTEM 거래·사건 감사 |
 | `GET /api/v1/transactions` | `TransactionQueryController`, 거래 목록 | R | USER · viewer authority 보유 role | `transaction:read` | 아니오 | authority 강제 | 없음 |
 | `GET /api/v1/transactions/{transactionId}` | `TransactionQueryController`, 거래 상세 | R | USER · viewer authority 보유 role | `transaction:read` | 아니오 | authority 강제 | 없음 |
+| `GET /api/v1/transactions/{transactionId}/adopted-detection-result` | `AdoptedDetectionResultQueryController`, 채택된 탐지 결과·RULE 근거 | R | USER · viewer authority 보유 role | `transaction:read`와 `detection:read` 모두 | 아니오 | authority 강제 | 없음 |
 | `POST /api/v1/behavior-events` | `BehaviorEventIntakeController`, 행동 접수 | W | SERVICE · `BEHAVIOR_INGESTOR` | `behavior-event:intake` | 아니오 | authority 강제 | 없음 |
 | `GET /api/v1/cases` | `FraudCaseQueryController`, 사건 목록 | R | USER · viewer authority 보유 role | `case:read` | 아니오 | authority 강제 | 없음 |
 | `GET /api/v1/cases/{caseId}` | `FraudCaseQueryController`, 사건 상세 | R | USER · viewer authority 보유 role | `case:read` | 아니오 | authority 강제 | 없음 |
