@@ -1,7 +1,11 @@
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import { isCanonicalUuidV4 } from "../api/responseValidation";
 import { safeAuthErrorMessage } from "../auth/authErrors";
-import { resolveReturnRoute } from "../auth/returnRoute";
+import {
+  INFORMATION_CASE_LIST_ROUTE,
+  OPEN_CASE_LIST_ROUTE,
+  resolveReturnRoute,
+} from "../auth/returnRoute";
 import { useAuth } from "../auth/useAuth";
 import { useCapabilities } from "../auth/useCapabilities";
 import { Icon } from "../shared/Icon";
@@ -15,10 +19,9 @@ const CASE_DETAIL_PATH = /^\/cases\/([^/]+)$/;
  *
  * The whole location is judged, not a prefix of its path. React Router's
  * `NavLink` marks itself current for everything *under* its `to`, and `end`
- * narrows that only to the pathname - so `/cases?caseStatus=OPEN`,
- * `/cases#content`, `/cases/`, `/casesx` and every unrouted address beneath
- * `/cases/` would still claim to be the page the analyst is on. None of them is
- * an address this application navigates to.
+ * narrows that only to the pathname. The two exact case-status queries are
+ * valid list addresses; fragments, duplicate or unknown queries, `/cases/`,
+ * `/casesx` and every unrouted address beneath `/cases/` are not.
  *
  * The detail form is admitted by the same rule the route, the API layer and the
  * return-route allowlist apply: one path segment that is already a canonical
@@ -29,12 +32,17 @@ const CASE_DETAIL_PATH = /^\/cases\/([^/]+)$/;
  * send a screen-reader user looking for a record that is not there.
  */
 function isCaseSectionLocation(pathname: string, search: string, hash: string): boolean {
-  if (search !== "" || hash !== "") {
+  if (hash !== "") {
     return false;
   }
-  if (pathname === "/cases") {
+  if (pathname === "/cases" && (
+    search === "" ||
+    `${pathname}${search}` === OPEN_CASE_LIST_ROUTE ||
+    `${pathname}${search}` === INFORMATION_CASE_LIST_ROUTE
+  )) {
     return true;
   }
+  if (search !== "") return false;
   const match = CASE_DETAIL_PATH.exec(pathname);
   return match !== null && isCanonicalUuidV4(match[1]);
 }
@@ -58,17 +66,17 @@ export function AppShell() {
   );
 
   /**
-   * Whether the browser is inside the case section: the list, or one case's
-   * detail.
+   * Whether the browser is inside the case section: the list (including its
+   * two exact status queries), or one case's detail.
    *
    * `aria-current` is a statement to a screen reader about where the user *is*,
-   * and both of those addresses are places this destination leads to, so both
-   * carry it. Everything else does not - see `isCaseSectionLocation`, which
+   * and these addresses are places this destination leads to, so each
+   * carries it. Everything else does not - see `isCaseSectionLocation`, which
    * owns the rule.
    *
    * `search` and `hash` are read as React Router reports them - already empty
-   * when absent, and nothing trimmed, decoded or normalized on the way in - so
-   * a location carrying either one is simply not the current page.
+   * when absent, and nothing trimmed, decoded or normalized on the way in.
+   * Only the two approved list queries are current; any fragment is refused.
    */
   const inCaseSection = isCaseSectionLocation(
     location.pathname,

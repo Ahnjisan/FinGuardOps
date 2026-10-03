@@ -17,15 +17,19 @@ function renderHome(roles: NonEmptyUserRoles = ["FDS_VIEWER"]) {
 }
 
 describe("HomePage", () => {
-  it("renders the home heading", () => {
+  it("renders the home heading", async () => {
     renderHome();
+
+    await act(async () => { await Promise.resolve(); });
 
     expect(screen.getByRole("heading", { name: "FinGuardOps" })).toBeInTheDocument();
     expect(screen.queryByText(/Business screens are not implemented yet/i)).not.toBeInTheDocument();
   });
 
-  it("provides an accessible link to the health page", () => {
+  it("provides an accessible link to the health page", async () => {
     renderHome();
+
+    await act(async () => { await Promise.resolve(); });
 
     const link = screen.getByRole("link", { name: /서비스 상태 확인/i });
     expect(link).toHaveAttribute("href", "/health");

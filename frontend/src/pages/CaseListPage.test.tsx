@@ -1,7 +1,7 @@
 import { act, fireEvent, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useLocation, type RouteObject } from "react-router-dom";
+import { Link, useLocation, useNavigate, type RouteObject } from "react-router-dom";
 import type { AuthSession } from "../auth/authClient";
 import { createFakeAuthClient, type FakeAuthClient } from "../test/fakeAuthClient";
 import { jsonResponse } from "../test/mockFetch";
@@ -142,8 +142,8 @@ function controlledFetch(): {
   return { calls, spy };
 }
 
-function renderPage(client: FakeAuthClient) {
-  return renderRoutesWithAuth(ROUTES, { client, initialEntries: ["/cases"] });
+function renderPage(client: FakeAuthClient, address = "/cases") {
+  return renderRoutesWithAuth(ROUTES, { client, initialEntries: [address] });
 }
 
 async function settle(): Promise<void> {
@@ -185,6 +185,79 @@ afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe("CaseListPage status route", () => {
+  it.each(["OPEN", "ADDITIONAL_INFORMATION_REQUIRED"] as const)(
+    "restores the %s URL into draft, applied filter and request", async (status) => {
+      const { calls } = controlledFetch();
+      renderPage(signedIn(), `/cases?caseStatus=${status}`);
+      await settle();
+      expect(calls).toHaveLength(1);
+      expect(queryOf(calls[0]).get("caseStatus")).toBe(status);
+      expect(screen.getByLabelText("사건 상태")).toHaveValue(status);
+      await answerWith(calls[0], listBody([listItem({ caseStatus: status })]));
+      expect(screen.getByRole("table")).toBeInTheDocument();
+    },
+  );
+
+  it.each([
+    "/cases?caseStatus=OPEN&caseStatus=CLOSED",
+    "/cases?caseStatus=OPEN&unknown=1",
+    "/cases?caseStatus=CLOSED",
+    "/cases?caseStatus=%4fPEN",
+    "/cases?caseStatus=OPEN#fragment",
+  ])("refuses %s before any case request", async (address) => {
+    const { calls } = controlledFetch();
+    renderPage(signedIn(), address);
+    await settle();
+    expect(calls).toHaveLength(0);
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "사건 목록으로" })).toHaveAttribute("href", "/cases");
+  });
+
+  it("Reset clears the URL and sends the unfiltered request", async () => {
+    const { calls } = controlledFetch();
+    const user = userEvent.setup();
+    renderPage(signedIn(), "/cases?caseStatus=OPEN");
+    await settle();
+    await answerWith(calls[0], listBody([listItem({ caseStatus: "OPEN" })]));
+    await user.click(screen.getByRole("button", { name: "필터 초기화" }));
+    await settle();
+    expect(calls).toHaveLength(2);
+    expect(queryOf(calls[1]).has("caseStatus")).toBe(false);
+    expect(screen.getByLabelText("사건 상태")).toHaveValue("");
+  });
+
+  it("browser Back and Forward restore the route filter", async () => {
+    function Navigation() {
+      const navigate = useNavigate();
+      return <>
+        <Link to="/cases?caseStatus=OPEN">Open queue</Link>
+        <Link to="/cases?caseStatus=ADDITIONAL_INFORMATION_REQUIRED">Information queue</Link>
+        <button onClick={() => navigate(-1)}>Back</button>
+        <button onClick={() => navigate(1)}>Forward</button>
+        <CaseListPage />
+      </>;
+    }
+    const { calls } = controlledFetch();
+    renderRoutesWithAuth([{ path: "/cases", element: <Navigation /> }], {
+      client: signedIn(), initialEntries: ["/cases?caseStatus=OPEN"],
+    });
+    await settle();
+    expect(queryOf(calls[0]).get("caseStatus")).toBe("OPEN");
+    fireEvent.click(screen.getByRole("link", { name: "Information queue" }));
+    await settle();
+    expect(queryOf(calls[1]).get("caseStatus")).toBe("ADDITIONAL_INFORMATION_REQUIRED");
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    await settle();
+    expect(screen.getByLabelText("사건 상태")).toHaveValue("OPEN");
+    expect(queryOf(calls[2]).get("caseStatus")).toBe("OPEN");
+    fireEvent.click(screen.getByRole("button", { name: "Forward" }));
+    await settle();
+    expect(screen.getByLabelText("사건 상태")).toHaveValue("ADDITIONAL_INFORMATION_REQUIRED");
+    expect(queryOf(calls[3]).get("caseStatus")).toBe("ADDITIONAL_INFORMATION_REQUIRED");
+  });
 });
 
 describe("CaseListPage opening query", () => {
