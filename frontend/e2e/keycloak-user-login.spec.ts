@@ -9136,13 +9136,18 @@ test("a real USER works the Run fixture case through review, a note and the audi
     const casesLink = page.getByRole("link", { name: "사건", exact: true });
     await casesLink.click();
     await page.waitForFunction((expected) => window.location.href === expected, `${APP_ORIGIN}/cases`);
-    const results = page.getByRole("main").getByRole("status");
-    await expect(results).not.toContainText("사건을 불러오는 중", { timeout: waitMs });
+    // Fixed, non-sensitive checkpoints distinguish route rendering, relay completion,
+    // and the list's loading state when the safe Gate reporter gives only a line.
+    await expect(page.getByRole("heading", { name: "사건 조회 결과" })).toBeVisible({ timeout: waitMs });
     await expect.poll(() => reads(CASE_LIST_PATH).length, { timeout: waitMs }).toBe(1);
     requireCondition(
       reads(CASE_LIST_PATH)[0].target === INITIAL_CASE_TARGET && reads(CASE_LIST_PATH)[0].status === 200,
       "The opening case list was not the exact default read.",
     );
+    const results = page.getByRole("main").getByRole("status");
+    await expect(results).toHaveCount(1, { timeout: waitMs });
+    await expect(results).not.toContainText("사건을 불러오는 중", { timeout: waitMs });
+    await expect(results).toContainText("건 표시", { timeout: waitMs });
     await page.getByLabel("연관 거래 ID").fill(fixture.transactionId);
     await page.getByRole("button", { name: "필터 적용" }).click();
     await expect.poll(() => reads(CASE_LIST_PATH).length, { timeout: waitMs }).toBe(2);
