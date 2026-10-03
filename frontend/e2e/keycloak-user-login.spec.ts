@@ -7445,7 +7445,9 @@ test("real USER follows the information-required Home card, resets, and rejects 
 
   const resetResponse = page.waitForResponse((response) =>
     response.url() === `${BACKEND_ORIGIN}${INITIAL_CASE_TARGET}` && response.request().method() === "GET");
-  await page.getByRole("button", { name: "필터 초기화" }).click();
+  const filterReset = page.locator("form.filters").getByRole("button", { name: "필터 초기화", exact: true });
+  await expect(filterReset).toHaveCount(1);
+  await filterReset.click();
   await resetResponse;
   requireCondition(page.url() === `${APP_ORIGIN}/cases`, "Reset did not clear the status URL.");
   await expect(page.getByLabel("사건 상태")).toHaveValue("");
