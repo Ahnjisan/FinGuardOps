@@ -31,6 +31,7 @@ const EXPECTED: ReadonlyArray<{ key: string; method: string; template: string }>
   { key: "transaction-detail", method: "GET", template: "/api/v1/transactions/{transactionId}" },
   { key: "case-list", method: "GET", template: "/api/v1/cases" },
   { key: "case-detail", method: "GET", template: "/api/v1/cases/{caseId}" },
+  { key: "case-transaction-list", method: "GET", template: "/api/v1/cases/{caseId}/transactions" },
   { key: "case-note-list", method: "GET", template: "/api/v1/cases/{caseId}/notes" },
   { key: "case-audit-list", method: "GET", template: "/api/v1/cases/{caseId}/audit-logs" },
   { key: "case-status-change", method: "PATCH", template: "/api/v1/cases/{caseId}/status" },
@@ -48,8 +49,8 @@ function paramsFor(descriptor: BackendEndpointDescriptor): Record<string, string
 }
 
 describe("endpoint registry — exact method and path matrix", () => {
-  it("contains exactly the ten approved USER endpoints", () => {
-    expect(BACKEND_ENDPOINT_KEYS).toHaveLength(10);
+  it("contains exactly the eleven approved USER endpoints", () => {
+    expect(BACKEND_ENDPOINT_KEYS).toHaveLength(11);
     expect([...BACKEND_ENDPOINT_KEYS].sort()).toEqual(EXPECTED.map((e) => e.key).sort());
   });
 
@@ -112,7 +113,6 @@ describe("endpoint registry — exact method and path matrix", () => {
       expect(template.startsWith("/actuator")).toBe(false);
       expect(template).not.toContain("ai-report");
       expect(template).not.toContain("detection-results");
-      expect(template).not.toBe("/api/v1/cases/{caseId}/transactions");
     }
   });
 });
@@ -184,6 +184,7 @@ describe("URL assembly — approved requests", () => {
       `http://localhost:8080/api/v1/transactions/${TRANSACTION_ID}`,
       "http://localhost:8080/api/v1/cases",
       `http://localhost:8080/api/v1/cases/${CASE_ID}`,
+      `http://localhost:8080/api/v1/cases/${CASE_ID}/transactions`,
       `http://localhost:8080/api/v1/cases/${CASE_ID}/notes`,
       `http://localhost:8080/api/v1/cases/${CASE_ID}/audit-logs`,
       `http://localhost:8080/api/v1/cases/${CASE_ID}/status`,
@@ -608,6 +609,7 @@ describe("endpoint registry — declared query parameters", () => {
     ],
     "case-note-list": ["page", "size", "sort"],
     "case-audit-list": ["page", "size", "sort"],
+    "case-transaction-list": ["page", "size"],
     "transaction-detail": [],
     "case-detail": [],
     "case-status-change": [],
@@ -815,7 +817,8 @@ describe("buildBackendRequestUrl — canonical query", () => {
 
 describe("findApprovedBackendRequest — query re-verification", () => {
   it("approves a URL whose query is exactly what the canonical builder emits", () => {
-    for (const key of ["transaction-list", "case-list", "case-note-list", "case-audit-list"]) {
+    for (const key of ["transaction-list", "case-list", "case-transaction-list",
+      "case-note-list", "case-audit-list"]) {
       const descriptor = getBackendEndpoint(key);
       if (descriptor === undefined) {
         throw new Error("registry lookup failed");
@@ -834,8 +837,19 @@ describe("findApprovedBackendRequest — query re-verification", () => {
       `${BASE}/api/v1/cases?page=0&page=1`,
       `${BASE}/api/v1/cases?page=0&page=0`,
       `${BASE}/api/v1/cases?size=20&page=0&size=20`,
+      `${BASE}/api/v1/cases/${CASE_ID}/transactions?page=0&page=0`,
     ]) {
       expect(findApprovedBackendRequest(BASE, "GET", url)).toBeUndefined();
+    }
+  });
+
+  it("enforces the linked transaction offset and fixed query shape at URL re-verification", () => {
+    const path = `${BASE}/api/v1/cases/${CASE_ID}/transactions`;
+    expect(findApprovedBackendRequest(BASE, "GET", `${path}?page=2147483647&size=1`)?.key)
+      .toBe("case-transaction-list");
+    for (const query of ["page=1073741824&size=2", "sort=transactionId,asc",
+      "page=-1", "size=101", "page=0&size=20&extra=1"]) {
+      expect(findApprovedBackendRequest(BASE, "GET", `${path}?${query}`)).toBeUndefined();
     }
   });
 

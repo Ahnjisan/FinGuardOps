@@ -44,6 +44,7 @@ export type BackendEndpointKey =
   | "transaction-detail"
   | "case-list"
   | "case-detail"
+  | "case-transaction-list"
   | "case-note-list"
   | "case-audit-list"
   | "case-status-change"
@@ -253,6 +254,14 @@ export function isApprovedQuerySet(
   descriptor: BackendEndpointDescriptor,
   query: Readonly<Record<string, string>>,
 ): boolean {
+  if (descriptor.key === "case-transaction-list") {
+    const page = Number(query.page ?? "0");
+    const size = Number(query.size ?? "20");
+    if (!Number.isSafeInteger(page) || !Number.isSafeInteger(size) ||
+        page < 0 || size < 1 || page * size > MAX_INT32) {
+      return false;
+    }
+  }
   for (const { from, to } of descriptor.queryRanges) {
     if (
       !Object.prototype.hasOwnProperty.call(query, from) ||
@@ -433,6 +442,12 @@ const CASE_AUDIT_LIST_QUERY: readonly BackendQueryParamContract[] = [
   { name: "sort", rule: choice(CASE_AUDIT_LIST_SORTS) },
 ];
 
+/** Transcribed from `FraudCaseTransactionQueryValidator`; sorting is server fixed. */
+const CASE_TRANSACTION_LIST_QUERY: readonly BackendQueryParamContract[] = [
+  { name: "page", rule: PAGE },
+  { name: "size", rule: SIZE },
+];
+
 const REGISTRY: Readonly<Record<BackendEndpointKey, BackendEndpointDescriptor>> = Object.freeze({
   "transaction-list": describe(
     "transaction-list",
@@ -454,6 +469,12 @@ const REGISTRY: Readonly<Record<BackendEndpointKey, BackendEndpointDescriptor>> 
     CASE_LIST_RANGES,
   ),
   "case-detail": describe("case-detail", "GET", "/api/v1/cases/{caseId}"),
+  "case-transaction-list": describe(
+    "case-transaction-list",
+    "GET",
+    "/api/v1/cases/{caseId}/transactions",
+    CASE_TRANSACTION_LIST_QUERY,
+  ),
   "case-note-list": describe(
     "case-note-list",
     "GET",

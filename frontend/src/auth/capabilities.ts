@@ -9,7 +9,8 @@ import type { UserRole } from "./userRoles";
  * `docs/02-architecture/security-architecture.md` section 5:
  *
  * - `transaction:view`  -> transaction-list, transaction-detail
- * - `case:view`         -> case-list, case-detail, case-note-list, case-audit-list
+ * - `case:view`         -> case-list, case-detail, case-transaction-list,
+ *                          case-note-list, case-audit-list
  * - `case:workflow`     -> case-status-change, case-assignee-change
  * - `case:note-write`   -> case-note-create
  * - `case:resolve`      -> case-resolution-create
