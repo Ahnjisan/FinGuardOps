@@ -1,6 +1,7 @@
 /** Test-only synthetic layout fixture. No Backend, token or real USER session is involved. */
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { MemoryRouter } from "react-router-dom";
 import type { CaseDetail } from "../src/api/caseApi";
 import type { CaseAuditView } from "../src/api/useCaseAuditLog";
 import type { CaseInvestigationNotesView } from "../src/api/useCaseInvestigationNotes";
@@ -105,7 +106,8 @@ createRoot(root).render(
                 onReconcile={() => undefined} /> : null} />
             <CaseAuditPanel state={auditState} onPageChange={() => undefined}
               onPageSizeChange={() => undefined} onRetry={() => undefined} />
-            <CaseTransactionsPanel state={mode === "empty"
+            {/* All three production fixture roles include transaction:view. */}
+            <MemoryRouter><CaseTransactionsPanel state={mode === "empty"
               ? { status: "success", ids: [], page: emptyPage }
               : mode === "error" ? { status: "error", kind: "network" }
                 : { status: "success", ids: [
@@ -114,7 +116,7 @@ createRoot(root).render(
                 ], page: { number: 0, size: 20, totalElements: 22, totalPages: 2,
                   first: true, last: false } }}
               pageNumber={0} onPageChange={() => undefined} onRetry={() => undefined}
-              mayViewTransaction={mode !== "viewer"} />
+              mayViewTransaction /></MemoryRouter>
           </section>
         </main>
       </div>

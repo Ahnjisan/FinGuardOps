@@ -5807,7 +5807,7 @@ const REFUSED_UNAPPROVED_ENDPOINTS: readonly {
  */
 test("the Backend relay refuses every endpoint it was not approved to reach", () => {
   requireCondition(
-    REFUSED_UNAPPROVED_ENDPOINTS.length === 70,
+    REFUSED_UNAPPROVED_ENDPOINTS.length === 69,
     "The relay endpoint-refusal matrix drifted.",
   );
   requireUniqueRelayDeclarations(REFUSED_UNAPPROVED_ENDPOINTS, "relay endpoint-refusal");
@@ -11169,6 +11169,7 @@ test("synthetic full case detail keeps its reading order, width and role states"
     await expect(page.locator(".investigation-notes__content")).toContainText("끊기지않는메모");
     await expect(page.locator(".audit__summary-value").last()).toContainText("synthetic-assignee-reference");
     await expect(page.getByRole("heading", { name: "연관 거래 ID" })).toBeVisible();
+    await expect(page.locator(".case-transactions").getByRole("link")).toHaveCount(2);
     const layout = await page.evaluate(() => {
       const rect = (selector: string) => {
         const element = document.querySelector(selector);
@@ -11219,6 +11220,7 @@ test("synthetic full case detail keeps its reading order, width and role states"
     if (mode === "viewer") {
       await expect(page.locator(".case-workflow")).toHaveCount(0);
       await expect(page.getByRole("button", { name: "메모 등록" })).toHaveCount(0);
+      await expect(page.locator(".case-transactions").getByRole("link")).toHaveCount(2);
     } else if (mode === "approver") {
       await expect(page.getByRole("button", { name: "사건 종결" })).toBeVisible();
       await expect(page.getByRole("button", { name: "담당자 변경" })).toHaveCount(0);
