@@ -93,6 +93,12 @@ function controlledFetch(auditStatus = 200, noteStatus = 200): {
   });
   const transport = vi.fn().mockImplementation((request: Request) => {
     const url = new URL(request.url);
+    if (url.pathname.endsWith("/transactions")) {
+      const caseId = url.pathname.split("/").at(-2) ?? "";
+      return Promise.resolve(jsonResponse({ caseId, content: [], page: {
+        number: 0, size: 20, totalElements: 0, totalPages: 0, first: true, last: true,
+      }, traceId: "trace_case_transactions_01" }));
+    }
     if (url.pathname.endsWith("/notes")) {
       noteRequests.push(request);
       return Promise.resolve(
@@ -164,6 +170,12 @@ function controlledAllCaseReads(): {
   const audit: PendingCall[] = [];
   const workflow: PendingCall[] = [];
   const spy = vi.fn().mockImplementation((request: Request) => {
+    if (new URL(request.url).pathname.endsWith("/transactions")) {
+      const caseId = new URL(request.url).pathname.split("/").at(-2) ?? "";
+      return Promise.resolve(jsonResponse({ caseId, content: [], page: {
+        number: 0, size: 20, totalElements: 0, totalPages: 0, first: true, last: true,
+      }, traceId: "trace_case_transactions_01" }));
+    }
     let settleCall!: (response: Response) => void;
     let fail!: (error: unknown) => void;
     const promise = new Promise<Response>((resolve, reject) => {
@@ -715,6 +727,7 @@ describe("CaseDetailPage record", () => {
       "사건 처리",
       "조사 메모",
       "감사 이력",
+      "연관 거래 ID",
     ]);
     expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(1);
     // Every labelled section really points at a heading that exists once.
@@ -1512,7 +1525,9 @@ describe("CaseDetailPage failures", () => {
       expect(notes).toHaveLength(3);
       expect(audit).toHaveLength(2);
       expect(workflow).toHaveLength(1);
-      expect(spy).toHaveBeenCalledTimes(8);
+      expect(spy).toHaveBeenCalledTimes(9);
+      expect(spy.mock.calls.filter(([request]) =>
+        new URL((request as Request).url).pathname.endsWith("/transactions"))).toHaveLength(1);
       expect(client.calls.invalidateIfCurrent).toBe(0);
       expect(client.calls.notified).toBe(0);
       expect(

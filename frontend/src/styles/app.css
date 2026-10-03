@@ -1764,6 +1764,32 @@ ul.notice__body li + li {
   margin-top: var(--space-4);
 }
 
+.case-transactions {
+  margin-top: var(--space-4);
+  min-width: 0;
+}
+
+.case-transactions__note {
+  color: var(--muted);
+}
+
+.case-transactions__list {
+  padding-left: 1.75rem;
+}
+
+.case-transactions__item {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  padding-block: 0.4rem;
+}
+
+.case-transactions__paging {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
 .audit__note {
   margin-bottom: var(--space-4);
   color: var(--muted);

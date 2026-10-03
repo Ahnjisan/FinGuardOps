@@ -12,8 +12,8 @@ PostgreSQL 낙관적 동시성·감사 원자성 경계를 구현했다. Issue #
 구현했다. Issue #215는 사건 감사 로그 조회 API와 명시적 비노출 projection을
 구현했다. Issue #221은 아래 실제 사건·메모·감사 endpoint RBAC와 네 high-risk write
 method security를 구현했고 Issue #223은 네 write의 USER actor와 조사 메모 USER author를
-구현했다. Issue #329는 연관 거래 ID 목록을 후속 구현 계약으로 확정하지만
-Controller, 인가 matcher와 Frontend 조회는 아직 구현되지 않았다. 사건 영속 계약은
+구현했다. Issue #329는 연관 거래 ID 목록 계약을 확정했고 Issue #331에서
+Controller와 인가 matcher를 구현했다. 사건 영속 계약은
 [`../04-database/fraud-case-schema.md`](../04-database/fraud-case-schema.md)를 따른다.
 구현 인증·인가와 USER Audit actor 계약은
 [`security-architecture.md`](../02-architecture/security-architecture.md)와
@@ -200,9 +200,8 @@ GET   /api/v1/cases/{caseId}/audit-logs
 
 실제 구현 endpoint 중 사건 목록·상세는 `case:read`, 상태·담당자 변경은
 `case:workflow:write`, 종결은 `case:resolution:write`, 메모 생성·조회는 각각
-`case-note:write`·`case-note:read`, 감사 조회는 `case-audit:read`를 요구한다. 확정된 후속 구현
-계약인 `GET /api/v1/cases/{caseId}/transactions`는 `case:read`를 요구하지만 현재 Controller와
-인가 matcher가 없다. write 네 개는 URL matcher와
+`case-note:write`·`case-note:read`, 감사 조회는 `case-audit:read`를 요구한다.
+`GET /api/v1/cases/{caseId}/transactions`도 구현됐으며 `case:read`를 요구한다. write 네 개는 URL matcher와
 production Service proxy의 method security로 이중 보호한다.
 
 ## 5. 사건 목록 조회
@@ -374,8 +373,8 @@ nullable 필드는 JSON에 명시적으로 `null`을 반환한다. 내부 PK·FK
 
 ## 7. 사건 연관 거래 조회
 
-이 절은 Issue #329에서 확정한 **후속 구현 계약**이다. 현재 Spring Controller, 인가 matcher와
-Frontend 조회·링크는 없다. 사건에 실제 저장된 `case_transaction` 관계의 거래 업무 ID만
+이 절은 Issue #329에서 확정하고 Issue #331에서 Backend에 구현한 계약이다.
+사건에 실제 저장된 `case_transaction` 관계의 거래 업무 ID만
 페이지로 조회한다. 이 API는 사건 또는 거래의 상태를 변경하지 않는다.
 
 ### 7.1 요청
@@ -433,7 +432,7 @@ GET /api/v1/cases/20000000-0000-4000-9000-000000000003/transactions?page=0&size=
 
 이 목록의 조회 권한은 USER `case:read`이다. 거래 ID를 받았다는 사실은 거래 상세 조회
 권한을 부여하지 않는다. `GET /api/v1/transactions/{transactionId}`는 별도의
-`transaction:read`를 요구한다. Frontend 후속 구현은 `case:view`와 `transaction:view`를
+`transaction:read`를 요구한다. Frontend는 `case:view`와 `transaction:view`를
 모두 가진 세션에서만 거래 상세 링크를 제공하며, 직접 주소 접근의 최종 권한 판정은
 Backend 거래 상세 endpoint가 한다. 현재 `FDS_VIEWER`, `FDS_ANALYST`, `FDS_APPROVER`는 두
 read authority를 모두 보유한다. 인증 전·세션 변경 후에는 이전 세션의 거래 ID를 표시하지
@@ -501,9 +500,9 @@ Content-Type: application/json
 있다. 거래의 공개 UUID는 `financial_transaction` 관계에서 읽는다. 관계 전체 건수 계산과
 깊은 offset 페이지의 비용은 실제 사건당 관계 수와 DB 실행 계획에 따라 달라진다.
 현재 데이터량·지연시간은 측정되지 않았고 성능 보장이나 색인 추가를 이번 계약으로
-확정하지 않는다. 후속 Backend PR에서 실제 조회 계획과 대량 페이지를 검증한다.
-Backend 조회 API, 인가 matcher와 Frontend 거래 상세 링크는 각각 후속 Issue/PR에서
-구현한다. 이 계약은 DB 구조나 사건 업무 전이를 변경하지 않는다.
+확정하지 않는다. Issue #331에서 Backend 조회 API와 인가 matcher를 구현했으며,
+대량 데이터 실행 계획과 지연시간 측정은 아직 수행하지 않았다.
+이 계약은 DB 구조나 사건 업무 전이를 변경하지 않는다.
 
 ## 8. 사건 상태 변경
 

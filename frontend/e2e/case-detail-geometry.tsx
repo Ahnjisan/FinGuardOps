@@ -9,6 +9,7 @@ import { AuthProvider } from "../src/auth/AuthProvider";
 import { CaseAtAGlance, CaseRecord } from "../src/pages/CaseDetailPage";
 import { CaseAuditPanel } from "../src/pages/cases/CaseAuditSection";
 import { CaseInvestigationNotesPanel } from "../src/pages/cases/CaseInvestigationNotesSection";
+import { CaseTransactionsPanel } from "../src/pages/cases/CaseTransactionsSection";
 import { CaseWorkflowSection } from "../src/pages/cases/CaseWorkflowSection";
 import { InvestigationNoteComposer } from "../src/pages/cases/InvestigationNoteComposer";
 import "../src/styles/app.css";
@@ -104,6 +105,16 @@ createRoot(root).render(
                 onReconcile={() => undefined} /> : null} />
             <CaseAuditPanel state={auditState} onPageChange={() => undefined}
               onPageSizeChange={() => undefined} onRetry={() => undefined} />
+            <CaseTransactionsPanel state={mode === "empty"
+              ? { status: "success", ids: [], page: emptyPage }
+              : mode === "error" ? { status: "error", kind: "network" }
+                : { status: "success", ids: [
+                  "91a2b3c4-d5e6-47f8-9a0b-1c2d3e4f5003",
+                  "12a2b3c4-d5e6-47f8-9a0b-1c2d3e4f5004",
+                ], page: { number: 0, size: 20, totalElements: 22, totalPages: 2,
+                  first: true, last: false } }}
+              pageNumber={0} onPageChange={() => undefined} onRetry={() => undefined}
+              mayViewTransaction={mode !== "viewer"} />
           </section>
         </main>
       </div>

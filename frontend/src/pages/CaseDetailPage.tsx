@@ -10,6 +10,7 @@ import {
 } from "../api/useCaseDetail";
 import type { CaseWorkflowReconciliationScope } from "../api/useCaseWorkflowMutations";
 import { CaseAuditSection } from "./cases/CaseAuditSection";
+import { CaseTransactionsSection } from "./cases/CaseTransactionsSection";
 import { CaseInvestigationNotesSection } from "./cases/CaseInvestigationNotesSection";
 import { CaseWorkflowSection } from "./cases/CaseWorkflowSection";
 import {
@@ -27,14 +28,13 @@ import {
  *
  * Everything in the record on this screen comes from the `CaseDetail` contract
  * and nothing else. There is no risk level, no risk score, no detection result,
- * no rule evidence, no related transaction, no investigation note and no AI
+ * no rule evidence, no related transaction ID, no investigation note and no AI
  * report, because `GET /api/v1/cases/{caseId}` carries none of them and a
  * console that infers one puts a judgement on screen that no system made.
  *
- * Below the record sit the workflow section, investigation notes and audit
- * history. All three reads mount in the same commit and own independent
- * request, error and paging state; a notes or audit failure therefore removes
- * neither the record nor its sibling.
+ * Below the record sit the workflow section, investigation notes, audit
+ * history and a separately fetched page of linked transaction IDs. Each read
+ * owns independent request, error and paging state.
  *
  * The two settled refusals are the exception, and deliberately so. A case that
  * does not exist and a case this session may not read are answers about the
@@ -354,6 +354,9 @@ export function CaseDetailPage() {
           <CaseAuditSection caseId={caseId} refreshSignal={auditRefreshSignal} />
         </>
       )}
+
+      {caseId !== null && state.status === "success" &&
+        <CaseTransactionsSection caseId={caseId} />}
     </section>
   );
 }

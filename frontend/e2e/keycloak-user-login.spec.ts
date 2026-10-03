@@ -121,6 +121,9 @@ const CASE_AUDIT_PATH = new RegExp(
 const CASE_NOTES_PATH = new RegExp(
   `^${CASE_LIST_PATH}/${CANONICAL_UUID_V4_PATTERN}/notes$`,
 );
+const CASE_TRANSACTIONS_PATH = new RegExp(
+  `^${CASE_LIST_PATH}/${CANONICAL_UUID_V4_PATTERN}/transactions$`,
+);
 
 /** `/api/v1/cases/{canonical lowercase UUID v4}/status`, exactly. */
 const CASE_STATUS_PATH = new RegExp(
@@ -235,6 +238,19 @@ const RELAYABLE_READ_PATHS: readonly RelayableEndpoint[] = [
     matches: (pathname) => CASE_AUDIT_PATH.test(pathname),
     queryNames: ["page", "size", "sort"],
     acceptsQuery: acceptsAuditQuery,
+  },
+  {
+    name: "case-transaction-list",
+    method: "GET",
+    matches: (pathname) => CASE_TRANSACTIONS_PATH.test(pathname),
+    queryNames: ["page", "size"],
+    acceptsQuery: (query) => {
+      const page = query.get("page");
+      const size = query.get("size");
+      return (page === null || (/^(?:0|[1-9][0-9]*)$/.test(page) && BigInt(page) <= 2_147_483_647n)) &&
+        (size === null || /^(?:[1-9]|[1-9][0-9]|100)$/.test(size)) &&
+        BigInt(page ?? "0") * BigInt(size ?? "20") <= 2_147_483_647n;
+    },
   },
 ];
 
@@ -5436,11 +5452,6 @@ const REFUSED_UNAPPROVED_ENDPOINTS: readonly {
     url: `${BACKEND_ORIGIN}${CASE_RESOLUTION_PATH}`,
   },
   {
-    why: "a case related-transactions read",
-    method: "GET",
-    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${SYNTHETIC_CASE_ID}/transactions`,
-  },
-  {
     why: "a current AI case report read",
     method: "GET",
     url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${SYNTHETIC_CASE_ID}/ai-reports/current`,
@@ -5865,9 +5876,9 @@ test("the Backend relay refuses every endpoint it was not approved to reach", ()
  */
 test("the Backend relay still admits the real reads and the one declared write probe", () => {
   requireCondition(
-    RELAYABLE_READ_PATHS.length === 6 &&
-      new Set(RELAYABLE_READ_PATHS.map(({ name }) => name)).size === 6,
-    "The six read relay descriptors were not unique.",
+    RELAYABLE_READ_PATHS.length === 7 &&
+      new Set(RELAYABLE_READ_PATHS.map(({ name }) => name)).size === 7,
+    "The seven read relay descriptors were not unique.",
   );
   requireCondition(
     RELAYABLE_WRITE_PROBES.length === 1 &&
@@ -5917,6 +5928,11 @@ test("the Backend relay still admits the real reads and the one declared write p
     },
     {
       method: "GET",
+      url: `${BACKEND_ORIGIN}${CASE_DETAIL_TARGET}/transactions?page=0&size=20`,
+      target: `${CASE_DETAIL_TARGET}/transactions?page=0&size=20`,
+    },
+    {
+      method: "GET",
       url: `${BACKEND_ORIGIN}${CASE_AUDIT_TARGET}`,
       target: CASE_AUDIT_TARGET,
     },
@@ -5942,7 +5958,7 @@ test("the Backend relay still admits the real reads and the one declared write p
     },
   ];
 
-  requireCondition(admitted.length === 13, "The relay positive admission matrix drifted.");
+  requireCondition(admitted.length === 14, "The relay positive admission matrix drifted.");
   requireCondition(
     new Set(admitted.map((entry) => `${entry.method}\u0000${entry.url}`)).size === admitted.length,
     "The relay positive admission matrix contains a duplicate method and URL.",
@@ -8954,6 +8970,7 @@ test("a real USER works the Run fixture case through review, a note and the audi
   const casePath = `${CASE_LIST_PATH}/${fixture.caseId}`;
   const notesPath = `${casePath}/notes`;
   const auditPath = `${casePath}/audit-logs`;
+  const linkedPath = `${casePath}/transactions`;
   const statusPath = `${casePath}/status`;
   const transactionRoute = `/transactions/${fixture.transactionId}`;
   const caseRoute = `/cases/${fixture.caseId}`;
@@ -8961,17 +8978,19 @@ test("a real USER works the Run fixture case through review, a note and the audi
     `${CASE_LIST_PATH}?transactionId=${fixture.transactionId}&page=0&size=20&sort=lastChangedAt%2Cdesc`;
   const screenNotesTarget = `${notesPath}?page=0&size=20&sort=createdAt%2Casc`;
   const screenAuditTarget = `${auditPath}?page=0&size=20&sort=changedAt%2Cdesc`;
+  const screenLinkedTarget = `${linkedPath}?page=0&size=20`;
   const allowedPaths = new Set([
     transactionPath,
     CASE_LIST_PATH,
     casePath,
     notesPath,
     auditPath,
+    linkedPath,
     statusPath,
   ]);
 
   const backend = await installBackendRelay(page, {
-    captureBodyOf: [transactionPath, CASE_LIST_PATH, casePath, notesPath, auditPath, statusPath],
+    captureBodyOf: [transactionPath, CASE_LIST_PATH, casePath, notesPath, auditPath, linkedPath, statusPath],
   });
   const reads = (pathname: string, target?: string) =>
     backend.filter(
@@ -9131,9 +9150,11 @@ test("a real USER works the Run fixture case through review, a note and the audi
     await expect.poll(() => reads(casePath).length, { timeout: waitMs }).toBe(1);
     await expect.poll(() => reads(notesPath, screenNotesTarget).length, { timeout: waitMs }).toBe(1);
     await expect.poll(() => reads(auditPath, screenAuditTarget).length, { timeout: waitMs }).toBe(1);
+    await expect.poll(() => reads(linkedPath, screenLinkedTarget).length, { timeout: waitMs }).toBe(1);
     const initialDetailRead = reads(casePath)[0];
     const initialNotesRead = reads(notesPath, screenNotesTarget)[0];
     const initialAuditRead = reads(auditPath, screenAuditTarget)[0];
+    const initialLinkedRead = reads(linkedPath, screenLinkedTarget)[0];
     requireCondition(
       initialDetailRead.target === casePath &&
         initialDetailRead.status === 200 &&
@@ -9141,6 +9162,19 @@ test("a real USER works the Run fixture case through review, a note and the audi
         initialAuditRead.status === 200,
       "The case detail, notes and audit reads did not each return 200.",
     );
+    const linkedBody = parseJsonObject(initialLinkedRead.body,
+      "The linked transaction body was not observed.",
+      "The linked transaction body was not a JSON object.");
+    const linkedItem = requireJsonRecord((linkedBody.content as unknown[])[0],
+      "The linked transaction item was invalid.");
+    requireCondition(initialLinkedRead.status === 200 &&
+      isDeepStrictEqual(sortedKeys(linkedBody), ["caseId", "content", "page", "traceId"]) &&
+      linkedBody.caseId === fixture.caseId &&
+      Array.isArray(linkedBody.content) && linkedBody.content.length === 1 &&
+      isDeepStrictEqual(sortedKeys(linkedItem), ["transactionId"]) &&
+      linkedItem.transactionId === fixture.transactionId &&
+      requireJsonRecord(linkedBody.page, "The linked page was invalid.").totalElements === 1,
+    "The real linked transaction read did not match the #329 ID-only contract.");
     const initialDetailBody = parseJsonObject(
       initialDetailRead.body,
       "The case detail body was not observed.",
@@ -9714,6 +9748,21 @@ test("a real USER works the Run fixture case through review, a note and the audi
       backend.every((entry) => allowedPaths.has(entry.pathname)),
       "The flow reached an address outside the Run fixture's transaction and case.",
     );
+    // #333: the real relation read on the case screen leads to the real ledger detail.
+    const transactionLink = page.getByRole("link", {
+      name: `거래 ${fixture.transactionId} 상세 보기`, exact: true,
+    });
+    await expect(transactionLink).toHaveAttribute("href", transactionRoute);
+    const detailReadsBeforeLink = reads(transactionPath).length;
+    await transactionLink.click();
+    await page.waitForFunction((expected) => window.location.href === expected,
+      `${APP_ORIGIN}${transactionRoute}`);
+    await expect.poll(() => reads(transactionPath).length, { timeout: waitMs })
+      .toBe(detailReadsBeforeLink + 1);
+    requireCondition(latest(transactionPath)?.status === 200,
+      "The case transaction link did not reach the real transaction detail.");
+    await expect(page.getByRole("heading", { name: `거래 ${fixture.transactionId}`, level: 2 }))
+      .toBeVisible();
     requireCondition(
       backend.relayFailureCount() === 0 &&
         backend.routeAbortCount() === 0 &&
@@ -11119,6 +11168,7 @@ test("synthetic full case detail keeps its reading order, width and role states"
     await expect(page.getByRole("button", { name: "메모 등록" })).toBeVisible();
     await expect(page.locator(".investigation-notes__content")).toContainText("끊기지않는메모");
     await expect(page.locator(".audit__summary-value").last()).toContainText("synthetic-assignee-reference");
+    await expect(page.getByRole("heading", { name: "연관 거래 ID" })).toBeVisible();
     const layout = await page.evaluate(() => {
       const rect = (selector: string) => {
         const element = document.querySelector(selector);
@@ -11133,20 +11183,27 @@ test("synthetic full case detail keeps its reading order, width and role states"
         workflow: rect(".case-workflow"),
         notes: rect(".investigation-notes"),
         audit: rect(".audit"),
+        transactions: rect(".case-transactions"),
+        transactionId: rect(".case-transactions__item"),
         order: Array.from(document.querySelectorAll(
-          ".detail__record, .case-workflow, .investigation-notes, .audit",
+          ".detail__record, .case-workflow, .investigation-notes, .audit, .case-transactions",
         ), (element) => element.matches(".detail__record") ? "record"
           : element.matches(".case-workflow") ? "workflow"
-          : element.matches(".investigation-notes") ? "notes" : "audit"),
+          : element.matches(".investigation-notes") ? "notes"
+          : element.matches(".audit") ? "audit" : "transactions"),
       };
     });
     requireCondition(layout.documentWidth <= layout.viewportWidth + 1,
       `The synthetic case detail overflowed at ${String(viewport.width)}px.`);
-    requireCondition(layout.order.join(",") === "record,workflow,notes,audit",
+    requireCondition(layout.order.join(",") === "record,workflow,notes,audit,transactions",
       "The case detail DOM reading order changed.");
     requireCondition(layout.notes.top >= Math.max(layout.record.bottom, layout.workflow.bottom) - 1 &&
-      layout.audit.top >= layout.notes.bottom - 1,
-    "Notes or audit moved ahead of the case work area.");
+      layout.audit.top >= layout.notes.bottom - 1 &&
+      layout.transactions.top >= layout.audit.bottom - 1,
+    "Notes, audit or linked transactions moved ahead of the case work area.");
+    requireCondition(layout.transactionId.left >= layout.transactions.left - 1 &&
+      layout.transactionId.right <= layout.transactions.right + 1,
+    `The linked transaction ID escaped its panel at ${String(viewport.width)}px.`);
     requireCondition(viewport.width >= 1200
       ? layout.workflow.left >= layout.record.right - 1
       : layout.workflow.top >= layout.record.bottom - 1,
@@ -11156,6 +11213,7 @@ test("synthetic full case detail keeps its reading order, width and role states"
   for (const mode of ["viewer", "approver", "empty", "error"] as const) {
     await page.goto(`${CASE_DETAIL_GEOMETRY_URL}?mode=${mode}`);
     await expect(page.getByRole("heading", { name: "사건 시각" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "연관 거래 ID" })).toBeVisible();
     const width = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     requireCondition(width <= 1, `The synthetic ${mode} state overflowed at 390px.`);
     if (mode === "viewer") {
