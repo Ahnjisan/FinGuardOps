@@ -61,7 +61,7 @@ const SYNTHETIC_TRANSACTION_ID = "e2e00000-0000-4000-8000-000000000e2e";
  *
  * A closed list of exact endpoints, and deliberately not a path syntax. That
  * `/api/v1/...` is well-formed says nothing about whether this suite may read
- * it: the console's screens reach eight read address kinds and one
+ * it: the console's screens reach nine read address kinds and one
  * authorization probe. These include the two collections, `/api/v1/transactions`
  * and `/api/v1/cases`; transaction and case detail at one canonical lowercase
  * UUID v4 segment; the adopted detection result; and that case's notes, audit
@@ -171,7 +171,7 @@ const CASE_RESOLUTION_PROBE_PATH = new RegExp(
 );
 
 /**
- * The eight read address kinds this suite relays.
+ * The nine read address kinds this suite relays.
  *
  * A `GET` carrying no query is not a lesser request. It opens the same socket
  * and reaches the same Spring Boot handler as one carrying a query, so it
@@ -978,7 +978,7 @@ function parseRelayedResponse(raw: Buffer): Omit<RelayedResponse, "target"> {
  *    path can be perfectly well-formed and still be an endpoint this suite has
  *    no business reaching;
  * 2. is this method at this exact address one of the approved endpoint
- *    kinds declared above - eight reads plus one write probe? Method and address are
+ *    kinds declared above - nine reads plus one write probe? Method and address are
  *    decided together, so `POST` to a read address and `GET` to the write probe
  *    are both refused here;
  * 3. the declared write probe carries no query, which is checked rather than
@@ -5474,9 +5474,7 @@ const REFUSED_UNAPPROVED_ENDPOINTS: readonly {
   readonly url: string;
 }[] = [
   // Valid, lowercase, query-free reads this suite is not approved to make.
-  // The case *detail* address is no longer among them - it is the one read this
-  // Issue admitted - so every one of these is a sibling of an address that is
-  // now allowed, which is exactly what makes their refusal worth asserting.
+  // These absent addresses sit beside approved case and transaction reads.
   {
     why: "a case status read",
     method: "GET",
@@ -5491,11 +5489,6 @@ const REFUSED_UNAPPROVED_ENDPOINTS: readonly {
     why: "a case resolution read",
     method: "GET",
     url: `${BACKEND_ORIGIN}${CASE_RESOLUTION_PATH}`,
-  },
-  {
-    why: "a current AI case report read",
-    method: "GET",
-    url: `${BACKEND_ORIGIN}${CASE_LIST_PATH}/${SYNTHETIC_CASE_ID}/ai-reports/current`,
   },
   {
     why: "an unnamed suffix under a case",
@@ -5848,7 +5841,7 @@ const REFUSED_UNAPPROVED_ENDPOINTS: readonly {
  */
 test("the Backend relay refuses every endpoint it was not approved to reach", () => {
   requireCondition(
-    REFUSED_UNAPPROVED_ENDPOINTS.length === 69,
+    REFUSED_UNAPPROVED_ENDPOINTS.length === 68,
     "The relay endpoint-refusal matrix drifted.",
   );
   requireUniqueRelayDeclarations(REFUSED_UNAPPROVED_ENDPOINTS, "relay endpoint-refusal");
@@ -5905,9 +5898,9 @@ test("the Backend relay refuses every endpoint it was not approved to reach", ()
  *
  * A closed endpoint allowlist is only worth having if it did not also close the
  * door on the reads and the one authorization probe this suite depends on. The
- * twelve reads are the two collection addresses with and without their real
- * queries, the two identified detail addresses, and the bare and canonical
- * page/size/sort notes and audit reads; the one write is the case resolution probe. These are
+ * fifteen reads cover collections, identified details, adopted detection,
+ * linked transactions, notes, audit and the current AI report; the one write
+ * is the case resolution probe. These are
  * resolved rather than relayed - the target is compared, no socket is opened -
  * so the assertion is about the boundary and not about the Backend.
  *
@@ -6009,7 +6002,7 @@ test("the Backend relay still admits the real reads and the one declared write p
     },
   ];
 
-  requireCondition(admitted.length === 15, "The relay positive admission matrix drifted.");
+  requireCondition(admitted.length === 16, "The relay positive admission matrix drifted.");
   requireCondition(
     new Set(admitted.map((entry) => `${entry.method}\u0000${entry.url}`)).size === admitted.length,
     "The relay positive admission matrix contains a duplicate method and URL.",
