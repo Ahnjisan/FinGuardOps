@@ -18,6 +18,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -1824,6 +1825,7 @@ class NativeCommandCapture:
     start_failed: bool = False
     timed_out: bool = False
     cleanup_failed: bool = False
+    output_limit_killed: bool = False
 
 
 def capture_native_command(
@@ -1835,10 +1837,65 @@ def capture_native_command(
     input_bytes: bytes | None = None,
     stdout_limit: int | None = None,
     stderr_limit: int | None = None,
+    file_backed_output: bool = False,
 ) -> NativeCommandCapture:
     merged = os.environ.copy()
     merged.update(environment)
     merged.update({"MSYS_NO_PATHCONV": "1", "MSYS2_ARG_CONV_EXCL": "*"})
+    if file_backed_output:
+        # Docker Compose can exit while a descendant still holds its inherited
+        # stdout/stderr pipe handles. Files let the direct command finish without
+        # mistaking that pipe EOF delay for a failed process cleanup.
+        if input_bytes is not None or stdout_limit is None or stderr_limit is None:
+            raise ValueError("file-backed capture requires bounded output and no input")
+        try:
+            with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+                try:
+                    process = subprocess.Popen(
+                        argv, stdin=subprocess.DEVNULL, stdout=stdout_file,
+                        stderr=stderr_file, cwd=cwd, env=merged, shell=False,
+                    )
+                except OSError:
+                    return NativeCommandCapture(None, b"", b"", start_failed=True)
+                timed_out = False
+                cleanup_failed = False
+                output_limit_killed = False
+                deadline = time.monotonic() + timeout
+                try:
+                    while True:
+                        if (os.fstat(stdout_file.fileno()).st_size > stdout_limit or
+                                os.fstat(stderr_file.fileno()).st_size > stderr_limit):
+                            output_limit_killed = process.poll() is None
+                            cleanup_failed = not reap_native_process(process)
+                            break
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            timed_out = True
+                            cleanup_failed = not reap_native_process(process)
+                            break
+                        try:
+                            process.wait(timeout=min(0.05, remaining))
+                            break
+                        except subprocess.TimeoutExpired:
+                            continue
+                except BaseException:
+                    if not reap_native_process(process):
+                        return NativeCommandCapture(None, b"", b"", cleanup_failed=True)
+                    raise
+                stdout_file.seek(0)
+                stderr_file.seek(0)
+                stdout = stdout_file.read(stdout_limit + 1)
+                stderr = stderr_file.read(stderr_limit + 1)
+                return NativeCommandCapture(
+                    process.returncode, stdout, stderr,
+                    stdout_overflow=len(stdout) > stdout_limit,
+                    stderr_overflow=len(stderr) > stderr_limit,
+                    timed_out=timed_out, cleanup_failed=cleanup_failed,
+                    output_limit_killed=output_limit_killed,
+                )
+        except (OSError, ValueError):
+            # Includes temporary-file allocation, capture and close failures.
+            return NativeCommandCapture(None, b"", b"", cleanup_failed=True)
     try:
         process = subprocess.Popen(
             argv,
@@ -1915,18 +1972,9 @@ def capture_native_command(
         process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
-        try:
-            process.kill()
-            process.wait(timeout=10)
-        except (OSError, subprocess.SubprocessError):
-            cleanup_failed = True
+        cleanup_failed = not reap_native_process(process)
     except BaseException:
-        try:
-            if process.poll() is None:
-                process.kill()
-            process.wait(timeout=10)
-        except (OSError, subprocess.SubprocessError):
-            cleanup_failed = True
+        cleanup_failed = not reap_native_process(process)
         for thread in threads:
             thread.join(10)
         if cleanup_failed:
@@ -1948,6 +1996,21 @@ def capture_native_command(
         timed_out=timed_out,
         cleanup_failed=cleanup_failed,
     )
+
+
+def reap_native_process(process: subprocess.Popen[Any]) -> bool:
+    try:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        # The target can exit between poll/kill/wait (notably on Windows).
+        # A failed cleanup call is harmless only when the exact process is gone.
+        try:
+            return process.poll() is not None
+        except (OSError, subprocess.SubprocessError):
+            return False
+    return True
 
 
 def validate_before_native_output(stage: str, output: bytes) -> None:
@@ -2395,6 +2458,7 @@ def run_command(
         input_bytes=input_bytes,
         stdout_limit=limits[0] if limits is not None else None,
         stderr_limit=limits[1] if limits is not None else None,
+        file_backed_output=before_stage == "RULE_PUBLICATION_COMMAND",
     )
     if before_stage is not None:
         codes = BEFORE_NATIVE_FAILURE_CODES[before_stage]
@@ -2404,6 +2468,8 @@ def run_command(
             fail(codes["start"])
         if capture.timed_out:
             fail(codes["timeout"])
+        if before_stage == "RULE_PUBLICATION_COMMAND" and capture.output_limit_killed:
+            fail(codes["output"])
         if capture.returncode != 0:
             if before_stage == "RULE_PUBLICATION_COMMAND":
                 fail(classify_rule_publication_nonzero(capture))

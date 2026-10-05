@@ -2933,6 +2933,131 @@ finguardops_rule_analysis_outcomes_created 99
         self.assertTrue(missing.start_failed)
         self.assertFalse(missing.cleanup_failed)
 
+    def test_publication_file_capture_preserves_native_failure_boundaries(self):
+        options = dict(
+            timeout=5, cwd=Path.cwd(), environment={},
+            stdout_limit=16, stderr_limit=16, file_backed_output=True,
+        )
+        success = verify_e2e.capture_native_command(
+            [sys.executable, "-c", "import sys;sys.stdout.buffer.write(b'ok')"],
+            **options,
+        )
+        self.assertEqual((success.returncode, success.stdout, success.stderr),
+                         (0, b"ok", b""))
+        self.assertFalse(success.cleanup_failed)
+        nonzero = verify_e2e.capture_native_command(
+            [sys.executable, "-c", "import sys;sys.exit(7)"], **options,
+        )
+        self.assertEqual(nonzero.returncode, 7)
+        self.assertFalse(nonzero.cleanup_failed)
+        timeout = verify_e2e.capture_native_command(
+            [sys.executable, "-c", "import time;time.sleep(30)"],
+            **{**options, "timeout": 0.05},
+        )
+        self.assertTrue(timeout.timed_out)
+        self.assertFalse(timeout.cleanup_failed)
+        missing = verify_e2e.capture_native_command(
+            ["missing-" + "a" * 32 + ".exe"], **options,
+        )
+        self.assertTrue(missing.start_failed)
+        overflow = verify_e2e.capture_native_command(
+            [sys.executable, "-c", "import sys;sys.stdout.buffer.write(b'A'*200000)"],
+            **options,
+        )
+        self.assertTrue(overflow.stdout_overflow)
+        self.assertEqual(len(overflow.stdout), 17)
+
+    def test_publication_file_capture_does_not_wait_for_inherited_pipe_eof(self):
+        child = "import time;time.sleep(2)"
+        parent = (
+            "import subprocess,sys; "
+            "subprocess.Popen([sys.executable, '-c', " + repr(child) + "], "
+            "stdout=sys.stdout, stderr=sys.stderr); "
+            "sys.stdout.write('ok'); sys.stdout.flush()"
+        )
+        started = time.monotonic()
+        result = verify_e2e.capture_native_command(
+            [sys.executable, "-c", parent], timeout=5,
+            cwd=Path.cwd(), environment={}, stdout_limit=16,
+            stderr_limit=16, file_backed_output=True,
+        )
+        elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"ok")
+        self.assertFalse(result.cleanup_failed)
+        self.assertLess(elapsed, 1)
+
+    def test_reap_native_process_distinguishes_vanished_and_live_target(self):
+        vanished = mock.Mock()
+        vanished.poll.side_effect = [None, 0]
+        vanished.kill.side_effect = OSError("already gone")
+        self.assertTrue(verify_e2e.reap_native_process(vanished))
+        vanished.wait.assert_not_called()
+
+        live = mock.Mock()
+        live.poll.side_effect = [None, None]
+        live.kill.side_effect = OSError("still running")
+        self.assertFalse(verify_e2e.reap_native_process(live))
+
+        unreaped = mock.Mock()
+        unreaped.poll.side_effect = [None, None]
+        unreaped.wait.side_effect = subprocess.TimeoutExpired("command", 10)
+        self.assertFalse(verify_e2e.reap_native_process(unreaped))
+
+    def test_publication_timeout_with_live_process_keeps_cleanup_failure(self):
+        process = mock.Mock()
+        process.wait.side_effect = subprocess.TimeoutExpired("command", 0.01)
+        process.returncode = None
+        with mock.patch.object(verify_e2e.subprocess, "Popen", return_value=process), \
+             mock.patch.object(verify_e2e, "reap_native_process", return_value=False):
+            result = verify_e2e.capture_native_command(
+                ["fixed-command"], timeout=0.01, cwd=Path.cwd(),
+                environment={}, stdout_limit=16, stderr_limit=16,
+                file_backed_output=True,
+            )
+        self.assertTrue(result.timed_out)
+        self.assertTrue(result.cleanup_failed)
+
+    def test_rule_publication_stage_uses_file_backed_capture(self):
+        capture = verify_e2e.NativeCommandCapture(
+            0, publication_success_output(), b"",
+        )
+        with mock.patch.object(
+            verify_e2e, "capture_native_command", return_value=capture
+        ) as native:
+            output = verify_e2e.run_command(
+                ["fixed-command"], timeout=1, cwd=Path.cwd(), environment={},
+                before_stage="RULE_PUBLICATION_COMMAND",
+            )
+        self.assertEqual(output, capture.stdout)
+        self.assertTrue(native.call_args.kwargs["file_backed_output"])
+
+        killed_for_limit = verify_e2e.NativeCommandCapture(
+            1, b"oversized", b"", stdout_overflow=True,
+            output_limit_killed=True,
+        )
+        with mock.patch.object(
+            verify_e2e, "capture_native_command", return_value=killed_for_limit
+        ), self.assertRaisesRegex(
+            verify_e2e.VerificationError,
+            "^RULE_PUBLICATION_COMMAND_OUTPUT_INVALID$",
+        ):
+            verify_e2e.run_command(
+                ["fixed-command"], timeout=1, cwd=Path.cwd(), environment={},
+                before_stage="RULE_PUBLICATION_COMMAND",
+            )
+
+        with mock.patch.object(
+            verify_e2e.tempfile, "TemporaryFile", side_effect=OSError("private path")
+        ), self.assertRaisesRegex(
+            verify_e2e.VerificationError,
+            "^RULE_PUBLICATION_COMMAND_CLEANUP_FAILED$",
+        ):
+            verify_e2e.run_command(
+                ["fixed-command"], timeout=1, cwd=Path.cwd(), environment={},
+                before_stage="RULE_PUBLICATION_COMMAND",
+            )
+
     def test_run_fixture_before_reaches_each_native_stage_in_exact_order(self):
         environment = valid_run_fixture_environment()
         contract = verify_e2e.load_owner_contract(environment)

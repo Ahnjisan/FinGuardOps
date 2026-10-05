@@ -8821,7 +8821,7 @@ function Invoke-D315AfterTargetedTests {
             'backend_metric_totals','capture_native_command','database_snapshot','dependency_hit_counts',
             'expected_transaction_cardinality','fixture_identity_from_environment','fixture_manifest_bytes',
             'is_canonical_uuid4','load_owner_contract','parse_args','parse_database_snapshot','parse_fixture_manifest_bytes',
-            'parse_run_fixture_state','run_command','run_fixture_after','run_fixture_state_bytes','service_logs',
+            'parse_run_fixture_state','reap_native_process','run_command','run_fixture_after','run_fixture_state_bytes','service_logs',
             'snapshot_sql','sql_scalar','state_to_snapshot','table_snapshot','transaction_cardinality','transaction_case_id',
             'validate_fixture_manifest_object','validate_plan','validate_run_fixture_project','validate_table_snapshot') `
             @($closure) 'The run-fixture-after call graph changed; re-derive the after allowlist.'
@@ -8831,7 +8831,7 @@ function Invoke-D315AfterTargetedTests {
             $found = @(Get-D315AfterFailLiterals $body)
             foreach ($code in $found) { $literals.Add($code) | Out-Null }
             $dynamic = [regex]::Matches($body, '(?<![\w.])fail\(').Count - $found.Count
-            $expectedDynamic = if ($name -ceq 'run_command') { 9 } else { 0 }
+            $expectedDynamic = if ($name -ceq 'run_command') { 10 } else { 0 }
             Assert-Equal $expectedDynamic $dynamic ('Non-literal failure identity count changed in ' + $name)
         }
         # Every non-literal identity in run_command is a before-stage code or the
@@ -9237,6 +9237,13 @@ raise SystemExit(42)
                     -WorkingDirectory $RepositoryRoot -StdoutLimit 64 -StderrLimit 64 -TimeoutMilliseconds 1500 -StdinBytes $payload
                 $childId = 0; $childAlive = $false
                 if ([int]::TryParse([System.Text.Encoding]::ASCII.GetString($tree.Stdout).Trim(), [ref]$childId)) {
+                    # Job termination can complete just after the native call returns.
+                    # Bound the observation window; a truly surviving child still fails.
+                    $deadline = [System.Diagnostics.Stopwatch]::StartNew()
+                    while ($deadline.ElapsedMilliseconds -lt 2000 -and
+                        $null -ne (Get-Process -Id $childId -ErrorAction SilentlyContinue)) {
+                        Start-Sleep -Milliseconds 25
+                    }
                     $childAlive = $null -ne (Get-Process -Id $childId -ErrorAction SilentlyContinue)
                     if ($childAlive) { Stop-Process -Id $childId -Force -ErrorAction SilentlyContinue }
                 }
