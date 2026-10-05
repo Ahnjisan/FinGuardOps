@@ -3018,6 +3018,33 @@ finguardops_rule_analysis_outcomes_created 99
         self.assertTrue(result.timed_out)
         self.assertTrue(result.cleanup_failed)
 
+    def test_publication_process_exiting_just_before_deadline_is_not_timeout(self):
+        process = mock.Mock()
+        process.returncode = None
+
+        def finish(*, timeout):
+            process.returncode = 0
+            return 0
+
+        process.wait.side_effect = finish
+
+        def start(*args, **kwargs):
+            kwargs["stdout"].write(b"ok")
+            return process
+
+        with mock.patch.object(verify_e2e.subprocess, "Popen", side_effect=start), \
+             mock.patch.object(verify_e2e.time, "monotonic", side_effect=[1000.0, 1239.99]):
+            result = verify_e2e.capture_native_command(
+                ["fixed-command"], timeout=240, cwd=Path.cwd(),
+                environment={}, stdout_limit=16, stderr_limit=16,
+                file_backed_output=True,
+            )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"ok")
+        self.assertFalse(result.timed_out)
+        self.assertFalse(result.cleanup_failed)
+        self.assertAlmostEqual(process.wait.call_args.kwargs["timeout"], 0.01)
+
     def test_rule_publication_stage_uses_file_backed_capture(self):
         capture = verify_e2e.NativeCommandCapture(
             0, publication_success_output(), b"",
