@@ -45,17 +45,17 @@ export interface HttpRequestOptions<TBody = unknown> extends HttpDeadlineOptions
    */
   classifyErrorStatus?: (response: Response) => Error;
   /**
-   * The one 2xx status this request's endpoint is contracted to answer with.
+   * The exact 2xx status or statuses this request's endpoint is contracted to answer with.
    *
    * `response.ok` spans 200-299, so without this a `204 No Content` or a `202
    * Accepted` would be read as the success the caller asked for. The endpoints
-   * differ deliberately - investigation note creation answers 201 and every
-   * other approved endpoint answers 200 - so a mismatch means this is not the
-   * response the contract describes, and it is refused rather than parsed.
+   * differ deliberately. A caller may provide a list only for an endpoint
+   * whose contract has multiple success statuses; any other 2xx is refused
+   * before its body is parsed.
    *
    * Checked inside the deadline, alongside every other verdict.
    */
-  expectedStatus?: number;
+  expectedStatus?: number | readonly number[];
   /**
    * Validates the parsed 2xx body inside the deadline. Returning false yields
    * InvalidResponseError, so `unknown` is never handed back unchecked, and the
@@ -139,7 +139,10 @@ async function performRequest<TBody>(
 
   // A 2xx that is not *the* 2xx this endpoint answers with. The body is never
   // read, so an unexpected success status discloses nothing either.
-  if (options.expectedStatus !== undefined && response.status !== options.expectedStatus) {
+  if (options.expectedStatus !== undefined &&
+      (typeof options.expectedStatus === "number"
+        ? response.status !== options.expectedStatus
+        : !options.expectedStatus.includes(response.status))) {
     if (isDeadlineExceeded()) {
       throw new TimeoutError();
     }

@@ -54,10 +54,13 @@ export interface AuthorizedRequestOptions<TData> {
   readonly query?: BackendQueryParams;
   /** Required for PATCH and POST, forbidden for GET. Serialized as JSON. */
   readonly body?: unknown;
+  /** Only the AI report creation endpoint may carry this caller-generated key. */
+  readonly idempotencyKey?: string;
   /**
-   * The one success status this endpoint answers with. Required rather than
+   * The primary success status this endpoint answers with. Required rather than
    * defaulted, so adding an endpoint forces a decision instead of inheriting
-   * 200: investigation note creation answers 201.
+   * 200: investigation note creation answers 201. Only AI report creation
+   * also accepts its contracted completed-reuse 200 alongside primary 202.
    */
   readonly expectedStatus: number;
   /** Runs inside the deadline. A 2xx response that fails it is not a success. */
@@ -239,6 +242,18 @@ export async function sendAuthorizedBackendRequest<TData>(
   }
 
   const headers = new Headers({ Accept: "application/json" });
+  if (options.idempotencyKey !== undefined) {
+    if (descriptor.key !== "ai-report-create" ||
+        !/^[A-Za-z0-9._:-]{8,128}$/.test(options.idempotencyKey)) {
+      throw new RequestNotAllowedError();
+    }
+    headers.set("Idempotency-Key", options.idempotencyKey);
+  } else if (descriptor.key === "ai-report-create") {
+    throw new RequestNotAllowedError();
+  }
+  if (descriptor.key === "ai-report-create" && options.expectedStatus !== 202) {
+    throw new RequestNotAllowedError();
+  }
   let serializedBody: string | undefined;
   if (descriptor.acceptsJsonBody) {
     serializedBody = serializeJsonBody(options.body);
@@ -261,7 +276,8 @@ export async function sendAuthorizedBackendRequest<TData>(
     const result = await httpRequest<TData>({
       timeoutMs: AUTHENTICATED_REQUEST_TIMEOUT_MS,
       signal: options.signal,
-      expectedStatus: options.expectedStatus,
+      expectedStatus: descriptor.key === "ai-report-create"
+        ? [202, 200] as const : options.expectedStatus,
       assertDispatchAllowed: options.assertDispatchAllowed,
       prepare: async (signal: AbortSignal) => {
         const unauthenticatedRequest = new Request(url, {
@@ -283,6 +299,9 @@ export async function sendAuthorizedBackendRequest<TData>(
           throw new AuthenticationRequiredError();
         }
         assertAuthorizedRequest(authorized.request, unauthenticatedRequest.url, descriptor.method);
+        if (authorized.request.headers.get("Idempotency-Key") !== headers.get("Idempotency-Key")) {
+          throw new RequestNotAllowedError();
+        }
         invalidateIfCurrent = authorized.invalidateIfCurrent;
 
         return () => fetch(authorized.request);

@@ -30,6 +30,13 @@ services:
       - "8000"
     expose:
       - "8000"
+    environment:
+      FINGUARDOPS_AI_OLLAMA_BASE_URL: ${FINGUARDOPS_AI_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      FINGUARDOPS_AI_OLLAMA_MODEL: ${FINGUARDOPS_AI_OLLAMA_MODEL:-qwen3.5:4b}
+      FINGUARDOPS_AI_OLLAMA_MODEL_DIGEST: ${FINGUARDOPS_AI_OLLAMA_MODEL_DIGEST:-}
+      FINGUARDOPS_AI_OLLAMA_QUANTIZATION: ${FINGUARDOPS_AI_OLLAMA_QUANTIZATION:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test:
         - CMD

@@ -1,6 +1,7 @@
 package com.aifds.backend.security.web;
 
 import com.aifds.backend.behavior.service.BehaviorEventIntakeService;
+import com.aifds.backend.aireport.service.AiReportService;
 import com.aifds.backend.detection.service.AdoptedDetectionResultQueryService;
 import com.aifds.backend.common.trace.TraceIdFilter;
 import com.aifds.backend.fraudcase.service.FraudCaseAuditLogService;
@@ -53,6 +54,8 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.BEHAVIOR_EVENT_INTAKE;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_REPORT_CREATE;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_REPORT_READ;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_AUDIT_READ;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_NOTE_READ;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_NOTE_WRITE;
@@ -188,6 +191,18 @@ class EndpointRbacSecurityIntegrationTest {
                     "/api/v1/transactions/" + TRANSACTION_ID + "/adopted-detection-result",
                     "FDS_VIEWER",
                     TRANSACTION_READ + "+" + DETECTION_READ
+            ),
+            endpoint(
+                    HttpMethod.POST,
+                    "/api/v1/cases/" + CASE_ID + "/ai-reports",
+                    "FDS_ANALYST",
+                    AI_REPORT_CREATE
+            ),
+            endpoint(
+                    HttpMethod.GET,
+                    "/api/v1/cases/" + CASE_ID + "/ai-reports/current",
+                    "FDS_VIEWER",
+                    AI_REPORT_READ
             )
     );
     private static final List<CorsProbe> APPROVED_PREFLIGHTS = Stream.concat(
@@ -310,6 +325,9 @@ class EndpointRbacSecurityIntegrationTest {
     @MockitoBean
     private FraudCaseAuditLogService fraudCaseAuditLogService;
 
+    @MockitoBean
+    private AiReportService aiReportService;
+
     @BeforeAll
     static void startJwkServer() {
         jwkServer = InProcessJwkSetServer.start();
@@ -344,14 +362,16 @@ class EndpointRbacSecurityIntegrationTest {
                 fraudCaseTransactionQueryService,
                 fraudCaseWorkflowService,
                 investigationNoteService,
-                fraudCaseAuditLogService
+                fraudCaseAuditLogService,
+                aiReportService
         );
     }
 
     @Test
-    void coversExactlyFifteenProductionEndpointsAndMinimumRoles()
+    void coversExistingFifteenAndTwoAiReportEndpointsAndMinimumRoles()
             throws Exception {
-        assertThat(ENDPOINTS).hasSize(15);
+        assertThat(ENDPOINTS.subList(0, 15)).hasSize(15);
+        assertThat(ENDPOINTS).hasSize(17);
         assertThat(ENDPOINTS.stream().map(Endpoint::signature))
                 .doesNotHaveDuplicates();
         Set<String> actualMappings = requestMappingHandlerMapping
@@ -605,10 +625,11 @@ class EndpointRbacSecurityIntegrationTest {
 
     @Test
     void permitsEveryApprovedCorsPathAndMethodExactly() {
-        assertThat(APPROVED_PREFLIGHTS).hasSize(16);
+        assertThat(APPROVED_PREFLIGHTS.subList(0, 16)).hasSize(16);
+        assertThat(APPROVED_PREFLIGHTS).hasSize(18);
         assertThat(APPROVED_PREFLIGHTS.subList(0, 15))
                 .extracting(CorsProbe::signature)
-                .containsExactlyElementsOf(ENDPOINTS.stream()
+                .containsExactlyElementsOf(ENDPOINTS.subList(0, 15).stream()
                         .map(Endpoint::signature)
                         .toList());
 
@@ -954,7 +975,8 @@ class EndpointRbacSecurityIntegrationTest {
                 fraudCaseTransactionQueryService,
                 fraudCaseWorkflowService,
                 investigationNoteService,
-                fraudCaseAuditLogService
+                fraudCaseAuditLogService,
+                aiReportService
         );
     }
 

@@ -1,5 +1,7 @@
 package com.aifds.backend.common.error;
 
+import com.aifds.backend.aireport.exception.AiReportException;
+
 import com.aifds.backend.behavior.exception.BehaviorEventConcurrentResultNotFoundException;
 import com.aifds.backend.behavior.exception.BehaviorEventDependencyTimeoutException;
 import com.aifds.backend.behavior.exception.BehaviorEventDependencyUnavailableException;
@@ -53,6 +55,13 @@ import java.util.Set;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    @ExceptionHandler(AiReportException.class)
+    ResponseEntity<ApiErrorResponse> handleAiReport(AiReportException exception,
+                                                    HttpServletRequest request) {
+        return response(exception.status(), exception.code(),
+                "AI 리포트 요청 조건을 확인해 주세요.", List.of(), request);
+    }
 
     private static final Logger LOGGER =
             LoggerFactory.getLogger(GlobalExceptionHandler.class);

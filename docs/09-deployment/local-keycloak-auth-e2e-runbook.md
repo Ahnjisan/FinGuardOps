@@ -923,6 +923,16 @@ receipt를 보존한다. glob, prefix enumeration, label 기반 broad cleanup은
 
 ## 12. Run fixture 사건 처리·감사 Browser E2E (#314)
 
+Issue #339의 AI 조사 리포트 Browser 검증은 #337 테스트가 동일 Run 사건을
+`IN_REVIEW`로 재개한 **뒤**, 종결하기 **전**에 실행한다. #314가 끝날 때의
+`ADDITIONAL_INFORMATION_REQUIRED`·version 3·Audit 5와 #337의 재개·종결
+write 및 Audit 단언을 유지한다. AI POST는 별도의 exact 현재 사건
+method/path/body/Idempotency-Key relay arm으로 요청 횟수를 검증한다.
+Gate의 모의 Ollama는 기존 external-risk-mock 컨테이너의 독립 내부 포트에서
+실행되며 FastAPI HTTP 경로·영속 상태·재조회만 검증한다. Qwen 품질·속도·
+메모리 검증은 실제 로컬 모델 합성 평가에서만 기록한다. 이 문서의 공식
+Prepare→Service→Run은 clean commit 이후 OWNER가 실행한다.
+
 `a real USER works the Run fixture case through review, a note and the audit trail` test는 §11의 Run
 fixture가 만든 현재 Run의 거래·사건으로 핵심 사건 처리 흐름을 검증한다. 기존 FDS_ANALYST USER
 (`local-fds-analyst`)의 실제 Keycloak 로그인과 실제 Spring Boot만 사용한다. production, API, DB,

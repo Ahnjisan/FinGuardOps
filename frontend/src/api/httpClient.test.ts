@@ -786,7 +786,7 @@ describe("httpRequest — deadline holds without a timer callback", () => {
  * response the caller asked for, so it is refused before the body is read.
  */
 describe("httpRequest — exact success status", () => {
-  function requestWithExpectedStatus(expectedStatus: number, responseStatus: number) {
+  function requestWithExpectedStatus(expectedStatus: number | readonly number[], responseStatus: number) {
     return httpRequest({
       timeoutMs: 1000,
       expectedStatus,
@@ -820,6 +820,13 @@ describe("httpRequest — exact success status", () => {
         InvalidResponseError,
       );
     }
+  });
+
+  it("accepts only the two explicitly contracted AI creation statuses", async () => {
+    await expect(requestWithExpectedStatus([202, 200], 202)).resolves.toMatchObject({ status: 202 });
+    await expect(requestWithExpectedStatus([202, 200], 200)).resolves.toMatchObject({ status: 200 });
+    await expect(requestWithExpectedStatus([202, 200], 201))
+      .rejects.toBeInstanceOf(InvalidResponseError);
   });
 
   it("does not read the body of an unexpected 2xx", async () => {

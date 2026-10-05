@@ -126,6 +126,12 @@ const CASE_NOTES_PATH = new RegExp(
 const CASE_TRANSACTIONS_PATH = new RegExp(
   `^${CASE_LIST_PATH}/${CANONICAL_UUID_V4_PATTERN}/transactions$`,
 );
+const CASE_AI_REPORT_PATH = new RegExp(
+  `^${CASE_LIST_PATH}/${CANONICAL_UUID_V4_PATTERN}/ai-reports$`,
+);
+const CASE_AI_REPORT_CURRENT_PATH = new RegExp(
+  `^${CASE_LIST_PATH}/${CANONICAL_UUID_V4_PATTERN}/ai-reports/current$`,
+);
 
 /** `/api/v1/cases/{canonical lowercase UUID v4}/status`, exactly. */
 const CASE_STATUS_PATH = new RegExp(
@@ -176,6 +182,12 @@ const CASE_RESOLUTION_PROBE_PATH = new RegExp(
  * names remain absent from this list and are refused.
  */
 const RELAYABLE_READ_PATHS: readonly RelayableEndpoint[] = [
+  {
+    name: "ai-report-current",
+    method: "GET",
+    matches: (pathname) => CASE_AI_REPORT_CURRENT_PATH.test(pathname),
+    queryNames: null,
+  },
   {
     name: "transaction-list",
     method: "GET",
@@ -301,6 +313,12 @@ const RELAYABLE_WRITE_PROBES: readonly RelayableEndpoint[] = [
  */
 const RELAYABLE_WORKFLOW_WRITES: readonly RelayableEndpoint[] = [
   {
+    name: "ai-report-create",
+    method: "POST",
+    matches: (pathname) => CASE_AI_REPORT_PATH.test(pathname),
+    queryNames: null,
+  },
+  {
     name: "case-status-change",
     method: "PATCH",
     matches: (pathname) => CASE_STATUS_PATH.test(pathname),
@@ -331,6 +349,7 @@ interface ArmedWorkflowWrite {
   readonly method: string;
   readonly pathname: string;
   readonly body: string;
+  readonly idempotencyKey?: string;
 }
 
 /**
@@ -1069,6 +1088,14 @@ function resolveRelayTarget(request: PlaywrightRequest): string {
       WORKFLOW_WRITE_NOT_ARMED,
     );
     requireCondition((request.postData() ?? "") === armed.body, WORKFLOW_WRITE_BODY_MISMATCH);
+    const requestKey = request.headers()["idempotency-key"];
+    if (CASE_AI_REPORT_PATH.test(url.pathname)) {
+      requireCondition(armed.idempotencyKey !== undefined && requestKey === armed.idempotencyKey,
+        "The AI report write did not carry its one exact armed idempotency key.");
+    } else {
+      requireCondition(requestKey === undefined && armed.idempotencyKey === undefined,
+        "A workflow write carried an unexpected idempotency key.");
+    }
     return url.pathname;
   }
 
@@ -1902,6 +1929,11 @@ function buildRelayRequestBytes(request: PlaywrightRequest): BuiltRelayRequest {
   );
 
   const credential = request.headers()["authorization"] ?? "";
+  const aiReportKey = request.headers()["idempotency-key"];
+  requireCondition(aiReportKey === undefined ||
+    (CASE_AI_REPORT_PATH.test(new URL(request.url()).pathname) &&
+      /^[A-Za-z0-9._:-]{8,128}$/.test(aiReportKey)),
+  "An invalid Backend idempotency key was refused.");
   requireCondition(
     credential === "" || /^Bearer [\x21-\x7e]+$/.test(credential),
     "An invalid credential header was refused.",
@@ -1912,6 +1944,7 @@ function buildRelayRequestBytes(request: PlaywrightRequest): BuiltRelayRequest {
     "Accept: application/json",
     "Connection: close",
     ...(credential === "" ? [] : [`Authorization: ${credential}`]),
+    ...(aiReportKey === undefined ? [] : [`Idempotency-Key: ${aiReportKey}`]),
     `Content-Length: ${String(body.byteLength)}`,
     ...(method !== "GET" ? ["Content-Type: application/json"] : []),
   ];
@@ -5884,9 +5917,9 @@ test("the Backend relay refuses every endpoint it was not approved to reach", ()
  */
 test("the Backend relay still admits the real reads and the one declared write probe", () => {
   requireCondition(
-    RELAYABLE_READ_PATHS.length === 8 &&
-      new Set(RELAYABLE_READ_PATHS.map(({ name }) => name)).size === 8,
-    "The eight read relay descriptors were not unique.",
+    RELAYABLE_READ_PATHS.length === 9 &&
+      new Set(RELAYABLE_READ_PATHS.map(({ name }) => name)).size === 9,
+    "The nine read relay descriptors were not unique.",
   );
   requireCondition(
     RELAYABLE_WRITE_PROBES.length === 1 &&
@@ -5953,6 +5986,11 @@ test("the Backend relay still admits the real reads and the one declared write p
       method: "GET",
       url: `${BACKEND_ORIGIN}${CASE_NOTES_TARGET}`,
       target: CASE_NOTES_TARGET,
+    },
+    {
+      method: "GET",
+      url: `${BACKEND_ORIGIN}${CASE_DETAIL_TARGET}/ai-reports/current`,
+      target: `${CASE_DETAIL_TARGET}/ai-reports/current`,
     },
     {
       method: "GET",
@@ -9873,9 +9911,11 @@ test("real Analyst resumes the Run case and Approver closes it with a public aud
   const casePath = `${CASE_LIST_PATH}/${fixture.caseId}`;
   const statusPath = `${casePath}/status`;
   const resolutionPath = `${casePath}/resolution`;
+  const aiReportPath = `${casePath}/ai-reports`;
+  const aiReportCurrentPath = `${aiReportPath}/current`;
   const notesPath = `${casePath}/notes`;
   const auditPath = `${casePath}/audit-logs`;
-  const captured = [casePath, statusPath, resolutionPath, notesPath, auditPath];
+  const captured = [casePath, statusPath, resolutionPath, notesPath, auditPath, aiReportCurrentPath];
   const relays: BackendRelay[] = [];
   const contexts: Array<Awaited<ReturnType<typeof browser.newContext>>> = [];
   const read = (subjectPage: Page) => readRoleCaseSnapshot(subjectPage, fixture.caseId);
@@ -9957,6 +9997,35 @@ test("real Analyst resumes the Run case and Approver closes it with a public aud
     requireCondition(isDeepStrictEqual(after, before),
       "A denied resolution changed the case, complete notes or complete business audit.");
   };
+  const denyAiCreate = async (subjectPage: Page, relay: BackendRelay,
+    version: number, key: string) => {
+    const before = await read(subjectPage);
+    const body = JSON.stringify({ detectionResultVersion: version, regenerationReason: null });
+    const previous = relay.filter((entry) => entry.method === "POST" &&
+      entry.pathname === aiReportPath).length;
+    armWorkflowWrite({ method: "POST", pathname: aiReportPath, body, idempotencyKey: key });
+    const outcome = await subjectPage.evaluate(async ({ caseId, version, key }) => {
+      const [{ getOidcAuthClient }, { createAiReport }] = await Promise.all([
+        import("/src/auth/oidcAuthClient.ts"),
+        // @ts-expect-error Vite serves this browser module at an absolute /src URL.
+        import("/src/api/aiReportApi.ts"),
+      ]);
+      try {
+        await createAiReport(getOidcAuthClient(), caseId, version, key);
+        return "unexpected-success";
+      } catch (error) {
+        return error instanceof Error ? error.name : "unknown";
+      }
+    }, { caseId: fixture.caseId, version, key });
+    const writes = relay.filter((entry) => entry.method === "POST" &&
+      entry.pathname === aiReportPath);
+    requireCondition(armedWorkflowWrite === null && outcome === "ForbiddenError" &&
+      writes.length === previous + 1 && writes.at(-1)?.status === 403 &&
+      writes.at(-1)?.requestBodyByteLength === Buffer.byteLength(body, "utf8"),
+    "The denied AI report request was not one exact armed Backend 403.");
+    requireCondition(isDeepStrictEqual(await read(subjectPage), before),
+      "A denied AI report request changed case, notes or business Audit.");
+  };
 
   try {
     const approver = await openAs(page, "local-fds-approver", "FDS_APPROVER");
@@ -10012,10 +10081,70 @@ test("real Analyst resumes the Run case and Approver closes it with a public aud
       isDeepStrictEqual(resumeAudit.metadata, {}),
     "The review-resume audit did not describe the one allowed transition.");
 
+    // #339 runs only after the real Analyst resumed review and before the
+    // Approver closes the same case. It writes no case or business Audit row.
+    const adoptedForReport = await analystPage.evaluate(async (transactionId) => {
+      const [{ getOidcAuthClient }, { fetchAdoptedDetection }] = await Promise.all([
+        import("/src/auth/oidcAuthClient.ts"),
+        // @ts-expect-error Vite serves this browser module at an absolute /src URL.
+        import("/src/api/adoptedDetectionApi.ts"),
+      ]);
+      return fetchAdoptedDetection(getOidcAuthClient(), transactionId);
+    }, fixture.transactionId);
+    requireCondition(adoptedForReport.availability === "AVAILABLE" &&
+      adoptedForReport.adoptedResult !== null &&
+      adoptedForReport.adoptedResult.riskLevel === fixture.expectedRiskLevel,
+    "The AI report did not start from the Run transaction's adopted detection.");
+    const reportVersion = adoptedForReport.adoptedResult.detectionResultVersion;
+    const reportKey = "run-case-ai-report-339";
+    const reportBody = JSON.stringify({ detectionResultVersion: reportVersion, regenerationReason: null });
+    const beforeAiWrites = analyst.relay.filter((entry) => entry.method === "POST" &&
+      entry.pathname === aiReportPath).length;
+    armWorkflowWrite({ method: "POST", pathname: aiReportPath, body: reportBody,
+      idempotencyKey: reportKey });
+    const acceptedReport = await analystPage.evaluate(async ({ caseId, version, key }) => {
+      const [{ getOidcAuthClient }, { createAiReport }] = await Promise.all([
+        import("/src/auth/oidcAuthClient.ts"),
+        // @ts-expect-error Vite serves this browser module at an absolute /src URL.
+        import("/src/api/aiReportApi.ts"),
+      ]);
+      return createAiReport(getOidcAuthClient(), caseId, version, key);
+    }, { caseId: fixture.caseId, version: reportVersion, key: reportKey });
+    requireCondition(armedWorkflowWrite === null && acceptedReport.reportStatus === "PENDING" &&
+      acceptedReport.detectionResultVersion === reportVersion,
+    "The AI report was not accepted exactly once for the adopted detection version.");
+    const aiWrites = analyst.relay.filter((entry) => entry.method === "POST" &&
+      entry.pathname === aiReportPath);
+    requireCondition(aiWrites.length === beforeAiWrites + 1 &&
+      aiWrites.at(-1)?.status === 202 && aiWrites.at(-1)?.target === aiReportPath &&
+      aiWrites.at(-1)?.requestBodyByteLength === Buffer.byteLength(reportBody, "utf8"),
+    "The AI report relay did not observe one exact 202 POST.");
+    await expect.poll(async () => {
+      const value = await analystPage.evaluate(async (caseId) => {
+        const [{ getOidcAuthClient }, { fetchAiReportCurrent }] = await Promise.all([
+          import("/src/auth/oidcAuthClient.ts"),
+          // @ts-expect-error Vite serves this browser module at an absolute /src URL.
+          import("/src/api/aiReportApi.ts"),
+        ]);
+        return fetchAiReportCurrent(getOidcAuthClient(), caseId);
+      }, fixture.caseId);
+      return value.currentReport?.reportStatus ?? null;
+    }, { timeout: 30_000 }).toMatch(/^(COMPLETED|FALLBACK_COMPLETED)$/);
+    await analystPage.getByText("AI 조사 보조 리포트 보기").click();
+    await analystPage.getByRole("button", { name: "리포트 새로고침" }).click();
+    await expect(analystPage.getByRole("heading", { name: "저장된 리포트" })).toBeVisible();
+    await expect(analystPage.locator(".case-ai-report__body"))
+      .toContainText(`탐지 버전 ${reportVersion}`);
+    requireCondition(isDeepStrictEqual(await read(analystPage), resumed),
+      "AI report generation changed the case, note or public business Audit.");
+
     const viewerContext = await browser.newContext();
     contexts.push(viewerContext);
     const viewerPage = await viewerContext.newPage();
     const viewer = await openAs(viewerPage, "local-fds-viewer", "FDS_VIEWER");
+    await viewerPage.getByText("AI 조사 보조 리포트 보기").click();
+    await expect(viewerPage.getByRole("button", { name: "리포트 생성 요청" })).toHaveCount(0);
+    await denyAiCreate(viewerPage, viewer.relay, reportVersion, "run-ai-viewer-denied-339");
     for (const subjectPage of [viewerPage, analystPage]) {
       await expect(subjectPage.locator(".case-resolution")).toHaveCount(0);
       await expect(subjectPage.getByRole("button", { name: "사건 종결", exact: true })).toHaveCount(0);
@@ -10026,6 +10155,9 @@ test("real Analyst resumes the Run case and Approver closes it with a public aud
     await page.reload();
     await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
     await signInFromGuard(page, password, route, true, "local-fds-approver", "FDS_APPROVER");
+    await page.getByText("AI 조사 보조 리포트 보기").click();
+    await expect(page.getByRole("button", { name: "리포트 생성 요청" })).toHaveCount(0);
+    await denyAiCreate(page, approver.relay, reportVersion, "run-ai-approver-denied-339");
     await expect(page.locator(".case-resolution")).toBeVisible();
     const beforeClose = await read(page);
     requireCondition(isDeepStrictEqual(beforeClose, resumed),
@@ -10037,7 +10169,8 @@ test("real Analyst resumes the Run case and Approver closes it with a public aud
     await expect(page.getByRole("status", { name: "사건 처리 결과" }))
       .toHaveText("최신 사건 정보에서 사건 종결을 확인했습니다.", { timeout: 15_000 });
     requireCondition(armedWorkflowWrite === null, "The successful resolution arm was not consumed once.");
-    const approverWrites = approver.relay.filter((entry) => entry.method !== "GET");
+    const approverWrites = approver.relay.filter((entry) => entry.method === "POST" &&
+      entry.pathname === resolutionPath);
     requireCondition(approverWrites.length === 3 &&
       isDeepStrictEqual(approverWrites.map((entry) => [entry.method, entry.target, entry.status]), [
         ["POST", resolutionPath, 409], ["POST", resolutionPath, 409],
@@ -10096,6 +10229,31 @@ test("real Analyst resumes the Run case and Approver closes it with a public aud
     await expect(page.locator("section[aria-labelledby=\"case-audit-heading\"] article.audit__entry"))
       .toHaveCount(7);
     await expect(page.locator(".case-resolution")).toHaveCount(0);
+    await page.getByText("AI 조사 보조 리포트 보기").click();
+    await expect(page.getByRole("heading", { name: "저장된 리포트" })).toBeVisible();
+    const persistedAi = await page.evaluate(async (caseId) => {
+      const [{ getOidcAuthClient }, { fetchAiReportCurrent }] = await Promise.all([
+        import("/src/auth/oidcAuthClient.ts"),
+        // @ts-expect-error Vite serves this browser module at an absolute /src URL.
+        import("/src/api/aiReportApi.ts"),
+      ]);
+      return fetchAiReportCurrent(getOidcAuthClient(), caseId);
+    }, fixture.caseId);
+    requireCondition(persistedAi.currentReport !== null &&
+      persistedAi.currentReport.detectionResultVersion === reportVersion &&
+      persistedAi.latestRequest?.reportStatus === persistedAi.currentReport.reportStatus &&
+      isDeepStrictEqual(sortedKeys(persistedAi), ["caseId", "currentReport", "latestRequest", "traceId"]) &&
+      !JSON.stringify(persistedAi).includes("modelDigest") &&
+      !JSON.stringify(persistedAi).includes("inputTokens") &&
+      !JSON.stringify(persistedAi).includes("estimatedCost"),
+    "The stored AI report was not safely reread after close and sign-in.");
+    const reportViewport = page.viewportSize();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.locator(".case-ai-report__body")).toBeVisible();
+    requireCondition(await page.evaluate(() =>
+      document.documentElement.scrollWidth <= window.innerWidth),
+    "The stored AI report overflowed the 390px document width.");
+    if (reportViewport !== null) await page.setViewportSize(reportViewport);
     const auditSection = page.locator('section[aria-labelledby="case-audit-heading"]');
     await expect(auditSection.locator("article.audit__entry").first()).toContainText("CASE_RESOLVED");
     const auditMarkup = await auditSection.innerHTML();
@@ -10105,10 +10263,21 @@ test("real Analyst resumes the Run case and Approver closes it with a public aud
         "The closed audit UI exposed a private identifier or credential.");
     }
     requireCondition(isDeepStrictEqual([
-      viewer.relay.filter((entry) => entry.method !== "GET").map((entry) => entry.status),
-      analyst.relay.filter((entry) => entry.method !== "GET").map((entry) => entry.status),
-      approver.relay.filter((entry) => entry.method !== "GET").map((entry) => entry.status),
-    ], [[403], [200, 403], [409, 409, 200]]),
+      viewer.relay.filter((entry) => entry.pathname === resolutionPath && entry.method === "POST")
+        .map((entry) => entry.status),
+      analyst.relay.filter((entry) => entry.method === "PATCH" || entry.pathname === resolutionPath)
+        .map((entry) => entry.status),
+      approver.relay.filter((entry) => entry.pathname === resolutionPath && entry.method === "POST")
+        .map((entry) => entry.status),
+    ], [[403], [200, 403], [409, 409, 200]]) &&
+      isDeepStrictEqual([
+        viewer.relay.filter((entry) => entry.pathname === aiReportPath && entry.method === "POST")
+          .map((entry) => entry.status),
+        analyst.relay.filter((entry) => entry.pathname === aiReportPath && entry.method === "POST")
+          .map((entry) => entry.status),
+        approver.relay.filter((entry) => entry.pathname === aiReportPath && entry.method === "POST")
+          .map((entry) => entry.status),
+      ], [[403], [202], [403]]),
     "The resolution scenario sent an unexpected role write or repeat request.");
   } finally {
     disarmWorkflowWrite();
