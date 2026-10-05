@@ -64,14 +64,13 @@ const SYNTHETIC_TRANSACTION_ID = "e2e00000-0000-4000-8000-000000000e2e";
  * it: the console's screens reach eight read address kinds and one
  * authorization probe. These include the two collections, `/api/v1/transactions`
  * and `/api/v1/cases`; transaction and case detail at one canonical lowercase
- * UUID v4 segment; and that case's notes and audit log. The two detail reads
- * carry no query. Notes and audit each carry their own closed page/size/sort
- * contract. Everything else under `/api/v1/**` - a case's status, its assignee, its
- * related transactions, its current AI report, a `GET` of its resolution, any
- * other unapproved suffix, a case status or assignee write, a note create, an
- * endpoint that does not exist yet - is refused here rather than relayed. The
- * one exception is `RELAYABLE_WORKFLOW_WRITES` below: a status or note write is
- * forwarded only while the Run fixture test has armed that exact write. The
+ * UUID v4 segment; the adopted detection result; and that case's notes, audit
+ * log and related transaction IDs. Detail reads carry no query. Collection,
+ * notes, audit and related-transaction reads have closed query contracts.
+ * Everything else under `/api/v1/**` is refused rather than relayed. The older
+ * fixed resolution probe runs only outside a live Run fixture. The four
+ * `RELAYABLE_WORKFLOW_WRITES` shapes below require one exact arm for the current
+ * Run case before any status, note, assignee or resolution write is forwarded. The
  * list grows when a screen's E2E really needs an address and not before: an
  * endpoint admitted ahead of the test that needs it is an address this suite
  * can reach for no stated reason.
@@ -264,7 +263,7 @@ const RELAYABLE_READ_PATHS: readonly RelayableEndpoint[] = [
 ];
 
 /**
- * The only non-`GET` request this suite will write onto the Backend socket.
+ * The older fixed non-`GET` authorization probe outside a live Run fixture.
  *
  * A single authorization-boundary probe: an `FDS_ANALYST` session attempting a
  * case resolution, which Spring Boot refuses with 403. It is declared as one
@@ -8778,6 +8777,7 @@ async function readRoleCaseSnapshot(page: Page, caseId: string) {
       throw new Error("The role snapshot exceeded the bounded page count.");
     };
     return {
+      case: record,
       caseStatus: record.caseStatus,
       concurrencyVersion: record.concurrencyVersion,
       assigneeRef: record.assigneeRef,
@@ -9859,6 +9859,264 @@ test("a real USER works the Run fixture case through review, a note and the audi
     );
   } finally {
     disarmWorkflowWrite();
+  }
+});
+
+/** #337 follows #318 and #314 on the same Run case; it adds no fixture or production rule. */
+test("real Analyst resumes the Run case and Approver closes it with a public audit trail", async ({ browser, page }) => {
+  test.setTimeout(420_000);
+  requireRoleWriteRelayOracle();
+  const fixture = readRunFixtureManifest(env[RUN_FIXTURE_MANIFEST_ENVIRONMENT]);
+  activeRunCaseId = fixture.caseId;
+  const password = readUserPassword();
+  const route = `/cases/${fixture.caseId}`;
+  const casePath = `${CASE_LIST_PATH}/${fixture.caseId}`;
+  const statusPath = `${casePath}/status`;
+  const resolutionPath = `${casePath}/resolution`;
+  const notesPath = `${casePath}/notes`;
+  const auditPath = `${casePath}/audit-logs`;
+  const captured = [casePath, statusPath, resolutionPath, notesPath, auditPath];
+  const relays: BackendRelay[] = [];
+  const contexts: Array<Awaited<ReturnType<typeof browser.newContext>>> = [];
+  const read = (subjectPage: Page) => readRoleCaseSnapshot(subjectPage, fixture.caseId);
+  const bodyFor = (expectedVersion: number) => JSON.stringify({
+    finalDisposition: "NORMAL", reasonCode: "CASE_RESOLUTION_COMPLETED", expectedVersion,
+  });
+  const requirePublicFields = (snapshot: Awaited<ReturnType<typeof readRoleCaseSnapshot>>) => {
+    requireCondition(isDeepStrictEqual(sortedKeys(snapshot.case), [
+      "assigneeRef", "caseId", "caseStatus", "closedAt", "concurrencyVersion",
+      "createdAt", "finalDisposition", "lastChangedAt", "relatedTransactionCount",
+      "reviewStartedAt",
+    ]), "The resolution case detail exposed fields outside its public projection.");
+    for (const raw of snapshot.notes) {
+      const note = requireJsonRecord(raw, "A resolution note item was not an object.");
+      requireCondition(isDeepStrictEqual(sortedKeys(note), [
+        "authorRef", "authorType", "caseId", "content", "createdAt", "noteId",
+      ]), "A resolution note item exposed fields outside its public projection.");
+    }
+    for (const raw of snapshot.audit) {
+      const entry = requireJsonRecord(raw, "A resolution audit item was not an object.");
+      requireCondition(isDeepStrictEqual(sortedKeys(entry), [
+        "action", "actorType", "afterSummary", "beforeSummary", "changedAt",
+        "metadata", "reasonCode",
+      ]) && typeof entry.changedAt === "string" && UTC_INSTANT.test(entry.changedAt),
+      "A resolution audit item exposed fields outside its public projection.");
+    }
+  };
+  const openAs = async (subjectPage: Page, username: string, role: string) => {
+    const relay = await installBackendRelay(subjectPage, { captureBodyOf: captured });
+    relays.push(relay);
+    await subjectPage.goto(`${APP_ORIGIN}${route}`);
+    await expect(subjectPage.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
+    const tokens = await signInFromGuard(subjectPage, password, route, false, username, role);
+    await expect(subjectPage.locator("#case-detail-heading")).toContainText(fixture.caseId);
+    await expect.poll(() => relay.filter((entry) => entry.pathname === casePath &&
+      entry.status === 200).length, { timeout: 15_000 }).toBeGreaterThan(0);
+    requireCondition(relay.some((entry) => entry.pathname === casePath && entry.status === 200),
+      "A resolution USER did not read the Run case from the Backend.");
+    return { relay, tokens };
+  };
+  const denyResolution = async (
+    subjectPage: Page, relay: BackendRelay, expectedVersion: number,
+    status: 403 | 409, code: string,
+  ) => {
+    const before = await read(subjectPage);
+    const body = bodyFor(expectedVersion);
+    const previous = relay.length;
+    armWorkflowWrite({ method: "POST", pathname: resolutionPath, body });
+    const outcome = await subjectPage.evaluate(async ({ caseId, body }) => {
+      const [{ getOidcAuthClient }, { sendAuthorizedBackendRequest }] = await Promise.all([
+        import("/src/auth/oidcAuthClient.ts"), import("/src/api/authorizedClient.ts"),
+      ]);
+      try {
+        await sendAuthorizedBackendRequest(getOidcAuthClient(), {
+          endpoint: "case-resolution-create", params: { caseId }, body,
+          expectedStatus: 200,
+          validate: (data: unknown): data is never => { void data; return false; },
+        });
+        return { name: "unexpected-success", status: 0 };
+      } catch (error: unknown) {
+        return { name: error instanceof Error ? error.name : "unknown",
+          status: typeof error === "object" && error !== null && "status" in error &&
+            typeof error.status === "number" ? error.status : 0 };
+      }
+    }, { caseId: fixture.caseId, body: JSON.parse(body) });
+    requireCondition(armedWorkflowWrite === null, "A denied resolution arm was not consumed once.");
+    requireCondition(status === 403
+      ? outcome.name === "ForbiddenError" && outcome.status === 0
+      : outcome.name === "HttpError" && outcome.status === 409,
+    "A denied resolution returned an unexpected client outcome.");
+    const writes = relay.slice(previous).filter((entry) => entry.method !== "GET");
+    requireCondition(writes.length === 1 && writes[0].method === "POST" &&
+      writes[0].pathname === resolutionPath && writes[0].target === resolutionPath &&
+      writes[0].status === status &&
+      writes[0].requestBodyByteLength === Buffer.byteLength(body, "utf8") &&
+      readBackendErrorFields(writes[0].body).code === code,
+    "A denied resolution was not the one exact armed Backend request and error code.");
+    const after = await read(subjectPage);
+    requireCondition(isDeepStrictEqual(after, before),
+      "A denied resolution changed the case, complete notes or complete business audit.");
+  };
+
+  try {
+    const approver = await openAs(page, "local-fds-approver", "FDS_APPROVER");
+    const initial = await read(page);
+    requirePublicFields(initial);
+    requireCondition(initial.caseStatus === "ADDITIONAL_INFORMATION_REQUIRED" &&
+      initial.concurrencyVersion === 3 && initial.finalDisposition === null &&
+      initial.case.closedAt === null && typeof initial.assigneeRef === "string" &&
+      CANONICAL_UUID_V4.test(initial.assigneeRef) &&
+      typeof initial.case.reviewStartedAt === "string" &&
+      initial.notes.length === 1 && initial.audit.length === 5 &&
+      requireJsonRecord(initial.audit[0], "The last #314 audit was absent.").reasonCode ===
+        "CASE_ADDITIONAL_INFORMATION_REQUESTED",
+    "The #314 case did not finish at the required version, note and audit boundary.");
+    await expect(page.locator(".case-workflow__unavailable")).toBeVisible();
+    await expect(page.getByRole("button", { name: "사건 종결", exact: true })).toHaveCount(0);
+    await denyResolution(page, approver.relay, 2, 409, "CONCURRENT_MODIFICATION");
+    await denyResolution(page, approver.relay, 3, 409, "CASE_STATUS_CONFLICT");
+
+    const analystContext = await browser.newContext();
+    contexts.push(analystContext);
+    const analystPage = await analystContext.newPage();
+    const analyst = await openAs(analystPage, USERNAME, "FDS_ANALYST");
+    await expect(analystPage.getByRole("button", { name: "검토 재개", exact: true })).toBeVisible();
+    const resumeBody = JSON.stringify({
+      targetStatus: "IN_REVIEW", reasonCode: "CASE_REVIEW_RESUMED", expectedVersion: 3,
+    });
+    armWorkflowWrite({ method: "PATCH", pathname: statusPath, body: resumeBody });
+    await analystPage.getByRole("button", { name: "검토 재개", exact: true }).click();
+    await expect(analystPage.getByRole("status", { name: "사건 처리 결과" }))
+      .toHaveText("최신 사건 정보에서 검토 재개를 확인했습니다.", { timeout: 15_000 });
+    requireCondition(armedWorkflowWrite === null, "The review-resume arm was not consumed once.");
+    const analystWrites = analyst.relay.filter((entry) => entry.method !== "GET");
+    requireCondition(analystWrites.length === 1 && analystWrites[0].method === "PATCH" &&
+      analystWrites[0].target === statusPath && analystWrites[0].status === 200 &&
+      analystWrites[0].requestBodyByteLength === Buffer.byteLength(resumeBody, "utf8"),
+    "The review resume was not the one exact armed status write.");
+    const resumed = await read(analystPage);
+    requirePublicFields(resumed);
+    requireCondition(resumed.caseStatus === "IN_REVIEW" && resumed.concurrencyVersion === 4 &&
+      resumed.assigneeRef === initial.assigneeRef && resumed.finalDisposition === null &&
+      resumed.case.reviewStartedAt === initial.case.reviewStartedAt &&
+      resumed.case.closedAt === null && isDeepStrictEqual(resumed.notes, initial.notes) &&
+      resumed.audit.length === 6 && isDeepStrictEqual(resumed.audit.slice(1), initial.audit),
+    "Review resume did not preserve the assignee, note and prior audit at version 4.");
+    const resumeAudit = requireJsonRecord(resumed.audit[0], "The review-resume audit was absent.");
+    requireCondition(resumeAudit.action === "CASE_STATUS_CHANGED" &&
+      resumeAudit.reasonCode === "CASE_REVIEW_RESUMED" && resumeAudit.actorType === "USER" &&
+      isDeepStrictEqual(resumeAudit.beforeSummary,
+        { caseStatus: "ADDITIONAL_INFORMATION_REQUIRED", assigneeRef: initial.assigneeRef }) &&
+      isDeepStrictEqual(resumeAudit.afterSummary,
+        { caseStatus: "IN_REVIEW", assigneeRef: initial.assigneeRef }) &&
+      isDeepStrictEqual(resumeAudit.metadata, {}),
+    "The review-resume audit did not describe the one allowed transition.");
+
+    const viewerContext = await browser.newContext();
+    contexts.push(viewerContext);
+    const viewerPage = await viewerContext.newPage();
+    const viewer = await openAs(viewerPage, "local-fds-viewer", "FDS_VIEWER");
+    for (const subjectPage of [viewerPage, analystPage]) {
+      await expect(subjectPage.locator(".case-resolution")).toHaveCount(0);
+      await expect(subjectPage.getByRole("button", { name: "사건 종결", exact: true })).toHaveCount(0);
+    }
+    await denyResolution(viewerPage, viewer.relay, 4, 403, "ACCESS_DENIED");
+    await denyResolution(analystPage, analyst.relay, 4, 403, "ACCESS_DENIED");
+
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
+    await signInFromGuard(page, password, route, true, "local-fds-approver", "FDS_APPROVER");
+    await expect(page.locator(".case-resolution")).toBeVisible();
+    const beforeClose = await read(page);
+    requireCondition(isDeepStrictEqual(beforeClose, resumed),
+      "Approver did not read the same version 4 case before closing it.");
+    const closeBody = bodyFor(4);
+    armWorkflowWrite({ method: "POST", pathname: resolutionPath, body: closeBody });
+    await page.getByRole("radio", { name: "정상", exact: true }).check();
+    await page.getByRole("button", { name: "사건 종결", exact: true }).click();
+    await expect(page.getByRole("status", { name: "사건 처리 결과" }))
+      .toHaveText("최신 사건 정보에서 사건 종결을 확인했습니다.", { timeout: 15_000 });
+    requireCondition(armedWorkflowWrite === null, "The successful resolution arm was not consumed once.");
+    const approverWrites = approver.relay.filter((entry) => entry.method !== "GET");
+    requireCondition(approverWrites.length === 3 &&
+      isDeepStrictEqual(approverWrites.map((entry) => [entry.method, entry.target, entry.status]), [
+        ["POST", resolutionPath, 409], ["POST", resolutionPath, 409],
+        ["POST", resolutionPath, 200],
+      ]) && approverWrites[2].requestBodyByteLength === Buffer.byteLength(closeBody, "utf8"),
+    "Approver did not send exactly two refusals and one successful resolution.");
+    const closeResponse = parseJsonObject(approverWrites[2].body,
+      "The successful resolution body was not observed.",
+      "The successful resolution body was not a JSON object.");
+    requireCondition(isDeepStrictEqual(sortedKeys(closeResponse), [
+      "assigneeRef", "caseId", "caseStatus", "closedAt", "concurrencyVersion",
+      "finalDisposition", "lastChangedAt", "reviewStartedAt", "traceId",
+    ]) && closeResponse.caseId === fixture.caseId &&
+      closeResponse.caseStatus === "CLOSED" && closeResponse.finalDisposition === "NORMAL" &&
+      closeResponse.concurrencyVersion === 5 &&
+      typeof closeResponse.closedAt === "string" && UTC_INSTANT.test(closeResponse.closedAt) &&
+      closeResponse.closedAt === closeResponse.lastChangedAt &&
+      closeResponse.assigneeRef === initial.assigneeRef &&
+      closeResponse.reviewStartedAt === initial.case.reviewStartedAt,
+    "The 200 resolution did not close this case with NORMAL at version 5.");
+    const closed = await read(page);
+    requirePublicFields(closed);
+    requireCondition(closed.caseStatus === "CLOSED" && closed.concurrencyVersion === 5 &&
+      closed.finalDisposition === "NORMAL" && closed.case.closedAt === closeResponse.closedAt &&
+      closed.case.lastChangedAt === closed.case.closedAt &&
+      isDeepStrictEqual(closed.notes, initial.notes) && closed.audit.length === 7 &&
+      isDeepStrictEqual(closed.audit.slice(1), resumed.audit),
+    "The closed case, original note or append-only audit did not survive the 200 response.");
+    const resolutionAudit = requireJsonRecord(closed.audit[0], "The resolution audit was absent.");
+    requireCondition(resolutionAudit.action === "CASE_RESOLVED" &&
+      resolutionAudit.reasonCode === "CASE_RESOLUTION_COMPLETED" &&
+      resolutionAudit.actorType === "USER" &&
+      isDeepStrictEqual(resolutionAudit.beforeSummary,
+        { caseStatus: "IN_REVIEW", assigneeRef: initial.assigneeRef }) &&
+      isDeepStrictEqual(resolutionAudit.afterSummary,
+        { caseStatus: "CLOSED", assigneeRef: initial.assigneeRef, finalDisposition: "NORMAL" }) &&
+      isDeepStrictEqual(resolutionAudit.metadata, {}),
+    "The successful resolution did not append exactly one public CASE_RESOLVED entry.");
+    await expect(factValue(page.getByRole("main").locator(".detail__record"), "사건 상태"))
+      .toHaveText("종결");
+    await expect(factValue(page.getByRole("main").locator(".detail__record"), "최종 판정"))
+      .toHaveText("정상");
+
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
+    await signInFromGuard(page, password, route, true, "local-fds-approver", "FDS_APPROVER");
+    const reread = await read(page);
+    requirePublicFields(reread);
+    requireCondition(isDeepStrictEqual(reread, closed) &&
+      reread.notes.length === 1 && reread.audit.length === 7,
+    "Reload and real sign-in did not reread the exact closed case, note and public audit.");
+    const rereadRecord = page.getByRole("main").locator(".detail__record");
+    await expect(factValue(rereadRecord, "사건 상태")).toHaveText("종결");
+    await expect(factValue(rereadRecord, "최종 판정")).toHaveText("정상");
+    await expect(factValue(rereadRecord, "버전")).toHaveText("5");
+    await expect(page.locator("section[aria-labelledby=\"case-audit-heading\"] article.audit__entry"))
+      .toHaveCount(7);
+    await expect(page.locator(".case-resolution")).toHaveCount(0);
+    const auditSection = page.locator('section[aria-labelledby="case-audit-heading"]');
+    await expect(auditSection.locator("article.audit__entry").first()).toContainText("CASE_RESOLVED");
+    const auditMarkup = await auditSection.innerHTML();
+    for (const hidden of ["actorId", "targetId", "traceId", fixture.caseId,
+      fixture.transactionId, approver.tokens.accessToken, approver.tokens.idToken]) {
+      requireCondition(!auditMarkup.includes(hidden),
+        "The closed audit UI exposed a private identifier or credential.");
+    }
+    requireCondition(isDeepStrictEqual([
+      viewer.relay.filter((entry) => entry.method !== "GET").map((entry) => entry.status),
+      analyst.relay.filter((entry) => entry.method !== "GET").map((entry) => entry.status),
+      approver.relay.filter((entry) => entry.method !== "GET").map((entry) => entry.status),
+    ], [[403], [200, 403], [409, 409, 200]]),
+    "The resolution scenario sent an unexpected role write or repeat request.");
+  } finally {
+    disarmWorkflowWrite();
+    try {
+      for (const relay of relays.reverse()) await relay.dispose();
+    } finally {
+      for (const context of contexts.reverse()) await context.close();
+    }
   }
 });
 

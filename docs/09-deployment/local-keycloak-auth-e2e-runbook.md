@@ -945,14 +945,16 @@ test는 Playwright child에 전달된 `FINGUARDOPS_E2E_FIXTURE_MANIFEST`를 직�
 가짜 file system 위의 path·symlink·junction·크기·읽기 실패·binding 반례는 20개다.
 
 `expectedRiskLevel=HIGH`와 `expectedResponseOutcome=ADDITIONAL_AUTH_REQUIRED`는 `run-fixture-after`가
-DB 기준으로 검증한 계약이다. 공개 거래 상세와 사건 상세에는 위험 등급과 대응 결과 필드가 없다. 그래서
-Browser는 거래의 공개 `processingStatus=ADDITIONAL_AUTH_REQUIRED`(화면 `Auth required`)만 확인하며,
-화면이 위험 등급을 보여 준다고 주장하지 않는다.
+DB 기준으로 검증한 계약이다. 거래 기록 응답에는 위험 등급·대응 결과·사건 ID가 없다. #335의 별도
+`GET /api/v1/transactions/{transactionId}/adopted-detection-result`는 채택된 완료 탐지 결과와 RULE 근거를
+공개하며, Browser는 이 응답의 `HIGH`와 거래 화면의 채택 탐지 결과 영역을 확인한다. 거래 기록의 공개
+`processingStatus=ADDITIONAL_AUTH_REQUIRED`도 별도로 확인한다. 채택 위험 등급은 최종 판정이 아니다.
 
 ### 12.2 검증 흐름
 
-1. 거래 상세 주소에서 실제 로그인을 한다. 응답이 manifest의 `transactionId`이고 `processingStatus`가
-   위와 같은지 확인한다. 응답에 `riskLevel`, `riskResponseOutcome`, `caseId`가 없는지도 확인한다.
+1. 거래 상세 주소에서 실제 로그인을 한다. 거래 기록 응답이 manifest의 `transactionId`이고 `processingStatus`가
+   위와 같은지 확인한다. 그 응답에 `riskLevel`, `riskResponseOutcome`, `caseId`가 없는지도 확인한다.
+   별도 채택 탐지 결과 응답과 화면에서 `HIGH` 및 RULE 근거를 확인한다.
 2. 사건 목록에서 공개 필터 `Related transaction ID`(`transactionId`)에 manifest 거래 ID를 넣는다. 확인 항목은 다음과 같다.
    - 요청 target이 `?transactionId=<id>&page=0&size=20&sort=lastChangedAt%2Cdesc`와 정확히 같다.
    - 결과가 정확히 1건이다.
@@ -996,11 +998,11 @@ assignee는 실행마다 새로 만든 canonical lowercase UUID v4다. 현재 pr
 
 ### 12.3 Relay write 경계
 
-Issue #318 extends the armed live-Run write descriptors to assignee PATCH and resolution POST. During a live Run, the older synthetic resolution probe is disabled. Each of the four live mutation paths requires one exact arm for the manifest case ID, method, path, and body; a successful relay build consumes that arm. The #314 status/note flow below remains the earlier subset.
-
-test relay가 새로 받아들이는 write는 `PATCH /api/v1/cases/{id}/status`와 `POST /api/v1/cases/{id}/notes`
-두 형태뿐이다. 둘 다 test가 직전에 arm한 exact method, path, body와 일치할 때만 한 번 전달하고,
-전달하는 순간 arm을 소비한다. 다음 요청은 process를 만들기 전에 고정 문장으로 거부한다.
+Issue #318은 Run 사건에 대한 status PATCH, note POST, assignee PATCH, resolution POST 네 write 주소를
+relay descriptor에 포함했다. live Run에서는 이전 synthetic resolution probe를 비활성화한다. 네 주소 모두
+test가 직전에 arm한 manifest 사건 ID의 exact method, path, body와 일치할 때만 한 번 전달하며, relay
+request를 만들 때 arm을 소비한다. #314는 이 중 status와 note만 사용한다. #318의 권한 반례와 #337의
+resolution 시나리오도 같은 1회 arm 경계를 사용한다. 다음 요청은 process 생성 전에 거부한다.
 
 - arm하지 않은 write와 중복 요청
 - 다른 caseId
@@ -1011,8 +1013,7 @@ test relay가 새로 받아들이는 write는 `PATCH /api/v1/cases/{id}/status`�
 - 다른 body와 재서식 body
 - 중복 key와 빈 body
 
-assignee write, resolution(기존 403 probe 제외), audit-log write는 계속 선언되지 않는다. 기존 query·endpoint
-반례 matrix 64개와 70개는 그대로 유지한다.
+audit-log write와 그 밖의 미승인 주소는 선언하지 않는다. 기존 query·endpoint 반례 matrix도 유지한다.
 
 ### 12.4 Verified gate for Issue #314
 
@@ -1026,4 +1027,32 @@ Each USER can read the case, all note pages, and all business Audit pages. The B
 
 For each denied write, the same USER reads case status, concurrencyVersion, assigneeRef, finalDisposition, every note page, and every public business Audit page before and after. The comparison excludes per-request trace IDs. Application/security logs are not business Audit rows. The following #314 test then performs its approved successful mutations on the same Run fixture.
 
-Issue #318 has only non-Docker validation at this stage. After review and an approved clean commit, run the official Prepare -> Service -> Run gate and verify the expanded Browser pass count, exact write matrix, cleanup, owned resource/manifest/receipt residue zero, and protected inventory unchanged. Do not report #318 as Docker-verified until that gate passes.
+Issue #318의 [PR #319](https://github.com/Ahnjisan/FinGuardOps/pull/319)은 공식 Prepare·Service·Run 각 1회와
+Browser 26/26 통과를 보고했다. 해당 PR의 cleanup 보고에는 owned resource·fixture·receipt 잔여 0이 포함된다.
+이는 #337의 Approver 성공 시나리오에 대한 Gate 결과가 아니다.
+
+## 14. Analyst 조사 재개 → Approver 최종 판정 → CLOSED 재조회 (Issue #337)
+
+#314 Browser 테스트 **뒤에** 독립 테스트 하나가 같은 Run manifest 사건을 사용한다. #318은 `OPEN`에서
+권한 거부를 확인하고, #314는 정확히 4건의 업무 write와 Audit 5건을 확인한 뒤 사건을
+`ADDITIONAL_INFORMATION_REQUIRED`로 남긴다. 두 기존 테스트의 요청·Audit 단언은 변경하지 않는다.
+
+1. Approver USER가 공개 상세·전체 메모·전체 업무 Audit를 읽어 추가 정보 필요, version 3, 기존 담당자,
+   최종 판정 없음, 메모 1건, Audit 5건을 확인한다.
+2. `expectedVersion=2` resolution은 `409 CONCURRENT_MODIFICATION`, 현재 version 3에서 직접 종료는
+   `409 CASE_STATUS_CONFLICT`다. 각각 한 번만 보내고 매번 사건 상세·전체 메모·전체 업무 Audit가 거부
+   전과 같음을 확인한다.
+3. Analyst USER가 기존 담당자를 유지하며 `CASE_REVIEW_RESUMED`로 `IN_REVIEW`에 복귀한다. version 4,
+   Audit 6건 및 `CASE_STATUS_CHANGED/CASE_REVIEW_RESUMED` 한 건을 확인한다.
+4. `IN_REVIEW`에서도 Viewer·Analyst에게 사건 종결 UI가 없고 두 USER의 실제 resolution 요청이 각각
+   Backend 403인지 확인한다. 각 거부 뒤 사건·전체 메모·전체 Audit가 불변이어야 한다.
+5. Approver USER가 최신 사건을 다시 읽고 UI에서 `NORMAL`을 **명시적으로 선택**한 뒤 사건을 종결한다.
+   `reasonCode=CASE_RESOLUTION_COMPLETED`, `expectedVersion=4` 요청 하나의 HTTP 200, `CLOSED`, version 5,
+   `closedAt=lastChangedAt`, 메모 1건, Audit 7건과 새 `CASE_RESOLVED` 한 건을 확인한다.
+6. 새로고침·실제 재로그인 뒤 공개 상세·메모·Audit를 다시 읽고 같은 판정·시각·version과 정확한 공개
+   필드만 남는지 확인한다. 모든 write는 기존 relay의 현재 Run 사건 method/path/body를 한 번씩만 arm한다.
+
+`NORMAL`은 이 테스트에서 OWNER가 지정한 입력값이다. `HIGH` 채택 탐지 결과를 정상 판정의 근거로
+해석하지 않는다. 이 시나리오는 판정의 업무적 타당성, 담당자 디렉터리 연동, 실제 승인 요청 단계나
+외부 서비스 성능을 검증하지 않는다. #337의 실제 성공과 cleanup은 clean commit의 다음 공식
+`Prepare → Service → Run` Gate가 통과한 후에만 완료로 기록한다.
