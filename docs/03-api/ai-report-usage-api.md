@@ -1,5 +1,71 @@
 # AI 리포트·AI 사용량 API
 
+**Issue #339 implementation boundary:** The first release implements only the case-scoped
+`POST /ai-reports` and `GET /ai-reports/current` routes described in the note below.
+Sections 2–17 retain the wider target design, including request-detail and usage APIs,
+example IDs, and future operator cost views. Those examples are not implemented
+responses. For the two implemented routes, the first-release note and the actual
+DTO field lists in this change take precedence over conflicting target examples.
+The internal model-identity endpoint hashes the digest and quantization observed
+from Ollama metadata with both prompt texts, the prompt version, and generation
+settings including `think: false`. A metadata
+outage uses a separate unavailable identity; a changed digest never matches a
+saved report generated under the old digest. Generation still checks the
+configured digest and quantization pin before calling the model.
+The hash also covers the deterministic fact templates and allowed checklist
+text passed in the model prompt, so changes to these inputs invalidate exact
+cache reuse.
+
+The first-release POST accepts `Idempotency-Key` and the exact JSON members
+`detectionResultVersion` and optional `regenerationReason`. It returns 202 for
+a new or shared active execution and 200 for a completed exact cache hit or
+terminal idempotency replay. The case-scoped current GET returns `caseId`,
+`currentReport`, `latestRequest`, and `traceId`; either nested value can be null.
+`latestRequest` includes its `resultLocation` at that same case-scoped GET.
+Public responses omit Provider name, model digest, quantization, attempts,
+tokens, power use, and cost. Only opaque `modelVersion` and `promptVersion`
+appear on the stored report. A failed latest request does not erase an older
+stored report.
+The first release accepts LLM content only when its summary and RULE reason
+sentences exactly match the safe adopted-evidence projection. Its checklist
+must select one or two distinct entries from the three approved public-data
+review actions. Other model text is rejected and the report uses the template
+fallback; `reportSource=LLM` means the model selected the checklist, not that
+it established new facts about a transaction or customer.
+If the internal model-identity call fails before persistence, POST returns
+`503 DEPENDENCY_UNAVAILABLE` and creates no request. Once a request is
+accepted, a FastAPI outage marks that execution `FAILED` without changing
+the case; an Ollama timeout or invalid model output is handled by the
+validated template fallback in FastAPI.
+Even when the public detection version is unchanged, a stored or active
+execution whose underlying adopted detection row differs from the current
+single linked transaction is rejected with `409 STATE_TRANSITION_NOT_ALLOWED`;
+it is never reused as evidence for another transaction.
+
+> Issue #339 첫 릴리스 범위: `POST /api/v1/cases/{caseId}/ai-reports`와
+> `GET /api/v1/cases/{caseId}/ai-reports/current`만 구현한다. 운영 요청 상세와
+> 사용량 목록·집계 API는 계속 목표 계약이다. 생성 대상은 `IN_REVIEW`이며
+> 연결 거래가 정확히 1건이어야 한다. 거래의 채택 `COMPLETED` 탐지 결과는
+> 같은 거래에 속하고 HIGH/CRITICAL이어야 한다. 0건·다수 거래·근거 불일치·
+> LOW/MEDIUM은 `422 VALIDATION_ERROR`, 다른 사건 상태는
+> `409 CASE_STATUS_CONFLICT`다. 대표 결과를 임의로 고르지 않는다.
+>
+> 로컬 Ollama 첫 후보는 `qwen3.5:4b`다. 공개 `modelVersion`은 모델명을 담지
+> 않는 해시 식별자이며 **실제 모델 digest, 양자화, promptVersion, Prompt 원문,
+> 출력 한도**의 조합으로 계산한다. 서버는 실제 Ollama `/api/tags` 응답과
+> 설정된 digest·양자화를 매 호출 대조한다. 불일치하면 LLM 결과를 채택하지
+> 않는다. 비용은 외부 API 청구가 없더라도 로컬 전력·장비 비용 미측정 시
+> `estimatedCost=null`, `costCurrency=null`이다. 0원 추정이 아니다.
+>
+> 첫 릴리스에는 공개 행동 타임라인 입력이 없으므로 `timelineSummary`는
+> 자료 부재를 명시하는 고정 문구다. 생성된 사건 리포트는 조사 보조 초안이며
+> 위험 점수·사건 상태·최종 판정·거래 결과를 변경하지 않는다. Ollama 오류는
+> FastAPI가 검증된 RULE 템플릿으로 fallback한다. FastAPI 자체가 불통이면
+> 영속 요청을 `FAILED`로 종결하며, 기존 저장 리포트는 계속 조회된다.
+> 첫 릴리스의 생성 응답과 `latestRequest`의 `resultLocation` 및 POST
+> `Location`은 구현된 `/api/v1/cases/{caseId}/ai-reports/current`를 가리킨다.
+> 아래 단건 운영 상세 경로 예시는 후속 구현 목표다.
+
 ## 1. 문서 목적
 
 이 문서는 FinGuardOps에서 다음 두 사용자에게 제공하는 Spring Boot REST API 계약을 정의한다.

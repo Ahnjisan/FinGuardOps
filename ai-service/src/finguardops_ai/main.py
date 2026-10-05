@@ -2,6 +2,7 @@ from fastapi import FastAPI
 
 from finguardops_ai.api.exception_handlers import register_rule_analysis_exception_handlers
 from finguardops_ai.api.middleware import RuleAnalysisHttpMiddleware
+from finguardops_ai.api.routers.ai_report import router as ai_report_router
 from finguardops_ai.api.routers.health import router as health_router
 from finguardops_ai.api.routers.rule_analysis import router as rule_analysis_router
 from finguardops_ai.core.config import get_settings
@@ -23,6 +24,7 @@ def create_app() -> FastAPI:
     )
     application.include_router(health_router, prefix=settings.api_prefix)
     application.include_router(rule_analysis_router, prefix=settings.api_prefix)
+    application.include_router(ai_report_router, prefix=settings.api_prefix)
     return application
 
 

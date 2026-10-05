@@ -16,7 +16,7 @@ import { isUserRole, resolveUserRoles, USER_ROLES, type UserRole } from "./userR
  * of a permission UI is something being granted that should not have been.
  */
 
-const VIEWER_CAPABILITIES: readonly UiCapability[] = ["transaction:view", "detection:view", "case:view"];
+const VIEWER_CAPABILITIES: readonly UiCapability[] = ["transaction:view", "detection:view", "case:view", "ai-report:view"];
 
 describe("resolveUserRoles - principal type", () => {
   it("accepts exactly USER", () => {
@@ -158,8 +158,8 @@ describe("isUserRole", () => {
 describe("resolveCapabilities - one role at a time", () => {
   const PER_ROLE: ReadonlyArray<[UserRole, readonly UiCapability[]]> = [
     ["FDS_VIEWER", VIEWER_CAPABILITIES],
-    ["FDS_ANALYST", ["transaction:view", "detection:view", "case:view", "case:workflow", "case:note-write"]],
-    ["FDS_APPROVER", ["transaction:view", "detection:view", "case:view", "case:resolve"]],
+    ["FDS_ANALYST", ["transaction:view", "detection:view", "case:view", "case:workflow", "case:note-write", "ai-report:view", "ai-report:create"]],
+    ["FDS_APPROVER", ["transaction:view", "detection:view", "case:view", "case:resolve", "ai-report:view"]],
     ["RULE_OPERATOR", []],
     ["RECOVERY_OPERATOR", []],
     ["PLATFORM_ADMIN", []],
@@ -192,6 +192,7 @@ describe("resolveCapabilities - one role at a time", () => {
     expect(capabilities.has("case:workflow")).toBe(false);
     expect(capabilities.has("case:note-write")).toBe(false);
     expect(capabilities.has("case:resolve")).toBe(false);
+    expect(capabilities.has("ai-report:create")).toBe(false);
   });
 
   it("does not let an analyst resolve a case", () => {
@@ -215,6 +216,8 @@ describe("resolveCapabilities - several roles", () => {
       "case:workflow",
       "case:note-write",
       "case:resolve",
+      "ai-report:view",
+      "ai-report:create",
     ]);
   });
 
@@ -318,8 +321,8 @@ describe("CapabilitySet", () => {
 });
 
 describe("the capability table as a whole", () => {
-  it("declares six capabilities", () => {
-    expect(UI_CAPABILITIES).toHaveLength(6);
+  it("declares eight capabilities", () => {
+    expect(UI_CAPABILITIES).toHaveLength(8);
     expect(Object.isFrozen(UI_CAPABILITIES)).toBe(true);
   });
 

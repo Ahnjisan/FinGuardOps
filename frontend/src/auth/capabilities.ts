@@ -18,7 +18,7 @@ import type { UserRole } from "./userRoles";
  *
  * Backend authorities with no reachable endpoint get no capability at all.
  * `rule-version:*`, `recovery:*`, `platform:*`, `ai-operations:*`,
- * `ai-usage:*`, `ai-report:*` and `behavior-event:read` are
+ * `ai-usage:*` and `behavior-event:read` are
  * therefore absent: some have no Spring controller, the rest have no endpoint
  * key in this client. Inventing a capability for them would describe an
  * unimplemented screen as if it existed.
@@ -29,7 +29,9 @@ export type UiCapability =
   | "case:view"
   | "case:workflow"
   | "case:note-write"
-  | "case:resolve";
+  | "case:resolve"
+  | "ai-report:view"
+  | "ai-report:create";
 
 /**
  * Canonical order, used to render a decided set deterministically. Role arrays
@@ -43,6 +45,8 @@ export const UI_CAPABILITIES: readonly UiCapability[] = Object.freeze<UiCapabili
   "case:workflow",
   "case:note-write",
   "case:resolve",
+  "ai-report:view",
+  "ai-report:create",
 ]);
 
 /**
@@ -59,7 +63,7 @@ const ROLE_CAPABILITIES: ReadonlyMap<UserRole, readonly UiCapability[]> = new Ma
   UserRole,
   readonly UiCapability[]
 >([
-  ["FDS_VIEWER", Object.freeze<UiCapability[]>(["transaction:view", "detection:view", "case:view"])],
+  ["FDS_VIEWER", Object.freeze<UiCapability[]>(["transaction:view", "detection:view", "case:view", "ai-report:view"])],
   [
     "FDS_ANALYST",
     Object.freeze<UiCapability[]>([
@@ -68,11 +72,13 @@ const ROLE_CAPABILITIES: ReadonlyMap<UserRole, readonly UiCapability[]> = new Ma
       "case:view",
       "case:workflow",
       "case:note-write",
+      "ai-report:view",
+      "ai-report:create",
     ]),
   ],
   [
     "FDS_APPROVER",
-    Object.freeze<UiCapability[]>(["transaction:view", "detection:view", "case:view", "case:resolve"]),
+    Object.freeze<UiCapability[]>(["transaction:view", "detection:view", "case:view", "case:resolve", "ai-report:view"]),
   ],
   ["RULE_OPERATOR", Object.freeze<UiCapability[]>([])],
   ["RECOVERY_OPERATOR", Object.freeze<UiCapability[]>([])],

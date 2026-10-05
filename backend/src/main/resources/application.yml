@@ -11,6 +11,10 @@ spring:
     open-in-view: false
 
 finguardops:
+  ai-report:
+    base-url: ${FINGUARDOPS_AI_SERVICE_BASE_URL:http://localhost:8000}
+    poll-interval-ms: ${FINGUARDOPS_AI_REPORT_POLL_INTERVAL_MS:1000}
+    lease-seconds: ${FINGUARDOPS_AI_REPORT_LEASE_SECONDS:300}
   security:
     issuer: ${FINGUARDOPS_SECURITY_ISSUER:https://issuer.example.invalid/finguardops}
     jwk-set-uri: ${FINGUARDOPS_SECURITY_JWK_SET_URI:https://issuer.example.invalid/.well-known/jwks.json}

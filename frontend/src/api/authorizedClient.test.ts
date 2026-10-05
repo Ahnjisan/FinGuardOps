@@ -318,7 +318,8 @@ describe("authorized transport — Authorization on approved endpoints only", ()
         endpoint: key,
         params,
         body: descriptor.acceptsJsonBody ? { field: "value" } : undefined,
-        expectedStatus: 200,
+        idempotencyKey: key === "ai-report-create" ? "report-test-001" : undefined,
+        expectedStatus: key === "ai-report-create" ? 202 : 200,
         validate: isRecord,
       });
 

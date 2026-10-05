@@ -1749,6 +1749,11 @@ Issue #215의 사건 감사 조회는 다음 조건으로 구현한다.
 
 `docs/03-api/ai-report-usage-api.md`는 이 ERD의 요청·실행·시도·결과 관계를 다음과 같이 반영한다.
 
+Issue #339 첫 릴리스의 V15 저장 구현은 단일 연결 거래의 채택 탐지 결과 FK를
+실행에 고정한다. 복수 거래 사건은 생성 단계에서 명시적으로 거부한다.
+Provider 시도에는 실제 Ollama digest와 양자화를 내부 운영 데이터로 남기며,
+Analyst에게 반환하는 `modelVersion`은 이 값과 Prompt 구성의 opaque hash다.
+
 - 요청 간 부모·자식 필드인 `parentAiRequestId`를 사용하지 않고, 새 실행·진행 실행 공유·완료 결과 캐시를 `executionId`, `executionShared`, `initiatingAiRequestId`로 구분한다.
 - `sourceAiRequestId`는 캐시 원본 요청을 `resolvedReportRef → AiReport.executionRef → AiReportExecution.initiatingRequestRef → AiReportRequest.aiRequestId` 관계로 조회한 파생값이다.
 - 요청 중심 운영 상세의 attempts는 연결 실행의 실제 `ProviderCallAttempt`를 투영하며, 캐시 요청에는 빈 attempts를 반환한다.

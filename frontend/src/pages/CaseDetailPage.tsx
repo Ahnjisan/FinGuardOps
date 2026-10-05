@@ -3,6 +3,7 @@ import { Link, useLocation } from "react-router-dom";
 import { Icon } from "../shared/Icon";
 import { isCanonicalUuidV4 } from "../api/backendEndpoints";
 import type { CaseDetail } from "../api/caseApi";
+import { CaseAiReportSection } from "./cases/CaseAiReportSection";
 import {
   useCaseDetail,
   type CaseDetailErrorKind,
@@ -215,6 +216,7 @@ export function CaseDetailPage() {
   } = useCaseDetail(caseId);
   const [notesRefreshSignal, setNotesRefreshSignal] = useState(0);
   const [auditRefreshSignal, setAuditRefreshSignal] = useState(0);
+  const [aiReportOpen, setAiReportOpen] = useState(false);
   const reconcileNoteMutation = useCallback((minimumDetailVersion?: number) => {
     refresh(minimumDetailVersion);
     setNotesRefreshSignal((current) => current + 1);
@@ -357,6 +359,12 @@ export function CaseDetailPage() {
 
       {caseId !== null && state.status === "success" &&
         <CaseTransactionsSection caseId={caseId} />}
+      {caseId !== null && state.status === "success" &&
+        <details className="case-ai-report-disclosure" onToggle={(event) =>
+          setAiReportOpen(event.currentTarget.open)}>
+          <summary>AI 조사 보조 리포트 보기</summary>
+          {aiReportOpen && <CaseAiReportSection caseId={caseId} caseStatus={state.data.caseStatus} />}
+        </details>}
     </section>
   );
 }

@@ -923,6 +923,16 @@ receipt를 보존한다. glob, prefix enumeration, label 기반 broad cleanup은
 
 ## 12. Run fixture 사건 처리·감사 Browser E2E (#314)
 
+Issue #339의 AI 조사 리포트 Browser 검증은 #337 테스트가 동일 Run 사건을
+`IN_REVIEW`로 재개한 **뒤**, 종결하기 **전**에 실행한다. #314가 끝날 때의
+`ADDITIONAL_INFORMATION_REQUIRED`·version 3·Audit 5와 #337의 재개·종결
+write 및 Audit 단언을 유지한다. AI POST는 별도의 exact 현재 사건
+method/path/body/Idempotency-Key relay arm으로 요청 횟수를 검증한다.
+Gate의 모의 Ollama는 기존 external-risk-mock 컨테이너의 독립 내부 포트에서
+실행되며 FastAPI HTTP 경로·영속 상태·재조회만 검증한다. Qwen 품질·속도·
+메모리 검증은 실제 로컬 모델 합성 평가에서만 기록한다. 이 문서의 공식
+Prepare→Service→Run은 clean commit 이후 OWNER가 실행한다.
+
 `a real USER works the Run fixture case through review, a note and the audit trail` test는 §11의 Run
 fixture가 만든 현재 Run의 거래·사건으로 핵심 사건 처리 흐름을 검증한다. 기존 FDS_ANALYST USER
 (`local-fds-analyst`)의 실제 Keycloak 로그인과 실제 Spring Boot만 사용한다. production, API, DB,
@@ -1056,3 +1066,11 @@ Browser 26/26 통과를 보고했다. 해당 PR의 cleanup 보고에는 owned re
 해석하지 않는다. 이 시나리오는 판정의 업무적 타당성, 담당자 디렉터리 연동, 실제 승인 요청 단계나
 외부 서비스 성능을 검증하지 않는다. #337의 실제 성공과 cleanup은 clean commit의 다음 공식
 `Prepare → Service → Run` Gate가 통과한 후에만 완료로 기록한다.
+
+## Issue #339 Service publication recovery (2026-10-05)
+
+The Service verifier runs the Rule v1 publication through `docker compose run --rm ... backend`. A host subprocess failure does not prove that Docker removed the one-off container. The Service publication call now reports fixed `RULE_PUBLICATION_COMMAND_PROCESS_START_FAILED`, `RULE_PUBLICATION_COMMAND_TIMEOUT`, `RULE_PUBLICATION_COMMAND_EXIT_NONZERO`, or `RULE_PUBLICATION_COMMAND_CLEANUP_FAILED` codes. These codes apply to **future** executions; the earlier `SUBPROCESS_FAILED` cannot be reclassified retrospectively. After a successful publication command, Service checks that no backend one-off remains and fails with `RULE_PUBLICATION_ONEOFF_REMAINS` if one does.
+
+For the existing recovery receipt, Cleanup first validates the one-off's full Docker ID, exact Service project and backend service, receipt-bound run/repository/source/revision labels, owned backend image reference and ID, publication command, environment, and runtime configuration. The regular backend container supplies the expected inherited configuration. A name or project label alone grants no removal authority. Any mismatch fails closed with `RESOURCE_CLEANUP_FAILED`; do not use a manual `docker rm`, `compose down --remove-orphans`, image prune, or receipt deletion to bypass it.
+
+After code and counterexample tests pass, run the official `-Mode Cleanup` once with the recovery receipt still present. It removes verified project resources first, then owned unique images, audits both projects and the browser container, and deletes the receipt last. If Cleanup fails, preserve the receipt and remaining resources for another read-only diagnosis; do not retry or delete more resources until the fixed failure boundary is understood. This recovery does not establish why the original Service subprocess failed and does not count as a successful Prepare → Service → Run Gate.

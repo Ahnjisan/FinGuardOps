@@ -49,6 +49,8 @@ import java.util.Map;
 import java.util.function.Predicate;
 
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.BEHAVIOR_EVENT_INTAKE;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_REPORT_CREATE;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_REPORT_READ;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_AUDIT_READ;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_NOTE_READ;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_NOTE_WRITE;
@@ -100,6 +102,14 @@ public class FinGuardOpsSecurityConfiguration {
             new CorsEndpoint(
                     HttpMethod.GET,
                     "/api/v1/cases/{caseId}/audit-logs"
+            ),
+            new CorsEndpoint(
+                    HttpMethod.POST,
+                    "/api/v1/cases/{caseId}/ai-reports"
+            ),
+            new CorsEndpoint(
+                    HttpMethod.GET,
+                    "/api/v1/cases/{caseId}/ai-reports/current"
             )
     );
     private static final CorsEndpoint APPLICATION_ACTUATOR_HEALTH =
@@ -201,6 +211,14 @@ public class FinGuardOpsSecurityConfiguration {
                                 HttpMethod.GET,
                                 "/api/v1/cases/{caseId}/audit-logs"
                         )).hasAuthority(CASE_AUDIT_READ)
+                        .requestMatchers(paths.matcher(
+                                HttpMethod.POST,
+                                "/api/v1/cases/{caseId}/ai-reports"
+                        )).hasAuthority(AI_REPORT_CREATE)
+                        .requestMatchers(paths.matcher(
+                                HttpMethod.GET,
+                                "/api/v1/cases/{caseId}/ai-reports/current"
+                        )).hasAuthority(AI_REPORT_READ)
                         .requestMatchers(paths.matcher(
                                 HttpMethod.PATCH,
                                 "/api/v1/cases/{caseId}/status"

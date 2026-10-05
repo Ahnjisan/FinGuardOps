@@ -271,8 +271,8 @@ authentication·TLS와 동일하지 않다.
 | `GET /api/v1/behavior-events` | USER · viewer authority 보유 role | `behavior-event:read` | 문서 후보, 미구현 |
 | `GET /api/v1/transactions/{transactionId}/detection-results` | USER · viewer authority 보유 role | `detection:read` | 문서 후보, 미구현 |
 | `GET /api/v1/detection-results/{detectionResultId}` | USER · viewer authority 보유 role | `detection:read` | 문서 후보, 미구현 |
-| `POST /api/v1/cases/{caseId}/ai-reports` | USER · `FDS_ANALYST` | `ai-report:create` | 문서 계약, 미구현 |
-| `GET /api/v1/cases/{caseId}/ai-reports/current` | USER · viewer authority 보유 role | `ai-report:read` | 문서 계약, 미구현 |
+| `POST /api/v1/cases/{caseId}/ai-reports` | USER · `FDS_ANALYST` | `ai-report:create` | #339 첫 릴리스 |
+| `GET /api/v1/cases/{caseId}/ai-reports/current` | USER · viewer authority 보유 role | `ai-report:read` | #339 첫 릴리스 |
 | `GET /api/v1/ai-report-requests/{aiRequestId}` | USER · `PLATFORM_ADMIN` | `ai-operations:read` | 문서 계약, 미구현 |
 | `GET /api/v1/ai-report-usage` | USER · `PLATFORM_ADMIN` | `ai-usage:read` | 문서 계약, 미구현 |
 | `GET /api/v1/ai-report-usage/summary` | USER · `PLATFORM_ADMIN` | `ai-usage:read` | 문서 계약, 미구현 |

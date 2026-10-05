@@ -2236,3 +2236,4 @@ ul.notice__body li + li {
     scroll-behavior: auto !important;
   }
 }
+.case-ai-report__body { overflow-wrap: anywhere; }

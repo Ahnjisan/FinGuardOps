@@ -51,7 +51,9 @@ export type BackendEndpointKey =
   | "case-status-change"
   | "case-assignee-change"
   | "case-resolution-create"
-  | "case-note-create";
+  | "case-note-create"
+  | "ai-report-current"
+  | "ai-report-create";
 
 export type BackendHttpMethod = "GET" | "PATCH" | "POST";
 
@@ -505,6 +507,8 @@ const REGISTRY: Readonly<Record<BackendEndpointKey, BackendEndpointDescriptor>> 
     "/api/v1/cases/{caseId}/resolution",
   ),
   "case-note-create": describe("case-note-create", "POST", "/api/v1/cases/{caseId}/notes"),
+  "ai-report-current": describe("ai-report-current", "GET", "/api/v1/cases/{caseId}/ai-reports/current"),
+  "ai-report-create": describe("ai-report-create", "POST", "/api/v1/cases/{caseId}/ai-reports"),
 });
 
 export const BACKEND_ENDPOINT_KEYS: readonly BackendEndpointKey[] = Object.freeze(

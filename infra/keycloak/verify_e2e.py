@@ -18,6 +18,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -158,6 +159,13 @@ BEFORE_NATIVE_FAILURE_CODES = {
         "output": "RULE_PUBLICATION_COMMAND_OUTPUT_INVALID",
         "cleanup": "RULE_PUBLICATION_COMMAND_CLEANUP_FAILED",
     },
+    "RULE_PUBLICATION_ONEOFF_CHECK": {
+        "start": "RULE_PUBLICATION_ONEOFF_CHECK_PROCESS_START_FAILED",
+        "timeout": "RULE_PUBLICATION_ONEOFF_CHECK_TIMEOUT",
+        "exit": "RULE_PUBLICATION_ONEOFF_CHECK_EXIT_NONZERO",
+        "output": "RULE_PUBLICATION_ONEOFF_CHECK_OUTPUT_INVALID",
+        "cleanup": "RULE_PUBLICATION_ONEOFF_CHECK_CLEANUP_FAILED",
+    },
     "RULE_ACTIVATION_POLL": {
         "start": "RULE_ACTIVATION_POLL_PROCESS_START_FAILED",
         "timeout": "RULE_ACTIVATION_POLL_TIMEOUT",
@@ -205,6 +213,7 @@ BEFORE_NATIVE_OUTPUT_LIMITS = {
     "RULE_PUBLISHED_STATE": (64, 4096),
     "RULE_ACTIVE_STATE": (64, 4096),
     "RULE_PUBLICATION_COMMAND": (4_194_304, 65_536),
+    "RULE_PUBLICATION_ONEOFF_CHECK": (4096, 4096),
     "RULE_ACTIVATION_POLL": (64, 4096),
     "TRANSACTION_CARDINALITY_SNAPSHOT": (2048, 4096),
     "DATABASE_GLOBAL_SNAPSHOT": (16_777_216, 4096),
@@ -1816,6 +1825,7 @@ class NativeCommandCapture:
     start_failed: bool = False
     timed_out: bool = False
     cleanup_failed: bool = False
+    output_limit_killed: bool = False
 
 
 def capture_native_command(
@@ -1827,10 +1837,65 @@ def capture_native_command(
     input_bytes: bytes | None = None,
     stdout_limit: int | None = None,
     stderr_limit: int | None = None,
+    file_backed_output: bool = False,
 ) -> NativeCommandCapture:
     merged = os.environ.copy()
     merged.update(environment)
     merged.update({"MSYS_NO_PATHCONV": "1", "MSYS2_ARG_CONV_EXCL": "*"})
+    if file_backed_output:
+        # Docker Compose can exit while a descendant still holds its inherited
+        # stdout/stderr pipe handles. Files let the direct command finish without
+        # mistaking that pipe EOF delay for a failed process cleanup.
+        if input_bytes is not None or stdout_limit is None or stderr_limit is None:
+            raise ValueError("file-backed capture requires bounded output and no input")
+        try:
+            with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+                try:
+                    process = subprocess.Popen(
+                        argv, stdin=subprocess.DEVNULL, stdout=stdout_file,
+                        stderr=stderr_file, cwd=cwd, env=merged, shell=False,
+                    )
+                except OSError:
+                    return NativeCommandCapture(None, b"", b"", start_failed=True)
+                timed_out = False
+                cleanup_failed = False
+                output_limit_killed = False
+                deadline = time.monotonic() + timeout
+                try:
+                    while True:
+                        if (os.fstat(stdout_file.fileno()).st_size > stdout_limit or
+                                os.fstat(stderr_file.fileno()).st_size > stderr_limit):
+                            output_limit_killed = process.poll() is None
+                            cleanup_failed = not reap_native_process(process)
+                            break
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            timed_out = True
+                            cleanup_failed = not reap_native_process(process)
+                            break
+                        try:
+                            process.wait(timeout=min(0.05, remaining))
+                            break
+                        except subprocess.TimeoutExpired:
+                            continue
+                except BaseException:
+                    if not reap_native_process(process):
+                        return NativeCommandCapture(None, b"", b"", cleanup_failed=True)
+                    raise
+                stdout_file.seek(0)
+                stderr_file.seek(0)
+                stdout = stdout_file.read(stdout_limit + 1)
+                stderr = stderr_file.read(stderr_limit + 1)
+                return NativeCommandCapture(
+                    process.returncode, stdout, stderr,
+                    stdout_overflow=len(stdout) > stdout_limit,
+                    stderr_overflow=len(stderr) > stderr_limit,
+                    timed_out=timed_out, cleanup_failed=cleanup_failed,
+                    output_limit_killed=output_limit_killed,
+                )
+        except (OSError, ValueError):
+            # Includes temporary-file allocation, capture and close failures.
+            return NativeCommandCapture(None, b"", b"", cleanup_failed=True)
     try:
         process = subprocess.Popen(
             argv,
@@ -1907,18 +1972,9 @@ def capture_native_command(
         process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
-        try:
-            process.kill()
-            process.wait(timeout=10)
-        except (OSError, subprocess.SubprocessError):
-            cleanup_failed = True
+        cleanup_failed = not reap_native_process(process)
     except BaseException:
-        try:
-            if process.poll() is None:
-                process.kill()
-            process.wait(timeout=10)
-        except (OSError, subprocess.SubprocessError):
-            cleanup_failed = True
+        cleanup_failed = not reap_native_process(process)
         for thread in threads:
             thread.join(10)
         if cleanup_failed:
@@ -1942,7 +1998,26 @@ def capture_native_command(
     )
 
 
+def reap_native_process(process: subprocess.Popen[Any]) -> bool:
+    try:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        # The target can exit between poll/kill/wait (notably on Windows).
+        # A failed cleanup call is harmless only when the exact process is gone.
+        try:
+            return process.poll() is not None
+        except (OSError, subprocess.SubprocessError):
+            return False
+    return True
+
+
 def validate_before_native_output(stage: str, output: bytes) -> None:
+    if stage == "RULE_PUBLICATION_ONEOFF_CHECK":
+        if output and re.fullmatch(rb"[0-9a-f]{64}(?:\r?\n[0-9a-f]{64})*\r?\n?", output) is None:
+            raise ValueError("invalid one-off inventory")
+        return
     if stage in {"RULE_PUBLISHED_STATE", "RULE_ACTIVE_STATE", "RULE_ACTIVATION_POLL"}:
         if re.fullmatch(rb"[0-9]+\n?", output) is None:
             raise ValueError("invalid rule-state scalar")
@@ -2383,6 +2458,7 @@ def run_command(
         input_bytes=input_bytes,
         stdout_limit=limits[0] if limits is not None else None,
         stderr_limit=limits[1] if limits is not None else None,
+        file_backed_output=before_stage == "RULE_PUBLICATION_COMMAND",
     )
     if before_stage is not None:
         codes = BEFORE_NATIVE_FAILURE_CODES[before_stage]
@@ -2392,6 +2468,8 @@ def run_command(
             fail(codes["start"])
         if capture.timed_out:
             fail(codes["timeout"])
+        if before_stage == "RULE_PUBLICATION_COMMAND" and capture.output_limit_killed:
+            fail(codes["output"])
         if capture.returncode != 0:
             if before_stage == "RULE_PUBLICATION_COMMAND":
                 fail(classify_rule_publication_nonzero(capture))
@@ -2583,7 +2661,10 @@ def rule_publication_arguments(effective: str) -> list[str]:
     ]
 
 
-def publish_rules(ctx: HostContext, *, before_diagnostics: bool = False) -> None:
+def publish_rules(
+    ctx: HostContext, *, before_diagnostics: bool = False,
+    verify_oneoff_lifetime: bool = False,
+) -> None:
     identifiers = ",".join("'%s'" % item for item in RULE_VERSION_IDS)
     published_query = (
         "select count(*) from rule_version where status='PUBLISHED' "
@@ -2610,6 +2691,19 @@ def publish_rules(ctx: HostContext, *, before_diagnostics: bool = False) -> None
         timeout=240,
         before_stage="RULE_PUBLICATION_COMMAND" if before_diagnostics else None,
     )
+    # Compose --rm must have removed its publication one-off before a successful
+    # command is allowed to advance. A failed command keeps its stage-specific
+    # failure; the receipt-owned host cleanup handles any surviving container.
+    if verify_oneoff_lifetime:
+        remaining = run_command([
+            "docker", "ps", "-aq", "--no-trunc",
+            "--filter", "label=com.docker.compose.project=" + ctx.project,
+            "--filter", "label=com.docker.compose.service=backend",
+            "--filter", "label=com.docker.compose.oneoff=True",
+        ], timeout=min(ctx.cli_timeout, ctx.remaining()), cwd=ctx.repo,
+            environment=ctx.environment, before_stage="RULE_PUBLICATION_ONEOFF_CHECK")
+        if remaining.strip():
+            fail("RULE_PUBLICATION_ONEOFF_REMAINS")
     for _ in range(90):
         if sql_scalar(
             ctx, active_query,
@@ -3586,7 +3680,7 @@ def existing_volume_phase(ctx: HostContext) -> None:
         timeout=120,
     )
     host_runtime(ctx.repo / "infra" / "keycloak" / ".local" / "tls" / "localhost.crt")
-    publish_rules(ctx)
+    publish_rules(ctx, before_diagnostics=True, verify_oneoff_lifetime=True)
     run_ingestion_phase(ctx)
     print("stage: existing-volume-ingestion-complete")
 
@@ -3615,7 +3709,7 @@ def all_runtime(ctx: HostContext) -> None:
     wait_container(ctx, "keycloak-bootstrap", "completed")
     print("stage: fresh-runtime-ready")
     host_runtime(ctx.repo / "infra" / "keycloak" / ".local" / "tls" / "localhost.crt")
-    publish_rules(ctx)
+    publish_rules(ctx, before_diagnostics=True, verify_oneoff_lifetime=True)
     print("stage: rules-active")
     run_ingestion_phase(ctx)
     print("stage: fresh-ingestion-complete")

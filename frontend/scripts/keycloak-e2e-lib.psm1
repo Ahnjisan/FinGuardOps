@@ -5467,6 +5467,15 @@ function Assert-E2EComposePortSecurityContract($Document, $Contract) {
     $definition = $Contract.Definition
     $config = Get-E2EExactMember $Document 'Config'
     $host = Get-E2EExactMember $Document 'HostConfig'
+    $declaredExtraHosts = Get-E2EComposeStringSet $definition 'extra_hosts'
+    $expectedExtraHosts = @()
+    if ($null -ne $declaredExtraHosts) {
+        if (-not (Test-E2EOrdinalSetEqual $declaredExtraHosts @('host.docker.internal=host-gateway'))) {
+            throw 'RESOURCE_CLEANUP_FAILED'
+        }
+        # Compose config JSON uses '=' while Docker's HostConfig records ':'.
+        $expectedExtraHosts = @('host.docker.internal:host-gateway')
+    }
     $exposed = [ordered]@{}
     foreach ($port in @($Contract.ImageExposedPorts)) {
         if ($port -isnot [string] -or $port -cnotmatch '\A[0-9]+/(?:tcp|udp|sctp)\z' -or $exposed.Contains($port)) {
@@ -5522,7 +5531,7 @@ function Assert-E2EComposePortSecurityContract($Document, $Contract) {
         @('PidMode', ''), @('IpcMode', 'private'), @('UTSMode', ''),
         @('UsernsMode', ''), @('CgroupnsMode', 'private'),
         @('Devices', $null), @('DeviceRequests', $null),
-        @('ExtraHosts', @()), @('GroupAdd', $null),
+        @('ExtraHosts', $expectedExtraHosts), @('GroupAdd', $null),
         @('AutoRemove', $false)
     )) {
         Assert-E2EExactContractValue $pair[1] (Get-E2EExactMember $host $pair[0])
@@ -5904,6 +5913,134 @@ function Get-E2EDockerLines([scriptblock]$Command) {
     }
 }
 
+# A failed Service publication may leave Compose's --rm backend one-off alive.
+# It is not a declared service container. The receipt and the ordinary backend
+# container jointly fix its image, environment and runtime; a copied name or
+# project label alone grants no cleanup authority.
+function Assert-E2EPublicationOneoffIdentity {
+    param($Document, [string]$Id, [string]$Project, $Receipt, $BackendDocument)
+
+    if (-not (Test-E2EOrdinalEqual $Project (Get-E2EServiceProjectName -Receipt $Receipt)) -or
+        $Id -cnotmatch '\A[0-9a-f]{64}\z' -or $null -eq $BackendDocument) { throw 'RESOURCE_CLEANUP_FAILED' }
+    $config = Get-JsonMember $Document 'Config'
+    $labels = Get-JsonMember $config 'Labels'
+    $baseConfig = Get-JsonMember $BackendDocument 'Config'
+    $baseHost = Get-JsonMember $BackendDocument 'HostConfig'
+    $host = Get-JsonMember $Document 'HostConfig'
+    $images = Get-E2EImageSet -Receipt $Receipt
+    $expectedLabels = Get-E2EOwnershipLabels -Receipt $Receipt -Role 'backend'
+    if (-not (Test-E2EOrdinalEqual (Get-JsonMember $Document 'Id') $Id) -or
+        (Get-JsonMember $Document 'Name') -cnotmatch ('\A/' + [regex]::Escape($Project) + '-backend-run-[0-9a-f]{12}\z') -or
+        -not (Test-E2EOrdinalEqual (Get-JsonMember $labels 'com.docker.compose.project') $Project) -or
+        -not (Test-E2EOrdinalEqual (Get-JsonMember $labels 'com.docker.compose.service') 'backend') -or
+        -not (Test-E2EOrdinalEqual (Get-JsonMember $labels 'com.docker.compose.oneoff') 'True') -or
+        -not (Test-E2EOrdinalEqual (Get-JsonMember $config 'Image') $images.Backend) -or
+        -not (Test-E2EOrdinalEqual (Get-JsonMember $Document 'Image') (Get-JsonMember $BackendDocument 'Image')) -or
+        -not (Test-E2EOrdinalEqual (Get-JsonMember $config 'Entrypoint' | ConvertTo-Json -Compress) (Get-JsonMember $baseConfig 'Entrypoint' | ConvertTo-Json -Compress)) -or
+        -not (Test-E2EOrdinalEqual (Get-JsonMember $config 'User') (Get-JsonMember $baseConfig 'User')) -or
+        -not (Test-E2EOrdinalEqual (Get-JsonMember $config 'WorkingDir') (Get-JsonMember $baseConfig 'WorkingDir')) -or
+        (Get-JsonMember $host 'AutoRemove') -ne $true -or
+        (Get-JsonMember $host 'Privileged') -ne $false -or
+        -not (Test-E2EOrdinalEqual (Get-JsonMember $host 'NetworkMode') (Get-JsonMember $baseHost 'NetworkMode')) -or
+        @(Get-JsonMemberNames (Get-JsonMember $host 'PortBindings')).Count -ne 0 -or
+        @(Get-JsonMember $Document 'Mounts' | Where-Object { $null -ne $_ }).Count -ne 0) {
+        throw 'RESOURCE_CLEANUP_FAILED'
+    }
+    foreach ($key in $expectedLabels.Keys) {
+        if (-not (Test-E2EOrdinalEqual (Get-JsonMember $labels $key) $expectedLabels[$key])) { throw 'RESOURCE_CLEANUP_FAILED' }
+    }
+    foreach ($key in @('com.docker.compose.project.config_files', 'com.docker.compose.project.working_dir')) {
+        if (-not (Test-E2EOrdinalEqual (Get-JsonMember $labels $key) (Get-JsonMember (Get-JsonMember $baseConfig 'Labels') $key))) {
+            throw 'RESOURCE_CLEANUP_FAILED'
+        }
+    }
+    $slug = Get-JsonMember $labels 'com.docker.compose.slug'
+    if ($slug -isnot [string] -or $slug -cnotmatch '\A[0-9a-f]{64}\z' -or
+        -not (Test-E2EOrdinalEqual $slug.Substring(0,12) (Get-JsonMember $Document 'Name').Substring((Get-JsonMember $Document 'Name').Length - 12)) -or
+        (Get-JsonMember $labels 'com.docker.compose.config-hash') -cnotmatch '\A[0-9a-f]{64}\z' -or
+        $null -ne (Get-JsonMember $labels 'com.docker.compose.container-number') -or
+        -not (Test-E2EOrdinalEqual (Get-JsonMember $labels 'com.docker.compose.depends_on') '')) {
+        throw 'RESOURCE_CLEANUP_FAILED'
+    }
+    $oneoffOnlyLabels = @('com.docker.compose.oneoff','com.docker.compose.slug',
+        'com.docker.compose.config-hash','com.docker.compose.container-number','com.docker.compose.depends_on')
+    foreach ($key in @(Get-E2EExactKeys $labels)) {
+        if ($key -in $oneoffOnlyLabels) { continue }
+        $baseLabels = Get-JsonMember $baseConfig 'Labels'
+        $expectedLabel = Get-JsonMember $baseLabels $key
+        if (-not (Test-E2EOrdinalEqual (Get-JsonMember $labels $key) $expectedLabel)) {
+            throw 'RESOURCE_CLEANUP_FAILED'
+        }
+    }
+    foreach ($key in @(Get-E2EExactKeys $host)) {
+        if ($key -in @('AutoRemove','PortBindings')) { continue }
+        $expected = Get-E2EExactMember $baseHost $key
+        $expectedJson = ConvertTo-Json -InputObject @($expected) -Depth 30 -Compress
+        $actualJson = ConvertTo-Json -InputObject @((Get-E2EExactMember $host $key)) -Depth 30 -Compress
+        if (-not (Test-E2EOrdinalEqual $expectedJson $actualJson)) {
+            throw 'RESOURCE_CLEANUP_FAILED'
+        }
+    }
+    foreach ($key in @(Get-E2EExactKeys $config)) {
+        if ($key -in @('Hostname','AttachStdin','ExposedPorts','OpenStdin','StdinOnce','Env','Cmd','Labels')) { continue }
+        $expected = Get-E2EExactMember $baseConfig $key
+        $expectedJson = ConvertTo-Json -InputObject @($expected) -Depth 30 -Compress
+        $actualJson = ConvertTo-Json -InputObject @((Get-E2EExactMember $config $key)) -Depth 30 -Compress
+        if (-not (Test-E2EOrdinalEqual $expectedJson $actualJson)) {
+            throw 'RESOURCE_CLEANUP_FAILED'
+        }
+    }
+    if (-not (Test-E2EOrdinalEqual (Get-JsonMember $config 'Hostname') $Id.Substring(0,12)) -or
+        (Get-JsonMember $config 'AttachStdin') -ne $true -or
+        (Get-JsonMember $config 'OpenStdin') -ne $true -or
+        (Get-JsonMember $config 'StdinOnce') -ne $true -or
+        -not (Test-E2EOrdinalSetEqual @(Get-E2EExactKeys (Get-JsonMember $config 'ExposedPorts')) @('8080/tcp','8081/tcp'))) {
+        throw 'RESOURCE_CLEANUP_FAILED'
+    }
+    $command = @(Get-JsonMember $config 'Cmd')
+    $fixed = @(
+        '--spring.main.web-application-type=none',
+        '--logging.level.org.hibernate.orm.connections.pooling=WARN',
+        '--finguardops.rule-v1-default-publication.enabled=true',
+        '--finguardops.rule-v1-default-publication.confirmation=PUBLISH_RULE_V1_DEFAULT_V1'
+    )
+    if ($command.Count -ne 5) { throw 'RESOURCE_CLEANUP_FAILED' }
+    for ($index = 0; $index -lt $fixed.Count; $index++) {
+        if (-not (Test-E2EOrdinalEqual $command[$index] $fixed[$index])) { throw 'RESOURCE_CLEANUP_FAILED' }
+    }
+    $prefix = '--finguardops.rule-v1-default-publication.effective-from='
+    if ($command[4] -isnot [string] -or $command[4] -cnotmatch ('\A' + [regex]::Escape($prefix) + '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\z')) {
+        throw 'RESOURCE_CLEANUP_FAILED'
+    }
+    $effective = [datetimeoffset]::MinValue
+    $created = [datetimeoffset]::MinValue
+    if (-not [datetimeoffset]::TryParseExact($command[4].Substring($prefix.Length), 'yyyy-MM-ddTHH:mm:ssZ',
+            [cultureinfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$effective) -or
+        -not [datetimeoffset]::TryParse((Get-JsonMember $Document 'Created'), [ref]$created) -or
+        [math]::Abs(($effective - $created).TotalSeconds) -gt 300) { throw 'RESOURCE_CLEANUP_FAILED' }
+    $expectedEnvironment = [System.Collections.Generic.List[string]]::new()
+    foreach ($entry in @(Get-JsonMember $baseConfig 'Env')) {
+        if ($entry -isnot [string]) { throw 'RESOURCE_CLEANUP_FAILED' }
+        if ($entry.StartsWith('SPRING_PROFILES_ACTIVE=', [System.StringComparison]::Ordinal)) {
+            $expectedEnvironment.Add('SPRING_PROFILES_ACTIVE=local,rule-v1-default-publication')
+        }
+        elseif ($entry.StartsWith('FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED=', [System.StringComparison]::Ordinal)) {
+            $expectedEnvironment.Add('FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED=false')
+        }
+        else { $expectedEnvironment.Add($entry) }
+    }
+    if (-not (Test-E2EOrdinalSetEqual $expectedEnvironment.ToArray() @(Get-JsonMember $config 'Env'))) {
+        throw 'RESOURCE_CLEANUP_FAILED'
+    }
+    $state = Get-E2EExactMember $Document 'State'
+    Assert-E2EContainerState $state
+    return [pscustomobject]@{ Id=$Id; Service='backend-rule-publication-oneoff';
+        Image=(Get-JsonMember $Document 'Image'); ImageReference=(Get-JsonMember $config 'Image');
+        Running=(Get-JsonMember $state 'Running'); AutoRemove=$true;
+        NetworkMode=(Get-JsonMember $host 'NetworkMode');
+        NetworkAttachments=(Get-JsonMember (Get-JsonMember $Document 'NetworkSettings') 'Networks') }
+}
+
 function Get-E2EProjectResourceInventory {
     param([Parameter(Mandatory = $true)][string]$Project, [Parameter(Mandatory = $true)]$Receipt, $PreviousInventory)
     if (-not (Test-E2EOrdinalEqual $Project $ProjectName) -and $Project -cnotmatch '\Afinguardops-kc241-e2e-[0-9a-f]{12}\z') {
@@ -5947,8 +6084,22 @@ function Get-E2EProjectResourceInventory {
     }
     $labelled = @(Get-E2EDockerLines { & docker ps -aq --no-trunc --filter $projectFilter })
     if ($labelled.Count -ne @($labelled | Sort-Object -Unique).Count) { throw 'RESOURCE_CLEANUP_FAILED' }
+    $oneoffId = $null
+    $oneoffEntry = $null
     foreach ($id in $labelled) {
-        if ($id -cnotmatch '\A[0-9a-f]{64}\z' -or -not (Test-E2EOrdinalContains $ids $id)) { throw 'RESOURCE_CLEANUP_FAILED' }
+        if ($id -cnotmatch '\A[0-9a-f]{64}\z') { throw 'RESOURCE_CLEANUP_FAILED' }
+        if (Test-E2EOrdinalContains $ids $id) { continue }
+        if ($null -ne $oneoffId) { throw 'RESOURCE_CLEANUP_FAILED' }
+        $backendId = @($ids | Where-Object {
+            Test-E2EOrdinalEqual (Get-JsonMember $serviceDocuments[$_] 'Name') ('/' + $Project + '-backend-1')
+        })
+        if ($backendId.Count -ne 1) { throw 'RESOURCE_CLEANUP_FAILED' }
+        $document = Get-ContainerDocument $id
+        $oneoffEntry = Assert-E2EPublicationOneoffIdentity -Document $document -Id $id -Project $Project `
+            -Receipt $Receipt -BackendDocument $serviceDocuments[$backendId[0]]
+        $oneoffId = $id
+        $ids += $id
+        $serviceDocuments[$id] = $document
     }
     $contract = if ($ids.Count -ne 0) { Get-E2EComposeOwnershipContract -Project $Project -Receipt $Receipt -PresentServices $presentServices.ToArray() } else { @{} }
     $containers = [System.Collections.Generic.List[object]]::new()
@@ -5964,6 +6115,10 @@ function Get-E2EProjectResourceInventory {
     $mountedNamed = [System.Collections.Generic.List[string]]::new()
     foreach ($id in $ids) {
         if ($id -cnotmatch '\A[0-9a-f]{64}\z') { throw 'RESOURCE_CLEANUP_FAILED' }
+        if ($null -ne $oneoffId -and (Test-E2EOrdinalEqual $id $oneoffId)) {
+            $containers.Insert(0, $oneoffEntry)
+            continue
+        }
         $document = $serviceDocuments[$id]
         $config = Get-JsonMember $document 'Config'
         $labels = Get-JsonMember $config 'Labels'
@@ -6171,6 +6326,13 @@ function Invoke-E2EExactResourceCleanup {
             Invoke-Native { & docker stop $entry.Id 2>$null | Out-Null }
             $code = $LASTEXITCODE
             if ($code -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
+            if ($entry.Service -ceq 'backend-rule-publication-oneoff') {
+                # Compose run --rm sets AutoRemove. Stop can therefore remove
+                # the exact container before a second inspect is possible.
+                $removed = Get-E2EProjectResourceInventory -Project $Before.Project -Receipt $Receipt -PreviousInventory $Before
+                Assert-E2EInventorySubset -Before $Before -After $removed
+                if (@($removed.Containers | Where-Object { Test-E2EOrdinalEqual $_.Id $entry.Id }).Count -eq 0) { continue }
+            }
             $stopped = Get-ContainerDocument $entry.Id
             $stoppedState = Get-E2EExactMember $stopped 'State'
             if (-not (Test-E2EOrdinalEqual (Get-JsonMember $stopped 'Id') $entry.Id) -or

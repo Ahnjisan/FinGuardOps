@@ -39,6 +39,8 @@ const EXPECTED: ReadonlyArray<{ key: string; method: string; template: string }>
   { key: "case-assignee-change", method: "PATCH", template: "/api/v1/cases/{caseId}/assignee" },
   { key: "case-resolution-create", method: "POST", template: "/api/v1/cases/{caseId}/resolution" },
   { key: "case-note-create", method: "POST", template: "/api/v1/cases/{caseId}/notes" },
+  { key: "ai-report-current", method: "GET", template: "/api/v1/cases/{caseId}/ai-reports/current" },
+  { key: "ai-report-create", method: "POST", template: "/api/v1/cases/{caseId}/ai-reports" },
 ];
 
 function paramsFor(descriptor: BackendEndpointDescriptor): Record<string, string> {
@@ -50,8 +52,8 @@ function paramsFor(descriptor: BackendEndpointDescriptor): Record<string, string
 }
 
 describe("endpoint registry — exact method and path matrix", () => {
-  it("contains exactly the twelve approved USER endpoints", () => {
-    expect(BACKEND_ENDPOINT_KEYS).toHaveLength(12);
+  it("contains exactly the fourteen approved USER endpoints", () => {
+    expect(BACKEND_ENDPOINT_KEYS).toHaveLength(14);
     expect([...BACKEND_ENDPOINT_KEYS].sort()).toEqual(EXPECTED.map((e) => e.key).sort());
   });
 
@@ -112,7 +114,6 @@ describe("endpoint registry — exact method and path matrix", () => {
     for (const key of BACKEND_ENDPOINT_KEYS) {
       const template = getBackendEndpoint(key)?.template ?? "";
       expect(template.startsWith("/actuator")).toBe(false);
-      expect(template).not.toContain("ai-report");
       expect(template).not.toContain("detection-results");
     }
   });
@@ -193,6 +194,8 @@ describe("URL assembly — approved requests", () => {
       `http://localhost:8080/api/v1/cases/${CASE_ID}/assignee`,
       `http://localhost:8080/api/v1/cases/${CASE_ID}/resolution`,
       `http://localhost:8080/api/v1/cases/${CASE_ID}/notes`,
+      `http://localhost:8080/api/v1/cases/${CASE_ID}/ai-reports/current`,
+      `http://localhost:8080/api/v1/cases/${CASE_ID}/ai-reports`,
     ]);
   });
 
@@ -619,6 +622,8 @@ describe("endpoint registry — declared query parameters", () => {
     "case-assignee-change": [],
     "case-resolution-create": [],
     "case-note-create": [],
+    "ai-report-current": [],
+    "ai-report-create": [],
   };
 
   it("declares exactly the Backend-approved names, in emission order", () => {
