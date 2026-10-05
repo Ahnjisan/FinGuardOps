@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Preflight', 'MajorFixPreflight', 'MajorFixFixture11', 'MajorFixTargeted', 'OwnerFixPreflight', 'OwnerFixTargeted', 'WaitBrowserPreflight', 'WaitBrowserTargeted', 'SessionStateTargeted', 'D209Preflight', 'D209A', 'D209B', 'D225Service', 'D248Targeted', 'CleanupBrowserTargeted', 'D273Targeted', 'D281Targeted', 'D294Preflight', 'D294Targeted', 'D299Red', 'D299Targeted', 'D308Oracle', 'D315LauncherTargeted', 'D315StageTargeted', 'D315Targeted', 'D315AfterTargeted', 'D315PlaywrightTargeted', 'Formal')]
+    [ValidateSet('Preflight', 'MajorFixPreflight', 'MajorFixFixture11', 'MajorFixTargeted', 'OwnerFixPreflight', 'OwnerFixTargeted', 'WaitBrowserPreflight', 'WaitBrowserTargeted', 'SessionStateTargeted', 'D209Preflight', 'D209A', 'D209B', 'D225Service', 'D248Targeted', 'CleanupBrowserTargeted', 'D273Targeted', 'D281Targeted', 'D294Preflight', 'D294Targeted', 'D299Red', 'D299Targeted', 'D308Oracle', 'D315LauncherTargeted', 'D315StageTargeted', 'D315Targeted', 'D315AfterTargeted', 'D315PlaywrightTargeted', 'D339Targeted', 'Formal')]
     [string]$Mode = 'Formal'
 )
 
@@ -10036,9 +10036,148 @@ function Invoke-FormalTests {
     Write-Output 'PowerShell contract tests passed'
 }
 
+function Invoke-D339TargetedTests {
+    $script:Failures = [System.Collections.Generic.List[string]]::new()
+    Invoke-TestCase 'D339 publication one-off requires receipt, full identity and exact command' {
+        $outcome = & $script:E2EModule {
+            $receipt = New-E2EReceipt -RunId '0123456789abcdef0123456789abcdef' `
+                -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+            $project = Get-E2EServiceProjectName -Receipt $receipt
+            $image = (Get-E2EImageSet -Receipt $receipt).Backend
+            $id = 'd' * 64
+            $labels = [pscustomobject]@{
+                'com.docker.compose.project' = $project
+                'com.docker.compose.service' = 'backend'
+                'com.docker.compose.oneoff' = 'True'
+                'com.docker.compose.slug' = ('abcdef012345' + ('0' * 52))
+                'com.docker.compose.config-hash' = ('f' * 64)
+                'com.docker.compose.depends_on' = ''
+                'com.docker.compose.project.config_files' = 'fixed-compose-files'
+                'com.docker.compose.project.working_dir' = 'fixed-working-dir'
+                'org.opencontainers.image.revision' = $receipt.commitSha
+                'com.finguardops.e2e.source-tree' = $receipt.treeSha
+                'com.finguardops.e2e.run-id' = $receipt.runId
+                'com.finguardops.e2e.repository-id' = $receipt.repositoryId
+                'com.finguardops.e2e.image-role' = 'backend'
+            }
+            $base = [pscustomobject]@{
+                Image = 'sha256:' + ('e' * 64)
+                Config = [pscustomobject]@{
+                    Image = $image
+                    Entrypoint = @('java','-jar','app.jar'); User = ''; WorkingDir = '/app'
+                    Labels = ($labels | ConvertTo-Json -Depth 10 | ConvertFrom-Json)
+                    Env = @('SPRING_PROFILES_ACTIVE=local','FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED=true','SAFE=x')
+                }
+                HostConfig = [pscustomobject]@{ NetworkMode = $project + '_application'; Privileged=$false }
+            }
+            $created = [datetimeoffset]::UtcNow
+            $effective = $created.AddSeconds(60).ToString('yyyy-MM-ddTHH:mm:ssZ', [cultureinfo]::InvariantCulture)
+            $candidate = [pscustomobject]@{
+                Id = $id; Name = '/' + $project + '-backend-run-abcdef012345'
+                Image = $base.Image; Created = $created.ToString('o')
+                Config = [pscustomobject]@{
+                    Image = $image; Labels = $labels; Entrypoint = @('java','-jar','app.jar')
+                    Hostname = $id.Substring(0,12); AttachStdin=$true; OpenStdin=$true; StdinOnce=$true
+                    ExposedPorts = [pscustomobject]@{ '8080/tcp'=[pscustomobject]@{}; '8081/tcp'=[pscustomobject]@{} }
+                    User = ''; WorkingDir = '/app'
+                    Cmd = @('--spring.main.web-application-type=none',
+                        '--logging.level.org.hibernate.orm.connections.pooling=WARN',
+                        '--finguardops.rule-v1-default-publication.enabled=true',
+                        '--finguardops.rule-v1-default-publication.confirmation=PUBLISH_RULE_V1_DEFAULT_V1',
+                        ('--finguardops.rule-v1-default-publication.effective-from=' + $effective))
+                    Env = @('SPRING_PROFILES_ACTIVE=local,rule-v1-default-publication',
+                        'FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED=false','SAFE=x')
+                }
+                HostConfig = [pscustomobject]@{ AutoRemove=$true; Privileged=$false;
+                    NetworkMode=$project + '_application'; PortBindings=[pscustomobject]@{} }
+                Mounts = $null
+                NetworkSettings = [pscustomobject]@{ Networks=[pscustomobject]@{} }
+                State = [pscustomobject]@{ Running=$true; Status='running'; Paused=$false;
+                    Restarting=$false; Dead=$false }
+            }
+            $evaluate = {
+                param($document, $owner)
+                try {
+                    $entry = Assert-E2EPublicationOneoffIdentity -Document $document -Id $id -Project $project `
+                        -Receipt $owner -BackendDocument $base
+                    if ($entry.Id -ceq $id -and $entry.AutoRemove) { return 'OK' }
+                    return 'BAD_RESULT'
+                }
+                catch { return [string]$_.Exception.Message }
+            }
+            $results = [ordered]@{}
+            $results['valid'] = & $evaluate $candidate $receipt
+            $differentRun = New-E2EReceipt -RunId 'fedcba9876543210fedcba9876543210' `
+                -RepositoryId $receipt.repositoryId -CommitSha $receipt.commitSha -TreeSha $receipt.treeSha
+            $results['different-run'] = & $evaluate $candidate $differentRun
+            foreach ($name in @('forged-name','forged-label','different-image','different-command','unrelated-running')) {
+                $copy = $candidate | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+                switch ($name) {
+                    'forged-name' { $copy.Name = '/' + $project + '-backend-1' }
+                    'forged-label' { $copy.Config.Labels.'com.finguardops.e2e.repository-id' = 'f' * 64 }
+                    'different-image' { $copy.Image = 'sha256:' + ('f' * 64) }
+                    'different-command' { $copy.Config.Cmd[2] = '--finguardops.rule-v1-default-publication.enabled=false' }
+                    'unrelated-running' { $copy.Config.Labels.'com.docker.compose.service' = 'ai-service' }
+                }
+                $results[$name] = & $evaluate $copy $receipt
+            }
+            return $results
+        }
+        Assert-Equal 'OK' $outcome['valid'] 'Owned one-off was refused.'
+        foreach ($name in @('different-run','forged-name','forged-label','different-image','different-command','unrelated-running')) {
+            Assert-Equal 'RESOURCE_CLEANUP_FAILED' $outcome[$name] "$name was accepted or leaked details."
+        }
+    }
+    Invoke-TestCase 'D339 stopped auto-removing one-off is cleared by exact full ID' {
+        $events = & $script:E2EModule {
+            $receipt = New-E2EReceipt -RunId '0123456789abcdef0123456789abcdef' `
+                -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
+            $id = 'd' * 64
+            $project = Get-E2EServiceProjectName -Receipt $receipt
+            $before = [pscustomobject]@{ Project=$project; Containers=@([pscustomobject]@{
+                Id=$id; Service='backend-rule-publication-oneoff'; Running=$true; AutoRemove=$true
+                Image='sha256:' + ('e' * 64); ImageReference='owned:tag'
+            }); Networks=@(); Volumes=@() }
+            $state = [pscustomobject]@{ Present=$true; Events=[System.Collections.Generic.List[string]]::new() }
+            $originalInventory = (Get-Command Get-E2EProjectResourceInventory -CommandType Function).ScriptBlock
+            $existingDocker = Get-Command docker -CommandType Function -ErrorAction SilentlyContinue
+            try {
+                Set-Item Function:\Get-E2EProjectResourceInventory -Value {
+                    if ($state.Present) { return $before }
+                    return [pscustomobject]@{ Project=$project; Containers=@(); Networks=@(); Volumes=@() }
+                }.GetNewClosure()
+                Set-Item Function:\docker -Value {
+                    $arguments = @($args | ForEach-Object { [string]$_ })
+                    $state.Events.Add(($arguments -join ' '))
+                    if ($arguments.Count -eq 2 -and $arguments[0] -ceq 'stop' -and $arguments[1] -ceq $id) {
+                        $state.Present = $false
+                        $global:LASTEXITCODE = 0
+                        return $id
+                    }
+                    $global:LASTEXITCODE = 1
+                }.GetNewClosure()
+                Invoke-E2EExactResourceCleanup -Before $before -Receipt $receipt
+                return @($state.Events.ToArray())
+            }
+            finally {
+                Set-Item Function:\Get-E2EProjectResourceInventory -Value $originalInventory
+                if ($null -eq $existingDocker) { Remove-Item Function:\docker -ErrorAction SilentlyContinue }
+                else { Set-Item Function:\docker -Value $existingDocker.ScriptBlock }
+            }
+        }
+        Assert-Equal @('stop ' + ('d' * 64)) @($events) 'Auto-removing one-off used another deletion operand.'
+    }
+    if ($script:Failures.Count -ne 0) { exit 1 }
+}
+
 Assert-Parsed $ModulePath
 Assert-Parsed $PSCommandPath
 $script:E2EModule = Import-Module $ModulePath -Force -PassThru
+
+if ($Mode -eq 'D339Targeted') {
+    Invoke-D339TargetedTests
+    exit 0
+}
 
 if ($Mode -eq 'D209Preflight') {
     Invoke-D209Preflight

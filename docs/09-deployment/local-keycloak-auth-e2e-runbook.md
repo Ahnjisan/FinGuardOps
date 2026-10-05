@@ -1066,3 +1066,11 @@ Browser 26/26 통과를 보고했다. 해당 PR의 cleanup 보고에는 owned re
 해석하지 않는다. 이 시나리오는 판정의 업무적 타당성, 담당자 디렉터리 연동, 실제 승인 요청 단계나
 외부 서비스 성능을 검증하지 않는다. #337의 실제 성공과 cleanup은 clean commit의 다음 공식
 `Prepare → Service → Run` Gate가 통과한 후에만 완료로 기록한다.
+
+## Issue #339 Service publication recovery (2026-10-05)
+
+The Service verifier runs the Rule v1 publication through `docker compose run --rm ... backend`. A host subprocess failure does not prove that Docker removed the one-off container. The Service publication call now reports fixed `RULE_PUBLICATION_COMMAND_PROCESS_START_FAILED`, `RULE_PUBLICATION_COMMAND_TIMEOUT`, `RULE_PUBLICATION_COMMAND_EXIT_NONZERO`, or `RULE_PUBLICATION_COMMAND_CLEANUP_FAILED` codes. These codes apply to **future** executions; the earlier `SUBPROCESS_FAILED` cannot be reclassified retrospectively. After a successful publication command, Service checks that no backend one-off remains and fails with `RULE_PUBLICATION_ONEOFF_REMAINS` if one does.
+
+For the existing recovery receipt, Cleanup first validates the one-off's full Docker ID, exact Service project and backend service, receipt-bound run/repository/source/revision labels, owned backend image reference and ID, publication command, environment, and runtime configuration. The regular backend container supplies the expected inherited configuration. A name or project label alone grants no removal authority. Any mismatch fails closed with `RESOURCE_CLEANUP_FAILED`; do not use a manual `docker rm`, `compose down --remove-orphans`, image prune, or receipt deletion to bypass it.
+
+After code and counterexample tests pass, run the official `-Mode Cleanup` once with the recovery receipt still present. It removes verified project resources first, then owned unique images, audits both projects and the browser container, and deletes the receipt last. If Cleanup fails, preserve the receipt and remaining resources for another read-only diagnosis; do not retry or delete more resources until the fixed failure boundary is understood. This recovery does not establish why the original Service subprocess failed and does not count as a successful Prepare → Service → Run Gate.

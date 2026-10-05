@@ -158,6 +158,13 @@ BEFORE_NATIVE_FAILURE_CODES = {
         "output": "RULE_PUBLICATION_COMMAND_OUTPUT_INVALID",
         "cleanup": "RULE_PUBLICATION_COMMAND_CLEANUP_FAILED",
     },
+    "RULE_PUBLICATION_ONEOFF_CHECK": {
+        "start": "RULE_PUBLICATION_ONEOFF_CHECK_PROCESS_START_FAILED",
+        "timeout": "RULE_PUBLICATION_ONEOFF_CHECK_TIMEOUT",
+        "exit": "RULE_PUBLICATION_ONEOFF_CHECK_EXIT_NONZERO",
+        "output": "RULE_PUBLICATION_ONEOFF_CHECK_OUTPUT_INVALID",
+        "cleanup": "RULE_PUBLICATION_ONEOFF_CHECK_CLEANUP_FAILED",
+    },
     "RULE_ACTIVATION_POLL": {
         "start": "RULE_ACTIVATION_POLL_PROCESS_START_FAILED",
         "timeout": "RULE_ACTIVATION_POLL_TIMEOUT",
@@ -205,6 +212,7 @@ BEFORE_NATIVE_OUTPUT_LIMITS = {
     "RULE_PUBLISHED_STATE": (64, 4096),
     "RULE_ACTIVE_STATE": (64, 4096),
     "RULE_PUBLICATION_COMMAND": (4_194_304, 65_536),
+    "RULE_PUBLICATION_ONEOFF_CHECK": (4096, 4096),
     "RULE_ACTIVATION_POLL": (64, 4096),
     "TRANSACTION_CARDINALITY_SNAPSHOT": (2048, 4096),
     "DATABASE_GLOBAL_SNAPSHOT": (16_777_216, 4096),
@@ -1943,6 +1951,10 @@ def capture_native_command(
 
 
 def validate_before_native_output(stage: str, output: bytes) -> None:
+    if stage == "RULE_PUBLICATION_ONEOFF_CHECK":
+        if output and re.fullmatch(rb"[0-9a-f]{64}(?:\r?\n[0-9a-f]{64})*\r?\n?", output) is None:
+            raise ValueError("invalid one-off inventory")
+        return
     if stage in {"RULE_PUBLISHED_STATE", "RULE_ACTIVE_STATE", "RULE_ACTIVATION_POLL"}:
         if re.fullmatch(rb"[0-9]+\n?", output) is None:
             raise ValueError("invalid rule-state scalar")
@@ -2583,7 +2595,10 @@ def rule_publication_arguments(effective: str) -> list[str]:
     ]
 
 
-def publish_rules(ctx: HostContext, *, before_diagnostics: bool = False) -> None:
+def publish_rules(
+    ctx: HostContext, *, before_diagnostics: bool = False,
+    verify_oneoff_lifetime: bool = False,
+) -> None:
     identifiers = ",".join("'%s'" % item for item in RULE_VERSION_IDS)
     published_query = (
         "select count(*) from rule_version where status='PUBLISHED' "
@@ -2610,6 +2625,19 @@ def publish_rules(ctx: HostContext, *, before_diagnostics: bool = False) -> None
         timeout=240,
         before_stage="RULE_PUBLICATION_COMMAND" if before_diagnostics else None,
     )
+    # Compose --rm must have removed its publication one-off before a successful
+    # command is allowed to advance. A failed command keeps its stage-specific
+    # failure; the receipt-owned host cleanup handles any surviving container.
+    if verify_oneoff_lifetime:
+        remaining = run_command([
+            "docker", "ps", "-aq", "--no-trunc",
+            "--filter", "label=com.docker.compose.project=" + ctx.project,
+            "--filter", "label=com.docker.compose.service=backend",
+            "--filter", "label=com.docker.compose.oneoff=True",
+        ], timeout=min(ctx.cli_timeout, ctx.remaining()), cwd=ctx.repo,
+            environment=ctx.environment, before_stage="RULE_PUBLICATION_ONEOFF_CHECK")
+        if remaining.strip():
+            fail("RULE_PUBLICATION_ONEOFF_REMAINS")
     for _ in range(90):
         if sql_scalar(
             ctx, active_query,
@@ -3586,7 +3614,7 @@ def existing_volume_phase(ctx: HostContext) -> None:
         timeout=120,
     )
     host_runtime(ctx.repo / "infra" / "keycloak" / ".local" / "tls" / "localhost.crt")
-    publish_rules(ctx)
+    publish_rules(ctx, before_diagnostics=True, verify_oneoff_lifetime=True)
     run_ingestion_phase(ctx)
     print("stage: existing-volume-ingestion-complete")
 
@@ -3615,7 +3643,7 @@ def all_runtime(ctx: HostContext) -> None:
     wait_container(ctx, "keycloak-bootstrap", "completed")
     print("stage: fresh-runtime-ready")
     host_runtime(ctx.repo / "infra" / "keycloak" / ".local" / "tls" / "localhost.crt")
-    publish_rules(ctx)
+    publish_rules(ctx, before_diagnostics=True, verify_oneoff_lifetime=True)
     print("stage: rules-active")
     run_ingestion_phase(ctx)
     print("stage: fresh-ingestion-complete")

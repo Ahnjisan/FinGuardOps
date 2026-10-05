@@ -1409,6 +1409,7 @@ finguardops_rule_analysis_outcomes_created 99
         valid = {
             "RULE_PUBLISHED_STATE": b"4\n",
             "RULE_ACTIVE_STATE": b"4\n",
+            "RULE_PUBLICATION_ONEOFF_CHECK": b"",
             "RULE_PUBLICATION_COMMAND": publication_success_output(),
             "RULE_ACTIVATION_POLL": b"4\n",
             "TRANSACTION_CARDINALITY_SNAPSHOT": ("|".join(["0"] * 14) + "\n").encode(),
@@ -1421,6 +1422,7 @@ finguardops_rule_analysis_outcomes_created 99
             "RULE_PUBLISHED_STATE": b"raw-sentinel",
             "RULE_ACTIVE_STATE": b"raw-sentinel",
             "RULE_PUBLICATION_COMMAND": b"\xff",
+            "RULE_PUBLICATION_ONEOFF_CHECK": b"raw-sentinel",
             "RULE_ACTIVATION_POLL": b"raw-sentinel",
             "TRANSACTION_CARDINALITY_SNAPSHOT": b"0|raw-sentinel",
             "DATABASE_GLOBAL_SNAPSHOT": b"raw-sentinel",
@@ -2088,6 +2090,7 @@ finguardops_rule_analysis_outcomes_created 99
         valid = {
             "RULE_PUBLISHED_STATE": b"4\n",
             "RULE_ACTIVE_STATE": b"4\n",
+            "RULE_PUBLICATION_ONEOFF_CHECK": b"",
             "RULE_ACTIVATION_POLL": b"4\n",
             "TRANSACTION_CARDINALITY_SNAPSHOT": ("|".join(["0"] * 14) + "\n").encode(),
             "DATABASE_GLOBAL_SNAPSHOT": b"".join(
@@ -2604,6 +2607,66 @@ finguardops_rule_analysis_outcomes_created 99
         ):
             verify_e2e.publish_rules(partial, before_diagnostics=True)
         self.assertEqual(len(partial.calls), 2)
+
+    def test_service_publication_distinguishes_native_failures_and_oneoff_lifetime(self):
+        for capture, expected in (
+            (verify_e2e.NativeCommandCapture(None, b"", b"", start_failed=True),
+             "RULE_PUBLICATION_COMMAND_PROCESS_START_FAILED"),
+            (verify_e2e.NativeCommandCapture(None, b"", b"", timed_out=True),
+             "RULE_PUBLICATION_COMMAND_TIMEOUT"),
+            (verify_e2e.NativeCommandCapture(23, b"private", b"private"),
+             "RULE_PUBLICATION_COMMAND_EXIT_NONZERO"),
+            (verify_e2e.NativeCommandCapture(None, b"", b"", cleanup_failed=True),
+             "RULE_PUBLICATION_COMMAND_CLEANUP_FAILED"),
+        ):
+            with self.subTest(code=expected), mock.patch.object(
+                verify_e2e, "capture_native_command", return_value=capture
+            ), self.assertRaises(verify_e2e.VerificationError) as raised:
+                verify_e2e.run_command(
+                    ["fixed-command"], timeout=1, cwd=Path.cwd(), environment={},
+                    before_stage="RULE_PUBLICATION_COMMAND",
+                )
+            self.assertEqual(str(raised.exception), expected)
+            self.assertNotIn("private", str(raised.exception))
+
+        class Context:
+            project = "finguardops-kc241-e2e-0123456789ab"
+            cli_timeout = 30
+            repo = Path.cwd()
+            environment = {}
+
+            def __init__(self):
+                self.outputs = [b"0\n", b"0\n", publication_success_output(), b"4\n"]
+                self.stages = []
+
+            def execute(self, arguments, *, input_bytes=None, timeout=None, before_stage=None):
+                self.stages.append(before_stage)
+                return self.outputs.pop(0)
+
+            def remaining(self):
+                return 60
+
+        clean = Context()
+        with mock.patch.object(verify_e2e, "run_command", return_value=b"") as oneoff_check:
+            verify_e2e.publish_rules(clean, before_diagnostics=True, verify_oneoff_lifetime=True)
+        self.assertEqual(oneoff_check.call_count, 1)
+        self.assertEqual(oneoff_check.call_args.args[0], [
+            "docker", "ps", "-aq", "--no-trunc",
+            "--filter", "label=com.docker.compose.project=" + clean.project,
+            "--filter", "label=com.docker.compose.service=backend",
+            "--filter", "label=com.docker.compose.oneoff=True",
+        ])
+        self.assertEqual(oneoff_check.call_args.kwargs["before_stage"], "RULE_PUBLICATION_ONEOFF_CHECK")
+        self.assertEqual(clean.stages, [
+            "RULE_PUBLISHED_STATE", "RULE_ACTIVE_STATE", "RULE_PUBLICATION_COMMAND",
+            "RULE_ACTIVATION_POLL",
+        ])
+        remaining = Context()
+        with mock.patch.object(verify_e2e, "run_command", return_value=(b"a" * 64) + b"\n"), self.assertRaisesRegex(
+            verify_e2e.VerificationError, "^RULE_PUBLICATION_ONEOFF_REMAINS$"
+        ):
+            verify_e2e.publish_rules(remaining, before_diagnostics=True, verify_oneoff_lifetime=True)
+        self.assertEqual(remaining.stages[-1], "RULE_PUBLICATION_COMMAND")
 
     def test_publication_argv_owns_the_hibernate_tab_producer(self):
         # The TAB in a publication capture comes from Hibernate's own INFO log,
