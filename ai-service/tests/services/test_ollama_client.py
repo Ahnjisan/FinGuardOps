@@ -48,7 +48,8 @@ def test_transport_classifies_connection_timeout_and_http_failure(
     ]
     for error, code in failures:
         monkeypatch.setattr(
-            client.opener, "open",
+            client.opener,
+            "open",
             lambda *args, error=error, **kwargs: (_ for _ in ()).throw(error),
         )
         with pytest.raises(OllamaFailure) as raised:

@@ -97,14 +97,20 @@ def test_timeout_falls_back_and_unknown_tokens_remain_unknown() -> None:
     assert result.attempts[0].outputTokens is None
 
 
-@pytest.mark.parametrize("code,expected,attempted,calls", [
-    ("CONNECTION_FAILED", "LLM_UNAVAILABLE", True, 2),
-    ("PROVIDER_ERROR", "LLM_UNAVAILABLE", True, 1),
-    ("MODEL_METADATA_UNAVAILABLE", "LLM_UNAVAILABLE", False, 1),
-    ("MODEL_NOT_PINNED", "LLM_UNAVAILABLE", False, 1),
-])
+@pytest.mark.parametrize(
+    "code,expected,attempted,calls",
+    [
+        ("CONNECTION_FAILED", "LLM_UNAVAILABLE", True, 2),
+        ("PROVIDER_ERROR", "LLM_UNAVAILABLE", True, 1),
+        ("MODEL_METADATA_UNAVAILABLE", "LLM_UNAVAILABLE", False, 1),
+        ("MODEL_NOT_PINNED", "LLM_UNAVAILABLE", False, 1),
+    ],
+)
 def test_only_confirmed_connection_failure_retries(
-    code: str, expected: str, attempted: bool, calls: int,
+    code: str,
+    expected: str,
+    attempted: bool,
+    calls: int,
 ) -> None:
     provider = FakeOllama(OllamaFailure(code, attempted=attempted))
     result = AiReportService(Settings(), provider).generate(sample())

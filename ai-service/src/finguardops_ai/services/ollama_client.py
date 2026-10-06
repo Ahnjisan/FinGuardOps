@@ -70,12 +70,23 @@ class OllamaClient:
         except URLError as exc:
             if isinstance(exc.reason, TimeoutError):
                 raise OllamaFailure("TIMEOUT") from exc
-            if isinstance(exc.reason, (ConnectionRefusedError, ConnectionResetError,
-                                       ConnectionAbortedError, BrokenPipeError)):
+            if isinstance(
+                exc.reason,
+                (
+                    ConnectionRefusedError,
+                    ConnectionResetError,
+                    ConnectionAbortedError,
+                    BrokenPipeError,
+                ),
+            ):
                 raise OllamaFailure("CONNECTION_FAILED") from exc
             raise OllamaFailure("PROVIDER_ERROR") from exc
-        except (ConnectionRefusedError, ConnectionResetError,
-                ConnectionAbortedError, BrokenPipeError) as exc:
+        except (
+            ConnectionRefusedError,
+            ConnectionResetError,
+            ConnectionAbortedError,
+            BrokenPipeError,
+        ) as exc:
             raise OllamaFailure("CONNECTION_FAILED") from exc
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise OllamaFailure("PROVIDER_ERROR") from exc
