@@ -367,14 +367,14 @@ class BootstrapTests(unittest.TestCase):
             ), self.assertRaisesRegex(bootstrap.ReconcileError, "USER_PASSWORD_CREDENTIAL_INVALID"):
                 reconciler.reconcile_user("x" * 64)
 
-    def test_three_user_contract_has_distinct_fixed_subjects_and_single_roles(self):
+    def test_four_user_contract_has_distinct_fixed_subjects_and_single_roles(self):
         self.assertEqual(bootstrap.USER_FIXTURES[0][:3], (bootstrap.USER_NAME, bootstrap.USER_ROLE, "Analyst"))
-        self.assertEqual(len({item[0] for item in bootstrap.USER_FIXTURES}), 3)
-        self.assertEqual(len({item[3] for item in bootstrap.USER_FIXTURES}), 3)
+        self.assertEqual(len({item[0] for item in bootstrap.USER_FIXTURES}), 4)
+        self.assertEqual(len({item[3] for item in bootstrap.USER_FIXTURES}), 4)
         for name, role, last_name, subject in bootstrap.USER_FIXTURES:
             with self.subTest(name=name):
                 self.assertTrue(bootstrap.is_canonical_uuid4(subject))
-                self.assertEqual(name, "local-fds-" + last_name.lower())
+                self.assertEqual(name, "local-platform-admin" if role == "PLATFORM_ADMIN" else "local-fds-" + last_name.lower())
                 self.assertIn(role, bootstrap.USER_ROLES)
 
     def test_user_role_reconcile_rejects_duplicate_or_leaked_final_roles(self):

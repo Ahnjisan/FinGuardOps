@@ -1123,12 +1123,13 @@ def validate_realm(realm: dict[str, Any]) -> None:
         if "offline_access" in scopes or "offline" in scopes or "roles" in scopes:
             fail("STATIC_FORBIDDEN_SCOPE")
     users = realm.get("users")
-    if not isinstance(users, list) or len(users) != 3:
+    if not isinstance(users, list) or len(users) != 4:
         fail("STATIC_USER_CONTRACT")
     expected_users = (
         ("local-fds-analyst", "FDS_ANALYST", "Analyst", "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a"),
         ("local-fds-viewer", "FDS_VIEWER", "Viewer", "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69b"),
         ("local-fds-approver", "FDS_APPROVER", "Approver", "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69c"),
+        ("local-platform-admin", "PLATFORM_ADMIN", "Admin", "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69d"),
     )
     for user, (username, role, last_name, subject) in zip(users, expected_users, strict=True):
         if (

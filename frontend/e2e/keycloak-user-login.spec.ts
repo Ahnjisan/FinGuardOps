@@ -812,7 +812,7 @@ function requireTokenClaims(
   );
   requireCondition(identity.preferred_username === username, "The stock profile claim was not issued.");
   requireCondition(identity.given_name === "Local", "The stock given-name claim was not issued.");
-  const lastName = username.slice("local-fds-".length);
+  const lastName = username === "local-platform-admin" ? "admin" : username.slice("local-fds-".length);
   const displayName = lastName.charAt(0).toUpperCase() + lastName.slice(1);
   requireCondition(identity.family_name === displayName, "The stock family-name claim was not issued.");
   requireCondition(identity.name === `Local ${displayName}`, "The stock full-name claim was not issued.");

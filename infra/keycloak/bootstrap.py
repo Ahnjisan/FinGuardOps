@@ -24,6 +24,7 @@ USER_FIXTURES = (
     ("local-fds-analyst", "FDS_ANALYST", "Analyst", "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69a"),
     ("local-fds-viewer", "FDS_VIEWER", "Viewer", "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69b"),
     ("local-fds-approver", "FDS_APPROVER", "Approver", "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69c"),
+    ("local-platform-admin", "PLATFORM_ADMIN", "Admin", "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69d"),
 )
 AUDIENCE = "finguardops-backend-api"
 SECRET_PATTERN = re.compile(rb"[A-Za-z0-9_-]{32,128}\Z")
