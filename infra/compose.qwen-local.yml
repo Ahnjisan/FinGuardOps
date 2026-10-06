@@ -1,0 +1,15 @@
+# Optional local Qwen path. Combine only with compose.yml and, for an
+# authenticated Backend experiment, compose.local-jwt-e2e.yml.
+services:
+  ai-service:
+    environment:
+      FINGUARDOPS_AI_OLLAMA_BASE_URL: http://host.docker.internal:11434
+      FINGUARDOPS_AI_OLLAMA_MODEL: qwen3.5:4b
+      FINGUARDOPS_AI_OLLAMA_MODEL_DIGEST: ${FINGUARDOPS_AI_OLLAMA_MODEL_DIGEST:?Pin the observed local Qwen digest}
+      FINGUARDOPS_AI_OLLAMA_QUANTIZATION: ${FINGUARDOPS_AI_OLLAMA_QUANTIZATION:?Pin the observed local Qwen quantization}
+    networks:
+      - application
+      - qwen-host
+
+networks:
+  qwen-host: {}

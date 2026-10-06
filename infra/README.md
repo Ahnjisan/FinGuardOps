@@ -83,3 +83,14 @@ Ollama를 사용한다. 이 Gate와 Kafka overlay를 결합하거나 Keycloak/JW
 `/api/tags`의 digest·quantization과 AI Service 컨테이너에서
 `host.docker.internal:11434` 접근성을 먼저 확인한다. 세 실행의 `caseId`가
 다르면 동일 사건의 단일 통합 통과로 보고하지 않는다.
+
+실제 Qwen 인증 검증의 선택 조합은 `compose.yml` + `compose.qwen-local.yml` +
+`compose.local-jwt-e2e.yml`이다. Qwen overlay는 AI Service의 `application`
+연결을 유지하면서 **AI Service에만** `qwen-host` bridge를 더하고, ignored
+`infra/.env`의 컨테이너 loopback URL을 이 실행에서만
+`http://host.docker.internal:11434`로 대체한다. 다른 서비스의 network나 host
+publish 포트는 변경하지 않는다. 현재 모델 digest·quantization은 host `/api/tags`에서
+읽어 프로세스 환경에 일시 지정하고 종료 시 이전 값으로 복원한다. 호스트 listen·
+방화벽 변경은 컨테이너 접근 검사에 실제로 필요할 때만 제한적으로 수행하고 복원한다.
+검사 명령, 인증된 합성 HIGH 사건, 실제 생성·저장 조회와 소유 프로젝트 정리는
+[Kafka/Qwen runbook 6절](../docs/09-deployment/local-kafka-ai-report-runbook.md#6-별도-실제-qwen-인증-실행)을 따른다.
