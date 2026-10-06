@@ -13,9 +13,10 @@
 - 외부 `AiReportRequest` 흐름과 실제 `AiReportExecution`·`ProviderCallAttempt` 흐름을 구분한다.
 - 현재 동기 처리와 비동기 AI 리포트 처리, 향후 메시지 기반 처리의 경계를 정의한다.
 
-이 문서는 Kafka 구현 문서가 아니다. 현재 단계에서 Event DTO, Producer, 실제 event
-emission, Kafka Topic, Consumer, Consumer Group, DLQ 또는 Outbox를 구현하거나 확정하지
-않는다. 다만 그 아래의 public 거래 접수 동기 흐름인 External Risk 조회,
+이 문서의 기존 이벤트 목록은 전송 독립적인 논리 계약이다. Issue #347의 첫 물리
+Kafka 경로는 `AiReportExecutionCreated` 한 종류와 지정 `executionId`의 기존
+Worker 실행에 한정한다. 거래·사건 이벤트의 Kafka 발행은 구현하지 않는다.
+public 거래 접수 동기 흐름인 External Risk 조회,
 `/api/v2/rule-analysis`의 Rule v1 결과 채택, 위험 대응·사건·감사 finalization,
 Snapshot v2 completion, 성공·Failure Snapshot replay와 제한된 one-shot recovery는
 구현되어 있다.
@@ -26,9 +27,9 @@ Snapshot v2 completion, 성공·Failure Snapshot replay와 제한된 one-shot re
 
 - Spring Boot Modular Monolith 내부 애플리케이션 이벤트
 - Spring Boot와 FastAPI AI Service 사이의 REST 요청·응답 처리
-- 향후 Kafka 메시지
+- Issue #347의 AI 실행 생성 Kafka 메시지와 향후 다른 도메인 메시지
 
-전달 방식이 달라져도 이벤트 발생 조건, 식별자 의미, 생산자 책임과 중복 방지 기준을 바꾸지 않는다. 다만 현재 REST 응답이나 내부 메서드 호출이 이 문서의 Envelope JSON을 그대로 사용해야 한다는 뜻은 아니다. 물리 DTO, 직렬화 Schema와 저장 구조는 후속 구현 계약이다.
+전달 방식이 달라져도 이벤트 발생 조건, 식별자 의미, 생산자 책임과 중복 방지 기준을 바꾸지 않는다. 현재 REST 응답이나 내부 메서드 호출이 이 문서의 Envelope JSON을 그대로 사용해야 한다는 뜻은 아니다. AI 실행 생성의 물리 DTO와 저장 구조는 이 Issue에서 구현하며, 다른 이벤트는 후속 계약이다.
 
 ### 2.1 현재 책임 경계
 
@@ -54,13 +55,13 @@ FastAPI와 생성형 AI는 거래 상태, 위험 등급, 위험 대응, 사건 �
 
 ### 2.2 제외 범위
 
-- Java 또는 Python 코드
-- JPA Entity와 PostgreSQL DDL·Migration
+- AI 실행 생성 외 Java 또는 Python 이벤트 코드
+- AI 실행 생성 V18 외 JPA Entity와 PostgreSQL DDL·Migration
 - Redis 중복 제거 자료구조
-- Kafka Topic·Consumer·DLQ
-- Outbox와 CDC
+- AI 실행 생성 이외 도메인의 Kafka Topic·Consumer·DLQ
+- AI 실행 생성 이외 Outbox와 CDC
 - OpenAPI 변경
-- Docker, Kubernetes와 AWS 설정
+- 선택형 로컬 Kafka overlay 외 Docker, Kubernetes와 AWS 설정
 - 인증·인가 구현
 - 실제 Provider와 Prompt 전문
 - 물리적인 이벤트 중복 제거 테이블
@@ -394,6 +395,16 @@ AiReport
 
 ### 7.2 `AiReportExecutionCreated`
 
+Issue #347 물리 JSON v1은 공통 Envelope의 `eventId`, `eventType`,
+`eventVersion`, `occurredAt`, `producer`, `traceId`, `correlationId`,
+`causationId`, `aggregateType`과 `executionId`, `initiatingAiRequestId`,
+`caseId`, `detectionResultVersion`, `promptVersion`, `modelVersion`,
+`executionStatus=PENDING`의 정확한 필드만 허용한다. 최대 UTF-8 4096 byte다.
+Kafka key는 `executionId`이며, `eventId`는 재발행해도 불변이다.
+Consumer는 key·v1·DB 실행·최초 요청·outbox eventId 관계를 검증한 뒤 해당 실행만 선점한다.
+중복·종료 실행·busy 전달은 Provider 재호출 없이 확인 처리하고, busy PENDING은
+30초 DB polling이 조정한다. DLQ 자동 재투입은 없다.
+
 | 항목 | 계약 |
 | --- | --- |
 | 발생 조건 | 재사용 가능한 완료 결과와 활성 실행이 없어 새 `AiReportExecution`이 생성되고 최초 요청과 상호 연결된 때 |
@@ -401,10 +412,10 @@ AiReport
 | 처리 주체·예상 소비자 | FastAPI AI 리포트 실행, 운영 관측 모듈 |
 | Aggregate | `AiReportExecution` / `executionId` |
 | 필수 식별자 | `executionId`, `initiatingAiRequestId`, `caseId`, 정확 일치 네 요소, `traceId` |
-| 최소 payload | `initiatingAiRequestId`, `caseId`, `detectionResultVersion`, `promptVersion`, `modelVersion`, `executionStatus=PENDING`, `createdAt` |
+| 최소 payload | `initiatingAiRequestId`, `caseId`, `detectionResultVersion`, `promptVersion`, `modelVersion`, `executionStatus=PENDING`, `occurredAt` |
 | 중복 처리 | 활성 정확 일치 조건의 실행을 하나만 허용. 충돌 시 기존 실행을 재조회해 요청 연결 |
 | 원거래 판단 영향 | 없음 |
-| 처리 범위 | 현재 비동기 실행 모델의 논리 경계. REST·내부 Worker·향후 메시지 모두 가능 |
+| 처리 범위 | 현재 REST·내부 Worker가 구현되어 있고 Issue #347에서 이 실행 생성 이벤트만 선택형 로컬 Kafka로 전달 |
 
 진행 중 실행 공유와 캐시 재사용에는 이 이벤트가 발생하지 않는다.
 
@@ -892,17 +903,16 @@ metric은 운영 관측이며 업무 AuditLog와 동일한 저장 계약이 아�
 감사 로그에는 Prompt 원문, Provider 응답 원문, 인증정보, 고객·계좌 원문, 조사 메모
 content와 내부 예외 원문을 기록하지 않는다.
 
-## 12. 현재 처리와 향후 Kafka 경계
+## 12. 현재 처리와 첫 Kafka 경계
 
 ### 12.1 현재 기준
 
-- Spring Boot Modular Monolith는 현재 거래·상태·사건을 오케스트레이션하며, AI 요청
-  오케스트레이션은 미래 목표 책임이다.
-- FastAPI AI Service는 현재 Rule·ML 계산을 담당하며, AI 리포트 관련 계산은 미래 목표
-  책임이다.
+- Spring Boot Modular Monolith는 거래·상태·사건 및 현재 AI 리포트 요청·실행을
+  오케스트레이션한다.
+- FastAPI AI Service는 Rule 계산과 AI 리포트 생성을 담당한다.
 - 핵심 기능 안정화 전에는 REST와 내부 애플리케이션 흐름을 우선한다.
 - 거래 위험 판단은 AI 리포트 완료를 기다리지 않는다.
-- 미래 AI 리포트 외부 API는 비동기 실행·상태 조회 목표 모델을 유지한다.
+- 현재 AI 리포트 외부 API는 비동기 `202` 실행·상태 조회 모델을 유지한다.
 - 내부 구현이 REST 호출과 내부 실행을 사용해도 Kafka를 전제로 하지 않는다.
 - PostgreSQL의 검증된 영속 업무 데이터가 정합성 기준이다.
 - Redis가 도입되더라도 정확 일치 조회를 보조하며 업무 원본을 대신하지 않는다.
@@ -920,15 +930,14 @@ content와 내부 예외 원문을 기록하지 않는다.
 - 확정 가능한 final-success completion gap의 단건 one-shot recovery와 append-only audit
 - 사건 상태·최종 판정·동시성 버전, InvestigationNote와 AuditLog
 
-다음은 미래/normative AI report 동기 정합성 계약이며 현재 production aggregate·
-persistence lifecycle로 구현되어 있지 않다.
+다음 AI report 요청·실행·결과의 DB 정합성은 현재 구현되어 있다.
 
 - 새 AiReportRequest와 AiReportExecution의 최초 상호 연결
 - AiReport 결과 생성과 실행·연결 요청 종료
 
 알림, 운영 통계, 기술 메트릭과 후속 조회 projection은 업무 원본 확정 후 비동기로 분리할 수 있다.
 
-### 12.3 향후 Kafka 도입 시 검토 사항
+### 12.3 첫 AI 실행 생성 범위 밖 Kafka 검토 사항
 
 다음 항목은 후속 검토 대상이며 현재 구현 완료나 확정 구성으로 표현하지 않는다.
 
@@ -1079,5 +1088,5 @@ event-driven architecture 또는 운영 배포 완료로 해석하지 않는다.
 - [ ] AI 리포트 실패가 거래 판단과 사건 처리를 중단시키지 않는가
 - [ ] FDS 분석 담당자에게 Provider attempt·토큰·비용 상세를 노출하지 않는가
 - [ ] Prompt 원문, Provider 응답 원문, 인증정보와 개인정보를 payload·로그에 넣지 않는가
-- [ ] 미확정 Kafka Topic·Partition·Consumer·DLQ·Outbox가 구현 완료처럼 표현되지 않는가
+- [ ] Issue #347의 AI 실행 생성 한 종류 외 Kafka Topic·Consumer·DLQ·Outbox가 구현 완료처럼 표현되지 않는가
 - [ ] 남은 문서 차이와 사용자 결정 사항을 확정된 정책처럼 표현하지 않는가

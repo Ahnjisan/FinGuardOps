@@ -18,6 +18,8 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.Optional;
+import java.util.UUID;
+import com.aifds.backend.observability.AiReportKafkaMetrics;
 
 @Service
 public class AiReportWorker {
@@ -31,6 +33,7 @@ public class AiReportWorker {
     private final ObjectProvider<FraudCaseRepository> caseBeans;
     private final ObjectProvider<AiReportInputProjection> projectionBeans;
     private final ObjectProvider<AiReportHttpClient> clientBeans;
+    private final ObjectProvider<AiReportKafkaMetrics> metricsBeans;
 
     public AiReportWorker(ObjectProvider<PlatformTransactionManager> transactionManagers,
                           ObjectProvider<JdbcTemplate> jdbcTemplates,
@@ -41,7 +44,8 @@ public class AiReportWorker {
                           ObjectProvider<ProviderCallAttemptRepository> attemptBeans,
                           ObjectProvider<FraudCaseRepository> caseBeans,
                           ObjectProvider<AiReportInputProjection> projectionBeans,
-                          ObjectProvider<AiReportHttpClient> clientBeans) {
+                          ObjectProvider<AiReportHttpClient> clientBeans,
+                          ObjectProvider<AiReportKafkaMetrics> metricsBeans) {
         this.transactionManagers = transactionManagers;
         this.jdbcTemplates = jdbcTemplates;
         this.properties = properties;
@@ -52,12 +56,21 @@ public class AiReportWorker {
         this.caseBeans = caseBeans;
         this.projectionBeans = projectionBeans;
         this.clientBeans = clientBeans;
+        this.metricsBeans = metricsBeans;
     }
 
     @Scheduled(fixedDelayString = "${finguardops.ai-report.poll-interval-ms:1000}")
     public void tick() {
+        run(null);
+    }
+
+    public StartResult runExecution(UUID executionId) {
+        return run(java.util.Objects.requireNonNull(executionId));
+    }
+
+    private StartResult run(UUID executionId) {
         var manager = transactionManagers.getIfAvailable();
-        if (manager == null || jdbcTemplates.getIfAvailable() == null) return;
+        if (manager == null || jdbcTemplates.getIfAvailable() == null) return StartResult.UNAVAILABLE;
         var executions = executionBeans.getIfAvailable();
         var requests = requestBeans.getIfAvailable();
         var reports = reportBeans.getIfAvailable();
@@ -66,20 +79,24 @@ public class AiReportWorker {
         var projection = projectionBeans.getIfAvailable();
         var client = clientBeans.getIfAvailable();
         if (executions == null || requests == null || reports == null || attempts == null
-                || cases == null || projection == null || client == null) return;
+                || cases == null || projection == null || client == null) return StartResult.UNAVAILABLE;
         var transactions = new TransactionTemplate(manager);
         transactions.executeWithoutResult(ignored -> {
             executions.expireLeases();
             requests.failExpired();
         });
         Optional<AiReportExecution> claimed = transactions.execute(ignored -> {
-            Optional<AiReportExecution> next = executions.claim(properties.leaseSeconds());
+            Optional<AiReportExecution> next = executionId == null
+                    ? executions.claim(properties.leaseSeconds())
+                    : executions.claim(executionId, properties.leaseSeconds());
             next.ifPresent(row -> requests.generating(row.id()));
             return next;
         });
         if (claimed == null || claimed.isEmpty()) {
-            return;
+            return StartResult.NOT_CLAIMED;
         }
+        AiReportKafkaMetrics metrics = metricsBeans.getIfAvailable();
+        if (metrics != null) metrics.started(executionId == null ? "polling" : "kafka");
         AiReportExecution row = claimed.get();
         AiReportDtos.GenerationRequest input;
         try {
@@ -90,26 +107,26 @@ public class AiReportWorker {
             });
             if (projected == null || projected.detectionPk() != row.detectionPk()) {
                 fail(transactions, executions, requests, row, "REPORT_INPUT_CHANGED");
-                return;
+                return StartResult.STARTED;
             }
             input = projected.request();
         } catch (com.aifds.backend.aireport.exception.AiReportException
                  | java.util.NoSuchElementException exception) {
             fail(transactions, executions, requests, row, "REPORT_INPUT_CHANGED");
-            return;
+            return StartResult.STARTED;
         }
         AiReportDtos.GenerationResult generated;
         try {
             generated = client.generate(input);
         } catch (AiReportHttpClient.GenerationFailure exception) {
             fail(transactions, executions, requests, row, exception.code());
-            return;
+            return StartResult.STARTED;
         }
         try {
             validate(generated, row, input);
         } catch (RuntimeException exception) {
             fail(transactions, executions, requests, row, "FASTAPI_RESPONSE_INVALID");
-            return;
+            return StartResult.STARTED;
         }
         transactions.executeWithoutResult(ignored -> {
             if (!executions.stillGenerating(row.id())) return;
@@ -130,7 +147,10 @@ public class AiReportWorker {
                     generated.fallbackTriggerCode());
             requests.complete(row.id(), report.id(), status);
         });
+        return StartResult.STARTED;
     }
+
+    public enum StartResult { STARTED, NOT_CLAIMED, UNAVAILABLE }
 
     private void fail(TransactionTemplate transactions, AiReportExecutionRepository executions,
                       AiReportRequestRepository requests, AiReportExecution row, String code) {

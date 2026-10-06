@@ -1,4 +1,29 @@
 spring:
+  kafka:
+    bootstrap-servers: ${FINGUARDOPS_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+        delivery.timeout.ms: 10000
+        request.timeout.ms: 5000
+        max.block.ms: 5000
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      enable-auto-commit: false
+      auto-offset-reset: earliest
+      properties:
+        max.poll.interval.ms: 600000
+    listener:
+      ack-mode: manual_immediate
+      missing-topics-fatal: false
+  task:
+    scheduling:
+      pool:
+        size: 3
   datasource:
     url: ${SPRING_DATASOURCE_URL}
     username: ${SPRING_DATASOURCE_USERNAME}
@@ -14,6 +39,14 @@ spring:
     open-in-view: false
 
 finguardops:
+  kafka:
+    enabled: ${FINGUARDOPS_KAFKA_ENABLED:false}
+    consumer-enabled: ${FINGUARDOPS_KAFKA_CONSUMER_ENABLED:true}
+    topic: finguardops.ai-report-execution-created.v1
+    dlq-topic: finguardops.ai-report-execution-created.v1.dlq
+    group-id: finguardops-ai-report-worker-v1
+    outbox-poll-ms: 1000
+    outbox-lease-seconds: 30
   ai-report:
     base-url: ${FINGUARDOPS_AI_SERVICE_BASE_URL:http://localhost:8000}
     poll-interval-ms: ${FINGUARDOPS_AI_REPORT_POLL_INTERVAL_MS:1000}

@@ -500,6 +500,16 @@ DB 쿼리 원문, 테이블 키, 고객·거래·사건 식별자를 메트릭�
 
 ### 12.2 Kafka
 
+Issue #347 첫 구현은 `finguardops.kafka.outbox.records{status}`,
+`finguardops.kafka.outbox.oldest.seconds`, 발행 성공/실패 counter,
+`finguardops.kafka.records{result}`, `finguardops.kafka.reprocess.attempts`,
+`finguardops.kafka.dlq`,
+`finguardops.kafka.consumer.lag{topic,group}`,
+`finguardops.ai.report.pending.oldest.seconds`,
+`finguardops.ai.report.starts{source=kafka|polling}`을 사용한다.
+Broker 조회 실패 또는 아직 group offset이 없을 때 lag는 -1로 표시한다. 이 이름은 아래 장기 후보 명세와
+구분되는 첫 경로의 실제 코드 이름이며 임계값은 측정 전 확정하지 않는다.
+
 | 논리 이름 | 구현 후보 | 목적 | 수집 주체 | 유형 | 단위 | 증가·관측 시점 | 허용 라벨 | 집계 기준 | 대시보드 활용 | 알림 활용 | 적용 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `kafka.consumer.lag` | `finguardops_kafka_consumer_lag_records` | 소비 적체 확인 | Kafka 운영 수집 계층 | Gauge | record 수 | Consumer offset 상태 수집 시 | `service`, 승인 후 `topic`, `consumerGroup` | Dashboard는 group·topic 합계와 최대값을 구분. partition 라벨은 기본 대시보드에서 제거 권장 | 비동기 적체와 복구 속도 | 임계값은 부하 테스트 후 결정 | `향후 도입 시` |

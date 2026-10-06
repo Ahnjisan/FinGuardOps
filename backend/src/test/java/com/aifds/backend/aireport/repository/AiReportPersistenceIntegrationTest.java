@@ -60,6 +60,7 @@ class AiReportPersistenceIntegrationTest {
                     VALUES (?,?,?,1,'legacy-prompt','legacy-model','FAILED','TIMEOUT') RETURNING id
                     """, Long.class, UUID.randomUUID(), casePk, resultPk);
             Flyway.configure().dataSource(dataSource).locations("classpath:db/migration").load().migrate();
+            assertEquals(0L, jdbc.queryForObject("SELECT count(*) FROM ai_report_outbox", Long.class));
             assertEquals("TIMEOUT", jdbc.queryForObject(
                     "SELECT failure_code FROM ai_report_execution WHERE id=?", String.class, legacy));
             assertEquals(null, jdbc.queryForObject(
@@ -85,7 +86,8 @@ class AiReportPersistenceIntegrationTest {
             assertThrows(org.springframework.dao.DataIntegrityViolationException.class,
                     () -> repository.insert(casePk, resultPk, 1, "prompt-1", "local-opaque-1"));
             var transactions = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
-            var claimed = transactions.execute(ignored -> repository.claim(300)).orElseThrow();
+            var claimed = transactions.execute(ignored ->
+                    repository.claim(first.executionId(), 300)).orElseThrow();
             assertEquals(first.executionId(), claimed.executionId());
             transactions.executeWithoutResult(ignored -> {
                 assertEquals(true, repository.stillGenerating(first.id()));
