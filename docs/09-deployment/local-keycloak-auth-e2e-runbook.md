@@ -889,10 +889,17 @@ Reporter는 아래 record만 stdout에 쓴다. Runner는 `FINGUARDOPS_E2E_PW_V1 
 
 | record | 의미 |
 | --- | --- |
-| `TEST line=<1-99999\|none> n=<1-999> status=<failed\|timedOut\|interrupted> kind=<REQUIRE_CONDITION\|EXPECT\|TIMEOUT\|INTERRUPTED\|OTHER> at=<1-99999\|none>` | `line`은 test 선언 줄, `n`은 같은 줄에서 선언된 test 중 순번, `at`은 `requireCondition` helper frame을 건너뛴 첫 spec frame 줄 |
+| `TEST line=<1-99999\|none> n=<1-999> status=<failed\|timedOut\|interrupted> kind=<REQUIRE_CONDITION\|EXPECT\|TIMEOUT\|INTERRUPTED\|OTHER> at=<1-99999\|none> stage=<RELAY_INIT\|GUARD\|LOGIN\|USAGE_API\|USAGE_UI\|DETAIL_API\|DETAIL_UI\|CLEANUP\|none>` | `line`은 test 선언 줄, `n`은 같은 줄에서 선언된 test 중 순번, `at`은 `requireCondition` helper frame을 건너뛴 첫 spec frame 줄. `stage`는 관리자 test의 첫 실패 고정 단계, 단계 오류가 기록되지 않았으면 마지막 진입 단계다. 단계 이전의 beforeEach 실패와 다른 test는 `none`이다. |
 | `GLOBAL kind=<WEBSERVER\|OTHER>` | test 밖 오류. `config.webServer` 오류만 `WEBSERVER` |
 | `SUMMARY status=<passed\|failed\|timedout\|interrupted> passed=<0-9999> failed=<0-9999> skipped=<0-9999>` | 실행 종료 요약 |
 | `OVERFLOW` | reporter 상한(TEST 32, GLOBAL 4) 초과 |
+
+관리자 test의 `USAGE_API`는 목록·집계 GET 각각의 200 관측, `DETAIL_API`는 상세 GET의 200 관측만
+확인한다. 추가 요청은 보내지 않으며 기존 화면·권한·민감정보 비노출 단언과 60초 전체 제한을 유지한다.
+관리자 test만 단계 값을 기록하고 테스트별 단계 상태는 서로 공유하지 않는다. 정상 완료는 TEST 실패 record를 내지 않고, 전체 timeout은
+`at=none`이어도 고정 `stage` 하나만 낸다. finally 정리 또는 그 뒤의 afterEach 실패는 `CLEANUP`으로
+표시하되, 그보다 앞선 단계 오류가 이미 기록되었다면 그 단계가 우선한다. 단계가 시작되기 전의
+beforeEach 실패는 `none`이다. URL·응답 본문·token·사용자·Provider·원문 예외는 stage에 포함되지 않는다.
 
 Runner가 직접 만드는 고정 code는 셋이다. 전달 상한 40줄을 넘으면 `RUNNER_OVERFLOW`를 한 번만 남기고
 나머지를 버린다. Child가 실패했는데 SUMMARY가 없으면 `SUMMARY_ABSENT`, nonce 생성에 실패했으면

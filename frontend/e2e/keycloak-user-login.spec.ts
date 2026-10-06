@@ -10340,42 +10340,60 @@ test("real Analyst resumes the Run case and Approver closes it with a public aud
 });
 
 test("a PLATFORM_ADMIN reviews the stored AI request usage without case authority", async ({ page }) => {
-  const relay = await installBackendRelay(page);
+  const relay = await test.step("RELAY_INIT", () => installBackendRelay(page));
   try {
-    await page.goto(`${APP_ORIGIN}/ai-operations`);
-    await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
-    await signInFromGuard(page, readUserPassword(), "/ai-operations", false,
-      "local-platform-admin", "PLATFORM_ADMIN");
-    const nav = page.getByRole("navigation", { name: "주요 탐색" });
-    await expect(nav.getByRole("link", { name: "AI 운영" })).toBeVisible();
-    await expect(nav.getByRole("link", { name: "거래" })).toHaveCount(0);
-    await expect(nav.getByRole("link", { name: "사건" })).toHaveCount(0);
-    await expect(page.getByRole("heading", { name: "선택 기간 전체 집계" })).toBeVisible();
-    await expect(page.locator(".ai-operations tbody a").first()).toBeVisible({ timeout: 30_000 });
-    const summaryAttempts = Number(await page.locator(".ai-operations__summary dt",
-      { hasText: "기록된 attempt 수" }).locator("..").locator("dd").textContent());
-    requireCondition(Number.isSafeInteger(summaryAttempts), "The stored attempt count was invalid.");
-    await expect(page.locator(".ai-operations__summary dt", { hasText: "비용" })
-      .locator("..").locator("dd")).toHaveText(
-      summaryAttempts === 0 ? "기록된 Provider 호출 없음" : "비용 미측정");
-    await page.locator(".ai-operations tbody a").first().click();
-    await expect(page.getByRole("heading", { name: "AI 요청 상세" })).toBeVisible();
-    const detailAttempts = Number(await page.locator(".ai-operations__summary dt",
-      { hasText: "기록된 attempt 수" }).locator("..").locator("dd").textContent());
-    requireCondition(Number.isSafeInteger(detailAttempts), "The request attempt count was invalid.");
-    await expect(page.locator(".ai-operations__summary dt", { hasText: "비용" })
-      .locator("..").locator("dd")).toHaveText(
-      detailAttempts === 0 ? "기록된 Provider 호출 없음" : "비용 미측정");
-    await page.setViewportSize({ width: 390, height: 844 });
-    requireCondition(await page.evaluate(() =>
-      document.documentElement.scrollWidth <= window.innerWidth),
-    "The AI operations detail overflowed the 390px document width.");
-    requireCondition(["/api/v1/ai-report-usage", "/api/v1/ai-report-usage/summary"]
-      .every((path) => relay.some((entry) => entry.pathname === path && entry.status === 200)) &&
-      relay.some((entry) => AI_REQUEST_DETAIL_PATH.test(entry.pathname) && entry.status === 200),
-    "The operator did not read all three approved Backend endpoints.");
+    await test.step("GUARD", async () => {
+      await page.goto(`${APP_ORIGIN}/ai-operations`);
+      await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
+    });
+    await test.step("LOGIN", async () => {
+      await signInFromGuard(page, readUserPassword(), "/ai-operations", false,
+        "local-platform-admin", "PLATFORM_ADMIN");
+    });
+    await test.step("USAGE_API", async () => {
+      await expect.poll(() => ["/api/v1/ai-report-usage", "/api/v1/ai-report-usage/summary"]
+        .every((path) => relay.some((entry) => entry.pathname === path && entry.status === 200)),
+      { timeout: 10_000 }).toBe(true);
+    });
+    await test.step("USAGE_UI", async () => {
+      const nav = page.getByRole("navigation", { name: "주요 탐색" });
+      await expect(nav.getByRole("link", { name: "AI 운영" })).toBeVisible();
+      await expect(nav.getByRole("link", { name: "거래" })).toHaveCount(0);
+      await expect(nav.getByRole("link", { name: "사건" })).toHaveCount(0);
+      await expect(page.getByRole("heading", { name: "선택 기간 전체 집계" })).toBeVisible();
+      await expect(page.locator(".ai-operations tbody a").first()).toBeVisible({ timeout: 30_000 });
+      const summaryAttempts = Number(await page.locator(".ai-operations__summary dt",
+        { hasText: "기록된 attempt 수" }).locator("..").locator("dd").textContent());
+      requireCondition(Number.isSafeInteger(summaryAttempts), "The stored attempt count was invalid.");
+      await expect(page.locator(".ai-operations__summary dt", { hasText: "비용" })
+        .locator("..").locator("dd")).toHaveText(
+        summaryAttempts === 0 ? "기록된 Provider 호출 없음" : "비용 미측정");
+    });
+    await test.step("DETAIL_API", async () => {
+      await page.locator(".ai-operations tbody a").first().click();
+      await expect.poll(() => relay.some((entry) =>
+        AI_REQUEST_DETAIL_PATH.test(entry.pathname) && entry.status === 200),
+      { timeout: 10_000 }).toBe(true);
+    });
+    await test.step("DETAIL_UI", async () => {
+      await expect(page.getByRole("heading", { name: "AI 요청 상세" })).toBeVisible();
+      const detailAttempts = Number(await page.locator(".ai-operations__summary dt",
+        { hasText: "기록된 attempt 수" }).locator("..").locator("dd").textContent());
+      requireCondition(Number.isSafeInteger(detailAttempts), "The request attempt count was invalid.");
+      await expect(page.locator(".ai-operations__summary dt", { hasText: "비용" })
+        .locator("..").locator("dd")).toHaveText(
+        detailAttempts === 0 ? "기록된 Provider 호출 없음" : "비용 미측정");
+      await page.setViewportSize({ width: 390, height: 844 });
+      requireCondition(await page.evaluate(() =>
+        document.documentElement.scrollWidth <= window.innerWidth),
+      "The AI operations detail overflowed the 390px document width.");
+      requireCondition(["/api/v1/ai-report-usage", "/api/v1/ai-report-usage/summary"]
+        .every((path) => relay.some((entry) => entry.pathname === path && entry.status === 200)) &&
+        relay.some((entry) => AI_REQUEST_DETAIL_PATH.test(entry.pathname) && entry.status === 200),
+      "The operator did not read all three approved Backend endpoints.");
+    });
   } finally {
-    await relay.dispose();
+    await test.step("CLEANUP", () => relay.dispose());
   }
 });
 
