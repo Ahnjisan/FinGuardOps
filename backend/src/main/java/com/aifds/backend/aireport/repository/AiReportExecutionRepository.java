@@ -9,6 +9,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Optional;
 import java.util.UUID;
+import com.aifds.backend.aireport.event.AiReportExecutionCreated;
 
 @Repository
 public class AiReportExecutionRepository {
@@ -34,6 +35,14 @@ public class AiReportExecutionRepository {
     }
 
     public Optional<AiReportExecution> claim(long leaseSeconds) {
+        return claimInternal(null, leaseSeconds);
+    }
+
+    public Optional<AiReportExecution> claim(UUID executionId, long leaseSeconds) {
+        return claimInternal(executionId, leaseSeconds);
+    }
+
+    private Optional<AiReportExecution> claimInternal(UUID executionId, long leaseSeconds) {
         // Serialize all worker claims across Spring instances. The transaction-scoped
         // advisory lock is released at commit; the GENERATING row remains the
         // durable one-at-a-time semaphore until completion or lease expiry.
@@ -41,13 +50,43 @@ public class AiReportExecutionRepository {
         Integer generating = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM ai_report_execution WHERE status='GENERATING'", Integer.class);
         if (generating == null || generating > 0) return Optional.empty();
-        return jdbc.query("""
+        String selector = executionId == null
+                ? "SELECT id FROM ai_report_execution WHERE status='PENDING' "
+                    + "ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1"
+                : "SELECT id FROM ai_report_execution WHERE execution_id=? AND status='PENDING' "
+                    + "FOR UPDATE SKIP LOCKED";
+        String sql = """
                 UPDATE ai_report_execution SET status='GENERATING',
                 lease_until=now() + (? * interval '1 second')
-                WHERE id=(SELECT id FROM ai_report_execution WHERE status='PENDING'
-                ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1)
+                WHERE id=(%s) AND status='PENDING'
                 RETURNING *
-                """, this::map, leaseSeconds).stream().findFirst();
+                """.formatted(selector);
+        return (executionId == null
+                ? jdbc.query(sql, this::map, leaseSeconds)
+                : jdbc.query(sql, this::map, leaseSeconds, executionId))
+                .stream().findFirst();
+    }
+
+    public Optional<AiReportStatus> status(UUID executionId) {
+        return jdbc.query("SELECT status FROM ai_report_execution WHERE execution_id=?",
+                (row, ignored) -> AiReportStatus.valueOf(row.getString(1)), executionId)
+                .stream().findFirst();
+    }
+
+    public boolean matches(AiReportExecutionCreated event) {
+        Integer count = jdbc.queryForObject("""
+                SELECT count(*) FROM ai_report_execution e
+                JOIN fraud_case c ON c.id=e.fraud_case_id
+                JOIN ai_report_request q ON q.execution_id=e.id
+                JOIN ai_report_outbox o ON o.execution_id=e.execution_id
+                WHERE e.execution_id=? AND o.event_id=? AND c.case_id=? AND q.ai_request_id=?
+                  AND q.execution_shared=false AND q.cache_hit=false
+                  AND e.detection_result_version=? AND e.prompt_version=?
+                  AND e.model_version=? AND q.trace_id=?
+                """, Integer.class, event.executionId(), event.eventId(), event.caseId(),
+                event.initiatingAiRequestId(), event.detectionResultVersion(),
+                event.promptVersion(), event.modelVersion(), event.traceId());
+        return count != null && count == 1;
     }
 
     public void complete(long pk, AiReportStatus status, String failure, String fallbackTrigger) {

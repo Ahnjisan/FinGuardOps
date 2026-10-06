@@ -13,6 +13,7 @@ import com.aifds.backend.aireport.repository.AiReportRequestRepository;
 import com.aifds.backend.aireport.repository.ProviderCallAttemptRepository;
 import com.aifds.backend.fraudcase.entity.FraudCase;
 import com.aifds.backend.fraudcase.repository.FraudCaseRepository;
+import com.aifds.backend.observability.AiReportKafkaMetrics;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -37,6 +38,7 @@ class AiReportWorkerTest {
     private final FraudCaseRepository cases = mock(FraudCaseRepository.class);
     private final AiReportInputProjection projection = mock(AiReportInputProjection.class);
     private final AiReportHttpClient client = mock(AiReportHttpClient.class);
+    private final AiReportKafkaMetrics metrics = mock(AiReportKafkaMetrics.class);
     private final PlatformTransactionManager manager = mock(PlatformTransactionManager.class);
     private final AiReportExecution row = new AiReportExecution(7, UUID.randomUUID(), 3, 5,
             1, "prompt-1", "model-1", AiReportStatus.GENERATING);
@@ -66,7 +68,32 @@ class AiReportWorkerTest {
         return new AiReportWorker(provider(manager), provider(mock(JdbcTemplate.class)),
                 new AiReportProperties.Values("http://localhost:8000", 1000, 300),
                 provider(executions), provider(requests), provider(reports), provider(attempts),
-                provider(cases), provider(projection), provider(client));
+                provider(cases), provider(projection), provider(client),
+                provider(metrics));
+    }
+
+    @Test
+    void busyKafkaSignalLeavesPendingForPollingReconciliation() {
+        AiReportWorker worker = worker();
+        when(executions.claim(row.executionId(), 300)).thenReturn(Optional.empty());
+        org.junit.jupiter.api.Assertions.assertEquals(AiReportWorker.StartResult.NOT_CLAIMED,
+                worker.runExecution(row.executionId()));
+        verify(client, never()).generate(any());
+        worker.tick();
+        verify(executions).claim(row.executionId(), 300);
+        verify(executions).claim(300);
+        verify(client, times(1)).generate(input);
+        verify(metrics).started("polling");
+    }
+
+    @Test
+    void targetedClaimCountsKafkaStartAndNeverClaimsOldest() {
+        AiReportWorker worker = worker();
+        when(executions.claim(row.executionId(), 300)).thenReturn(Optional.of(row));
+        worker.runExecution(row.executionId());
+        verify(executions).claim(row.executionId(), 300);
+        verify(executions, never()).claim(300);
+        verify(metrics).started("kafka");
     }
 
     @Test

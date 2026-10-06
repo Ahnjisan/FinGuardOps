@@ -22,6 +22,10 @@ Flyway V15는 `ai_report_request`, `ai_report_execution`, `ai_report`,
 토큰·지연시간·분류 결과를 기록한다. 로컬 전력·장비 원가가 미측정이면
 `estimated_cost`·`cost_currency`는 NULL이다.
 
+Issue #347의 V18은 새 실행과 최초 요청을 저장한 동일 transaction에
+`AiReportExecutionCreated` outbox를 하나 추가한다. 공유·캐시·동일 키 재생에는
+추가하지 않는다. 상세 제약은 [AI 리포트 Outbox](ai-report-outbox-schema.md)를 따른다.
+
 V17은 `ai_report_execution.fallback_trigger_code VARCHAR(64) NULL`을 추가한다.
 기존 행은 NULL 그대로 두며 `failure_code`나 attempt outcome에서 원인을 추정해
 backfill하지 않는다. 신규 정상 LLM 완료는 두 코드가 모두 NULL, 템플릿 완료는

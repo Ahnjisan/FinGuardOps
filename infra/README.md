@@ -65,3 +65,10 @@ overwrite하지 않는다. 두 생성기는 physical `infra/keycloak` 아래의 
 physical target으로 resolve할 수 있는 환경에서는 approved root 밖 junction도 거부한다. 동시에 filesystem을 바꾸는
 악의적인 local operator에 대한 완전한 TOCTOU 방어는 보장하지 않으며 해당 주체는 local trust
 boundary 밖이다.
+# 선택형 AI 리포트 Kafka 검증
+
+기본 Compose에는 Kafka가 없다. Issue #347의 로컬 검증에는
+`compose.yml`과 `compose.kafka-local.yml`을 함께 지정한다. Kafka JVM 4.3.1
+digest를 고정했고 broker 포트를 host에 공개하지 않는다. Backend는 Kafka 장애
+중에도 DB outbox와 AI 요청 `202/PENDING`을 저장할 수 있어야 한다. 실험 순서와
+정리는 [로컬 Kafka runbook](../docs/09-deployment/local-kafka-ai-report-runbook.md)을 따른다.

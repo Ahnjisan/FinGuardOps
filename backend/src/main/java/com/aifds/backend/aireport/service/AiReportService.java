@@ -6,6 +6,7 @@ import com.aifds.backend.aireport.entity.AiReportExecution;
 import com.aifds.backend.aireport.entity.AiReportRequest;
 import com.aifds.backend.aireport.entity.AiReportStatus;
 import com.aifds.backend.aireport.exception.AiReportException;
+import com.aifds.backend.aireport.event.AiReportExecutionCreated;
 import com.aifds.backend.aireport.repository.AiReportExecutionRepository;
 import com.aifds.backend.aireport.repository.AiReportRepository;
 import com.aifds.backend.aireport.repository.AiReportRequestRepository;
@@ -14,6 +15,7 @@ import com.aifds.backend.fraudcase.entity.FraudCaseStatus;
 import com.aifds.backend.fraudcase.repository.FraudCaseRepository;
 import com.aifds.backend.security.principal.CurrentAuditActorProvider;
 import com.aifds.backend.transaction.validation.IdempotencyKeyValidator;
+import com.aifds.backend.outbox.OutboxRepository;
 import jakarta.persistence.EntityManager;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.http.HttpStatus;
@@ -38,12 +40,13 @@ public class AiReportService {
     private final IdempotencyKeyValidator keys;
     private final CurrentAuditActorProvider actors;
     private final EntityManager entityManager;
+    private final OutboxRepository outbox;
 
     public AiReportService(FraudCaseRepository cases, JdbcTemplate jdbc, AiReportInputProjection projection,
                            AiReportHttpClient client, AiReportRequestRepository requests,
                            AiReportExecutionRepository executions, AiReportRepository reports,
                            IdempotencyKeyValidator keys, CurrentAuditActorProvider actors,
-                           EntityManager entityManager) {
+                           EntityManager entityManager, OutboxRepository outbox) {
         this.cases = cases;
         this.jdbc = jdbc;
         this.projection = projection;
@@ -54,6 +57,7 @@ public class AiReportService {
         this.keys = keys;
         this.actors = actors;
         this.entityManager = entityManager;
+        this.outbox = outbox;
     }
 
     @Transactional
@@ -110,6 +114,7 @@ public class AiReportService {
         if (active.isPresent() && active.get().detectionPk() != input.detectionPk()) {
             throw new AiReportException(HttpStatus.CONFLICT, "STATE_TRANSITION_NOT_ALLOWED");
         }
+        boolean newExecution = cached.isEmpty() && active.isEmpty();
         AiReportExecution execution = cached.isPresent() ? null : active.orElseGet(() ->
                 executions.insert(fraudCase.getId(), input.detectionPk(), body.detectionResultVersion(),
                         identity.promptVersion(), identity.modelVersion()));
@@ -121,6 +126,11 @@ public class AiReportService {
                 key, fingerprint, actors.currentUserSubject().toString(), body.detectionResultVersion(),
                 identity.promptVersion(), identity.modelVersion(), status,
                 cached.isPresent(), active.isPresent(), traceId);
+        if (newExecution) {
+            outbox.insert(AiReportExecutionCreated.newExecution(execution.executionId(),
+                    created.aiRequestId(), caseId, body.detectionResultVersion(),
+                    identity.promptVersion(), identity.modelVersion(), traceId));
+        }
         return new CreateOutcome(status(created), !terminal(status));
     }
 

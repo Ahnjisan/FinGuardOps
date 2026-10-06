@@ -1,5 +1,10 @@
 # FinGuardOps 시스템 아키텍처
 
+> Issue #347: 선택형 로컬 Kafka overlay에서 새 AI 리포트 실행만 V18 DB outbox로
+> 발행하고, Consumer가 지정 실행의 기존 Worker 작업을 시작한다. 기본 실행은
+> Kafka 비활성이고 DB polling은 유지된다. 거래·탐지·사건·Audit의 소유권과
+> 동기 commit 경계는 변경하지 않는다. 운영 Kafka 배포는 이 범위가 아니다.
+
 ## 1. 문서 목적
 
 이 문서는 FinGuardOps의 주요 구성요소, 책임, 데이터 소유권, 통신 방식, 장애 경계, 주요 업무 흐름과 기술 도입 순서를 정의한다.
@@ -234,7 +239,7 @@ flowchart LR
     External[External Risk Mock]
     PostgreSQL[(PostgreSQL)]
     Redis[(Redis)]
-    Kafka[(Kafka<br/>후속)]
+    Kafka[(Kafka<br/>선택형 로컬 AI 실행)]
     LLM[LLM Provider]
     Obs[Observability Stack<br/>후속]
     Delivery[GitHub Actions · Kubernetes · AWS<br/>배포 환경 후보]
@@ -248,8 +253,8 @@ flowchart LR
     Spring -->|업무 데이터 읽기·쓰기| PostgreSQL
     Spring -.->|정확 일치 캐시·단기 캐시 후보| Redis
     FastAPI -->|고위험 사건 리포트 생성| LLM
-    Spring -.->|비동기 작업·이벤트, 후속| Kafka
-    Kafka -.->|비동기 실행, 후속| FastAPI
+    Spring -.->|AI 실행 생성 V18 outbox 발행| Kafka
+    Kafka -.->|executionId 지정 신호| Spring
     Spring -.-> Obs
     FastAPI -.-> Obs
     PostgreSQL -.-> Obs
@@ -567,7 +572,7 @@ Reason Code 또는 시맨틱 유사도만으로 다른 사건의 리포트를 �
 
 #### 선정 이유
 
-Kafka는 후속 단계에서 다음 작업을 거래 응답 경로와 분리하고 재처리하기 위한 후보이다.
+Issue #347에서 Kafka는 선택형 로컬 AI 리포트 실행 시작에만 사용한다. 다음 다른 작업의 분리와 재처리는 후속 후보다.
 
 - AI 리포트 요청
 - 사건 관련 이벤트
@@ -975,7 +980,7 @@ sequenceDiagram
     end
 ```
 
-AI 리포트는 논리적으로 비동기이다. 초기 실행 메커니즘과 Kafka 적용 시점은 후속 설계에서 확정한다. 상태는 기존 문서의 `PENDING`, `GENERATING`, `COMPLETED`, `FALLBACK_COMPLETED`, `FAILED`를 유지한다.
+AI 리포트는 비동기이며 DB polling Worker가 구현되어 있다. Issue #347의 선택형 Kafka Consumer는 신규 실행을 지정해 같은 Worker 작업을 시작한다. 상태는 `PENDING`, `GENERATING`, `COMPLETED`, `FALLBACK_COMPLETED`, `FAILED`를 유지한다.
 
 ### 13.4 플랫폼 운영
 
