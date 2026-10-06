@@ -433,7 +433,7 @@ class IdempotencyRecoveryCommandIntegrationTest
     }
 
     @Test
-    void repeatedCommandsHaveOneWinnerAndMigrationsRemainV1ThroughV16()
+    void repeatedCommandsHaveOneWinnerAndMigrationsRemainV1ThroughV17()
             throws Exception {
         RecoveryFixture fixture = finalizedFixture(
                 RiskLevel.LOW,
@@ -471,7 +471,7 @@ class IdempotencyRecoveryCommandIntegrationTest
                 String.class
         )).containsExactly(
                 "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
-                "11", "12", "13", "14", "15", "16"
+                "11", "12", "13", "14", "15", "16", "17"
         );
     }
 

@@ -26,15 +26,16 @@ const attempt = { attemptNumber: 1, provider: "OLLAMA_LOCAL", model: null,
   estimatedCost: null, costCurrency: null, latencyMs: 4000 };
 
 it("accepts stored attempt detail without invented timestamps or cost", async () => {
-  mockFetchOnce(async () => jsonResponse({ ...base, usageFinalized: true,
+  mockFetchOnce(async () => jsonResponse({ ...base, fallbackTriggerCode: "LLM_TIMEOUT", usageFinalized: true,
     requestedByRef: caseId, attempts: [attempt], queryTraceId: "trace-query-001" }));
   const result = await fetchAiRequestDetail(auth(), id);
   expect(result.attempts).toHaveLength(1);
   expect(result.costBreakdown).toBeNull();
+  expect(result.fallbackTriggerCode).toBe("LLM_TIMEOUT");
 });
 
 it("rejects invented attempt failure detail", async () => {
-  mockFetchOnce(async () => jsonResponse({ ...base, usageFinalized: true,
+  mockFetchOnce(async () => jsonResponse({ ...base, fallbackTriggerCode: null, usageFinalized: true,
     requestedByRef: caseId, attempts: [{ ...attempt, failureCode: "TIMEOUT" }],
     queryTraceId: "trace-query-001" }));
   await expect(fetchAiRequestDetail(auth(), id)).rejects.toBeInstanceOf(InvalidResponseError);

@@ -92,9 +92,9 @@ class InvestigationNoteIntegrationTest extends PostgresqlIntegrationTestSupport 
     }
 
     @Test
-    void freshV16RetainsExactAppendOnlySchemaAndDefendsUnicodeAndAuditJsonNull() {
-        assertThat(flyway.info().applied()).hasSize(16);
-        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("16");
+    void freshV17RetainsExactAppendOnlySchemaAndDefendsUnicodeAndAuditJsonNull() {
+        assertThat(flyway.info().applied()).hasSize(17);
+        assertThat(flyway.info().current().getVersion().getVersion()).isEqualTo("17");
         assertThat(columns("investigation_note")).containsExactlyInAnyOrder(
                 "id", "note_id", "fraud_case_id", "author_type", "author_ref",
                 "content", "created_at"

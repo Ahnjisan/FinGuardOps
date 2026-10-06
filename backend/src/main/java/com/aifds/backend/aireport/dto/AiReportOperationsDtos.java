@@ -29,10 +29,11 @@ public final class AiReportOperationsDtos {
                          Long outputTokens, Long totalTokens, String estimatedCost,
                          String costCurrency, List<Object> costBreakdown, Long latencyMs,
                          boolean cacheHit, boolean fallbackUsed, Instant requestedAt,
-                         Instant completedAt, String failureCode, String traceId,
+                          Instant completedAt, String failureCode, String fallbackTriggerCode,
+                          String traceId,
                          boolean usageFinalized, String requestedByRef, List<Attempt> attempts,
                          String queryTraceId) {
-        public Detail(Item item, boolean usageFinalized, String requestedByRef,
+        public Detail(Item item, String fallbackTriggerCode, boolean usageFinalized, String requestedByRef,
                       List<Attempt> attempts, String queryTraceId) {
             this(item.aiRequestId(), item.executionId(), item.executionShared(),
                     item.initiatingAiRequestId(), item.reportId(), item.caseId(),
@@ -42,7 +43,8 @@ public final class AiReportOperationsDtos {
                     item.outputTokens(), item.totalTokens(), item.estimatedCost(),
                     item.costCurrency(), item.costBreakdown(), item.latencyMs(),
                     item.cacheHit(), item.fallbackUsed(), item.requestedAt(),
-                    item.completedAt(), item.failureCode(), item.traceId(), usageFinalized,
+                    item.completedAt(), item.failureCode(), fallbackTriggerCode,
+                    item.traceId(), usageFinalized,
                     requestedByRef, attempts, queryTraceId);
         }
     }

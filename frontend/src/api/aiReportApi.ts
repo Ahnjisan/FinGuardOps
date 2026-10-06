@@ -21,6 +21,7 @@ export interface AiReportRequestStatus {
   readonly requestedAt: string;
   readonly generatedAt: string | null;
   readonly failureCode: string | null;
+  readonly fallbackTriggerCode: string | null;
   readonly resultLocation: string;
   readonly traceId: string;
 }
@@ -41,6 +42,7 @@ export interface AiReportBody {
   readonly modelVersion: string;
   readonly generatedAt: string;
   readonly failureCode: string | null;
+  readonly fallbackTriggerCode: string | null;
   readonly traceId: string;
 }
 
@@ -73,7 +75,7 @@ function status(value: unknown): value is AiReportRequestStatus {
   return onlyKeys(value, ["aiRequestId", "executionId", "executionShared",
     "initiatingAiRequestId", "reportId", "caseId", "detectionResultVersion",
     "reportStatus", "reportSource", "sourceAiRequestId", "cacheHit", "requestedAt",
-    "generatedAt", "failureCode", "resultLocation", "traceId"]) &&
+    "generatedAt", "failureCode", "fallbackTriggerCode", "resultLocation", "traceId"]) &&
     uuid(value.aiRequestId) &&
     (value.executionId === null || uuid(value.executionId)) &&
     typeof value.executionShared === "boolean" &&
@@ -86,6 +88,7 @@ function status(value: unknown): value is AiReportRequestStatus {
     typeof value.cacheHit === "boolean" && typeof value.requestedAt === "string" &&
     (value.generatedAt === null || typeof value.generatedAt === "string") &&
     (value.failureCode === null || typeof value.failureCode === "string") &&
+    (value.fallbackTriggerCode === null || typeof value.fallbackTriggerCode === "string") &&
     value.resultLocation === `/api/v1/cases/${value.caseId}/ai-reports/current` &&
     typeof value.traceId === "string";
 }
@@ -95,7 +98,7 @@ function report(value: unknown): value is AiReportBody {
   return onlyKeys(value, ["reportId", "executionId", "initiatingAiRequestId", "caseId",
     "detectionResultVersion", "reportStatus", "reportSource", "summary", "keyReasons",
     "timelineSummary", "investigationChecklist", "promptVersion", "modelVersion",
-    "generatedAt", "failureCode", "traceId"]) &&
+    "generatedAt", "failureCode", "fallbackTriggerCode", "traceId"]) &&
     uuid(value.reportId) && uuid(value.executionId) &&
     uuid(value.initiatingAiRequestId) && uuid(value.caseId) &&
     version(value.detectionResultVersion) &&
@@ -110,6 +113,7 @@ function report(value: unknown): value is AiReportBody {
     typeof value.promptVersion === "string" && typeof value.modelVersion === "string" &&
     typeof value.generatedAt === "string" &&
     (value.failureCode === null || typeof value.failureCode === "string") &&
+    (value.fallbackTriggerCode === null || typeof value.fallbackTriggerCode === "string") &&
     typeof value.traceId === "string";
 }
 

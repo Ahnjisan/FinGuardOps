@@ -69,6 +69,14 @@ def observed_model_version(settings: Settings, client: OllamaClient) -> str:
     return public_model_version(settings, actual)
 
 
+def safe_failure_code(code: str) -> str:
+    if code == "TIMEOUT":
+        return "LLM_TIMEOUT"
+    if code == "INVALID_OUTPUT":
+        return "LLM_OUTPUT_REJECTED"
+    return "LLM_UNAVAILABLE"
+
+
 class AiReportService:
     def __init__(self, settings: Settings, client: OllamaClient | None = None) -> None:
         self.settings = settings
@@ -105,6 +113,7 @@ class AiReportService:
             start = time.monotonic()
             input_tokens = None
             output_tokens = None
+            attempted = True
             try:
                 raw, input_tokens, output_tokens, latency = self.client.generate(prompt)
                 content = ReportContent.model_validate_json(raw)
@@ -142,19 +151,16 @@ class AiReportService:
                     source="LLM",
                     content=content,
                     failureCode=None,
+                    fallbackTriggerCode=None,
                     modelVersion=version,
                     promptVersion=self.settings.ai_report_prompt_version,
                     attempts=attempts,
                 )
             except OllamaFailure as exc:
                 failure = exc.code
+                attempted = exc.attempted
             except (ValidationError, ValueError):
                 failure = "INVALID_OUTPUT"
-            attempted = failure not in {
-                "MODEL_NOT_PINNED",
-                "MODEL_VERSION_MISMATCH",
-                "MODEL_METADATA_UNAVAILABLE",
-            }
             if attempted:
                 attempts.append(
                     ProviderAttempt(
@@ -164,11 +170,11 @@ class AiReportService:
                         outputTokens=output_tokens,
                         latencyMs=round((time.monotonic() - start) * 1000),
                         outcome=failure
-                        if failure in {"TIMEOUT", "INVALID_OUTPUT"}
+                        if failure in {"TIMEOUT", "CONNECTION_FAILED", "INVALID_OUTPUT"}
                         else "PROVIDER_ERROR",
                     )
                 )
-            if failure not in {"TIMEOUT", "PROVIDER_ERROR"} or number == 1:
+            if failure not in {"TIMEOUT", "CONNECTION_FAILED"} or number == 1:
                 break
         try:
             fallback = build_fallback(request)
@@ -176,7 +182,8 @@ class AiReportService:
                 status="FALLBACK_COMPLETED",
                 source="TEMPLATE_FALLBACK",
                 content=fallback,
-                failureCode=failure,
+                failureCode=None,
+                fallbackTriggerCode=safe_failure_code(failure),
                 modelVersion=version,
                 promptVersion=self.settings.ai_report_prompt_version,
                 attempts=attempts,
@@ -186,7 +193,8 @@ class AiReportService:
                 status="FAILED",
                 source=None,
                 content=None,
-                failureCode="FALLBACK_FAILED",
+                failureCode="TEMPLATE_FALLBACK_FAILED",
+                fallbackTriggerCode=safe_failure_code(failure),
                 modelVersion=version,
                 promptVersion=self.settings.ai_report_prompt_version,
                 attempts=attempts,

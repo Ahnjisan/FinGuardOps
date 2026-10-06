@@ -81,25 +81,34 @@ public class AiReportWorker {
             return;
         }
         AiReportExecution row = claimed.get();
-        AiReportDtos.GenerationResult generated;
+        AiReportDtos.GenerationRequest input;
         try {
-            var input = transactions.execute(ignored -> {
+            var projected = transactions.execute(ignored -> {
                 var fraudCase = cases.findById(row.casePk()).orElseThrow();
                 return projection.project(fraudCase, row.detectionResultVersion(),
                         requests.initiators(row.id()).get(0).traceId());
             });
-            if (input == null) throw new IllegalStateException("Projection unavailable");
-            if (input.detectionPk() != row.detectionPk()) {
-                throw new IllegalStateException("Adopted result changed");
+            if (projected == null || projected.detectionPk() != row.detectionPk()) {
+                fail(transactions, executions, requests, row, "REPORT_INPUT_CHANGED");
+                return;
             }
-            generated = client.generate(input.request());
-            validate(generated, row, input.request());
+            input = projected.request();
+        } catch (com.aifds.backend.aireport.exception.AiReportException
+                 | java.util.NoSuchElementException exception) {
+            fail(transactions, executions, requests, row, "REPORT_INPUT_CHANGED");
+            return;
+        }
+        AiReportDtos.GenerationResult generated;
+        try {
+            generated = client.generate(input);
+        } catch (AiReportHttpClient.GenerationFailure exception) {
+            fail(transactions, executions, requests, row, exception.code());
+            return;
+        }
+        try {
+            validate(generated, row, input);
         } catch (RuntimeException exception) {
-            transactions.executeWithoutResult(ignored -> {
-                if (!executions.stillGenerating(row.id())) return;
-                executions.complete(row.id(), AiReportStatus.FAILED, "DEPENDENCY_UNAVAILABLE");
-                requests.fail(row.id());
-            });
+            fail(transactions, executions, requests, row, "FASTAPI_RESPONSE_INVALID");
             return;
         }
         transactions.executeWithoutResult(ignored -> {
@@ -109,15 +118,26 @@ public class AiReportWorker {
             }
             AiReportStatus status = AiReportStatus.valueOf(generated.status());
             if (status == AiReportStatus.FAILED) {
-                executions.complete(row.id(), status, generated.failureCode());
+                executions.complete(row.id(), status, generated.failureCode(),
+                        generated.fallbackTriggerCode());
                 requests.fail(row.id());
                 return;
             }
             String traceId = requests.initiators(row.id()).get(0).traceId();
             var report = reports.insert(row.casePk(), row.id(), row.detectionResultVersion(),
                     row.promptVersion(), row.modelVersion(), generated, traceId);
-            executions.complete(row.id(), status, generated.failureCode());
+            executions.complete(row.id(), status, generated.failureCode(),
+                    generated.fallbackTriggerCode());
             requests.complete(row.id(), report.id(), status);
+        });
+    }
+
+    private void fail(TransactionTemplate transactions, AiReportExecutionRepository executions,
+                      AiReportRequestRepository requests, AiReportExecution row, String code) {
+        transactions.executeWithoutResult(ignored -> {
+            if (!executions.stillGenerating(row.id())) return;
+            executions.complete(row.id(), AiReportStatus.FAILED, code, null);
+            requests.fail(row.id());
         });
     }
 
@@ -130,6 +150,8 @@ public class AiReportWorker {
         }
         for (var attempt : result.attempts()) {
             if (attempt == null || !"OLLAMA_LOCAL".equals(attempt.provider())
+                    || !java.util.Set.of("COMPLETED", "TIMEOUT", "CONNECTION_FAILED",
+                    "PROVIDER_ERROR", "INVALID_OUTPUT").contains(attempt.outcome())
                     || attempt.latencyMs() < 0
                     || (attempt.inputTokens() != null && attempt.inputTokens() < 0)
                     || (attempt.outputTokens() != null && attempt.outputTokens() < 0)) {
@@ -146,17 +168,21 @@ public class AiReportWorker {
                 && status != AiReportStatus.FAILED) {
             throw new IllegalStateException("AI response status invalid");
         }
-        if (result.failureCode() != null && !java.util.Set.of("MODEL_NOT_PINNED",
-                "MODEL_VERSION_MISMATCH", "MODEL_METADATA_UNAVAILABLE", "TIMEOUT",
-                "PROVIDER_ERROR", "INVALID_OUTPUT", "FALLBACK_FAILED")
-                .contains(result.failureCode())) {
+        if (result.fallbackTriggerCode() != null && !java.util.Set.of("LLM_TIMEOUT",
+                "LLM_UNAVAILABLE", "LLM_OUTPUT_REJECTED")
+                .contains(result.fallbackTriggerCode())) {
             throw new IllegalStateException("AI failure code invalid");
         }
         if ((status == AiReportStatus.COMPLETED && !"LLM".equals(result.source()))
                 || (status == AiReportStatus.FALLBACK_COMPLETED
                     && !"TEMPLATE_FALLBACK".equals(result.source()))
-                || (status == AiReportStatus.COMPLETED && result.failureCode() != null)
-                || (status != AiReportStatus.COMPLETED && result.failureCode() == null)) {
+                || (status == AiReportStatus.COMPLETED
+                    && (result.failureCode() != null || result.fallbackTriggerCode() != null))
+                || (status == AiReportStatus.FALLBACK_COMPLETED
+                    && (result.failureCode() != null || result.fallbackTriggerCode() == null))
+                || (status == AiReportStatus.FAILED
+                    && (!"TEMPLATE_FALLBACK_FAILED".equals(result.failureCode())
+                        || result.fallbackTriggerCode() == null))) {
             throw new IllegalStateException("AI response source invalid");
         }
         if (status == AiReportStatus.FAILED) {

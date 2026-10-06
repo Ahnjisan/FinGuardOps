@@ -1,3 +1,5 @@
+from urllib.error import HTTPError, URLError
+
 import pytest
 
 from finguardops_ai.core.config import Settings
@@ -33,6 +35,26 @@ def test_digest_and_quantization_are_checked(monkeypatch: pytest.MonkeyPatch) ->
 def test_unpinned_model_never_calls_provider() -> None:
     with pytest.raises(OllamaFailure, match="MODEL_NOT_PINNED"):
         OllamaClient(Settings()).verify_model()
+
+
+def test_transport_classifies_connection_timeout_and_http_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = OllamaClient(Settings())
+    failures = [
+        (URLError(ConnectionRefusedError("synthetic refusal")), "CONNECTION_FAILED"),
+        (URLError(TimeoutError("synthetic read timeout")), "TIMEOUT"),
+        (HTTPError("http://localhost", 503, "synthetic", {}, None), "PROVIDER_ERROR"),
+    ]
+    for error, code in failures:
+        monkeypatch.setattr(
+            client.opener,
+            "open",
+            lambda *args, error=error, **kwargs: (_ for _ in ()).throw(error),
+        )
+        with pytest.raises(OllamaFailure) as raised:
+            client._json("/api/chat", {"model": "synthetic"})
+        assert raised.value.code == code
 
 
 def test_observed_digest_changes_opaque_cache_identity(

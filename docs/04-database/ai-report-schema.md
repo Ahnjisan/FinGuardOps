@@ -22,6 +22,14 @@ Flyway V15는 `ai_report_request`, `ai_report_execution`, `ai_report`,
 토큰·지연시간·분류 결과를 기록한다. 로컬 전력·장비 원가가 미측정이면
 `estimated_cost`·`cost_currency`는 NULL이다.
 
+V17은 `ai_report_execution.fallback_trigger_code VARCHAR(64) NULL`을 추가한다.
+기존 행은 NULL 그대로 두며 `failure_code`나 attempt outcome에서 원인을 추정해
+backfill하지 않는다. 신규 정상 LLM 완료는 두 코드가 모두 NULL, 템플릿 완료는
+최종 `failure_code=NULL`과 안전한 `fallback_trigger_code`, 템플릿도 실패하면
+`failure_code=TEMPLATE_FALLBACK_FAILED`와 원인 코드를 저장한다. 기존 fallback
+행의 `failure_code` 의미는 당시 기록 그대로 유지한다. 저장 트랜잭션이 실패하면
+새 코드의 영속화도 보장되지 않는다.
+
 현재 리포트는 성공한 **실행 최초 요청**의 `requested_at DESC`,
 `ai_request_id DESC`로 정한다. 새 요청이 진행 중이거나 실패해도 과거 성공
 결과를 숨기지 않으며, 공개 응답은 각기 다른 탐지 버전을 명시한다.

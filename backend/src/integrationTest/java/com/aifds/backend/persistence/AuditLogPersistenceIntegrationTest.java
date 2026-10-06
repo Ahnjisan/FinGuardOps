@@ -64,12 +64,12 @@ class AuditLogPersistenceIntegrationTest
     private Flyway flyway;
 
     @Test
-    void appliesFreshV1ThroughV16WithAuditSchemaAndAppendOnlyTrigger() {
-        assertThat(flyway.info().applied()).hasSize(16);
+    void appliesFreshV1ThroughV17WithAuditSchemaAndAppendOnlyTrigger() {
+        assertThat(flyway.info().applied()).hasSize(17);
         assertThat(flyway.info().current().getVersion().getVersion())
-                .isEqualTo("16");
+                .isEqualTo("17");
         assertThat(flyway.info().current().getDescription())
-                .isEqualTo("add transaction intake maintenance recovery");
+                .isEqualTo("add ai report fallback trigger code");
         assertThat(columns("audit_log")).containsExactlyInAnyOrder(
                 "id",
                 "audit_id",

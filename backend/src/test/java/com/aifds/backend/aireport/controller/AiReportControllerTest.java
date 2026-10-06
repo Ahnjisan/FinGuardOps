@@ -32,7 +32,8 @@ class AiReportControllerTest {
         UUID caseId = UUID.randomUUID();
         var response = new AiReportDtos.RequestStatus(UUID.randomUUID(), UUID.randomUUID(), false,
                 UUID.randomUUID(), null, caseId, 1, "PENDING", null, null, false,
-                Instant.now(), null, null, "/api/v1/cases/" + caseId + "/ai-reports/current",
+                Instant.now(), null, null, null,
+                "/api/v1/cases/" + caseId + "/ai-reports/current",
                 "trace-test-001");
         when(service.create(eq(caseId), eq("report-test-001"), any(), eq("trace-test-001")))
                 .thenReturn(new AiReportService.CreateOutcome(response, true));

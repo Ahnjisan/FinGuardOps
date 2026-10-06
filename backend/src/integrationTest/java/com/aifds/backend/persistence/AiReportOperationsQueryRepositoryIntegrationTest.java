@@ -47,9 +47,10 @@ class AiReportOperationsQueryRepositoryIntegrationTest {
                     """, Long.class, UUID.randomUUID(), "synthetic-analyst", at, at, at);
             Long execution = jdbc.queryForObject("""
                     INSERT INTO ai_report_execution(execution_id,fraud_case_id,detection_result_id,
-                    detection_result_version,prompt_version,model_version,status)
-                    VALUES (?,?,?,1,'prompt-1','model-1','FALLBACK_COMPLETED') RETURNING id
+                    detection_result_version,prompt_version,model_version,status,fallback_trigger_code)
+                    VALUES (?,?,?,1,'prompt-1','model-1','FALLBACK_COMPLETED','LLM_TIMEOUT') RETURNING id
                     """, Long.class, UUID.randomUUID(), casePk, detection);
+            UUID initiatingId = UUID.randomUUID();
             for (int i = 0; i < 2; i++) {
                 jdbc.update("""
                         INSERT INTO ai_report_request(ai_request_id,fraud_case_id,execution_id,
@@ -57,15 +58,17 @@ class AiReportOperationsQueryRepositoryIntegrationTest {
                         prompt_version,model_version,status,cache_hit,execution_shared,trace_id,requested_at)
                         VALUES (?,?,?,?,?,'synthetic-analyst',1,'prompt-1','model-1',
                         'FALLBACK_COMPLETED',false,?,'trace-test-001',?)
-                        """, UUID.randomUUID(), casePk, execution, "key-" + i, "a".repeat(64), i == 1, at);
+                        """, i == 0 ? initiatingId : UUID.randomUUID(), casePk, execution,
+                        "key-" + i, "a".repeat(64), i == 1, at);
             }
+            UUID cacheId = UUID.randomUUID();
             jdbc.update("""
                     INSERT INTO ai_report_request(ai_request_id,fraud_case_id,idempotency_key,
                     fingerprint,requested_by,detection_result_version,prompt_version,model_version,
                     status,cache_hit,execution_shared,trace_id,requested_at)
                     VALUES (?,?,'cache-key',?,'synthetic-analyst',1,'prompt-1','model-1',
                     'FALLBACK_COMPLETED',true,false,'trace-test-001',?)
-                    """, UUID.randomUUID(), casePk, "b".repeat(64), at);
+                    """, cacheId, casePk, "b".repeat(64), at);
             for (int i = 1; i <= 2; i++) {
                 jdbc.update("""
                         INSERT INTO provider_call_attempt(execution_id,attempt_number,provider,
@@ -83,6 +86,8 @@ class AiReportOperationsQueryRepositoryIntegrationTest {
             assertEquals(2, counts.attempts());
             assertEquals(1, counts.missingInput());
             assertNull(repo.detail(UUID.randomUUID()).orElse(null));
+            assertEquals("LLM_TIMEOUT", repo.detail(initiatingId).orElseThrow().fallbackTriggerCode());
+            assertNull(repo.detail(cacheId).orElseThrow().fallbackTriggerCode());
             var filtered = AiReportUsageQuery.parse(Map.of("from", new String[]{"2026-10-01T00:00:00Z"},
                     "to", new String[]{"2026-10-02T00:00:00Z"},
                     "provider", new String[]{"OLLAMA_LOCAL"}), true);

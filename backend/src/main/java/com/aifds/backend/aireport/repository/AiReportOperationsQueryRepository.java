@@ -109,7 +109,7 @@ public class AiReportOperationsQueryRepository {
                    q.execution_shared,q.report_id AS report_pk,r.report_id,c.case_id,
                    q.detection_result_version,q.status,r.report_source,q.prompt_version,q.model_version,
                    q.cache_hit,q.requested_at,q.requested_by,q.trace_id,e.status AS execution_status,
-                   e.failure_code,r.generated_at
+                   e.failure_code,e.fallback_trigger_code,r.generated_at
             FROM ai_report_request q
             """ + JOINS;
 
@@ -123,7 +123,7 @@ public class AiReportOperationsQueryRepository {
                 rs.getString("model_version"), rs.getBoolean("cache_hit"),
                 rs.getTimestamp("requested_at").toInstant(), rs.getString("requested_by"),
                 rs.getString("trace_id"), rs.getString("execution_status"),
-                rs.getString("failure_code"));
+                rs.getString("failure_code"), rs.getString("fallback_trigger_code"));
     }
 
     private Filter filter(AiReportUsageQuery q) {
@@ -152,7 +152,8 @@ public class AiReportOperationsQueryRepository {
                       int detectionResultVersion, String status, String reportSource,
                       String promptVersion, String modelVersion, boolean cacheHit,
                       Instant requestedAt, String requestedBy, String traceId,
-                      String executionStatus, String failureCode) { }
+                       String executionStatus, String failureCode,
+                       String fallbackTriggerCode) { }
     public record Counts(long requests, long executions, long attempts, long successes,
                          long failures, long inProgress, long fallbacks, long cacheHits,
                          long missingInput, Long input, long missingOutput, Long output) { }

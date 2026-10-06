@@ -19,9 +19,10 @@ OLLAMA_CHAT_PARAMETERS = {"format": "json", "think": False, "temperature": 0}
 
 
 class OllamaFailure(Exception):
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, attempted: bool = True) -> None:
         super().__init__(code)
         self.code = code
+        self.attempted = attempted
 
 
 class OllamaClient:
@@ -64,17 +65,42 @@ class OllamaClient:
                 return parsed
         except TimeoutError as exc:
             raise OllamaFailure("TIMEOUT") from exc
-        except (HTTPError, URLError, OSError, ValueError, json.JSONDecodeError) as exc:
+        except HTTPError as exc:
+            raise OllamaFailure("PROVIDER_ERROR") from exc
+        except URLError as exc:
+            if isinstance(exc.reason, TimeoutError):
+                raise OllamaFailure("TIMEOUT") from exc
+            if isinstance(
+                exc.reason,
+                (
+                    ConnectionRefusedError,
+                    ConnectionResetError,
+                    ConnectionAbortedError,
+                    BrokenPipeError,
+                ),
+            ):
+                raise OllamaFailure("CONNECTION_FAILED") from exc
+            raise OllamaFailure("PROVIDER_ERROR") from exc
+        except (
+            ConnectionRefusedError,
+            ConnectionResetError,
+            ConnectionAbortedError,
+            BrokenPipeError,
+        ) as exc:
+            raise OllamaFailure("CONNECTION_FAILED") from exc
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise OllamaFailure("PROVIDER_ERROR") from exc
 
     def model_metadata(self) -> tuple[str, str]:
         try:
             tags = self._json("/api/tags")
         except OllamaFailure as exc:
-            raise OllamaFailure("MODEL_METADATA_UNAVAILABLE") from exc
+            if exc.code in {"TIMEOUT", "CONNECTION_FAILED"}:
+                raise OllamaFailure(exc.code, attempted=False) from exc
+            raise OllamaFailure("MODEL_METADATA_UNAVAILABLE", attempted=False) from exc
         models = tags.get("models")
         if not isinstance(models, list):
-            raise OllamaFailure("MODEL_METADATA_UNAVAILABLE")
+            raise OllamaFailure("MODEL_METADATA_UNAVAILABLE", attempted=False)
         match = next(
             (
                 item
@@ -84,20 +110,20 @@ class OllamaClient:
             None,
         )
         if match is None or not isinstance(match.get("digest"), str):
-            raise OllamaFailure("MODEL_METADATA_UNAVAILABLE")
+            raise OllamaFailure("MODEL_METADATA_UNAVAILABLE", attempted=False)
         details = match.get("details")
         if not isinstance(details, dict) or not isinstance(details.get("quantization_level"), str):
-            raise OllamaFailure("MODEL_METADATA_UNAVAILABLE")
+            raise OllamaFailure("MODEL_METADATA_UNAVAILABLE", attempted=False)
         return match["digest"], details["quantization_level"]
 
     def verify_model(self) -> None:
         configured_digest = self.settings.ollama_model_digest
         configured_quantization = self.settings.ollama_quantization
         if not configured_digest or not configured_quantization:
-            raise OllamaFailure("MODEL_NOT_PINNED")
+            raise OllamaFailure("MODEL_NOT_PINNED", attempted=False)
         actual_digest, actual_quantization = self.model_metadata()
         if actual_digest != configured_digest or actual_quantization != configured_quantization:
-            raise OllamaFailure("MODEL_VERSION_MISMATCH")
+            raise OllamaFailure("MODEL_VERSION_MISMATCH", attempted=False)
 
     def generate(self, prompt: str) -> tuple[str, int | None, int | None, int]:
         self.verify_model()

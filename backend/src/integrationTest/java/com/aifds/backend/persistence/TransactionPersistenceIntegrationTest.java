@@ -87,7 +87,7 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
         MigrationInfo[] appliedMigrations = flyway.info().applied();
 
         assertThat(jdbcTemplate.queryForObject("SELECT 1", Integer.class)).isEqualTo(1);
-        assertThat(appliedMigrations).hasSize(16);
+        assertThat(appliedMigrations).hasSize(17);
         assertThat(appliedMigrations[0].getVersion().getVersion()).isEqualTo("1");
         assertThat(appliedMigrations[0].getState()).isEqualTo(MigrationState.SUCCESS);
         assertThat(appliedMigrations[1].getVersion().getVersion()).isEqualTo("2");
@@ -147,6 +147,10 @@ class TransactionPersistenceIntegrationTest extends PostgresqlIntegrationTestSup
                 .isEqualTo("16");
         assertThat(appliedMigrations[15].getDescription())
                 .isEqualTo("add transaction intake maintenance recovery");
+        assertThat(appliedMigrations[16].getVersion().getVersion()).isEqualTo("17");
+        assertThat(appliedMigrations[16].getDescription())
+                .isEqualTo("add ai report fallback trigger code");
+        assertThat(appliedMigrations[16].getState()).isEqualTo(MigrationState.SUCCESS);
         assertThat(appliedMigrations[15].getState())
                 .isEqualTo(MigrationState.SUCCESS);
         assertThat(tableNames()).contains(

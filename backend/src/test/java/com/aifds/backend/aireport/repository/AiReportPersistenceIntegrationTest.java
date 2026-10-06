@@ -12,6 +12,7 @@ import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import com.aifds.backend.aireport.entity.AiReportStatus;
+import com.aifds.backend.aireport.dto.AiReportDtos;
 
 import java.time.Instant;
 import java.sql.Timestamp;
@@ -27,7 +28,8 @@ class AiReportPersistenceIntegrationTest {
             postgres.start();
             var dataSource = new DriverManagerDataSource(postgres.getJdbcUrl(),
                     postgres.getUsername(), postgres.getPassword());
-            Flyway.configure().dataSource(dataSource).locations("classpath:db/migration").load().migrate();
+            Flyway.configure().dataSource(dataSource).locations("classpath:db/migration")
+                    .target("16").load().migrate();
             JdbcTemplate jdbc = new JdbcTemplate(dataSource);
             UUID transactionId = UUID.randomUUID();
             UUID resultId = UUID.randomUUID();
@@ -52,8 +54,22 @@ class AiReportPersistenceIntegrationTest {
                     created_at,last_changed_at)
                     VALUES (?,'IN_REVIEW',?,?,?,?) RETURNING id
                     """, Long.class, caseId, UUID.randomUUID().toString(), timestamp, timestamp, timestamp);
+            Long legacy = jdbc.queryForObject("""
+                    INSERT INTO ai_report_execution(execution_id,fraud_case_id,detection_result_id,
+                    detection_result_version,prompt_version,model_version,status,failure_code)
+                    VALUES (?,?,?,1,'legacy-prompt','legacy-model','FAILED','TIMEOUT') RETURNING id
+                    """, Long.class, UUID.randomUUID(), casePk, resultPk);
+            Flyway.configure().dataSource(dataSource).locations("classpath:db/migration").load().migrate();
+            assertEquals("TIMEOUT", jdbc.queryForObject(
+                    "SELECT failure_code FROM ai_report_execution WHERE id=?", String.class, legacy));
+            assertEquals(null, jdbc.queryForObject(
+                    "SELECT fallback_trigger_code FROM ai_report_execution WHERE id=?",
+                    String.class, legacy));
             var repository = new AiReportExecutionRepository(jdbc);
             var first = repository.insert(casePk, resultPk, 1, "prompt-1", "local-opaque-1");
+            assertEquals(null, jdbc.queryForObject(
+                    "SELECT fallback_trigger_code FROM ai_report_execution WHERE id=?",
+                    String.class, first.id()));
             var requests = new AiReportRequestRepository(jdbc);
             requests.insert(UUID.randomUUID(), casePk, first.id(), null, "fixed-idempotency-key",
                     "a".repeat(64), "synthetic-analyst", 1, "prompt-1", "local-opaque-1",
@@ -74,13 +90,64 @@ class AiReportPersistenceIntegrationTest {
             transactions.executeWithoutResult(ignored -> {
                 assertEquals(true, repository.stillGenerating(first.id()));
                 requests.generating(first.id());
-                repository.complete(first.id(), AiReportStatus.FAILED, "PROVIDER_ERROR");
+                repository.complete(first.id(), AiReportStatus.FAILED, "PROVIDER_ERROR", null);
                 requests.fail(first.id());
             });
             assertEquals(false, repository.stillGenerating(first.id()));
             assertEquals(AiReportStatus.FAILED,
                     requests.byKey(casePk, "fixed-idempotency-key").orElseThrow().status());
             assertEquals(true, repository.active(casePk, 1, "prompt-1", "local-opaque-1").isEmpty());
+            var fallback = repository.insert(casePk, resultPk, 1, "prompt-1", "local-opaque-1");
+            transactions.execute(ignored -> repository.claim(300));
+            transactions.executeWithoutResult(ignored -> repository.complete(fallback.id(),
+                    AiReportStatus.FALLBACK_COMPLETED, null, "LLM_TIMEOUT"));
+            assertEquals("LLM_TIMEOUT", jdbc.queryForObject(
+                    "SELECT fallback_trigger_code FROM ai_report_execution WHERE id=?",
+                    String.class, fallback.id()));
+            requests.insert(UUID.randomUUID(), casePk, fallback.id(), null, "fallback-key",
+                    "c".repeat(64), "synthetic-analyst", 1, "prompt-1", "local-opaque-1",
+                    AiReportStatus.FALLBACK_COMPLETED, false, false, "trace-test-002");
+            var reportStore = new AiReportRepository(jdbc, new com.fasterxml.jackson.databind.ObjectMapper());
+            var generated = new AiReportDtos.GenerationResult("FALLBACK_COMPLETED",
+                    "TEMPLATE_FALLBACK", new AiReportDtos.Content("synthetic summary",
+                    java.util.List.of(new AiReportDtos.KeyReason("REASON_A", "synthetic reason")),
+                    java.util.List.of("synthetic check")), null, "LLM_TIMEOUT",
+                    "local-opaque-1", "prompt-1", java.util.List.of());
+            var saved = reportStore.insert(casePk, fallback.id(), 1, "prompt-1",
+                    "local-opaque-1", generated, "trace-test-002");
+            requests.complete(fallback.id(), saved.id(), AiReportStatus.FALLBACK_COMPLETED);
+            assertEquals("LLM_TIMEOUT", reportStore.current(casePk).orElseThrow().fallbackTriggerCode());
+            assertEquals(null, jdbc.queryForObject(
+                    "SELECT failure_code FROM ai_report_execution WHERE id=?",
+                    String.class, fallback.id()));
+            assertEquals("PROVIDER_ERROR", jdbc.queryForObject(
+                    "SELECT failure_code FROM ai_report_execution WHERE id=?",
+                    String.class, first.id()));
+            assertEquals(null, jdbc.queryForObject(
+                    "SELECT fallback_trigger_code FROM ai_report_execution WHERE id=?",
+                    String.class, first.id()));
+            var interrupted = repository.insert(casePk, resultPk, 1, "prompt-1", "local-opaque-1");
+            requests.insert(UUID.randomUUID(), casePk, interrupted.id(), null, "interrupted-key",
+                    "b".repeat(64), "synthetic-analyst", 1, "prompt-1", "local-opaque-1",
+                    AiReportStatus.PENDING, false, false, "trace-test-003");
+            transactions.executeWithoutResult(ignored -> {
+                repository.claim(300);
+                requests.generating(interrupted.id());
+                jdbc.update("UPDATE ai_report_execution SET lease_until=now()-interval '1 second' WHERE id=?",
+                        interrupted.id());
+                repository.expireLeases();
+                requests.failExpired();
+            });
+            assertEquals("WORKER_INTERRUPTED", jdbc.queryForObject(
+                    "SELECT failure_code FROM ai_report_execution WHERE id=?",
+                    String.class, interrupted.id()));
+            assertEquals(null, jdbc.queryForObject(
+                    "SELECT fallback_trigger_code FROM ai_report_execution WHERE id=?",
+                    String.class, interrupted.id()));
+            jdbc.update("UPDATE ai_report_request SET requested_at=now()+interval '1 second' WHERE execution_id=?",
+                    interrupted.id());
+            assertEquals(AiReportStatus.FAILED, requests.latest(casePk).orElseThrow().status());
+            assertEquals(saved.reportId(), reportStore.current(casePk).orElseThrow().reportId());
             try (var context = new SpringApplicationBuilder(BackendApplication.class)
                     .web(WebApplicationType.NONE)
                     .run("--SPRING_DATASOURCE_URL=" + postgres.getJdbcUrl(),

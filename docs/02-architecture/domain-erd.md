@@ -1761,6 +1761,10 @@ Analyst에게 반환하는 `modelVersion`은 이 값과 Prompt 구성의 opaque 
 - `reportId`, `executionId`, `initiatingAiRequestId`와 최신 외부 요청의 `aiRequestId` 의미를 구분한다.
 - 캐시 요청은 `executionId = null`, `executionShared = false`, `cacheHit = true`이며 새 실행·attempt·가상 사용량을 만들지 않는다.
 - 자동 재시도는 Timeout과 연결 실패에만 같은 `executionId` 아래 최대 1회 적용한다.
+- Issue #345 V17은 `AiReportExecution`에 nullable `fallback_trigger_code`만 추가한다.
+  신규 실행의 최종 `failure_code`와 템플릿 전환 원인을 분리하며, 과거 행은
+  null 그대로 유지한다. 결과와 최신 요청은 각각 원본 실행과 연결 실행에서
+  저장된 코드만 투영한다.
 - 정확 일치 `AiReport`가 있으면 캐시로 재사용하며 동일 정확 일치 결과의 강제 재생성을 허용하지 않는다.
 
 구체적인 경로, DTO와 상태 코드는 API 기준 문서에서 사용자 승인 후

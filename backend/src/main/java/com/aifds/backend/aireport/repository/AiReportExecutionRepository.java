@@ -50,9 +50,9 @@ public class AiReportExecutionRepository {
                 """, this::map, leaseSeconds).stream().findFirst();
     }
 
-    public void complete(long pk, AiReportStatus status, String failure) {
-        jdbc.update("UPDATE ai_report_execution SET status=?,failure_code=?,lease_until=NULL,finished_at=now() WHERE id=? AND status='GENERATING'",
-                status.name(), failure, pk);
+    public void complete(long pk, AiReportStatus status, String failure, String fallbackTrigger) {
+        jdbc.update("UPDATE ai_report_execution SET status=?,failure_code=?,fallback_trigger_code=?,lease_until=NULL,finished_at=now() WHERE id=? AND status='GENERATING'",
+                status.name(), failure, fallbackTrigger, pk);
     }
 
     public boolean stillGenerating(long pk) {
