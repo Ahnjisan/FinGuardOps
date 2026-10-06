@@ -67,8 +67,30 @@ physical target으로 resolve할 수 있는 환경에서는 approved root 밖 ju
 boundary 밖이다.
 # 선택형 AI 리포트 Kafka 검증
 
-기본 Compose에는 Kafka가 없다. Issue #347의 로컬 검증에는
-`compose.yml`과 `compose.kafka-local.yml`을 함께 지정한다. Kafka JVM 4.3.1
-digest를 고정했고 broker 포트를 host에 공개하지 않는다. Backend는 Kafka 장애
-중에도 DB outbox와 AI 요청 `202/PENDING`을 저장할 수 있어야 한다. 실험 순서와
-정리는 [로컬 Kafka runbook](../docs/09-deployment/local-kafka-ai-report-runbook.md)을 따른다.
+기본 Compose에는 Kafka가 없다. Issue #349의 **별도 Kafka 실험**은
+`compose.yml` + `compose.kafka-local.yml` + `compose.local-jwt-e2e.yml`을
+고유 Compose 프로젝트에 결합한다. Kafka JVM 4.3.1 digest는 고정되어 있고 broker
+포트는 host에 공개하지 않는다. JWT fixture는 Backend namespace의 loopback JWK와
+tmpfs/control socket을 사용한다. 세 파일과 ignored `infra/.env`를 지정한
+`config --quiet`, 기동, Rule 발행, 인증된 AI `202/PENDING`, outbox·topic/group·소비·
+최종 조회·metric, 소유 자원 정리는
+[로컬 Kafka runbook](../docs/09-deployment/local-kafka-ai-report-runbook.md)을 따른다.
+Backend는 Kafka 장애 중에도 DB outbox와 AI 요청 접수를 유지해야 한다.
+
+공식 Keycloak Browser Gate는 자체 runner의 clean commit·receipt 경계를 따르며 모의
+Ollama를 사용한다. 이 Gate와 Kafka overlay를 결합하거나 Keycloak/JWT overlay를
+한 Backend에 결합하지 않는다. 실제 호스트 Qwen은 별도 평가로,
+`/api/tags`의 digest·quantization과 AI Service 컨테이너에서
+`host.docker.internal:11434` 접근성을 먼저 확인한다. 세 실행의 `caseId`가
+다르면 동일 사건의 단일 통합 통과로 보고하지 않는다.
+
+실제 Qwen 인증 검증의 선택 조합은 `compose.yml` + `compose.qwen-local.yml` +
+`compose.local-jwt-e2e.yml`이다. Qwen overlay는 AI Service의 `application`
+연결을 유지하면서 **AI Service에만** `qwen-host` bridge를 더하고, ignored
+`infra/.env`의 컨테이너 loopback URL을 이 실행에서만
+`http://host.docker.internal:11434`로 대체한다. 다른 서비스의 network나 host
+publish 포트는 변경하지 않는다. 현재 모델 digest·quantization은 host `/api/tags`에서
+읽어 프로세스 환경에 일시 지정하고 종료 시 이전 값으로 복원한다. 호스트 listen·
+방화벽 변경은 컨테이너 접근 검사에 실제로 필요할 때만 제한적으로 수행하고 복원한다.
+검사 명령, 인증된 합성 HIGH 사건, 실제 생성·저장 조회와 소유 프로젝트 정리는
+[Kafka/Qwen runbook 6절](../docs/09-deployment/local-kafka-ai-report-runbook.md#6-별도-실제-qwen-인증-실행)을 따른다.
