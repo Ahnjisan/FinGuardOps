@@ -9371,11 +9371,15 @@ function Invoke-D315PlaywrightDiagnosticTargetedTests {
                 $d315Records = [System.Collections.Generic.List[string]]::new()
                 $d315SeenNonce = [System.Collections.Generic.List[string]]::new()
                 $d315Valid = @(
-                    'TEST line=6899 n=1 status=failed kind=REQUIRE_CONDITION at=6905',
-                    'TEST line=6017 n=3 status=timedOut kind=TIMEOUT at=none',
-                    'TEST line=none n=999 status=interrupted kind=INTERRUPTED at=99999',
-                    'TEST line=1 n=1 status=failed kind=EXPECT at=1',
-                    'TEST line=5826 n=1 status=failed kind=OTHER at=none',
+                    'TEST line=6899 n=1 status=failed kind=REQUIRE_CONDITION at=6905 stage=USAGE_UI',
+                    'TEST line=6017 n=3 status=timedOut kind=TIMEOUT at=none stage=LOGIN',
+                    'TEST line=none n=999 status=interrupted kind=INTERRUPTED at=99999 stage=CLEANUP',
+                    'TEST line=1 n=1 status=failed kind=EXPECT at=1 stage=DETAIL_API',
+                    'TEST line=5826 n=1 status=failed kind=OTHER at=none stage=none',
+                    'TEST line=1 n=1 status=failed kind=OTHER at=none stage=RELAY_INIT',
+                    'TEST line=1 n=1 status=failed kind=OTHER at=none stage=GUARD',
+                    'TEST line=1 n=1 status=failed kind=OTHER at=none stage=USAGE_API',
+                    'TEST line=1 n=1 status=failed kind=OTHER at=none stage=DETAIL_UI',
                     'GLOBAL kind=WEBSERVER',
                     'GLOBAL kind=OTHER',
                     'OVERFLOW',
@@ -9418,7 +9422,10 @@ function Invoke-D315PlaywrightDiagnosticTargetedTests {
                         ($p + 'overflow'),
                         ($p + 'RUNNER_OVERFLOW'),
                         ($p + 'SUMMARY_ABSENT'),
-                        ($p + 'TEST n=1 line=1 status=failed kind=OTHER at=none'),
+                        ($p + 'TEST n=1 line=1 status=failed kind=OTHER at=none stage=none'),
+                        ($p + 'TEST line=1 n=1 status=failed kind=OTHER at=none'),
+                        ($p + 'TEST line=1 n=1 status=failed kind=OTHER at=none stage=UNKNOWN'),
+                        ($p + 'TEST line=1 n=1 status=failed kind=OTHER at=none stage=LOGIN extra=1'),
                         ($p + 'TEST line=1 n=1 status=failed kind=OTHER at=none extra=1'),
                         ($p + 'TEST line=1 n=1 status=failed kind=OTHER'),
                         ($p + 'TEST line=1 n=1 status=failed kind=UNKNOWN at=none'),
@@ -9487,7 +9494,7 @@ function Invoke-D315PlaywrightDiagnosticTargetedTests {
                 $d315Primary = [System.InvalidOperationException]::new('PRIMARY_PLAYWRIGHT_FAILURE')
                 $d315Body = {
                     $p = 'FINGUARDOPS_E2E_PW_V1 ' + [System.Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_REPORTER_NONCE', 'Process') + ' '
-                    foreach ($index in 1..45) { Write-Output ($p + 'TEST line=' + $index + ' n=1 status=failed kind=OTHER at=none') }
+                    foreach ($index in 1..45) { Write-Output ($p + 'TEST line=' + $index + ' n=1 status=failed kind=OTHER at=none stage=none') }
                     Write-Output ($p + 'SUMMARY status=failed passed=0 failed=45 skipped=0')
                     throw $d315Primary
                 }
@@ -9500,7 +9507,7 @@ function Invoke-D315PlaywrightDiagnosticTargetedTests {
                 return [pscustomobject]@{ Records = @($d315Records); Same = [object]::ReferenceEquals($d315Primary, $d315Caught) }
             }
         } $script:D315PlaywrightManifestHarnessSource
-        $expected = @(1..40 | ForEach-Object { 'PLAYWRIGHT_DIAGNOSTIC=TEST line=' + $_ + ' n=1 status=failed kind=OTHER at=none' }) +
+        $expected = @(1..40 | ForEach-Object { 'PLAYWRIGHT_DIAGNOSTIC=TEST line=' + $_ + ' n=1 status=failed kind=OTHER at=none stage=none' }) +
             @('PLAYWRIGHT_DIAGNOSTIC=RUNNER_OVERFLOW')
         Assert-Equal $expected @($result.Records) 'Playwright diagnostic line bound or overflow code differs.'
         Assert-True $result.Same 'Primary Playwright exception identity changed under overflow.'
@@ -9514,7 +9521,7 @@ function Invoke-D315PlaywrightDiagnosticTargetedTests {
                 $d315Outcomes = [System.Collections.Generic.List[object]]::new()
                 foreach ($d315Case in @(
                     [pscustomobject]@{ Name = 'summary-passed-exit-1'; Exit = 1; Record = 'SUMMARY status=passed passed=22 failed=0 skipped=0' },
-                    [pscustomobject]@{ Name = 'failures-exit-0'; Exit = 0; Record = 'TEST line=6834 n=1 status=failed kind=EXPECT at=6900' },
+                    [pscustomobject]@{ Name = 'failures-exit-0'; Exit = 0; Record = 'TEST line=6834 n=1 status=failed kind=EXPECT at=6900 stage=DETAIL_UI' },
                     [pscustomobject]@{ Name = 'nothing-exit-1'; Exit = 1; Record = $null }
                 )) {
                     $d315Records = [System.Collections.Generic.List[string]]::new()
@@ -9543,7 +9550,7 @@ function Invoke-D315PlaywrightDiagnosticTargetedTests {
         Assert-Equal 'Playwright Keycloak E2E failed.' $result[0].Message 'A passed SUMMARY hid a nonzero Playwright exit.'
         Assert-Equal @('PLAYWRIGHT_DIAGNOSTIC=SUMMARY status=passed passed=22 failed=0 skipped=0') @($result[0].Records) 'Native SUMMARY record was not forwarded exactly.'
         Assert-Equal $null $result[1].Message 'A failure record turned a zero Playwright exit into a failure.'
-        Assert-Equal @('PLAYWRIGHT_DIAGNOSTIC=TEST line=6834 n=1 status=failed kind=EXPECT at=6900') @($result[1].Records) 'Native TEST record was not forwarded exactly.'
+        Assert-Equal @('PLAYWRIGHT_DIAGNOSTIC=TEST line=6834 n=1 status=failed kind=EXPECT at=6900 stage=DETAIL_UI') @($result[1].Records) 'Native TEST record was not forwarded exactly.'
         Assert-Equal 'Playwright Keycloak E2E failed.' $result[2].Message 'A nonzero Playwright exit without records was not a failure.'
         Assert-Equal @('PLAYWRIGHT_DIAGNOSTIC=SUMMARY_ABSENT') @($result[2].Records) 'Missing SUMMARY was not named with its fixed code.'
     }
@@ -9666,7 +9673,7 @@ $module = Import-Module $ModulePath -Force -PassThru
                 $nonce = [System.Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_REPORTER_NONCE', 'Process')
                 Invoke-Native { & cmd.exe /d /c "echo D315_CHILD_STDERR_SENTINEL 1>&2" }
                 Invoke-Native { & cmd.exe /d /c "echo D315_CHILD_STDOUT_SENTINEL" }
-                $marker = 'echo FINGUARDOPS_E2E_PW_V1 ' + $nonce + ' TEST line=6899 n=1 status=failed kind=REQUIRE_CONDITION at=6905'
+                $marker = 'echo FINGUARDOPS_E2E_PW_V1 ' + $nonce + ' TEST line=6899 n=1 status=failed kind=REQUIRE_CONDITION at=6905 stage=USAGE_UI'
                 Invoke-Native { & cmd.exe /d /c $marker }
                 Invoke-Native { & cmd.exe /d /c 'exit 1' }
                 Assert-Success 'Playwright Keycloak E2E'
@@ -9703,7 +9710,7 @@ $module = Import-Module $ModulePath -Force -PassThru
         }
         $combined = $stdout + "`n" + $stderr
         Assert-True ($stdout.Contains('D315_CHILD_PRIMARY=Playwright Keycloak E2E failed.')) 'Child Playwright primary failure differs.'
-        Assert-True ($combined.Contains('PLAYWRIGHT_DIAGNOSTIC=TEST line=6899 n=1 status=failed kind=REQUIRE_CONDITION at=6905')) 'Child fixed record was not forwarded.'
+        Assert-True ($combined.Contains('PLAYWRIGHT_DIAGNOSTIC=TEST line=6899 n=1 status=failed kind=REQUIRE_CONDITION at=6905 stage=USAGE_UI')) 'Child fixed record was not forwarded.'
         Assert-True ($combined.Contains('PLAYWRIGHT_DIAGNOSTIC=SUMMARY_ABSENT')) 'Child missing SUMMARY code was not forwarded.'
         foreach ($forbidden in @('D315_CHILD_STDERR_SENTINEL', 'D315_CHILD_STDOUT_SENTINEL', 'FINGUARDOPS_E2E_PW_V1')) {
             Assert-True (-not $combined.Contains($forbidden)) 'Raw Playwright process output reached the run output.'
@@ -9727,9 +9734,88 @@ $module = Import-Module $ModulePath -Force -PassThru
         Assert-True ($config.Contains('[["line"], ["./e2e/safe-failure-reporter.ts", { nonce: reporterNonce }]]')) 'Config does not pair the line reporter with the fixed-field reporter.'
         Assert-True ($config.Contains('delete webServerEnvironment[REPORTER_NONCE_ENVIRONMENT];')) 'Config passes the reporter nonce to the web server.'
         Assert-True ($reporter.Contains('delete process.env[REPORTER_NONCE_ENVIRONMENT];')) 'Reporter does not remove the nonce before workers start.'
-        foreach ($forbidden in @('error.message}', 'test.title', 'titlePath', 'error.stack}', 'snippet', 'attachments')) {
+        Assert-True ($reporter.Contains('test.title === ADMIN_TEST_TITLE')) 'Reporter does not confine stages to the administrator test.'
+        foreach ($forbidden in @('error.message}', 'test.title}', 'titlePath', 'error.stack}', 'snippet', 'attachments')) {
             Assert-True (-not $reporter.Contains($forbidden)) 'Reporter source writes a raw title, message, stack or attachment.'
         }
+    }
+
+    Invoke-TestCase 'D341 reporter stages are fixed and isolated across completion and failure paths' {
+        $frontend = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+        $typescript = Join-Path $frontend 'node_modules\typescript\lib\typescript.js'
+        $reporter = Join-Path $frontend 'e2e\safe-failure-reporter.ts'
+        Assert-True ([System.IO.File]::Exists($typescript)) 'The installed TypeScript compiler is unavailable.'
+        $probe = @'
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const process = require("node:process");
+const ts = require(process.argv[2]);
+const source = fs.readFileSync(process.argv[3], "utf8");
+const compiled = ts.transpileModule(source, { compilerOptions: {
+  module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true,
+} }).outputText;
+const loaded = { exports: {} };
+new Function("require", "module", "exports", compiled)(require, loaded, loaded.exports);
+const Reporter = loaded.exports.default;
+const tests = ["admin", "second-admin", "other"].map((id, index) => ({
+  id, title: index === 2 ? "another test" :
+    "a PLATFORM_ADMIN reviews the stored AI request usage without case authority",
+  location: { file: "keycloak-user-login.spec.ts", line: 10342 + index },
+}));
+const captured = [];
+const originalWrite = process.stdout.write;
+process.stdout.write = (chunk, callback) => {
+  captured.push(String(chunk));
+  if (typeof callback === "function") callback();
+  return true;
+};
+try {
+  const reporter = new Reporter({ nonce: "a".repeat(32) });
+  reporter.onBegin({}, { allTests: () => tests });
+  const result = (status, error) => ({ status, errors: error === undefined ? [] : [error] });
+  const step = (title, error) => ({ title, error });
+  const end = (test, status, error) => reporter.onTestEnd(test, result(status, error));
+  reporter.onStepBegin(tests[0], result("passed"), step("RELAY_INIT"));
+  reporter.onStepBegin(tests[0], result("passed"), step("CLEANUP"));
+  end(tests[0], "passed");
+  assert.equal(captured.length, 0, "normal completion emitted a failure record");
+
+  reporter.onStepBegin(tests[0], result("failed"), step("USAGE_API"));
+  reporter.onStepEnd(tests[0], result("failed"), step("USAGE_API", { message: "private body" }));
+  reporter.onStepBegin(tests[0], result("failed"), step("CLEANUP"));
+  end(tests[0], "failed", { message: "expect(private credential)" });
+  assert.match(captured.pop(), /kind=EXPECT at=none stage=USAGE_API\n$/);
+
+  reporter.onStepBegin(tests[0], result("timedOut"), step("LOGIN"));
+  end(tests[0], "timedOut");
+  assert.match(captured.pop(), /kind=TIMEOUT at=none stage=LOGIN\n$/);
+
+  end(tests[0], "failed", { message: "beforeEach private" });
+  assert.match(captured.pop(), /stage=none\n$/);
+
+  reporter.onStepBegin(tests[0], result("passed"), step("DETAIL_UI"));
+  reporter.onStepBegin(tests[0], result("failed"), step("CLEANUP"));
+  end(tests[0], "failed", { message: "afterEach private" });
+  assert.match(captured.pop(), /stage=CLEANUP\n$/);
+
+  reporter.onStepBegin(tests[0], result("timedOut"), step("DETAIL_API"));
+  reporter.onStepBegin(tests[1], result("failed"), step("GUARD"));
+  end(tests[1], "failed");
+  assert.match(captured.pop(), /stage=GUARD\n$/);
+  end(tests[0], "timedOut");
+  assert.match(captured.pop(), /stage=DETAIL_API\n$/);
+  reporter.onStepBegin(tests[2], result("failed"), step("GUARD"));
+  end(tests[2], "failed");
+  assert.match(captured.pop(), /stage=none\n$/);
+  assert.equal(captured.length, 0);
+} finally {
+  process.stdout.write = originalWrite;
+}
+process.stdout.write("REPORTER_STAGE_PROBE_OK\n");
+'@
+        $result = @($probe | & node - $typescript $reporter 2>&1)
+        Assert-Equal 0 $LASTEXITCODE 'Reporter stage probe failed.'
+        Assert-Equal @('REPORTER_STAGE_PROBE_OK') $result 'Reporter stage probe emitted unexpected output.'
     }
 
     if ($script:Failures.Count -ne 0) {

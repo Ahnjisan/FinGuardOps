@@ -26,7 +26,7 @@ import { isCanonicalUuidV4 } from "../api/responseValidation";
  * literal written in this file or a route assembled here from thirty-six
  * characters of `[0-9a-f-]`.
  */
-export const ALLOWED_RETURN_ROUTES = ["/", "/health", "/transactions", "/cases"] as const;
+export const ALLOWED_RETURN_ROUTES = ["/", "/health", "/transactions", "/cases", "/ai-operations"] as const;
 export const OPEN_CASE_LIST_ROUTE = "/cases?caseStatus=OPEN" as const;
 export const INFORMATION_CASE_LIST_ROUTE = "/cases?caseStatus=ADDITIONAL_INFORMATION_REQUIRED" as const;
 
@@ -37,13 +37,15 @@ export type TransactionDetailReturnRoute = `/transactions/${string}`;
 
 /** `/cases/{canonical lowercase UUID v4}`, built only by this module. */
 export type CaseDetailReturnRoute = `/cases/${string}`;
+export type AiRequestDetailReturnRoute = `/ai-operations/${string}`;
 
 export type AllowedReturnRoute =
   | LiteralReturnRoute
   | typeof OPEN_CASE_LIST_ROUTE
   | typeof INFORMATION_CASE_LIST_ROUTE
   | TransactionDetailReturnRoute
-  | CaseDetailReturnRoute;
+  | CaseDetailReturnRoute
+  | AiRequestDetailReturnRoute;
 
 export const DEFAULT_RETURN_ROUTE: LiteralReturnRoute = "/";
 
@@ -74,6 +76,7 @@ const TRANSACTION_DETAIL_SEGMENT = /^\/transactions\/([^/]+)$/;
  * consists only of `[0-9a-f-]`.
  */
 const CASE_DETAIL_SEGMENT = /^\/cases\/([^/]+)$/;
+const AI_REQUEST_DETAIL_SEGMENT = /^\/ai-operations\/([^/]+)$/;
 
 export function resolveReturnRoute(value: unknown): AllowedReturnRoute {
   if (value === "/") {
@@ -91,6 +94,7 @@ export function resolveReturnRoute(value: unknown): AllowedReturnRoute {
   if (value === "/cases") {
     return "/cases";
   }
+  if (value === "/ai-operations") return "/ai-operations";
   if (value === OPEN_CASE_LIST_ROUTE) return OPEN_CASE_LIST_ROUTE;
   if (value === INFORMATION_CASE_LIST_ROUTE) return INFORMATION_CASE_LIST_ROUTE;
   // `typeof` rather than `instanceof String`: a `String` object wrapping an
@@ -108,6 +112,10 @@ export function resolveReturnRoute(value: unknown): AllowedReturnRoute {
     const detail = CASE_DETAIL_SEGMENT.exec(value);
     if (detail !== null && isCanonicalUuidV4(detail[1])) {
       return `/cases/${detail[1]}`;
+    }
+    const aiDetail = AI_REQUEST_DETAIL_SEGMENT.exec(value);
+    if (aiDetail !== null && isCanonicalUuidV4(aiDetail[1])) {
+      return `/ai-operations/${aiDetail[1]}`;
     }
   }
   return DEFAULT_RETURN_ROUTE;

@@ -6,6 +6,7 @@ import type {
   TestCase,
   TestError,
   TestResult,
+  TestStep,
 } from "@playwright/test/reporter";
 
 /**
@@ -16,14 +17,15 @@ import type {
  * What this reporter writes instead is a closed set of records that name *where*
  * a failure happened and *what kind* of failure it was, and nothing else:
  *
- *   FINGUARDOPS_E2E_PW_V1 <nonce> TEST line=<n|none> n=<n> status=<s> kind=<k> at=<n|none>
+ *   FINGUARDOPS_E2E_PW_V1 <nonce> TEST line=<n|none> n=<n> status=<s> kind=<k> at=<n|none> stage=<fixed|none>
  *   FINGUARDOPS_E2E_PW_V1 <nonce> GLOBAL kind=<WEBSERVER|OTHER>
  *   FINGUARDOPS_E2E_PW_V1 <nonce> SUMMARY status=<s> passed=<n> failed=<n> skipped=<n>
  *   FINGUARDOPS_E2E_PW_V1 <nonce> OVERFLOW
  *
  * `line` is the spec line that declares the test and `n` its ordinal among
  * tests declared on that line (the tampering matrices declare several). `at`
- * is the spec line of the failing assertion. Line numbers are positions in a
+ * is the spec line of the failing assertion. `stage` is the first failed fixed
+ * step, or the last entered fixed step if no step error was reported. Line numbers are positions in a
  * checked-in source file; no title, message, stack, URL, DOM text, credential
  * or token is ever written, and an error's text is read only to choose `kind`.
  *
@@ -42,6 +44,7 @@ export const SAFE_FAILURE_MARKER_PREFIX = "FINGUARDOPS_E2E_PW_V1";
 const REPORTER_NONCE_ENVIRONMENT = "FINGUARDOPS_E2E_REPORTER_NONCE";
 const NONCE_PATTERN = /^[0-9a-f]{32}$/;
 const SPEC_FILE = "keycloak-user-login.spec.ts";
+const ADMIN_TEST_TITLE = "a PLATFORM_ADMIN reviews the stored AI request usage without case authority";
 const ASSERTION_HELPER = "requireCondition";
 const MAX_TEST_RECORDS = 32;
 const MAX_GLOBAL_RECORDS = 4;
@@ -53,6 +56,12 @@ const FLUSH_WAIT_MILLISECONDS = 1_000;
 // eslint-disable-next-line no-control-regex
 const ANSI_SEQUENCE = /\u001b\[[0-9;]*[A-Za-z]/g;
 const STACK_FRAME = /^\s*at (?:(.*?) \()?(.+?):(\d+):(\d+)\)?$/;
+const ADMIN_STAGES = [
+  "RELAY_INIT", "GUARD", "LOGIN", "USAGE_API", "USAGE_UI",
+  "DETAIL_API", "DETAIL_UI", "CLEANUP",
+] as const;
+type AdminStage = typeof ADMIN_STAGES[number];
+const ADMIN_STAGE_SET: ReadonlySet<string> = new Set(ADMIN_STAGES);
 
 type FailureStatus = "failed" | "timedOut" | "interrupted";
 type FailureKind = "REQUIRE_CONDITION" | "EXPECT" | "TIMEOUT" | "INTERRUPTED" | "OTHER";
@@ -136,6 +145,7 @@ function failureKind(status: FailureStatus, error: TestError | undefined): Failu
 export default class SafeFailureReporter implements Reporter {
   private readonly nonce: string | null;
   private readonly ordinals = new Map<string, number>();
+  private readonly stages = new Map<string, { last: AdminStage; failed?: AdminStage }>();
   private testRecords = 0;
   private globalRecords = 0;
   private overflowed = false;
@@ -171,6 +181,29 @@ export default class SafeFailureReporter implements Reporter {
     }
   }
 
+  onStepBegin(test: TestCase, _result: TestResult, step: TestStep): void {
+    try {
+      if (isSpecFile(test.location.file) && test.title === ADMIN_TEST_TITLE && ADMIN_STAGE_SET.has(step.title)) {
+        const previous = this.stages.get(test.id);
+        this.stages.set(test.id, { last: step.title as AdminStage, failed: previous?.failed });
+      }
+    } catch {
+      // A diagnostic never replaces the test's verdict.
+    }
+  }
+
+  onStepEnd(test: TestCase, _result: TestResult, step: TestStep): void {
+    try {
+      const current = this.stages.get(test.id);
+      if (current !== undefined && current.failed === undefined &&
+          ADMIN_STAGE_SET.has(step.title) && step.error !== undefined) {
+        current.failed = step.title as AdminStage;
+      }
+    } catch {
+      // A diagnostic never replaces the test's verdict.
+    }
+  }
+
   onTestEnd(test: TestCase, result: TestResult): void {
     try {
       if (result.status === "passed") {
@@ -191,12 +224,15 @@ export default class SafeFailureReporter implements Reporter {
       const error = result.errors[0];
       const line = isSpecFile(test.location.file) ? boundedLine(test.location.line) : "none";
       const ordinal = Math.min(this.ordinals.get(test.id) ?? 1, MAX_ORDINAL);
+      const stage = this.stages.get(test.id);
       this.write(
         `TEST line=${line} n=${String(ordinal)} status=${status} ` +
-          `kind=${failureKind(status, error)} at=${failingSpecLine(error)}`,
+          `kind=${failureKind(status, error)} at=${failingSpecLine(error)} stage=${stage?.failed ?? stage?.last ?? "none"}`,
       );
     } catch {
       // A diagnostic never replaces the failure it describes.
+    } finally {
+      this.stages.delete(test.id);
     }
   }
 

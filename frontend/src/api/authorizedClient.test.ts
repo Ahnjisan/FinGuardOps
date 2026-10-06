@@ -317,6 +317,8 @@ describe("authorized transport — Authorization on approved endpoints only", ()
       await sendAuthorizedBackendRequest(client, {
         endpoint: key,
         params,
+        query: key === "ai-usage-list" || key === "ai-usage-summary"
+          ? { from: "2026-10-01T00:00:00Z", to: "2026-10-02T00:00:00Z" } : undefined,
         body: descriptor.acceptsJsonBody ? { field: "value" } : undefined,
         idempotencyKey: key === "ai-report-create" ? "report-test-001" : undefined,
         expectedStatus: key === "ai-report-create" ? 202 : 200,

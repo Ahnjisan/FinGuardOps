@@ -114,7 +114,8 @@ $PlaywrightDiagnosticCandidateLengthLimit = 160
 $PlaywrightDiagnosticLineLimit = 40
 $PlaywrightDiagnosticRecordPattern = '\A(?:' +
     'TEST line=(?:[1-9][0-9]{0,4}|none) n=[1-9][0-9]{0,2} status=(?:failed|timedOut|interrupted) ' +
-        'kind=(?:REQUIRE_CONDITION|EXPECT|TIMEOUT|INTERRUPTED|OTHER) at=(?:[1-9][0-9]{0,4}|none)' +
+        'kind=(?:REQUIRE_CONDITION|EXPECT|TIMEOUT|INTERRUPTED|OTHER) at=(?:[1-9][0-9]{0,4}|none) ' +
+        'stage=(?:RELAY_INIT|GUARD|LOGIN|USAGE_API|USAGE_UI|DETAIL_API|DETAIL_UI|CLEANUP|none)' +
     '|GLOBAL kind=(?:WEBSERVER|OTHER)' +
     '|SUMMARY status=(?:passed|failed|timedout|interrupted) passed=(?:0|[1-9][0-9]{0,3}) ' +
         'failed=(?:0|[1-9][0-9]{0,3}) skipped=(?:0|[1-9][0-9]{0,3})' +

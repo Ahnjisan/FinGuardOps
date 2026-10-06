@@ -1,11 +1,11 @@
 # AI 리포트·AI 사용량 API
 
-**Issue #339 implementation boundary:** The first release implements only the case-scoped
-`POST /ai-reports` and `GET /ai-reports/current` routes described in the note below.
-Sections 2–17 retain the wider target design, including request-detail and usage APIs,
-example IDs, and future operator cost views. Those examples are not implemented
-responses. For the two implemented routes, the first-release note and the actual
-DTO field lists in this change take precedence over conflicting target examples.
+**Implementation boundary:** Issue #339 implements the case-scoped
+`POST /ai-reports` and `GET /ai-reports/current` routes. Issue #341 adds the
+operator request detail, usage list, and usage summary GET routes in §§7–9.
+Other target examples in this document are not necessarily implemented responses.
+For these five routes, the first-release notes and explicit DTO field lists take
+precedence over older target examples.
 The internal model-identity endpoint hashes the digest and quantization observed
 from Ollama metadata with both prompt texts, the prompt version, and generation
 settings including `think: false`. A metadata
@@ -207,12 +207,9 @@ AiReportRequest.resolvedReportRef
   상세는 `ai-operations:read`, 사용량·비용은 `ai-usage:read`를 요구한다.
 - USER·SERVICE principal과 role mapping은
   [`security-architecture.md`](../02-architecture/security-architecture.md)를 따른다.
-- Backend web application의 공통 Spring Security Resource Server, JWT/JWK 검증,
-  USER·SERVICE principal과 기존 production 업무 endpoint RBAC는 구현되어 있다. 그러나
-  이 문서의 AI report endpoint와 controller·service·persistence lifecycle, 해당 endpoint의
-  method/path authorization·capability 연결, production AI Provider 호출과 별도 audit/event
-  흐름은 아직 구현되지 않았으며 위 API·권한은 미래 목표 계약이다. 임의 Mock Actor
-  header를 목표 계약으로 도입하지 않는다.
+- #339에서 사건 AI 리포트 생성·현재 조회와 V15 저장 경로가 구현되었다.
+  #341에서 §§7–9의 운영 조회 세 GET과 해당 method/path authorization을 구현한다.
+  임의 Mock Actor header를 도입하지 않는다.
 - 감사 기록에는 제한된 요청자 참조값, `aiRequestId`, `caseId`, 요청 시각과 `traceId`를 연결한다.
 
 ### 3.4 시간 범위
@@ -226,6 +223,10 @@ from <= requestedAt < to
 `from`은 `to`보다 앞서야 하며 최대 조회 기간은 31일이다. 31일을 초과하면 `422 Unprocessable Entity`, `VALIDATION_ERROR`와 필드 오류 코드 `INVALID_TIME_RANGE`를 반환한다.
 
 ### 3.5 비용 표현
+
+Issue #341 첫 구현은 로컬 Ollama 가격 정책과 비용 측정값이 없어 금액을
+집계하거나 표시하지 않는다. 아래 완전한 비용값의 계산 규칙과 금액 예시는
+후속 가격·저장 계약이 확정된 경우에만 적용한다. 첫 구현 응답은 §§7–9를 따른다.
 
 - `estimatedCost`는 JSON number가 아닌 소수점 문자열이다.
 - `costCurrency`는 비용 통화를 명시하는 문자열이다.
@@ -281,9 +282,9 @@ from <= requestedAt < to
 
 - `page`: 0부터 시작하며 기본값은 0
 - `size`: 한 페이지의 항목 수. 기본값은 20, 최대값은 100
-- `sort`: `field,direction` 형식이며 반복 가능
+- 첫 구현 `sort`: 단일 `field,direction` 형식. 중복 전달은 400
 - 기본 정렬: `requestedAt,desc`와 안정적인 보조 정렬 `aiRequestId,desc`
-- 허용 정렬 필드: `requestedAt`, `completedAt`, `latencyMs`, `totalTokens`, `aiRequestId`
+- 첫 구현 허용 정렬 필드: `requestedAt`, `aiRequestId`
 
 통화를 환산하지 않으므로 `estimatedCost` 정렬은 제공하지 않는다. 향후 단일 `costCurrency` 필터를 필수 적용하는 별도 계약이 승인될 때만 비용 정렬을 확장할 수 있다. 보존 기간은 DB·운영 정책의 후속 결정 사항이다.
 
@@ -787,593 +788,101 @@ GET /api/v1/cases/{caseId}/ai-reports/current
 - 멱등성: GET이므로 별도 키를 사용하지 않음
 - 추적: 현재 조회 `traceId`, 리포트와 최신 요청의 과거 `traceId`
 
-## 7. AI 요청 단건 운영 상세 조회 API
-
-### 7.1 목적과 요청
-
-`aiRequestId`를 기준으로 리포트 상태, Provider 호출 사용량과 장애 처리 결과를 조회한다.
-
-```http
-GET /api/v1/ai-report-requests/{aiRequestId}
-```
-
-### 7.2 Parameter와 Header
-
-| 구분 | 이름 | 필수 | 설명 |
-| --- | --- | --- | --- |
-| Path | `aiRequestId` | 필수 | AI 리포트 생성 요청 식별자 |
-| Query | 없음 | - | - |
-| Header | 추적 헤더 | 미확정 | 공통 추적 정책 적용 |
-| Body | 없음 | - | GET 요청 본문을 사용하지 않음 |
-
-### 7.3 Response Body
-
-| 필드 | 타입 | 설명 |
-| --- | --- | --- |
-| `aiRequestId` | string | 외부 `AiReportRequest` 식별자 |
-| `executionId` | string 또는 null | 연결된 `AiReportExecution` 식별자. 캐시 적중이면 null |
-| `executionShared` | boolean | 이 요청이 기존 진행 실행에 연결되었는지 |
-| `initiatingAiRequestId` | string 또는 null | 실행의 `initiatingRequestRef`에서 파생한 최초 요청 ID. 캐시 적중이면 null |
-| `reportId` | string 또는 null | 요청의 `resolvedReportRef`가 가리키는 결과 ID |
-| `caseId` | string | 대상 사건 |
-| `detectionResultVersion` | integer | 요청에 고정된 탐지 버전 |
-| `reportStatus` | string | 리포트 상태 |
-| `reportSource` | string 또는 null | 본문 최초 생성 출처. `LLM`, `TEMPLATE_FALLBACK` 또는 null |
-| `sourceAiRequestId` | string 또는 null | 캐시 적중 시 결과 계보에서 파생한 원본 생성 요청 ID |
-| `lastProvider` | string 또는 null | 연결 실행의 마지막 실제 Provider 호출. 실행·attempt가 없으면 null |
-| `lastModel` | string 또는 null | 연결 실행의 마지막 실제 Provider 모델명. 실행·attempt가 없으면 null |
-| `promptVersion` | string | Prompt 버전 |
-| `modelVersion` | string | 정확 일치 기준 모델 버전 |
-| `inputTokens` | integer 또는 null | attempts가 없으면 0. 모든 attempt에서 입력 토큰이 확인될 때만 합계, 하나라도 null이면 null |
-| `outputTokens` | integer 또는 null | attempts가 없으면 0. 모든 attempt에서 출력 토큰이 확인될 때만 합계, 하나라도 null이면 null |
-| `totalTokens` | integer 또는 null | attempts가 없으면 0. 모든 attempt에서 전체 토큰이 확인될 때만 합계, 하나라도 null이면 null |
-| `estimatedCost` | string 또는 null | 모든 실제 attempt의 비용·통화가 확인된 단일 통화 실행의 전체 추정 비용. 무호출·다중 통화·불완전 비용이면 null |
-| `costCurrency` | string 또는 null | `estimatedCost`의 통화 |
-| `costBreakdown` | array 또는 null | 비용이 완전하면 통화별 전체 합계, attempts가 없으면 빈 배열, 일부 비용·통화가 미측정이면 null |
-| `latencyMs` | integer 또는 null | 외부 요청 접수부터 요청 종료까지의 시간. 미종료이면 null |
-| `cacheHit` | boolean | 이번 요청이 정확 일치 기존 리포트를 재사용했는지 |
-| `fallbackUsed` | boolean | 연결 실행의 결과가 템플릿 fallback인지. 캐시 적중은 원본 출처와 무관하게 false |
-| `usageFinalized` | boolean | 실행이 종료되어 더 이상 attempt가 추가되지 않는지. true여도 Provider 측정 실패로 토큰·비용 합계가 null일 수 있음 |
-| `requestedByRef` | string | 서버 사용자 문맥에서 얻은 제한된 요청자 참조값 |
-| `requestedAt` | string | 요청 접수 시각 |
-| `completedAt` | string 또는 null | 종료 상태 확정 시각 |
-| `failureCode` | string 또는 null | 실패 또는 fallback 원인 분류 |
-| `attempts` | array | 연결된 `AiReportExecution`의 실제 Provider 호출 이력. 캐시·호출 전 대기는 빈 배열 |
-| `traceId` | string | 과거 AI 생성 흐름 추적 식별자 |
-| `queryTraceId` | string | 현재 조회 HTTP 요청 추적 식별자 |
-
-`attempts`는 `AiReportRequest`가 아니라 `AiReportExecution`에 귀속된다. 같은 `executionId`를 공유하는 요청은 조회 시 같은 attempts를 볼 수 있지만 이는 요청별 Provider 호출이 발생했다는 뜻이 아니다. 공유 요청별로 attempt, 토큰 또는 비용 원본을 복제하지 않는다.
-
-`attempts` 항목은 다음 필드를 유지한다.
-
-| 필드 | 타입 | 의미 |
-| --- | --- | --- |
-| `attemptNumber` | integer | 실행 안에서 1부터 시작하는 실제 호출 순서 |
-| `provider` | string | 실제 호출 Provider |
-| `model` | string | 실제 호출 모델 |
-| `outcome` | string | `SUCCEEDED`, `FAILED`, `OUTPUT_REJECTED` 등 호출 결과 |
-| `inputTokens` | integer 또는 null | Provider가 확인한 실제 입력 토큰 |
-| `outputTokens` | integer 또는 null | Provider가 확인한 실제 출력 토큰 |
-| `totalTokens` | integer 또는 null | Provider가 확인한 실제 총 토큰 |
-| `estimatedCost` | string 또는 null | 실제 확인 사용량에 근거한 추정 비용 |
-| `costCurrency` | string 또는 null | 추정 비용의 Provider 원통화 |
-| `latencyMs` | integer 또는 null | 실제 호출 지연시간 |
-| `failureCode` | string 또는 null | 안전하게 분류한 실패 원인 |
-| `requestedAt` | string | Provider 호출 시작 시각 |
-| `completedAt` | string 또는 null | Provider 호출 종료 시각 |
-
-Prompt 원문, Provider 응답 원문, 고객 개인정보와 내부 예외 원문은 attempts에 포함하지 않는다.
-
-### 7.4 상태별 운영 필드
-
-- `PENDING`: Provider 호출 전이면 `attempts = []`, 토큰은 0, `costBreakdown = []`, `latencyMs`·`completedAt`은 null, `usageFinalized = false`.
-- `GENERATING`: 현재까지 기록된 attempts를 보여주되 3.5절의 완전성 규칙으로 합계를 계산하며 `usageFinalized = false`.
-- `COMPLETED`: 실행 종료를 `usageFinalized = true`로 표시한다. 종료됐어도 attempt 측정값이 불완전하면 해당 토큰·비용 합계는 null이다.
-- `FALLBACK_COMPLETED`: 템플릿 자체에는 Provider 비용을 만들지 않는다. fallback 전에 실제 Provider 호출이 있었고 사용량이 확인되면 해당 attempt 사용량을 누락하지 않으며 `fallbackUsed = true`.
-- `FAILED`: 사용 가능한 리포트는 없어도 실제 Provider 호출을 기록하고 `usageFinalized = true`로 표시한다. 측정하지 못한 토큰·비용을 0으로 바꾸지 않는다.
-- 캐시 적중: `executionId = null`, `attempts = []`, 토큰 세 필드는 0, `estimatedCost = null`, `costCurrency = null`, `costBreakdown = []`, `lastProvider = null`, `lastModel = null`, `cacheHit = true`, `fallbackUsed = false`. 재사용한 원본이 fallback 결과이면 `reportSource = TEMPLATE_FALLBACK`으로 최초 생성 출처만 표시한다.
-- 진행 실행 공유 요청: `executionShared = true`로 반환하고 연결된 실행의 동일 attempts를 보여준다. 아직 호출이 없으면 빈 배열이다. 요청별 Provider 사용량 원본을 복제하지 않으며 집계 API는 같은 attempts를 다시 합산하지 않는다.
-
-자동 재시도는 Timeout과 연결 실패처럼 일시적인 오류에만 적용한다. 최초 호출을 포함해 최대 2회 시도하므로 자동 재시도는 최대 1회이다. 출력 검증 실패와 비일시적 Provider 오류는 자동 재시도하지 않고 템플릿 fallback으로 전환한다. 자동 재시도와 모델 라우팅의 실제 호출은 같은 `executionId` 아래 `attemptNumber` 순서로 기록한다.
-
-### 7.5 성공 응답 예시
-
-LLM 생성 완료:
-
-```json
-{
-  "aiRequestId": "air_demo_20260726_0001",
-  "executionId": "aiexec_demo_20260726_0001",
-  "executionShared": false,
-  "initiatingAiRequestId": "air_demo_20260726_0001",
-  "reportId": "aireport_demo_20260726_0001",
-  "caseId": "case_demo_20260724_0031",
-  "detectionResultVersion": 3,
-  "reportStatus": "COMPLETED",
-  "reportSource": "LLM",
-  "sourceAiRequestId": null,
-  "lastProvider": "provider-demo",
-  "lastModel": "report-model-demo",
-  "promptVersion": "ai-report-prompt-3",
-  "modelVersion": "report-model-lite-2",
-  "inputTokens": 920,
-  "outputTokens": 310,
-  "totalTokens": 1230,
-  "estimatedCost": "0.014200",
-  "costCurrency": "USD",
-  "costBreakdown": [
-    {
-      "costCurrency": "USD",
-      "estimatedCost": "0.014200"
-    }
-  ],
-  "latencyMs": 8100,
-  "cacheHit": false,
-  "fallbackUsed": false,
-  "usageFinalized": true,
-  "requestedByRef": "analyst_ref_demo_07",
-  "requestedAt": "2026-07-26T02:10:00Z",
-  "completedAt": "2026-07-26T02:10:08.100Z",
-  "failureCode": null,
-  "attempts": [
-    {
-      "attemptNumber": 1,
-      "provider": "provider-demo",
-      "model": "report-model-demo",
-      "outcome": "SUCCEEDED",
-      "inputTokens": 920,
-      "outputTokens": 310,
-      "totalTokens": 1230,
-      "estimatedCost": "0.014200",
-      "costCurrency": "USD",
-      "latencyMs": 7900,
-      "failureCode": null,
-      "requestedAt": "2026-07-26T02:10:00.100Z",
-      "completedAt": "2026-07-26T02:10:08Z"
-    }
-  ],
-  "traceId": "trace_demo_ai_request_01",
-  "queryTraceId": "trace_demo_ai_request_query_01"
-}
-```
-
-`TEMPLATE_FALLBACK` 생성 완료:
-
-```json
-{
-  "aiRequestId": "air_demo_20260726_0004",
-  "executionId": "aiexec_demo_20260726_0004",
-  "executionShared": false,
-  "initiatingAiRequestId": "air_demo_20260726_0004",
-  "reportId": "aireport_demo_20260726_0004",
-  "caseId": "case_demo_20260724_0044",
-  "detectionResultVersion": 2,
-  "reportStatus": "FALLBACK_COMPLETED",
-  "reportSource": "TEMPLATE_FALLBACK",
-  "sourceAiRequestId": null,
-  "lastProvider": "provider-demo",
-  "lastModel": "report-model-demo",
-  "promptVersion": "ai-report-prompt-3",
-  "modelVersion": "report-model-lite-2",
-  "inputTokens": 920,
-  "outputTokens": 0,
-  "totalTokens": 920,
-  "estimatedCost": "0.002300",
-  "costCurrency": "USD",
-  "costBreakdown": [
-    {
-      "costCurrency": "USD",
-      "estimatedCost": "0.002300"
-    }
-  ],
-  "latencyMs": 4200,
-  "cacheHit": false,
-  "fallbackUsed": true,
-  "usageFinalized": true,
-  "requestedByRef": "analyst_ref_demo_07",
-  "requestedAt": "2026-07-26T03:00:00Z",
-  "completedAt": "2026-07-26T03:00:04.200Z",
-  "failureCode": "LLM_TIMEOUT",
-  "attempts": [
-    {
-      "attemptNumber": 1,
-      "provider": "provider-demo",
-      "model": "report-model-demo",
-      "inputTokens": 920,
-      "outputTokens": 0,
-      "totalTokens": 920,
-      "estimatedCost": "0.002300",
-      "costCurrency": "USD",
-      "latencyMs": 4000,
-      "outcome": "FAILED",
-      "failureCode": "LLM_TIMEOUT",
-      "requestedAt": "2026-07-26T03:00:00.100Z",
-      "completedAt": "2026-07-26T03:00:04.100Z"
-    }
-  ],
-  "traceId": "trace_demo_ai_request_04",
-  "queryTraceId": "trace_demo_ai_request_query_04"
-}
-```
-
-템플릿 fallback 자체에는 Provider attempt나 비용을 생성하지 않는다. 위 사용량은 fallback 전에 실제로 발생하고 Provider가 확인한 실패 호출의 값이다.
-
-최종 실행 실패:
-
-```json
-{
-  "aiRequestId": "air_demo_20260726_0005",
-  "executionId": "aiexec_demo_20260726_0005",
-  "executionShared": false,
-  "initiatingAiRequestId": "air_demo_20260726_0005",
-  "reportId": null,
-  "caseId": "case_demo_20260724_0055",
-  "detectionResultVersion": 1,
-  "reportStatus": "FAILED",
-  "reportSource": null,
-  "sourceAiRequestId": null,
-  "lastProvider": "provider-demo",
-  "lastModel": "report-model-demo",
-  "promptVersion": "ai-report-prompt-3",
-  "modelVersion": "report-model-lite-2",
-  "inputTokens": null,
-  "outputTokens": null,
-  "totalTokens": null,
-  "estimatedCost": null,
-  "costCurrency": null,
-  "costBreakdown": null,
-  "latencyMs": 8200,
-  "cacheHit": false,
-  "fallbackUsed": false,
-  "usageFinalized": true,
-  "requestedByRef": "analyst_ref_demo_07",
-  "requestedAt": "2026-07-26T04:00:00Z",
-  "completedAt": "2026-07-26T04:00:08.200Z",
-  "failureCode": "TEMPLATE_FALLBACK_FAILED",
-  "attempts": [
-    {
-      "attemptNumber": 1,
-      "provider": "provider-demo",
-      "model": "report-model-demo",
-      "outcome": "FAILED",
-      "inputTokens": null,
-      "outputTokens": null,
-      "totalTokens": null,
-      "estimatedCost": null,
-      "costCurrency": null,
-      "latencyMs": 4000,
-      "failureCode": "LLM_TIMEOUT",
-      "requestedAt": "2026-07-26T04:00:00.100Z",
-      "completedAt": "2026-07-26T04:00:04.100Z"
-    },
-    {
-      "attemptNumber": 2,
-      "provider": "provider-demo",
-      "model": "report-model-demo",
-      "outcome": "FAILED",
-      "inputTokens": null,
-      "outputTokens": null,
-      "totalTokens": null,
-      "estimatedCost": null,
-      "costCurrency": null,
-      "latencyMs": 4000,
-      "failureCode": "LLM_TIMEOUT",
-      "requestedAt": "2026-07-26T04:00:04.150Z",
-      "completedAt": "2026-07-26T04:00:08.150Z"
-    }
-  ],
-  "traceId": "trace_demo_ai_request_05",
-  "queryTraceId": "trace_demo_ai_request_query_05"
-}
-```
-
-실패 attempt의 토큰과 비용을 Provider가 확인하지 못한 경우 null로 유지한다. 확인된 실제 사용량이 있으면 실패 호출도 누락하지 않는다.
-
-캐시 적중 요청의 핵심 운영 필드는 다음과 같다. 원본의 `reportSource`는 유지하지만 이번 요청의 Provider 실행과 사용량은 생성하지 않는다.
-
-```json
-{
-  "aiRequestId": "air_demo_20260726_0003",
-  "executionId": null,
-  "executionShared": false,
-  "initiatingAiRequestId": null,
-  "reportId": "aireport_demo_20260726_0001",
-  "reportStatus": "COMPLETED",
-  "reportSource": "LLM",
-  "sourceAiRequestId": "air_demo_20260726_0001",
-  "lastProvider": null,
-  "lastModel": null,
-  "inputTokens": 0,
-  "outputTokens": 0,
-  "totalTokens": 0,
-  "estimatedCost": null,
-  "costCurrency": null,
-  "costBreakdown": [],
-  "cacheHit": true,
-  "fallbackUsed": false,
-  "usageFinalized": true,
-  "attempts": []
-}
-```
-
-### 7.6 Validation, 오류와 사용 주체
-
-| 상태 | 코드 | 상황 |
-| --- | --- | --- |
-| `400 Bad Request` | `VALIDATION_ERROR` | `aiRequestId` 형식 오류 |
-| `404 Not Found` | `RESOURCE_NOT_FOUND` | AI 요청을 찾을 수 없음 |
-| `403 Forbidden` | `ACCESS_DENIED` | `ai-operations:read` 권한 부족 |
-| `500 Internal Server Error` | `INTERNAL_ERROR` | 요청·호출 사용량 관계가 일관되지 않음 |
-
-- 사용 주체: 플랫폼·클라우드 운영자 전용
-- FDS 분석 담당자는 이 운영 상세 API로 Provider, 모델 호출 시도, 토큰과 비용을 조회하지 않는다.
-- 멱등성: GET이므로 별도 키를 사용하지 않음
-- 추적: 과거 `traceId`와 현재 `queryTraceId`를 구분
-- 비노출: Prompt 원문, Provider 응답 원문, 고객 개인정보, 인증정보와 내부 예외 원문
-
-## 8. AI 사용량·비용 상세 목록 조회 API
-
-### 8.1 목적과 요청
-
-플랫폼·클라우드 운영자가 기간과 운영 조건으로 AI 요청별 사용량·비용을 조회한다.
-
-```http
-GET /api/v1/ai-report-usage
-```
-
-### 8.2 Query Parameter
-
-| 이름 | 타입 | 필수 | 설명 |
-| --- | --- | --- | --- |
-| `from` | datetime | 필수 | 요청 접수 시각 범위 시작 |
-| `to` | datetime | 필수 | 요청 접수 시각 범위 끝 |
-| `provider` | string | 선택 | 연결 실행의 `ProviderCallAttempt` 중 하나라도 해당 Provider와 일치하는 요청. 캐시 요청은 매칭되지 않음 |
-| `model` | string | 선택 | 연결 실행의 `ProviderCallAttempt` 중 하나라도 해당 모델과 일치하는 요청. 캐시 요청은 매칭되지 않음 |
-| `reportStatus` | string | 선택 | 상태 Enum |
-| `reportSource` | string | 선택 | 본문 최초 생성 출처인 `LLM`, `TEMPLATE_FALLBACK` |
-| `cacheHit` | boolean | 선택 | 정확 일치 캐시 재사용 여부 |
-| `fallbackUsed` | boolean | 선택 | 이번 요청의 실제 fallback 채택 여부 |
-| `page` | integer | 선택 | 0부터 시작, 기본값 0 |
-| `size` | integer | 선택 | 기본값 20, 최대값 100 |
-| `sort` | string | 선택·반복 | `field,direction`. 기본값 `requestedAt,desc`, 보조 정렬 `aiRequestId,desc` |
-
-### 8.3 Header와 Body
-
-- 요청 본문 없음
-- 추적 헤더는 공통 정책 적용
-- `Idempotency-Key`는 사용하지 않음
-
-### 8.4 목록 항목
-
-각 `content` 항목은 다음 필드를 포함한다.
-
-- `aiRequestId`
-- `executionId`
-- `executionShared`
-- `initiatingAiRequestId`
-- `reportId`
-- `caseId`
-- `detectionResultVersion`
-- `reportStatus`
-- `reportSource`
-- `sourceAiRequestId`
-- `lastProvider`
-- `lastModel`
-- `promptVersion`
-- `modelVersion`
-- `inputTokens`
-- `outputTokens`
-- `totalTokens`
-- `estimatedCost`
-- `costCurrency`
-- `costBreakdown`
-- `latencyMs`
-- `cacheHit`
-- `fallbackUsed`
-- `requestedAt`
-- `completedAt`
-- `failureCode`
-- `traceId`
-
-여러 Provider 시도가 있으면 `lastProvider`와 `lastModel`은 연결 실행의 마지막 실제 호출을 표시하고 토큰·비용은 그 실행의 distinct attempts 합계 projection이다. `inputTokens`, `outputTokens`, `totalTokens`의 타입은 각각 integer 또는 null이며, `estimatedCost`, `costCurrency`, `costBreakdown`은 3.5절의 단건 실행 완전성 규칙을 그대로 적용한다. 일부 attempt가 미측정이면 확인된 값만 완전한 실행 합계처럼 반환하지 않는다.
-
-전체 시도는 단건 운영 상세 API에서 조회한다. 같은 실행을 공유하는 요청 행에는 같은 projection이 보일 수 있으므로 목록 행의 토큰·비용을 직접 합산하지 않는다. 집계는 9절의 distinct 실행·attempt 기준을 사용한다. `provider`와 `model` 필터는 마지막 호출만이 아니라 연결 실행의 attempts 중 하나라도 일치하면 해당 요청을 포함한다.
-
-`fallbackUsed`는 연결 실행이 이번 요청에 제공한 결과로 템플릿 fallback을 실제 채택했는지를 나타낸다. 캐시 요청은 원본 `reportSource`가 `TEMPLATE_FALLBACK`이어도 새 fallback을 수행하지 않았으므로 `fallbackUsed = false`이다.
-
-### 8.5 성공 응답 예시
-
-```json
-{
-  "content": [
-    {
-      "aiRequestId": "air_demo_20260726_0001",
-      "executionId": "aiexec_demo_20260726_0001",
-      "executionShared": false,
-      "initiatingAiRequestId": "air_demo_20260726_0001",
-      "reportId": "aireport_demo_20260726_0001",
-      "caseId": "case_demo_20260724_0031",
-      "detectionResultVersion": 3,
-      "reportStatus": "COMPLETED",
-      "reportSource": "LLM",
-      "sourceAiRequestId": null,
-      "lastProvider": "provider-demo",
-      "lastModel": "report-model-demo",
-      "promptVersion": "ai-report-prompt-3",
-      "modelVersion": "report-model-lite-2",
-      "inputTokens": 920,
-      "outputTokens": 310,
-      "totalTokens": 1230,
-      "estimatedCost": "0.014200",
-      "costCurrency": "USD",
-      "costBreakdown": [
-        {
-          "costCurrency": "USD",
-          "estimatedCost": "0.014200"
-        }
-      ],
-      "latencyMs": 8100,
-      "cacheHit": false,
-      "fallbackUsed": false,
-      "requestedAt": "2026-07-26T02:10:00Z",
-      "completedAt": "2026-07-26T02:10:08.100Z",
-      "failureCode": null,
-      "traceId": "trace_demo_ai_request_01"
-    }
-  ],
-  "page": {
-    "number": 0,
-    "size": 20,
-    "totalElements": 1,
-    "totalPages": 1,
-    "first": true,
-    "last": true
-  },
-  "traceId": "trace_demo_ai_usage_list_01"
-}
-```
-
-목록 항목의 `traceId`는 과거 생성 요청을, 최상위 `traceId`는 현재 목록 조회를 추적한다.
-
-### 8.6 Validation, 오류와 사용 주체
-
-- `from`과 `to`는 필수이며 UTC ISO-8601 형식이어야 한다.
-- `from < to`여야 한다.
-- 조회 기간은 반개구간 `from <= requestedAt < to`이며 최대 31일이다. 초과하면 `422 VALIDATION_ERROR`와 `INVALID_TIME_RANGE`를 반환한다.
-- Enum, boolean, 페이지와 정렬 필드를 검증한다.
-- `page < 0` 또는 `size < 1`은 형식·범위 오류이며 `size > 100`은 `422 VALIDATION_ERROR`이다.
-- `estimatedCost` 정렬은 제공하지 않는다.
-
-| 상태 | 코드 | 상황 |
-| --- | --- | --- |
-| `400 Bad Request` | `VALIDATION_ERROR` | 시각, Enum, boolean, 페이지 또는 정렬 형식 오류 |
-| `422 Unprocessable Entity` | `VALIDATION_ERROR` | `from >= to`, 과도한 기간 또는 허용하지 않은 정렬 |
-| `403 Forbidden` | `ACCESS_DENIED` | `ai-usage:read` 권한 부족 |
-| `500 Internal Server Error` | `INTERNAL_ERROR` | 예기치 않은 조회 오류 |
-
-- 사용 주체: 플랫폼·클라우드 운영자
-- 멱등성: GET이므로 별도 키를 사용하지 않음
-- 추적: 현재 목록 조회와 각 과거 요청의 `traceId` 구분
-
-## 9. AI 사용량·비용 집계 조회 API
-
-### 9.1 목적과 요청
-
-상세 목록과 같은 필터를 사용해 외부 요청 수, distinct 실행 수, distinct Provider 호출 수, 성공·실패, fallback, 캐시, 토큰, 비용과 평균 요청 지연시간을 집계한다.
-
-```http
-GET /api/v1/ai-report-usage/summary
-```
-
-### 9.2 Query Parameter
-
-`from`, `to`, `provider`, `model`, `reportStatus`, `reportSource`, `cacheHit`, `fallbackUsed`는 상세 목록과 같은 의미를 사용한다. 집계 API에는 `page`, `size`, `sort`를 사용하지 않는다.
-
-### 9.3 Header와 Body
-
-- 요청 본문 없음
-- 추적 헤더는 공통 정책 적용
-- `Idempotency-Key`는 사용하지 않음
-
-### 9.4 집계 의미
-
-| 필드 | 의미 |
-| --- | --- |
-| `requestCount` | 기간·필터에 포함된 `AiReportRequest` 수. 캐시·실행 공유 요청 포함 |
-| `executionCount` | 필터에 포함된 요청들이 참조하는 distinct `AiReportExecution` 수. 캐시 요청은 실행이 없어 기여하지 않음 |
-| `providerCallCount` | 포함된 distinct 실행에 속한 distinct `ProviderCallAttempt` 수 |
-| `successCount` | 사용 가능한 리포트로 종료된 요청 수. `COMPLETED`와 `FALLBACK_COMPLETED` 포함 |
-| `failureCount` | `FAILED` 요청 수 |
-| `inProgressCount` | `PENDING`과 `GENERATING` 요청 수 |
-| `fallbackCount` | 연결 실행에서 `TEMPLATE_FALLBACK` 결과를 받은 비캐시 요청 수. 캐시 재사용은 원본 출처가 fallback이어도 포함하지 않음 |
-| `cacheHitCount` | `cacheHit = true`인 `AiReportRequest` 수 |
-| `inputTokens` | integer 또는 null. 모든 포함 attempt에서 입력 토큰이 확인될 때만 합계 |
-| `outputTokens` | integer 또는 null. 모든 포함 attempt에서 출력 토큰이 확인될 때만 합계 |
-| `totalTokens` | integer 또는 null. 모든 포함 attempt에서 전체 토큰이 확인될 때만 합계 |
-| `estimatedCost` | string 또는 null. 모든 포함 attempt의 비용·통화가 확인된 단일 통화 집계의 전체 추정 비용 |
-| `costCurrency` | string 또는 null. 완전한 단일 통화 집계일 때의 통화이며 무호출·다중 통화·불완전 비용이면 null |
-| `costBreakdown` | array 또는 null. 완전한 통화별 전체 합계, 무호출이면 빈 배열, 일부 미측정이면 null |
-| `averageLatencyMs` | 종료된 `AiReportRequest`의 접수부터 종료까지 평균 지연시간. Provider 호출 지연 집계가 아님 |
-
-`successCount + failureCount + inProgressCount = requestCount`가 되어야 한다. `fallbackCount`와 `cacheHitCount`는 성공 요청의 처리 방식 부분집합이며 성공·실패 합계에 다시 더하지 않는다.
-
-집계는 요청별 상세 응답에 투영된 attempts를 합산하지 않고 `executionId`와 attempt 식별자로 중복 제거한 영속 `ProviderCallAttempt`를 직접 집계한다. 같은 실행을 공유하는 요청 수가 늘어도 `executionCount`, `providerCallCount`, 토큰과 비용이 증가하지 않는다.
-
-기간 토큰 집계는 다음 완전성 규칙을 적용한다.
-
-- 필터에 포함된 distinct `ProviderCallAttempt`가 없으면 `inputTokens`, `outputTokens`, `totalTokens`는 0이다.
-- attempt가 하나 이상이면 각 토큰 필드별로 모든 포함 attempt에서 값이 확인될 때만 합계를 반환한다.
-- 하나라도 해당 토큰 필드가 null이면 집계 응답의 해당 합계도 null이다.
-- 확인하지 못한 토큰을 0으로 바꾸거나, 확인된 값만 합산해 완전한 총사용량처럼 반환하지 않는다.
-
-기간 비용 집계는 다음 완전성 규칙을 적용한다.
-
-- 모든 포함 attempt의 비용과 통화가 확인되고 통화가 하나이면 `estimatedCost`, `costCurrency`와 단일 항목 `costBreakdown`을 반환한다.
-- 모든 비용과 통화가 확인되고 통화가 여러 개이면 `estimatedCost = null`, `costCurrency = null`이고 `costBreakdown`에 통화별 전체 합계를 반환한다.
-- attempt가 하나 이상인데 일부 비용 또는 통화가 null이면 `estimatedCost = null`, `costCurrency = null`, `costBreakdown = null`로 반환한다. 확인된 일부 비용만 전체 비용처럼 합산하지 않는다.
-- 포함 attempt가 없으면 `estimatedCost = null`, `costCurrency = null`, `costBreakdown = []`이다.
-
-캐시 적중과 Provider 호출 전 대기 상태는 attempt가 없으므로 미측정 attempt로 계산하지 않는다. 따라서 “실제 사용량 없음”은 0과 빈 배열로, “실제 호출은 있으나 사용량 측정 불완전”은 null로 구분한다. 캐시 요청을 위한 가상 호출·토큰·비용 행은 만들지 않는다.
-
-`TEMPLATE_FALLBACK` 자체도 Provider 비용을 생성하지 않는다. fallback 전에 실제 Provider 호출이 있었다면 그 distinct attempt를 집계 대상으로 포함하되, 확인된 사용량만 완전성 규칙에 따라 반환한다. `fallbackCount`는 실제 fallback 결과를 받은 비캐시 요청만 집계하며, 원본 출처가 `TEMPLATE_FALLBACK`인 캐시 요청은 포함하지 않는다.
-
-### 9.5 성공 응답 예시
-
-```json
-{
-  "from": "2026-07-26T00:00:00Z",
-  "to": "2026-07-27T00:00:00Z",
-  "requestCount": 125,
-  "executionCount": 91,
-  "providerCallCount": 96,
-  "successCount": 119,
-  "failureCount": 2,
-  "inProgressCount": 4,
-  "fallbackCount": 7,
-  "cacheHitCount": 31,
-  "inputTokens": 84200,
-  "outputTokens": 25100,
-  "totalTokens": 109300,
-  "estimatedCost": "12.340000",
-  "costCurrency": "USD",
-  "costBreakdown": [
-    {
-      "costCurrency": "USD",
-      "estimatedCost": "12.340000"
-    }
-  ],
-  "averageLatencyMs": 7350,
-  "traceId": "trace_demo_ai_usage_summary_01"
-}
-```
-
-### 9.6 Validation, 오류와 사용 주체
-
-상세 목록과 같은 기간·필터 Validation을 적용한다.
-
-```json
-{
-  "code": "VALIDATION_ERROR",
-  "message": "조회 기간을 확인해 주세요.",
-  "traceId": "trace_demo_ai_usage_range_01",
-  "fieldErrors": [
-    {
-      "field": "to",
-      "code": "INVALID_TIME_RANGE",
-      "reason": "from부터 to까지의 조회 기간은 최대 31일이어야 합니다."
-    }
-  ]
-}
-```
-
-- `400 Bad Request`: 형식 오류
-- `422 Unprocessable Entity`: 의미상 잘못된 기간 또는 필터 조합
-- `403 ACCESS_DENIED`: `ai-usage:read` 권한 부족
-- `500 Internal Server Error`: 예기치 않은 집계 오류
-- 사용 주체: 플랫폼·클라우드 운영자
-- 멱등성: GET이므로 별도 키를 사용하지 않음
-- 추적: 응답 `traceId`로 현재 집계 조회 추적
-
+## 7. AI 요청 운영 상세 조회 — Issue #341 첫 구현 계약
+
+`GET /api/v1/ai-report-requests/{aiRequestId}`는 USER `PLATFORM_ADMIN`의
+`ai-operations:read`가 필요하다. `aiRequestId`는 canonical lowercase UUID v4이다.
+요청 본문과 query는 없다. GET은 AI 서비스나 Ollama를 호출하지 않는다.
+
+응답은 다음의 **평면 JSON 객체**이다. `aiRequestId`, `executionId`,
+`executionShared`, `initiatingAiRequestId`, `reportId`, `caseId`,
+`detectionResultVersion`, `reportStatus`, `reportSource`, `sourceAiRequestId`,
+`lastProvider`, `lastModel`, `promptVersion`, `modelVersion`, `inputTokens`,
+`outputTokens`, `totalTokens`, `estimatedCost`, `costCurrency`,
+`costBreakdown`, `latencyMs`, `cacheHit`, `fallbackUsed`, `requestedAt`,
+`completedAt`, `failureCode`, `traceId`, `usageFinalized`, `requestedByRef`,
+`attempts`, `queryTraceId`를 반환한다. `traceId`는 과거 생성 흐름,
+`queryTraceId`는 이번 조회의 추적값이다.
+
+- `lastProvider`는 마지막 기록 attempt의 Provider이다. `lastModel`과 모델 필터의
+  값은 V15 `model_digest`이며 없으면 null이다. 실행 정확 일치 키
+  `modelVersion`과 구분한다.
+- `attempts`는 실행에 귀속된 저장 행을 `attemptNumber` 순서로 반환한다.
+  각 원소는 `attemptNumber`, `provider`, `model`(digest 또는 null),
+  `outcome`(저장된 `COMPLETED`, `TIMEOUT`, `PROVIDER_ERROR`,
+  `INVALID_OUTPUT`), `inputTokens`, `outputTokens`, `totalTokens`,
+  `estimatedCost`, `costCurrency`, `latencyMs`만 갖는다.
+  attempt별 `failureCode`, `requestedAt`, `completedAt`은 첫 구현 응답에서
+  **제외**한다. 실행의 최종 `failureCode`를 개별 attempt 원인으로 복제하지 않는다.
+- 요청 전체 `latencyMs`와 요청 `completedAt`은 V15에 저장되지 않으므로
+  첫 구현에서는 **항상 null**이다. 실행 `finished_at`, 결과 `generated_at`,
+  attempt 지연 합계를 요청 완료 시각이나 요청 전체 지연으로 치환하지 않는다.
+- `usageFinalized`는 캐시 적중 또는 실행 종료 상태이면 true이다.
+  `fallbackUsed`는 이번 요청에 연결된 실행의 최종 결과가
+  `FALLBACK_COMPLETED`일 때만 true이다. 캐시 결과의 원본 출처가 fallback이어도 false이다.
+- Provider 호출 수는 영속 기록된 attempt 수이다. Worker가 응답을 받기 전
+  중단되면 실제 호출이 저장되지 않을 수 있다. 호출의 완전한 계수라는 뜻이 아니다.
+- 실제 attempt가 없으면 각 토큰 합계는 0, `costBreakdown=[]`이다.
+  attempt가 있고 해당 토큰값 하나라도 미측정이면 그 필드의 합계는 null이다.
+  로컬 Ollama 비용은 미측정이므로 attempt가 있으면 `estimatedCost=null`,
+  `costCurrency=null`, `costBreakdown=null`이다. 0원이나 절감액은 아니다.
+- Prompt/Provider 응답 원문, 개인정보, 인증정보, idempotency key와 fingerprint를
+  반환하거나 로그에 남기지 않는다.
+
+오류: ID 형식 400 `VALIDATION_ERROR`, 미존재 404 `RESOURCE_NOT_FOUND`,
+권한 부족 403 `ACCESS_DENIED`, 조회 내부 오류 500 `INTERNAL_ERROR`.
+
+## 8. AI 사용량 요청 목록 — Issue #341 첫 구현 계약
+
+`GET /api/v1/ai-report-usage`는 `ai-usage:read`가 필요하다.
+필수 `from`, `to`는 UTC ISO-8601 `Z` 시각이고
+`from <= requestedAt < to`, `from < to`, 최대 31일이다.
+선택 필터는 `provider`, `model`(저장된 model digest),
+`reportStatus`, `reportSource`, `cacheHit`, `fallbackUsed`이다.
+Provider와 모델은 **같은** attempt가 두 조건을 모두 만족할 때 요청을 선택한다.
+캐시 요청은 Provider/모델 필터에 매칭되지 않는다.
+
+`page`는 0부터, 기본 0이다. `size`는 1–100, 기본 20이다.
+첫 구현 `sort`는 `requestedAt,asc|desc`, `aiRequestId,asc|desc`만 허용하고
+기본 `requestedAt,desc`이다. 정렬에는 항상 `aiRequestId` 보조 키를 쓴다.
+`completedAt`, 요청 `latencyMs`, `totalTokens`, 비용 정렬은 제공하지 않는다.
+
+응답 `content`의 각 항목은 §7의 평면 필드 중 `usageFinalized`,
+`requestedByRef`, `attempts`, `queryTraceId`를 제외한 필드를 가진다.
+목록 행의 토큰은 연결 실행 전체의 projection이므로 공유 실행의 여러 행을
+합산해서는 안 된다. 응답에는 `page: {number,size,totalElements,totalPages,first,last}`와
+이번 조회 `traceId`가 있다. 집계는 페이지와 무관하게 §9가 계산한다.
+
+형식·Enum·정렬 오류는 400 `VALIDATION_ERROR`, 역전·31일 초과 기간과
+범위 밖 페이지·크기는 422 `VALIDATION_ERROR`이다. 기간 오류는
+`fieldErrors=[{field:"to",code:"INVALID_TIME_RANGE",reason:...}]`를 포함한다.
+권한 부족 403 `ACCESS_DENIED`, 내부 오류 500 `INTERNAL_ERROR`이다.
+
+## 9. AI 사용량 전체 집계 — Issue #341 첫 구현 계약
+
+`GET /api/v1/ai-report-usage/summary`는 `ai-usage:read`가 필요하다.
+§8과 같은 필수 기간·선택 필터를 받으며 `page`, `size`, `sort`는 받지 않는다.
+오류 계약도 §8과 같다.
+
+먼저 필터된 요청 집합을 정한다. `requestCount`, `successCount`
+(`COMPLETED`·`FALLBACK_COMPLETED`), `failureCount` (`FAILED`),
+`inProgressCount` (`PENDING`·`GENERATING`), `fallbackCount`,
+`cacheHitCount`는 요청을 센다.
+`successCount + failureCount + inProgressCount = requestCount`이다.
+선택된 요청이 참조하는 distinct 실행을 `executionCount`로 세고 그 실행의
+distinct 저장 attempt를 `providerCallCount`로 센다. Provider/모델
+필터는 요청 선택에 쓰고, 선택된 distinct 실행의 **모든** attempts를 집계한다.
+A/B가 E의 두 attempts를 공유하면 요청 2, 실행 1, 기록된 attempt 2이다.
+캐시 요청 C는 요청만 한 건 늘린다.
+
+응답은 `from`, `to`, 위 8개 count, `inputTokens`, `outputTokens`,
+`totalTokens`, `estimatedCost`, `costCurrency`, `costBreakdown`,
+`averageLatencyMs`, 이번 조회 `traceId`로 구성한다. attempt가 없으면
+토큰은 0이고 `costBreakdown=[]`이다. 하나라도 해당 토큰이 미측정이면
+해당 전체 합계는 null이다. attempt가 있는 로컬 Ollama 비용은 미측정이므로
+`estimatedCost=null`, `costCurrency=null`, `costBreakdown=null`이다.
+요청 전체 지연이 없어서 `averageLatencyMs=null`이다. 금액 합계·절감액·
+비용 그래프와 요청 지연 그래프는 이 계약으로 제공하지 않는다.
 ## 10. 중복 요청·멱등성·재생성 정책
 
 ### 10.1 정확 일치 중복

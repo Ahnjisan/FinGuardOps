@@ -53,11 +53,14 @@ export type BackendEndpointKey =
   | "case-resolution-create"
   | "case-note-create"
   | "ai-report-current"
-  | "ai-report-create";
+  | "ai-report-create"
+  | "ai-operations-detail"
+  | "ai-usage-list"
+  | "ai-usage-summary";
 
 export type BackendHttpMethod = "GET" | "PATCH" | "POST";
 
-export type BackendPathParamName = "transactionId" | "caseId";
+export type BackendPathParamName = "transactionId" | "caseId" | "aiRequestId";
 
 export type BackendPathParams = Readonly<Record<string, string>>;
 
@@ -84,7 +87,15 @@ export type BackendQueryParamName =
   | "createdAtTo"
   | "lastChangedAtFrom"
   | "lastChangedAtTo"
-  | "transactionId";
+  | "transactionId"
+  | "from"
+  | "to"
+  | "provider"
+  | "model"
+  | "reportStatus"
+  | "reportSource"
+  | "cacheHit"
+  | "fallbackUsed";
 
 /**
  * Already-stringified query values, keyed by approved name. This is the only
@@ -168,7 +179,9 @@ export type BackendQueryValueRule =
    * into one shared rule would silently impose this endpoint's bounds on the
    * other - refusing transaction filters Backend would have accepted.
    */
-  | { readonly kind: "case-assignee-ref" };
+  | { readonly kind: "case-assignee-ref" }
+  | { readonly kind: "ai-provider" }
+  | { readonly kind: "ai-model" };
 
 export interface BackendQueryParamContract {
   readonly name: BackendQueryParamName;
@@ -238,6 +251,10 @@ export function isApprovedQueryValue(rule: BackendQueryValueRule, value: string)
       return !isJavaBlank(value);
     case "case-assignee-ref":
       return !isJavaBlank(value) && value.length <= 128 && isJavaTrimmed(value);
+    case "ai-provider":
+      return /^[A-Z][A-Z0-9_]{0,31}$/.test(value);
+    case "ai-model":
+      return /^[a-zA-Z0-9:_.-]{1,128}$/.test(value);
   }
 }
 
@@ -257,6 +274,14 @@ export function isApprovedQuerySet(
   descriptor: BackendEndpointDescriptor,
   query: Readonly<Record<string, string>>,
 ): boolean {
+  if (descriptor.key === "ai-usage-list" || descriptor.key === "ai-usage-summary") {
+    if (query.from === undefined || query.to === undefined ||
+        !isUtcInstantString(query.from) || !isUtcInstantString(query.to) ||
+        compareUtcInstants(query.from, query.to) >= 0 ||
+        Date.parse(query.to) - Date.parse(query.from) > 31 * 24 * 60 * 60 * 1000) {
+      return false;
+    }
+  }
   if (descriptor.key === "case-transaction-list") {
     const page = Number(query.page ?? "0");
     const size = Number(query.size ?? "20");
@@ -315,7 +340,7 @@ export interface BackendEndpointDescriptor {
   readonly acceptsJsonBody: boolean;
 }
 
-const PARAM_NAMES: readonly BackendPathParamName[] = ["transactionId", "caseId"];
+const PARAM_NAMES: readonly BackendPathParamName[] = ["transactionId", "caseId", "aiRequestId"];
 
 function isParamName(value: string): value is BackendPathParamName {
   return (PARAM_NAMES as readonly string[]).includes(value);
@@ -445,6 +470,22 @@ const CASE_AUDIT_LIST_QUERY: readonly BackendQueryParamContract[] = [
   { name: "sort", rule: choice(CASE_AUDIT_LIST_SORTS) },
 ];
 
+export const AI_USAGE_SORTS = ["requestedAt,asc", "requestedAt,desc",
+  "aiRequestId,asc", "aiRequestId,desc"] as const;
+const AI_USAGE_FILTERS: readonly BackendQueryParamContract[] = [
+  { name: "from", rule: INSTANT }, { name: "to", rule: INSTANT },
+  { name: "provider", rule: { kind: "ai-provider" } },
+  { name: "model", rule: { kind: "ai-model" } },
+  { name: "reportStatus", rule: choice(["PENDING", "GENERATING", "COMPLETED", "FALLBACK_COMPLETED", "FAILED"]) },
+  { name: "reportSource", rule: choice(["LLM", "TEMPLATE_FALLBACK"]) },
+  { name: "cacheHit", rule: choice(["true", "false"]) },
+  { name: "fallbackUsed", rule: choice(["true", "false"]) },
+];
+const AI_USAGE_LIST_QUERY: readonly BackendQueryParamContract[] = [
+  ...AI_USAGE_FILTERS, { name: "page", rule: PAGE }, { name: "size", rule: SIZE },
+  { name: "sort", rule: choice(AI_USAGE_SORTS) },
+];
+
 /** Transcribed from `FraudCaseTransactionQueryValidator`; sorting is server fixed. */
 const CASE_TRANSACTION_LIST_QUERY: readonly BackendQueryParamContract[] = [
   { name: "page", rule: PAGE },
@@ -509,6 +550,9 @@ const REGISTRY: Readonly<Record<BackendEndpointKey, BackendEndpointDescriptor>> 
   "case-note-create": describe("case-note-create", "POST", "/api/v1/cases/{caseId}/notes"),
   "ai-report-current": describe("ai-report-current", "GET", "/api/v1/cases/{caseId}/ai-reports/current"),
   "ai-report-create": describe("ai-report-create", "POST", "/api/v1/cases/{caseId}/ai-reports"),
+  "ai-operations-detail": describe("ai-operations-detail", "GET", "/api/v1/ai-report-requests/{aiRequestId}"),
+  "ai-usage-list": describe("ai-usage-list", "GET", "/api/v1/ai-report-usage", AI_USAGE_LIST_QUERY),
+  "ai-usage-summary": describe("ai-usage-summary", "GET", "/api/v1/ai-report-usage/summary", AI_USAGE_FILTERS),
 });
 
 export const BACKEND_ENDPOINT_KEYS: readonly BackendEndpointKey[] = Object.freeze(

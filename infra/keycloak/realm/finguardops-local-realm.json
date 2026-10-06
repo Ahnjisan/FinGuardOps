@@ -499,6 +499,18 @@
       "requiredActions": [],
       "credentials": [],
       "realmRoles": ["FDS_APPROVER"]
+    },
+    {
+      "id": "32a6a5db-71e4-4e58-8b3f-ec8c2c07b69d",
+      "username": "local-platform-admin",
+      "firstName": "Local",
+      "lastName": "Admin",
+      "email": "local-platform-admin@finguardops.invalid",
+      "enabled": true,
+      "emailVerified": false,
+      "requiredActions": [],
+      "credentials": [],
+      "realmRoles": ["PLATFORM_ADMIN"]
     }
   ]
 }

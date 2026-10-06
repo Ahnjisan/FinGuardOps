@@ -162,7 +162,7 @@ describe("resolveCapabilities - one role at a time", () => {
     ["FDS_APPROVER", ["transaction:view", "detection:view", "case:view", "case:resolve", "ai-report:view"]],
     ["RULE_OPERATOR", []],
     ["RECOVERY_OPERATOR", []],
-    ["PLATFORM_ADMIN", []],
+    ["PLATFORM_ADMIN", ["ai-operations:view", "ai-usage:view"]],
   ];
 
   it.each(PER_ROLE)("grants %s exactly its reachable capabilities", (role, expected) => {
@@ -181,7 +181,8 @@ describe("resolveCapabilities - one role at a time", () => {
   it("gives PLATFORM_ADMIN no case or transaction capability", () => {
     const capabilities = resolveCapabilities(["PLATFORM_ADMIN"]);
 
-    for (const capability of UI_CAPABILITIES) {
+    for (const capability of ["transaction:view", "detection:view", "case:view",
+      "case:workflow", "case:note-write", "case:resolve", "ai-report:view", "ai-report:create"] as const) {
       expect(capabilities.has(capability)).toBe(false);
     }
   });
@@ -227,16 +228,16 @@ describe("resolveCapabilities - several roles", () => {
     );
   });
 
-  it("adds nothing for a role that grants nothing", () => {
+  it("unions viewer and platform access without case write", () => {
     expect(resolveCapabilities(["FDS_VIEWER", "PLATFORM_ADMIN"]).granted).toEqual(
-      VIEWER_CAPABILITIES,
+      [...VIEWER_CAPABILITIES, "ai-operations:view", "ai-usage:view"],
     );
   });
 
-  it("grants nothing for a combination of empty roles", () => {
+  it("grants only platform access for the operator combination", () => {
     expect(
       resolveCapabilities(["RULE_OPERATOR", "RECOVERY_OPERATOR", "PLATFORM_ADMIN"]).granted,
-    ).toEqual([]);
+    ).toEqual(["ai-operations:view", "ai-usage:view"]);
   });
 
   it("grants everything reachable when all six roles are held", () => {
@@ -321,8 +322,8 @@ describe("CapabilitySet", () => {
 });
 
 describe("the capability table as a whole", () => {
-  it("declares eight capabilities", () => {
-    expect(UI_CAPABILITIES).toHaveLength(8);
+  it("declares ten capabilities", () => {
+    expect(UI_CAPABILITIES).toHaveLength(10);
     expect(Object.isFrozen(UI_CAPABILITIES)).toBe(true);
   });
 
@@ -344,8 +345,8 @@ describe("the capability table as a whole", () => {
    * screens this client has, not an oversight, and it is asserted so that
    * adding a screen has to update this expectation deliberately.
    */
-  it("leaves the operator and admin roles with nothing reachable", () => {
-    for (const role of ["RULE_OPERATOR", "RECOVERY_OPERATOR", "PLATFORM_ADMIN"] as const) {
+  it("leaves rule and recovery operators with nothing reachable", () => {
+    for (const role of ["RULE_OPERATOR", "RECOVERY_OPERATOR"] as const) {
       expect(resolveCapabilities([role]).granted).toEqual([]);
     }
   });

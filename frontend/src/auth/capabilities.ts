@@ -31,7 +31,9 @@ export type UiCapability =
   | "case:note-write"
   | "case:resolve"
   | "ai-report:view"
-  | "ai-report:create";
+  | "ai-report:create"
+  | "ai-operations:view"
+  | "ai-usage:view";
 
 /**
  * Canonical order, used to render a decided set deterministically. Role arrays
@@ -47,6 +49,8 @@ export const UI_CAPABILITIES: readonly UiCapability[] = Object.freeze<UiCapabili
   "case:resolve",
   "ai-report:view",
   "ai-report:create",
+  "ai-operations:view",
+  "ai-usage:view",
 ]);
 
 /**
@@ -82,7 +86,7 @@ const ROLE_CAPABILITIES: ReadonlyMap<UserRole, readonly UiCapability[]> = new Ma
   ],
   ["RULE_OPERATOR", Object.freeze<UiCapability[]>([])],
   ["RECOVERY_OPERATOR", Object.freeze<UiCapability[]>([])],
-  ["PLATFORM_ADMIN", Object.freeze<UiCapability[]>([])],
+  ["PLATFORM_ADMIN", Object.freeze<UiCapability[]>(["ai-operations:view", "ai-usage:view"])],
 ]);
 
 /**

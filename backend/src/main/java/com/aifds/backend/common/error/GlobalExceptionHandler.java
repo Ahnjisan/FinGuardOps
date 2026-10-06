@@ -60,7 +60,9 @@ public class GlobalExceptionHandler {
     ResponseEntity<ApiErrorResponse> handleAiReport(AiReportException exception,
                                                     HttpServletRequest request) {
         return response(exception.status(), exception.code(),
-                "AI 리포트 요청 조건을 확인해 주세요.", List.of(), request);
+                "AI 리포트 요청 조건을 확인해 주세요.", exception.field() == null ? List.of()
+                        : List.of(new FieldErrorResponse(exception.field(), exception.fieldCode(),
+                        "조회 조건을 확인해 주세요.")), request);
     }
 
     private static final Logger LOGGER =

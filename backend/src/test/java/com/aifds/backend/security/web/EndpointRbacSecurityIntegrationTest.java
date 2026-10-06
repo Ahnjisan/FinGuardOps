@@ -2,6 +2,7 @@ package com.aifds.backend.security.web;
 
 import com.aifds.backend.behavior.service.BehaviorEventIntakeService;
 import com.aifds.backend.aireport.service.AiReportService;
+import com.aifds.backend.aireport.service.AiReportOperationsQueryService;
 import com.aifds.backend.detection.service.AdoptedDetectionResultQueryService;
 import com.aifds.backend.common.trace.TraceIdFilter;
 import com.aifds.backend.fraudcase.service.FraudCaseAuditLogService;
@@ -38,6 +39,7 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 
 import java.io.BufferedReader;
@@ -56,6 +58,8 @@ import java.util.stream.Stream;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.BEHAVIOR_EVENT_INTAKE;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_REPORT_CREATE;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_REPORT_READ;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_OPERATIONS_READ;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_USAGE_READ;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_AUDIT_READ;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_NOTE_READ;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_NOTE_WRITE;
@@ -203,7 +207,11 @@ class EndpointRbacSecurityIntegrationTest {
                     "/api/v1/cases/" + CASE_ID + "/ai-reports/current",
                     "FDS_VIEWER",
                     AI_REPORT_READ
-            )
+            ),
+            endpoint(HttpMethod.GET, "/api/v1/ai-report-requests/" + CASE_ID,
+                    "PLATFORM_ADMIN", AI_OPERATIONS_READ),
+            endpoint(HttpMethod.GET, "/api/v1/ai-report-usage", "PLATFORM_ADMIN", AI_USAGE_READ),
+            endpoint(HttpMethod.GET, "/api/v1/ai-report-usage/summary", "PLATFORM_ADMIN", AI_USAGE_READ)
     );
     private static final List<CorsProbe> APPROVED_PREFLIGHTS = Stream.concat(
             ENDPOINTS.stream().map(endpoint -> new CorsProbe(
@@ -298,6 +306,10 @@ class EndpointRbacSecurityIntegrationTest {
     @Qualifier("applicationSecurityFilterChain")
     private SecurityFilterChain applicationSecurityFilterChain;
 
+    @Autowired
+    @Qualifier("corsConfigurationSource")
+    private CorsConfigurationSource applicationCorsConfigurationSource;
+
     @MockitoBean
     private TransactionIntakeService transactionIntakeService;
 
@@ -327,6 +339,9 @@ class EndpointRbacSecurityIntegrationTest {
 
     @MockitoBean
     private AiReportService aiReportService;
+
+    @MockitoBean
+    private AiReportOperationsQueryService aiReportOperationsQueryService;
 
     @BeforeAll
     static void startJwkServer() {
@@ -363,15 +378,16 @@ class EndpointRbacSecurityIntegrationTest {
                 fraudCaseWorkflowService,
                 investigationNoteService,
                 fraudCaseAuditLogService,
-                aiReportService
+                aiReportService,
+                aiReportOperationsQueryService
         );
     }
 
     @Test
-    void coversExistingFifteenAndTwoAiReportEndpointsAndMinimumRoles()
+    void coversExistingFifteenAndFiveAiReportEndpointsAndMinimumRoles()
             throws Exception {
         assertThat(ENDPOINTS.subList(0, 15)).hasSize(15);
-        assertThat(ENDPOINTS).hasSize(17);
+        assertThat(ENDPOINTS).hasSize(20);
         assertThat(ENDPOINTS.stream().map(Endpoint::signature))
                 .doesNotHaveDuplicates();
         Set<String> actualMappings = requestMappingHandlerMapping
@@ -427,6 +443,31 @@ class EndpointRbacSecurityIntegrationTest {
                             + "error=\"insufficient_scope\"");
         }
         verifyNoBusinessInteractions();
+    }
+
+    @Test
+    void aiOperationsReadsEachRequireTheirExactPlatformAdminAuthority() throws Exception {
+        Map<String, String> required = Map.of(
+                "/api/v1/ai-report-requests/" + CASE_ID, AI_OPERATIONS_READ,
+                "/api/v1/ai-report-usage", AI_USAGE_READ,
+                "/api/v1/ai-report-usage/summary", AI_USAGE_READ);
+        for (var requirement : required.entrySet()) {
+            String path = requirement.getKey();
+            Endpoint endpoint = ENDPOINTS.stream().filter(item -> item.path().equals(path))
+                    .findFirst().orElseThrow();
+            assertThat(endpoint.method()).isEqualTo(HttpMethod.GET);
+            assertThat(endpoint.authority()).isEqualTo(requirement.getValue());
+            var admitted = exchange(endpoint,
+                    bearer(token("USER", List.of("PLATFORM_ADMIN"))), null).getStatusCode();
+            assertThat(admitted).as(endpoint.signature()).isEqualTo(
+                    path.equals("/api/v1/ai-report-requests/" + CASE_ID)
+                            ? HttpStatus.OK : HttpStatus.BAD_REQUEST);
+            for (String role : List.of("FDS_ANALYST", "FDS_VIEWER")) {
+                assertSecurityError(exchange(endpoint, bearer(token("USER", List.of(role))), null),
+                        HttpStatus.FORBIDDEN, "ACCESS_DENIED",
+                        "Bearer realm=\"finguardops-backend\", error=\"insufficient_scope\"");
+            }
+        }
     }
 
     @Test
@@ -626,12 +667,25 @@ class EndpointRbacSecurityIntegrationTest {
     @Test
     void permitsEveryApprovedCorsPathAndMethodExactly() {
         assertThat(APPROVED_PREFLIGHTS.subList(0, 16)).hasSize(16);
-        assertThat(APPROVED_PREFLIGHTS).hasSize(18);
+        assertThat(APPROVED_PREFLIGHTS).hasSize(21);
         assertThat(APPROVED_PREFLIGHTS.subList(0, 15))
                 .extracting(CorsProbe::signature)
                 .containsExactlyElementsOf(ENDPOINTS.subList(0, 15).stream()
                         .map(Endpoint::signature)
                         .toList());
+        Map<String, Set<String>> expectedCors = Stream.concat(
+                ENDPOINTS.stream().map(endpoint -> Map.entry(
+                        endpoint.registeredPath(), endpoint.method().name())),
+                Stream.of(Map.entry("/actuator/health", HttpMethod.GET.name())))
+                .collect(Collectors.groupingBy(Map.Entry::getKey,
+                        Collectors.mapping(Map.Entry::getValue, Collectors.toSet())));
+        assertThat(applicationCorsConfigurationSource)
+                .isInstanceOf(UrlBasedCorsConfigurationSource.class);
+        Map<String, Set<String>> registeredCors = ((UrlBasedCorsConfigurationSource) applicationCorsConfigurationSource)
+                .getCorsConfigurations().entrySet().stream()
+                .collect(Collectors.toMap(Map.Entry::getKey,
+                        entry -> Set.copyOf(entry.getValue().getAllowedMethods())));
+        assertThat(registeredCors).isEqualTo(expectedCors);
 
         for (CorsProbe probe : APPROVED_PREFLIGHTS) {
             assertThat(preflightAuthorizationGranted(probe))
@@ -976,7 +1030,8 @@ class EndpointRbacSecurityIntegrationTest {
                 fraudCaseWorkflowService,
                 investigationNoteService,
                 fraudCaseAuditLogService,
-                aiReportService
+                aiReportService,
+                aiReportOperationsQueryService
         );
     }
 
@@ -1017,7 +1072,13 @@ class EndpointRbacSecurityIntegrationTest {
         }
 
         String mappingSignature() {
-            return signature()
+            return method + " " + registeredPath();
+        }
+
+        String registeredPath() {
+            return path
+                    .replace("/api/v1/ai-report-requests/" + CASE_ID,
+                            "/api/v1/ai-report-requests/{aiRequestId}")
                     .replace(CASE_ID, "{caseId}")
                     .replace(TRANSACTION_ID, "{transactionId}");
         }
