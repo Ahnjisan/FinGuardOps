@@ -35,6 +35,7 @@ it("sends one exact idempotency key with the generation body", async () => {
     caseId, detectionResultVersion: 1,
     reportStatus: "PENDING", reportSource: null, sourceAiRequestId: null, cacheHit: false,
     requestedAt: "2026-10-05T00:00:00Z", generatedAt: null, failureCode: null,
+    fallbackTriggerCode: null,
     resultLocation: `/api/v1/cases/${caseId}/ai-reports/current`,
     traceId: "trace-test-001" }, { status: 202 }));
   await createAiReport(auth(), caseId, 1, key);
@@ -49,6 +50,7 @@ it("accepts an exact-match completed report reused with 200", async () => {
     caseId, detectionResultVersion: 1,
     reportStatus: "COMPLETED", reportSource: "LLM", sourceAiRequestId: requestId, cacheHit: true,
     requestedAt: "2026-10-05T00:00:00Z", generatedAt: "2026-10-05T00:00:01Z", failureCode: null,
+    fallbackTriggerCode: null,
     resultLocation: `/api/v1/cases/${caseId}/ai-reports/current`,
     traceId: "trace-test-001" }, { status: 200 }));
 

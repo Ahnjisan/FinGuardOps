@@ -10170,12 +10170,86 @@ test("real Analyst resumes the Run case and Approver closes it with a public aud
         return fetchAiReportCurrent(getOidcAuthClient(), caseId);
       }, fixture.caseId);
       return value.currentReport?.reportStatus ?? null;
-    }, { timeout: 30_000 }).toMatch(/^(COMPLETED|FALLBACK_COMPLETED)$/);
+    }, { timeout: 30_000 }).toBe("FALLBACK_COMPLETED");
     await analystPage.getByText("AI 조사 보조 리포트 보기").click();
     await analystPage.getByRole("button", { name: "리포트 새로고침" }).click();
     await expect(analystPage.getByRole("heading", { name: "저장된 리포트" })).toBeVisible();
     await expect(analystPage.locator(".case-ai-report__body"))
       .toContainText(`탐지 버전 ${reportVersion}`);
+    const fallbackReport = await analystPage.evaluate(async (caseId) => {
+      const [{ getOidcAuthClient }, { fetchAiReportCurrent }] = await Promise.all([
+        import("/src/auth/oidcAuthClient.ts"),
+        // @ts-expect-error Vite serves this browser module at an absolute /src URL.
+        import("/src/api/aiReportApi.ts"),
+      ]);
+      return fetchAiReportCurrent(getOidcAuthClient(), caseId);
+    }, fixture.caseId);
+    requireCondition(fallbackReport.currentReport?.reportStatus === "FALLBACK_COMPLETED" &&
+      fallbackReport.currentReport.failureCode === null &&
+      fallbackReport.currentReport.fallbackTriggerCode === "LLM_OUTPUT_REJECTED" &&
+      fallbackReport.latestRequest?.fallbackTriggerCode === "LLM_OUTPUT_REJECTED" &&
+      fallbackReport.latestRequest.failureCode === null,
+    "The first stored report did not keep its fallback trigger separate from final failure.");
+    const priorReportId = fallbackReport.currentReport.reportId;
+    await expect(analystPage.locator(".case-ai-report__body"))
+      .toContainText("모델 출력이 근거 검증을 통과하지 못했습니다.");
+
+    // The mock changes model identity for one later acceptance, then restores it
+    // before generation. The Worker safely stores a response-contract failure.
+    const failedKey = "run-case-ai-report-345-failed";
+    armWorkflowWrite({ method: "POST", pathname: aiReportPath, body: reportBody,
+      idempotencyKey: failedKey });
+    const failedAcceptance = await analystPage.evaluate(async ({ caseId, version, key }) => {
+      const [{ getOidcAuthClient }, { createAiReport }] = await Promise.all([
+        import("/src/auth/oidcAuthClient.ts"),
+        // @ts-expect-error Vite serves this browser module at an absolute /src URL.
+        import("/src/api/aiReportApi.ts"),
+      ]);
+      return createAiReport(getOidcAuthClient(), caseId, version, key);
+    }, { caseId: fixture.caseId, version: reportVersion, key: failedKey });
+    requireCondition(armedWorkflowWrite === null && failedAcceptance.reportStatus === "PENDING" &&
+      failedAcceptance.executionId !== acceptedReport.executionId,
+    "The changed model identity did not create one distinct pending execution.");
+    await expect.poll(async () => {
+      const value = await analystPage.evaluate(async (caseId) => {
+        const [{ getOidcAuthClient }, { fetchAiReportCurrent }] = await Promise.all([
+          import("/src/auth/oidcAuthClient.ts"),
+          // @ts-expect-error Vite serves this browser module at an absolute /src URL.
+          import("/src/api/aiReportApi.ts"),
+        ]);
+        return fetchAiReportCurrent(getOidcAuthClient(), caseId);
+      }, fixture.caseId);
+      return value.latestRequest?.reportStatus ?? null;
+    }, { timeout: 30_000 }).toBe("FAILED");
+    await analystPage.getByRole("button", { name: "리포트 새로고침" }).click();
+    await expect(analystPage.locator(".case-ai-report").getByRole("alert"))
+      .toContainText("AI 서비스 응답을 확인하지 못했습니다.");
+    await expect(analystPage.getByText(/이전에 저장된 리포트입니다/)).toBeVisible();
+    await expect(analystPage.getByRole("heading", { name: "저장된 리포트" })).toBeVisible();
+    const failedCurrent = await analystPage.evaluate(async (caseId) => {
+      const [{ getOidcAuthClient }, { fetchAiReportCurrent }] = await Promise.all([
+        import("/src/auth/oidcAuthClient.ts"),
+        // @ts-expect-error Vite serves this browser module at an absolute /src URL.
+        import("/src/api/aiReportApi.ts"),
+      ]);
+      return fetchAiReportCurrent(getOidcAuthClient(), caseId);
+    }, fixture.caseId);
+    requireCondition(failedCurrent.currentReport?.reportId === priorReportId &&
+      failedCurrent.latestRequest?.aiRequestId === failedAcceptance.aiRequestId &&
+      failedCurrent.latestRequest.reportStatus === "FAILED" &&
+      failedCurrent.latestRequest.failureCode === "FASTAPI_RESPONSE_INVALID" &&
+      failedCurrent.latestRequest.fallbackTriggerCode === null &&
+      !JSON.stringify(failedCurrent).includes("SYNTHETIC_PROVIDER_RAW_DO_NOT_EXPOSE") &&
+      !JSON.stringify(failedCurrent).includes("safeSummary") &&
+      !JSON.stringify(failedCurrent).includes("inputTokens"),
+    "The current report confused the prior valid result with the latest stored failure.");
+    const analystReportMarkup = await analystPage.locator(".case-ai-report").innerHTML();
+    for (const hidden of ["SYNTHETIC_PROVIDER_RAW_DO_NOT_EXPOSE", "safeSummary",
+      "inputTokens", "externalCustomerRef", analyst.tokens.accessToken,
+      analyst.tokens.idToken]) {
+      requireCondition(!analystReportMarkup.includes(hidden),
+        "The Analyst report exposed a private Provider value or credential.");
+    }
     requireCondition(isDeepStrictEqual(await read(analystPage), resumed),
       "AI report generation changed the case, note or public business Audit.");
 
@@ -10291,11 +10365,18 @@ test("real Analyst resumes the Run case and Approver closes it with a public aud
     }, fixture.caseId);
     requireCondition(persistedAi.currentReport !== null &&
       persistedAi.currentReport.detectionResultVersion === reportVersion &&
-      persistedAi.latestRequest?.reportStatus === persistedAi.currentReport.reportStatus &&
+      persistedAi.currentReport.reportId === priorReportId &&
+      persistedAi.currentReport.reportStatus === "FALLBACK_COMPLETED" &&
+      persistedAi.currentReport.failureCode === null &&
+      persistedAi.currentReport.fallbackTriggerCode === "LLM_OUTPUT_REJECTED" &&
+      persistedAi.latestRequest?.reportStatus === "FAILED" &&
+      persistedAi.latestRequest.failureCode === "FASTAPI_RESPONSE_INVALID" &&
+      persistedAi.latestRequest.fallbackTriggerCode === null &&
       isDeepStrictEqual(sortedKeys(persistedAi), ["caseId", "currentReport", "latestRequest", "traceId"]) &&
       !JSON.stringify(persistedAi).includes("modelDigest") &&
       !JSON.stringify(persistedAi).includes("inputTokens") &&
-      !JSON.stringify(persistedAi).includes("estimatedCost"),
+      !JSON.stringify(persistedAi).includes("estimatedCost") &&
+      !JSON.stringify(persistedAi).includes("SYNTHETIC_PROVIDER_RAW_DO_NOT_EXPOSE"),
     "The stored AI report was not safely reread after close and sign-in.");
     const reportViewport = page.viewportSize();
     await page.setViewportSize({ width: 390, height: 844 });
@@ -10327,7 +10408,7 @@ test("real Analyst resumes the Run case and Approver closes it with a public aud
           .map((entry) => entry.status),
         approver.relay.filter((entry) => entry.pathname === aiReportPath && entry.method === "POST")
           .map((entry) => entry.status),
-      ], [[403], [202], [403]]),
+      ], [[403], [202, 202], [403]]),
     "The resolution scenario sent an unexpected role write or repeat request.");
   } finally {
     disarmWorkflowWrite();
@@ -10341,15 +10422,17 @@ test("real Analyst resumes the Run case and Approver closes it with a public aud
 
 test("a PLATFORM_ADMIN reviews the stored AI request usage without case authority", async ({ page }) => {
   const relay = await test.step("RELAY_INIT", () => installBackendRelay(page));
+  const fixture = readRunFixtureManifest(env[RUN_FIXTURE_MANIFEST_ENVIRONMENT]);
+  let failedId = "";
+  let fallbackId = "";
   try {
     await test.step("GUARD", async () => {
       await page.goto(`${APP_ORIGIN}/ai-operations`);
       await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
     });
-    await test.step("LOGIN", async () => {
-      await signInFromGuard(page, readUserPassword(), "/ai-operations", false,
-        "local-platform-admin", "PLATFORM_ADMIN");
-    });
+    const adminTokens = await test.step("LOGIN", () =>
+      signInFromGuard(page, readUserPassword(), "/ai-operations", false,
+        "local-platform-admin", "PLATFORM_ADMIN"));
     await test.step("USAGE_API", async () => {
       await expect.poll(() => ["/api/v1/ai-report-usage", "/api/v1/ai-report-usage/summary"]
         .every((path) => relay.some((entry) => entry.pathname === path && entry.status === 200)),
@@ -10368,28 +10451,99 @@ test("a PLATFORM_ADMIN reviews the stored AI request usage without case authorit
       await expect(page.locator(".ai-operations__summary dt", { hasText: "비용" })
         .locator("..").locator("dd")).toHaveText(
         summaryAttempts === 0 ? "기록된 Provider 호출 없음" : "비용 미측정");
+      const stored: Array<{ id: string; status: string }> = await page.evaluate(async (caseId) => {
+        const [{ getOidcAuthClient }, { fetchAiUsageList }] = await Promise.all([
+          import("/src/auth/oidcAuthClient.ts"),
+          // @ts-expect-error Vite serves this browser module at an absolute /src URL.
+          import("/src/api/aiOperationsApi.ts"),
+        ]);
+        const to = new Date();
+        const from = new Date(to.getTime() - 24 * 60 * 60 * 1000);
+        const list = await fetchAiUsageList(getOidcAuthClient(), {
+          from: from.toISOString(), to: to.toISOString(), page: "0", size: "20",
+          sort: "requestedAt,desc",
+        });
+        return list.content.filter((item: { caseId: string }) => item.caseId === caseId)
+          .map((item: { aiRequestId: string; reportStatus: string }) =>
+            ({ id: item.aiRequestId, status: item.reportStatus }));
+      }, fixture.caseId);
+      const failed = stored.filter((item) => item.status === "FAILED");
+      const fallback = stored.filter((item) => item.status === "FALLBACK_COMPLETED");
+      requireCondition(failed.length === 1 && fallback.length === 1,
+        "The operator did not find the two stored Run-case requests.");
+      failedId = failed[0].id;
+      fallbackId = fallback[0].id;
     });
     await test.step("DETAIL_API", async () => {
-      await page.locator(".ai-operations tbody a").first().click();
+      await page.locator(`.ai-operations tbody a[href="/ai-operations/${failedId}"]`).click();
       await expect.poll(() => relay.some((entry) =>
-        AI_REQUEST_DETAIL_PATH.test(entry.pathname) && entry.status === 200),
+        entry.pathname === `/api/v1/ai-report-requests/${failedId}` && entry.status === 200),
       { timeout: 10_000 }).toBe(true);
     });
     await test.step("DETAIL_UI", async () => {
       await expect(page.getByRole("heading", { name: "AI 요청 상세" })).toBeVisible();
       const detailAttempts = Number(await page.locator(".ai-operations__summary dt",
         { hasText: "기록된 attempt 수" }).locator("..").locator("dd").textContent());
-      requireCondition(Number.isSafeInteger(detailAttempts), "The request attempt count was invalid.");
+      requireCondition(detailAttempts === 0, "The failed request invented a recorded attempt.");
       await expect(page.locator(".ai-operations__summary dt", { hasText: "비용" })
-        .locator("..").locator("dd")).toHaveText(
-        detailAttempts === 0 ? "기록된 Provider 호출 없음" : "비용 미측정");
+        .locator("..").locator("dd")).toHaveText("기록된 attempt 없음");
+      await expect(page.locator(".ai-operations__summary dt", { hasText: "최종 실패 분류" })
+        .locator("..").locator("dd")).toHaveText("FASTAPI_RESPONSE_INVALID");
+      await expect(page.locator(".ai-operations__summary dt", { hasText: "fallback 원인" })
+        .locator("..").locator("dd")).toHaveText("없음");
+      await expect(page.getByText("실제 호출 여부는 확인할 수 없습니다.", { exact: false }))
+        .toBeVisible();
+      const failedDetail = await page.evaluate(async (id) => {
+        const [{ getOidcAuthClient }, { fetchAiRequestDetail }] = await Promise.all([
+          import("/src/auth/oidcAuthClient.ts"),
+          // @ts-expect-error Vite serves this browser module at an absolute /src URL.
+          import("/src/api/aiOperationsApi.ts"),
+        ]);
+        return fetchAiRequestDetail(getOidcAuthClient(), id);
+      }, failedId);
+      requireCondition(failedDetail.failureCode === "FASTAPI_RESPONSE_INVALID" &&
+        failedDetail.fallbackTriggerCode === null && failedDetail.attempts.length === 0,
+      "The failed request detail did not match stored final failure and attempts.");
+      await page.getByRole("link", { name: "AI 요청 목록" }).click();
+      await page.locator(`.ai-operations tbody a[href="/ai-operations/${fallbackId}"]`).click();
+      await expect(page.getByRole("heading", { name: "AI 요청 상세" })).toBeVisible();
+      await expect(page.locator(".ai-operations__summary dt", { hasText: "최종 실패 분류" })
+        .locator("..").locator("dd")).toHaveText("없음");
+      await expect(page.locator(".ai-operations__summary dt", { hasText: "fallback 원인" })
+        .locator("..").locator("dd")).toHaveText("LLM_OUTPUT_REJECTED");
+      await expect(page.locator(".ai-operations__summary dt", { hasText: "기록된 attempt 수" })
+        .locator("..").locator("dd")).toHaveText("1");
+      await expect(page.locator(".ai-operations tbody tr")).toHaveCount(1);
+      await expect(page.locator(".ai-operations tbody tr")).toContainText("INVALID_OUTPUT");
+      const fallbackDetail = await page.evaluate(async (id) => {
+        const [{ getOidcAuthClient }, { fetchAiRequestDetail }] = await Promise.all([
+          import("/src/auth/oidcAuthClient.ts"),
+          // @ts-expect-error Vite serves this browser module at an absolute /src URL.
+          import("/src/api/aiOperationsApi.ts"),
+        ]);
+        return fetchAiRequestDetail(getOidcAuthClient(), id);
+      }, fallbackId);
+      requireCondition(fallbackDetail.failureCode === null &&
+        fallbackDetail.fallbackTriggerCode === "LLM_OUTPUT_REJECTED" &&
+        fallbackDetail.attempts.length === 1 &&
+        fallbackDetail.attempts[0].outcome === "INVALID_OUTPUT" &&
+        fallbackDetail.attempts[0].estimatedCost === null,
+      "The fallback detail lost its stored trigger, attempt or unknown cost.");
+      const detailMarkup = await page.locator(".ai-operations").innerHTML();
+      for (const hidden of ["SYNTHETIC_PROVIDER_RAW_DO_NOT_EXPOSE", "safeSummary",
+        "externalCustomerRef", adminTokens.accessToken, adminTokens.idToken]) {
+        requireCondition(!JSON.stringify([failedDetail, fallbackDetail]).includes(hidden) &&
+          !detailMarkup.includes(hidden),
+        "The operator detail exposed raw Provider material or a credential.");
+      }
       await page.setViewportSize({ width: 390, height: 844 });
       requireCondition(await page.evaluate(() =>
         document.documentElement.scrollWidth <= window.innerWidth),
       "The AI operations detail overflowed the 390px document width.");
       requireCondition(["/api/v1/ai-report-usage", "/api/v1/ai-report-usage/summary"]
         .every((path) => relay.some((entry) => entry.pathname === path && entry.status === 200)) &&
-        relay.some((entry) => AI_REQUEST_DETAIL_PATH.test(entry.pathname) && entry.status === 200),
+        [failedId, fallbackId].every((id) => relay.some((entry) =>
+          entry.pathname === `/api/v1/ai-report-requests/${id}` && entry.status === 200)),
       "The operator did not read all three approved Backend endpoints.");
     });
   } finally {

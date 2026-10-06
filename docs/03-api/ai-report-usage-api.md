@@ -353,21 +353,32 @@ TEMPLATE_FALLBACK
 
 `PENDING`, `GENERATING`, `FAILED`에서는 사용 가능한 본문 출처가 없으므로 `reportSource = null`이다. 캐시가 아니면 `sourceAiRequestId = null`이다. 캐시를 `reportSource` Enum 값으로 사용하지 않는다. 캐시 적중 요청에는 새 Provider 실행과 `ProviderCallAttempt`가 없다. 진행 중 실행 공유 요청의 attempts는 플랫폼·클라우드 운영자 전용 단건 운영 상세 API에서만 조회할 수 있으며, 요청별 호출을 새로 만든 것은 아니다.
 
-### 4.3 실패 원인 코드 후보
+### 4.3 저장된 실패 분류 — Issue #345
 
-다음은 HTTP 오류 코드가 아니라 AI 요청의 `failureCode` 후보이다. 최종 목록은 사용자 승인이 필요하다.
+접수 전 모델 식별 실패는 기존 HTTP `503 DEPENDENCY_UNAVAILABLE`이며 AI 요청 행을 만들지 않는다.
+접수 후 신규 실행의 `failureCode`는 최종 실패, `fallbackTriggerCode`는
+FastAPI가 템플릿으로 전환한 안전한 원인이다.
 
 ```text
 FASTAPI_TIMEOUT
 FASTAPI_CONNECTION_FAILED
+FASTAPI_RESPONSE_INVALID
+DEPENDENCY_UNAVAILABLE
+REPORT_INPUT_CHANGED
 LLM_TIMEOUT
-LLM_PROVIDER_ERROR
-LLM_OUTPUT_VALIDATION_FAILED
+LLM_UNAVAILABLE
+LLM_OUTPUT_REJECTED
 TEMPLATE_FALLBACK_FAILED
-RESULT_PERSISTENCE_FAILED
+WORKER_INTERRUPTED
 ```
 
-Provider 원본 오류 메시지, Prompt와 응답 원문을 `failureCode`나 외부 응답에 포함하지 않는다.
+신규 LLM 성공은 두 코드 모두 null, fallback 성공은 `failureCode=null`과
+`fallbackTriggerCode=LLM_*`, fallback 실패는 `failureCode=TEMPLATE_FALLBACK_FAILED`와
+원인 코드가 남는다. FastAPI 자체가 불통이면 Backend는 fallback을 만들지 않는다.
+저장 트랜잭션이 실패하면 코드의 영속화를 보장할 수 없으므로
+`RESULT_PERSISTENCE_FAILED`가 저장됐다고 주장하지 않는다. 과거 V15/V16 행의
+`failureCode`는 당시 의미를 그대로 유지하고 V17 원인을 추정해 backfill하지 않는다.
+Provider 원본 오류 메시지, Prompt와 응답 원문을 코드나 외부 응답에 포함하지 않는다.
 
 ## 5. 사건 AI 리포트 생성 요청 API
 
@@ -456,6 +467,8 @@ Idempotency-Key: <required>
 | `cacheHit` | 완료된 기존 `AiReport`를 재사용했는지 |
 | `reportStatus` | 외부 요청 관점 상태 |
 | `reportSource` | 결과 최초 생성 출처. 처리 중·실패이면 null |
+| `failureCode` | 저장된 최종 실패 코드. 신규 fallback 성공이면 null |
+| `fallbackTriggerCode` | 저장된 안전한 fallback 원인. 캐시 요청은 null |
 | `requestedAt` | 외부 요청 최초 접수 시각 |
 | `resultLocation` | 단건 운영 상세 조회 경로 |
 | `traceId` | 현재 HTTP 응답의 추적 식별자 |
@@ -679,7 +692,8 @@ GET /api/v1/cases/{caseId}/ai-reports/current
 | `promptVersion` | string | 사용 Prompt 버전 |
 | `modelVersion` | string | 정확 일치 조건의 모델 버전 |
 | `generatedAt` | string | 리포트가 실제로 최초 사용 가능해진 UTC 시각. 현재 리포트 우선순위의 첫 번째 기준은 아님 |
-| `failureCode` | string 또는 null | fallback의 원인이 된 실패 분류. 정상 LLM 결과는 null |
+| `failureCode` | string 또는 null | 신규 결과의 최종 실패 코드. 과거 fallback 결과에는 당시 원인 코드가 남을 수 있음 |
+| `fallbackTriggerCode` | string 또는 null | 원본 실행에 저장된 안전한 fallback 원인. 과거 실행은 null |
 | `traceId` | string | 해당 리포트를 만든 실행의 과거 추적 식별자 |
 
 `latestRequest` 필드:
@@ -698,7 +712,8 @@ GET /api/v1/cases/{caseId}/ai-reports/current
 | `sourceAiRequestId` | string 또는 null | 캐시 적중일 때 결과 계보에서 파생한 원본 요청 ID |
 | `requestedAt` | string | 접수 시각 |
 | `generatedAt` | string 또는 null | 요청이 참조하는 리포트가 실제 사용 가능해진 시각. 현재 리포트 우선순위는 실행 최초 요청의 `requestedAt`으로 결정 |
-| `failureCode` | string 또는 null | 최종 또는 fallback 실패 분류 |
+| `failureCode` | string 또는 null | 연결 실행에 저장된 최종 실패 코드. 과거 행의 의미는 4.3절 참조 |
+| `fallbackTriggerCode` | string 또는 null | 연결 실행의 저장된 fallback 원인. 캐시 요청은 새 실행이 없어 null |
 | `traceId` | string | 최신 요청의 처리 흐름 추적 식별자 |
 
 ### 6.4 null 정책과 현재 선택
@@ -708,7 +723,8 @@ GET /api/v1/cases/{caseId}/ai-reports/current
 - 새 요청이 `PENDING`, `GENERATING` 또는 `FAILED`여도 과거 유효 리포트를 숨기지 않고 `currentReport`로 유지한다.
 - `FAILED` 요청은 리포트 본문 필드를 만들지 않고 `latestRequest`로 제공한다.
 - `summary`, `keyReasons`, `timelineSummary`, `investigationChecklist`, `generatedAt`은 사용 가능한 리포트에 필수이다.
-- `failureCode`는 `FAILED`와 `FALLBACK_COMPLETED`에서 값이 있을 수 있다.
+- 신규 `FALLBACK_COMPLETED`의 `failureCode`는 null이고 `fallbackTriggerCode`가 있다.
+  과거 fallback 행의 기존 `failureCode`는 변경하지 않는다.
 - 빈 근거·체크리스트가 업무상 허용되는 경우 빈 배열을 사용하며 `null`과 혼합하지 않는다.
 - `currentReport`는 결과 자체와 그 생성 계보를 나타내므로 요청 처리 방식인 `cacheHit`, `executionShared`, `sourceAiRequestId`를 포함하지 않는다. 이 값들은 `latestRequest`에서 확인한다.
 
@@ -749,6 +765,7 @@ GET /api/v1/cases/{caseId}/ai-reports/current
     "modelVersion": "report-model-lite-2",
     "generatedAt": "2026-07-26T02:10:08Z",
     "failureCode": null,
+    "fallbackTriggerCode": null,
     "traceId": "trace_demo_ai_request_01"
   },
   "latestRequest": {
@@ -765,6 +782,7 @@ GET /api/v1/cases/{caseId}/ai-reports/current
     "requestedAt": "2026-07-26T02:20:00Z",
     "generatedAt": null,
     "failureCode": null,
+    "fallbackTriggerCode": null,
     "traceId": "trace_demo_ai_request_02"
   },
   "traceId": "trace_demo_ai_current_query_01"
@@ -800,7 +818,7 @@ GET /api/v1/cases/{caseId}/ai-reports/current
 `lastProvider`, `lastModel`, `promptVersion`, `modelVersion`, `inputTokens`,
 `outputTokens`, `totalTokens`, `estimatedCost`, `costCurrency`,
 `costBreakdown`, `latencyMs`, `cacheHit`, `fallbackUsed`, `requestedAt`,
-`completedAt`, `failureCode`, `traceId`, `usageFinalized`, `requestedByRef`,
+`completedAt`, `failureCode`, `fallbackTriggerCode`, `traceId`, `usageFinalized`, `requestedByRef`,
 `attempts`, `queryTraceId`를 반환한다. `traceId`는 과거 생성 흐름,
 `queryTraceId`는 이번 조회의 추적값이다.
 
@@ -809,7 +827,7 @@ GET /api/v1/cases/{caseId}/ai-reports/current
   `modelVersion`과 구분한다.
 - `attempts`는 실행에 귀속된 저장 행을 `attemptNumber` 순서로 반환한다.
   각 원소는 `attemptNumber`, `provider`, `model`(digest 또는 null),
-  `outcome`(저장된 `COMPLETED`, `TIMEOUT`, `PROVIDER_ERROR`,
+  `outcome`(저장된 `COMPLETED`, `TIMEOUT`, `CONNECTION_FAILED`, `PROVIDER_ERROR`,
   `INVALID_OUTPUT`), `inputTokens`, `outputTokens`, `totalTokens`,
   `estimatedCost`, `costCurrency`, `latencyMs`만 갖는다.
   attempt별 `failureCode`, `requestedAt`, `completedAt`은 첫 구현 응답에서
@@ -822,6 +840,10 @@ GET /api/v1/cases/{caseId}/ai-reports/current
   `FALLBACK_COMPLETED`일 때만 true이다. 캐시 결과의 원본 출처가 fallback이어도 false이다.
 - Provider 호출 수는 영속 기록된 attempt 수이다. Worker가 응답을 받기 전
   중단되면 실제 호출이 저장되지 않을 수 있다. 호출의 완전한 계수라는 뜻이 아니다.
+  attempt가 0건이어도 실제 Provider 호출 0건으로 단정하지 않는다.
+- 운영 상세의 `fallbackTriggerCode`는 해당 요청에 연결된 실행의 저장값이다.
+  캐시 요청은 새 실행이 없으므로 null이며, `reportSource`와 `sourceAiRequestId`로
+  원본 fallback 결과를 추적한다. 과거 행의 null은 원인을 알 수 없다는 뜻이다.
 - 실제 attempt가 없으면 각 토큰 합계는 0, `costBreakdown=[]`이다.
   attempt가 있고 해당 토큰값 하나라도 미측정이면 그 필드의 합계는 null이다.
   로컬 Ollama 비용은 미측정이므로 attempt가 있으면 `estimatedCost=null`,
@@ -1005,7 +1027,8 @@ FastAPI·LLM의 비동기 처리 실패를 생성 접수 API의 HTTP 오류로 �
 | `UNAUTHORIZED` | `401` | credential 또는 Bearer JWT·필수 claim 검증 실패 |
 | `ACCESS_DENIED` | `403` | 인증된 USER principal의 endpoint authority 부족 |
 
-FastAPI Timeout, FastAPI 연결 실패, LLM 호출 실패와 출력 형식 검증 실패는 접수 이후의 AI 처리 결과이면 HTTP 오류 코드가 아니라 `failureCode`로 기록한다.
+FastAPI Timeout·연결 실패는 접수 후 최종 `failureCode`로 기록한다.
+LLM 실패 뒤 템플릿이 완료되면 신규 실행의 `fallbackTriggerCode`로 원인을 기록한다.
 
 ### 13.4 오류 상황 매핑
 
@@ -1033,7 +1056,7 @@ FastAPI Timeout, FastAPI 연결 실패, LLM 호출 실패와 출력 형식 검�
 
 ## 14. 보안·개인정보·감사
 
-- FDS 분석 담당자는 생성 API와 `GET /api/v1/cases/{caseId}/ai-reports/current`에서 리포트 상태, 안전한 `failureCode`, 본문과 `reportSource`, 요청의 `cacheHit`·실행 공유·원본 요청 관계를 조회한다. Provider, 모델, `ProviderCallAttempt`, attempts, 토큰과 비용 상세는 조회하지 못한다.
+- FDS 분석 담당자는 생성 API와 `GET /api/v1/cases/{caseId}/ai-reports/current`에서 리포트 상태, 안전한 `failureCode`·`fallbackTriggerCode`, 본문과 `reportSource`, 요청의 `cacheHit`·실행 공유·원본 요청 관계를 조회한다. Provider, 모델, `ProviderCallAttempt`, attempts, 토큰과 비용 상세는 조회하지 못한다.
 - `GET /api/v1/ai-report-requests/{aiRequestId}`, `GET /api/v1/ai-report-usage`와 `GET /api/v1/ai-report-usage/summary`의 Provider, 모델 시도, 토큰과 비용 상세는 플랫폼·클라우드 운영자에게만 제공한다.
 - 실제 고객번호, 계좌번호, 비밀번호, OTP, 인증 토큰은 요청·응답·오류와 예시에 사용하지 않는다.
 - Prompt 원문과 Provider 응답 원문은 사건·운영 조회 API에서 반환하지 않는다.
@@ -1053,7 +1076,6 @@ FastAPI Timeout, FastAPI 연결 실패, LLM 호출 실패와 출력 형식 검�
 | 결정 항목 | 선택 가능한 안 | 권장안과 이유 | API·구현 영향 | 현재 작업 차단 여부 |
 | --- | --- | --- | --- | --- |
 | AI 리포트 생성 가능 `caseStatus` | A. 모든 상태 허용 / B. 활성 조사 상태만 허용 / C. `IN_REVIEW`만 허용 | **B: `OPEN`, `IN_REVIEW`, `ADDITIONAL_INFORMATION_REQUIRED`만 허용.** 조사 지원 목적과 `CLOSED` 사건의 읽기 전용 원칙을 함께 지키기 쉬움 | POST Validation, `CASE_STATUS_CONFLICT` 조건과 테스트 케이스에 영향 | API 문서 정렬은 차단하지 않음. 생성 API 구현 전 결정 필요 |
-| `failureCode`와 attempt `outcome` 최종 목록 | A. Provider별 자유 문자열 / B. 제한된 공통 Enum / C. 공통 Enum과 내부 원본 코드 별도 보관 | **C.** 외부 계약을 안정화하면서 운영 진단용 내부 정보를 분리할 수 있음 | DTO Enum, OpenAPI, 저장 필드와 Provider 매핑에 영향. 외부에는 원문을 노출하지 않음 | 현재 작업은 차단하지 않음. Provider 연동 구현 전 결정 필요 |
 | 변경된 정확 일치 조건의 재생성 횟수 제한 | A. 제한 없음 / B. 사건별 UTC 일일 고정 횟수 / C. 역할·위험도별 정책 한도 | **C.** 서비스 범위의 비용 통제 의도를 유지하면서 CRITICAL 사건 조사 필요를 단일 고정값이 막지 않도록 할 수 있음 | `429` 사용 여부, 오류 코드, 한도 조회·감사와 운영 설정에 영향 | 현재 작업은 차단하지 않음. 제한 도입 전 별도 API 승인 필요 |
 | AI 요청·실행·attempt·리포트 보존 기간 | A. 동일 기간 / B. 엔티티별 차등 기간 / C. 상세 단기 보존 후 비식별 집계만 장기 보존 | **C.** 감사·비용 검증과 개인정보 최소 보존의 균형이 좋음 | 목록 조회 가능 기간, 삭제·비식별화와 감사 참조에 영향 | 후속 결정 |
 | `caseAnalysisSnapshotVersion` 도입 시점 | A. 초기부터 네 요소에 추가 / B. 대표 DetectionResult 계약으로 시작 후 복수 거래 사건 입력이 확정될 때 도입 | **B.** 현재 확정된 네 요소를 유지하면서 실제 복수 거래 입력 모델을 먼저 검증할 수 있음 | 향후 요청 필드, 정확 일치 키와 캐시 무효화 버전 변경에 영향 | 후속 ADR·ERD 결정 |

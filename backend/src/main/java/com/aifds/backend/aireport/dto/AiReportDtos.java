@@ -18,6 +18,7 @@ public final class AiReportDtos {
     public record Content(String summary, List<KeyReason> keyReasons,
                           List<String> investigationChecklist) { }
     public record GenerationResult(String status, String source, Content content, String failureCode,
+                                   String fallbackTriggerCode,
                                    String modelVersion, String promptVersion, List<Attempt> attempts) { }
     public record ModelIdentity(String modelVersion, String promptVersion) { }
     public record RequestStatus(UUID aiRequestId, UUID executionId, boolean executionShared,
@@ -25,11 +26,13 @@ public final class AiReportDtos {
                                 int detectionResultVersion, String reportStatus,
                                 String reportSource, UUID sourceAiRequestId, boolean cacheHit,
                                 Instant requestedAt, Instant generatedAt, String failureCode,
+                                String fallbackTriggerCode,
                                 String resultLocation, String traceId) { }
     public record Report(UUID reportId, UUID executionId, UUID initiatingAiRequestId, UUID caseId,
                          int detectionResultVersion, String reportStatus, String reportSource,
                          String summary, List<KeyReason> keyReasons, String timelineSummary,
                          List<String> investigationChecklist, String promptVersion,
-                         String modelVersion, Instant generatedAt, String failureCode, String traceId) { }
+                         String modelVersion, Instant generatedAt, String failureCode,
+                         String fallbackTriggerCode, String traceId) { }
     public record Current(UUID caseId, Report currentReport, RequestStatus latestRequest, String traceId) { }
 }

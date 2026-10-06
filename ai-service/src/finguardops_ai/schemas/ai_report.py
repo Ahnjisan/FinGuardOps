@@ -45,7 +45,9 @@ class ProviderAttempt(BaseModel):
     inputTokens: int | None = Field(default=None, ge=0)
     outputTokens: int | None = Field(default=None, ge=0)
     latencyMs: int = Field(ge=0)
-    outcome: Literal["COMPLETED", "TIMEOUT", "PROVIDER_ERROR", "INVALID_OUTPUT"]
+    outcome: Literal[
+        "COMPLETED", "TIMEOUT", "CONNECTION_FAILED", "PROVIDER_ERROR", "INVALID_OUTPUT"
+    ]
 
 
 class ReportResponse(BaseModel):
@@ -54,6 +56,7 @@ class ReportResponse(BaseModel):
     source: Literal["LLM", "TEMPLATE_FALLBACK"] | None
     content: ReportContent | None
     failureCode: str | None
+    fallbackTriggerCode: str | None
     modelVersion: str
     promptVersion: str
     attempts: list[ProviderAttempt] = Field(max_length=2)

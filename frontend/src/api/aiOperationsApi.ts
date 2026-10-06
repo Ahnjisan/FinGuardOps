@@ -21,7 +21,8 @@ export interface AiUsageItem {
   failureCode: string | null; traceId: string;
 }
 export interface AiUsageDetail extends AiUsageItem {
-  usageFinalized: boolean; requestedByRef: string; attempts: AiAttempt[]; queryTraceId: string;
+  fallbackTriggerCode: string | null; usageFinalized: boolean;
+  requestedByRef: string; attempts: AiAttempt[]; queryTraceId: string;
 }
 export interface AiUsageList {
   content: AiUsageItem[];
@@ -100,9 +101,11 @@ function attempt(value: unknown): value is AiAttempt {
     value.costCurrency === null && count(value.latencyMs);
 }
 function detail(value: unknown): value is AiUsageDetail {
-  if (!obj(value) || !exact(value, [...ITEM_KEYS, "usageFinalized", "requestedByRef", "attempts", "queryTraceId"])) return false;
+  if (!obj(value) || !exact(value, [...ITEM_KEYS, "fallbackTriggerCode", "usageFinalized",
+    "requestedByRef", "attempts", "queryTraceId"])) return false;
   const core = Object.fromEntries(ITEM_KEYS.map((key) => [key, value[key]]));
-  return item(core) && typeof value.usageFinalized === "boolean" &&
+  return item(core) && textOrNull(value.fallbackTriggerCode) &&
+    typeof value.usageFinalized === "boolean" &&
     typeof value.requestedByRef === "string" && Array.isArray(value.attempts) &&
     value.attempts.every(attempt) && typeof value.queryTraceId === "string" &&
     (value.executionId !== null || value.attempts.length === 0) &&

@@ -24,14 +24,19 @@ function Detail({ id }: { id: string }) {
           <div><dt>실행 공유</dt><dd>{state.data.executionShared ? "예" : "아니오"}</dd></div>
           <div><dt>캐시</dt><dd>{state.data.cacheHit ? "적중" : "아니오"}</dd></div>
           <div><dt>fallback</dt><dd>{state.data.fallbackUsed ? "사용" : "미사용"}</dd></div>
-          <div><dt>최종 실패 분류</dt><dd>{state.data.failureCode ?? "없음"}</dd></div>
+          <div><dt>{state.data.fallbackUsed && state.data.fallbackTriggerCode === null &&
+            state.data.failureCode !== null ? "기존 저장 코드" : "최종 실패 분류"}</dt>
+            <dd>{state.data.failureCode ?? "없음"}</dd></div>
+          <div><dt>fallback 원인</dt><dd>{state.data.fallbackTriggerCode ??
+            (state.data.fallbackUsed && state.data.failureCode !== null
+              ? "미기록 (기존 저장 형식)" : "없음")}</dd></div>
           <div><dt>기록된 attempt 수</dt><dd>{state.data.attempts.length}</dd></div>
           <div><dt>입력 토큰</dt><dd>{state.data.inputTokens ?? "미측정"}</dd></div>
           <div><dt>출력 토큰</dt><dd>{state.data.outputTokens ?? "미측정"}</dd></div>
-          <div><dt>비용</dt><dd>{state.data.attempts.length === 0 ? "기록된 Provider 호출 없음" : "비용 미측정"}</dd></div>
+          <div><dt>비용</dt><dd>{state.data.attempts.length === 0 ? "기록된 attempt 없음" : "비용 미측정"}</dd></div>
         </dl>
         <h3>기록된 Provider attempts</h3>
-        {state.data.attempts.length === 0 ? <p>기록된 Provider 호출이 없습니다.</p> :
+        {state.data.attempts.length === 0 ? <p>기록된 attempt가 없습니다. 실제 호출 여부는 확인할 수 없습니다.</p> :
           <div className="ai-operations__table-wrap"><table><thead><tr><th>순서</th><th>Provider</th>
             <th>모델 digest</th><th>결과</th><th>입력 토큰</th><th>출력 토큰</th><th>호출 지연(ms)</th>
           </tr></thead><tbody>{state.data.attempts.map((attempt) => <tr key={attempt.attemptNumber}>

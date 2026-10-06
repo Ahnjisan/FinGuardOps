@@ -50,12 +50,12 @@ class FraudCasePersistenceIntegrationTest
     private Flyway flyway;
 
     @Test
-    void appliesFreshV1ThroughV16SchemaWithApprovedConstraintsAndIndexes() {
-        assertThat(flyway.info().applied()).hasSize(16);
+    void appliesFreshV1ThroughV17SchemaWithApprovedConstraintsAndIndexes() {
+        assertThat(flyway.info().applied()).hasSize(17);
         assertThat(flyway.info().current().getVersion().getVersion())
-                .isEqualTo("16");
+                .isEqualTo("17");
         assertThat(flyway.info().current().getDescription())
-                .isEqualTo("add transaction intake maintenance recovery");
+                .isEqualTo("add ai report fallback trigger code");
         assertThat(columns("fraud_case")).containsExactlyInAnyOrder(
                 "id",
                 "case_id",

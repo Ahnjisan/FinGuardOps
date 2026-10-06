@@ -54,7 +54,7 @@ public class AiReportRepository {
 
     public Optional<AiReportDtos.Report> current(long casePk) {
         return jdbc.query("""
-                SELECT r.*,e.execution_id AS public_execution_id,
+                SELECT r.*,e.execution_id AS public_execution_id,e.fallback_trigger_code,
                        q.ai_request_id AS initiating_request_id,c.case_id AS public_case_id
                 FROM ai_report r
                 JOIN ai_report_execution e ON e.id=r.execution_id
@@ -68,7 +68,7 @@ public class AiReportRepository {
 
     public Optional<AiReportDtos.Report> byPk(long pk) {
         return jdbc.query("""
-                SELECT r.*,e.execution_id AS public_execution_id,
+                SELECT r.*,e.execution_id AS public_execution_id,e.fallback_trigger_code,
                        q.ai_request_id AS initiating_request_id,c.case_id AS public_case_id
                 FROM ai_report r JOIN ai_report_execution e ON e.id=r.execution_id
                 JOIN fraud_case c ON c.id=r.fraud_case_id
@@ -92,6 +92,7 @@ public class AiReportRepository {
                     row.getString("summary"), reasons, row.getString("timeline_summary"), checklist,
                     row.getString("prompt_version"), row.getString("model_version"),
                     row.getTimestamp("generated_at").toInstant(), row.getString("failure_code"),
+                    row.getString("fallback_trigger_code"),
                     row.getString("trace_id"));
         } catch (java.io.IOException exception) {
             throw new SQLException("Stored report is invalid", exception);

@@ -18,7 +18,7 @@ const current: AiReportCurrent = {
     timelineSummary: "공개된 행동 타임라인 자료가 없어 요약하지 않았습니다.",
     investigationChecklist: ["원거래 확인"], promptVersion: "prompt-1",
     modelVersion: "local-opaque", generatedAt: "2026-10-05T00:00:00Z",
-    failureCode: "TIMEOUT", traceId: "trace-test-001",
+    failureCode: "TIMEOUT", fallbackTriggerCode: null, traceId: "trace-test-001",
   },
   latestRequest: {
     aiRequestId: requestId, executionId: "66666666-6666-4666-8666-666666666666",
@@ -26,7 +26,8 @@ const current: AiReportCurrent = {
     caseId, detectionResultVersion: 3,
     reportStatus: "GENERATING", reportSource: null, sourceAiRequestId: null, cacheHit: false,
     requestedAt: "2026-10-05T01:00:00Z", generatedAt: null,
-    failureCode: null, resultLocation: `/api/v1/cases/${caseId}/ai-reports/current`,
+    failureCode: null, fallbackTriggerCode: null,
+    resultLocation: `/api/v1/cases/${caseId}/ai-reports/current`,
     traceId: "trace-test-002",
   },
   traceId: "trace-test-003",
@@ -40,6 +41,17 @@ it("distinguishes previous saved report from a newer generation request", () => 
   expect(screen.getByText(/출처: RULE 근거 템플릿 · 탐지 버전 2/)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "리포트 생성 요청" })).toBeDisabled();
   expect(screen.queryByText(/0원/)).not.toBeInTheDocument();
+});
+
+it("keeps a previous valid report distinct from the latest failed request", () => {
+  const failed: AiReportCurrent = { ...current,
+    latestRequest: { ...current.latestRequest!, reportStatus: "FAILED",
+      failureCode: "FASTAPI_TIMEOUT" } };
+  render(<CaseAiReportPanel current={failed} loading={false} error={null} busy={false}
+    canCreate onCreate={() => undefined} onRefresh={() => undefined} />);
+  expect(screen.getByText(/이전에 저장된 리포트/)).toBeInTheDocument();
+  expect(screen.getByText(/AI 서비스 응답 시간이 초과됐습니다/)).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "저장된 리포트" })).toBeInTheDocument();
 });
 
 it("hides create control without capability and keeps manual refresh keyboard operable", async () => {

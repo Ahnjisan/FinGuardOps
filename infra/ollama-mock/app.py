@@ -5,10 +5,17 @@ This is never a model-quality measurement. It returns only fixed synthetic text.
 
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Lock
 
 MODEL = "qwen3.5:4b"
 DIGEST = "a" * 64
 QUANTIZATION = "Q4_K_M"
+RAW_REFUSAL_MARKER = "SYNTHETIC_PROVIDER_RAW_DO_NOT_EXPOSE"
+# The Run case first stores a fallback; one later identity read then diverges
+# from generation so the Backend stores a final response-contract failure.
+_state_lock = Lock()
+_first_chat_pending = True
+_alternate_identity_pending = False
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -25,7 +32,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/api/tags":
-            self._reply(200, {"models": [{"name": MODEL, "digest": DIGEST,
+            global _alternate_identity_pending
+            with _state_lock:
+                alternate = _alternate_identity_pending
+                _alternate_identity_pending = False
+            self._reply(200, {"models": [{"name": MODEL,
+                                         "digest": "b" * 64 if alternate else DIGEST,
                                          "details": {"quantization_level": QUANTIZATION}}]})
         elif self.path == "/health":
             self._reply(200, {"status": "UP"})
@@ -59,6 +71,16 @@ class Handler(BaseHTTPRequestHandler):
             }
         except (ValueError, KeyError, IndexError, TypeError, json.JSONDecodeError):
             self._reply(400, {"error": "invalid request"})
+            return
+        global _first_chat_pending, _alternate_identity_pending
+        with _state_lock:
+            reject = _first_chat_pending
+            if reject:
+                _first_chat_pending = False
+                _alternate_identity_pending = True
+        if reject:
+            self._reply(200, {"message": {"content": RAW_REFUSAL_MARKER},
+                              "prompt_eval_count": 40, "eval_count": 35})
             return
         self._reply(200, {"message": {"content": json.dumps(body, ensure_ascii=False)},
                           "prompt_eval_count": 40, "eval_count": 35})

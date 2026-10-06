@@ -145,13 +145,17 @@ public class AiReportService {
                 ? report.map(AiReportDtos.Report::initiatingAiRequestId).orElse(null) : null;
         String failure = request.executionPk() == null ? null : jdbc.queryForObject(
                 "SELECT failure_code FROM ai_report_execution WHERE id=?", String.class, request.executionPk());
+        String fallbackTrigger = request.executionPk() == null ? null : jdbc.queryForObject(
+                "SELECT fallback_trigger_code FROM ai_report_execution WHERE id=?",
+                String.class, request.executionPk());
         return new AiReportDtos.RequestStatus(request.aiRequestId(), executionId,
                 request.executionShared(), initiating,
                 report.map(AiReportDtos.Report::reportId).orElse(null), caseId,
                 request.detectionResultVersion(), request.status().name(),
                 report.map(AiReportDtos.Report::reportSource).orElse(null), source, request.cacheHit(),
                 request.requestedAt(), report.map(AiReportDtos.Report::generatedAt).orElse(null),
-                failure, "/api/v1/cases/" + caseId + "/ai-reports/current", request.traceId());
+                failure, fallbackTrigger,
+                "/api/v1/cases/" + caseId + "/ai-reports/current", request.traceId());
     }
 
     private boolean terminal(AiReportStatus status) {

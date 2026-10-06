@@ -25,7 +25,7 @@ public class AiReportOperationsQueryService {
         var row = repository.detail(id).orElseThrow(() ->
                 new AiReportException(HttpStatus.NOT_FOUND, "RESOURCE_NOT_FOUND"));
         var attempts = attempts(row);
-        return new AiReportOperationsDtos.Detail(item(row, attempts),
+        return new AiReportOperationsDtos.Detail(item(row, attempts), row.fallbackTriggerCode(),
                 row.executionPk() == null || terminal(row.executionStatus()),
                 row.requestedBy(), attempts, traceId);
     }

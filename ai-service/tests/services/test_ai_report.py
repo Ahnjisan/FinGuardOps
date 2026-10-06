@@ -31,8 +31,10 @@ def sample() -> ReportRequest:
 class FakeOllama:
     def __init__(self, result: str | Exception) -> None:
         self.result = result
+        self.calls = 0
 
     def generate(self, prompt: str) -> tuple[str, int, int, int]:
+        self.calls += 1
         assert "externalCustomerRef" not in prompt
         if isinstance(self.result, Exception):
             raise self.result
@@ -56,7 +58,8 @@ def test_unverified_model_claim_falls_back_even_with_matching_reason_codes() -> 
     result = AiReportService(Settings(), FakeOllama(json.dumps(claimed))).generate(sample())
     assert result.status == "FALLBACK_COMPLETED"
     assert result.source == "TEMPLATE_FALLBACK"
-    assert result.failureCode == "INVALID_OUTPUT"
+    assert result.failureCode is None
+    assert result.fallbackTriggerCode == "LLM_OUTPUT_REJECTED"
 
 
 def test_unavailable_timeline_suggestion_is_rejected() -> None:
@@ -64,7 +67,8 @@ def test_unavailable_timeline_suggestion_is_rejected() -> None:
     claimed["investigationChecklist"] = ["공개되지 않은 행동 타임라인을 확인하세요."]
     result = AiReportService(Settings(), FakeOllama(json.dumps(claimed))).generate(sample())
     assert result.status == "FALLBACK_COMPLETED"
-    assert result.failureCode == "INVALID_OUTPUT"
+    assert result.failureCode is None
+    assert result.fallbackTriggerCode == "LLM_OUTPUT_REJECTED"
 
 
 def test_unapproved_reason_falls_back_without_exposing_raw_response() -> None:
@@ -77,7 +81,8 @@ def test_unapproved_reason_falls_back_without_exposing_raw_response() -> None:
     )
     result = AiReportService(Settings(), FakeOllama(body)).generate(sample())
     assert result.status == "FALLBACK_COMPLETED"
-    assert result.failureCode == "INVALID_OUTPUT"
+    assert result.failureCode is None
+    assert result.fallbackTriggerCode == "LLM_OUTPUT_REJECTED"
     assert result.content.keyReasons[0].reasonCode == "NEW_DEVICE"
     assert "허위" not in result.model_dump_json()
 
@@ -86,8 +91,28 @@ def test_timeout_falls_back_and_unknown_tokens_remain_unknown() -> None:
     result = AiReportService(Settings(), FakeOllama(OllamaFailure("TIMEOUT"))).generate(sample())
     assert result.status == "FALLBACK_COMPLETED"
     assert len(result.attempts) == 2
+    assert result.failureCode is None
+    assert result.fallbackTriggerCode == "LLM_TIMEOUT"
     assert result.attempts[0].inputTokens is None
     assert result.attempts[0].outputTokens is None
+
+
+@pytest.mark.parametrize("code,expected,attempted,calls", [
+    ("CONNECTION_FAILED", "LLM_UNAVAILABLE", True, 2),
+    ("PROVIDER_ERROR", "LLM_UNAVAILABLE", True, 1),
+    ("MODEL_METADATA_UNAVAILABLE", "LLM_UNAVAILABLE", False, 1),
+    ("MODEL_NOT_PINNED", "LLM_UNAVAILABLE", False, 1),
+])
+def test_only_confirmed_connection_failure_retries(
+    code: str, expected: str, attempted: bool, calls: int,
+) -> None:
+    provider = FakeOllama(OllamaFailure(code, attempted=attempted))
+    result = AiReportService(Settings(), provider).generate(sample())
+    assert result.status == "FALLBACK_COMPLETED"
+    assert result.failureCode is None
+    assert result.fallbackTriggerCode == expected
+    assert provider.calls == calls
+    assert len(result.attempts) == (calls if attempted else 0)
 
 
 def test_invalid_provider_format_and_failed_fallback_end_failed(
@@ -100,7 +125,8 @@ def test_invalid_provider_format_and_failed_fallback_end_failed(
     result = AiReportService(Settings(), FakeOllama("not-json")).generate(sample())
     assert result.status == "FAILED"
     assert result.content is None
-    assert result.failureCode == "FALLBACK_FAILED"
+    assert result.failureCode == "TEMPLATE_FALLBACK_FAILED"
+    assert result.fallbackTriggerCode == "LLM_OUTPUT_REJECTED"
     assert len(result.attempts) == 1
     assert result.attempts[0].outcome == "INVALID_OUTPUT"
 
