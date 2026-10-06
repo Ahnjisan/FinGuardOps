@@ -31,8 +31,12 @@ export function useAiUsage(query: AiUsageListQuery) {
         if (active) setList({ loading: false, data, error: false, session, key });
       }).catch(() => { if (active) setList({ loading: false, data: null, error: true, session, key }); });
       const filters: AiUsageFilters = { from: query.from, to: query.to,
-        provider: query.provider, model: query.model, reportStatus: query.reportStatus,
-        reportSource: query.reportSource, cacheHit: query.cacheHit, fallbackUsed: query.fallbackUsed };
+        ...(query.provider !== undefined ? { provider: query.provider } : {}),
+        ...(query.model !== undefined ? { model: query.model } : {}),
+        ...(query.reportStatus !== undefined ? { reportStatus: query.reportStatus } : {}),
+        ...(query.reportSource !== undefined ? { reportSource: query.reportSource } : {}),
+        ...(query.cacheHit !== undefined ? { cacheHit: query.cacheHit } : {}),
+        ...(query.fallbackUsed !== undefined ? { fallbackUsed: query.fallbackUsed } : {}) };
       fetchAiUsageSummary(client, filters, controller.signal).then((data) => {
         if (active) setSummary({ loading: false, data, error: false, session, key });
       }).catch(() => { if (active) setSummary({ loading: false, data: null, error: true, session, key }); });
