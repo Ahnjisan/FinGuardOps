@@ -24,12 +24,15 @@ public record IdempotencyRecoveryCommandArguments(
     private static final String THRESHOLD = "threshold";
     private static final String PAGE_SIZE = "page-size";
     private static final String RECORD_ID = "record-id";
+    private static final String INSTANCES_TERMINATED_CONFIRMED =
+            "instances-terminated-confirmed";
     private static final Set<String> ALLOWED_OPTIONS = Set.of(
             ENABLED,
             ACTION,
             THRESHOLD,
             PAGE_SIZE,
-            RECORD_ID
+            RECORD_ID,
+            INSTANCES_TERMINATED_CONFIRMED
     );
     private static final Pattern DECIMAL = Pattern.compile("[0-9]+");
     private static final Pattern CANONICAL_POSITIVE_LONG = Pattern.compile(
@@ -38,7 +41,9 @@ public record IdempotencyRecoveryCommandArguments(
 
     public enum Action {
         INSPECT,
-        RECOVER
+        RECOVER,
+        CLOSE_GATE,
+        OPEN_GATE
     }
 
     public static boolean hasRecoveryPrefix(String[] args) {
@@ -63,6 +68,8 @@ public record IdempotencyRecoveryCommandArguments(
         return switch (rawAction) {
             case "inspect" -> inspect(options);
             case "recover" -> recover(options);
+            case "close-gate" -> gate(options, Action.CLOSE_GATE);
+            case "open-gate" -> gate(options, Action.OPEN_GATE);
             default -> throw invalid();
         };
     }
@@ -98,7 +105,8 @@ public record IdempotencyRecoveryCommandArguments(
     private static IdempotencyRecoveryCommandArguments inspect(
             Map<String, String> options
     ) {
-        if (options.containsKey(RECORD_ID)) {
+        if (options.containsKey(RECORD_ID)
+                || options.containsKey(INSTANCES_TERMINATED_CONFIRMED)) {
             throw invalid();
         }
         Duration threshold = options.containsKey(THRESHOLD)
@@ -119,7 +127,8 @@ public record IdempotencyRecoveryCommandArguments(
             Map<String, String> options
     ) {
         if (options.containsKey(THRESHOLD)
-                || options.containsKey(PAGE_SIZE)) {
+                || options.containsKey(PAGE_SIZE)
+                || !"true".equals(options.get(INSTANCES_TERMINATED_CONFIRMED))) {
             throw invalid();
         }
         String rawRecordId = required(options, RECORD_ID);
@@ -136,6 +145,16 @@ public record IdempotencyRecoveryCommandArguments(
         } catch (NumberFormatException exception) {
             throw invalid();
         }
+    }
+
+    private static IdempotencyRecoveryCommandArguments gate(
+            Map<String, String> options,
+            Action action
+    ) {
+        if (options.size() != 2) {
+            throw invalid();
+        }
+        return new IdempotencyRecoveryCommandArguments(action, null, 0, null);
     }
 
     private static Duration parseThreshold(String rawThreshold) {

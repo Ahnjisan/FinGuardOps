@@ -700,3 +700,9 @@ Prometheus·Alertmanager·Grafana·receiver와 credential 배포, production SLA
 - 실제 SLA·SLO 수치와 비용 예산 확정
 - 환율 변환과 확정 청구액 정산
 - 측정하지 않은 성능 향상·비용 절감률 주장
+
+## Issue #343 단계 지연 계측
+
+`finguardops.transaction.stage.duration` Timer는 고정된 `service`, `stage`, `result` 태그만 사용한다. stage는 claim, received_commit, external_risk, rule_analysis, finalization_commit, snapshot_commit, maintenance_recovery이다. 호출 시작부터 반환 또는 예외까지 단조 시계로 측정하므로 DB stage에는 해당 서비스 호출의 커밋 대기가 포함된다. rule_analysis는 FastAPI 호출과 탐지 채택을 포함한 전체 구간이며 기존 Rule 지표와 별도로 해석한다. 메트릭 기록 오류는 업무 결과를 변경하지 않는다.
+
+Prometheus는 stage별 5분 처리율과 평균을 기록한다. TPS와 p50/p95/p99는 격리된 합성 부하의 클라이언트 원시 요청 표본에서 산출하고 성공·실패·재생을 분리한다. Timer는 재시작이나 커밋 직후 중단 때 유실될 수 있으므로 DB 복구 증거가 아니다. 측정하지 않은 운영 SLO, 성능 개선율, 비용 절감률은 주장하지 않는다.

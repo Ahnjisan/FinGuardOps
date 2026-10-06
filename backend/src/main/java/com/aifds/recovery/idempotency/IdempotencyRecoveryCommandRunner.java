@@ -33,6 +33,8 @@ public class IdempotencyRecoveryCommandRunner {
         return switch (arguments.action()) {
             case INSPECT -> inspect(arguments);
             case RECOVER -> recover(arguments);
+            case CLOSE_GATE -> gate(true);
+            case OPEN_GATE -> gate(false);
         };
     }
 
@@ -88,11 +90,26 @@ public class IdempotencyRecoveryCommandRunner {
         output.put("decision", result.decision().name());
         output.put("auditResult", result.auditResult().name());
         int exitCode = result.auditResult()
-                == IdempotencyRecoveryAuditResult.RECOVERED ? 0 : 3;
+                == IdempotencyRecoveryAuditResult.RECOVERED
+                || result.auditResult()
+                == IdempotencyRecoveryAuditResult.TERMINATED ? 0 : 3;
         return new IdempotencyRecoveryCommandResult(
                 exitCode,
                 List.of(toJson(output))
         );
+    }
+
+    private IdempotencyRecoveryCommandResult gate(boolean closed) {
+        if (closed) {
+            recoveryService.closeGate();
+        } else {
+            recoveryService.openGate();
+        }
+        String action = closed ? "close-gate" : "open-gate";
+        ObjectNode output = base("result", action);
+        output.put("gate", closed ? "CLOSED" : "OPEN");
+        return new IdempotencyRecoveryCommandResult(0,
+                List.of(toJson(output)));
     }
 
     private ObjectNode base(String type, String action) {

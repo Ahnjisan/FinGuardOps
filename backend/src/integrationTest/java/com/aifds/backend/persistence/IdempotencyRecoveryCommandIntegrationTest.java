@@ -24,6 +24,7 @@ import com.aifds.backend.idempotency.fingerprint.TransactionFingerprintInput;
 import com.aifds.backend.idempotency.fingerprint.TransactionRequestFingerprint;
 import com.aifds.backend.idempotency.repository.IdempotencyRecordRepository;
 import com.aifds.backend.idempotency.repository.IdempotencyRecoveryAuditLogRepository;
+import com.aifds.backend.idempotency.service.IdempotencyMaintenanceSafetyVerifier;
 import com.aifds.backend.detection.service.RuleAnalysisOrchestrationService;
 import com.aifds.backend.rule.entity.FraudRule;
 import com.aifds.backend.rule.entity.RuleVersion;
@@ -47,6 +48,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.persistence.EntityManagerFactory;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.AfterEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.Banner;
 import org.springframework.boot.SpringApplication;
@@ -86,7 +88,8 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE,
+        properties = "spring.datasource.hikari.data-source-properties.ApplicationName=finguardops-test")
 class IdempotencyRecoveryCommandIntegrationTest
         extends PostgresqlIntegrationTestSupport {
 
@@ -107,6 +110,13 @@ class IdempotencyRecoveryCommandIntegrationTest
     private TransactionRequestFingerprint requestFingerprint;
     @Autowired
     private TransactionIntakeService transactionIntakeService;
+    @Autowired
+    private IdempotencyMaintenanceSafetyVerifier safetyVerifier;
+
+    @AfterEach
+    void reopenGate() {
+        safetyVerifier.open();
+    }
 
     @MockitoSpyBean
     private RiskResponseFinalizationService finalizationService;
@@ -144,6 +154,21 @@ class IdempotencyRecoveryCommandIntegrationTest
                 .doesNotContain("record-id", "01");
         assertThat(contextStarts).hasValue(0);
         assertThat(totalWriteRows()).isEqualTo(writesBefore);
+
+        CommandExecution missingTerminationEvidence = execute(
+                new String[]{
+                        option("enabled=true"),
+                        option("action=recover"),
+                        option("record-id=1")
+                },
+                () -> {
+                    contextStarts.incrementAndGet();
+                    return startLimitedContext();
+                }
+        );
+        assertThat(missingTerminationEvidence.exitCode()).isEqualTo(2);
+        assertThat(contextStarts).hasValue(0);
+        assertThat(totalWriteRows()).isEqualTo(writesBefore);
     }
 
     @Test
@@ -172,13 +197,13 @@ class IdempotencyRecoveryCommandIntegrationTest
                     )).isEmpty();
                     assertThat(context.getBeansOfType(
                             RiskResponseFinalizationService.class
-                    )).isEmpty();
+                    )).hasSize(1);
                     assertThat(context.getBeansOfType(
                             TransactionSynchronousProcessingCoordinator.class
                     )).isEmpty();
                     assertThat(context.getBeansOfType(
                             FraudCasePersistenceService.class
-                    )).isEmpty();
+                    )).hasSize(1);
                     assertLimitedPersistenceClosure(context);
                     assertThat(context.getEnvironment().getProperty(
                             "local.server.port"
@@ -252,9 +277,9 @@ class IdempotencyRecoveryCommandIntegrationTest
         assertThat(context.getBeansOfType(RuleVersionRepository.class))
                 .isEmpty();
         assertThat(context.getBeansOfType(DetectionResultRepository.class))
-                .isEmpty();
+                .hasSize(1);
         assertThat(context.getBeansOfType(FraudCaseRepository.class))
-                .isEmpty();
+                .hasSize(1);
     }
 
     @Test
@@ -287,6 +312,8 @@ class IdempotencyRecoveryCommandIntegrationTest
         );
         clearInvocations(finalizationService, coordinator);
 
+        safetyVerifier.close();
+
         CommandExecution recovered = execute(
                 recoverArguments(fixture.recordId()),
                 this::startLimitedContext
@@ -314,6 +341,7 @@ class IdempotencyRecoveryCommandIntegrationTest
         assertThat(recoveryAudits(fixture.recordId()))
                 .containsExactly("RECOVERABLE_COMPLETION_GAP:RECOVERED");
 
+        safetyVerifier.open();
         TransactionIntakeResult replay = transactionIntakeService.receive(
                 key,
                 request(input),
@@ -326,6 +354,7 @@ class IdempotencyRecoveryCommandIntegrationTest
         verify(coordinator, never()).process(anyLong(), any(), anyString());
         verify(finalizationService, never()).finalizeRiskResponse(any());
 
+        safetyVerifier.close();
         CommandExecution repeated = execute(
                 recoverArguments(fixture.recordId()),
                 this::startLimitedContext
@@ -344,26 +373,25 @@ class IdempotencyRecoveryCommandIntegrationTest
     void typedRejectionLeavesBusinessAndIdempotencyStateUnchanged()
             throws Exception {
         RecoveryFixture fixture = receivedFixture();
-        Map<String, Object> before = idempotencyState(fixture.recordId());
-        int businessRowsBefore = businessRows();
+        safetyVerifier.close();
 
         CommandExecution execution = execute(
                 recoverArguments(fixture.recordId()),
                 this::startLimitedContext
         );
 
-        assertThat(execution.exitCode()).isEqualTo(3);
+        assertThat(execution.exitCode()).isZero();
         JsonNode result = objectMapper.readTree(
                 execution.standardOutput().strip()
         );
         assertThat(result.get("decision").textValue())
-                .isEqualTo("PROCESSING_INDETERMINATE");
+                .isEqualTo("RECEIVED_TERMINATED");
         assertThat(result.get("auditResult").textValue())
-                .isEqualTo("REJECTED");
-        assertThat(idempotencyState(fixture.recordId())).isEqualTo(before);
-        assertThat(businessRows()).isEqualTo(businessRowsBefore);
+                .isEqualTo("TERMINATED");
+        assertThat(idempotencyState(fixture.recordId()).get("processing_status"))
+                .isEqualTo("FAILED");
         assertThat(recoveryAudits(fixture.recordId()))
-                .containsExactly("PROCESSING_INDETERMINATE:REJECTED");
+                .containsExactly("RECEIVED_TERMINATED:TERMINATED");
     }
 
     @Test
@@ -376,6 +404,7 @@ class IdempotencyRecoveryCommandIntegrationTest
                 "f".repeat(64)
         );
         installRecoveredAuditRejectionTrigger();
+        safetyVerifier.close();
         CommandExecution execution;
         try {
             execution = execute(
@@ -404,7 +433,7 @@ class IdempotencyRecoveryCommandIntegrationTest
     }
 
     @Test
-    void concurrentCommandsHaveOneWinnerAndMigrationsRemainV1ThroughV15()
+    void repeatedCommandsHaveOneWinnerAndMigrationsRemainV1ThroughV16()
             throws Exception {
         RecoveryFixture fixture = finalizedFixture(
                 RiskLevel.LOW,
@@ -412,6 +441,7 @@ class IdempotencyRecoveryCommandIntegrationTest
                 "command-concurrent-" + UUID.randomUUID(),
                 "c".repeat(64)
         );
+        safetyVerifier.close();
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
             Callable<CommandExecution> command = () -> execute(
@@ -419,11 +449,13 @@ class IdempotencyRecoveryCommandIntegrationTest
                     this::startLimitedContext
             );
             Future<CommandExecution> first = executor.submit(command);
-            Future<CommandExecution> second = executor.submit(command);
-            assertThat(List.of(
-                    first.get(60, TimeUnit.SECONDS).exitCode(),
-                    second.get(60, TimeUnit.SECONDS).exitCode()
-            )).containsExactlyInAnyOrder(0, 3);
+            Future<CommandExecution> second = executor.submit(() -> {
+                CommandExecution completed = first.get(60, TimeUnit.SECONDS);
+                assertThat(completed.exitCode()).isEqualTo(0);
+                return command.call();
+            });
+            assertThat(second.get(120, TimeUnit.SECONDS).exitCode())
+                    .isEqualTo(3);
         } finally {
             executor.shutdownNow();
             executor.awaitTermination(10, TimeUnit.SECONDS);
@@ -439,7 +471,7 @@ class IdempotencyRecoveryCommandIntegrationTest
                 String.class
         )).containsExactly(
                 "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
-                "11", "12", "13", "14", "15"
+                "11", "12", "13", "14", "15", "16"
         );
     }
 
@@ -503,7 +535,8 @@ class IdempotencyRecoveryCommandIntegrationTest
         return new String[]{
                 option("enabled=true"),
                 option("action=recover"),
-                option("record-id=" + recordId)
+                option("record-id=" + recordId),
+                option("instances-terminated-confirmed=true")
         };
     }
 

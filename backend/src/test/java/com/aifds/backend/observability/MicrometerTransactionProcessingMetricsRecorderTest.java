@@ -458,6 +458,22 @@ class MicrometerTransactionProcessingMetricsRecorderTest {
                         && line.contains("service=\"spring-backend\""));
     }
 
+    @Test
+    void stageTimerUsesBoundedTagsAndPrometheusBuckets() {
+        PrometheusMeterRegistry registry = new PrometheusMeterRegistry(
+                PrometheusConfig.DEFAULT);
+        MicrometerTransactionProcessingMetricsRecorder recorder =
+                new MicrometerTransactionProcessingMetricsRecorder(registry);
+        recorder.recordStage(TransactionProcessingMetricsRecorder.Stage.CLAIM,
+                true, Duration.ofMillis(25));
+
+        String scrape = registry.scrape();
+        assertThat(scrape).contains(
+                "finguardops_transaction_stage_duration_seconds_bucket",
+                "stage=\"claim\"", "result=\"success\"");
+        assertThat(scrape).doesNotContain("transactionId=", "traceId=");
+    }
+
     private void assertTimer(SimpleMeterRegistry registry, String name) {
         Timer timer = registry.find(name).timer();
         assertThat(timer).isNotNull();

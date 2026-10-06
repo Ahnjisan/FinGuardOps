@@ -7,6 +7,7 @@ import com.aifds.backend.detection.entity.RiskLevel;
 import com.aifds.backend.detection.repository.DetectionEvidenceRepository;
 import com.aifds.backend.detection.repository.DetectionResultRepository;
 import com.aifds.backend.externalrisk.domain.ExternalRiskSnapshot;
+import com.aifds.backend.idempotency.service.TransactionIntakeMaintenanceGate;
 import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.rule.client.RuleAnalysisRequestV2Mapper;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV2;
@@ -40,6 +41,7 @@ public class RuleAnalysisPersistenceService {
     private final RuleAnalysisSnapshotAssembler snapshotAssembler;
     private final RuleAnalysisRequestV2Mapper requestV2Mapper;
     private final TransactionProcessingMetricsRecorder metricsRecorder;
+    private final TransactionIntakeMaintenanceGate maintenanceGate;
 
     @Autowired
     public RuleAnalysisPersistenceService(
@@ -49,7 +51,8 @@ public class RuleAnalysisPersistenceService {
             RuleVersionRepository ruleVersionRepository,
             RuleAnalysisSnapshotAssembler snapshotAssembler,
             RuleAnalysisRequestV2Mapper requestV2Mapper,
-            TransactionProcessingMetricsRecorder metricsRecorder
+            TransactionProcessingMetricsRecorder metricsRecorder,
+            TransactionIntakeMaintenanceGate maintenanceGate
     ) {
         this.transactionRepository = transactionRepository;
         this.detectionResultRepository = detectionResultRepository;
@@ -60,6 +63,7 @@ public class RuleAnalysisPersistenceService {
         this.metricsRecorder = metricsRecorder == null
                 ? TransactionProcessingMetricsRecorder.noop()
                 : metricsRecorder;
+        this.maintenanceGate = maintenanceGate;
     }
 
     public RuleAnalysisPersistenceService(
@@ -77,8 +81,23 @@ public class RuleAnalysisPersistenceService {
                 ruleVersionRepository,
                 snapshotAssembler,
                 requestV2Mapper,
-                TransactionProcessingMetricsRecorder.noop()
+                TransactionProcessingMetricsRecorder.noop(),
+                null
         );
+    }
+
+    public RuleAnalysisPersistenceService(
+            FinancialTransactionRepository transactionRepository,
+            DetectionResultRepository detectionResultRepository,
+            DetectionEvidenceRepository evidenceRepository,
+            RuleVersionRepository ruleVersionRepository,
+            RuleAnalysisSnapshotAssembler snapshotAssembler,
+            RuleAnalysisRequestV2Mapper requestV2Mapper,
+            TransactionProcessingMetricsRecorder metricsRecorder
+    ) {
+        this(transactionRepository, detectionResultRepository,
+                evidenceRepository, ruleVersionRepository, snapshotAssembler,
+                requestV2Mapper, metricsRecorder, null);
     }
 
     @Transactional(
@@ -93,6 +112,7 @@ public class RuleAnalysisPersistenceService {
             String analysisTraceId,
             Instant startedAt
     ) {
+        requireOpenGate();
         PreparedRuleAnalysisStart prepared = prepareStart(transactionId);
         StartedRuleAnalysis started = persistStart(
                 prepared,
@@ -121,6 +141,7 @@ public class RuleAnalysisPersistenceService {
             String analysisTraceId,
             Instant startedAt
     ) {
+        requireOpenGate();
         PreparedRuleAnalysisStart prepared = prepareStart(transactionId);
         RuleAnalysisRequestV2 request = requestV2Mapper.map(
                 prepared.snapshot().request(),
@@ -206,6 +227,7 @@ public class RuleAnalysisPersistenceService {
             Instant completedAt,
             List<RuleEvidenceDraft> evidenceDrafts
     ) {
+        requireOpenGate();
         StartedRuleAnalysis validatedStarted = Objects.requireNonNull(
                 started,
                 "started must not be null"
@@ -257,6 +279,7 @@ public class RuleAnalysisPersistenceService {
             String failureCode,
             Instant failedAt
     ) {
+        requireOpenGate();
         StartedRuleAnalysis validatedStarted = Objects.requireNonNull(
                 started,
                 "started must not be null"
@@ -284,6 +307,12 @@ public class RuleAnalysisPersistenceService {
         transaction.failAnalysis();
         transactionRepository.saveAndFlush(transaction);
         recordFailedTerminalAfterCommit(transaction, failureCode);
+    }
+
+    private void requireOpenGate() {
+        if (maintenanceGate != null) {
+            maintenanceGate.requireOpen();
+        }
     }
 
     private void recordFailedTerminalAfterCommit(

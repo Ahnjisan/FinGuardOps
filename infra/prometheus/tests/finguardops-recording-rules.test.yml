@@ -74,7 +74,21 @@ tests:
         values: '0+90x20'
       - series: 'finguardops_rule_analysis_duration_seconds_count{service="service-b",result="completed",riskLevel="MEDIUM",failureCategory="none",job="backend-b",instance="b-1"}'
         values: '0+30x20'
+      - series: 'finguardops_transaction_stage_duration_seconds_sum{service="service-a",stage="claim",result="success",job="backend-a"}'
+        values: '0+30x20'
+      - series: 'finguardops_transaction_stage_duration_seconds_count{service="service-a",stage="claim",result="success",job="backend-a"}'
+        values: '0+15x20'
     promql_expr_test:
+      - expr: 'finguardops:transaction_stage:rate5m'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="finguardops:transaction_stage:rate5m",service="service-a",stage="claim",result="success"}'
+            value: 1
+      - expr: 'finguardops:transaction_stage_duration:avg5m'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{__name__="finguardops:transaction_stage_duration:avg5m",service="service-a",stage="claim",result="success"}'
+            value: 2
       - expr: 'finguardops:transaction_intake:rate5m'
         eval_time: 5m
         exp_samples:

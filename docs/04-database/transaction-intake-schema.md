@@ -1084,3 +1084,11 @@ trigger가 append-only를 보장한다고 표현하지 않는다.
 commit한다. 정상 거부는 업무·Idempotency를 변경하지 않고 감사만 commit한다. 내부
 실패는 원 transaction rollback 뒤 별도 transaction에서 실패 감사를 저장한다. 신규
 DB trigger는 없으며 기존 V1~V8은 변경하지 않는다.
+
+## V16 maintenance 복구 저장 계약
+
+`transaction_intake_maintenance_gate`는 `id=1`인 단일 행이며 `closed`와 `changed_at`을 보유한다. 정상 거래 writer는 각 DB 트랜잭션의 첫 잠금으로 이 행에 `FOR SHARE`를 적용하고 OPEN만 허용한다. `close-gate`는 같은 행을 UPDATE하여 기존 writer 커밋을 기다린 후 CLOSED로 만든다. Provider 호출 중 DB 트랜잭션은 유지하지 않으며, 늦은 응답의 후속 writer가 CLOSED를 확인해 저장하지 못한다. 복구 writer도 CLOSED 행을 공유 잠금으로 확인한 뒤 멱등 record→거래→탐지→사건 순으로 잠근다.
+
+RECEIVED→FAILED는 채택 결과·위험값·최종 outcome·탐지·사건이 없을 때만 허용한다. ANALYZING→FAILED에서는 유일한 비종결 탐지를 `MAINTENANCE_INTERRUPTED`로 FAILED 처리하고 거래·멱등 record와 한 트랜잭션에서 확정한다. 기존 거래 상태 CHECK, 탐지 상태 trigger, 멱등 FAILED CHECK가 이를 허용한다. V16은 recovery decision/result CHECK에 `TERMINATED`와 새 decision을, 일반 Audit CHECK에 `TRANSACTION_TERMINATED_BY_MAINTENANCE` reason을 추가한다. 기존 V1~V15 migration은 수정하지 않는다.
+
+ANALYZED finalization은 사건·거래 최종 상태·업무 Audit를 한 트랜잭션에서 저장한다. Snapshot은 다음 트랜잭션에서 저장한다. 그 사이 중단된 경우 최종 상태·채택 탐지·사건·Audit를 검증한 후 Snapshot만 복원한다. 복구 Audit는 append-only이며 각 성공/거부 시도에 하나씩 남는다.

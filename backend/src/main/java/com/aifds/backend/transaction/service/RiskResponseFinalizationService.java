@@ -12,6 +12,7 @@ import com.aifds.backend.detection.entity.DetectionResult;
 import com.aifds.backend.fraudcase.entity.FraudCaseStatus;
 import com.aifds.backend.fraudcase.service.FraudCaseLinkResult;
 import com.aifds.backend.fraudcase.service.FraudCasePersistenceService;
+import com.aifds.backend.idempotency.service.TransactionIntakeMaintenanceGate;
 import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
@@ -40,13 +41,15 @@ public class RiskResponseFinalizationService {
     private final AuditLogPersistenceService auditLogPersistenceService;
     private final RiskResponseDecisionPolicy decisionPolicy;
     private final TransactionProcessingMetricsRecorder metricsRecorder;
+    private final TransactionIntakeMaintenanceGate maintenanceGate;
 
     @Autowired
     public RiskResponseFinalizationService(
             FinancialTransactionRepository transactionRepository,
             FraudCasePersistenceService fraudCasePersistenceService,
             AuditLogPersistenceService auditLogPersistenceService,
-            TransactionProcessingMetricsRecorder metricsRecorder
+            TransactionProcessingMetricsRecorder metricsRecorder,
+            TransactionIntakeMaintenanceGate maintenanceGate
     ) {
         this.transactionRepository = transactionRepository;
         this.fraudCasePersistenceService = fraudCasePersistenceService;
@@ -55,6 +58,7 @@ public class RiskResponseFinalizationService {
         this.metricsRecorder = metricsRecorder == null
                 ? TransactionProcessingMetricsRecorder.noop()
                 : metricsRecorder;
+        this.maintenanceGate = maintenanceGate;
     }
 
     public RiskResponseFinalizationService(
@@ -66,14 +70,40 @@ public class RiskResponseFinalizationService {
                 transactionRepository,
                 fraudCasePersistenceService,
                 auditLogPersistenceService,
-                TransactionProcessingMetricsRecorder.noop()
+                TransactionProcessingMetricsRecorder.noop(),
+                null
         );
+    }
+
+    public RiskResponseFinalizationService(
+            FinancialTransactionRepository transactionRepository,
+            FraudCasePersistenceService fraudCasePersistenceService,
+            AuditLogPersistenceService auditLogPersistenceService,
+            TransactionProcessingMetricsRecorder metricsRecorder
+    ) {
+        this(transactionRepository, fraudCasePersistenceService,
+                auditLogPersistenceService, metricsRecorder, null);
     }
 
     @Transactional
     public RiskResponseFinalizationResult finalizeRiskResponse(
             UUID transactionId
     ) {
+        if (maintenanceGate != null) {
+            maintenanceGate.requireOpen();
+        }
+        return finalizeLocked(transactionId);
+    }
+
+    @Transactional
+    public RiskResponseFinalizationResult finalizeForMaintenance(UUID transactionId) {
+        if (maintenanceGate != null) {
+            maintenanceGate.requireClosed();
+        }
+        return finalizeLocked(transactionId);
+    }
+
+    private RiskResponseFinalizationResult finalizeLocked(UUID transactionId) {
         UUID requestedTransactionId = Objects.requireNonNull(
                 transactionId,
                 "transactionId must not be null"

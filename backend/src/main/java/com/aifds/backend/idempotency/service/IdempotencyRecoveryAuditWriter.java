@@ -44,4 +44,18 @@ public class IdempotencyRecoveryAuditWriter {
                 attemptedAt
         ));
     }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void writeRejected(
+            long idempotencyRecordId,
+            UUID transactionId,
+            AuditActorType actorType,
+            String actorId,
+            IdempotencyRecoveryDecision decision
+    ) {
+        auditRepository.insert(IdempotencyRecoveryAuditLog.create(
+                idempotencyRecordId, transactionId, actorType, actorId,
+                decision, IdempotencyRecoveryAuditResult.REJECTED,
+                timestampProvider.currentTransactionTimestamp()));
+    }
 }

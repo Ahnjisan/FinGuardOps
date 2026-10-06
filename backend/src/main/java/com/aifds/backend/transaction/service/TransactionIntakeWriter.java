@@ -5,6 +5,7 @@ import com.aifds.backend.idempotency.entity.IdempotencyRecord;
 import com.aifds.backend.idempotency.exception.IdempotencyRecordNotFoundException;
 import com.aifds.backend.idempotency.exception.IdempotencyStateTransitionNotAllowedException;
 import com.aifds.backend.idempotency.repository.IdempotencyRecordRepository;
+import com.aifds.backend.idempotency.service.TransactionIntakeMaintenanceGate;
 import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.transaction.command.ValidatedTransactionCommand;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
@@ -23,13 +24,15 @@ public class TransactionIntakeWriter {
     private final IdempotencyRecordRepository idempotencyRecordRepository;
     private final EntityManager entityManager;
     private final TransactionProcessingMetricsRecorder metricsRecorder;
+    private final TransactionIntakeMaintenanceGate maintenanceGate;
 
     @Autowired
     public TransactionIntakeWriter(
             FinancialTransactionRepository financialTransactionRepository,
             IdempotencyRecordRepository idempotencyRecordRepository,
             EntityManager entityManager,
-            TransactionProcessingMetricsRecorder metricsRecorder
+            TransactionProcessingMetricsRecorder metricsRecorder,
+            TransactionIntakeMaintenanceGate maintenanceGate
     ) {
         this.financialTransactionRepository = financialTransactionRepository;
         this.idempotencyRecordRepository = idempotencyRecordRepository;
@@ -37,6 +40,7 @@ public class TransactionIntakeWriter {
         this.metricsRecorder = metricsRecorder == null
                 ? TransactionProcessingMetricsRecorder.noop()
                 : metricsRecorder;
+        this.maintenanceGate = maintenanceGate;
     }
 
     public TransactionIntakeWriter(
@@ -48,7 +52,8 @@ public class TransactionIntakeWriter {
                 financialTransactionRepository,
                 idempotencyRecordRepository,
                 entityManager,
-                TransactionProcessingMetricsRecorder.noop()
+                TransactionProcessingMetricsRecorder.noop(),
+                null
         );
     }
 
@@ -57,6 +62,9 @@ public class TransactionIntakeWriter {
             long idempotencyRecordId,
             ValidatedTransactionCommand command
     ) {
+        if (maintenanceGate != null) {
+            maintenanceGate.requireOpen();
+        }
         IdempotencyRecord record = idempotencyRecordRepository
                 .findByIdForUpdate(idempotencyRecordId)
                 .orElseThrow(

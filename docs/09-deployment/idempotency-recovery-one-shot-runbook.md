@@ -80,7 +80,7 @@ count, offset, 후보 lock, DB write와 recovery audit 생성은 하지 않는�
 
 ```powershell
 cd backend
-java -jar .\build\libs\backend-0.0.1-SNAPSHOT.jar --finguardops.idempotency-recovery.enabled=true --finguardops.idempotency-recovery.action=recover --finguardops.idempotency-recovery.record-id=123
+java -jar .\build\libs\backend-0.0.1-SNAPSHOT.jar --finguardops.idempotency-recovery.enabled=true --finguardops.idempotency-recovery.action=recover --finguardops.idempotency-recovery.record-id=123 --finguardops.idempotency-recovery.instances-terminated-confirmed=true
 $LASTEXITCODE
 ```
 
@@ -148,3 +148,19 @@ typed `REJECTED`이면 반복 실행하지 말고 업무·Idempotency 불변과 
 확인한다. exit 1이면 원 transaction rollback과 FAILED 감사 여부를 확인한 후 중단하고
 Project Owner에게 수동 검토를 요청한다. 불확실 상태 자동 재실행과 `FAILED` 재분석,
 public·internal 관리 API는 구현되어 있지 않다.
+
+## Issue #343 maintenance 절차
+
+이 절차는 V16과 gate 규칙을 적용한 Backend 인스턴스만 배포된 환경에서 사용한다. gate를 모르는 구버전 인스턴스와 혼재 배포하지 않는다. 승인된 배포 제어에서 새 요청의 외부 유입과 자동 재시작을 차단하고 모든 거래 처리 인스턴스 종료를 확인한다. DB 세션 수만으로 OS 프로세스 종료를 증명할 수 없으므로 배포 제어의 종료 증거를 별도로 보관한다. recovery 명령은 CLOSED gate와 `application_name=finguardops-web` DB 세션 0개를 확인하지 못하면 업무 상태를 쓰기 전에 `MAINTENANCE_PRECONDITION_FAILED / REJECTED`로 거부한다.
+
+1. 같은 recovery non-web artifact에서 `--finguardops.idempotency-recovery.enabled=true --finguardops.idempotency-recovery.action=close-gate`를 한 번 실행한다. 출력 `gate:CLOSED`를 확인한다. 이 전환은 현재 DB writer의 공유 잠금이 풀릴 때까지 기다린다.
+2. 유입·자동 재시작 차단과 모든 처리 인스턴스 종료를 확인한다. 읽기 전용 DB 조회로 gate가 CLOSED이고 web DB 세션이 0인지 확인한다. 확인할 수 없으면 recover를 실행하지 않는다.
+3. `action=inspect`로 record ID를 고른 뒤 기존 형식의 `action=recover --finguardops.idempotency-recovery.record-id=<positive-id> --finguardops.idempotency-recovery.instances-terminated-confirmed=true`를 단건 실행한다. `TERMINATED`와 `RECOVERED`는 exit 0, typed `REJECTED`는 exit 3, 내부 오류는 exit 1이다. Provider 재호출은 없다.
+4. 거래·탐지·사건·일반 Audit·복구 Audit·멱등 Snapshot을 읽기 전용으로 확인한다. ANALYZED finalization 후 Snapshot 전 중단되었다면 같은 단건 명령을 다시 실행해 최종 상태를 재검증하고 Snapshot만 복원한다. 모순·경합이면 수동 조사하고 상태를 직접 덮어쓰지 않는다.
+5. 미완료 record와 실패 원인을 확인한 뒤 최신 Backend 인스턴스만 재시작한다. `action=open-gate`를 실행하고 `gate:OPEN`을 확인한 후 외부 유입과 자동 재시작을 재개한다. 열기 실패 시 유입 차단을 유지하고 운영자가 DB·명령 오류를 수동 조사한다.
+
+`MAINTENANCE_INTERRUPTED`는 내부 보존 코드이며 재전송 HTTP에는 `500 INTERNAL_ERROR`만 노출한다. 로그·명령 출력·Issue에는 원래 요청, Idempotency-Key, 고객·계좌 reference, Provider payload, 자격 정보를 쓰지 않는다. 단건 조치가 실패해도 무인 자동 재시도와 복구 시간 보장은 없다.
+
+복구 DB 계정은 pg_read_all_stats 권한(또는 superuser)이 있어야 모든 처리 인스턴스의 `application_name=finguardops-web` 연결을 확인할 수 있다. 권한이 없으면 세션 수를 알 수 없는 상태로 간주하여 one-shot은 업무 상태 쓰기를 거부한다. 복구 계정과 웹 계정이 달라도 두 계정의 연결을 모두 확인한다.
+
+`instances-terminated-confirmed=true` is the operator attestation backed by deployment-controller evidence that all processing instances have stopped. Missing or non-true values fail command validation with exit 2 before a recovery attempt or DB write. The argument alone does not prove termination; retain the deployment evidence. A recovery attempt also requires the CLOSED gate and zero web DB sessions, otherwise it records `MAINTENANCE_PRECONDITION_FAILED / REJECTED` without business writes.

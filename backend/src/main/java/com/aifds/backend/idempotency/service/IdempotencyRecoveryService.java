@@ -5,6 +5,8 @@ import com.aifds.backend.common.time.DatabaseTransactionTimestampProvider;
 import com.aifds.backend.idempotency.entity.IdempotencyProcessingStatus;
 import com.aifds.backend.idempotency.entity.IdempotencyRecoveryAuditLog;
 import com.aifds.backend.idempotency.repository.IdempotencyRecordRepository;
+import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Limit;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
@@ -13,6 +15,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.sql.SQLException;
 import java.util.List;
 
 @Service
@@ -29,6 +32,26 @@ public class IdempotencyRecoveryService {
     private final DatabaseTransactionTimestampProvider timestampProvider;
     private final IdempotencyRecoveryTransaction recoveryTransaction;
     private final IdempotencyRecoveryAuditWriter auditWriter;
+    private final IdempotencyMaintenanceSafetyVerifier safetyVerifier;
+    private final TransactionProcessingMetricsRecorder metricsRecorder;
+
+    @Autowired
+    public IdempotencyRecoveryService(
+            IdempotencyRecordRepository idempotencyRecordRepository,
+            DatabaseTransactionTimestampProvider timestampProvider,
+            IdempotencyRecoveryTransaction recoveryTransaction,
+            IdempotencyRecoveryAuditWriter auditWriter,
+            IdempotencyMaintenanceSafetyVerifier safetyVerifier,
+            TransactionProcessingMetricsRecorder metricsRecorder
+    ) {
+        this.idempotencyRecordRepository = idempotencyRecordRepository;
+        this.timestampProvider = timestampProvider;
+        this.recoveryTransaction = recoveryTransaction;
+        this.auditWriter = auditWriter;
+        this.safetyVerifier = safetyVerifier;
+        this.metricsRecorder = metricsRecorder == null
+                ? TransactionProcessingMetricsRecorder.noop() : metricsRecorder;
+    }
 
     public IdempotencyRecoveryService(
             IdempotencyRecordRepository idempotencyRecordRepository,
@@ -36,10 +59,16 @@ public class IdempotencyRecoveryService {
             IdempotencyRecoveryTransaction recoveryTransaction,
             IdempotencyRecoveryAuditWriter auditWriter
     ) {
-        this.idempotencyRecordRepository = idempotencyRecordRepository;
-        this.timestampProvider = timestampProvider;
-        this.recoveryTransaction = recoveryTransaction;
-        this.auditWriter = auditWriter;
+        this(idempotencyRecordRepository, timestampProvider,
+                recoveryTransaction, auditWriter, null, null);
+    }
+
+    public void closeGate() {
+        safetyVerifier.close();
+    }
+
+    public void openGate() {
+        safetyVerifier.open();
     }
 
     @Transactional(
@@ -81,6 +110,29 @@ public class IdempotencyRecoveryService {
             AuditActorType actorType,
             String actorId
     ) {
+        long started = System.nanoTime();
+        boolean completed = false;
+        try {
+            IdempotencyRecoveryResult result = recoverMeasured(
+                    idempotencyRecordId, actorType, actorId);
+            completed = true;
+            return result;
+        } finally {
+            try {
+                metricsRecorder.recordStage(
+                        TransactionProcessingMetricsRecorder.Stage.MAINTENANCE_RECOVERY,
+                        completed, Duration.ofNanos(System.nanoTime() - started));
+            } catch (Throwable ignored) {
+                // Observability cannot change reconciliation.
+            }
+        }
+    }
+
+    private IdempotencyRecoveryResult recoverMeasured(
+            long idempotencyRecordId,
+            AuditActorType actorType,
+            String actorId
+    ) {
         if (idempotencyRecordId < 1) {
             throw new IllegalArgumentException(
                     "idempotencyRecordId must be positive"
@@ -88,12 +140,24 @@ public class IdempotencyRecoveryService {
         }
         IdempotencyRecoveryAuditLog.validateActor(actorType, actorId);
         try {
-            return recoveryTransaction.recover(
+            IdempotencyRecoveryResult first = recoveryTransaction.recover(
                     idempotencyRecordId,
                     actorType,
                     actorId
             );
+            if (first.decision() == IdempotencyRecoveryDecision.ANALYZED_FINALIZED) {
+                return recoveryTransaction.recover(idempotencyRecordId,
+                        actorType, actorId);
+            }
+            return first;
         } catch (RuntimeException original) {
+            if (isLockContention(original)) {
+                auditWriter.writeRejected(idempotencyRecordId, null,
+                        actorType, actorId,
+                        IdempotencyRecoveryDecision.LOCK_CONTENTION);
+                return IdempotencyRecoveryResult.rejected(idempotencyRecordId,
+                        null, IdempotencyRecoveryDecision.LOCK_CONTENTION);
+            }
             try {
                 auditWriter.writeInternalFailure(
                         idempotencyRecordId,
@@ -108,6 +172,16 @@ public class IdempotencyRecoveryService {
             }
             throw original;
         }
+    }
+
+    private boolean isLockContention(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof SQLException sqlException
+                    && "55P03".equals(sqlException.getSQLState())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Duration validateThreshold(Duration threshold) {

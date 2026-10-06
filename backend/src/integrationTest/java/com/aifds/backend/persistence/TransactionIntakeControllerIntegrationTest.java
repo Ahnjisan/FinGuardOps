@@ -5,6 +5,7 @@ import com.aifds.backend.idempotency.entity.IdempotencyProcessingStatus;
 import com.aifds.backend.idempotency.repository.IdempotencyRecordRepository;
 import com.aifds.backend.idempotency.service.IdempotencyClaimResult;
 import com.aifds.backend.idempotency.service.IdempotencyService;
+import com.aifds.backend.idempotency.service.IdempotencyMaintenanceSafetyVerifier;
 import com.aifds.backend.transaction.command.ValidatedTransactionCommand;
 import com.aifds.backend.transaction.entity.TransactionChannel;
 import com.aifds.backend.transaction.entity.TransactionType;
@@ -43,6 +44,29 @@ class TransactionIntakeControllerIntegrationTest
     @Autowired private IdempotencyService idempotencyService;
     @Autowired private IdempotencyRecordRepository idempotencyRepository;
     @Autowired private FinancialTransactionRepository transactionRepository;
+    @Autowired private IdempotencyMaintenanceSafetyVerifier safetyVerifier;
+
+    @Test
+    void closedMaintenanceGateReturnsSafe503BeforeAnyClaim() throws Exception {
+        String key = key("http-maintenance");
+        safetyVerifier.close();
+        try {
+            mockMvc.perform(post(PATH)
+                            .header("Idempotency-Key", key)
+                            .header(TraceIdFilter.TRACE_ID_HEADER,
+                                    "trace_http_maintenance_01")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(requestJson(UUID.randomUUID(), "1250000")))
+                    .andExpect(status().isServiceUnavailable())
+                    .andExpect(jsonPath("$.code")
+                            .value("DEPENDENCY_UNAVAILABLE"));
+            assertThat(idempotencyRepository.findByOperationScopeAndIdempotencyKey(
+                    "POST:/api/v1/transactions", key)).isEmpty();
+            assertThat(transactionRepository.count()).isZero();
+        } finally {
+            safetyVerifier.open();
+        }
+    }
 
     @Test
     void missingProviderReturnsSafe503AndWritesNoRows() throws Exception {

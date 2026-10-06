@@ -2,8 +2,10 @@ package com.aifds.backend.transaction.service;
 
 import com.aifds.backend.common.time.DatabaseTransactionTimestampProvider;
 import com.aifds.backend.idempotency.service.IdempotencyService;
+import com.aifds.backend.idempotency.service.TransactionIntakeMaintenanceGate;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -15,15 +17,27 @@ public class TransactionIntakeCompletionService {
     private final TransactionIntakeSnapshotCodec snapshotCodec;
     private final IdempotencyService idempotencyService;
     private final DatabaseTransactionTimestampProvider timestampProvider;
+    private final TransactionIntakeMaintenanceGate maintenanceGate;
+
+    @Autowired
+    public TransactionIntakeCompletionService(
+            TransactionIntakeSnapshotCodec snapshotCodec,
+            IdempotencyService idempotencyService,
+            DatabaseTransactionTimestampProvider timestampProvider,
+            TransactionIntakeMaintenanceGate maintenanceGate
+    ) {
+        this.snapshotCodec = snapshotCodec;
+        this.idempotencyService = idempotencyService;
+        this.timestampProvider = timestampProvider;
+        this.maintenanceGate = maintenanceGate;
+    }
 
     public TransactionIntakeCompletionService(
             TransactionIntakeSnapshotCodec snapshotCodec,
             IdempotencyService idempotencyService,
             DatabaseTransactionTimestampProvider timestampProvider
     ) {
-        this.snapshotCodec = snapshotCodec;
-        this.idempotencyService = idempotencyService;
-        this.timestampProvider = timestampProvider;
+        this(snapshotCodec, idempotencyService, timestampProvider, null);
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -32,6 +46,9 @@ public class TransactionIntakeCompletionService {
             RiskResponseFinalizationResult finalizationResult,
             Instant createdAt
     ) {
+        if (maintenanceGate != null) {
+            maintenanceGate.requireOpen();
+        }
         Instant finalizedAt = timestampProvider.currentTransactionTimestamp();
         TransactionFinalResponseSnapshot finalSnapshot =
                 new TransactionFinalResponseSnapshot(

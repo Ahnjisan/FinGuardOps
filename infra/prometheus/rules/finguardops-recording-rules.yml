@@ -163,3 +163,25 @@ groups:
           sum by (service) (
             rate(finguardops_rule_analysis_duration_seconds_count[5m])
           ) > 0
+
+      - record: finguardops:transaction_stage:rate5m
+        expr: |
+          sum by (service, stage, result) (
+            rate(finguardops_transaction_stage_duration_seconds_count[5m])
+          )
+
+      - record: finguardops:transaction_stage_duration:avg5m
+        expr: |
+          (
+            sum by (service, stage, result) (
+              rate(finguardops_transaction_stage_duration_seconds_sum[5m])
+            )
+            /
+            sum by (service, stage, result) (
+              rate(finguardops_transaction_stage_duration_seconds_count[5m])
+            )
+          )
+          and on (service, stage, result)
+          sum by (service, stage, result) (
+            rate(finguardops_transaction_stage_duration_seconds_count[5m])
+          ) > 0

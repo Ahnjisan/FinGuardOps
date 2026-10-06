@@ -5,9 +5,12 @@ import com.aifds.backend.audit.entity.AuditLog;
 import com.aifds.backend.detection.entity.RiskLevel;
 import com.aifds.backend.idempotency.fingerprint.TransactionFingerprintInput;
 import com.aifds.backend.idempotency.fingerprint.TransactionRequestFingerprint;
+import com.aifds.backend.idempotency.repository.IdempotencyRecordRepository;
 import com.aifds.backend.idempotency.service.IdempotencyRecoveryDecision;
 import com.aifds.backend.idempotency.service.IdempotencyRecoveryResult;
 import com.aifds.backend.idempotency.service.IdempotencyRecoveryService;
+import com.aifds.backend.idempotency.service.IdempotencyMaintenanceSafetyVerifier;
+import com.aifds.backend.idempotency.service.TransactionIntakeMaintenanceGate;
 import com.aifds.backend.transaction.dto.TransactionCreateRequest;
 import com.aifds.backend.transaction.entity.TransactionChannel;
 import com.aifds.backend.transaction.entity.TransactionType;
@@ -15,10 +18,18 @@ import com.aifds.backend.transaction.service.RiskResponseFinalizationService;
 import com.aifds.backend.transaction.service.TransactionIntakeResult;
 import com.aifds.backend.transaction.service.TransactionIntakeService;
 import com.aifds.backend.transaction.service.TransactionSynchronousProcessingCoordinator;
+import com.aifds.recovery.idempotency.IdempotencyRecoveryCommandArguments;
+import com.aifds.recovery.idempotency.IdempotencyRecoveryCommandResult;
+import com.aifds.recovery.idempotency.IdempotencyRecoveryCommandRunner;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 
@@ -29,6 +40,7 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -62,9 +74,142 @@ class IdempotencyRecoveryConcurrencyIntegrationTest
     private TransactionRequestFingerprint requestFingerprint;
     @Autowired
     private JdbcTemplate jdbcTemplate;
+    @Autowired
+    private IdempotencyRecordRepository idempotencyRecordRepository;
+    @Autowired
+    private PlatformTransactionManager transactionManager;
+    @Autowired
+    private ObjectMapper objectMapper;
 
     @MockitoBean
     private TransactionSynchronousProcessingCoordinator coordinator;
+
+    @MockitoBean
+    private IdempotencyMaintenanceSafetyVerifier safetyVerifier;
+
+    @MockitoBean
+    private TransactionIntakeMaintenanceGate maintenanceGate;
+
+    @BeforeEach
+    void allowIsolatedRecoveryFixtures() {
+        when(safetyVerifier.isSafeForReconciliation()).thenReturn(true);
+        when(maintenanceGate.isOpen()).thenReturn(true);
+    }
+
+    @Test
+    void heldRecordLockProducesTypedRejectionWithoutBusinessMutation()
+            throws Exception {
+        RecoveryFixture fixture = finalizedFixture(RiskLevel.MEDIUM);
+        CountDownLatch locked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> holder = executor.submit(() ->
+                    new TransactionTemplate(transactionManager).executeWithoutResult(
+                            ignored -> {
+                                jdbcTemplate.queryForObject("""
+                                        SELECT id FROM idempotency_record
+                                        WHERE id = ? FOR NO KEY UPDATE
+                                        """, Long.class, fixture.recordId());
+                                locked.countDown();
+                                try {
+                                    assertThat(release.await(10, TimeUnit.SECONDS))
+                                            .isTrue();
+                                } catch (InterruptedException exception) {
+                                    Thread.currentThread().interrupt();
+                                    throw new IllegalStateException(exception);
+                                }
+                            }));
+            assertThat(locked.await(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(recoveryService.recover(fixture.recordId(),
+                    AuditActorType.SYSTEM, AuditLog.SYSTEM_ACTOR_ID)
+                    .decision()).isEqualTo(
+                    IdempotencyRecoveryDecision.LOCK_CONTENTION);
+            assertThat(jdbcTemplate.queryForObject("""
+                    SELECT processing_status FROM idempotency_record WHERE id = ?
+                    """, String.class, fixture.recordId())).isEqualTo("IN_PROGRESS");
+            assertThat(jdbcTemplate.queryForObject("""
+                    SELECT recovery_decision || ':' || audit_result
+                    FROM idempotency_recovery_audit_log
+                    WHERE idempotency_record_id = ?
+                    """, String.class, fixture.recordId()))
+                    .isEqualTo("LOCK_CONTENTION:REJECTED");
+            release.countDown();
+            holder.get(10, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void heldTransactionLockProducesTypedRejectionWithoutBusinessMutation()
+            throws Exception {
+        RecoveryFixture fixture = finalizedFixture(RiskLevel.CRITICAL);
+        CountDownLatch locked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> holder = executor.submit(() ->
+                    new TransactionTemplate(transactionManager).executeWithoutResult(
+                            ignored -> {
+                                jdbcTemplate.queryForObject("""
+                                        SELECT id FROM financial_transaction
+                                        WHERE transaction_id = ? FOR NO KEY UPDATE
+                                        """, Long.class, fixture.transactionId());
+                                locked.countDown();
+                                try {
+                                    assertThat(release.await(10, TimeUnit.SECONDS))
+                                            .isTrue();
+                                } catch (InterruptedException exception) {
+                                    Thread.currentThread().interrupt();
+                                    throw new IllegalStateException(exception);
+                                }
+                            }));
+            assertThat(locked.await(10, TimeUnit.SECONDS)).isTrue();
+
+            // The record lock remains available; the later transaction lock
+            // must be the source of the typed NOWAIT rejection.
+            Long lockedRecordId = new TransactionTemplate(transactionManager)
+                    .execute(ignored -> idempotencyRecordRepository
+                            .findByIdForUpdateNowait(fixture.recordId())
+                            .orElseThrow().getId());
+            assertThat(lockedRecordId).isEqualTo(fixture.recordId());
+            StoredState before = storedState(fixture);
+            assertThat(recoveryAudits(fixture.recordId())).isEmpty();
+
+            IdempotencyRecoveryCommandArguments arguments =
+                    IdempotencyRecoveryCommandArguments.parse(new String[]{
+                            recoveryOption("enabled=true"),
+                            recoveryOption("action=recover"),
+                            recoveryOption("record-id=" + fixture.recordId()),
+                            recoveryOption("instances-terminated-confirmed=true")
+                    });
+            Future<IdempotencyRecoveryCommandResult> recovery = executor.submit(
+                    () -> new IdempotencyRecoveryCommandRunner(
+                            recoveryService, objectMapper).run(arguments));
+            IdempotencyRecoveryCommandResult rejected =
+                    recovery.get(3, TimeUnit.SECONDS);
+            assertThat(rejected.exitCode()).isEqualTo(3);
+            assertThat(rejected.standardOutputLines()).hasSize(1);
+            JsonNode output = objectMapper.readTree(
+                    rejected.standardOutputLines().get(0));
+            assertThat(output.path("decision").asText())
+                    .isEqualTo("LOCK_CONTENTION");
+            assertThat(output.path("auditResult").asText())
+                    .isEqualTo("REJECTED");
+            assertThat(storedState(fixture)).isEqualTo(before);
+            assertThat(recoveryAudits(fixture.recordId()))
+                    .containsExactly("LOCK_CONTENTION:REJECTED");
+
+            release.countDown();
+            holder.get(10, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+            executor.awaitTermination(10, TimeUnit.SECONDS);
+        }
+    }
 
     @Test
     void concurrentRecoveryHasOneWinnerAndOneTerminalRejection()
@@ -88,13 +233,15 @@ class IdempotencyRecoveryConcurrencyIntegrationTest
                     invocation
             );
 
-            assertThat(List.of(
+            List<IdempotencyRecoveryDecision> decisions = List.of(
                     first.get(20, TimeUnit.SECONDS).decision(),
                     second.get(20, TimeUnit.SECONDS).decision()
-            )).containsExactlyInAnyOrder(
-                    IdempotencyRecoveryDecision.RECOVERABLE_COMPLETION_GAP,
-                    IdempotencyRecoveryDecision.ALREADY_TERMINAL
             );
+            assertThat(decisions).contains(
+                    IdempotencyRecoveryDecision.RECOVERABLE_COMPLETION_GAP);
+            assertThat(decisions).anyMatch(decision -> decision
+                    == IdempotencyRecoveryDecision.LOCK_CONTENTION
+                    || decision == IdempotencyRecoveryDecision.ALREADY_TERMINAL);
         } finally {
             executor.shutdownNow();
             executor.awaitTermination(10, TimeUnit.SECONDS);
@@ -105,7 +252,7 @@ class IdempotencyRecoveryConcurrencyIntegrationTest
                 String.class,
                 fixture.recordId()
         )).isEqualTo("COMPLETED");
-        assertThat(jdbcTemplate.queryForList(
+        List<String> audits = jdbcTemplate.queryForList(
                 """
                         SELECT recovery_decision || ':' || audit_result
                         FROM idempotency_recovery_audit_log
@@ -114,10 +261,11 @@ class IdempotencyRecoveryConcurrencyIntegrationTest
                         """,
                 String.class,
                 fixture.recordId()
-        )).containsExactlyInAnyOrder(
-                "RECOVERABLE_COMPLETION_GAP:RECOVERED",
-                "ALREADY_TERMINAL:REJECTED"
         );
+        assertThat(audits).contains("RECOVERABLE_COMPLETION_GAP:RECOVERED");
+        assertThat(audits).anyMatch(audit -> audit.equals(
+                "LOCK_CONTENTION:REJECTED") || audit.equals(
+                "ALREADY_TERMINAL:REJECTED"));
     }
 
     @Test
@@ -343,6 +491,77 @@ class IdempotencyRecoveryConcurrencyIntegrationTest
                 input.channel().name(),
                 input.deviceRef()
         );
+    }
+
+    private StoredState storedState(RecoveryFixture fixture) {
+        UUID transactionId = fixture.transactionId();
+        return new StoredState(
+                jdbcTemplate.queryForObject("""
+                        SELECT to_jsonb(t)::text FROM financial_transaction t
+                        WHERE t.transaction_id = ?
+                        """, String.class, transactionId),
+                jdbcTemplate.queryForObject("""
+                        SELECT COALESCE(jsonb_agg(to_jsonb(d) ORDER BY d.id),
+                            '[]'::jsonb)::text
+                        FROM detection_result d
+                        JOIN financial_transaction t
+                          ON t.id = d.financial_transaction_id
+                        WHERE t.transaction_id = ?
+                        """, String.class, transactionId),
+                jdbcTemplate.queryForObject("""
+                        SELECT COALESCE(jsonb_agg(to_jsonb(e) ORDER BY e.id),
+                            '[]'::jsonb)::text
+                        FROM detection_evidence e
+                        JOIN detection_result d ON d.id = e.detection_result_id
+                        JOIN financial_transaction t
+                          ON t.id = d.financial_transaction_id
+                        WHERE t.transaction_id = ?
+                        """, String.class, transactionId),
+                jdbcTemplate.queryForObject("""
+                        SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY c.id),
+                            '[]'::jsonb)::text
+                        FROM fraud_case c
+                        JOIN case_transaction ct ON ct.fraud_case_id = c.id
+                        JOIN financial_transaction t
+                          ON t.id = ct.financial_transaction_id
+                        WHERE t.transaction_id = ?
+                        """, String.class, transactionId),
+                jdbcTemplate.queryForObject("""
+                        SELECT COALESCE(jsonb_agg(to_jsonb(ct) ORDER BY ct.id),
+                            '[]'::jsonb)::text
+                        FROM case_transaction ct
+                        JOIN financial_transaction t
+                          ON t.id = ct.financial_transaction_id
+                        WHERE t.transaction_id = ?
+                        """, String.class, transactionId),
+                jdbcTemplate.queryForObject("""
+                        SELECT to_jsonb(r)::text FROM idempotency_record r
+                        WHERE r.id = ?
+                        """, String.class, fixture.recordId()),
+                jdbcTemplate.queryForObject("""
+                        SELECT COALESCE(jsonb_agg(to_jsonb(a) ORDER BY a.id),
+                            '[]'::jsonb)::text
+                        FROM audit_log a
+                        """, String.class));
+    }
+
+    private List<String> recoveryAudits(long recordId) {
+        return jdbcTemplate.queryForList("""
+                SELECT recovery_decision || ':' || audit_result
+                FROM idempotency_recovery_audit_log
+                WHERE idempotency_record_id = ? ORDER BY id
+                """, String.class, recordId);
+    }
+
+    private String recoveryOption(String option) {
+        return IdempotencyRecoveryCommandArguments.PREFIX + option;
+    }
+
+    private record StoredState(
+            String transaction, String detection, String evidence,
+            String fraudCase, String caseTransaction,
+            String idempotency, String businessAudit
+    ) {
     }
 
     private record RecoveryFixture(

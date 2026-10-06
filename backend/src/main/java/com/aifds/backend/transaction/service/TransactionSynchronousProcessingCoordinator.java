@@ -11,11 +11,14 @@ import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.transaction.command.ValidatedTransactionCommand;
 import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.sql.SQLException;
+import java.time.Duration;
+import java.util.function.Supplier;
 
 @Service
 public class TransactionSynchronousProcessingCoordinator {
@@ -34,7 +37,9 @@ public class TransactionSynchronousProcessingCoordinator {
     private final IdempotencyService idempotencyService;
     private final RiskResponseFinalizationService finalizationService;
     private final TransactionIntakeCompletionService completionService;
+    private final TransactionProcessingMetricsRecorder metricsRecorder;
 
+    @Autowired
     public TransactionSynchronousProcessingCoordinator(
             ObjectProvider<ExternalRiskRuleAnalysisCoordinator>
                     analysisCoordinatorProvider,
@@ -43,7 +48,8 @@ public class TransactionSynchronousProcessingCoordinator {
             TransactionProcessingFailureStateReader failureStateReader,
             IdempotencyService idempotencyService,
             RiskResponseFinalizationService finalizationService,
-            TransactionIntakeCompletionService completionService
+            TransactionIntakeCompletionService completionService,
+            TransactionProcessingMetricsRecorder metricsRecorder
     ) {
         this.analysisCoordinatorProvider = analysisCoordinatorProvider;
         this.transactionIntakeWriter = transactionIntakeWriter;
@@ -52,6 +58,22 @@ public class TransactionSynchronousProcessingCoordinator {
         this.idempotencyService = idempotencyService;
         this.finalizationService = finalizationService;
         this.completionService = completionService;
+        this.metricsRecorder = metricsRecorder == null
+                ? TransactionProcessingMetricsRecorder.noop() : metricsRecorder;
+    }
+
+    public TransactionSynchronousProcessingCoordinator(
+            ObjectProvider<ExternalRiskRuleAnalysisCoordinator> analysisCoordinatorProvider,
+            TransactionIntakeWriter transactionIntakeWriter,
+            ExternalRiskFailureSnapshotService failureSnapshotService,
+            TransactionProcessingFailureStateReader failureStateReader,
+            IdempotencyService idempotencyService,
+            RiskResponseFinalizationService finalizationService,
+            TransactionIntakeCompletionService completionService
+    ) {
+        this(analysisCoordinatorProvider, transactionIntakeWriter,
+                failureSnapshotService, failureStateReader, idempotencyService,
+                finalizationService, completionService, null);
     }
 
     public boolean isAvailable() {
@@ -71,7 +93,8 @@ public class TransactionSynchronousProcessingCoordinator {
 
         final PersistedTransactionIntake persisted;
         try {
-            persisted = persistReceived(idempotencyRecordId, command);
+            persisted = timed(TransactionProcessingMetricsRecorder.Stage.RECEIVED_COMMIT,
+                    () -> persistReceived(idempotencyRecordId, command));
         } catch (DuplicateTransactionSignal duplicate) {
             return new TransactionIntakeResult.DuplicateTransaction(
                     duplicate.command().transactionId()
@@ -80,21 +103,23 @@ public class TransactionSynchronousProcessingCoordinator {
         requireNoActiveTransaction();
         final ExternalRiskSnapshot externalRiskSnapshot;
         try {
-            externalRiskSnapshot = analysisCoordinator.lookupExternalRisk(
-                    persisted.transactionId(),
-                    traceId
-            );
+            externalRiskSnapshot = timed(
+                    TransactionProcessingMetricsRecorder.Stage.EXTERNAL_RISK,
+                    () -> analysisCoordinator.lookupExternalRisk(
+                            persisted.transactionId(), traceId));
         } catch (ExternalRiskLookupException original) {
             return persistExternalRiskFailure(idempotencyRecordId, original);
         }
 
         requireNoActiveTransaction();
         try {
-            analysisCoordinator.analyzeWithExternalRiskSnapshot(
-                    persisted.transactionId(),
-                    traceId,
-                    externalRiskSnapshot
-            );
+            timed(TransactionProcessingMetricsRecorder.Stage.RULE_ANALYSIS,
+                    () -> {
+                        analysisCoordinator.analyzeWithExternalRiskSnapshot(
+                                persisted.transactionId(), traceId,
+                                externalRiskSnapshot);
+                        return null;
+                    });
         } catch (RuntimeException original) {
             return handleRuleFailure(
                     idempotencyRecordId,
@@ -106,9 +131,10 @@ public class TransactionSynchronousProcessingCoordinator {
         requireNoActiveTransaction();
         final RiskResponseFinalizationResult finalized;
         try {
-            finalized = finalizationService.finalizeRiskResponse(
-                    persisted.transactionId()
-            );
+            finalized = timed(
+                    TransactionProcessingMetricsRecorder.Stage.FINALIZATION_COMMIT,
+                    () -> finalizationService.finalizeRiskResponse(
+                            persisted.transactionId()));
         } catch (RuntimeException original) {
             markIntakeFailure(
                     TransactionProcessingMetricsRecorder.IntakeOutcome
@@ -118,17 +144,35 @@ public class TransactionSynchronousProcessingCoordinator {
         }
         requireNoActiveTransaction();
         try {
-            return completionService.complete(
-                    idempotencyRecordId,
-                    finalized,
-                    persisted.createdAt()
-            );
+            return timed(TransactionProcessingMetricsRecorder.Stage.SNAPSHOT_COMMIT,
+                    () -> completionService.complete(idempotencyRecordId,
+                            finalized, persisted.createdAt()));
         } catch (RuntimeException original) {
             markIntakeFailure(
                     TransactionProcessingMetricsRecorder.IntakeOutcome
                             .COMPLETION_FAILED
             );
             throw original;
+        }
+    }
+
+    private <T> T timed(
+            TransactionProcessingMetricsRecorder.Stage stage,
+            Supplier<T> operation
+    ) {
+        long started = System.nanoTime();
+        boolean success = false;
+        try {
+            T result = operation.get();
+            success = true;
+            return result;
+        } finally {
+            try {
+                metricsRecorder.recordStage(stage, success,
+                        Duration.ofNanos(System.nanoTime() - started));
+            } catch (Throwable ignored) {
+                // Observability cannot change transaction processing.
+            }
         }
     }
 

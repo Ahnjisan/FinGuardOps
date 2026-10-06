@@ -219,6 +219,26 @@ class IdempotencyRecoveryCommandRunnerTest {
         verifyNoMoreInteractions(recoveryService);
     }
 
+    @Test
+    void gateCommandsReturnTypedStateWithoutRecordData() throws Exception {
+        IdempotencyRecoveryCommandResult closed = runner.run(
+                new IdempotencyRecoveryCommandArguments(
+                        IdempotencyRecoveryCommandArguments.Action.CLOSE_GATE,
+                        null, 0, null));
+        IdempotencyRecoveryCommandResult opened = runner.run(
+                new IdempotencyRecoveryCommandArguments(
+                        IdempotencyRecoveryCommandArguments.Action.OPEN_GATE,
+                        null, 0, null));
+        assertThat(closed.exitCode()).isZero();
+        assertThat(opened.exitCode()).isZero();
+        assertThat(objectMapper.readTree(closed.standardOutputLines().get(0))
+                .get("gate").textValue()).isEqualTo("CLOSED");
+        assertThat(objectMapper.readTree(opened.standardOutputLines().get(0))
+                .get("gate").textValue()).isEqualTo("OPEN");
+        verify(recoveryService).closeGate();
+        verify(recoveryService).openGate();
+    }
+
     private IdempotencyRecoveryCommandArguments inspectArguments() {
         return new IdempotencyRecoveryCommandArguments(
                 IdempotencyRecoveryCommandArguments.Action.INSPECT,
