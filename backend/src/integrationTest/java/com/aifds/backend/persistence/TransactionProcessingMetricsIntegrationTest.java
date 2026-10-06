@@ -11,6 +11,7 @@ import com.aifds.backend.idempotency.entity.IdempotencyProcessingStatus;
 import com.aifds.backend.idempotency.service.IdempotencyClaimResult;
 import com.aifds.backend.idempotency.service.IdempotencyRecoveryDecision;
 import com.aifds.backend.idempotency.service.IdempotencyRecoveryService;
+import com.aifds.backend.idempotency.service.IdempotencyMaintenanceSafetyVerifier;
 import com.aifds.backend.idempotency.service.IdempotencyService;
 import com.aifds.backend.observability.MicrometerTransactionProcessingMetricsRecorder;
 import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
@@ -94,6 +95,7 @@ class TransactionProcessingMetricsIntegrationTest
     @Autowired private MeterRegistry meterRegistry;
     @Autowired private IdempotencyService idempotencyService;
     @Autowired private IdempotencyRecoveryService recoveryService;
+    @Autowired private IdempotencyMaintenanceSafetyVerifier safetyVerifier;
     @Autowired private TransactionRequestValidator requestValidator;
     @Autowired private TransactionIntakeWriter transactionIntakeWriter;
     @Autowired private PlatformTransactionManager transactionManager;
@@ -570,13 +572,18 @@ class TransactionProcessingMetricsIntegrationTest
                 "result", "completed"
         );
         long recordId = idempotencyRecordId(key);
-        assertThat(recoveryService.recover(
-                recordId,
-                AuditActorType.SYSTEM,
-                AuditLog.SYSTEM_ACTOR_ID
-        ).decision()).isEqualTo(
-                IdempotencyRecoveryDecision.RECOVERABLE_COMPLETION_GAP
-        );
+        safetyVerifier.close();
+        try {
+            assertThat(recoveryService.recover(
+                    recordId,
+                    AuditActorType.SYSTEM,
+                    AuditLog.SYSTEM_ACTOR_ID
+            ).decision()).isEqualTo(
+                    IdempotencyRecoveryDecision.RECOVERABLE_COMPLETION_GAP
+            );
+        } finally {
+            safetyVerifier.open();
+        }
 
         perform(key, request, "trace_metrics_recovered_replay_01")
                 .andExpect(status().isCreated());
@@ -927,7 +934,7 @@ class TransactionProcessingMetricsIntegrationTest
             assertThat(meter.getId().getTags())
                     .extracting(tag -> tag.getKey())
                     .allMatch(Set.of(
-                            "service", "result", "status", "riskLevel",
+                            "service", "result", "status", "riskLevel", "stage", "le",
                             "failureCategory"
                     )::contains)
                     .doesNotContain(

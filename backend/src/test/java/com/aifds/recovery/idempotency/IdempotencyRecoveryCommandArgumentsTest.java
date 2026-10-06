@@ -93,7 +93,8 @@ class IdempotencyRecoveryCommandArgumentsTest {
         IdempotencyRecoveryCommandArguments arguments = parse(
                 "enabled=true",
                 "action=recover",
-                "record-id=9223372036854775807"
+                "record-id=9223372036854775807",
+                "instances-terminated-confirmed=true"
         );
 
         assertThat(arguments.action())
@@ -164,6 +165,19 @@ class IdempotencyRecoveryCommandArgumentsTest {
                 "page-size=50"
         );
         assertInvalid("enabled=true", "action=recover");
+        assertInvalid("enabled=true", "action=recover", "record-id=1");
+        assertInvalid("enabled=true", "action=recover", "record-id=1",
+                "instances-terminated-confirmed=false");
+    }
+
+    @Test
+    void gateActionsAcceptOnlyEnabledAndAction() {
+        assertThat(parse("enabled=true", "action=close-gate").action())
+                .isEqualTo(IdempotencyRecoveryCommandArguments.Action.CLOSE_GATE);
+        assertThat(parse("enabled=true", "action=open-gate").action())
+                .isEqualTo(IdempotencyRecoveryCommandArguments.Action.OPEN_GATE);
+        assertInvalid("enabled=true", "action=close-gate", "record-id=1");
+        assertInvalid("enabled=true", "action=open-gate", "threshold=PT5M");
     }
 
     private IdempotencyRecoveryCommandArguments parse(String... options) {

@@ -196,9 +196,27 @@ public class IdempotencyRecoveryAuditLog {
     private void validateDecisionResult() {
         boolean valid = switch (auditResult) {
             case RECOVERED -> recoveryDecision
-                    == IdempotencyRecoveryDecision.RECOVERABLE_COMPLETION_GAP;
+                    == IdempotencyRecoveryDecision.RECOVERABLE_COMPLETION_GAP
+                    || recoveryDecision
+                    == IdempotencyRecoveryDecision.ANALYZED_FINALIZED;
+            case TERMINATED -> switch (recoveryDecision) {
+                case UNLINKED_CLAIM_TERMINATED, RECEIVED_TERMINATED,
+                        ANALYZING_TERMINATED,
+                        CONFIRMED_FAILURE_TERMINATED -> true;
+                default -> false;
+            };
             case REJECTED -> recoveryDecision
                     != IdempotencyRecoveryDecision.RECOVERABLE_COMPLETION_GAP
+                    && recoveryDecision
+                    != IdempotencyRecoveryDecision.ANALYZED_FINALIZED
+                    && recoveryDecision
+                    != IdempotencyRecoveryDecision.UNLINKED_CLAIM_TERMINATED
+                    && recoveryDecision
+                    != IdempotencyRecoveryDecision.RECEIVED_TERMINATED
+                    && recoveryDecision
+                    != IdempotencyRecoveryDecision.ANALYZING_TERMINATED
+                    && recoveryDecision
+                    != IdempotencyRecoveryDecision.CONFIRMED_FAILURE_TERMINATED
                     && recoveryDecision
                     != IdempotencyRecoveryDecision.INTERNAL_FAILURE;
             case FAILED -> recoveryDecision

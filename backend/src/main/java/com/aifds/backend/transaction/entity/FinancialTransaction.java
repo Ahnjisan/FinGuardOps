@@ -166,6 +166,12 @@ public class FinancialTransaction {
         this.processingStatus = TransactionProcessingStatus.FAILED;
     }
 
+    public void failInterruptedBeforeAnalysis() {
+        requireAnalysisState(TransactionProcessingStatus.RECEIVED);
+        requireNoAnalysisOutcome();
+        this.processingStatus = TransactionProcessingStatus.FAILED;
+    }
+
     public void finalizeRiskResponse(RiskResponseDecision decision) {
         RiskResponseDecision validatedDecision = Objects.requireNonNull(
                 decision,

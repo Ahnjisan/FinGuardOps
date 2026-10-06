@@ -285,7 +285,9 @@ public class AuditLog {
             case TRANSACTION_STATUS_CHANGED ->
                     reasonCode
                             == AuditReasonCode
-                            .TRANSACTION_FINALIZED_BY_RISK_POLICY;
+                            .TRANSACTION_FINALIZED_BY_RISK_POLICY
+                            || reasonCode == AuditReasonCode
+                            .TRANSACTION_TERMINATED_BY_MAINTENANCE;
         };
         if (!valid) {
             throw new IllegalArgumentException(

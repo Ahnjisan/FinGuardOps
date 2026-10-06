@@ -13,6 +13,9 @@ import com.aifds.backend.idempotency.service.IdempotencyRecoveryCandidate;
 import com.aifds.backend.idempotency.service.IdempotencyRecoveryDecision;
 import com.aifds.backend.idempotency.service.IdempotencyRecoveryResult;
 import com.aifds.backend.idempotency.service.IdempotencyRecoveryService;
+import com.aifds.backend.idempotency.service.IdempotencyRecoveryTransaction;
+import com.aifds.backend.idempotency.service.IdempotencyMaintenanceSafetyVerifier;
+import com.aifds.backend.idempotency.service.TransactionIntakeMaintenanceGate;
 import com.aifds.backend.transaction.dto.TransactionCreateRequest;
 import com.aifds.backend.transaction.entity.RiskResponseOutcome;
 import com.aifds.backend.transaction.entity.TransactionChannel;
@@ -28,6 +31,7 @@ import com.aifds.backend.transaction.service.TransactionSynchronousProcessingCoo
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -76,6 +80,8 @@ class IdempotencyRecoveryIntegrationTest
 
     @Autowired
     private IdempotencyRecoveryService recoveryService;
+    @Autowired
+    private IdempotencyRecoveryTransaction recoveryTransaction;
     @MockitoSpyBean
     private RiskResponseFinalizationService finalizationService;
     @Autowired
@@ -99,6 +105,18 @@ class IdempotencyRecoveryIntegrationTest
 
     @MockitoSpyBean
     private TransactionIntakeSnapshotCodec snapshotCodec;
+
+    @MockitoBean
+    private IdempotencyMaintenanceSafetyVerifier safetyVerifier;
+
+    @MockitoBean
+    private TransactionIntakeMaintenanceGate maintenanceGate;
+
+    @BeforeEach
+    void allowIsolatedRecoveryFixtures() {
+        when(safetyVerifier.isSafeForReconciliation()).thenReturn(true);
+        when(maintenanceGate.isOpen()).thenReturn(true);
+    }
 
     @Test
     void findsBoundedCandidatesAtInclusiveCutoffWithStableOrderAndScope() {
@@ -298,7 +316,7 @@ class IdempotencyRecoveryIntegrationTest
     }
 
     @Test
-    void rejectsMissingReceivedAnalyzedFailedCaseAndAuditStatesWithoutMutation() {
+    void reconcilesRecoverableStatesAndRejectsContradictoryEvidence() {
         Instant recoveryTimestamp = databaseRecoveryTimestamp();
         when(timestampProvider.currentTransactionTimestamp())
                 .thenReturn(recoveryTimestamp);
@@ -312,28 +330,42 @@ class IdempotencyRecoveryIntegrationTest
                 FIXED_CANDIDATE_TIME.minus(Duration.ofHours(1)),
                 FIXED_CANDIDATE_TIME.minus(Duration.ofHours(1))
         );
-        assertRejected(
-                missingTransaction,
-                IdempotencyRecoveryDecision.MISSING_TRANSACTION
-        );
+        assertThat(recoveryService.recover(missingTransaction,
+                AuditActorType.SYSTEM, AuditLog.SYSTEM_ACTOR_ID).decision())
+                .isEqualTo(IdempotencyRecoveryDecision.UNLINKED_CLAIM_TERMINATED);
+        assertThat(idempotencyState(missingTransaction).get("processing_status"))
+                .isEqualTo("FAILED");
 
         RecoveryFixture received = receivedFixture();
-        assertRejected(
-                received.recordId(),
-                IdempotencyRecoveryDecision.PROCESSING_INDETERMINATE
-        );
+        assertThat(recoveryService.recover(received.recordId(),
+                AuditActorType.SYSTEM, AuditLog.SYSTEM_ACTOR_ID).decision())
+                .isEqualTo(IdempotencyRecoveryDecision.RECEIVED_TERMINATED);
+        assertThat(idempotencyState(received.recordId()).get("processing_status"))
+                .isEqualTo("FAILED");
+
+        RecoveryFixture analyzing = analyzingFixture();
+        assertThat(recoveryService.recover(analyzing.recordId(),
+                AuditActorType.SYSTEM, AuditLog.SYSTEM_ACTOR_ID).decision())
+                .isEqualTo(IdempotencyRecoveryDecision.ANALYZING_TERMINATED);
+        assertThat(jdbcTemplate.queryForObject("""
+                SELECT analysis_status FROM detection_result
+                WHERE financial_transaction_id = ?
+                """, String.class, analyzing.transactionPk()))
+                .isEqualTo("FAILED");
 
         RecoveryFixture analyzed = analyzedFixture(RiskLevel.LOW);
-        assertRejected(
-                analyzed.recordId(),
-                IdempotencyRecoveryDecision.FINALIZATION_INCOMPLETE
-        );
+        assertThat(recoveryService.recover(analyzed.recordId(),
+                AuditActorType.SYSTEM, AuditLog.SYSTEM_ACTOR_ID).decision())
+                .isEqualTo(IdempotencyRecoveryDecision.RECOVERABLE_COMPLETION_GAP);
+        assertThat(idempotencyState(analyzed.recordId()).get("processing_status"))
+                .isEqualTo("COMPLETED");
 
         RecoveryFixture failed = failedFixture();
-        assertRejected(
-                failed.recordId(),
-                IdempotencyRecoveryDecision.CONFIRMED_DOMAIN_FAILURE
-        );
+        assertThat(recoveryService.recover(failed.recordId(),
+                AuditActorType.SYSTEM, AuditLog.SYSTEM_ACTOR_ID).decision())
+                .isEqualTo(IdempotencyRecoveryDecision.CONFIRMED_FAILURE_TERMINATED);
+        assertThat(idempotencyState(failed.recordId()).get("processing_status"))
+                .isEqualTo("FAILED");
 
         RecoveryFixture highWithoutCase = analyzedFixture(RiskLevel.HIGH);
         finalizationWithoutCase(highWithoutCase, RiskLevel.HIGH);
@@ -349,6 +381,39 @@ class IdempotencyRecoveryIntegrationTest
                 noAudits.recordId(),
                 IdempotencyRecoveryDecision.FINALIZATION_AUDIT_MISMATCH
         );
+    }
+
+    @Test
+    void restartAfterAnalyzedFinalizationRestoresOnlySnapshot() {
+        RecoveryFixture fixture = analyzedFixture(RiskLevel.HIGH);
+        when(timestampProvider.currentTransactionTimestamp())
+                .thenReturn(databaseRecoveryTimestamp());
+
+        assertThat(recoveryTransaction.recover(fixture.recordId(),
+                AuditActorType.SYSTEM, AuditLog.SYSTEM_ACTOR_ID).decision())
+                .isEqualTo(IdempotencyRecoveryDecision.ANALYZED_FINALIZED);
+        assertThat(idempotencyState(fixture.recordId()).get("processing_status"))
+                .isEqualTo("IN_PROGRESS");
+        int auditCount = jdbcTemplate.queryForObject("""
+                SELECT count(*) FROM audit_log WHERE transaction_id = ?
+                """, Integer.class, fixture.transactionId());
+        int caseCount = jdbcTemplate.queryForObject("""
+                SELECT count(*) FROM case_transaction
+                WHERE financial_transaction_id = ?
+                """, Integer.class, fixture.transactionPk());
+
+        assertThat(recoveryService.recover(fixture.recordId(),
+                AuditActorType.SYSTEM, AuditLog.SYSTEM_ACTOR_ID).decision())
+                .isEqualTo(IdempotencyRecoveryDecision.RECOVERABLE_COMPLETION_GAP);
+        assertThat(idempotencyState(fixture.recordId()).get("processing_status"))
+                .isEqualTo("COMPLETED");
+        assertThat(jdbcTemplate.queryForObject("""
+                SELECT count(*) FROM audit_log WHERE transaction_id = ?
+                """, Integer.class, fixture.transactionId())).isEqualTo(auditCount);
+        assertThat(jdbcTemplate.queryForObject("""
+                SELECT count(*) FROM case_transaction
+                WHERE financial_transaction_id = ?
+                """, Integer.class, fixture.transactionPk())).isEqualTo(caseCount);
     }
 
     @Test
@@ -688,6 +753,20 @@ class IdempotencyRecoveryIntegrationTest
                 TransactionProcessingStatus.FAILED,
                 input
         );
+        jdbcTemplate.update("""
+                INSERT INTO detection_result (
+                    detection_result_id, financial_transaction_id,
+                    detection_result_version, analysis_status,
+                    rule_set_version, scoring_policy_version, feature_version,
+                    evaluation_cutoff_at, analysis_started_at,
+                    analysis_completed_at, failure_code, analysis_trace_id
+                ) VALUES (?, ?, 1, 'FAILED', 'rule-set-v1', 'scoring-v1',
+                    'feature-v1', ?, ?, ?, 'AI_SERVICE_RESPONSE_TIMEOUT',
+                    'trace_recovery_failed_01')
+                """, UUID.randomUUID(), transactionPk,
+                Timestamp.from(OCCURRED_AT),
+                Timestamp.from(OCCURRED_AT.plusSeconds(1)),
+                Timestamp.from(OCCURRED_AT.plusSeconds(2)));
         long recordId = insertIdempotency(
                 "failed-recovery-" + UUID.randomUUID(),
                 "c".repeat(64),
@@ -699,6 +778,31 @@ class IdempotencyRecoveryIntegrationTest
                 transactionId,
                 null
         );
+    }
+
+    private RecoveryFixture analyzingFixture() {
+        UUID transactionId = UUID.randomUUID();
+        TransactionFingerprintInput input = fingerprintInput(transactionId);
+        long transactionPk = insertTransaction(transactionId,
+                TransactionProcessingStatus.ANALYZING, input);
+        UUID detectionId = UUID.randomUUID();
+        jdbcTemplate.update("""
+                INSERT INTO detection_result (
+                    detection_result_id, financial_transaction_id,
+                    detection_result_version, analysis_status,
+                    rule_set_version, scoring_policy_version, feature_version,
+                    evaluation_cutoff_at, analysis_started_at,
+                    analysis_trace_id
+                ) VALUES (?, ?, 1, 'IN_PROGRESS', 'rule-set-v1',
+                    'scoring-v1', 'feature-v1', ?, ?,
+                    'trace_recovery_analyzing_01')
+                """, detectionId, transactionPk,
+                Timestamp.from(OCCURRED_AT),
+                Timestamp.from(OCCURRED_AT.plusSeconds(1)));
+        long recordId = insertIdempotency("analyzing-recovery-" + UUID.randomUUID(),
+                "e".repeat(64), transactionPk);
+        return new RecoveryFixture(recordId, transactionPk, transactionId,
+                detectionId);
     }
 
     private long insertTransaction(

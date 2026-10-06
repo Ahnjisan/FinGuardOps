@@ -437,6 +437,7 @@ Content-Type: application/json
 | --- | --- | --- | --- |
 | `DUPLICATE_TRANSACTION` | `409 Conflict` | `DUPLICATE_TRANSACTION` | `이미 존재하는 transactionId입니다.` |
 | `DEPENDENCY_TIMEOUT` | `503 Service Unavailable` | `DEPENDENCY_TIMEOUT` | `탐지 서비스를 사용할 수 없습니다.` |
+| `DEPENDENCY_UNAVAILABLE` | `503 Service Unavailable` | `DEPENDENCY_UNAVAILABLE` | `탐지 서비스를 사용할 수 없습니다.` |
 
 저장된 `failureCode`가 null, 빈 값, 알 수 없는 값 또는 내부 전용 값이면 `500 Internal Server Error`, `INTERNAL_ERROR`, `요청을 처리하는 중 오류가 발생했습니다.`로 축약한다. 원래 `failureCode` 문자열을 공개 code나 message로 전달하지 않는다. 현재 거래 저장 또는 멱등 완료의 예기치 않은 실패를 기록하는 내부 코드 `TRANSACTION_INTAKE_FAILED`도 공개 whitelist가 아니므로 `INTERNAL_ERROR`로 처리한다.
 
@@ -1414,3 +1415,9 @@ code-only `DEPENDENCY_TIMEOUT` 매핑은 유지한다.
 External Risk lookup과 Rule 단계를 분리해 command read·Provider 단계의 일반 예외는
 Rule 실패 reader 대상이 아니며 원본 객체 그대로 `500 INTERNAL_ERROR` 경계로
 전파된다. Idempotency는 `IN_PROGRESS`를 유지한다.
+
+## Issue #343: maintenance gate와 단건 복구
+
+운영자가 거래 maintenance gate를 CLOSED로 전환한 동안 POST /api/v1/transactions는 멱등 claim이나 거래 행을 만들기 전에 `503 Service Unavailable`, `DEPENDENCY_UNAVAILABLE`로 거부한다. 같은 키 재전송도 gate가 닫힌 동안에는 처리하지 않는다. gate를 다시 열면 기존 계약대로 정상 완료는 `201`, 진행 중 동일 키·동일 요청은 `409 IDEMPOTENCY_REQUEST_IN_PROGRESS`, 저장된 성공 Snapshot 재전송은 `201`이다.
+
+단건 복구로 RECEIVED 또는 ANALYZING의 불확실한 Provider 호출을 종결한 경우 내부 `MAINTENANCE_INTERRUPTED`를 저장한다. 재개 후 같은 키·동일 요청에는 `500 INTERNAL_ERROR`와 고정된 안전 메시지만 반환한다. 이미 확정된 Rule 실패를 복구한 경우 기존 `503 DEPENDENCY_UNAVAILABLE`을 반환한다. 내부 코드, Provider payload, 원래 예외는 공개하지 않는다. Provider 재호출과 자동 재시도는 없다.

@@ -172,6 +172,13 @@ class IdempotencyRecoveryServiceTest {
                 .extracting(Enum::name)
                 .containsExactly(
                         "RECOVERABLE_COMPLETION_GAP",
+                        "ANALYZED_FINALIZED",
+                        "UNLINKED_CLAIM_TERMINATED",
+                        "RECEIVED_TERMINATED",
+                        "ANALYZING_TERMINATED",
+                        "CONFIRMED_FAILURE_TERMINATED",
+                        "MAINTENANCE_PRECONDITION_FAILED",
+                        "LOCK_CONTENTION",
                         "MISSING_IDEMPOTENCY_RECORD",
                         "MISSING_TRANSACTION",
                         "PROCESSING_INDETERMINATE",

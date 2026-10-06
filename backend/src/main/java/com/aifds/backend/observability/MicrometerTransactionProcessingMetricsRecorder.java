@@ -37,6 +37,8 @@ public final class MicrometerTransactionProcessingMetricsRecorder
             "finguardops.rule.analysis.outcomes";
     public static final String RULE_ANALYSIS_DURATION =
             "finguardops.rule.analysis.duration";
+    public static final String STAGE_DURATION =
+            "finguardops.transaction.stage.duration";
 
     private final MeterRegistry meterRegistry;
 
@@ -188,6 +190,24 @@ public final class MicrometerTransactionProcessingMetricsRecorder
                 tags,
                 duration
         );
+    }
+
+    @Override
+    public void recordStage(Stage stage, boolean success, Duration duration) {
+        if (stage == null || duration == null || duration.isNegative()) {
+            return;
+        }
+        safely(() -> Timer.builder(STAGE_DURATION)
+                .description("Synchronous transaction stage elapsed time")
+                .tags("service", SERVICE, "stage", stage.tagValue(),
+                        "result", success ? "success" : "failure")
+                .serviceLevelObjectives(Duration.ofMillis(10),
+                        Duration.ofMillis(25), Duration.ofMillis(50),
+                        Duration.ofMillis(100), Duration.ofMillis(250),
+                        Duration.ofMillis(500), Duration.ofSeconds(1),
+                        Duration.ofSeconds(2), Duration.ofSeconds(5),
+                        Duration.ofSeconds(10), Duration.ofSeconds(30))
+                .register(meterRegistry).record(duration));
     }
 
     private void counter(

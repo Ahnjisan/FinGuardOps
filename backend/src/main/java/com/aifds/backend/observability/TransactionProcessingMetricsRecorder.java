@@ -8,6 +8,26 @@ import java.time.Duration;
 
 public interface TransactionProcessingMetricsRecorder {
 
+    enum Stage {
+        CLAIM("claim"),
+        RECEIVED_COMMIT("received_commit"),
+        EXTERNAL_RISK("external_risk"),
+        RULE_ANALYSIS("rule_analysis"),
+        FINALIZATION_COMMIT("finalization_commit"),
+        SNAPSHOT_COMMIT("snapshot_commit"),
+        MAINTENANCE_RECOVERY("maintenance_recovery");
+
+        private final String tagValue;
+
+        Stage(String tagValue) {
+            this.tagValue = tagValue;
+        }
+
+        public String tagValue() {
+            return tagValue;
+        }
+    }
+
     enum IntakeOutcome {
         ACCEPTED("accepted"),
         VALIDATION_REJECTED("validation_rejected"),
@@ -173,6 +193,8 @@ public interface TransactionProcessingMetricsRecorder {
             Duration duration
     );
 
+    void recordStage(Stage stage, boolean success, Duration duration);
+
     static TransactionProcessingMetricsRecorder noop() {
         return NoOp.INSTANCE;
     }
@@ -220,6 +242,10 @@ public interface TransactionProcessingMetricsRecorder {
                 FailureCategory failureCategory,
                 Duration duration
         ) {
+        }
+
+        @Override
+        public void recordStage(Stage stage, boolean success, Duration duration) {
         }
     }
 }

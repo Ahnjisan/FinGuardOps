@@ -10,6 +10,7 @@ import com.aifds.backend.idempotency.repository.IdempotencyRecordRepository;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.aifds.backend.transaction.repository.FinancialTransactionRepository;
 import com.fasterxml.jackson.databind.JsonNode;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -34,6 +35,24 @@ public class IdempotencyService {
     private final FinancialTransactionRepository financialTransactionRepository;
     private final TransactionRequestFingerprint transactionRequestFingerprint;
     private final DatabaseTransactionTimestampProvider timestampProvider;
+    private final TransactionIntakeMaintenanceGate maintenanceGate;
+
+    @Autowired
+    public IdempotencyService(
+            IdempotencyClaimWriter idempotencyClaimWriter,
+            IdempotencyRecordRepository idempotencyRecordRepository,
+            FinancialTransactionRepository financialTransactionRepository,
+            TransactionRequestFingerprint transactionRequestFingerprint,
+            DatabaseTransactionTimestampProvider timestampProvider,
+            TransactionIntakeMaintenanceGate maintenanceGate
+    ) {
+        this.idempotencyClaimWriter = idempotencyClaimWriter;
+        this.idempotencyRecordRepository = idempotencyRecordRepository;
+        this.financialTransactionRepository = financialTransactionRepository;
+        this.transactionRequestFingerprint = transactionRequestFingerprint;
+        this.timestampProvider = timestampProvider;
+        this.maintenanceGate = maintenanceGate;
+    }
 
     public IdempotencyService(
             IdempotencyClaimWriter idempotencyClaimWriter,
@@ -42,11 +61,9 @@ public class IdempotencyService {
             TransactionRequestFingerprint transactionRequestFingerprint,
             DatabaseTransactionTimestampProvider timestampProvider
     ) {
-        this.idempotencyClaimWriter = idempotencyClaimWriter;
-        this.idempotencyRecordRepository = idempotencyRecordRepository;
-        this.financialTransactionRepository = financialTransactionRepository;
-        this.transactionRequestFingerprint = transactionRequestFingerprint;
-        this.timestampProvider = timestampProvider;
+        this(idempotencyClaimWriter, idempotencyRecordRepository,
+                financialTransactionRepository, transactionRequestFingerprint,
+                timestampProvider, null);
     }
 
     public IdempotencyClaimResult claim(
@@ -97,6 +114,31 @@ public class IdempotencyService {
             JsonNode responseSnapshot,
             Instant finishedAt
     ) {
+        if (maintenanceGate != null) {
+            maintenanceGate.requireOpen();
+        }
+        return completeLocked(recordId, transactionId, responseSnapshot, finishedAt);
+    }
+
+    @Transactional
+    public IdempotencyClaimResult.Completed completeForMaintenance(
+            long recordId,
+            UUID transactionId,
+            JsonNode responseSnapshot,
+            Instant finishedAt
+    ) {
+        if (maintenanceGate != null) {
+            maintenanceGate.requireClosed();
+        }
+        return completeLocked(recordId, transactionId, responseSnapshot, finishedAt);
+    }
+
+    private IdempotencyClaimResult.Completed completeLocked(
+            long recordId,
+            UUID transactionId,
+            JsonNode responseSnapshot,
+            Instant finishedAt
+    ) {
         FinancialTransaction financialTransaction = financialTransactionRepository
                 .findByTransactionId(transactionId)
                 .orElseThrow(
@@ -117,6 +159,9 @@ public class IdempotencyService {
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public IdempotencyClaimResult.Failed fail(long recordId, String failureCode) {
+        if (maintenanceGate != null) {
+            maintenanceGate.requireOpen();
+        }
         IdempotencyRecord record = idempotencyRecordRepository
                 .findByIdForUpdate(recordId)
                 .orElseThrow(() -> new IdempotencyRecordNotFoundException(recordId));
@@ -135,6 +180,9 @@ public class IdempotencyService {
             String failureCode,
             Function<Instant, JsonNode> snapshotFactory
     ) {
+        if (maintenanceGate != null) {
+            maintenanceGate.requireOpen();
+        }
         if (snapshotFactory == null) {
             throw new NullPointerException("snapshotFactory must not be null");
         }

@@ -2,22 +2,32 @@ package com.aifds.recovery.idempotency;
 
 import com.aifds.backend.audit.entity.AuditLog;
 import com.aifds.backend.audit.repository.JpaAuditLogRepository;
+import com.aifds.backend.audit.service.AuditLogPersistenceService;
+import com.aifds.backend.audit.service.AuditMetadataPolicy;
 import com.aifds.backend.common.time.PostgresqlTransactionTimestampProvider;
 import com.aifds.backend.detection.entity.DetectionEvidence;
 import com.aifds.backend.detection.repository.DetectionResultRepository;
 import com.aifds.backend.fraudcase.entity.CaseTransaction;
 import com.aifds.backend.fraudcase.repository.FraudCaseRepository;
+import com.aifds.backend.fraudcase.service.FraudCasePersistenceService;
 import com.aifds.backend.idempotency.entity.IdempotencyRecord;
 import com.aifds.backend.idempotency.fingerprint.TransactionRequestFingerprint;
 import com.aifds.backend.idempotency.repository.IdempotencyRecoveryAuditLogRepository;
+import com.aifds.backend.idempotency.repository.TransactionIntakeMaintenanceGateRepository;
 import com.aifds.backend.idempotency.service.IdempotencyClaimWriter;
 import com.aifds.backend.idempotency.service.IdempotencyRecoveryAuditWriter;
 import com.aifds.backend.idempotency.service.IdempotencyRecoveryService;
+import com.aifds.backend.idempotency.service.IdempotencyMaintenanceSafetyVerifier;
+import com.aifds.backend.idempotency.service.TransactionIntakeMaintenanceGate;
 import com.aifds.backend.idempotency.service.IdempotencyRecoveryTransaction;
 import com.aifds.backend.idempotency.service.IdempotencyService;
 import com.aifds.backend.rule.entity.RuleVersion;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.aifds.backend.transaction.service.TransactionIntakeSnapshotCodec;
+import com.aifds.backend.transaction.service.RiskResponseFinalizationService;
+import com.aifds.backend.observability.MicrometerTransactionProcessingMetricsRecorder;
+import com.zaxxer.hikari.HikariDataSource;
+import org.springframework.boot.autoconfigure.jdbc.DataSourceProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.autoconfigure.domain.EntityScan;
@@ -27,6 +37,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.FilterType;
 import org.springframework.context.annotation.Import;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+import java.time.Clock;
 
 @Configuration(proxyBeanMethods = false)
 @EnableAutoConfiguration
@@ -43,13 +54,7 @@ import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
         "com.aifds.backend.transaction.repository",
         "com.aifds.backend.detection.repository",
         "com.aifds.backend.fraudcase.repository"
-}, excludeFilters = @ComponentScan.Filter(
-        type = FilterType.ASSIGNABLE_TYPE,
-        classes = {
-                DetectionResultRepository.class,
-                FraudCaseRepository.class
-        }
-))
+})
 @ComponentScan(
         basePackageClasses = TransactionIntakeSnapshotCodec.class,
         useDefaultFilters = false,
@@ -61,9 +66,17 @@ import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
 )
 @Import({
         JpaAuditLogRepository.class,
+        AuditMetadataPolicy.class,
+        AuditLogPersistenceService.class,
         PostgresqlTransactionTimestampProvider.class,
         TransactionRequestFingerprint.class,
         IdempotencyRecoveryAuditLogRepository.class,
+        TransactionIntakeMaintenanceGateRepository.class,
+        TransactionIntakeMaintenanceGate.class,
+        IdempotencyMaintenanceSafetyVerifier.class,
+        FraudCasePersistenceService.class,
+        RiskResponseFinalizationService.class,
+        MicrometerTransactionProcessingMetricsRecorder.class,
         IdempotencyClaimWriter.class,
         IdempotencyService.class,
         IdempotencyRecoveryAuditWriter.class,
@@ -71,6 +84,19 @@ import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
         IdempotencyRecoveryService.class
 })
 public class IdempotencyRecoveryCommandConfiguration {
+
+    @Bean
+    HikariDataSource recoveryDataSource(DataSourceProperties properties) {
+        HikariDataSource dataSource = properties.initializeDataSourceBuilder()
+                .type(HikariDataSource.class).build();
+        dataSource.addDataSourceProperty("ApplicationName", "finguardops-recovery");
+        return dataSource;
+    }
+
+    @Bean
+    Clock recoveryClock() {
+        return Clock.systemUTC();
+    }
 
     @Bean
     IdempotencyRecoveryCommandRunner idempotencyRecoveryCommandRunner(

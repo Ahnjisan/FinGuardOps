@@ -4,10 +4,12 @@ import com.aifds.backend.idempotency.entity.IdempotencyRecord;
 import com.aifds.backend.idempotency.entity.IdempotencyProcessingStatus;
 import com.aifds.backend.idempotency.service.IdempotencyRecoveryCandidate;
 import jakarta.persistence.LockModeType;
+import jakarta.persistence.QueryHint;
 import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.jpa.repository.QueryHints;
 import org.springframework.data.repository.query.Param;
 
 import java.time.Instant;
@@ -45,4 +47,9 @@ public interface IdempotencyRecordRepository extends JpaRepository<IdempotencyRe
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select r from IdempotencyRecord r where r.id = :id")
     Optional<IdempotencyRecord> findByIdForUpdate(@Param("id") Long id);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @QueryHints(@QueryHint(name = "jakarta.persistence.lock.timeout", value = "0"))
+    @Query("select r from IdempotencyRecord r where r.id = :id")
+    Optional<IdempotencyRecord> findByIdForUpdateNowait(@Param("id") Long id);
 }
