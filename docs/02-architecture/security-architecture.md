@@ -273,9 +273,9 @@ authentication·TLS와 동일하지 않다.
 | `GET /api/v1/detection-results/{detectionResultId}` | USER · viewer authority 보유 role | `detection:read` | 문서 후보, 미구현 |
 | `POST /api/v1/cases/{caseId}/ai-reports` | USER · `FDS_ANALYST` | `ai-report:create` | #339 첫 릴리스 |
 | `GET /api/v1/cases/{caseId}/ai-reports/current` | USER · viewer authority 보유 role | `ai-report:read` | #339 첫 릴리스 |
-| `GET /api/v1/ai-report-requests/{aiRequestId}` | USER · `PLATFORM_ADMIN` | `ai-operations:read` | 문서 계약, 미구현 |
-| `GET /api/v1/ai-report-usage` | USER · `PLATFORM_ADMIN` | `ai-usage:read` | 문서 계약, 미구현 |
-| `GET /api/v1/ai-report-usage/summary` | USER · `PLATFORM_ADMIN` | `ai-usage:read` | 문서 계약, 미구현 |
+| `GET /api/v1/ai-report-requests/{aiRequestId}` | USER · `PLATFORM_ADMIN` | `ai-operations:read` | #341 운영 상세 |
+| `GET /api/v1/ai-report-usage` | USER · `PLATFORM_ADMIN` | `ai-usage:read` | #341 사용량 목록 |
+| `GET /api/v1/ai-report-usage/summary` | USER · `PLATFORM_ADMIN` | `ai-usage:read` | #341 전체 집계 |
 
 사건별 연관 거래 ID 목록의 인증·인가는 기존 사건 조회와 같다. credential·claim이
 유효하지 않으면 401 `UNAUTHORIZED`, 유효한 USER에게 `case:read`가 없으면 사건 존재나

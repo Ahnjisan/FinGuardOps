@@ -41,6 +41,9 @@ const EXPECTED: ReadonlyArray<{ key: string; method: string; template: string }>
   { key: "case-note-create", method: "POST", template: "/api/v1/cases/{caseId}/notes" },
   { key: "ai-report-current", method: "GET", template: "/api/v1/cases/{caseId}/ai-reports/current" },
   { key: "ai-report-create", method: "POST", template: "/api/v1/cases/{caseId}/ai-reports" },
+  { key: "ai-operations-detail", method: "GET", template: "/api/v1/ai-report-requests/{aiRequestId}" },
+  { key: "ai-usage-list", method: "GET", template: "/api/v1/ai-report-usage" },
+  { key: "ai-usage-summary", method: "GET", template: "/api/v1/ai-report-usage/summary" },
 ];
 
 function paramsFor(descriptor: BackendEndpointDescriptor): Record<string, string> {
@@ -52,8 +55,8 @@ function paramsFor(descriptor: BackendEndpointDescriptor): Record<string, string
 }
 
 describe("endpoint registry — exact method and path matrix", () => {
-  it("contains exactly the fourteen approved USER endpoints", () => {
-    expect(BACKEND_ENDPOINT_KEYS).toHaveLength(14);
+  it("contains exactly the seventeen approved USER endpoints", () => {
+    expect(BACKEND_ENDPOINT_KEYS).toHaveLength(17);
     expect([...BACKEND_ENDPOINT_KEYS].sort()).toEqual(EXPECTED.map((e) => e.key).sort());
   });
 
@@ -196,6 +199,9 @@ describe("URL assembly — approved requests", () => {
       `http://localhost:8080/api/v1/cases/${CASE_ID}/notes`,
       `http://localhost:8080/api/v1/cases/${CASE_ID}/ai-reports/current`,
       `http://localhost:8080/api/v1/cases/${CASE_ID}/ai-reports`,
+      `http://localhost:8080/api/v1/ai-report-requests/${TRANSACTION_ID}`,
+      "http://localhost:8080/api/v1/ai-report-usage",
+      "http://localhost:8080/api/v1/ai-report-usage/summary",
     ]);
   });
 
@@ -456,8 +462,9 @@ describe("findApprovedBackendRequest", () => {
       if (descriptor === undefined) {
         throw new Error("registry lookup failed");
       }
-      const { url } = buildBackendRequestUrl(BASE, key, paramsFor(descriptor));
-
+      const query = key === "ai-usage-list" || key === "ai-usage-summary"
+        ? { from: "2026-10-01T00:00:00Z", to: "2026-10-02T00:00:00Z" } : undefined;
+      const { url } = buildBackendRequestUrl(BASE, key, paramsFor(descriptor), query);
       expect(findApprovedBackendRequest(BASE, descriptor.method, url)?.key).toBe(key);
     }
   });
@@ -624,6 +631,11 @@ describe("endpoint registry — declared query parameters", () => {
     "case-note-create": [],
     "ai-report-current": [],
     "ai-report-create": [],
+    "ai-operations-detail": [],
+    "ai-usage-list": ["from", "to", "provider", "model", "reportStatus", "reportSource",
+      "cacheHit", "fallbackUsed", "page", "size", "sort"],
+    "ai-usage-summary": ["from", "to", "provider", "model", "reportStatus", "reportSource",
+      "cacheHit", "fallbackUsed"],
   };
 
   it("declares exactly the Backend-approved names, in emission order", () => {

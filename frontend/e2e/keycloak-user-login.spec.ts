@@ -132,6 +132,25 @@ const CASE_AI_REPORT_PATH = new RegExp(
 const CASE_AI_REPORT_CURRENT_PATH = new RegExp(
   `^${CASE_LIST_PATH}/${CANONICAL_UUID_V4_PATTERN}/ai-reports/current$`,
 );
+const AI_REQUEST_DETAIL_PATH = new RegExp(
+  `^/api/v1/ai-report-requests/${CANONICAL_UUID_V4_PATTERN}$`,
+);
+
+function acceptsAiUsageQuery(query: URLSearchParams): boolean {
+  const from = query.get("from");
+  const to = query.get("to");
+  if (from === null || to === null || !UTC_INSTANT.test(from) || !UTC_INSTANT.test(to) ||
+      Date.parse(to) <= Date.parse(from) || Date.parse(to) - Date.parse(from) > 31 * 86400000) {
+    return false;
+  }
+  const page = query.get("page");
+  const size = query.get("size");
+  const sort = query.get("sort");
+  return (page === null || /^(?:0|[1-9][0-9]*)$/.test(page)) &&
+    (size === null || /^(?:[1-9]|[1-9][0-9]|100)$/.test(size)) &&
+    (sort === null || ["requestedAt,asc", "requestedAt,desc",
+      "aiRequestId,asc", "aiRequestId,desc"].includes(sort));
+}
 
 /** `/api/v1/cases/{canonical lowercase UUID v4}/status`, exactly. */
 const CASE_STATUS_PATH = new RegExp(
@@ -182,6 +201,14 @@ const CASE_RESOLUTION_PROBE_PATH = new RegExp(
  * names remain absent from this list and are refused.
  */
 const RELAYABLE_READ_PATHS: readonly RelayableEndpoint[] = [
+  { name: "ai-operations-detail", method: "GET", matches: (pathname) => AI_REQUEST_DETAIL_PATH.test(pathname),
+    queryNames: null },
+  { name: "ai-usage-list", method: "GET", matches: (pathname) => pathname === "/api/v1/ai-report-usage",
+    queryNames: ["from", "to", "provider", "model", "reportStatus", "reportSource", "cacheHit",
+      "fallbackUsed", "page", "size", "sort"], acceptsQuery: acceptsAiUsageQuery },
+  { name: "ai-usage-summary", method: "GET", matches: (pathname) => pathname === "/api/v1/ai-report-usage/summary",
+    queryNames: ["from", "to", "provider", "model", "reportStatus", "reportSource", "cacheHit",
+      "fallbackUsed"], acceptsQuery: acceptsAiUsageQuery },
   {
     name: "ai-report-current",
     method: "GET",
@@ -5910,9 +5937,9 @@ test("the Backend relay refuses every endpoint it was not approved to reach", ()
  */
 test("the Backend relay still admits the real reads and the one declared write probe", () => {
   requireCondition(
-    RELAYABLE_READ_PATHS.length === 9 &&
-      new Set(RELAYABLE_READ_PATHS.map(({ name }) => name)).size === 9,
-    "The nine read relay descriptors were not unique.",
+    RELAYABLE_READ_PATHS.length === 12 &&
+      new Set(RELAYABLE_READ_PATHS.map(({ name }) => name)).size === 12,
+    "The twelve read relay descriptors were not unique.",
   );
   requireCondition(
     RELAYABLE_WRITE_PROBES.length === 1 &&
@@ -5995,6 +6022,14 @@ test("the Backend relay still admits the real reads and the one declared write p
       url: `${BACKEND_ORIGIN}${INITIAL_CASE_AUDIT_TARGET}`,
       target: INITIAL_CASE_AUDIT_TARGET,
     },
+    { method: "GET", url: `${BACKEND_ORIGIN}/api/v1/ai-report-requests/${SYNTHETIC_CASE_ID}`,
+      target: `/api/v1/ai-report-requests/${SYNTHETIC_CASE_ID}` },
+    ...["/api/v1/ai-report-usage", "/api/v1/ai-report-usage/summary"].map((path) => {
+      const target = `${path}?${new URLSearchParams({
+        from: "2026-10-01T00:00:00Z", to: "2026-10-02T00:00:00Z",
+      }).toString()}`;
+      return { method: "GET", url: `${BACKEND_ORIGIN}${target}`, target };
+    }),
     {
       method: "POST",
       url: `${BACKEND_ORIGIN}${CASE_RESOLUTION_PATH}`,
@@ -6002,7 +6037,7 @@ test("the Backend relay still admits the real reads and the one declared write p
     },
   ];
 
-  requireCondition(admitted.length === 16, "The relay positive admission matrix drifted.");
+  requireCondition(admitted.length === 19, "The relay positive admission matrix drifted.");
   requireCondition(
     new Set(admitted.map((entry) => `${entry.method}\u0000${entry.url}`)).size === admitted.length,
     "The relay positive admission matrix contains a duplicate method and URL.",
@@ -6743,6 +6778,19 @@ test("a real USER reaches the transaction console over the real Backend", async 
   const tokens = parseTokenResponse(await (await tokenResponsePromise).json());
   requireTokenClaims(tokens);
   await expect(page.getByLabel("인증 상태")).toContainText("님으로 로그인했습니다.");
+
+  // #341: an Analyst must not gain an operations affordance or reach its route.
+  await expect(page.getByRole("navigation", { name: "주요 탐색" })
+    .getByRole("link", { name: "AI 운영" })).toHaveCount(0);
+  await page.evaluate(() => {
+    history.pushState(null, "", "/ai-operations");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+  await expect(page.getByText("이 화면을 볼 권한이 없습니다.")).toBeVisible();
+  await page.evaluate(() => {
+    history.pushState(null, "", "/");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
 
   // The capability navigation, decided from the real role claim of a real
   // Keycloak session rather than from a fixture.
@@ -10144,6 +10192,15 @@ test("real Analyst resumes the Run case and Approver closes it with a public aud
     }
     await denyResolution(viewerPage, viewer.relay, 4, 403, "ACCESS_DENIED");
     await denyResolution(analystPage, analyst.relay, 4, 403, "ACCESS_DENIED");
+    for (const subjectPage of [viewerPage, analystPage]) {
+      await expect(subjectPage.getByRole("navigation", { name: "주요 탐색" })
+        .getByRole("link", { name: "AI 운영" })).toHaveCount(0);
+      await subjectPage.evaluate(() => {
+        history.pushState(null, "", "/ai-operations");
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      });
+      await expect(subjectPage.getByText("이 화면을 볼 권한이 없습니다.")).toBeVisible();
+    }
 
     await page.reload();
     await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
@@ -10279,6 +10336,46 @@ test("real Analyst resumes the Run case and Approver closes it with a public aud
     } finally {
       for (const context of contexts.reverse()) await context.close();
     }
+  }
+});
+
+test("a PLATFORM_ADMIN reviews the stored AI request usage without case authority", async ({ page }) => {
+  const relay = await installBackendRelay(page);
+  try {
+    await page.goto(`${APP_ORIGIN}/ai-operations`);
+    await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
+    await signInFromGuard(page, readUserPassword(), "/ai-operations", false,
+      "local-platform-admin", "PLATFORM_ADMIN");
+    const nav = page.getByRole("navigation", { name: "주요 탐색" });
+    await expect(nav.getByRole("link", { name: "AI 운영" })).toBeVisible();
+    await expect(nav.getByRole("link", { name: "거래" })).toHaveCount(0);
+    await expect(nav.getByRole("link", { name: "사건" })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "선택 기간 전체 집계" })).toBeVisible();
+    await expect(page.locator(".ai-operations tbody a").first()).toBeVisible({ timeout: 30_000 });
+    const summaryAttempts = Number(await page.locator(".ai-operations__summary dt",
+      { hasText: "기록된 attempt 수" }).locator("..").locator("dd").textContent());
+    requireCondition(Number.isSafeInteger(summaryAttempts), "The stored attempt count was invalid.");
+    await expect(page.locator(".ai-operations__summary dt", { hasText: "비용" })
+      .locator("..").locator("dd")).toHaveText(
+      summaryAttempts === 0 ? "기록된 Provider 호출 없음" : "비용 미측정");
+    await page.locator(".ai-operations tbody a").first().click();
+    await expect(page.getByRole("heading", { name: "AI 요청 상세" })).toBeVisible();
+    const detailAttempts = Number(await page.locator(".ai-operations__summary dt",
+      { hasText: "기록된 attempt 수" }).locator("..").locator("dd").textContent());
+    requireCondition(Number.isSafeInteger(detailAttempts), "The request attempt count was invalid.");
+    await expect(page.locator(".ai-operations__summary dt", { hasText: "비용" })
+      .locator("..").locator("dd")).toHaveText(
+      detailAttempts === 0 ? "기록된 Provider 호출 없음" : "비용 미측정");
+    await page.setViewportSize({ width: 390, height: 844 });
+    requireCondition(await page.evaluate(() =>
+      document.documentElement.scrollWidth <= window.innerWidth),
+    "The AI operations detail overflowed the 390px document width.");
+    requireCondition(["/api/v1/ai-report-usage", "/api/v1/ai-report-usage/summary"]
+      .every((path) => relay.some((entry) => entry.pathname === path && entry.status === 200)) &&
+      relay.some((entry) => AI_REQUEST_DETAIL_PATH.test(entry.pathname) && entry.status === 200),
+    "The operator did not read all three approved Backend endpoints.");
+  } finally {
+    await relay.dispose();
   }
 });
 

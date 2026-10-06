@@ -60,6 +60,8 @@ import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_RES
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_WORKFLOW_WRITE;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.TRANSACTION_INTAKE;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.TRANSACTION_READ;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_OPERATIONS_READ;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_USAGE_READ;
 
 @Configuration(proxyBeanMethods = false)
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
@@ -110,7 +112,10 @@ public class FinGuardOpsSecurityConfiguration {
             new CorsEndpoint(
                     HttpMethod.GET,
                     "/api/v1/cases/{caseId}/ai-reports/current"
-            )
+            ),
+            new CorsEndpoint(HttpMethod.GET, "/api/v1/ai-report-requests/{aiRequestId}"),
+            new CorsEndpoint(HttpMethod.GET, "/api/v1/ai-report-usage"),
+            new CorsEndpoint(HttpMethod.GET, "/api/v1/ai-report-usage/summary")
     );
     private static final CorsEndpoint APPLICATION_ACTUATOR_HEALTH =
             new CorsEndpoint(HttpMethod.GET, "/actuator/health");
@@ -219,6 +224,17 @@ public class FinGuardOpsSecurityConfiguration {
                                 HttpMethod.GET,
                                 "/api/v1/cases/{caseId}/ai-reports/current"
                         )).hasAuthority(AI_REPORT_READ)
+                        .requestMatchers(paths.matcher(
+                                HttpMethod.GET,
+                                "/api/v1/ai-report-requests/{aiRequestId}"
+                        )).hasAuthority(AI_OPERATIONS_READ)
+                        .requestMatchers(paths.matcher(
+                                HttpMethod.GET,
+                                "/api/v1/ai-report-usage"
+                        ), paths.matcher(
+                                HttpMethod.GET,
+                                "/api/v1/ai-report-usage/summary"
+                        )).hasAuthority(AI_USAGE_READ)
                         .requestMatchers(paths.matcher(
                                 HttpMethod.PATCH,
                                 "/api/v1/cases/{caseId}/status"

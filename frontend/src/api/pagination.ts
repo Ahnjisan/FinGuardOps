@@ -67,6 +67,8 @@ function toQueryString(rule: BackendQueryValueRule, value: unknown): string {
     case "uuid":
     case "transaction-ref":
     case "case-assignee-ref":
+    case "ai-provider":
+    case "ai-model":
       if (typeof value !== "string") {
         throw new RequestNotAllowedError();
       }

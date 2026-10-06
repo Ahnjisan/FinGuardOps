@@ -176,6 +176,9 @@ export function AppShell() {
                 <Icon name="health" />서비스 상태
               </NavLink>
             </li>
+            {capabilities.has("ai-usage:view") && <li>
+              <NavLink className="rail__link" to="/ai-operations" end>AI 운영</NavLink>
+            </li>}
           </ul>
         </nav>
         <div className="rail__session">

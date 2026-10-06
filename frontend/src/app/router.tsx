@@ -9,6 +9,8 @@ import { HomePage } from "../pages/HomePage";
 import { NotFoundPage } from "../pages/NotFoundPage";
 import { TransactionDetailPage } from "../pages/TransactionDetailPage";
 import { TransactionListPage } from "../pages/TransactionListPage";
+import { AiOperationsPage } from "../pages/AiOperationsPage";
+import { AiRequestDetailPage } from "../pages/AiRequestDetailPage";
 
 export const routes: RouteObject[] = [
   {
@@ -89,6 +91,12 @@ export const routes: RouteObject[] = [
         ),
       },
       { path: "health", element: <HealthPage /> },
+      { path: "ai-operations", element: <RequireCapability capability="ai-usage:view">
+        <AiOperationsPage />
+      </RequireCapability> },
+      { path: "ai-operations/:aiRequestId", element: <RequireCapability capability="ai-operations:view">
+        <AiRequestDetailPage />
+      </RequireCapability> },
       { path: "auth/callback", element: <AuthCallbackPage /> },
       { path: "*", element: <NotFoundPage /> },
     ],

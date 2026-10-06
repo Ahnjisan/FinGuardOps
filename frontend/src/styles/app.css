@@ -2237,3 +2237,16 @@ ul.notice__body li + li {
   }
 }
 .case-ai-report__body { overflow-wrap: anywhere; }
+.ai-operations { max-width: 1200px; padding: 1.5rem; }
+.ai-operations__filters { display: flex; flex-wrap: wrap; gap: .75rem; align-items: end; }
+.ai-operations__filters label { display: grid; gap: .25rem; min-width: min(100%, 12rem); }
+.ai-operations__filters input, .ai-operations__filters select { max-width: 100%; }
+.ai-operations__summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: .75rem; }
+.ai-operations__summary > div { padding: .75rem; border: 1px solid currentColor; border-radius: .5rem; overflow-wrap: anywhere; }
+.ai-operations__summary dt { font-size: .85rem; }
+.ai-operations__summary dd { margin: .25rem 0 0; font-weight: 600; }
+.ai-operations__table-wrap { max-width: 100%; overflow-x: auto; }
+.ai-operations table { border-collapse: collapse; min-width: 44rem; width: 100%; }
+.ai-operations th, .ai-operations td { text-align: left; padding: .6rem; border-bottom: 1px solid currentColor; }
+.ai-operations__pagination { display: flex; gap: 1rem; align-items: center; margin-top: 1rem; }
+@media (max-width: 390px) { .ai-operations { padding: .75rem; } }
