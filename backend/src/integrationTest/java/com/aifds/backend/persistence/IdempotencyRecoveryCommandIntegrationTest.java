@@ -433,7 +433,7 @@ class IdempotencyRecoveryCommandIntegrationTest
     }
 
     @Test
-    void concurrentCommandsHaveOneWinnerAndMigrationsRemainV1ThroughV16()
+    void repeatedCommandsHaveOneWinnerAndMigrationsRemainV1ThroughV16()
             throws Exception {
         RecoveryFixture fixture = finalizedFixture(
                 RiskLevel.LOW,
@@ -449,11 +449,13 @@ class IdempotencyRecoveryCommandIntegrationTest
                     this::startLimitedContext
             );
             Future<CommandExecution> first = executor.submit(command);
-            Future<CommandExecution> second = executor.submit(command);
-            assertThat(List.of(
-                    first.get(60, TimeUnit.SECONDS).exitCode(),
-                    second.get(60, TimeUnit.SECONDS).exitCode()
-            )).containsExactlyInAnyOrder(0, 3);
+            Future<CommandExecution> second = executor.submit(() -> {
+                CommandExecution completed = first.get(60, TimeUnit.SECONDS);
+                assertThat(completed.exitCode()).isEqualTo(0);
+                return command.call();
+            });
+            assertThat(second.get(120, TimeUnit.SECONDS).exitCode())
+                    .isEqualTo(3);
         } finally {
             executor.shutdownNow();
             executor.awaitTermination(10, TimeUnit.SECONDS);
