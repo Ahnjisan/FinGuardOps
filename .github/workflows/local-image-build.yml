@@ -1,0 +1,58 @@
+name: Local Image Build
+
+on:
+  pull_request:
+    paths:
+      - "backend/**"
+      - "ai-service/**"
+      - ".github/workflows/local-image-build.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/**"
+      - "ai-service/**"
+      - ".github/workflows/local-image-build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.service }} image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - backend
+          - ai-service
+    steps:
+      - name: Check out repository without stored credentials
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        shell: bash
+        run: |
+          set -euo pipefail
+          service="${{ matrix.service }}"
+          tag_args=()
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            tag_args=(--tag "finguardops-${service}:sha-${GITHUB_SHA}")
+          fi
+
+          docker build \
+            --file "${service}/Dockerfile" \
+            --iidfile "${RUNNER_TEMP}/${service}-image.id" \
+            "${tag_args[@]}" \
+            "$service"
+
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            printf 'commit_sha=%s\nimage_tag=%s\nimage_id=%s\n' \
+              "$GITHUB_SHA" \
+              "finguardops-${service}:sha-${GITHUB_SHA}" \
+              "$(cat "${RUNNER_TEMP}/${service}-image.id")"
+          fi
