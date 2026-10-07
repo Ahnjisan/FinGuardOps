@@ -371,9 +371,41 @@ rm -rf -- "$publication_temp_dir"
 
 ## 5. 1차 traffic으로 Meter 등록
 
+기본 Compose의 거래 POST는 JWT 없이 `401`이다. 이 절부터는 [로컬 JWT fixture overlay](./local-jwt-auth-e2e-runbook.md#5-topology와-lifecycle)를 사용한다. Keycloak·Kafka·Qwen overlay는 추가하지 않는다. 이미 Rule을 발행한 프로젝트라면 PostgreSQL 컨테이너와 익명 DB mount가 전환 전후 동일해야 한다. 독립적으로 기록한 프로젝트명, Compose 인자, PostgreSQL 소유 label을 먼저 대조한다. 아래 명령은 Backend network namespace를 공유하는 sidecar를 내린 뒤 Backend만 재생성한다. DB ID 또는 mount가 달라지면 중단한다.
+
+```bash
+set +x
+enable_local_jwt_overlay() {
+  local pg_before pg_after db_mount_before db_mount_after pg_labels recorded_project confirmed_files
+  read -r -p 'Project name from the independent run record: ' recorded_project </dev/tty || return 1
+  [[ -n "$recorded_project" ]] || return 1
+  pg_before="$("${compose[@]}" ps -q postgresql)" || return 1
+  [[ -n "$pg_before" ]] || return 1
+  db_mount_before="$(docker inspect "$pg_before" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}')" || return 1
+  [[ -n "$db_mount_before" ]] || return 1
+  pg_labels="$(docker inspect "$pg_before" --format '{{index .Config.Labels "com.docker.compose.project"}} {{index .Config.Labels "com.docker.compose.service"}} {{index .Config.Labels "com.docker.compose.project.config_files"}}')" || return 1
+  [[ "$pg_labels" == "$recorded_project postgresql "* ]] || return 1
+  printf 'PostgreSQL owner: %s\n' "$pg_labels"
+  read -r -p 'If config_files matches the independent run record, type MATCH: ' confirmed_files </dev/tty || return 1
+  [[ "$confirmed_files" == MATCH ]] || return 1
+  compose+=(-f infra/compose.local-jwt-e2e.yml)
+  "${compose[@]}" config --quiet || return 1
+  "${compose[@]}" stop external-risk-mock || return 1
+  "${compose[@]}" rm -f external-risk-mock || return 1
+  "${compose[@]}" up -d --no-deps --force-recreate --wait --wait-timeout 180 backend || return 1
+  pg_after="$("${compose[@]}" ps -q postgresql)" || return 1
+  [[ -n "$pg_after" ]] || return 1
+  db_mount_after="$(docker inspect "$pg_after" --format '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}')" || return 1
+  [[ -n "$db_mount_after" ]] || return 1
+  [[ "$pg_after" == "$pg_before" && "$db_mount_after" == "$db_mount_before" ]] || return 1
+  "${compose[@]}" up -d --no-deps --wait --wait-timeout 180 external-risk-mock local-jwt-fixture || return 1
+}
+enable_local_jwt_overlay || { printf '%s\n' 'JWT overlay transition failed; stop without cleanup or traffic' >&2; exit 1; }
+```
+
 각 traffic 묶음의 첫 요청은 정상 접수·`RECEIVED`·terminal 결과, External Risk와 Rule
 분석을 발생시킨다. 두 번째는 동일 payload replay, 세 번째는 같은 key의 다른 payload
-conflict를 발생시키며 HTTP status `201`, `201`, `409`를 확인한다. 1차 traffic의 목적은
+conflict(`IDEMPOTENCY_KEY_CONFLICT`)를 발생시키며 HTTP status `201`, `201`, `409`를 확인한다. 이는 [거래 API 계약 5.7절](../03-api/transaction-detection-api.md#57-멱등성과-중복)의 완료 재전송과 같은 키·다른 요청 조건이다. fixture의 `service-transaction-ingestor`는 `TRANSACTION_INTAKE` 권한과 `finguardops-backend-api` audience를 제공한다. token은 machine mode로 메모리에 받고 stdin으로만 전달하며 argv, 환경 변수, 파일, 로그에 남기지 않는다. 1차 traffic의 목적은
 lazy 등록되는 업무 Meter 10개를 생성하고 rate 계산의 기준이 될 최초 scrape를 확보하는
 것이다. 이 단계의 non-empty 결과나 기존 volume의 과거 sample만으로 recording rule 검증을
 통과 처리하지 않는다.
@@ -381,16 +413,32 @@ lazy 등록되는 업무 Meter 10개를 생성하고 rate 계산의 기준이 �
 ```bash
 send_traffic() {
   local run_label="$1"
-  "${compose[@]}" exec -T external-risk-mock \
-    python - "$run_label" <<'PY'
+  local token result
+  token="$(MSYS_NO_PATHCONV=1 "${compose[@]}" exec -T local-jwt-fixture python \
+    /opt/local-jwt-fixture/fixture.py machine mint service-transaction-ingestor)" || return 1
+  [[ "$token" == *.*.* ]] || { unset token; return 1; }
+  printf '%s\n' "$token" | MSYS_NO_PATHCONV=1 "${compose[@]}" exec -T \
+    local-jwt-fixture python -c '
+import base64
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 import uuid
 from datetime import UTC, datetime
 
 run_label = sys.argv[1]
+token = sys.stdin.readline(16384).strip()
+if len(token) >= 16383 or token.count(".") != 2:
+    raise RuntimeError("invalid token shape")
+part = token.split(".")[1]
+claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+if (claims.get("aud") != ["finguardops-backend-api"]
+        or claims.get("principal_type") != "SERVICE"
+        or claims.get("roles") != ["TRANSACTION_INGESTOR"]
+        or claims.get("exp", 0) <= time.time() + 60):
+    raise RuntimeError("wrong fixture authority, audience or expiry")
 key = f"local-prom-{run_label}-{uuid.uuid4().hex}"
 payload = {
     "transactionId": str(uuid.uuid4()),
@@ -409,28 +457,31 @@ def send(body):
     request = urllib.request.Request(
         "http://127.0.0.1:8080/api/v1/transactions",
         data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "Idempotency-Key": key},
+        headers={"Content-Type": "application/json", "Idempotency-Key": key,
+                 "Authorization": "Bearer " + token},
         method="POST",
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
-            response.read()
-            return response.status
+            return response.status, json.load(response)
     except urllib.error.HTTPError as error:
-        error.read()
-        return error.code
+        return error.code, json.load(error)
 
-statuses = [send(payload), send(payload)]
+first, replay = send(payload), send(payload)
 payload["amount"] = "10001"
-statuses.append(send(payload))
-if statuses != [201, 201, 409]:
-    raise RuntimeError(f"Unexpected transaction statuses: {statuses}")
-print(f"transaction statuses={statuses}")
-PY
+conflict = send(payload)
+statuses = [first[0], replay[0], conflict[0]]
+if statuses != [201, 201, 409] or conflict[1].get("code") != "IDEMPOTENCY_KEY_CONFLICT":
+    raise RuntimeError(f"Unexpected transaction statuses/conflict: {statuses}")
+print("transactionId={} statuses={} conflict=IDEMPOTENCY_KEY_CONFLICT".format(payload["transactionId"], statuses))
+' "$run_label"
+  result="${PIPESTATUS[1]}"
+  unset token
+  return "$result"
 }
 
 first_traffic_started_at="$(date -u +%s)"
-send_traffic "meter-registration"
+send_traffic "meter-registration" || exit 1
 ```
 
 ## 6. 기준 scrape 확인과 2차 traffic
@@ -1449,6 +1500,11 @@ PY
 
 ### 8.3 bounded 장애 traffic
 
+아래 기존 worker는 Authorization 헤더가 없어 현재 거래 API에서 `401`을 받는다. 이 코드를
+그대로 실행하거나 실패율·복구 결과를 통과 처리하지 않는다. 인증된 alert traffic은
+[로컬 JWT fixture runbook 7.1절](./local-jwt-auth-e2e-runbook.md#71-인증-overlay-전용-alert-traffic-worker)의
+worker와 overlay 절차를 사용한다.
+
 고정 요청 수와 순차 sleep은 요청 latency·15초 scrape·30초 evaluation과 5분 `rate`의
 extrapolation 때문에 최소 처리율을 보장하지 않는다. 아래 generator는 worker를 2개 이하로
 제한하고 각 요청 완료 1초 뒤 다음 요청을 보내며 최대 12분 동안 동작한다. failure 단계는
@@ -2172,9 +2228,15 @@ Ratio panel은 원본 0~1을 percent unit으로 표시하며 duration은 seconds
 
 ### 11.3 pending·firing·inactive alert query
 
-8.2절과 8.3절의 함수 및 bounded traffic을 같은 fresh project에서 사용한다. 장애 traffic을
-시작하기 전에 pending 검증을 background에서 시작하면 worker와 Grafana query가 함께 bounded
-polling된다. 다음은 External Risk signal 예시다. background 검증도 `wait` exit code로 확인하고
+이 절의 기존 `start_bounded_traffic` 호출 역시 Authorization 헤더가 없으므로 현재 보안
+설정에서는 실행 결과를 검증 성공으로 보지 않는다. 실제 인증 alert traffic은
+[로컬 JWT fixture runbook 7.1절](./local-jwt-auth-e2e-runbook.md#71-인증-overlay-전용-alert-traffic-worker)을
+따른다.
+
+아래는 과거 8.2·8.3절의 bounded traffic 호출 예시이며 현재 인증 경로에서는 그대로
+실행하지 않는다. 인증 worker로 교체한 검증에서는 장애 traffic 전에 pending 검증을
+background에서 시작하면 Grafana query와 함께 bounded polling된다. background 검증도
+`wait` exit code로 확인하고
 marker 출력만으로 성공 처리하지 않는다.
 Alert-state 검증은 앞 단계에서 별도로 통과한 recording 14개 non-empty 계약을 다시 결합하지
 않는다. 장애가 5분 이상 지속되어 정상 outcome rate series가 만료되어도 alert query의 실제
@@ -2597,8 +2659,11 @@ alert와 장기 `IN_PROGRESS` Gauge도 계속 미구현이다.
 
 ## 12. Issue #225 인증 overlay 회귀
 
-기존 8-service runbook의 `start_bounded_traffic`은 인증이 비활성인 base Compose 계약으로만
-유지한다. 실제 JWT 인증 traffic을 결합할 때는 해당 함수를 재사용하지 않고
+기본 Compose에서도 거래 POST는 JWT를 요구한다. 위 8·11절의 기존
+`start_bounded_traffic`은 Authorization 헤더가 없어 현재 보안 설정에서는 `401`이므로
+그대로 실행해 alert traffic 검증을 통과 처리할 수 없다. 해당 고급 시나리오는
+[JWT fixture runbook 7.1절](./local-jwt-auth-e2e-runbook.md#71-인증-overlay-전용-alert-traffic-worker)의
+인증 worker를 사용한다. 아래 회귀 경로에서는 기존 무인증 worker를 재사용하지 않고
 `infra/compose.local-jwt-e2e.yml`을 두 번째 Compose 파일로 추가한다. merged config는
 9 service·4 network·3 named volume이며 기존 Prometheus·Grafana host bind만 남아야 한다.
 fixture JWT는 machine CLI의 캡처 pipe에서 worker stdin과 process memory로만 전달하고 traffic
