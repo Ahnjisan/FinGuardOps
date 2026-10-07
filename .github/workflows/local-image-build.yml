@@ -56,3 +56,79 @@ jobs:
               "finguardops-${service}:sha-${GITHUB_SHA}" \
               "$(cat "${RUNNER_TEMP}/${service}-image.id")"
           fi
+
+  publish:
+    name: Publish ${{ matrix.service }} to GHCR
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.FINGUARDOPS_GHCR_PUBLISH == 'enabled' }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - backend
+          - ai-service
+    concurrency:
+      group: ghcr-${{ github.repository }}-${{ github.sha }}-${{ matrix.service }}
+      cancel-in-progress: false
+    steps:
+      - name: Check out repository without stored credentials
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Log in to GHCR
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Refuse an existing SHA tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          service="${{ matrix.service }}"
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/finguardops-${service}:sha-${GITHUB_SHA}"
+          lookup_error="${RUNNER_TEMP}/${service}-tag-lookup.err"
+
+          if docker buildx imagetools inspect --raw "$image" > /dev/null 2> "$lookup_error"; then
+            echo "::error::SHA tag already exists: $image"
+            exit 1
+          fi
+          if ! grep -Eiq 'manifest unknown|manifest.*not found' "$lookup_error"; then
+            echo "::error::Cannot establish that the SHA tag is absent; refusing to publish"
+            exit 1
+          fi
+
+      - name: Build and publish image
+        shell: bash
+        run: |
+          set -euo pipefail
+          service="${{ matrix.service }}"
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/finguardops-${service}:sha-${GITHUB_SHA}"
+          metadata="${RUNNER_TEMP}/${service}-publish.json"
+
+          docker buildx build \
+            --file "${service}/Dockerfile" \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --tag "$image" \
+            --metadata-file "$metadata" \
+            --push \
+            "$service"
+
+          digest="$(jq -er '."containerimage.digest"' "$metadata")"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Registry digest is missing or invalid"
+            exit 1
+          fi
+          printf 'commit_sha=%s\nimage_tag=%s\nregistry_digest=%s\nimage_by_digest=%s\n' \
+            "$GITHUB_SHA" "$image" "$digest" "${image%:*}@${digest}"
+
+      - name: Log out of GHCR
+        if: always()
+        shell: bash
+        run: docker logout ghcr.io
