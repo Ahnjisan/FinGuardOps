@@ -1,5 +1,15 @@
 # FinGuardOps local infrastructure
 
+새 체크아웃에서 기본 서비스를 시작하고 합성 거래·관측을 확인한 뒤 소유 프로젝트만
+종료하려면 [기본 로컬 운영 runbook](../docs/09-deployment/local-operations-runbook.md)부터 따른다.
+
+| 실행 목적 | 선택할 절차 |
+| --- | --- |
+| 기본 합성 거래·Prometheus·Grafana | [기본 로컬 운영](../docs/09-deployment/local-operations-runbook.md) |
+| local/dev Keycloak 로그인·브라우저 Gate | [Keycloak 인증 E2E](../docs/09-deployment/local-keycloak-auth-e2e-runbook.md)와 공식 runner |
+| Kafka 인증 AI 리포트·outbox·소비 | [로컬 Kafka AI 리포트](../docs/09-deployment/local-kafka-ai-report-runbook.md) |
+| 호스트 Qwen 실제 생성·저장 | [별도 Qwen 인증 실행](../docs/09-deployment/local-kafka-ai-report-runbook.md#6-별도-실제-qwen-인증-실행) |
+
 `compose.yml`은 기본 애플리케이션·관측 stack이다. 인증 공급자는 기본 stack에 자동 포함하지
 않으며 목적에 맞는 overlay 하나만 명시적으로 결합한다.
 
