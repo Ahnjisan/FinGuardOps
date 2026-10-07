@@ -44,6 +44,9 @@ const EXPECTED: ReadonlyArray<{ key: string; method: string; template: string }>
   { key: "ai-operations-detail", method: "GET", template: "/api/v1/ai-report-requests/{aiRequestId}" },
   { key: "ai-outbox-diagnostic", method: "GET", template: "/api/v1/ai-report-outbox/{executionId}" },
   { key: "ai-outbox-requeue", method: "POST", template: "/api/v1/ai-report-outbox/{eventId}/requeue" },
+  { key: "ai-dlq-diagnostic", method: "GET", template: "/api/v1/ai-report-dlq/{topicId}/{partition}/{offset}" },
+  { key: "ai-dlq-quarantine", method: "POST", template: "/api/v1/ai-report-dlq/{topicId}/{partition}/{offset}/quarantine" },
+  { key: "ai-dlq-replay", method: "POST", template: "/api/v1/ai-report-dlq/{topicId}/{partition}/{offset}/replay" },
   { key: "ai-usage-list", method: "GET", template: "/api/v1/ai-report-usage" },
   { key: "ai-usage-summary", method: "GET", template: "/api/v1/ai-report-usage/summary" },
 ];
@@ -51,14 +54,15 @@ const EXPECTED: ReadonlyArray<{ key: string; method: string; template: string }>
 function paramsFor(descriptor: BackendEndpointDescriptor): Record<string, string> {
   const params: Record<string, string> = {};
   for (const name of descriptor.paramNames) {
-    params[name] = name === "caseId" ? CASE_ID : TRANSACTION_ID;
+    params[name] = name === "caseId" ? CASE_ID : name === "partition" ? "0" :
+      name === "offset" ? "1" : TRANSACTION_ID;
   }
   return params;
 }
 
 describe("endpoint registry — exact method and path matrix", () => {
   it("contains exactly the nineteen approved USER endpoints", () => {
-    expect(BACKEND_ENDPOINT_KEYS).toHaveLength(19);
+    expect(BACKEND_ENDPOINT_KEYS).toHaveLength(22);
     expect([...BACKEND_ENDPOINT_KEYS].sort()).toEqual(EXPECTED.map((e) => e.key).sort());
   });
 
@@ -204,6 +208,9 @@ describe("URL assembly — approved requests", () => {
       `http://localhost:8080/api/v1/ai-report-requests/${TRANSACTION_ID}`,
       `http://localhost:8080/api/v1/ai-report-outbox/${TRANSACTION_ID}`,
       `http://localhost:8080/api/v1/ai-report-outbox/${TRANSACTION_ID}/requeue`,
+      `http://localhost:8080/api/v1/ai-report-dlq/${TRANSACTION_ID}/0/1`,
+      `http://localhost:8080/api/v1/ai-report-dlq/${TRANSACTION_ID}/0/1/quarantine`,
+      `http://localhost:8080/api/v1/ai-report-dlq/${TRANSACTION_ID}/0/1/replay`,
       "http://localhost:8080/api/v1/ai-report-usage",
       "http://localhost:8080/api/v1/ai-report-usage/summary",
     ]);
@@ -638,6 +645,9 @@ describe("endpoint registry — declared query parameters", () => {
     "ai-operations-detail": [],
     "ai-outbox-diagnostic": [],
     "ai-outbox-requeue": [],
+    "ai-dlq-diagnostic": [],
+    "ai-dlq-quarantine": [],
+    "ai-dlq-replay": [],
     "ai-usage-list": ["from", "to", "provider", "model", "reportStatus", "reportSource",
       "cacheHit", "fallbackUsed", "page", "size", "sort"],
     "ai-usage-summary": ["from", "to", "provider", "model", "reportStatus", "reportSource",

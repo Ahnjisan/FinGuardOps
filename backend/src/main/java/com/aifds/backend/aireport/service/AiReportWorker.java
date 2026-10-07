@@ -63,7 +63,8 @@ public class AiReportWorker {
         this.metricsBeans = metricsBeans;
     }
 
-    @Scheduled(fixedDelayString = "${finguardops.ai-report.poll-interval-ms:1000}")
+    @Scheduled(fixedDelayString = "${finguardops.ai-report.poll-interval-ms:1000}",
+            initialDelayString = "${finguardops.ai-report.poll-initial-delay-ms:0}")
     public void tick() {
         run(null);
     }
@@ -93,7 +94,13 @@ public class AiReportWorker {
             Optional<AiReportExecution> next = executionId == null
                     ? executions.claim(properties.leaseSeconds())
                     : executions.claim(executionId, properties.leaseSeconds());
-            next.ifPresent(row -> requests.generating(row.id()));
+            next.ifPresent(row -> {
+                requests.generating(row.id());
+                jdbcTemplates.getIfAvailable().update("""
+                        INSERT INTO ai_report_execution_start_source(execution_id,source)
+                        VALUES (?,?) ON CONFLICT (execution_id) DO NOTHING
+                        """, row.executionId(), executionId == null ? "POLLING" : "KAFKA");
+            });
             return next;
         });
         if (claimed == null || claimed.isEmpty()) {

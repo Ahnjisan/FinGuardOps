@@ -468,3 +468,42 @@ outbox·이력·실행·연결 요청, topic/group offset, 시작 경로 counter
 `PUBLISHED`만으로 리포트 완료를 선언하지 않는다. token·payload·고객 식별자·Prompt·
 Provider 원문은 수집하지 않는다. 프로젝트 소유 컨테이너·네트워크·one-off만 종료하고
 PostgreSQL 및 Kafka volume은 보존한다. `down --volumes`와 prune은 사용하지 않는다.
+
+## Issue #365 DLQ 단건 복구 로컬 증거
+
+매 실행 고유 Compose 프로젝트명으로 기존 `compose.yml`, `compose.kafka-local.yml`,
+`compose.local-jwt-e2e.yml` 세 파일만 결합한다. 새 프로젝트의 PostgreSQL/Kafka
+volume만 사용하고 다른 실행의 volume은 mount하지 않는다. 먼저 topic describe에서
+DLQ topic ID를 확인하고 지정 partition·offset 한 건을 `PLATFORM_ADMIN` JWT로
+`GET /api/v1/ai-report-dlq/{topicId}/{partition}/{offset}` 조회한다. JWT는 fixture
+내부에서만 발급·사용한다. 응답의 `sourceVerified`, `sourceRecovered`, 분류,
+V18/V15 관계 및 `replayAllowed`를 기록한다. 구형 `UNKNOWN`·poison은 격리하고
+`QUARANTINE` V20 이력 한 행만 확인한다. `PRE_CLAIM_TRANSIENT`에만 관측 분류로
+`POST .../replay`를 호출한다. `202`는 V20 조치·의도 한 쌍이다.
+
+Broker 중단/복구와 Backend 재시작은 각각 독립된 새 실행에서 시험한다. broker
+ack 전후 중단은 `PENDING/CLAIMED/ACKED/BLOCKED/SKIPPED`, 원본/replay topic
+offset, group committed offset, 실행 시작 경로 및 V15 report·attempt를 대조한다.
+`ACKED`만으로 Consumer·Provider 완료를 선언하지 않는다. polling 선점은
+`startSource=POLLING`으로 표시하며 재처리 성과에 넣지 않는다. Provider 호출 뒤
+저장 전 중단은 `WORKER_INTERRUPTED`와 실제 호출 미확정으로 기록하고 재투입하지
+않는다. token·payload·Prompt·고객/계좌·모델/Provider 원문을 출력하지 않는다.
+
+새 프로젝트만 동일한 Compose 파일 조합과 프로젝트명으로 `down`하고 컨테이너,
+네트워크, one-off 잔여를 확인한다. PostgreSQL/Kafka volume을 보존하며
+`down --volumes` 또는 prune을 사용하지 않는다. 운영 화면은 API와 같은 안전
+metadata, 조치·발행·업무 상태만 보인다.
+
+Issue #365의 격리된 JWT/Kafka/PostgreSQL 자동 검증은 저장소 루트에서
+`python infra/local-jwt-fixture/verify_dlq_recovery_e2e.py`로 실행한다. 이 검증은
+`compose.yml`, `compose.local-jwt-e2e.yml`, `compose.kafka-local.yml`,
+`compose.dlq-recovery-e2e.yml`을 고유 프로젝트로 결합한다. 최초 소비를 별도
+consumer로 확인한 후 PostgreSQL을 잠시 중단하고 canonical 이벤트를 한 번 더
+발행하여 실제 Consumer의 claim 이전 예외와 DLQ 분류를 만든다. 원본 payload는
+검증 프로세스의 메모리 안에서만 사용하며 출력하지 않는다. 승인 후 V20 의도,
+broker ack 좌표, 실행 최종 상태를 연결해 확인한다. 종료는 같은 Compose 조합의
+`down --remove-orphans`이며 volume은 삭제하지 않는다.
+E2E overlay의 긴 polling 시작 지연과 2초 DB connection timeout은 격리 fixture에서
+Kafka 선점과 claim 이전 DB 장애를 재현하기 위한 설정이다. 기본 Compose와 운영 설정에는
+적용되지 않는다. 이 검증은 유료 Provider를 사용하지 않지만 기록된 attempt 수가 실제
+외부 호출 수를 증명하지는 않는다.

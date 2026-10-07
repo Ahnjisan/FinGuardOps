@@ -1090,3 +1090,19 @@ event-driven architecture 또는 운영 배포 완료로 해석하지 않는다.
 - [ ] Prompt 원문, Provider 응답 원문, 인증정보와 개인정보를 payload·로그에 넣지 않는가
 - [ ] Issue #347의 AI 실행 생성 한 종류 외 Kafka Topic·Consumer·DLQ·Outbox가 구현 완료처럼 표현되지 않는가
 - [ ] 남은 문서 차이와 사용자 결정 사항을 확정된 정책처럼 표현하지 않는가
+
+### Issue #365 AI 실행 생성 DLQ 단건 복구
+
+이 절은 `AiReportExecutionCreated` v1의 로컬 Kafka 경로에만 적용한다. Event JSON
+schema는 변경하지 않는다. 새 DLQ record에는 `fgo-dlq-` 접두사의 version,
+category, source topic ID·name·partition·offset·group header만 새로 만든다.
+원본 header를 복사하지 않는다. `PRE_CLAIM_TRANSIENT`는 Consumer가 execution
+claim 전에 받은 명시적 Worker unavailable 또는 DB resource/transient 오류에서만
+부여한다. codec·DB 관계 오류는 `INVALID_EVENT`, 그 밖은 `UNKNOWN`이다.
+구형·UNKNOWN은 payload가 유효해도 재처리 불가다.
+
+PLATFORM_ADMIN의 단건 조치와 V20 발행 의도는 같은 DB 거래로 확정된다. Kafka
+발행·원본 group recovered offset·Worker claim·Provider 결과는 각각 별도 경계다.
+broker ack 뒤 DB 표시 전 중단은 중복 Kafka record를 만들 수 있다. 실행이
+`GENERATING`, terminal 또는 `WORKER_INTERRUPTED`면 원본 event 재투입으로
+재시작하지 않는다. #363 outbox BLOCKED 재대기는 이 DLQ 복구 의도와 섞지 않는다.

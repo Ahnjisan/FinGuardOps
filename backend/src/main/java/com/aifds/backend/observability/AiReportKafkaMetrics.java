@@ -56,6 +56,18 @@ public class AiReportKafkaMetrics {
         Gauge.builder("finguardops.kafka.consumer.lag", lag, AtomicLong::get)
                 .tag("topic", properties.topic()).tag("group", properties.groupId())
                 .register(registry);
+        for (String action : new String[]{"QUARANTINE", "REPLAY"}) {
+            Gauge.builder("finguardops.kafka.dlq.actions", jdbc, value ->
+                    value.queryForObject("SELECT count(*) FROM ai_report_dlq_action WHERE action=?",
+                            Long.class, action))
+                    .tag("action", action).register(registry);
+        }
+        for (String status : new String[]{"PENDING", "CLAIMED", "ACKED", "BLOCKED", "SKIPPED"}) {
+            Gauge.builder("finguardops.kafka.dlq.dispatch", jdbc, value ->
+                    value.queryForObject("SELECT count(*) FROM ai_report_dlq_replay_dispatch WHERE status=?",
+                            Long.class, status))
+                    .tag("status", status).register(registry);
+        }
     }
 
     public void started(String source) { increment("finguardops.ai.report.starts", "source", source); }
@@ -67,6 +79,9 @@ public class AiReportKafkaMetrics {
     public void failed() { increment("finguardops.kafka.records", "result", "failure"); }
     public void reprocessed() { increment("finguardops.kafka.reprocess.attempts", "result", "retry"); }
     public void dlq() { increment("finguardops.kafka.dlq", "result", "published"); }
+    public void dlqReplayPublished() { increment("finguardops.kafka.dlq.replay", "result", "published"); }
+    public void dlqReplayUnconfirmed() { increment("finguardops.kafka.dlq.replay", "result", "unconfirmed"); }
+    public void dlqReplaySkipped() { increment("finguardops.kafka.dlq.replay", "result", "skipped"); }
 
     private void increment(String name, String tag, String value) {
         Counter.builder(name).tag(tag, value).register(registry).increment();

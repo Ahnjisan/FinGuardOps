@@ -13,6 +13,8 @@ import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.kafka.support.KafkaHeaders;
 import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.stereotype.Component;
+import org.springframework.dao.TransientDataAccessException;
+import org.springframework.dao.DataAccessResourceFailureException;
 
 @Component
 @ConditionalOnProperty(prefix = "finguardops.kafka", name = "enabled", havingValue = "true")
@@ -38,7 +40,13 @@ public class AiReportExecutionConsumer {
     public void consume(String payload, @Header(KafkaHeaders.RECEIVED_KEY) String key,
                         Acknowledgment ack) {
         AiReportExecutionCreated event = codec.decode(payload, key);
-        if (!executions.matches(event)) {
+        boolean matches;
+        try {
+            matches = executions.matches(event);
+        } catch (TransientDataAccessException | DataAccessResourceFailureException beforeClaim) {
+            throw new PreClaimTransientException();
+        }
+        if (!matches) {
             throw new AiReportExecutionCreatedCodec.InvalidEventException("event DB relationship");
         }
         LOGGER.info("event=ai_report_kafka_received executionId={} eventId={} otelTraceId={}",
@@ -46,7 +54,7 @@ public class AiReportExecutionConsumer {
         AiReportWorker.StartResult result = worker.runExecution(event.executionId());
         if (result == AiReportWorker.StartResult.UNAVAILABLE) {
             metrics.failed();
-            throw new IllegalStateException("AI report worker unavailable");
+            throw new PreClaimTransientException();
         }
         if (result == AiReportWorker.StartResult.NOT_CLAIMED) {
             AiReportStatus status = executions.status(event.executionId()).orElseThrow(

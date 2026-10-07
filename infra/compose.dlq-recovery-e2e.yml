@@ -1,0 +1,9 @@
+services:
+  kafka:
+    healthcheck:
+      timeout: 15s
+      retries: 20
+  backend:
+    environment:
+      FINGUARDOPS_AI_REPORT_POLL_INTERVAL_MS: "600000"
+      FINGUARDOPS_AI_REPORT_POLL_INITIAL_DELAY_MS: "600000"

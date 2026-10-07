@@ -1,4 +1,5 @@
 import { createElement, type ReactNode } from "react";
+import { MemoryRouter } from "react-router-dom";
 import { act, render, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { AuthSession } from "../auth/authClient";
@@ -111,7 +112,8 @@ it("classifies requeue conflict and refreshes before another action", async () =
 it("starts one list and one summary GET for the default 24-hour period without unset filters", async () => {
   const { requests, fetch } = observeRequests();
   const client = adapter.client as FakeAuthClient;
-  render(createElement(authenticatedWrapper(client), null, createElement(AiOperationsPage)));
+  render(createElement(authenticatedWrapper(client), null,
+    createElement(MemoryRouter, null, createElement(AiOperationsPage))));
 
   await waitFor(() => expect(requests).toHaveLength(2));
   await waitFor(() => expect(probe.summaryQueries).toHaveLength(1));

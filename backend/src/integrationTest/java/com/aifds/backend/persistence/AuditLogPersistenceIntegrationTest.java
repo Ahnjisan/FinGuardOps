@@ -64,12 +64,12 @@ class AuditLogPersistenceIntegrationTest
     private Flyway flyway;
 
     @Test
-    void appliesFreshV1ThroughV19WithAuditSchemaAndAppendOnlyTrigger() {
-        assertThat(flyway.info().applied()).hasSize(19);
+    void appliesFreshV1ThroughV20WithAuditSchemaAndAppendOnlyTrigger() {
+        assertThat(flyway.info().applied()).hasSize(20);
         assertThat(flyway.info().current().getVersion().getVersion())
-                .isEqualTo("19");
+                .isEqualTo("20");
         assertThat(flyway.info().current().getDescription())
-                .isEqualTo("create ai report outbox requeue log");
+                .isEqualTo("create ai report dlq recovery");
         assertThat(columns("audit_log")).containsExactlyInAnyOrder(
                 "id",
                 "audit_id",
