@@ -208,7 +208,165 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($remainingDbVolume)) { 
 $remainingDbVolume
 ```
 
-`--volumes`, `--remove-orphans`, 전역 prune을 사용하지 않는다. 일반 `down` 뒤 해당 프로젝트의 컨테이너·네트워크 잔여와 Prometheus·Grafana·Alertmanager named volume, 위에서 기록한 익명 DB volume의 잔여를 각각 확인한다. 이번 점검 PC에는 앞선 Kafka 실험의 `finguardops-kafka-349-20261006a`와 `finguardops-kafka-349-20261006b`에 `kafka-data`, `prometheus-data`, `grafana-data`, `alertmanager-data`가 각각 하나씩, 총 8개 보존되어 있다. 새 PC에는 없을 수 있으며 이 절차의 소유물이 아니다. 다른 Docker 프로젝트와 기존 DB, Keycloak runner의 image·receipt·secret·volume도 건드리지 않는다. 이름이 비어 있거나 기록과 다르면 명령을 중단한다. 보존 자원의 삭제 시점과 책임자는 별도로 결정한다. ignored `infra/.env`도 이 절차에서 변경·삭제하지 않는다.
+`--volumes`, `--remove-orphans`, 전역 prune을 사용하지 않는다. 일반 `down` 뒤 해당 프로젝트의 컨테이너·네트워크 잔여와 Prometheus·Grafana·Alertmanager named volume, 위에서 기록한 익명 DB volume의 잔여를 각각 확인한다. 다른 실험에서 보존한 volume은 이 종료 절차의 소유물이 아니다. 다른 Docker 프로젝트와 기존 DB, Keycloak runner의 image·receipt·secret·volume도 건드리지 않는다. 이름이 비어 있거나 기록과 다르면 명령을 중단한다. 보존 자원의 삭제 시점과 책임자는 아래 5절에서 개별적으로 결정한다. ignored `infra/.env`도 이 절차에서 변경·삭제하지 않는다.
+
+## 5. 보존 volume의 소유권·선택적 정리 판단
+
+이 절은 **이미 종료된 로컬 실험**의 volume을 대상으로 한다. 이 문서나 공개 Issue에는 실제 프로젝트명, volume 이름·ID, 재고 수치, 로컬 절대 경로, 비밀을 남기지 않는다. 정확한 식별자와 근거는 OWNER의 **비공개 실행 기록**에만 남긴다. 이름 접두사나 생성 시각만으로 소유권을 추정하지 않는다. 앞 절의 `down` 판단과 물리적 volume 삭제 판단은 별개다.
+
+OWNER는 **volume 하나당 한 행**으로 아래 표를 비공개 기록에 작성한다. `독립 실행 증거`는 현재 Docker 이름·label을 그대로 베낀 값이 아니라, 실험 당시 별도로 기록한 프로젝트명·Compose 인자·checkout commit·저장소 루트와 해당 실험의 비민감 결과를 뜻한다. 과거 기록이 없으면 `미확정`으로 둔다. 삭제 승인을 받은 **정확히 한 행**만 별도 비공개 JSON 파일의 `rows` 배열에 담고, 이 파일은 Git 추적 범위 밖에 둔다. 여러 행을 담거나 다른 파일의 값을 합쳐 입력하지 않는다.
+
+| 정확한 volume 이름·ID | Compose project·volume label | 생성 시각 | 독립 실행 증거·과거 mount | 현재 참조 컨테이너 ID | 보존 필요 여부·근거 | OWNER 개별 삭제 판단·승인 시각 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 비공개 기록에 기입 | 비공개 기록에 기입/없음 | 비공개 기록에 기입 | 비공개 기록에 기입/미확정 | 비공개 기록에 기입/없음 | 보존/불필요/미확정 | 보류/개별 삭제 승인 |
+
+익명 PostgreSQL volume은 Compose 소유 label이 없을 수 있다. 과거 PostgreSQL 컨테이너의 `/var/lib/postgresql/data` mount와 **정확한 이름**의 연결, Rule·합성 거래·탐지·사건·감사·AI·outbox 등 데이터의 보존 필요 여부가 모두 확인되기 전에는 삭제 후보에서 제외한다. 컨테이너가 이미 없어 mount를 재확인할 수 없거나 DB를 열지 않고 내용 판단이 불가능하면 **보존 보류**다. 이 판단을 위해 DB를 기동하거나 volume을 mount하지 않는다. 공식 Keycloak runner 자원은 [Keycloak runbook의 Cleanup](./local-keycloak-auth-e2e-runbook.md)을 따르고 여기서 제외한다. 다른 프로젝트, 참조 중인 volume, ignored `infra/.env`도 제외한다.
+
+비공개 JSON의 단일 행에는 문자열 `volumeName`, `composeProject`, `composeVolume`, `createdAt`, `runRecordProject`, `runRecordRoot`, `runRecordComposeArgs`, `runRecordCommit`, `independentEvidence`, `retentionReason`, `owner`, `approvedAt`, `retentionDecision`, `ownerDecision`과 배열 `recordedReferences`를 둔다. `runRecordRoot`와 `runRecordComposeArgs`에는 실제 실행 당시의 값을 비공개로 기록한다. `recordedReferences`는 참조가 없는 경우에도 빈 배열로 명시한다. 삭제 가능 상태는 `retentionDecision=NOT_REQUIRED`, `ownerDecision=DELETE_APPROVED`, 참조 배열이 비어 있고 나머지 근거가 모두 있는 경우뿐이다. 이 필드의 내용과 승인 주체의 진위는 OWNER가 원본 실행 기록과 직접 대조한다. 스크립트의 문자열 검사는 그 증거의 진위를 대신하지 않는다.
+
+다음 PowerShell은 저장소 루트에서 **개별 named volume 하나**의 비공개 승인 파일을 읽고 Docker 재고를 조회한다. `Invoke-VolumeDecision`을 `-Delete` 없이 호출하면 읽기 전용 점검만 한다. 나중에 별도 삭제 승인이 난 뒤 `-Delete`로 호출해도 함수가 **처음부터 동일한 단일 승인 행과 전체 재고를 다시 검증**한다. 앞선 점검의 세션 변수나 출력은 삭제 권한이 아니다. 파일 경로·실제 식별자·조회 출력은 비공개 운영 세션에만 둔다. 아래 블록을 정의한 뒤 비공개 파일 경로를 `Read-Host`로 받아 `Invoke-VolumeDecision -ApprovalRecord $privateApprovalPath`를 실행한다. 삭제를 별도로 승인받은 경우에만 같은 함수에 `-Delete`를 추가한다.
+
+```powershell
+function Read-VolumeApproval([object]$approvalPath) {
+  if ($approvalPath -isnot [string] -or [string]::IsNullOrWhiteSpace($approvalPath)) { throw 'Approval path must be one string' }
+  $resolved = (Resolve-Path -LiteralPath $approvalPath -ErrorAction Stop).Path
+  $repositoryRoot = (Resolve-Path -LiteralPath '.' -ErrorAction Stop).Path.TrimEnd([char[]]@('\','/'))
+  if ($resolved.StartsWith($repositoryRoot + [IO.Path]::DirectorySeparatorChar,
+      [StringComparison]::OrdinalIgnoreCase)) { throw 'Private approval file must be outside the repository' }
+  if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) { throw 'Approval file is missing' }
+  $raw = Get-Content -LiteralPath $resolved -Raw -Encoding utf8 -ErrorAction Stop
+  if ([string]::IsNullOrWhiteSpace($raw)) { throw 'Approval file is empty' }
+  $document = $raw | ConvertFrom-Json -ErrorAction Stop
+  if ($null -eq $document -or $document.rows -isnot [array] -or $document.rows.Count -ne 1) {
+    throw 'Approval record must contain exactly one row'
+  }
+  $row = $document.rows[0]
+  if ($null -eq $row) { throw 'Approval row is missing' }
+  $fields = @('volumeName','composeProject','composeVolume','createdAt','runRecordProject',
+    'runRecordRoot','runRecordComposeArgs','runRecordCommit','independentEvidence',
+    'retentionReason','owner','approvedAt','retentionDecision','ownerDecision')
+  foreach ($field in $fields) {
+    if ($row.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($row.$field)) {
+      throw "Approval field missing or not a string: $field"
+    }
+  }
+  if ($row.recordedReferences -isnot [array] -or $row.recordedReferences.Count -ne 0 -or
+      $row.retentionDecision -cne 'NOT_REQUIRED' -or $row.ownerDecision -cne 'DELETE_APPROVED' -or
+      $row.runRecordProject -cne $row.composeProject -or
+      $row.runRecordRoot -cne (Resolve-Path -LiteralPath '.').Path -or
+      $row.runRecordCommit -cnotmatch '^[0-9a-fA-F]{40}$' -or
+      $row.runRecordComposeArgs -cnotmatch 'infra[/\\]compose\.yml' -or
+      $row.composeProject -cnotmatch '^finguardops-' -or
+      $row.composeProject -match 'keycloak' -or $row.composeVolume -match 'keycloak' -or
+      $row.runRecordComposeArgs -match 'compose\.keycloak') {
+    throw 'Independent run, retention, ownership or OWNER approval is not established'
+  }
+  [pscustomobject]@{ Row=$row; Raw=$raw }
+}
+
+function Get-VolumeInventory {
+  $names = @(docker volume ls -q)
+  if ($LASTEXITCODE -ne 0 -or $names.Count -eq 0) { throw 'Volume list failed or empty' }
+  $volumes = foreach ($name in ($names | Sort-Object)) {
+    $raw = & docker volume inspect $name --format '{{json .}}'
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) { throw 'Volume inspect failed' }
+    $item = $raw | ConvertFrom-Json -ErrorAction Stop
+    if ($null -eq $item -or $item.Name -ne $name) { throw 'Volume identity changed' }
+    [pscustomobject]@{
+      Name = $item.Name
+      Created = $item.CreatedAt
+      Project = $item.Labels.'com.docker.compose.project'
+      ComposeVolume = $item.Labels.'com.docker.compose.volume'
+      Labels = ($item.Labels | ConvertTo-Json -Compress -Depth 5 -ErrorAction Stop)
+    }
+  }
+  $ids = @(docker ps -aq --no-trunc)
+  if ($LASTEXITCODE -ne 0) { throw 'Container list failed' }
+  $mounts = foreach ($id in ($ids | Sort-Object)) {
+    $raw = & docker inspect $id --format '{{json .}}'
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) { throw 'Container inspect failed' }
+    $item = $raw | ConvertFrom-Json -ErrorAction Stop
+    if ($null -eq $item -or $item.Id -ne $id) { throw 'Container identity changed' }
+    if ($null -eq $item.PSObject.Properties['Mounts'] -or $item.Mounts -isnot [array]) {
+      throw 'Container Mounts field is missing or malformed'
+    }
+    foreach ($mount in $item.Mounts) {
+      if ($null -eq $mount -or $mount.Type -isnot [string]) { throw 'Container mount entry is malformed' }
+      if ($mount.Type -eq 'volume') {
+        if ($mount.Name -isnot [string] -or [string]::IsNullOrWhiteSpace($mount.Name)) {
+          throw 'Volume mount name is missing'
+        }
+        [pscustomobject]@{ Volume=$mount.Name; Container=$item.Id }
+      }
+    }
+  }
+  $networks = @(docker network ls -q)
+  if ($LASTEXITCODE -ne 0 -or $networks.Count -eq 0) { throw 'Network list failed or empty' }
+  [pscustomobject]@{ Volumes=@($volumes); Containers=@($ids | Sort-Object);
+    Networks=@($networks | Sort-Object); Mounts=@($mounts) }
+}
+
+function Assert-ApprovedVolume($row, $inventory) {
+  if ($row.volumeName -isnot [string] -or [string]::IsNullOrWhiteSpace($row.volumeName)) {
+    throw 'Approved volume name must be one string'
+  }
+  $target = @($inventory.Volumes | Where-Object Name -CEQ $row.volumeName)
+  if ($target.Count -ne 1 -or $target[0].Project -cne $row.composeProject -or
+      $target[0].ComposeVolume -cne $row.composeVolume -or
+      $target[0].Created -cne $row.createdAt -or
+      $target[0].Name -cne ($row.composeProject + '_' + $row.composeVolume)) {
+    throw 'Named volume does not match independent approval row'
+  }
+  if (@($inventory.Mounts | Where-Object Volume -CEQ $row.volumeName).Count -ne 0) {
+    throw 'Approved volume has a referencing container'
+  }
+}
+
+function Invoke-VolumeDecision {
+  param([object]$ApprovalRecord, [switch]$Delete)
+  $ErrorActionPreference = 'Stop'
+  $approval = Read-VolumeApproval $ApprovalRecord
+  $row = $approval.Row
+  $before = Get-VolumeInventory
+  Assert-ApprovedVolume $row $before
+  if (-not $Delete) { Write-Output 'One approved named volume passed read-only checks'; return }
+
+  $decision = Read-Host 'From the private OWNER approval, type DELETE followed by its exact volume name'
+  if ($decision -cne ('DELETE ' + $row.volumeName)) { throw 'No exact deletion confirmation' }
+  $currentApproval = Read-VolumeApproval $ApprovalRecord
+  if ($currentApproval.Raw -cne $approval.Raw) { throw 'Private approval row changed before deletion' }
+  $current = Get-VolumeInventory
+  Assert-ApprovedVolume $currentApproval.Row $current
+  if (($current | ConvertTo-Json -Compress -Depth 8 -ErrorAction Stop) -cne
+      ($before | ConvertTo-Json -Compress -Depth 8 -ErrorAction Stop)) {
+    throw 'Docker inventory changed before deletion'
+  }
+  $exactName = $currentApproval.Row.volumeName
+  if ($exactName -isnot [string] -or $exactName -cne $row.volumeName) { throw 'Approved name changed' }
+  & docker volume rm $exactName
+  if ($LASTEXITCODE -ne 0) { throw 'Exact volume removal failed; stop' }
+  $after = Get-VolumeInventory
+  if (@($after.Volumes | Where-Object Name -CEQ $exactName).Count -ne 0) {
+    throw 'Removed volume still listed; stop'
+  }
+  $remainingBefore = @($before.Volumes | Where-Object Name -CNE $exactName)
+  if ((($remainingBefore | ConvertTo-Json -Compress -Depth 8 -ErrorAction Stop) -cne
+       ($after.Volumes | ConvertTo-Json -Compress -Depth 8 -ErrorAction Stop)) -or
+      (($before.Containers | ConvertTo-Json -Compress -ErrorAction Stop) -cne
+       ($after.Containers | ConvertTo-Json -Compress -ErrorAction Stop)) -or
+      (($before.Networks | ConvertTo-Json -Compress -ErrorAction Stop) -cne
+       ($after.Networks | ConvertTo-Json -Compress -ErrorAction Stop)) -or
+      (($before.Mounts | ConvertTo-Json -Compress -Depth 5 -ErrorAction Stop) -cne
+       ($after.Mounts | ConvertTo-Json -Compress -Depth 5 -ErrorAction Stop))) {
+    throw 'Other Docker resources changed; stop further deletion and investigate'
+  }
+}
+
+$privateApprovalPath = Read-Host 'Private single-row OWNER approval JSON path'
+Invoke-VolumeDecision -ApprovalRecord $privateApprovalPath # 읽기 전용 점검
+```
+
+별도 OWNER 삭제 승인을 확인한 뒤에만 `Invoke-VolumeDecision -ApprovalRecord $privateApprovalPath -Delete`를 **새 호출**로 실행한다. 이 함수는 승인 파일의 **단일 행**에서 확인 문구·최종 대조 대상·삭제 인자를 다시 도출한다. A를 읽기 전용 점검한 뒤 세션 변수를 B로 바꾸더라도 삭제 호출은 비공개 파일의 승인 행으로 전체 검증을 다시 수행한다. 파일이 바뀌거나 둘 이상의 행이 있으면 중단한다. 조회 명령 실패·빈 목록·label 누락·생성 시각 불일치·새 컨테이너 참조·`Mounts` 필드 누락이나 형식 오류도 삭제 전에 중단한다. 이 절차는 실험별 image와 익명 volume을 제거하지 않는다. `down --volumes`, `docker volume prune`, `docker system prune`, 이름 패턴 일괄 삭제는 사용하지 않는다. 앞서 정리된 컨테이너·네트워크를 다시 정리 대상으로 만들지 않는다. 삭제 후 대조에서 다른 변경이 나타나면 추가 삭제를 중단하고 OWNER에게 보고한다.
 
 ## 별도 경로 선택
 
