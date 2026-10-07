@@ -169,7 +169,7 @@ if ($LASTEXITCODE -ne 0 -or $requestCount.Trim() -ne '1') { throw 'Initial AI re
   Select-String 'finguardops_(kafka_|ai_report_(starts|pending))'
 ```
 
-`finguardops_kafka_outbox_records{status}`, 최고 연령, 발행 성공/실패, `finguardops_kafka_records{result}`, `finguardops_kafka_consumer_lag{topic,group}`, DLQ, `finguardops_ai_report_pending_oldest_seconds`도 기록한다. 첫 offset 전이나 broker 조회 실패의 lag `-1`은 0건이 아니다. 필요하면 같은 프로젝트의 `exec -T kafka ... kafka-console-consumer.sh --topic finguardops.ai-report-execution-created.v1.dlq --from-beginning --max-messages 1`로 DLQ를 확인하되 payload 원문은 결과물에 복사하지 않는다.
+`finguardops_kafka_outbox_records`의 `status`별 값, 최고 연령, 발행 성공/실패, `finguardops_kafka_records_total`의 `result`별 값, `finguardops_kafka_consumer_lag`, DLQ, `finguardops_ai_report_pending_oldest_seconds`도 기록한다. 첫 offset 전이나 broker 조회 실패의 lag `-1`은 0건이 아니다. DLQ는 아래의 topic offset·지표와 비민감 오류 코드로 확인하며 메시지 원문을 콘솔에 출력하지 않는다.
 
 Analyst token을 fixture 내부에서 다시 발급해 `GET /api/v1/cases/{caseId}/ai-reports/current`를 bounded polling하고 `COMPLETED`, `FALLBACK_COMPLETED`, `FAILED` 중 최종 상태와 `reportSource`, `failureCode`, `fallbackTriggerCode`를 기록한다. `PLATFORM_ADMIN` token으로 `GET /api/v1/ai-report-requests/{aiRequestId}`를 호출해 같은 `executionId`, 저장된 `attempts`, 토큰·비용 NULL 계약을 대조한다. 두 GET 모두 위의 `mint`/`call`처럼 fixture 내부에서 수행하고 token을 host로 반환하지 않는다. Worker 중단 전에 저장하지 못한 호출은 attempt 0건이어도 실제 호출 0건이라고 단정할 수 없다.
 
@@ -229,6 +229,41 @@ if ($delta.kafkaStarts -eq 0 -and $delta.pollingStarts -eq 1) {
 ```
 
 Kafka 시작 성공은 **격리된 이 한 실행에서** `kafkaStarts`와 `kafkaRecordsStarted`가 각각 1 증가하고 `pollingStarts`는 증가하지 않으며, 같은 topic/partition의 group `CURRENT-OFFSET`이 접수 전보다 진행한 경우에만 기록한다. 첫 요청 전 group offset이 없다면 접수 후 숫자 offset이 생겨 진행한 것을 확인한다. `PUBLISHED`, 최종 리포트, lag 0만으로는 Kafka 시작 성공이 아니다. Polling이 먼저 실행을 선점했다면 polling 완료로 기록하고 Kafka 소비 통과에서 제외한다. 다른 AI 실행이 섞였거나 Backend가 재시작되어 counter가 초기화됐거나 counter와 offset이 맞지 않으면 이 전역 counter만으로 해당 `executionId`의 시작 경로를 단정하지 않고 결과를 미확정으로 둔다.
+
+### 4.1 상태별 읽기 전용 진단
+
+같은 Compose 프로젝트와 실행 중인 전용 PostgreSQL을 먼저 확인하고, 아래 SELECT만 실행한다. 전체 집계는 `status`별 건수, 가장 오래된 행의 생성 후 초, 발행 시도 횟수 범위를 보여준다. `OutboxRepository.oldestPendingSeconds()`의 Meter는 `PENDING`·`CLAIMED`·`BLOCKED`를 합친 최고 연령이므로 아래 상태별 최고 연령과 범위가 다르다. 행이 없는 상태는 집계 결과에 나타나지 않는다. 반복 조회의 두 시점과 간격을 기록하지 않았다면 증가율을 산출하지 않는다.
+
+```powershell
+$outboxByStatusSql = "SELECT status,count(*) AS records,COALESCE(EXTRACT(EPOCH FROM now()-min(created_at))::bigint,0) AS oldest_seconds,min(attempt_count) AS min_attempts,max(attempt_count) AS max_attempts FROM ai_report_outbox GROUP BY status ORDER BY status;"
+& docker @compose exec -T postgresql psql -U finguardops -d finguardops -v ON_ERROR_STOP=1 -c $outboxByStatusSql
+if ($LASTEXITCODE -ne 0) { throw 'Read-only outbox status query failed' }
+$outboxDetailSql = "SELECT o.event_id,o.execution_id,o.status AS outbox_status,o.attempt_count,o.next_attempt_at,o.lease_until,o.published_at,o.last_failure_code,e.status AS execution_status,q.ai_request_id,q.status AS request_status,c.case_status,c.final_disposition,r.report_status FROM ai_report_outbox o JOIN ai_report_execution e ON e.execution_id=o.execution_id JOIN fraud_case c ON c.id=e.fraud_case_id LEFT JOIN ai_report_request q ON q.execution_id=e.id LEFT JOIN ai_report r ON r.execution_id=e.id WHERE o.execution_id='$executionId' ORDER BY q.ai_request_id;"
+& docker @compose exec -T postgresql psql -U finguardops -d finguardops -v ON_ERROR_STOP=1 -c $outboxDetailSql
+if ($LASTEXITCODE -ne 0) { throw 'Read-only outbox detail query failed' }
+& docker @compose exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group finguardops-ai-report-worker-v1
+if ($LASTEXITCODE -ne 0) { Write-Output 'Consumer group offset unavailable; do not interpret as lag zero' }
+& docker @compose exec -T kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic finguardops.ai-report-execution-created.v1.dlq --time -1
+if ($LASTEXITCODE -ne 0) { Write-Output 'DLQ end offset unavailable; DLQ count unconfirmed' }
+```
+
+`$executionId`는 위 4절에서 `[guid]::Parse`로 정규화한 값이다. 요청 공유로 `q` 행이 여럿이면 같은 outbox·실행이 반복 출력될 수 있으므로 행 수를 outbox 건수로 세지 않는다. 위 SQL은 payload, 리포트 본문, Prompt, 요청자와 고객 식별자를 선택하지 않는다. DLQ end offset은 topic의 위치이며 해당 실행의 poison 건수나 성공적인 재투입 건수가 아니다. 최초 offset·topic 재생성 여부를 모르면 단일 end offset만으로 DLQ 유입 증가도 확정하지 않는다.
+
+같은 시점의 `/actuator/prometheus`에서 `finguardops_kafka_outbox_records`, `finguardops_kafka_outbox_oldest_seconds`, `finguardops_kafka_outbox_published_total`, `finguardops_ai_report_pending_oldest_seconds`, `finguardops_ai_report_starts_total`, `finguardops_kafka_records_total`, `finguardops_kafka_reprocess_attempts_total`, `finguardops_kafka_dlq_total`, `finguardops_kafka_consumer_lag`를 확인한다. outbox 건수는 `status`별, 발행 결과와 소비 결과는 `result`별, 실행 시작은 `source`별로 구분한다. 예를 들어 PromQL에서 발행 결과 두 값을 함께 조회할 때는 `finguardops_kafka_outbox_published_total{result=~"success|failure"}`, 시작 경로는 `finguardops_ai_report_starts_total{source=~"polling|kafka"}`를 사용한다. Counter의 증분은 동일 Backend 프로세스의 전후 샘플에서만 계산하며, 아직 발생하지 않은 결과의 시계열 부재를 0으로 단정하지 않는다. `lag=-1`은 첫 group offset 부재 또는 broker 조회 실패 등으로 **미확인**이며, 0이나 정상 소비를 뜻하지 않는다. DLQ 발행 실패는 `finguardops_kafka_dlq_total` 증가가 없을 수 있으므로 실패 로그의 비민감 오류 분류, 재시도 지표, group offset과 DLQ end offset을 함께 조사한다. 현재 로컬 Grafana 패널·Prometheus alert에는 outbox 전용 패널·경고가 없으므로 임계값 판정 대신 SQL·지표·offset을 기록한다.
+
+| 관측 조합 | 판정과 다음 확인 |
+| --- | --- |
+| `PENDING`, `attempt_count=0`, `next_attempt_at` 도래 전·후 | 미발행 또는 아직 선점 전이다. 실행·요청 상태를 별도로 확인한다. 오래된 `PENDING`만으로 AI 실행 실패를 선언하지 않는다. |
+| `PENDING`이며 `attempt_count>0`·`last_failure_code` 존재 | 발행 재시도 대기다. `next_attempt_at`, 발행 실패 counter, broker 상태를 대조한다. |
+| `CLAIMED` | 발행 시도 또는 lease 대기 중이다. `lease_until`과 시도 횟수를 확인한다. broker ack 여부는 DB 상태만으로 알 수 없다. |
+| `BLOCKED` | 발행 시도 한도 10회에 도달했다. 실행·요청이 이미 완료됐는지 확인하고 event ID·실패 코드·offset을 보존한다. 자동 재발행 절차는 없다. |
+| `PENDING`/`CLAIMED`/`BLOCKED`인데 broker ack 뒤 DB `PUBLISHED` 표시 전 중단 가능 | 같은 event ID가 다시 발행될 수 있는 미확정 구간이다. DB 상태나 발행 실패 counter만으로 broker 미수신을 단정하지 않는다. topic·group offset과 소비 결과를 대조한다. |
+| `PUBLISHED`인데 실행이 polling으로 먼저 완료 | broker 발행 표시는 성공했지만 Kafka가 실행을 시작했다는 뜻은 아니다. 격리된 실행의 `polling`·`kafka` 시작 counter 증분과 group offset을 4절 기준으로 대조한다. |
+| `PUBLISHED`, 실행·요청은 `PENDING`/`GENERATING` 또는 `FAILED` | 발행 상태와 AI 업무 상태는 별개다. `PUBLISHED`만으로 소비·리포트 완료를 선언하지 않는다. |
+| consumer lag `-1` | offset 또는 broker 조회 미확인이다. group 명령과 broker 상태를 확인하며 lag 0으로 대체하지 않는다. |
+| poison 이벤트 또는 DLQ 발행 실패 의심 | 잘못된 이벤트는 재시도 없이, 그 밖의 소비 오류는 제한된 재시도 후 DLQ 발행을 시도한다. DLQ 성공 counter·end offset·group offset·비민감 오류를 대조한다. DLQ ack 실패면 성공/복구를 선언하지 않는다. |
+
+수동 복구 여부를 결정하기 **전** 비공개 실행 기록에 checkout commit, Compose 프로젝트와 설정, 측정 시각, `event_id`·`execution_id`·연결 `ai_request_id`, outbox 상태·시도 횟수·다음 시도/lease/발행 시각·실패 코드, 실행·요청·사건 상태와 리포트 유무, 원본 topic/partition의 group current/log-end offset·lag, DLQ end offset과 위 counter의 전후 값을 남긴다. 거래·사건 업무 상태와 Audit도 기존 4절의 범위에서 대조한다. token·암호·고객 식별자·payload·리포트 본문·Prompt·Provider 응답을 출력하거나 공개 Issue에 붙이지 않는다. 이 절은 재발행, DLQ 재투입, 삭제와 보존 기간을 결정하지 않는다. 실행 중인 전용 DB가 없다면 실제 outbox 건수·증가율은 **미측정**으로 표시하고 기존 volume을 mount하지 않는다.
 
 추가 장애 실험은 **각각 새 실행**으로 한다. Broker 중단/복구, ack 뒤 DB 표시 전 중단, consumer 비활성화와 30초 polling 경합, 중복·늦은 이벤트, poison DLQ를 구분한다. Consumer만 끌 때는 먼저 `external-risk-mock`과 `local-jwt-fixture`를 중단하고, `$env:FINGUARDOPS_KAFKA_CONSUMER_ENABLED='false'`로 Backend를 `up -d --no-build --force-recreate backend`한 다음 두 sidecar를 같은 namespace에 다시 만든다. 복구할 때도 같은 순서와 `true` 설정을 사용하고 환경 변수를 제거한다([JWT fixture lifecycle](./local-jwt-auth-e2e-runbook.md#5-topology와-lifecycle)). Sidecar 재생성 시 JWT 서명 키가 바뀌므로 token을 다시 발급한다. Broker는 같은 `$compose`의 `stop kafka`/`start kafka`만 사용한다. `PUBLISHED`는 자동 삭제하지 않고 DLQ 자동 재투입 consumer도 없다. 거래 `201`/멱등 `409`, 사건 상태·최종 판정·업무 Audit, AI `202/200`, outbox·attempt를 전후 대조한다.
 
