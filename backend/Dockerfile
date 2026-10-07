@@ -9,6 +9,8 @@ RUN ./gradlew bootJar --no-daemon
 
 FROM eclipse-temurin:17.0.16_8-jre-jammy@sha256:e90fd2b084488c0ffdd22610d44c1579e63b585c7fb83489fd815c0dc5b4e1f7 AS runtime
 
+COPY --from=ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java:2.32.0@sha256:9dad1c6e3e2ecee48fc164a19bcfde703510bee972c8cb421689fde89b5f89e9 /javaagent.jar /opt/otel/javaagent.jar
+
 WORKDIR /app
 COPY --from=build --chown=10001:10001 /workspace/build/libs/backend-0.0.1-SNAPSHOT.jar /app/backend.jar
 USER 10001:10001

@@ -20,9 +20,13 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.util.Optional;
 import java.util.UUID;
 import com.aifds.backend.observability.AiReportKafkaMetrics;
+import com.aifds.backend.observability.LocalTrace;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Service
 public class AiReportWorker {
+    private static final Logger LOGGER = LoggerFactory.getLogger(AiReportWorker.class);
     private final AiReportProperties.Values properties;
     private final ObjectProvider<PlatformTransactionManager> transactionManagers;
     private final ObjectProvider<JdbcTemplate> jdbcTemplates;
@@ -98,67 +102,79 @@ public class AiReportWorker {
         AiReportKafkaMetrics metrics = metricsBeans.getIfAvailable();
         if (metrics != null) metrics.started(executionId == null ? "polling" : "kafka");
         AiReportExecution row = claimed.get();
-        AiReportDtos.GenerationRequest input;
-        try {
-            var projected = transactions.execute(ignored -> {
-                var fraudCase = cases.findById(row.casePk()).orElseThrow();
-                return projection.project(fraudCase, row.detectionResultVersion(),
-                        requests.initiators(row.id()).get(0).traceId());
-            });
-            if (projected == null || projected.detectionPk() != row.detectionPk()) {
+        String source = executionId == null ? "polling" : "kafka";
+        try (LocalTrace traceScope = LocalTrace.execution("ai-report.worker", row.executionId())) {
+            LOGGER.info("event=ai_report_worker_started executionId={} source={} otelTraceId={}",
+                    row.executionId(), source, LocalTrace.currentTraceId());
+            AiReportDtos.GenerationRequest input;
+            try {
+                var projected = transactions.execute(ignored -> {
+                    var fraudCase = cases.findById(row.casePk()).orElseThrow();
+                    return projection.project(fraudCase, row.detectionResultVersion(),
+                            requests.initiators(row.id()).get(0).traceId());
+                });
+                if (projected == null || projected.detectionPk() != row.detectionPk()) {
+                    fail(transactions, executions, requests, row, "REPORT_INPUT_CHANGED");
+                    return StartResult.STARTED;
+                }
+                input = projected.request();
+            } catch (com.aifds.backend.aireport.exception.AiReportException
+                     | java.util.NoSuchElementException exception) {
                 fail(transactions, executions, requests, row, "REPORT_INPUT_CHANGED");
                 return StartResult.STARTED;
             }
-            input = projected.request();
-        } catch (com.aifds.backend.aireport.exception.AiReportException
-                 | java.util.NoSuchElementException exception) {
-            fail(transactions, executions, requests, row, "REPORT_INPUT_CHANGED");
-            return StartResult.STARTED;
-        }
-        AiReportDtos.GenerationResult generated;
-        try {
-            generated = client.generate(input);
-        } catch (AiReportHttpClient.GenerationFailure exception) {
-            fail(transactions, executions, requests, row, exception.code());
-            return StartResult.STARTED;
-        }
-        try {
-            validate(generated, row, input);
-        } catch (RuntimeException exception) {
-            fail(transactions, executions, requests, row, "FASTAPI_RESPONSE_INVALID");
-            return StartResult.STARTED;
-        }
-        transactions.executeWithoutResult(ignored -> {
-            if (!executions.stillGenerating(row.id())) return;
-            for (int index = 0; index < generated.attempts().size(); index++) {
-                attempts.insert(row.id(), index + 1, generated.attempts().get(index));
+            AiReportDtos.GenerationResult generated;
+            try {
+                generated = client.generate(input);
+            } catch (AiReportHttpClient.GenerationFailure exception) {
+                fail(transactions, executions, requests, row, exception.code());
+                return StartResult.STARTED;
             }
-            AiReportStatus status = AiReportStatus.valueOf(generated.status());
-            if (status == AiReportStatus.FAILED) {
+            try {
+                validate(generated, row, input);
+            } catch (RuntimeException exception) {
+                fail(transactions, executions, requests, row, "FASTAPI_RESPONSE_INVALID");
+                return StartResult.STARTED;
+            }
+            Boolean persisted = transactions.execute(ignored -> {
+                if (!executions.stillGenerating(row.id())) return false;
+                for (int index = 0; index < generated.attempts().size(); index++) {
+                    attempts.insert(row.id(), index + 1, generated.attempts().get(index));
+                }
+                AiReportStatus status = AiReportStatus.valueOf(generated.status());
+                if (status == AiReportStatus.FAILED) {
+                    executions.complete(row.id(), status, generated.failureCode(),
+                            generated.fallbackTriggerCode());
+                    requests.fail(row.id());
+                    return true;
+                }
+                String traceId = requests.initiators(row.id()).get(0).traceId();
+                var report = reports.insert(row.casePk(), row.id(), row.detectionResultVersion(),
+                        row.promptVersion(), row.modelVersion(), generated, traceId);
                 executions.complete(row.id(), status, generated.failureCode(),
                         generated.fallbackTriggerCode());
-                requests.fail(row.id());
-                return;
-            }
-            String traceId = requests.initiators(row.id()).get(0).traceId();
-            var report = reports.insert(row.casePk(), row.id(), row.detectionResultVersion(),
-                    row.promptVersion(), row.modelVersion(), generated, traceId);
-            executions.complete(row.id(), status, generated.failureCode(),
-                    generated.fallbackTriggerCode());
-            requests.complete(row.id(), report.id(), status);
-        });
-        return StartResult.STARTED;
+                requests.complete(row.id(), report.id(), status);
+                return true;
+            });
+            LOGGER.info("event=ai_report_worker_finished executionId={} source={} persisted={} reportStatus={} otelTraceId={}",
+                    row.executionId(), source, Boolean.TRUE.equals(persisted), generated.status(),
+                    LocalTrace.currentTraceId());
+            return StartResult.STARTED;
+        }
     }
 
     public enum StartResult { STARTED, NOT_CLAIMED, UNAVAILABLE }
 
     private void fail(TransactionTemplate transactions, AiReportExecutionRepository executions,
                       AiReportRequestRepository requests, AiReportExecution row, String code) {
-        transactions.executeWithoutResult(ignored -> {
-            if (!executions.stillGenerating(row.id())) return;
+        Boolean persisted = transactions.execute(ignored -> {
+            if (!executions.stillGenerating(row.id())) return false;
             executions.complete(row.id(), AiReportStatus.FAILED, code, null);
             requests.fail(row.id());
+            return true;
         });
+        LOGGER.warn("event=ai_report_worker_failed executionId={} code={} persisted={} otelTraceId={}",
+                row.executionId(), code, Boolean.TRUE.equals(persisted), LocalTrace.currentTraceId());
     }
 
     private void validate(AiReportDtos.GenerationResult result, AiReportExecution execution,

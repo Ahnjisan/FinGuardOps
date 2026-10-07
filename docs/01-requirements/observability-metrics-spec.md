@@ -44,6 +44,8 @@ API 요청·응답과 상태 코드는 `docs/03-api/`, 시스템 책임은 `docs
 | 운영 수집·노출 | 부분 구현 | production runtime Prometheus registry와 `prometheus` profile 전용 `/actuator/prometheus`가 구현되었다. 기본 profile에서는 export가 비활성이고 health만 노출한다. 별도 management listener의 기본 경계는 `127.0.0.1:8081`이며 인증은 미구현이다. Issue #196의 로컬 Compose Prometheus 서버와 Backend scrape·24시간 보존 경계가 구현되었지만 production 배포·scrape는 미구현이다. |
 | 활용 계층 | 부분 구현 | 로컬 Prometheus의 service 수준 recording rule 14개와 실패율 alert rule 6개, deterministic promtool test, 로컬 Alertmanager routing·signal별 inhibition·webhook firing/resolved 전달, 로컬 Grafana datasource·16-panel dashboard file provisioning과 fresh·restart·query 검증이 구현되었다. production recording rule·alert rule·Prometheus·Alertmanager·Grafana·receiver와 외부 알림은 없다. |
 
+Issue #361의 선택형 로컬 overlay는 Spring Boot·FastAPI 로그와 trace를 OTLP Collector에서 Loki·Tempo로 보내 Grafana에서 조회한다. 기존 `X-Trace-Id`는 업무 correlation이고 OTel trace ID와 별도다. AI 요청 이후 Worker와 outbox는 `executionId`로 대조하는 별도 실행 경계다. 이 구현은 production 수집, 장기 보존, 모든 Provider 호출의 trace 계측을 뜻하지 않는다.
+
 로컬 검증에서 PostgreSQL·AI Service·Backend는 internal application network를 사용하고,
 Backend·Prometheus·Alertmanager·local webhook receiver는 별도 internal observability
 network를 사용한다. Prometheus는 host UI용 `prometheus-ui`, Grafana는 host UI용
@@ -694,12 +696,12 @@ Breaker가 없다. 따라서 이를 현재 구현 metric이나 성공 결과로 
 
 로컬 Alertmanager·webhook·Grafana 검증은 외부 Slack·email·SMS·PagerDuty, production
 Prometheus·Alertmanager·Grafana·receiver와 credential 배포, production SLA·SLO,
-인증·TLS·SSO·RBAC, Kubernetes·AWS, HA·장기 retention과 OpenTelemetry를 구현하지 않는다.
+인증·TLS·SSO·RBAC, Kubernetes·AWS, HA·장기 retention과 production OpenTelemetry를 구현하지 않는다. Issue #361의 선택형 로컬 로그·trace 경계만 예외다.
 
 - 신규 Java와 Python Meter 코드 구현
 - production Prometheus 설치·scrape와 production recording rule 설정
 - production Grafana 배포와 추가 사건·AI·복구 dashboard
-- OpenTelemetry 적용과 sampling 설정
+- production OpenTelemetry 적용과 sampling 설정
 - 실제 알림 발송과 담당자 routing
 - Redis와 Kafka 구현
 - production Docker 배포, Kubernetes와 AWS 설정

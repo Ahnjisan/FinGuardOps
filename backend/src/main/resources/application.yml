@@ -75,4 +75,4 @@ management:
 
 logging:
   pattern:
-    correlation: "[traceId=%X{traceId:-no-trace}] "
+    correlation: "[traceId=%X{traceId:-no-trace}] [otelTraceId=%X{trace_id:-no-trace} otelSpanId=%X{span_id:-no-span}] "

@@ -16,6 +16,9 @@ import com.aifds.backend.fraudcase.repository.FraudCaseRepository;
 import com.aifds.backend.security.principal.CurrentAuditActorProvider;
 import com.aifds.backend.transaction.validation.IdempotencyKeyValidator;
 import com.aifds.backend.outbox.OutboxRepository;
+import com.aifds.backend.observability.LocalTrace;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import jakarta.persistence.EntityManager;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.http.HttpStatus;
@@ -30,6 +33,7 @@ import java.util.UUID;
 
 @Service
 public class AiReportService {
+    private static final Logger LOGGER = LoggerFactory.getLogger(AiReportService.class);
     private final FraudCaseRepository cases;
     private final JdbcTemplate jdbc;
     private final AiReportInputProjection projection;
@@ -131,6 +135,9 @@ public class AiReportService {
                     created.aiRequestId(), caseId, body.detectionResultVersion(),
                     identity.promptVersion(), identity.modelVersion(), traceId));
         }
+        LOGGER.info("event=ai_report_requested aiRequestId={} executionId={} newExecution={} otelTraceId={}",
+                created.aiRequestId(), execution == null ? "none" : execution.executionId(),
+                newExecution, LocalTrace.currentTraceId());
         return new CreateOutcome(status(created), !terminal(status));
     }
 
