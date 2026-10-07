@@ -162,7 +162,7 @@ describe("resolveCapabilities - one role at a time", () => {
     ["FDS_APPROVER", ["transaction:view", "detection:view", "case:view", "case:resolve", "ai-report:view"]],
     ["RULE_OPERATOR", []],
     ["RECOVERY_OPERATOR", []],
-    ["PLATFORM_ADMIN", ["ai-operations:view", "ai-usage:view"]],
+    ["PLATFORM_ADMIN", ["ai-operations:view", "ai-outbox:requeue", "ai-usage:view"]],
   ];
 
   it.each(PER_ROLE)("grants %s exactly its reachable capabilities", (role, expected) => {
@@ -230,14 +230,14 @@ describe("resolveCapabilities - several roles", () => {
 
   it("unions viewer and platform access without case write", () => {
     expect(resolveCapabilities(["FDS_VIEWER", "PLATFORM_ADMIN"]).granted).toEqual(
-      [...VIEWER_CAPABILITIES, "ai-operations:view", "ai-usage:view"],
+      [...VIEWER_CAPABILITIES, "ai-operations:view", "ai-outbox:requeue", "ai-usage:view"],
     );
   });
 
   it("grants only platform access for the operator combination", () => {
     expect(
       resolveCapabilities(["RULE_OPERATOR", "RECOVERY_OPERATOR", "PLATFORM_ADMIN"]).granted,
-    ).toEqual(["ai-operations:view", "ai-usage:view"]);
+    ).toEqual(["ai-operations:view", "ai-outbox:requeue", "ai-usage:view"]);
   });
 
   it("grants everything reachable when all six roles are held", () => {
@@ -322,8 +322,8 @@ describe("CapabilitySet", () => {
 });
 
 describe("the capability table as a whole", () => {
-  it("declares ten capabilities", () => {
-    expect(UI_CAPABILITIES).toHaveLength(10);
+  it("declares eleven capabilities", () => {
+    expect(UI_CAPABILITIES).toHaveLength(11);
     expect(Object.isFrozen(UI_CAPABILITIES)).toBe(true);
   });
 

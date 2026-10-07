@@ -13,3 +13,10 @@
 | `published_at`, `last_failure_code` | broker ack 후 기록한 시각과 안전한 실패 분류 |
 
 Dispatcher는 broker ack와 DB 표시를 한 원자적 transaction으로 묶지 못한다. ack 뒤 중단하면 같은 `event_id`가 다시 전송될 수 있다. Consumer는 `execution_id`가 가리키는 현재 실행 상태를 확인한다. `PUBLISHED` 자동 삭제는 첫 PR에 없다. 30일 보존은 후속 정책 검토값이며 `BLOCKED`는 자동 삭제하지 않는다. Payload에 Prompt·Provider 응답·고객 식별 원문을 저장하지 않는다.
+# V19 BLOCKED 단건 재대기 이력
+
+`ai_report_outbox_requeue_log`는 outbox `event_id`당 성공 조치 한 행만 저장한다.
+`execution_id`, UUID v4 USER `actor_id`, `BLOCKED → PENDING`, `trace_id`, `changed_at`을
+기록하며 UPDATE/DELETE trigger가 변경을 거부한다. outbox 상태 전이와 이력 INSERT는
+하나의 PostgreSQL 거래다. 실패하거나 경합에 진 조치는 이 성공 이력에 기록하지 않는다.
+기존 거래·사건 `audit_log`의 action/target 계약은 바꾸지 않는다.

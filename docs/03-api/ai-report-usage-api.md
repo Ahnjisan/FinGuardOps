@@ -1166,3 +1166,25 @@ LLM 실패 뒤 템플릿이 완료되면 신규 실행의 `fallbackTriggerCode`�
 - [ ] Prompt·Provider 응답 원문과 개인정보를 반환하지 않는가
 - [ ] 요청자, 캐시, fallback, 재생성과 실패가 감사 가능한가
 - [ ] 문서·코드·테스트에서 구현되지 않은 기능을 완료로 표현하지 않는가
+# Issue #363: BLOCKED outbox 단건 진단·재대기
+
+`PLATFORM_ADMIN`의 `ai-operations:read`로 `GET /api/v1/ai-report-outbox/{executionId}`를
+조회한다. UUID v4 실행 ID에 해당하는 단일 outbox를 찾지 못하면 `404`다. 응답은
+`eventId`, `executionId`, `outboxStatus`, `attemptCount`, 안전한 `failureCode`,
+`executionStatus`, 안전한 `executionFailureCode`, 연결된 모든 `requests`의 ID·상태,
+`reportExists`, `attemptExists`, `requeueAllowed`, `rejectionReason`,
+`previouslyRequeued`, `traceId`로 제한한다. payload·고객 정보·Provider 원문은 없다.
+
+별도 `ai-outbox:requeue` authority의 `POST /api/v1/ai-report-outbox/{eventId}/requeue`는
+`{"executionId":"<UUID v4>","observedStatus":"BLOCKED"}`만 받는다. 동일 DB 거래에서
+outbox·실행·모든 연결 요청을 잠그고 현재 상태와 v1 payload/DB 관계, 결과·attempt 부재,
+기존 성공 조치 부재를 재검증한다. 단일 `BLOCKED` 행만 `PENDING`으로 전이하고
+`attempt_count=0`, `next_attempt_at=now()`, claim/lease/published/failure 필드를
+초기화하며 V19 운영 조치 이력을 함께 기록한다. `202` 응답은 갱신된 진단이며 **DB
+발행 대기 수락만** 뜻한다. broker가 중단되어도 안전 조건이 맞으면 수락될 수 있고,
+발행·소비·Provider 처리·리포트 완료는 보장하지 않는다. 대상 없음 `404`, 권한 부족
+`403`, 관측값·상태 불일치 및 동시 잠금 경합 `409`, 형식 오류 `400`이다.
+
+재대기 API는 Provider를 직접 호출하거나 실행 상태를 되돌리지 않는다. 이후 기존
+polling/Kafka Worker가 `PENDING` 실행을 처리할 수 있다. `PUBLISHED`는 broker 발행
+표시이며 consumer 또는 리포트 완료를 뜻하지 않는다. DLQ 재투입은 이 API의 범위 밖이다.

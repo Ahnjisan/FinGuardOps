@@ -62,6 +62,7 @@ import static com.aifds.backend.security.principal.FinGuardOpsAuthority.TRANSACT
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.TRANSACTION_READ;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_OPERATIONS_READ;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_USAGE_READ;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_OUTBOX_REQUEUE;
 
 @Configuration(proxyBeanMethods = false)
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
@@ -115,7 +116,9 @@ public class FinGuardOpsSecurityConfiguration {
             ),
             new CorsEndpoint(HttpMethod.GET, "/api/v1/ai-report-requests/{aiRequestId}"),
             new CorsEndpoint(HttpMethod.GET, "/api/v1/ai-report-usage"),
-            new CorsEndpoint(HttpMethod.GET, "/api/v1/ai-report-usage/summary")
+            new CorsEndpoint(HttpMethod.GET, "/api/v1/ai-report-usage/summary"),
+            new CorsEndpoint(HttpMethod.GET, "/api/v1/ai-report-outbox/{executionId}"),
+            new CorsEndpoint(HttpMethod.POST, "/api/v1/ai-report-outbox/{eventId}/requeue")
     );
     private static final CorsEndpoint APPLICATION_ACTUATOR_HEALTH =
             new CorsEndpoint(HttpMethod.GET, "/actuator/health");
@@ -228,6 +231,14 @@ public class FinGuardOpsSecurityConfiguration {
                                 HttpMethod.GET,
                                 "/api/v1/ai-report-requests/{aiRequestId}"
                         )).hasAuthority(AI_OPERATIONS_READ)
+                        .requestMatchers(paths.matcher(
+                                HttpMethod.GET,
+                                "/api/v1/ai-report-outbox/{executionId}"
+                        )).hasAuthority(AI_OPERATIONS_READ)
+                        .requestMatchers(paths.matcher(
+                                HttpMethod.POST,
+                                "/api/v1/ai-report-outbox/{eventId}/requeue"
+                        )).hasAuthority(AI_OUTBOX_REQUEUE)
                         .requestMatchers(paths.matcher(
                                 HttpMethod.GET,
                                 "/api/v1/ai-report-usage"

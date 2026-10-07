@@ -3,7 +3,9 @@ import { getOidcAuthClient } from "../auth/oidcAuthClient";
 import { useAuth } from "../auth/useAuth";
 import { useCapabilities } from "../auth/useCapabilities";
 import type { AuthSession } from "../auth/authClient";
+import { ForbiddenError, HttpError } from "./errors";
 import { fetchAiRequestDetail, fetchAiUsageList, fetchAiUsageSummary,
+  fetchAiOutboxDiagnostic, requeueAiOutbox, type AiOutboxDiagnostic,
   type AiUsageDetail, type AiUsageFilters, type AiUsageList, type AiUsageListQuery,
   type AiUsageSummary } from "./aiOperationsApi";
 
@@ -70,4 +72,58 @@ export function useAiRequestDetail(aiRequestId: string) {
     return () => { active = false; controller.abort(); };
   }, [session, aiRequestId]);
   return session !== null && result.session === session && result.key === aiRequestId ? result : EMPTY;
+}
+
+export function useAiOutbox(executionId: string | null) {
+  const { state } = useAuth();
+  const capabilities = useCapabilities();
+  const session = state.status === "authenticated" && capabilities.has("ai-operations:view")
+    ? state.session : null;
+  const canRequeue = session !== null && capabilities.has("ai-outbox:requeue");
+  const [data, setData] = useState<AiOutboxDiagnostic | null>(null);
+  const [error, setError] = useState<"forbidden" | "conflict" | "not-found" | "other" | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [acceptedExecutionId, setAcceptedExecutionId] = useState<string | null>(null);
+  const [priorFailure, setPriorFailure] = useState<{ executionId: string; code: string | null } | null>(null);
+  const accepted = acceptedExecutionId === executionId && executionId !== null;
+  const visibleData = data?.executionId === executionId ? data : null;
+  const [refreshKey, setRefreshKey] = useState(0);
+  useEffect(() => {
+    if (session === null || executionId === null) return;
+    const controller = new AbortController();
+    let active = true;
+    fetchAiOutboxDiagnostic(getOidcAuthClient(), executionId, controller.signal)
+      .then((value) => { if (active) { setData(value); setError(null); } })
+      .catch((failure: unknown) => {
+        if (!active) return;
+        if (failure instanceof ForbiddenError) { setData(null); setError("forbidden"); }
+        else if (failure instanceof HttpError && failure.status === 404) {
+          setData(null); setError("not-found");
+        } else setError("other");
+      });
+    return () => { active = false; controller.abort(); };
+  }, [session, executionId, refreshKey]);
+  useEffect(() => {
+    if (!accepted || executionId === null) return;
+    const timer = window.setInterval(() => setRefreshKey((key) => key + 1), 5000);
+    return () => window.clearInterval(timer);
+  }, [accepted, executionId]);
+  async function requeue() {
+    if (!canRequeue || visibleData === null || !visibleData.requeueAllowed || busy || error !== null) return;
+    setBusy(true);
+    try {
+      const result = await requeueAiOutbox(getOidcAuthClient(), visibleData);
+      setPriorFailure({ executionId: result.executionId, code: visibleData.failureCode });
+      setData(result); setAcceptedExecutionId(result.executionId); setError(null);
+    } catch (failure) {
+      if (failure instanceof ForbiddenError) setError("forbidden");
+      else if (failure instanceof HttpError && failure.status === 409) setError("conflict");
+      else setError("other");
+      setRefreshKey((key) => key + 1);
+    } finally { setBusy(false); }
+  }
+  return { data: visibleData, error, busy, accepted,
+    priorFailureCode: priorFailure?.executionId === executionId ? priorFailure.code : null,
+    canRequeue, requeue,
+    refresh: () => setRefreshKey((key) => key + 1) };
 }

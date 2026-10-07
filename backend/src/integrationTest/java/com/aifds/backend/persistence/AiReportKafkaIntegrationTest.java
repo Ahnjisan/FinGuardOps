@@ -24,6 +24,8 @@ import com.aifds.backend.transaction.validation.IdempotencyKeyValidator;
 import com.aifds.backend.observability.AiReportKafkaMetrics;
 import com.aifds.backend.outbox.OutboxDispatcher;
 import com.aifds.backend.outbox.OutboxRepository;
+import com.aifds.backend.outbox.OutboxRecoveryRepository;
+import com.aifds.backend.outbox.OutboxRecoveryService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.prometheusmetrics.PrometheusConfig;
 import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
@@ -87,7 +89,7 @@ class AiReportKafkaIntegrationTest {
             }
             var source = new DriverManagerDataSource(postgres.getJdbcUrl(),
                     postgres.getUsername(), postgres.getPassword());
-            assertEquals(18, Flyway.configure().dataSource(source)
+            assertEquals(19, Flyway.configure().dataSource(source)
                     .locations("classpath:db/migration").load().migrate().migrationsExecuted);
             var jdbc = new JdbcTemplate(source);
             var manager = new DataSourceTransactionManager(source);
@@ -296,6 +298,21 @@ class AiReportKafkaIntegrationTest {
                 assertEquals(AiReportStatus.PENDING,
                         executions.status(second.executionId()).orElseThrow());
                 verify(client, times(1)).generate(input);
+                jdbc.update("""
+                        UPDATE ai_report_outbox SET status='BLOCKED',attempt_count=10,
+                            next_attempt_at=now(),last_failure_code='PUBLISH_ACK_UNCONFIRMED'
+                        WHERE event_id=?
+                        """, second.eventId());
+                var recoveryService = new OutboxRecoveryService(outbox,
+                        new OutboxRecoveryRepository(jdbc), codec);
+                assertTrue(recoveryService.inspect(second.executionId(),
+                        "trace-integration-2").requeueAllowed());
+                assertEquals("PENDING", transactions.execute(status -> recoveryService.requeue(
+                        second.eventId(), second.executionId(), "BLOCKED", UUID.randomUUID(),
+                        "trace-integration-2")).outboxStatus());
+                assertEquals(1, jdbc.queryForObject("""
+                        SELECT count(*) FROM ai_report_outbox_requeue_log WHERE event_id=?
+                        """, Integer.class, second.eventId()));
                 broker.start();
                 try (AdminClient admin = AdminClient.create(Map.of("bootstrap.servers", bootstrap))) {
                     admin.createTopics(List.of(new NewTopic(TOPIC, 1, (short) 1),

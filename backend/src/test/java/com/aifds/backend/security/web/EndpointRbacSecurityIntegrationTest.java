@@ -3,6 +3,7 @@ package com.aifds.backend.security.web;
 import com.aifds.backend.behavior.service.BehaviorEventIntakeService;
 import com.aifds.backend.aireport.service.AiReportService;
 import com.aifds.backend.aireport.service.AiReportOperationsQueryService;
+import com.aifds.backend.outbox.OutboxRecoveryService;
 import com.aifds.backend.detection.service.AdoptedDetectionResultQueryService;
 import com.aifds.backend.common.trace.TraceIdFilter;
 import com.aifds.backend.fraudcase.service.FraudCaseAuditLogService;
@@ -60,6 +61,7 @@ import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_REPOR
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_REPORT_READ;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_OPERATIONS_READ;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_USAGE_READ;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_OUTBOX_REQUEUE;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_AUDIT_READ;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_NOTE_READ;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_NOTE_WRITE;
@@ -211,7 +213,11 @@ class EndpointRbacSecurityIntegrationTest {
             endpoint(HttpMethod.GET, "/api/v1/ai-report-requests/" + CASE_ID,
                     "PLATFORM_ADMIN", AI_OPERATIONS_READ),
             endpoint(HttpMethod.GET, "/api/v1/ai-report-usage", "PLATFORM_ADMIN", AI_USAGE_READ),
-            endpoint(HttpMethod.GET, "/api/v1/ai-report-usage/summary", "PLATFORM_ADMIN", AI_USAGE_READ)
+            endpoint(HttpMethod.GET, "/api/v1/ai-report-usage/summary", "PLATFORM_ADMIN", AI_USAGE_READ),
+            endpoint(HttpMethod.GET, "/api/v1/ai-report-outbox/" + CASE_ID,
+                    "PLATFORM_ADMIN", AI_OPERATIONS_READ),
+            endpoint(HttpMethod.POST, "/api/v1/ai-report-outbox/" + CASE_ID + "/requeue",
+                    "PLATFORM_ADMIN", AI_OUTBOX_REQUEUE)
     );
     private static final List<CorsProbe> APPROVED_PREFLIGHTS = Stream.concat(
             ENDPOINTS.stream().map(endpoint -> new CorsProbe(
@@ -343,6 +349,9 @@ class EndpointRbacSecurityIntegrationTest {
     @MockitoBean
     private AiReportOperationsQueryService aiReportOperationsQueryService;
 
+    @MockitoBean
+    private OutboxRecoveryService outboxRecoveryService;
+
     @BeforeAll
     static void startJwkServer() {
         jwkServer = InProcessJwkSetServer.start();
@@ -379,7 +388,8 @@ class EndpointRbacSecurityIntegrationTest {
                 investigationNoteService,
                 fraudCaseAuditLogService,
                 aiReportService,
-                aiReportOperationsQueryService
+                aiReportOperationsQueryService,
+                outboxRecoveryService
         );
     }
 
@@ -387,7 +397,7 @@ class EndpointRbacSecurityIntegrationTest {
     void coversExistingFifteenAndFiveAiReportEndpointsAndMinimumRoles()
             throws Exception {
         assertThat(ENDPOINTS.subList(0, 15)).hasSize(15);
-        assertThat(ENDPOINTS).hasSize(20);
+        assertThat(ENDPOINTS).hasSize(22);
         assertThat(ENDPOINTS.stream().map(Endpoint::signature))
                 .doesNotHaveDuplicates();
         Set<String> actualMappings = requestMappingHandlerMapping
@@ -667,7 +677,7 @@ class EndpointRbacSecurityIntegrationTest {
     @Test
     void permitsEveryApprovedCorsPathAndMethodExactly() {
         assertThat(APPROVED_PREFLIGHTS.subList(0, 16)).hasSize(16);
-        assertThat(APPROVED_PREFLIGHTS).hasSize(21);
+        assertThat(APPROVED_PREFLIGHTS).hasSize(23);
         assertThat(APPROVED_PREFLIGHTS.subList(0, 15))
                 .extracting(CorsProbe::signature)
                 .containsExactlyElementsOf(ENDPOINTS.subList(0, 15).stream()
@@ -1031,7 +1041,8 @@ class EndpointRbacSecurityIntegrationTest {
                 investigationNoteService,
                 fraudCaseAuditLogService,
                 aiReportService,
-                aiReportOperationsQueryService
+                aiReportOperationsQueryService,
+                outboxRecoveryService
         );
     }
 
@@ -1077,6 +1088,10 @@ class EndpointRbacSecurityIntegrationTest {
 
         String registeredPath() {
             return path
+                    .replace("/api/v1/ai-report-outbox/" + CASE_ID + "/requeue",
+                            "/api/v1/ai-report-outbox/{eventId}/requeue")
+                    .replace("/api/v1/ai-report-outbox/" + CASE_ID,
+                            "/api/v1/ai-report-outbox/{executionId}")
                     .replace("/api/v1/ai-report-requests/" + CASE_ID,
                             "/api/v1/ai-report-requests/{aiRequestId}")
                     .replace(CASE_ID, "{caseId}")

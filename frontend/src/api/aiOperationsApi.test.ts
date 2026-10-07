@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createFakeAuthClient } from "../test/fakeAuthClient";
 import { jsonResponse, mockFetchOnce } from "../test/mockFetch";
-import { fetchAiRequestDetail, fetchAiUsageSummary } from "./aiOperationsApi";
+import { fetchAiOutboxDiagnostic, fetchAiRequestDetail, fetchAiUsageSummary,
+  requeueAiOutbox } from "./aiOperationsApi";
 import { InvalidResponseError } from "./errors";
 
 const id = "33333333-3333-4333-8333-333333333333";
@@ -52,4 +53,21 @@ it("accepts distinct counts and refuses inconsistent request partition", async (
   mockFetchOnce(async () => jsonResponse({ ...response, providerCallCount: 3,
     successCount: 3 }));
   await expect(fetchAiUsageSummary(auth(), range)).rejects.toBeInstanceOf(InvalidResponseError);
+});
+
+it("accepts only the exact safe outbox diagnostic and 202 DB requeue response", async () => {
+  const diagnostic = { eventId: "44444444-4444-4444-8444-444444444444", executionId: id,
+    outboxStatus: "BLOCKED", attemptCount: 10, failureCode: "PUBLISH_FAILED",
+    executionStatus: "PENDING", executionFailureCode: null,
+    requests: [{ aiRequestId: id, status: "PENDING" }], reportExists: false,
+    attemptExists: false, requeueAllowed: true, rejectionReason: null,
+    previouslyRequeued: false, traceId: "trace-query-001" };
+  mockFetchOnce(async () => jsonResponse(diagnostic));
+  expect((await fetchAiOutboxDiagnostic(auth(), id)).requeueAllowed).toBe(true);
+  mockFetchOnce(async () => jsonResponse({ ...diagnostic, payload: "secret" }));
+  await expect(fetchAiOutboxDiagnostic(auth(), id)).rejects.toBeInstanceOf(InvalidResponseError);
+  mockFetchOnce(async () => jsonResponse({ ...diagnostic, outboxStatus: "PENDING",
+    attemptCount: 0, requeueAllowed: false, rejectionReason: "OUTBOX_NOT_BLOCKED",
+    previouslyRequeued: true }, { status: 202 }));
+  expect((await requeueAiOutbox(auth(), diagnostic)).outboxStatus).toBe("PENDING");
 });

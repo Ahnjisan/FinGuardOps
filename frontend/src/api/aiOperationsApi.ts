@@ -2,6 +2,7 @@ import type { CredentialAuthClient } from "../auth/authClient";
 import { sendAuthorizedBackendRequest } from "./authorizedClient";
 import { isCanonicalUuidV4 } from "./backendEndpoints";
 import { InvalidResponseError } from "./errors";
+import { readExactRequestFields } from "./authorizedClient";
 import { isUtcInstantString } from "./responseValidation";
 
 export interface AiAttempt {
@@ -23,6 +24,33 @@ export interface AiUsageItem {
 export interface AiUsageDetail extends AiUsageItem {
   fallbackTriggerCode: string | null; usageFinalized: boolean;
   requestedByRef: string; attempts: AiAttempt[]; queryTraceId: string;
+}
+export interface AiOutboxDiagnostic {
+  eventId: string; executionId: string; outboxStatus: string; attemptCount: number;
+  failureCode: string | null; executionStatus: string | null;
+  executionFailureCode: string | null;
+  requests: { aiRequestId: string; status: string }[];
+  reportExists: boolean; attemptExists: boolean; requeueAllowed: boolean;
+  rejectionReason: string | null; previouslyRequeued: boolean; traceId: string;
+}
+
+function outboxDiagnostic(value: unknown): value is AiOutboxDiagnostic {
+  if (!obj(value) || !exact(value, ["eventId", "executionId", "outboxStatus",
+    "attemptCount", "failureCode", "executionStatus", "executionFailureCode", "requests",
+    "reportExists", "attemptExists", "requeueAllowed", "rejectionReason",
+    "previouslyRequeued", "traceId"])) return false;
+  return typeof value.eventId === "string" && isCanonicalUuidV4(value.eventId) &&
+    typeof value.executionId === "string" && isCanonicalUuidV4(value.executionId) &&
+    ["PENDING", "CLAIMED", "PUBLISHED", "BLOCKED"].includes(String(value.outboxStatus)) &&
+    count(value.attemptCount) && textOrNull(value.failureCode) &&
+    (value.executionStatus === null || STATUSES.includes(String(value.executionStatus))) &&
+    textOrNull(value.executionFailureCode) && Array.isArray(value.requests) &&
+    value.requests.every((request) => obj(request) && exact(request, ["aiRequestId", "status"]) &&
+      typeof request.aiRequestId === "string" && isCanonicalUuidV4(request.aiRequestId) &&
+      STATUSES.includes(String(request.status))) &&
+    typeof value.reportExists === "boolean" && typeof value.attemptExists === "boolean" &&
+    typeof value.requeueAllowed === "boolean" && textOrNull(value.rejectionReason) &&
+    typeof value.previouslyRequeued === "boolean" && typeof value.traceId === "string";
 }
 export interface AiUsageList {
   content: AiUsageItem[];
@@ -152,5 +180,26 @@ export async function fetchAiRequestDetail(auth: CredentialAuthClient, aiRequest
   const result = await sendAuthorizedBackendRequest(auth, { endpoint: "ai-operations-detail",
     params: { aiRequestId }, expectedStatus: 200, validate: detail, signal });
   if (result.data.aiRequestId !== aiRequestId) throw new InvalidResponseError();
+  return result.data;
+}
+
+export async function fetchAiOutboxDiagnostic(auth: CredentialAuthClient, executionId: string,
+  signal?: AbortSignal): Promise<AiOutboxDiagnostic> {
+  const result = await sendAuthorizedBackendRequest(auth, { endpoint: "ai-outbox-diagnostic",
+    params: { executionId }, expectedStatus: 200, validate: outboxDiagnostic, signal });
+  if (result.data.executionId !== executionId) throw new InvalidResponseError();
+  return result.data;
+}
+
+export async function requeueAiOutbox(auth: CredentialAuthClient,
+  diagnostic: AiOutboxDiagnostic): Promise<AiOutboxDiagnostic> {
+  const body = readExactRequestFields({ executionId: diagnostic.executionId,
+    observedStatus: "BLOCKED" }, ["executionId", "observedStatus"]);
+  const result = await sendAuthorizedBackendRequest(auth, { endpoint: "ai-outbox-requeue",
+    params: { eventId: diagnostic.eventId }, body, expectedStatus: 202,
+    validate: outboxDiagnostic });
+  if (result.data.eventId !== diagnostic.eventId ||
+      result.data.executionId !== diagnostic.executionId ||
+      result.data.outboxStatus !== "PENDING") throw new InvalidResponseError();
   return result.data;
 }
