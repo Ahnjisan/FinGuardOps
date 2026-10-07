@@ -67,7 +67,18 @@ $outboxSql = "SELECT status,count(*) AS records,COALESCE(EXTRACT(EPOCH FROM now(
 if ($LASTEXITCODE -ne 0) { throw 'Read-only outbox query failed' }
 ```
 
-결과가 비어 있으면 현재 DB에 outbox 행이 없는 것이다. Kafka를 켠 **별도 실험**에서는 [Kafka runbook 4절](./local-kafka-ai-report-runbook.md#4-outbox소비최종-조회지표)의 실행별 SQL, `finguardops_kafka_outbox_records{status}`, 최고 연령과 lag·DLQ를 사용한다. Lag `-1`은 미확인이다. `PUBLISHED`도 자동 삭제되지 않는다. 여기서는 삭제 SQL, 자동 정리, 경고 임계값을 정하지 않는다.
+결과가 비어 있으면 현재 DB에 outbox 행이 없는 것이다. Kafka를 켠 **별도 실험**에서는 [Kafka runbook 4절](./local-kafka-ai-report-runbook.md#4-outbox소비최종-조회지표)의 실행별 SQL, `finguardops_kafka_outbox_records`의 `status`별 값, 최고 연령과 lag·DLQ를 사용한다. Lag `-1`은 미확인이다. `PUBLISHED`도 자동 삭제되지 않는다. 여기서는 삭제 SQL, 자동 정리, 경고 임계값을 정하지 않는다.
+
+Kafka 비활성 실행에서 outbox `PENDING`은 발행 대기 상태이지 AI 실행의 실패 상태가 아니다. 이 구성에서는 `OutboxDispatcher`·Kafka 전용 Meter가 생성되지 않지만 `AiReportWorker`는 기본 1초 간격으로 `ai_report_execution`의 `PENDING`을 선점한다. 따라서 해당 실행의 outbox, 실행, 연결된 요청과 리포트 상태를 **함께** 읽는다. 합성 거래만 수행해 AI 실행 ID가 없다면 outbox나 리포트 결과를 추정하지 않는다. 아래 `$executionId`에는 해당 실행에서 이미 기록한 UUID만 넣으며, DB/user 이름이 다르면 위 조회와 같이 맞춘다. SQL은 payload·리포트 본문·Prompt·토큰·고객 식별자를 출력하지 않는다.
+
+```powershell
+$executionId = [guid]::Parse('<기록한-executionId>').ToString()
+$executionSql = "SELECT o.event_id,o.status AS outbox_status,o.attempt_count,e.status AS execution_status,q.ai_request_id,q.status AS request_status,r.report_status FROM ai_report_outbox o JOIN ai_report_execution e ON e.execution_id=o.execution_id LEFT JOIN ai_report_request q ON q.execution_id=e.id LEFT JOIN ai_report r ON r.execution_id=e.id WHERE o.execution_id='$executionId' ORDER BY q.ai_request_id;"
+& docker @compose exec -T postgresql psql -U finguardops -d finguardops -v ON_ERROR_STOP=1 -c $executionSql
+if ($LASTEXITCODE -ne 0) { throw 'Read-only AI execution query failed' }
+```
+
+`outbox_status=PENDING`이어도 `execution_status`와 연결 요청이 `COMPLETED` 또는 `FALLBACK_COMPLETED`이고 `report_status`가 일치하면 polling 경로의 완료로 기록한다. 실행이 `FAILED`라면 실행의 실패로 따로 조사하고, `PENDING`/`GENERATING`이면 아직 완료 여부가 미확정이다. 공유 요청이 있으면 요청 행이 여러 개 나올 수 있다. Kafka 전용 지표의 부재나 오래 남은 outbox `PENDING`만으로 AI 처리 실패·Kafka 발행 성공을 판정하지 않는다. 실행 중인 **해당 프로젝트의** PostgreSQL이 없으면 건수·증가율은 미측정으로 남기고 기존 익명 volume을 진단 목적으로 mount하지 않는다.
 
 ## 4. 종료와 보존 경계
 
