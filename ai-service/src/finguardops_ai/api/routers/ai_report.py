@@ -1,5 +1,6 @@
 """Spring Boot's internal report-generation endpoint."""
 
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
@@ -14,6 +15,7 @@ from finguardops_ai.services.ai_report import (
 from finguardops_ai.services.ollama_client import OllamaClient
 
 router = APIRouter(tags=["ai-report-internal"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("/v1/ai-reports/model")
@@ -30,4 +32,11 @@ def generate_report(
     request: ReportRequest,
     service: Annotated[AiReportService, Depends(get_ai_report_service)],
 ) -> ReportResponse:
-    return service.generate(request)
+    result = service.generate(request)
+    logger.info(
+        "event=ai_report_generated status=%s source=%s failureCode=%s",
+        result.status,
+        result.source or "none",
+        result.failureCode or "none",
+    )
+    return result

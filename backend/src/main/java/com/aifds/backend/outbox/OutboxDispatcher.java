@@ -2,6 +2,9 @@ package com.aifds.backend.outbox;
 
 import com.aifds.backend.aireport.config.AiReportKafkaProperties;
 import com.aifds.backend.observability.AiReportKafkaMetrics;
+import com.aifds.backend.observability.LocalTrace;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -14,6 +17,7 @@ import java.util.concurrent.TimeUnit;
 @Service
 @ConditionalOnProperty(prefix = "finguardops.kafka", name = "enabled", havingValue = "true")
 public class OutboxDispatcher {
+    private static final Logger LOGGER = LoggerFactory.getLogger(OutboxDispatcher.class);
     private final OutboxRepository outbox;
     private final KafkaTemplate<String, String> kafka;
     private final AiReportKafkaProperties properties;
@@ -36,19 +40,28 @@ public class OutboxDispatcher {
         OutboxRepository.Claim claim = transactions.execute(ignored ->
                 outbox.claim(properties.outboxLeaseSeconds()).orElse(null));
         if (claim == null) return;
-        try {
-            kafka.send(properties.topic(), claim.executionId().toString(), claim.payload())
-                    .get(10, TimeUnit.SECONDS);
-            Boolean marked = transactions.execute(ignored -> outbox.published(claim));
-            if (Boolean.TRUE.equals(marked)) metrics.published();
-            else metrics.publishFailed();
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            transactions.executeWithoutResult(ignored -> outbox.failed(claim, "PUBLISH_INTERRUPTED"));
-            metrics.publishFailed();
-        } catch (Exception exception) {
-            transactions.executeWithoutResult(ignored -> outbox.failed(claim, "PUBLISH_FAILED"));
-            metrics.publishFailed();
+        try (LocalTrace traceScope = LocalTrace.execution("ai-report.outbox-publish", claim.executionId())) {
+            try {
+                kafka.send(properties.topic(), claim.executionId().toString(), claim.payload())
+                        .get(10, TimeUnit.SECONDS);
+                Boolean marked = transactions.execute(ignored -> outbox.published(claim));
+                if (Boolean.TRUE.equals(marked)) {
+                    metrics.published();
+                    LOGGER.info("event=ai_report_outbox_published executionId={} otelTraceId={}",
+                            claim.executionId(), LocalTrace.currentTraceId());
+                } else metrics.publishFailed();
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                transactions.executeWithoutResult(ignored -> outbox.failed(claim, "PUBLISH_INTERRUPTED"));
+                metrics.publishFailed();
+                LOGGER.warn("event=ai_report_outbox_failed executionId={} code=PUBLISH_INTERRUPTED",
+                        claim.executionId());
+            } catch (Exception exception) {
+                transactions.executeWithoutResult(ignored -> outbox.failed(claim, "PUBLISH_FAILED"));
+                metrics.publishFailed();
+                LOGGER.warn("event=ai_report_outbox_failed executionId={} code=PUBLISH_FAILED",
+                        claim.executionId());
+            }
         }
     }
 }

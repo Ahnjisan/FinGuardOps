@@ -6,6 +6,7 @@ from finguardops_ai.api.routers.ai_report import router as ai_report_router
 from finguardops_ai.api.routers.health import router as health_router
 from finguardops_ai.api.routers.rule_analysis import router as rule_analysis_router
 from finguardops_ai.core.config import get_settings
+from finguardops_ai.core.telemetry import TelemetryMiddleware, configure_telemetry
 
 
 def create_app() -> FastAPI:
@@ -25,6 +26,8 @@ def create_app() -> FastAPI:
     application.include_router(health_router, prefix=settings.api_prefix)
     application.include_router(rule_analysis_router, prefix=settings.api_prefix)
     application.include_router(ai_report_router, prefix=settings.api_prefix)
+    if configure_telemetry():
+        application.add_middleware(TelemetryMiddleware)
     return application
 
 

@@ -1,0 +1,66 @@
+services:
+  backend:
+    environment:
+      SPRING_PROFILES_ACTIVE: local,external-risk-http,prometheus,observability-local
+      JAVA_TOOL_OPTIONS: -javaagent:/opt/otel/javaagent.jar
+      OTEL_SERVICE_NAME: backend
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=local
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_EXPORTER: otlp
+      OTEL_LOGS_EXPORTER: otlp
+      OTEL_METRICS_EXPORTER: none
+      OTEL_TRACES_SAMPLER: always_on
+      OTEL_BSP_MAX_QUEUE_SIZE: "256"
+      OTEL_BSP_MAX_EXPORT_BATCH_SIZE: "32"
+      OTEL_BSP_SCHEDULE_DELAY: "1000"
+      OTEL_BLRP_MAX_QUEUE_SIZE: "256"
+      OTEL_BLRP_MAX_EXPORT_BATCH_SIZE: "32"
+      OTEL_BLRP_SCHEDULE_DELAY: "1000"
+      OTEL_EXPORTER_OTLP_TIMEOUT: "2000"
+
+  ai-service:
+    command: [--host, 0.0.0.0, --port, "8000", --no-access-log]
+    environment:
+      FINGUARDOPS_AI_OBSERVABILITY_ENABLED: "true"
+      FINGUARDOPS_AI_OTLP_ENDPOINT: http://otel-collector:4318
+    networks:
+      - observability
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.162.0@sha256:39923a8e431bd1f57be82411999d389fcfe40857492e4365456d97a4c1f74be6
+    command: [--config=/etc/otelcol-contrib/config.yaml]
+    volumes:
+      - ./otel-collector/config.yml:/etc/otelcol-contrib/config.yaml:ro
+    expose: ["4318", "13133", "8888"]
+    mem_limit: 256m
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    networks: [application, observability]
+
+  loki:
+    image: grafana/loki:3.7.8@sha256:1107dd5274e0ada47e42472b7a7e71f3b2a2fe878878108f3e2f9e51528f0193
+    command: [-config.file=/etc/loki/config.yaml]
+    volumes:
+      - ./loki/config.yml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    expose: ["3100"]
+    mem_limit: 512m
+    security_opt: ["no-new-privileges:true"]
+    networks: [observability]
+
+  tempo:
+    image: grafana/tempo:2.9.5@sha256:785fd6c81d7f26ff0973208cd7093ac6030e13946c288612ff32f02416941d3a
+    command: [-config.file=/etc/tempo/config.yaml]
+    volumes:
+      - ./tempo/config.yml:/etc/tempo/config.yaml:ro
+      - tempo-data:/var/tempo
+    expose: ["3200", "4318"]
+    mem_limit: 512m
+    security_opt: ["no-new-privileges:true"]
+    networks: [observability]
+
+volumes:
+  loki-data:
+  tempo-data:

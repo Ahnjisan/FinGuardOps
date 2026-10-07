@@ -1,0 +1,5 @@
+# Active only in the local observability Compose overlay. The Java agent owns
+# trace and log export; Prometheus retains the existing metrics path.
+logging:
+  level:
+    io.opentelemetry: WARN

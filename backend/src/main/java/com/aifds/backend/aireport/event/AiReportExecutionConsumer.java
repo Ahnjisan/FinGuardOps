@@ -4,6 +4,9 @@ import com.aifds.backend.aireport.entity.AiReportStatus;
 import com.aifds.backend.aireport.repository.AiReportExecutionRepository;
 import com.aifds.backend.aireport.service.AiReportWorker;
 import com.aifds.backend.observability.AiReportKafkaMetrics;
+import com.aifds.backend.observability.LocalTrace;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.support.Acknowledgment;
@@ -14,6 +17,7 @@ import org.springframework.stereotype.Component;
 @Component
 @ConditionalOnProperty(prefix = "finguardops.kafka", name = "enabled", havingValue = "true")
 public class AiReportExecutionConsumer {
+    private static final Logger LOGGER = LoggerFactory.getLogger(AiReportExecutionConsumer.class);
     private final AiReportExecutionCreatedCodec codec;
     private final AiReportExecutionRepository executions;
     private final AiReportWorker worker;
@@ -37,6 +41,8 @@ public class AiReportExecutionConsumer {
         if (!executions.matches(event)) {
             throw new AiReportExecutionCreatedCodec.InvalidEventException("event DB relationship");
         }
+        LOGGER.info("event=ai_report_kafka_received executionId={} eventId={} otelTraceId={}",
+                event.executionId(), event.eventId(), LocalTrace.currentTraceId());
         AiReportWorker.StartResult result = worker.runExecution(event.executionId());
         if (result == AiReportWorker.StartResult.UNAVAILABLE) {
             metrics.failed();
@@ -51,5 +57,7 @@ public class AiReportExecutionConsumer {
             metrics.processed();
         }
         ack.acknowledge();
+        LOGGER.info("event=ai_report_kafka_acked executionId={} result={} otelTraceId={}",
+                event.executionId(), result, LocalTrace.currentTraceId());
     }
 }
