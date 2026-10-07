@@ -11,6 +11,7 @@ import { TransactionDetailPage } from "../pages/TransactionDetailPage";
 import { TransactionListPage } from "../pages/TransactionListPage";
 import { AiOperationsPage } from "../pages/AiOperationsPage";
 import { AiRequestDetailPage } from "../pages/AiRequestDetailPage";
+import { AiDlqRecoveryPage } from "../pages/AiDlqRecoveryPage";
 
 export const routes: RouteObject[] = [
   {
@@ -96,6 +97,9 @@ export const routes: RouteObject[] = [
       </RequireCapability> },
       { path: "ai-operations/:aiRequestId", element: <RequireCapability capability="ai-operations:view">
         <AiRequestDetailPage />
+      </RequireCapability> },
+      { path: "ai-operations/dlq", element: <RequireCapability capability="ai-operations:view">
+        <AiDlqRecoveryPage />
       </RequireCapability> },
       { path: "auth/callback", element: <AuthCallbackPage /> },
       { path: "*", element: <NotFoundPage /> },

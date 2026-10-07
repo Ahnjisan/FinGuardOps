@@ -34,6 +34,7 @@ export function AiOperationsPage() {
   }
   const page = list.data?.page;
   return <section className="ai-operations" aria-labelledby="ai-operations-title">
+    <Link to="/ai-operations/dlq">AI 리포트 DLQ 단건 복구</Link>
     <h2 id="ai-operations-title">AI 요청 사용량</h2>
     <p>호출 수는 영속 기록된 attempt 수입니다. 중단으로 기록되지 않은 호출은 포함되지 않을 수 있습니다.</p>
     <form onSubmit={apply} className="ai-operations__filters">

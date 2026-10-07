@@ -1188,3 +1188,35 @@ outbox·실행·모든 연결 요청을 잠그고 현재 상태와 v1 payload/DB
 재대기 API는 Provider를 직접 호출하거나 실행 상태를 되돌리지 않는다. 이후 기존
 polling/Kafka Worker가 `PENDING` 실행을 처리할 수 있다. `PUBLISHED`는 broker 발행
 표시이며 consumer 또는 리포트 완료를 뜻하지 않는다. DLQ 재투입은 이 API의 범위 밖이다.
+
+## Issue #365: AI 리포트 DLQ 단건 복구
+
+Kafka가 활성인 로컬 환경에서 `PLATFORM_ADMIN`은 `ai-operations:read`로
+`GET /api/v1/ai-report-dlq/{topicId}/{partition}/{offset}`를 조회한다.
+`topicId`는 현재 DLQ topic UUID이며 `partition`과 `offset`은 0 이상의 정수다.
+조회는 지정 좌표 한 건만 읽고 운영 조회용 consumer는 원본 group offset을 commit하지 않는다.
+응답은 `topicId`, `partition`, `offset`, `failureCategory`, `sourceVerified`,
+`sourceRecovered`, `eventId`, `executionId`, `executionStatus`, `reportExists`,
+`attemptExists`, `action`, `dispatchStatus`, `startSource`, `ackPartition`,
+`ackOffset`, `replayAllowed`, `rejectionReason`, `traceId`만 포함한다. 유효하지 않은
+event의 ID·상태는 null 또는 false다. `UNKNOWN`과 구형 메시지는 payload가 형식상
+유효해도 재처리할 수 없다. payload·임의 header·JWT·고객/계좌·Prompt·Provider
+원문과 모델 출력은 응답·화면·로그에 포함하지 않는다.
+
+`ai-dlq:action` 권한의 `POST /api/v1/ai-report-dlq/{topicId}/{partition}/{offset}/quarantine`
+및 `/replay`는 `{"observedCategory":"<조회한 분류>"}`만 받는다. 격리는 Kafka
+삭제나 offset 변경이 아닌 V20 append-only 운영 조치다. replay는 신규 v1 metadata의
+`PRE_CLAIM_TRANSIENT`에 한하여 현재 source topic ID·원본 group recovered offset,
+V18 canonical event와 V15 실행·최초/공유 요청 관계, `PENDING`·lease 부재,
+결과·Provider attempt 부재 및 동일 event의 기존 승인 부재를 거래 안에서 재검증한다.
+`202`는 DB 발행 의도 수락이며 Kafka 발행·Consumer 시작·Provider·리포트 완료가 아니다.
+중복·상태 경합·관계 불일치는 `409`, 형식 오류는 `400`, broker 조회 불가는 `503`이다.
+topic 재생성·retention으로 좌표가 달라진 경우도 `409`이며 재처리하지 않는다.
+
+Dispatcher는 승인된 의도의 V18 canonical event만 기존 topic에 발행한다. `PENDING`,
+`CLAIMED`, `ACKED`, `BLOCKED`, `SKIPPED`는 발행 의도 상태이며 실행 상태와 다르다.
+`ackPartition`·`ackOffset`은 broker ack가 DB에 기록된 때만 있다. ack 뒤 DB 기록 전
+중단하면 재발행될 수 있다. 기존 Consumer의 claim과 결과 고유 제약으로 업무 중복을
+막지만 Kafka 발행 또는 Provider 호출의 exactly-once를 보장하지 않는다. Worker
+시작 경로 `KAFKA`·`POLLING`은 실제 claim에 기록되며, 리포트의 최종 상태를 별도로
+조회해야 한다. #363 `BLOCKED` outbox 재대기 API·이력과는 별개다.

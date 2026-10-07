@@ -32,10 +32,12 @@ import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
 import jakarta.persistence.EntityManager;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.admin.RecordsToDelete;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.flywaydb.core.Flyway;
@@ -89,7 +91,7 @@ class AiReportKafkaIntegrationTest {
             }
             var source = new DriverManagerDataSource(postgres.getJdbcUrl(),
                     postgres.getUsername(), postgres.getPassword());
-            assertEquals(19, Flyway.configure().dataSource(source)
+            assertEquals(20, Flyway.configure().dataSource(source)
                     .locations("classpath:db/migration").load().migrate().migrationsExecuted);
             var jdbc = new JdbcTemplate(source);
             var manager = new DataSourceTransactionManager(source);
@@ -206,7 +208,10 @@ class AiReportKafkaIntegrationTest {
                 assertEquals(1, outbox.count("PUBLISHED"));
 
                 var errorHandler = new AiReportKafkaConfiguration()
-                        .aiReportKafkaErrorHandler(kafka, properties, metrics);
+                        .aiReportKafkaErrorHandler(kafka, properties, metrics,
+                                new com.aifds.backend.aireport.dlq.AiReportDlqReader(bootstrap, properties));
+                var dlqReader = new com.aifds.backend.aireport.dlq.AiReportDlqReader(bootstrap, properties);
+                UUID dlqTopicId = dlqReader.topicId(DLQ);
                 try (var deadLetters = receiver(bootstrap, DLQ)) {
                     var absent = AiReportExecutionCreated.newExecution(UUID.randomUUID(),
                             UUID.randomUUID(), UUID.randomUUID(), 1, "prompt-1", "model-1",
@@ -234,8 +239,47 @@ class AiReportKafkaIntegrationTest {
                         var quarantined = awaitRecord(deadLetters);
                         assertEquals(poison.key(), quarantined.key());
                         assertEquals(poison.value(), quarantined.value());
+                        if (scenario == 2) {
+                            var oversizedOffset = quarantined.offset();
+                            assertEquals("AI_DLQ_RECORD_INVALID", assertThrows(
+                                    com.aifds.backend.aireport.exception.AiReportException.class,
+                                    () -> dlqReader.read(dlqTopicId, quarantined.partition(),
+                                            oversizedOffset)).code());
+                        } else {
+                            var inspected = dlqReader.read(dlqTopicId, quarantined.partition(),
+                                    quarantined.offset());
+                            assertEquals("INVALID_EVENT", inspected.metadata().category());
+                            assertTrue(inspected.sourceVerified());
+                            assertEquals(poison.offset(), inspected.metadata().sourceOffset());
+                        }
                         receiver.commitSync();
                     }
+                    kafka.send(TOPIC, null, null).get(10, TimeUnit.SECONDS);
+                    var nullSource = awaitRecord(receiver);
+                    assertNull(nullSource.key());
+                    assertNull(nullSource.value());
+                    assertTrue(errorHandler.handleOne(
+                            new AiReportExecutionCreatedCodec.InvalidEventException("null payload"),
+                            nullSource, mock(org.apache.kafka.clients.consumer.Consumer.class),
+                            mock(org.springframework.kafka.listener.MessageListenerContainer.class)));
+                    var nullDlq = awaitRecord(deadLetters);
+                    assertNull(nullDlq.key());
+                    assertNull(nullDlq.value());
+                    assertEquals("INVALID_EVENT", dlqReader.read(dlqTopicId,
+                            nullDlq.partition(), nullDlq.offset()).metadata().category());
+                    try (AdminClient admin = AdminClient.create(Map.of("bootstrap.servers", bootstrap))) {
+                        admin.deleteRecords(Map.of(new TopicPartition(DLQ, 0),
+                                RecordsToDelete.beforeOffset(1))).all().get(30, TimeUnit.SECONDS);
+                    }
+                    assertEquals("AI_DLQ_OFFSET_UNAVAILABLE", assertThrows(
+                            com.aifds.backend.aireport.exception.AiReportException.class,
+                            () -> dlqReader.read(dlqTopicId, 0, 0)).code());
+                    assertEquals("AI_DLQ_TOPIC_CHANGED", assertThrows(
+                            com.aifds.backend.aireport.exception.AiReportException.class,
+                            () -> dlqReader.read(UUID.randomUUID(), 0, 0)).code());
+                    assertEquals("AI_DLQ_OFFSET_UNAVAILABLE", assertThrows(
+                            com.aifds.backend.aireport.exception.AiReportException.class,
+                            () -> dlqReader.read(dlqTopicId, 0, 1000000)).code());
                 }
                 verify(client, times(1)).generate(input);
                 kafka.send(TOPIC, record.key(), record.value()).get(10, TimeUnit.SECONDS);
@@ -318,6 +362,11 @@ class AiReportKafkaIntegrationTest {
                     admin.createTopics(List.of(new NewTopic(TOPIC, 1, (short) 1),
                             new NewTopic(DLQ, 1, (short) 1))).all().get(30, TimeUnit.SECONDS);
                 }
+                UUID recreatedDlqTopicId = awaitTopicId(dlqReader, DLQ);
+                assertNotEquals(dlqTopicId, recreatedDlqTopicId);
+                assertEquals("AI_DLQ_TOPIC_CHANGED", assertThrows(
+                        com.aifds.backend.aireport.exception.AiReportException.class,
+                        () -> dlqReader.read(dlqTopicId, 0, 0)).code());
                 when(client.generate(secondInput)).thenReturn(new AiReportDtos.GenerationResult(
                         "FALLBACK_COMPLETED", "TEMPLATE_FALLBACK",
                         new AiReportDtos.Content("Second synthetic report",
@@ -453,6 +502,19 @@ class AiReportKafkaIntegrationTest {
             Thread.sleep(100);
         }
         throw new AssertionError("Kafka listener did not finish the report");
+    }
+
+    private UUID awaitTopicId(com.aifds.backend.aireport.dlq.AiReportDlqReader reader,
+                              String topic) throws InterruptedException {
+        long deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos();
+        while (true) {
+            try {
+                return reader.topicId(topic);
+            } catch (com.aifds.backend.aireport.exception.AiReportException unavailable) {
+                if (System.nanoTime() >= deadline) throw unavailable;
+                Thread.sleep(250);
+            }
+        }
     }
 
     @SuppressWarnings("unchecked")

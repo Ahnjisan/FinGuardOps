@@ -1430,3 +1430,18 @@ Kafka Topic, Partition과 Consumer Group은 이벤트 요구가 확정된 뒤 �
 - GitHub Actions, Kubernetes와 AWS 단계별 승인 및 검증 범위
 
 후속 문서는 본 문서의 책임과 데이터 소유권을 변경하지 않는 범위에서 구체화한다. 변경이 필요하면 사용자 승인과 ADR을 통해 근거를 기록한다.
+
+## Issue #365 로컬 AI 리포트 DLQ 복구 경계
+
+AI 실행 생성 이벤트 한 종류에서 Consumer 실패 시 제한된 v1 DLQ metadata를 기록한다.
+출처 topic ID·partition·offset·group과 코드가 판정한 실패 분류만 전파하고 원본의
+임의 header는 복사하지 않는다. 운영자는 DLQ 좌표 한 건을 별도 `assign/seek`
+consumer로 읽으며 업무 consumer group offset을 변경하지 않는다.
+
+Spring Boot가 PostgreSQL V20 조치와 재처리 발행 의도를 소유한다. 재처리 승인은
+현재 메시지·V18 canonical event·V15 실행/요청의 정합성을 잠금 아래 확인한 후
+DB 거래만 commit한다. Dispatcher는 canonical event를 Kafka로 at-least-once
+발행하고 Worker의 기존 claim이 업무 중복을 제어한다. broker ack와 DB 기록은
+원자적이지 않다. 격리는 논리적 운영 기록이며 DLQ 삭제나 offset 변경이 아니다.
+Kafka/Polling 시작 경로, 발행 ack, 실행·리포트 최종 상태는 별개의 관측값이다.
+거래·사건 상태와 업무 Audit, #363 BLOCKED outbox 재대기 책임은 변경하지 않는다.

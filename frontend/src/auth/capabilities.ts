@@ -34,6 +34,7 @@ export type UiCapability =
   | "ai-report:create"
   | "ai-operations:view"
   | "ai-outbox:requeue"
+  | "ai-dlq:action"
   | "ai-usage:view";
 
 /**
@@ -52,6 +53,7 @@ export const UI_CAPABILITIES: readonly UiCapability[] = Object.freeze<UiCapabili
   "ai-report:create",
   "ai-operations:view",
   "ai-outbox:requeue",
+  "ai-dlq:action",
   "ai-usage:view",
 ]);
 
@@ -88,7 +90,7 @@ const ROLE_CAPABILITIES: ReadonlyMap<UserRole, readonly UiCapability[]> = new Ma
   ],
   ["RULE_OPERATOR", Object.freeze<UiCapability[]>([])],
   ["RECOVERY_OPERATOR", Object.freeze<UiCapability[]>([])],
-  ["PLATFORM_ADMIN", Object.freeze<UiCapability[]>(["ai-operations:view", "ai-outbox:requeue", "ai-usage:view"])],
+  ["PLATFORM_ADMIN", Object.freeze<UiCapability[]>(["ai-operations:view", "ai-outbox:requeue", "ai-dlq:action", "ai-usage:view"])],
 ]);
 
 /**

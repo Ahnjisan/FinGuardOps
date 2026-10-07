@@ -311,7 +311,8 @@ describe("authorized transport — Authorization on approved endpoints only", ()
       const client = createLocalFakeAuthClient();
       const params: Record<string, string> = {};
       for (const name of descriptor.paramNames) {
-        params[name] = name === "caseId" ? CASE_ID : TRANSACTION_ID;
+        params[name] = name === "caseId" ? CASE_ID : name === "partition" ? "0" :
+          name === "offset" ? "1" : TRANSACTION_ID;
       }
 
       await sendAuthorizedBackendRequest(client, {

@@ -60,4 +60,14 @@ class AiReportExecutionConsumerTest {
         verifyNoInteractions(worker);
         verifyNoInteractions(ack);
     }
+
+    @Test
+    void databaseResourceFailureBeforeClaimHasTypedTransientCategoryAndNoAck() {
+        when(executions.matches(event)).thenThrow(
+                new org.springframework.dao.DataAccessResourceFailureException("unavailable"));
+        assertThrows(PreClaimTransientException.class,
+                () -> consumer.consume(codec.encode(event), event.executionId().toString(), ack));
+        verifyNoInteractions(worker);
+        verifyNoInteractions(ack);
+    }
 }

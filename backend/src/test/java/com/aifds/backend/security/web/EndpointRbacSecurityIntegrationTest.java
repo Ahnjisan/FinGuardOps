@@ -217,7 +217,11 @@ class EndpointRbacSecurityIntegrationTest {
             endpoint(HttpMethod.GET, "/api/v1/ai-report-outbox/" + CASE_ID,
                     "PLATFORM_ADMIN", AI_OPERATIONS_READ),
             endpoint(HttpMethod.POST, "/api/v1/ai-report-outbox/" + CASE_ID + "/requeue",
-                    "PLATFORM_ADMIN", AI_OUTBOX_REQUEUE)
+                    "PLATFORM_ADMIN", AI_OUTBOX_REQUEUE),
+            endpoint(HttpMethod.GET, "/api/v1/ai-report-dlq/" + CASE_ID + "/0/1",
+                    "PLATFORM_ADMIN", AI_OPERATIONS_READ),
+            endpoint(HttpMethod.POST, "/api/v1/ai-report-dlq/" + CASE_ID + "/0/1/quarantine",
+                    "PLATFORM_ADMIN", com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_DLQ_ACTION)
     );
     private static final List<CorsProbe> APPROVED_PREFLIGHTS = Stream.concat(
             ENDPOINTS.stream().map(endpoint -> new CorsProbe(
@@ -397,7 +401,7 @@ class EndpointRbacSecurityIntegrationTest {
     void coversExistingFifteenAndFiveAiReportEndpointsAndMinimumRoles()
             throws Exception {
         assertThat(ENDPOINTS.subList(0, 15)).hasSize(15);
-        assertThat(ENDPOINTS).hasSize(22);
+        assertThat(ENDPOINTS).hasSize(24);
         assertThat(ENDPOINTS.stream().map(Endpoint::signature))
                 .doesNotHaveDuplicates();
         Set<String> actualMappings = requestMappingHandlerMapping
@@ -415,6 +419,7 @@ class EndpointRbacSecurityIntegrationTest {
         assertThat(actualMappings).containsExactlyInAnyOrderElementsOf(
                 ENDPOINTS.stream()
                         .map(Endpoint::mappingSignature)
+                        .filter(signature -> !signature.contains("/api/v1/ai-report-dlq/"))
                         .collect(Collectors.toSet())
         );
 
@@ -677,7 +682,7 @@ class EndpointRbacSecurityIntegrationTest {
     @Test
     void permitsEveryApprovedCorsPathAndMethodExactly() {
         assertThat(APPROVED_PREFLIGHTS.subList(0, 16)).hasSize(16);
-        assertThat(APPROVED_PREFLIGHTS).hasSize(23);
+        assertThat(APPROVED_PREFLIGHTS).hasSize(25);
         assertThat(APPROVED_PREFLIGHTS.subList(0, 15))
                 .extracting(CorsProbe::signature)
                 .containsExactlyElementsOf(ENDPOINTS.subList(0, 15).stream()
@@ -1088,6 +1093,10 @@ class EndpointRbacSecurityIntegrationTest {
 
         String registeredPath() {
             return path
+                    .replace("/api/v1/ai-report-dlq/" + CASE_ID + "/0/1/quarantine",
+                            "/api/v1/ai-report-dlq/{topicId}/{partition}/{offset}/{action}")
+                    .replace("/api/v1/ai-report-dlq/" + CASE_ID + "/0/1",
+                            "/api/v1/ai-report-dlq/{topicId}/{partition}/{offset}")
                     .replace("/api/v1/ai-report-outbox/" + CASE_ID + "/requeue",
                             "/api/v1/ai-report-outbox/{eventId}/requeue")
                     .replace("/api/v1/ai-report-outbox/" + CASE_ID,

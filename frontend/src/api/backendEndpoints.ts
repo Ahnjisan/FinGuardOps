@@ -57,12 +57,16 @@ export type BackendEndpointKey =
   | "ai-operations-detail"
   | "ai-outbox-diagnostic"
   | "ai-outbox-requeue"
+  | "ai-dlq-diagnostic"
+  | "ai-dlq-quarantine"
+  | "ai-dlq-replay"
   | "ai-usage-list"
   | "ai-usage-summary";
 
 export type BackendHttpMethod = "GET" | "PATCH" | "POST";
 
-export type BackendPathParamName = "transactionId" | "caseId" | "aiRequestId" | "executionId" | "eventId";
+export type BackendPathParamName = "transactionId" | "caseId" | "aiRequestId" | "executionId" | "eventId"
+  | "topicId" | "partition" | "offset";
 
 export type BackendPathParams = Readonly<Record<string, string>>;
 
@@ -342,7 +346,7 @@ export interface BackendEndpointDescriptor {
   readonly acceptsJsonBody: boolean;
 }
 
-const PARAM_NAMES: readonly BackendPathParamName[] = ["transactionId", "caseId", "aiRequestId", "executionId", "eventId"];
+const PARAM_NAMES: readonly BackendPathParamName[] = ["transactionId", "caseId", "aiRequestId", "executionId", "eventId", "topicId", "partition", "offset"];
 
 function isParamName(value: string): value is BackendPathParamName {
   return (PARAM_NAMES as readonly string[]).includes(value);
@@ -555,6 +559,9 @@ const REGISTRY: Readonly<Record<BackendEndpointKey, BackendEndpointDescriptor>> 
   "ai-operations-detail": describe("ai-operations-detail", "GET", "/api/v1/ai-report-requests/{aiRequestId}"),
   "ai-outbox-diagnostic": describe("ai-outbox-diagnostic", "GET", "/api/v1/ai-report-outbox/{executionId}"),
   "ai-outbox-requeue": describe("ai-outbox-requeue", "POST", "/api/v1/ai-report-outbox/{eventId}/requeue"),
+  "ai-dlq-diagnostic": describe("ai-dlq-diagnostic", "GET", "/api/v1/ai-report-dlq/{topicId}/{partition}/{offset}"),
+  "ai-dlq-quarantine": describe("ai-dlq-quarantine", "POST", "/api/v1/ai-report-dlq/{topicId}/{partition}/{offset}/quarantine"),
+  "ai-dlq-replay": describe("ai-dlq-replay", "POST", "/api/v1/ai-report-dlq/{topicId}/{partition}/{offset}/replay"),
   "ai-usage-list": describe("ai-usage-list", "GET", "/api/v1/ai-report-usage", AI_USAGE_LIST_QUERY),
   "ai-usage-summary": describe("ai-usage-summary", "GET", "/api/v1/ai-report-usage/summary", AI_USAGE_FILTERS),
 });
@@ -741,10 +748,19 @@ function resolveParamValue(
     throw new RequestNotAllowedError();
   }
   const value: unknown = params[name];
-  if (typeof value !== "string" || !isCanonicalUuidV4(value)) {
+  if (typeof value !== "string" || !approvedPathValue(name, value)) {
     throw new RequestNotAllowedError();
   }
   return value;
+}
+
+function approvedPathValue(name: BackendPathParamName, value: string): boolean {
+  if (name === "partition" || name === "offset") {
+    return /^(0|[1-9][0-9]*)$/.test(value) && Number.isSafeInteger(Number(value)) &&
+      (name !== "partition" || Number(value) <= 2147483647);
+  }
+  if (name === "topicId") return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
+  return isCanonicalUuidV4(value);
 }
 
 export interface BackendRequestTarget {
@@ -950,7 +966,7 @@ export function findApprovedBackendRequest(
           matched = false;
           break;
         }
-      } else if (isCanonicalUuidV4(part)) {
+      } else if (approvedPathValue(segment.name, part)) {
         params[segment.name] = part;
       } else {
         matched = false;
