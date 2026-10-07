@@ -54,7 +54,8 @@ public enum FinGuardOpsRole {
             FinGuardOpsPrincipal.Type.USER,
             FinGuardOpsAuthority.PLATFORM_READ,
             FinGuardOpsAuthority.AI_OPERATIONS_READ,
-            FinGuardOpsAuthority.AI_USAGE_READ
+            FinGuardOpsAuthority.AI_USAGE_READ,
+            FinGuardOpsAuthority.AI_OUTBOX_REQUEUE
     ),
     TRANSACTION_INGESTOR(
             FinGuardOpsPrincipal.Type.SERVICE,

@@ -21,6 +21,7 @@ public final class FinGuardOpsAuthority {
     public static final String PLATFORM_READ = "platform:read";
     public static final String AI_OPERATIONS_READ = "ai-operations:read";
     public static final String AI_USAGE_READ = "ai-usage:read";
+    public static final String AI_OUTBOX_REQUEUE = "ai-outbox:requeue";
     public static final String TRANSACTION_INTAKE = "transaction:intake";
     public static final String BEHAVIOR_EVENT_INTAKE =
             "behavior-event:intake";

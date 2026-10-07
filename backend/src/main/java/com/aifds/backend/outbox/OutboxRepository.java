@@ -7,6 +7,7 @@ import org.springframework.stereotype.Repository;
 
 import java.util.Optional;
 import java.util.UUID;
+import java.time.Instant;
 
 @Repository
 public class OutboxRepository {
@@ -24,6 +25,37 @@ public class OutboxRepository {
                 VALUES (?,?,?, ?,?::jsonb)
                 """, event.eventId(), event.eventType(), event.eventVersion(),
                 event.executionId(), codec.encode(event));
+    }
+
+    public Optional<RecoveryRow> recoveryRow(UUID eventId, boolean lock) {
+        String sql = """
+                SELECT id,event_id,execution_id,event_type,event_version,payload::text,status,
+                       attempt_count,last_failure_code,claim_token,lease_until,published_at
+                FROM ai_report_outbox WHERE event_id=?
+                """ + (lock ? " FOR UPDATE NOWAIT" : "");
+        return jdbc.query(sql, (row, ignored) -> new RecoveryRow(
+                row.getLong("id"), row.getObject("event_id", UUID.class),
+                row.getObject("execution_id", UUID.class), row.getString("event_type"),
+                row.getInt("event_version"), row.getString("payload"),
+                row.getString("status"), row.getInt("attempt_count"),
+                row.getString("last_failure_code"), row.getObject("claim_token", UUID.class),
+                row.getTimestamp("lease_until") == null ? null : row.getTimestamp("lease_until").toInstant(),
+                row.getTimestamp("published_at") == null ? null : row.getTimestamp("published_at").toInstant()),
+                eventId).stream().findFirst();
+    }
+
+    public Optional<UUID> eventIdForExecution(UUID executionId) {
+        return jdbc.query("SELECT event_id FROM ai_report_outbox WHERE execution_id=?",
+                (row, ignored) -> row.getObject(1, UUID.class), executionId).stream().findFirst();
+    }
+
+    public boolean requeueBlocked(long id, UUID eventId, UUID executionId) {
+        return jdbc.update("""
+                UPDATE ai_report_outbox SET status='PENDING',attempt_count=0,next_attempt_at=now(),
+                    claim_token=NULL,lease_until=NULL,published_at=NULL,last_failure_code=NULL
+                WHERE id=? AND event_id=? AND execution_id=? AND status='BLOCKED'
+                  AND claim_token IS NULL AND lease_until IS NULL AND published_at IS NULL
+                """, id, eventId, executionId) == 1;
     }
 
     public Optional<Claim> claim(int leaseSeconds) {
@@ -88,4 +120,8 @@ public class OutboxRepository {
 
     public record Claim(long id, UUID eventId, UUID executionId, String payload,
                         UUID token, int attemptCount) { }
+    public record RecoveryRow(long id, UUID eventId, UUID executionId, String eventType,
+                              int eventVersion, String payload, String status, int attemptCount,
+                              String failureCode, UUID claimToken, Instant leaseUntil,
+                              Instant publishedAt) { }
 }

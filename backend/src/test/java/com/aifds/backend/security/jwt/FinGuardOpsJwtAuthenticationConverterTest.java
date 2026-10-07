@@ -16,6 +16,7 @@ import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_OPERA
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_REPORT_CREATE;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_REPORT_READ;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_USAGE_READ;
+import static com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_OUTBOX_REQUEUE;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.BEHAVIOR_EVENT_INTAKE;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.BEHAVIOR_EVENT_READ;
 import static com.aifds.backend.security.principal.FinGuardOpsAuthority.CASE_AUDIT_READ;
@@ -119,7 +120,7 @@ class FinGuardOpsJwtAuthenticationConverterTest {
                 FinGuardOpsRole.RECOVERY_OPERATOR,
                 Set.of(RECOVERY_INSPECT, RECOVERY_EXECUTE),
                 FinGuardOpsRole.PLATFORM_ADMIN,
-                Set.of(PLATFORM_READ, AI_OPERATIONS_READ, AI_USAGE_READ),
+                Set.of(PLATFORM_READ, AI_OPERATIONS_READ, AI_USAGE_READ, AI_OUTBOX_REQUEUE),
                 FinGuardOpsRole.TRANSACTION_INGESTOR,
                 Set.of(TRANSACTION_INTAKE),
                 FinGuardOpsRole.BEHAVIOR_INGESTOR,

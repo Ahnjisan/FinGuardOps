@@ -1,5 +1,5 @@
 import { createElement, type ReactNode } from "react";
-import { render, renderHook, waitFor } from "@testing-library/react";
+import { act, render, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { AuthSession } from "../auth/authClient";
 import { AuthContext, type AuthContextValue } from "../auth/authContext";
@@ -20,7 +20,7 @@ vi.mock("./aiOperationsApi", async (importOriginal) => {
     } };
 });
 
-const { useAiUsage } = await import("./useAiOperations");
+const { useAiUsage, useAiOutbox } = await import("./useAiOperations");
 const session: AuthSession = { subject: "6f1e0b6c-3a2b-4c8d-9e0f-1a2b3c4d5e6f",
   roles: ["PLATFORM_ADMIN"] };
 
@@ -65,6 +65,48 @@ beforeEach(() => {
   probe.summaryQueries.length = 0;
 });
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
+
+it("classifies forbidden diagnosis without retaining a requeue action", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 403 })));
+  const client = adapter.client as FakeAuthClient;
+  const view = renderHook(() => useAiOutbox("33333333-3333-4333-8333-333333333333"),
+    { wrapper: authenticatedWrapper(client) });
+  await waitFor(() => expect(view.result.current.error).toBe("forbidden"));
+  expect(view.result.current.data).toBeNull();
+});
+
+it("classifies requeue conflict and refreshes before another action", async () => {
+  const executionId = "33333333-3333-4333-8333-333333333333";
+  const diagnostic = { eventId: "44444444-4444-4444-8444-444444444444", executionId,
+    outboxStatus: "BLOCKED", attemptCount: 10, failureCode: "PUBLISH_FAILED",
+    executionStatus: "PENDING", executionFailureCode: null,
+    requests: [{ aiRequestId: executionId, status: "PENDING" }],
+    reportExists: false, attemptExists: false, requeueAllowed: true,
+    rejectionReason: null, previouslyRequeued: false, traceId: "trace-query-001" };
+  let reads = 0;
+  let releaseRefresh: ((response: Response) => void) | undefined;
+  const fetch = vi.fn((request: Request) => {
+    if (request.method === "POST") return Promise.resolve(new Response(null, { status: 409 }));
+    reads += 1;
+    if (reads === 1) return Promise.resolve(jsonResponse(diagnostic));
+    return new Promise<Response>((resolve) => { releaseRefresh = resolve; });
+  });
+  vi.stubGlobal("fetch", fetch);
+  const client = adapter.client as FakeAuthClient;
+  const view = renderHook(() => useAiOutbox(executionId),
+    { wrapper: authenticatedWrapper(client) });
+  await waitFor(() => expect(view.result.current.data?.requeueAllowed).toBe(true));
+  await act(async () => { await view.result.current.requeue(); });
+  expect(view.result.current.error).toBe("conflict");
+  await waitFor(() => expect(reads).toBe(2));
+  await act(async () => {
+    releaseRefresh?.(jsonResponse({ ...diagnostic, outboxStatus: "PUBLISHED",
+      requeueAllowed: false, rejectionReason: "OUTBOX_NOT_BLOCKED" }));
+  });
+  await waitFor(() => expect(view.result.current.data?.requeueAllowed).toBe(false));
+  expect(view.result.current.error).toBeNull();
+  expect(fetch).toHaveBeenCalledTimes(3);
+});
 
 it("starts one list and one summary GET for the default 24-hour period without unset filters", async () => {
   const { requests, fetch } = observeRequests();

@@ -42,6 +42,8 @@ const EXPECTED: ReadonlyArray<{ key: string; method: string; template: string }>
   { key: "ai-report-current", method: "GET", template: "/api/v1/cases/{caseId}/ai-reports/current" },
   { key: "ai-report-create", method: "POST", template: "/api/v1/cases/{caseId}/ai-reports" },
   { key: "ai-operations-detail", method: "GET", template: "/api/v1/ai-report-requests/{aiRequestId}" },
+  { key: "ai-outbox-diagnostic", method: "GET", template: "/api/v1/ai-report-outbox/{executionId}" },
+  { key: "ai-outbox-requeue", method: "POST", template: "/api/v1/ai-report-outbox/{eventId}/requeue" },
   { key: "ai-usage-list", method: "GET", template: "/api/v1/ai-report-usage" },
   { key: "ai-usage-summary", method: "GET", template: "/api/v1/ai-report-usage/summary" },
 ];
@@ -55,8 +57,8 @@ function paramsFor(descriptor: BackendEndpointDescriptor): Record<string, string
 }
 
 describe("endpoint registry — exact method and path matrix", () => {
-  it("contains exactly the seventeen approved USER endpoints", () => {
-    expect(BACKEND_ENDPOINT_KEYS).toHaveLength(17);
+  it("contains exactly the nineteen approved USER endpoints", () => {
+    expect(BACKEND_ENDPOINT_KEYS).toHaveLength(19);
     expect([...BACKEND_ENDPOINT_KEYS].sort()).toEqual(EXPECTED.map((e) => e.key).sort());
   });
 
@@ -200,6 +202,8 @@ describe("URL assembly — approved requests", () => {
       `http://localhost:8080/api/v1/cases/${CASE_ID}/ai-reports/current`,
       `http://localhost:8080/api/v1/cases/${CASE_ID}/ai-reports`,
       `http://localhost:8080/api/v1/ai-report-requests/${TRANSACTION_ID}`,
+      `http://localhost:8080/api/v1/ai-report-outbox/${TRANSACTION_ID}`,
+      `http://localhost:8080/api/v1/ai-report-outbox/${TRANSACTION_ID}/requeue`,
       "http://localhost:8080/api/v1/ai-report-usage",
       "http://localhost:8080/api/v1/ai-report-usage/summary",
     ]);
@@ -632,6 +636,8 @@ describe("endpoint registry — declared query parameters", () => {
     "ai-report-current": [],
     "ai-report-create": [],
     "ai-operations-detail": [],
+    "ai-outbox-diagnostic": [],
+    "ai-outbox-requeue": [],
     "ai-usage-list": ["from", "to", "provider", "model", "reportStatus", "reportSource",
       "cacheHit", "fallbackUsed", "page", "size", "sort"],
     "ai-usage-summary": ["from", "to", "provider", "model", "reportStatus", "reportSource",

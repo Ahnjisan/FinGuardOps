@@ -55,12 +55,14 @@ export type BackendEndpointKey =
   | "ai-report-current"
   | "ai-report-create"
   | "ai-operations-detail"
+  | "ai-outbox-diagnostic"
+  | "ai-outbox-requeue"
   | "ai-usage-list"
   | "ai-usage-summary";
 
 export type BackendHttpMethod = "GET" | "PATCH" | "POST";
 
-export type BackendPathParamName = "transactionId" | "caseId" | "aiRequestId";
+export type BackendPathParamName = "transactionId" | "caseId" | "aiRequestId" | "executionId" | "eventId";
 
 export type BackendPathParams = Readonly<Record<string, string>>;
 
@@ -340,7 +342,7 @@ export interface BackendEndpointDescriptor {
   readonly acceptsJsonBody: boolean;
 }
 
-const PARAM_NAMES: readonly BackendPathParamName[] = ["transactionId", "caseId", "aiRequestId"];
+const PARAM_NAMES: readonly BackendPathParamName[] = ["transactionId", "caseId", "aiRequestId", "executionId", "eventId"];
 
 function isParamName(value: string): value is BackendPathParamName {
   return (PARAM_NAMES as readonly string[]).includes(value);
@@ -551,6 +553,8 @@ const REGISTRY: Readonly<Record<BackendEndpointKey, BackendEndpointDescriptor>> 
   "ai-report-current": describe("ai-report-current", "GET", "/api/v1/cases/{caseId}/ai-reports/current"),
   "ai-report-create": describe("ai-report-create", "POST", "/api/v1/cases/{caseId}/ai-reports"),
   "ai-operations-detail": describe("ai-operations-detail", "GET", "/api/v1/ai-report-requests/{aiRequestId}"),
+  "ai-outbox-diagnostic": describe("ai-outbox-diagnostic", "GET", "/api/v1/ai-report-outbox/{executionId}"),
+  "ai-outbox-requeue": describe("ai-outbox-requeue", "POST", "/api/v1/ai-report-outbox/{eventId}/requeue"),
   "ai-usage-list": describe("ai-usage-list", "GET", "/api/v1/ai-report-usage", AI_USAGE_LIST_QUERY),
   "ai-usage-summary": describe("ai-usage-summary", "GET", "/api/v1/ai-report-usage/summary", AI_USAGE_FILTERS),
 });

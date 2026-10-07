@@ -455,3 +455,16 @@ if ($downExit -ne 0) { throw 'Qwen project cleanup failed' }
 & docker network ls --filter "label=com.docker.compose.project=$qwenProject" --format '{{.Name}}'
 & docker volume ls --filter "label=com.docker.compose.project=$qwenProject" --format '{{.Name}}'
 ```
+# Issue #363 BLOCKED 단건 재대기 확인
+
+고유 Compose 프로젝트와 같은 실행의 `executionId`, `eventId`를 기록하고 PLATFORM_ADMIN
+JWT로 `GET /api/v1/ai-report-outbox/{executionId}`를 조회한다. `requeueAllowed=true`와
+연결 요청·실행 `PENDING`, 결과·attempt 부재, v1 관계를 확인한 경우에만
+`POST /api/v1/ai-report-outbox/{eventId}/requeue`에 관측한 `executionId`와 `BLOCKED`를
+전달한다. `202`는 DB `PENDING` 한 행과 V19 이력 한 행의 수락이다. broker 중단 중에도
+수락될 수 있으므로 발행·소비 완료로 기록하지 않는다. 같은 요청 반복이나 polling
+선점으로 조건이 바뀌면 `409`를 정상 거부로 기록한다. broker 복구 뒤 같은 ID의
+outbox·이력·실행·연결 요청, topic/group offset, 시작 경로 counter를 대조한다.
+`PUBLISHED`만으로 리포트 완료를 선언하지 않는다. token·payload·고객 식별자·Prompt·
+Provider 원문은 수집하지 않는다. 프로젝트 소유 컨테이너·네트워크·one-off만 종료하고
+PostgreSQL 및 Kafka volume은 보존한다. `down --volumes`와 prune은 사용하지 않는다.

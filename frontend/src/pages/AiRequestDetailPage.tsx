@@ -1,6 +1,6 @@
 import { Link, useLocation } from "react-router-dom";
 import { isCanonicalUuidV4 } from "../api/backendEndpoints";
-import { useAiRequestDetail } from "../api/useAiOperations";
+import { useAiOutbox, useAiRequestDetail } from "../api/useAiOperations";
 import { NotFoundPage } from "./NotFoundPage";
 
 export function AiRequestDetailPage() {
@@ -13,6 +13,7 @@ export function AiRequestDetailPage() {
 
 function Detail({ id }: { id: string }) {
   const state = useAiRequestDetail(id);
+  const outbox = useAiOutbox(state.data?.executionId ?? null);
   return <section className="ai-operations" aria-labelledby="ai-request-title">
     <Link to="/ai-operations">AI 요청 목록</Link><h2 id="ai-request-title">AI 요청 상세</h2>
     {state.loading ? <p>조회 중</p> : state.error ? <p role="alert">요청 상세를 조회하지 못했습니다.</p>
@@ -44,6 +45,29 @@ function Detail({ id }: { id: string }) {
             <td>{attempt.outcome}</td><td>{attempt.inputTokens ?? "미측정"}</td>
             <td>{attempt.outputTokens ?? "미측정"}</td><td>{attempt.latencyMs}</td>
           </tr>)}</tbody></table></div>}
+        {state.data.executionId && <section aria-label="AI outbox recovery">
+          <h3>AI outbox 진단</h3>
+          {outbox.error && <p role="alert">{outbox.error === "forbidden" ? "AI outbox 조회 또는 재대기 권한이 없습니다."
+            : outbox.error === "conflict" ? "재대기 조건이 변경됐습니다. 현재 상태를 다시 확인하세요."
+              : outbox.error === "not-found" ? "연결된 outbox를 찾지 못했습니다."
+                : "진단 또는 재대기 요청을 확인하지 못했습니다. 상태를 다시 조회하세요."}</p>}
+          {outbox.data ? <>
+            <dl><div><dt>이벤트 ID</dt><dd>{outbox.data.eventId}</dd></div>
+              <div><dt>Outbox 상태</dt><dd>{outbox.data.outboxStatus}</dd></div>
+              <div><dt>실행 상태</dt><dd>{outbox.data.executionStatus ?? "없음"}</dd></div>
+              <div><dt>발행 실패 코드</dt><dd>{outbox.data.failureCode ?? "없음"}</dd></div>
+              <div><dt>재대기 불가 사유</dt><dd>{outbox.data.rejectionReason ?? "없음"}</dd></div></dl>
+            <p>연결 요청: {outbox.data.requests.map((request) =>
+              `${request.aiRequestId} (${request.status})`).join(", ") || "없음"}</p>
+            <p>결과: {outbox.data.reportExists ? "있음" : "없음"}, 기록된 attempt: {outbox.data.attemptExists ? "있음" : "없음"}</p>
+            {outbox.canRequeue && <button type="button" disabled={!outbox.data.requeueAllowed || outbox.busy || outbox.error !== null}
+              onClick={() => void outbox.requeue()}>단건 재대기</button>}
+          </> : !outbox.error && <p>outbox 진단 조회 중</p>}
+          <button type="button" onClick={outbox.refresh}>상태 다시 조회</button>
+          {outbox.accepted && <p role="status">202: DB 발행 대기만 수락됐습니다. broker 발행·소비·Provider 완료는 보장되지 않습니다.</p>}
+          {outbox.accepted && outbox.priorFailureCode && <p>재대기 전 발행 실패 코드: {outbox.priorFailureCode}</p>}
+          <p>PUBLISHED는 broker 발행 표시이며 리포트 완료를 뜻하지 않습니다.</p>
+        </section>}
       </>}
   </section>;
 }
