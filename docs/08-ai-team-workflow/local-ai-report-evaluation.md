@@ -108,3 +108,14 @@ Provider 오류 원문은 기록하지 않는다. 보고서는 저장소 밖의 
 [`local-kafka-ai-report-runbook.md`](../09-deployment/local-kafka-ai-report-runbook.md)의
 Issue #367 절을 따른다. Kafka overlay를 쓰지 않으므로 Kafka 발행·소비
 성공을 이 평가 결과로 주장하지 않는다.
+## Issue #369 Rule v2 CRITICAL smoke
+
+기존 #367의 Rule v1 HIGH 반복 결과는 그대로 보존한다. 별도
+`rule_v2_critical_fixture.json`은 네 적격 근거와 85/CRITICAL을 요구한다.
+`scoring-policy-v2`와 `feature_version=rule-v2`가 저장된 채택 결과에
+일치할 때만 리포트를 요청한다. 리포트는 전달된 Rule code·version·reason과
+기여도만 사실 근거로 삼으며 입력에 없는 상세 행동 타임라인이나 최종 사기
+판정을 주장하지 않는다. 실제 모델 검증은 tag·digest·quantization과 가용
+메모리를 재확인한 뒤 별도 프로젝트에서 한 번만 실행한다. 완료/LLM과
+fallback을 구분하고 호출 수·지연·토큰은 관측값만 보고한다. 미측정 비용과
+토큰은 0으로 환산하지 않는다.

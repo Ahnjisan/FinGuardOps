@@ -297,6 +297,11 @@ def _validate_behavior_references(event: object) -> None:
 
 
 def _validate_rule_versions(request: RuleAnalysisRequest) -> None:
+    version_numbers = {item.version_number for item in request.rule_versions}
+    if version_numbers.issubset({1, 2}) and 2 in version_numbers and (
+        version_numbers != {2} or len(request.rule_versions) != 4
+    ):
+        _contract_error("Rule v2 requires one complete immutable version-2 set")
     seen_fraud_rule_ids: set[UUID] = set()
     seen_rule_version_ids: set[UUID] = set()
     seen_rule_codes: set[str] = set()

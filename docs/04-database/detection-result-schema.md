@@ -389,3 +389,13 @@ V10~V14는 사건 조회·workflow·resolution·InvestigationNote 감사 계약�
 DetectionResult/Evidence table의 위 책임을 바꾸지 않는다. External Risk API v2 연결도
 Snapshot을 DetectionEvidence로 저장하지 않는다. 별도 영속·감사 요구가 생기면 DB
 계약과 Migration 승인을 거친다.
+# Rule v2 결과 보존 (Issue #369)
+
+Rule v1의 `scoring-policy-v1`과 최대 75/HIGH는 그대로 보존한다. 활성
+RuleVersion 2의 완전한 집합에서 생성한 결과만 `feature_version=rule-v2`,
+`scoring_policy_version=scoring-policy-v2`로 저장한다. v2는 amount 15,
+security 60, beneficiary 10의 그룹 상한을 사용하며 네 독립 적중의 최종
+점수는 85/CRITICAL이다. 개별 Evidence의 contribution은 원래 15·20·40·10을
+보존하고 최종 점수와 단순 합이 같다고 가정하지 않는다. CRITICAL 채택 거래는
+`HELD`로 확정하고 사건 연결을 요구한다. 과거 결과와 사건은 새 정책을
+기준으로 재분류하지 않는다.

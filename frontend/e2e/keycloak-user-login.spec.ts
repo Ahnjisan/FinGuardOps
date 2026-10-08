@@ -10184,7 +10184,9 @@ test("real Analyst resumes the Run case and Approver closes it with a public aud
       ]);
       return fetchAiReportCurrent(getOidcAuthClient(), caseId);
     }, fixture.caseId);
-    requireCondition(fallbackReport.currentReport?.reportStatus === "FALLBACK_COMPLETED" &&
+    requireCondition(fallbackReport.caseId === fixture.caseId &&
+      fallbackReport.currentReport?.reportStatus === "FALLBACK_COMPLETED" &&
+      fallbackReport.currentReport.initiatingAiRequestId === acceptedReport.aiRequestId &&
       fallbackReport.currentReport.failureCode === null &&
       fallbackReport.currentReport.fallbackTriggerCode === "LLM_OUTPUT_REJECTED" &&
       fallbackReport.latestRequest?.fallbackTriggerCode === "LLM_OUTPUT_REJECTED" &&
@@ -10548,6 +10550,216 @@ test("a PLATFORM_ADMIN reviews the stored AI request usage without case authorit
     });
   } finally {
     await test.step("CLEANUP", () => relay.dispose());
+  }
+});
+
+test("real Keycloak users investigate a stored Rule v2 CRITICAL case", async ({ browser, page }) => {
+  test.setTimeout(600_000);
+  requireRunFixtureManifestOracle();
+  requireWorkflowWriteRelayOracle();
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+  const fixturePath = resolve(root, "infra/keycloak/run_critical_fixture.py");
+  const originalManifest = env[RUN_FIXTURE_MANIFEST_ENVIRONMENT];
+  requireCondition(typeof originalManifest === "string" && originalManifest.length > 0,
+    "The official Run fixture identity is absent.");
+  readRunFixtureManifest(originalManifest);
+  // This host child runs only inside the official Run process and its owned DB.
+  // It publishes v2 after the v1 browser workflow, then returns safe IDs only.
+  const output = await new Promise<string>((resolveOutput, reject) => {
+    const child = spawn("python", ["-B", fixturePath], {
+      cwd: root, shell: false,
+      env: { ...env, FINGUARDOPS_E2E_FIXTURE_DIR: dirname(originalManifest) },
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => { child.kill(); reject(new Error("CRITICAL_FIXTURE_TIMEOUT")); }, 420_000);
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+      if (stdout.length > 512) { child.kill(); reject(new Error("CRITICAL_FIXTURE_OUTPUT_INVALID")); }
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+      if (stderr.length > 512) { child.kill(); reject(new Error("CRITICAL_FIXTURE_FAILED")); }
+    });
+    child.on("error", () => { clearTimeout(timer); reject(new Error("CRITICAL_FIXTURE_START_FAILED")); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0 || stderr.length > 0) reject(new Error("CRITICAL_FIXTURE_FAILED"));
+      else resolveOutput(stdout);
+    });
+  });
+  const created = JSON.parse(output) as Record<string, unknown>;
+  requireCondition(isDeepStrictEqual(sortedKeys(created),
+    ["caseId", "riskLevel", "riskScore", "transactionId", "transactionStatus"]) &&
+    typeof created.caseId === "string" && CANONICAL_UUID_V4.test(created.caseId) &&
+    typeof created.transactionId === "string" && CANONICAL_UUID_V4.test(created.transactionId) &&
+    created.riskScore === 85 && created.riskLevel === "CRITICAL" &&
+    created.transactionStatus === "HELD", "The critical fixture returned no verified stored identity.");
+  const caseId = created.caseId as string;
+  const transactionId = created.transactionId as string;
+  activeRunCaseId = caseId;
+  const relay = await installBackendRelay(page);
+  const adminContext = await browser.newContext();
+  const adminPage = await adminContext.newPage();
+  const adminRelay = await installBackendRelay(adminPage);
+  try {
+    await page.goto(`${APP_ORIGIN}/cases/${caseId}`);
+    await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
+    await signInFromGuard(page, readUserPassword(), `/cases/${caseId}`, false);
+    await expect(page.getByRole("heading", { name: `사건 ${caseId}`, level: 2 })).toBeVisible();
+    await expect(factValue(page.locator(".detail__record"), "사건 상태")).toHaveText("접수");
+    await expect(page.locator(".case-transactions__item a")).toHaveAttribute("href", `/transactions/${transactionId}`);
+    const initial = await page.evaluate(async (id) => {
+      const [{ getOidcAuthClient }, { fetchCaseDetail }] = await Promise.all([
+        import("/src/auth/oidcAuthClient.ts"),
+        // @ts-expect-error Vite serves the production module at an absolute URL.
+        import("/src/api/caseApi.ts"),
+      ]);
+      return fetchCaseDetail(getOidcAuthClient(), id);
+    }, caseId);
+    requireCondition(initial.case.caseStatus === "OPEN" && initial.case.finalDisposition === null,
+      "The critical case did not begin OPEN without a disposition.");
+    await page.locator(".case-transactions__item a").click();
+    await expect(page.getByRole("heading", { name: `거래 ${transactionId}`, level: 2 })).toBeVisible();
+    await expect(factValue(page.locator(".transaction-detail__record"), "처리 상태")).toHaveText("보류");
+    const adopted = await page.evaluate(async (id) => {
+      const [{ getOidcAuthClient }, { fetchAdoptedDetection }] = await Promise.all([
+        import("/src/auth/oidcAuthClient.ts"),
+        // @ts-expect-error Vite serves the production module at an absolute URL.
+        import("/src/api/adoptedDetectionApi.ts"),
+      ]);
+      return fetchAdoptedDetection(getOidcAuthClient(), id);
+    }, transactionId);
+    const evidence = adopted.adoptedResult?.ruleEvidence ?? [];
+    requireCondition(adopted.availability === "AVAILABLE" &&
+      adopted.adoptedResult?.riskScore === 85 &&
+      adopted.adoptedResult?.riskLevel === "CRITICAL" &&
+      adopted.adoptedResult?.scoringPolicyVersion === "scoring-policy-v2" &&
+      isDeepStrictEqual(evidence.map((item: { reasonCode: string }) => item.reasonCode), [
+        "TRANSFER_ABSOLUTE_HIGH_AMOUNT", "RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT",
+        "RECENT_SECURITY_CHANGE_HIGH_AMOUNT", "RECENT_BENEFICIARY_TRANSFER",
+      ]), "The linked transaction did not expose four adopted v2 reasons.");
+    await expect(page.locator(".adopted-detection")).toContainText("CRITICAL");
+    await expect(page.locator(".adopted-detection")).toContainText("85");
+    await page.getByRole("link", { name: "사건으로 돌아가기" }).click();
+    await expect(page.getByRole("heading", { name: `사건 ${caseId}`, level: 2 })).toBeVisible();
+    const assigneeRef = randomUUID();
+    armWorkflowWrite({ method: "PATCH", pathname: `${CASE_LIST_PATH}/${caseId}/status`,
+      body: JSON.stringify({ targetStatus: "IN_REVIEW", assigneeRef,
+        reasonCode: "CASE_REVIEW_STARTED", expectedVersion: initial.case.concurrencyVersion }) });
+    await page.getByRole("textbox", { name: "담당자 UUID", exact: true }).fill(assigneeRef);
+    await page.getByRole("button", { name: "검토 시작", exact: true }).click();
+    await expect(factValue(page.locator(".detail__record"), "사건 상태")).toHaveText("검토 중");
+    requireCondition(armedWorkflowWrite === null, "The review write was not consumed.");
+    const note = `Rule v2 review ${randomUUID()}`;
+    armWorkflowWrite({ method: "POST", pathname: `${CASE_LIST_PATH}/${caseId}/notes`,
+      body: JSON.stringify({ content: note, expectedVersion: initial.case.concurrencyVersion + 1 }) });
+    await page.getByRole("textbox", { name: "조사 메모", exact: true }).fill(note);
+    await page.getByRole("button", { name: "메모 등록", exact: true }).click();
+    await expect(page.locator(".investigation-notes__item")).toContainText(note);
+    requireCondition(armedWorkflowWrite === null, "The note write was not consumed.");
+    await expect(page.locator("article.audit__entry")).toHaveCount(4);
+    const reportVersion = adopted.adoptedResult.detectionResultVersion;
+    const reportBody = JSON.stringify({ detectionResultVersion: reportVersion, regenerationReason: null });
+    const reportKey = `run-critical-report-${randomUUID()}`;
+    armWorkflowWrite({ method: "POST", pathname: `${CASE_LIST_PATH}/${caseId}/ai-reports`,
+      body: reportBody, idempotencyKey: reportKey });
+    const accepted = await page.evaluate(async ({ id, version, key }) => {
+      const [{ getOidcAuthClient }, { createAiReport }] = await Promise.all([
+        import("/src/auth/oidcAuthClient.ts"),
+        // @ts-expect-error Vite serves the production module at an absolute URL.
+        import("/src/api/aiReportApi.ts"),
+      ]);
+      return createAiReport(getOidcAuthClient(), id, version, key);
+    }, { id: caseId, version: reportVersion, key: reportKey });
+    requireCondition(armedWorkflowWrite === null && accepted.reportStatus === "PENDING",
+      "The critical report request was not accepted once.");
+    await expect.poll(async () => {
+      const value = await page.evaluate(async (id) => {
+        const [{ getOidcAuthClient }, { fetchAiReportCurrent }] = await Promise.all([
+          import("/src/auth/oidcAuthClient.ts"),
+          // @ts-expect-error Vite serves the production module at an absolute URL.
+          import("/src/api/aiReportApi.ts"),
+        ]);
+        return fetchAiReportCurrent(getOidcAuthClient(), id);
+      }, caseId);
+      return value.currentReport?.reportStatus ?? null;
+    }, { timeout: 30_000 }).toBe("COMPLETED");
+    await page.getByText("AI 조사 보조 리포트 보기").click();
+    await page.getByRole("button", { name: "리포트 새로고침" }).click();
+    await expect(page.locator(".case-ai-report__body")).toContainText("RECENT_BENEFICIARY_TRANSFER");
+    const finalReport = await page.evaluate(async (id) => {
+      const [{ getOidcAuthClient }, { fetchAiReportCurrent }] = await Promise.all([
+        import("/src/auth/oidcAuthClient.ts"),
+        // @ts-expect-error Vite serves the production module at an absolute URL.
+        import("/src/api/aiReportApi.ts"),
+      ]);
+      return fetchAiReportCurrent(getOidcAuthClient(), id);
+    }, caseId);
+    requireCondition(finalReport.caseId === caseId &&
+      finalReport.latestRequest?.aiRequestId === accepted.aiRequestId &&
+      finalReport.currentReport?.reportStatus === "COMPLETED" &&
+      finalReport.currentReport.caseId === caseId &&
+      finalReport.currentReport.reportSource === "LLM" &&
+      finalReport.currentReport.initiatingAiRequestId === accepted.aiRequestId &&
+      isDeepStrictEqual(finalReport.currentReport.keyReasons.map(
+        (item: { reasonCode: string }) => item.reasonCode).sort(), evidence.map(
+        (item: { reasonCode: string }) => item.reasonCode).sort()) &&
+      !/사기 확정|fraud confirmed|행동 타임라인을 직접 관측/i.test(
+        finalReport.currentReport.summary + finalReport.currentReport.timelineSummary),
+    "The mock Ollama report invented a verdict, timeline or unrelated evidence.");
+    await expect(factValue(page.locator(".detail__record"), "사건 상태")).toHaveText("검토 중");
+    await expect(page.locator("article.audit__entry")).toHaveCount(4);
+    await adminPage.goto(`${APP_ORIGIN}/ai-operations`);
+    await expect(adminPage.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
+    await signInFromGuard(adminPage, readUserPassword(), "/ai-operations", false,
+      "local-platform-admin", "PLATFORM_ADMIN");
+    await expect(adminPage.getByRole("navigation", { name: "주요 탐색" })
+      .getByRole("link", { name: "사건" })).toHaveCount(0);
+    await adminPage.locator(`.ai-operations tbody a[href="/ai-operations/${accepted.aiRequestId}"]`)
+      .click();
+    await expect(adminPage.getByRole("heading", { name: "AI 요청 상세" })).toBeVisible();
+    requireCondition(adminRelay.some((entry) => entry.pathname ===
+      `/api/v1/ai-report-requests/${accepted.aiRequestId}` && entry.status === 200),
+    "The operator did not read the critical report request.");
+    const adminDetail = await adminPage.evaluate(async (id) => {
+      const [{ getOidcAuthClient }, { fetchAiRequestDetail }] = await Promise.all([
+        import("/src/auth/oidcAuthClient.ts"),
+        // @ts-expect-error Vite serves the production module at an absolute URL.
+        import("/src/api/aiOperationsApi.ts"),
+      ]);
+      return fetchAiRequestDetail(getOidcAuthClient(), id);
+    }, accepted.aiRequestId);
+    requireCondition(adminDetail.aiRequestId === accepted.aiRequestId &&
+      adminDetail.reportStatus === "COMPLETED" &&
+      adminDetail.reportSource === "LLM" && adminDetail.attempts.length === 1 &&
+      adminDetail.estimatedCost === null,
+    "The operator did not read the same stored mock Provider result with unknown cost.");
+    const adminCaseRead = await adminPage.evaluate(async (id) => {
+      const [{ getOidcAuthClient }, { fetchCaseDetail }] = await Promise.all([
+        import("/src/auth/oidcAuthClient.ts"),
+        // @ts-expect-error Vite serves the production module at an absolute URL.
+        import("/src/api/caseApi.ts"),
+      ]);
+      try {
+        await fetchCaseDetail(getOidcAuthClient(), id);
+        return 200;
+      } catch (error: unknown) {
+        return typeof error === "object" && error !== null && "status" in error
+          ? (error as { status: number }).status : 0;
+      }
+    }, caseId);
+    requireCondition(adminCaseRead === 403, "The operator gained case authority.");
+    requireCondition(relay.some((entry) => entry.pathname ===
+      `${TRANSACTION_LIST_PATH}/${transactionId}/adopted-detection-result` && entry.status === 200),
+    "The analyst did not read the stored adopted evidence.");
+  } finally {
+    disarmWorkflowWrite();
+    activeRunCaseId = null;
+    await adminRelay.dispose();
+    await relay.dispose();
+    await adminContext.close();
   }
 });
 

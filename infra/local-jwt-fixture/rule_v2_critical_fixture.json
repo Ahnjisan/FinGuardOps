@@ -1,0 +1,17 @@
+{
+  "fixtureVersion": "rule-v2-critical-1",
+  "scoringPolicyVersion": "scoring-policy-v2",
+  "modelEligibleRiskLevels": ["HIGH", "CRITICAL"],
+  "criticalAvailability": "REACHABLE_WITH_RULE_V2_MAX_85",
+  "fixtures": [
+    {
+      "id": "four_distinct_critical",
+      "amount": "12000000",
+      "events": ["DEVICE_REGISTERED", "PASSWORD_CHANGED", "TRANSFER_LIMIT_CHANGED", "BENEFICIARY_REGISTERED"],
+      "expectedRiskScore": 85,
+      "expectedRiskLevel": "CRITICAL",
+      "expectedReasonCodes": ["TRANSFER_ABSOLUTE_HIGH_AMOUNT", "RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT", "RECENT_SECURITY_CHANGE_HIGH_AMOUNT", "RECENT_BENEFICIARY_TRANSFER"],
+      "reportExpected": true
+    }
+  ]
+}

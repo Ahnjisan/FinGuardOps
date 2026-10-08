@@ -77,10 +77,14 @@ def idempotency_key(kind):
     return "qwen367-" + kind + "-" + uuid.uuid4().hex
 
 
-def score(codes):
+def score(codes, policy="scoring-policy-v1"):
     amount = sum(RULES[code][0] for code in codes if RULES[code][1] == "amount")
     security = sum(RULES[code][0] for code in codes if RULES[code][1] == "security")
-    total = min(100, min(15, amount) + min(60, security))
+    beneficiary = 0
+    if policy == "scoring-policy-v2":
+        beneficiary = min(10, RULES["RECENT_BENEFICIARY_TRANSFER"][0]) if "RECENT_BENEFICIARY_TRANSFER" in codes else 0
+        security -= beneficiary
+    total = min(100, min(15, amount) + min(60, security) + beneficiary)
     return total, ("CRITICAL" if total >= 80 else "HIGH" if total >= 50 else
                    "MEDIUM" if total >= 20 else "LOW")
 
@@ -91,9 +95,9 @@ def load_fixtures(path):
         if set(data) != {"fixtureVersion", "scoringPolicyVersion", "modelEligibleRiskLevels",
                          "criticalAvailability", "fixtures"}:
             raise ValueError()
-        if data["scoringPolicyVersion"] != "scoring-policy-v1" or data["modelEligibleRiskLevels"] != ["HIGH", "CRITICAL"]:
+        if data["scoringPolicyVersion"] not in {"scoring-policy-v1", "scoring-policy-v2"} or data["modelEligibleRiskLevels"] != ["HIGH", "CRITICAL"]:
             raise ValueError()
-        if data["criticalAvailability"] != "UNREACHABLE_WITH_RULE_V1_MAX_75":
+        if data["criticalAvailability"] != ("UNREACHABLE_WITH_RULE_V1_MAX_75" if data["scoringPolicyVersion"] == "scoring-policy-v1" else "REACHABLE_WITH_RULE_V2_MAX_85"):
             raise ValueError()
         if not isinstance(data["fixtureVersion"], str) or not re.fullmatch(r"[a-z0-9-]{8,64}", data["fixtureVersion"]):
             raise ValueError()
@@ -117,7 +121,7 @@ def load_fixtures(path):
                 matched.add("RECENT_SECURITY_CHANGE_HIGH_AMOUNT")
             if "BENEFICIARY_REGISTERED" in item["events"]:
                 matched.add("RECENT_BENEFICIARY_TRANSFER")
-            actual_score, level = score(matched)
+            actual_score, level = score(matched, data["scoringPolicyVersion"])
             if (item["expectedReasonCodes"] != [code for code in RULES if code in matched]
                     or type(item["expectedRiskScore"]) is not int or item["expectedRiskScore"] != actual_score
                     or item["expectedRiskLevel"] != level or type(item["reportExpected"]) is not bool
@@ -201,11 +205,11 @@ def assert_detection(fixture, created, adopted):
     evidence = result.get("ruleEvidence") if isinstance(result, dict) else None
     codes = [item.get("reasonCode") for item in evidence] if isinstance(evidence, list) else []
     if (created.get("riskLevel") != fixture["expectedRiskLevel"]
-            or created.get("riskResponseOutcome") != ("ADDITIONAL_AUTH_REQUIRED" if fixture["reportExpected"] else "APPROVED")
+            or created.get("riskResponseOutcome") != ("HELD" if fixture["expectedRiskLevel"] == "CRITICAL" else "ADDITIONAL_AUTH_REQUIRED" if fixture["reportExpected"] else "APPROVED")
             or bool(created.get("caseId")) != fixture["reportExpected"]
             or not isinstance(result, dict) or result.get("riskLevel") != fixture["expectedRiskLevel"]
             or result.get("riskScore") != fixture["expectedRiskScore"]
-            or result.get("scoringPolicyVersion") != "scoring-policy-v1"
+            or result.get("scoringPolicyVersion") != fixture.get("scoringPolicyVersion", "scoring-policy-v1")
             or codes != fixture["expectedReasonCodes"] or len(codes) != len(set(codes))):
         raise EvaluationError("DETECTION_MISMATCH")
     return result["detectionResultVersion"]
@@ -484,7 +488,8 @@ def evaluate(args):
             raise EvaluationError("FIXTURE_INVALID")
         for item in selected:
             for repetition in range(1, args.repetitions + 1):
-                evaluate_one(item, repetition, prior_ids, args.digest, report["results"])
+                evaluate_one({**item, "scoringPolicyVersion": fixtures["scoringPolicyVersion"]},
+                             repetition, prior_ids, args.digest, report["results"])
         report["status"] = "COMPLETED"
     except EvaluationError as exc:
         report["errorCode"] = exc.code

@@ -1019,3 +1019,19 @@ connect·response timeout, 자동 retry 0회, 트랜잭션 밖 HTTP 호출과 �
 - FastAPI production 세부 metrics와 OpenTelemetry/W3C 분산 tracing 확장
 - Redis·Kafka, ML·LLM과 AI report 연동
 - production/cloud deployment와 HA
+# Rule v2 공존 (Issue #369)
+
+이 문서의 `/api/v1/rule-analysis`와 `/api/v2/rule-analysis`는 **wire 형식**을
+구분한다. Rule 정책 버전은 요청의 평가 cutoff에서 Spring Boot가 선택한 네
+`RuleVersion.versionNumber`와 응답의 `scoringPolicyVersion`으로 구분한다.
+Rule v1의 기존 요청·응답·예시는 그대로 유효하다.
+
+Rule v2는 R001–R004 조건, 순서, reasonCode, 15·20·40·10 기여도를 유지하며
+네 RuleVersion 모두 versionNumber 2인 완전한 집합만 실행한다. 점수 그룹의
+응답 순서는 `amount`(상한 15), `security`(상한 60), `beneficiary`(상한 10)이다.
+R001은 amount, R002·R003은 security, R004는 beneficiary에 속한다.
+`scoring-policy-v2`에서 네 근거가 모두 유효하면 85/CRITICAL이다. 이 정책은
+로컬 검증 가설이며 오탐률 개선이나 운영 적용 효과를 뜻하지 않는다. 혼합
+RuleVersion 집합, 버전과 점수 정책 불일치, 잘못된 그룹 수·순서·상한·기여도,
+Evidence 누락·중복은 계약 오류다. CRITICAL 거래 대응은 기존 거래 API의
+`HELD`와 사건 연결 계약을 따른다.
