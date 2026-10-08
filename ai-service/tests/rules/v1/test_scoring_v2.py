@@ -1,15 +1,62 @@
 from dataclasses import replace
-
-from tests.rules.v1.test_scoring import _plan
+from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 from finguardops_ai.rules.v1 import (
+    BehaviorEventType,
     PlannedRuleResult,
+    R004ConditionDefinition,
     RiskLevel,
     RuleEvaluationResult,
+    RuleExecutionPlan,
+    RuleExecutionPlanItem,
     RuleId,
     RuleScoringCalculator,
     ScoringGroupId,
 )
+
+
+def _plan() -> RuleExecutionPlan:
+    cutoff = datetime(2026, 7, 23, 12, 0, tzinfo=UTC)
+    codes = (
+        "TRANSFER_ABSOLUTE_HIGH_AMOUNT",
+        "RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT",
+        "RECENT_SECURITY_CHANGE_HIGH_AMOUNT",
+        "RECENT_BENEFICIARY_TRANSFER",
+    )
+    condition = R004ConditionDefinition(
+        event_type=BehaviorEventType.BENEFICIARY_REGISTERED,
+        window_seconds=86400,
+        match_policy="SAME_CUSTOMER_SENDER_ACCOUNT_AND_BENEFICIARY",
+        selection_policy="LATEST_OCCURRED_AT_THEN_EVENT_ID_ASC",
+    )
+    return RuleExecutionPlan(
+        evaluation_cutoff_at=cutoff,
+        rule_set_version="rule-set-version",
+        items=tuple(
+            RuleExecutionPlanItem(
+                rule_version_id=UUID(f"20000000-0000-4000-8000-00000000000{order}"),
+                rule_code=code,
+                rule_id=rule_id,
+                version_number=1,
+                reason_code=code,
+                weight=weight,
+                condition_definition=condition,
+                effective_from=cutoff - timedelta(days=1),
+                effective_to=cutoff + timedelta(days=1),
+                execution_order=order,
+            )
+            for order, (rule_id, code, weight) in enumerate(
+                zip(
+                    (RuleId.R001, RuleId.R002, RuleId.R003, RuleId.R004),
+                    codes,
+                    (15, 20, 40, 10),
+                    strict=True,
+                ),
+                start=1,
+            )
+        ),
+    )
 
 
 def test_v2_four_distinct_rules_are_critical_while_v1_stays_high() -> None:
