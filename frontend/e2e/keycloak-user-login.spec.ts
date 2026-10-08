@@ -10618,7 +10618,7 @@ test("real Keycloak users investigate a stored Rule v2 CRITICAL case", async ({ 
       ]);
       return fetchCaseDetail(getOidcAuthClient(), id);
     }, caseId);
-    requireCondition(initial.case.caseStatus === "OPEN" && initial.case.finalDisposition === null,
+    requireCondition(initial.data.case.caseStatus === "OPEN" && initial.data.case.finalDisposition === null,
       "The critical case did not begin OPEN without a disposition.");
     await page.locator(".case-transactions__item a").click();
     await expect(page.getByRole("heading", { name: `거래 ${transactionId}`, level: 2 })).toBeVisible();
@@ -10647,14 +10647,14 @@ test("real Keycloak users investigate a stored Rule v2 CRITICAL case", async ({ 
     const assigneeRef = randomUUID();
     armWorkflowWrite({ method: "PATCH", pathname: `${CASE_LIST_PATH}/${caseId}/status`,
       body: JSON.stringify({ targetStatus: "IN_REVIEW", assigneeRef,
-        reasonCode: "CASE_REVIEW_STARTED", expectedVersion: initial.case.concurrencyVersion }) });
+        reasonCode: "CASE_REVIEW_STARTED", expectedVersion: initial.data.case.concurrencyVersion }) });
     await page.getByRole("textbox", { name: "담당자 UUID", exact: true }).fill(assigneeRef);
     await page.getByRole("button", { name: "검토 시작", exact: true }).click();
     await expect(factValue(page.locator(".detail__record"), "사건 상태")).toHaveText("검토 중");
     requireCondition(armedWorkflowWrite === null, "The review write was not consumed.");
     const note = `Rule v2 review ${randomUUID()}`;
     armWorkflowWrite({ method: "POST", pathname: `${CASE_LIST_PATH}/${caseId}/notes`,
-      body: JSON.stringify({ content: note, expectedVersion: initial.case.concurrencyVersion + 1 }) });
+      body: JSON.stringify({ content: note, expectedVersion: initial.data.case.concurrencyVersion + 1 }) });
     await page.getByRole("textbox", { name: "조사 메모", exact: true }).fill(note);
     await page.getByRole("button", { name: "메모 등록", exact: true }).click();
     await expect(page.locator(".investigation-notes__item")).toContainText(note);
@@ -10744,13 +10744,14 @@ test("real Keycloak users investigate a stored Rule v2 CRITICAL case", async ({ 
       ]);
       try {
         await fetchCaseDetail(getOidcAuthClient(), id);
-        return 200;
+        return "unexpected-success";
       } catch (error: unknown) {
-        return typeof error === "object" && error !== null && "status" in error
-          ? (error as { status: number }).status : 0;
+        return error instanceof Error ? error.name : "unknown";
       }
     }, caseId);
-    requireCondition(adminCaseRead === 403, "The operator gained case authority.");
+    requireCondition(adminCaseRead === "ForbiddenError" && adminRelay.some((entry) =>
+      entry.pathname === `${CASE_LIST_PATH}/${caseId}` && entry.status === 403),
+    "The operator gained case authority.");
     requireCondition(relay.some((entry) => entry.pathname ===
       `${TRANSACTION_LIST_PATH}/${transactionId}/adopted-detection-result` && entry.status === 200),
     "The analyst did not read the stored adopted evidence.");
