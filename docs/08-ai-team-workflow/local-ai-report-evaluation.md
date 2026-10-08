@@ -73,3 +73,38 @@ Qwen만의 독립 메모리 사용량으로 해석하지 않는다.
 실제 전력·장비 비용은 미측정이므로 비용 필드는 계속 NULL이다. 공식 Docker
 Gate는 이번 작업에서 실행하지 않았으며, 기존 모의 Ollama Gate 결과를 실제
 Qwen 평가에 합산하지 않는다.
+
+## Issue #367: 반복 평가 계약
+
+`infra/local-jwt-fixture/qwen_evaluation_fixtures.json`은 비식별 Rule v1 fixture의
+버전, 이벤트 조합, 예상 점수·등급·채택 reason code를 고정한다. 실행기는 매 반복마다
+새 고객·계좌 참조, 이벤트·거래 UUID, 거래·리포트 멱등 키를 만들고 실제 거래 접수와
+채택 결과가 fixture 기대값에 맞는지 확인한 **뒤에만** AI 리포트를 요청한다.
+동일 사건의 캐시 적중이나 실행 공유는 실제 Qwen 반복 횟수로 세지 않고 실패로
+분류한다. `amount_only_control`은 15/LOW이므로 사건과 AI 요청이 생기지 않는
+비대상 대조군이다. R001+R003은 55/HIGH, 기기 등록을 더하면 75/HIGH,
+수취인 등록을 더하면 65/HIGH, 네 Rule 전부는 보안 그룹 상한 때문에 75/HIGH다.
+R001+R002만으로는 35/MEDIUM이다. 현행 Rule v1의 최고점은 75여서
+CRITICAL fixture의 실제 접수·리포트 생성은 **불가능**하다. 점수·등급이나
+채택 Evidence를 임의로 주입하지 않는다. CRITICAL 평가 완료 조건은 그 등급을
+만드는 승인된 탐지 계약과 실행 경로가 생긴 뒤 별도로 충족해야 한다.
+
+평가 통과 항목은 리포트 구조, 채택 reason code 집합과 중복 부재, 허용된
+체크리스트 1~2개, 알려진 금지 주장 패턴 부재다. 문장 전체를 고정 문자열과
+비교하지 않는다. 금지 주장 검사는 한정된 반례 탐지이며 모델의 한국어 자유
+서술 전반이나 사실성을 보증하지 않는다. 서비스의 `COMPLETED/LLM`과
+`FALLBACK_COMPLETED/TEMPLATE_FALLBACK`을 구분하고 attempt별 결과를 별도 기록한다.
+저장 상세 API를 두 번 읽어 같은 순서의 attempt를 대조한다. timeout·연결 실패
+뒤에만 두 번째 시도가 가능하고 총 2회를 넘으면 실패다. attempt 0건은 호출
+0회를 입증하지 않는다. 입력·출력 토큰이 누락되면 합계는 `null`, 로컬
+전력·장비 비용 미측정도 `null`이다.
+
+실행 보고서에는 실행 시작·종료 UTC, fixture 버전, 호스트와 컨테이너에서
+대조한 현재 model tag·digest·quantization, 공개 promptVersion·modelVersion,
+설정 스냅샷, 사건·요청·실행 ID, 리포트 상태·fallback 원인·벽시계 지연과
+저장 attempt를 기록한다. 원문 Prompt·모델 응답, JWT·암호, 고객·계좌 참조와
+Provider 오류 원문은 기록하지 않는다. 보고서는 저장소 밖의 실행별 접근 제한
+디렉터리에 둔다. 실행 및 DB 대조·정리는
+[`local-kafka-ai-report-runbook.md`](../09-deployment/local-kafka-ai-report-runbook.md)의
+Issue #367 절을 따른다. Kafka overlay를 쓰지 않으므로 Kafka 발행·소비
+성공을 이 평가 결과로 주장하지 않는다.

@@ -390,7 +390,8 @@ def read(path,identity):
                                    headers={'Authorization':'Bearer '+token})
     with urllib.request.urlopen(request,timeout=15) as response:
         return response.status,json.load(response)
-case_id,request_id=os.environ['CASE_ID'],os.environ['AI_REQUEST_ID']
+case_id,request_id,transaction_id=(os.environ['CASE_ID'],os.environ['AI_REQUEST_ID'],
+                                   os.environ['TRANSACTION_ID'])
 deadline=time.monotonic()+300
 while True:
     current_status,current=read('/api/v1/cases/'+case_id+'/ai-reports/current','user-analyst')
@@ -507,3 +508,202 @@ E2E overlay의 긴 polling 시작 지연과 2초 DB connection timeout은 격리
 Kafka 선점과 claim 이전 DB 장애를 재현하기 위한 설정이다. 기본 Compose와 운영 설정에는
 적용되지 않는다. 이 검증은 유료 Provider를 사용하지 않지만 기록된 attempt 수가 실제
 외부 호출 수를 증명하지는 않는다.
+
+## Issue #367 실제 Qwen 반복 평가
+
+이 절은 저장소 루트의 PowerShell에서 실행한다. 조합은 기존 6절과 같은
+`compose.yml` + `compose.qwen-local.yml` + `compose.local-jwt-e2e.yml`이다.
+Kafka·Keycloak overlay는 포함하지 않는다. 아래 평가는 실제 호스트 Ollama가
+기동되고 Docker Desktop Linux Engine이 응답할 때만 진행한다. 모델 재설치나
+기존 모델·volume 삭제는 절차에 없다. 현재 Rule v1로는 CRITICAL을 만들 수
+없으므로 `amount_only_control`과 여러 HIGH 조합만 실제 접수한다.
+
+### 준비·현재 모델 식별
+
+```powershell
+git status --short
+docker version --format '{{.Server.Version}}'
+$hostModel = @((Invoke-RestMethod http://127.0.0.1:11434/api/tags -TimeoutSec 10).models |
+  Where-Object name -eq 'qwen3.5:4b')
+if ($hostModel.Count -ne 1 -or -not $hostModel[0].digest -or
+    -not $hostModel[0].details.quantization_level) { throw 'Current host Qwen identity unavailable' }
+$oldDigest = [Environment]::GetEnvironmentVariable('FINGUARDOPS_AI_OLLAMA_MODEL_DIGEST','Process')
+$oldQuantization = [Environment]::GetEnvironmentVariable('FINGUARDOPS_AI_OLLAMA_QUANTIZATION','Process')
+$env:FINGUARDOPS_AI_OLLAMA_MODEL_DIGEST = $hostModel[0].digest
+$env:FINGUARDOPS_AI_OLLAMA_QUANTIZATION = $hostModel[0].details.quantization_level
+$qwenProject = 'finguardops-qwen-367-' + (Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss')
+$qwenCompose = @('compose','-p',$qwenProject,'--env-file','infra/.env',
+  '-f','infra/compose.yml','-f','infra/compose.qwen-local.yml',
+  '-f','infra/compose.local-jwt-e2e.yml')
+& docker @qwenCompose config --quiet
+if ($LASTEXITCODE -ne 0) { throw 'Compose configuration invalid' }
+$containerJson = & docker @qwenCompose run --rm --no-deps -T --entrypoint python ai-service -c "import json,urllib.request; data=json.load(urllib.request.urlopen('http://host.docker.internal:11434/api/tags',timeout=10)); matches=[m for m in data['models'] if m['name']=='qwen3.5:4b']; assert len(matches)==1; print(json.dumps({'name':matches[0]['name'],'digest':matches[0]['digest'],'quantization':matches[0]['details']['quantization_level']}))"
+if ($LASTEXITCODE -ne 0) { throw 'AI Service container cannot read current host model' }
+$containerModel = $containerJson | ConvertFrom-Json
+if ($containerModel.name -cne $hostModel[0].name -or
+    $containerModel.digest -cne $hostModel[0].digest -or
+    $containerModel.quantization -cne $hostModel[0].details.quantization_level) {
+  throw 'Host/container model identity mismatch; do not generate'
+}
+```
+
+이 사전 검사는 컨테이너 하나를 일시 생성하므로 그 전후의 프로젝트 소유
+one-off 잔여를 확인한다. 실패하면 생성 요청을 보내지 않고 아래 정리 단계로
+간다. `infra/.env`의 비밀은 출력하지 않는다. 호스트 메모리·디스크 여유와
+다른 Compose 프로젝트의 포트·자원을 확인한다. 과거 평가의 digest를 현재
+값으로 가정하지 않는다. 모델 식별은 각 생성 때 AI Service도 다시 검사한다.
+
+### 고유 프로젝트 실행·평가 보고서
+
+```powershell
+& docker @qwenCompose up -d --build --wait --wait-timeout 180 backend local-jwt-fixture external-risk-mock
+if ($LASTEXITCODE -ne 0) { throw 'Qwen project did not become healthy' }
+$backendContainer = "$qwenProject-backend-1"
+& docker network connect "${qwenProject}_qwen-host" $backendContainer
+if ($LASTEXITCODE -ne 0) { throw 'JWT fixture host-model route failed' }
+$fixtureJson = & docker @qwenCompose exec -T local-jwt-fixture python -c "import json,urllib.request; d=json.load(urllib.request.urlopen('http://host.docker.internal:11434/api/tags',timeout=10)); m=[x for x in d['models'] if x['name']=='qwen3.5:4b']; assert len(m)==1; print(json.dumps({'name':m[0]['name'],'digest':m[0]['digest'],'quantization':m[0]['details']['quantization_level']}))"
+if ($LASTEXITCODE -ne 0) { throw 'JWT fixture cannot read current host model' }
+$fixtureModel = $fixtureJson | ConvertFrom-Json
+if ($fixtureModel.name -cne $hostModel[0].name -or
+    $fixtureModel.digest -cne $hostModel[0].digest -or
+    $fixtureModel.quantization -cne $hostModel[0].details.quantization_level) {
+  throw 'JWT fixture model identity mismatch; do not generate'
+}
+```
+
+`local-jwt-fixture`는 Backend의 네트워크 네임스페이스를 공유한다. Backend의 기본
+격리 네트워크에서는 `host.docker.internal`에 접근할 수 없으므로, 이 고유
+프로젝트의 Backend만 `qwen-host`에 일시 연결한다. 평가기가 같은 URL에서
+현재 모델 식별값을 다시 확인한 뒤 생성한다. 아래의 같은 조합 `down`은 이
+연결과 프로젝트 네트워크도 함께 제거한다.
+
+신규 프로젝트에는 활성 Rule이 없다. 먼저 발행 상태를 조회하고 0/0일 때만
+기존 Rule v1 one-shot을 한 번 실행한다. 이미 발행된 프로젝트에서는 재실행하지
+않는다. 발행 직후 아직 유효 시각 전이면 최대 420초 기다려 4/4를 확인한다.
+
+```powershell
+$ruleSql = "SELECT count(*) FILTER (WHERE status='PUBLISHED'),count(*) FILTER (WHERE status='PUBLISHED' AND effective_from<=current_timestamp) FROM rule_version;"
+$ruleCounts = (& docker @qwenCompose exec -T postgresql psql -U finguardops -d finguardops -tAc $ruleSql).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Rule inventory failed' }
+if ($ruleCounts -eq '0|0') {
+  $effectiveFrom = (Get-Date).ToUniversalTime().AddMinutes(5).ToString('yyyy-MM-ddTHH:mm:ssZ')
+  & docker @qwenCompose run --rm --no-deps -T -e SPRING_PROFILES_ACTIVE=local,rule-v1-default-publication -e FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED=false -e FINGUARDOPS_KAFKA_ENABLED=false backend --spring.main.web-application-type=none --logging.level.org.hibernate.orm.connections.pooling=WARN --finguardops.rule-v1-default-publication.enabled=true --finguardops.rule-v1-default-publication.confirmation=PUBLISH_RULE_V1_DEFAULT_V1 "--finguardops.rule-v1-default-publication.effective-from=$effectiveFrom"
+  if ($LASTEXITCODE -ne 0) { throw 'Rule publication failed' }
+} elseif ($ruleCounts -ne '4|4' -and $ruleCounts -ne '4|0') { throw 'Unexpected Rule publication state' }
+$deadline = (Get-Date).AddSeconds(420)
+do {
+  $ruleCounts = (& docker @qwenCompose exec -T postgresql psql -U finguardops -d finguardops -tAc $ruleSql).Trim()
+  if ($LASTEXITCODE -ne 0) { throw 'Rule activation query failed' }
+  if ($ruleCounts -eq '4|4') { break }
+  Start-Sleep -Seconds 5
+} while ((Get-Date) -lt $deadline)
+if ($ruleCounts -ne '4|4') { throw 'Rule activation timed out' }
+```
+
+이후 보고서를 저장소 밖의 고유 디렉터리에 만들고 현재 PowerShell 사용자에게만
+접근을 허용한다.
+
+```powershell
+$reportRoot = Join-Path $env:LOCALAPPDATA 'FinGuardOps\qwen-evaluation'
+$runDir = Join-Path $reportRoot $qwenProject
+if (Test-Path -LiteralPath $runDir) { throw 'Report directory already exists' }
+New-Item -ItemType Directory -Path $runDir -Force | Out-Null
+$currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+icacls.exe $runDir /inheritance:r /grant:r "$($currentUser):(OI)(CI)F" | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Report directory ACL failed' }
+function Assert-QwenStoredResult($runReport) {
+  foreach ($row in @($runReport.results | Where-Object reportEvaluated)) {
+    $executionId = [guid]::Parse($row.executionId).ToString()
+    $caseId = [guid]::Parse($row.caseId).ToString()
+    $transactionId = [guid]::Parse($row.transactionId).ToString()
+    $attemptSql = "SELECT json_build_object('attemptNumber',a.attempt_number,'provider',a.provider,'model',a.model_digest,'outcome',a.outcome,'inputTokens',a.input_tokens,'outputTokens',a.output_tokens,'latencyMs',a.latency_ms,'estimatedCost',a.estimated_cost::text,'costCurrency',a.cost_currency)::text FROM provider_call_attempt a JOIN ai_report_execution e ON e.id=a.execution_id WHERE e.execution_id='$executionId' ORDER BY a.attempt_number;"
+    $dbLines = @(& docker @qwenCompose exec -T postgresql psql -U finguardops -d finguardops -tA -c $attemptSql)
+    if ($LASTEXITCODE -ne 0) { throw 'DB attempt query failed' }
+    $dbAttempts = @($dbLines | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json })
+    $check = @{ reported = @($row.attempts); persisted = $dbAttempts; digest = $runReport.model.digest } | ConvertTo-Json -Depth 8 -Compress
+    $check | python -B -c 'import json,sys; sys.path.insert(0,"infra/local-jwt-fixture"); import evaluate_qwen_reports as e; p=json.load(sys.stdin); e.compare_persisted_attempts(p["reported"],p["persisted"],p["digest"])'
+    if ($LASTEXITCODE -ne 0) { throw 'DB/API/report attempt mismatch' }
+    $stateSql = "SELECT (SELECT count(*) FROM audit_log WHERE target_type='FRAUD_CASE' AND target_id='$caseId'),(SELECT case_status FROM fraud_case WHERE case_id='$caseId'),(SELECT processing_status FROM financial_transaction WHERE transaction_id='$transactionId');"
+    $values = (& docker @qwenCompose exec -T postgresql psql -U finguardops -d finguardops -tAc $stateSql).Trim().Split('|')
+    if ($LASTEXITCODE -ne 0 -or $values.Count -ne 3 -or
+        [int]$values[0] -ne $row.baselineAuditCount -or
+        $values[1] -cne $row.baselineCaseStatus -or
+        $values[2] -cne $row.baselineTransactionStatus) {
+      throw 'DB/API/report business-state mismatch'
+    }
+  }
+}
+$smokePath = Join-Path $runDir 'smoke.json'
+$smokeText = & docker @qwenCompose exec -T local-jwt-fixture python /opt/local-jwt-fixture/evaluate_qwen_reports.py --model-tag $hostModel[0].name --digest $hostModel[0].digest --quantization $hostModel[0].details.quantization_level --fixture-id security_change_high --repetitions 1
+$smokeExit = $LASTEXITCODE
+if (-not $smokeText) { throw 'No smoke report returned' }
+$smoke = ($smokeText -join "`n") | ConvertFrom-Json
+$smokeText | Set-Content -LiteralPath $smokePath -Encoding utf8
+if ($smokeExit -ne 0 -or $smoke.status -ne 'COMPLETED' -or
+    @($smoke.results | Where-Object reportEvaluated).Count -ne 1) {
+  throw "Smoke incomplete; inspect restricted report $smokePath"
+}
+Assert-QwenStoredResult $smoke
+$reportPath = Join-Path $runDir 'evaluation.json'
+$reportText = & docker @qwenCompose exec -T local-jwt-fixture python /opt/local-jwt-fixture/evaluate_qwen_reports.py --model-tag $hostModel[0].name --digest $hostModel[0].digest --quantization $hostModel[0].details.quantization_level --repetitions 3
+$evaluationExit = $LASTEXITCODE
+if (-not $reportText) { throw 'No evaluation report returned' }
+$report = ($reportText -join "`n") | ConvertFrom-Json
+if (-not $report.schemaVersion -or $report.fixtureVersion -ne 'rule-v1-qwen-eval-1') {
+  throw 'Evaluation report contract invalid'
+}
+$reportText | Set-Content -LiteralPath $reportPath -Encoding utf8
+if ($evaluationExit -ne 0 -or $report.status -ne 'COMPLETED') {
+  throw "Evaluation incomplete; inspect restricted report $reportPath"
+}
+Assert-QwenStoredResult $report
+$report.results | Select-Object fixtureId,repetition,status,requestStatus,
+  reportSource,aiWallLatencyMs,fallbackTriggerCode
+```
+
+Python 실행기는 JWT를 fixture의 private socket 안에서 발급·사용하고 stdout에
+비민감 보고서 JSON 한 개만 출력한다. HTTP·Provider 오류 원문은 기록하지
+않는다. 중도 실패 시 `status=INCOMPLETE`와 안전한 `errorCode`, 진행 중
+식별자만 보존한다. `COMPLETED`는 평가 절차 종료를 뜻하며 개별 리포트의
+`COMPLETED/LLM`과 구별한다. `attempts=[]`는 저장된 attempt 0건이지
+Provider 호출 0회 증거가 아니다. 모델 tag·digest·quantization과
+`promptVersion`·`modelVersion`, 설정 스냅샷을 함께 대조한다. 메모리·전력은
+이 평가기가 계측하지 않는다.
+
+### 저장 결과·업무 불변·정리
+
+실행기는 같은 `aiRequestId`의 PLATFORM_ADMIN 상세를 두 번 읽어 attempt별
+순서·결과·지연·토큰·비용을 대조하고, AI 요청 전후의 사건 상태·거래 상태·
+사건 Audit 목록을 비교한다. 위의 `Assert-QwenStoredResult`를 smoke와 전체 반복
+보고서에 동일하게 적용한다. 이 함수는 `ai_report_execution.execution_id`로
+연결한 `provider_call_attempt`를 `attempt_number` 순서대로 읽어 운영 상세
+API에서 저장한 보고서의 결과·지연·토큰·비용 null까지 필드별 대조한다. SQL에는
+UUID만 넣고 attempt 메타데이터만 SELECT하며 원문 payload·Prompt·JWT는
+조회하지 않는다. API의 입력·출력·전체 토큰 합계는 평가기가 attempt별
+측정값과 비교한다. 저장 attempt가 0건이면 Backend 상세 API의 집계는 0이지만
+실제 Provider 호출 0회라는 증거로 해석하지 않는다. `/api/tags` 조회가
+45초에 timeout되면 채팅 attempt 없이 `LLM_TIMEOUT`도 가능하다.
+
+성공률은 `COMPLETED/LLM` 건수와 실제 AI 요청 건수를 함께 적고, fallback·
+timeout attempt 건수, attempt별 지연 및 요청 전체 벽시계 지연의 표본 수를
+따로 적는다. 토큰 `null`과 비용 `null`을 0으로 환산하지 않는다. 이 조합에서
+outbox는 Kafka 발행·소비 증거가 아니다. 실패 시 보고서의 안전한 분류와
+기존 DB 상태를 보존한 뒤 같은 프로젝트만 정리한다.
+
+```powershell
+& docker @qwenCompose down --remove-orphans
+$downExit = $LASTEXITCODE
+if ($null -eq $oldDigest) { Remove-Item Env:FINGUARDOPS_AI_OLLAMA_MODEL_DIGEST -ErrorAction SilentlyContinue }
+else { $env:FINGUARDOPS_AI_OLLAMA_MODEL_DIGEST = $oldDigest }
+if ($null -eq $oldQuantization) { Remove-Item Env:FINGUARDOPS_AI_OLLAMA_QUANTIZATION -ErrorAction SilentlyContinue }
+else { $env:FINGUARDOPS_AI_OLLAMA_QUANTIZATION = $oldQuantization }
+if ($downExit -ne 0) { throw 'Owned project cleanup failed' }
+& docker ps -a --filter "label=com.docker.compose.project=$qwenProject" --format '{{.Names}}'
+& docker network ls --filter "label=com.docker.compose.project=$qwenProject" --format '{{.Name}}'
+& docker volume ls --filter "label=com.docker.compose.project=$qwenProject" --format '{{.Name}}'
+```
+
+앞의 두 목록은 비어 있어야 한다. 마지막 목록은 **보존되는** 이 프로젝트의
+named volume 목록이다. `--volumes`, prune, 기존 프로젝트 volume mount·삭제를
+수행하지 않는다. 접근 제한 보고서와 모델 식별값을 기록한 뒤 운영자가 개별
+volume 보존·정리 여부를 별도 절차로 판단한다.

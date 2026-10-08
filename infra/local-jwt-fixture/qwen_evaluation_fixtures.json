@@ -1,0 +1,53 @@
+{
+  "fixtureVersion": "rule-v1-qwen-eval-1",
+  "scoringPolicyVersion": "scoring-policy-v1",
+  "modelEligibleRiskLevels": ["HIGH", "CRITICAL"],
+  "criticalAvailability": "UNREACHABLE_WITH_RULE_V1_MAX_75",
+  "fixtures": [
+    {
+      "id": "amount_only_control",
+      "amount": "12000000",
+      "events": [],
+      "expectedRiskScore": 15,
+      "expectedRiskLevel": "LOW",
+      "expectedReasonCodes": ["TRANSFER_ABSOLUTE_HIGH_AMOUNT"],
+      "reportExpected": false
+    },
+    {
+      "id": "security_change_high",
+      "amount": "12000000",
+      "events": ["PASSWORD_CHANGED", "TRANSFER_LIMIT_CHANGED"],
+      "expectedRiskScore": 55,
+      "expectedRiskLevel": "HIGH",
+      "expectedReasonCodes": ["TRANSFER_ABSOLUTE_HIGH_AMOUNT", "RECENT_SECURITY_CHANGE_HIGH_AMOUNT"],
+      "reportExpected": true
+    },
+    {
+      "id": "recent_device_high",
+      "amount": "12000000",
+      "events": ["DEVICE_REGISTERED", "PASSWORD_CHANGED", "TRANSFER_LIMIT_CHANGED"],
+      "expectedRiskScore": 75,
+      "expectedRiskLevel": "HIGH",
+      "expectedReasonCodes": ["TRANSFER_ABSOLUTE_HIGH_AMOUNT", "RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT", "RECENT_SECURITY_CHANGE_HIGH_AMOUNT"],
+      "reportExpected": true
+    },
+    {
+      "id": "recent_beneficiary_high",
+      "amount": "12000000",
+      "events": ["PASSWORD_CHANGED", "TRANSFER_LIMIT_CHANGED", "BENEFICIARY_REGISTERED"],
+      "expectedRiskScore": 65,
+      "expectedRiskLevel": "HIGH",
+      "expectedReasonCodes": ["TRANSFER_ABSOLUTE_HIGH_AMOUNT", "RECENT_SECURITY_CHANGE_HIGH_AMOUNT", "RECENT_BENEFICIARY_TRANSFER"],
+      "reportExpected": true
+    },
+    {
+      "id": "all_rule_cap_high",
+      "amount": "12000000",
+      "events": ["DEVICE_REGISTERED", "PASSWORD_CHANGED", "TRANSFER_LIMIT_CHANGED", "BENEFICIARY_REGISTERED"],
+      "expectedRiskScore": 75,
+      "expectedRiskLevel": "HIGH",
+      "expectedReasonCodes": ["TRANSFER_ABSOLUTE_HIGH_AMOUNT", "RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT", "RECENT_SECURITY_CHANGE_HIGH_AMOUNT", "RECENT_BENEFICIARY_TRANSFER"],
+      "reportExpected": true
+    }
+  ]
+}
