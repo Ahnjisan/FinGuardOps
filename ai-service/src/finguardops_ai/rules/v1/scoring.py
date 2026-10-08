@@ -150,8 +150,11 @@ _SCORING_POLICY_V2 = _ScoringPolicy(
         _RuleScoringBinding(RuleId.R003, ScoringGroupId.SECURITY, 40),
         _RuleScoringBinding(RuleId.R004, ScoringGroupId.BENEFICIARY, 10),
     ),
-    group_caps=((ScoringGroupId.AMOUNT, 15), (ScoringGroupId.SECURITY, 60),
-                (ScoringGroupId.BENEFICIARY, 10)),
+    group_caps=(
+        (ScoringGroupId.AMOUNT, 15),
+        (ScoringGroupId.SECURITY, 60),
+        (ScoringGroupId.BENEFICIARY, 10),
+    ),
     final_score_cap=100,
     risk_boundaries=_EXPECTED_RISK_BOUNDARIES,
 )
@@ -167,10 +170,12 @@ class RuleScoringCalculator:
         planned_results: tuple[PlannedRuleResult, ...],
     ) -> RuleScoringResult:
         if not isinstance(plan, RuleExecutionPlan) or not isinstance(plan.items, tuple):
-            _raise_scoring_error(RuleScoringErrorCategory.INVALID_SCORING_INPUT,
-                                 "plan must be a RuleExecutionPlan")
-        versions = {item.version_number for item in plan.items
-                    if isinstance(item, RuleExecutionPlanItem)}
+            _raise_scoring_error(
+                RuleScoringErrorCategory.INVALID_SCORING_INPUT, "plan must be a RuleExecutionPlan"
+            )
+        versions = {
+            item.version_number for item in plan.items if isinstance(item, RuleExecutionPlanItem)
+        }
         policy = _SCORING_POLICY_V2 if versions == {2} and len(plan.items) == 4 else _SCORING_POLICY
         return _calculate(plan, planned_results, policy)
 
@@ -216,12 +221,15 @@ def _calculate(
         security_raw_score,
         policy,
     )
-    beneficiary_summary = (_summarize_group(ScoringGroupId.BENEFICIARY,
-                                            beneficiary_raw_score, policy)
-                           if policy.version == "scoring-policy-v2" else None)
+    beneficiary_summary = (
+        _summarize_group(ScoringGroupId.BENEFICIARY, beneficiary_raw_score, policy)
+        if policy.version == "scoring-policy-v2"
+        else None
+    )
     risk_score = min(
         policy.final_score_cap,
-        amount_summary.applied_score + security_summary.applied_score
+        amount_summary.applied_score
+        + security_summary.applied_score
         + (beneficiary_summary.applied_score if beneficiary_summary else 0),
     )
 
@@ -230,8 +238,11 @@ def _calculate(
         risk_score=risk_score,
         risk_level=_risk_level_for_score(risk_score, policy),
         rule_contributions=tuple(contributions),
-        group_summaries=((amount_summary, security_summary, beneficiary_summary)
-                         if beneficiary_summary else (amount_summary, security_summary)),
+        group_summaries=(
+            (amount_summary, security_summary, beneficiary_summary)
+            if beneficiary_summary
+            else (amount_summary, security_summary)
+        ),
     )
 
 

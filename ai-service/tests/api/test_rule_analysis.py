@@ -208,44 +208,88 @@ def test_all_rules_unmatched_is_a_valid_low_zero_result(client: TestClient) -> N
 def _rule_v2_critical_payload() -> dict[str, object]:
     payload = _valid_v2_request()
     base = payload["ruleVersions"][0]
-    common = {key: base[key] for key in (
-        "lifecycleStatus", "status", "effectiveFrom", "effectiveTo")}
+    common = {
+        key: base[key] for key in ("lifecycleStatus", "status", "effectiveFrom", "effectiveTo")
+    }
+
     def rule(number, code, weight, condition):
-        return {**common, "fraudRuleId": f"40000000-0000-4000-8000-00000000000{number}",
-                "ruleCode": code, "ruleVersionId": f"20000000-0000-4000-8000-00000000000{number}",
-                "versionNumber": 2, "reasonCode": code, "weight": weight,
-                "conditionDefinition": condition}
+        return {
+            **common,
+            "fraudRuleId": f"40000000-0000-4000-8000-00000000000{number}",
+            "ruleCode": code,
+            "ruleVersionId": f"20000000-0000-4000-8000-00000000000{number}",
+            "versionNumber": 2,
+            "reasonCode": code,
+            "weight": weight,
+            "conditionDefinition": condition,
+        }
+
     payload["ruleVersions"] = [
-        rule(1, "TRANSFER_ABSOLUTE_HIGH_AMOUNT", 15,
-             {"transactionTypes": ["ACCOUNT_TRANSFER", "OPEN_BANKING_TRANSFER"],
-              "currencyCode": "KRW", "amountThreshold": "10000000"}),
-        rule(2, "RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT", 20,
-             {"prerequisiteRuleCode": "TRANSFER_ABSOLUTE_HIGH_AMOUNT",
-              "eventType": "DEVICE_REGISTERED", "windowSeconds": 86400,
-              "matchPolicy": "SAME_CUSTOMER_AND_DEVICE",
-              "selectionPolicy": "LATEST_OCCURRED_AT_THEN_EVENT_ID_ASC"}),
-        rule(3, "RECENT_SECURITY_CHANGE_HIGH_AMOUNT", 40,
-             {"prerequisiteRuleCode": "TRANSFER_ABSOLUTE_HIGH_AMOUNT",
-              "passwordEventType": "PASSWORD_CHANGED",
-              "transferLimitEventType": "TRANSFER_LIMIT_CHANGED", "windowSeconds": 86400,
-              "matchPolicy": "SAME_CUSTOMER_AND_SENDER_ACCOUNT",
-              "sequencePolicy": "PASSWORD_CHANGED_AT_OR_BEFORE_TRANSFER_LIMIT_CHANGED",
-              "selectionPolicy": (
-                  "LATEST_TRANSFER_LIMIT_THEN_EVENT_ID_ASC_LATEST_PASSWORD_THEN_EVENT_ID_ASC")}),
+        rule(
+            1,
+            "TRANSFER_ABSOLUTE_HIGH_AMOUNT",
+            15,
+            {
+                "transactionTypes": ["ACCOUNT_TRANSFER", "OPEN_BANKING_TRANSFER"],
+                "currencyCode": "KRW",
+                "amountThreshold": "10000000",
+            },
+        ),
+        rule(
+            2,
+            "RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT",
+            20,
+            {
+                "prerequisiteRuleCode": "TRANSFER_ABSOLUTE_HIGH_AMOUNT",
+                "eventType": "DEVICE_REGISTERED",
+                "windowSeconds": 86400,
+                "matchPolicy": "SAME_CUSTOMER_AND_DEVICE",
+                "selectionPolicy": "LATEST_OCCURRED_AT_THEN_EVENT_ID_ASC",
+            },
+        ),
+        rule(
+            3,
+            "RECENT_SECURITY_CHANGE_HIGH_AMOUNT",
+            40,
+            {
+                "prerequisiteRuleCode": "TRANSFER_ABSOLUTE_HIGH_AMOUNT",
+                "passwordEventType": "PASSWORD_CHANGED",
+                "transferLimitEventType": "TRANSFER_LIMIT_CHANGED",
+                "windowSeconds": 86400,
+                "matchPolicy": "SAME_CUSTOMER_AND_SENDER_ACCOUNT",
+                "sequencePolicy": "PASSWORD_CHANGED_AT_OR_BEFORE_TRANSFER_LIMIT_CHANGED",
+                "selectionPolicy": (
+                    "LATEST_TRANSFER_LIMIT_THEN_EVENT_ID_ASC_LATEST_PASSWORD_THEN_EVENT_ID_ASC"
+                ),
+            },
+        ),
         rule(4, "RECENT_BENEFICIARY_TRANSFER", 10, base["conditionDefinition"]),
     ]
+
     def event(number, kind, when, **refs):
-        return {"eventId": f"30000000-0000-4000-8000-00000000000{number}",
-                "eventType": kind, "occurredAt": when,
-                "externalCustomerRef": "customer-ref-001", "accountRef": refs.get("accountRef"),
-                "deviceRef": refs.get("deviceRef"), "beneficiaryRef": refs.get("beneficiaryRef")}
+        return {
+            "eventId": f"30000000-0000-4000-8000-00000000000{number}",
+            "eventType": kind,
+            "occurredAt": when,
+            "externalCustomerRef": "customer-ref-001",
+            "accountRef": refs.get("accountRef"),
+            "deviceRef": refs.get("deviceRef"),
+            "beneficiaryRef": refs.get("beneficiaryRef"),
+        }
+
     payload["behaviorEvents"] = [
         event(1, "DEVICE_REGISTERED", "2026-07-23T11:56:00Z", deviceRef="device-ref-001"),
         event(2, "PASSWORD_CHANGED", "2026-07-23T11:57:00Z"),
-        event(3, "TRANSFER_LIMIT_CHANGED", "2026-07-23T11:58:00Z",
-              accountRef="sender-account-ref-001"),
-        event(4, "BENEFICIARY_REGISTERED", "2026-07-23T11:59:00Z",
-              accountRef="sender-account-ref-001", beneficiaryRef="recipient-account-ref-001"),
+        event(
+            3, "TRANSFER_LIMIT_CHANGED", "2026-07-23T11:58:00Z", accountRef="sender-account-ref-001"
+        ),
+        event(
+            4,
+            "BENEFICIARY_REGISTERED",
+            "2026-07-23T11:59:00Z",
+            accountRef="sender-account-ref-001",
+            beneficiaryRef="recipient-account-ref-001",
+        ),
     ]
     return payload
 
@@ -258,16 +302,28 @@ def test_rule_v2_full_evidence_is_critical_on_existing_wire_v2(client: TestClien
     assert analysis["scoringResult"]["riskScore"] == 85
     assert analysis["scoringResult"]["riskLevel"] == "CRITICAL"
     assert [item["groupId"] for item in analysis["scoringResult"]["groupSummaries"]] == [
-        "amount", "security", "beneficiary"]
+        "amount",
+        "security",
+        "beneficiary",
+    ]
     assert len(analysis["evidence"]) == 4
 
 
-@pytest.mark.parametrize("mutation", [
-    "outside_window", "after_transaction", "wrong_customer", "wrong_device",
-    "wrong_sender", "wrong_beneficiary", "reversed_security_sequence",
-])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "outside_window",
+        "after_transaction",
+        "wrong_customer",
+        "wrong_device",
+        "wrong_sender",
+        "wrong_beneficiary",
+        "reversed_security_sequence",
+    ],
+)
 def test_rule_v2_rejects_unrelated_behavior_as_critical(
-    client: TestClient, mutation: str,
+    client: TestClient,
+    mutation: str,
 ) -> None:
     payload = _rule_v2_critical_payload()
     events = payload["behaviorEvents"]
