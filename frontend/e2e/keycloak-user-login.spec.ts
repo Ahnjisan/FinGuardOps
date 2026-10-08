@@ -10720,9 +10720,11 @@ test("real Keycloak users investigate a stored Rule v2 CRITICAL case", async ({ 
     await adminPage.locator(`.ai-operations tbody a[href="/ai-operations/${accepted.aiRequestId}"]`)
       .click();
     await expect(adminPage.getByRole("heading", { name: "AI 요청 상세" })).toBeVisible();
-    requireCondition(adminRelay.some((entry) => entry.pathname ===
-      `/api/v1/ai-report-requests/${accepted.aiRequestId}` && entry.status === 200),
-    "The operator did not read the critical report request.");
+    await expect.poll(() => adminRelay.filter((entry) => entry.method === "GET" &&
+      entry.pathname === `/api/v1/ai-report-requests/${accepted.aiRequestId}`)
+      .map((entry) => entry.status), { timeout: 10_000 }).toContain(200);
+    await expect(factValue(adminPage.locator(".ai-operations__summary"), "요청 ID"))
+      .toHaveText(accepted.aiRequestId);
     const adminDetail = await adminPage.evaluate(async (id) => {
       const [{ getOidcAuthClient }, { fetchAiRequestDetail }] = await Promise.all([
         import("/src/auth/oidcAuthClient.ts"),
@@ -10731,9 +10733,15 @@ test("real Keycloak users investigate a stored Rule v2 CRITICAL case", async ({ 
       ]);
       return fetchAiRequestDetail(getOidcAuthClient(), id);
     }, accepted.aiRequestId);
-    requireCondition(adminDetail.aiRequestId === accepted.aiRequestId &&
+    requireCondition(accepted.executionId !== null &&
+      adminDetail.aiRequestId === accepted.aiRequestId &&
+      adminDetail.caseId === caseId &&
+      adminDetail.executionId === accepted.executionId &&
+      adminDetail.reportId === finalReport.currentReport.reportId &&
+      adminDetail.detectionResultVersion === reportVersion &&
       adminDetail.reportStatus === "COMPLETED" &&
       adminDetail.reportSource === "LLM" && adminDetail.attempts.length === 1 &&
+      adminDetail.attempts[0].outcome === "COMPLETED" &&
       adminDetail.estimatedCost === null,
     "The operator did not read the same stored mock Provider result with unknown cost.");
     const adminCaseRead = await adminPage.evaluate(async (id) => {
@@ -10749,9 +10757,10 @@ test("real Keycloak users investigate a stored Rule v2 CRITICAL case", async ({ 
         return error instanceof Error ? error.name : "unknown";
       }
     }, caseId);
-    requireCondition(adminCaseRead === "ForbiddenError" && adminRelay.some((entry) =>
-      entry.pathname === `${CASE_LIST_PATH}/${caseId}` && entry.status === 403),
-    "The operator gained case authority.");
+    requireCondition(adminCaseRead === "ForbiddenError", "The operator gained case authority.");
+    await expect.poll(() => adminRelay.filter((entry) => entry.method === "GET" &&
+      entry.pathname === `${CASE_LIST_PATH}/${caseId}`)
+      .map((entry) => entry.status), { timeout: 10_000 }).toContain(403);
     requireCondition(relay.some((entry) => entry.pathname ===
       `${TRANSACTION_LIST_PATH}/${transactionId}/adopted-detection-result` && entry.status === 200),
     "The analyst did not read the stored adopted evidence.");
