@@ -34,6 +34,17 @@ def detail(status, attempts, trigger=None, source=None):
 
 
 class FixtureTests(unittest.TestCase):
+    def test_v2_critical_manifest_and_response_boundary(self):
+        manifest = evaluation.load_fixtures(ROOT / "rule_v2_critical_fixture.json")
+        fixture = {**manifest["fixtures"][0], "scoringPolicyVersion": manifest["scoringPolicyVersion"]}
+        self.assertEqual(evaluation.score(set(fixture["expectedReasonCodes"]),
+                                          manifest["scoringPolicyVersion"]), (85, "CRITICAL"))
+        created = {"riskLevel": "CRITICAL", "riskResponseOutcome": "HELD", "caseId": "case"}
+        adopted = {"adoptedResult": {"riskLevel": "CRITICAL", "riskScore": 85,
+                   "scoringPolicyVersion": "scoring-policy-v2", "detectionResultVersion": 1,
+                   "ruleEvidence": [{"reasonCode": code} for code in fixture["expectedReasonCodes"]]}}
+        self.assertEqual(evaluation.assert_detection(fixture, created, adopted), 1)
+
     def test_v1_fixtures_and_no_reachable_critical(self):
         manifest = evaluation.load_fixtures(FIXTURES)
         self.assertEqual(len(manifest["fixtures"]), 5)

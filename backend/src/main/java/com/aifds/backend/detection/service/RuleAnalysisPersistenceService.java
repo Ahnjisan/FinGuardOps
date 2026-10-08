@@ -13,6 +13,7 @@ import com.aifds.backend.rule.client.RuleAnalysisRequestV2Mapper;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV2;
 import com.aifds.backend.rule.entity.RuleVersion;
 import com.aifds.backend.rule.repository.RuleVersionRepository;
+import com.aifds.backend.rule.contract.RulePolicyVersion;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
 import com.aifds.backend.transaction.exception.TransactionNotFoundException;
@@ -180,6 +181,9 @@ public class RuleAnalysisPersistenceService {
         FinancialTransaction transaction = prepared.transaction();
         RuleAnalysisSnapshotAssembler.AssembledRuleAnalysisSnapshot snapshot =
                 prepared.snapshot();
+        int selectedPolicy = RulePolicyVersion.from(snapshot.request().ruleVersions());
+        scoringPolicyVersion = RulePolicyVersion.scoringPolicy(selectedPolicy);
+        featureVersion = RulePolicyVersion.feature(selectedPolicy);
 
         int nextVersion = Math.addExact(
                 detectionResultRepository.findMaximumVersionByTransactionPk(

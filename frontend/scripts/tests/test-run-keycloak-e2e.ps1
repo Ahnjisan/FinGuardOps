@@ -10189,10 +10189,10 @@ function Invoke-D339TargetedTests {
                     Restarting=$false; Dead=$false }
             }
             $evaluate = {
-                param($document, $owner)
+                param($document, $owner, $targetProject = $project, $targetBase = $base)
                 try {
-                    $entry = Assert-E2EPublicationOneoffIdentity -Document $document -Id $id -Project $project `
-                        -Receipt $owner -BackendDocument $base
+                    $entry = Assert-E2EPublicationOneoffIdentity -Document $document -Id $id -Project $targetProject `
+                        -Receipt $owner -BackendDocument $targetBase
                     if ($entry.Id -ceq $id -and $entry.AutoRemove) { return 'OK' }
                     return 'BAD_RESULT'
                 }
@@ -10200,6 +10200,45 @@ function Invoke-D339TargetedTests {
             }
             $results = [ordered]@{}
             $results['valid'] = & $evaluate $candidate $receipt
+            $v2 = $candidate | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+            $v2.Config.Cmd[2] = '--finguardops.rule-v2-local-publication.enabled=true'
+            $v2.Config.Cmd[3] = '--finguardops.rule-v2-local-publication.confirmation=PUBLISH_RULE_V2_LOCAL'
+            $v2.Config.Cmd[4] = '--finguardops.rule-v2-local-publication.effective-from=' + $effective
+            $v2.Config.Env = @('SPRING_PROFILES_ACTIVE=local,rule-v2-local-publication',
+                'FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED=false','FINGUARDOPS_KAFKA_ENABLED=false','SAFE=x')
+            $runProject = 'finguardops-keycloak-browser-e2e'
+            $runBase = $base | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+            $runBase.Config.Labels.'com.docker.compose.project' = $runProject
+            $runBase.HostConfig.NetworkMode = $runProject + '_application'
+            $v2.Name = '/' + $runProject + '-backend-run-abcdef012345'
+            $v2.Config.Labels.'com.docker.compose.project' = $runProject
+            $v2.HostConfig.NetworkMode = $runProject + '_application'
+            $results['valid-v2-interrupted'] = & $evaluate $v2 $receipt $runProject $runBase
+            $wrongV2 = $v2 | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+            $wrongV2.Config.Cmd[3] = '--finguardops.rule-v2-local-publication.confirmation=WRONG'
+            $results['wrong-v2-command'] = & $evaluate $wrongV2 $receipt $runProject $runBase
+            $wrongImage = $v2 | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+            $wrongImage.Image = 'sha256:' + ('f' * 64)
+            $results['wrong-v2-image'] = & $evaluate $wrongImage $receipt $runProject $runBase
+            $wrongReceipt = New-E2EReceipt -RunId 'fedcba9876543210fedcba9876543210' `
+                -RepositoryId $receipt.repositoryId -CommitSha $receipt.commitSha -TreeSha $receipt.treeSha
+            $results['wrong-v2-receipt'] = & $evaluate $v2 $wrongReceipt $runProject $runBase
+            $v2InService = $candidate | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+            $v2InService.Config.Cmd = @($v2.Config.Cmd)
+            $v2InService.Config.Env = @($v2.Config.Env)
+            $results['v2-in-service-project'] = & $evaluate $v2InService $receipt $project $base
+            $wrongProject = $v2 | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+            $wrongProject.Name = '/unrelated-project-backend-run-abcdef012345'
+            $wrongProject.Config.Labels.'com.docker.compose.project' = 'unrelated-project'
+            $wrongProject.HostConfig.NetworkMode = 'unrelated-project_application'
+            $wrongBase = $runBase | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+            $wrongBase.Config.Labels.'com.docker.compose.project' = 'unrelated-project'
+            $wrongBase.HostConfig.NetworkMode = 'unrelated-project_application'
+            $results['wrong-v2-project'] = & $evaluate $wrongProject $receipt 'unrelated-project' $wrongBase
+            $v1InRun = $v2 | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+            $v1InRun.Config.Cmd = @($candidate.Config.Cmd)
+            $v1InRun.Config.Env = @($candidate.Config.Env)
+            $results['v1-in-run-project'] = & $evaluate $v1InRun $receipt $runProject $runBase
             $differentRun = New-E2EReceipt -RunId 'fedcba9876543210fedcba9876543210' `
                 -RepositoryId $receipt.repositoryId -CommitSha $receipt.commitSha -TreeSha $receipt.treeSha
             $results['different-run'] = & $evaluate $candidate $differentRun
@@ -10217,48 +10256,55 @@ function Invoke-D339TargetedTests {
             return $results
         }
         Assert-Equal 'OK' $outcome['valid'] 'Owned one-off was refused.'
+        Assert-Equal 'OK' $outcome['valid-v2-interrupted'] 'Owned interrupted Rule v2 one-off was refused.'
+        foreach ($name in @('wrong-v2-command','wrong-v2-image','wrong-v2-receipt',
+            'wrong-v2-project','v1-in-run-project','v2-in-service-project')) {
+            Assert-Equal 'RESOURCE_CLEANUP_FAILED' $outcome[$name] "$name was accepted or leaked details."
+        }
         foreach ($name in @('different-run','forged-name','forged-label','different-image','different-command','unrelated-running')) {
             Assert-Equal 'RESOURCE_CLEANUP_FAILED' $outcome[$name] "$name was accepted or leaked details."
         }
     }
-    Invoke-TestCase 'D339 stopped auto-removing one-off is cleared by exact full ID' {
+    Invoke-TestCase 'D339 stopped Service and Browser Run one-offs are cleared by exact full ID' {
         $events = & $script:E2EModule {
             $receipt = New-E2EReceipt -RunId '0123456789abcdef0123456789abcdef' `
                 -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
             $id = 'd' * 64
-            $project = Get-E2EServiceProjectName -Receipt $receipt
-            $before = [pscustomobject]@{ Project=$project; Containers=@([pscustomobject]@{
-                Id=$id; Service='backend-rule-publication-oneoff'; Running=$true; AutoRemove=$true
-                Image='sha256:' + ('e' * 64); ImageReference='owned:tag'
-            }); Networks=@(); Volumes=@() }
-            $state = [pscustomobject]@{ Present=$true; Events=[System.Collections.Generic.List[string]]::new() }
-            $originalInventory = (Get-Command Get-E2EProjectResourceInventory -CommandType Function).ScriptBlock
-            $existingDocker = Get-Command docker -CommandType Function -ErrorAction SilentlyContinue
-            try {
-                Set-Item Function:\Get-E2EProjectResourceInventory -Value {
-                    if ($state.Present) { return $before }
-                    return [pscustomobject]@{ Project=$project; Containers=@(); Networks=@(); Volumes=@() }
-                }.GetNewClosure()
-                Set-Item Function:\docker -Value {
-                    $arguments = @($args | ForEach-Object { [string]$_ })
-                    $state.Events.Add(($arguments -join ' '))
-                    if ($arguments.Count -eq 2 -and $arguments[0] -ceq 'stop' -and $arguments[1] -ceq $id) {
-                        $state.Present = $false
-                        $global:LASTEXITCODE = 0
-                        return $id
-                    }
-                    $global:LASTEXITCODE = 1
-                }.GetNewClosure()
-                Invoke-E2EExactResourceCleanup -Before $before -Receipt $receipt
-                return @($state.Events.ToArray())
-            }
-            finally {
-                Set-Item Function:\Get-E2EProjectResourceInventory -Value $originalInventory
-                if ($null -eq $existingDocker) { Remove-Item Function:\docker -ErrorAction SilentlyContinue }
-                else { Set-Item Function:\docker -Value $existingDocker.ScriptBlock }
+            foreach ($project in @((Get-E2EServiceProjectName -Receipt $receipt), $ProjectName)) {
+                $before = [pscustomobject]@{ Project=$project; Containers=@([pscustomobject]@{
+                    Id=$id; Service='backend-rule-publication-oneoff'; Running=$true; AutoRemove=$true
+                    Image='sha256:' + ('e' * 64); ImageReference='owned:tag'
+                }); Networks=@(); Volumes=@() }
+                $state = [pscustomobject]@{ Present=$true; Events=[System.Collections.Generic.List[string]]::new() }
+                $originalInventory = (Get-Command Get-E2EProjectResourceInventory -CommandType Function).ScriptBlock
+                $existingDocker = Get-Command docker -CommandType Function -ErrorAction SilentlyContinue
+                try {
+                    Set-Item Function:\Get-E2EProjectResourceInventory -Value {
+                        if ($state.Present) { return $before }
+                        return [pscustomobject]@{ Project=$project; Containers=@(); Networks=@(); Volumes=@() }
+                    }.GetNewClosure()
+                    Set-Item Function:\docker -Value {
+                        $arguments = @($args | ForEach-Object { [string]$_ })
+                        $state.Events.Add(($arguments -join ' '))
+                        if ($arguments.Count -eq 2 -and $arguments[0] -ceq 'stop' -and $arguments[1] -ceq $id) {
+                            $state.Present = $false
+                            $global:LASTEXITCODE = 0
+                            return $id
+                        }
+                        $global:LASTEXITCODE = 1
+                    }.GetNewClosure()
+                    Invoke-E2EExactResourceCleanup -Before $before -Receipt $receipt
+                    Write-Output @($state.Events.ToArray())
+                }
+                finally {
+                    Set-Item Function:\Get-E2EProjectResourceInventory -Value $originalInventory
+                    if ($null -eq $existingDocker) { Remove-Item Function:\docker -ErrorAction SilentlyContinue }
+                    else { Set-Item Function:\docker -Value $existingDocker.ScriptBlock }
+                }
             }
         }
-        Assert-Equal @('stop ' + ('d' * 64)) @($events) 'Auto-removing one-off used another deletion operand.'
+        Assert-Equal @(('stop ' + ('d' * 64)), ('stop ' + ('d' * 64))) @($events) `
+            'Auto-removing one-off used another deletion operand.'
     }
     if ($script:Failures.Count -ne 0) { exit 1 }
 }

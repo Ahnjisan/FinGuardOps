@@ -5914,15 +5914,17 @@ function Get-E2EDockerLines([scriptblock]$Command) {
     }
 }
 
-# A failed Service publication may leave Compose's --rm backend one-off alive.
+# A failed Service v1 or Browser Run v2 publication may leave Compose's --rm
+# backend one-off alive.
 # It is not a declared service container. The receipt and the ordinary backend
 # container jointly fix its image, environment and runtime; a copied name or
 # project label alone grants no cleanup authority.
 function Assert-E2EPublicationOneoffIdentity {
     param($Document, [string]$Id, [string]$Project, $Receipt, $BackendDocument)
 
-    if (-not (Test-E2EOrdinalEqual $Project (Get-E2EServiceProjectName -Receipt $Receipt)) -or
-        $Id -cnotmatch '\A[0-9a-f]{64}\z' -or $null -eq $BackendDocument) { throw 'RESOURCE_CLEANUP_FAILED' }
+    if ($Id -cnotmatch '\A[0-9a-f]{64}\z' -or $null -eq $BackendDocument) {
+        throw 'RESOURCE_CLEANUP_FAILED'
+    }
     $config = Get-JsonMember $Document 'Config'
     $labels = Get-JsonMember $config 'Labels'
     $baseConfig = Get-JsonMember $BackendDocument 'Config'
@@ -5999,17 +6001,27 @@ function Assert-E2EPublicationOneoffIdentity {
         throw 'RESOURCE_CLEANUP_FAILED'
     }
     $command = @(Get-JsonMember $config 'Cmd')
-    $fixed = @(
+    if ($command.Count -ne 5) { throw 'RESOURCE_CLEANUP_FAILED' }
+    $v2 = Test-E2EOrdinalEqual $command[2] '--finguardops.rule-v2-local-publication.enabled=true'
+    $expectedProject = if ($v2) { $ProjectName } else { Get-E2EServiceProjectName -Receipt $Receipt }
+    if (-not (Test-E2EOrdinalEqual $Project $expectedProject)) { throw 'RESOURCE_CLEANUP_FAILED' }
+    $fixed = if ($v2) { @(
+        '--spring.main.web-application-type=none',
+        '--logging.level.org.hibernate.orm.connections.pooling=WARN',
+        '--finguardops.rule-v2-local-publication.enabled=true',
+        '--finguardops.rule-v2-local-publication.confirmation=PUBLISH_RULE_V2_LOCAL'
+    ) } else { @(
         '--spring.main.web-application-type=none',
         '--logging.level.org.hibernate.orm.connections.pooling=WARN',
         '--finguardops.rule-v1-default-publication.enabled=true',
         '--finguardops.rule-v1-default-publication.confirmation=PUBLISH_RULE_V1_DEFAULT_V1'
-    )
-    if ($command.Count -ne 5) { throw 'RESOURCE_CLEANUP_FAILED' }
+    ) }
     for ($index = 0; $index -lt $fixed.Count; $index++) {
         if (-not (Test-E2EOrdinalEqual $command[$index] $fixed[$index])) { throw 'RESOURCE_CLEANUP_FAILED' }
     }
-    $prefix = '--finguardops.rule-v1-default-publication.effective-from='
+    $prefix = if ($v2) { '--finguardops.rule-v2-local-publication.effective-from=' } else {
+        '--finguardops.rule-v1-default-publication.effective-from='
+    }
     if ($command[4] -isnot [string] -or $command[4] -cnotmatch ('\A' + [regex]::Escape($prefix) + '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\z')) {
         throw 'RESOURCE_CLEANUP_FAILED'
     }
@@ -6020,16 +6032,24 @@ function Assert-E2EPublicationOneoffIdentity {
         -not [datetimeoffset]::TryParse((Get-JsonMember $Document 'Created'), [ref]$created) -or
         [math]::Abs(($effective - $created).TotalSeconds) -gt 300) { throw 'RESOURCE_CLEANUP_FAILED' }
     $expectedEnvironment = [System.Collections.Generic.List[string]]::new()
+    $hasKafkaEnvironment = $false
     foreach ($entry in @(Get-JsonMember $baseConfig 'Env')) {
         if ($entry -isnot [string]) { throw 'RESOURCE_CLEANUP_FAILED' }
         if ($entry.StartsWith('SPRING_PROFILES_ACTIVE=', [System.StringComparison]::Ordinal)) {
-            $expectedEnvironment.Add('SPRING_PROFILES_ACTIVE=local,rule-v1-default-publication')
+            $expectedEnvironment.Add($(if ($v2) { 'SPRING_PROFILES_ACTIVE=local,rule-v2-local-publication' } else {
+                'SPRING_PROFILES_ACTIVE=local,rule-v1-default-publication'
+            }))
         }
         elseif ($entry.StartsWith('FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED=', [System.StringComparison]::Ordinal)) {
             $expectedEnvironment.Add('FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED=false')
         }
+        elseif ($v2 -and $entry.StartsWith('FINGUARDOPS_KAFKA_ENABLED=', [System.StringComparison]::Ordinal)) {
+            $hasKafkaEnvironment = $true
+            $expectedEnvironment.Add('FINGUARDOPS_KAFKA_ENABLED=false')
+        }
         else { $expectedEnvironment.Add($entry) }
     }
+    if ($v2 -and -not $hasKafkaEnvironment) { $expectedEnvironment.Add('FINGUARDOPS_KAFKA_ENABLED=false') }
     if (-not (Test-E2EOrdinalSetEqual $expectedEnvironment.ToArray() @(Get-JsonMember $config 'Env'))) {
         throw 'RESOURCE_CLEANUP_FAILED'
     }

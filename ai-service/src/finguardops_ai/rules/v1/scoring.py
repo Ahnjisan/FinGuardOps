@@ -12,6 +12,7 @@ from finguardops_ai.rules.v1.runner import PlannedRuleResult
 class ScoringGroupId(StrEnum):
     AMOUNT = "amount"
     SECURITY = "security"
+    BENEFICIARY = "beneficiary"
 
 
 class RiskLevel(StrEnum):
@@ -139,6 +140,26 @@ _SCORING_POLICY = _ScoringPolicy(
     ),
 )
 
+# Rule v2 keeps every evaluator and weight. A newly registered beneficiary is
+# an independent observation, rather than another security-change observation.
+_SCORING_POLICY_V2 = _ScoringPolicy(
+    version="scoring-policy-v2",
+    rule_bindings=(
+        _RuleScoringBinding(RuleId.R001, ScoringGroupId.AMOUNT, 15),
+        _RuleScoringBinding(RuleId.R002, ScoringGroupId.SECURITY, 20),
+        _RuleScoringBinding(RuleId.R003, ScoringGroupId.SECURITY, 40),
+        _RuleScoringBinding(RuleId.R004, ScoringGroupId.BENEFICIARY, 10),
+    ),
+    group_caps=(
+        (ScoringGroupId.AMOUNT, 15),
+        (ScoringGroupId.SECURITY, 60),
+        (ScoringGroupId.BENEFICIARY, 10),
+    ),
+    final_score_cap=100,
+    risk_boundaries=_EXPECTED_RISK_BOUNDARIES,
+)
+_EXPECTED_POLICY_V2 = _SCORING_POLICY_V2
+
 
 class RuleScoringCalculator:
     """Calculate deterministic Rule v1 scores from validated Runner results."""
@@ -148,7 +169,15 @@ class RuleScoringCalculator:
         plan: RuleExecutionPlan,
         planned_results: tuple[PlannedRuleResult, ...],
     ) -> RuleScoringResult:
-        return _calculate(plan, planned_results, _SCORING_POLICY)
+        if not isinstance(plan, RuleExecutionPlan) or not isinstance(plan.items, tuple):
+            _raise_scoring_error(
+                RuleScoringErrorCategory.INVALID_SCORING_INPUT, "plan must be a RuleExecutionPlan"
+            )
+        versions = {
+            item.version_number for item in plan.items if isinstance(item, RuleExecutionPlanItem)
+        }
+        policy = _SCORING_POLICY_V2 if versions == {2} and len(plan.items) == 4 else _SCORING_POLICY
+        return _calculate(plan, planned_results, policy)
 
 
 def _calculate(
@@ -156,12 +185,13 @@ def _calculate(
     planned_results: tuple[PlannedRuleResult, ...],
     policy: _ScoringPolicy,
 ) -> RuleScoringResult:
-    _validate_scoring_inputs(plan, planned_results)
     _validate_policy(policy)
+    _validate_scoring_inputs(plan, planned_results, policy)
 
     contributions: list[RuleScoreContribution] = []
     amount_raw_score = 0
     security_raw_score = 0
+    beneficiary_raw_score = 0
 
     for plan_item, planned_result in zip(plan.items, planned_results, strict=True):
         binding = _binding_for(plan_item.rule_id, policy)
@@ -176,8 +206,10 @@ def _calculate(
         )
         if binding.group_id is ScoringGroupId.AMOUNT:
             amount_raw_score += original_contribution
-        else:
+        elif binding.group_id is ScoringGroupId.SECURITY:
             security_raw_score += original_contribution
+        else:
+            beneficiary_raw_score += original_contribution
 
     amount_summary = _summarize_group(
         ScoringGroupId.AMOUNT,
@@ -189,9 +221,16 @@ def _calculate(
         security_raw_score,
         policy,
     )
+    beneficiary_summary = (
+        _summarize_group(ScoringGroupId.BENEFICIARY, beneficiary_raw_score, policy)
+        if policy.version == "scoring-policy-v2"
+        else None
+    )
     risk_score = min(
         policy.final_score_cap,
-        amount_summary.applied_score + security_summary.applied_score,
+        amount_summary.applied_score
+        + security_summary.applied_score
+        + (beneficiary_summary.applied_score if beneficiary_summary else 0),
     )
 
     return RuleScoringResult(
@@ -199,13 +238,18 @@ def _calculate(
         risk_score=risk_score,
         risk_level=_risk_level_for_score(risk_score, policy),
         rule_contributions=tuple(contributions),
-        group_summaries=(amount_summary, security_summary),
+        group_summaries=(
+            (amount_summary, security_summary, beneficiary_summary)
+            if beneficiary_summary
+            else (amount_summary, security_summary)
+        ),
     )
 
 
 def _validate_scoring_inputs(
     plan: object,
     planned_results: object,
+    policy: _ScoringPolicy,
 ) -> None:
     if not isinstance(plan, RuleExecutionPlan):
         _raise_scoring_error(
@@ -309,7 +353,7 @@ def _validate_scoring_inputs(
 
 
 def _validate_policy(policy: object) -> None:
-    if not _policy_matches_expected_definition(policy):
+    if not (_policy_matches_expected_definition(policy) or policy == _EXPECTED_POLICY_V2):
         _raise_scoring_error(
             RuleScoringErrorCategory.INVALID_SCORING_POLICY,
             "scoring policy binding must exactly match scoring-policy-v1",

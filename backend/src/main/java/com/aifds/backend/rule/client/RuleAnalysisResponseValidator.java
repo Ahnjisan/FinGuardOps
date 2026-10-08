@@ -16,6 +16,7 @@ import com.aifds.backend.rule.client.dto.RuleVersionSnapshotRequest;
 import com.aifds.backend.rule.contract.CanonicalRuleSetVersionCalculator;
 import com.aifds.backend.rule.contract.RuleV1ContractRegistry;
 import com.aifds.backend.rule.contract.RuleV1ExecutionPlanRegistry;
+import com.aifds.backend.rule.contract.RulePolicyVersion;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.time.Duration;
@@ -111,6 +112,7 @@ public final class RuleAnalysisResponseValidator {
                 behaviorEventsById(request.behaviorEvents());
         validateScoring(
                 expectedRules,
+                RulePolicyVersion.from(request.ruleVersions()),
                 response.analysis().scoringResult()
         );
         validateEvidence(
@@ -139,11 +141,11 @@ public final class RuleAnalysisResponseValidator {
 
     private void validateScoring(
             List<ExpectedRule> expectedRules,
+            int policyVersion,
             RuleScoringResultResponse scoring
     ) {
         require(
-                RuleV1ContractRegistry.ruleAnalysisMetadata()
-                        .scoringPolicyVersion()
+                RulePolicyVersion.scoringPolicy(policyVersion)
                         .equals(scoring.scoringPolicyVersion()),
                 "scoringPolicyVersion is unsupported"
         );
@@ -156,6 +158,7 @@ public final class RuleAnalysisResponseValidator {
                 new EnumMap<>(RuleScoreGroupId.class);
         rawScores.put(RuleScoreGroupId.amount, 0);
         rawScores.put(RuleScoreGroupId.security, 0);
+        rawScores.put(RuleScoreGroupId.beneficiary, 0);
 
         Set<RuleId> seenRuleIds = new HashSet<>();
         Set<Integer> seenOrders = new HashSet<>();
@@ -183,15 +186,19 @@ public final class RuleAnalysisResponseValidator {
                     contribution.originalContribution() == expectedContribution,
                     "contribution value contradicts matched state"
             );
+            RuleScoreGroupId scoreGroup = policyVersion == 2
+                    && contribution.ruleId() == RuleId.R004
+                    ? RuleScoreGroupId.beneficiary : expected.contract().groupId();
             rawScores.compute(
-                    expected.contract().groupId(),
+                    scoreGroup,
                     (ignored, current) -> current + contribution.originalContribution()
             );
         }
         requireMatchedPrerequisite(scoring.ruleContributions(), RuleId.R002);
         requireMatchedPrerequisite(scoring.ruleContributions(), RuleId.R003);
 
-        require(scoring.groupSummaries().size() == 2, "group summary count is invalid");
+        require(scoring.groupSummaries().size() == (policyVersion == 2 ? 3 : 2),
+                "group summary count is invalid");
         RuleScoreGroupSummaryResponse amount = scoring.groupSummaries().get(0);
         RuleScoreGroupSummaryResponse security = scoring.groupSummaries().get(1);
         validateGroupSummary(amount, RuleScoreGroupId.amount, 15, rawScores.get(
@@ -202,6 +209,12 @@ public final class RuleAnalysisResponseValidator {
         ));
 
         int expectedRiskScore = amount.appliedScore() + security.appliedScore();
+        if (policyVersion == 2) {
+            RuleScoreGroupSummaryResponse beneficiary = scoring.groupSummaries().get(2);
+            validateGroupSummary(beneficiary, RuleScoreGroupId.beneficiary, 10,
+                    rawScores.get(RuleScoreGroupId.beneficiary));
+            expectedRiskScore += beneficiary.appliedScore();
+        }
         require(scoring.riskScore() == expectedRiskScore, "riskScore is inconsistent");
         require(scoring.riskScore() >= 0 && scoring.riskScore() <= 100,
                 "riskScore is outside the supported range");

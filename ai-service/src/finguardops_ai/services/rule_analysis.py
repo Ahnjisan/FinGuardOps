@@ -13,6 +13,7 @@ from finguardops_ai.rules.v1 import (
     RuleScoringCalculator,
     create_default_rule_evaluator_registry,
 )
+from finguardops_ai.rules.v2.scoring import RuleV2ScoringCalculator
 from finguardops_ai.schemas.rule_analysis import RuleAnalysisRequest
 
 
@@ -28,7 +29,11 @@ class RuleAnalysisService:
             execution_input.rule_versions,
         )
         planned_results = self.plan_runner.execute(plan, execution_input.rule_input)
-        scoring_result = RuleScoringCalculator.calculate(plan, planned_results)
+        scoring_result = (
+            RuleV2ScoringCalculator.calculate(plan, planned_results)
+            if {item.version_number for item in plan.items} == {2}
+            else RuleScoringCalculator.calculate(plan, planned_results)
+        )
         return RuleEvidenceTransformer.transform(plan, planned_results, scoring_result)
 
 

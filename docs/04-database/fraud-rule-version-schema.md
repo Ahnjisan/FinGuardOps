@@ -253,3 +253,20 @@ PostgreSQL 17 Testcontainers에서 다음을 검증한다.
 - 실행 가능 시각 경계와 결정적 버전 목록
 - Evidence legacy null FK, snapshot 일치와 LAZY 관계
 - 기존 거래·행동·탐지 persistence 회귀
+# 로컬 Rule v2 발행·활성화 (Issue #369)
+
+기존 V5의 v1 DRAFT seed와 v1 기본 발행 경로는 유지한다. 로컬 전용 one-shot
+`RuleV2LocalPublicationRunner`는 미래의 마이크로초 정밀도 `effectiveFrom`에서
+동일한 네 FraudRule의 새 versionNumber 2 DRAFT를 만들고 한 트랜잭션 안에서
+PUBLISHED로 전환한다. 기존 PUBLISHED v1의 실행 정의는 수정하지 않으며
+`effectiveTo`만 v2 시작 시각으로 닫는다. 시작 전에는 네 v1 버전이 모두
+PUBLISHED·open-ended이고 canonical 정의와 일치해야 한다. v2가 이미 있거나
+시각·집합이 맞지 않으면 전체를 거부한다. 유효기간은 `[from,to)`이므로
+cutoff 직전의 v1과 cutoff부터의 v2가 동시에 실행되지 않는다.
+
+이 변경에는 신규 테이블·컬럼·인덱스가 필요하지 않다. 과거 DetectionResult,
+Evidence, 사건을 재계산하거나 backfill하지 않는다. 이전 시각의 결과는 해당
+`ruleSetVersion`, `scoringPolicyVersion`, RuleVersion FK 및 snapshot으로 해석한다.
+v2 발행 후 되돌림은 이미 기록된 탐지를 수정하는 행위가 아니다. 새 미래
+cutoff로 v2 유효기간을 닫고 별도의 새 불변 RuleVersion 집합을 발행하는
+후속 승인 절차가 필요하며, 이 one-shot은 자동 되돌림을 제공하지 않는다.
