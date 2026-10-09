@@ -100,7 +100,10 @@ jobs:
             echo "::error::SHA tag already exists: $image"
             exit 1
           fi
-          if ! grep -Eiq 'manifest unknown|manifest.*not found' "$lookup_error"; then
+          # Buildx may report an absent tag as either "manifest unknown" or "<ref>: not found".
+          # Authentication and transport failures must never be treated as tag absence.
+          if grep -Eiq 'unauthorized|denied|forbidden|authentication|permission|401|403|timeout|connection|tls|certificate' "$lookup_error" ||
+             ! grep -Eiq 'manifest unknown|(^|[^[:alpha:]])not found([^[:alpha:]]|$)' "$lookup_error"; then
             echo "::error::Cannot establish that the SHA tag is absent; refusing to publish"
             exit 1
           fi
