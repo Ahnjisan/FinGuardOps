@@ -2,6 +2,7 @@
 """Issue 371 owned kind lifecycle. Output is bounded to stages, IDs and counts."""
 
 import argparse
+import base64
 import ctypes
 import datetime as dt
 import hashlib
@@ -13,6 +14,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -30,6 +32,9 @@ BASE_IMAGES = (
 )
 BASE_SERVICES = ("postgres", "python")
 RUN_ID_RE = re.compile(r"^[0-9a-f]{8}$")
+DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+REGISTRY_IMAGES = {"backend": "ghcr.io/ahnjisan/finguardops-backend",
+                   "ai": "ghcr.io/ahnjisan/finguardops-ai-service"}
 STAGES = ("preflight", "prepare", "deploy", "verify", "recover", "storage",
           "inventory", "cleanup", "kind-cleanup-preflight", "record-kind-cleanup",
           "cleanup-partial")
@@ -63,17 +68,27 @@ class GateError(Exception):
     pass
 
 
-def run(argv, *, input_text=None, check=True, timeout=600):
+def run(argv, *, input_text=None, check=True, timeout=600, env=None):
     try:
         result = subprocess.run(argv, input=input_text, text=True, encoding="utf-8", errors="replace",
                                 capture_output=True,
-                                timeout=timeout, check=False, cwd=ROOT)
+                                timeout=timeout, check=False, cwd=ROOT, env=env)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise GateError("COMMAND_UNAVAILABLE_OR_TIMED_OUT") from exc
     if check and result.returncode:
         # Command stderr may include credentials or fixture payloads.
         raise GateError("STAGE_COMMAND_FAILED")
     return result
+
+
+def run_bytes(argv, *, timeout=60):
+    try:
+        result = subprocess.run(argv, capture_output=True, timeout=timeout, check=False, cwd=ROOT)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise GateError("COMMAND_UNAVAILABLE_OR_TIMED_OUT") from exc
+    if result.returncode:
+        raise GateError("STAGE_COMMAND_FAILED")
+    return result.stdout
 
 
 def emit(stage, status, **safe):
@@ -139,6 +154,114 @@ def base_image_gate():
         if docker_image_id(image) != pinned:
             raise GateError("PINNED_BASE_IMAGE_ID_MISMATCH")
         docker_platform_image_id(image)
+
+
+def pull_credentials(path):
+    if not path:
+        raise GateError("PULL_CREDENTIALS_REQUIRED")
+    candidate = Path(path).resolve()
+    if candidate.is_relative_to(ROOT.resolve()) or not candidate.is_file() or candidate.stat().st_size > 4096:
+        raise GateError("PULL_CREDENTIALS_LOCATION_INVALID")
+    try:
+        value = json.loads(candidate.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise GateError("PULL_CREDENTIALS_INVALID") from exc
+    if (not isinstance(value, dict) or set(value) != {"username", "token"}
+            or not isinstance(value["username"], str)
+            or not isinstance(value["token"], str) or not value["username"]
+            or not value["token"] or len(value["token"]) > 2048
+            or not re.fullmatch(r"[A-Za-z0-9-]+", value["username"])
+            or any(char.isspace() for char in value["token"])):
+        raise GateError("PULL_CREDENTIALS_INVALID")
+    auth = base64.b64encode((value["username"] + ":" + value["token"]).encode()).decode()
+    return json.dumps({"auths": {"ghcr.io": {"auth": auth}}}, separators=(",", ":"))
+
+
+def registry_manifest(image, docker_config, sha):
+    with tempfile.TemporaryDirectory(prefix="finguardops-ghcr-") as config_dir:
+        config_file = Path(config_dir) / "config.json"
+        config_file.write_text(docker_config, encoding="utf-8")
+        os.chmod(config_file, 0o600)
+        env = {**os.environ, "DOCKER_CONFIG": config_dir}
+        try:
+            manifest = json.loads(run(["docker", "buildx", "imagetools", "inspect", image,
+                                       "--format", "{{json .Manifest}}"], env=env, timeout=60).stdout)
+            index = manifest.get("digest")
+            if not isinstance(index, str) or not DIGEST_RE.fullmatch(index):
+                raise GateError("REGISTRY_DIGEST_INVALID")
+            pinned = image.rsplit(":", 1)[0] + "@" + index
+            metadata = json.loads(run(["docker", "buildx", "imagetools", "inspect", pinned,
+                                       "--format", "{{json .Image}}"], env=env, timeout=60).stdout)
+            current = json.loads(run(["docker", "buildx", "imagetools", "inspect", image,
+                                      "--format", "{{json .Manifest}}"], env=env, timeout=60).stdout)
+        except ValueError as exc:
+            raise GateError("REGISTRY_MANIFEST_INVALID") from exc
+    if current.get("digest") != index:
+        raise GateError("CURRENT_TAG_DIGEST_CHANGED")
+    if metadata.get("config", {}).get("Labels", {}).get("org.opencontainers.image.revision") != sha:
+        raise GateError("REGISTRY_REVISION_MISMATCH")
+    children = [item.get("digest") for item in manifest.get("manifests", [])
+                if item.get("platform", {}).get("os") == "linux"
+                and item.get("platform", {}).get("architecture") == "amd64"]
+    if "manifests" not in manifest:
+        children = [index]
+    if len(children) != 1 or not isinstance(children[0], str) or not DIGEST_RE.fullmatch(children[0]):
+        raise GateError("REGISTRY_PLATFORM_MISSING")
+    return {"index": index, "platform": children[0]}
+
+
+def verified_registry_pair(sha, workflow_run_id, images, docker_config):
+    if not re.fullmatch(r"[0-9a-f]{40}", sha or "") or not re.fullmatch(r"[1-9][0-9]*", workflow_run_id or ""):
+        raise GateError("PAIR_INPUT_INVALID")
+    for service, base in REGISTRY_IMAGES.items():
+        if not re.fullmatch(re.escape(base) + r"@sha256:[0-9a-f]{64}", images.get(service, "")):
+            raise GateError("DIGEST_IMAGE_REQUIRED")
+    api = "repos/Ahnjisan/FinGuardOps/actions/runs/" + workflow_run_id
+    workflow = json.loads(run(["gh", "api", api], timeout=60).stdout)
+    attempt = workflow.get("run_attempt")
+    if (workflow.get("event") != "push" or workflow.get("head_branch") != "main"
+            or workflow.get("head_sha") != sha or workflow.get("conclusion") != "success"
+            or workflow.get("path") != ".github/workflows/local-image-build.yml"
+            or workflow.get("repository", {}).get("full_name") != "Ahnjisan/FinGuardOps"
+            or not isinstance(attempt, int) or attempt < 1):
+        raise GateError("PAIR_WORKFLOW_MISMATCH")
+    jobs = json.loads(run(["gh", "api", api + "/attempts/" + str(attempt) + "/jobs"],
+                          timeout=60).stdout).get("jobs", [])
+    expected_jobs = {"Build backend image", "Build ai-service image",
+                     "Publish backend to GHCR", "Publish ai-service to GHCR",
+                     "Verify GHCR digest pair"}
+    successful = [job["name"] for job in jobs if job.get("conclusion") == "success"
+                  and job.get("name") in expected_jobs]
+    if len(successful) != len(expected_jobs) or set(successful) != expected_jobs:
+        raise GateError("PAIR_JOB_INCOMPLETE")
+    platform = {}
+    with tempfile.TemporaryDirectory(prefix="finguardops-evidence-") as evidence_dir:
+        run(["gh", "run", "download", workflow_run_id, "-R", "Ahnjisan/FinGuardOps",
+             "-n", "ghcr-publish-backend", "-n", "ghcr-publish-ai-service",
+             "-D", evidence_dir], timeout=120)
+        for service, artifact_service in (("backend", "backend"), ("ai", "ai-service")):
+            records = list(Path(evidence_dir).rglob(artifact_service + "-publish-evidence.json"))
+            if len(records) != 1:
+                raise GateError("PAIR_EVIDENCE_MISSING")
+            try:
+                record = json.loads(records[0].read_text(encoding="utf-8"))
+            except ValueError as exc:
+                raise GateError("PAIR_EVIDENCE_INVALID") from exc
+            expected_tag = REGISTRY_IMAGES[service] + ":sha-" + sha
+            expected_digest = images[service].split("@", 1)[1]
+            if (record.get("service") != artifact_service or record.get("commit_sha") != sha
+                    or record.get("workflow_run_id") != workflow_run_id
+                    or record.get("run_attempt") != str(attempt)
+                    or record.get("image_tag") != expected_tag
+                    or record.get("registry_digest") != expected_digest):
+                raise GateError("PAIR_EVIDENCE_MISMATCH")
+            current = registry_manifest(expected_tag, docker_config, sha)
+            if current["index"] != expected_digest:
+                raise GateError("CURRENT_TAG_DIGEST_MISMATCH")
+            platform[service] = current["platform"]
+    return {"workflowRunId": workflow_run_id, "runAttempt": attempt, "sha": sha,
+            "indexDigests": {service: images[service].split("@", 1)[1] for service in images},
+            "platformDigests": platform}
 
 
 def build_input_inventory():
@@ -390,13 +513,56 @@ def node_image_id(state, image):
     return match.group("digest")
 
 
+def assert_registry_node_empty(state):
+    """Require a healthy CRI inventory before claiming a fresh service-image pull."""
+    try:
+        inventory = json.loads(run(["docker", "exec", state["cluster"] + "-control-plane",
+                                    "crictl", "images", "-o", "json"], timeout=30).stdout)
+    except ValueError as exc:
+        raise GateError("REGISTRY_NODE_IMAGE_LIST_INVALID") from exc
+    if not isinstance(inventory, dict) or not isinstance(inventory.get("images"), list):
+        raise GateError("REGISTRY_NODE_IMAGE_LIST_INVALID")
+    targets = set()
+    for service, base in REGISTRY_IMAGES.items():
+        targets.add(base + ":sha-" + state["revision"])
+        targets.add(state["images"][service])
+        targets.add(base + "@" + state["registry"]["platformDigests"][service])
+        targets.update((state["registry"]["indexDigests"][service],
+                        state["registry"]["platformDigests"][service]))
+    for entry in inventory["images"]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("repoTags", []), list) \
+                or not isinstance(entry.get("repoDigests", []), list) \
+                or not isinstance(entry.get("id"), str) \
+                or any(not isinstance(ref, str) for ref in
+                       entry.get("repoTags", []) + entry.get("repoDigests", [])):
+            raise GateError("REGISTRY_NODE_IMAGE_LIST_INVALID")
+        references = entry.get("repoTags", []) + entry.get("repoDigests", [])
+        if (any(ref in targets or any(ref.startswith(base + suffix)
+                                       for base in REGISTRY_IMAGES.values()
+                                       for suffix in (":", "@")) for ref in references)
+                or entry.get("id") in targets):
+            raise GateError("REGISTRY_IMAGE_PRELOADED")
+
+
+def assert_registry_receipt(state):
+    if state.get("registry", {}).get("sha") != state.get("revision"):
+        raise GateError("REGISTRY_SHA_RECEIPT_MISMATCH")
+    for service, base in REGISTRY_IMAGES.items():
+        image = state.get("images", {}).get(service, "")
+        if image != base + "@" + state.get("registry", {}).get("indexDigests", {}).get(service, ""):
+            raise GateError("REGISTRY_IMAGE_RECEIPT_MISMATCH")
+
+
 def assert_images(state):
     assert_docker(state)
     assert_source(state)
-    for service, image in state["images"].items():
-        expected = state.get("imageIds", {}).get(service)
-        if not expected or docker_image_id(image) != expected or node_image_id(state, image) != expected:
-            raise GateError("IMAGE_ID_MISMATCH")
+    if state.get("imageSource") == "registry":
+        assert_registry_receipt(state)
+    else:
+        for service, image in state["images"].items():
+            expected = state.get("imageIds", {}).get(service)
+            if not expected or docker_image_id(image) != expected or node_image_id(state, image) != expected:
+                raise GateError("IMAGE_ID_MISMATCH")
     for service, image in zip(BASE_SERVICES, BASE_IMAGES):
         alias = state.get("baseAliases", {}).get(service)
         expected = state.get("baseImageIds", {}).get(service, {})
@@ -412,10 +578,13 @@ def mutation_gate(state, *, absent=False, backend=None, partial=False):
     assert_cluster(state)
     assert_source(state)
     if partial:
-        for service, expected in state.get("imageIds", {}).items():
-            image = state["images"][service]
-            if docker_image_id(image) != expected or node_image_id(state, image) != expected:
-                raise GateError("IMAGE_ID_MISMATCH")
+        if state.get("imageSource") == "registry":
+            assert_registry_receipt(state)
+        else:
+            for service, expected in state.get("imageIds", {}).items():
+                image = state["images"][service]
+                if docker_image_id(image) != expected or node_image_id(state, image) != expected:
+                    raise GateError("IMAGE_ID_MISMATCH")
     else:
         assert_images(state)
     assert_namespace(state, absent=absent)
@@ -428,6 +597,9 @@ def mutation_gate(state, *, absent=False, backend=None, partial=False):
                 raise GateError("BOOTSTRAP_UID_MISMATCH")
         if state.get("secretHash") and secret_content_hash(state) != state["secretHash"]:
             raise GateError("SECRET_HASH_MISMATCH")
+        if state.get("imageSource") == "registry" and state.get("pullSecretHash"):
+            if pull_secret_content_hash(state) != state["pullSecretHash"]:
+                raise GateError("PULL_SECRET_HASH_MISMATCH")
         if state.get("resourceUids"):
             assert_resources(state)
             assert_workload_images(state, backend=backend)
@@ -440,6 +612,8 @@ def fixed_resource_uids(state):
                  ("pvc", "postgres-data"), ("deployment", "postgresql"),
                  ("deployment", "ai-service"), ("deployment", "backend"),
                  ("service", "postgresql"), ("service", "ai-service"), ("service", "backend"))
+    if state.get("imageSource") == "registry":
+        resources += (("secret", "ghcr-pull"),)
     return {kind + "/" + name: json.loads(kubectl(state, "-n", NAMESPACE, "get", kind, name,
                                                    "-o", "json").stdout)["metadata"]["uid"]
             for kind, name in resources}
@@ -456,6 +630,17 @@ def assert_resources(state):
     if (not expected or fixed_resource_uids(state) != expected
             or not state.get("secretHash") or secret_content_hash(state) != state["secretHash"]):
         raise GateError("RESOURCE_UID_MISMATCH")
+    if state.get("imageSource") == "registry" and (
+            not state.get("pullSecretHash") or pull_secret_content_hash(state) != state["pullSecretHash"]):
+        raise GateError("PULL_SECRET_HASH_MISMATCH")
+
+
+def pull_secret_content_hash(state):
+    secret = json.loads(kubectl(state, "-n", NAMESPACE, "get", "secret", "ghcr-pull",
+                                "-o", "json").stdout)
+    if secret.get("type") != "kubernetes.io/dockerconfigjson":
+        raise GateError("PULL_SECRET_TYPE_MISMATCH")
+    return hashlib.sha256(json.dumps(secret.get("data", {}), sort_keys=True).encode()).hexdigest()
 
 
 def assert_workload_images(state, *, backend=None):
@@ -472,6 +657,16 @@ def assert_workload_images(state, *, backend=None):
                   deployment["spec"]["template"]["spec"]["containers"]}
         if actual != images:
             raise GateError("WORKLOAD_IMAGE_MISMATCH")
+        template = deployment["spec"]["template"]["spec"]
+        if name in {"backend", "ai-service"} and state.get("imageSource") == "registry":
+            if template.get("imagePullSecrets", []) != [{"name": "ghcr-pull"}]:
+                raise GateError("WORKLOAD_PULL_SECRET_MISMATCH")
+            for container in template["containers"]:
+                expected_policy = ("Always" if container["image"] in state["images"].values()
+                                   or (container["name"] == "backend" and backend is not None)
+                                   else "Never")
+                if container.get("imagePullPolicy") != expected_policy:
+                    raise GateError("WORKLOAD_PULL_POLICY_MISMATCH")
 
 
 def context(state):
@@ -561,7 +756,8 @@ def create_namespace(state):
     assert_namespace(state)
 
 
-def prepare(node_image, run_id=None):
+def prepare(node_image, run_id=None, *, image_source="local", workflow_run_id=None,
+            backend_image=None, ai_image=None, credentials_file=None):
     if STATE.exists():
         raise GateError("EXISTING_RECEIPT_REQUIRES_REVIEW")
     required_tools("kind", "kubectl", "docker", "git")
@@ -574,16 +770,36 @@ def prepare(node_image, run_id=None):
         raise GateError("KIND_NODE_IMAGE_NOT_LOCAL")
     sha = run(["git", "rev-parse", "HEAD"], timeout=10).stdout.strip()
     branch = run(["git", "branch", "--show-current"], timeout=10).stdout.strip()
-    if branch != "feature/371-local-k8s-critical-e2e" or not re.fullmatch(r"[0-9a-f]{40}", sha):
-        raise GateError("WRONG_SOURCE_BRANCH")
+    registry = None
+    if image_source == "local":
+        if branch != "feature/371-local-k8s-critical-e2e" or not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise GateError("WRONG_SOURCE_BRANCH")
+    elif image_source == "registry":
+        required_tools("gh")
+        if branch != "main" or run(["git", "status", "--porcelain=v1"], timeout=10).stdout.strip():
+            raise GateError("CLEAN_MAIN_REQUIRED")
+        remote_sha = json.loads(run(["gh", "api", "repos/Ahnjisan/FinGuardOps/git/ref/heads/main"],
+                                    timeout=60).stdout)["object"]["sha"]
+        if sha != remote_sha:
+            raise GateError("MAIN_SHA_MISMATCH")
+        docker_config = pull_credentials(credentials_file)
+        requested = {"backend": backend_image, "ai": ai_image}
+        registry = verified_registry_pair(sha, workflow_run_id, requested, docker_config)
+    else:
+        raise GateError("IMAGE_SOURCE_INVALID")
     run_id = run_id or uuid.uuid4().hex[:8]
     state = {"owner": OWNER, "runId": run_id, "cluster": OWNER + "-" + run_id,
              "namespace": NAMESPACE, "revision": sha, "stage": "CREATING", "nodeImage": node_image,
              "docker": docker_identity(), "sourceHash": source_fingerprint(),
-             "images": {"backend": "finguardops-backend:k8s-371-" + run_id,
-                        "ai": "finguardops-ai-service:k8s-371-" + run_id},
+             "imageSource": image_source,
+             "images": ({"backend": "finguardops-backend:k8s-371-" + run_id,
+                         "ai": "finguardops-ai-service:k8s-371-" + run_id}
+                        if image_source == "local" else requested),
              "baseAliases": {service: "finguardops-" + service + ":k8s-371-" + run_id
                              for service in BASE_SERVICES}}
+    if registry:
+        state["registry"] = registry
+        state["credentialHash"] = hashlib.sha256(docker_config.encode()).hexdigest()
     clusters = run(["kind", "get", "clusters"], timeout=30).stdout.splitlines()
     if state["cluster"] in clusters:
         raise GateError("CLUSTER_ALREADY_EXISTS")
@@ -602,20 +818,25 @@ def prepare(node_image, run_id=None):
     assert_cluster(state)
     state["stage"] = "CLUSTER_CREATED"
     save(state)
-    for service, directory in (("backend", "backend"), ("ai", "ai-service")):
-        capacity_gate()
-        assert_cluster(state)
-        assert_source(state)
-        run(["docker", "build", "-f", str(ROOT / directory / "Dockerfile"),
-             "-t", state["images"][service], str(ROOT / directory)], timeout=1800)
-        image_id = docker_image_id(state["images"][service])
-        run(["kind", "load", "docker-image", state["images"][service],
-             "--name", state["cluster"]], timeout=300)
-        if node_image_id(state, state["images"][service]) != image_id:
-            raise GateError("LOADED_IMAGE_ID_MISMATCH")
-        state.setdefault("imageIds", {})[service] = image_id
+    if image_source == "local":
+        for service, directory in (("backend", "backend"), ("ai", "ai-service")):
+            capacity_gate()
+            assert_cluster(state)
+            assert_source(state)
+            run(["docker", "build", "-f", str(ROOT / directory / "Dockerfile"),
+                 "-t", state["images"][service], str(ROOT / directory)], timeout=1800)
+            image_id = docker_image_id(state["images"][service])
+            run(["kind", "load", "docker-image", state["images"][service],
+                 "--name", state["cluster"]], timeout=300)
+            if node_image_id(state, state["images"][service]) != image_id:
+                raise GateError("LOADED_IMAGE_ID_MISMATCH")
+            state.setdefault("imageIds", {})[service] = image_id
+            save(state)
+            emit("image", "LOADED", service=service, image=state["images"][service])
+    else:
+        assert_registry_node_empty(state)
+        state["registryNodeInitiallyEmpty"] = True
         save(state)
-        emit("image", "LOADED", service=service, image=state["images"][service])
     for service, image in zip(BASE_SERVICES, BASE_IMAGES):
         capacity_gate()
         # Docker Desktop can have a partial multiarch cache. Export the already
@@ -681,7 +902,8 @@ def publication_job(state, version, cutoff):
            "spec": {"backoffLimit": 0, "template": {"metadata": {"labels": {"app": name}},
               "spec": {"restartPolicy": "Never", "automountServiceAccountToken": False,
                        "containers": [{"name": "publisher",
-                 "image": state["images"]["backend"], "imagePullPolicy": "Never",
+                 "image": state["images"]["backend"],
+                 "imagePullPolicy": "Always" if state.get("imageSource") == "registry" else "Never",
                  "env": [{"name": "SPRING_PROFILES_ACTIVE", "value": "local," + flag},
                          {"name": "SPRING_DATASOURCE_URL", "value": "jdbc:postgresql://postgresql:5432/finguardops"},
                          {"name": "SPRING_DATASOURCE_USERNAME", "value": "finguardops"},
@@ -695,6 +917,8 @@ def publication_job(state, version, cutoff):
                           "--finguardops." + flag + ".effective-from=" + cutoff],
                  "resources": {"requests": {"cpu": "200m", "memory": "512Mi"},
                                "limits": {"memory": "2Gi"}}}]}}}}
+    if state.get("imageSource") == "registry":
+        job["spec"]["template"]["spec"]["imagePullSecrets"] = [{"name": "ghcr-pull"}]
     capture_lineage(state)
     mutation_gate(state)
     created = kubectl(state, "-n", NAMESPACE, "create", "-f", "-", "-o", "json",
@@ -710,7 +934,7 @@ def publication_job(state, version, cutoff):
     emit("publication", "PASS", version=version, effectiveFrom=cutoff)
 
 
-def deploy():
+def deploy(credentials_file=None):
     state = load()
     if state["stage"] != "IMAGES_LOADED":
         raise GateError("WRONG_LIFECYCLE_STAGE")
@@ -718,6 +942,15 @@ def deploy():
     assert_cluster(state)
     assert_images(state)
     assert_namespace(state, absent=True)
+    docker_config = None
+    if state.get("imageSource") == "registry":
+        docker_config = pull_credentials(credentials_file)
+        if hashlib.sha256(docker_config.encode()).hexdigest() != state.get("credentialHash"):
+            raise GateError("PULL_CREDENTIALS_CHANGED")
+        observed = verified_registry_pair(state["revision"], state["registry"]["workflowRunId"],
+                                          state["images"], docker_config)
+        if observed != state["registry"] or state.get("registryNodeInitiallyEmpty") is not True:
+            raise GateError("PAIR_RECEIPT_CHANGED")
     storage = kubectl(state, "get", "storageclass", "-o", "json", timeout=30)
     defaults = [item for item in json.loads(storage.stdout)["items"]
                 if item["metadata"].get("annotations", {}).get("storageclass.kubernetes.io/is-default-class") == "true"]
@@ -744,8 +977,28 @@ def deploy():
     save(state)
     state["secretHash"] = secret_content_hash(state)
     save(state)
+    if state.get("imageSource") == "registry":
+        pull_secret = {"apiVersion": "v1", "kind": "Secret",
+                       "metadata": {"name": "ghcr-pull", "namespace": NAMESPACE,
+                                    "labels": {"app.kubernetes.io/part-of": OWNER}},
+                       "type": "kubernetes.io/dockerconfigjson",
+                       "stringData": {".dockerconfigjson": docker_config}}
+        mutation_gate(state)
+        created = kubectl(state, "-n", NAMESPACE, "create", "-f", "-", "-o", "json",
+                          input_text=json.dumps(pull_secret))
+        meta = json.loads(created.stdout)["metadata"]
+        if meta.get("name") != "ghcr-pull" or not meta.get("uid"):
+            raise GateError("PULL_SECRET_UID_MISSING")
+        state.setdefault("bootstrapUids", {})["secret/ghcr-pull"] = meta["uid"]
+        state["pullSecretHash"] = pull_secret_content_hash(state)
+        save(state)
     code_configmaps(state)
     template = (HERE / "workloads.yaml").read_text(encoding="utf-8")
+    template = template.replace("# __REGISTRY_PULL_SECRET__",
+                                "imagePullSecrets: [{name: ghcr-pull}]"
+                                if state.get("imageSource") == "registry" else "")
+    template = template.replace("__SERVICE_PULL_POLICY__",
+                                "Always" if state.get("imageSource") == "registry" else "Never")
     template = template.replace("__BACKEND_IMAGE__", state["images"]["backend"])
     template = template.replace("__AI_IMAGE__", state["images"]["ai"])
     template = template.replace("__POSTGRES_IMAGE__", state["baseAliases"]["postgres"])
@@ -769,6 +1022,8 @@ def deploy():
         kubectl(state, "-n", NAMESPACE, "rollout", "status", "deployment/" + name,
                 "--timeout=240s", timeout=260)
         capture_lineage(state)
+    if state.get("imageSource") == "registry":
+        assert_registry_pull(state, require_events=True)
     emit("deploy", "PASS", namespace=NAMESPACE, storageClass=state["storageClass"],
          reclaimPolicy=state["reclaimPolicy"], v2EffectiveFrom=v2)
 
@@ -783,6 +1038,60 @@ def backend_pod(state):
     if len(ready) != 1:
         raise GateError("BACKEND_POD_NOT_READY")
     return ready[0]
+
+
+def assert_registry_pull(state, *, require_events=False):
+    if state.get("imageSource") != "registry":
+        return
+    if state.get("registryNodeInitiallyEmpty") is not True:
+        raise GateError("REGISTRY_PRELOAD_PROOF_MISSING")
+    allowed = {}
+    for service, image in state["images"].items():
+        index = state["registry"]["indexDigests"][service]
+        platform = state["registry"]["platformDigests"][service]
+        target = node_image_id(state, image)
+        if target not in {index, platform}:
+            raise GateError("NODE_REGISTRY_TARGET_MISMATCH")
+        content = run_bytes(["docker", "exec", state["cluster"] + "-control-plane",
+                             "ctr", "-n", "k8s.io", "content", "get", platform], timeout=30)
+        if "sha256:" + hashlib.sha256(content).hexdigest() != platform:
+            raise GateError("NODE_PLATFORM_MANIFEST_MISMATCH")
+        try:
+            manifest = json.loads(content)
+            config_digest = manifest["config"]["digest"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise GateError("NODE_PLATFORM_MANIFEST_INVALID") from exc
+        if not DIGEST_RE.fullmatch(config_digest):
+            raise GateError("NODE_PLATFORM_CONFIG_INVALID")
+        allowed[image] = {index, platform, config_digest}
+    for deployment in ("backend", "ai-service"):
+        pods = json.loads(kubectl(state, "-n", NAMESPACE, "get", "pods", "-l",
+                                  "app=" + deployment, "-o", "json").stdout)["items"]
+        active = [pod for pod in pods if pod["status"].get("phase") == "Running"
+                  and not pod["metadata"].get("deletionTimestamp")]
+        if len(active) != 1:
+            raise GateError("REGISTRY_POD_NOT_READY")
+        pod = active[0]
+        statuses = {item["name"]: item for item in pod["status"].get("containerStatuses", [])}
+        for container in pod["spec"]["containers"]:
+            image = container["image"]
+            if image not in allowed:
+                continue
+            status = statuses.get(container["name"], {})
+            image_id = status.get("imageID", "")
+            found = re.search(r"@?(sha256:[0-9a-f]{64})$", image_id)
+            if not status.get("ready") or status.get("image") != image or not found:
+                raise GateError("POD_REGISTRY_IMAGE_MISMATCH")
+            if found.group(1) not in allowed[image]:
+                raise GateError("POD_REGISTRY_DIGEST_MISMATCH")
+    if require_events:
+        events = json.loads(kubectl(state, "-n", NAMESPACE, "get", "events", "-o", "json").stdout)["items"]
+        for image in state["images"].values():
+            if not any(item.get("reason") == "Pulled" and image in item.get("message", "")
+                       for item in events):
+                raise GateError("REGISTRY_PULL_EVENT_MISSING")
+        state["registryPullVerified"] = True
+        save(state)
 
 
 def wait_for_rule_v2(cutoff, *, now=None, sleep=None):
@@ -812,6 +1121,10 @@ def verify():
     assert_resources(state)
     assert_workload_images(state)
     assert_images(state)
+    if state.get("imageSource") == "registry":
+        if state.get("registryPullVerified") is not True:
+            raise GateError("REGISTRY_PULL_PROOF_MISSING")
+        assert_registry_pull(state)
     pod = backend_pod(state)
     result = kubectl(state, "-n", NAMESPACE, "exec", pod, "-c", "jwt-fixture", "--",
                      "python", "-B", "/opt/local-jwt-fixture/verify_rule_v2_critical.py", timeout=420)
@@ -1004,6 +1317,10 @@ def recover():
     assert_resources(state)
     assert_workload_images(state)
     assert_images(state)
+    if state.get("imageSource") == "registry":
+        if state.get("registryPullVerified") is not True:
+            raise GateError("REGISTRY_PULL_PROOF_MISSING")
+        assert_registry_pull(state)
     namespace_inventory(state)
     baseline = recheck(state)
     pod = backend_pod(state)
@@ -1075,7 +1392,8 @@ def recover():
 
 
 def bad_image_recovery(state, baseline):
-    bad = state["images"]["backend"] + "-missing"
+    bad = (REGISTRY_IMAGES["backend"] + "@sha256:" + "0" * 64
+           if state.get("imageSource") == "registry" else state["images"]["backend"] + "-missing")
     mutation_gate(state)
     original = json.loads(kubectl(state, "-n", NAMESPACE, "get", "deployment", "backend", "-o", "json").stdout)
     template = original["spec"]["template"]
@@ -1113,6 +1431,11 @@ def bad_image_recovery(state, baseline):
                           "--timeout=35s", timeout=50, check=False)
         if attempt.returncode == 0:
             raise GateError("BAD_IMAGE_UNEXPECTEDLY_READY")
+        if state.get("imageSource") == "registry":
+            events = json.loads(kubectl(state, "-n", NAMESPACE, "get", "events", "-o", "json").stdout)["items"]
+            if not any(item.get("reason") in {"Failed", "FailedToRetrieveImagePullSecret"}
+                       and bad in item.get("message", "") for item in events):
+                raise GateError("BAD_DIGEST_PULL_FAILURE_NOT_PROVEN")
         capture_lineage(state)
         record_recovery_check(state, "bad-image-readiness-failed")
         emit("bad-image", "EXPECTED_FAILURE")
@@ -1135,6 +1458,8 @@ def bad_image_recovery(state, baseline):
         kubectl(state, "-n", NAMESPACE, "patch", "deployment", "backend", "--type=json",
                 "-p", json.dumps(revert))
     rollout(state, "backend")
+    if state.get("imageSource") == "registry":
+        assert_registry_pull(state)
     if recheck(state) != baseline:
         raise GateError("IMAGE_REVERT_DATA_CHANGED")
     record_recovery_check(state, "image-revert-ready-data-unchanged")
@@ -1254,6 +1579,8 @@ def namespace_inventory(state, *, capture=False):
              "Secret": {"local-runtime"}, "ServiceAccount": {"default"},
              "Job": {"publish-rule-v1", "publish-rule-v2"},
              "Endpoints": {"backend", "ai-service", "postgresql"}}
+    if state.get("imageSource") == "registry":
+        fixed["Secret"].add("ghcr-pull")
     deployments = {name: state.get("resourceUids", {}).get("deployment/" + name)
                    for name in fixed["Deployment"]}
     jobs = state.get("jobUids", {})
@@ -1373,13 +1700,27 @@ def deletion_inventory(state):
     assert_namespace(state)
     assert_resources(state)
     assert_workload_images(state)
+    if state.get("imageSource") == "registry":
+        if state.get("registryPullVerified") is not True:
+            raise GateError("REGISTRY_PULL_PROOF_MISSING")
+        assert_registry_pull(state)
+        if (not state.get("pullSecretHash") or
+                not state.get("resourceUids", {}).get("secret/ghcr-pull")):
+            raise GateError("PULL_SECRET_OWNERSHIP_MISSING")
+        images = {"source": "registry", "revision": state["revision"],
+                  "references": state["images"], "publication": state["registry"],
+                  "pullVerified": True,
+                  "pullSecretUid": state["resourceUids"]["secret/ghcr-pull"],
+                  "pullSecretHash": state["pullSecretHash"]}
+    else:
+        images = state["imageIds"]
     storage = inspect_storage()
     cluster_storage = cluster_storage_inventory(state)
     resources = namespace_inventory(state)
     tables = database_inventory(state)
     return {"runId": state["runId"], "docker": state["docker"],
             "nodeContainerId": state["nodeContainerId"], "nodeUid": state["nodeUid"],
-            "namespaceUid": state["namespaceUid"], "images": state["imageIds"],
+            "namespaceUid": state["namespaceUid"], "images": images,
             "storage": storage, "clusterStorage": cluster_storage,
             "resources": resources, "tables": tables}
 
@@ -1468,10 +1809,13 @@ def cleanup_partial(confirmation):
     else:
         assert_namespace(state, absent=True)
     cluster_storage_inventory(state, partial=True)
-    for service, image_id in state.get("imageIds", {}).items():
-        image = state["images"][service]
-        if docker_image_id(image) != image_id or node_image_id(state, image) != image_id:
-            raise GateError("IMAGE_ID_MISMATCH")
+    if state.get("imageSource") == "registry":
+        assert_registry_receipt(state)
+    else:
+        for service, image_id in state.get("imageIds", {}).items():
+            image = state["images"][service]
+            if docker_image_id(image) != image_id or node_image_id(state, image) != image_id:
+                raise GateError("IMAGE_ID_MISMATCH")
     for service, image in zip(BASE_SERVICES, BASE_IMAGES):
         alias = state.get("baseAliases", {}).get(service)
         observed = state.get("baseImageIds", {}).get(service)
@@ -1571,7 +1915,8 @@ def record_kind_cleanup(command_exit):
             or run(["docker", "network", "inspect", audit["networkId"]],
                    check=False, timeout=30).returncode == 0):
         raise GateError("MANUAL_KIND_CLEANUP_RESOURCE_REMAINS")
-    for image in list(state["images"].values()) + list(state["baseAliases"].values()):
+    owned_images = (list(state["images"].values()) if state.get("imageSource") != "registry" else [])
+    for image in owned_images + list(state["baseAliases"].values()):
         if run(["docker", "image", "inspect", image], check=False, timeout=30).returncode == 0:
             raise GateError("MANUAL_KIND_CLEANUP_IMAGE_REMAINS")
     emit("record-kind-cleanup", "PASS", runId=state["runId"], cluster=state["cluster"])
@@ -1589,6 +1934,11 @@ def main():
     parser.add_argument("--command-exit", type=int,
                         help="actual exit code captured from the explicit manual kind deletion")
     parser.add_argument("--node-image", help="already-local kindest/node image for prepare")
+    parser.add_argument("--image-source", choices=("local", "registry"), default="local")
+    parser.add_argument("--workflow-run-id", help="successful main push Local Image Build run")
+    parser.add_argument("--backend-image", help="GHCR backend name@sha256 digest")
+    parser.add_argument("--ai-image", help="GHCR AI Service name@sha256 digest")
+    parser.add_argument("--pull-credentials-file", help="JSON username/token file outside the repository")
     parser.add_argument("--allow-low-host-memory", action="store_true",
                         help="this invocation only: warn below 4 GiB host free RAM")
     parser.add_argument("--allow-critical-host-memory", action="store_true",
@@ -1613,9 +1963,11 @@ def main():
             build_input_inventory()
             emit("preflight", "PASS")
         elif args.mode == "prepare":
-            prepare(args.node_image, args.run_id)
+            prepare(args.node_image, args.run_id, image_source=args.image_source,
+                    workflow_run_id=args.workflow_run_id, backend_image=args.backend_image,
+                    ai_image=args.ai_image, credentials_file=args.pull_credentials_file)
         elif args.mode == "deploy":
-            deploy()
+            deploy(args.pull_credentials_file)
         elif args.mode == "verify":
             verify()
         elif args.mode == "recover":

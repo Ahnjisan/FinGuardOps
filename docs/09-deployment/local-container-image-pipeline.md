@@ -34,3 +34,9 @@ PR 또는 관련 `main` push의 **Actions → Local Image Build**에서 Backend�
 이 workflow의 빌드 성공은 기존 Backend 단위·PostgreSQL 통합 테스트나 AI Service lint·format·pytest 통과를 뜻하지 않는다. 해당 결과는 기존 `Backend Tests`, `AI Service Tests` workflow에서 별도로 확인한다. Frontend Playwright 이미지는 Keycloak Browser Gate의 `Prepare` 절차가 관리하며 이 CI의 빌드 대상이 아니다.
 
 PR의 Dockerfile은 실행 가능한 비신뢰 코드로 취급한다. PR과 로컬 build job은 표준 GitHub-hosted Ubuntu runner와 `contents: read`만 사용하고, checkout 자격 증명을 작업 트리에 저장하지 않는다. 빌드 컨텍스트는 저장소 루트의 `.git`을 포함하지 않는 서비스 디렉터리이며 각 `.dockerignore`는 `.env` 파일을 제외한다. PR과 로컬 build job에는 비밀 build arg, 로그인, 패키지 발행, artifact 업로드가 없다. Publish job의 GHCR 자격 증명은 `main` 전용 로그인 단계에서만 주입한다.
+
+## Issue #373: private 발행 쌍 승인
+
+`verify_pair`는 기존 main push·정확한 `FINGUARDOPS_GHCR_PUBLISH=enabled` 조건에서만 실행한다. 두 build와 두 publish matrix job 중 하나라도 실패·skip이면 쌍 승인은 실패한다. 각 publish job은 전체 SHA, 서비스 이름, SHA 태그, Buildx registry digest, workflow run ID와 attempt를 7일 보존되는 비밀 없는 artifact에 기록한다. 집계 job은 두 기록이 모두 있는지 검사하고, 현재 GHCR SHA 태그의 digest를 다시 조회해 기록과 일치할 때만 `PAIR_APPROVED`를 출력한다. 이 job에는 `packages: read`만 부여한다. 기존 SHA 태그의 선조회 거부와 서비스별 직렬화는 유지된다. 집계 실패나 한쪽만 발행된 상태는 배포 입력으로 사용하지 않는다. 발행된 패키지·태그는 자동으로 덮어쓰거나 삭제하지 않는다.
+
+PR에서는 빌드와 정적·단위 검증까지만 가능하다. OWNER가 두 기존 패키지의 존재·private visibility·저장소 연결·Actions 접근, 비용·예산 및 초기 private 발행을 확인한 뒤 별도로 변수를 활성화해야 한다. 변수 변경만으로 지난 실행은 재시작되지 않으므로 관련 **새 main push**의 두 publish와 쌍 승인 결과가 필요하다. Artifact 7일 기한이 지났거나 tag→digest가 달라졌으면 로컬 registry 실행기는 거부한다. pull 자격 증명은 발행용 `GITHUB_TOKEN`과 분리된 최소 `read:packages` 입력이며 관리 방식은 OWNER가 결정한다. 실제 발행·kind 인증 pull·업무 E2E가 끝나기 전에는 Issue #373을 완료로 기록하지 않는다.

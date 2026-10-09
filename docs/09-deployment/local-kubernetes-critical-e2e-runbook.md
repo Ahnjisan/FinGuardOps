@@ -1,6 +1,6 @@
 # Issue #371 로컬 Kubernetes CRITICAL 거래·복구 E2E
 
-기준 브랜치는 `feature/371-local-k8s-critical-e2e`, 기준 HEAD는 `c01d05ff7277e3e87c740004ec01477727d546d4`이다. 전용 kind 클러스터에서 PostgreSQL, Backend, AI Service, JWT·외부 위험·Ollama 모의 fixture를 실행한다. 실제 Qwen, Frontend, Keycloak Browser, Kafka consumer, 전체 관측 스택, GHCR, AWS는 검증 범위 밖이다.
+기존 #371 로컬 적재 경로의 기준 브랜치는 `feature/371-local-k8s-critical-e2e`, 기준 HEAD는 `c01d05ff7277e3e87c740004ec01477727d546d4`이다. 전용 kind 클러스터에서 PostgreSQL, Backend, AI Service, JWT·외부 위험·Ollama 모의 fixture를 실행한다. 아래 #373 registry 경로를 명시하지 않으면 기존 로컬 빌드·kind load 경로를 사용한다. 실제 Qwen, Frontend, Keycloak Browser, Kafka consumer, 전체 관측 스택과 AWS는 검증 범위 밖이다.
 
 ## 사전 조건과 소유권
 
@@ -64,4 +64,30 @@ python -B infra/k8s/local-critical/run.py cleanup --run-id $runId --decision del
 
 ## 검증 경계
 
-mock 테스트는 안전 게이트의 실패 반례이며 실제 Kubernetes 통과 증거가 아니다. 실행한 단계의 종료 코드·동일 ID·UID·digest·Pod 재시작·OOM·호스트 RAM을 따로 기록한다. 기존 Compose·Keycloak·Kafka·Qwen 결과를 Kubernetes E2E 통과로 합산하지 않는다. GHCR 실제 발행, AWS 배포, outbox 경고·보존 정책, CRITICAL 오탐률과 Qwen 반복 평가는 후속 작업이다.
+mock 테스트는 안전 게이트의 실패 반례이며 실제 Kubernetes 통과 증거가 아니다. 실행한 단계의 종료 코드·동일 ID·UID·digest·Pod 재시작·OOM·호스트 RAM을 따로 기록한다. 기존 Compose·Keycloak·Kafka·Qwen 결과를 Kubernetes E2E 통과로 합산하지 않는다. #371 로컬 적재 실행은 GHCR 발행·pull을 증명하지 않는다. AWS 배포, outbox 경고·보존 정책, CRITICAL 오탐률과 Qwen 반복 평가는 별도 작업이다.
+
+## Issue #373: private GHCR digest 인증 pull 경로
+
+이 경로는 #371 로컬 모드를 바꾸지 않는다. OWNER가 두 패키지의 존재·private visibility·저장소 연결·Actions 접근, 계정 예산과 최소 권한 pull 자격 증명 방식을 확인하고 초기 private 발행을 승인해야 한다. 발행 잠금 해제 뒤 관련 새 main push의 `Local Image Build`에서 두 build, 두 publish와 `Verify GHCR digest pair`가 모두 성공해야 한다. PR의 테스트·빌드 결과는 실제 발행 또는 pull 증거가 아니다.
+
+전용 로컬 환경에는 기존 도구 외에 `gh`가 필요하다. `gh`는 해당 Actions run·job·artifact 조회 권한이 있어야 한다. pull 입력은 Git 밖의 접근 제한된 JSON 파일 `{"username":"<GHCR 사용자>","token":"<read:packages 권한의 토큰>"}` 형식이다. 경로만 명령 인수로 넘긴다. 토큰 값은 명령 인수·Git·manifest·receipt·로그에 넣지 않는다. 실행기는 일시 Docker config로 태그와 manifest를 조회하고, 배포 시 전용 namespace의 `ghcr-pull` Secret을 stdin `create`로 생성한다. Backend·AI Service Pod와 Backend Rule 발행 Job만 `imagePullSecrets`를 참조한다. 기존 PostgreSQL·Python 로컬 적재 이미지는 `Never`, registry 서비스 이미지는 `Always`를 사용한다.
+
+```powershell
+$runId = python -c "import uuid; print(uuid.uuid4().hex[:8])"
+$sha = (git rev-parse HEAD).Trim()  # clean local main; 원격 main과 같아야 함
+$workflowRunId = "<성공한 main push Actions run ID>"
+$backendDigest = "sha256:<검증된 Backend registry digest>"
+$aiDigest = "sha256:<검증된 AI Service registry digest>"
+$pullCredentialsFile = "<저장소 밖의 접근 제한된 JSON 파일 경로>"
+python -B infra/k8s/local-critical/run.py preflight --run-id $runId
+python -B infra/k8s/local-critical/run.py prepare --run-id $runId --image-source registry --node-image <로컬 kindest/node:버전@sha256:...> --workflow-run-id $workflowRunId --backend-image "ghcr.io/ahnjisan/finguardops-backend@$backendDigest" --ai-image "ghcr.io/ahnjisan/finguardops-ai-service@$aiDigest" --pull-credentials-file $pullCredentialsFile
+python -B infra/k8s/local-critical/run.py deploy --run-id $runId --pull-credentials-file $pullCredentialsFile
+python -B infra/k8s/local-critical/run.py verify --run-id $runId
+python -B infra/k8s/local-critical/run.py recover --run-id $runId
+python -B infra/k8s/local-critical/run.py storage --run-id $runId
+python -B infra/k8s/local-critical/run.py inventory --run-id $runId
+```
+
+`prepare`는 클러스터 생성 전에 원격 main SHA, 성공한 main push workflow와 다섯 job, 해당 attempt의 두 artifact, 전체 SHA 태그와 현재 registry digest, 이미지 revision label, linux/amd64 플랫폼 manifest를 대조한다. `deploy`는 namespace·Secret 생성 **전** 같은 증거와 자격 증명을 재검증한다. 태그·digest·artifact 누락, 한쪽 publish 실패, 인증 실패, 입력 변경은 배포 거부다. 새 kind node의 Backend·AI 이미지는 미리 적재하지 않는다. 배포 후 Pod image/imageID와 실제 `Pulled` 이벤트, node containerd 대상, node의 플랫폼 manifest 바이트 digest를 확인한다. index digest와 플랫폼 digest가 다를 수 있으므로 둘을 동일하다고 가정하지 않는다.
+
+registry 복구 시험은 존재하지 않는 Backend digest의 pull 실패와 readiness 실패를 확인한 뒤 영수증의 원래 검증된 digest로 되돌린다. 거래·사건·AI 리포트와 DB 증거 불변을 다시 확인하며 migration 또는 발행 Rule의 롤백으로 해석하지 않는다. `ghcr-pull` Secret의 UID와 내용 hash는 기존 mutation·inventory·cleanup 게이트에 포함된다. Secret을 포함한 namespace나 PVC/PV의 삭제 여부는 위 보존 절차와 OWNER 결정에 따른다. GHCR 패키지, 기존 minikube·다른 프로젝트 자원·Compose volume은 정리 대상이 아니다. 두 실제 발행과 인증 pull E2E 전까지 Issue #373은 미완료다.
