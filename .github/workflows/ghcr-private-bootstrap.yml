@@ -40,10 +40,10 @@ jobs:
           set -euo pipefail
           for service in backend ai-service; do
             response="${RUNNER_TEMP}/${service}-before.json"
-            status="$(curl --silent --show-error --output "$response" --write-out '%{http_code}' \
+            status="$(printf 'header = "Authorization: Bearer %s"\n' "$GHCR_BOOTSTRAP_TOKEN" | \
+              curl --config - --silent --show-error --output "$response" --write-out '%{http_code}' \
               --header 'Accept: application/vnd.github+json' \
               --header 'X-GitHub-Api-Version: 2022-11-28' \
-              --header "Authorization: Bearer ${GHCR_BOOTSTRAP_TOKEN}" \
               "https://api.github.com/user/packages/container/finguardops-${service}")"
             if [[ "$status" != 404 ]]; then
               echo "::error::Target package is not confirmed absent: ${service} (HTTP ${status})"
@@ -80,10 +80,10 @@ jobs:
               echo "::error::Invalid registry digest: ${service}"
               exit 1
             fi
-            curl --fail --silent --show-error --output "$package" \
+            printf 'header = "Authorization: Bearer %s"\n' "$GHCR_BOOTSTRAP_TOKEN" | \
+              curl --config - --fail --silent --show-error --output "$package" \
               --header 'Accept: application/vnd.github+json' \
               --header 'X-GitHub-Api-Version: 2022-11-28' \
-              --header "Authorization: Bearer ${GHCR_BOOTSTRAP_TOKEN}" \
               "https://api.github.com/user/packages/container/${name}"
             if [[ "$(jq -er '.visibility' "$package")" != private ]]; then
               echo "::error::Package is not private: ${service}; stop before publishing the other image"
