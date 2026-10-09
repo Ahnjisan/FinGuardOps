@@ -16,6 +16,36 @@ spec.loader.exec_module(runner)
 
 
 class SafetyGateTests(unittest.TestCase):
+    def test_receipt_replace_retries_transient_reader_and_preserves_failed_temp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state.json"
+            real_replace = Path.replace
+            attempts = [0]
+
+            def transient_reader(path, target):
+                attempts[0] += 1
+                if attempts[0] < 3:
+                    raise PermissionError("private-token-must-not-appear")
+                return real_replace(path, target)
+
+            with (mock.patch.object(runner, "STATE", state_path),
+                  mock.patch.object(Path, "replace", transient_reader),
+                  mock.patch.object(runner.time, "sleep") as sleep):
+                runner.save({"runId": "12345678"})
+            self.assertEqual(attempts[0], 3)
+            self.assertEqual(sleep.call_count, 2)
+            self.assertEqual(json.loads(state_path.read_text()), {"runId": "12345678"})
+
+            attempts[0] = 0
+            with (mock.patch.object(runner, "STATE", state_path),
+                  mock.patch.object(Path, "replace", side_effect=PermissionError("private-token-must-not-appear")),
+                  mock.patch.object(runner.time, "sleep")):
+                with self.assertRaisesRegex(runner.GateError, "RECEIPT_ATOMIC_REPLACE_FAILED") as failure:
+                    runner.save({"runId": "87654321"})
+            self.assertNotIn("private-token-must-not-appear", str(failure.exception))
+            self.assertEqual(json.loads(state_path.with_suffix(".tmp").read_text()),
+                             {"runId": "87654321"})
+
     def test_verify_waits_for_published_v2_effective_time(self):
         start = dt.datetime(2026, 10, 9, tzinfo=dt.timezone.utc)
         cutoff = start + dt.timedelta(seconds=11)
@@ -541,6 +571,8 @@ class SafetyGateTests(unittest.TestCase):
                 self.assertEqual(entries[-1]["status"], "BLOCKED")
                 self.assertEqual(entries[-1]["exitCode"], 1)
                 self.assertEqual(entries[-1]["code"], "UNEXPECTED_STAGE_FAILURE")
+                self.assertEqual(entries[-1]["safe"]["exceptionType"], "ValueError")
+                self.assertGreater(entries[-1]["safe"]["line"], 0)
                 self.assertTrue(entries[-1]["utc"].endswith("Z"))
                 self.assertNotIn("bad-secret-payload", runner.stage_log("12345678").read_text())
                 emitted.assert_called_with("verify", "BLOCKED", code="UNEXPECTED_STAGE_FAILURE")
@@ -1308,6 +1340,19 @@ class RegistryModeTests(unittest.TestCase):
               mock.patch.object(runner, "save")):
             runner.assert_registry_pull(state, require_events=True)
         self.assertTrue(state["registryPullVerified"])
+        backend["status"]["containerStatuses"][0]["image"] = "sha256:" + "e" * 64
+        ai["status"]["containerStatuses"][0]["image"] = "sha256:" + "e" * 64
+        with (mock.patch.object(runner, "node_image_id", side_effect=[self.BACKEND, self.AI]),
+              mock.patch.object(runner, "run_bytes", return_value=manifest.encode()),
+              mock.patch.object(runner, "kubectl", side_effect=kube)):
+            runner.assert_registry_pull(state)
+        backend["status"]["containerStatuses"][0]["image"] = "sha256:" + "d" * 64
+        with (mock.patch.object(runner, "node_image_id", side_effect=[self.BACKEND, self.AI]),
+              mock.patch.object(runner, "run_bytes", return_value=manifest.encode()),
+              mock.patch.object(runner, "kubectl", side_effect=kube)):
+            with self.assertRaisesRegex(runner.GateError, "POD_REGISTRY_IMAGE_MISMATCH"):
+                runner.assert_registry_pull(state)
+        backend["status"]["containerStatuses"][0]["image"] = "sha256:" + "e" * 64
         events["items"] = []
         with (mock.patch.object(runner, "node_image_id", side_effect=[self.BACKEND, self.AI]),
               mock.patch.object(runner, "run_bytes", return_value=manifest.encode()),

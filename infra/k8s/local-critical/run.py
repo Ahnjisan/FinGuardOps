@@ -304,7 +304,18 @@ def save(state):
     temp = STATE.with_suffix(".tmp")
     temp.write_text(json.dumps(state, separators=(",", ":")), encoding="utf-8")
     os.chmod(temp, 0o600)
-    temp.replace(STATE)
+    # Windows readers can briefly prevent replacing an open receipt. Keep the
+    # fully written temporary receipt if the bounded retry still fails.
+    for attempt in range(4):
+        try:
+            temp.replace(STATE)
+            return
+        except PermissionError as exc:
+            if attempt == 3:
+                raise GateError("RECEIPT_ATOMIC_REPLACE_FAILED") from exc
+            time.sleep(0.05 * (attempt + 1))
+        except OSError as exc:
+            raise GateError("RECEIPT_ATOMIC_REPLACE_FAILED") from exc
 
 
 def load():
@@ -399,6 +410,22 @@ def record_stage(run_id, stage, exit_code, status, code=None, safe=None):
     if safe:
         entry["safe"] = safe
     append_execution_entry(run_id, entry)
+
+
+def safe_exception_site(exc):
+    """Record only exception class and this runner's code location, never its text."""
+    kind = type(exc).__name__
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", kind):
+        kind = "Other"
+    site = {"exceptionType": kind, "function": "unknown", "line": 0}
+    frame = exc.__traceback__
+    while frame:
+        if frame.tb_frame.f_code.co_filename == __file__:
+            function = frame.tb_frame.f_code.co_name
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", function):
+                site.update(function=function, line=frame.tb_lineno)
+        frame = frame.tb_next
+    return site
 
 
 def record_recovery_check(state, check):
@@ -1046,6 +1073,7 @@ def assert_registry_pull(state, *, require_events=False):
     if state.get("registryNodeInitiallyEmpty") is not True:
         raise GateError("REGISTRY_PRELOAD_PROOF_MISSING")
     allowed = {}
+    configs = {}
     for service, image in state["images"].items():
         index = state["registry"]["indexDigests"][service]
         platform = state["registry"]["platformDigests"][service]
@@ -1064,6 +1092,7 @@ def assert_registry_pull(state, *, require_events=False):
         if not DIGEST_RE.fullmatch(config_digest):
             raise GateError("NODE_PLATFORM_CONFIG_INVALID")
         allowed[image] = {index, platform, config_digest}
+        configs[image] = config_digest
     for deployment in ("backend", "ai-service"):
         pods = json.loads(kubectl(state, "-n", NAMESPACE, "get", "pods", "-l",
                                   "app=" + deployment, "-o", "json").stdout)["items"]
@@ -1080,7 +1109,10 @@ def assert_registry_pull(state, *, require_events=False):
             status = statuses.get(container["name"], {})
             image_id = status.get("imageID", "")
             found = re.search(r"@?(sha256:[0-9a-f]{64})$", image_id)
-            if not status.get("ready") or status.get("image") != image or not found:
+            # containerd may report the config digest in status.image while
+            # spec.image and imageID retain the pinned registry reference.
+            if (not status.get("ready") or status.get("image") not in
+                    {image, configs[image]} or not found):
                 raise GateError("POD_REGISTRY_IMAGE_MISMATCH")
             if found.group(1) not in allowed[image]:
                 raise GateError("POD_REGISTRY_DIGEST_MISMATCH")
@@ -1995,8 +2027,9 @@ def main():
         exit_code, error_code = 1, "STAGE_INTERRUPTED"
     except SystemExit:
         exit_code, error_code = 1, "STAGE_SYSTEM_EXIT"
-    except Exception:
+    except Exception as exc:
         exit_code, error_code = 1, "UNEXPECTED_STAGE_FAILURE"
+        stage_safe = safe_exception_site(exc)
     try:
         recorded_status = ("BLOCKED" if exit_code else
                            "RECOVERY_ONLY" if args.mode == "cleanup-partial" else "PASS")
