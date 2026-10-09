@@ -219,7 +219,8 @@ def verified_registry_pair(sha, workflow_run_id, images, docker_config):
     api = "repos/Ahnjisan/FinGuardOps/actions/runs/" + workflow_run_id
     workflow = json.loads(run(["gh", "api", api], timeout=60).stdout)
     attempt = workflow.get("run_attempt")
-    if (workflow.get("event") != "push" or workflow.get("head_branch") != "main"
+    if (workflow.get("event") not in {"push", "workflow_dispatch"}
+            or workflow.get("head_branch") != "main"
             or workflow.get("head_sha") != sha or workflow.get("conclusion") != "success"
             or workflow.get("path") != ".github/workflows/local-image-build.yml"
             or workflow.get("repository", {}).get("full_name") != "Ahnjisan/FinGuardOps"
