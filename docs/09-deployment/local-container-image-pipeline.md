@@ -13,11 +13,19 @@ GitHub Actions `Local Image Build`는 Backend와 AI Service의 기존 Dockerfile
 
 `pull_request`에서는 두 이미지를 빌드하지만 태그를 붙이거나 registry에 올리지 않는다. 기본 잠금 상태의 `main` push에서도 GHCR 로그인·push를 하지 않는다. GitHub-hosted runner의 로컬 이미지는 실행 종료 후 내려받을 수 없다. Docker의 로컬 `image_id`는 발행 후의 registry digest와 다르다. GHCR의 SHA 태그도 이름만으로 변경 불가가 보장되지 않으므로, 소비 시에는 검증된 `이름@sha256:...` 참조를 사용한다.
 
+## 공개 저장소의 private GHCR 첫 게시
+
+이 저장소는 public이다. Issue #373의 private 패키지를 처음 만드는 경우에는 `GITHUB_TOKEN` 기반 main publish 잠금을 먼저 풀지 않는다. OWNER 계정의 신규 패키지 기본 설정에서 저장소 접근 권한 자동 상속을 끈 다음, `write:packages`만 가진 7일 만료 classic PAT를 `GHCR_BOOTSTRAP_TOKEN` Actions Secret으로 전달한다. 토큰 원문을 Issue, PR, 로그, 커밋, artifact에 남기지 않는다.
+
+`GHCR Private Bootstrap` workflow를 main에서 수동 실행한다. 실행기는 대상 두 패키지의 부재를 먼저 확인하고, source repository label을 붙이지 않은 `bootstrap-<runId>-<attempt>` 태그로 Backend 다음 AI Service를 게시한다. 각 push 뒤 패키지 API의 `visibility=private`을 확인하며, 실패하면 두 이미지 쌍을 승인하지 않는다. 첫 이미지만 게시된 부분 성공 상태는 자동 삭제하거나 덮어쓰지 않고 OWNER가 패키지 상태를 확인한다. 이 수동 실행은 SHA 쌍 승인이나 Kubernetes 인증 pull의 성공을 뜻하지 않는다.
+
+두 패키지가 private인 것을 각각 확인한 뒤 FinGuardOps에 연결하고 패키지별 Manage Actions access에 저장소의 쓰기 권한을 명시적으로 부여한다. 연결 단계에서 접근 권한 상속을 켜지 않는다. 그 후 일회성 Secret을 삭제하고 PAT를 폐기한다. 이후에만 `FINGUARDOPS_GHCR_PUBLISH=enabled`를 설정하고 관련 새 main push의 SHA 태그 발행·digest 쌍 승인을 진행한다. 로컬 kind pull에는 이 발행용 토큰을 재사용하지 않는다.
+
 ## GHCR 발행 잠금과 OWNER 결정
 
 Publish job은 `push` 이벤트의 `refs/heads/main`에서 **저장소 변수** `FINGUARDOPS_GHCR_PUBLISH`가 정확히 `enabled`인 경우에만 실행된다. 변수가 없거나 `Enabled`, `enable` 등 다른 값이면 skip한다. PR과 fork PR에서는 변수 값과 관계없이 skip한다. Issue #353의 PR을 병합할 때는 변수를 만들거나 `enabled`로 바꾸지 않는다.
 
-잠금을 풀기 전에 OWNER는 `ghcr.io/ahnjisan/finguardops-backend`와 `ghcr.io/ahnjisan/finguardops-ai-service`의 기존 패키지 존재, visibility, `Ahnjisan/FinGuardOps` 연결, Actions 접근 권한과 계정의 비용·예산 설정을 확인해야 한다. 현재 조회 권한으로 이를 확인할 수 없다면 추정하지 않는다. GitHub 안내상 신규 GHCR 패키지의 기본 visibility는 private이며 저장소 연결만으로 public이 되지 않는다. **초기 private 발행 승인**과 공개 전환 여부도 별도로 결정해야 한다. 공개 전환은 패키지 설정에서 OWNER가 수행하며 공개 후 private으로 되돌릴 수 없다는 GitHub 안내를 확인한다. 이 결정과 확인이 끝나기 전에는 잠금을 풀 수 없다.
+잠금을 풀기 전에 OWNER는 `ghcr.io/ahnjisan/finguardops-backend`와 `ghcr.io/ahnjisan/finguardops-ai-service`의 기존 패키지 존재, visibility, `Ahnjisan/FinGuardOps` 연결, Actions 접근 권한과 계정의 비용·예산 설정을 확인해야 한다. 현재 조회 권한으로 이를 확인할 수 없다면 추정하지 않는다. 이 공개 저장소의 첫 패키지는 위의 별도 private bootstrap을 거쳐 두 패키지의 실제 visibility를 확인한다. **초기 private 발행 승인**과 공개 전환 여부도 별도로 결정해야 한다. 공개 전환은 패키지 설정에서 OWNER가 수행하며 공개 후 private으로 되돌릴 수 없다는 GitHub 안내를 확인한다. 이 결정과 확인이 끝나기 전에는 잠금을 풀 수 없다.
 
 잠금 해제는 위 사항을 기록한 뒤 OWNER가 저장소 변수 값을 정확히 `enabled`로 설정하는 별도 조치다. 변수 변경만으로 과거 실행이 다시 시작되지는 않는다. 이후 관련 `main` push의 로컬 build job이 모두 성공하면 publish job이 별도 runner에서 서비스별 이미지를 다시 빌드한다. 발행 job만 `packages: write`를 받고 `GITHUB_TOKEN`으로 GHCR에 로그인한다. 비밀 build arg, PAT, `latest` 및 PR 태그는 사용하지 않는다.
 
