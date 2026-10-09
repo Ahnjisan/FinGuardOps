@@ -1,0 +1,201 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  labels: {app.kubernetes.io/part-of: finguardops-371}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests: {storage: 2Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgresql
+  labels: {app.kubernetes.io/part-of: finguardops-371}
+spec:
+  type: ClusterIP
+  selector: {app: postgresql}
+  ports: [{name: sql, port: 5432, targetPort: 5432}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgresql
+  labels: {app.kubernetes.io/part-of: finguardops-371}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: postgresql}}
+  template:
+    metadata: {labels: {app: postgresql}}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: postgresql
+          image: __POSTGRES_IMAGE__
+          imagePullPolicy: Never
+          env:
+            - {name: POSTGRES_DB, value: finguardops}
+            - {name: POSTGRES_USER, value: finguardops}
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: local-runtime, key: postgres-password}}
+          ports: [{containerPort: 5432}]
+          readinessProbe:
+            exec: {command: [sh, -ec, 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"']}
+            periodSeconds: 5
+          volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}]
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 768Mi}
+      volumes: [{name: data, persistentVolumeClaim: {claimName: postgres-data}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-service
+  labels: {app.kubernetes.io/part-of: finguardops-371}
+spec:
+  type: ClusterIP
+  selector: {app: ai-service}
+  ports: [{name: http, port: 8000, targetPort: 8000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-service
+  labels: {app.kubernetes.io/part-of: finguardops-371}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: ai-service}}
+  template:
+    metadata: {labels: {app: ai-service}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {fsGroup: 10001, fsGroupChangePolicy: OnRootMismatch}
+      containers:
+        - name: ai-service
+          image: __AI_IMAGE__
+          imagePullPolicy: Never
+          env:
+            - {name: FINGUARDOPS_AI_OLLAMA_BASE_URL, value: 'http://backend:11434'}
+            - {name: FINGUARDOPS_AI_OLLAMA_MODEL, value: 'qwen3.5:4b'}
+            - {name: FINGUARDOPS_AI_OLLAMA_MODEL_DIGEST, value: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'}
+            - {name: FINGUARDOPS_AI_OLLAMA_QUANTIZATION, value: 'Q4_K_M'}
+          ports: [{containerPort: 8000}]
+          readinessProbe:
+            httpGet: {path: /api/health, port: 8000}
+            periodSeconds: 5
+          securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false}
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {memory: 512Mi}
+      volumes: [{name: tmp, emptyDir: {medium: Memory, sizeLimit: 16Mi}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  labels: {app.kubernetes.io/part-of: finguardops-371}
+spec:
+  type: ClusterIP
+  selector: {app: backend}
+  ports:
+    - {name: api, port: 8080, targetPort: 8080}
+    - {name: ollama-mock, port: 11434, targetPort: 11434}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels: {app.kubernetes.io/part-of: finguardops-371}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: backend}}
+  template:
+    metadata: {labels: {app: backend}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {fsGroup: 10001, fsGroupChangePolicy: OnRootMismatch}
+      initContainers:
+        - name: init-jwt-state
+          image: __PYTHON_IMAGE__
+          imagePullPolicy: Never
+          command: [sh, -ec, 'chown 10001:10001 /run/local-jwt && chmod 0700 /run/local-jwt']
+          securityContext: {runAsUser: 0, allowPrivilegeEscalation: false}
+          volumeMounts: [{name: jwt-state, mountPath: /run/local-jwt}]
+      containers:
+        - name: backend
+          image: __BACKEND_IMAGE__
+          imagePullPolicy: Never
+          env:
+            - {name: SPRING_PROFILES_ACTIVE, value: 'local,external-risk-http,prometheus'}
+            - {name: SPRING_DATASOURCE_URL, value: 'jdbc:postgresql://postgresql:5432/finguardops'}
+            - {name: SPRING_DATASOURCE_USERNAME, value: finguardops}
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom: {secretKeyRef: {name: local-runtime, key: postgres-password}}
+            - {name: FINGUARDOPS_AI_SERVICE_BASE_URL, value: 'http://ai-service:8000'}
+            - {name: FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED, value: 'true'}
+            - {name: FINGUARDOPS_EXTERNAL_RISK_HTTP_BASE_URL, value: 'http://127.0.0.1:8001'}
+            - name: FINGUARDOPS_EXTERNAL_RISK_HTTP_API_KEY
+              valueFrom: {secretKeyRef: {name: local-runtime, key: external-risk-key}}
+            - {name: FINGUARDOPS_SECURITY_ISSUER, value: 'https://local-jwt.fixture.finguardops.invalid'}
+            - {name: FINGUARDOPS_SECURITY_JWK_SET_URI, value: 'http://127.0.0.1:8002/oauth2/jwks'}
+            - {name: FINGUARDOPS_SECURITY_INSECURE_LOOPBACK_JWK_ALLOWED, value: 'true'}
+            - {name: FINGUARDOPS_SECURITY_JWK_CONNECT_TIMEOUT, value: '2s'}
+            - {name: FINGUARDOPS_SECURITY_JWK_READ_TIMEOUT, value: '2s'}
+            - {name: MANAGEMENT_SERVER_ADDRESS, value: '0.0.0.0'}
+            - {name: MANAGEMENT_SERVER_PORT, value: '8081'}
+            - {name: FINGUARDOPS_KAFKA_ENABLED, value: 'false'}
+          ports: [{containerPort: 8080}, {containerPort: 8081}]
+          readinessProbe:
+            httpGet: {path: /actuator/health, port: 8081}
+            periodSeconds: 5
+            failureThreshold: 3
+          startupProbe:
+            httpGet: {path: /actuator/health, port: 8081}
+            periodSeconds: 5
+            failureThreshold: 36
+          securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false}
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+          resources:
+            requests: {cpu: 300m, memory: 768Mi}
+            limits: {memory: 2Gi}
+        - name: jwt-fixture
+          image: __PYTHON_IMAGE__
+          imagePullPolicy: Never
+          command: [python, -B, /opt/local-jwt-fixture/fixture.py, serve]
+          readinessProbe:
+            exec: {command: [python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/ready',timeout=2).read()"]}
+            periodSeconds: 5
+          securityContext: {runAsUser: 10001, runAsGroup: 10001, readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          volumeMounts:
+            - {name: jwt-code, mountPath: /opt/local-jwt-fixture, readOnly: true}
+            - {name: jwt-state, mountPath: /run/local-jwt}
+          resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 192Mi}}
+        - name: external-risk-mock
+          image: __AI_IMAGE__
+          imagePullPolicy: Never
+          command: [python, -B, /opt/external-risk-mock/app.py]
+          readinessProbe:
+            exec: {command: [python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health',timeout=2).read()"]}
+            periodSeconds: 5
+          securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false}
+          volumeMounts: [{name: risk-code, mountPath: /opt/external-risk-mock, readOnly: true}]
+          resources: {requests: {cpu: 25m, memory: 32Mi}, limits: {memory: 128Mi}}
+        - name: ollama-mock
+          image: __AI_IMAGE__
+          imagePullPolicy: Never
+          command: [python, -B, /opt/ollama-mock/app.py]
+          readinessProbe: {httpGet: {path: /health, port: 11434}, periodSeconds: 5}
+          securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false}
+          volumeMounts: [{name: ollama-code, mountPath: /opt/ollama-mock, readOnly: true}]
+          resources: {requests: {cpu: 25m, memory: 32Mi}, limits: {memory: 128Mi}}
+      volumes:
+        - {name: tmp, emptyDir: {medium: Memory, sizeLimit: 32Mi}}
+        - name: jwt-state
+          emptyDir: {medium: Memory, sizeLimit: 8Mi}
+        - {name: jwt-code, configMap: {name: jwt-code, defaultMode: 0444}}
+        - {name: risk-code, configMap: {name: risk-code, defaultMode: 0444}}
+        - {name: ollama-code, configMap: {name: ollama-code, defaultMode: 0444}}

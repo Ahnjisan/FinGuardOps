@@ -73,6 +73,15 @@ def verify():
                         "user-platform-admin")
     report = current.get("currentReport")
     if (detail.get("reportStatus") not in {"COMPLETED", "FALLBACK_COMPLETED"}
+            or detail.get("caseId") != case_id
+            or detail.get("executionId") != execution_id
+            or detail.get("detectionResultVersion") != version
+            or not isinstance(report, dict)
+            or report.get("caseId") != case_id
+            or report.get("executionId") != execution_id
+            or report.get("initiatingAiRequestId") != request_id
+            or report.get("detectionResultVersion") != version
+            or report.get("reportStatus") != detail.get("reportStatus")
             or not all(shared.quality(report, fixture["expectedReasonCodes"]).values())
             or shared.business_snapshot(case_id, transaction_id) != baseline):
         raise shared.EvaluationError("REPORT_QUALITY_FAILED")
