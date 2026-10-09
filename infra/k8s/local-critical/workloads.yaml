@@ -71,12 +71,13 @@ spec:
   template:
     metadata: {labels: {app: ai-service}}
     spec:
+      # __REGISTRY_PULL_SECRET__
       automountServiceAccountToken: false
       securityContext: {fsGroup: 10001, fsGroupChangePolicy: OnRootMismatch}
       containers:
         - name: ai-service
           image: __AI_IMAGE__
-          imagePullPolicy: Never
+          imagePullPolicy: __SERVICE_PULL_POLICY__
           env:
             - {name: FINGUARDOPS_AI_OLLAMA_BASE_URL, value: 'http://backend:11434'}
             - {name: FINGUARDOPS_AI_OLLAMA_MODEL, value: 'qwen3.5:4b'}
@@ -116,6 +117,7 @@ spec:
   template:
     metadata: {labels: {app: backend}}
     spec:
+      # __REGISTRY_PULL_SECRET__
       automountServiceAccountToken: false
       securityContext: {fsGroup: 10001, fsGroupChangePolicy: OnRootMismatch}
       initContainers:
@@ -128,7 +130,7 @@ spec:
       containers:
         - name: backend
           image: __BACKEND_IMAGE__
-          imagePullPolicy: Never
+          imagePullPolicy: __SERVICE_PULL_POLICY__
           env:
             - {name: SPRING_PROFILES_ACTIVE, value: 'local,external-risk-http,prometheus'}
             - {name: SPRING_DATASOURCE_URL, value: 'jdbc:postgresql://postgresql:5432/finguardops'}
@@ -176,7 +178,7 @@ spec:
           resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 192Mi}}
         - name: external-risk-mock
           image: __AI_IMAGE__
-          imagePullPolicy: Never
+          imagePullPolicy: __SERVICE_PULL_POLICY__
           command: [python, -B, /opt/external-risk-mock/app.py]
           readinessProbe:
             exec: {command: [python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health',timeout=2).read()"]}
@@ -186,7 +188,7 @@ spec:
           resources: {requests: {cpu: 25m, memory: 32Mi}, limits: {memory: 128Mi}}
         - name: ollama-mock
           image: __AI_IMAGE__
-          imagePullPolicy: Never
+          imagePullPolicy: __SERVICE_PULL_POLICY__
           command: [python, -B, /opt/ollama-mock/app.py]
           readinessProbe: {httpGet: {path: /health, port: 11434}, periodSeconds: 5}
           securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false}

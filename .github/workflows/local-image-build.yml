@@ -115,6 +115,7 @@ jobs:
           docker buildx build \
             --file "${service}/Dockerfile" \
             --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
             --tag "$image" \
             --metadata-file "$metadata" \
             --push \
@@ -127,6 +128,94 @@ jobs:
           fi
           printf 'commit_sha=%s\nimage_tag=%s\nregistry_digest=%s\nimage_by_digest=%s\n' \
             "$GITHUB_SHA" "$image" "$digest" "${image%:*}@${digest}"
+
+          jq -n --arg service "$service" --arg sha "$GITHUB_SHA" \
+            --arg run_id "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg tag "$image" --arg digest "$digest" \
+            '{service:$service,commit_sha:$sha,workflow_run_id:$run_id,run_attempt:$attempt,image_tag:$tag,registry_digest:$digest}' \
+            > "${RUNNER_TEMP}/${service}-publish-evidence.json"
+
+      - name: Upload digest evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghcr-publish-${{ matrix.service }}
+          path: ${{ runner.temp }}/${{ matrix.service }}-publish-evidence.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Log out of GHCR
+        if: always()
+        shell: bash
+        run: docker logout ghcr.io
+
+  verify_pair:
+    name: Verify GHCR digest pair
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.FINGUARDOPS_GHCR_PUBLISH == 'enabled' }}
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Refuse incomplete publication
+        shell: bash
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$BUILD_RESULT" != success || "$PUBLISH_RESULT" != success ]]; then
+            echo "::error::Both build and publish jobs must succeed"
+            exit 1
+          fi
+
+      - name: Download both digest records
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ghcr-publish-*
+          path: ${{ runner.temp }}/ghcr-pair
+
+      - name: Log in to GHCR
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Verify both current SHA tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          for service in backend ai-service; do
+            image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/finguardops-${service}:sha-${GITHUB_SHA}"
+            record="${RUNNER_TEMP}/ghcr-pair/ghcr-publish-${service}/${service}-publish-evidence.json"
+            if [[ ! -f "$record" ]]; then
+              echo "::error::Missing publish record: $service"
+              exit 1
+            fi
+            if [[ "$(jq -r '.service' "$record")" != "$service" ||
+                  "$(jq -r '.commit_sha' "$record")" != "$GITHUB_SHA" ||
+                  "$(jq -r '.workflow_run_id' "$record")" != "$GITHUB_RUN_ID" ||
+                  "$(jq -r '.run_attempt' "$record")" != "$GITHUB_RUN_ATTEMPT" ||
+                  "$(jq -r '.image_tag' "$record")" != "$image" ]]; then
+              echo "::error::Publish record does not match the main SHA tag: $service"
+              exit 1
+            fi
+            expected="$(jq -r '.registry_digest' "$record")"
+            if [[ ! "$expected" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::Missing registry digest: $service"
+              exit 1
+            fi
+            observed="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest}}' | jq -er '.digest')"
+            if [[ "$observed" != "$expected" ]]; then
+              echo "::error::Current SHA tag differs from published digest: $service"
+              exit 1
+            fi
+            printf 'pair_service=%s commit_sha=%s image_tag=%s registry_digest=%s image_by_digest=%s\n' \
+              "$service" "$GITHUB_SHA" "$image" "$observed" "${image%:*}@${observed}"
+            if [[ "$service" == backend ]]; then backend_digest="$observed"; else ai_digest="$observed"; fi
+          done
+          printf 'PAIR_APPROVED sha=%s backend=%s ai-service=%s\n' "$GITHUB_SHA" "$backend_digest" "$ai_digest"
 
       - name: Log out of GHCR
         if: always()

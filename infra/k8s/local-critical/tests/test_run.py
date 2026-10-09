@@ -1,5 +1,6 @@
 import importlib.util
 import datetime as dt
+import hashlib
 from contextlib import ExitStack
 import json
 from pathlib import Path
@@ -848,6 +849,486 @@ class SafetyGateTests(unittest.TestCase):
             self.assertEqual(kube.call_count, 1)
             self.assertIn("delete", kube.call_args.args)
             command.assert_not_called()
+
+
+class RegistryModeTests(unittest.TestCase):
+    SHA = "a" * 40
+    BACKEND = "sha256:" + "b" * 64
+    AI = "sha256:" + "c" * 64
+
+    def images(self):
+        return {"backend": runner.REGISTRY_IMAGES["backend"] + "@" + self.BACKEND,
+                "ai": runner.REGISTRY_IMAGES["ai"] + "@" + self.AI}
+
+    def fake_evidence_run(self, *, missing_job=None, wrong_sha=False, wrong_digest=False):
+        sha = "f" * 40 if wrong_sha else self.SHA
+        workflow = {"event": "push", "head_branch": "main", "head_sha": sha,
+                    "conclusion": "success", "run_attempt": 1,
+                    "path": ".github/workflows/local-image-build.yml",
+                    "repository": {"full_name": "Ahnjisan/FinGuardOps"}}
+        names = ["Build backend image", "Build ai-service image", "Publish backend to GHCR",
+                 "Publish ai-service to GHCR", "Verify GHCR digest pair"]
+
+        def command(argv, **_kwargs):
+            if argv[:2] == ["gh", "api"] and argv[2].endswith("/jobs"):
+                return mock.Mock(stdout=json.dumps({"jobs": [
+                    {"name": name, "conclusion": "failure" if name == missing_job else "success"}
+                    for name in names]}))
+            if argv[:2] == ["gh", "api"]:
+                return mock.Mock(stdout=json.dumps(workflow))
+            if argv[:3] == ["gh", "run", "download"]:
+                directory = Path(argv[argv.index("-D") + 1])
+                for service, artifact in (("backend", "backend"), ("ai", "ai-service")):
+                    value = self.images()[service].split("@", 1)[1]
+                    if wrong_digest and service == "ai":
+                        value = "sha256:" + "d" * 64
+                    record = {"service": artifact, "commit_sha": self.SHA,
+                              "workflow_run_id": "123", "run_attempt": "1",
+                              "image_tag": runner.REGISTRY_IMAGES[service] + ":sha-" + self.SHA,
+                              "registry_digest": value}
+                    (directory / (artifact + "-publish-evidence.json")).write_text(
+                        json.dumps(record), encoding="utf-8")
+                return mock.Mock(stdout="")
+            self.fail("unexpected command")
+
+        return command
+
+    def test_workflow_pair_accepts_only_both_same_main_sha_and_digests(self):
+        with (mock.patch.object(runner, "run", side_effect=self.fake_evidence_run()),
+              mock.patch.object(runner, "registry_manifest", side_effect=[
+                  {"index": self.BACKEND, "platform": self.BACKEND},
+                  {"index": self.AI, "platform": self.AI}])):
+            pair = runner.verified_registry_pair(self.SHA, "123", self.images(), "config")
+        self.assertEqual(pair["sha"], self.SHA)
+        self.assertEqual(pair["indexDigests"], {"backend": self.BACKEND, "ai": self.AI})
+
+    def test_workflow_pair_rejects_partial_failure_sha_and_digest_mismatch(self):
+        for options, error in (({"missing_job": "Publish ai-service to GHCR"}, "PAIR_JOB_INCOMPLETE"),
+                               ({"wrong_sha": True}, "PAIR_WORKFLOW_MISMATCH"),
+                               ({"wrong_digest": True}, "PAIR_EVIDENCE_MISMATCH")):
+            with self.subTest(options=options):
+                with (mock.patch.object(runner, "run", side_effect=self.fake_evidence_run(**options)),
+                      mock.patch.object(runner, "registry_manifest", return_value={
+                          "index": self.BACKEND, "platform": self.BACKEND})):
+                    with self.assertRaisesRegex(runner.GateError, error):
+                        runner.verified_registry_pair(self.SHA, "123", self.images(), "config")
+
+    def test_pair_rejects_tag_and_current_registry_digest_change(self):
+        with (mock.patch.object(runner, "run", side_effect=self.fake_evidence_run()),
+              mock.patch.object(runner, "registry_manifest", return_value={
+                  "index": "sha256:" + "e" * 64, "platform": "sha256:" + "e" * 64})):
+            with self.assertRaisesRegex(runner.GateError, "CURRENT_TAG_DIGEST_MISMATCH"):
+                runner.verified_registry_pair(self.SHA, "123", self.images(), "config")
+        bad = self.images()
+        bad["backend"] = runner.REGISTRY_IMAGES["backend"] + ":sha-" + self.SHA
+        with self.assertRaisesRegex(runner.GateError, "DIGEST_IMAGE_REQUIRED"):
+            runner.verified_registry_pair(self.SHA, "123", bad, "config")
+
+    def test_prepare_rejects_pair_before_kind_create(self):
+        def command(argv, **_kwargs):
+            if argv[:3] == ["docker", "image", "inspect"]:
+                return mock.Mock(returncode=0)
+            if argv[:2] == ["git", "rev-parse"]:
+                return mock.Mock(stdout=self.SHA)
+            if argv[:2] == ["git", "branch"]:
+                return mock.Mock(stdout="main")
+            if argv[:2] == ["git", "status"]:
+                return mock.Mock(stdout="")
+            if argv[:2] == ["gh", "api"]:
+                return mock.Mock(stdout=json.dumps({"object": {"sha": self.SHA}}))
+            self.fail("kind must not be created")
+        with (mock.patch.object(runner, "STATE", mock.Mock(exists=lambda: False)),
+              mock.patch.object(runner, "required_tools"),
+              mock.patch.object(runner, "capacity_gate"),
+              mock.patch.object(runner, "base_image_gate"),
+              mock.patch.object(runner, "build_input_inventory"),
+              mock.patch.object(runner, "pull_credentials", return_value="config"),
+              mock.patch.object(runner, "verified_registry_pair",
+                                side_effect=runner.GateError("PAIR_JOB_INCOMPLETE")),
+              mock.patch.object(runner, "run", side_effect=command)):
+            with self.assertRaisesRegex(runner.GateError, "PAIR_JOB_INCOMPLETE"):
+                runner.prepare("kindest/node:v@sha256:" + "a" * 64, "12345678",
+                               image_source="registry", workflow_run_id="123",
+                               backend_image=self.images()["backend"],
+                               ai_image=self.images()["ai"], credentials_file="outside.json")
+
+    def test_deploy_rechecks_pair_before_namespace_and_secret(self):
+        state = {"stage": "IMAGES_LOADED", "imageSource": "registry", "revision": self.SHA,
+                 "images": self.images(), "credentialHash": hashlib.sha256(b"config").hexdigest(),
+                 "registry": {"workflowRunId": "123"}, "registryNodeInitiallyEmpty": True}
+        with (mock.patch.object(runner, "load", return_value=state),
+              mock.patch.object(runner, "capacity_gate"),
+              mock.patch.object(runner, "assert_cluster"),
+              mock.patch.object(runner, "assert_images"),
+              mock.patch.object(runner, "assert_namespace"),
+              mock.patch.object(runner, "pull_credentials", return_value="config"),
+              mock.patch.object(runner, "verified_registry_pair", return_value={"changed": True}),
+              mock.patch.object(runner, "kubectl") as kube):
+            with self.assertRaisesRegex(runner.GateError, "PAIR_RECEIPT_CHANGED"):
+                runner.deploy("outside.json")
+            kube.assert_not_called()
+
+    def test_registry_deploy_secret_is_stdin_only_and_workloads_use_pull_secret(self):
+        token = "private-sentinel-token"
+        config = json.dumps({"auths": {"ghcr.io": {"auth":
+                           runner.base64.b64encode(("owner:" + token).encode()).decode()}}})
+        pair = {"workflowRunId": "123", "sha": self.SHA,
+                "indexDigests": {"backend": self.BACKEND, "ai": self.AI},
+                "platformDigests": {"backend": self.BACKEND, "ai": self.AI}}
+        state = {"runId": "12345678", "stage": "IMAGES_LOADED", "imageSource": "registry",
+                 "revision": self.SHA, "images": self.images(), "registry": pair,
+                 "registryNodeInitiallyEmpty": True,
+                 "credentialHash": hashlib.sha256(config.encode()).hexdigest(),
+                 "baseAliases": {"postgres": "local:postgres", "python": "local:python"}}
+        observed = []
+        def kube(_state, *args, **kwargs):
+            observed.append((args, kwargs))
+            if "storageclass" in args:
+                return mock.Mock(stdout=json.dumps({"items": [{"metadata": {"name": "local-path",
+                    "annotations": {"storageclass.kubernetes.io/is-default-class": "true"}},
+                    "reclaimPolicy": "Delete"}]}))
+            if "create" in args and "-o" in args:
+                payload = json.loads(kwargs["input_text"])
+                return mock.Mock(stdout=json.dumps({"metadata": {
+                    "name": payload["metadata"]["name"], "uid": "uid-" + payload["metadata"]["name"]}}))
+            return mock.Mock(stdout="", returncode=0)
+        with (mock.patch.object(runner, "load", return_value=state),
+              mock.patch.object(runner, "capacity_gate"),
+              mock.patch.object(runner, "assert_cluster"),
+              mock.patch.object(runner, "assert_images"),
+              mock.patch.object(runner, "assert_namespace"),
+              mock.patch.object(runner, "create_namespace"),
+              mock.patch.object(runner, "namespace_inventory"),
+              mock.patch.object(runner, "mutation_gate"),
+              mock.patch.object(runner, "capture_lineage"),
+              mock.patch.object(runner, "pull_credentials", return_value=config),
+              mock.patch.object(runner, "verified_registry_pair", return_value=pair),
+              mock.patch.object(runner, "secret_content_hash", return_value="runtime-hash"),
+              mock.patch.object(runner, "pull_secret_content_hash", return_value="pull-hash"),
+              mock.patch.object(runner, "code_configmaps"),
+              mock.patch.object(runner, "fixed_resource_uids", return_value={}),
+              mock.patch.object(runner, "publication_job"),
+              mock.patch.object(runner, "assert_registry_pull"),
+              mock.patch.object(runner, "kubectl", side_effect=kube),
+              mock.patch.object(runner, "save"), mock.patch.object(runner, "emit")):
+            runner.deploy("outside.json")
+        self.assertEqual(state["pullSecretHash"], "pull-hash")
+        self.assertNotIn(token, json.dumps(state))
+        self.assertTrue(all(token not in str(args) for args, _ in observed))
+        secret = next(json.loads(kwargs["input_text"]) for args, kwargs in observed
+                      if "create" in args and "-o" in args
+                      and json.loads(kwargs["input_text"])["metadata"]["name"] == "ghcr-pull")
+        self.assertEqual(secret["type"], "kubernetes.io/dockerconfigjson")
+        workload = next(kwargs["input_text"] for args, kwargs in observed
+                        if "create" in args and "-o" not in args)
+        self.assertNotIn(token, workload)
+        self.assertEqual(workload.count("imagePullSecrets: [{name: ghcr-pull}]"), 2)
+        self.assertNotIn("__SERVICE_PULL_POLICY__", workload)
+
+    def test_private_pull_credentials_stay_outside_git_and_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pull.json"
+            token = "private-sentinel-token"
+            path.write_text(json.dumps({"username": "owner", "token": token}), encoding="utf-8")
+            config = runner.pull_credentials(str(path))
+            self.assertNotIn(token, config)
+            self.assertEqual(json.loads(config)["auths"]["ghcr.io"]["auth"],
+                             runner.base64.b64encode(("owner:" + token).encode()).decode())
+            with mock.patch.object(runner, "run", side_effect=runner.GateError("STAGE_COMMAND_FAILED")):
+                with self.assertRaises(runner.GateError) as raised:
+                    runner.registry_manifest(self.images()["backend"], config, self.SHA)
+            self.assertNotIn(token, str(raised.exception))
+        with self.assertRaisesRegex(runner.GateError, "PULL_CREDENTIALS_REQUIRED"):
+            runner.pull_credentials(None)
+
+    def test_registry_manifest_selects_platform_digest_not_index(self):
+        platform = "sha256:" + "d" * 64
+        responses = [json.dumps({"digest": self.BACKEND, "manifests": [
+            {"digest": platform, "platform": {"os": "linux", "architecture": "amd64"}},
+            {"digest": "sha256:" + "e" * 64,
+             "platform": {"os": "unknown", "architecture": "unknown"}}]}),
+            json.dumps({"config": {"Labels": {"org.opencontainers.image.revision": self.SHA}}}),
+            json.dumps({"digest": self.BACKEND})]
+        with mock.patch.object(runner, "run", side_effect=[
+                mock.Mock(stdout=value) for value in responses]):
+            observed = runner.registry_manifest(self.images()["backend"], "{}", self.SHA)
+        self.assertEqual(observed, {"index": self.BACKEND, "platform": platform})
+
+    def test_registry_manifest_rejects_tag_race_before_namespace_or_secret(self):
+        manifest = {"digest": self.BACKEND, "manifests": [{
+            "digest": self.BACKEND,
+            "platform": {"os": "linux", "architecture": "amd64"}}]}
+        responses = [json.dumps(manifest),
+                     json.dumps({"config": {"Labels": {
+                         "org.opencontainers.image.revision": self.SHA}}}),
+                     json.dumps({"digest": self.AI})]
+        with (mock.patch.object(runner, "run", side_effect=[
+                mock.Mock(stdout=value) for value in responses]) as command,
+              mock.patch.object(runner, "kubectl") as kube):
+            with self.assertRaisesRegex(runner.GateError, "CURRENT_TAG_DIGEST_CHANGED"):
+                runner.registry_manifest(runner.REGISTRY_IMAGES["backend"] + ":sha-" + self.SHA,
+                                         "{}", self.SHA)
+            self.assertEqual(command.call_count, 3)
+            kube.assert_not_called()
+
+        manifest_results = iter(responses)
+        def prepare_command(argv, **_kwargs):
+            if argv[:3] == ["docker", "buildx", "imagetools"]:
+                return mock.Mock(stdout=next(manifest_results))
+            if argv[:3] == ["docker", "image", "inspect"]:
+                return mock.Mock(returncode=0)
+            if argv[:2] == ["git", "rev-parse"]:
+                return mock.Mock(stdout=self.SHA)
+            if argv[:2] == ["git", "branch"]:
+                return mock.Mock(stdout="main")
+            if argv[:2] == ["git", "status"]:
+                return mock.Mock(stdout="")
+            if argv[:2] == ["gh", "api"]:
+                return mock.Mock(stdout=json.dumps({"object": {"sha": self.SHA}}))
+            self.fail("tag race must stop before kind creation")
+
+        with (mock.patch.object(runner, "STATE", mock.Mock(exists=lambda: False)),
+              mock.patch.object(runner, "required_tools"),
+              mock.patch.object(runner, "capacity_gate"),
+              mock.patch.object(runner, "base_image_gate"),
+              mock.patch.object(runner, "build_input_inventory"),
+              mock.patch.object(runner, "pull_credentials", return_value="{}"),
+              mock.patch.object(runner, "run", side_effect=prepare_command),
+              mock.patch.object(runner, "verified_registry_pair", side_effect=lambda *_:
+                  runner.registry_manifest(runner.REGISTRY_IMAGES["backend"] + ":sha-" + self.SHA,
+                                           "{}", self.SHA)),
+              mock.patch.object(runner, "kubectl") as kube):
+            with self.assertRaisesRegex(runner.GateError, "CURRENT_TAG_DIGEST_CHANGED"):
+                runner.prepare("kindest/node:v@sha256:" + "a" * 64, "12345678",
+                               image_source="registry", workflow_run_id="123",
+                               backend_image=self.images()["backend"],
+                               ai_image=self.images()["ai"], credentials_file="outside.json")
+            kube.assert_not_called()
+
+    def test_registry_node_requires_healthy_empty_cri_inventory(self):
+        state = {"cluster": "finguardops-371-12345678", "revision": self.SHA,
+                 "images": self.images(), "registry": {"indexDigests": {
+                     "backend": self.BACKEND, "ai": self.AI},
+                     "platformDigests": {"backend": self.BACKEND, "ai": self.AI}}}
+        empty = {"images": [{"id": "sha256:" + "f" * 64,
+                              "repoTags": ["docker.io/library/postgres:16"],
+                              "repoDigests": []}, {"id": "sha256:" + "e" * 64}]}
+        with mock.patch.object(runner, "run", return_value=mock.Mock(stdout=json.dumps(empty))):
+            runner.assert_registry_node_empty(state)
+        for response in (runner.GateError("STAGE_COMMAND_FAILED"),
+                         mock.Mock(stdout="not json"),
+                         mock.Mock(stdout=json.dumps({"images": [{"id": "x", "repoTags": "bad"}]}))):
+            with self.subTest(response=response), mock.patch.object(runner, "run",
+                                                                  side_effect=response if isinstance(response, Exception) else None,
+                                                                  return_value=None if isinstance(response, Exception) else response):
+                with self.assertRaises(runner.GateError):
+                    runner.assert_registry_node_empty(state)
+        for reference in (self.images()["backend"],
+                          runner.REGISTRY_IMAGES["ai"] + ":sha-" + self.SHA):
+            loaded = {"images": [{"id": "sha256:" + "f" * 64,
+                                  "repoTags": [reference], "repoDigests": []}]}
+            with self.subTest(reference=reference), mock.patch.object(
+                    runner, "run", return_value=mock.Mock(stdout=json.dumps(loaded))):
+                with self.assertRaisesRegex(runner.GateError, "REGISTRY_IMAGE_PRELOADED"):
+                    runner.assert_registry_node_empty(state)
+
+    def test_prepare_stops_on_cri_failure_or_preload_before_namespace(self):
+        pair = {"sha": self.SHA, "workflowRunId": "123", "runAttempt": 1,
+                "indexDigests": {"backend": self.BACKEND, "ai": self.AI},
+                "platformDigests": {"backend": self.BACKEND, "ai": self.AI}}
+        for cri_response, error in ((runner.GateError("STAGE_COMMAND_FAILED"),
+                                     "STAGE_COMMAND_FAILED"),
+                                    (mock.Mock(stdout=json.dumps({"images": [{
+                                        "id": self.BACKEND, "repoTags": [],
+                                        "repoDigests": []}]})), "REGISTRY_IMAGE_PRELOADED")):
+            def command(argv, **_kwargs):
+                if argv[:3] == ["docker", "image", "inspect"]:
+                    return mock.Mock(returncode=0)
+                if argv[:2] == ["git", "rev-parse"]:
+                    return mock.Mock(stdout=self.SHA)
+                if argv[:2] == ["git", "branch"]:
+                    return mock.Mock(stdout="main")
+                if argv[:2] == ["git", "status"]:
+                    return mock.Mock(stdout="")
+                if argv[:2] == ["gh", "api"]:
+                    return mock.Mock(stdout=json.dumps({"object": {"sha": self.SHA}}))
+                if argv[:3] == ["kind", "get", "clusters"]:
+                    return mock.Mock(stdout="")
+                if argv[:3] == ["kind", "create", "cluster"]:
+                    return mock.Mock(stdout="")
+                if "crictl" in argv:
+                    if isinstance(cri_response, Exception):
+                        raise cri_response
+                    return cri_response
+                self.fail("unexpected command after failed CRI inventory")
+
+            with (self.subTest(error=error),
+                  mock.patch.object(runner, "STATE", mock.Mock(exists=lambda: False)),
+                  mock.patch.object(runner, "required_tools"),
+                  mock.patch.object(runner, "capacity_gate"),
+                  mock.patch.object(runner, "base_image_gate"),
+                  mock.patch.object(runner, "build_input_inventory"),
+                  mock.patch.object(runner, "pull_credentials", return_value="{}"),
+                  mock.patch.object(runner, "verified_registry_pair", return_value=pair),
+                  mock.patch.object(runner, "docker_identity", return_value={}),
+                  mock.patch.object(runner, "source_fingerprint", return_value="source"),
+                  mock.patch.object(runner, "node_container", return_value="node-container"),
+                  mock.patch.object(runner, "assert_docker"),
+                  mock.patch.object(runner, "assert_cluster"),
+                  mock.patch.object(runner, "save"),
+                  mock.patch.object(runner, "run", side_effect=command),
+                  mock.patch.object(runner, "kubectl", return_value=mock.Mock(stdout=json.dumps({
+                      "items": [{"metadata": {"uid": "node-uid"}}]}))) as kube):
+                with self.assertRaisesRegex(runner.GateError, error):
+                    runner.prepare("kindest/node:v@sha256:" + "a" * 64, "12345678",
+                                   image_source="registry", workflow_run_id="123",
+                                   backend_image=self.images()["backend"],
+                                   ai_image=self.images()["ai"], credentials_file="outside.json")
+                self.assertFalse(any("create" in call.args for call in kube.call_args_list))
+
+    def test_registry_inventory_preserve_delete_and_changed_evidence(self):
+        state = {"runId": "12345678", "cluster": "finguardops-371-12345678",
+                 "stage": "VERIFIED", "imageSource": "registry",
+                 "revision": self.SHA, "images": self.images(),
+                 "registry": {"sha": self.SHA, "workflowRunId": "123", "runAttempt": 1,
+                              "indexDigests": {"backend": self.BACKEND, "ai": self.AI},
+                              "platformDigests": {"backend": self.BACKEND, "ai": self.AI}},
+                 "registryNodeInitiallyEmpty": True, "registryPullVerified": True,
+                 "pullSecretHash": "pull-hash", "secretHash": "runtime-hash",
+                 "resourceUids": {"secret/ghcr-pull": "pull-uid"},
+                 "docker": {"daemonId": "daemon"}, "nodeContainerId": "node-container",
+                 "nodeUid": "node-uid", "namespaceUid": "namespace-uid",
+                 "baseAliases": {"postgres": "local:postgres", "python": "local:python"},
+                 "baseImageIds": {"postgres": {"source": "sha256:base", "platform": "sha256:base"},
+                                  "python": {"source": "sha256:base", "platform": "sha256:base"}}}
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = Path(directory) / "receipt.json"
+            decision = Path(directory) / "decision.json"
+            with ExitStack() as stack:
+                for name in ("db_counts", "assert_cluster", "assert_cluster_namespaces",
+                             "assert_namespace", "assert_docker", "assert_source",
+                             "assert_workload_images", "save", "emit"):
+                    stack.enter_context(mock.patch.object(runner, name))
+                for name, value in (("STATE", receipt), ("DECISION", decision),
+                                    ("load", state), ("docker_image_id", "sha256:base"),
+                                    ("docker_platform_image_id", "sha256:base"),
+                                    ("node_image_id", "sha256:base"),
+                                    ("fixed_resource_uids", state["resourceUids"]),
+                                    ("secret_content_hash", "runtime-hash"),
+                                    ("inspect_storage", {"volumes": []}),
+                                    ("cluster_storage_inventory", {"claims": [], "volumes": []}),
+                                    ("namespace_inventory", []),
+                                    ("database_inventory", {"financial_transaction": {
+                                        "rows": 1, "hash": "a" * 32}})):
+                    stack.enter_context(mock.patch.object(runner, name, return_value=value)
+                                        if name not in {"STATE", "DECISION"} else
+                                        mock.patch.object(runner, name, value))
+                pull = stack.enter_context(mock.patch.object(runner, "assert_registry_pull"))
+                secret_hash = stack.enter_context(mock.patch.object(
+                    runner, "pull_secret_content_hash", return_value="pull-hash"))
+                mutation = stack.enter_context(mock.patch.object(runner, "mutation_gate"))
+                kube = stack.enter_context(mock.patch.object(runner, "kubectl"))
+                runner.record_inventory()
+                inventory = json.loads((Path(directory) / "inventory.json").read_text())
+                self.assertEqual(inventory["images"]["references"], self.images())
+                self.assertEqual(inventory["images"]["publication"]["sha"], self.SHA)
+                self.assertEqual(inventory["images"]["pullSecretUid"], "pull-uid")
+                self.assertNotIn("imageIds", state)
+                runner.cleanup("preserve", None)
+                kube.assert_not_called()
+                decision.write_text(json.dumps({"runId": state["runId"], "decision": "delete",
+                                                "namespaceUid": state["namespaceUid"],
+                                                "inventoryHash": runner.inventory_hash(inventory)}))
+                secret_hash.return_value = "changed"
+                with self.assertRaisesRegex(runner.GateError, "PULL_SECRET_HASH_MISMATCH"):
+                    runner.cleanup("delete", state["runId"])
+                kube.assert_not_called()
+                secret_hash.return_value = "pull-hash"
+                state["images"]["backend"] = runner.REGISTRY_IMAGES["backend"] + "@sha256:" + "f" * 64
+                with self.assertRaisesRegex(runner.GateError, "REGISTRY_IMAGE_RECEIPT_MISMATCH"):
+                    runner.cleanup("delete", state["runId"])
+                kube.assert_not_called()
+                state["images"]["backend"] = self.images()["backend"]
+                runner.cleanup("delete", state["runId"])
+                pull.assert_called()
+                mutation.assert_called_once_with(state)
+                self.assertEqual(kube.call_args.args[1:3], ("delete", "namespace"))
+                self.assertEqual(state["stage"], "NAMESPACE_DELETED_CLUSTER_RETAINED")
+
+    def test_partial_registry_mutation_rechecks_digest_receipt_without_local_ids(self):
+        state = {"imageSource": "registry", "revision": self.SHA,
+                 "images": self.images(), "registry": {"sha": self.SHA,
+                 "indexDigests": {"backend": self.BACKEND, "ai": self.AI}}}
+        with (mock.patch.object(runner, "assert_cluster"),
+              mock.patch.object(runner, "assert_source"),
+              mock.patch.object(runner, "assert_namespace"),
+              mock.patch.object(runner, "kubectl") as kube):
+            runner.mutation_gate(state, absent=True, partial=True)
+            kube.assert_not_called()
+            state["registry"]["sha"] = "f" * 40
+            with self.assertRaisesRegex(runner.GateError, "REGISTRY_SHA_RECEIPT_MISMATCH"):
+                runner.mutation_gate(state, absent=True, partial=True)
+            kube.assert_not_called()
+
+    def test_pull_secret_content_change_is_rejected(self):
+        state = {"imageSource": "registry", "resourceUids": {"secret/ghcr-pull": "uid"},
+                 "secretHash": "runtime", "pullSecretHash": "original"}
+        with (mock.patch.object(runner, "fixed_resource_uids", return_value=state["resourceUids"]),
+              mock.patch.object(runner, "secret_content_hash", return_value="runtime"),
+              mock.patch.object(runner, "pull_secret_content_hash", return_value="changed")):
+            with self.assertRaisesRegex(runner.GateError, "PULL_SECRET_HASH_MISMATCH"):
+                runner.assert_resources(state)
+
+    def test_new_node_pull_proof_checks_platform_content_pods_and_events(self):
+        manifest = json.dumps({"config": {"digest": "sha256:" + "e" * 64}}, separators=(",", ":"))
+        platform = "sha256:" + hashlib.sha256(manifest.encode()).hexdigest()
+        images = self.images()
+        state = {"imageSource": "registry", "registryNodeInitiallyEmpty": True,
+                 "cluster": "finguardops-371-12345678", "images": images,
+                 "registry": {"indexDigests": {"backend": self.BACKEND, "ai": self.AI},
+                              "platformDigests": {"backend": platform, "ai": platform}}}
+        def pod(name, containers):
+            return {"metadata": {"name": name + "-pod"}, "status": {"phase": "Running",
+                    "containerStatuses": [{"name": item["name"], "image": item["image"],
+                                           "imageID": item["image"] + "@" + platform,
+                                           "ready": True} for item in containers]},
+                    "spec": {"containers": containers}}
+        backend = pod("backend", [{"name": "backend", "image": images["backend"]},
+                                  {"name": "external-risk-mock", "image": images["ai"]}])
+        ai = pod("ai", [{"name": "ai-service", "image": images["ai"]}])
+        events = {"items": [{"reason": "Pulled", "message": "Successfully pulled image " + image}
+                            for image in images.values()]}
+        def kube(_state, *args, **_kwargs):
+            if "events" in args:
+                return mock.Mock(stdout=json.dumps(events))
+            return mock.Mock(stdout=json.dumps({"items": [backend if "app=backend" in args else ai]}))
+        with (mock.patch.object(runner, "node_image_id", side_effect=[self.BACKEND, self.AI]),
+              mock.patch.object(runner, "run_bytes", return_value=manifest.encode()),
+              mock.patch.object(runner, "kubectl", side_effect=kube),
+              mock.patch.object(runner, "save")):
+            runner.assert_registry_pull(state, require_events=True)
+        self.assertTrue(state["registryPullVerified"])
+        events["items"] = []
+        with (mock.patch.object(runner, "node_image_id", side_effect=[self.BACKEND, self.AI]),
+              mock.patch.object(runner, "run_bytes", return_value=manifest.encode()),
+              mock.patch.object(runner, "kubectl", side_effect=kube)):
+            with self.assertRaisesRegex(runner.GateError, "REGISTRY_PULL_EVENT_MISSING"):
+                runner.assert_registry_pull(state, require_events=True)
+        backend["status"]["containerStatuses"][0]["imageID"] = "sha256:" + "f" * 64
+        with (mock.patch.object(runner, "node_image_id", side_effect=[self.BACKEND, self.AI]),
+              mock.patch.object(runner, "run_bytes", return_value=manifest.encode()),
+              mock.patch.object(runner, "kubectl", side_effect=kube)):
+            with self.assertRaisesRegex(runner.GateError, "POD_REGISTRY_DIGEST_MISMATCH"):
+                runner.assert_registry_pull(state)
+
+    def test_workflow_static_publish_boundary_and_aggregation(self):
+        workflow = (runner.ROOT / ".github/workflows/local-image-build.yml").read_text(encoding="utf-8")
+        self.assertIn("github.event_name == 'push' && github.ref == 'refs/heads/main'", workflow)
+        self.assertIn("vars.FINGUARDOPS_GHCR_PUBLISH == 'enabled'", workflow)
+        self.assertIn("needs: [build, publish]", workflow)
+        self.assertIn('"$PUBLISH_RESULT" != success', workflow)
+        self.assertIn("ghcr-publish-${{ matrix.service }}", workflow)
+        self.assertIn("CURRENT_TAG_DIGEST_MISMATCH", RUNNER.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
