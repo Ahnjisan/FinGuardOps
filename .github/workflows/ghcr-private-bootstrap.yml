@@ -1,0 +1,99 @@
+name: GHCR Private Bootstrap
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ghcr-private-bootstrap-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Check out main without stored credentials
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Require one-time package token
+        shell: bash
+        env:
+          GHCR_BOOTSTRAP_TOKEN: ${{ secrets.GHCR_BOOTSTRAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$GHCR_BOOTSTRAP_TOKEN" ]]; then
+            echo '::error::GHCR_BOOTSTRAP_TOKEN is missing'
+            exit 1
+          fi
+
+      - name: Ensure neither target package exists
+        shell: bash
+        env:
+          GHCR_BOOTSTRAP_TOKEN: ${{ secrets.GHCR_BOOTSTRAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          for service in backend ai-service; do
+            response="${RUNNER_TEMP}/${service}-before.json"
+            status="$(printf 'header = "Authorization: Bearer %s"\n' "$GHCR_BOOTSTRAP_TOKEN" | \
+              curl --config - --silent --show-error --output "$response" --write-out '%{http_code}' \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/user/packages/container/finguardops-${service}")"
+            if [[ "$status" != 404 ]]; then
+              echo "::error::Target package is not confirmed absent: ${service} (HTTP ${status})"
+              exit 1
+            fi
+          done
+
+      - name: Log in with the one-time package token
+        shell: bash
+        env:
+          GHCR_BOOTSTRAP_TOKEN: ${{ secrets.GHCR_BOOTSTRAP_TOKEN }}
+        run: printf '%s' "$GHCR_BOOTSTRAP_TOKEN" | docker login ghcr.io --username "$GITHUB_REPOSITORY_OWNER" --password-stdin
+
+      - name: Publish private bootstrap images and verify visibility
+        shell: bash
+        env:
+          GHCR_BOOTSTRAP_TOKEN: ${{ secrets.GHCR_BOOTSTRAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          for service in backend ai-service; do
+            name="finguardops-${service}"
+            image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${name}:bootstrap-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            metadata="${RUNNER_TEMP}/${service}-bootstrap.json"
+            package="${RUNNER_TEMP}/${service}-package.json"
+            docker buildx build \
+              --file "${service}/Dockerfile" \
+              --tag "$image" \
+              --metadata-file "$metadata" \
+              --push \
+              "$service"
+
+            digest="$(jq -er '."containerimage.digest"' "$metadata")"
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::Invalid registry digest: ${service}"
+              exit 1
+            fi
+            printf 'header = "Authorization: Bearer %s"\n' "$GHCR_BOOTSTRAP_TOKEN" | \
+              curl --config - --fail --silent --show-error --output "$package" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/user/packages/container/${name}"
+            if [[ "$(jq -er '.visibility' "$package")" != private ]]; then
+              echo "::error::Package is not private: ${service}; stop before publishing the other image"
+              exit 1
+            fi
+            printf 'PRIVATE_BOOTSTRAP service=%s commit_sha=%s image=%s digest=%s\n' \
+              "$service" "$GITHUB_SHA" "$image" "$digest"
+          done
+
+      - name: Log out of GHCR
+        if: always()
+        shell: bash
+        run: docker logout ghcr.io
