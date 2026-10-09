@@ -68,14 +68,14 @@ mock 테스트는 안전 게이트의 실패 반례이며 실제 Kubernetes 통�
 
 ## Issue #373: private GHCR digest 인증 pull 경로
 
-이 경로는 #371 로컬 모드를 바꾸지 않는다. OWNER가 두 패키지의 존재·private visibility·저장소 연결·Actions 접근, 계정 예산과 최소 권한 pull 자격 증명 방식을 확인하고 초기 private 발행을 승인해야 한다. 발행 잠금 해제 뒤 관련 새 main push의 `Local Image Build`에서 두 build, 두 publish와 `Verify GHCR digest pair`가 모두 성공해야 한다. PR의 테스트·빌드 결과는 실제 발행 또는 pull 증거가 아니다.
+이 경로는 #371 로컬 모드를 바꾸지 않는다. OWNER가 두 패키지의 존재·private visibility·저장소 연결·Actions 접근, 계정 예산과 최소 권한 pull 자격 증명 방식을 확인하고 초기 private 발행을 승인해야 한다. 발행 잠금 해제 뒤 관련 새 main push 또는 main 전용 `workflow_dispatch`의 `Local Image Build`에서 두 build, 두 publish와 `Verify GHCR digest pair`가 모두 성공해야 한다. 수동 실행은 최신 clean main SHA를 확인해 시작하고, 완료 후 발행 변수를 다시 잠근다. PR의 테스트·빌드 결과는 실제 발행 또는 pull 증거가 아니다.
 
 전용 로컬 환경에는 기존 도구 외에 `gh`가 필요하다. `gh`는 해당 Actions run·job·artifact 조회 권한이 있어야 한다. pull 입력은 Git 밖의 접근 제한된 JSON 파일 `{"username":"<GHCR 사용자>","token":"<read:packages 권한의 토큰>"}` 형식이다. 경로만 명령 인수로 넘긴다. 토큰 값은 명령 인수·Git·manifest·receipt·로그에 넣지 않는다. 실행기는 일시 Docker config로 태그와 manifest를 조회하고, 배포 시 전용 namespace의 `ghcr-pull` Secret을 stdin `create`로 생성한다. Backend·AI Service Pod와 Backend Rule 발행 Job만 `imagePullSecrets`를 참조한다. 기존 PostgreSQL·Python 로컬 적재 이미지는 `Never`, registry 서비스 이미지는 `Always`를 사용한다.
 
 ```powershell
 $runId = python -c "import uuid; print(uuid.uuid4().hex[:8])"
 $sha = (git rev-parse HEAD).Trim()  # clean local main; 원격 main과 같아야 함
-$workflowRunId = "<성공한 main push Actions run ID>"
+$workflowRunId = "<성공한 main push 또는 main 수동 Actions run ID>"
 $backendDigest = "sha256:<검증된 Backend registry digest>"
 $aiDigest = "sha256:<검증된 AI Service registry digest>"
 $pullCredentialsFile = "<저장소 밖의 접근 제한된 JSON 파일 경로>"
@@ -88,6 +88,6 @@ python -B infra/k8s/local-critical/run.py storage --run-id $runId
 python -B infra/k8s/local-critical/run.py inventory --run-id $runId
 ```
 
-`prepare`는 클러스터 생성 전에 원격 main SHA, 성공한 main push workflow와 다섯 job, 해당 attempt의 두 artifact, 전체 SHA 태그와 현재 registry digest, 이미지 revision label, linux/amd64 플랫폼 manifest를 대조한다. `deploy`는 namespace·Secret 생성 **전** 같은 증거와 자격 증명을 재검증한다. 태그·digest·artifact 누락, 한쪽 publish 실패, 인증 실패, 입력 변경은 배포 거부다. 새 kind node의 Backend·AI 이미지는 미리 적재하지 않는다. 배포 후 Pod image/imageID와 실제 `Pulled` 이벤트, node containerd 대상, node의 플랫폼 manifest 바이트 digest를 확인한다. index digest와 플랫폼 digest가 다를 수 있으므로 둘을 동일하다고 가정하지 않는다.
+`prepare`는 클러스터 생성 전에 원격 main SHA, 성공한 main push 또는 main `workflow_dispatch`의 정확한 이벤트·브랜치·저장소·SHA와 다섯 job, 해당 attempt의 두 artifact, 전체 SHA 태그와 현재 registry digest, 이미지 revision label, linux/amd64 플랫폼 manifest를 대조한다. `deploy`는 namespace·Secret 생성 **전** 같은 증거와 자격 증명을 재검증한다. 태그·digest·artifact 누락, 한쪽 publish 실패, 인증 실패, 입력 변경은 배포 거부다. 새 kind node의 Backend·AI 이미지는 미리 적재하지 않는다. 배포 후 Pod image/imageID와 실제 `Pulled` 이벤트, node containerd 대상, node의 플랫폼 manifest 바이트 digest를 확인한다. index digest와 플랫폼 digest가 다를 수 있으므로 둘을 동일하다고 가정하지 않는다.
 
 registry 복구 시험은 존재하지 않는 Backend digest의 pull 실패와 readiness 실패를 확인한 뒤 영수증의 원래 검증된 digest로 되돌린다. 거래·사건·AI 리포트와 DB 증거 불변을 다시 확인하며 migration 또는 발행 Rule의 롤백으로 해석하지 않는다. `ghcr-pull` Secret의 UID와 내용 hash는 기존 mutation·inventory·cleanup 게이트에 포함된다. Secret을 포함한 namespace나 PVC/PV의 삭제 여부는 위 보존 절차와 OWNER 결정에 따른다. GHCR 패키지, 기존 minikube·다른 프로젝트 자원·Compose volume은 정리 대상이 아니다. 두 실제 발행과 인증 pull E2E 전까지 Issue #373은 미완료다.

@@ -892,12 +892,14 @@ class RegistryModeTests(unittest.TestCase):
         return {"backend": runner.REGISTRY_IMAGES["backend"] + "@" + self.BACKEND,
                 "ai": runner.REGISTRY_IMAGES["ai"] + "@" + self.AI}
 
-    def fake_evidence_run(self, *, missing_job=None, wrong_sha=False, wrong_digest=False):
+    def fake_evidence_run(self, *, missing_job=None, wrong_sha=False, wrong_digest=False,
+                          event="push", branch="main", repository="Ahnjisan/FinGuardOps",
+                          attempt=1, artifact_attempt=None):
         sha = "f" * 40 if wrong_sha else self.SHA
-        workflow = {"event": "push", "head_branch": "main", "head_sha": sha,
-                    "conclusion": "success", "run_attempt": 1,
+        workflow = {"event": event, "head_branch": branch, "head_sha": sha,
+                    "conclusion": "success", "run_attempt": attempt,
                     "path": ".github/workflows/local-image-build.yml",
-                    "repository": {"full_name": "Ahnjisan/FinGuardOps"}}
+                    "repository": {"full_name": repository}}
         names = ["Build backend image", "Build ai-service image", "Publish backend to GHCR",
                  "Publish ai-service to GHCR", "Verify GHCR digest pair"]
 
@@ -915,7 +917,8 @@ class RegistryModeTests(unittest.TestCase):
                     if wrong_digest and service == "ai":
                         value = "sha256:" + "d" * 64
                     record = {"service": artifact, "commit_sha": self.SHA,
-                              "workflow_run_id": "123", "run_attempt": "1",
+                              "workflow_run_id": "123", "run_attempt": str(
+                                  attempt if artifact_attempt is None else artifact_attempt),
                               "image_tag": runner.REGISTRY_IMAGES[service] + ":sha-" + self.SHA,
                               "registry_digest": value}
                     (directory / (artifact + "-publish-evidence.json")).write_text(
@@ -926,18 +929,39 @@ class RegistryModeTests(unittest.TestCase):
         return command
 
     def test_workflow_pair_accepts_only_both_same_main_sha_and_digests(self):
-        with (mock.patch.object(runner, "run", side_effect=self.fake_evidence_run()),
-              mock.patch.object(runner, "registry_manifest", side_effect=[
-                  {"index": self.BACKEND, "platform": self.BACKEND},
-                  {"index": self.AI, "platform": self.AI}])):
-            pair = runner.verified_registry_pair(self.SHA, "123", self.images(), "config")
-        self.assertEqual(pair["sha"], self.SHA)
-        self.assertEqual(pair["indexDigests"], {"backend": self.BACKEND, "ai": self.AI})
+        for event in ("push", "workflow_dispatch"):
+            with self.subTest(event=event):
+                with (mock.patch.object(runner, "run", side_effect=self.fake_evidence_run(event=event)),
+                      mock.patch.object(runner, "registry_manifest", side_effect=[
+                          {"index": self.BACKEND, "platform": self.BACKEND},
+                          {"index": self.AI, "platform": self.AI}])):
+                    pair = runner.verified_registry_pair(self.SHA, "123", self.images(), "config")
+                self.assertEqual(pair["sha"], self.SHA)
+                self.assertEqual(pair["runAttempt"], 1)
+                self.assertEqual(pair["indexDigests"], {"backend": self.BACKEND, "ai": self.AI})
 
     def test_workflow_pair_rejects_partial_failure_sha_and_digest_mismatch(self):
-        for options, error in (({"missing_job": "Publish ai-service to GHCR"}, "PAIR_JOB_INCOMPLETE"),
-                               ({"wrong_sha": True}, "PAIR_WORKFLOW_MISMATCH"),
-                               ({"wrong_digest": True}, "PAIR_EVIDENCE_MISMATCH")):
+        for event in ("push", "workflow_dispatch"):
+            for options, error in (({"missing_job": "Publish ai-service to GHCR"}, "PAIR_JOB_INCOMPLETE"),
+                                   ({"wrong_sha": True}, "PAIR_WORKFLOW_MISMATCH"),
+                                   ({"wrong_digest": True}, "PAIR_EVIDENCE_MISMATCH")):
+                with self.subTest(event=event, options=options):
+                    with (mock.patch.object(runner, "run", side_effect=self.fake_evidence_run(
+                              event=event, **options)),
+                          mock.patch.object(runner, "registry_manifest", return_value={
+                              "index": self.BACKEND, "platform": self.BACKEND})):
+                        with self.assertRaisesRegex(runner.GateError, error):
+                            runner.verified_registry_pair(self.SHA, "123", self.images(), "config")
+
+    def test_manual_pair_rejects_non_main_fork_pr_and_wrong_attempt(self):
+        cases = (({"event": "workflow_dispatch", "branch": "feature/x"}, "PAIR_WORKFLOW_MISMATCH"),
+                 ({"event": "workflow_dispatch", "repository": "other/FinGuardOps"}, "PAIR_WORKFLOW_MISMATCH"),
+                 ({"event": "pull_request"}, "PAIR_WORKFLOW_MISMATCH"),
+                 ({"event": "workflow_dispatch", "attempt": 2, "artifact_attempt": 1},
+                  "PAIR_EVIDENCE_MISMATCH"),
+                 ({"event": "workflow_dispatch", "missing_job": "Publish ai-service to GHCR"},
+                  "PAIR_JOB_INCOMPLETE"))
+        for options, error in cases:
             with self.subTest(options=options):
                 with (mock.patch.object(runner, "run", side_effect=self.fake_evidence_run(**options)),
                       mock.patch.object(runner, "registry_manifest", return_value={
@@ -1368,7 +1392,10 @@ class RegistryModeTests(unittest.TestCase):
 
     def test_workflow_static_publish_boundary_and_aggregation(self):
         workflow = (runner.ROOT / ".github/workflows/local-image-build.yml").read_text(encoding="utf-8")
-        self.assertIn("github.event_name == 'push' && github.ref == 'refs/heads/main'", workflow)
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("github.event_name != 'workflow_dispatch' || (github.ref == 'refs/heads/main'", workflow)
+        self.assertIn("(github.event_name == 'push' || github.event_name == 'workflow_dispatch')", workflow)
+        self.assertIn("github.ref == 'refs/heads/main' && github.repository == 'Ahnjisan/FinGuardOps'", workflow)
         self.assertIn("vars.FINGUARDOPS_GHCR_PUBLISH == 'enabled'", workflow)
         self.assertIn("needs: [build, publish]", workflow)
         self.assertIn('"$PUBLISH_RESULT" != success', workflow)

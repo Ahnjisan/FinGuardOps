@@ -2,6 +2,7 @@ name: Local Image Build
 # Private GHCR packages are bootstrapped; main SHA publishing remains gated by FINGUARDOPS_GHCR_PUBLISH.
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - "backend/**"
@@ -21,6 +22,7 @@ permissions:
 jobs:
   build:
     name: Build ${{ matrix.service }} image
+    if: ${{ github.event_name != 'workflow_dispatch' || (github.ref == 'refs/heads/main' && github.repository == 'Ahnjisan/FinGuardOps') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -41,7 +43,7 @@ jobs:
           set -euo pipefail
           service="${{ matrix.service }}"
           tag_args=()
-          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "push" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
             tag_args=(--tag "finguardops-${service}:sha-${GITHUB_SHA}")
           fi
 
@@ -51,7 +53,7 @@ jobs:
             "${tag_args[@]}" \
             "$service"
 
-          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "push" || "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
             printf 'commit_sha=%s\nimage_tag=%s\nimage_id=%s\n' \
               "$GITHUB_SHA" \
               "finguardops-${service}:sha-${GITHUB_SHA}" \
@@ -60,7 +62,7 @@ jobs:
 
   publish:
     name: Publish ${{ matrix.service }} to GHCR
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.FINGUARDOPS_GHCR_PUBLISH == 'enabled' }}
+    if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && github.repository == 'Ahnjisan/FinGuardOps' && vars.FINGUARDOPS_GHCR_PUBLISH == 'enabled' }}
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -154,7 +156,7 @@ jobs:
 
   verify_pair:
     name: Verify GHCR digest pair
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.FINGUARDOPS_GHCR_PUBLISH == 'enabled' }}
+    if: ${{ always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && github.repository == 'Ahnjisan/FinGuardOps' && vars.FINGUARDOPS_GHCR_PUBLISH == 'enabled' }}
     needs: [build, publish]
     runs-on: ubuntu-latest
     timeout-minutes: 10
