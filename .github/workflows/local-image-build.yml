@@ -1,4 +1,5 @@
 name: Local Image Build
+# Private GHCR packages are bootstrapped; main SHA publishing remains gated by FINGUARDOPS_GHCR_PUBLISH.
 
 on:
   pull_request:
