@@ -10,6 +10,8 @@ import com.aifds.backend.externalrisk.domain.ExternalRiskPolicyResult;
 import com.aifds.backend.externalrisk.domain.ExternalRiskProviderRequest;
 import com.aifds.backend.externalrisk.domain.ExternalRiskProviderResponse;
 import com.aifds.backend.externalrisk.domain.ExternalRiskSnapshot;
+import com.aifds.backend.externalrisk.domain.ExternalRiskSubjectDigest;
+import com.aifds.backend.externalrisk.domain.ExternalRiskSubjectType;
 import com.aifds.backend.externalrisk.port.ExternalRiskLookupPort;
 import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import org.slf4j.Logger;
@@ -94,7 +96,7 @@ public final class ExternalRiskPolicyService {
             command.validate();
             ExternalRiskProviderRequest request = toProviderRequest(command);
             ExternalRiskProviderResponse response = lookupPort.lookup(request);
-            ValidatedResponse validated = validateResponse(response);
+            ValidatedResponse validated = validateResponse(response, request);
             Instant lookedUpAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
             if (validated.providerAsOf().isAfter(lookedUpAt)) {
                 throw invalidResponse();
@@ -186,7 +188,8 @@ public final class ExternalRiskPolicyService {
     }
 
     private ValidatedResponse validateResponse(
-            ExternalRiskProviderResponse response
+            ExternalRiskProviderResponse response,
+            ExternalRiskProviderRequest request
     ) {
         if (response == null
                 || !ExternalRiskContracts.isProviderCode(response.providerCode())
@@ -198,6 +201,15 @@ public final class ExternalRiskPolicyService {
                     response.matches()
                 )) {
             throw invalidResponse();
+        }
+        for (ExternalRiskMatch match : response.matches()) {
+            if (match.subjectType() == ExternalRiskSubjectType.DEVICE
+                    && (match.subjectDigest() == null
+                    || request.deviceRef() == null
+                    || !match.subjectDigest().equals(
+                            ExternalRiskSubjectDigest.of(request.deviceRef())))) {
+                throw invalidResponse();
+            }
         }
         return new ValidatedResponse(
                 response.providerCode(),

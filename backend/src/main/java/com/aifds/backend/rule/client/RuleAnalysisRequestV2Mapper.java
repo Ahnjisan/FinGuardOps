@@ -72,8 +72,19 @@ public final class RuleAnalysisRequestV2Mapper {
         requireMicrosecond(snapshot.providerAsOf(), "providerAsOf");
         requireMicrosecond(snapshot.lookedUpAt(), "lookedUpAt");
         Instant cutoff = request.evaluationCutoffAt();
-        if (RulePolicyVersion.from(request.ruleVersions()) == 3
+        int policyVersion = RulePolicyVersion.from(request.ruleVersions());
+        boolean candidateDeviceRisk = policyVersion == 4
+                && snapshot.matches().stream().anyMatch(match ->
+                match.subjectType() == ExternalRiskSubjectType.DEVICE
+                        && match.riskType() == ExternalRiskType.RISK_DEVICE
+                        && match.reasonCode() == ExternalRiskReasonCode.RISK_DEVICE);
+        boolean transfer = request.transaction().transactionType()
+                == com.aifds.backend.rule.client.dto.RuleTransactionType.ACCOUNT_TRANSFER
+                || request.transaction().transactionType()
+                == com.aifds.backend.rule.client.dto.RuleTransactionType.OPEN_BANKING_TRANSFER;
+        if (transfer && (policyVersion >= 3
                 && request.transaction().recipientAccountRef() != null
+                || policyVersion == 4 && candidateDeviceRisk)
                 && (snapshot.providerAsOf().isBefore(cutoff.minusSeconds(86_400))
                     || snapshot.providerAsOf().isAfter(cutoff)
                     || snapshot.lookedUpAt().isBefore(cutoff)

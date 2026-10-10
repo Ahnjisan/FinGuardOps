@@ -13,7 +13,7 @@ HTTP Provider의 기대 `providerCode`는 필수 시작 설정 `finguardops.exte
 
 ## 점수와 Evidence
 
-R005 기여도 40점과 `external_recipient` 그룹 상한 40점을 기존 amount 15, security 60, beneficiary 10 뒤에 적용하고 Rule 합계를 100점에서 자른다. ML 적용 시 기존 확률 기여 함수 0–40점을 Rule 점수 뒤에 더해 100점에서 자르며 정책 버전은 `rule-ml-policy-v2`다. R005 단독은 40/MEDIUM 및 모니터링 승인, R005+R004는 50/HIGH 및 검토 보류, R005 단독+ML40은 80/CRITICAL 및 차단이다. 기존 LOW 0–19, MEDIUM 20–49, HIGH 50–79, CRITICAL 80–100 경계를 유지한다.
+R005 기여도 40점과 `external_recipient` 그룹 상한 40점을 기존 amount 15, security 60, beneficiary 10 뒤에 적용하고 Rule 합계를 100점에서 자른다. ML 적용 시 기존 확률 기여 함수 0–40점을 Rule 점수 뒤에 더해 100점에서 자르며 정책 버전은 `rule-ml-policy-v2`다. R005 단독은 40/MEDIUM 및 모니터링 승인, R005+R004는 50/HIGH 및 Mock 추가 인증 필요(`ADDITIONAL_AUTH_REQUIRED`), R005 단독+ML40은 80/CRITICAL 및 Mock 거래 보류(`HELD`)다. 기존 LOW 0–19, MEDIUM 20–49, HIGH 50–79, CRITICAL 80–100 경계를 유지한다.
 
 R005 RULE Evidence의 observationSummary는 `providerCode`, `providerAsOf`, `lookedUpAt`, `freshnessSeconds`만 포함한다. 동일 채택 DetectionResult의 EXTERNAL_RISK Evidence는 `sourceVersion`, `providerCode`, `providerAsOf`, `lookedUpAt`, `recipientAccountMatched`만 포함한다. 양쪽의 Provider 코드·시각과 적중 여부를 저장 전에 대조한다. Evidence ID를 상호 참조하지 않는다. 비점수 BEHAVIOR_PATTERN Evidence에는 `sourceVersion`과 `priorApprovedRecipientTransferObserved`만 저장한다. 동일 고객·수취 계좌의 승인 이체 중 `occurredAt < T`와 `createdAt <= T`를 모두 만족하는 이력만 사용한다. `false`는 적격 이력 미관측이며 첫 송금 확정이 아니다.
 

@@ -46,12 +46,12 @@ export function AdoptedDetectionPanel({ state, onRetry }: {
         <div><dt>규칙 집합 버전</dt><dd className="facts__ref">{state.data.adoptedResult.ruleSetVersion}</dd></div>
         <div><dt>점수 정책 버전</dt><dd className="facts__ref">{state.data.adoptedResult.scoringPolicyVersion}</dd></div>
         {state.data.adoptedResult.ruleScore !== undefined &&
-          <div><dt>Rule 원점수</dt><dd>{state.data.adoptedResult.ruleScore} / 100</dd></div>}
+          <div><dt>Rule 채택 점수</dt><dd>{state.data.adoptedResult.ruleScore} / 100</dd></div>}
         {state.data.adoptedResult.mlStatus !== undefined &&
           <div><dt>사기 탐지 ML 상태</dt><dd>{state.data.adoptedResult.mlStatus === "APPLIED" ?
             "결합됨" : "Rule 전용 결과"}</dd></div>}
         {state.data.adoptedResult.mlStatus === "APPLIED" && <>
-          <div><dt>ML 기여도</dt><dd>+{state.data.adoptedResult.mlContribution}점 (최종 100점 상한)</dd></div>
+          <div><dt>ML 기여도</dt><dd>원점수 +{state.data.adoptedResult.mlRawContribution ?? state.data.adoptedResult.mlContribution}점 · 채택 +{state.data.adoptedResult.mlContribution}점</dd></div>
           <div><dt>사기 탐지 모델 버전</dt><dd className="facts__ref">{state.data.adoptedResult.modelVersion}</dd></div>
           <div><dt>ML Feature 버전</dt><dd>{state.data.adoptedResult.mlFeatureVersion}</dd></div>
           <div><dt>모델 SHA-256</dt><dd className="facts__ref">{state.data.adoptedResult.modelSha256}</dd></div>
@@ -62,9 +62,20 @@ export function AdoptedDetectionPanel({ state, onRetry }: {
         <ol className="adopted-detection__rules">{state.data.adoptedResult.ruleEvidence.map((rule, index) =>
           <li key={`${rule.ruleCode}-${index}`}>
             <strong>{rule.ruleCode}</strong> (버전 {rule.ruleVersion})<br />
-            Reason Code: {rule.reasonCode}<br />개별 기여도: {rule.scoreContribution}
+            Reason Code: {rule.reasonCode}<br />원점수: {rule.scoreContribution}
+            {rule.appliedContribution !== undefined && <> · 채택: {rule.appliedContribution}</>}
           </li>)}</ol>}
-      <p className="adopted-detection__note">개별 기여도의 합은 최종 위험 점수와 다를 수 있습니다.</p>
+      {state.data.adoptedResult.scoreGroupSummary && <section aria-label="점수 그룹 상한">
+        <h4>그룹별 점수 배분</h4><ol>{state.data.adoptedResult.scoreGroupSummary.map(group =>
+          <li key={group.groupId}>{group.groupId}: 원점수 {group.rawScore} · 상한 {group.cap} · 채택 {group.appliedScore}</li>)}</ol>
+      </section>}
+      <p className="adopted-detection__note">개별 원점수의 합은 최종 위험 점수와 다를 수 있습니다.</p>
+      {state.data.adoptedResult.scn001002Evidence && <section aria-label="신규 기기와 한도 변경 근거">
+        <h4>SCN-001·002 평가 근거</h4>
+        <p>기준선 {state.data.adoptedResult.scn001002Evidence.baselineStatus} · 표본 {state.data.adoptedResult.scn001002Evidence.baselineCount}건/{state.data.adoptedResult.scn001002Evidence.baselineDays}일</p>
+        <p>수취인 {state.data.adoptedResult.scn001002Evidence.recipientStatus} · 기기 {state.data.adoptedResult.scn001002Evidence.deviceStatus}</p>
+        <p>외부 위험 출처 {state.data.adoptedResult.scn001002Evidence.providerCode} · 기기 정확 일치 {state.data.adoptedResult.scn001002Evidence.exactDeviceMatched ? "확인" : "없음"}</p>
+      </section>}
       {state.data.adoptedResult.scn003Evidence && <section aria-label="외부 위험 수취 계좌 근거">
         <h4>외부 위험 수취 계좌 근거</h4>
         <p>출처 {state.data.adoptedResult.scn003Evidence.providerCode} · 계약 {state.data.adoptedResult.scn003Evidence.sourceVersion}</p>

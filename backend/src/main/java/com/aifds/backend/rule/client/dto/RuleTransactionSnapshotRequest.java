@@ -33,19 +33,24 @@ public record RuleTransactionSnapshotRequest(
                 "externalCustomerRef must not be null"
         );
         Objects.requireNonNull(senderAccountRef, "senderAccountRef must not be null");
-        Objects.requireNonNull(
-                recipientAccountRef,
-                "recipientAccountRef must not be null"
-        );
+        boolean transfer = transactionType == RuleTransactionType.ACCOUNT_TRANSFER
+                || transactionType == RuleTransactionType.OPEN_BANKING_TRANSFER;
+        if (transfer) {
+            Objects.requireNonNull(recipientAccountRef,
+                    "recipientAccountRef must not be null for a transfer");
+        } else if (recipientAccountRef != null) {
+            throw new IllegalArgumentException(
+                    "recipientAccountRef must be null for a non-transfer");
+        }
         RuleAnalysisDtoContracts.requireReference(
                 externalCustomerRef,
                 "externalCustomerRef"
         );
         RuleAnalysisDtoContracts.requireReference(senderAccountRef, "senderAccountRef");
-        RuleAnalysisDtoContracts.requireReference(
-                recipientAccountRef,
-                "recipientAccountRef"
-        );
+        if (transfer) {
+            RuleAnalysisDtoContracts.requireReference(
+                    recipientAccountRef, "recipientAccountRef");
+        }
         RuleAnalysisDtoContracts.requireOptionalReference(deviceRef, "deviceRef");
     }
 }

@@ -84,6 +84,9 @@ public class DetectionEvidence {
     @Column(name = "score_contribution", updatable = false)
     private Integer scoreContribution;
 
+    @Column(name = "applied_contribution", updatable = false)
+    private Integer appliedContribution;
+
     @Column(name = "rule_code", length = 64, updatable = false)
     private String ruleCode;
 
@@ -211,6 +214,91 @@ public class DetectionEvidence {
         return evidence;
     }
 
+    public static DetectionEvidence ruleV4(DetectionResult result,
+                                           RuleVersion version,
+                                           String displayDescription,
+                                           JsonNode validatedObservation,
+                                           int rawContribution,
+                                           int appliedContribution,
+                                           Instant evidenceAt,
+                                           int sortOrder) {
+        if (result == null || !"rule-ml-policy-v3".equals(result.getScoringPolicyVersion())
+                || version == null || version.getStatus() != RuleVersionStatus.PUBLISHED
+                || validatedObservation == null || !validatedObservation.isObject()
+                || rawContribution != version.getWeight()
+                || appliedContribution < 0 || appliedContribution > rawContribution
+                || evidenceAt == null || evidenceAt.isAfter(result.getEvaluationCutoffAt())
+                || sortOrder < 0) {
+            throw new IllegalArgumentException("Invalid Rule v4 Evidence");
+        }
+        DetectionEvidence evidence = new DetectionEvidence();
+        evidence.evidenceId = UUID.randomUUID();
+        evidence.detectionResult = result;
+        evidence.evidenceType = DetectionEvidenceType.RULE;
+        evidence.ruleVersionRef = version;
+        evidence.reasonCode = evidence.requireCode(version.getReasonCode(), "reasonCode");
+        evidence.ruleCode = evidence.requireCode(version.getFraudRule().getRuleCode(), "ruleCode");
+        evidence.ruleVersion = Integer.toString(version.getVersionNumber());
+        evidence.displayDescription = evidence.requireDescription(displayDescription);
+        evidence.scoreContribution = rawContribution;
+        evidence.appliedContribution = appliedContribution;
+        evidence.observationSummary = validatedObservation.deepCopy();
+        evidence.evidenceOccurredAt = evidenceAt;
+        evidence.sortOrder = sortOrder;
+        return evidence;
+    }
+
+    public static DetectionEvidence mlV4(DetectionResult result, String reasonCode,
+                                         int contribution, int appliedContribution,
+                                         int probabilityBasisPoints, Instant cutoff,
+                                         int sortOrder) {
+        DetectionEvidence evidence = ml(result, reasonCode, contribution,
+                probabilityBasisPoints, cutoff, sortOrder);
+        if (appliedContribution < 0 || appliedContribution > contribution
+                || !"rule-ml-policy-v3".equals(result.getScoringPolicyVersion())) {
+            throw new IllegalArgumentException("Invalid ML v3 applied contribution");
+        }
+        evidence.appliedContribution = appliedContribution;
+        return evidence;
+    }
+
+    public static DetectionEvidence externalRiskV4(DetectionResult result,
+            ExternalRiskSnapshotRequest snapshot, boolean exactDeviceMatch, int sortOrder) {
+        DetectionEvidence evidence = externalRisk(result, snapshot, sortOrder);
+        boolean recipientMatch = evidence.observationSummary.path("recipientAccountMatched")
+                .booleanValue();
+        evidence.displayDescription = "Validated External Risk scenario snapshot";
+        evidence.observationSummary = JsonNodeFactory.instance.objectNode()
+                .put("sourceVersion", "SCN001-002-contract-v1")
+                .put("providerCode", snapshot.providerCode())
+                .put("providerAsOf", snapshot.providerAsOf().toString())
+                .put("lookedUpAt", snapshot.lookedUpAt().toString())
+                .put("recipientAccountMatched", recipientMatch)
+                .put("exactDeviceMatched", exactDeviceMatch);
+        return evidence;
+    }
+
+    public static DetectionEvidence scenarioHistory(DetectionResult result,
+            String baselineStatus, long baselineCount, long baselineDays,
+            String recipientStatus, String deviceStatus, int sortOrder) {
+        DetectionEvidence evidence = new DetectionEvidence();
+        evidence.evidenceId = UUID.randomUUID();
+        evidence.detectionResult = Objects.requireNonNull(result);
+        evidence.evidenceType = DetectionEvidenceType.BEHAVIOR_PATTERN;
+        evidence.reasonCode = "SCENARIO_HISTORY_CONTEXT";
+        evidence.displayDescription = "Cutoff-safe scenario history and completeness";
+        evidence.observationSummary = JsonNodeFactory.instance.objectNode()
+                .put("sourceVersion", "SCN001-002-contract-v1")
+                .put("baselineStatus", baselineStatus)
+                .put("baselineCount", baselineCount)
+                .put("baselineDays", baselineDays)
+                .put("recipientStatus", recipientStatus)
+                .put("deviceStatus", deviceStatus);
+        evidence.evidenceOccurredAt = result.getEvaluationCutoffAt();
+        evidence.sortOrder = sortOrder;
+        return evidence;
+    }
+
     public static DetectionEvidence externalRisk(
             DetectionResult result, ExternalRiskSnapshotRequest snapshot,
             int sortOrder) {
@@ -322,6 +410,8 @@ public class DetectionEvidence {
     public Integer getScoreContribution() {
         return scoreContribution;
     }
+
+    public Integer getAppliedContribution() { return appliedContribution; }
 
     public String getRuleCode() {
         return ruleCode;

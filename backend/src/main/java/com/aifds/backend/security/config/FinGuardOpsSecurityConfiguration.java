@@ -188,6 +188,14 @@ public class FinGuardOpsSecurityConfiguration {
                                 "/api/v1/behavior-events"
                         )).hasAuthority(BEHAVIOR_EVENT_INTAKE)
                         .requestMatchers(paths.matcher(
+                                HttpMethod.POST,
+                                "/api/v1/fds-mock-facts"
+                        )).hasAuthority(BEHAVIOR_EVENT_INTAKE)
+                          .requestMatchers(paths.matcher(
+                                  HttpMethod.POST,
+                                  "/api/v1/transactions/{transactionId}/mock-auth"
+                          )).hasAuthority(BEHAVIOR_EVENT_INTAKE)
+                        .requestMatchers(paths.matcher(
                                 HttpMethod.GET,
                                 "/api/v1/transactions/{transactionId}/adopted-detection-result"
                         )).access((authentication, request) -> {

@@ -279,6 +279,8 @@ public class RiskResponseFinalizationService {
                     adoptedResult,
                     caseResult
             ));
+        }
+        if (caseResult != null && caseResult.newlyLinked()) {
             auditLogPersistenceService.append(caseLinkedDraft(
                     transaction,
                     adoptedResult,

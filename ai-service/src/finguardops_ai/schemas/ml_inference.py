@@ -7,6 +7,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from finguardops_ai.schemas.scenario_rule import ScenarioFactsDto
+
 
 class MlDto(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=False)
@@ -55,11 +57,12 @@ class MlInferenceRequest(MlDto):
         "ACCOUNT_TRANSFER", "OPEN_BANKING_TRANSFER", "ATM_WITHDRAWAL", "LOAN_DISBURSED"
     ]
     channel: Literal["MOBILE_BANKING", "OPEN_BANKING", "ATM", "CORE_BANKING"]
-    featureVersion: Literal["fraud-feature-v1"]
-    scoringPolicyVersion: Literal["rule-ml-policy-v1", "rule-ml-policy-v2"]
+    featureVersion: Literal["fraud-feature-v1", "fraud-feature-v2"]
+    scoringPolicyVersion: Literal["rule-ml-policy-v1", "rule-ml-policy-v2", "rule-ml-policy-v3"]
     modelVersion: str = Field(min_length=1, max_length=64)
     modelSha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     events: tuple[MlEvent, ...] = Field(max_length=1000)
+    scenarioFacts: ScenarioFactsDto | None = None
 
     @field_validator("transactionId")
     @classmethod
@@ -82,6 +85,16 @@ class MlInferenceRequest(MlDto):
             for event in self.events
         ):
             raise ValueError("timestamps must have timezone")
+        if self.scoringPolicyVersion == "rule-ml-policy-v3":
+            if (
+                self.featureVersion != "fraud-feature-v2"
+                or self.modelVersion != "fraud-logistic-v3"
+                or self.scenarioFacts is None
+                or self.events
+            ):
+                raise ValueError("Rule+ML v3 requires pinned v2 facts and no legacy events")
+        elif self.featureVersion != "fraud-feature-v1" or self.scenarioFacts is not None:
+            raise ValueError("Legacy Rule+ML requires legacy features")
         return self
 
 

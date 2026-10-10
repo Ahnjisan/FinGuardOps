@@ -1,6 +1,7 @@
 """Local Docker Compose fixture for the existing External Risk HTTP contract."""
 
 import json
+import hashlib
 import os
 import time
 from datetime import datetime, timedelta
@@ -22,6 +23,39 @@ REQUEST_FIELDS = {
 MAX_REQUEST_BYTES = 65_536
 LOOKUP_RECEIVED_MARKER = "FINGUARDOPS_EXTERNAL_RISK_LOOKUP_RECEIVED"
 SCN003_FIXTURE_ENABLED = os.environ.get("FINGUARDOPS_SCN003_FIXTURE_ENABLED") == "true"
+SCN001002_FIXTURE_ENABLED = os.environ.get("FINGUARDOPS_SCN001002_FIXTURE_ENABLED") == "true"
+
+
+def scn001002_response(request: dict[str, object]) -> tuple[int, dict[str, object]]:
+    """Exact-device synthetic match, isolated from the SCN-003 recipient fixture."""
+    device = request["deviceRef"]
+    cutoff = datetime.fromisoformat(str(request["evaluationCutoffAt"]).replace("Z", "+00:00"))
+    if not isinstance(device, str) or not device.startswith("issue384-synthetic-"):
+        return 200, {"providerCode": "PROVIDER_V1", "providerAsOf": request["evaluationCutoffAt"],
+                     "matches": []}
+    scenario = device.removeprefix("issue384-synthetic-").split("-", 1)[0]
+    if scenario == "unavailable":
+        return 503, {"status": "UNAVAILABLE"}
+    if scenario == "timeout":
+        time.sleep(4)
+    as_of = cutoff
+    if scenario == "boundary":
+        as_of -= timedelta(hours=24)
+    elif scenario == "stale":
+        as_of -= timedelta(hours=24, microseconds=1)
+    elif scenario == "future":
+        as_of += timedelta(microseconds=1)
+    matches = []
+    if scenario in {"risk", "wrongdigest", "boundary", "stale", "future"}:
+        subject = device if scenario != "wrongdigest" else device + "-other"
+        matches.append({"subjectType": "DEVICE", "riskType": "RISK_DEVICE",
+                        "reasonCode": "RISK_DEVICE",
+                        "subjectDigest": hashlib.sha256(subject.encode("utf-8")).hexdigest()})
+    elif scenario == "contradictory":
+        matches.append({"subjectType": "DEVICE", "riskType": "SUSPICIOUS_ACCOUNT",
+                        "reasonCode": "RISK_DEVICE"})
+    return 200, {"providerCode": "PROVIDER_V1",
+                 "providerAsOf": as_of.isoformat().replace("+00:00", "Z"), "matches": matches}
 
 
 def scn003_response(request: dict[str, object]) -> tuple[int, dict[str, object]]:
@@ -74,7 +108,10 @@ class Handler(BaseHTTPRequestHandler):
         if request is None:
             self._json(400, {"status": "INVALID_REQUEST"})
             return
-        if SCN003_FIXTURE_ENABLED:
+        if SCN001002_FIXTURE_ENABLED:
+            status, payload = scn001002_response(request)
+            self._json(status, payload)
+        elif SCN003_FIXTURE_ENABLED:
             status, payload = scn003_response(request)
             self._json(status, payload)
         else:

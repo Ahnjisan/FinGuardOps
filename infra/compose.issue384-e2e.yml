@@ -1,0 +1,11 @@
+services:
+  ai-service:
+    image: ${FINGUARDOPS_ISSUE384_AI_IMAGE:?issue 384 image required}
+  external-risk-mock:
+    image: ${FINGUARDOPS_ISSUE384_AI_IMAGE:?issue 384 image required}
+    environment:
+      FINGUARDOPS_SCN001002_FIXTURE_ENABLED: "true"
+  backend:
+    image: ${FINGUARDOPS_ISSUE384_BACKEND_IMAGE:?issue 384 image required}
+    environment:
+      JAVA_TOOL_OPTIONS: -Xmx768m

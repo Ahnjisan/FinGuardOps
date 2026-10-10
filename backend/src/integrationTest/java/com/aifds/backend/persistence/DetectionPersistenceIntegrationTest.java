@@ -125,7 +125,7 @@ class DetectionPersistenceIntegrationTest
 
     @Test
     void migrationCreatesExactColumnsConstraintsIndexesAndTriggers() {
-        assertThat(flyway.info().applied()).hasSize(23);
+        assertThat(flyway.info().applied()).hasSize(32);
         assertThat(columns("detection_result")).containsExactlyInAnyOrder(
                 "id",
                 "detection_result_id",
@@ -143,6 +143,7 @@ class DetectionPersistenceIntegrationTest
                 "rule_risk_score",
                 "ml_contribution",
                 "ml_probability_basis_points",
+                "score_group_summary",
                 "evaluation_cutoff_at",
                 "analysis_started_at",
                 "analysis_completed_at",
@@ -159,6 +160,7 @@ class DetectionPersistenceIntegrationTest
                 "reason_code",
                 "display_description",
                 "score_contribution",
+                "applied_contribution",
                 "rule_code",
                 "rule_version",
                 "rule_version_id",
@@ -206,7 +208,8 @@ class DetectionPersistenceIntegrationTest
                 "ck_detection_result_state_fields",
                 "ck_detection_result_timestamps",
                 "ck_detection_result_ml_identity",
-                "ck_detection_result_ml_scores"
+                "ck_detection_result_ml_scores",
+                "ck_detection_result_v4_groups"
         );
         assertThat(constraints("detection_evidence"))
                 .containsExactlyInAnyOrder(
@@ -220,6 +223,7 @@ class DetectionPersistenceIntegrationTest
                         "ck_detection_evidence_reason_code",
                         "ck_detection_evidence_description",
                         "ck_detection_evidence_score",
+                        "ck_detection_evidence_applied_contribution",
                         "ck_detection_evidence_rule_fields",
                         "ck_detection_evidence_observation_summary",
                         "ck_detection_evidence_sort_order",
@@ -232,7 +236,9 @@ class DetectionPersistenceIntegrationTest
         assertThat(triggers()).containsExactlyInAnyOrder(
                 "tg_detection_result_history_guard",
                 "tg_detection_evidence_history_guard",
-                "tg_financial_transaction_adoption_guard"
+                "tg_financial_transaction_adoption_guard",
+                "tr_financial_transaction_approved_at",
+                "tr_financial_transaction_approval_insert_guard"
         );
     }
 

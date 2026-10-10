@@ -9,6 +9,7 @@ import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.rule.client.RuleAnalysisClientException;
 import com.aifds.backend.rule.client.RuleAnalysisHttpClient;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResponse;
+import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV3;
 import com.aifds.backend.rule.contract.RuleV1ContractRegistry;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -122,7 +123,8 @@ public class RuleAnalysisOrchestrationService {
                 metricStartedAt,
                 false,
                 null,
-                false
+                false,
+                null
         );
     }
 
@@ -162,16 +164,19 @@ public class RuleAnalysisOrchestrationService {
         }
         StartedRuleAnalysis started = execution.startedAnalysis();
 
+        RuleAnalysisRequestV3 scenarioRequest = execution.scenarioFacts() == null
+                ? null : RuleAnalysisRequestV3.from(execution.request(),
+                        execution.scenarioFacts());
         return executeStartedAnalysis(
                 started,
-                () -> httpClient.analyzeV2(
-                        execution.request(),
-                        started.analysisTraceId()
-                ),
+                () -> scenarioRequest == null
+                        ? httpClient.analyzeV2(execution.request(), started.analysisTraceId())
+                        : httpClient.analyzeV3(scenarioRequest, started.analysisTraceId()),
                 metricStartedAt,
                 mlEnabled,
                 execution.request().externalRisk(),
-                execution.priorApprovedRecipientTransfer()
+                execution.priorApprovedRecipientTransfer(),
+                scenarioRequest
         );
     }
 
@@ -181,7 +186,8 @@ public class RuleAnalysisOrchestrationService {
             long metricStartedAt,
             boolean mlEnabled,
             ExternalRiskSnapshotRequest externalRisk,
-            boolean priorApprovedRecipientTransfer
+            boolean priorApprovedRecipientTransfer,
+            RuleAnalysisRequestV3 scenarioRequest
     ) {
         try {
             requireNoActiveTransaction();
@@ -228,9 +234,13 @@ public class RuleAnalysisOrchestrationService {
         MlDetectionService.MlResult mlResult = null;
         if (mlEnabled) {
             try {
-                mlResult = mlDetectionService.infer(started.transactionId(),
-                        started.evaluationCutoffAt(), started.scoringPolicyVersion(),
-                        started.modelVersion());
+                mlResult = scenarioRequest == null
+                        ? mlDetectionService.infer(started.transactionId(),
+                                started.evaluationCutoffAt(), started.scoringPolicyVersion(),
+                                started.modelVersion())
+                        : mlDetectionService.infer(started.transactionId(),
+                                started.evaluationCutoffAt(), started.scoringPolicyVersion(),
+                                started.modelVersion(), scenarioRequest.scenarioFacts());
             } catch (MlDetectionService.MlDetectionException original) {
                 throw recordFailureAndMetric(started, original.code(), original,
                         metricStartedAt);
@@ -241,7 +251,10 @@ public class RuleAnalysisOrchestrationService {
         }
 
         try {
-            if (externalRisk != null) {
+            if (scenarioRequest != null) {
+                persistenceService.completeAndAdoptV4(started, scenarioRequest,
+                        response, mlResult, clock.instant());
+            } else if (externalRisk != null) {
                 persistenceService.completeAndAdoptMl(started, mapped.riskScore(),
                         mapped.riskLevel(), clock.instant(), mapped.evidenceDrafts(),
                         mlResult, externalRisk, priorApprovedRecipientTransfer);

@@ -13,7 +13,7 @@ function verified(value: unknown): AdoptedDetectionResponse {
 it("shows the Rule and fraud ML contributions with the synthetic policy warning", () => {
   render(<AdoptedDetectionPanel onRetry={() => undefined} state={{ status: "success",
     data: verified(issue380Fixture.adopted) }} />);
-  expect(screen.getByText("Rule 원점수")).toBeInTheDocument();
+  expect(screen.getByText("Rule 채택 점수")).toBeInTheDocument();
   expect(screen.getByText("85 / 100")).toBeInTheDocument();
   expect(screen.getByText("100 / 100")).toBeInTheDocument();
   expect(screen.getAllByText(/\+35점/)).toHaveLength(2);
@@ -42,7 +42,7 @@ it("shows only the adopted version and keeps a later analysis separate", () => {
   expect(screen.getByText(/이후 탐지 실행 버전 2/)).toHaveTextContent("IN_PROGRESS");
   expect(screen.getByText("55 / 100")).toBeInTheDocument();
   expect(screen.getByText("HIGH")).toBeInTheDocument();
-  expect(screen.getByText(/개별 기여도의 합은/)).toBeInTheDocument();
+  expect(screen.getByText(/개별 원점수의 합은/)).toBeInTheDocument();
   expect(document.querySelector("time")?.getAttribute("datetime")).toBe("2026-07-23T01:15:32Z");
   expect(screen.queryByText(/사기 확정률/)).not.toBeInTheDocument();
 });

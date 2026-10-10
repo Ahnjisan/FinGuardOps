@@ -71,7 +71,8 @@ public final class ExternalRiskHttpMapper {
             matches.add(new ExternalRiskMatch(
                     match.subjectType(),
                     match.riskType(),
-                    match.reasonCode()
+                    match.reasonCode(),
+                    match.subjectDigest()
             ));
         }
         if (!ExternalRiskContracts.hasValidUniqueMatches(matches)) {

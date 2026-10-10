@@ -5,6 +5,8 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.List;
+import com.aifds.backend.rule.client.dto.RuleVersionSnapshotRequest;
+import com.aifds.backend.scenario.ScenarioRuleVersionContract;
 
 public final class CanonicalRuleSetVersionCalculator {
 
@@ -14,6 +16,22 @@ public final class CanonicalRuleSetVersionCalculator {
             List<RuleV1ExecutionPlanRegistry.RuleVersionIdentity> identities
     ) {
         return HexFormat.of().formatHex(sha256(canonicalInput(identities)));
+    }
+
+    public String calculateV4(List<RuleVersionSnapshotRequest> snapshots) {
+        if (snapshots.size() != 10) throw new IllegalArgumentException("Rule v4 requires ten versions");
+        StringBuilder input = new StringBuilder("rule-plan-v4\n");
+        for (int i = 0; i < snapshots.size(); i++) {
+            RuleVersionSnapshotRequest item = snapshots.get(i);
+            if (!ScenarioRuleVersionContract.CODES.get(i).equals(item.ruleCode())) {
+                throw new IllegalArgumentException("Rule v4 order mismatch");
+            }
+            input.append(i + 1).append('\t').append(item.ruleVersionId()).append('\t')
+                    .append(item.ruleCode()).append('\t').append("R")
+                    .append(String.format("%03d", i + 1)).append('\t')
+                    .append(item.versionNumber()).append('\n');
+        }
+        return HexFormat.of().formatHex(sha256(input.toString().getBytes(StandardCharsets.UTF_8)));
     }
 
     public byte[] canonicalInput(

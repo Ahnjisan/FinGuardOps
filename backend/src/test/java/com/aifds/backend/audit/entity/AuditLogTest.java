@@ -576,6 +576,16 @@ class AuditLogTest {
                         "FINANCIAL_TRANSACTION",
                         false,
                         true
+                ),
+                new ActionContract(
+                        AuditAction.TRANSACTION_STATUS_CHANGED,
+                        "TRANSACTION_STATUS_CHANGED",
+                        AuditReasonCode.MOCK_AUTH_DECIDED,
+                        "MOCK_AUTH_DECIDED",
+                        AuditTargetType.FINANCIAL_TRANSACTION,
+                        "FINANCIAL_TRANSACTION",
+                        false,
+                        true
                 )
         );
     }

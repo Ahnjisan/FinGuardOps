@@ -4,6 +4,8 @@ import com.aifds.backend.common.trace.TraceIdFilter;
 import com.aifds.backend.rule.client.dto.RuleAnalysisErrorResponse;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequest;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV2;
+import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV3;
+import com.aifds.backend.scenario.ScenarioRuleResponseValidator;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResponse;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -27,6 +29,7 @@ public final class RuleAnalysisHttpClient {
 
     public static final String ENDPOINT = "/api/v1/rule-analysis";
     public static final String V2_ENDPOINT = "/api/v2/rule-analysis";
+    public static final String V3_ENDPOINT = "/api/v3/rule-analysis";
 
     private static final Logger LOGGER =
             LoggerFactory.getLogger(RuleAnalysisHttpClient.class);
@@ -101,6 +104,12 @@ public final class RuleAnalysisHttpClient {
         );
     }
 
+    public RuleAnalysisResponse analyzeV3(RuleAnalysisRequestV3 request, String traceId) {
+        Objects.requireNonNull(request, "request must not be null");
+        return exchange(request, V3_ENDPOINT, traceId,
+                response -> ScenarioRuleResponseValidator.validate(request, response));
+    }
+
     private RuleAnalysisResponse exchange(
             Object request,
             String endpoint,
@@ -173,6 +182,12 @@ public final class RuleAnalysisHttpClient {
             } catch (RuleAnalysisClientException exception) {
                 throw exception;
             } catch (RuntimeException exception) {
+                String validationCode = exception instanceof IllegalArgumentException
+                        && exception.getMessage() != null
+                        && exception.getMessage().startsWith("Rule v4 ")
+                        ? exception.getMessage() : "UNCLASSIFIED_CONTRACT_MISMATCH";
+                LOGGER.warn("Rule response contract rejected traceId={} validationCode={}",
+                        requestTraceId, validationCode);
                 throw invalidResponse(status);
             }
             return success;

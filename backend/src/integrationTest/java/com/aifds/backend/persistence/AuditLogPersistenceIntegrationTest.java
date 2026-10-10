@@ -65,11 +65,11 @@ class AuditLogPersistenceIntegrationTest
 
     @Test
     void appliesFreshV1ThroughV23WithAuditSchemaAndAppendOnlyTrigger() {
-        assertThat(flyway.info().applied()).hasSize(23);
+        assertThat(flyway.info().applied()).hasSize(32);
         assertThat(flyway.info().current().getVersion().getVersion())
-                .isEqualTo("23");
+                .isEqualTo("32");
         assertThat(flyway.info().current().getDescription())
-                .isEqualTo("add scn003 policy and history index");
+                .isEqualTo("guard scenario source provenance");
         assertThat(columns("audit_log")).containsExactlyInAnyOrder(
                 "id",
                 "audit_id",

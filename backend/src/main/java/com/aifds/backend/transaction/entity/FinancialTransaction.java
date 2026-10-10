@@ -97,6 +97,10 @@ public class FinancialTransaction {
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
+    /** Database-owned transition time; legacy approved rows intentionally have NULL. */
+    @Column(name = "approved_at", insertable = false, updatable = false)
+    private Instant approvedAt;
+
     @UpdateTimestamp(source = SourceType.DB)
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
@@ -217,6 +221,18 @@ public class FinancialTransaction {
         this.processingStatus = validatedDecision.targetTransactionStatus();
     }
 
+    /** A separate trusted Mock command, leaving the original adopted result intact. */
+    public void decideAdditionalAuthentication(boolean successful) {
+        if (riskLevel != RiskLevel.HIGH
+                || processingStatus != TransactionProcessingStatus.ADDITIONAL_AUTH_REQUIRED
+                || riskResponseOutcome != RiskResponseOutcome.ADDITIONAL_AUTH_REQUIRED
+                || adoptedDetectionResult == null) {
+            throw new IllegalStateException("Additional authentication is not pending");
+        }
+        processingStatus = successful ? TransactionProcessingStatus.APPROVED
+                : TransactionProcessingStatus.HELD;
+    }
+
     private boolean matchesApprovedFinalization(
             RiskResponseDecision decision
     ) {
@@ -331,6 +347,10 @@ public class FinancialTransaction {
 
     public Instant getCreatedAt() {
         return createdAt;
+    }
+
+    public Instant getApprovedAt() {
+        return approvedAt;
     }
 
     public Instant getUpdatedAt() {

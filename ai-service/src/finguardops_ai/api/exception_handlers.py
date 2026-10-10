@@ -60,6 +60,15 @@ async def _request_validation_error(
     exc: RequestValidationError,
 ) -> JSONResponse:
     if request.url.path == "/api/v1/ml-inference":
+        fields = sorted(
+            {
+                ".".join(str(part) for part in error.get("loc", ()) if isinstance(part, (str, int)))
+                + ":"
+                + str(error.get("type", "invalid"))
+                for error in exc.errors()
+            }
+        )
+        logger.warning("ML request contract rejected fields=%s", ",".join(fields)[:512])
         return JSONResponse(status_code=400, content={"code": "ML_INVALID_REQUEST"})
     trace_id = _trace_id(request)
     logger.warning(

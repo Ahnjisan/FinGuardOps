@@ -287,7 +287,8 @@ public class AuditLog {
                             == AuditReasonCode
                             .TRANSACTION_FINALIZED_BY_RISK_POLICY
                             || reasonCode == AuditReasonCode
-                            .TRANSACTION_TERMINATED_BY_MAINTENANCE;
+                            .TRANSACTION_TERMINATED_BY_MAINTENANCE
+                            || reasonCode == AuditReasonCode.MOCK_AUTH_DECIDED;
         };
         if (!valid) {
             throw new IllegalArgumentException(

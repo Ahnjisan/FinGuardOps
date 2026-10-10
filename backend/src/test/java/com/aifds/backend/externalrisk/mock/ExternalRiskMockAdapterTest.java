@@ -48,10 +48,11 @@ class ExternalRiskMockAdapterTest {
         );
         assertScenario(
                 ExternalRiskMockScenario.MATCHED_DEVICE,
-                List.of(match(
+                List.of(new ExternalRiskMatch(
                         ExternalRiskSubjectType.DEVICE,
                         ExternalRiskType.RISK_DEVICE,
-                        ExternalRiskReasonCode.RISK_DEVICE
+                        ExternalRiskReasonCode.RISK_DEVICE,
+                        com.aifds.backend.externalrisk.domain.ExternalRiskSubjectDigest.of("device-ref")
                 ))
         );
         assertScenario(ExternalRiskMockScenario.UNMATCHED, List.of());

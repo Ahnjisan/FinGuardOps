@@ -14,6 +14,37 @@ public final class RulePolicyVersion {
         if (snapshots.isEmpty()) {
             throw new IllegalArgumentException("RuleVersion set is empty");
         }
+        if (snapshots.size() == 10 || snapshots.stream().anyMatch(snapshot ->
+                RuleV1ContractRegistry.CUSTOMER_BASELINE_HIGH_AMOUNT.equals(snapshot.ruleCode())
+                || RuleV1ContractRegistry.EXTERNAL_RISK_DEVICE_MATCH.equals(snapshot.ruleCode())
+                || RuleV1ContractRegistry.MOCK_APP_SECURITY_ALERT.equals(snapshot.ruleCode())
+                || RuleV1ContractRegistry.MATERIAL_LIMIT_UPLIFT.equals(snapshot.ruleCode())
+                || RuleV1ContractRegistry.MOCK_OVERSEAS_NETWORK.equals(snapshot.ruleCode()))) {
+            Map<String, Integer> expected = Map.of(
+                    RuleV1ContractRegistry.TRANSFER_ABSOLUTE_HIGH_AMOUNT, 3,
+                    RuleV1ContractRegistry.RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT, 4,
+                    RuleV1ContractRegistry.RECENT_SECURITY_CHANGE_HIGH_AMOUNT, 4,
+                    RuleV1ContractRegistry.RECENT_BENEFICIARY_TRANSFER, 4,
+                    RuleV1ContractRegistry.EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT, 1,
+                    RuleV1ContractRegistry.CUSTOMER_BASELINE_HIGH_AMOUNT, 1,
+                    RuleV1ContractRegistry.EXTERNAL_RISK_DEVICE_MATCH, 1,
+                    RuleV1ContractRegistry.MOCK_APP_SECURITY_ALERT, 1,
+                    RuleV1ContractRegistry.MATERIAL_LIMIT_UPLIFT, 1,
+                    RuleV1ContractRegistry.MOCK_OVERSEAS_NETWORK, 1
+            );
+            Map<String, Integer> actual;
+            try {
+                actual = snapshots.stream().collect(Collectors.toMap(
+                        RuleVersionSnapshotRequest::ruleCode,
+                        RuleVersionSnapshotRequest::versionNumber));
+            } catch (IllegalStateException duplicate) {
+                throw new IllegalArgumentException("Duplicate Rule in SCN-001/002 set", duplicate);
+            }
+            if (snapshots.size() != 10 || !actual.equals(expected)) {
+                throw new IllegalArgumentException("Invalid SCN-001/002 RuleVersion set");
+            }
+            return 4;
+        }
         if (snapshots.size() == 5 || snapshots.stream().anyMatch(snapshot ->
                 RuleV1ContractRegistry.EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT.equals(
                         snapshot.ruleCode()))) {

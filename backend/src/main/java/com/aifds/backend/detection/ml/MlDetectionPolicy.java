@@ -7,7 +7,12 @@ import java.time.Instant;
 public final class MlDetectionPolicy {
     public static final String POLICY_VERSION = "rule-ml-policy-v1";
     public static final String SCN003_POLICY_VERSION = "rule-ml-policy-v2";
+    public static final String SCN001_002_POLICY_VERSION = "rule-ml-policy-v3";
     public static final String FEATURE_VERSION = "fraud-feature-v1";
+    public static final String SCN001_002_FEATURE_VERSION = "fraud-feature-v2";
+    public static final String SCN001_002_MODEL_VERSION = "fraud-logistic-v3";
+    public static final String SCN001_002_MODEL_SHA256 =
+            "630a7d078ab35f8b9b49e8d1aadfaaf583af64452edd68fa2542d13b5b4b4636";
     public static final String MODEL_V1_VERSION = "fraud-logistic-v1";
     public static final String MODEL_V1_SHA256 =
             "93a91797f6a652a08871191e87385ced6edd1a560abd6ee9b2782411bb19c286";
@@ -24,6 +29,7 @@ public final class MlDetectionPolicy {
     }
 
     public static String shaForModel(String modelVersion) {
+        if (SCN001_002_MODEL_VERSION.equals(modelVersion)) return SCN001_002_MODEL_SHA256;
         if (MODEL_V1_VERSION.equals(modelVersion)) return MODEL_V1_SHA256;
         if (MODEL_VERSION.equals(modelVersion)) return MODEL_SHA256;
         throw new IllegalArgumentException("Unknown pinned model version");

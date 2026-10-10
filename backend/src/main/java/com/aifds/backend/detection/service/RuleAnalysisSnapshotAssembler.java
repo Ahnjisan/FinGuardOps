@@ -11,6 +11,7 @@ import com.aifds.backend.rule.client.dto.RuleTransactionSnapshotRequest;
 import com.aifds.backend.rule.client.dto.RuleTransactionType;
 import com.aifds.backend.rule.client.dto.RuleVersionSnapshotRequest;
 import com.aifds.backend.rule.contract.CanonicalRuleSetVersionCalculator;
+import com.aifds.backend.scenario.ScenarioRuleVersionContract;
 import com.aifds.backend.rule.contract.RuleV1ExecutionPlanRegistry;
 import com.aifds.backend.rule.entity.FraudRule;
 import com.aifds.backend.rule.entity.FraudRuleLifecycleStatus;
@@ -74,6 +75,19 @@ public class RuleAnalysisSnapshotAssembler {
         List<RuleVersion> executableVersions = List.copyOf(
                 ruleVersionRepository.findAllExecutableVersions(cutoff)
         );
+        if (executableVersions.size() == 10 || executableVersions.stream().anyMatch(version ->
+                ScenarioRuleVersionContract.CODES.indexOf(
+                        version.getFraudRule().getRuleCode()) >= 5)) {
+            List<RuleVersionSnapshotRequest> v4 = executableVersions.stream()
+                    .sorted(java.util.Comparator.comparingInt(version ->
+                            ScenarioRuleVersionContract.CODES.indexOf(
+                                    version.getFraudRule().getRuleCode())))
+                    .map(this::toRuleSnapshot).toList();
+            ScenarioRuleVersionContract.validate(v4, cutoff);
+            return new AssembledRuleAnalysisSnapshot(
+                    ruleSetVersionCalculator.calculateV4(v4),
+                    new RuleAnalysisRequest(cutoff, transactionSnapshot, List.of(), v4));
+        }
 
         Map<UUID, RuleVersion> versionsById = new HashMap<>();
         List<RuleV1ExecutionPlanRegistry.RuleVersionIdentity> identities =
@@ -211,9 +225,8 @@ public class RuleAnalysisSnapshotAssembler {
             case ACCOUNT_TRANSFER -> RuleTransactionType.ACCOUNT_TRANSFER;
             case OPEN_BANKING_TRANSFER ->
                     RuleTransactionType.OPEN_BANKING_TRANSFER;
-            case ATM_WITHDRAWAL, LOAN_DISBURSED -> throw new IllegalArgumentException(
-                    "Transaction type is not supported by Rule v1"
-            );
+            case ATM_WITHDRAWAL -> RuleTransactionType.ATM_WITHDRAWAL;
+            case LOAN_DISBURSED -> RuleTransactionType.LOAN_DISBURSED;
         };
     }
 
