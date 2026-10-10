@@ -9197,10 +9197,12 @@ test("a real USER works the Run fixture case through review, a note and the audi
       "The adopted result did not match the manifest risk or RULE projection.");
     requireCondition(isDeepStrictEqual(Object.keys(adoptedBody).sort(),
       ["transactionId", "availability", "latestDetectionResultVersion",
-        "latestAnalysisStatus", "adoptedResult"].sort()) &&
+        "latestAnalysisStatus", "adoptedResult", "latestFailureCode"].sort()) &&
       isDeepStrictEqual(Object.keys(adoptedResult).sort(), ["detectionResultId",
         "detectionResultVersion", "riskLevel", "riskScore", "analysisCompletedAt",
-        "ruleSetVersion", "scoringPolicyVersion", "ruleEvidence"].sort()),
+        "ruleSetVersion", "scoringPolicyVersion", "ruleEvidence", "ruleScore",
+        "mlContribution", "mlStatus", "modelVersion", "mlFeatureVersion",
+        "modelSha256", "mlEvidence"].sort()),
       "The adopted response exposed fields outside the approved projection.");
     await expect(factValue(page.locator(".adopted-detection"), "위험 등급"))
       .toHaveText(fixture.expectedRiskLevel);

@@ -162,6 +162,15 @@ class CriticalFixtureTests(unittest.TestCase):
             ],
         )
         self.assertEqual(seen[12][1], seen[13][1])
+        normal_cutoff = dt.datetime.fromisoformat(
+            seen[12][1]["occurredAt"].replace("Z", "+00:00")
+        )
+        self.assertLessEqual(normal_cutoff, dt.datetime.now(dt.timezone.utc))
+        for _, body, _ in seen[:12]:
+            self.assertLessEqual(
+                dt.datetime.fromisoformat(body["occurredAt"].replace("Z", "+00:00")),
+                normal_cutoff,
+            )
         self.assertEqual(seen[12][2]["key"], seen[13][2]["key"])
         self.assertEqual(seen[12][1]["deviceRef"], seen[0][1]["deviceRef"])
         self.assertEqual(
@@ -171,6 +180,10 @@ class CriticalFixtureTests(unittest.TestCase):
         self.assertEqual(
             failed.call_args.args[1]["transactionId"], result["failedTransactionId"]
         )
+        failed_cutoff = dt.datetime.fromisoformat(
+            failed.call_args.args[1]["occurredAt"].replace("Z", "+00:00")
+        )
+        self.assertLessEqual(failed_cutoff, dt.datetime.now(dt.timezone.utc))
 
 
 if __name__ == "__main__":

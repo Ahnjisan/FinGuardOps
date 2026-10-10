@@ -7,6 +7,7 @@ customer reference is written to stdout or stderr.
 import datetime as dt
 import json
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -124,9 +125,10 @@ def create(secrets):
             )
             if accepted.get("eventId") != event_id:
                 raise RuntimeError("CRITICAL_EVENT_IDENTITY_INVALID")
-    normal_cutoff = dt.datetime.now(dt.timezone.utc).replace(
-        microsecond=0
-    ) + dt.timedelta(seconds=2)
+    # Keep both the persisted event creation time and the provider as-of at or
+    # before the transaction cutoff; a future cutoff is rejected by External Risk.
+    time.sleep(1.2)
+    normal_cutoff = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     transaction_id = str(uuid.uuid4())
     transaction_body = {
         "transactionId": transaction_id,
@@ -188,6 +190,7 @@ def create(secrets):
         if observed.get("eventId") != event_id:
             raise RuntimeError("CRITICAL_ML_LIMIT_EVENT_INVALID")
     failure_id = str(uuid.uuid4())
+    time.sleep(1.2)
     failed_request(
         "http://127.0.0.1:8080/api/v1/transactions",
         {
@@ -195,10 +198,7 @@ def create(secrets):
             "transactionType": "ACCOUNT_TRANSFER",
             "amount": "12000000",
             "currencyCode": "KRW",
-            "occurredAt": stamp(
-                dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
-                + dt.timedelta(seconds=2)
-            ),
+            "occurredAt": stamp(dt.datetime.now(dt.timezone.utc).replace(microsecond=0)),
             "externalCustomerRef": failure_customer,
             "senderAccountRef": failure_sender,
             "recipientAccountRef": recipient,
