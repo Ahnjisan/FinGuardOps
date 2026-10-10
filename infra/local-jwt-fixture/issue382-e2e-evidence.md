@@ -21,4 +21,4 @@ R005 단독 40/MEDIUM과 R005+ML 기여 40의 80/CRITICAL은 별도 PostgreSQL �
 
 측정 시점의 호스트 물리 메모리는 총 15.69 GiB, E2E 시작 전 가용 1.82 GiB, 최종 점검 시 가용 1.77 GiB였으며 Docker 할당은 8,161,275,904 bytes였다. 이 수치는 구간 최솟값이 아니다. #382 소유 컨테이너 다섯 개 모두 OOMKilled=false, RestartCount=0이었다. Backend·AI·Provider 로그에서 합성 고객·계좌 참조 문자열 적중은 각각 0건이었다. 실제 Secret 값은 기록하지 않았다.
 
-공식 Keycloak Browser Gate는 별도 clean commit 단계에서 실행한다. 이 문서는 그 결과를 미리 통과로 기록하지 않는다.
+공식 Keycloak Browser Gate의 최종 결과는 PR 본문에 별도로 기록한다. 이 문서는 로컬 거래 E2E의 결과만 기록한다.

@@ -1372,7 +1372,9 @@ function Invoke-E2EPlaywrightWithFixtureEnvironment {
     $primary = $null
     try {
         [System.Environment]::SetEnvironmentVariable($FixtureManifestEnvironmentName, $ManifestPath, 'Process')
-        [System.Environment]::SetEnvironmentVariable($FixtureDirectoryEnvironmentName, $null, 'Process')
+        if ($null -ne [System.Environment]::GetEnvironmentVariable($FixtureDirectoryEnvironmentName, 'Process')) {
+            Remove-Item -LiteralPath ('Env:' + $FixtureDirectoryEnvironmentName) -ErrorAction Stop
+        }
         $diagnostic.Nonce = New-E2EPlaywrightDiagnosticNonce
         [System.Environment]::SetEnvironmentVariable($PlaywrightReporterNonceEnvironmentName, $diagnostic.Nonce, 'Process')
         # stdout and stderr both arrive here, stderr as ErrorRecord objects. The
@@ -1391,21 +1393,38 @@ function Invoke-E2EPlaywrightWithFixtureEnvironment {
     $actions = @(
         [pscustomobject]@{
             Action = {
-                [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_FIXTURE_MANIFEST', $previous, 'Process')
+                if ($null -eq $previous) {
+                    Remove-Item -LiteralPath 'Env:FINGUARDOPS_E2E_FIXTURE_MANIFEST' -ErrorAction Stop
+                }
+                else {
+                    [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_FIXTURE_MANIFEST', $previous, 'Process')
+                }
             }.GetNewClosure()
             ErrorCode = 'ENVIRONMENT_RESTORE_FAILED'
             SkipAfterCleanupFailure = $false
         },
         [pscustomobject]@{
             Action = {
-                [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_FIXTURE_DIR', $fixtureDirectory, 'Process')
+                if ($null -eq $fixtureDirectory) {
+                    if ($null -ne [System.Environment]::GetEnvironmentVariable('FINGUARDOPS_E2E_FIXTURE_DIR', 'Process')) {
+                        Remove-Item -LiteralPath 'Env:FINGUARDOPS_E2E_FIXTURE_DIR' -ErrorAction Stop
+                    }
+                }
+                else {
+                    [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_FIXTURE_DIR', $fixtureDirectory, 'Process')
+                }
             }.GetNewClosure()
             ErrorCode = 'ENVIRONMENT_RESTORE_FAILED'
             SkipAfterCleanupFailure = $false
         },
         [pscustomobject]@{
             Action = {
-                [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_REPORTER_NONCE', $previousReporterNonce, 'Process')
+                if ($null -eq $previousReporterNonce) {
+                    Remove-Item -LiteralPath 'Env:FINGUARDOPS_E2E_REPORTER_NONCE' -ErrorAction Stop
+                }
+                else {
+                    [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_REPORTER_NONCE', $previousReporterNonce, 'Process')
+                }
             }.GetNewClosure()
             ErrorCode = 'ENVIRONMENT_RESTORE_FAILED'
             SkipAfterCleanupFailure = $false
@@ -1826,7 +1845,12 @@ function Invoke-E2EFixedFixtureService {
     }
     $actions = @([pscustomobject]@{
         Action = {
-            [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_FIXTURE_PLAN', $previous, 'Process')
+            if ($null -eq $previous) {
+                Remove-Item -LiteralPath 'Env:FINGUARDOPS_E2E_FIXTURE_PLAN' -ErrorAction Stop
+            }
+            else {
+                [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_FIXTURE_PLAN', $previous, 'Process')
+            }
         }.GetNewClosure()
         ErrorCode = 'ENVIRONMENT_RESTORE_FAILED'
         SkipAfterCleanupFailure = $false
@@ -4874,13 +4898,28 @@ catch {
 }
 $cleanupBoundaries = @{
         RestoreOutputEnvironment = {
-            [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_OUTPUT_DIR', $previousOutput, 'Process')
+            if ($null -eq $previousOutput) {
+                Remove-Item -LiteralPath 'Env:FINGUARDOPS_E2E_OUTPUT_DIR' -ErrorAction Stop
+            }
+            else {
+                [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_OUTPUT_DIR', $previousOutput, 'Process')
+            }
         }
         RestoreProjectEnvironment = {
-            [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_COMPOSE_PROJECT', $previousProject, 'Process')
+            if ($null -eq $previousProject) {
+                Remove-Item -LiteralPath 'Env:FINGUARDOPS_E2E_COMPOSE_PROJECT' -ErrorAction Stop
+            }
+            else {
+                [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_COMPOSE_PROJECT', $previousProject, 'Process')
+            }
         }
         RestoreBrowserEnvironment = {
-            [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_BROWSER_WS', $previousBrowser, 'Process')
+            if ($null -eq $previousBrowser) {
+                Remove-Item -LiteralPath 'Env:FINGUARDOPS_E2E_BROWSER_WS' -ErrorAction Stop
+            }
+            else {
+                [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_BROWSER_WS', $previousBrowser, 'Process')
+            }
         }
         RemoveBrowser = {
             $cleanupBrowser = if ($null -ne $browserContainer) { $browserContainer } else { $runState.BrowserContainer }
@@ -5010,7 +5049,12 @@ function Restore-E2EOwnerEnvironment {
     param([Parameter(Mandatory = $true)]$Previous)
 
     foreach ($key in $Previous.Keys) {
-        [System.Environment]::SetEnvironmentVariable($key, $Previous[$key], 'Process')
+        if ($null -eq $Previous[$key]) {
+            Remove-Item -LiteralPath ('Env:' + $key) -ErrorAction Stop
+        }
+        else {
+            [System.Environment]::SetEnvironmentVariable($key, $Previous[$key], 'Process')
+        }
     }
     $script:BrowserImage = $null
 }
