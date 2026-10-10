@@ -28,6 +28,10 @@ abstract class PostgresqlIntegrationTestSupport {
         registry.add("spring.datasource.password", POSTGRESQL::getPassword);
         registry.add("spring.datasource.hikari.data-source-properties.ApplicationName",
                 () -> "finguardops-test");
+        // Cached Spring contexts share one Testcontainers PostgreSQL instance.
+        // Bound each test pool so later contexts still have connections for Flyway.
+        registry.add("spring.datasource.hikari.maximum-pool-size", () -> 4);
+        registry.add("spring.datasource.hikari.minimum-idle", () -> 0);
         registry.add(
                 "finguardops.ai-service.base-url",
                 () -> "http://127.0.0.1:65535"
