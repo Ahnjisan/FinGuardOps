@@ -173,6 +173,32 @@ class RuleAnalysisSnapshotAssemblerTest {
     }
 
     @Test
+    void combinedMlRuleSnapshotUsesTheIngestTimeSafeEventWindow() {
+        FinancialTransaction transaction = transfer(CUTOFF);
+        RuleVersion device = publishedVersion(
+                RuleV1ContractRegistry.RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT,
+                20, deviceCondition());
+        RuleVersion amount = publishedVersion(
+                RuleV1ContractRegistry.TRANSFER_ABSOLUTE_HIGH_AMOUNT,
+                15, amountCondition());
+        when(ruleVersionRepository.findAllExecutableVersions(CUTOFF))
+                .thenReturn(List.of(device, amount));
+        when(behaviorEventRepository.findForMlEvaluation(
+                eq(transaction.getExternalCustomerRef()),
+                eq(Set.of(BehaviorEventType.DEVICE_REGISTERED)),
+                eq(CUTOFF.minusSeconds(86_400)), eq(CUTOFF), any(Pageable.class)))
+                .thenReturn(List.of());
+
+        assertThat(assembler.assemble(transaction, true).request().behaviorEvents()).isEmpty();
+        verify(behaviorEventRepository).findForMlEvaluation(
+                eq(transaction.getExternalCustomerRef()),
+                eq(Set.of(BehaviorEventType.DEVICE_REGISTERED)),
+                eq(CUTOFF.minusSeconds(86_400)), eq(CUTOFF), any(Pageable.class));
+        verify(behaviorEventRepository, never()).findForRuleEvaluation(
+                any(), any(), any(), any(), any());
+    }
+
+    @Test
     void rejectsUnsupportedTransactionAndWindowBeforeReturningSnapshot() {
         FinancialTransaction unsupported = new FinancialTransaction(
                 UUID.randomUUID(),

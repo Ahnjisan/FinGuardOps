@@ -116,7 +116,7 @@ public class RuleAnalysisPersistenceService {
             Instant startedAt
     ) {
         requireOpenGate();
-        PreparedRuleAnalysisStart prepared = prepareStart(transactionId);
+        PreparedRuleAnalysisStart prepared = prepareStart(transactionId, false);
         StartedRuleAnalysis started = persistStart(
                 prepared,
                 scoringPolicyVersion,
@@ -145,7 +145,7 @@ public class RuleAnalysisPersistenceService {
             Instant startedAt
     ) {
         requireOpenGate();
-        PreparedRuleAnalysisStart prepared = prepareStart(transactionId);
+        PreparedRuleAnalysisStart prepared = prepareStart(transactionId, modelVersion != null);
         RuleAnalysisRequestV2 request = requestV2Mapper.map(
                 prepared.snapshot().request(),
                 externalRiskSnapshot
@@ -161,14 +161,15 @@ public class RuleAnalysisPersistenceService {
         return new StartedRuleAnalysisV2Execution(started, request);
     }
 
-    private PreparedRuleAnalysisStart prepareStart(UUID transactionId) {
+    private PreparedRuleAnalysisStart prepareStart(UUID transactionId, boolean cutoffSafeMl) {
         Objects.requireNonNull(transactionId, "transactionId must not be null");
         FinancialTransaction transaction = transactionRepository
                 .findByTransactionIdForUpdate(transactionId)
                 .orElseThrow(TransactionNotFoundException::new);
         validateCanStart(transaction);
         RuleAnalysisSnapshotAssembler.AssembledRuleAnalysisSnapshot snapshot =
-                snapshotAssembler.assemble(transaction);
+                cutoffSafeMl ? snapshotAssembler.assemble(transaction, true)
+                        : snapshotAssembler.assemble(transaction);
         return new PreparedRuleAnalysisStart(transaction, snapshot);
     }
 

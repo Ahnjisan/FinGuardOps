@@ -62,6 +62,8 @@ function isAdopted(value: unknown): value is AdoptedResult {
   const newKeys = [...oldKeys, "ruleScore", "mlContribution", "mlStatus", "modelVersion",
     "mlFeatureVersion", "modelSha256", "mlEvidence"];
   if (!(isObjectWithExactKeys(value, oldKeys) || isObjectWithExactKeys(value, newKeys))) return false;
+  if (isObjectWithExactKeys(value, oldKeys) &&
+      value.scoringPolicyVersion === "rule-ml-policy-v1") return false;
   if (isObjectWithExactKeys(value, newKeys)) {
     if (!Number.isInteger(value.ruleScore) || (value.ruleScore as number) < 0 ||
         (value.ruleScore as number) > 100 || !Array.isArray(value.mlEvidence)) return false;
@@ -87,7 +89,8 @@ function isAdopted(value: unknown): value is AdoptedResult {
           value.mlContribution !== ((item.probabilityBasisPoints as number) <= 5000 ? 0 :
             Math.floor((((item.probabilityBasisPoints as number) - 5000) * 40 + 2500) / 5000)) ||
           value.scoringPolicyVersion !== "rule-ml-policy-v1") return false;
-    } else if (value.mlStatus !== "RULE_ONLY" || value.mlContribution !== null ||
+    } else if (value.mlStatus !== "RULE_ONLY" ||
+        value.scoringPolicyVersion === "rule-ml-policy-v1" || value.mlContribution !== null ||
         value.modelVersion !== null || value.mlFeatureVersion !== null ||
         value.modelSha256 !== null || value.mlEvidence.length !== 0 ||
         value.ruleScore !== value.riskScore) return false;

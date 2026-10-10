@@ -179,3 +179,24 @@ def test_tampered_model_asset_fails_hash_check(
             model_module.load_model()
     finally:
         model_module.load_model.cache_clear()
+
+
+def test_manifest_feature_version_must_match_model_and_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finguardops_ai.ml import model as model_module
+
+    original = Path(model_module.files("finguardops_ai.ml"))
+    (tmp_path / "fraud_model_v2.json").write_bytes(
+        original.joinpath("fraud_model_v2.json").read_bytes()
+    )
+    manifest = json.loads(original.joinpath("fraud_model_v2.manifest.json").read_text())
+    manifest["featureVersion"] = "unexpected-feature"
+    (tmp_path / "fraud_model_v2.manifest.json").write_text(json.dumps(manifest))
+    monkeypatch.setattr(model_module, "files", lambda _: tmp_path)
+    model_module.load_model.cache_clear()
+    try:
+        with pytest.raises(ModelUnavailable, match="MODEL_VERSION_MISMATCH"):
+            model_module.load_model()
+    finally:
+        model_module.load_model.cache_clear()

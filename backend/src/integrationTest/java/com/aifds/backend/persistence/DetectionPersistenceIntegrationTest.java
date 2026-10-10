@@ -125,7 +125,7 @@ class DetectionPersistenceIntegrationTest
 
     @Test
     void migrationCreatesExactColumnsConstraintsIndexesAndTriggers() {
-        assertThat(flyway.info().applied()).hasSize(20);
+        assertThat(flyway.info().applied()).hasSize(22);
         assertThat(columns("detection_result")).containsExactlyInAnyOrder(
                 "id",
                 "detection_result_id",
@@ -138,6 +138,11 @@ class DetectionPersistenceIntegrationTest
                 "scoring_policy_version",
                 "feature_version",
                 "model_version",
+                "ml_feature_version",
+                "model_sha256",
+                "rule_risk_score",
+                "ml_contribution",
+                "ml_probability_basis_points",
                 "evaluation_cutoff_at",
                 "analysis_started_at",
                 "analysis_completed_at",
@@ -199,7 +204,9 @@ class DetectionPersistenceIntegrationTest
                 "ck_detection_result_failure_code",
                 "ck_detection_result_trace_id",
                 "ck_detection_result_state_fields",
-                "ck_detection_result_timestamps"
+                "ck_detection_result_timestamps",
+                "ck_detection_result_ml_identity",
+                "ck_detection_result_ml_scores"
         );
         assertThat(constraints("detection_evidence"))
                 .containsExactlyInAnyOrder(
@@ -227,6 +234,45 @@ class DetectionPersistenceIntegrationTest
                 "tg_detection_evidence_history_guard",
                 "tg_financial_transaction_adoption_guard"
         );
+    }
+
+    @Test
+    void combinedMlConstraintsRejectMissingIdentityAndCompletedScoresWhileLegacyRemainsValid() {
+        FinancialTransaction transaction = saveTransaction(UUID.randomUUID());
+        assertConstraint(() -> jdbcTemplate.update("""
+                INSERT INTO detection_result (
+                    detection_result_id, financial_transaction_id,
+                    detection_result_version, analysis_status, rule_set_version,
+                    scoring_policy_version, feature_version, model_version,
+                    evaluation_cutoff_at, analysis_trace_id
+                ) VALUES (?, ?, 1, 'PENDING', 'rule-v2', 'rule-ml-policy-v1',
+                    'rule-v2', 'fraud-logistic-v2', ?, 'trace_ml_missing_identity')
+                """, UUID.randomUUID(), transaction.getId(),
+                Timestamp.from(transaction.getOccurredAt())),
+                "ck_detection_result_ml_identity");
+
+        assertConstraint(() -> jdbcTemplate.update("""
+                INSERT INTO detection_result (
+                    detection_result_id, financial_transaction_id,
+                    detection_result_version, analysis_status, risk_score, risk_level,
+                    rule_set_version, scoring_policy_version, feature_version,
+                    model_version, ml_feature_version, model_sha256,
+                    evaluation_cutoff_at, analysis_started_at,
+                    analysis_completed_at, analysis_trace_id
+                ) VALUES (?, ?, 1, 'COMPLETED', 15, 'LOW', 'rule-v2',
+                    'rule-ml-policy-v1', 'rule-v2', 'fraud-logistic-v2',
+                    'fraud-feature-v1', ?, ?, CURRENT_TIMESTAMP,
+                    CURRENT_TIMESTAMP, 'trace_ml_missing_scores')
+                """, UUID.randomUUID(), transaction.getId(),
+                "42344d398008babdd6a0404c750b24f1f27f1260aeac65851195d81500a876af",
+                Timestamp.from(transaction.getOccurredAt())),
+                "ck_detection_result_ml_scores");
+
+        DetectionResult legacy = persistenceService.createPending(
+                transaction.getTransactionId(), "rule-v2", "scoring-policy-v2",
+                "rule-v2", null, transaction.getOccurredAt(), "trace_legacy_still_valid");
+        assertThat(legacy.getModelVersion()).isNull();
+        assertThat(legacy.getAnalysisStatus()).isEqualTo(DetectionAnalysisStatus.PENDING);
     }
 
     @Test

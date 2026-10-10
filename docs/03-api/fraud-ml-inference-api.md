@@ -6,7 +6,17 @@
 
 `POST /api/v1/ml-inference`는 Backend 전용이다. 성공은 `200`, 요청 형식 오류는 `400`, Feature 시점·중복 위반은 `422`, 모델 부재·해시/버전 불일치는 `503`이다. 응답을 받은 Backend는 Rule 응답을 기존 계약대로 먼저 검증하고 ML 응답을 별도로 검증한다. 이 endpoint는 거래·사건 상태를 변경하지 않는다.
 
+Backend는 ML 성공 본문을 채택하기 전에 HTTP 상태가 정확히 `200`이고
+Content-Type이 단일 JSON media type이며 본문이 비어 있지 않은지 확인한다.
+`201`·`202`, 비 JSON·누락·중복 Content-Type, 빈 성공 본문은
+`ML_INVALID_RESPONSE`로 실패 처리한다. 정상적인 모델 오류 응답의 제한된
+실패 코드 분류는 유지한다.
+
 요청은 `transactionId`(UUID v4), `evaluationCutoffAt`(UTC), `amount`(0 이상 문자열), `transactionType`, `channel`, `featureVersion=fraud-feature-v1`, `scoringPolicyVersion=rule-ml-policy-v1`, `modelVersion=fraud-logistic-v1` 또는 `fraud-logistic-v2`(cutoff로 선택), `modelSha256`(64자리 SHA-256), `events` 배열만 받는다. 각 이벤트는 불투명 `eventId`, `eventType`, `occurredAt`, `createdAt`만 포함한다. 고객·계좌·기기·수취인 원문 참조, Rule 점수, 사건 판정은 받지 않는다. Backend는 같은 고객의 24시간 이벤트를 `occurredAt DESC, eventId ASC`로 최대 1001건 읽고 1000건 초과를 `ML_EVENT_LIMIT_EXCEEDED`로 실패시킨다. `occurredAt`과 `createdAt`은 모두 cutoff 이하여야 한다. FastAPI도 시간·중복을 다시 검사한다.
+
+결합 분석의 Rule 행동 Snapshot에도 `occurredAt`과 DB 저장 시각
+`createdAt`이 모두 cutoff 이하여야 한다. 과거 Rule 전용 분석의 조회 계약은
+변경하지 않으며 저장된 v1/v2 결과는 다시 계산하지 않는다.
 
 응답 필드는 `transactionId`, `evaluationCutoffAt`, `featureVersion`, `scoringPolicyVersion`, `modelVersion`, `modelSha256`, `probabilityBasisPoints`(정수 0–10000), `reasonCode`(`ML_RISK_SIGNAL` 또는 `ML_BELOW_THRESHOLD`)뿐이다. Backend는 거래·cutoff·버전·해시·확률 범위·Reason Code 일치를 검증한다. 모델 원문, 전체 Feature 벡터, 식별자 원문은 반환하지 않는다.
 

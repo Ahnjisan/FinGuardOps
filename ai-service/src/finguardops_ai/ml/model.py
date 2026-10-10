@@ -47,6 +47,7 @@ def load_model(version: str = "fraud-logistic-v2") -> FraudModel:
         model = json.loads(raw)
         if (
             model["featureVersion"] != FEATURE_VERSION
+            or manifest["featureVersion"] != FEATURE_VERSION
             or tuple(model["featureNames"]) != FEATURE_NAMES
             or model["modelVersion"] != manifest["modelVersion"]
             or model["modelVersion"] != version

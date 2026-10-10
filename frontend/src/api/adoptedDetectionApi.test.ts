@@ -41,6 +41,14 @@ describe("adopted detection response", () => {
       { ...combined.adoptedResult, riskScore: 79 } })).toBe(false);
     expect(isAdoptedDetectionResponse({ ...combined, adoptedResult:
       { ...combined.adoptedResult, riskLevel: "HIGH" } })).toBe(false);
+    expect(isAdoptedDetectionResponse({ ...available, adoptedResult: {
+      ...adopted, scoringPolicyVersion: "rule-ml-policy-v1",
+    } })).toBe(false);
+    expect(isAdoptedDetectionResponse({ ...combined, adoptedResult: {
+      ...combined.adoptedResult, mlStatus: "RULE_ONLY", mlContribution: null,
+      modelVersion: null, mlFeatureVersion: null, modelSha256: null, mlEvidence: [],
+      ruleScore: combined.adoptedResult.riskScore,
+    } })).toBe(false);
   });
   it("accepts an older adopted result while a later analysis is running", () => {
     expect(isAdoptedDetectionResponse(available)).toBe(true);

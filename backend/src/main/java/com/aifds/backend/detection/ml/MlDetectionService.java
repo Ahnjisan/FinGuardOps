@@ -15,7 +15,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
@@ -135,10 +137,20 @@ public class MlDetectionService {
                 modelSha256, safeEvents);
         final MlResponse response;
         try {
-            String body = client.post().uri("/api/v1/ml-inference")
+            ResponseEntity<String> reply = client.post().uri("/api/v1/ml-inference")
                     .contentType(MediaType.APPLICATION_JSON).accept(MediaType.APPLICATION_JSON)
-                    .body(request).retrieve().body(String.class);
-            response = mapper.readValue(body, MlResponse.class);
+                    .body(request).retrieve().toEntity(String.class);
+            List<String> contentTypes = reply.getHeaders().get(HttpHeaders.CONTENT_TYPE);
+            if (reply.getStatusCode().value() != 200 || contentTypes == null
+                    || contentTypes.size() != 1
+                    || !MediaType.APPLICATION_JSON.isCompatibleWith(
+                            MediaType.parseMediaType(contentTypes.get(0)))
+                    || reply.getBody() == null || reply.getBody().isBlank()) {
+                throw new MlDetectionException("ML_INVALID_RESPONSE");
+            }
+            response = mapper.readValue(reply.getBody(), MlResponse.class);
+        } catch (MlDetectionException exception) {
+            throw exception;
         } catch (RestClientResponseException exception) {
             throw new MlDetectionException(serviceFailureCode(exception));
         } catch (ResourceAccessException exception) {

@@ -22,13 +22,15 @@ def utc(value):
     return value.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def context(project, tag, *, image_tag=None, fault=False):
+def context(project, tag, *, image_tag=None, fault=False, http_fault=False):
     if not re.fullmatch(r"i380[a-z0-9]{6,24}", tag) or project != "finguardops-380-" + tag:
         raise ValueError("Invalid dedicated Compose project")
     ctx = JWT.Context(ROOT, project, 180, 1500)
     ctx.compose.extend(["-f", str(ROOT / "infra" / "compose.issue380-e2e.yml")])
     if fault:
         ctx.compose.extend(["-f", str(ROOT / "infra" / "compose.issue380-fault.yml")])
+    if http_fault:
+        ctx.compose.extend(["-f", str(ROOT / "infra" / "compose.issue380-http-contract-fault.yml")])
     image_tag = image_tag or tag
     if not re.fullmatch(r"i380[a-z0-9]{6,24}", image_tag):
         raise ValueError("Invalid dedicated image tag")
@@ -85,9 +87,11 @@ def call_counts(ctx):
             risk.count('FINGUARDOPS_EXTERNAL_RISK_LOOKUP_RECEIVED'))
 
 
-def fault_ml_calls(ctx):
-    output = ctx.compose_run(["logs", "--no-color", "ai-service-model-mismatch"])
-    return output.decode("utf-8", "replace").count('POST /api/v1/ml-inference')
+def fault_ml_calls(ctx, *, http_fault=False):
+    service = "ml-http-contract-fault" if http_fault else "ai-service-model-mismatch"
+    output = ctx.compose_run(["logs", "--no-color", service])
+    marker = "ML_HTTP_CONTRACT_FAULT_RECEIVED" if http_fault else 'POST /api/v1/ml-inference'
+    return output.decode("utf-8", "replace").count(marker)
 
 
 def safe_error_probe(ctx, token, body, headers):
@@ -310,7 +314,7 @@ def delayed_cutoff(ctx, previous_transaction_id):
                       "callDelta": [1, 1, 1]}), flush=True)
 
 
-def fault(ctx, previous_transaction_id):
+def fault(ctx, previous_transaction_id, *, http_fault=False):
     replay_previous(ctx, previous_transaction_id)
     tx_token = ctx.mint("service-transaction-ingestor")
     viewer = ctx.mint("user-viewer")
@@ -323,12 +327,28 @@ def fault(ctx, previous_transaction_id):
     transaction_id = str(uuid.uuid4())
     failure_body = dict(previous_body)
     failure_body["transactionId"] = transaction_id
-    failure_body["occurredAt"] = utc(dt.datetime.now(dt.timezone.utc).replace(microsecond=0))
     failure_body["externalCustomerRef"] = "issue380-failure-customer-" + uuid.uuid4().hex[:12]
+    behavior_token = ctx.mint("service-behavior-ingestor")
+    event_base = dt.datetime.now(dt.timezone.utc).replace(microsecond=0) - dt.timedelta(seconds=20)
+    for kind in ("DEVICE_REGISTERED", "PASSWORD_CHANGED", "TRANSFER_LIMIT_CHANGED",
+                 "BENEFICIARY_REGISTERED"):
+        for number in range(3):
+            event = {
+                "eventId": str(uuid.uuid4()), "eventType": kind,
+                "occurredAt": utc(event_base + dt.timedelta(seconds=number)),
+                "externalCustomerRef": failure_body["externalCustomerRef"],
+                "accountRef": failure_body["senderAccountRef"] if kind != "DEVICE_REGISTERED" else None,
+                "deviceRef": failure_body["deviceRef"] if kind == "DEVICE_REGISTERED" else None,
+                "transactionId": None,
+                "beneficiaryRef": failure_body["recipientAccountRef"] if kind == "BENEFICIARY_REGISTERED" else None,
+            }
+            ctx.probe("POST", "http://127.0.0.1:8080/api/v1/behavior-events", 201,
+                      behavior_token, event, {"Content-Type": "application/json"})
+    failure_body["occurredAt"] = utc(dt.datetime.now(dt.timezone.utc).replace(microsecond=0))
     key = "issue380-failure-" + uuid.uuid4().hex[:12]
     headers = {"Idempotency-Key": key}
     before_calls = call_counts(ctx)
-    before_fault_calls = fault_ml_calls(ctx)
+    before_fault_calls = fault_ml_calls(ctx, http_fault=http_fault)
     response = safe_error_probe(ctx, tx_token, failure_body, headers)
     assert response["status"] == 503 and response["code"] == "DEPENDENCY_UNAVAILABLE", response
     assert response["keys"] == ["code", "fieldErrors", "message", "traceId"]
@@ -344,24 +364,25 @@ def fault(ctx, previous_transaction_id):
         "join detection_result d on d.financial_transaction_id=t.id "
         "join idempotency_record i on i.financial_transaction_id=t.id "
         "where t.transaction_id='" + transaction_id + "'"))
+    expected_failure = "ML_INVALID_RESPONSE" if http_fault else "ML_MODEL_HASH_MISMATCH"
     assert failure == {
         "transactionStatus": "FAILED", "adopted": None, "riskLevel": None,
-        "riskResponse": None, "analysis": "FAILED", "failureCode": "ML_MODEL_HASH_MISMATCH",
+        "riskResponse": None, "analysis": "FAILED", "failureCode": expected_failure,
         "score": None, "evidence": 0, "cases": 0, "audit": 0, "idempotency": "FAILED",
     }, failure
     adopted = ctx.probe("GET", "http://127.0.0.1:8080/api/v1/transactions/" +
                         transaction_id + "/adopted-detection-result", 200, viewer)["body"]
     assert adopted["availability"] == "FAILED" and adopted["adoptedResult"] is None
-    assert adopted["latestFailureCode"] == "ML_MODEL_HASH_MISMATCH"
+    assert adopted["latestFailureCode"] == expected_failure
     after_calls = call_counts(ctx)
-    after_fault_calls = fault_ml_calls(ctx)
+    after_fault_calls = fault_ml_calls(ctx, http_fault=http_fault)
     assert tuple(b-a for a, b in zip(before_calls, after_calls)) == (1, 0, 1)
     assert after_fault_calls - before_fault_calls == 1
     row_counts = counts(ctx)
     replay = safe_error_probe(ctx, tx_token, failure_body, headers)
     assert replay == response and counts(ctx) == row_counts
-    assert call_counts(ctx) == after_calls and fault_ml_calls(ctx) == after_fault_calls
-    print(json.dumps({"step": "ml-model-hash-mismatch", "exitCode": 0,
+    assert call_counts(ctx) == after_calls and fault_ml_calls(ctx, http_fault=http_fault) == after_fault_calls
+    print(json.dumps({"step": "ml-http-contract-fault" if http_fault else "ml-model-hash-mismatch", "exitCode": 0,
                       "transactionId": transaction_id, "publicStatus": 503,
                       "publicCode": response["code"], "failureCode": failure["failureCode"],
                       "transactionStatus": failure["transactionStatus"],
@@ -396,13 +417,13 @@ def main():
     parser.add_argument("--image-tag")
     parser.add_argument("--previous-transaction-id")
     parser.add_argument("--failed-transaction-id")
-    parser.add_argument("phase", choices=["publish", "normal", "replay", "delayed", "fault", "fixture"])
+    parser.add_argument("phase", choices=["publish", "normal", "replay", "delayed", "fault", "http-fault", "fixture"])
     args = parser.parse_args()
     for item in (args.previous_transaction_id, args.failed_transaction_id):
         if item is not None and (str(uuid.UUID(item)) != item or uuid.UUID(item).version != 4):
             raise ValueError("Invalid E2E transaction ID")
     ctx = context("finguardops-380-" + args.tag, args.tag, image_tag=args.image_tag,
-                  fault=args.phase == "fault")
+                  fault=args.phase == "fault", http_fault=args.phase == "http-fault")
     if args.phase == "publish":
         publish(ctx)
     elif args.phase == "normal":
@@ -413,9 +434,9 @@ def main():
     elif args.phase == "delayed":
         assert args.previous_transaction_id is not None
         delayed_cutoff(ctx, args.previous_transaction_id)
-    elif args.phase == "fault":
+    elif args.phase in ("fault", "http-fault"):
         assert args.previous_transaction_id is not None
-        fault(ctx, args.previous_transaction_id)
+        fault(ctx, args.previous_transaction_id, http_fault=args.phase == "http-fault")
     else:
         assert args.previous_transaction_id is not None and args.failed_transaction_id is not None
         fixture(ctx, args.previous_transaction_id, args.failed_transaction_id)

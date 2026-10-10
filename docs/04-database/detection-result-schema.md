@@ -406,3 +406,10 @@ Flyway `V21__add_combined_ml_detection.sql`은 기존 행과 완료된 멱등 Sn
 새 결과에는 기존 RuleVersion FK를 가진 `RULE` Evidence와 제한된 `ML` Evidence를 같은 완료 트랜잭션에서 기록한다. ML Evidence의 `reason_code`는 `ML_RISK_SIGNAL` 또는 `ML_BELOW_THRESHOLD`, `score_contribution`은 결합 정책의 기여도, `observation_summary`는 `probabilityBasisPoints`만 담는다. 전체 Feature 벡터·고객/계좌/기기 참조는 저장하지 않는다. ML 실패에서는 두 Evidence 모두 저장하지 않고 DetectionResult와 거래를 `FAILED`로 둔다. 과거 Rule 전용 행의 새 열은 null이며 당시 채택·사건 판정을 변경하지 않는다.
 
 For `rule-ml-policy-v1`, V21 also checks the final `risk_level` against score boundaries 0-19 LOW, 20-49 MEDIUM, 50-79 HIGH, and 80-100 CRITICAL. Legacy Rule rows retain their stored scores and levels.
+
+Flyway `V22__enforce_combined_ml_result_presence.sql` strengthens the V21 CHECKs without
+changing historical rows or the V21 checksum. PostgreSQL CHECK accepts an UNKNOWN
+expression, so V22 explicitly requires ML identity fields and, for a COMPLETED
+combined result, all three score components and final score/level to be non-null.
+Rule-only rows must keep the ML score fields null. A malformed combined result
+cannot be stored as a Rule-only completion.

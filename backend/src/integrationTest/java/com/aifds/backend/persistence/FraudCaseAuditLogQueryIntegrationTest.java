@@ -328,7 +328,7 @@ class FraudCaseAuditLogQueryIntegrationTest
 
     @Test
     void keepsFreshV1ThroughV20ExactIndexAndAppendOnlyRollbackContracts() {
-        assertThat(flyway.info().applied()).hasSize(20);
+        assertThat(flyway.info().applied()).hasSize(22);
         assertThat(flyway.info().current().getVersion().getVersion())
                 .isEqualTo("20");
         String indexDefinition = jdbcTemplate.queryForObject("""

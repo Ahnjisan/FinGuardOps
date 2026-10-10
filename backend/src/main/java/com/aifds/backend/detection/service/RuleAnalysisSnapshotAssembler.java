@@ -54,6 +54,13 @@ public class RuleAnalysisSnapshotAssembler {
     public AssembledRuleAnalysisSnapshot assemble(
             FinancialTransaction transaction
     ) {
+        return assemble(transaction, false);
+    }
+
+    public AssembledRuleAnalysisSnapshot assemble(
+            FinancialTransaction transaction,
+            boolean cutoffSafeMl
+    ) {
         FinancialTransaction source = Objects.requireNonNull(
                 transaction,
                 "transaction must not be null"
@@ -87,7 +94,7 @@ public class RuleAnalysisSnapshotAssembler {
                 ))
                 .toList();
         List<RuleBehaviorEventSnapshotRequest> behaviorSnapshots =
-                behaviorSnapshots(source, cutoff, canonicalRules);
+                behaviorSnapshots(source, cutoff, canonicalRules, cutoffSafeMl);
         RuleAnalysisRequest request = new RuleAnalysisRequest(
                 cutoff,
                 transactionSnapshot,
@@ -137,7 +144,8 @@ public class RuleAnalysisSnapshotAssembler {
     private List<RuleBehaviorEventSnapshotRequest> behaviorSnapshots(
             FinancialTransaction transaction,
             Instant cutoff,
-            List<RuleV1ExecutionPlanRegistry.CanonicalRule> canonicalRules
+            List<RuleV1ExecutionPlanRegistry.CanonicalRule> canonicalRules,
+            boolean cutoffSafeMl
     ) {
         Set<BehaviorEventType> eventTypes = EnumSet.noneOf(
                 BehaviorEventType.class
@@ -165,13 +173,19 @@ public class RuleAnalysisSnapshotAssembler {
                     exception
             );
         }
-        return behaviorEventRepository.findForRuleEvaluation(
+        List<BehaviorEvent> events = cutoffSafeMl
+                ? behaviorEventRepository.findForMlEvaluation(
+                        transaction.getExternalCustomerRef(),
+                        Set.copyOf(eventTypes), fromInclusive, cutoff,
+                        PageRequest.of(0, MAX_BEHAVIOR_EVENTS))
+                : behaviorEventRepository.findForRuleEvaluation(
                         transaction.getExternalCustomerRef(),
                         Set.copyOf(eventTypes),
                         fromInclusive,
                         cutoff,
                         PageRequest.of(0, MAX_BEHAVIOR_EVENTS)
-                ).stream()
+                );
+        return events.stream()
                 .map(this::toBehaviorSnapshot)
                 .toList();
     }

@@ -148,6 +148,39 @@ class MlDetectionServiceTest {
     }
 
     @Test
+    void rejectsNon200OrNonJsonMlSuccessWithoutInventingContribution() throws Exception {
+        String validBody = """
+                {"transactionId":"%s","evaluationCutoffAt":"%s",
+                 "featureVersion":"%s","scoringPolicyVersion":"%s",
+                 "modelVersion":"%s","modelSha256":"%s",
+                 "probabilityBasisPoints":7500,"reasonCode":"ML_RISK_SIGNAL"}
+                """.formatted(transactionId, cutoff, MlDetectionPolicy.FEATURE_VERSION,
+                MlDetectionPolicy.POLICY_VERSION, MlDetectionPolicy.MODEL_VERSION,
+                MlDetectionPolicy.MODEL_SHA256);
+        for (int status : List.of(201, 202)) {
+            assertInvalidResponse(status, validBody, List.of("application/json"));
+        }
+        assertInvalidResponse(200, validBody, List.of("text/plain"));
+        assertInvalidResponse(200, validBody, List.of());
+        assertInvalidResponse(200, validBody,
+                List.of("application/json", "application/json"));
+        assertInvalidResponse(200, "", List.of("application/json"));
+    }
+
+    private void assertInvalidResponse(int status, String body, List<String> contentTypes)
+            throws Exception {
+        HttpServer server = server(status, body, contentTypes, new AtomicReference<>());
+        try {
+            assertThatThrownBy(() -> service(server).infer(transactionId, cutoff,
+                    MlDetectionPolicy.POLICY_VERSION, MlDetectionPolicy.MODEL_VERSION))
+                    .isInstanceOf(MlDetectionService.MlDetectionException.class)
+                    .hasMessage("ML_INVALID_RESPONSE");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void failsExplicitlyWhenCutoffWindowExceedsEventLimit() throws Exception {
         HttpServer server = server(200, "{}", new AtomicReference<>());
         try {
@@ -226,13 +259,18 @@ class MlDetectionServiceTest {
 
     private HttpServer server(int status, String body, AtomicReference<String> captured)
             throws Exception {
+        return server(status, body, List.of("application/json"), captured);
+    }
+
+    private HttpServer server(int status, String body, List<String> contentTypes,
+                              AtomicReference<String> captured) throws Exception {
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/api/v1/ml-inference", exchange -> {
             captured.set(new String(exchange.getRequestBody().readAllBytes(),
                     StandardCharsets.UTF_8));
             byte[] response = body.getBytes(StandardCharsets.UTF_8);
-            exchange.getResponseHeaders().add("Content-Type", "application/json");
-            exchange.sendResponseHeaders(status, response.length);
+            contentTypes.forEach(value -> exchange.getResponseHeaders().add("Content-Type", value));
+            exchange.sendResponseHeaders(status, response.length == 0 ? -1 : response.length);
             try (var output = exchange.getResponseBody()) {
                 output.write(response);
             }
