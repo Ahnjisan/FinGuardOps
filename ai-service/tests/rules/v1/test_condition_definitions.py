@@ -110,7 +110,7 @@ def _assert_unsupported(
 def test_all_rule_condition_definitions_are_parsed_to_typed_immutable_values() -> None:
     plan = RuleExecutionPlanBuilder(create_default_rule_evaluator_registry()).build(
         CUTOFF_AT,
-        [_snapshot(rule_id) for rule_id in RuleId],
+        [_snapshot(rule_id) for rule_id in (RuleId.R001, RuleId.R002, RuleId.R003, RuleId.R004)],
     )
 
     r001, r002, r003, r004 = (item.condition_definition for item in plan.items)

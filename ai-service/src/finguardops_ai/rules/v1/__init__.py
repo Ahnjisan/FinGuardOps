@@ -5,6 +5,7 @@ from finguardops_ai.rules.v1.condition_definitions import (
     R002ConditionDefinition,
     R003ConditionDefinition,
     R004ConditionDefinition,
+    R005ConditionDefinition,
     RuleConditionDefinition,
 )
 from finguardops_ai.rules.v1.evidence import (
@@ -32,6 +33,7 @@ from finguardops_ai.rules.v1.models import (
     R002Facts,
     R003Facts,
     R004Facts,
+    R005Facts,
     RuleEvaluationInput,
     RuleEvaluationResult,
     RuleId,
@@ -47,6 +49,7 @@ from finguardops_ai.rules.v1.r001 import evaluate_r001
 from finguardops_ai.rules.v1.r002 import evaluate_r002
 from finguardops_ai.rules.v1.r003 import evaluate_r003
 from finguardops_ai.rules.v1.r004 import evaluate_r004
+from finguardops_ai.rules.v1.r005 import evaluate_r005
 from finguardops_ai.rules.v1.registry import (
     DuplicateRuleIdError,
     RuleEvaluator,
@@ -87,6 +90,8 @@ __all__ = [
     "R003Facts",
     "R004ConditionDefinition",
     "R004Facts",
+    "R005ConditionDefinition",
+    "R005Facts",
     "RiskLevel",
     "RuleAnalysisResult",
     "RuleConditionDefinition",
@@ -128,4 +133,5 @@ __all__ = [
     "evaluate_r002",
     "evaluate_r003",
     "evaluate_r004",
+    "evaluate_r005",
 ]

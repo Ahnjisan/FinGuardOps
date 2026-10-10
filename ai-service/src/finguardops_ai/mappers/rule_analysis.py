@@ -37,6 +37,8 @@ from finguardops_ai.schemas.rule_analysis import (
     R003ObservationResponse,
     R004EvidenceResponse,
     R004ObservationResponse,
+    R005EvidenceResponse,
+    R005ObservationResponse,
     RuleAnalysisRequest,
     RuleAnalysisRequestV2,
     RuleAnalysisResponse,
@@ -94,6 +96,11 @@ _RULE_METADATA = MappingProxyType(
             RuleId.R004,
             "RECENT_BENEFICIARY_TRANSFER",
             10,
+        ),
+        "EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT": (
+            RuleId.R005,
+            "EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT",
+            40,
         ),
     }
 )
@@ -157,6 +164,12 @@ class RuleAnalysisRequestMapper:
             rule_input=RuleEvaluationInput(
                 transaction=transaction,
                 behavior_events=behavior_events,
+                external_risk=(
+                    request.external_risk
+                    if isinstance(request, RuleAnalysisRequestV2)
+                    and len(request.rule_versions) == 5
+                    else None
+                ),
             ),
             rule_versions=rule_versions,
         )
@@ -230,12 +243,34 @@ def _validate_request_contract(request: RuleAnalysisRequest) -> None:
         _validate_behavior_references(event)
 
     _validate_rule_versions(request)
+    versions = {item.rule_code: item.version_number for item in request.rule_versions}
+    if "EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT" in versions:
+        expected = {
+            "TRANSFER_ABSOLUTE_HIGH_AMOUNT": 3,
+            "RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT": 3,
+            "RECENT_SECURITY_CHANGE_HIGH_AMOUNT": 3,
+            "RECENT_BENEFICIARY_TRANSFER": 3,
+            "EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT": 1,
+        }
+        if versions != expected or len(request.rule_versions) != 5:
+            _contract_error("SCN-003 requires the exact five RuleVersion set")
+        if not isinstance(request, RuleAnalysisRequestV2):
+            _contract_error("SCN-003 requires External Risk wire input")
     if isinstance(request, RuleAnalysisRequestV2):
         _validate_external_risk_contract(request)
 
 
 def _validate_external_risk_contract(request: RuleAnalysisRequestV2) -> None:
     external_risk = request.external_risk
+    if any(
+        item.rule_code == "EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT" for item in request.rule_versions
+    ):
+        from datetime import timedelta
+
+        if request.transaction.recipient_account_ref is not None and (
+            external_risk.provider_as_of < request.evaluation_cutoff_at - timedelta(hours=24)
+        ):
+            _contract_error("SCN-003 External Risk snapshot is stale")
     matches = external_risk.matches
     match_count = len(matches)
 
@@ -508,6 +543,21 @@ def _to_evidence_response(item: object):
                 beneficiaryRegisteredAt=_datetime_wire(observation.beneficiary_registered_at),
                 elapsedSeconds=observation.elapsed_seconds,
                 windowSeconds=observation.window_seconds,
+            ),
+            **common,
+        )
+    if item.rule_id is RuleId.R005:
+        _require_observation_fields(
+            observation_fields,
+            {"provider_code", "provider_as_of", "looked_up_at", "freshness_seconds"},
+        )
+        return R005EvidenceResponse(
+            ruleId=RuleId.R005,
+            observationSummary=R005ObservationResponse(
+                providerCode=observation.provider_code,
+                providerAsOf=_datetime_wire(observation.provider_as_of),
+                lookedUpAt=_datetime_wire(observation.looked_up_at),
+                freshnessSeconds=observation.freshness_seconds,
             ),
             **common,
         )

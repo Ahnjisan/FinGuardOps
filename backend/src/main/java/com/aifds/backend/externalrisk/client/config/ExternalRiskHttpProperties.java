@@ -1,6 +1,7 @@
 package com.aifds.backend.externalrisk.client.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 import org.springframework.validation.annotation.Validated;
 
 import java.net.URI;
@@ -14,13 +15,15 @@ public record ExternalRiskHttpProperties(
         String apiKey,
         Duration connectTimeout,
         Duration readTimeout,
-        Integer maxResponseBytes
+        Integer maxResponseBytes,
+        String expectedProviderCode
 ) {
 
     public static final Duration DEFAULT_CONNECT_TIMEOUT = Duration.ofSeconds(2);
     public static final Duration DEFAULT_READ_TIMEOUT = Duration.ofSeconds(3);
     public static final int DEFAULT_MAX_RESPONSE_BYTES = 65_536;
 
+    @ConstructorBinding
     public ExternalRiskHttpProperties {
         connectTimeout = connectTimeout == null
                 ? DEFAULT_CONNECT_TIMEOUT
@@ -44,7 +47,18 @@ public record ExternalRiskHttpProperties(
             if (apiKey.chars().anyMatch(Character::isISOControl)) {
                 throw new IllegalArgumentException("apiKey is invalid");
             }
+            if (!com.aifds.backend.externalrisk.domain.ExternalRiskContracts
+                    .isProviderCode(expectedProviderCode)) {
+                throw new IllegalArgumentException("expectedProviderCode is required and invalid");
+            }
         }
+    }
+
+    public ExternalRiskHttpProperties(boolean enabled, URI baseUrl, String apiKey,
+                                      Duration connectTimeout, Duration readTimeout,
+                                      Integer maxResponseBytes) {
+        this(enabled, baseUrl, apiKey, connectTimeout, readTimeout,
+                maxResponseBytes, null);
     }
 
     @Override
@@ -53,7 +67,8 @@ public record ExternalRiskHttpProperties(
                 + ", baseUrlConfigured=" + (baseUrl != null)
                 + ", apiKey=REDACTED, connectTimeout=" + connectTimeout
                 + ", readTimeout=" + readTimeout
-                + ", maxResponseBytes=" + maxResponseBytes + "]";
+                + ", maxResponseBytes=" + maxResponseBytes
+                + ", expectedProviderCode=" + expectedProviderCode + "]";
     }
 
     private static Duration requirePositive(Duration value, String field) {

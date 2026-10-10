@@ -4,6 +4,8 @@ import com.aifds.backend.detection.dto.AdoptedDetectionResultItemResponse;
 import com.aifds.backend.detection.dto.AdoptedDetectionResultResponse;
 import com.aifds.backend.detection.dto.AdoptedRuleEvidenceResponse;
 import com.aifds.backend.detection.dto.AdoptedMlEvidenceResponse;
+import com.aifds.backend.detection.dto.Scn003EvidenceResponse;
+import com.aifds.backend.rule.contract.RuleV1ContractRegistry;
 import com.aifds.backend.detection.entity.DetectionAnalysisStatus;
 import com.aifds.backend.detection.entity.DetectionEvidenceType;
 import com.aifds.backend.detection.entity.DetectionResult;
@@ -26,6 +28,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.UUID;
+import java.time.Instant;
 
 @Service
 // Transaction, latest analysis and RULE rows must come from one PostgreSQL snapshot.
@@ -133,6 +136,35 @@ public class AdoptedDetectionResultQueryService {
         } else if (!ml.isEmpty()) {
             throw new IllegalStateException("Rule-only result has ML evidence");
         }
+        Scn003EvidenceResponse scn003 = null;
+        if ("scoring-policy-v3".equals(adopted.getScoringPolicyVersion())
+                || MlDetectionPolicy.SCN003_POLICY_VERSION.equals(
+                        adopted.getScoringPolicyVersion())) {
+            var external = evidence.findAllByDetectionResult_IdAndEvidenceTypeOrderBySortOrderAscIdAsc(
+                    adopted.getId(), DetectionEvidenceType.EXTERNAL_RISK);
+            var history = evidence.findAllByDetectionResult_IdAndEvidenceTypeOrderBySortOrderAscIdAsc(
+                    adopted.getId(), DetectionEvidenceType.BEHAVIOR_PATTERN);
+            if (external.size() != 1 || history.size() != 1) {
+                throw new IllegalStateException("SCN-003 Evidence is incomplete");
+            }
+            var source = external.get(0).getObservationSummary();
+            var prior = history.get(0).getObservationSummary();
+            boolean matched = source.path("recipientAccountMatched").asBoolean(false);
+            long r005Count = rules.stream().filter(row ->
+                    RuleV1ContractRegistry.EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT.equals(
+                            row.ruleCode())).count();
+            if (r005Count != (matched ? 1 : 0)
+                    || !"SCN003-contract-v1".equals(source.path("sourceVersion").asText())
+                    || !"SCN003-contract-v1".equals(prior.path("sourceVersion").asText())
+                    || !prior.path("priorApprovedRecipientTransferObserved").isBoolean()) {
+                throw new IllegalStateException("SCN-003 Evidence contradicts R005");
+            }
+            scn003 = new Scn003EvidenceResponse("SCN003-contract-v1",
+                    source.path("providerCode").asText(),
+                    Instant.parse(source.path("providerAsOf").asText()),
+                    Instant.parse(source.path("lookedUpAt").asText()),
+                    matched, prior.path("priorApprovedRecipientTransferObserved").booleanValue());
+        }
         return new AdoptedDetectionResultItemResponse(
                 adopted.getDetectionResultId(), adopted.getDetectionResultVersion(),
                 adopted.getRiskLevel().name(), adopted.getRiskScore(),
@@ -141,7 +173,7 @@ public class AdoptedDetectionResultQueryService {
                 applied ? adopted.getRuleRiskScore() : adopted.getRiskScore(),
                 adopted.getMlContribution(), applied ? "APPLIED" : "RULE_ONLY",
                 applied ? adopted.getModelVersion() : null,
-                adopted.getMlFeatureVersion(), adopted.getModelSha256(), ml
+                adopted.getMlFeatureVersion(), adopted.getModelSha256(), ml, scn003
         );
     }
 

@@ -43,6 +43,8 @@ services:
 
   external-risk-mock:
     image: ${FINGUARDOPS_E2E_AI_SERVICE_IMAGE:?FINGUARDOPS_E2E_AI_SERVICE_IMAGE is required}
+    environment:
+      FINGUARDOPS_SCN003_FIXTURE_ENABLED: "true"
     entrypoint:
       - sh
       - -ec

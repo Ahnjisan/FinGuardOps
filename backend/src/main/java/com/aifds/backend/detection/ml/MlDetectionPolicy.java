@@ -6,6 +6,7 @@ import java.time.Instant;
 /** Synthetic-only local policy. This is not a production fraud threshold. */
 public final class MlDetectionPolicy {
     public static final String POLICY_VERSION = "rule-ml-policy-v1";
+    public static final String SCN003_POLICY_VERSION = "rule-ml-policy-v2";
     public static final String FEATURE_VERSION = "fraud-feature-v1";
     public static final String MODEL_V1_VERSION = "fraud-logistic-v1";
     public static final String MODEL_V1_SHA256 =

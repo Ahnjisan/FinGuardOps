@@ -56,11 +56,20 @@ class R004ConditionDefinition:
     selection_policy: str
 
 
+@dataclass(frozen=True, slots=True)
+class R005ConditionDefinition:
+    subject_type: str
+    risk_type: str
+    reason_code: str
+    freshness_seconds: int
+
+
 type RuleConditionDefinition = (
     R001ConditionDefinition
     | R002ConditionDefinition
     | R003ConditionDefinition
     | R004ConditionDefinition
+    | R005ConditionDefinition
 )
 
 
@@ -79,6 +88,8 @@ def parse_condition_definition(
             return _parse_r003(root)
         case RuleId.R004:
             return _parse_r004(root)
+        case RuleId.R005:
+            return _parse_r005(root)
     raise InvalidConditionDefinitionError(f"Unsupported Rule ID: {rule_id!r}")
 
 
@@ -177,6 +188,18 @@ def _parse_r004(root: dict[object, object]) -> R004ConditionDefinition:
             "SAME_CUSTOMER_SENDER_ACCOUNT_AND_BENEFICIARY",
         ),
         selection_policy=_require_exact_text(root, "selectionPolicy", _LATEST_EVENT_SELECTION),
+    )
+
+
+def _parse_r005(root: dict[object, object]) -> R005ConditionDefinition:
+    _require_exact_fields(root, {"subjectType", "riskType", "reasonCode", "freshnessSeconds"})
+    if type(root["freshnessSeconds"]) is not int or root["freshnessSeconds"] != 86_400:
+        raise InvalidConditionDefinitionError("freshnessSeconds must equal 86400")
+    return R005ConditionDefinition(
+        subject_type=_require_exact_text(root, "subjectType", "RECIPIENT_ACCOUNT"),
+        risk_type=_require_exact_text(root, "riskType", "SUSPICIOUS_ACCOUNT"),
+        reason_code=_require_exact_text(root, "reasonCode", "SUSPICIOUS_RECIPIENT_ACCOUNT"),
+        freshness_seconds=86_400,
     )
 
 

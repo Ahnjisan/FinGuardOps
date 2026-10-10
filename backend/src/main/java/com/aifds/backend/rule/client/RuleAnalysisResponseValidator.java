@@ -13,6 +13,7 @@ import com.aifds.backend.rule.client.dto.RuleScoreGroupId;
 import com.aifds.backend.rule.client.dto.RuleScoreGroupSummaryResponse;
 import com.aifds.backend.rule.client.dto.RuleScoringResultResponse;
 import com.aifds.backend.rule.client.dto.RuleVersionSnapshotRequest;
+import com.aifds.backend.rule.client.dto.ExternalRiskSnapshotRequest;
 import com.aifds.backend.rule.contract.CanonicalRuleSetVersionCalculator;
 import com.aifds.backend.rule.contract.RuleV1ContractRegistry;
 import com.aifds.backend.rule.contract.RuleV1ExecutionPlanRegistry;
@@ -74,12 +75,22 @@ public final class RuleAnalysisResponseValidator {
                     "beneficiaryRegisteredAt",
                     "elapsedSeconds",
                     "windowSeconds"
-            )
+            ),
+            RuleId.R005,
+            Set.of("providerCode", "providerAsOf", "lookedUpAt", "freshnessSeconds")
     );
 
     public void validate(
             RuleAnalysisRequest request,
             RuleAnalysisResponse response
+    ) {
+        validate(request, response, null);
+    }
+
+    private void validate(
+            RuleAnalysisRequest request,
+            RuleAnalysisResponse response,
+            ExternalRiskSnapshotRequest externalRisk
     ) {
         require(
                 response.transactionId().equals(request.transaction().transactionId()),
@@ -120,8 +131,19 @@ public final class RuleAnalysisResponseValidator {
                 expectedRules,
                 behaviorEvents,
                 response.analysis().scoringResult().ruleContributions(),
-                response.analysis().evidence()
+                response.analysis().evidence(),
+                externalRisk
         );
+        if (RulePolicyVersion.from(request.ruleVersions()) == 3) {
+            require(externalRisk != null, "R005 requires External Risk input");
+            boolean recipientMatched = externalRisk.matches().stream().anyMatch(match ->
+                    match.subjectType().name().equals("RECIPIENT_ACCOUNT")
+                    && match.riskType().name().equals("SUSPICIOUS_ACCOUNT")
+                    && match.reasonCode().name().equals("SUSPICIOUS_RECIPIENT_ACCOUNT"));
+            boolean reported = response.analysis().scoringResult().ruleContributions().stream()
+                    .anyMatch(item -> item.ruleId() == RuleId.R005 && item.matched());
+            require(recipientMatched == reported, "R005 contribution contradicts Provider match");
+        }
     }
 
     public void validate(
@@ -135,7 +157,8 @@ public final class RuleAnalysisResponseValidator {
                         request.behaviorEvents(),
                         request.ruleVersions()
                 ),
-                response
+                response,
+                request.externalRisk()
         );
     }
 
@@ -159,6 +182,7 @@ public final class RuleAnalysisResponseValidator {
         rawScores.put(RuleScoreGroupId.amount, 0);
         rawScores.put(RuleScoreGroupId.security, 0);
         rawScores.put(RuleScoreGroupId.beneficiary, 0);
+        rawScores.put(RuleScoreGroupId.external_recipient, 0);
 
         Set<RuleId> seenRuleIds = new HashSet<>();
         Set<Integer> seenOrders = new HashSet<>();
@@ -186,7 +210,7 @@ public final class RuleAnalysisResponseValidator {
                     contribution.originalContribution() == expectedContribution,
                     "contribution value contradicts matched state"
             );
-            RuleScoreGroupId scoreGroup = policyVersion == 2
+            RuleScoreGroupId scoreGroup = policyVersion >= 2
                     && contribution.ruleId() == RuleId.R004
                     ? RuleScoreGroupId.beneficiary : expected.contract().groupId();
             rawScores.compute(
@@ -197,7 +221,7 @@ public final class RuleAnalysisResponseValidator {
         requireMatchedPrerequisite(scoring.ruleContributions(), RuleId.R002);
         requireMatchedPrerequisite(scoring.ruleContributions(), RuleId.R003);
 
-        require(scoring.groupSummaries().size() == (policyVersion == 2 ? 3 : 2),
+        require(scoring.groupSummaries().size() == (policyVersion == 3 ? 4 : policyVersion == 2 ? 3 : 2),
                 "group summary count is invalid");
         RuleScoreGroupSummaryResponse amount = scoring.groupSummaries().get(0);
         RuleScoreGroupSummaryResponse security = scoring.groupSummaries().get(1);
@@ -209,13 +233,19 @@ public final class RuleAnalysisResponseValidator {
         ));
 
         int expectedRiskScore = amount.appliedScore() + security.appliedScore();
-        if (policyVersion == 2) {
+        if (policyVersion >= 2) {
             RuleScoreGroupSummaryResponse beneficiary = scoring.groupSummaries().get(2);
             validateGroupSummary(beneficiary, RuleScoreGroupId.beneficiary, 10,
                     rawScores.get(RuleScoreGroupId.beneficiary));
             expectedRiskScore += beneficiary.appliedScore();
         }
-        require(scoring.riskScore() == expectedRiskScore, "riskScore is inconsistent");
+        if (policyVersion == 3) {
+            RuleScoreGroupSummaryResponse external = scoring.groupSummaries().get(3);
+            validateGroupSummary(external, RuleScoreGroupId.external_recipient, 40,
+                    rawScores.get(RuleScoreGroupId.external_recipient));
+            expectedRiskScore += external.appliedScore();
+        }
+        require(scoring.riskScore() == Math.min(100, expectedRiskScore), "riskScore is inconsistent");
         require(scoring.riskScore() >= 0 && scoring.riskScore() <= 100,
                 "riskScore is outside the supported range");
         require(
@@ -263,7 +293,8 @@ public final class RuleAnalysisResponseValidator {
             List<ExpectedRule> expectedRules,
             Map<UUID, RuleBehaviorEventSnapshotRequest> behaviorEvents,
             List<RuleContributionResponse> contributions,
-            List<RuleEvidenceResponse> evidence
+            List<RuleEvidenceResponse> evidence,
+            ExternalRiskSnapshotRequest externalRisk
     ) {
         List<ExpectedRule> matchedRules = new ArrayList<>();
         Map<RuleId, RuleContributionResponse> contributionByRule =
@@ -307,14 +338,15 @@ public final class RuleAnalysisResponseValidator {
                     "Evidence exists without a matched contribution");
             require(item.scoreContribution() == contribution.originalContribution(),
                     "Evidence contribution does not match scoring contribution");
-            validateObservation(request, behaviorEvents, item);
+            validateObservation(request, behaviorEvents, item, externalRisk);
         }
     }
 
     private void validateObservation(
             RuleAnalysisRequest request,
             Map<UUID, RuleBehaviorEventSnapshotRequest> behaviorEvents,
-            RuleEvidenceResponse evidence
+            RuleEvidenceResponse evidence,
+            ExternalRiskSnapshotRequest externalRisk
     ) {
         JsonNode observation = evidence.observationSummary();
         require(observation.isObject(), "observationSummary must be an object");
@@ -324,19 +356,19 @@ public final class RuleAnalysisResponseValidator {
                 OBSERVATION_FIELDS.get(evidence.ruleId()).equals(actualFields),
                 "observationSummary fields are invalid"
         );
-        requireDecimal(observation, "observedAmount");
-        require(
-                request.transaction().amount().equals(
-                        observation.get("observedAmount").textValue()
-                ),
-                "observedAmount does not match request"
-        );
+        if (evidence.ruleId() != RuleId.R005) {
+            requireDecimal(observation, "observedAmount");
+            require(request.transaction().amount().equals(
+                    observation.get("observedAmount").textValue()),
+                    "observedAmount does not match request");
+        }
 
         switch (evidence.ruleId()) {
             case R001 -> validateR001(request, evidence, observation);
             case R002 -> validateR002(request, behaviorEvents, evidence, observation);
             case R003 -> validateR003(request, behaviorEvents, evidence, observation);
             case R004 -> validateR004(request, behaviorEvents, evidence, observation);
+            case R005 -> validateR005(request, externalRisk, evidence, observation);
         }
     }
 
@@ -458,6 +490,31 @@ public final class RuleAnalysisResponseValidator {
         validateElapsed(request.evaluationCutoffAt(), eventTime, observation);
         require(evidence.evidenceOccurredAt().equals(eventTime),
                 "R004 evidenceOccurredAt is invalid");
+    }
+
+    private void validateR005(
+            RuleAnalysisRequest request,
+            ExternalRiskSnapshotRequest externalRisk,
+            RuleEvidenceResponse evidence,
+            JsonNode observation
+    ) {
+        require(externalRisk != null, "R005 has no External Risk snapshot");
+        Instant providerAsOf = requireInstant(observation, "providerAsOf");
+        Instant lookedUpAt = requireInstant(observation, "lookedUpAt");
+        require(externalRisk.providerCode().equals(observation.path("providerCode").textValue()),
+                "R005 providerCode does not match request");
+        require(providerAsOf.equals(externalRisk.providerAsOf())
+                        && lookedUpAt.equals(externalRisk.lookedUpAt()),
+                "R005 times do not match request");
+        require(!providerAsOf.isBefore(request.evaluationCutoffAt().minusSeconds(86_400))
+                        && !providerAsOf.isAfter(request.evaluationCutoffAt())
+                        && !lookedUpAt.isBefore(request.evaluationCutoffAt()),
+                "R005 freshness is invalid");
+        require(requireInteger(observation, "freshnessSeconds", 0)
+                        == Duration.between(providerAsOf, request.evaluationCutoffAt()).getSeconds(),
+                "R005 freshnessSeconds is invalid");
+        require(evidence.evidenceOccurredAt().equals(providerAsOf),
+                "R005 evidenceOccurredAt is invalid");
     }
 
     private void validateElapsed(
@@ -594,6 +651,8 @@ public final class RuleAnalysisResponseValidator {
         RuleScoreGroupId groupId = switch (capability.scoreGroup()) {
             case AMOUNT -> RuleScoreGroupId.amount;
             case SECURITY -> RuleScoreGroupId.security;
+            case BENEFICIARY -> RuleScoreGroupId.beneficiary;
+            case EXTERNAL_RECIPIENT -> RuleScoreGroupId.external_recipient;
         };
         return new RuleContract(
                 RuleId.valueOf(capability.ruleId().name()),

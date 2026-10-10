@@ -65,6 +65,13 @@ export function AdoptedDetectionPanel({ state, onRetry }: {
             Reason Code: {rule.reasonCode}<br />개별 기여도: {rule.scoreContribution}
           </li>)}</ol>}
       <p className="adopted-detection__note">개별 기여도의 합은 최종 위험 점수와 다를 수 있습니다.</p>
+      {state.data.adoptedResult.scn003Evidence && <section aria-label="외부 위험 수취 계좌 근거">
+        <h4>외부 위험 수취 계좌 근거</h4>
+        <p>출처 {state.data.adoptedResult.scn003Evidence.providerCode} · 계약 {state.data.adoptedResult.scn003Evidence.sourceVersion}</p>
+        <p>기준 시각 {formatKstDateTime(state.data.adoptedResult.scn003Evidence.providerAsOf)} KST · 조회 시각 {formatKstDateTime(state.data.adoptedResult.scn003Evidence.lookedUpAt)} KST</p>
+        <p>수취 계좌 일치: {state.data.adoptedResult.scn003Evidence.recipientAccountMatched ? "확인" : "없음"}</p>
+        <p>적격 과거 승인 송금: {state.data.adoptedResult.scn003Evidence.priorApprovedRecipientTransferObserved ? "관측됨" : "관측되지 않음"}</p>
+      </section>}
       {state.data.adoptedResult.mlStatus === "APPLIED" && <>
         <h4>채택 결과의 사기 탐지 ML 근거</h4>
         <p>5000bp 기준·최대 40점 가산은 합성 데이터로 검증하는 로컬 정책입니다. 실제 금융 사기 성능이나 운영 오탐 기준이 아닙니다.</p>

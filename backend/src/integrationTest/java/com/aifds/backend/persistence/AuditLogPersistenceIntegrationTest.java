@@ -64,12 +64,12 @@ class AuditLogPersistenceIntegrationTest
     private Flyway flyway;
 
     @Test
-    void appliesFreshV1ThroughV22WithAuditSchemaAndAppendOnlyTrigger() {
-        assertThat(flyway.info().applied()).hasSize(22);
+    void appliesFreshV1ThroughV23WithAuditSchemaAndAppendOnlyTrigger() {
+        assertThat(flyway.info().applied()).hasSize(23);
         assertThat(flyway.info().current().getVersion().getVersion())
-                .isEqualTo("22");
+                .isEqualTo("23");
         assertThat(flyway.info().current().getDescription())
-                .isEqualTo("enforce combined ml result presence");
+                .isEqualTo("add scn003 policy and history index");
         assertThat(columns("audit_log")).containsExactlyInAnyOrder(
                 "id",
                 "audit_id",

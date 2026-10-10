@@ -56,7 +56,7 @@ class MlInferenceRequest(MlDto):
     ]
     channel: Literal["MOBILE_BANKING", "OPEN_BANKING", "ATM", "CORE_BANKING"]
     featureVersion: Literal["fraud-feature-v1"]
-    scoringPolicyVersion: Literal["rule-ml-policy-v1"]
+    scoringPolicyVersion: Literal["rule-ml-policy-v1", "rule-ml-policy-v2"]
     modelVersion: str = Field(min_length=1, max_length=64)
     modelSha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     events: tuple[MlEvent, ...] = Field(max_length=1000)

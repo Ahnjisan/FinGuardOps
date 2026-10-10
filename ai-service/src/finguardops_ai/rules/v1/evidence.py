@@ -9,6 +9,7 @@ from finguardops_ai.rules.v1.condition_definitions import (
     R002ConditionDefinition,
     R003ConditionDefinition,
     R004ConditionDefinition,
+    R005ConditionDefinition,
 )
 from finguardops_ai.rules.v1.execution_plan import (
     RuleExecutionPlan,
@@ -20,6 +21,7 @@ from finguardops_ai.rules.v1.models import (
     R002Facts,
     R003Facts,
     R004Facts,
+    R005Facts,
     RuleEvaluationResult,
     RuleId,
 )
@@ -106,6 +108,14 @@ class _R004EvidenceObservation(RuleEvidenceObservation):
 
 
 @dataclass(frozen=True, slots=True)
+class _R005EvidenceObservation(RuleEvidenceObservation):
+    provider_code: str
+    provider_as_of: datetime
+    looked_up_at: datetime
+    freshness_seconds: int
+
+
+@dataclass(frozen=True, slots=True)
 class RuleEvidenceOutput:
     rule_id: RuleId
     rule_version_id: UUID
@@ -139,18 +149,21 @@ _RULE_CODES = {
     RuleId.R002: "RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT",
     RuleId.R003: "RECENT_SECURITY_CHANGE_HIGH_AMOUNT",
     RuleId.R004: "RECENT_BENEFICIARY_TRANSFER",
+    RuleId.R005: "EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT",
 }
 _FACT_TYPES = {
     RuleId.R001: R001Facts,
     RuleId.R002: R002Facts,
     RuleId.R003: R003Facts,
     RuleId.R004: R004Facts,
+    RuleId.R005: R005Facts,
 }
 _CONDITION_TYPES = {
     RuleId.R001: R001ConditionDefinition,
     RuleId.R002: R002ConditionDefinition,
     RuleId.R003: R003ConditionDefinition,
     RuleId.R004: R004ConditionDefinition,
+    RuleId.R005: R005ConditionDefinition,
 }
 _FACT_FIELDS = {
     RuleId.R001: ("observed_amount", "amount_threshold"),
@@ -179,8 +192,9 @@ _FACT_FIELDS = {
         "elapsed_seconds",
         "window_seconds",
     ),
+    RuleId.R005: ("provider_code", "provider_as_of", "looked_up_at", "freshness_seconds"),
 }
-_CANONICAL_RULE_ORDER = (RuleId.R001, RuleId.R002, RuleId.R003, RuleId.R004)
+_CANONICAL_RULE_ORDER = (RuleId.R001, RuleId.R002, RuleId.R003, RuleId.R004, RuleId.R005)
 
 
 class RuleEvidenceTransformer:
@@ -568,6 +582,32 @@ def _create_observation(
                     window_seconds=facts.window_seconds,
                 ),
                 facts.beneficiary_registered_at,
+            )
+        case RuleId.R005:
+            assert type(facts) is R005Facts
+            _require_utc(facts.provider_as_of, "R005.provider_as_of")
+            _require_utc(facts.looked_up_at, "R005.looked_up_at")
+            if not (
+                cutoff_at - timedelta(hours=24)
+                <= facts.provider_as_of
+                <= cutoff_at
+                <= facts.looked_up_at
+            ):
+                _invalid_time("R005 provider timestamp is outside the inclusive window")
+            if type(facts.freshness_seconds) is not int or facts.freshness_seconds != int(
+                (cutoff_at - facts.provider_as_of).total_seconds()
+            ):
+                _invalid_time("R005 freshness_seconds does not match cutoff")
+            if not isinstance(facts.provider_code, str) or not facts.provider_code:
+                _invalid_facts("R005 provider_code is invalid")
+            return (
+                _R005EvidenceObservation(
+                    provider_code=facts.provider_code,
+                    provider_as_of=facts.provider_as_of,
+                    looked_up_at=facts.looked_up_at,
+                    freshness_seconds=facts.freshness_seconds,
+                ),
+                facts.provider_as_of,
             )
     _unsupported(f"Unsupported Rule Evidence: {plan_item.rule_id!r}")
 

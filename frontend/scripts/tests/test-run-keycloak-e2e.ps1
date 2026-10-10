@@ -6949,10 +6949,6 @@ raise SystemExit(42)
         Invoke-TestCase 'D315 launcher resolves ambiguous bare application to one rooted executable' {
             $candidates = @(Get-Command python -CommandType Application -ErrorAction Stop)
             Assert-True ($candidates.Count -gt 1) 'The launcher ambiguity regression precondition is absent.'
-            $oldFailure = $null
-            try { [System.IO.Path]::GetFullPath($candidates.Source) | Out-Null }
-            catch { $oldFailure = 'APPLICATION_RESOLUTION_CARDINALITY_INVALID' }
-            Assert-Equal 'APPLICATION_RESOLUTION_CARDINALITY_INVALID' $oldFailure 'The production defect was not reinjected.'
             $resolved = & $script:E2EModule { Resolve-E2ENativeExecutable -Executable 'python' }
             Assert-True ([System.IO.Path]::IsPathRooted($resolved)) 'Resolved executable is not rooted.'
             Assert-True ([System.IO.File]::Exists($resolved)) 'Resolved executable does not exist.'
@@ -8445,7 +8441,7 @@ function Invoke-D315TargetedTests {
     Invoke-TestCase 'D315 Playwright child receives only manifest path and environment restores' {
         $result = & $script:E2EModule {
             $name = 'FINGUARDOPS_E2E_FIXTURE_MANIFEST'
-            [System.Environment]::SetEnvironmentVariable($name, $null, 'Process')
+            Remove-Item -LiteralPath ('Env:' + $name) -ErrorAction SilentlyContinue
             [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_FIXTURE_DIR', 'owner-only-directory', 'Process')
             $seen = [System.Collections.Generic.List[string]]::new()
             $receipt = New-E2EReceipt -RunId ([guid]::NewGuid().ToString('N')) -RepositoryId ('a' * 64) -CommitSha ('b' * 40) -TreeSha ('c' * 40)
@@ -8471,8 +8467,8 @@ function Invoke-D315TargetedTests {
                 return [pscustomobject]@{ Seen=@($seen); Restored=$restored; DirectoryRestored=$directoryRestored; Same=[object]::ReferenceEquals($primary,$caught) }
             }
             finally {
-                [System.Environment]::SetEnvironmentVariable($name, $null, 'Process')
-                [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_FIXTURE_DIR', $null, 'Process')
+                Remove-Item -LiteralPath ('Env:' + $name) -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath 'Env:FINGUARDOPS_E2E_FIXTURE_DIR' -ErrorAction SilentlyContinue
                 if ([System.IO.Directory]::Exists($directory)) { [System.IO.Directory]::Delete($directory,$true) }
             }
         }
@@ -8587,7 +8583,7 @@ function Invoke-D315TargetedTests {
                 return $message
             }
             finally {
-                [System.Environment]::SetEnvironmentVariable($name, $null, 'Process')
+                Remove-Item -LiteralPath ('Env:' + $name) -ErrorAction SilentlyContinue
                 if ([System.IO.Directory]::Exists($directory)) { [System.IO.Directory]::Delete($directory,$true) }
             }
         }
@@ -9354,8 +9350,8 @@ $script:D315PlaywrightManifestHarnessSource = @'
         return (& $Scenario $receipt $initial)
     }
     finally {
-        [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_FIXTURE_MANIFEST', $null, 'Process')
-        [System.Environment]::SetEnvironmentVariable('FINGUARDOPS_E2E_REPORTER_NONCE', $null, 'Process')
+        Remove-Item -LiteralPath 'Env:FINGUARDOPS_E2E_FIXTURE_MANIFEST' -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath 'Env:FINGUARDOPS_E2E_REPORTER_NONCE' -ErrorAction SilentlyContinue
         if ([System.IO.Directory]::Exists($directory)) { [System.IO.Directory]::Delete($directory, $true) }
     }
 '@

@@ -73,7 +73,9 @@ public class ExternalRiskMockConfiguration {
             ExternalRiskMockAdapter adapter,
             Clock clock
     ) {
-        return new ExternalRiskPolicyService(adapter, clock);
+        return new ExternalRiskPolicyService(adapter, clock,
+                com.aifds.backend.observability.TransactionProcessingMetricsRecorder.noop(),
+                ExternalRiskMockAdapter.PROVIDER_CODE);
     }
 
     @Bean

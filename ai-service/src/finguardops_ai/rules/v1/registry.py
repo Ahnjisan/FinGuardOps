@@ -7,6 +7,7 @@ from finguardops_ai.rules.v1.models import (
     R002Facts,
     R003Facts,
     R004Facts,
+    R005Facts,
     RuleEvaluationInput,
     RuleEvaluationResult,
     RuleId,
@@ -15,12 +16,14 @@ from finguardops_ai.rules.v1.r001 import evaluate_r001
 from finguardops_ai.rules.v1.r002 import evaluate_r002
 from finguardops_ai.rules.v1.r003 import evaluate_r003
 from finguardops_ai.rules.v1.r004 import evaluate_r004
+from finguardops_ai.rules.v1.r005 import evaluate_r005
 
 type RuleEvaluatorResult = (
     RuleEvaluationResult[R001Facts]
     | RuleEvaluationResult[R002Facts]
     | RuleEvaluationResult[R003Facts]
     | RuleEvaluationResult[R004Facts]
+    | RuleEvaluationResult[R005Facts]
 )
 type RuleEvaluator = Callable[[RuleEvaluationInput], RuleEvaluatorResult]
 
@@ -88,5 +91,6 @@ def create_default_rule_evaluator_registry() -> RuleEvaluatorRegistry:
             (RuleId.R002, evaluate_r002),
             (RuleId.R003, evaluate_r003),
             (RuleId.R004, evaluate_r004),
+            (RuleId.R005, evaluate_r005),
         )
     )

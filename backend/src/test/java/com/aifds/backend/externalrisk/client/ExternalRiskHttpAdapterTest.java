@@ -414,7 +414,8 @@ class ExternalRiskHttpAdapterTest {
                 API_KEY,
                 Duration.ofMillis(100),
                 readTimeout,
-                maxResponseBytes
+                maxResponseBytes,
+                "PROVIDER_V1"
         );
         MockEnvironment environment = new MockEnvironment();
         environment.setActiveProfiles("test", ExternalRiskHttpConfiguration.HTTP_PROFILE);

@@ -48,6 +48,7 @@ import static org.mockito.Mockito.when;
         webEnvironment = SpringBootTest.WebEnvironment.NONE,
         properties = {
                 "finguardops.external-risk.http.enabled=true",
+                "finguardops.external-risk.http.expected-provider-code=PROVIDER_V1",
                 "finguardops.external-risk.http.api-key=integration-test-key"
         }
 )

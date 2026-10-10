@@ -19,6 +19,14 @@ export interface AdoptedMlEvidence {
   readonly scoreContribution: number;
   readonly probabilityBasisPoints: number;
 }
+export interface Scn003Evidence {
+  readonly sourceVersion: "SCN003-contract-v1";
+  readonly providerCode: string;
+  readonly providerAsOf: string;
+  readonly lookedUpAt: string;
+  readonly recipientAccountMatched: boolean;
+  readonly priorApprovedRecipientTransferObserved: boolean;
+}
 export interface AdoptedResult {
   readonly detectionResultId: string;
   readonly detectionResultVersion: number;
@@ -35,6 +43,7 @@ export interface AdoptedResult {
   readonly mlFeatureVersion?: string | null;
   readonly modelSha256?: string | null;
   readonly mlEvidence?: readonly AdoptedMlEvidence[];
+  readonly scn003Evidence?: Scn003Evidence;
 }
 export interface AdoptedDetectionResponse {
   readonly transactionId: string;
@@ -61,10 +70,30 @@ function isAdopted(value: unknown): value is AdoptedResult {
     "analysisCompletedAt", "ruleSetVersion", "scoringPolicyVersion", "ruleEvidence"];
   const newKeys = [...oldKeys, "ruleScore", "mlContribution", "mlStatus", "modelVersion",
     "mlFeatureVersion", "modelSha256", "mlEvidence"];
-  if (!(isObjectWithExactKeys(value, oldKeys) || isObjectWithExactKeys(value, newKeys))) return false;
+  const scn003Keys = [...newKeys, "scn003Evidence"];
+  const scn003 = isObjectWithExactKeys(value, scn003Keys);
+  if (!(isObjectWithExactKeys(value, oldKeys) || isObjectWithExactKeys(value, newKeys) || scn003)) return false;
+  const scn003Policy = value.scoringPolicyVersion === "scoring-policy-v3" ||
+    value.scoringPolicyVersion === "rule-ml-policy-v2";
+  if (scn003Policy !== scn003) return false;
+  if (scn003) {
+    const item = value.scn003Evidence;
+    if (!isObjectWithExactKeys(item, ["sourceVersion", "providerCode", "providerAsOf", "lookedUpAt",
+      "recipientAccountMatched", "priorApprovedRecipientTransferObserved"]) ||
+      item.sourceVersion !== "SCN003-contract-v1" ||
+      typeof item.providerCode !== "string" || !/^[A-Z][A-Z0-9_]{0,63}$/.test(item.providerCode) ||
+      !isUtcInstantString(item.providerAsOf) || !isUtcInstantString(item.lookedUpAt) ||
+      typeof item.recipientAccountMatched !== "boolean" ||
+      typeof item.priorApprovedRecipientTransferObserved !== "boolean") return false;
+    if (!isArrayOf(value.ruleEvidence, isRule)) return false;
+    const hasR005 = value.ruleEvidence.some(rule =>
+      rule.ruleCode === "EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT" && rule.ruleVersion === "1" &&
+      rule.scoreContribution === 40);
+    if (hasR005 !== item.recipientAccountMatched) return false;
+  }
   if (isObjectWithExactKeys(value, oldKeys) &&
       value.scoringPolicyVersion === "rule-ml-policy-v1") return false;
-  if (isObjectWithExactKeys(value, newKeys)) {
+  if (isObjectWithExactKeys(value, newKeys) || scn003) {
     if (!Number.isInteger(value.ruleScore) || (value.ruleScore as number) < 0 ||
         (value.ruleScore as number) > 100 || !Array.isArray(value.mlEvidence)) return false;
     if (value.mlStatus === "APPLIED") {
@@ -88,9 +117,9 @@ function isAdopted(value: unknown): value is AdoptedResult {
             "ML_RISK_SIGNAL" : "ML_BELOW_THRESHOLD") ||
           value.mlContribution !== ((item.probabilityBasisPoints as number) <= 5000 ? 0 :
             Math.floor((((item.probabilityBasisPoints as number) - 5000) * 40 + 2500) / 5000)) ||
-          value.scoringPolicyVersion !== "rule-ml-policy-v1") return false;
+          !["rule-ml-policy-v1", "rule-ml-policy-v2"].includes(String(value.scoringPolicyVersion))) return false;
     } else if (value.mlStatus !== "RULE_ONLY" ||
-        value.scoringPolicyVersion === "rule-ml-policy-v1" || value.mlContribution !== null ||
+        ["rule-ml-policy-v1", "rule-ml-policy-v2"].includes(String(value.scoringPolicyVersion)) || value.mlContribution !== null ||
         value.modelVersion !== null || value.mlFeatureVersion !== null ||
         value.modelSha256 !== null || value.mlEvidence.length !== 0 ||
         value.ruleScore !== value.riskScore) return false;

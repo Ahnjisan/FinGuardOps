@@ -20,6 +20,8 @@ public final class RuleConditionDefinition {
             RuleV1ContractRegistry.RECENT_SECURITY_CHANGE_HIGH_AMOUNT;
     public static final String RECENT_BENEFICIARY_TRANSFER =
             RuleV1ContractRegistry.RECENT_BENEFICIARY_TRANSFER;
+    public static final String EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT =
+            RuleV1ContractRegistry.EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT;
 
     private static final String HIGH_AMOUNT_PREREQUISITE =
             TRANSFER_ABSOLUTE_HIGH_AMOUNT;
@@ -61,6 +63,10 @@ public final class RuleConditionDefinition {
                     "windowSeconds",
                     "matchPolicy",
                     "selectionPolicy"
+            ),
+            EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT,
+            Set.of(
+                    "subjectType", "riskType", "reasonCode", "freshnessSeconds"
             )
     );
 
@@ -102,6 +108,7 @@ public final class RuleConditionDefinition {
             case RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT -> validateR002(value);
             case RECENT_SECURITY_CHANGE_HIGH_AMOUNT -> validateR003(value);
             case RECENT_BENEFICIARY_TRANSFER -> validateR004(value);
+            case EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT -> validateR005(value);
             default -> throw new IllegalArgumentException(
                     "Unsupported Rule v1 ruleCode: " + ruleCode
             );
@@ -193,6 +200,16 @@ public final class RuleConditionDefinition {
                 "SAME_CUSTOMER_SENDER_ACCOUNT_AND_BENEFICIARY"
         );
         requireExactText(root, "selectionPolicy", LATEST_EVENT_SELECTION);
+    }
+
+    private static void validateR005(JsonNode root) {
+        requireExactText(root, "subjectType", "RECIPIENT_ACCOUNT");
+        requireExactText(root, "riskType", "SUSPICIOUS_ACCOUNT");
+        requireExactText(root, "reasonCode", "SUSPICIOUS_RECIPIENT_ACCOUNT");
+        requirePositiveInteger(root, "freshnessSeconds");
+        if (root.get("freshnessSeconds").intValue() != 86_400) {
+            throw new IllegalArgumentException("freshnessSeconds must equal 86400");
+        }
     }
 
     private static void requireExactText(

@@ -1,6 +1,9 @@
 """Local Docker Compose fixture for the existing External Risk HTTP contract."""
 
 import json
+import os
+import time
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HOST = "127.0.0.1"
@@ -18,6 +21,41 @@ REQUEST_FIELDS = {
 }
 MAX_REQUEST_BYTES = 65_536
 LOOKUP_RECEIVED_MARKER = "FINGUARDOPS_EXTERNAL_RISK_LOOKUP_RECEIVED"
+SCN003_FIXTURE_ENABLED = os.environ.get("FINGUARDOPS_SCN003_FIXTURE_ENABLED") == "true"
+
+
+def scn003_response(request: dict[str, object]) -> tuple[int, dict[str, object]]:
+    """Deterministic synthetic responses only in the dedicated issue-382 overlay."""
+    recipient = request["recipientAccountRef"]
+    sender = request["senderAccountRef"]
+    if not isinstance(recipient, str) or not recipient.startswith("issue382-synthetic-"):
+        return 200, {"providerCode": "PROVIDER_V1",
+                     "providerAsOf": request["evaluationCutoffAt"], "matches": []}
+    scenario = recipient.removeprefix("issue382-synthetic-").split("-", 1)[0]
+    if scenario == "unavailable":
+        return 503, {"status": "UNAVAILABLE"}
+    if scenario == "timeout":
+        time.sleep(4)
+    cutoff = datetime.fromisoformat(str(request["evaluationCutoffAt"]).replace("Z", "+00:00"))
+    as_of = cutoff
+    if scenario == "boundary":
+        as_of -= timedelta(hours=24)
+    elif scenario == "stale":
+        as_of -= timedelta(hours=24, microseconds=1)
+    elif scenario == "future":
+        as_of += timedelta(microseconds=1)
+    matches = []
+    if scenario in {"risk", "boundary", "stale", "future", "wrongcode"}:
+        matches.append({"subjectType": "RECIPIENT_ACCOUNT", "riskType": "SUSPICIOUS_ACCOUNT",
+                        "reasonCode": "SUSPICIOUS_RECIPIENT_ACCOUNT"})
+    elif scenario == "senderonly" and isinstance(sender, str):
+        matches.append({"subjectType": "SENDER_ACCOUNT", "riskType": "SUSPICIOUS_ACCOUNT",
+                        "reasonCode": "SUSPICIOUS_SENDER_ACCOUNT"})
+    elif scenario == "contradictory":
+        matches.append({"subjectType": "RECIPIENT_ACCOUNT", "riskType": "RISK_DEVICE",
+                        "reasonCode": "RISK_DEVICE"})
+    return 200, {"providerCode": "WRONG_PROVIDER" if scenario == "wrongcode" else "PROVIDER_V1",
+                 "providerAsOf": as_of.isoformat().replace("+00:00", "Z"), "matches": matches}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -36,14 +74,12 @@ class Handler(BaseHTTPRequestHandler):
         if request is None:
             self._json(400, {"status": "INVALID_REQUEST"})
             return
-        self._json(
-            200,
-            {
-                "providerCode": "PROVIDER_V1",
-                "providerAsOf": request["evaluationCutoffAt"],
-                "matches": [],
-            },
-        )
+        if SCN003_FIXTURE_ENABLED:
+            status, payload = scn003_response(request)
+            self._json(status, payload)
+        else:
+            self._json(200, {"providerCode": "PROVIDER_V1",
+                             "providerAsOf": request["evaluationCutoffAt"], "matches": []})
 
     def _request_json(self) -> dict[str, object] | None:
         try:
@@ -116,7 +152,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except BrokenPipeError:
+            pass  # A timeout probe has already closed its local HTTP connection.
 
     def log_message(self, format: str, *args: object) -> None:
         return

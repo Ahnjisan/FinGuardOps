@@ -120,6 +120,8 @@ public class TransactionSynchronousProcessingCoordinator {
                                 externalRiskSnapshot);
                         return null;
                     });
+        } catch (ExternalRiskLookupException original) {
+            return persistExternalRiskFailure(idempotencyRecordId, original);
         } catch (RuntimeException original) {
             return handleRuleFailure(
                     idempotencyRecordId,

@@ -319,6 +319,13 @@ class R004ObservationResponse(RuleAnalysisDto):
     window_seconds: int
 
 
+class R005ObservationResponse(RuleAnalysisDto):
+    provider_code: ProviderCode
+    provider_as_of: UtcZDateTime
+    looked_up_at: UtcZDateTime
+    freshness_seconds: int
+
+
 class _RuleEvidenceResponse(RuleAnalysisDto):
     rule_version_id: CanonicalUuid4
     rule_code: StrictText
@@ -349,8 +356,17 @@ class R004EvidenceResponse(_RuleEvidenceResponse):
     observation_summary: R004ObservationResponse
 
 
+class R005EvidenceResponse(_RuleEvidenceResponse):
+    rule_id: Literal[RuleId.R005]
+    observation_summary: R005ObservationResponse
+
+
 RuleEvidenceResponse = Annotated[
-    R001EvidenceResponse | R002EvidenceResponse | R003EvidenceResponse | R004EvidenceResponse,
+    R001EvidenceResponse
+    | R002EvidenceResponse
+    | R003EvidenceResponse
+    | R004EvidenceResponse
+    | R005EvidenceResponse,
     Field(discriminator="rule_id"),
 ]
 

@@ -2,6 +2,10 @@ package com.aifds.backend.detection.entity;
 
 import com.aifds.backend.rule.entity.RuleVersion;
 import com.aifds.backend.rule.entity.RuleVersionStatus;
+import com.aifds.backend.rule.client.dto.ExternalRiskSnapshotRequest;
+import com.aifds.backend.externalrisk.domain.ExternalRiskReasonCode;
+import com.aifds.backend.externalrisk.domain.ExternalRiskSubjectType;
+import com.aifds.backend.externalrisk.domain.ExternalRiskType;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import jakarta.persistence.Column;
@@ -203,6 +207,59 @@ public class DetectionEvidence {
         evidence.observationSummary = JsonNodeFactory.instance.objectNode()
                 .put("probabilityBasisPoints", probabilityBasisPoints);
         evidence.evidenceOccurredAt = Objects.requireNonNull(cutoff);
+        evidence.sortOrder = sortOrder;
+        return evidence;
+    }
+
+    public static DetectionEvidence externalRisk(
+            DetectionResult result, ExternalRiskSnapshotRequest snapshot,
+            int sortOrder) {
+        Objects.requireNonNull(snapshot, "snapshot must not be null");
+        if (sortOrder < 0
+                || snapshot.providerAsOf().isAfter(result.getEvaluationCutoffAt())
+                || snapshot.lookedUpAt().isBefore(result.getEvaluationCutoffAt())) {
+            throw new IllegalArgumentException("External Risk Evidence time is invalid");
+        }
+        boolean recipientMatch = snapshot.matches().stream().anyMatch(match ->
+                match.subjectType() == ExternalRiskSubjectType.RECIPIENT_ACCOUNT
+                && match.riskType() == ExternalRiskType.SUSPICIOUS_ACCOUNT
+                && match.reasonCode() == ExternalRiskReasonCode.SUSPICIOUS_RECIPIENT_ACCOUNT);
+        DetectionEvidence evidence = new DetectionEvidence();
+        evidence.evidenceId = UUID.randomUUID();
+        evidence.detectionResult = Objects.requireNonNull(result);
+        evidence.evidenceType = DetectionEvidenceType.EXTERNAL_RISK;
+        evidence.reasonCode = "EXTERNAL_RISK_LOOKUP_SUCCEEDED";
+        evidence.displayDescription = "Validated External Risk recipient snapshot";
+        evidence.observationSummary = JsonNodeFactory.instance.objectNode()
+                .put("sourceVersion", "SCN003-contract-v1")
+                .put("providerCode", snapshot.providerCode())
+                .put("providerAsOf", snapshot.providerAsOf().toString())
+                .put("lookedUpAt", snapshot.lookedUpAt().toString())
+                .put("recipientAccountMatched", recipientMatch);
+        evidence.evidenceOccurredAt = snapshot.providerAsOf();
+        evidence.sortOrder = sortOrder;
+        return evidence;
+    }
+
+    public static DetectionEvidence recipientHistory(
+            DetectionResult result, boolean observed, int sortOrder) {
+        if (sortOrder < 0) {
+            throw new IllegalArgumentException("sortOrder must not be negative");
+        }
+        DetectionEvidence evidence = new DetectionEvidence();
+        evidence.evidenceId = UUID.randomUUID();
+        evidence.detectionResult = Objects.requireNonNull(result);
+        evidence.evidenceType = DetectionEvidenceType.BEHAVIOR_PATTERN;
+        evidence.reasonCode = observed
+                ? "PRIOR_APPROVED_RECIPIENT_TRANSFER_OBSERVED"
+                : "NO_ELIGIBLE_PRIOR_RECIPIENT_TRANSFER_OBSERVED";
+        evidence.displayDescription = observed
+                ? "Eligible prior approved recipient transfer observed"
+                : "No eligible prior approved recipient transfer observed";
+        evidence.observationSummary = JsonNodeFactory.instance.objectNode()
+                .put("sourceVersion", "SCN003-contract-v1")
+                .put("priorApprovedRecipientTransferObserved", observed);
+        evidence.evidenceOccurredAt = result.getEvaluationCutoffAt();
         evidence.sortOrder = sortOrder;
         return evidence;
     }

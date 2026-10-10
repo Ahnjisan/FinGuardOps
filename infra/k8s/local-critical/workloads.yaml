@@ -139,6 +139,7 @@ spec:
               valueFrom: {secretKeyRef: {name: local-runtime, key: postgres-password}}
             - {name: FINGUARDOPS_AI_SERVICE_BASE_URL, value: 'http://ai-service:8000'}
             - {name: FINGUARDOPS_EXTERNAL_RISK_HTTP_ENABLED, value: 'true'}
+            - {name: FINGUARDOPS_EXTERNAL_RISK_HTTP_EXPECTED_PROVIDER_CODE, value: 'PROVIDER_V1'}
             - {name: FINGUARDOPS_EXTERNAL_RISK_HTTP_BASE_URL, value: 'http://127.0.0.1:8001'}
             - name: FINGUARDOPS_EXTERNAL_RISK_HTTP_API_KEY
               valueFrom: {secretKeyRef: {name: local-runtime, key: external-risk-key}}
