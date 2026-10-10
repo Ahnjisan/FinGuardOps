@@ -1089,6 +1089,12 @@ images, receipts, the fixed Run Compose project, and cleanup. With the local ML
 profile enabled, the existing Service and Run ingestion fixtures retain their
 Rule scores and business responses but persist one additional ML Evidence row
 with zero contribution. Their expected row cardinality is three Evidence rows.
+The Service ingestion fixture pins its transaction cutoff after the behavior API
+calls have completed and waits until that cutoff before posting the transaction.
+The Run fixture keeps its owner-bound plan immutable, with a cutoff 90 seconds
+after plan creation, and waits until that time after behavior intake. Both keep
+behavior database `createdAt` at or before cutoff and External Risk `lookedUpAt`
+at or after cutoff; neither silently drops late-ingested events.
 
 The Run Browser suite then publishes RuleVersion 2 and creates a separate
 synthetic transaction through the public API. Twelve preceding behavior events
