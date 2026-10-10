@@ -30,7 +30,7 @@ class OutboxRecoveryIntegrationTest {
             postgres.start();
             var source = new DriverManagerDataSource(postgres.getJdbcUrl(),
                     postgres.getUsername(), postgres.getPassword());
-            assertEquals(20, Flyway.configure().dataSource(source)
+            assertEquals(22, Flyway.configure().dataSource(source)
                     .locations("classpath:db/migration").load().migrate().migrationsExecuted);
             var jdbc = new JdbcTemplate(source);
             var tx = new TransactionTemplate(new DataSourceTransactionManager(source));
