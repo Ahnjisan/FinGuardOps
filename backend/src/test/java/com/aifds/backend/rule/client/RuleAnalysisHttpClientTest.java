@@ -187,6 +187,27 @@ class RuleAnalysisHttpClientTest {
     }
 
     @Test
+    void acceptsLegacyV2ResponseWithoutV4ScoreAttributionFields() throws Exception {
+        ObjectNode legacy = validResponseTree();
+        for (JsonNode contribution : contributions(legacy)) {
+            ((ObjectNode) contribution).remove("appliedContribution");
+        }
+        for (JsonNode item : evidence(legacy)) {
+            ((ObjectNode) item).remove("appliedContribution");
+        }
+        response.set(jsonResponse(200, mapper.writeValueAsString(legacy)));
+
+        RuleAnalysisResponse actual = client(Duration.ofSeconds(1))
+                .analyzeV2(requestV2, TRACE_ID);
+        assertThat(actual.analysis().scoringResult().riskScore()).isEqualTo(25);
+        assertThat(actual.analysis().scoringResult().ruleContributions())
+                .allSatisfy(item -> assertThat(item.appliedContribution()).isNull());
+        RuleAnalysisResponse v1 = client(Duration.ofSeconds(1))
+                .analyze(request, TRACE_ID);
+        assertThat(v1.analysis().scoringResult().riskScore()).isEqualTo(25);
+    }
+
+    @Test
     void acceptsTheValidAllRulesUnmatchedResult() throws Exception {
         response.set(jsonResponse(
                 200,
