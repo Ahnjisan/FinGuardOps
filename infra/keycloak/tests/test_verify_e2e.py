@@ -1253,7 +1253,7 @@ finguardops_rule_analysis_outcomes_created 99
     def test_transaction_cardinality_contract_includes_high_case_and_four_actions(self):
         self.assertEqual(
             verify_e2e.expected_transaction_cardinality(True, True, True),
-            (1, 1, 1, 1, 1, 1, 2, 1, 1, 4, 1, 1, 1, 1),
+            (1, 1, 1, 1, 1, 1, 3, 1, 1, 4, 1, 1, 1, 1),
         )
 
     def test_step_rejects_dependency_hit_delta_independently_from_metrics(self):

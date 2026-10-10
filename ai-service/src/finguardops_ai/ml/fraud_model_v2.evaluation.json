@@ -1,0 +1,104 @@
+{
+  "dataVersion": "synthetic-fraud-v2",
+  "featureVersion": "fraud-feature-v1",
+  "localInferenceMillisecondsPerTransaction": {
+    "max": 0.002954,
+    "median": 0.002081,
+    "samples": 10,
+    "scope": "model calculation only; excludes HTTP and feature query"
+  },
+  "modelSha256": "42344d398008babdd6a0404c750b24f1f27f1260aeac65851195d81500a876af",
+  "modelVersion": "fraud-logistic-v2",
+  "seed": 380,
+  "split": {
+    "test": {
+      "positives": 232,
+      "rows": 600
+    },
+    "train": {
+      "positives": 219,
+      "rows": 600
+    },
+    "validation": {
+      "positives": 237,
+      "rows": 600
+    }
+  },
+  "test": [
+    {
+      "f1": 0.6746987951807228,
+      "falseNegativeRate": 0.15517241379310345,
+      "falsePositiveRate": 0.4157608695652174,
+      "fn": 36,
+      "fp": 153,
+      "precision": 0.5616045845272206,
+      "recall": 0.8448275862068966,
+      "thresholdBasisPoints": 3000,
+      "tn": 215,
+      "tp": 196
+    },
+    {
+      "f1": 0.6619385342789598,
+      "falseNegativeRate": 0.39655172413793105,
+      "falsePositiveRate": 0.13858695652173914,
+      "fn": 92,
+      "fp": 51,
+      "precision": 0.7329842931937173,
+      "recall": 0.603448275862069,
+      "thresholdBasisPoints": 5000,
+      "tn": 317,
+      "tp": 140
+    },
+    {
+      "f1": 0.42675159235668786,
+      "falseNegativeRate": 0.7112068965517241,
+      "falsePositiveRate": 0.04076086956521739,
+      "fn": 165,
+      "fp": 15,
+      "precision": 0.8170731707317073,
+      "recall": 0.28879310344827586,
+      "thresholdBasisPoints": 7000,
+      "tn": 353,
+      "tp": 67
+    }
+  ],
+  "validation": [
+    {
+      "f1": 0.687392055267703,
+      "falseNegativeRate": 0.16033755274261605,
+      "falsePositiveRate": 0.3939393939393939,
+      "fn": 38,
+      "fp": 143,
+      "precision": 0.5818713450292398,
+      "recall": 0.8396624472573839,
+      "thresholdBasisPoints": 3000,
+      "tn": 220,
+      "tp": 199
+    },
+    {
+      "f1": 0.6496519721577726,
+      "falseNegativeRate": 0.4092827004219409,
+      "falsePositiveRate": 0.1487603305785124,
+      "fn": 97,
+      "fp": 54,
+      "precision": 0.7216494845360825,
+      "recall": 0.5907172995780591,
+      "thresholdBasisPoints": 5000,
+      "tn": 309,
+      "tp": 140
+    },
+    {
+      "f1": 0.39228295819935693,
+      "falseNegativeRate": 0.7426160337552743,
+      "falsePositiveRate": 0.03581267217630854,
+      "fn": 176,
+      "fp": 13,
+      "precision": 0.8243243243243243,
+      "recall": 0.25738396624472576,
+      "thresholdBasisPoints": 7000,
+      "tn": 350,
+      "tp": 61
+    }
+  ],
+  "warning": "Synthetic pipeline validation only; not real financial fraud performance"
+}

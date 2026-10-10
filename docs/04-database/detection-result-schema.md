@@ -399,3 +399,10 @@ security 60, beneficiary 10의 그룹 상한을 사용하며 네 독립 적중�
 보존하고 최종 점수와 단순 합이 같다고 가정하지 않는다. CRITICAL 채택 거래는
 `HELD`로 확정하고 사건 연결을 요구한다. 과거 결과와 사건은 새 정책을
 기준으로 재분류하지 않는다.
+# Issue #380 Rule+ML 결합 저장 확장
+
+Flyway `V21__add_combined_ml_detection.sql`은 기존 행과 완료된 멱등 Snapshot을 변경하지 않고 `detection_result`에 nullable `ml_feature_version`, `model_sha256`, `rule_risk_score`, `ml_contribution`, `ml_probability_basis_points`를 추가한다. 기존 `feature_version`은 Rule Feature 버전, `model_version`은 ML 모델 버전이며 `scoring_policy_version=rule-ml-policy-v1`의 경우 새 Feature·해시를 분석 시작 시 고정한다. 완료 시 Rule 원점수, ML 기여도, 확률을 한 번 기록한다. DB CHECK는 `risk_score=LEAST(100,rule_risk_score+ml_contribution)`과 5000bp/40점 결합식을 확인한다. terminal 결과와 Evidence의 불변 trigger를 유지한다.
+
+새 결과에는 기존 RuleVersion FK를 가진 `RULE` Evidence와 제한된 `ML` Evidence를 같은 완료 트랜잭션에서 기록한다. ML Evidence의 `reason_code`는 `ML_RISK_SIGNAL` 또는 `ML_BELOW_THRESHOLD`, `score_contribution`은 결합 정책의 기여도, `observation_summary`는 `probabilityBasisPoints`만 담는다. 전체 Feature 벡터·고객/계좌/기기 참조는 저장하지 않는다. ML 실패에서는 두 Evidence 모두 저장하지 않고 DetectionResult와 거래를 `FAILED`로 둔다. 과거 Rule 전용 행의 새 열은 null이며 당시 채택·사건 판정을 변경하지 않는다.
+
+For `rule-ml-policy-v1`, V21 also checks the final `risk_level` against score boundaries 0-19 LOW, 20-49 MEDIUM, 50-79 HIGH, and 80-100 CRITICAL. Legacy Rule rows retain their stored scores and levels.

@@ -7,6 +7,13 @@ public record AdoptedDetectionResultResponse(
         String availability,
         Integer latestDetectionResultVersion,
         String latestAnalysisStatus,
-        AdoptedDetectionResultItemResponse adoptedResult
+        AdoptedDetectionResultItemResponse adoptedResult,
+        String latestFailureCode
 ) {
+    public AdoptedDetectionResultResponse(UUID transactionId, String availability,
+            Integer latestDetectionResultVersion, String latestAnalysisStatus,
+            AdoptedDetectionResultItemResponse adoptedResult) {
+        this(transactionId, availability, latestDetectionResultVersion,
+                latestAnalysisStatus, adoptedResult, null);
+    }
 }

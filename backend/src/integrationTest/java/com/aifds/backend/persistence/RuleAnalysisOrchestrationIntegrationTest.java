@@ -1,17 +1,25 @@
 package com.aifds.backend.persistence;
 
 import com.aifds.backend.detection.entity.DetectionAnalysisStatus;
+import com.aifds.backend.behavior.repository.BehaviorEventRepository;
+import com.aifds.backend.behavior.entity.BehaviorEvent;
+import com.aifds.backend.behavior.entity.BehaviorEventType;
 import com.aifds.backend.detection.entity.DetectionEvidence;
 import com.aifds.backend.detection.entity.DetectionResult;
 import com.aifds.backend.detection.entity.RiskLevel;
+import com.aifds.backend.detection.ml.MlDetectionPolicy;
+import com.aifds.backend.detection.ml.MlDetectionService;
 import com.aifds.backend.detection.repository.DetectionEvidenceRepository;
 import com.aifds.backend.detection.repository.DetectionResultRepository;
 import com.aifds.backend.detection.service.CompletedRuleAnalysis;
+import com.aifds.backend.detection.service.AdoptedDetectionResultQueryService;
 import com.aifds.backend.detection.service.RuleAnalysisOrchestrationService;
 import com.aifds.backend.externalrisk.domain.ExternalRiskLookupStatus;
 import com.aifds.backend.externalrisk.domain.ExternalRiskPolicyResult;
 import com.aifds.backend.externalrisk.domain.ExternalRiskSnapshot;
 import com.aifds.backend.rule.client.RuleAnalysisHttpClient;
+import com.aifds.backend.rule.client.RuleAnalysisResponseValidator;
+import com.aifds.backend.rule.client.config.RuleAnalysisClientConfiguration;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV2;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResponse;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResultResponse;
@@ -29,19 +37,25 @@ import com.aifds.backend.transaction.entity.TransactionChannel;
 import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
 import com.aifds.backend.transaction.entity.TransactionType;
 import com.aifds.backend.transaction.repository.FinancialTransactionRepository;
+import com.aifds.backend.transaction.service.RiskResponseFinalizationService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Assumptions;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.web.client.RestClient;
+import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.time.Duration;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
@@ -69,7 +83,16 @@ class RuleAnalysisOrchestrationIntegrationTest
     private RuleAnalysisOrchestrationService orchestrationService;
 
     @Autowired
+    private AdoptedDetectionResultQueryService adoptedQuery;
+
+    @Autowired
+    private RiskResponseFinalizationService riskResponseFinalizationService;
+
+    @Autowired
     private FinancialTransactionRepository transactionRepository;
+
+    @Autowired
+    private BehaviorEventRepository behaviorEventRepository;
 
     @Autowired
     private DetectionResultRepository resultRepository;
@@ -90,10 +113,17 @@ class RuleAnalysisOrchestrationIntegrationTest
     private ObjectMapper objectMapper;
 
     @Autowired
+    @Qualifier(RuleAnalysisClientConfiguration.OBJECT_MAPPER_BEAN)
+    private ObjectMapper ruleWireMapper;
+
+    @Autowired
     private PlatformTransactionManager transactionManager;
 
     @MockitoBean
     private RuleAnalysisHttpClient httpClient;
+
+    @MockitoBean
+    private MlDetectionService mlService;
 
     @Test
     void callsClientAfterStartCommitWithoutAnActiveTransactionAndAdoptsResult() {
@@ -183,6 +213,171 @@ class RuleAnalysisOrchestrationIntegrationTest
                 .isEqualTo(externalRisk.providerCode());
         assertThat(completed.riskScore()).isEqualTo(15);
         assertThat(completed.riskLevel()).isEqualTo(RiskLevel.MEDIUM);
+    }
+
+    @Test
+    void v2CombinesRuleClientResultWithPinnedMlAndPersistsBothEvidenceTypes() {
+        FinancialTransaction transaction = saveTransaction(
+                UUID.fromString("00000000-0000-4000-8000-000000000380"));
+        RuleVersion version = publishAmountRule();
+        ExternalRiskSnapshot externalRisk = externalRiskSnapshot(transaction);
+        when(mlService.cutoffFor(transaction.getTransactionId()))
+                .thenReturn(transaction.getOccurredAt());
+        when(mlService.appliesAt(transaction.getOccurredAt())).thenReturn(true);
+        when(httpClient.analyzeV2(any(), eq(TRACE_ID))).thenReturn(response(
+                transaction, version, List.of(amountEvidence(transaction, version)),
+                15, RuleRiskLevel.LOW));
+        when(mlService.infer(transaction.getTransactionId(), transaction.getOccurredAt(),
+                MlDetectionPolicy.POLICY_VERSION, MlDetectionPolicy.MODEL_VERSION))
+                .thenReturn(new MlDetectionService.MlResult(10000, "ML_RISK_SIGNAL"));
+
+        CompletedRuleAnalysis completed = orchestrationService.analyzeV2(
+                transaction.getTransactionId(), externalRisk, TRACE_ID);
+
+        assertCompletedState(completed, 55, RiskLevel.HIGH, 2);
+        DetectionResult result = resultRepository.findByDetectionResultId(
+                completed.detectionResultId()).orElseThrow();
+        assertThat(result.getScoringPolicyVersion()).isEqualTo(MlDetectionPolicy.POLICY_VERSION);
+        assertThat(result.getModelVersion()).isEqualTo(MlDetectionPolicy.MODEL_VERSION);
+        assertThat(result.getModelSha256()).isEqualTo(MlDetectionPolicy.MODEL_SHA256);
+        assertThat(result.getRuleRiskScore()).isEqualTo(15);
+        assertThat(result.getMlContribution()).isEqualTo(40);
+        assertThat(result.getMlProbabilityBasisPoints()).isEqualTo(10000);
+        assertThat(evidenceRepository.findAllByDetectionResult_DetectionResultIdOrderBySortOrderAscIdAsc(
+                completed.detectionResultId())).extracting(e -> e.getEvidenceType().name())
+                .containsExactly("RULE", "ML");
+        var queried = adoptedQuery.find(transaction.getTransactionId().toString());
+        assertThat(queried.adoptedResult().ruleScore()).isEqualTo(15);
+        assertThat(queried.adoptedResult().mlContribution()).isEqualTo(40);
+        assertThat(queried.adoptedResult().riskScore()).isEqualTo(55);
+        assertThat(queried.adoptedResult().mlEvidence()).hasSize(1);
+        var finalized = riskResponseFinalizationService.finalizeRiskResponse(
+                transaction.getTransactionId());
+        assertThat(finalized.processingStatus())
+                .isEqualTo(TransactionProcessingStatus.ADDITIONAL_AUTH_REQUIRED);
+        assertThat(finalized.caseId()).isNotNull();
+        assertThat(jdbcTemplate.queryForObject("""
+                SELECT result.detection_result_id FROM financial_transaction tx
+                JOIN detection_result result ON result.id = tx.adopted_detection_result_id
+                WHERE tx.transaction_id = ?
+                """, UUID.class, transaction.getTransactionId()))
+                .isEqualTo(completed.detectionResultId());
+        assertThat(adoptedQuery.find(transaction.getTransactionId().toString())
+                .adoptedResult().riskScore()).isEqualTo(55);
+    }
+
+    @Test
+    void mlFailureKeepsTransactionAndResultFailedWithoutAdoptionOrEvidence() {
+        FinancialTransaction transaction = saveTransaction();
+        RuleVersion version = publishAmountRule();
+        when(mlService.cutoffFor(transaction.getTransactionId()))
+                .thenReturn(transaction.getOccurredAt());
+        when(mlService.appliesAt(transaction.getOccurredAt())).thenReturn(true);
+        when(httpClient.analyzeV2(any(), eq(TRACE_ID))).thenReturn(response(
+                transaction, version, List.of(amountEvidence(transaction, version)),
+                15, RuleRiskLevel.LOW));
+        when(mlService.infer(transaction.getTransactionId(), transaction.getOccurredAt(),
+                MlDetectionPolicy.POLICY_VERSION, MlDetectionPolicy.MODEL_VERSION))
+                .thenThrow(new MlDetectionService.MlDetectionException("ML_SERVICE_UNAVAILABLE"));
+
+        assertThatThrownBy(() -> orchestrationService.analyzeV2(
+                transaction.getTransactionId(), externalRiskSnapshot(transaction), TRACE_ID))
+                .isInstanceOf(MlDetectionService.MlDetectionException.class);
+        assertFailedState(transaction.getTransactionId(), "ML_SERVICE_UNAVAILABLE");
+        assertThat(adoptedQuery.find(transaction.getTransactionId().toString())
+                .latestFailureCode()).isEqualTo("ML_SERVICE_UNAVAILABLE");
+        assertThat(adoptedQuery.find(transaction.getTransactionId().toString())
+                .adoptedResult()).isNull();
+        assertThatThrownBy(() -> riskResponseFinalizationService.finalizeRiskResponse(
+                transaction.getTransactionId())).isInstanceOf(RuntimeException.class);
+        assertThat(jdbcTemplate.queryForList("""
+                SELECT action FROM audit_log WHERE transaction_id = ?
+                """, String.class, transaction.getTransactionId())).isEmpty();
+        assertThat(jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM case_transaction ct
+                JOIN financial_transaction tx ON tx.id = ct.financial_transaction_id
+                WHERE tx.transaction_id = ?
+                """, Integer.class, transaction.getTransactionId())).isZero();
+    }
+
+    @Test
+    void liveLocalFastApiInferenceCanBeAdoptedWithTheSameTransactionId() {
+        String url = System.getenv("FINGUARDOPS_LIVE_ML_URL");
+        Assumptions.assumeTrue(url != null && !url.isBlank(),
+                "Run only with an owned local FastAPI process");
+        Instant eventAt = Instant.now().minusSeconds(120).truncatedTo(ChronoUnit.MICROS);
+        List<BehaviorEvent> eventRows = new java.util.ArrayList<>();
+        for (BehaviorEventType type : List.of(BehaviorEventType.DEVICE_REGISTERED,
+                BehaviorEventType.PASSWORD_CHANGED,
+                BehaviorEventType.TRANSFER_LIMIT_CHANGED,
+                BehaviorEventType.BENEFICIARY_REGISTERED)) {
+            for (int index = 0; index < 3; index++) {
+                eventRows.add(new BehaviorEvent(UUID.randomUUID(), type, eventAt,
+                        "cust_ref_rule_orchestration",
+                        type == BehaviorEventType.DEVICE_REGISTERED ? null
+                                : "acct_ref_rule_orchestration_sender",
+                        type == BehaviorEventType.DEVICE_REGISTERED
+                                ? "device_ref_rule_orchestration" : null,
+                        type == BehaviorEventType.BENEFICIARY_REGISTERED
+                                ? "acct_ref_rule_orchestration_recipient" : null,
+                        null, "b".repeat(64)));
+            }
+        }
+        behaviorEventRepository.saveAllAndFlush(eventRows);
+        Instant cutoff = Instant.now().plusMillis(500).truncatedTo(ChronoUnit.MICROS);
+        try {
+            Thread.sleep(600);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(interrupted);
+        }
+        FinancialTransaction transaction = saveTransaction(
+                UUID.fromString("00000000-0000-4000-8000-000000000382"), cutoff);
+        publishAmountRule();
+        MlDetectionService live = new MlDetectionService(true, Instant.EPOCH, url,
+                transactionRepository, behaviorEventRepository, ruleWireMapper);
+        RuleAnalysisHttpClient liveRule = new RuleAnalysisHttpClient(
+                RestClient.builder().baseUrl(url)
+                        .messageConverters(converters -> {
+                            converters.removeIf(MappingJackson2HttpMessageConverter.class::isInstance);
+                            converters.add(0, new MappingJackson2HttpMessageConverter(ruleWireMapper));
+                        }).build(),
+                ruleWireMapper, new RuleAnalysisResponseValidator(), Duration.ofSeconds(3));
+        when(mlService.cutoffFor(transaction.getTransactionId()))
+                .thenReturn(transaction.getOccurredAt());
+        when(mlService.appliesAt(transaction.getOccurredAt())).thenReturn(true);
+        when(httpClient.analyzeV2(any(), eq(TRACE_ID))).thenAnswer(invocation ->
+                liveRule.analyzeV2(invocation.getArgument(0), TRACE_ID));
+        when(mlService.infer(transaction.getTransactionId(), transaction.getOccurredAt(),
+                MlDetectionPolicy.POLICY_VERSION, MlDetectionPolicy.MODEL_VERSION))
+                .thenAnswer(invocation -> live.infer(transaction.getTransactionId(),
+                        transaction.getOccurredAt(), MlDetectionPolicy.POLICY_VERSION,
+                        MlDetectionPolicy.MODEL_VERSION));
+
+        CompletedRuleAnalysis completed = orchestrationService.analyzeV2(
+                transaction.getTransactionId(), externalRiskSnapshot(transaction), TRACE_ID);
+        var queried = adoptedQuery.find(transaction.getTransactionId().toString());
+        assertThat(queried.adoptedResult().detectionResultId())
+                .isEqualTo(completed.detectionResultId());
+        assertThat(queried.adoptedResult().modelSha256())
+                .isEqualTo(MlDetectionPolicy.MODEL_SHA256);
+        assertThat(queried.adoptedResult().mlEvidence()).hasSize(1);
+        assertThat(queried.adoptedResult().riskScore())
+                .isEqualTo(MlDetectionPolicy.finalScore(
+                        queried.adoptedResult().ruleScore(),
+                        queried.adoptedResult().mlContribution()));
+        assertThat(queried.adoptedResult().ruleScore()).isEqualTo(15);
+        assertThat(queried.adoptedResult().mlContribution()).isEqualTo(35);
+        assertThat(queried.adoptedResult().riskScore()).isEqualTo(50);
+        var finalized = riskResponseFinalizationService.finalizeRiskResponse(
+                transaction.getTransactionId());
+        assertThat(finalized.adoptedDetectionResultId())
+                .isEqualTo(completed.detectionResultId());
+        assertThat(finalized.processingStatus())
+                .isEqualTo(TransactionProcessingStatus.ADDITIONAL_AUTH_REQUIRED);
+        assertThat(finalized.caseId()).isNotNull();
+        assertThat(adoptedQuery.find(transaction.getTransactionId().toString())
+                .adoptedResult().riskScore()).isEqualTo(completed.riskScore());
     }
 
     @Test
@@ -509,14 +704,21 @@ class RuleAnalysisOrchestrationIntegrationTest
     }
 
     private FinancialTransaction saveTransaction() {
+        return saveTransaction(UUID.randomUUID());
+    }
+
+    private FinancialTransaction saveTransaction(UUID transactionId) {
+        return saveTransaction(transactionId, Instant.now()
+                .minus(1, ChronoUnit.MINUTES).truncatedTo(ChronoUnit.MICROS));
+    }
+
+    private FinancialTransaction saveTransaction(UUID transactionId, Instant occurredAt) {
         return transactionRepository.saveAndFlush(new FinancialTransaction(
-                UUID.randomUUID(),
+                transactionId,
                 TransactionType.ACCOUNT_TRANSFER,
                 new BigDecimal("10000000"),
                 "KRW",
-                Instant.now()
-                        .minus(1, ChronoUnit.MINUTES)
-                        .truncatedTo(ChronoUnit.MICROS),
+                occurredAt,
                 "cust_ref_rule_orchestration",
                 "acct_ref_rule_orchestration_sender",
                 "acct_ref_rule_orchestration_recipient",

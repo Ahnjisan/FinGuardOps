@@ -1445,3 +1445,16 @@ DB 거래만 commit한다. Dispatcher는 canonical event를 Kafka로 at-least-on
 원자적이지 않다. 격리는 논리적 운영 기록이며 DLQ 삭제나 offset 변경이 아니다.
 Kafka/Polling 시작 경로, 발행 ack, 실행·리포트 최종 상태는 별개의 관측값이다.
 거래·사건 상태와 업무 Audit, #363 BLOCKED outbox 재대기 책임은 변경하지 않는다.
+
+## Issue #380 로컬 Rule·ML 채택 경로
+
+Spring Boot는 거래 접수와 External Risk 조회 뒤 기존 Rule v2 응답을 검증하고,
+거래 `occurredAt` cutoff와 고정된 정책·Feature·모델 버전으로 FastAPI ML 추론을 호출한다.
+FastAPI는 확률과 제한된 Reason Code만 반환하며 거래·사건 상태를 변경하지 않는다.
+Spring Boot가 Rule 원점수와 ML 기여도를 결합해 DetectionResult와 RULE/ML Evidence를
+한 트랜잭션에서 채택하고 최종 등급으로 위험 대응·사건 생성을 결정한다.
+ML 실패는 분석과 거래의 FAILED 상태로 전파하며 점수·사건을 만들지 않는다.
+기존 Rule 결과와 멱등 완료 Snapshot은 재평가하지 않는다.
+5000bp 기준과 최대 40점 가산은 합성 데이터 전용 로컬 검증 정책이다.
+세부 계약은 [fraud-ml-inference-api.md](../03-api/fraud-ml-inference-api.md)와
+[ML_BASELINE.md](../../ai-service/ML_BASELINE.md)를 따른다.

@@ -1081,3 +1081,27 @@ The Service verifier runs the Rule v1 publication through `docker compose run --
 For the existing recovery receipt, Cleanup first validates the one-off's full Docker ID, exact Service project and backend service, receipt-bound run/repository/source/revision labels, owned backend image reference and ID, publication command, environment, and runtime configuration. The regular backend container supplies the expected inherited configuration. A name or project label alone grants no removal authority. Any mismatch fails closed with `RESOURCE_CLEANUP_FAILED`; do not use a manual `docker rm`, `compose down --remove-orphans`, image prune, or receipt deletion to bypass it.
 
 After code and counterexample tests pass, run the official `-Mode Cleanup` once with the recovery receipt still present. It removes verified project resources first, then owned unique images, audits both projects and the browser container, and deletes the receipt last. If Cleanup fails, preserve the receipt and remaining resources for another read-only diagnosis; do not retry or delete more resources until the fixed failure boundary is understood. This recovery does not establish why the original Service subprocess failed and does not count as a successful Prepare → Service → Run Gate.
+
+## Issue #380 Rule+ML local Browser Gate
+
+The official `Prepare → Validate → Service → Run` lifecycle remains the owner of
+images, receipts, the fixed Run Compose project, and cleanup. With the local ML
+profile enabled, the existing Service and Run ingestion fixtures retain their
+Rule scores and business responses but persist one additional ML Evidence row
+with zero contribution. Their expected row cardinality is three Evidence rows.
+
+The Run Browser suite then publishes RuleVersion 2 and creates a separate
+synthetic transaction through the public API. Twelve preceding behavior events
+produce an applied `fraud-logistic-v2` result. The Run fixture checks External
+Risk/Rule/ML call deltas, pinned cutoff and SHA-256, Rule 85 + ML 35 = capped
+100/CRITICAL, HELD, four RULE plus one ML Evidence, one linked OPEN case, four
+Audit rows, and a completed idempotent replay without another call or row.
+The same Run project creates a separate transaction with 1001 preceding events;
+ML must fail explicitly with `ML_EVENT_LIMIT_EXCEEDED`, public 503, no adopted
+result, Evidence, case, risk response or business Audit. The analyst signs in
+through real Keycloak and reads the normal transaction, adopted result, case,
+and the failed transaction in the production UI. The existing USER permission,
+case workflow and AI report Browser tests still run. The Ollama response in
+this Gate is a local mock and is not a real Qwen result. All model metrics and
+the 5000bp/40 point score rule are synthetic local validation, not measured
+financial fraud detection performance.

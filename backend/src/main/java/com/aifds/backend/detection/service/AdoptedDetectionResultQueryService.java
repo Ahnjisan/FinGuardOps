@@ -3,9 +3,11 @@ package com.aifds.backend.detection.service;
 import com.aifds.backend.detection.dto.AdoptedDetectionResultItemResponse;
 import com.aifds.backend.detection.dto.AdoptedDetectionResultResponse;
 import com.aifds.backend.detection.dto.AdoptedRuleEvidenceResponse;
+import com.aifds.backend.detection.dto.AdoptedMlEvidenceResponse;
 import com.aifds.backend.detection.entity.DetectionAnalysisStatus;
 import com.aifds.backend.detection.entity.DetectionEvidenceType;
 import com.aifds.backend.detection.entity.DetectionResult;
+import com.aifds.backend.detection.ml.MlDetectionPolicy;
 import com.aifds.backend.detection.repository.DetectionEvidenceRepository;
 import com.aifds.backend.detection.repository.DetectionResultRepository;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
@@ -73,7 +75,11 @@ public class AdoptedDetectionResultQueryService {
                     availability,
                     latest == null ? null : latest.getDetectionResultVersion(),
                     latest == null ? null : latest.getAnalysisStatus().name(),
-                    item
+                    item,
+                    latest != null && latest.getAnalysisStatus() == DetectionAnalysisStatus.FAILED
+                            && latest.getFailureCode() != null
+                            && latest.getFailureCode().startsWith("ML_")
+                            ? latest.getFailureCode() : null
             );
         } catch (DataAccessException exception) {
             if (hasCause(exception, QueryTimeoutException.class)) {
@@ -105,11 +111,37 @@ public class AdoptedDetectionResultQueryService {
                         row.getRuleCode(), row.getRuleVersion(),
                         row.getReasonCode(), row.getScoreContribution()))
                 .toList();
+        var mlRows = evidence.findAllByDetectionResult_IdAndEvidenceTypeOrderBySortOrderAscIdAsc(
+                adopted.getId(), DetectionEvidenceType.ML);
+        List<AdoptedMlEvidenceResponse> ml = mlRows.stream()
+                .map(row -> new AdoptedMlEvidenceResponse(row.getReasonCode(),
+                        row.getScoreContribution(),
+                        row.getObservationSummary().path("probabilityBasisPoints").asInt(-1)))
+                .toList();
+        boolean applied = adopted.getMlContribution() != null;
+        if (applied) {
+            if (ml.size() != 1 || adopted.getRuleRiskScore() == null
+                    || adopted.getMlProbabilityBasisPoints() == null
+                    || ml.get(0).scoreContribution() != adopted.getMlContribution()
+                    || ml.get(0).probabilityBasisPoints() != adopted.getMlProbabilityBasisPoints()
+                    || adopted.getRiskScore() != Math.min(100,
+                        adopted.getRuleRiskScore() + adopted.getMlContribution())
+                    || adopted.getRiskLevel() != MlDetectionPolicy.riskLevel(
+                        adopted.getRiskScore())) {
+                throw new IllegalStateException("Adopted ML result is inconsistent");
+            }
+        } else if (!ml.isEmpty()) {
+            throw new IllegalStateException("Rule-only result has ML evidence");
+        }
         return new AdoptedDetectionResultItemResponse(
                 adopted.getDetectionResultId(), adopted.getDetectionResultVersion(),
                 adopted.getRiskLevel().name(), adopted.getRiskScore(),
                 adopted.getAnalysisCompletedAt(), adopted.getRuleSetVersion(),
-                adopted.getScoringPolicyVersion(), rules
+                adopted.getScoringPolicyVersion(), rules,
+                applied ? adopted.getRuleRiskScore() : adopted.getRiskScore(),
+                adopted.getMlContribution(), applied ? "APPLIED" : "RULE_ONLY",
+                applied ? adopted.getModelVersion() : null,
+                adopted.getMlFeatureVersion(), adopted.getModelSha256(), ml
         );
     }
 

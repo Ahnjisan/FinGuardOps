@@ -27,6 +27,9 @@ export function AdoptedDetectionPanel({ state, onRetry }: {
       {state.status === "idle" && <p>조회할 수 있는 거래가 없습니다.</p>}
       {state.status === "loading" && <p>채택된 탐지 결과를 불러오는 중입니다…</p>}
       {state.status === "success" && <p>{AVAILABILITY_TEXT[state.data.availability]}</p>}
+      {state.status === "success" && state.data.latestAnalysisStatus === "FAILED" &&
+        state.data.latestFailureCode && <p>최근 ML 분석 실패: {state.data.latestFailureCode}.
+          이 실패는 채택 결과의 점수와 별개입니다.</p>}
     </div>
     {state.status === "success" && state.data.adoptedResult !== null && <>
       {state.data.latestDetectionResultVersion !== null &&
@@ -42,6 +45,17 @@ export function AdoptedDetectionPanel({ state, onRetry }: {
           {formatKstDateTime(state.data.adoptedResult.analysisCompletedAt)} KST</time></dd></div>
         <div><dt>규칙 집합 버전</dt><dd className="facts__ref">{state.data.adoptedResult.ruleSetVersion}</dd></div>
         <div><dt>점수 정책 버전</dt><dd className="facts__ref">{state.data.adoptedResult.scoringPolicyVersion}</dd></div>
+        {state.data.adoptedResult.ruleScore !== undefined &&
+          <div><dt>Rule 원점수</dt><dd>{state.data.adoptedResult.ruleScore} / 100</dd></div>}
+        {state.data.adoptedResult.mlStatus !== undefined &&
+          <div><dt>사기 탐지 ML 상태</dt><dd>{state.data.adoptedResult.mlStatus === "APPLIED" ?
+            "결합됨" : "Rule 전용 결과"}</dd></div>}
+        {state.data.adoptedResult.mlStatus === "APPLIED" && <>
+          <div><dt>ML 기여도</dt><dd>+{state.data.adoptedResult.mlContribution}점 (최종 100점 상한)</dd></div>
+          <div><dt>사기 탐지 모델 버전</dt><dd className="facts__ref">{state.data.adoptedResult.modelVersion}</dd></div>
+          <div><dt>ML Feature 버전</dt><dd>{state.data.adoptedResult.mlFeatureVersion}</dd></div>
+          <div><dt>모델 SHA-256</dt><dd className="facts__ref">{state.data.adoptedResult.modelSha256}</dd></div>
+        </>}
       </dl>
       <h4>채택 결과의 규칙 근거</h4>
       {state.data.adoptedResult.ruleEvidence.length === 0 ? <p>저장된 매칭 RULE 근거가 없습니다.</p> :
@@ -51,6 +65,12 @@ export function AdoptedDetectionPanel({ state, onRetry }: {
             Reason Code: {rule.reasonCode}<br />개별 기여도: {rule.scoreContribution}
           </li>)}</ol>}
       <p className="adopted-detection__note">개별 기여도의 합은 최종 위험 점수와 다를 수 있습니다.</p>
+      {state.data.adoptedResult.mlStatus === "APPLIED" && <>
+        <h4>채택 결과의 사기 탐지 ML 근거</h4>
+        <p>5000bp 기준·최대 40점 가산은 합성 데이터로 검증하는 로컬 정책입니다. 실제 금융 사기 성능이나 운영 오탐 기준이 아닙니다.</p>
+        <ol>{state.data.adoptedResult.mlEvidence?.map((item) =>
+          <li key={item.reasonCode}>{item.reasonCode} · 확률 {item.probabilityBasisPoints}bp · 기여 +{item.scoreContribution}점</li>)}</ol>
+      </>}
     </>}
     {(state.status === "forbidden" || state.status === "not-found" ||
       state.status === "authentication-required" || state.status === "error") &&

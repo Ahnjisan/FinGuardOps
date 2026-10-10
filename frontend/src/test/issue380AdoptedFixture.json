@@ -1,0 +1,65 @@
+{
+  "adopted": {
+    "adoptedResult": {
+      "analysisCompletedAt": "2026-10-10T00:55:47.001604Z",
+      "detectionResultId": "c5e6cfe7-dae9-48dd-8d6c-6b518c12e8e5",
+      "detectionResultVersion": 1,
+      "mlContribution": 35,
+      "mlEvidence": [
+        {
+          "probabilityBasisPoints": 9364,
+          "reasonCode": "ML_RISK_SIGNAL",
+          "scoreContribution": 35
+        }
+      ],
+      "mlFeatureVersion": "fraud-feature-v1",
+      "mlStatus": "APPLIED",
+      "modelSha256": "42344d398008babdd6a0404c750b24f1f27f1260aeac65851195d81500a876af",
+      "modelVersion": "fraud-logistic-v2",
+      "riskLevel": "CRITICAL",
+      "riskScore": 100,
+      "ruleEvidence": [
+        {
+          "reasonCode": "TRANSFER_ABSOLUTE_HIGH_AMOUNT",
+          "ruleCode": "TRANSFER_ABSOLUTE_HIGH_AMOUNT",
+          "ruleVersion": "2",
+          "scoreContribution": 15
+        },
+        {
+          "reasonCode": "RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT",
+          "ruleCode": "RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT",
+          "ruleVersion": "2",
+          "scoreContribution": 20
+        },
+        {
+          "reasonCode": "RECENT_SECURITY_CHANGE_HIGH_AMOUNT",
+          "ruleCode": "RECENT_SECURITY_CHANGE_HIGH_AMOUNT",
+          "ruleVersion": "2",
+          "scoreContribution": 40
+        },
+        {
+          "reasonCode": "RECENT_BENEFICIARY_TRANSFER",
+          "ruleCode": "RECENT_BENEFICIARY_TRANSFER",
+          "ruleVersion": "2",
+          "scoreContribution": 10
+        }
+      ],
+      "ruleScore": 85,
+      "ruleSetVersion": "9ca9d86142297a5569cb8b03fc66213c2776640ab28bef0f1b690ddb6c42b896",
+      "scoringPolicyVersion": "rule-ml-policy-v1"
+    },
+    "availability": "AVAILABLE",
+    "latestAnalysisStatus": "COMPLETED",
+    "latestDetectionResultVersion": 1,
+    "latestFailureCode": null,
+    "transactionId": "e8a5d507-a3bd-43e9-8095-bd4a9a319ab1"
+  },
+  "failed": {
+    "adoptedResult": null,
+    "availability": "FAILED",
+    "latestAnalysisStatus": "FAILED",
+    "latestDetectionResultVersion": 1,
+    "latestFailureCode": "ML_MODEL_HASH_MISMATCH",
+    "transactionId": "c9abd926-1a46-47e7-86e2-b75d61536821"
+  }
+}

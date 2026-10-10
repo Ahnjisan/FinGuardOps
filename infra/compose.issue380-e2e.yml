@@ -1,0 +1,9 @@
+services:
+  ai-service:
+    image: ${FINGUARDOPS_ISSUE380_AI_IMAGE:?issue 380 image required}
+  external-risk-mock:
+    image: ${FINGUARDOPS_ISSUE380_AI_IMAGE:?issue 380 image required}
+  backend:
+    image: ${FINGUARDOPS_ISSUE380_BACKEND_IMAGE:?issue 380 image required}
+    environment:
+      JAVA_TOOL_OPTIONS: -Xmx768m

@@ -59,6 +59,8 @@ async def _request_validation_error(
     request: Request,
     exc: RequestValidationError,
 ) -> JSONResponse:
+    if request.url.path == "/api/v1/ml-inference":
+        return JSONResponse(status_code=400, content={"code": "ML_INVALID_REQUEST"})
     trace_id = _trace_id(request)
     logger.warning(
         "Rule analysis request failed traceId=%s code=INVALID_REQUEST category=wire_validation",

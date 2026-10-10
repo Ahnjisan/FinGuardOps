@@ -30,6 +30,7 @@ services:
         com.finguardops.e2e.repository-id: ${FINGUARDOPS_E2E_REPOSITORY_ID:?FINGUARDOPS_E2E_REPOSITORY_ID is required}
         com.finguardops.e2e.image-role: backend
     environment:
+      JAVA_TOOL_OPTIONS: -Xmx768m
       FINGUARDOPS_SECURITY_ISSUER: https://localhost:8443/realms/finguardops-local
       FINGUARDOPS_SECURITY_JWK_SET_URI: http://127.0.0.1:8082/realms/finguardops-local/protocol/openid-connect/certs
       FINGUARDOPS_SECURITY_INSECURE_LOOPBACK_JWK_ALLOWED: "true"

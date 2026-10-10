@@ -74,6 +74,7 @@ class AdoptedDetectionResultQueryServiceTest {
         when(adopted.getAnalysisStatus()).thenReturn(DetectionAnalysisStatus.COMPLETED);
         when(adopted.getRiskLevel()).thenReturn(RiskLevel.HIGH);
         when(adopted.getRiskScore()).thenReturn(55);
+        when(adopted.getMlContribution()).thenReturn(null);
         when(adopted.getAnalysisCompletedAt()).thenReturn(Instant.parse("2026-07-23T01:15:32Z"));
         when(adopted.getRuleSetVersion()).thenReturn("rule-v1");
         when(adopted.getScoringPolicyVersion()).thenReturn("scoring-policy-v1");
@@ -94,6 +95,8 @@ class AdoptedDetectionResultQueryServiceTest {
         assertThat(response.adoptedResult().detectionResultVersion()).isEqualTo(1);
         assertThat(response.adoptedResult().riskScore()).isEqualTo(55);
         assertThat(response.adoptedResult().ruleEvidence()).hasSize(1);
+        assertThat(response.adoptedResult().mlStatus()).isEqualTo("RULE_ONLY");
+        assertThat(response.adoptedResult().mlEvidence()).isEmpty();
         verify(evidence).findAllByDetectionResult_IdAndEvidenceTypeOrderBySortOrderAscIdAsc(
                 30L, DetectionEvidenceType.RULE);
     }

@@ -38,4 +38,21 @@ public interface BehaviorEventRepository extends JpaRepository<BehaviorEvent, Lo
             @Param("toInclusive") Instant toInclusive,
             Pageable pageable
     );
+
+    @Query("""
+            SELECT event FROM BehaviorEvent event
+            WHERE event.externalCustomerRef = :externalCustomerRef
+              AND event.eventType IN :eventTypes
+              AND event.occurredAt >= :fromInclusive
+              AND event.occurredAt <= :toInclusive
+              AND event.createdAt <= :toInclusive
+            ORDER BY event.occurredAt DESC, event.eventId ASC
+            """)
+    List<BehaviorEvent> findForMlEvaluation(
+            @Param("externalCustomerRef") String externalCustomerRef,
+            @Param("eventTypes") Set<BehaviorEventType> eventTypes,
+            @Param("fromInclusive") Instant fromInclusive,
+            @Param("toInclusive") Instant toInclusive,
+            Pageable pageable
+    );
 }

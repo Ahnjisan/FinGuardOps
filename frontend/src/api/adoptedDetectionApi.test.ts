@@ -3,6 +3,7 @@ import { createFakeAuthClient } from "../test/fakeAuthClient";
 import { jsonResponse, mockFetchOnce } from "../test/mockFetch";
 import { InvalidResponseError } from "./errors";
 import { fetchAdoptedDetection, isAdoptedDetectionResponse } from "./adoptedDetectionApi";
+import issue380Fixture from "../test/issue380AdoptedFixture.json";
 
 const transactionId = "2f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430001";
 const resultId = "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430101";
@@ -19,6 +20,28 @@ beforeEach(() => vi.stubEnv("VITE_API_BASE_URL", "http://localhost:8080"));
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 
 describe("adopted detection response", () => {
+  it("accepts the same adopted and failed responses captured in the local transaction E2E", () => {
+    expect(isAdoptedDetectionResponse(issue380Fixture.adopted)).toBe(true);
+    expect(isAdoptedDetectionResponse(issue380Fixture.failed)).toBe(true);
+    expect(isAdoptedDetectionResponse({ ...issue380Fixture.adopted, adoptedResult: {
+      ...issue380Fixture.adopted.adoptedResult, riskScore: 99,
+    } })).toBe(false);
+  });
+  it("validates a combined Rule and ML result and rejects inconsistent totals", () => {
+    const combined = { ...available, latestFailureCode: null, adoptedResult: {
+      ...adopted, riskLevel: "CRITICAL", riskScore: 80, scoringPolicyVersion: "rule-ml-policy-v1",
+      ruleScore: 55, mlContribution: 25, mlStatus: "APPLIED",
+      modelVersion: "fraud-logistic-v1", mlFeatureVersion: "fraud-feature-v1",
+      modelSha256: "a".repeat(64),
+      mlEvidence: [{ reasonCode: "ML_RISK_SIGNAL", scoreContribution: 25,
+        probabilityBasisPoints: 8125 }],
+    } };
+    expect(isAdoptedDetectionResponse(combined)).toBe(true);
+    expect(isAdoptedDetectionResponse({ ...combined, adoptedResult:
+      { ...combined.adoptedResult, riskScore: 79 } })).toBe(false);
+    expect(isAdoptedDetectionResponse({ ...combined, adoptedResult:
+      { ...combined.adoptedResult, riskLevel: "HIGH" } })).toBe(false);
+  });
   it("accepts an older adopted result while a later analysis is running", () => {
     expect(isAdoptedDetectionResponse(available)).toBe(true);
   });
