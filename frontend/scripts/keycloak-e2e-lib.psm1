@@ -1439,7 +1439,7 @@ function ConvertFrom-E2ERunFixtureState {
             $stateText.EndsWith("`n`n", [System.StringComparison]::Ordinal)) {
             throw 'RUN_FIXTURE_STATE_INVALID'
         }
-        $state = $stateText | ConvertFrom-Json
+        $state = $stateText | ConvertFrom-Json -DateKind String
         $canonical = ($state | ConvertTo-Json -Compress -Depth 100) + "`n"
         if (-not [string]::Equals($stateText, $canonical, [System.StringComparison]::Ordinal)) {
             throw 'RUN_FIXTURE_STATE_INVALID'
