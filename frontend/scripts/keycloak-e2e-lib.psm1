@@ -5506,7 +5506,8 @@ function Assert-E2EComposePortSecurityContract($Document, $Contract) {
             $protocol = Get-E2EExactMember $port 'protocol'
             $hostIp = Get-E2EExactMember $port 'host_ip'
             $published = Get-E2EExactMember $port 'published'
-            if ($target -isnot [int] -or $target -lt 1 -or $target -gt 65535 -or
+            if (($target -isnot [int] -and $target -isnot [long]) -or
+                $target -lt 1 -or $target -gt 65535 -or
                 $protocol -isnot [string] -or $protocol -cnotmatch '\A(?:tcp|udp|sctp)\z' -or
                 $hostIp -isnot [string] -or $published -isnot [string] -or
                 $published -cnotmatch '\A[0-9]+\z') { throw 'RESOURCE_CLEANUP_FAILED' }
@@ -5827,7 +5828,7 @@ function Get-E2EVolumeIdentity {
 
     $encoded = Invoke-NativeStdout { & docker volume inspect --format '{{json .}}' $Name }
     if ($LASTEXITCODE -ne 0) { throw 'RESOURCE_CLEANUP_FAILED' }
-    try { $document = $encoded | ConvertFrom-Json } catch { throw 'RESOURCE_CLEANUP_FAILED' }
+    try { $document = $encoded | ConvertFrom-Json -DateKind String } catch { throw 'RESOURCE_CLEANUP_FAILED' }
     if ($null -eq $document -or $document -is [array] -or $document -is [string]) {
         throw 'RESOURCE_CLEANUP_FAILED'
     }
