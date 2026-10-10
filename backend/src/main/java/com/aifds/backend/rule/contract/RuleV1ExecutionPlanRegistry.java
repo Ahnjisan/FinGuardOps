@@ -65,6 +65,13 @@ public final class RuleV1ExecutionPlanRegistry {
                     EXECUTION_WINDOW_SECONDS,
                     Set.of(),
                     Set.of(RequiredBehaviorEventType.BENEFICIARY_REGISTERED)
+            ),
+            RuleV1ContractRegistry.EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT,
+            new RuleCapability(
+                    CanonicalRuleId.R005, 5,
+                    RuleV1ContractRegistry.EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT,
+                    40, ScoreGroup.EXTERNAL_RECIPIENT, 86_400,
+                    Set.of(), Set.of()
             )
     );
 
@@ -111,6 +118,10 @@ public final class RuleV1ExecutionPlanRegistry {
                         "Rule v1 amountThreshold is not executable for "
                                 + ruleCode
                 );
+            }
+        } else if (capability.ruleId() == CanonicalRuleId.R005) {
+            if (condition.path("freshnessSeconds").intValue() != EXECUTION_WINDOW_SECONDS) {
+                throw new IllegalArgumentException("R005 freshnessSeconds is invalid");
             }
         } else if (condition.path("windowSeconds").intValue()
                 != EXECUTION_WINDOW_SECONDS) {
@@ -188,12 +199,15 @@ public final class RuleV1ExecutionPlanRegistry {
         R001,
         R002,
         R003,
-        R004
+        R004,
+        R005
     }
 
     public enum ScoreGroup {
         AMOUNT,
-        SECURITY
+        SECURITY,
+        BENEFICIARY,
+        EXTERNAL_RECIPIENT
     }
 
     public enum RequiredBehaviorEventType {

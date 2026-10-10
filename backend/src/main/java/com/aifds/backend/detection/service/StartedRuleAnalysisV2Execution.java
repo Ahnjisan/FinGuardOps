@@ -8,8 +8,14 @@ import java.util.Objects;
 
 public record StartedRuleAnalysisV2Execution(
         StartedRuleAnalysis startedAnalysis,
-        RuleAnalysisRequestV2 request
+        RuleAnalysisRequestV2 request,
+        boolean priorApprovedRecipientTransfer
 ) {
+
+    public StartedRuleAnalysisV2Execution(
+            StartedRuleAnalysis startedAnalysis, RuleAnalysisRequestV2 request) {
+        this(startedAnalysis, request, false);
+    }
 
     public StartedRuleAnalysisV2Execution {
         Objects.requireNonNull(

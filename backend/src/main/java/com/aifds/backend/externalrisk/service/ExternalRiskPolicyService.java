@@ -31,6 +31,7 @@ public final class ExternalRiskPolicyService {
 
     private final ExternalRiskLookupPort lookupPort;
     private final Clock clock;
+    private final String expectedProviderCode;
     private volatile TransactionProcessingMetricsRecorder metricsRecorder;
 
     public ExternalRiskPolicyService(
@@ -49,11 +50,25 @@ public final class ExternalRiskPolicyService {
             Clock clock,
             TransactionProcessingMetricsRecorder metricsRecorder
     ) {
+        this(lookupPort, clock, metricsRecorder, null);
+    }
+
+    public ExternalRiskPolicyService(
+            ExternalRiskLookupPort lookupPort,
+            Clock clock,
+            TransactionProcessingMetricsRecorder metricsRecorder,
+            String expectedProviderCode
+    ) {
         this.lookupPort = Objects.requireNonNull(
                 lookupPort,
                 "lookupPort must not be null"
         );
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
+        if (expectedProviderCode != null
+                && !ExternalRiskContracts.isProviderCode(expectedProviderCode)) {
+            throw new IllegalArgumentException("expectedProviderCode is invalid");
+        }
+        this.expectedProviderCode = expectedProviderCode;
         this.metricsRecorder = metricsRecorder == null
                 ? TransactionProcessingMetricsRecorder.noop()
                 : metricsRecorder;
@@ -175,6 +190,8 @@ public final class ExternalRiskPolicyService {
     ) {
         if (response == null
                 || !ExternalRiskContracts.isProviderCode(response.providerCode())
+                || (expectedProviderCode != null
+                    && !expectedProviderCode.equals(response.providerCode()))
                 || response.providerAsOf() == null
                 || response.providerAsOf().getNano() % 1_000 != 0
                 || !ExternalRiskContracts.hasValidUniqueMatches(

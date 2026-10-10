@@ -186,6 +186,127 @@ def _valid_v2_request() -> dict[str, object]:
     return payload
 
 
+def _scn003_request(
+    *, recipient_match: bool, provider_as_of: str = "2026-07-22T12:00:00Z"
+) -> dict[str, object]:
+    payload = _valid_v2_request()
+    transaction = payload["transaction"]
+    assert isinstance(transaction, dict)
+    transaction["amount"] = "1000"
+    payload["behaviorEvents"] = []
+    versions = payload["ruleVersions"]
+    assert isinstance(versions, list)
+    for version in versions:
+        assert isinstance(version, dict)
+        version["versionNumber"] = 3
+    versions.append(
+        {
+            "fraudRuleId": "10000000-0000-4000-8000-000000000005",
+            "ruleCode": "EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT",
+            "lifecycleStatus": "ACTIVE",
+            "ruleVersionId": "20000000-0000-4000-8000-000000000005",
+            "versionNumber": 1,
+            "status": "PUBLISHED",
+            "reasonCode": "EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT",
+            "weight": 40,
+            "conditionDefinition": {
+                "subjectType": "RECIPIENT_ACCOUNT",
+                "riskType": "SUSPICIOUS_ACCOUNT",
+                "reasonCode": "SUSPICIOUS_RECIPIENT_ACCOUNT",
+                "freshnessSeconds": 86400,
+            },
+            "effectiveFrom": "2026-07-22T00:00:00Z",
+            "effectiveTo": None,
+        }
+    )
+    external = payload["externalRisk"]
+    assert isinstance(external, dict)
+    external["providerAsOf"] = provider_as_of
+    external["matches"] = (
+        [_external_match("RECIPIENT_ACCOUNT", "SUSPICIOUS_ACCOUNT", "SUSPICIOUS_RECIPIENT_ACCOUNT")]
+        if recipient_match
+        else []
+    )
+    external["policyResult"] = "MATCHED" if recipient_match else "UNMATCHED"
+    return payload
+
+
+@pytest.mark.parametrize(("matched", "score", "level"), [(True, 40, "MEDIUM"), (False, 0, "LOW")])
+def test_scn003_exact_recipient_match_scores_independent_group(matched, score, level) -> None:
+    mapped = _map_v2(_scn003_request(recipient_match=matched))
+    registry = create_default_rule_evaluator_registry()
+    plan = RuleExecutionPlanBuilder(registry).build(
+        mapped.evaluation_cutoff_at, mapped.rule_versions
+    )
+    results = RuleExecutionPlanRunner(RuleExecutionOrchestrator(registry)).execute(
+        plan, mapped.rule_input
+    )
+    scored = RuleScoringCalculator.calculate(plan, results)
+    transformed = RuleEvidenceTransformer.transform(plan, results, scored)
+    assert scored.scoring_policy_version == "scoring-policy-v3"
+    assert scored.risk_score == score
+    assert scored.risk_level.value == level
+    assert scored.group_summaries[-1].cap == 40
+    assert [item.rule_id for item in transformed.evidence] == ([RuleId.R005] if matched else [])
+
+
+def test_scn003_rejects_stale_and_mixed_rule_set() -> None:
+    with pytest.raises(RuleAnalysisRequestError):
+        _map_v2(_scn003_request(recipient_match=True, provider_as_of="2026-07-22T11:59:59Z"))
+    payload = _scn003_request(recipient_match=True)
+    versions = payload["ruleVersions"]
+    assert isinstance(versions, list)
+    versions[0]["versionNumber"] = 2
+    with pytest.raises(RuleAnalysisRequestError):
+        _map_v2(payload)
+
+
+def test_scn003_recipient_match_and_recent_registration_reach_high() -> None:
+    payload = _scn003_request(recipient_match=True)
+    payload["behaviorEvents"] = [_valid_request()["behaviorEvents"][3]]  # type: ignore[index]
+    mapped = _map_v2(payload)
+    registry = create_default_rule_evaluator_registry()
+    plan = RuleExecutionPlanBuilder(registry).build(
+        mapped.evaluation_cutoff_at, mapped.rule_versions
+    )
+    results = RuleExecutionPlanRunner(RuleExecutionOrchestrator(registry)).execute(
+        plan, mapped.rule_input
+    )
+    scored = RuleScoringCalculator.calculate(plan, results)
+    assert scored.risk_score == 50
+    assert scored.risk_level.value == "HIGH"
+    assert [
+        item.rule_id for item in RuleEvidenceTransformer.transform(plan, results, scored).evidence
+    ] == [RuleId.R004, RuleId.R005]
+
+
+def test_scn003_sender_only_match_does_not_score_r005() -> None:
+    payload = _scn003_request(recipient_match=False)
+    external = payload["externalRisk"]
+    assert isinstance(external, dict)
+    external["matches"] = [
+        _external_match("SENDER_ACCOUNT", "SUSPICIOUS_ACCOUNT", "SUSPICIOUS_SENDER_ACCOUNT")
+    ]
+    external["policyResult"] = "MATCHED"
+    mapped = _map_v2(payload)
+    registry = create_default_rule_evaluator_registry()
+    plan = RuleExecutionPlanBuilder(registry).build(
+        mapped.evaluation_cutoff_at, mapped.rule_versions
+    )
+    results = RuleExecutionPlanRunner(RuleExecutionOrchestrator(registry)).execute(
+        plan, mapped.rule_input
+    )
+    assert RuleScoringCalculator.calculate(plan, results).risk_score == 0
+
+
+def test_scn003_cutoff_boundaries_are_inclusive_and_future_provider_time_fails() -> None:
+    for provider_as_of in ("2026-07-22T12:00:00Z", "2026-07-23T12:00:00Z"):
+        assert _map_v2(_scn003_request(recipient_match=True, provider_as_of=provider_as_of))
+    payload = _scn003_request(recipient_match=True, provider_as_of="2026-07-23T12:00:00.000001Z")
+    with pytest.raises(RuleAnalysisRequestError):
+        _map_v2(payload)
+
+
 def _rule_version(
     number: int,
     rule_code: str,
@@ -706,7 +827,7 @@ def test_v1_and_v2_map_to_the_exact_same_rule_execution_input() -> None:
     v2_input = _map_v2(_valid_v2_request())
 
     assert v2_input == v1_input
-    assert not hasattr(v2_input.rule_input, "external_risk")
+    assert v2_input.rule_input.external_risk is None
 
 
 @pytest.mark.parametrize(

@@ -4,6 +4,7 @@ import com.aifds.backend.detection.entity.RiskLevel;
 import com.aifds.backend.detection.ml.MlDetectionPolicy;
 import com.aifds.backend.detection.ml.MlDetectionService;
 import com.aifds.backend.externalrisk.domain.ExternalRiskSnapshot;
+import com.aifds.backend.rule.client.dto.ExternalRiskSnapshotRequest;
 import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.rule.client.RuleAnalysisClientException;
 import com.aifds.backend.rule.client.RuleAnalysisHttpClient;
@@ -119,6 +120,8 @@ public class RuleAnalysisOrchestrationService {
                         started.analysisTraceId()
                 ),
                 metricStartedAt,
+                false,
+                null,
                 false
         );
     }
@@ -151,6 +154,8 @@ public class RuleAnalysisOrchestrationService {
                     analysisTraceId,
                     clock.instant()
             );
+        } catch (com.aifds.backend.externalrisk.domain.ExternalRiskLookupException original) {
+            throw original;
         } catch (RuntimeException original) {
             recordRuleFailure(START_FAILED, metricStartedAt);
             throw original;
@@ -164,7 +169,9 @@ public class RuleAnalysisOrchestrationService {
                         started.analysisTraceId()
                 ),
                 metricStartedAt,
-                mlEnabled
+                mlEnabled,
+                execution.request().externalRisk(),
+                execution.priorApprovedRecipientTransfer()
         );
     }
 
@@ -172,7 +179,9 @@ public class RuleAnalysisOrchestrationService {
             StartedRuleAnalysis started,
             Supplier<RuleAnalysisResponse> clientCall,
             long metricStartedAt,
-            boolean mlEnabled
+            boolean mlEnabled,
+            ExternalRiskSnapshotRequest externalRisk,
+            boolean priorApprovedRecipientTransfer
     ) {
         try {
             requireNoActiveTransaction();
@@ -232,7 +241,11 @@ public class RuleAnalysisOrchestrationService {
         }
 
         try {
-            if (mlResult == null) {
+            if (externalRisk != null) {
+                persistenceService.completeAndAdoptMl(started, mapped.riskScore(),
+                        mapped.riskLevel(), clock.instant(), mapped.evidenceDrafts(),
+                        mlResult, externalRisk, priorApprovedRecipientTransfer);
+            } else if (mlResult == null) {
                 persistenceService.completeAndAdopt(started, mapped.riskScore(),
                         mapped.riskLevel(), clock.instant(), mapped.evidenceDrafts());
             } else {

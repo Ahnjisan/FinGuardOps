@@ -96,6 +96,18 @@ class ExternalRiskHttpConfigurationTest {
     }
 
     @Test
+    void enabledProviderRequiresExplicitExpectedCodeAtStartup() {
+        profiled("test", ExternalRiskHttpConfiguration.HTTP_PROFILE)
+                .withPropertyValues(
+                        ExternalRiskHttpConfiguration.PROPERTY_PREFIX + ".enabled=true",
+                        ExternalRiskHttpConfiguration.PROPERTY_PREFIX
+                                + ".base-url=http://127.0.0.1:9000",
+                        ExternalRiskHttpConfiguration.PROPERTY_PREFIX
+                                + ".api-key=test-api-key")
+                .run(context -> assertThat(context).hasFailed());
+    }
+
+    @Test
     void rejectsUnapprovedProfileRemoteHttpAndInvalidProperties() {
         profiled(ExternalRiskHttpConfiguration.HTTP_PROFILE)
                 .run(context -> assertThat(context).hasFailed());
@@ -157,7 +169,9 @@ class ExternalRiskHttpConfigurationTest {
                 ExternalRiskHttpConfiguration.PROPERTY_PREFIX
                         + ".base-url=" + baseUrl,
                 ExternalRiskHttpConfiguration.PROPERTY_PREFIX
-                        + ".api-key=test-api-key"
+                        + ".api-key=test-api-key",
+                ExternalRiskHttpConfiguration.PROPERTY_PREFIX
+                        + ".expected-provider-code=PROVIDER_V1"
         );
     }
 

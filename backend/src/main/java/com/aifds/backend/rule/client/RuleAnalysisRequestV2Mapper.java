@@ -7,6 +7,9 @@ import com.aifds.backend.externalrisk.domain.ExternalRiskReasonCode;
 import com.aifds.backend.externalrisk.domain.ExternalRiskSnapshot;
 import com.aifds.backend.externalrisk.domain.ExternalRiskSubjectType;
 import com.aifds.backend.externalrisk.domain.ExternalRiskType;
+import com.aifds.backend.externalrisk.domain.ExternalRiskLookupException;
+import com.aifds.backend.externalrisk.domain.ExternalRiskFailureCategory;
+import com.aifds.backend.rule.contract.RulePolicyVersion;
 import com.aifds.backend.rule.client.dto.ExternalRiskMatchRequest;
 import com.aifds.backend.rule.client.dto.ExternalRiskSnapshotRequest;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequest;
@@ -69,6 +72,14 @@ public final class RuleAnalysisRequestV2Mapper {
         requireMicrosecond(snapshot.providerAsOf(), "providerAsOf");
         requireMicrosecond(snapshot.lookedUpAt(), "lookedUpAt");
         Instant cutoff = request.evaluationCutoffAt();
+        if (RulePolicyVersion.from(request.ruleVersions()) == 3
+                && request.transaction().recipientAccountRef() != null
+                && (snapshot.providerAsOf().isBefore(cutoff.minusSeconds(86_400))
+                    || snapshot.providerAsOf().isAfter(cutoff)
+                    || snapshot.lookedUpAt().isBefore(cutoff)
+                    || snapshot.lookupStatus() != ExternalRiskLookupStatus.SUCCEEDED)) {
+            throw new ExternalRiskLookupException(ExternalRiskFailureCategory.INVALID_RESPONSE);
+        }
         require(
                 !snapshot.providerAsOf().isAfter(cutoff),
                 "providerAsOf must not be after evaluationCutoffAt"

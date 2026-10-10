@@ -198,9 +198,12 @@ public class ExternalRiskHttpConfiguration {
     @HttpProviderEnabled
     public ExternalRiskPolicyService externalRiskPolicyService(
             ExternalRiskHttpAdapter adapter,
-            Clock clock
+            Clock clock,
+            ExternalRiskHttpProperties properties
     ) {
-        return new ExternalRiskPolicyService(adapter, clock);
+        return new ExternalRiskPolicyService(adapter, clock,
+                com.aifds.backend.observability.TransactionProcessingMetricsRecorder.noop(),
+                properties.expectedProviderCode());
     }
 
     @Bean("externalRiskHttpRuleAnalysisCoordinator")

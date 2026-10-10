@@ -24,6 +24,8 @@ public final class RuleEvidenceObservationSummary {
             RuleV1ContractRegistry.RECENT_SECURITY_CHANGE_HIGH_AMOUNT;
     public static final String RECENT_BENEFICIARY_TRANSFER =
             RuleV1ContractRegistry.RECENT_BENEFICIARY_TRANSFER;
+    public static final String EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT =
+            RuleV1ContractRegistry.EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT;
 
     private static final Pattern KRW_INTEGER_PATTERN =
             Pattern.compile("^(0|[1-9][0-9]{0,18})$");
@@ -57,7 +59,9 @@ public final class RuleEvidenceObservationSummary {
                     "beneficiaryRegisteredAt",
                     "elapsedSeconds",
                     "windowSeconds"
-            )
+            ),
+            EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT,
+            Set.of("providerCode", "providerAsOf", "lookedUpAt", "freshnessSeconds")
     );
 
     private final String reasonCode;
@@ -102,7 +106,9 @@ public final class RuleEvidenceObservationSummary {
             );
         }
 
-        requireKrwInteger(value, "observedAmount");
+        if (!EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT.equals(reasonCode)) {
+            requireKrwInteger(value, "observedAmount");
+        }
         if (value.has("amountThreshold")) {
             requireKrwInteger(value, "amountThreshold");
         }
@@ -133,6 +139,23 @@ public final class RuleEvidenceObservationSummary {
         if (value.has("windowSeconds")) {
             requirePositiveInteger(value, "windowSeconds");
         }
+        if (EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT.equals(reasonCode)) {
+            JsonNode providerCode = value.get("providerCode");
+            if (providerCode == null || !providerCode.isTextual()
+                    || providerCode.textValue().isBlank()) {
+                throw new IllegalArgumentException("providerCode must be non-empty");
+            }
+            Instant providerAsOf = requireUtcInstant(value, "providerAsOf");
+            Instant lookedUpAt = requireUtcInstant(value, "lookedUpAt");
+            requireNonNegativeInteger(value, "freshnessSeconds");
+            long freshness = Duration.between(providerAsOf, evaluationCutoffAt).getSeconds();
+            if (providerAsOf.isAfter(evaluationCutoffAt)
+                    || providerAsOf.isBefore(evaluationCutoffAt.minusSeconds(86_400))
+                    || lookedUpAt.isBefore(evaluationCutoffAt)
+                    || value.get("freshnessSeconds").longValue() != freshness) {
+                throw new IllegalArgumentException("R005 provider timing is invalid");
+            }
+        }
         rejectNestedValues(value);
         validateBehaviorTiming(reasonCode, value, evaluationCutoffAt);
 
@@ -157,6 +180,8 @@ public final class RuleEvidenceObservationSummary {
                             value,
                             "beneficiaryRegisteredAt"
                     ));
+            case EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT ->
+                    Optional.of(requireUtcInstant(value, "providerAsOf"));
             default -> Optional.empty();
         };
     }

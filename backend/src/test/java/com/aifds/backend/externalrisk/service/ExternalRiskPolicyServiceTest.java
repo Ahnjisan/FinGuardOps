@@ -52,6 +52,17 @@ class ExternalRiskPolicyServiceTest {
     private static final String TRACE_ID = "trace-ext-risk-0001";
 
     @Test
+    void configuredProviderCodeRejectsContradictoryResponse() {
+        ExternalRiskLookupPort port = request -> response(List.of(recipientMatch()));
+        assertThatThrownBy(() -> new ExternalRiskPolicyService(port, CLOCK,
+                TransactionProcessingMetricsRecorder.noop(), "EXPECTED_PROVIDER")
+                .lookup(command()))
+                .isInstanceOf(ExternalRiskLookupException.class)
+                .satisfies(error -> assertThat(((ExternalRiskLookupException) error).category())
+                        .isEqualTo(ExternalRiskFailureCategory.INVALID_RESPONSE));
+    }
+
+    @Test
     void recordsOnePolicyAttemptWithTypedOutcomeAndMonotonicDuration() {
         TransactionProcessingMetricsRecorder recorder = mock(
                 TransactionProcessingMetricsRecorder.class

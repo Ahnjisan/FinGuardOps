@@ -7,6 +7,7 @@ from finguardops_ai.rules.v1.r001 import evaluate_r001
 from finguardops_ai.rules.v1.r002 import evaluate_r002
 from finguardops_ai.rules.v1.r003 import evaluate_r003
 from finguardops_ai.rules.v1.r004 import evaluate_r004
+from finguardops_ai.rules.v1.r005 import evaluate_r005
 from finguardops_ai.rules.v1.registry import (
     DuplicateRuleIdError,
     RuleEvaluatorRegistry,
@@ -23,6 +24,7 @@ def test_default_registry_has_official_rule_ids_in_deterministic_order() -> None
         RuleId.R002,
         RuleId.R003,
         RuleId.R004,
+        RuleId.R005,
     )
 
 
@@ -33,6 +35,7 @@ def test_default_registry_has_official_rule_ids_in_deterministic_order() -> None
         (RuleId.R002, evaluate_r002),
         (RuleId.R003, evaluate_r003),
         (RuleId.R004, evaluate_r004),
+        (RuleId.R005, evaluate_r005),
     ),
 )
 def test_default_registry_maps_each_rule_id_to_its_evaluator(rule_id, expected_evaluator) -> None:
@@ -48,7 +51,7 @@ def test_registry_accepts_exact_string_and_rule_id_lookup() -> None:
     assert registry.get_evaluator(RuleId.R001) is evaluate_r001
 
 
-@pytest.mark.parametrize("rule_id", ("r001", " R001", "R001 ", "R005"))
+@pytest.mark.parametrize("rule_id", ("r001", " R001", "R001 ", "R999"))
 def test_registry_rejects_unsupported_rule_id_without_normalization(rule_id: str) -> None:
     registry = create_default_rule_evaluator_registry()
 

@@ -13,6 +13,11 @@ import com.aifds.backend.idempotency.service.TransactionIntakeMaintenanceGate;
 import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.rule.client.RuleAnalysisRequestV2Mapper;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV2;
+import com.aifds.backend.rule.client.dto.ExternalRiskSnapshotRequest;
+import com.aifds.backend.externalrisk.domain.ExternalRiskSubjectType;
+import com.aifds.backend.externalrisk.domain.ExternalRiskType;
+import com.aifds.backend.externalrisk.domain.ExternalRiskReasonCode;
+import com.aifds.backend.rule.contract.RuleV1ContractRegistry;
 import com.aifds.backend.rule.entity.RuleVersion;
 import com.aifds.backend.rule.repository.RuleVersionRepository;
 import com.aifds.backend.rule.contract.RulePolicyVersion;
@@ -27,6 +32,7 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.data.domain.PageRequest;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -158,7 +164,16 @@ public class RuleAnalysisPersistenceService {
                 analysisTraceId,
                 startedAt
         );
-        return new StartedRuleAnalysisV2Execution(started, request);
+        boolean priorApprovedRecipientTransfer = RulePolicyVersion.from(
+                request.ruleVersions()) == 3
+                && request.transaction().recipientAccountRef() != null
+                && !transactionRepository.findPriorApprovedRecipientTransfers(
+                    prepared.transaction().getExternalCustomerRef(),
+                    prepared.transaction().getRecipientAccountRef(),
+                    transactionId, request.evaluationCutoffAt(), PageRequest.of(0, 1))
+                    .isEmpty();
+        return new StartedRuleAnalysisV2Execution(started, request,
+                priorApprovedRecipientTransfer);
     }
 
     private PreparedRuleAnalysisStart prepareStart(UUID transactionId, boolean cutoffSafeMl) {
@@ -187,7 +202,9 @@ public class RuleAnalysisPersistenceService {
         int selectedPolicy = RulePolicyVersion.from(snapshot.request().ruleVersions());
         scoringPolicyVersion = RulePolicyVersion.scoringPolicy(selectedPolicy);
         featureVersion = RulePolicyVersion.feature(selectedPolicy);
-        if (modelVersion != null) scoringPolicyVersion = MlDetectionPolicy.POLICY_VERSION;
+        if (modelVersion != null) scoringPolicyVersion = selectedPolicy == 3
+                ? MlDetectionPolicy.SCN003_POLICY_VERSION
+                : MlDetectionPolicy.POLICY_VERSION;
 
         int nextVersion = Math.addExact(
                 detectionResultRepository.findMaximumVersionByTransactionPk(
@@ -251,6 +268,21 @@ public class RuleAnalysisPersistenceService {
             List<RuleEvidenceDraft> evidenceDrafts,
             MlDetectionService.MlResult mlResult
     ) {
+        completeAndAdoptMl(started, ruleRiskScore, ruleRiskLevel, completedAt,
+                evidenceDrafts, mlResult, null, false);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void completeAndAdoptMl(
+            StartedRuleAnalysis started,
+            int ruleRiskScore,
+            RiskLevel ruleRiskLevel,
+            Instant completedAt,
+            List<RuleEvidenceDraft> evidenceDrafts,
+            MlDetectionService.MlResult mlResult,
+            ExternalRiskSnapshotRequest externalRisk,
+            boolean priorApprovedRecipientTransfer
+    ) {
         requireOpenGate();
         StartedRuleAnalysis validatedStarted = Objects.requireNonNull(
                 started,
@@ -284,15 +316,43 @@ public class RuleAnalysisPersistenceService {
                         "evidenceDrafts must not be null"
                 )
         );
-        List<DetectionEvidence> evidence = drafts.stream()
+        List<DetectionEvidence> evidence = new java.util.ArrayList<>(drafts.stream()
                 .map(draft -> RuleEvidenceAssembler.assemble(
                         result,
                         findRuleVersion(draft.ruleVersionId()),
                         draft
                 ))
-                .toList();
+                .toList());
+        if ("scoring-policy-v3".equals(result.getScoringPolicyVersion())
+                || MlDetectionPolicy.SCN003_POLICY_VERSION.equals(result.getScoringPolicyVersion())) {
+            if (externalRisk == null) {
+                throw new IllegalArgumentException("SCN-003 requires validated External Risk");
+            }
+            boolean matched = externalRisk.matches().stream().anyMatch(match ->
+                    match.subjectType() == ExternalRiskSubjectType.RECIPIENT_ACCOUNT
+                    && match.riskType() == ExternalRiskType.SUSPICIOUS_ACCOUNT
+                    && match.reasonCode() == ExternalRiskReasonCode.SUSPICIOUS_RECIPIENT_ACCOUNT);
+            List<DetectionEvidence> r005 = evidence.stream().filter(item ->
+                    RuleV1ContractRegistry.EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT.equals(
+                            item.getRuleCode())).toList();
+            if (r005.size() != (matched ? 1 : 0)) {
+                throw new IllegalArgumentException("R005 RULE and External Risk Evidence mismatch");
+            }
+            if (matched) {
+                var summary = r005.get(0).getObservationSummary();
+                if (!externalRisk.providerCode().equals(summary.path("providerCode").asText())
+                        || !externalRisk.providerAsOf().equals(
+                                Instant.parse(summary.path("providerAsOf").asText()))
+                        || !externalRisk.lookedUpAt().equals(
+                                Instant.parse(summary.path("lookedUpAt").asText()))) {
+                    throw new IllegalArgumentException("R005 Evidence source and time mismatch");
+                }
+            }
+            evidence.add(DetectionEvidence.externalRisk(result, externalRisk, evidence.size()));
+            evidence.add(DetectionEvidence.recipientHistory(result,
+                    priorApprovedRecipientTransfer, evidence.size()));
+        }
         if (mlResult != null) {
-            evidence = new java.util.ArrayList<>(evidence);
             evidence.add(DetectionEvidence.ml(result, mlResult.reasonCode(),
                     mlResult.contribution(), mlResult.probabilityBasisPoints(),
                     result.getEvaluationCutoffAt(), evidence.size()));

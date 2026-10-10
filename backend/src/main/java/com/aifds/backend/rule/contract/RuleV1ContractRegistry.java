@@ -20,6 +20,8 @@ public final class RuleV1ContractRegistry {
             "RECENT_SECURITY_CHANGE_HIGH_AMOUNT";
     public static final String RECENT_BENEFICIARY_TRANSFER =
             "RECENT_BENEFICIARY_TRANSFER";
+    public static final String EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT =
+            "EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT";
 
     private static final Map<String, Set<String>> ALLOWED_REASON_CODES =
             Map.of(
@@ -30,13 +32,16 @@ public final class RuleV1ContractRegistry {
                     RECENT_SECURITY_CHANGE_HIGH_AMOUNT,
                     Set.of(RECENT_SECURITY_CHANGE_HIGH_AMOUNT),
                     RECENT_BENEFICIARY_TRANSFER,
-                    Set.of(RECENT_BENEFICIARY_TRANSFER)
+                    Set.of(RECENT_BENEFICIARY_TRANSFER),
+                    EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT,
+                    Set.of(EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT)
             );
     private static final Set<String> SUPPORTED_REASON_CODES = Set.of(
             TRANSFER_ABSOLUTE_HIGH_AMOUNT,
             RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT,
             RECENT_SECURITY_CHANGE_HIGH_AMOUNT,
-            RECENT_BENEFICIARY_TRANSFER
+            RECENT_BENEFICIARY_TRANSFER,
+            EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT
     );
     private static final Map<String, String> DISPLAY_DESCRIPTIONS = Map.of(
             TRANSFER_ABSOLUTE_HIGH_AMOUNT,
@@ -46,7 +51,9 @@ public final class RuleV1ContractRegistry {
             RECENT_SECURITY_CHANGE_HIGH_AMOUNT,
             "최근 보안정보 변경 시퀀스가 있는 고액 이체",
             RECENT_BENEFICIARY_TRANSFER,
-            "최근 등록 수취인 이체"
+            "최근 등록 수취인 이체",
+            EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT,
+            "외부 위험 수취 계좌 일치"
     );
 
     private RuleV1ContractRegistry() {

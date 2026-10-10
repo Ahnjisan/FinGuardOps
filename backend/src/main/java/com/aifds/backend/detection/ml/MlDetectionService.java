@@ -115,7 +115,8 @@ public class MlDetectionService {
 
     private MlResult inferValidated(UUID transactionId, Instant cutoff,
                                     String scoringPolicyVersion, String modelVersion) {
-        if (!MlDetectionPolicy.POLICY_VERSION.equals(scoringPolicyVersion)
+        if (!(MlDetectionPolicy.POLICY_VERSION.equals(scoringPolicyVersion)
+                || MlDetectionPolicy.SCN003_POLICY_VERSION.equals(scoringPolicyVersion))
                 || !MlDetectionPolicy.modelForCutoff(cutoff).equals(modelVersion)) {
             throw new MlDetectionException("ML_PINNED_VERSION_MISMATCH");
         }

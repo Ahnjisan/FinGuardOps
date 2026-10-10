@@ -211,7 +211,12 @@ def test_transform_all_rules_creates_exact_observations_and_evidence_times() -> 
     assert result.evaluation_cutoff_at == CUTOFF_AT
     assert result.rule_set_version == plan.rule_set_version
     assert result.scoring_result is scoring_result
-    assert tuple(item.rule_id for item in result.evidence) == tuple(RuleId)
+    assert tuple(item.rule_id for item in result.evidence) == (
+        RuleId.R001,
+        RuleId.R002,
+        RuleId.R003,
+        RuleId.R004,
+    )
     assert tuple(item.rule_version for item in result.evidence) == ("1", "2", "3", "4")
     assert tuple(item.rule_code for item in result.evidence) == tuple(RULE_CODES.values())
     assert tuple(item.reason_code for item in result.evidence) == tuple(RULE_CODES.values())
@@ -395,7 +400,7 @@ def test_transform_rejects_rule_id_execution_order_and_duplicate_mismatch() -> N
 
 def test_transform_rejects_unsupported_rule_id() -> None:
     plan, planned_results, scoring_result = _inputs()
-    unsupported_item = replace(plan.items[0], rule_id=cast(RuleId, "R005"))
+    unsupported_item = replace(plan.items[0], rule_id=cast(RuleId, "R999"))
     unsupported_plan, unsupported_results = _replace_plan_item(
         plan, planned_results, 0, unsupported_item
     )

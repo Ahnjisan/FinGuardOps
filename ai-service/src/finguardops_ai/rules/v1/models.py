@@ -32,6 +32,7 @@ class RuleId(StrEnum):
     R002 = "R002"
     R003 = "R003"
     R004 = "R004"
+    R005 = "R005"
 
 
 def _require_uuid_v4(value: object, field_name: str) -> None:
@@ -142,6 +143,7 @@ class RuleEvaluationInput:
 
     transaction: TransactionSnapshot
     behavior_events: tuple[BehaviorEventSnapshot, ...] = ()
+    external_risk: object | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.transaction, TransactionSnapshot):
@@ -187,6 +189,14 @@ class R004Facts:
     beneficiary_registered_at: datetime
     elapsed_seconds: int
     window_seconds: int
+
+
+@dataclass(frozen=True, slots=True)
+class R005Facts:
+    provider_code: str
+    provider_as_of: datetime
+    looked_up_at: datetime
+    freshness_seconds: int
 
 
 @dataclass(frozen=True, slots=True)

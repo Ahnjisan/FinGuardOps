@@ -3,6 +3,8 @@ package com.aifds.backend.rule.contract;
 import com.aifds.backend.rule.client.dto.RuleVersionSnapshotRequest;
 
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 /** The persisted RuleVersion set, never the HTTP wire version, selects scoring. */
 public final class RulePolicyVersion {
@@ -11,6 +13,29 @@ public final class RulePolicyVersion {
     public static int from(List<RuleVersionSnapshotRequest> snapshots) {
         if (snapshots.isEmpty()) {
             throw new IllegalArgumentException("RuleVersion set is empty");
+        }
+        if (snapshots.size() == 5 || snapshots.stream().anyMatch(snapshot ->
+                RuleV1ContractRegistry.EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT.equals(
+                        snapshot.ruleCode()))) {
+            Map<String, Integer> expected = Map.of(
+                    RuleV1ContractRegistry.TRANSFER_ABSOLUTE_HIGH_AMOUNT, 3,
+                    RuleV1ContractRegistry.RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT, 3,
+                    RuleV1ContractRegistry.RECENT_SECURITY_CHANGE_HIGH_AMOUNT, 3,
+                    RuleV1ContractRegistry.RECENT_BENEFICIARY_TRANSFER, 3,
+                    RuleV1ContractRegistry.EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT, 1
+            );
+            Map<String, Integer> actual;
+            try {
+                actual = snapshots.stream().collect(Collectors.toMap(
+                        RuleVersionSnapshotRequest::ruleCode,
+                        RuleVersionSnapshotRequest::versionNumber));
+            } catch (IllegalStateException duplicate) {
+                throw new IllegalArgumentException("Duplicate Rule in SCN-003 set", duplicate);
+            }
+            if (snapshots.size() != 5 || !actual.equals(expected)) {
+                throw new IllegalArgumentException("Invalid SCN-003 RuleVersion set");
+            }
+            return 3;
         }
         int version = snapshots.get(0).versionNumber();
         if (version != 1 && version != 2) {

@@ -53,6 +53,24 @@ describe("adopted detection response", () => {
   it("accepts an older adopted result while a later analysis is running", () => {
     expect(isAdoptedDetectionResponse(available)).toBe(true);
   });
+  it("shows only allowlisted SCN-003 source and rejects account leakage", () => {
+    const result = { ...adopted, riskLevel: "MEDIUM", riskScore: 40,
+      scoringPolicyVersion: "scoring-policy-v3", ruleScore: 40,
+      mlContribution: null, mlStatus: "RULE_ONLY", modelVersion: null,
+      mlFeatureVersion: null, modelSha256: null, mlEvidence: [],
+      ruleEvidence: [{ ruleCode: "EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT",
+        ruleVersion: "1", reasonCode: "EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT",
+        scoreContribution: 40 }],
+      scn003Evidence: { sourceVersion: "SCN003-contract-v1", providerCode: "PROVIDER_V1",
+        providerAsOf: "2026-07-23T01:15:00Z", lookedUpAt: "2026-07-23T01:15:32Z",
+        recipientAccountMatched: true, priorApprovedRecipientTransferObserved: false },
+    };
+    expect(isAdoptedDetectionResponse({ ...available, adoptedResult: result })).toBe(true);
+    expect(isAdoptedDetectionResponse({ ...available, adoptedResult: { ...result,
+      scn003Evidence: { ...result.scn003Evidence, recipientAccountRef: "raw-account" } } })).toBe(false);
+    expect(isAdoptedDetectionResponse({ ...available, adoptedResult: { ...result,
+      scn003Evidence: { ...result.scn003Evidence, recipientAccountMatched: false } } })).toBe(false);
+  });
   it.each(["PENDING", "IN_PROGRESS", "FAILED", "COMPLETED_NOT_ADOPTED"])(
     "accepts unadopted %s without a risk value", (availability) => {
       expect(isAdoptedDetectionResponse({ transactionId, availability,

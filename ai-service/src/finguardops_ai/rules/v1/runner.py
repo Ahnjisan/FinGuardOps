@@ -46,7 +46,7 @@ class PlannedRuleResult:
     evaluation_result: RuleEvaluatorResult
 
 
-_CANONICAL_RULE_ORDER = (RuleId.R001, RuleId.R002, RuleId.R003, RuleId.R004)
+_CANONICAL_RULE_ORDER = (RuleId.R001, RuleId.R002, RuleId.R003, RuleId.R004, RuleId.R005)
 
 
 @dataclass(frozen=True, slots=True)

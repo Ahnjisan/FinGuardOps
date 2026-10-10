@@ -10832,6 +10832,89 @@ test("Issue 380: real Keycloak analyst investigates Rule v2 + ML adoption and ML
   }
 });
 
+test("Issue 382: real Keycloak analyst reads SCN-003 case and adopted evidence", async ({ page }) => {
+  test.setTimeout(420_000);
+  requireRunFixtureManifestOracle();
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+  const fixturePath = resolve(root, "infra/keycloak/run_scn003_fixture.py");
+  const originalManifest = env[RUN_FIXTURE_MANIFEST_ENVIRONMENT];
+  requireCondition(typeof originalManifest === "string" && originalManifest.length > 0,
+    "The official Run fixture identity is absent.");
+  readRunFixtureManifest(originalManifest);
+  const output = await new Promise<string>((resolveOutput, reject) => {
+    const child = spawn("python", ["-B", fixturePath], {
+      cwd: root, shell: false,
+      env: { ...env, FINGUARDOPS_E2E_FIXTURE_DIR: dirname(originalManifest) },
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => { child.kill(); reject(new Error("SCN003_FIXTURE_TIMEOUT")); }, 330_000);
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+      if (stdout.length > 512) { child.kill(); reject(new Error("SCN003_FIXTURE_OUTPUT_INVALID")); }
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+      if (stderr.length > 512) { child.kill(); reject(new Error("SCN003_FIXTURE_FAILED")); }
+    });
+    child.on("error", () => { clearTimeout(timer); reject(new Error("SCN003_FIXTURE_START_FAILED")); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0 || stderr.length > 0) reject(new Error("SCN003_FIXTURE_FAILED"));
+      else resolveOutput(stdout);
+    });
+  });
+  const created = JSON.parse(output) as Record<string, unknown>;
+  requireCondition(isDeepStrictEqual(sortedKeys(created), ["caseId", "detectionResultId",
+    "evaluationCutoffAt", "riskLevel", "riskScore", "transactionId", "transactionStatus"]) &&
+    typeof created.caseId === "string" && CANONICAL_UUID_V4.test(created.caseId) &&
+    typeof created.transactionId === "string" && CANONICAL_UUID_V4.test(created.transactionId) &&
+    typeof created.detectionResultId === "string" && CANONICAL_UUID_V4.test(created.detectionResultId) &&
+    created.riskScore === 50 && created.riskLevel === "HIGH" &&
+    created.transactionStatus === "ADDITIONAL_AUTH_REQUIRED",
+  "The SCN-003 fixture returned no verified stored identity.");
+  const caseId = created.caseId as string;
+  const transactionId = created.transactionId as string;
+  const relay = await installBackendRelay(page);
+  try {
+    await page.goto(`${APP_ORIGIN}/cases/${caseId}`);
+    await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
+    await signInFromGuard(page, readUserPassword(), `/cases/${caseId}`, false);
+    await expect(page.getByRole("heading", { name: `사건 ${caseId}`, level: 2 })).toBeVisible();
+    await expect(page.locator("article.audit__entry")).toHaveCount(4);
+    await expect(page.locator(".case-transactions__item a")).toHaveAttribute("href", `/transactions/${transactionId}`);
+    await page.locator(".case-transactions__item a").click();
+    await expect(page.getByRole("heading", { name: `거래 ${transactionId}`, level: 2 })).toBeVisible();
+    await expect(factValue(page.locator(".transaction-detail__record"), "처리 상태")).toHaveText("인증 필요");
+    const adopted = await page.evaluate(async (id) => {
+      const [{ getOidcAuthClient }, { fetchAdoptedDetection }] = await Promise.all([
+        import("/src/auth/oidcAuthClient.ts"),
+        // @ts-expect-error Vite serves the production module at an absolute URL.
+        import("/src/api/adoptedDetectionApi.ts"),
+      ]);
+      return fetchAdoptedDetection(getOidcAuthClient(), id);
+    }, transactionId);
+    const item = adopted.adoptedResult;
+    requireCondition(adopted.availability === "AVAILABLE" &&
+      item?.detectionResultId === created.detectionResultId &&
+      item.riskScore === 50 && item.ruleScore === 50 && item.mlContribution === 0 &&
+      item.scoringPolicyVersion === "rule-ml-policy-v2" &&
+      item.scn003Evidence?.sourceVersion === "SCN003-contract-v1" &&
+      item.scn003Evidence.providerCode === "PROVIDER_V1" &&
+      item.scn003Evidence.recipientAccountMatched === true &&
+      item.ruleEvidence.some((rule: { ruleCode: string }) =>
+        rule.ruleCode === "EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT") &&
+      !JSON.stringify(item).includes("issue382-synthetic-"),
+    "The Keycloak transaction did not expose one safe adopted SCN-003 result.");
+    await expect(page.locator(".adopted-detection")).toContainText("외부 위험 수취 계좌 근거");
+    await expect(page.locator(".adopted-detection")).toContainText("PROVIDER_V1");
+    await expect(page.locator(".adopted-detection")).toContainText("적격 과거 승인 송금");
+  } finally {
+    await test.step("CLEANUP", () => relay.dispose());
+  }
+});
+
 /**
  * The address of the test-only geometry fixture, served by the same Vite dev
  * server that serves the application.

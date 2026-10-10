@@ -13,6 +13,7 @@ class ScoringGroupId(StrEnum):
     AMOUNT = "amount"
     SECURITY = "security"
     BENEFICIARY = "beneficiary"
+    EXTERNAL_RECIPIENT = "external_recipient"
 
 
 class RiskLevel(StrEnum):
@@ -158,6 +159,25 @@ _SCORING_POLICY_V2 = _ScoringPolicy(
     final_score_cap=100,
     risk_boundaries=_EXPECTED_RISK_BOUNDARIES,
 )
+
+_SCORING_POLICY_V3 = _ScoringPolicy(
+    version="scoring-policy-v3",
+    rule_bindings=(
+        _RuleScoringBinding(RuleId.R001, ScoringGroupId.AMOUNT, 15),
+        _RuleScoringBinding(RuleId.R002, ScoringGroupId.SECURITY, 20),
+        _RuleScoringBinding(RuleId.R003, ScoringGroupId.SECURITY, 40),
+        _RuleScoringBinding(RuleId.R004, ScoringGroupId.BENEFICIARY, 10),
+        _RuleScoringBinding(RuleId.R005, ScoringGroupId.EXTERNAL_RECIPIENT, 40),
+    ),
+    group_caps=(
+        (ScoringGroupId.AMOUNT, 15),
+        (ScoringGroupId.SECURITY, 60),
+        (ScoringGroupId.BENEFICIARY, 10),
+        (ScoringGroupId.EXTERNAL_RECIPIENT, 40),
+    ),
+    final_score_cap=100,
+    risk_boundaries=_EXPECTED_RISK_BOUNDARIES,
+)
 _EXPECTED_POLICY_V2 = _SCORING_POLICY_V2
 
 
@@ -176,7 +196,25 @@ class RuleScoringCalculator:
         versions = {
             item.version_number for item in plan.items if isinstance(item, RuleExecutionPlanItem)
         }
-        policy = _SCORING_POLICY_V2 if versions == {2} and len(plan.items) == 4 else _SCORING_POLICY
+        exact_v3 = len(plan.items) == 5 and tuple(
+            (item.rule_id, item.version_number) for item in plan.items
+        ) == (
+            (RuleId.R001, 3),
+            (RuleId.R002, 3),
+            (RuleId.R003, 3),
+            (RuleId.R004, 3),
+            (RuleId.R005, 1),
+        )
+        if exact_v3:
+            policy = _SCORING_POLICY_V3
+        elif versions == {2} and len(plan.items) == 4:
+            policy = _SCORING_POLICY_V2
+        elif all(item.rule_id is not RuleId.R005 for item in plan.items):
+            policy = _SCORING_POLICY
+        else:
+            _raise_scoring_error(
+                RuleScoringErrorCategory.INVALID_SCORING_POLICY, "unsupported RuleVersion set"
+            )
         return _calculate(plan, planned_results, policy)
 
 
@@ -189,9 +227,7 @@ def _calculate(
     _validate_scoring_inputs(plan, planned_results, policy)
 
     contributions: list[RuleScoreContribution] = []
-    amount_raw_score = 0
-    security_raw_score = 0
-    beneficiary_raw_score = 0
+    raw_scores = {group_id: 0 for group_id, _ in policy.group_caps}
 
     for plan_item, planned_result in zip(plan.items, planned_results, strict=True):
         binding = _binding_for(plan_item.rule_id, policy)
@@ -204,45 +240,20 @@ def _calculate(
                 original_contribution=original_contribution,
             )
         )
-        if binding.group_id is ScoringGroupId.AMOUNT:
-            amount_raw_score += original_contribution
-        elif binding.group_id is ScoringGroupId.SECURITY:
-            security_raw_score += original_contribution
-        else:
-            beneficiary_raw_score += original_contribution
+        raw_scores[binding.group_id] += original_contribution
 
-    amount_summary = _summarize_group(
-        ScoringGroupId.AMOUNT,
-        amount_raw_score,
-        policy,
+    summaries = tuple(
+        _summarize_group(group_id, raw_scores[group_id], policy)
+        for group_id, _ in policy.group_caps
     )
-    security_summary = _summarize_group(
-        ScoringGroupId.SECURITY,
-        security_raw_score,
-        policy,
-    )
-    beneficiary_summary = (
-        _summarize_group(ScoringGroupId.BENEFICIARY, beneficiary_raw_score, policy)
-        if policy.version == "scoring-policy-v2"
-        else None
-    )
-    risk_score = min(
-        policy.final_score_cap,
-        amount_summary.applied_score
-        + security_summary.applied_score
-        + (beneficiary_summary.applied_score if beneficiary_summary else 0),
-    )
+    risk_score = min(policy.final_score_cap, sum(item.applied_score for item in summaries))
 
     return RuleScoringResult(
         scoring_policy_version=policy.version,
         risk_score=risk_score,
         risk_level=_risk_level_for_score(risk_score, policy),
         rule_contributions=tuple(contributions),
-        group_summaries=(
-            (amount_summary, security_summary, beneficiary_summary)
-            if beneficiary_summary
-            else (amount_summary, security_summary)
-        ),
+        group_summaries=summaries,
     )
 
 
@@ -302,7 +313,7 @@ def _validate_scoring_inputs(
                 f"plan.items[{index}].execution_order must equal {index + 1}",
             )
 
-        binding = _find_canonical_binding(plan_item.rule_id)
+        binding = _find_canonical_binding(plan_item.rule_id, policy)
         if binding is None:
             _raise_scoring_error(
                 RuleScoringErrorCategory.UNSUPPORTED_SCORING_RULE,
@@ -314,7 +325,7 @@ def _validate_scoring_inputs(
                 f"plan.items must not contain duplicate Rule ID: {plan_item.rule_id!r}",
             )
         seen_rule_ids.add(plan_item.rule_id)
-        rule_index = _EXPECTED_RULE_BINDINGS.index(binding)
+        rule_index = policy.rule_bindings.index(binding)
         if rule_index <= previous_rule_index:
             _raise_scoring_error(
                 RuleScoringErrorCategory.INVALID_SCORING_INPUT,
@@ -353,7 +364,10 @@ def _validate_scoring_inputs(
 
 
 def _validate_policy(policy: object) -> None:
-    if not (_policy_matches_expected_definition(policy) or policy == _EXPECTED_POLICY_V2):
+    if not (
+        _policy_matches_expected_definition(policy)
+        or policy in (_EXPECTED_POLICY_V2, _SCORING_POLICY_V3)
+    ):
         _raise_scoring_error(
             RuleScoringErrorCategory.INVALID_SCORING_POLICY,
             "scoring policy binding must exactly match scoring-policy-v1",
@@ -426,8 +440,8 @@ def _risk_boundaries_match_expected(boundaries: object) -> bool:
     return True
 
 
-def _find_canonical_binding(rule_id: object) -> _RuleScoringBinding | None:
-    for binding in _EXPECTED_RULE_BINDINGS:
+def _find_canonical_binding(rule_id: object, policy: _ScoringPolicy) -> _RuleScoringBinding | None:
+    for binding in policy.rule_bindings:
         if binding.rule_id is rule_id:
             return binding
     return None
