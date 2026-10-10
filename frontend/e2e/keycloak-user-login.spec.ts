@@ -10679,6 +10679,9 @@ test("Issue 380: real Keycloak analyst investigates Rule v2 + ML adoption and ML
     await expect(page.locator(".adopted-detection")).toContainText("fraud-logistic-v2");
     await expect(page.locator(".adopted-detection")).toContainText(String(created.modelSha256));
     await page.goto(`${APP_ORIGIN}/transactions/${created.failedTransactionId}`);
+    await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
+    await signInFromGuard(page, readUserPassword(),
+      `/transactions/${created.failedTransactionId}`, true);
     await expect(page.getByRole("heading", { name: `거래 ${created.failedTransactionId}`, level: 2 })).toBeVisible();
     await expect(factValue(page.locator(".transaction-detail__record"), "처리 상태")).toHaveText("실패");
     const failedAdopted = await page.evaluate(async (id) => {
@@ -10697,6 +10700,8 @@ test("Issue 380: real Keycloak analyst investigates Rule v2 + ML adoption and ML
     await expect(page.locator(".adopted-detection")).toContainText("채택된 결과가 없습니다");
     await expect(page.getByRole("link", { name: "사건으로 돌아가기" })).toHaveCount(0);
     await page.goto(`${APP_ORIGIN}/cases/${caseId}`);
+    await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
+    await signInFromGuard(page, readUserPassword(), `/cases/${caseId}`, true);
     await expect(page.getByRole("heading", { name: `사건 ${caseId}`, level: 2 })).toBeVisible();
     const assigneeRef = randomUUID();
     armWorkflowWrite({ method: "PATCH", pathname: `${CASE_LIST_PATH}/${caseId}/status`,
