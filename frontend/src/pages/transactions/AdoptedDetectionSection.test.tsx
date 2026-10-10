@@ -13,7 +13,7 @@ function verified(value: unknown): AdoptedDetectionResponse {
 it("shows the Rule and fraud ML contributions with the synthetic policy warning", () => {
   render(<AdoptedDetectionPanel onRetry={() => undefined} state={{ status: "success",
     data: verified(issue380Fixture.adopted) }} />);
-  expect(screen.getByText("Rule 채택 점수")).toBeInTheDocument();
+  expect(screen.getByText("Rule 원점수")).toBeInTheDocument();
   expect(screen.getByText("85 / 100")).toBeInTheDocument();
   expect(screen.getByText("100 / 100")).toBeInTheDocument();
   expect(screen.getAllByText(/\+35점/)).toHaveLength(2);
@@ -22,6 +22,19 @@ it("shows the Rule and fraud ML contributions with the synthetic policy warning"
   expect(screen.getByText("fraud-logistic-v2")).toBeInTheDocument();
   expect(screen.getByText("fraud-feature-v1")).toBeInTheDocument();
   expect(screen.getByText(issue380Fixture.adopted.adoptedResult.modelSha256)).toBeInTheDocument();
+});
+
+it("labels capped v4 Rule totals as adopted scores", () => {
+  const legacy = verified(issue380Fixture.adopted);
+  render(<AdoptedDetectionPanel onRetry={() => undefined} state={{ status: "success", data: {
+    ...legacy,
+    adoptedResult: {
+      ...legacy.adoptedResult!,
+      scoringPolicyVersion: "rule-ml-policy-v3",
+      scoreGroupSummary: [{ groupId: "DEVICE", rawScore: 50, cap: 40, appliedScore: 40 }],
+    },
+  } }} />);
+  expect(screen.getByText("Rule 채택 점수")).toBeInTheDocument();
 });
 
 it("shows only the adopted version and keeps a later analysis separate", () => {

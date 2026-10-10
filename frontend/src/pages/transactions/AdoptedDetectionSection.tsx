@@ -46,7 +46,8 @@ export function AdoptedDetectionPanel({ state, onRetry }: {
         <div><dt>규칙 집합 버전</dt><dd className="facts__ref">{state.data.adoptedResult.ruleSetVersion}</dd></div>
         <div><dt>점수 정책 버전</dt><dd className="facts__ref">{state.data.adoptedResult.scoringPolicyVersion}</dd></div>
         {state.data.adoptedResult.ruleScore !== undefined &&
-          <div><dt>Rule 채택 점수</dt><dd>{state.data.adoptedResult.ruleScore} / 100</dd></div>}
+          <div><dt>{state.data.adoptedResult.scoreGroupSummary ? "Rule 채택 점수" : "Rule 원점수"}</dt>
+            <dd>{state.data.adoptedResult.ruleScore} / 100</dd></div>}
         {state.data.adoptedResult.mlStatus !== undefined &&
           <div><dt>사기 탐지 ML 상태</dt><dd>{state.data.adoptedResult.mlStatus === "APPLIED" ?
             "결합됨" : "Rule 전용 결과"}</dd></div>}
