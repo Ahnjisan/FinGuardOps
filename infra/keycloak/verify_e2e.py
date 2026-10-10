@@ -410,7 +410,7 @@ RUN_FIXTURE_GLOBAL_DELTA = {
     "audit_log": 4,
     "behavior_event": 2,
     "case_transaction": 1,
-    "detection_evidence": 2,
+    "detection_evidence": 3,
     "detection_result": 1,
     "financial_transaction": 1,
     "fraud_case": 1,
@@ -2729,8 +2729,22 @@ def create_plan() -> dict[str, str]:
         "recipientRef": "kc241-recipient-" + suffix,
         "passwordOccurredAt": (now - dt.timedelta(seconds=120)).isoformat().replace("+00:00", "Z"),
         "transferLimitOccurredAt": (now - dt.timedelta(seconds=60)).isoformat().replace("+00:00", "Z"),
-        "transactionOccurredAt": now.isoformat().replace("+00:00", "Z"),
+        # Run fixture binds this plan before its worker ingests behavior events.
+        # The worker waits until this cutoff before it posts the transaction.
+        "transactionOccurredAt": (now + dt.timedelta(seconds=90)).isoformat().replace("+00:00", "Z"),
     }
+
+
+def wait_for_plan_cutoff(plan: dict[str, str]) -> None:
+    cutoff = dt.datetime.fromisoformat(plan["transactionOccurredAt"].replace("Z", "+00:00"))
+    while (remaining := (cutoff - dt.datetime.now(dt.timezone.utc)).total_seconds()) > 0:
+        time.sleep(min(remaining, 0.25))
+
+
+def pin_cutoff_after_behavior_ingest(plan: dict[str, str]) -> None:
+    cutoff = dt.datetime.now(dt.timezone.utc).replace(microsecond=0) + dt.timedelta(seconds=2)
+    plan["transactionOccurredAt"] = cutoff.isoformat().replace("+00:00", "Z")
+    wait_for_plan_cutoff(plan)
 
 
 def fixture_identity_from_environment(environment: dict[str, str]) -> dict[str, Any]:
@@ -3015,6 +3029,7 @@ def create_run_fixture(plan: dict[str, str]) -> dict[str, str]:
         )
         if response.get("eventId") != identifier:
             fail(codes["RESPONSE_INVALID"])
+    wait_for_plan_cutoff(valid)
     response = run_fixture_stage(
         "TRANSACTION",
         lambda: request_backend(
@@ -3230,7 +3245,7 @@ def expected_transaction_cardinality(
         transaction,
         duplicate,
         transaction,
-        2 * transaction,
+        3 * transaction,
         transaction,
         transaction,
         4 * transaction,
@@ -3392,7 +3407,7 @@ def run_ingestion_phase(ctx: HostContext) -> dict[str, str]:
             {
                 "audit_log": 4,
                 "case_transaction": 1,
-                "detection_evidence": 2,
+                "detection_evidence": 3,
                 "detection_result": 1,
                 "financial_transaction": 1,
                 "fraud_case": 1,
@@ -3425,6 +3440,8 @@ def run_ingestion_phase(ctx: HostContext) -> dict[str, str]:
         ),
     )
     for step, global_delta, cardinality, dependency_delta, metric_delta in scenarios:
+        if step == "transaction-create":
+            pin_cutoff_after_behavior_ingest(plan)
         run_ingestion_step(
             ctx, plan, step, global_delta, cardinality, dependency_delta, metric_delta
         )
@@ -3581,16 +3598,16 @@ def run_fixture_before(ctx: HostContext, fixture_directory: Path) -> dict[str, A
     ):
         fail("FIXTURE_DIRECTORY_INVALID")
     publish_rules(ctx, before_diagnostics=True)
-    plan = create_plan()
-    if transaction_cardinality(
-        ctx, plan, "TRANSACTION_CARDINALITY_SNAPSHOT"
-    ) != expected_transaction_cardinality(False, False, False):
-        fail("DATABASE_TRANSACTION_CARDINALITY_INVALID")
     before_database = database_snapshot(ctx, "DATABASE_GLOBAL_SNAPSHOT")
     before_dependencies = dependency_hit_counts(
         ctx, ("EXTERNAL_RISK_LOG_SNAPSHOT", "RULE_V2_LOG_SNAPSHOT")
     )
     before_metrics = backend_metric_totals(ctx, "BACKEND_METRIC_SNAPSHOT")
+    plan = create_plan()
+    if transaction_cardinality(
+        ctx, plan, "TRANSACTION_CARDINALITY_SNAPSHOT"
+    ) != expected_transaction_cardinality(False, False, False):
+        fail("DATABASE_TRANSACTION_CARDINALITY_INVALID")
     state = {
         "schemaVersion": 1,
         "runId": ctx.contract.run_id,

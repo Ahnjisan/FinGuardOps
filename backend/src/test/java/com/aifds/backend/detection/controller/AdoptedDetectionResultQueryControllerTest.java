@@ -66,8 +66,12 @@ class AdoptedDetectionResultQueryControllerTest {
                 () -> "transaction:read", () -> "detection:read")))
                 .andExpect(status().isOk()).andReturn().getResponse();
         var root = objectMapper.readTree(response.getContentAsString());
-        assertThat(root.size()).isEqualTo(5);
-        assertThat(root.get("adoptedResult").size()).isEqualTo(8);
+        assertThat(root.size()).isEqualTo(6);
+        assertThat(root.get("latestFailureCode").isNull()).isTrue();
+        assertThat(root.get("adoptedResult").size()).isEqualTo(15);
+        assertThat(root.get("adoptedResult").get("ruleScore").asInt()).isEqualTo(55);
+        assertThat(root.get("adoptedResult").get("mlStatus").asText()).isEqualTo("RULE_ONLY");
+        assertThat(root.get("adoptedResult").get("mlEvidence").size()).isZero();
         assertThat(root.get("adoptedResult").get("ruleEvidence").get(0).size()).isEqualTo(4);
         for (String forbidden : List.of("observationSummary", "displayDescription", "failureCode",
                 "traceId", "providerResponse", "token", "financialTransactionId")) {

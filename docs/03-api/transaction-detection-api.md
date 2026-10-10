@@ -1,5 +1,7 @@
 # 거래·행동·탐지 API
 
+Issue #380 local Rule+ML extension: [fraud-ml-inference-api.md](./fraud-ml-inference-api.md). The extension adds a versioned ML call after the existing validated Rule v2 response; the final score controls risk response and case creation. The 5000bp threshold and 40 point cap are synthetic data validation values only.
+
 ## 1. 문서 목적
 
 이 문서는 FinGuardOps의 거래 접수·조회, 행동 이벤트 수집·조회와 탐지 결과 조회 REST API 계약을 정의한다.
@@ -1059,11 +1061,11 @@ Timeout 실패와 늦은 성공 응답은 같은 거래·DetectionResult 잠금 
 
 `GET /api/v1/transactions/{transactionId}/adopted-detection-result`는 canonical lowercase UUID v4 거래 ID 하나를 받으며 query와 request body를 받지 않는다. 인증된 USER에게 `transaction:read`와 `detection:read`가 모두 있어야 한다. 사건 연결 여부는 권한 조건이 아니다. 결과 ID만으로 조회하는 공개 경로는 이 기능에 없다.
 
-서버는 거래의 `adopted_detection_result_id`를 기준으로 **같은 거래의 COMPLETED 결과**만 투영한다. 최신 결과 버전은 채택 결과의 대체 근거가 아니다. 응답의 정확한 최상위 필드는 `transactionId`, `availability`, `latestDetectionResultVersion`, `latestAnalysisStatus`, `adoptedResult`이다. `availability`는 `NO_HISTORY`, `PENDING`, `IN_PROGRESS`, `FAILED`, `COMPLETED_NOT_ADOPTED`, `AVAILABLE` 중 하나다. 앞의 다섯 값에서는 `adoptedResult=null`이고, `latestDetectionResultVersion`·`latestAnalysisStatus`는 이력 없음일 때만 null이다. `AVAILABLE`에서는 채택 결과가 존재하며 최신 버전 상태는 별도로 반환한다. 최신 버전 번호가 채택 버전보다 크면 재분석 이력이 있음을 알 수 있으나, 현재 진행 여부는 반드시 `latestAnalysisStatus`로만 표현한다.
+서버는 거래의 `adopted_detection_result_id`를 기준으로 **같은 거래의 COMPLETED 결과**만 투영한다. 최신 결과 버전은 채택 결과의 대체 근거가 아니다. 신규 응답의 정확한 최상위 필드는 `transactionId`, `availability`, `latestDetectionResultVersion`, `latestAnalysisStatus`, `adoptedResult`, `latestFailureCode`이다. `availability`는 `NO_HISTORY`, `PENDING`, `IN_PROGRESS`, `FAILED`, `COMPLETED_NOT_ADOPTED`, `AVAILABLE` 중 하나다. 앞의 다섯 값에서는 `adoptedResult=null`이고, `latestDetectionResultVersion`·`latestAnalysisStatus`는 이력 없음일 때만 null이다. `AVAILABLE`에서는 채택 결과가 존재하며 최신 버전 상태는 별도로 반환한다. 최신 버전 번호가 채택 버전보다 크면 재분석 이력이 있음을 알 수 있으나, 현재 진행 여부는 반드시 `latestAnalysisStatus`로만 표현한다. `latestFailureCode`는 최신 분석이 ML 실패일 때만 제한된 `ML_*` 코드이고 그 외에는 null이다. 과거 최소 응답의 다섯 필드도 화면의 읽기 호환 범위에 둔다.
 
-`adoptedResult`의 정확한 필드는 `detectionResultId`, `detectionResultVersion`, `riskLevel`, `riskScore`, `analysisCompletedAt`, `ruleSetVersion`, `scoringPolicyVersion`, `ruleEvidence`이다. `ruleEvidence` 항목은 `ruleCode`, `ruleVersion`, `reasonCode`, `scoreContribution`만 포함하며 채택 결과 소속 `RULE` 근거만 저장 순서로 반환한다. 0건도 정상이다. 개별 `scoreContribution`의 합은 그룹 상한 적용 전 값이라 최종 `riskScore`와 다를 수 있다. `analysisCompletedAt`은 탐지 분석 완료 시각이며 사건 최종 판정 시각이 아니다. 위험 등급은 사기 확정률이나 사건 최종 판정이 아니다.
+신규 `adoptedResult`의 필드는 `detectionResultId`, `detectionResultVersion`, `riskLevel`, `riskScore`, `analysisCompletedAt`, `ruleSetVersion`, `scoringPolicyVersion`, `ruleEvidence`, `ruleScore`, `mlContribution`, `mlStatus`, `modelVersion`, `mlFeatureVersion`, `modelSha256`, `mlEvidence`이다. `ruleEvidence` 항목은 `ruleCode`, `ruleVersion`, `reasonCode`, `scoreContribution`만 포함하며 채택 결과 소속 `RULE` 근거만 저장 순서로 반환한다. 0건도 정상이다. 개별 Rule 근거 기여도의 합은 그룹 상한 적용 전 값이라 저장된 `ruleScore`와 다를 수 있다. ML 채택 시 `riskScore=min(100,ruleScore+mlContribution)`이며 등급은 최종 점수에서 결정된다. `mlEvidence`는 `reasonCode`, `scoreContribution`, `probabilityBasisPoints` 한 건이고, Rule 전용 결과에서는 빈 배열이다. 5000bp 기준과 최대 40점 가산은 합성 데이터 로컬 검증 계약이며 운영 성능이나 오탐 기준이 아니다. 상세 버전·장애 계약은 [사기 탐지 ML API](./fraud-ml-inference-api.md)를 따른다. `analysisCompletedAt`은 탐지 분석 완료 시각이며 사건 최종 판정 시각이 아니다. 위험 등급은 사기 확정률이나 사건 최종 판정이 아니다.
 
-설명 원문, `observationSummary`, provider 응답, 내부 PK, `failureCode`, 원문 JSON, token, trace ID는 이 성공 응답 본문에 포함하지 않는다. 공통 추적 필터의 `X-Trace-Id` 헤더는 유지한다. 이 본문은 기존 조회 응답의 `traceId` 관례보다 Issue #335의 명시적 최소 투영을 우선한다.
+설명 원문, `observationSummary`, provider 응답, 내부 PK, 무제한 실패 상세, 원문 JSON, token, trace ID는 이 성공 응답 본문에 포함하지 않는다. 공통 추적 필터의 `X-Trace-Id` 헤더는 유지한다. 이 본문은 기존 조회 응답의 `traceId` 관례보다 Issue #335의 명시적 최소 투영을 우선한다.
 
 성공은 채택 여부와 관계없이 `200`이다. 잘못된 거래 ID는 `400`, 거래 부재는 `404`, 인증 부재는 `401`, 두 권한 중 하나라도 없으면 `403`, 저장소 timeout·일시 장애는 `503`, 저장 정합성 위반은 내부 상세를 숨긴 `500`이다. 인증·인가를 입력 검증과 존재 조회보다 먼저 수행한다.
 

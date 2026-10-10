@@ -2,6 +2,7 @@ import ast
 import base64
 import contextlib
 import copy
+import datetime as dt
 import errno as errno_module
 import http.client
 import io
@@ -1049,6 +1050,52 @@ class VerifyTests(unittest.TestCase):
             ):
                 verify_e2e.validate_plan(plan)
 
+    def test_ingestion_plan_keeps_behavior_ingest_before_ml_cutoff(self):
+        before = dt.datetime.now(dt.timezone.utc)
+        plan = verify_e2e.create_plan()
+        after = dt.datetime.now(dt.timezone.utc)
+        verify_e2e.validate_plan(plan)
+        cutoff = dt.datetime.fromisoformat(plan["transactionOccurredAt"].replace("Z", "+00:00"))
+        assert before + dt.timedelta(seconds=89) <= cutoff <= after + dt.timedelta(seconds=90)
+        assert cutoff <= before + dt.timedelta(minutes=5)
+        for field in ("passwordOccurredAt", "transferLimitOccurredAt"):
+            occurred = dt.datetime.fromisoformat(plan[field].replace("Z", "+00:00"))
+            assert occurred < before < cutoff
+
+    def test_service_cutoff_is_pinned_after_behavior_ingest_and_waited(self):
+        plan = valid_plan()
+        before = dt.datetime.now(dt.timezone.utc)
+        verify_e2e.pin_cutoff_after_behavior_ingest(plan)
+        after = dt.datetime.now(dt.timezone.utc)
+        cutoff = dt.datetime.fromisoformat(plan["transactionOccurredAt"].replace("Z", "+00:00"))
+        self.assertGreater(cutoff, before)
+        self.assertLessEqual(cutoff, after)
+        self.assertLessEqual(after - before, dt.timedelta(seconds=3))
+
+    def test_service_ingestion_uses_new_cutoff_only_after_behavior_steps(self):
+        plan = valid_plan()
+        original_cutoff = plan["transactionOccurredAt"]
+        new_cutoff = "2026-10-10T01:02:03Z"
+        observed = []
+
+        def capture_step(_context, current_plan, step, *_args):
+            observed.append((step, current_plan["transactionOccurredAt"]))
+
+        def pin_cutoff(current_plan):
+            current_plan["transactionOccurredAt"] = new_cutoff
+
+        empty = verify_e2e.expected_transaction_cardinality(False, False, False)
+        with mock.patch.object(verify_e2e, "create_plan", return_value=plan), \
+             mock.patch.object(verify_e2e, "transaction_cardinality", return_value=empty), \
+             mock.patch.object(verify_e2e, "run_ingestion_step", side_effect=capture_step), \
+             mock.patch.object(verify_e2e, "pin_cutoff_after_behavior_ingest", side_effect=pin_cutoff) as pin:
+            verify_e2e.run_ingestion_phase(object())
+        self.assertEqual(pin.call_count, 1)
+        self.assertEqual([cutoff for step, cutoff in observed if step.startswith("behavior-")],
+                         [original_cutoff, original_cutoff])
+        self.assertEqual([cutoff for step, cutoff in observed if step.startswith("transaction-")],
+                         [new_cutoff, new_cutoff])
+
     def test_metric_totals_sum_only_exact_counter_series(self):
         scrape = """# HELP ignored ignored
 finguardops_external_risk_outcomes_total{result=\"matched\"} 1.0
@@ -1253,7 +1300,7 @@ finguardops_rule_analysis_outcomes_created 99
     def test_transaction_cardinality_contract_includes_high_case_and_four_actions(self):
         self.assertEqual(
             verify_e2e.expected_transaction_cardinality(True, True, True),
-            (1, 1, 1, 1, 1, 1, 2, 1, 1, 4, 1, 1, 1, 1),
+            (1, 1, 1, 1, 1, 1, 3, 1, 1, 4, 1, 1, 1, 1),
         )
 
     def test_step_rejects_dependency_hit_delta_independently_from_metrics(self):
@@ -3131,11 +3178,11 @@ finguardops_rule_analysis_outcomes_created 99
                 "RULE_ACTIVE_STATE",
                 "RULE_PUBLICATION_COMMAND",
                 "RULE_ACTIVATION_POLL",
-                "TRANSACTION_CARDINALITY_SNAPSHOT",
                 "DATABASE_GLOBAL_SNAPSHOT",
                 "EXTERNAL_RISK_LOG_SNAPSHOT",
                 "RULE_V2_LOG_SNAPSHOT",
                 "BACKEND_METRIC_SNAPSHOT",
+                "TRANSACTION_CARDINALITY_SNAPSHOT",
             ],
         )
 

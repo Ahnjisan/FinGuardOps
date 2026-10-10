@@ -149,6 +149,53 @@ class BehaviorEventRuleLookupIntegrationTest
     }
 
     @Test
+    void mlWindowExcludesLateIngestedAndPostTransactionEvents() {
+        String customer = "synthetic_ml_cutoff_" + UUID.randomUUID();
+        Instant now = Instant.now();
+        UUID lateIngested = UUID.randomUUID();
+        UUID futureEvent = UUID.randomUUID();
+        save(lateIngested, BehaviorEventType.DEVICE_REGISTERED,
+                now.minusSeconds(90), customer, null);
+        save(futureEvent, BehaviorEventType.DEVICE_REGISTERED,
+                now.plusSeconds(60), customer, null);
+        entityManager.clear();
+
+        List<BehaviorEvent> beforeIngest = behaviorEventRepository.findForMlEvaluation(
+                customer, Set.of(BehaviorEventType.DEVICE_REGISTERED),
+                now.minusSeconds(30).minusSeconds(86400), now.minusSeconds(30),
+                PageRequest.of(0, 1001));
+        assertThat(beforeIngest).isEmpty();
+
+        List<BehaviorEvent> afterIngest = behaviorEventRepository.findForMlEvaluation(
+                customer, Set.of(BehaviorEventType.DEVICE_REGISTERED),
+                now.plusSeconds(30).minusSeconds(86400), now.plusSeconds(30),
+                PageRequest.of(0, 1001));
+        assertThat(afterIngest).extracting(BehaviorEvent::getEventId)
+                .containsExactly(lateIngested);
+        assertThat(afterIngest).extracting(BehaviorEvent::getEventId)
+                .doesNotContain(futureEvent);
+    }
+
+    @Test
+    void mlWindowExposesTheThousandAndFirstEventForExplicitFailure() {
+        String customer = "synthetic_ml_limit_" + UUID.randomUUID();
+        Instant cutoff = Instant.now().plusSeconds(60);
+        List<BehaviorEvent> rows = new ArrayList<>();
+        for (int index = 0; index <= 1000; index++) {
+            rows.add(new BehaviorEvent(UUID.randomUUID(),
+                    BehaviorEventType.DEVICE_REGISTERED,
+                    cutoff.minusSeconds(index + 120), customer, null,
+                    "synthetic-device", null, null, FINGERPRINT));
+        }
+        behaviorEventRepository.saveAllAndFlush(rows);
+        entityManager.clear();
+        List<BehaviorEvent> found = behaviorEventRepository.findForMlEvaluation(
+                customer, Set.of(BehaviorEventType.DEVICE_REGISTERED),
+                cutoff.minusSeconds(86400), cutoff, PageRequest.of(0, 1001));
+        assertThat(found).hasSize(1001);
+    }
+
+    @Test
     void freezesTheLatestOneThousandEventsInContractOrder() {
         List<BehaviorEvent> events = new ArrayList<>();
         List<UUID> ids = new ArrayList<>();

@@ -9197,10 +9197,12 @@ test("a real USER works the Run fixture case through review, a note and the audi
       "The adopted result did not match the manifest risk or RULE projection.");
     requireCondition(isDeepStrictEqual(Object.keys(adoptedBody).sort(),
       ["transactionId", "availability", "latestDetectionResultVersion",
-        "latestAnalysisStatus", "adoptedResult"].sort()) &&
+        "latestAnalysisStatus", "adoptedResult", "latestFailureCode"].sort()) &&
       isDeepStrictEqual(Object.keys(adoptedResult).sort(), ["detectionResultId",
         "detectionResultVersion", "riskLevel", "riskScore", "analysisCompletedAt",
-        "ruleSetVersion", "scoringPolicyVersion", "ruleEvidence"].sort()),
+        "ruleSetVersion", "scoringPolicyVersion", "ruleEvidence", "ruleScore",
+        "mlContribution", "mlStatus", "modelVersion", "mlFeatureVersion",
+        "modelSha256", "mlEvidence"].sort()),
       "The adopted response exposed fields outside the approved projection.");
     await expect(factValue(page.locator(".adopted-detection"), "위험 등급"))
       .toHaveText(fixture.expectedRiskLevel);
@@ -10553,8 +10555,8 @@ test("a PLATFORM_ADMIN reviews the stored AI request usage without case authorit
   }
 });
 
-test("real Keycloak users investigate a stored Rule v2 CRITICAL case", async ({ browser, page }) => {
-  test.setTimeout(600_000);
+test("Issue 380: real Keycloak analyst investigates Rule v2 + ML adoption and ML failure", async ({ browser, page }) => {
+  test.setTimeout(900_000);
   requireRunFixtureManifestOracle();
   requireWorkflowWriteRelayOracle();
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -10591,10 +10593,18 @@ test("real Keycloak users investigate a stored Rule v2 CRITICAL case", async ({ 
   });
   const created = JSON.parse(output) as Record<string, unknown>;
   requireCondition(isDeepStrictEqual(sortedKeys(created),
-    ["caseId", "riskLevel", "riskScore", "transactionId", "transactionStatus"]) &&
+    ["caseId", "detectionResultId", "evaluationCutoffAt", "failedTransactionId",
+      "mlContribution", "modelSha256", "modelVersion", "riskLevel", "riskScore",
+      "ruleScore", "transactionId", "transactionStatus"]) &&
     typeof created.caseId === "string" && CANONICAL_UUID_V4.test(created.caseId) &&
     typeof created.transactionId === "string" && CANONICAL_UUID_V4.test(created.transactionId) &&
-    created.riskScore === 85 && created.riskLevel === "CRITICAL" &&
+    typeof created.detectionResultId === "string" && CANONICAL_UUID_V4.test(created.detectionResultId) &&
+    typeof created.failedTransactionId === "string" && CANONICAL_UUID_V4.test(created.failedTransactionId) &&
+    typeof created.evaluationCutoffAt === "string" &&
+    created.ruleScore === 85 && created.mlContribution === 35 && created.riskScore === 100 &&
+    created.modelVersion === "fraud-logistic-v2" &&
+    created.modelSha256 === "42344d398008babdd6a0404c750b24f1f27f1260aeac65851195d81500a876af" &&
+    created.riskLevel === "CRITICAL" &&
     created.transactionStatus === "HELD", "The critical fixture returned no verified stored identity.");
   const caseId = created.caseId as string;
   const transactionId = created.transactionId as string;
@@ -10623,6 +10633,19 @@ test("real Keycloak users investigate a stored Rule v2 CRITICAL case", async ({ 
     await page.locator(".case-transactions__item a").click();
     await expect(page.getByRole("heading", { name: `거래 ${transactionId}`, level: 2 })).toBeVisible();
     await expect(factValue(page.locator(".transaction-detail__record"), "처리 상태")).toHaveText("보류");
+    const transactionDetail = await page.evaluate(async (id) => {
+      const [{ getOidcAuthClient }, { fetchTransactionDetail }] = await Promise.all([
+        import("/src/auth/oidcAuthClient.ts"),
+        // @ts-expect-error Vite serves the production module at an absolute URL.
+        import("/src/api/transactionApi.ts"),
+      ]);
+      return fetchTransactionDetail(getOidcAuthClient(), id);
+    }, transactionId);
+    requireCondition(transactionDetail.data.transaction.transactionId === transactionId &&
+      transactionDetail.data.transaction.processingStatus === "HELD" &&
+      Date.parse(transactionDetail.data.transaction.occurredAt) ===
+        Date.parse(String(created.evaluationCutoffAt)),
+    "The displayed transaction did not retain the pinned evaluation cutoff.");
     const adopted = await page.evaluate(async (id) => {
       const [{ getOidcAuthClient }, { fetchAdoptedDetection }] = await Promise.all([
         import("/src/auth/oidcAuthClient.ts"),
@@ -10633,16 +10656,52 @@ test("real Keycloak users investigate a stored Rule v2 CRITICAL case", async ({ 
     }, transactionId);
     const evidence = adopted.adoptedResult?.ruleEvidence ?? [];
     requireCondition(adopted.availability === "AVAILABLE" &&
-      adopted.adoptedResult?.riskScore === 85 &&
+      adopted.adoptedResult?.detectionResultId === created.detectionResultId &&
+      adopted.adoptedResult?.riskScore === 100 &&
       adopted.adoptedResult?.riskLevel === "CRITICAL" &&
-      adopted.adoptedResult?.scoringPolicyVersion === "scoring-policy-v2" &&
+      adopted.adoptedResult?.ruleScore === 85 &&
+      adopted.adoptedResult?.mlContribution === 35 &&
+      adopted.adoptedResult?.mlStatus === "APPLIED" &&
+      adopted.adoptedResult?.scoringPolicyVersion === "rule-ml-policy-v1" &&
+      adopted.adoptedResult?.mlFeatureVersion === "fraud-feature-v1" &&
+      adopted.adoptedResult?.modelVersion === created.modelVersion &&
+      adopted.adoptedResult?.modelSha256 === created.modelSha256 &&
+      adopted.adoptedResult?.mlEvidence?.length === 1 &&
+      adopted.adoptedResult?.mlEvidence?.[0].scoreContribution === 35 &&
+      adopted.adoptedResult?.mlEvidence?.[0].reasonCode === "ML_RISK_SIGNAL" &&
       isDeepStrictEqual(evidence.map((item: { reasonCode: string }) => item.reasonCode), [
         "TRANSFER_ABSOLUTE_HIGH_AMOUNT", "RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT",
         "RECENT_SECURITY_CHANGE_HIGH_AMOUNT", "RECENT_BENEFICIARY_TRANSFER",
       ]), "The linked transaction did not expose four adopted v2 reasons.");
     await expect(page.locator(".adopted-detection")).toContainText("CRITICAL");
-    await expect(page.locator(".adopted-detection")).toContainText("85");
-    await page.getByRole("link", { name: "사건으로 돌아가기" }).click();
+    await expect(page.locator(".adopted-detection")).toContainText("Rule 원점수");
+    await expect(page.locator(".adopted-detection")).toContainText("+35점");
+    await expect(page.locator(".adopted-detection")).toContainText("fraud-logistic-v2");
+    await expect(page.locator(".adopted-detection")).toContainText(String(created.modelSha256));
+    await page.goto(`${APP_ORIGIN}/transactions/${created.failedTransactionId}`);
+    await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
+    await signInFromGuard(page, readUserPassword(),
+      `/transactions/${created.failedTransactionId}`, true);
+    await expect(page.getByRole("heading", { name: `거래 ${created.failedTransactionId}`, level: 2 })).toBeVisible();
+    await expect(factValue(page.locator(".transaction-detail__record"), "처리 상태")).toHaveText("실패");
+    const failedAdopted = await page.evaluate(async (id) => {
+      const [{ getOidcAuthClient }, { fetchAdoptedDetection }] = await Promise.all([
+        import("/src/auth/oidcAuthClient.ts"),
+        // @ts-expect-error Vite serves the production module at an absolute URL.
+        import("/src/api/adoptedDetectionApi.ts"),
+      ]);
+      return fetchAdoptedDetection(getOidcAuthClient(), id);
+    }, String(created.failedTransactionId));
+    requireCondition(failedAdopted.availability === "FAILED" &&
+      failedAdopted.latestAnalysisStatus === "FAILED" &&
+      failedAdopted.latestFailureCode === "ML_EVENT_LIMIT_EXCEEDED" &&
+      failedAdopted.adoptedResult === null, "The failed ML transaction was shown as adopted.");
+    await expect(page.locator(".adopted-detection")).toContainText("ML_EVENT_LIMIT_EXCEEDED");
+    await expect(page.locator(".adopted-detection")).toContainText("채택된 결과가 없습니다");
+    await expect(page.getByRole("link", { name: "사건으로 돌아가기" })).toHaveCount(0);
+    await page.goto(`${APP_ORIGIN}/cases/${caseId}`);
+    await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
+    await signInFromGuard(page, readUserPassword(), `/cases/${caseId}`, true);
     await expect(page.getByRole("heading", { name: `사건 ${caseId}`, level: 2 })).toBeVisible();
     const assigneeRef = randomUUID();
     armWorkflowWrite({ method: "PATCH", pathname: `${CASE_LIST_PATH}/${caseId}/status`,

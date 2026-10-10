@@ -4,6 +4,8 @@ import com.aifds.backend.detection.entity.DetectionAnalysisStatus;
 import com.aifds.backend.detection.entity.DetectionEvidence;
 import com.aifds.backend.detection.entity.DetectionResult;
 import com.aifds.backend.detection.entity.RiskLevel;
+import com.aifds.backend.detection.ml.MlDetectionPolicy;
+import com.aifds.backend.detection.ml.MlDetectionService;
 import com.aifds.backend.detection.repository.DetectionEvidenceRepository;
 import com.aifds.backend.detection.repository.DetectionResultRepository;
 import com.aifds.backend.externalrisk.domain.ExternalRiskSnapshot;
@@ -114,7 +116,7 @@ public class RuleAnalysisPersistenceService {
             Instant startedAt
     ) {
         requireOpenGate();
-        PreparedRuleAnalysisStart prepared = prepareStart(transactionId);
+        PreparedRuleAnalysisStart prepared = prepareStart(transactionId, false);
         StartedRuleAnalysis started = persistStart(
                 prepared,
                 scoringPolicyVersion,
@@ -143,7 +145,7 @@ public class RuleAnalysisPersistenceService {
             Instant startedAt
     ) {
         requireOpenGate();
-        PreparedRuleAnalysisStart prepared = prepareStart(transactionId);
+        PreparedRuleAnalysisStart prepared = prepareStart(transactionId, modelVersion != null);
         RuleAnalysisRequestV2 request = requestV2Mapper.map(
                 prepared.snapshot().request(),
                 externalRiskSnapshot
@@ -159,14 +161,15 @@ public class RuleAnalysisPersistenceService {
         return new StartedRuleAnalysisV2Execution(started, request);
     }
 
-    private PreparedRuleAnalysisStart prepareStart(UUID transactionId) {
+    private PreparedRuleAnalysisStart prepareStart(UUID transactionId, boolean cutoffSafeMl) {
         Objects.requireNonNull(transactionId, "transactionId must not be null");
         FinancialTransaction transaction = transactionRepository
                 .findByTransactionIdForUpdate(transactionId)
                 .orElseThrow(TransactionNotFoundException::new);
         validateCanStart(transaction);
         RuleAnalysisSnapshotAssembler.AssembledRuleAnalysisSnapshot snapshot =
-                snapshotAssembler.assemble(transaction);
+                cutoffSafeMl ? snapshotAssembler.assemble(transaction, true)
+                        : snapshotAssembler.assemble(transaction);
         return new PreparedRuleAnalysisStart(transaction, snapshot);
     }
 
@@ -184,6 +187,7 @@ public class RuleAnalysisPersistenceService {
         int selectedPolicy = RulePolicyVersion.from(snapshot.request().ruleVersions());
         scoringPolicyVersion = RulePolicyVersion.scoringPolicy(selectedPolicy);
         featureVersion = RulePolicyVersion.feature(selectedPolicy);
+        if (modelVersion != null) scoringPolicyVersion = MlDetectionPolicy.POLICY_VERSION;
 
         int nextVersion = Math.addExact(
                 detectionResultRepository.findMaximumVersionByTransactionPk(
@@ -201,6 +205,10 @@ public class RuleAnalysisPersistenceService {
                 snapshot.request().evaluationCutoffAt(),
                 analysisTraceId
         );
+        if (modelVersion != null) {
+            pending.pinMl(MlDetectionPolicy.FEATURE_VERSION,
+                    MlDetectionPolicy.shaForModel(modelVersion));
+        }
         DetectionResult saved = detectionResultRepository.saveAndFlush(
                 pending
         );
@@ -231,6 +239,18 @@ public class RuleAnalysisPersistenceService {
             Instant completedAt,
             List<RuleEvidenceDraft> evidenceDrafts
     ) {
+        completeAndAdoptMl(started, riskScore, riskLevel, completedAt, evidenceDrafts, null);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void completeAndAdoptMl(
+            StartedRuleAnalysis started,
+            int ruleRiskScore,
+            RiskLevel ruleRiskLevel,
+            Instant completedAt,
+            List<RuleEvidenceDraft> evidenceDrafts,
+            MlDetectionService.MlResult mlResult
+    ) {
         requireOpenGate();
         StartedRuleAnalysis validatedStarted = Objects.requireNonNull(
                 started,
@@ -254,6 +274,9 @@ public class RuleAnalysisPersistenceService {
             );
         }
         requireStartedMatches(validatedStarted, transaction, result);
+        if ((result.getModelVersion() != null) != (mlResult != null)) {
+            throw new IllegalArgumentException("Pinned ML selection and result differ");
+        }
 
         List<RuleEvidenceDraft> drafts = List.copyOf(
                 Objects.requireNonNull(
@@ -268,9 +291,22 @@ public class RuleAnalysisPersistenceService {
                         draft
                 ))
                 .toList();
+        if (mlResult != null) {
+            evidence = new java.util.ArrayList<>(evidence);
+            evidence.add(DetectionEvidence.ml(result, mlResult.reasonCode(),
+                    mlResult.contribution(), mlResult.probabilityBasisPoints(),
+                    result.getEvaluationCutoffAt(), evidence.size()));
+        }
         evidenceRepository.saveAllAndFlush(evidence);
 
-        result.complete(riskScore, riskLevel, completedAt);
+        if (mlResult == null) {
+            result.complete(ruleRiskScore, ruleRiskLevel, completedAt);
+        } else {
+            int finalScore = MlDetectionPolicy.finalScore(ruleRiskScore, mlResult.contribution());
+            result.completeMl(ruleRiskScore, mlResult.contribution(),
+                    mlResult.probabilityBasisPoints(), MlDetectionPolicy.riskLevel(finalScore),
+                    completedAt);
+        }
         detectionResultRepository.saveAndFlush(result);
 
         transaction.adoptDetectionResult(result);

@@ -3,6 +3,7 @@ package com.aifds.backend.detection.entity;
 import com.aifds.backend.rule.entity.RuleVersion;
 import com.aifds.backend.rule.entity.RuleVersionStatus;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -182,6 +183,28 @@ public class DetectionEvidence {
                 evidenceOccurredAt,
                 sortOrder
         );
+    }
+
+    public static DetectionEvidence ml(DetectionResult result, String reasonCode,
+                                       int contribution, int probabilityBasisPoints,
+                                       Instant cutoff, int sortOrder) {
+        DetectionEvidence evidence = new DetectionEvidence();
+        evidence.evidenceId = UUID.randomUUID();
+        evidence.detectionResult = Objects.requireNonNull(result);
+        result.validateEvaluationCutoffConsistency();
+        evidence.evidenceType = DetectionEvidenceType.ML;
+        evidence.reasonCode = evidence.requireCode(reasonCode, "reasonCode");
+        evidence.displayDescription = "Local synthetic-baseline ML signal";
+        if (contribution < 0 || contribution > 40 || probabilityBasisPoints < 0
+                || probabilityBasisPoints > 10000 || sortOrder < 0) {
+            throw new IllegalArgumentException("Invalid ML evidence values");
+        }
+        evidence.scoreContribution = contribution;
+        evidence.observationSummary = JsonNodeFactory.instance.objectNode()
+                .put("probabilityBasisPoints", probabilityBasisPoints);
+        evidence.evidenceOccurredAt = Objects.requireNonNull(cutoff);
+        evidence.sortOrder = sortOrder;
+        return evidence;
     }
 
     private String requireCode(String value, String fieldName) {

@@ -1,0 +1,5 @@
+finguardops:
+  ml:
+    enabled: true
+    effective-from: ${FINGUARDOPS_ML_EFFECTIVE_FROM:2026-10-09T15:00:00Z}
+    base-url: ${FINGUARDOPS_AI_SERVICE_BASE_URL:http://localhost:8000}

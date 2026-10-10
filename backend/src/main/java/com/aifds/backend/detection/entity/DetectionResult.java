@@ -97,6 +97,21 @@ public class DetectionResult {
     @Column(name = "model_version", length = 64, updatable = false)
     private String modelVersion;
 
+    @Column(name = "ml_feature_version", length = 64, updatable = false)
+    private String mlFeatureVersion;
+
+    @Column(name = "model_sha256", length = 64, updatable = false)
+    private String modelSha256;
+
+    @Column(name = "rule_risk_score")
+    private Integer ruleRiskScore;
+
+    @Column(name = "ml_contribution")
+    private Integer mlContribution;
+
+    @Column(name = "ml_probability_basis_points")
+    private Integer mlProbabilityBasisPoints;
+
     @Column(
             name = "evaluation_cutoff_at",
             nullable = false,
@@ -215,6 +230,43 @@ public class DetectionResult {
         );
         this.analysisStatus = DetectionAnalysisStatus.IN_PROGRESS;
     }
+
+    public void pinMl(String featureVersion, String sha256) {
+        requireStatus(DetectionAnalysisStatus.PENDING);
+        if (modelVersion == null || featureVersion == null || featureVersion.isBlank()
+                || sha256 == null || !sha256.matches("[0-9a-f]{64}")) {
+            throw new IllegalArgumentException("Invalid pinned ML identity");
+        }
+        this.mlFeatureVersion = requireVersion(featureVersion, "mlFeatureVersion");
+        this.modelSha256 = sha256;
+    }
+
+    public void completeMl(int ruleScore, int contribution, int probabilityBasisPoints,
+                           RiskLevel finalLevel, Instant completedAt) {
+        if (modelVersion == null || mlFeatureVersion == null || modelSha256 == null) {
+            throw new IllegalStateException("ML identity was not pinned");
+        }
+        int expectedContribution = com.aifds.backend.detection.ml.MlDetectionPolicy
+                .contribution(probabilityBasisPoints);
+        if (contribution != expectedContribution) {
+            throw new IllegalArgumentException("ML contribution mismatch");
+        }
+        int score = com.aifds.backend.detection.ml.MlDetectionPolicy.finalScore(
+                ruleScore, contribution);
+        if (finalLevel != com.aifds.backend.detection.ml.MlDetectionPolicy.riskLevel(score)) {
+            throw new IllegalArgumentException("Final ML risk level mismatch");
+        }
+        this.ruleRiskScore = ruleScore;
+        this.mlContribution = contribution;
+        this.mlProbabilityBasisPoints = probabilityBasisPoints;
+        complete(score, finalLevel, completedAt);
+    }
+
+    public Integer getRuleRiskScore() { return ruleRiskScore; }
+    public Integer getMlContribution() { return mlContribution; }
+    public Integer getMlProbabilityBasisPoints() { return mlProbabilityBasisPoints; }
+    public String getMlFeatureVersion() { return mlFeatureVersion; }
+    public String getModelSha256() { return modelSha256; }
 
     public void complete(
             int completedRiskScore,

@@ -1,6 +1,8 @@
 package com.aifds.backend.detection.service;
 
 import com.aifds.backend.detection.entity.RiskLevel;
+import com.aifds.backend.detection.ml.MlDetectionPolicy;
+import com.aifds.backend.detection.ml.MlDetectionService;
 import com.aifds.backend.externalrisk.domain.ExternalRiskSnapshot;
 import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.rule.client.RuleAnalysisClientException;
@@ -34,6 +36,7 @@ public class RuleAnalysisOrchestrationService {
     private final RuleAnalysisResponseMapper responseMapper;
     private final Clock clock;
     private final TransactionProcessingMetricsRecorder metricsRecorder;
+    private final MlDetectionService mlDetectionService;
 
     @Autowired
     public RuleAnalysisOrchestrationService(
@@ -41,7 +44,8 @@ public class RuleAnalysisOrchestrationService {
             RuleAnalysisHttpClient httpClient,
             RuleAnalysisResponseMapper responseMapper,
             Clock clock,
-            TransactionProcessingMetricsRecorder metricsRecorder
+            TransactionProcessingMetricsRecorder metricsRecorder,
+            MlDetectionService mlDetectionService
     ) {
         this.persistenceService = persistenceService;
         this.httpClient = httpClient;
@@ -50,6 +54,17 @@ public class RuleAnalysisOrchestrationService {
         this.metricsRecorder = metricsRecorder == null
                 ? TransactionProcessingMetricsRecorder.noop()
                 : metricsRecorder;
+        this.mlDetectionService = mlDetectionService;
+    }
+
+    public RuleAnalysisOrchestrationService(
+            RuleAnalysisPersistenceService persistenceService,
+            RuleAnalysisHttpClient httpClient,
+            RuleAnalysisResponseMapper responseMapper,
+            Clock clock,
+            TransactionProcessingMetricsRecorder metricsRecorder
+    ) {
+        this(persistenceService, httpClient, responseMapper, clock, metricsRecorder, null);
     }
 
     public RuleAnalysisOrchestrationService(
@@ -63,7 +78,8 @@ public class RuleAnalysisOrchestrationService {
                 httpClient,
                 responseMapper,
                 clock,
-                TransactionProcessingMetricsRecorder.noop()
+                TransactionProcessingMetricsRecorder.noop(),
+                null
         );
     }
 
@@ -102,7 +118,8 @@ public class RuleAnalysisOrchestrationService {
                         execution.request(),
                         started.analysisTraceId()
                 ),
-                metricStartedAt
+                metricStartedAt,
+                false
         );
     }
 
@@ -120,6 +137,9 @@ public class RuleAnalysisOrchestrationService {
         }
         final RuleV1ContractRegistry.RuleAnalysisMetadata metadata;
         final StartedRuleAnalysisV2Execution execution;
+        final java.time.Instant cutoff = mlDetectionService == null ? null
+                : mlDetectionService.cutoffFor(transactionId);
+        final boolean mlEnabled = cutoff != null && mlDetectionService.appliesAt(cutoff);
         try {
             metadata = RuleV1ContractRegistry.ruleAnalysisMetadata();
             execution = persistenceService.startAnalysisV2(
@@ -127,7 +147,7 @@ public class RuleAnalysisOrchestrationService {
                     externalRiskSnapshot,
                     metadata.scoringPolicyVersion(),
                     metadata.featureVersion(),
-                    metadata.modelVersion(),
+                    mlEnabled ? MlDetectionPolicy.modelForCutoff(cutoff) : metadata.modelVersion(),
                     analysisTraceId,
                     clock.instant()
             );
@@ -143,14 +163,16 @@ public class RuleAnalysisOrchestrationService {
                         execution.request(),
                         started.analysisTraceId()
                 ),
-                metricStartedAt
+                metricStartedAt,
+                mlEnabled
         );
     }
 
     private CompletedRuleAnalysis executeStartedAnalysis(
             StartedRuleAnalysis started,
             Supplier<RuleAnalysisResponse> clientCall,
-            long metricStartedAt
+            long metricStartedAt,
+            boolean mlEnabled
     ) {
         try {
             requireNoActiveTransaction();
@@ -194,14 +216,29 @@ public class RuleAnalysisOrchestrationService {
             );
         }
 
+        MlDetectionService.MlResult mlResult = null;
+        if (mlEnabled) {
+            try {
+                mlResult = mlDetectionService.infer(started.transactionId(),
+                        started.evaluationCutoffAt(), started.scoringPolicyVersion(),
+                        started.modelVersion());
+            } catch (MlDetectionService.MlDetectionException original) {
+                throw recordFailureAndMetric(started, original.code(), original,
+                        metricStartedAt);
+            } catch (RuntimeException original) {
+                throw recordFailureAndMetric(started, "ML_INFERENCE_FAILED", original,
+                        metricStartedAt);
+            }
+        }
+
         try {
-            persistenceService.completeAndAdopt(
-                    started,
-                    mapped.riskScore(),
-                    mapped.riskLevel(),
-                    clock.instant(),
-                    mapped.evidenceDrafts()
-            );
+            if (mlResult == null) {
+                persistenceService.completeAndAdopt(started, mapped.riskScore(),
+                        mapped.riskLevel(), clock.instant(), mapped.evidenceDrafts());
+            } else {
+                persistenceService.completeAndAdoptMl(started, mapped.riskScore(),
+                        mapped.riskLevel(), clock.instant(), mapped.evidenceDrafts(), mlResult);
+            }
         } catch (RuntimeException original) {
             throw recordFailureAndMetric(
                     started,
@@ -211,14 +248,18 @@ public class RuleAnalysisOrchestrationService {
             );
         }
 
-        recordRuleSuccess(mapped.riskLevel(), metricStartedAt);
+        int finalScore = mlResult == null ? mapped.riskScore()
+                : MlDetectionPolicy.finalScore(mapped.riskScore(), mlResult.contribution());
+        RiskLevel finalLevel = mlResult == null ? mapped.riskLevel()
+                : MlDetectionPolicy.riskLevel(finalScore);
+        recordRuleSuccess(finalLevel, metricStartedAt);
 
         return new CompletedRuleAnalysis(
                 started.transactionId(),
                 started.detectionResultId(),
                 started.detectionResultVersion(),
-                mapped.riskScore(),
-                mapped.riskLevel()
+                finalScore,
+                finalLevel
         );
     }
 

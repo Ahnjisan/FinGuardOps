@@ -1,0 +1,12 @@
+services:
+  ai-service-model-mismatch:
+    image: ${FINGUARDOPS_ISSUE380_AI_IMAGE:?issue 380 image required}
+    command: ["--host", "0.0.0.0", "--port", "8000"]
+    volumes:
+      - ./local-jwt-fixture/model-hash-mismatch.json:/opt/venv/lib/python3.12/site-packages/finguardops_ai/ml/fraud_model_v2.json:ro
+    read_only: true
+    tmpfs: [/tmp]
+    networks: [application]
+  backend:
+    environment:
+      FINGUARDOPS_ML_BASE_URL: http://ai-service-model-mismatch:8000
