@@ -51,7 +51,7 @@ class FraudCasePersistenceIntegrationTest
 
     @Test
     void appliesFreshV1ThroughV22SchemaWithApprovedConstraintsAndIndexes() {
-        assertThat(flyway.info().applied()).hasSize(24);
+        assertThat(flyway.info().applied()).hasSize(22);
         assertThat(flyway.info().current().getVersion().getVersion())
                 .isEqualTo("22");
         assertThat(flyway.info().current().getDescription())
