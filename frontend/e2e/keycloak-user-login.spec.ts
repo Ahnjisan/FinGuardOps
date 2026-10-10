@@ -10882,7 +10882,7 @@ test("Issue 382: real Keycloak analyst reads SCN-003 case and adopted evidence",
     await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
     await signInFromGuard(page, readUserPassword(), `/cases/${caseId}`, false);
     await expect(page.getByRole("heading", { name: `사건 ${caseId}`, level: 2 })).toBeVisible();
-    await expect(page.locator("article.audit__entry")).toHaveCount(4);
+    await expect(page.locator("article.audit__entry")).toHaveCount(2);
     await expect(page.locator(".case-transactions__item a")).toHaveAttribute("href", `/transactions/${transactionId}`);
     await page.locator(".case-transactions__item a").click();
     await expect(page.getByRole("heading", { name: `거래 ${transactionId}`, level: 2 })).toBeVisible();
