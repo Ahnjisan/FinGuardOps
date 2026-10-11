@@ -43,6 +43,8 @@ const CANONICAL_UUID_V4 = new RegExp(`^${CANONICAL_UUID_V4_PATTERN}$`);
 const BACKEND_ORIGIN = "http://localhost:8080";
 const TRANSACTION_LIST_PATH = "/api/v1/transactions";
 const CASE_LIST_PATH = "/api/v1/cases";
+const DASHBOARD_TRANSACTIONS_PATH = "/api/v1/fds-dashboard/transactions";
+const DASHBOARD_CASES_PATH = "/api/v1/fds-dashboard/cases";
 
 /**
  * A canonical lowercase UUID v4 that names no transaction.
@@ -200,7 +202,22 @@ const CASE_RESOLUTION_PROBE_PATH = new RegExp(
  * trailing or extra paths, non-canonical identifiers, and mixed endpoint query
  * names remain absent from this list and are refused.
  */
+function acceptsDashboardQuery(query: URLSearchParams): boolean {
+  const from = query.get("from");
+  const to = query.get("to");
+  if (from === null || to === null || !/^\d{4}-\d{2}-\d{2}$/.test(from) ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(to)) return false;
+  const duration = (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000;
+  return Number.isInteger(duration) && duration >= 1 && duration <= 31;
+}
+
 const RELAYABLE_READ_PATHS: readonly RelayableEndpoint[] = [
+  { name: "fds-dashboard-transactions", method: "GET",
+    matches: (pathname) => pathname === DASHBOARD_TRANSACTIONS_PATH,
+    queryNames: ["from", "to"], acceptsQuery: acceptsDashboardQuery },
+  { name: "fds-dashboard-cases", method: "GET",
+    matches: (pathname) => pathname === DASHBOARD_CASES_PATH,
+    queryNames: ["from", "to"], acceptsQuery: acceptsDashboardQuery },
   { name: "ai-operations-detail", method: "GET", matches: (pathname) => AI_REQUEST_DETAIL_PATH.test(pathname),
     queryNames: null },
   { name: "ai-usage-list", method: "GET", matches: (pathname) => pathname === "/api/v1/ai-report-usage",
@@ -5925,7 +5942,7 @@ test("the Backend relay refuses every endpoint it was not approved to reach", ()
  *
  * A closed endpoint allowlist is only worth having if it did not also close the
  * door on the reads and the one authorization probe this suite depends on. The
- * fifteen reads cover collections, identified details, adopted detection,
+ * The fourteen reads cover collections, identified details, adopted detection,
  * linked transactions, notes, audit and the current AI report; the one write
  * is the case resolution probe. These are
  * resolved rather than relayed - the target is compared, no socket is opened -
@@ -5937,9 +5954,9 @@ test("the Backend relay refuses every endpoint it was not approved to reach", ()
  */
 test("the Backend relay still admits the real reads and the one declared write probe", () => {
   requireCondition(
-    RELAYABLE_READ_PATHS.length === 12 &&
-      new Set(RELAYABLE_READ_PATHS.map(({ name }) => name)).size === 12,
-    "The twelve read relay descriptors were not unique.",
+    RELAYABLE_READ_PATHS.length === 14 &&
+      new Set(RELAYABLE_READ_PATHS.map(({ name }) => name)).size === 14,
+    "The fourteen read relay descriptors were not unique.",
   );
   requireCondition(
     RELAYABLE_WRITE_PROBES.length === 1 &&
@@ -5953,6 +5970,10 @@ test("the Backend relay still admits the real reads and the one declared write p
     readonly url: string;
     readonly target: string;
   }[] = [
+    { method: "GET", url: `${BACKEND_ORIGIN}${DASHBOARD_TRANSACTIONS_PATH}`,
+      target: DASHBOARD_TRANSACTIONS_PATH },
+    { method: "GET", url: `${BACKEND_ORIGIN}${DASHBOARD_CASES_PATH}`,
+      target: DASHBOARD_CASES_PATH },
     {
       method: "GET",
       url: `${BACKEND_ORIGIN}${INITIAL_TRANSACTION_TARGET}`,
@@ -6037,7 +6058,7 @@ test("the Backend relay still admits the real reads and the one declared write p
     },
   ];
 
-  requireCondition(admitted.length === 19, "The relay positive admission matrix drifted.");
+  requireCondition(admitted.length === 21, "The relay positive admission matrix drifted.");
   requireCondition(
     new Set(admitted.map((entry) => `${entry.method}\u0000${entry.url}`)).size === admitted.length,
     "The relay positive admission matrix contains a duplicate method and URL.",
@@ -10910,6 +10931,37 @@ test("Issue 382: real Keycloak analyst reads SCN-003 case and adopted evidence",
     await expect(page.locator(".adopted-detection")).toContainText("외부 위험 수취 계좌 근거");
     await expect(page.locator(".adopted-detection")).toContainText("PROVIDER_V1");
     await expect(page.locator(".adopted-detection")).toContainText("적격 과거 승인 송금");
+  } finally {
+    await test.step("CLEANUP", () => relay.dispose());
+  }
+});
+
+test("Issue 392: real Keycloak analyst reads aggregate dashboard through Backend", async ({ page }) => {
+  const relay = await installBackendRelay(page, {
+    captureBodyOf: [DASHBOARD_TRANSACTIONS_PATH, DASHBOARD_CASES_PATH],
+  });
+  try {
+    await page.goto(`${APP_ORIGIN}/fds-dashboard`);
+    await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
+    await signInFromGuard(page, readUserPassword(), "/fds-dashboard", false);
+    await expect(page.getByRole("heading", { name: "FDS 기간별 집계" })).toBeVisible();
+    await expect(page.getByRole("table", { name: "일별 거래·위험등급 건수" })).toBeVisible();
+    await expect(page.getByRole("table", { name: "일별 신규 사건 추세" })).toBeVisible();
+    const transaction = relay.find(entry => entry.pathname === DASHBOARD_TRANSACTIONS_PATH);
+    const cases = relay.find(entry => entry.pathname === DASHBOARD_CASES_PATH);
+    requireCondition(transaction?.status === 200 && cases?.status === 200 &&
+      transaction.target.startsWith(`${DASHBOARD_TRANSACTIONS_PATH}?`) &&
+      cases.target === `${DASHBOARD_CASES_PATH}${transaction.target.slice(DASHBOARD_TRANSACTIONS_PATH.length)}`,
+    "The analyst did not read both aggregate APIs through Backend.");
+    const transactionBody = parseJsonObject(transaction.body,
+      "dashboard transactions absent", "dashboard transactions invalid");
+    const caseBody = parseJsonObject(cases.body, "dashboard cases absent", "dashboard cases invalid");
+    requireCondition(transactionBody.timeZone === "Asia/Seoul" && caseBody.timeZone === "Asia/Seoul" &&
+      Array.isArray(transactionBody.days) && transactionBody.days.length === 7 &&
+      Array.isArray(caseBody.days) && caseBody.days.length === 7 &&
+      !/externalCustomerRef|accountRef|recipientAccountRef|customerId|transactionId|caseId/.test(
+        JSON.stringify([transactionBody, caseBody])),
+    "The aggregate API exposed an invalid KST range or personal identifiers.");
   } finally {
     await test.step("CLEANUP", () => relay.dispose());
   }

@@ -16,7 +16,7 @@ import { isUserRole, resolveUserRoles, USER_ROLES, type UserRole } from "./userR
  * of a permission UI is something being granted that should not have been.
  */
 
-const VIEWER_CAPABILITIES: readonly UiCapability[] = ["transaction:view", "detection:view", "case:view", "ai-report:view"];
+const VIEWER_CAPABILITIES: readonly UiCapability[] = ["fds-dashboard:view", "transaction:view", "detection:view", "case:view", "ai-report:view"];
 
 describe("resolveUserRoles - principal type", () => {
   it("accepts exactly USER", () => {
@@ -158,8 +158,8 @@ describe("isUserRole", () => {
 describe("resolveCapabilities - one role at a time", () => {
   const PER_ROLE: ReadonlyArray<[UserRole, readonly UiCapability[]]> = [
     ["FDS_VIEWER", VIEWER_CAPABILITIES],
-    ["FDS_ANALYST", ["transaction:view", "detection:view", "case:view", "case:workflow", "case:note-write", "ai-report:view", "ai-report:create"]],
-    ["FDS_APPROVER", ["transaction:view", "detection:view", "case:view", "case:resolve", "ai-report:view"]],
+    ["FDS_ANALYST", ["fds-dashboard:view", "transaction:view", "detection:view", "case:view", "case:workflow", "case:note-write", "ai-report:view", "ai-report:create"]],
+    ["FDS_APPROVER", ["fds-dashboard:view", "transaction:view", "detection:view", "case:view", "case:resolve", "ai-report:view"]],
     ["RULE_OPERATOR", []],
     ["RECOVERY_OPERATOR", []],
     ["PLATFORM_ADMIN", ["ai-operations:view", "ai-outbox:requeue", "ai-dlq:action", "ai-usage:view"]],
@@ -211,6 +211,7 @@ describe("resolveCapabilities - one role at a time", () => {
 describe("resolveCapabilities - several roles", () => {
   it("takes the union", () => {
     expect(resolveCapabilities(["FDS_ANALYST", "FDS_APPROVER"]).granted).toEqual([
+      "fds-dashboard:view",
       "transaction:view",
       "detection:view",
       "case:view",
@@ -322,8 +323,8 @@ describe("CapabilitySet", () => {
 });
 
 describe("the capability table as a whole", () => {
-  it("declares eleven capabilities", () => {
-    expect(UI_CAPABILITIES).toHaveLength(12);
+  it("declares thirteen capabilities", () => {
+    expect(UI_CAPABILITIES).toHaveLength(13);
     expect(Object.isFrozen(UI_CAPABILITIES)).toBe(true);
   });
 

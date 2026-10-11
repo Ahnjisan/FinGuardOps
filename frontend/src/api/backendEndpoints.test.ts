@@ -27,6 +27,8 @@ const LETTERED_ID = "6f1e0b6c-3a2b-4c8d-9e0f-1a2b3c4d5e6f";
  * design and are asserted absent below.
  */
 const EXPECTED: ReadonlyArray<{ key: string; method: string; template: string }> = [
+  { key: "fds-dashboard-transactions", method: "GET", template: "/api/v1/fds-dashboard/transactions" },
+  { key: "fds-dashboard-cases", method: "GET", template: "/api/v1/fds-dashboard/cases" },
   { key: "transaction-list", method: "GET", template: "/api/v1/transactions" },
   { key: "transaction-detail", method: "GET", template: "/api/v1/transactions/{transactionId}" },
   { key: "adopted-detection-result", method: "GET", template: "/api/v1/transactions/{transactionId}/adopted-detection-result" },
@@ -61,8 +63,8 @@ function paramsFor(descriptor: BackendEndpointDescriptor): Record<string, string
 }
 
 describe("endpoint registry — exact method and path matrix", () => {
-  it("contains exactly the nineteen approved USER endpoints", () => {
-    expect(BACKEND_ENDPOINT_KEYS).toHaveLength(22);
+  it("contains exactly the twenty-four approved USER endpoints", () => {
+    expect(BACKEND_ENDPOINT_KEYS).toHaveLength(24);
     expect([...BACKEND_ENDPOINT_KEYS].sort()).toEqual(EXPECTED.map((e) => e.key).sort());
   });
 
@@ -191,6 +193,8 @@ describe("URL assembly — approved requests", () => {
     });
 
     expect(built).toEqual([
+      "http://localhost:8080/api/v1/fds-dashboard/transactions",
+      "http://localhost:8080/api/v1/fds-dashboard/cases",
       "http://localhost:8080/api/v1/transactions",
       `http://localhost:8080/api/v1/transactions/${TRANSACTION_ID}`,
       `http://localhost:8080/api/v1/transactions/${TRANSACTION_ID}/adopted-detection-result`,
@@ -652,6 +656,8 @@ describe("endpoint registry — declared query parameters", () => {
       "cacheHit", "fallbackUsed", "page", "size", "sort"],
     "ai-usage-summary": ["from", "to", "provider", "model", "reportStatus", "reportSource",
       "cacheHit", "fallbackUsed"],
+    "fds-dashboard-transactions": ["from", "to"],
+    "fds-dashboard-cases": ["from", "to"],
   };
 
   it("declares exactly the Backend-approved names, in emission order", () => {

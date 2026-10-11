@@ -137,6 +137,11 @@ export function AppShell() {
               independently, and Backend re-decides authorization from the
               access token on every request.
             */}
+            {capabilities.has("fds-dashboard:view") && (
+              <li><NavLink className="rail__link" to="/fds-dashboard">
+                <Icon name="home" />FDS 집계
+              </NavLink></li>
+            )}
             {capabilities.has("transaction:view") && (
               <li>
                 <NavLink className="rail__link" to="/transactions">

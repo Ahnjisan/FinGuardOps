@@ -12,6 +12,7 @@ import com.aifds.backend.behavior.exception.DuplicateBehaviorEventException;
 import com.aifds.backend.behavior.validation.BehaviorEventValidationException;
 import com.aifds.backend.behavior.validation.BehaviorEventValidationType;
 import com.aifds.backend.common.trace.TraceIdFilter;
+import com.aifds.backend.dashboard.FdsDashboardValidationException;
 import com.aifds.backend.fraudcase.exception.FraudCaseNotFoundException;
 import com.aifds.backend.fraudcase.exception.FraudCaseQueryTimeoutException;
 import com.aifds.backend.fraudcase.exception.FraudCaseQueryUnavailableException;
@@ -57,6 +58,13 @@ import java.util.Set;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    @ExceptionHandler(FdsDashboardValidationException.class)
+    ResponseEntity<ApiErrorResponse> handleFdsDashboardValidation(
+            FdsDashboardValidationException exception, HttpServletRequest request) {
+        return response(HttpStatus.BAD_REQUEST, VALIDATION_ERROR,
+                VALIDATION_MESSAGE, List.of(), request);
+    }
 
     @ExceptionHandler(MockAuthException.class)
     ResponseEntity<ApiErrorResponse> handleMockAuth(MockAuthException exception,

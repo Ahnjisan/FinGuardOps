@@ -8,6 +8,8 @@ import type { UserRole } from "./userRoles";
  * `src/api/backendEndpoints.ts`, which is itself the exact USER subset of
  * `docs/02-architecture/security-architecture.md` section 5:
  *
+ * - `fds-dashboard:view` -> the two period aggregate reads (also needs
+ *                           transaction:read, detection:read and case:read)
  * - `transaction:view`  -> transaction-list, transaction-detail
  * - `detection:view`    -> adopted-detection-result (also needs transaction:view)
  * - `case:view`         -> case-list, case-detail, case-transaction-list,
@@ -17,13 +19,10 @@ import type { UserRole } from "./userRoles";
  * - `case:resolve`      -> case-resolution-create
  *
  * Backend authorities with no reachable endpoint get no capability at all.
- * `rule-version:*`, `recovery:*`, `platform:*`, `ai-operations:*`,
- * `ai-usage:*` and `behavior-event:read` are
- * therefore absent: some have no Spring controller, the rest have no endpoint
- * key in this client. Inventing a capability for them would describe an
- * unimplemented screen as if it existed.
+ * Other Backend authorities without a reachable endpoint have no capability.
  */
 export type UiCapability =
+  | "fds-dashboard:view"
   | "transaction:view"
   | "detection:view"
   | "case:view"
@@ -43,6 +42,7 @@ export type UiCapability =
  * role the Authorization Server happened to list first.
  */
 export const UI_CAPABILITIES: readonly UiCapability[] = Object.freeze<UiCapability[]>([
+  "fds-dashboard:view",
   "transaction:view",
   "detection:view",
   "case:view",
@@ -61,9 +61,9 @@ export const UI_CAPABILITIES: readonly UiCapability[] = Object.freeze<UiCapabili
  * The role table, keyed by a `Map` so that a name reaching here from untyped
  * data cannot resolve to an inherited property.
  *
- * `PLATFORM_ADMIN` maps to nothing on purpose. Section 4 of the security
- * architecture states it does not inherit case or transaction authority, and
- * every authority it does hold belongs to an endpoint this client cannot call.
+ * `PLATFORM_ADMIN` has operations and usage capabilities, and no FDS read
+ * capability. Section 4 of the security architecture says it does not inherit
+ * case or transaction authority.
  * `RULE_OPERATOR` and `RECOVERY_OPERATOR` are empty for the same reason: rule
  * publication and recovery execution are not HTTP endpoints at all.
  */
@@ -71,10 +71,11 @@ const ROLE_CAPABILITIES: ReadonlyMap<UserRole, readonly UiCapability[]> = new Ma
   UserRole,
   readonly UiCapability[]
 >([
-  ["FDS_VIEWER", Object.freeze<UiCapability[]>(["transaction:view", "detection:view", "case:view", "ai-report:view"])],
+  ["FDS_VIEWER", Object.freeze<UiCapability[]>(["fds-dashboard:view", "transaction:view", "detection:view", "case:view", "ai-report:view"])],
   [
     "FDS_ANALYST",
     Object.freeze<UiCapability[]>([
+      "fds-dashboard:view",
       "transaction:view",
       "detection:view",
       "case:view",
@@ -86,7 +87,7 @@ const ROLE_CAPABILITIES: ReadonlyMap<UserRole, readonly UiCapability[]> = new Ma
   ],
   [
     "FDS_APPROVER",
-    Object.freeze<UiCapability[]>(["transaction:view", "detection:view", "case:view", "case:resolve", "ai-report:view"]),
+    Object.freeze<UiCapability[]>(["fds-dashboard:view", "transaction:view", "detection:view", "case:view", "case:resolve", "ai-report:view"]),
   ],
   ["RULE_OPERATOR", Object.freeze<UiCapability[]>([])],
   ["RECOVERY_OPERATOR", Object.freeze<UiCapability[]>([])],

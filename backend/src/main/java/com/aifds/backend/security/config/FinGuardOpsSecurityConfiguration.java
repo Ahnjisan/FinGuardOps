@@ -74,6 +74,8 @@ public class FinGuardOpsSecurityConfiguration {
             new CorsEndpoint(HttpMethod.GET, "/api/health"),
             new CorsEndpoint(HttpMethod.POST, "/api/v1/transactions"),
             new CorsEndpoint(HttpMethod.GET, "/api/v1/transactions"),
+            new CorsEndpoint(HttpMethod.GET, "/api/v1/fds-dashboard/transactions"),
+            new CorsEndpoint(HttpMethod.GET, "/api/v1/fds-dashboard/cases"),
             new CorsEndpoint(HttpMethod.GET, "/api/v1/transactions/{transactionId}/adopted-detection-result"),
             new CorsEndpoint(
                     HttpMethod.GET,
@@ -210,6 +212,20 @@ public class FinGuardOpsSecurityConfiguration {
                             var granted = authentication.get().getAuthorities();
                             return new AuthorizationDecision(
                                     granted.stream().anyMatch(a -> TRANSACTION_READ.equals(a.getAuthority()))
+                                            && granted.stream().anyMatch(a -> DETECTION_READ.equals(a.getAuthority()))
+                            );
+                        })
+                        .requestMatchers(paths.matcher(
+                                HttpMethod.GET,
+                                "/api/v1/fds-dashboard/transactions"
+                        ), paths.matcher(
+                                HttpMethod.GET,
+                                "/api/v1/fds-dashboard/cases"
+                        )).access((authentication, request) -> {
+                            var granted = authentication.get().getAuthorities();
+                            return new AuthorizationDecision(
+                                    granted.stream().anyMatch(a -> TRANSACTION_READ.equals(a.getAuthority()))
+                                            && granted.stream().anyMatch(a -> CASE_READ.equals(a.getAuthority()))
                                             && granted.stream().anyMatch(a -> DETECTION_READ.equals(a.getAuthority()))
                             );
                         })

@@ -40,6 +40,8 @@ export { isCanonicalUuidV4 };
  * - endpoints that exist only as documentation candidates
  */
 export type BackendEndpointKey =
+  | "fds-dashboard-transactions"
+  | "fds-dashboard-cases"
   | "transaction-list"
   | "transaction-detail"
   | "adopted-detection-result"
@@ -159,6 +161,7 @@ export const CASE_AUDIT_LIST_SORTS = ["changedAt,asc", "changedAt,desc"] as cons
  * so widening one endpoint's filter cannot silently widen another's.
  */
 export type BackendQueryValueRule =
+  | { readonly kind: "kst-date" }
   /** 0-based page index within Java `int`. */
   | { readonly kind: "page" }
   /** Page size inside Backend's 1..100 window. */
@@ -231,6 +234,11 @@ const NON_NEGATIVE_INTEGER = /^(0|[1-9][0-9]*)$/;
  */
 export function isApprovedQueryValue(rule: BackendQueryValueRule, value: string): boolean {
   switch (rule.kind) {
+    case "kst-date": {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+      const parsed = new Date(`${value}T00:00:00Z`);
+      return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+    }
     case "page":
       // Rejects a sign, a leading zero, a fraction and anything past Java `int`.
       // The length guard keeps the `Number` conversion exact.
@@ -280,6 +288,14 @@ export function isApprovedQuerySet(
   descriptor: BackendEndpointDescriptor,
   query: Readonly<Record<string, string>>,
 ): boolean {
+  if (descriptor.key === "fds-dashboard-transactions" || descriptor.key === "fds-dashboard-cases") {
+    if ((query.from === undefined) !== (query.to === undefined)) return false;
+    if (query.from !== undefined && query.to !== undefined) {
+      const days = (Date.parse(`${query.to}T00:00:00Z`) -
+        Date.parse(`${query.from}T00:00:00Z`)) / 86400000;
+      if (!Number.isInteger(days) || days < 1 || days > 31) return false;
+    }
+  }
   if (descriptor.key === "ai-usage-list" || descriptor.key === "ai-usage-summary") {
     if (query.from === undefined || query.to === undefined ||
         !isUtcInstantString(query.from) || !isUtcInstantString(query.to) ||
@@ -499,6 +515,16 @@ const CASE_TRANSACTION_LIST_QUERY: readonly BackendQueryParamContract[] = [
 ];
 
 const REGISTRY: Readonly<Record<BackendEndpointKey, BackendEndpointDescriptor>> = Object.freeze({
+  "fds-dashboard-transactions": describe("fds-dashboard-transactions", "GET",
+    "/api/v1/fds-dashboard/transactions", [
+      { name: "from", rule: { kind: "kst-date" } },
+      { name: "to", rule: { kind: "kst-date" } },
+    ]),
+  "fds-dashboard-cases": describe("fds-dashboard-cases", "GET",
+    "/api/v1/fds-dashboard/cases", [
+      { name: "from", rule: { kind: "kst-date" } },
+      { name: "to", rule: { kind: "kst-date" } },
+    ]),
   "transaction-list": describe(
     "transaction-list",
     "GET",

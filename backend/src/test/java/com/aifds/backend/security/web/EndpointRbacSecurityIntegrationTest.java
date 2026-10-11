@@ -6,6 +6,9 @@ import com.aifds.backend.aireport.service.AiReportOperationsQueryService;
 import com.aifds.backend.outbox.OutboxRecoveryService;
 import com.aifds.backend.detection.service.AdoptedDetectionResultQueryService;
 import com.aifds.backend.common.trace.TraceIdFilter;
+import com.aifds.backend.dashboard.FdsDashboardRange;
+import com.aifds.backend.dashboard.FdsDashboardResponse;
+import com.aifds.backend.dashboard.FdsDashboardService;
 import com.aifds.backend.fraudcase.service.FraudCaseAuditLogService;
 import com.aifds.backend.fraudcase.service.FraudCaseQueryService;
 import com.aifds.backend.fraudcase.service.FraudCaseTransactionQueryService;
@@ -48,6 +51,7 @@ import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -74,6 +78,9 @@ import static com.aifds.backend.security.principal.FinGuardOpsAuthority.TRANSACT
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
@@ -222,6 +229,10 @@ class EndpointRbacSecurityIntegrationTest {
                     "PLATFORM_ADMIN", AI_OPERATIONS_READ),
             endpoint(HttpMethod.POST, "/api/v1/ai-report-dlq/" + CASE_ID + "/0/1/quarantine",
                     "PLATFORM_ADMIN", com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_DLQ_ACTION),
+            endpoint(HttpMethod.GET, "/api/v1/fds-dashboard/transactions",
+                    "FDS_VIEWER", TRANSACTION_READ + "+" + DETECTION_READ + "+" + CASE_READ),
+            endpoint(HttpMethod.GET, "/api/v1/fds-dashboard/cases",
+                    "FDS_VIEWER", TRANSACTION_READ + "+" + DETECTION_READ + "+" + CASE_READ),
             endpoint(HttpMethod.POST, "/api/v1/fds-mock-facts",
                     "BEHAVIOR_INGESTOR", BEHAVIOR_EVENT_INTAKE),
             endpoint(HttpMethod.POST, "/api/v1/fds-mock-fund-links",
@@ -368,6 +379,9 @@ class EndpointRbacSecurityIntegrationTest {
     @MockitoBean
     private OutboxRecoveryService outboxRecoveryService;
 
+    @MockitoBean
+    private FdsDashboardService fdsDashboardService;
+
     @BeforeAll
     static void startJwkServer() {
         jwkServer = InProcessJwkSetServer.start();
@@ -405,15 +419,28 @@ class EndpointRbacSecurityIntegrationTest {
                 fraudCaseAuditLogService,
                 aiReportService,
                 aiReportOperationsQueryService,
-                outboxRecoveryService
+                outboxRecoveryService,
+                fdsDashboardService
         );
     }
 
     @Test
     void coversExistingFifteenAndFiveAiReportEndpointsAndMinimumRoles()
             throws Exception {
+        when(fdsDashboardService.transactions(any(FdsDashboardRange.class), any(Instant.class), anyString()))
+                .thenAnswer(call -> {
+                    FdsDashboardRange range = call.getArgument(0);
+                    return new FdsDashboardResponse.Transactions(range.from(), range.to(),
+                            "Asia/Seoul", call.getArgument(1), List.of(), call.getArgument(2));
+                });
+        when(fdsDashboardService.cases(any(FdsDashboardRange.class), any(Instant.class), anyString()))
+                .thenAnswer(call -> {
+                    FdsDashboardRange range = call.getArgument(0);
+                    return new FdsDashboardResponse.Cases(range.from(), range.to(),
+                            "Asia/Seoul", call.getArgument(1), List.of(), Map.of(), call.getArgument(2));
+                });
         assertThat(ENDPOINTS.subList(0, 15)).hasSize(15);
-        assertThat(ENDPOINTS).hasSize(28);
+        assertThat(ENDPOINTS).hasSize(30);
         assertThat(ENDPOINTS.stream().map(Endpoint::signature))
                 .doesNotHaveDuplicates();
         Set<String> actualMappings = requestMappingHandlerMapping
@@ -449,6 +476,9 @@ class EndpointRbacSecurityIntegrationTest {
                     .as(endpoint.signature() + " requires "
                             + endpoint.authority())
                     .isNotIn(HttpStatus.UNAUTHORIZED, HttpStatus.FORBIDDEN);
+            if (endpoint.path().startsWith("/api/v1/fds-dashboard/")) {
+                assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+            }
             assertThat(response.getHeaders().getFirst(
                     TraceIdFilter.TRACE_ID_HEADER
             )).isEqualTo(TRACE_ID);
@@ -501,8 +531,8 @@ class EndpointRbacSecurityIntegrationTest {
     void enforcesUserServiceAndIngestorCrossBoundaries() throws Exception {
         List<Endpoint> serviceEndpoints = Stream.concat(
                 ENDPOINTS.subList(1, 3).stream(),
-                ENDPOINTS.subList(24, ENDPOINTS.size()).stream()).toList();
-        List<Endpoint> userEndpoints = ENDPOINTS.subList(3, 24);
+                ENDPOINTS.subList(26, ENDPOINTS.size()).stream()).toList();
+        List<Endpoint> userEndpoints = ENDPOINTS.subList(3, 26);
 
         for (String role : USER_ROLES) {
             for (Endpoint endpoint : serviceEndpoints) {
@@ -696,7 +726,7 @@ class EndpointRbacSecurityIntegrationTest {
     @Test
     void permitsEveryApprovedCorsPathAndMethodExactly() {
         assertThat(APPROVED_PREFLIGHTS.subList(0, 16)).hasSize(16);
-        assertThat(APPROVED_PREFLIGHTS).hasSize(25);
+        assertThat(APPROVED_PREFLIGHTS).hasSize(27);
         assertThat(APPROVED_PREFLIGHTS.subList(0, 15))
                 .extracting(CorsProbe::signature)
                 .containsExactlyElementsOf(ENDPOINTS.subList(0, 15).stream()
@@ -820,6 +850,9 @@ class EndpointRbacSecurityIntegrationTest {
     }
 
     private String deniedRole(Endpoint endpoint) {
+        if (endpoint.path().startsWith("/api/v1/fds-dashboard/")) {
+            return "PLATFORM_ADMIN";
+        }
         if (endpoint.role().equals("TRANSACTION_INGESTOR")) {
             return "BEHAVIOR_INGESTOR";
         }
@@ -1065,7 +1098,8 @@ class EndpointRbacSecurityIntegrationTest {
                 fraudCaseAuditLogService,
                 aiReportService,
                 aiReportOperationsQueryService,
-                outboxRecoveryService
+                outboxRecoveryService,
+                fdsDashboardService
         );
     }
 
