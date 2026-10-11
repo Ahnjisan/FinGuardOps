@@ -11,8 +11,13 @@ from finguardops_ai.ml.train_v3 import build_artifacts, generate, verify_split
 def test_v3_synthetic_split_and_artifact_hash_reproduce() -> None:
     splits = generate()
     verify_split(splits)
-    assert len({row.customer_group for row in splits["train"]}
-               & {row.customer_group for row in splits["test"]}) == 0
+    assert (
+        len(
+            {row.customer_group for row in splits["train"]}
+            & {row.customer_group for row in splits["test"]}
+        )
+        == 0
+    )
     source = Path(__file__).resolve().parents[1] / "src" / "finguardops_ai" / "ml"
     with TemporaryDirectory() as folder:
         report = build_artifacts(Path(folder))
