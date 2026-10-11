@@ -25,7 +25,7 @@ def post(url, payload, *, token=None, key=None, form=False, status=None):
         headers["Authorization"] = "Bearer " + token
     if key:
         headers["Idempotency-Key"] = key
-    with urllib.request.urlopen(urllib.request(url, data=body, headers=headers,
+    with urllib.request.urlopen(urllib.request.Request(url, data=body, headers=headers,
                                                       method="POST"), timeout=30) as response:
         if response.status != (status if status is not None else (200 if form else 201)):
             raise RuntimeError("SCN001002_STATUS_INVALID")
