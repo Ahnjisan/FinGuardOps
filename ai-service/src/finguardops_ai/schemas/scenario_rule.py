@@ -112,3 +112,21 @@ class RuleAnalysisResponseV3(RuleAnalysisDto):
     transaction_id: CanonicalUuid4
     trace_id: TraceId
     analysis: ScenarioAnalysis
+
+
+class ScenarioWindowDto(RuleAnalysisDto):
+    transfer_count: int
+    distinct_count: int
+    total_amount: Annotated[Decimal, Field(strict=False)]
+    unknown_count: int
+    coverage_fact_id: CanonicalUuid4 | None
+
+
+class ScenarioAggregationFactsDto(RuleAnalysisDto):
+    source_version: StrictText
+    outbound: ScenarioWindowDto
+    inbound: ScenarioWindowDto
+
+
+class RuleAnalysisRequestV4(RuleAnalysisRequestV3):
+    aggregation_facts: ScenarioAggregationFactsDto

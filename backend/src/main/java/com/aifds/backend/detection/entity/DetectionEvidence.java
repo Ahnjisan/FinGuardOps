@@ -6,6 +6,8 @@ import com.aifds.backend.rule.client.dto.ExternalRiskSnapshotRequest;
 import com.aifds.backend.externalrisk.domain.ExternalRiskReasonCode;
 import com.aifds.backend.externalrisk.domain.ExternalRiskSubjectType;
 import com.aifds.backend.externalrisk.domain.ExternalRiskType;
+import com.aifds.backend.scenario.ScenarioAggregationFacts;
+import com.aifds.backend.scenario.history.ScenarioTransferWindowRepository.Window;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import jakarta.persistence.Column;
@@ -222,7 +224,8 @@ public class DetectionEvidence {
                                            int appliedContribution,
                                            Instant evidenceAt,
                                            int sortOrder) {
-        if (result == null || !"rule-ml-policy-v3".equals(result.getScoringPolicyVersion())
+        if (result == null || !("rule-ml-policy-v3".equals(result.getScoringPolicyVersion())
+                || "rule-ml-policy-v4".equals(result.getScoringPolicyVersion()))
                 || version == null || version.getStatus() != RuleVersionStatus.PUBLISHED
                 || validatedObservation == null || !validatedObservation.isObject()
                 || rawContribution != version.getWeight()
@@ -255,7 +258,8 @@ public class DetectionEvidence {
         DetectionEvidence evidence = ml(result, reasonCode, contribution,
                 probabilityBasisPoints, cutoff, sortOrder);
         if (appliedContribution < 0 || appliedContribution > contribution
-                || !"rule-ml-policy-v3".equals(result.getScoringPolicyVersion())) {
+                || !("rule-ml-policy-v3".equals(result.getScoringPolicyVersion())
+                        || "rule-ml-policy-v4".equals(result.getScoringPolicyVersion()))) {
             throw new IllegalArgumentException("Invalid ML v3 applied contribution");
         }
         evidence.appliedContribution = appliedContribution;
@@ -294,6 +298,46 @@ public class DetectionEvidence {
                 .put("baselineDays", baselineDays)
                 .put("recipientStatus", recipientStatus)
                 .put("deviceStatus", deviceStatus);
+        evidence.evidenceOccurredAt = result.getEvaluationCutoffAt();
+        evidence.sortOrder = sortOrder;
+        return evidence;
+    }
+
+    public static DetectionEvidence aggregationHistory(DetectionResult result,
+            ScenarioAggregationFacts facts, int sortOrder) {
+        if (result == null || facts == null || sortOrder < 0
+                || !"rule-ml-policy-v4".equals(result.getScoringPolicyVersion())) {
+            throw new IllegalArgumentException("Invalid aggregation Evidence");
+        }
+        DetectionEvidence evidence = new DetectionEvidence();
+        evidence.evidenceId = UUID.randomUUID();
+        evidence.detectionResult = result;
+        evidence.evidenceType = DetectionEvidenceType.BEHAVIOR_PATTERN;
+        evidence.reasonCode = "AGGREGATION_HISTORY_CONTEXT";
+        evidence.displayDescription = "Cutoff-fixed transfer window and Mock completeness";
+        var observation = JsonNodeFactory.instance.objectNode()
+                .put("sourceVersion", facts.sourceVersion())
+                .put("mockSourceCode", "LOCAL_FDS_MOCK")
+                .put("mockSourceVersion", "v1")
+                .put("evaluationCutoffAt", result.getEvaluationCutoffAt().toString());
+        for (var entry : java.util.Map.of("outbound", facts.outbound(),
+                "inbound", facts.inbound()).entrySet()) {
+            Window window = entry.getValue();
+            var node = observation.putObject(entry.getKey())
+                    .put("windowStartAt", result.getEvaluationCutoffAt().minus(
+                            "outbound".equals(entry.getKey())
+                                    ? java.time.Duration.ofMinutes(10)
+                                    : java.time.Duration.ofHours(24)).toString())
+                    .put("status", window.available() ? "AVAILABLE" : "UNKNOWN")
+                    .put("transferCount", window.transferCount())
+                    .put("distinctCount", window.distinctCount())
+                    .put("totalAmount", window.totalAmount().toPlainString())
+                    .put("unknownCount", window.unknownCount());
+            if (window.coverageFactId() != null) {
+                node.put("coverageFactId", window.coverageFactId().toString());
+            }
+        }
+        evidence.observationSummary = observation;
         evidence.evidenceOccurredAt = result.getEvaluationCutoffAt();
         evidence.sortOrder = sortOrder;
         return evidence;

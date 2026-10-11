@@ -25,8 +25,23 @@ public record AdoptedDetectionResultItemResponse(
         @JsonInclude(JsonInclude.Include.NON_NULL) Scn003EvidenceResponse scn003Evidence,
         @JsonInclude(JsonInclude.Include.NON_NULL) JsonNode scoreGroupSummary,
         @JsonInclude(JsonInclude.Include.NON_NULL) Integer mlRawContribution,
-        @JsonInclude(JsonInclude.Include.NON_NULL) Scn001002EvidenceResponse scn001002Evidence
+        @JsonInclude(JsonInclude.Include.NON_NULL) Scn001002EvidenceResponse scn001002Evidence,
+        @JsonInclude(JsonInclude.Include.NON_NULL) JsonNode aggregationEvidence
 ) {
+    public AdoptedDetectionResultItemResponse(UUID detectionResultId, int detectionResultVersion,
+            String riskLevel, int riskScore, Instant analysisCompletedAt, String ruleSetVersion,
+            String scoringPolicyVersion, List<AdoptedRuleEvidenceResponse> ruleEvidence,
+            int ruleScore, Integer mlContribution, String mlStatus, String modelVersion,
+            String mlFeatureVersion, String modelSha256,
+            List<AdoptedMlEvidenceResponse> mlEvidence,
+            Scn003EvidenceResponse scn003Evidence, JsonNode scoreGroupSummary,
+            Integer mlRawContribution, Scn001002EvidenceResponse scn001002Evidence) {
+        this(detectionResultId, detectionResultVersion, riskLevel, riskScore,
+                analysisCompletedAt, ruleSetVersion, scoringPolicyVersion, ruleEvidence,
+                ruleScore, mlContribution, mlStatus, modelVersion, mlFeatureVersion,
+                modelSha256, mlEvidence, scn003Evidence, scoreGroupSummary,
+                mlRawContribution, scn001002Evidence, null);
+    }
     public AdoptedDetectionResultItemResponse(UUID detectionResultId, int detectionResultVersion,
             String riskLevel, int riskScore, Instant analysisCompletedAt, String ruleSetVersion,
             String scoringPolicyVersion, List<AdoptedRuleEvidenceResponse> ruleEvidence,
@@ -36,7 +51,7 @@ public record AdoptedDetectionResultItemResponse(
         this(detectionResultId, detectionResultVersion, riskLevel, riskScore,
                 analysisCompletedAt, ruleSetVersion, scoringPolicyVersion, ruleEvidence,
                 ruleScore, mlContribution, mlStatus, modelVersion, mlFeatureVersion,
-                modelSha256, mlEvidence, null, null, null, null);
+                modelSha256, mlEvidence, null, null, null, null, null);
     }
     public AdoptedDetectionResultItemResponse(UUID detectionResultId, int detectionResultVersion,
             String riskLevel, int riskScore, Instant analysisCompletedAt, String ruleSetVersion,
@@ -44,6 +59,6 @@ public record AdoptedDetectionResultItemResponse(
         this(detectionResultId, detectionResultVersion, riskLevel, riskScore,
                 analysisCompletedAt, ruleSetVersion, scoringPolicyVersion, ruleEvidence,
                 riskScore, null, "RULE_ONLY", null, null, null, List.of(), null,
-                null, null, null);
+                null, null, null, null);
     }
 }

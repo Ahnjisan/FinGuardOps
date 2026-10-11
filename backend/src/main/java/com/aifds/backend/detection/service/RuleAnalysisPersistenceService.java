@@ -14,8 +14,11 @@ import com.aifds.backend.observability.TransactionProcessingMetricsRecorder;
 import com.aifds.backend.rule.client.RuleAnalysisRequestV2Mapper;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV2;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV3;
+import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV4;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResponse;
 import com.aifds.backend.scenario.ScenarioRuleResponseValidator;
+import com.aifds.backend.scenario.ScenarioAggregationRuleResponseValidator;
+import com.aifds.backend.scenario.ScenarioAggregationRulePolicy;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.aifds.backend.rule.client.dto.ExternalRiskSnapshotRequest;
 import com.aifds.backend.externalrisk.domain.ExternalRiskSubjectType;
@@ -27,6 +30,8 @@ import com.aifds.backend.rule.repository.RuleVersionRepository;
 import com.aifds.backend.rule.contract.RulePolicyVersion;
 import com.aifds.backend.scenario.ScenarioFacts;
 import com.aifds.backend.scenario.ScenarioFactsService;
+import com.aifds.backend.scenario.ScenarioAggregationFacts;
+import com.aifds.backend.scenario.ScenarioAggregationFactsService;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
 import com.aifds.backend.transaction.exception.TransactionNotFoundException;
@@ -50,10 +55,16 @@ import java.util.UUID;
 public class RuleAnalysisPersistenceService {
 
     private ScenarioFactsService scenarioFactsService;
+    private ScenarioAggregationFactsService aggregationFactsService;
 
     @Autowired(required = false)
     void setScenarioFactsService(ScenarioFactsService scenarioFactsService) {
         this.scenarioFactsService = scenarioFactsService;
+    }
+
+    @Autowired(required = false)
+    void setAggregationFactsService(ScenarioAggregationFactsService aggregationFactsService) {
+        this.aggregationFactsService = aggregationFactsService;
     }
 
     private final FinancialTransactionRepository transactionRepository;
@@ -170,16 +181,23 @@ public class RuleAnalysisPersistenceService {
                 externalRiskSnapshot
         );
         int selectedPolicy = RulePolicyVersion.from(request.ruleVersions());
-        if (selectedPolicy == 4 && modelVersion == null) {
-            throw new IllegalStateException("Rule v4 requires the pinned ML v3 model");
+        if (selectedPolicy >= 4 && modelVersion == null) {
+            throw new IllegalStateException("Scenario Rule requires a pinned ML model");
         }
-        if (selectedPolicy == 4) {
-            modelVersion = MlDetectionPolicy.SCN001_002_MODEL_VERSION;
+        if (selectedPolicy >= 4) {
+            modelVersion = selectedPolicy == 5
+                    ? MlDetectionPolicy.SCN004_005_MODEL_VERSION
+                    : MlDetectionPolicy.SCN001_002_MODEL_VERSION;
         }
-        ScenarioFacts scenarioFacts = selectedPolicy == 4
+        ScenarioFacts scenarioFacts = selectedPolicy >= 4
                 ? Objects.requireNonNull(scenarioFactsService,
-                        "ScenarioFactsService is required for Rule v4")
+                        "ScenarioFactsService is required for scenario Rule")
                         .snapshot(prepared.transaction(), externalRiskSnapshot)
+                : null;
+        ScenarioAggregationFacts aggregationFacts = selectedPolicy == 5
+                ? Objects.requireNonNull(aggregationFactsService,
+                        "ScenarioAggregationFactsService is required for Rule v5")
+                        .snapshot(prepared.transaction())
                 : null;
         StartedRuleAnalysis started = persistStart(
                 prepared,
@@ -197,7 +215,7 @@ public class RuleAnalysisPersistenceService {
                     transactionId, request.evaluationCutoffAt(), PageRequest.of(0, 1))
                     .isEmpty();
         return new StartedRuleAnalysisV2Execution(started, request,
-                priorApprovedRecipientTransfer, scenarioFacts);
+                priorApprovedRecipientTransfer, scenarioFacts, aggregationFacts);
     }
 
     private PreparedRuleAnalysisStart prepareStart(UUID transactionId, boolean cutoffSafeMl) {
@@ -226,8 +244,9 @@ public class RuleAnalysisPersistenceService {
         int selectedPolicy = RulePolicyVersion.from(snapshot.request().ruleVersions());
         scoringPolicyVersion = RulePolicyVersion.scoringPolicy(selectedPolicy);
         featureVersion = RulePolicyVersion.feature(selectedPolicy);
-        if (modelVersion != null) scoringPolicyVersion = selectedPolicy == 4
-                ? MlDetectionPolicy.SCN001_002_POLICY_VERSION
+        if (modelVersion != null) scoringPolicyVersion = selectedPolicy == 5
+                ? MlDetectionPolicy.SCN004_005_POLICY_VERSION
+                : selectedPolicy == 4 ? MlDetectionPolicy.SCN001_002_POLICY_VERSION
                 : selectedPolicy == 3 ? MlDetectionPolicy.SCN003_POLICY_VERSION
                 : MlDetectionPolicy.POLICY_VERSION;
 
@@ -248,8 +267,9 @@ public class RuleAnalysisPersistenceService {
                 analysisTraceId
         );
         if (modelVersion != null) {
-            pending.pinMl(selectedPolicy == 4
-                            ? MlDetectionPolicy.SCN001_002_FEATURE_VERSION
+            pending.pinMl(selectedPolicy == 5
+                            ? MlDetectionPolicy.SCN004_005_FEATURE_VERSION
+                            : selectedPolicy == 4 ? MlDetectionPolicy.SCN001_002_FEATURE_VERSION
                             : MlDetectionPolicy.FEATURE_VERSION,
                     MlDetectionPolicy.shaForModel(modelVersion));
         }
@@ -406,20 +426,55 @@ public class RuleAnalysisPersistenceService {
                                    RuleAnalysisResponse response,
                                    MlDetectionService.MlResult mlResult,
                                    Instant completedAt) {
+        completeAndAdoptScenario(started, request, null, response, mlResult, completedAt);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void completeAndAdoptV5(StartedRuleAnalysis started,
+                                   RuleAnalysisRequestV4 request,
+                                   RuleAnalysisResponse response,
+                                   MlDetectionService.MlResult mlResult,
+                                   Instant completedAt) {
+        completeAndAdoptScenario(started, request.base(), request, response, mlResult,
+                completedAt);
+    }
+
+    private void completeAndAdoptScenario(StartedRuleAnalysis started,
+                                   RuleAnalysisRequestV3 request,
+                                   RuleAnalysisRequestV4 aggregationRequest,
+                                   RuleAnalysisResponse response,
+                                   MlDetectionService.MlResult mlResult,
+                                   Instant completedAt) {
         requireOpenGate();
-        Objects.requireNonNull(mlResult, "Rule v4 requires pinned ML result");
-        ScenarioRuleResponseValidator.validate(request, response);
+        Objects.requireNonNull(mlResult, "Scenario Rule requires pinned ML result");
+        if (aggregationRequest == null) {
+            ScenarioRuleResponseValidator.validate(request, response);
+        } else {
+            ScenarioAggregationRuleResponseValidator.validate(aggregationRequest, response);
+        }
         FinancialTransaction transaction = transactionForUpdate(started.transactionId());
         DetectionResult result = resultForUpdate(started.detectionResultId());
         requireTransactionStatus(transaction, TransactionProcessingStatus.ANALYZING);
         requireResultStatus(result, DetectionAnalysisStatus.IN_PROGRESS);
         requireStartedMatches(started, transaction, result);
         if (!result.belongsTo(transaction)
-                || !"rule-ml-policy-v3".equals(result.getScoringPolicyVersion())
-                || !MlDetectionPolicy.SCN001_002_MODEL_VERSION.equals(result.getModelVersion())
-                || !MlDetectionPolicy.SCN001_002_FEATURE_VERSION.equals(result.getMlFeatureVersion())
-                || !MlDetectionPolicy.SCN001_002_MODEL_SHA256.equals(result.getModelSha256())) {
-            throw new IllegalArgumentException("Rule v4 pinned result mismatch");
+                || !(aggregationRequest == null
+                        ? MlDetectionPolicy.SCN001_002_POLICY_VERSION
+                        : MlDetectionPolicy.SCN004_005_POLICY_VERSION)
+                        .equals(result.getScoringPolicyVersion())
+                || !(aggregationRequest == null
+                        ? MlDetectionPolicy.SCN001_002_MODEL_VERSION
+                        : MlDetectionPolicy.SCN004_005_MODEL_VERSION)
+                        .equals(result.getModelVersion())
+                || !(aggregationRequest == null
+                        ? MlDetectionPolicy.SCN001_002_FEATURE_VERSION
+                        : MlDetectionPolicy.SCN004_005_FEATURE_VERSION)
+                        .equals(result.getMlFeatureVersion())
+                || !(aggregationRequest == null
+                        ? MlDetectionPolicy.SCN001_002_MODEL_SHA256
+                        : MlDetectionPolicy.SCN004_005_MODEL_SHA256)
+                        .equals(result.getModelSha256())) {
+            throw new IllegalArgumentException("Scenario Rule pinned result mismatch");
         }
         var scoring = response.analysis().scoringResult();
         var groupSummary = JsonNodeFactory.instance.arrayNode();
@@ -450,7 +505,14 @@ public class RuleAnalysisPersistenceService {
                 request.scenarioFacts().baselineDays(),
                 request.scenarioFacts().recipientStatus(),
                 request.scenarioFacts().deviceStatus(), evidence.size()));
-        int appliedMl = Math.min(mlResult.contribution(), 100 - scoring.riskScore());
+        if (aggregationRequest != null) {
+            evidence.add(DetectionEvidence.aggregationHistory(result,
+                    aggregationRequest.aggregationFacts(), evidence.size()));
+        }
+        int ceiling = aggregationRequest == null ? 100
+                : ScenarioAggregationRulePolicy.scoreCeiling(scoring);
+        int appliedMl = Math.min(mlResult.contribution(),
+                Math.max(0, ceiling - scoring.riskScore()));
         evidence.add(DetectionEvidence.mlV4(result, mlResult.reasonCode(),
                 mlResult.contribution(), appliedMl, mlResult.probabilityBasisPoints(),
                 result.getEvaluationCutoffAt(), evidence.size()));

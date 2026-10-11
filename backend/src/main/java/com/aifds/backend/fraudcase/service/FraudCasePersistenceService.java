@@ -151,6 +151,8 @@ public class FraudCasePersistenceService {
                 Instant linkedAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
                 CaseTransaction link = caseTransactionRepository.saveAndFlush(
                         CaseTransaction.link(representative.get(), transaction, linkedAt));
+                correlationService.attachRelated(correlation, representative.get(),
+                        transaction, linkedAt);
                 return new FraudCaseLinkResult(representative.get().getCaseId(),
                         transaction.getTransactionId(), representative.get().getCaseStatus(),
                         link.getLinkedAt(), false, true);
@@ -165,6 +167,7 @@ public class FraudCasePersistenceService {
         );
         if (correlation != null) {
             correlationService.register(correlation, fraudCase, transaction);
+            correlationService.attachRelated(correlation, fraudCase, transaction, createdAt);
         }
         return result(fraudCase, transaction, link, true);
     }

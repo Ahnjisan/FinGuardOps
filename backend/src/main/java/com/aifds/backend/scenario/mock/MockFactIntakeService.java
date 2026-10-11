@@ -99,6 +99,16 @@ public class MockFactIntakeService {
                         || !"COMPLETE".equals(r.assertionState()) || hasLimit(r)
                         || r.countryCode() != null) throw invalid();
             }
+            case INBOUND_ACCOUNT_HISTORY_COMPLETE -> {
+                if (r.accountRef() == null || r.deviceRef() != null
+                        || r.behaviorEventId() != null || r.coverageFrom() == null
+                        || r.coverageFrom().isAfter(r.occurredAt())
+                        || r.coverageThrough() == null
+                        || r.coverageThrough().isBefore(r.occurredAt())
+                        || r.coverageThrough().isAfter(clock.instant().plus(Duration.ofMinutes(5)))
+                        || !"COMPLETE".equals(r.assertionState()) || hasLimit(r)
+                        || r.countryCode() != null) throw invalid();
+            }
             case DEVICE_TRUST -> {
                 if (r.deviceRef() == null || r.behaviorEventId() == null
                         || !("VERIFIED".equals(r.assertionState())

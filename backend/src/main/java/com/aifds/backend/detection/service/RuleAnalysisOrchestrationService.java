@@ -10,6 +10,8 @@ import com.aifds.backend.rule.client.RuleAnalysisClientException;
 import com.aifds.backend.rule.client.RuleAnalysisHttpClient;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResponse;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV3;
+import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV4;
+import com.aifds.backend.scenario.ScenarioAggregationRulePolicy;
 import com.aifds.backend.rule.contract.RuleV1ContractRegistry;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -124,6 +126,7 @@ public class RuleAnalysisOrchestrationService {
                 false,
                 null,
                 false,
+                null,
                 null
         );
     }
@@ -167,16 +170,22 @@ public class RuleAnalysisOrchestrationService {
         RuleAnalysisRequestV3 scenarioRequest = execution.scenarioFacts() == null
                 ? null : RuleAnalysisRequestV3.from(execution.request(),
                         execution.scenarioFacts());
+        RuleAnalysisRequestV4 aggregationRequest = execution.aggregationFacts() == null
+                ? null : RuleAnalysisRequestV4.from(execution.request(),
+                        execution.scenarioFacts(), execution.aggregationFacts());
         return executeStartedAnalysis(
                 started,
-                () -> scenarioRequest == null
-                        ? httpClient.analyzeV2(execution.request(), started.analysisTraceId())
-                        : httpClient.analyzeV3(scenarioRequest, started.analysisTraceId()),
+                () -> aggregationRequest != null
+                        ? httpClient.analyzeV4(aggregationRequest, started.analysisTraceId())
+                        : scenarioRequest == null
+                                ? httpClient.analyzeV2(execution.request(), started.analysisTraceId())
+                                : httpClient.analyzeV3(scenarioRequest, started.analysisTraceId()),
                 metricStartedAt,
                 mlEnabled,
                 execution.request().externalRisk(),
                 execution.priorApprovedRecipientTransfer(),
-                scenarioRequest
+                scenarioRequest,
+                aggregationRequest
         );
     }
 
@@ -187,7 +196,8 @@ public class RuleAnalysisOrchestrationService {
             boolean mlEnabled,
             ExternalRiskSnapshotRequest externalRisk,
             boolean priorApprovedRecipientTransfer,
-            RuleAnalysisRequestV3 scenarioRequest
+            RuleAnalysisRequestV3 scenarioRequest,
+            RuleAnalysisRequestV4 aggregationRequest
     ) {
         try {
             requireNoActiveTransaction();
@@ -234,7 +244,12 @@ public class RuleAnalysisOrchestrationService {
         MlDetectionService.MlResult mlResult = null;
         if (mlEnabled) {
             try {
-                mlResult = scenarioRequest == null
+                mlResult = aggregationRequest != null
+                        ? mlDetectionService.infer(started.transactionId(),
+                                started.evaluationCutoffAt(), started.scoringPolicyVersion(),
+                                started.modelVersion(), aggregationRequest.scenarioFacts(),
+                                aggregationRequest.aggregationFacts())
+                        : scenarioRequest == null
                         ? mlDetectionService.infer(started.transactionId(),
                                 started.evaluationCutoffAt(), started.scoringPolicyVersion(),
                                 started.modelVersion())
@@ -251,7 +266,10 @@ public class RuleAnalysisOrchestrationService {
         }
 
         try {
-            if (scenarioRequest != null) {
+            if (aggregationRequest != null) {
+                persistenceService.completeAndAdoptV5(started, aggregationRequest,
+                        response, mlResult, clock.instant());
+            } else if (scenarioRequest != null) {
                 persistenceService.completeAndAdoptV4(started, scenarioRequest,
                         response, mlResult, clock.instant());
             } else if (externalRisk != null) {
@@ -275,7 +293,11 @@ public class RuleAnalysisOrchestrationService {
         }
 
         int finalScore = mlResult == null ? mapped.riskScore()
-                : MlDetectionPolicy.finalScore(mapped.riskScore(), mlResult.contribution());
+                : aggregationRequest == null
+                        ? MlDetectionPolicy.finalScore(mapped.riskScore(), mlResult.contribution())
+                        : mapped.riskScore() + Math.min(mlResult.contribution(),
+                                Math.max(0, ScenarioAggregationRulePolicy.scoreCeiling(
+                                        response.analysis().scoringResult()) - mapped.riskScore()));
         RiskLevel finalLevel = mlResult == null ? mapped.riskLevel()
                 : MlDetectionPolicy.riskLevel(finalScore);
         recordRuleSuccess(finalLevel, metricStartedAt);

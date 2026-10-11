@@ -12,6 +12,7 @@ import com.aifds.backend.rule.client.dto.RuleTransactionType;
 import com.aifds.backend.rule.client.dto.RuleVersionSnapshotRequest;
 import com.aifds.backend.rule.contract.CanonicalRuleSetVersionCalculator;
 import com.aifds.backend.scenario.ScenarioRuleVersionContract;
+import com.aifds.backend.scenario.ScenarioAggregationRuleVersionContract;
 import com.aifds.backend.rule.contract.RuleV1ExecutionPlanRegistry;
 import com.aifds.backend.rule.entity.FraudRule;
 import com.aifds.backend.rule.entity.FraudRuleLifecycleStatus;
@@ -75,6 +76,22 @@ public class RuleAnalysisSnapshotAssembler {
         List<RuleVersion> executableVersions = List.copyOf(
                 ruleVersionRepository.findAllExecutableVersions(cutoff)
         );
+        if (executableVersions.size() == 12 || executableVersions.stream().anyMatch(version ->
+                ScenarioAggregationRuleVersionContract.CODES.contains(
+                        version.getFraudRule().getRuleCode()))) {
+            List<RuleVersionSnapshotRequest> v5 = executableVersions.stream()
+                    .sorted(java.util.Comparator.comparingInt(version -> {
+                        String code = version.getFraudRule().getRuleCode();
+                        int oldIndex = ScenarioRuleVersionContract.CODES.indexOf(code);
+                        return oldIndex >= 0 ? oldIndex : 10
+                                + ScenarioAggregationRuleVersionContract.CODES.indexOf(code);
+                    }))
+                    .map(this::toRuleSnapshot).toList();
+            ScenarioAggregationRuleVersionContract.validate(v5, cutoff);
+            return new AssembledRuleAnalysisSnapshot(
+                    ruleSetVersionCalculator.calculateV5(v5),
+                    new RuleAnalysisRequest(cutoff, transactionSnapshot, List.of(), v5));
+        }
         if (executableVersions.size() == 10 || executableVersions.stream().anyMatch(version ->
                 ScenarioRuleVersionContract.CODES.indexOf(
                         version.getFraudRule().getRuleCode()) >= 5)) {

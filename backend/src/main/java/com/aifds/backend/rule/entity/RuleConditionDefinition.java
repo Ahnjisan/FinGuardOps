@@ -42,6 +42,10 @@ public final class RuleConditionDefinition {
             RuleV1ContractRegistry.MATERIAL_LIMIT_UPLIFT, "MATERIAL_LIMIT_UPLIFT",
             RuleV1ContractRegistry.MOCK_OVERSEAS_NETWORK, "OVERSEAS_NETWORK"
     );
+    private static final Map<String, String> V5_SIGNALS = Map.of(
+            RuleV1ContractRegistry.DISTRIBUTED_OUTBOUND_WINDOW, "THREE_RECIPIENTS_TEN_MINUTES",
+            RuleV1ContractRegistry.MANY_CUSTOMER_INBOUND_WINDOW, "THREE_CUSTOMERS_TWENTY_FOUR_HOURS"
+    );
     private static final Map<String, Set<String>> ALLOWED_FIELDS = Map.of(
             TRANSFER_ABSOLUTE_HIGH_AMOUNT,
             Set.of(
@@ -108,6 +112,17 @@ public final class RuleConditionDefinition {
             }
             requireExactText(value, "contractVersion", "SCN001-002-contract-v1");
             requireExactText(value, "signal", V4_SIGNALS.get(ruleCode));
+            return new RuleConditionDefinition(value);
+        }
+
+        if (V5_SIGNALS.containsKey(ruleCode)) {
+            Set<String> fields = new HashSet<>();
+            value.fieldNames().forEachRemaining(fields::add);
+            if (!fields.equals(Set.of("contractVersion", "signal"))) {
+                throw new IllegalArgumentException("Rule v5 condition fields mismatch");
+            }
+            requireExactText(value, "contractVersion", "SCN004-005-contract-v1");
+            requireExactText(value, "signal", V5_SIGNALS.get(ruleCode));
             return new RuleConditionDefinition(value);
         }
 

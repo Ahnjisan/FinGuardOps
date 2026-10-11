@@ -14,6 +14,20 @@ public final class RulePolicyVersion {
         if (snapshots.isEmpty()) {
             throw new IllegalArgumentException("RuleVersion set is empty");
         }
+        if (snapshots.size() == 12 || snapshots.stream().anyMatch(snapshot ->
+                RuleV1ContractRegistry.DISTRIBUTED_OUTBOUND_WINDOW.equals(snapshot.ruleCode())
+                || RuleV1ContractRegistry.MANY_CUSTOMER_INBOUND_WINDOW.equals(snapshot.ruleCode()))) {
+            if (snapshots.size() != 12 || from(snapshots.subList(0, 10)) != 4
+                    || !RuleV1ContractRegistry.DISTRIBUTED_OUTBOUND_WINDOW.equals(
+                            snapshots.get(10).ruleCode())
+                    || !RuleV1ContractRegistry.MANY_CUSTOMER_INBOUND_WINDOW.equals(
+                            snapshots.get(11).ruleCode())
+                    || snapshots.get(10).versionNumber() != 1
+                    || snapshots.get(11).versionNumber() != 1) {
+                throw new IllegalArgumentException("Invalid SCN-004/005 RuleVersion set");
+            }
+            return 5;
+        }
         if (snapshots.size() == 10 || snapshots.stream().anyMatch(snapshot ->
                 RuleV1ContractRegistry.CUSTOMER_BASELINE_HIGH_AMOUNT.equals(snapshot.ruleCode())
                 || RuleV1ContractRegistry.EXTERNAL_RISK_DEVICE_MATCH.equals(snapshot.ruleCode())
