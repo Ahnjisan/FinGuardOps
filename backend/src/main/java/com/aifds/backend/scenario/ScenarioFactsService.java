@@ -61,7 +61,11 @@ public class ScenarioFactsService {
                     false, null, null, null, null, null, null, null);
         }
         List<MockFact> facts = mockFacts.findAsOf(tx.getExternalCustomerRef(),
-                List.of(MockFactType.values()), t, t.minus(Duration.ofHours(24)),
+                List.of(MockFactType.TRANSFER_HISTORY_COMPLETE,
+                        MockFactType.DEVICE_HISTORY_COMPLETE, MockFactType.DEVICE_TRUST,
+                        MockFactType.LIMIT_CHANGE, MockFactType.IDENTITY_CHECK,
+                        MockFactType.APP_SECURITY, MockFactType.NETWORK_REGION),
+                t, t.minus(Duration.ofHours(24)),
                 PageRequest.of(0, MAX_FACTS + 1));
         if (facts.size() > MAX_FACTS) {
             throw new IllegalStateException("SCENARIO_MOCK_FACT_LIMIT_EXCEEDED");
