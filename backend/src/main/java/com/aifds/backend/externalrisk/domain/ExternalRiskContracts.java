@@ -75,10 +75,10 @@ public final class ExternalRiskContracts {
         if (size > MAX_MATCHES) {
             return false;
         }
-        Set<ExternalRiskMatch> uniqueMatches = new HashSet<>();
+        Set<ExternalRiskSubjectType> uniqueSubjects = new HashSet<>();
         for (int index = 0; index < size; index++) {
             ExternalRiskMatch match = matches.get(index);
-            if (!isSupportedMatch(match) || !uniqueMatches.add(match)) {
+            if (!isSupportedMatch(match) || !uniqueSubjects.add(match.subjectType())) {
                 return false;
             }
         }
@@ -87,6 +87,10 @@ public final class ExternalRiskContracts {
 
     private static boolean isSupportedMatch(ExternalRiskMatch match) {
         if (match == null) {
+            return false;
+        }
+        if (match.subjectDigest() != null
+                && !match.subjectDigest().matches("^[0-9a-f]{64}$")) {
             return false;
         }
         return isMatch(

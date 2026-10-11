@@ -13,6 +13,9 @@ import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
+import com.fasterxml.jackson.databind.JsonNode;
 import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.SourceType;
 import org.hibernate.annotations.UpdateTimestamp;
@@ -111,6 +114,10 @@ public class DetectionResult {
 
     @Column(name = "ml_probability_basis_points")
     private Integer mlProbabilityBasisPoints;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "score_group_summary", columnDefinition = "jsonb")
+    private JsonNode scoreGroupSummary;
 
     @Column(
             name = "evaluation_cutoff_at",
@@ -241,6 +248,16 @@ public class DetectionResult {
         this.modelSha256 = sha256;
     }
 
+    public void setScoreGroupSummary(JsonNode summary) {
+        requireStatus(DetectionAnalysisStatus.IN_PROGRESS);
+        if (!"rule-ml-policy-v3".equals(scoringPolicyVersion)
+                || summary == null || !summary.isArray() || summary.size() != 4
+                || scoreGroupSummary != null) {
+            throw new IllegalArgumentException("Invalid Rule v4 group summary");
+        }
+        scoreGroupSummary = summary.deepCopy();
+    }
+
     public void completeMl(int ruleScore, int contribution, int probabilityBasisPoints,
                            RiskLevel finalLevel, Instant completedAt) {
         if (modelVersion == null || mlFeatureVersion == null || modelSha256 == null) {
@@ -262,9 +279,36 @@ public class DetectionResult {
         complete(score, finalLevel, completedAt);
     }
 
+    public void completeMlV4(int ruleScore, int appliedContribution,
+                             int probabilityBasisPoints, RiskLevel finalLevel,
+                             Instant completedAt) {
+        if (!"rule-ml-policy-v3".equals(scoringPolicyVersion)
+                || scoreGroupSummary == null || modelVersion == null
+                || mlFeatureVersion == null || modelSha256 == null) {
+            throw new IllegalStateException("Rule v4 ML identity or groups are not pinned");
+        }
+        int raw = com.aifds.backend.detection.ml.MlDetectionPolicy
+                .contribution(probabilityBasisPoints);
+        if (ruleScore < 0 || ruleScore > 100
+                || appliedContribution != Math.min(raw, 100 - ruleScore)) {
+            throw new IllegalArgumentException("Rule v4 applied ML contribution mismatch");
+        }
+        int score = ruleScore + appliedContribution;
+        if (finalLevel != com.aifds.backend.detection.ml.MlDetectionPolicy.riskLevel(score)) {
+            throw new IllegalArgumentException("Rule v4 final risk level mismatch");
+        }
+        this.ruleRiskScore = ruleScore;
+        this.mlContribution = appliedContribution;
+        this.mlProbabilityBasisPoints = probabilityBasisPoints;
+        complete(score, finalLevel, completedAt);
+    }
+
     public Integer getRuleRiskScore() { return ruleRiskScore; }
     public Integer getMlContribution() { return mlContribution; }
     public Integer getMlProbabilityBasisPoints() { return mlProbabilityBasisPoints; }
+    public JsonNode getScoreGroupSummary() {
+        return scoreGroupSummary == null ? null : scoreGroupSummary.deepCopy();
+    }
     public String getMlFeatureVersion() { return mlFeatureVersion; }
     public String getModelSha256() { return modelSha256; }
 

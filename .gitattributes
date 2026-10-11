@@ -2,3 +2,5 @@
 * text=auto
 *.sh text eol=lf
 ai-service/src/finguardops_ai/ml/fraud_model_v*.json -text
+ai-service/src/finguardops_ai/ml/fraud_model_v3.manifest.json text eol=lf
+ai-service/src/finguardops_ai/ml/fraud_model_v3.evaluation.json text eol=lf

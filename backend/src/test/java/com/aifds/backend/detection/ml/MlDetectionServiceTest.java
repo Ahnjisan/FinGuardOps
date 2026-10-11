@@ -2,11 +2,14 @@ package com.aifds.backend.detection.ml;
 
 import com.aifds.backend.behavior.repository.BehaviorEventRepository;
 import com.aifds.backend.behavior.entity.BehaviorEvent;
+import com.aifds.backend.rule.client.config.RuleAnalysisClientConfiguration;
+import com.aifds.backend.scenario.ScenarioFacts;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.aifds.backend.transaction.entity.TransactionChannel;
 import com.aifds.backend.transaction.entity.TransactionType;
 import com.aifds.backend.transaction.repository.FinancialTransactionRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -67,6 +70,55 @@ class MlDetectionServiceTest {
             assertThat(payload.path("events").size()).isZero();
             assertThat(payload.has("externalCustomerRef")).isFalse();
             assertThat(payload.has("ruleScore")).isFalse();
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void v3SerializesScenarioTimesWithTheStrictRuleWireMapper() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        HttpServer server = server(200, """
+                {"transactionId":"%s","evaluationCutoffAt":"%s",
+                 "featureVersion":"%s","scoringPolicyVersion":"%s",
+                 "modelVersion":"%s","modelSha256":"%s",
+                 "probabilityBasisPoints":4000,"reasonCode":"ML_BELOW_THRESHOLD"}
+                """.formatted(transactionId, cutoff,
+                MlDetectionPolicy.SCN001_002_FEATURE_VERSION,
+                MlDetectionPolicy.SCN001_002_POLICY_VERSION,
+                MlDetectionPolicy.SCN001_002_MODEL_VERSION,
+                MlDetectionPolicy.SCN001_002_MODEL_SHA256), requestBody);
+        try {
+            var transactions = mock(FinancialTransactionRepository.class);
+            var transaction = mock(FinancialTransaction.class);
+            when(transaction.getOccurredAt()).thenReturn(cutoff);
+            when(transaction.getAmount()).thenReturn(new BigDecimal("1000000"));
+            when(transaction.getTransactionType()).thenReturn(TransactionType.ACCOUNT_TRANSFER);
+            when(transaction.getChannel()).thenReturn(TransactionChannel.MOBILE_BANKING);
+            when(transactions.findByTransactionId(transactionId)).thenReturn(Optional.of(transaction));
+            ObjectMapper strictMapper = new RuleAnalysisClientConfiguration()
+                    .ruleAnalysisObjectMapper(Jackson2ObjectMapperBuilder.json()
+                            .modules(new JavaTimeModule()));
+            ScenarioFacts facts = new ScenarioFacts("SCN001-002-contract-v1", "UNKNOWN", 0, 0,
+                    BigDecimal.ZERO, BigDecimal.ZERO, "UNKNOWN", null,
+                    Instant.parse("2026-10-10T00:59:00.123456Z"), "UNKNOWN", null,
+                    Instant.parse("2026-10-10T00:58:00.123456Z"), "UNKNOWN", null,
+                    null, null, "UNKNOWN", null, null, null, null,
+                    "UNKNOWN", "UNKNOWN", null, "UNKNOWN", null, false,
+                    null, null, null, null, null, null, null);
+            MlDetectionService service = new MlDetectionService(true, Instant.EPOCH,
+                    "http://127.0.0.1:" + server.getAddress().getPort(), transactions,
+                    mock(BehaviorEventRepository.class), strictMapper);
+            assertThat(service.infer(transactionId, cutoff,
+                    MlDetectionPolicy.SCN001_002_POLICY_VERSION,
+                    MlDetectionPolicy.SCN001_002_MODEL_VERSION, facts).probabilityBasisPoints())
+                    .isEqualTo(4000);
+            var payload = strictMapper.readTree(requestBody.get());
+            assertThat(payload.path("scenarioFacts").path("beneficiaryRegisteredAt").asText())
+                    .isEqualTo("2026-10-10T00:59:00.123456Z");
+            assertThat(payload.path("scenarioFacts").path("deviceFirstSeenAt").asText())
+                    .isEqualTo("2026-10-10T00:58:00.123456Z");
+            assertThat(payload.path("evaluationCutoffAt").asText()).isEqualTo(cutoff.toString());
         } finally {
             server.stop(0);
         }

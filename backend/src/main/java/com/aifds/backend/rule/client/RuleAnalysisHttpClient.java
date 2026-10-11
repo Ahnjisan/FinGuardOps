@@ -4,8 +4,12 @@ import com.aifds.backend.common.trace.TraceIdFilter;
 import com.aifds.backend.rule.client.dto.RuleAnalysisErrorResponse;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequest;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV2;
+import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV3;
+import com.aifds.backend.scenario.ScenarioRuleResponseValidator;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResponse;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
@@ -27,6 +31,7 @@ public final class RuleAnalysisHttpClient {
 
     public static final String ENDPOINT = "/api/v1/rule-analysis";
     public static final String V2_ENDPOINT = "/api/v2/rule-analysis";
+    public static final String V3_ENDPOINT = "/api/v3/rule-analysis";
 
     private static final Logger LOGGER =
             LoggerFactory.getLogger(RuleAnalysisHttpClient.class);
@@ -101,6 +106,12 @@ public final class RuleAnalysisHttpClient {
         );
     }
 
+    public RuleAnalysisResponse analyzeV3(RuleAnalysisRequestV3 request, String traceId) {
+        Objects.requireNonNull(request, "request must not be null");
+        return exchange(request, V3_ENDPOINT, traceId,
+                response -> ScenarioRuleResponseValidator.validate(request, response));
+    }
+
     private RuleAnalysisResponse exchange(
             Object request,
             String endpoint,
@@ -173,6 +184,12 @@ public final class RuleAnalysisHttpClient {
             } catch (RuleAnalysisClientException exception) {
                 throw exception;
             } catch (RuntimeException exception) {
+                String validationCode = exception instanceof IllegalArgumentException
+                        && exception.getMessage() != null
+                        && exception.getMessage().startsWith("Rule v4 ")
+                        ? exception.getMessage() : "UNCLASSIFIED_CONTRACT_MISMATCH";
+                LOGGER.warn("Rule response contract rejected traceId={} validationCode={}",
+                        requestTraceId, validationCode);
                 throw invalidResponse(status);
             }
             return success;
@@ -201,7 +218,17 @@ public final class RuleAnalysisHttpClient {
             long startedAt
     ) {
         try {
-            T body = objectMapper.readValue(response.getBody(), bodyType);
+            T body;
+            if (bodyType == RuleAnalysisResponse.class) {
+                JsonNode tree = objectMapper.readValue(response.getBody(), JsonNode.class);
+                // v1/v2 did not emit the nullable v4 attribution fields. Add only
+                // those absent fields before the strict DTO parse; v3 validation
+                // still requires their actual, non-null values.
+                fillAbsentAttribution(tree);
+                body = objectMapper.treeToValue(tree, bodyType);
+            } else {
+                body = objectMapper.readValue(response.getBody(), bodyType);
+            }
             if (body == null) {
                 throw invalidResponse(status);
             }
@@ -221,6 +248,21 @@ public final class RuleAnalysisHttpClient {
                 );
             }
             throw invalidResponse(status);
+        }
+    }
+
+    private static void fillAbsentAttribution(JsonNode root) {
+        JsonNode analysis = root == null ? null : root.path("analysis");
+        if (analysis == null || analysis.isMissingNode()) return;
+        for (JsonNode row : analysis.path("scoringResult").path("ruleContributions")) {
+            if (row instanceof ObjectNode object && !object.has("appliedContribution")) {
+                object.putNull("appliedContribution");
+            }
+        }
+        for (JsonNode row : analysis.path("evidence")) {
+            if (row instanceof ObjectNode object && !object.has("appliedContribution")) {
+                object.putNull("appliedContribution");
+            }
         }
     }
 

@@ -22,38 +22,60 @@ public final class RuleV1ContractRegistry {
             "RECENT_BENEFICIARY_TRANSFER";
     public static final String EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT =
             "EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT";
+    public static final String CUSTOMER_BASELINE_HIGH_AMOUNT =
+            "CUSTOMER_BASELINE_HIGH_AMOUNT";
+    public static final String EXTERNAL_RISK_DEVICE_MATCH =
+            "EXTERNAL_RISK_DEVICE_MATCH";
+    public static final String MOCK_APP_SECURITY_ALERT =
+            "MOCK_APP_SECURITY_ALERT";
+    public static final String MATERIAL_LIMIT_UPLIFT =
+            "MATERIAL_LIMIT_UPLIFT";
+    public static final String MOCK_OVERSEAS_NETWORK =
+            "MOCK_OVERSEAS_NETWORK";
 
     private static final Map<String, Set<String>> ALLOWED_REASON_CODES =
-            Map.of(
-                    TRANSFER_ABSOLUTE_HIGH_AMOUNT,
-                    Set.of(TRANSFER_ABSOLUTE_HIGH_AMOUNT),
-                    RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT,
-                    Set.of(RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT),
-                    RECENT_SECURITY_CHANGE_HIGH_AMOUNT,
-                    Set.of(RECENT_SECURITY_CHANGE_HIGH_AMOUNT),
-                    RECENT_BENEFICIARY_TRANSFER,
-                    Set.of(RECENT_BENEFICIARY_TRANSFER),
-                    EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT,
-                    Set.of(EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT)
+            Map.ofEntries(
+                    Map.entry(TRANSFER_ABSOLUTE_HIGH_AMOUNT,
+                    Set.of(TRANSFER_ABSOLUTE_HIGH_AMOUNT)),
+                    Map.entry(RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT,
+                    Set.of(RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT)),
+                    Map.entry(RECENT_SECURITY_CHANGE_HIGH_AMOUNT,
+                    Set.of(RECENT_SECURITY_CHANGE_HIGH_AMOUNT)),
+                    Map.entry(RECENT_BENEFICIARY_TRANSFER,
+                    Set.of(RECENT_BENEFICIARY_TRANSFER)),
+                    Map.entry(EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT,
+                    Set.of(EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT)),
+                    Map.entry(CUSTOMER_BASELINE_HIGH_AMOUNT, Set.of(CUSTOMER_BASELINE_HIGH_AMOUNT)),
+                    Map.entry(EXTERNAL_RISK_DEVICE_MATCH, Set.of(EXTERNAL_RISK_DEVICE_MATCH)),
+                    Map.entry(MOCK_APP_SECURITY_ALERT, Set.of(MOCK_APP_SECURITY_ALERT)),
+                    Map.entry(MATERIAL_LIMIT_UPLIFT, Set.of(MATERIAL_LIMIT_UPLIFT)),
+                    Map.entry(MOCK_OVERSEAS_NETWORK, Set.of(MOCK_OVERSEAS_NETWORK))
             );
     private static final Set<String> SUPPORTED_REASON_CODES = Set.of(
             TRANSFER_ABSOLUTE_HIGH_AMOUNT,
             RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT,
             RECENT_SECURITY_CHANGE_HIGH_AMOUNT,
             RECENT_BENEFICIARY_TRANSFER,
-            EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT
-    );
-    private static final Map<String, String> DISPLAY_DESCRIPTIONS = Map.of(
-            TRANSFER_ABSOLUTE_HIGH_AMOUNT,
-            "절대 고액 이체",
-            RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT,
-            "최근 기기 등록 이벤트가 있는 고액 이체",
-            RECENT_SECURITY_CHANGE_HIGH_AMOUNT,
-            "최근 보안정보 변경 시퀀스가 있는 고액 이체",
-            RECENT_BENEFICIARY_TRANSFER,
-            "최근 등록 수취인 이체",
             EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT,
-            "외부 위험 수취 계좌 일치"
+            CUSTOMER_BASELINE_HIGH_AMOUNT,
+            EXTERNAL_RISK_DEVICE_MATCH,
+            MOCK_APP_SECURITY_ALERT,
+            MATERIAL_LIMIT_UPLIFT,
+            MOCK_OVERSEAS_NETWORK
+    );
+    private static final Map<String, String> DISPLAY_DESCRIPTIONS = Map.ofEntries(
+            Map.entry(TRANSFER_ABSOLUTE_HIGH_AMOUNT, "절대 고액 이체"),
+            Map.entry(RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT,
+                    "최근 기기 등록 이벤트가 있는 고액 이체"),
+            Map.entry(RECENT_SECURITY_CHANGE_HIGH_AMOUNT,
+                    "최근 보안정보 변경 시퀀스가 있는 고액 이체"),
+            Map.entry(RECENT_BENEFICIARY_TRANSFER, "최근 등록 수취인 이체"),
+            Map.entry(EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT, "외부 위험 수취 계좌 일치"),
+            Map.entry(CUSTOMER_BASELINE_HIGH_AMOUNT, "고객 기준선 대비 고액 이체"),
+            Map.entry(EXTERNAL_RISK_DEVICE_MATCH, "외부 위험 기기 일치"),
+            Map.entry(MOCK_APP_SECURITY_ALERT, "Mock 앱 보안 위험 신호"),
+            Map.entry(MATERIAL_LIMIT_UPLIFT, "큰 폭의 한도 상향"),
+            Map.entry(MOCK_OVERSEAS_NETWORK, "Mock 해외 접속 신호")
     );
 
     private RuleV1ContractRegistry() {

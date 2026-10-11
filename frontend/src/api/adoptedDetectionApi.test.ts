@@ -20,6 +20,56 @@ beforeEach(() => vi.stubEnv("VITE_API_BASE_URL", "http://localhost:8080"));
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 
 describe("adopted detection response", () => {
+  it("accepts attributed v4 scoring and rejects missing rule attribution", () => {
+    const v4 = {
+      transactionId,
+      availability: "AVAILABLE",
+      latestDetectionResultVersion: 1,
+      latestAnalysisStatus: "COMPLETED",
+      adoptedResult: {
+        detectionResultId: resultId, detectionResultVersion: 1,
+        riskLevel: "CRITICAL", riskScore: 100,
+        analysisCompletedAt: "2026-10-11T00:00:00Z",
+        ruleSetVersion: "a".repeat(64), scoringPolicyVersion: "rule-ml-policy-v3",
+        ruleEvidence: [
+          { ruleCode: "RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT", ruleVersion: "4",
+            reasonCode: "RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT", scoreContribution: 20,
+            appliedContribution: 20 },
+          { ruleCode: "RECENT_SECURITY_CHANGE_HIGH_AMOUNT", ruleVersion: "4",
+            reasonCode: "RECENT_SECURITY_CHANGE_HIGH_AMOUNT", scoreContribution: 50,
+            appliedContribution: 40 },
+          { ruleCode: "RECENT_BENEFICIARY_TRANSFER", ruleVersion: "4",
+            reasonCode: "RECENT_BENEFICIARY_TRANSFER", scoreContribution: 10,
+            appliedContribution: 10 },
+          { ruleCode: "CUSTOMER_BASELINE_HIGH_AMOUNT", ruleVersion: "1",
+            reasonCode: "CUSTOMER_BASELINE_HIGH_AMOUNT", scoreContribution: 20,
+            appliedContribution: 20 },
+        ],
+        ruleScore: 90, mlContribution: 10, mlRawContribution: 40,
+        mlStatus: "APPLIED", modelVersion: "fraud-logistic-v3",
+        mlFeatureVersion: "fraud-feature-v2", modelSha256: "a".repeat(64),
+        mlEvidence: [{ reasonCode: "ML_RISK_SIGNAL", scoreContribution: 40,
+          probabilityBasisPoints: 10000 }],
+        scoreGroupSummary: [
+          { groupId: "amount", rawScore: 20, cap: 20, appliedScore: 20, reduction: 0 },
+          { groupId: "security", rawScore: 70, cap: 60, appliedScore: 60, reduction: 10 },
+          { groupId: "beneficiary", rawScore: 10, cap: 10, appliedScore: 10, reduction: 0 },
+          { groupId: "external_recipient", rawScore: 0, cap: 40, appliedScore: 0, reduction: 0 },
+        ],
+        scn001002Evidence: { sourceVersion: "SCN001-002-contract-v1", baselineStatus: "AVAILABLE",
+          baselineCount: 10, baselineDays: 3, recipientStatus: "FIRST",
+          deviceStatus: "NEW_UNVERIFIED", providerCode: "PROVIDER_V1",
+          providerAsOf: "2026-10-11T00:00:00Z", lookedUpAt: "2026-10-11T00:00:00Z",
+          recipientAccountMatched: false, exactDeviceMatched: false },
+      },
+    };
+    expect(isAdoptedDetectionResponse(v4)).toBe(true);
+    const missing = structuredClone(v4);
+    delete (missing.adoptedResult.ruleEvidence[0] as { appliedContribution?: number }).appliedContribution;
+    expect(isAdoptedDetectionResponse(missing)).toBe(false);
+    expect(isAdoptedDetectionResponse({ ...v4, adoptedResult: {
+      ...v4.adoptedResult, recipientAccountRef: "raw-secret" } })).toBe(false);
+  });
   it("accepts the same adopted and failed responses captured in the local transaction E2E", () => {
     expect(isAdoptedDetectionResponse(issue380Fixture.adopted)).toBe(true);
     expect(isAdoptedDetectionResponse(issue380Fixture.failed)).toBe(true);

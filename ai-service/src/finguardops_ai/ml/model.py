@@ -8,6 +8,8 @@ from functools import lru_cache
 from importlib.resources import files
 
 from finguardops_ai.ml.features import FEATURE_NAMES, FEATURE_VERSION
+from finguardops_ai.ml.features_v2 import FEATURE_NAMES as FEATURE_NAMES_V2
+from finguardops_ai.ml.features_v2 import FEATURE_VERSION as FEATURE_VERSION_V2
 
 
 class ModelUnavailable(Exception):
@@ -31,12 +33,14 @@ class FraudModel:
         return max(0, min(10000, math.floor(probability * 10000 + 0.5)))
 
 
-@lru_cache(maxsize=2)
+@lru_cache(maxsize=3)
 def load_model(version: str = "fraud-logistic-v2") -> FraudModel:
     try:
-        if version not in ("fraud-logistic-v1", "fraud-logistic-v2"):
+        if version not in ("fraud-logistic-v1", "fraud-logistic-v2", "fraud-logistic-v3"):
             raise ModelUnavailable("MODEL_VERSION_MISMATCH")
-        suffix = "v1" if version == "fraud-logistic-v1" else "v2"
+        suffix = version.rsplit("-", 1)[-1]
+        feature_version = FEATURE_VERSION_V2 if suffix == "v3" else FEATURE_VERSION
+        feature_names = FEATURE_NAMES_V2 if suffix == "v3" else FEATURE_NAMES
         asset = files("finguardops_ai.ml").joinpath(f"fraud_model_{suffix}.json")
         manifest_asset = files("finguardops_ai.ml").joinpath(f"fraud_model_{suffix}.manifest.json")
         raw = asset.read_bytes()
@@ -46,16 +50,16 @@ def load_model(version: str = "fraud-logistic-v2") -> FraudModel:
             raise ModelUnavailable("MODEL_HASH_MISMATCH")
         model = json.loads(raw)
         if (
-            model["featureVersion"] != FEATURE_VERSION
-            or manifest["featureVersion"] != FEATURE_VERSION
-            or tuple(model["featureNames"]) != FEATURE_NAMES
+            model["featureVersion"] != feature_version
+            or manifest["featureVersion"] != feature_version
+            or tuple(model["featureNames"]) != feature_names
             or model["modelVersion"] != manifest["modelVersion"]
             or model["modelVersion"] != version
         ):
             raise ModelUnavailable("MODEL_VERSION_MISMATCH")
         weights = tuple(float(value) for value in model["weights"])
         bias = float(model["bias"])
-        if len(weights) != len(FEATURE_NAMES) or not all(
+        if len(weights) != len(feature_names) or not all(
             math.isfinite(value) for value in (*weights, bias)
         ):
             raise ModelUnavailable("MODEL_INVALID")

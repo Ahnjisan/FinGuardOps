@@ -10,10 +10,12 @@ from finguardops_ai.schemas.rule_analysis import (
     RuleAnalysisRequestV2,
     RuleAnalysisResponse,
 )
+from finguardops_ai.schemas.scenario_rule import RuleAnalysisRequestV3, RuleAnalysisResponseV3
 from finguardops_ai.services.rule_analysis import (
     RuleAnalysisService,
     get_rule_analysis_service,
 )
+from finguardops_ai.services.scenario_rule import analyze as analyze_scenario
 
 router = APIRouter(tags=["rule-analysis"])
 
@@ -42,6 +44,15 @@ def analyze_rule_v2(
     service: Annotated[RuleAnalysisService, Depends(get_rule_analysis_service)],
 ) -> RuleAnalysisResponse:
     return _analyze(request_dto, request, service)
+
+
+@router.post(
+    "/v3/rule-analysis",
+    response_model=RuleAnalysisResponseV3,
+    status_code=status.HTTP_200_OK,
+)
+def analyze_rule_v3(request_dto: RuleAnalysisRequestV3, request: Request) -> RuleAnalysisResponseV3:
+    return analyze_scenario(request_dto, request.state.trace_id)
 
 
 def _analyze(

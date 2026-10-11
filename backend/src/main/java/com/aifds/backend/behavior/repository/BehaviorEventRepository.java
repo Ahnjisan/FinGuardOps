@@ -17,6 +17,21 @@ public interface BehaviorEventRepository extends JpaRepository<BehaviorEvent, Lo
 
     Optional<BehaviorEvent> findByEventId(UUID eventId);
 
+    @Query("""
+            SELECT COUNT(event) FROM BehaviorEvent event
+            WHERE event.externalCustomerRef = :customerRef
+              AND event.deviceRef = :deviceRef
+              AND event.eventType IN :eventTypes
+              AND event.occurredAt <= :occurredAt
+              AND event.createdAt <= :createdBy
+            """)
+    long countDeviceOwnershipEvidence(
+            @Param("customerRef") String customerRef,
+            @Param("deviceRef") String deviceRef,
+            @Param("eventTypes") Set<BehaviorEventType> eventTypes,
+            @Param("occurredAt") Instant occurredAt,
+            @Param("createdBy") Instant createdBy);
+
     /**
      * Returns the first limited rule-evaluation window in fixed business order.
      * Callers must provide a non-empty {@code eventTypes} set and a paged

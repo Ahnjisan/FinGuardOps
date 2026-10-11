@@ -1,0 +1,98 @@
+{
+  "dataVersion": "synthetic-fraud-v3",
+  "featureVersion": "fraud-feature-v2",
+  "modelSha256": "630a7d078ab35f8b9b49e8d1aadfaaf583af64452edd68fa2542d13b5b4b4636",
+  "modelVersion": "fraud-logistic-v3",
+  "seed": 384,
+  "split": {
+    "test": {
+      "positives": 195,
+      "rows": 600
+    },
+    "train": {
+      "positives": 174,
+      "rows": 600
+    },
+    "validation": {
+      "positives": 180,
+      "rows": 600
+    }
+  },
+  "test": [
+    {
+      "f1": 0.639080459770115,
+      "falseNegativeRate": 0.28717948717948716,
+      "falsePositiveRate": 0.24938271604938272,
+      "fn": 56,
+      "fp": 101,
+      "precision": 0.5791666666666667,
+      "recall": 0.7128205128205128,
+      "thresholdBasisPoints": 3000,
+      "tn": 304,
+      "tp": 139
+    },
+    {
+      "f1": 0.4966442953020134,
+      "falseNegativeRate": 0.6205128205128205,
+      "falsePositiveRate": 0.07160493827160494,
+      "fn": 121,
+      "fp": 29,
+      "precision": 0.7184466019417476,
+      "recall": 0.37948717948717947,
+      "thresholdBasisPoints": 5000,
+      "tn": 376,
+      "tp": 74
+    },
+    {
+      "f1": 0.23111111111111113,
+      "falseNegativeRate": 0.8666666666666667,
+      "falsePositiveRate": 0.009876543209876543,
+      "fn": 169,
+      "fp": 4,
+      "precision": 0.8666666666666667,
+      "recall": 0.13333333333333333,
+      "thresholdBasisPoints": 7000,
+      "tn": 401,
+      "tp": 26
+    }
+  ],
+  "validation": [
+    {
+      "f1": 0.5986078886310904,
+      "falseNegativeRate": 0.2833333333333333,
+      "falsePositiveRate": 0.2904761904761905,
+      "fn": 51,
+      "fp": 122,
+      "precision": 0.5139442231075697,
+      "recall": 0.7166666666666667,
+      "thresholdBasisPoints": 3000,
+      "tn": 298,
+      "tp": 129
+    },
+    {
+      "f1": 0.4900662251655629,
+      "falseNegativeRate": 0.5888888888888889,
+      "falsePositiveRate": 0.11428571428571428,
+      "fn": 106,
+      "fp": 48,
+      "precision": 0.6065573770491803,
+      "recall": 0.4111111111111111,
+      "thresholdBasisPoints": 5000,
+      "tn": 372,
+      "tp": 74
+    },
+    {
+      "f1": 0.2922374429223744,
+      "falseNegativeRate": 0.8222222222222222,
+      "falsePositiveRate": 0.016666666666666666,
+      "fn": 148,
+      "fp": 7,
+      "precision": 0.8205128205128205,
+      "recall": 0.17777777777777778,
+      "thresholdBasisPoints": 7000,
+      "tn": 413,
+      "tp": 32
+    }
+  ],
+  "warning": "Synthetic local evaluation only; not real financial fraud performance"
+}

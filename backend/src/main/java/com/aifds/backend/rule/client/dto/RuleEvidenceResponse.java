@@ -16,8 +16,17 @@ public record RuleEvidenceResponse(
         @JsonProperty(required = true) int executionOrder,
         @JsonProperty(required = true) int scoreContribution,
         @JsonProperty(required = true) JsonNode observationSummary,
-        @JsonProperty(required = true) Instant evidenceOccurredAt
+        @JsonProperty(required = true) Instant evidenceOccurredAt,
+        Integer appliedContribution
 ) {
+
+    public RuleEvidenceResponse(RuleId ruleId, UUID ruleVersionId, String ruleCode,
+                                String ruleVersion, String reasonCode, int executionOrder,
+                                int scoreContribution, JsonNode observationSummary,
+                                Instant evidenceOccurredAt) {
+        this(ruleId, ruleVersionId, ruleCode, ruleVersion, reasonCode, executionOrder,
+                scoreContribution, observationSummary, evidenceOccurredAt, null);
+    }
 
     public RuleEvidenceResponse {
         Objects.requireNonNull(ruleId, "ruleId must not be null");

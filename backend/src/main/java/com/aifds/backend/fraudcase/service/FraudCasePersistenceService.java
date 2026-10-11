@@ -8,6 +8,9 @@ import com.aifds.backend.fraudcase.entity.FraudCaseStatus;
 import com.aifds.backend.fraudcase.exception.FraudCaseConsistencyException;
 import com.aifds.backend.fraudcase.repository.CaseTransactionRepository;
 import com.aifds.backend.fraudcase.repository.FraudCaseRepository;
+import com.aifds.backend.scenario.ScenarioCaseCorrelationService;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
 import com.aifds.backend.transaction.exception.TransactionNotFoundException;
@@ -38,18 +41,33 @@ public class FraudCasePersistenceService {
     private final CaseTransactionRepository caseTransactionRepository;
     private final Clock clock;
     private final RiskResponseDecisionPolicy decisionPolicy;
+    private final ScenarioCaseCorrelationService correlationService;
 
+    @Autowired
     public FraudCasePersistenceService(
             FinancialTransactionRepository transactionRepository,
             FraudCaseRepository fraudCaseRepository,
             CaseTransactionRepository caseTransactionRepository,
-            Clock clock
+            Clock clock,
+            ObjectProvider<ScenarioCaseCorrelationService> correlationService
     ) {
         this.transactionRepository = transactionRepository;
         this.fraudCaseRepository = fraudCaseRepository;
         this.caseTransactionRepository = caseTransactionRepository;
         this.clock = clock;
         this.decisionPolicy = new RiskResponseDecisionPolicy();
+        this.correlationService = correlationService.getIfAvailable();
+    }
+
+    public FraudCasePersistenceService(FinancialTransactionRepository transactionRepository,
+            FraudCaseRepository fraudCaseRepository,
+            CaseTransactionRepository caseTransactionRepository, Clock clock) {
+        this.transactionRepository = transactionRepository;
+        this.fraudCaseRepository = fraudCaseRepository;
+        this.caseTransactionRepository = caseTransactionRepository;
+        this.clock = clock;
+        this.decisionPolicy = new RiskResponseDecisionPolicy();
+        this.correlationService = null;
     }
 
     @Transactional
@@ -125,6 +143,19 @@ public class FraudCasePersistenceService {
     private FraudCaseLinkResult createAndLink(
             FinancialTransaction transaction
     ) {
+        ScenarioCaseCorrelationService.Correlation correlation = correlationService == null
+                ? null : correlationService.correlation(transaction).orElse(null);
+        if (correlation != null) {
+            var representative = correlationService.lockRepresentative(correlation, transaction);
+            if (representative.isPresent()) {
+                Instant linkedAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
+                CaseTransaction link = caseTransactionRepository.saveAndFlush(
+                        CaseTransaction.link(representative.get(), transaction, linkedAt));
+                return new FraudCaseLinkResult(representative.get().getCaseId(),
+                        transaction.getTransactionId(), representative.get().getCaseStatus(),
+                        link.getLinkedAt(), false, true);
+            }
+        }
         Instant createdAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
         FraudCase fraudCase = fraudCaseRepository.saveAndFlush(
                 FraudCase.open(UUID.randomUUID(), createdAt)
@@ -132,6 +163,9 @@ public class FraudCasePersistenceService {
         CaseTransaction link = caseTransactionRepository.saveAndFlush(
                 CaseTransaction.link(fraudCase, transaction, createdAt)
         );
+        if (correlation != null) {
+            correlationService.register(correlation, fraudCase, transaction);
+        }
         return result(fraudCase, transaction, link, true);
     }
 

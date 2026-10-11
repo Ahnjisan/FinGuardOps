@@ -10,6 +10,7 @@ import java.time.Instant;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.assertThat;
 
 class RuleAnalysisRequestDtoTest {
 
@@ -70,5 +71,29 @@ class RuleAnalysisRequestDtoTest {
                 List.of()
         )).isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("ruleVersions");
+    }
+
+    @Test
+    void nontransferV4SnapshotRequiresNoRecipientWhileTransfersRequireOne() {
+        RuleTransactionSnapshotRequest sample = RuleAnalysisClientTestFixtures
+                .request(mapper).transaction();
+        for (RuleTransactionType type : List.of(RuleTransactionType.ATM_WITHDRAWAL,
+                RuleTransactionType.LOAN_DISBURSED)) {
+            var nontransfer = new RuleTransactionSnapshotRequest(sample.transactionId(),
+                    type, sample.amount(), sample.currencyCode(), sample.occurredAt(),
+                    sample.externalCustomerRef(), sample.senderAccountRef(), null,
+                    sample.deviceRef());
+            assertThat(nontransfer.recipientAccountRef()).isNull();
+            assertThatThrownBy(() -> new RuleTransactionSnapshotRequest(
+                    sample.transactionId(), type, sample.amount(), sample.currencyCode(),
+                    sample.occurredAt(), sample.externalCustomerRef(), sample.senderAccountRef(),
+                    sample.recipientAccountRef(), sample.deviceRef()))
+                    .hasMessageContaining("must be null");
+        }
+        assertThatThrownBy(() -> new RuleTransactionSnapshotRequest(
+                sample.transactionId(), RuleTransactionType.ACCOUNT_TRANSFER,
+                sample.amount(), sample.currencyCode(), sample.occurredAt(),
+                sample.externalCustomerRef(), sample.senderAccountRef(), null,
+                sample.deviceRef())).hasMessageContaining("must not be null");
     }
 }

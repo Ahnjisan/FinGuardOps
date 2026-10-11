@@ -63,6 +63,17 @@ class ExternalRiskPolicyServiceTest {
     }
 
     @Test
+    void deviceMatchWithoutExactSubjectProofFailsClosed() {
+        ExternalRiskLookupPort port = request -> response(List.of(new ExternalRiskMatch(
+                ExternalRiskSubjectType.DEVICE, ExternalRiskType.RISK_DEVICE,
+                ExternalRiskReasonCode.RISK_DEVICE)));
+        assertThatThrownBy(() -> service(port).lookup(command()))
+                .isInstanceOf(ExternalRiskLookupException.class)
+                .satisfies(error -> assertThat(((ExternalRiskLookupException) error).category())
+                        .isEqualTo(ExternalRiskFailureCategory.INVALID_RESPONSE));
+    }
+
+    @Test
     void recordsOnePolicyAttemptWithTypedOutcomeAndMonotonicDuration() {
         TransactionProcessingMetricsRecorder recorder = mock(
                 TransactionProcessingMetricsRecorder.class
@@ -456,7 +467,8 @@ class ExternalRiskPolicyServiceTest {
         return new ExternalRiskMatch(
                 ExternalRiskSubjectType.DEVICE,
                 ExternalRiskType.RISK_DEVICE,
-                ExternalRiskReasonCode.RISK_DEVICE
+                ExternalRiskReasonCode.RISK_DEVICE,
+                com.aifds.backend.externalrisk.domain.ExternalRiskSubjectDigest.of("device-ref")
         );
     }
 }

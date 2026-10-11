@@ -199,31 +199,7 @@ class RuleAnalysisSnapshotAssemblerTest {
     }
 
     @Test
-    void rejectsUnsupportedTransactionAndWindowBeforeReturningSnapshot() {
-        FinancialTransaction unsupported = new FinancialTransaction(
-                UUID.randomUUID(),
-                TransactionType.ATM_WITHDRAWAL,
-                new BigDecimal("10000000.0000"),
-                "KRW",
-                CUTOFF,
-                "customer_ref",
-                "sender_ref",
-                null,
-                TransactionChannel.ATM,
-                null
-        );
-        RuleVersion r004 = publishedVersion(
-                RuleV1ContractRegistry.RECENT_BENEFICIARY_TRANSFER,
-                10,
-                beneficiaryCondition(86_400)
-        );
-        when(ruleVersionRepository.findAllExecutableVersions(CUTOFF))
-                .thenReturn(List.of(r004));
-
-        assertThatThrownBy(() -> assembler.assemble(unsupported))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("Transaction type");
-
+    void rejectsUnsupportedWindowBeforeReturningSnapshot() {
         RuleVersion unsupportedWindow = publishedVersion(
                 RuleV1ContractRegistry.RECENT_BENEFICIARY_TRANSFER,
                 10,

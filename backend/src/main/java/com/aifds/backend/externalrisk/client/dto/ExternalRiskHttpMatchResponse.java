@@ -7,6 +7,12 @@ import com.aifds.backend.externalrisk.domain.ExternalRiskType;
 public record ExternalRiskHttpMatchResponse(
         ExternalRiskSubjectType subjectType,
         ExternalRiskType riskType,
-        ExternalRiskReasonCode reasonCode
+        ExternalRiskReasonCode reasonCode,
+        String subjectDigest
 ) {
+    public ExternalRiskHttpMatchResponse(ExternalRiskSubjectType subjectType,
+                                         ExternalRiskType riskType,
+                                         ExternalRiskReasonCode reasonCode) {
+        this(subjectType, riskType, reasonCode, null);
+    }
 }

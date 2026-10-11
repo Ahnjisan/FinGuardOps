@@ -1,6 +1,6 @@
 import type { CredentialAuthClient } from "../auth/authClient";
 import { sendAuthorizedBackendRequest } from "./authorizedClient";
-import { isArrayOf, isEnumMember, isObjectWithExactKeys, isUtcInstantString, isUuidV4String } from "./responseValidation";
+import { isArrayOf, isEnumMember, isJsonObject, isObjectWithExactKeys, isUtcInstantString, isUuidV4String } from "./responseValidation";
 
 const ANALYSIS = ["PENDING", "IN_PROGRESS", "COMPLETED", "FAILED"] as const;
 const AVAILABILITY = ["NO_HISTORY", "PENDING", "IN_PROGRESS", "FAILED", "COMPLETED_NOT_ADOPTED", "AVAILABLE"] as const;
@@ -13,6 +13,7 @@ export interface AdoptedRuleEvidence {
   readonly ruleVersion: string;
   readonly reasonCode: string;
   readonly scoreContribution: number;
+  readonly appliedContribution?: number;
 }
 export interface AdoptedMlEvidence {
   readonly reasonCode: string;
@@ -44,6 +45,29 @@ export interface AdoptedResult {
   readonly modelSha256?: string | null;
   readonly mlEvidence?: readonly AdoptedMlEvidence[];
   readonly scn003Evidence?: Scn003Evidence;
+  readonly scoreGroupSummary?: readonly ScoreGroupSummary[];
+  readonly mlRawContribution?: number;
+  readonly scn001002Evidence?: Scn001002Evidence;
+}
+export interface ScoreGroupSummary {
+  readonly groupId: "amount" | "security" | "beneficiary" | "external_recipient";
+  readonly rawScore: number;
+  readonly cap: number;
+  readonly appliedScore: number;
+  readonly reduction: number;
+}
+export interface Scn001002Evidence {
+  readonly sourceVersion: "SCN001-002-contract-v1";
+  readonly baselineStatus: string;
+  readonly baselineCount: number;
+  readonly baselineDays: number;
+  readonly recipientStatus: string;
+  readonly deviceStatus: string;
+  readonly providerCode: string;
+  readonly providerAsOf: string;
+  readonly lookedUpAt: string;
+  readonly recipientAccountMatched: boolean;
+  readonly exactDeviceMatched: boolean;
 }
 export interface AdoptedDetectionResponse {
   readonly transactionId: string;
@@ -58,21 +82,76 @@ function isVersion(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= 2147483647;
 }
 function isRule(value: unknown): value is AdoptedRuleEvidence {
-  return isObjectWithExactKeys(value, ["ruleCode", "ruleVersion", "reasonCode", "scoreContribution"]) &&
+  return (isObjectWithExactKeys(value, ["ruleCode", "ruleVersion", "reasonCode", "scoreContribution"]) ||
+    isObjectWithExactKeys(value, ["ruleCode", "ruleVersion", "reasonCode", "scoreContribution", "appliedContribution"])) &&
     typeof value.ruleCode === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(value.ruleCode) &&
     typeof value.reasonCode === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(value.reasonCode) &&
     typeof value.ruleVersion === "string" && /^[0-9]+$/.test(value.ruleVersion) &&
     Number.isInteger(value.scoreContribution) && (value.scoreContribution as number) >= 0 &&
-    (value.scoreContribution as number) <= 100;
+    (value.scoreContribution as number) <= 100 &&
+    (value.appliedContribution === undefined ||
+      (Number.isInteger(value.appliedContribution) && (value.appliedContribution as number) >= 0 &&
+       (value.appliedContribution as number) <= (value.scoreContribution as number)));
+}
+function isScoreGroup(value: unknown): value is ScoreGroupSummary {
+  return isObjectWithExactKeys(value, ["groupId", "rawScore", "cap", "appliedScore", "reduction"]) &&
+    ["amount", "security", "beneficiary", "external_recipient"].includes(String(value.groupId)) &&
+    [value.rawScore, value.cap, value.appliedScore, value.reduction].every(item =>
+      Number.isInteger(item) && (item as number) >= 0 && (item as number) <= 200) &&
+    (value.rawScore as number) - (value.appliedScore as number) === value.reduction &&
+    (value.appliedScore as number) <= (value.cap as number);
+}
+function isScenario(value: unknown): value is Scn001002Evidence {
+  return isObjectWithExactKeys(value, ["sourceVersion", "baselineStatus", "baselineCount", "baselineDays",
+    "recipientStatus", "deviceStatus", "providerCode", "providerAsOf", "lookedUpAt",
+    "recipientAccountMatched", "exactDeviceMatched"]) &&
+    value.sourceVersion === "SCN001-002-contract-v1" &&
+    [value.baselineStatus, value.recipientStatus, value.deviceStatus, value.providerCode].every(item =>
+      typeof item === "string" && item.length > 0 && item.length <= 64) &&
+    Number.isSafeInteger(value.baselineCount) && (value.baselineCount as number) >= 0 &&
+    Number.isSafeInteger(value.baselineDays) && (value.baselineDays as number) >= 0 &&
+    isUtcInstantString(value.providerAsOf) && isUtcInstantString(value.lookedUpAt) &&
+    typeof value.recipientAccountMatched === "boolean" && typeof value.exactDeviceMatched === "boolean";
+}
+function hasV4Keys(value: unknown, keys: readonly string[]): boolean {
+  return isObjectWithExactKeys(value, keys);
 }
 function isAdopted(value: unknown): value is AdoptedResult {
+  if (!isJsonObject(value)) return false;
   const oldKeys = ["detectionResultId", "detectionResultVersion", "riskLevel", "riskScore",
     "analysisCompletedAt", "ruleSetVersion", "scoringPolicyVersion", "ruleEvidence"];
   const newKeys = [...oldKeys, "ruleScore", "mlContribution", "mlStatus", "modelVersion",
     "mlFeatureVersion", "modelSha256", "mlEvidence"];
   const scn003Keys = [...newKeys, "scn003Evidence"];
   const scn003 = isObjectWithExactKeys(value, scn003Keys);
-  if (!(isObjectWithExactKeys(value, oldKeys) || isObjectWithExactKeys(value, newKeys) || scn003)) return false;
+  const v4 = hasV4Keys(value, [...newKeys, "scoreGroupSummary", "mlRawContribution", "scn001002Evidence"]);
+  if (!(isObjectWithExactKeys(value, oldKeys) || isObjectWithExactKeys(value, newKeys) || scn003 || v4)) return false;
+  if (v4) {
+    if (value.scoringPolicyVersion !== "rule-ml-policy-v3" ||
+      value.mlFeatureVersion !== "fraud-feature-v2" ||
+      !isScenario(value.scn001002Evidence) || !isArrayOf(value.scoreGroupSummary, isScoreGroup) ||
+      value.scoreGroupSummary.length !== 4 || !isArrayOf(value.ruleEvidence, isRule) ||
+      value.ruleEvidence.some(item => item.appliedContribution === undefined) ||
+      !Number.isInteger(value.ruleScore) || !Number.isInteger(value.mlContribution) ||
+      !Number.isInteger(value.mlRawContribution) ||
+      value.mlStatus !== "APPLIED" ||
+      (value.mlRawContribution as number) < (value.mlContribution as number) ||
+      (value.mlRawContribution as number) > 40 ||
+      value.ruleEvidence.reduce((sum, item) => sum + (item.appliedContribution ?? 0), 0) !== value.ruleScore ||
+      value.scoreGroupSummary.reduce((sum, item) => sum + item.appliedScore, 0) !== value.ruleScore ||
+      (value.ruleScore as number) + (value.mlContribution as number) !== value.riskScore ||
+      !Array.isArray(value.mlEvidence) || value.mlEvidence.length !== 1 ||
+      !isObjectWithExactKeys(value.mlEvidence[0], ["reasonCode", "scoreContribution", "probabilityBasisPoints"]) ||
+      value.mlEvidence[0].scoreContribution !== value.mlRawContribution ||
+      !Number.isInteger(value.mlEvidence[0].probabilityBasisPoints) ||
+      typeof value.modelVersion !== "string" ||
+      typeof value.modelSha256 !== "string" || !/^[0-9a-f]{64}$/.test(value.modelSha256)) return false;
+    const level = value.riskScore < 20 ? "LOW" : value.riskScore < 50 ? "MEDIUM" :
+      value.riskScore < 80 ? "HIGH" : "CRITICAL";
+    return value.riskLevel === level && isUuidV4String(value.detectionResultId) &&
+      isVersion(value.detectionResultVersion) && isUtcInstantString(value.analysisCompletedAt) &&
+      typeof value.ruleSetVersion === "string" && value.ruleSetVersion.length > 0;
+  }
   const scn003Policy = value.scoringPolicyVersion === "scoring-policy-v3" ||
     value.scoringPolicyVersion === "rule-ml-policy-v2";
   if (scn003Policy !== scn003) return false;

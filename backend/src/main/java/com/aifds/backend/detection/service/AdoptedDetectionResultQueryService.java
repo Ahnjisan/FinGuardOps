@@ -5,6 +5,7 @@ import com.aifds.backend.detection.dto.AdoptedDetectionResultResponse;
 import com.aifds.backend.detection.dto.AdoptedRuleEvidenceResponse;
 import com.aifds.backend.detection.dto.AdoptedMlEvidenceResponse;
 import com.aifds.backend.detection.dto.Scn003EvidenceResponse;
+import com.aifds.backend.detection.dto.Scn001002EvidenceResponse;
 import com.aifds.backend.rule.contract.RuleV1ContractRegistry;
 import com.aifds.backend.detection.entity.DetectionAnalysisStatus;
 import com.aifds.backend.detection.entity.DetectionEvidenceType;
@@ -112,7 +113,8 @@ public class AdoptedDetectionResultQueryService {
                 .stream()
                 .map(row -> new AdoptedRuleEvidenceResponse(
                         row.getRuleCode(), row.getRuleVersion(),
-                        row.getReasonCode(), row.getScoreContribution()))
+                        row.getReasonCode(), row.getScoreContribution(),
+                        row.getAppliedContribution()))
                 .toList();
         var mlRows = evidence.findAllByDetectionResult_IdAndEvidenceTypeOrderBySortOrderAscIdAsc(
                 adopted.getId(), DetectionEvidenceType.ML);
@@ -125,7 +127,10 @@ public class AdoptedDetectionResultQueryService {
         if (applied) {
             if (ml.size() != 1 || adopted.getRuleRiskScore() == null
                     || adopted.getMlProbabilityBasisPoints() == null
-                    || ml.get(0).scoreContribution() != adopted.getMlContribution()
+                    || ("rule-ml-policy-v3".equals(adopted.getScoringPolicyVersion())
+                            ? mlRows.get(0).getAppliedContribution() == null
+                                    || mlRows.get(0).getAppliedContribution() != adopted.getMlContribution()
+                            : ml.get(0).scoreContribution() != adopted.getMlContribution())
                     || ml.get(0).probabilityBasisPoints() != adopted.getMlProbabilityBasisPoints()
                     || adopted.getRiskScore() != Math.min(100,
                         adopted.getRuleRiskScore() + adopted.getMlContribution())
@@ -137,6 +142,7 @@ public class AdoptedDetectionResultQueryService {
             throw new IllegalStateException("Rule-only result has ML evidence");
         }
         Scn003EvidenceResponse scn003 = null;
+        Scn001002EvidenceResponse scn001002 = null;
         if ("scoring-policy-v3".equals(adopted.getScoringPolicyVersion())
                 || MlDetectionPolicy.SCN003_POLICY_VERSION.equals(
                         adopted.getScoringPolicyVersion())) {
@@ -165,6 +171,45 @@ public class AdoptedDetectionResultQueryService {
                     Instant.parse(source.path("lookedUpAt").asText()),
                     matched, prior.path("priorApprovedRecipientTransferObserved").booleanValue());
         }
+        if ("rule-ml-policy-v3".equals(adopted.getScoringPolicyVersion())) {
+            var external = evidence.findAllByDetectionResult_IdAndEvidenceTypeOrderBySortOrderAscIdAsc(
+                    adopted.getId(), DetectionEvidenceType.EXTERNAL_RISK);
+            var history = evidence.findAllByDetectionResult_IdAndEvidenceTypeOrderBySortOrderAscIdAsc(
+                    adopted.getId(), DetectionEvidenceType.BEHAVIOR_PATTERN);
+            if (external.size() != 1 || history.size() != 1
+                    || adopted.getScoreGroupSummary() == null
+                    || rules.stream().anyMatch(row -> row.appliedContribution() == null)
+                    || rules.stream().mapToInt(AdoptedRuleEvidenceResponse::appliedContribution).sum()
+                            != adopted.getRuleRiskScore()) {
+                throw new IllegalStateException("SCN-001/002 Evidence attribution is inconsistent");
+            }
+            var source = external.get(0).getObservationSummary();
+            var prior = history.get(0).getObservationSummary();
+            if (!"SCN001-002-contract-v1".equals(source.path("sourceVersion").asText())
+                    || !"SCN001-002-contract-v1".equals(prior.path("sourceVersion").asText())) {
+                throw new IllegalStateException("SCN-001/002 Evidence source is inconsistent");
+            }
+            boolean recipientMatched = source.path("recipientAccountMatched").asBoolean(false);
+            boolean deviceMatched = source.path("exactDeviceMatched").asBoolean(false);
+            boolean r005 = rules.stream().anyMatch(row ->
+                    RuleV1ContractRegistry.EXTERNAL_SUSPICIOUS_RECIPIENT_ACCOUNT
+                            .equals(row.ruleCode()));
+            boolean r007 = rules.stream().anyMatch(row ->
+                    RuleV1ContractRegistry.EXTERNAL_RISK_DEVICE_MATCH
+                            .equals(row.ruleCode()));
+            if (recipientMatched != r005 || deviceMatched != r007) {
+                throw new IllegalStateException("SCN-001/002 External Risk Evidence is inconsistent");
+            }
+            scn001002 = new Scn001002EvidenceResponse("SCN001-002-contract-v1",
+                    prior.path("baselineStatus").asText(),
+                    prior.path("baselineCount").asLong(), prior.path("baselineDays").asLong(),
+                    prior.path("recipientStatus").asText(), prior.path("deviceStatus").asText(),
+                    source.path("providerCode").asText(),
+                    Instant.parse(source.path("providerAsOf").asText()),
+                    Instant.parse(source.path("lookedUpAt").asText()),
+                    source.path("recipientAccountMatched").asBoolean(),
+                    source.path("exactDeviceMatched").asBoolean());
+        }
         return new AdoptedDetectionResultItemResponse(
                 adopted.getDetectionResultId(), adopted.getDetectionResultVersion(),
                 adopted.getRiskLevel().name(), adopted.getRiskScore(),
@@ -173,7 +218,10 @@ public class AdoptedDetectionResultQueryService {
                 applied ? adopted.getRuleRiskScore() : adopted.getRiskScore(),
                 adopted.getMlContribution(), applied ? "APPLIED" : "RULE_ONLY",
                 applied ? adopted.getModelVersion() : null,
-                adopted.getMlFeatureVersion(), adopted.getModelSha256(), ml, scn003
+                adopted.getMlFeatureVersion(), adopted.getModelSha256(), ml, scn003,
+                adopted.getScoreGroupSummary(),
+                "rule-ml-policy-v3".equals(adopted.getScoringPolicyVersion())
+                        ? mlRows.get(0).getScoreContribution() : null, scn001002
         );
     }
 

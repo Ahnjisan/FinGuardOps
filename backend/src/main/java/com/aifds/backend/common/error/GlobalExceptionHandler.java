@@ -1,6 +1,8 @@
 package com.aifds.backend.common.error;
 
 import com.aifds.backend.aireport.exception.AiReportException;
+import com.aifds.backend.scenario.mock.MockFactException;
+import com.aifds.backend.scenario.auth.MockAuthException;
 
 import com.aifds.backend.behavior.exception.BehaviorEventConcurrentResultNotFoundException;
 import com.aifds.backend.behavior.exception.BehaviorEventDependencyTimeoutException;
@@ -55,6 +57,21 @@ import java.util.Set;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
+
+    @ExceptionHandler(MockAuthException.class)
+    ResponseEntity<ApiErrorResponse> handleMockAuth(MockAuthException exception,
+                                                     HttpServletRequest request) {
+        return response(exception.status(), exception.code(),
+                "추가 인증 Mock 명령의 상태와 권한을 확인해 주세요.", List.of(), request);
+    }
+
+    @ExceptionHandler(MockFactException.class)
+    ResponseEntity<ApiErrorResponse> handleMockFact(MockFactException exception,
+                                                     HttpServletRequest request) {
+        return response(exception.status(), exception.code(),
+                "Mock 입력의 출처·대상·시각 또는 중복 상태를 확인해 주세요.",
+                List.of(), request);
+    }
 
     @ExceptionHandler(AiReportException.class)
     ResponseEntity<ApiErrorResponse> handleAiReport(AiReportException exception,

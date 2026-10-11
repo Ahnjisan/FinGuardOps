@@ -11,8 +11,14 @@ public record FraudCaseLinkResult(
         UUID transactionId,
         FraudCaseStatus caseStatus,
         Instant linkedAt,
-        boolean newlyCreated
+        boolean newlyCreated,
+        boolean newlyLinked
 ) {
+
+    public FraudCaseLinkResult(UUID caseId, UUID transactionId,
+            FraudCaseStatus caseStatus, Instant linkedAt, boolean newlyCreated) {
+        this(caseId, transactionId, caseStatus, linkedAt, newlyCreated, newlyCreated);
+    }
 
     public FraudCaseLinkResult {
         Objects.requireNonNull(caseId, "caseId must not be null");

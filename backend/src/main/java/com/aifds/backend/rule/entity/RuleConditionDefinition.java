@@ -32,6 +32,16 @@ public final class RuleConditionDefinition {
                     + "LATEST_PASSWORD_THEN_EVENT_ID_ASC";
     private static final Pattern AMOUNT_PATTERN =
             Pattern.compile("^[1-9][0-9]{0,14}$");
+    private static final Map<String, String> V4_SIGNALS = Map.of(
+            RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT, "NEW_UNVERIFIED_DEVICE",
+            RECENT_SECURITY_CHANGE_HIGH_AMOUNT, "PASSWORD_LIMIT_SEQUENCE",
+            RECENT_BENEFICIARY_TRANSFER, "FIRST_REGISTERED_RECIPIENT",
+            RuleV1ContractRegistry.CUSTOMER_BASELINE_HIGH_AMOUNT, "TENFOLD_BASELINE",
+            RuleV1ContractRegistry.EXTERNAL_RISK_DEVICE_MATCH, "EXACT_RISK_DEVICE",
+            RuleV1ContractRegistry.MOCK_APP_SECURITY_ALERT, "APP_SECURITY_ALERT",
+            RuleV1ContractRegistry.MATERIAL_LIMIT_UPLIFT, "MATERIAL_LIMIT_UPLIFT",
+            RuleV1ContractRegistry.MOCK_OVERSEAS_NETWORK, "OVERSEAS_NETWORK"
+    );
     private static final Map<String, Set<String>> ALLOWED_FIELDS = Map.of(
             TRANSFER_ABSOLUTE_HIGH_AMOUNT,
             Set.of(
@@ -87,6 +97,18 @@ public final class RuleConditionDefinition {
             throw new IllegalArgumentException(
                     "conditionDefinition must be a non-empty JSON object"
             );
+        }
+
+        if (V4_SIGNALS.containsKey(ruleCode)
+                && value.has("contractVersion")) {
+            Set<String> fields = new HashSet<>();
+            value.fieldNames().forEachRemaining(fields::add);
+            if (!fields.equals(Set.of("contractVersion", "signal"))) {
+                throw new IllegalArgumentException("Rule v4 condition fields mismatch");
+            }
+            requireExactText(value, "contractVersion", "SCN001-002-contract-v1");
+            requireExactText(value, "signal", V4_SIGNALS.get(ruleCode));
+            return new RuleConditionDefinition(value);
         }
 
         Set<String> expectedFields = ALLOWED_FIELDS.get(ruleCode);

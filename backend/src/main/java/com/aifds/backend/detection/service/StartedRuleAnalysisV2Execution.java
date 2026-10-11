@@ -3,18 +3,27 @@ package com.aifds.backend.detection.service;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV2;
 import com.aifds.backend.rule.contract.CanonicalRuleSetVersionCalculator;
 import com.aifds.backend.rule.contract.RuleV1ExecutionPlanRegistry;
+import com.aifds.backend.rule.contract.RulePolicyVersion;
+import com.aifds.backend.scenario.ScenarioFacts;
 
 import java.util.Objects;
 
 public record StartedRuleAnalysisV2Execution(
         StartedRuleAnalysis startedAnalysis,
         RuleAnalysisRequestV2 request,
-        boolean priorApprovedRecipientTransfer
+        boolean priorApprovedRecipientTransfer,
+        ScenarioFacts scenarioFacts
 ) {
 
     public StartedRuleAnalysisV2Execution(
             StartedRuleAnalysis startedAnalysis, RuleAnalysisRequestV2 request) {
-        this(startedAnalysis, request, false);
+        this(startedAnalysis, request, false, null);
+    }
+
+    public StartedRuleAnalysisV2Execution(StartedRuleAnalysis startedAnalysis,
+                                          RuleAnalysisRequestV2 request,
+                                          boolean priorApprovedRecipientTransfer) {
+        this(startedAnalysis, request, priorApprovedRecipientTransfer, null);
     }
 
     public StartedRuleAnalysisV2Execution {
@@ -37,8 +46,10 @@ public record StartedRuleAnalysisV2Execution(
                     "Started analysis cutoff does not match request"
             );
         }
-        String requestRuleSetVersion =
-                new CanonicalRuleSetVersionCalculator().calculate(
+        var calculator = new CanonicalRuleSetVersionCalculator();
+        String requestRuleSetVersion = RulePolicyVersion.from(request.ruleVersions()) == 4
+                ? calculator.calculateV4(request.ruleVersions())
+                : calculator.calculate(
                         request.ruleVersions().stream()
                                 .map(rule -> new RuleV1ExecutionPlanRegistry
                                         .RuleVersionIdentity(

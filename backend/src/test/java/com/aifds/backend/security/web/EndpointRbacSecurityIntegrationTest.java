@@ -221,10 +221,16 @@ class EndpointRbacSecurityIntegrationTest {
             endpoint(HttpMethod.GET, "/api/v1/ai-report-dlq/" + CASE_ID + "/0/1",
                     "PLATFORM_ADMIN", AI_OPERATIONS_READ),
             endpoint(HttpMethod.POST, "/api/v1/ai-report-dlq/" + CASE_ID + "/0/1/quarantine",
-                    "PLATFORM_ADMIN", com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_DLQ_ACTION)
+                    "PLATFORM_ADMIN", com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_DLQ_ACTION),
+            endpoint(HttpMethod.POST, "/api/v1/fds-mock-facts",
+                    "BEHAVIOR_INGESTOR", BEHAVIOR_EVENT_INTAKE),
+            endpoint(HttpMethod.POST, "/api/v1/transactions/" + TRANSACTION_ID + "/mock-auth",
+                    "BEHAVIOR_INGESTOR", BEHAVIOR_EVENT_INTAKE)
     );
     private static final List<CorsProbe> APPROVED_PREFLIGHTS = Stream.concat(
-            ENDPOINTS.stream().map(endpoint -> new CorsProbe(
+            ENDPOINTS.stream().filter(endpoint -> !endpoint.path().equals("/api/v1/fds-mock-facts")
+                    && !endpoint.path().endsWith("/mock-auth"))
+                    .map(endpoint -> new CorsProbe(
                     endpoint.path(),
                     endpoint.method(),
                     "https://console.example.test",
@@ -401,7 +407,7 @@ class EndpointRbacSecurityIntegrationTest {
     void coversExistingFifteenAndFiveAiReportEndpointsAndMinimumRoles()
             throws Exception {
         assertThat(ENDPOINTS.subList(0, 15)).hasSize(15);
-        assertThat(ENDPOINTS).hasSize(24);
+        assertThat(ENDPOINTS).hasSize(26);
         assertThat(ENDPOINTS.stream().map(Endpoint::signature))
                 .doesNotHaveDuplicates();
         Set<String> actualMappings = requestMappingHandlerMapping
@@ -487,8 +493,10 @@ class EndpointRbacSecurityIntegrationTest {
 
     @Test
     void enforcesUserServiceAndIngestorCrossBoundaries() throws Exception {
-        List<Endpoint> serviceEndpoints = ENDPOINTS.subList(1, 3);
-        List<Endpoint> userEndpoints = ENDPOINTS.subList(3, ENDPOINTS.size());
+        List<Endpoint> serviceEndpoints = Stream.concat(
+                ENDPOINTS.subList(1, 3).stream(),
+                ENDPOINTS.subList(24, ENDPOINTS.size()).stream()).toList();
+        List<Endpoint> userEndpoints = ENDPOINTS.subList(3, 24);
 
         for (String role : USER_ROLES) {
             for (Endpoint endpoint : serviceEndpoints) {
@@ -689,7 +697,9 @@ class EndpointRbacSecurityIntegrationTest {
                         .map(Endpoint::signature)
                         .toList());
         Map<String, Set<String>> expectedCors = Stream.concat(
-                ENDPOINTS.stream().map(endpoint -> Map.entry(
+                ENDPOINTS.stream().filter(endpoint -> !endpoint.path().equals("/api/v1/fds-mock-facts")
+                        && !endpoint.path().endsWith("/mock-auth"))
+                        .map(endpoint -> Map.entry(
                         endpoint.registeredPath(), endpoint.method().name())),
                 Stream.of(Map.entry("/actuator/health", HttpMethod.GET.name())))
                 .collect(Collectors.groupingBy(Map.Entry::getKey,

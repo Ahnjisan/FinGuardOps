@@ -8,6 +8,7 @@ import com.aifds.backend.externalrisk.domain.ExternalRiskProviderResponse;
 import com.aifds.backend.externalrisk.domain.ExternalRiskReasonCode;
 import com.aifds.backend.externalrisk.domain.ExternalRiskSubjectType;
 import com.aifds.backend.externalrisk.domain.ExternalRiskType;
+import com.aifds.backend.externalrisk.domain.ExternalRiskSubjectDigest;
 import com.aifds.backend.externalrisk.port.ExternalRiskLookupPort;
 
 import java.util.List;
@@ -91,7 +92,8 @@ public final class ExternalRiskMockAdapter implements ExternalRiskLookupPort {
                 new ExternalRiskMatch(
                         ExternalRiskSubjectType.DEVICE,
                         ExternalRiskType.RISK_DEVICE,
-                        ExternalRiskReasonCode.RISK_DEVICE
+                        ExternalRiskReasonCode.RISK_DEVICE,
+                        ExternalRiskSubjectDigest.of(request.deviceRef())
                 )
         );
     }

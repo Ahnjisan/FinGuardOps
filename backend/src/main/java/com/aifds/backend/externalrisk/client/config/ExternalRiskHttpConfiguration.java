@@ -116,8 +116,10 @@ public class ExternalRiskHttpConfiguration {
         ObjectMapper mapper = applicationObjectMapperBuilder.build();
         mapper.enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
         mapper.enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
-        mapper.enable(DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES);
-        mapper.enable(DeserializationFeature.FAIL_ON_NULL_CREATOR_PROPERTIES);
+        // subjectDigest is an optional extension; required legacy fields are
+        // checked by ExternalRiskHttpMapper and the domain contract.
+        mapper.disable(DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES);
+        mapper.disable(DeserializationFeature.FAIL_ON_NULL_CREATOR_PROPERTIES);
         mapper.enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         mapper.enable(DeserializationFeature.FAIL_ON_NUMBERS_FOR_ENUMS);
         mapper.disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT);
