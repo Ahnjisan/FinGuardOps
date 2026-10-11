@@ -4,6 +4,7 @@ from finguardops_ai.ml.features import extract_features
 from finguardops_ai.ml.features_v2 import extract_features as extract_features_v2
 from finguardops_ai.ml.features_v3 import extract_features as extract_features_v3
 from finguardops_ai.ml.features_v4 import extract_features as extract_features_v4
+from finguardops_ai.ml.features_v5 import extract_features as extract_features_v5
 from finguardops_ai.ml.model import ModelUnavailable, load_model
 from finguardops_ai.schemas.ml_inference import MlInferenceRequest, MlInferenceResponse
 
@@ -13,7 +14,18 @@ def infer(request: MlInferenceRequest) -> MlInferenceResponse:
     if request.modelVersion != model.version or request.modelSha256 != model.sha256:
         raise ModelUnavailable("MODEL_VERSION_MISMATCH")
     features = (
-        extract_features_v4(
+        extract_features_v5(
+            amount=request.amount,
+            channel=request.channel,
+            cutoff=request.evaluationCutoffAt,
+            facts=request.scenarioFacts,
+            aggregation=request.aggregationFacts,
+            fund_flow=request.fundFlowFacts,
+            open_banking=request.openBankingFacts,
+            transfer=request.transactionType in {"ACCOUNT_TRANSFER", "OPEN_BANKING_TRANSFER"},
+        )
+        if request.openBankingFacts is not None
+        else extract_features_v4(
             amount=request.amount,
             channel=request.channel,
             cutoff=request.evaluationCutoffAt,

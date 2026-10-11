@@ -7,9 +7,11 @@ import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV2;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV3;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV4;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV5;
+import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV6;
 import com.aifds.backend.scenario.ScenarioRuleResponseValidator;
 import com.aifds.backend.scenario.ScenarioAggregationRuleResponseValidator;
 import com.aifds.backend.scenario.ScenarioFundFlowRuleResponseValidator;
+import com.aifds.backend.scenario.ScenarioOpenBankingRuleResponseValidator;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResponse;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -38,6 +40,7 @@ public final class RuleAnalysisHttpClient {
     public static final String V3_ENDPOINT = "/api/v3/rule-analysis";
     public static final String V4_ENDPOINT = "/api/v4/rule-analysis";
     public static final String V5_ENDPOINT = "/api/v5/rule-analysis";
+    public static final String V6_ENDPOINT = "/api/v6/rule-analysis";
 
     private static final Logger LOGGER =
             LoggerFactory.getLogger(RuleAnalysisHttpClient.class);
@@ -128,6 +131,12 @@ public final class RuleAnalysisHttpClient {
         Objects.requireNonNull(request, "request must not be null");
         return exchange(request, V5_ENDPOINT, traceId,
                 response -> ScenarioFundFlowRuleResponseValidator.validate(request, response));
+    }
+
+    public RuleAnalysisResponse analyzeV6(RuleAnalysisRequestV6 request, String traceId) {
+        Objects.requireNonNull(request, "request must not be null");
+        return exchange(request, V6_ENDPOINT, traceId,
+                response -> ScenarioOpenBankingRuleResponseValidator.validate(request, response));
     }
 
     private RuleAnalysisResponse exchange(

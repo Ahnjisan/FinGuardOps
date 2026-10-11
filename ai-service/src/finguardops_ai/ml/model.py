@@ -14,6 +14,8 @@ from finguardops_ai.ml.features_v3 import FEATURE_NAMES as FEATURE_NAMES_V3
 from finguardops_ai.ml.features_v3 import FEATURE_VERSION as FEATURE_VERSION_V3
 from finguardops_ai.ml.features_v4 import FEATURE_NAMES as FEATURE_NAMES_V4
 from finguardops_ai.ml.features_v4 import FEATURE_VERSION as FEATURE_VERSION_V4
+from finguardops_ai.ml.features_v5 import FEATURE_NAMES as FEATURE_NAMES_V5
+from finguardops_ai.ml.features_v5 import FEATURE_VERSION as FEATURE_VERSION_V5
 
 
 class ModelUnavailable(Exception):
@@ -37,7 +39,7 @@ class FraudModel:
         return max(0, min(10000, math.floor(probability * 10000 + 0.5)))
 
 
-@lru_cache(maxsize=5)
+@lru_cache(maxsize=6)
 def load_model(version: str = "fraud-logistic-v2") -> FraudModel:
     try:
         if version not in (
@@ -46,11 +48,14 @@ def load_model(version: str = "fraud-logistic-v2") -> FraudModel:
             "fraud-logistic-v3",
             "fraud-logistic-v4",
             "fraud-logistic-v5",
+            "fraud-logistic-v6",
         ):
             raise ModelUnavailable("MODEL_VERSION_MISMATCH")
         suffix = version.rsplit("-", 1)[-1]
         feature_version = (
-            FEATURE_VERSION_V4
+            FEATURE_VERSION_V5
+            if suffix == "v6"
+            else FEATURE_VERSION_V4
             if suffix == "v5"
             else FEATURE_VERSION_V3
             if suffix == "v4"
@@ -59,7 +64,9 @@ def load_model(version: str = "fraud-logistic-v2") -> FraudModel:
             else FEATURE_VERSION
         )
         feature_names = (
-            FEATURE_NAMES_V4
+            FEATURE_NAMES_V5
+            if suffix == "v6"
+            else FEATURE_NAMES_V4
             if suffix == "v5"
             else FEATURE_NAMES_V3
             if suffix == "v4"

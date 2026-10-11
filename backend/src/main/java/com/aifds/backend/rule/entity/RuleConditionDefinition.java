@@ -52,6 +52,7 @@ public final class RuleConditionDefinition {
             RuleV1ContractRegistry.VERIFIED_LOAN_NEW_RECIPIENT_DRAIN,
             "APPROVED_LOAN_LINKED_NEW_RECIPIENT_EIGHTY_PERCENT"
     );
+    private static final String V7_SIGNAL = "TWO_OWNED_EXTERNAL_ACCOUNTS_CONCENTRATE_AND_RESEND";
     private static final Map<String, Set<String>> ALLOWED_FIELDS = Map.of(
             TRANSFER_ABSOLUTE_HIGH_AMOUNT,
             Set.of(
@@ -140,6 +141,18 @@ public final class RuleConditionDefinition {
             }
             requireExactText(value, "contractVersion", "SCN006-007-contract-v1");
             requireExactText(value, "signal", V6_SIGNALS.get(ruleCode));
+            return new RuleConditionDefinition(value);
+        }
+
+        if (RuleV1ContractRegistry.VERIFIED_OPEN_BANKING_CONCENTRATION_RESEND
+                .equals(ruleCode)) {
+            Set<String> fields = new HashSet<>();
+            value.fieldNames().forEachRemaining(fields::add);
+            if (!fields.equals(Set.of("contractVersion", "signal"))) {
+                throw new IllegalArgumentException("Rule v7 condition fields mismatch");
+            }
+            requireExactText(value, "contractVersion", "SCN008-contract-v1");
+            requireExactText(value, "signal", V7_SIGNAL);
             return new RuleConditionDefinition(value);
         }
 

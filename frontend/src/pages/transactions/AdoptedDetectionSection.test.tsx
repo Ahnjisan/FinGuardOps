@@ -51,6 +51,36 @@ it("shows verified funding and unknown source evidence without account ownership
   expect(screen.queryByText(/외부 계좌 소유 확정/)).not.toBeInTheDocument();
 });
 
+it("shows the SCN-008 Mock chain stages without raw external accounts", () => {
+  const base = verified(issue380Fixture.adopted);
+  const extended = { ...base, adoptedResult: { ...base.adoptedResult!, openBankingEvidence: {
+    sourceVersion: "SCN008-contract-v1" as const,
+    mockSourceCode: "LOCAL_OPEN_BANKING_MOCK" as const, mockSourceVersion: "v1" as const,
+    evaluationCutoffAt: "2026-10-11T00:00:00Z", status: "AVAILABLE" as const,
+    reasonCode: "VERIFIED_OPEN_BANKING_CHAIN", concentrationAmount: "10000000",
+    resendAmount: "8000000", ratioBasisPoints: 8000,
+    historyCoverageFactId: "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430114",
+    concentrationStartedAt: "2026-10-10T23:40:00Z",
+    concentrationCompletedAt: "2026-10-10T23:42:00Z",
+    stages: [{ sourceTransactionId: "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430112",
+      ownershipAssertionId: "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430113",
+      linkId: "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430115",
+      occurredAt: "2026-10-10T23:40:00Z", approvedAt: "2026-10-10T23:41:00Z",
+      amount: "3000000" },
+    { sourceTransactionId: "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430116",
+      ownershipAssertionId: "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430117",
+      linkId: "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430118",
+      occurredAt: "2026-10-10T23:42:00Z", approvedAt: "2026-10-10T23:43:00Z",
+      amount: "7000000" }],
+  } } } as AdoptedDetectionResponse;
+  render(<AdoptedDetectionPanel onRetry={() => undefined} state={{ status: "success",
+    data: extended }} />);
+  expect(screen.getByText("SCN-008 오픈뱅킹 다단계 흐름")).toBeInTheDocument();
+  expect(screen.getByText(/LOCAL_OPEN_BANKING_MOCK/)).toBeInTheDocument();
+  expect(screen.getAllByText(/소유 Mock 증명/)).toHaveLength(2);
+  expect(screen.queryByText(/external-a/)).not.toBeInTheDocument();
+});
+
 it("labels capped v4 Rule totals as adopted scores", () => {
   const legacy = verified(issue380Fixture.adopted);
   const adoptedResult = legacy.adoptedResult!;

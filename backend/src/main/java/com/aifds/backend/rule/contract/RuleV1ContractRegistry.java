@@ -40,6 +40,8 @@ public final class RuleV1ContractRegistry {
             "VERIFIED_INBOUND_ATM_DRAIN";
     public static final String VERIFIED_LOAN_NEW_RECIPIENT_DRAIN =
             "VERIFIED_LOAN_NEW_RECIPIENT_DRAIN";
+    public static final String VERIFIED_OPEN_BANKING_CONCENTRATION_RESEND =
+            "VERIFIED_OPEN_BANKING_CONCENTRATION_RESEND";
 
     private static final Map<String, Set<String>> ALLOWED_REASON_CODES =
             Map.ofEntries(
@@ -62,7 +64,9 @@ public final class RuleV1ContractRegistry {
                     Map.entry(MANY_CUSTOMER_INBOUND_WINDOW, Set.of(MANY_CUSTOMER_INBOUND_WINDOW)),
                     Map.entry(VERIFIED_INBOUND_ATM_DRAIN, Set.of(VERIFIED_INBOUND_ATM_DRAIN)),
                     Map.entry(VERIFIED_LOAN_NEW_RECIPIENT_DRAIN,
-                            Set.of(VERIFIED_LOAN_NEW_RECIPIENT_DRAIN))
+                            Set.of(VERIFIED_LOAN_NEW_RECIPIENT_DRAIN)),
+                    Map.entry(VERIFIED_OPEN_BANKING_CONCENTRATION_RESEND,
+                            Set.of(VERIFIED_OPEN_BANKING_CONCENTRATION_RESEND))
             );
     private static final Set<String> SUPPORTED_REASON_CODES = Set.of(
             TRANSFER_ABSOLUTE_HIGH_AMOUNT,
@@ -78,7 +82,8 @@ public final class RuleV1ContractRegistry {
             DISTRIBUTED_OUTBOUND_WINDOW,
             MANY_CUSTOMER_INBOUND_WINDOW,
             VERIFIED_INBOUND_ATM_DRAIN,
-            VERIFIED_LOAN_NEW_RECIPIENT_DRAIN
+            VERIFIED_LOAN_NEW_RECIPIENT_DRAIN,
+            VERIFIED_OPEN_BANKING_CONCENTRATION_RESEND
     );
     private static final Map<String, String> DISPLAY_DESCRIPTIONS = Map.ofEntries(
             Map.entry(TRANSFER_ABSOLUTE_HIGH_AMOUNT, "절대 고액 이체"),
@@ -97,7 +102,9 @@ public final class RuleV1ContractRegistry {
             Map.entry(MANY_CUSTOMER_INBOUND_WINDOW, "다수 고객의 동일 계좌 집금"),
             Map.entry(VERIFIED_INBOUND_ATM_DRAIN, "검증된 입금 후 ATM 인출"),
             Map.entry(VERIFIED_LOAN_NEW_RECIPIENT_DRAIN,
-                    "검증된 대출금의 신규 수취인 송금")
+                    "검증된 대출금의 신규 수취인 송금"),
+            Map.entry(VERIFIED_OPEN_BANKING_CONCENTRATION_RESEND,
+                    "검증된 오픈뱅킹 다계좌 집중 후 재송금")
     );
 
     private RuleV1ContractRegistry() {

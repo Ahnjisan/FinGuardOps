@@ -91,7 +91,7 @@ class AiReportKafkaIntegrationTest {
             }
             var source = new DriverManagerDataSource(postgres.getJdbcUrl(),
                     postgres.getUsername(), postgres.getPassword());
-            assertEquals(36, Flyway.configure().dataSource(source)
+            assertEquals(38, Flyway.configure().dataSource(source)
                     .locations("classpath:db/migration").load().migrate().migrationsExecuted);
             var jdbc = new JdbcTemplate(source);
             var manager = new DataSourceTransactionManager(source);

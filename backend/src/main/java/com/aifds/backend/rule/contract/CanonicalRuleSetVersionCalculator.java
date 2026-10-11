@@ -9,6 +9,7 @@ import com.aifds.backend.rule.client.dto.RuleVersionSnapshotRequest;
 import com.aifds.backend.scenario.ScenarioRuleVersionContract;
 import com.aifds.backend.scenario.ScenarioAggregationRuleVersionContract;
 import com.aifds.backend.scenario.ScenarioFundFlowRuleVersionContract;
+import com.aifds.backend.scenario.ScenarioOpenBankingRuleVersionContract;
 
 public final class CanonicalRuleSetVersionCalculator {
 
@@ -68,6 +69,28 @@ public final class CanonicalRuleSetVersionCalculator {
                     : ScenarioFundFlowRuleVersionContract.CODES.get(i - 12);
             if (!expected.equals(item.ruleCode())) {
                 throw new IllegalArgumentException("Rule v6 order mismatch");
+            }
+            input.append(i + 1).append('\t').append(item.ruleVersionId()).append('\t')
+                    .append(item.ruleCode()).append('\t').append("R")
+                    .append(String.format("%03d", i + 1)).append('\t')
+                    .append(item.versionNumber()).append('\n');
+        }
+        return HexFormat.of().formatHex(sha256(input.toString().getBytes(StandardCharsets.UTF_8)));
+    }
+
+    public String calculateV7(List<RuleVersionSnapshotRequest> snapshots) {
+        if (snapshots.size() != 15) {
+            throw new IllegalArgumentException("Rule v7 requires fifteen versions");
+        }
+        StringBuilder input = new StringBuilder("rule-plan-v7\n");
+        for (int i = 0; i < snapshots.size(); i++) {
+            RuleVersionSnapshotRequest item = snapshots.get(i);
+            String expected = i < 10 ? ScenarioRuleVersionContract.CODES.get(i)
+                    : i < 12 ? ScenarioAggregationRuleVersionContract.CODES.get(i - 10)
+                    : i < 14 ? ScenarioFundFlowRuleVersionContract.CODES.get(i - 12)
+                    : ScenarioOpenBankingRuleVersionContract.CODE;
+            if (!expected.equals(item.ruleCode())) {
+                throw new IllegalArgumentException("Rule v7 order mismatch");
             }
             input.append(i + 1).append('\t').append(item.ruleVersionId()).append('\t')
                     .append(item.ruleCode()).append('\t').append("R")

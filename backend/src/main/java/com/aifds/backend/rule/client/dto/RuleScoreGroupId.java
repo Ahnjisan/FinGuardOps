@@ -6,5 +6,6 @@ public enum RuleScoreGroupId {
     beneficiary,
     external_recipient,
     flow_aggregation,
-    flow_link
+    flow_link,
+    open_banking_chain
 }

@@ -16,6 +16,7 @@ import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV2;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV3;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV4;
 import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV5;
+import com.aifds.backend.rule.client.dto.RuleAnalysisRequestV6;
 import com.aifds.backend.rule.client.dto.RuleAnalysisResponse;
 import com.aifds.backend.scenario.ScenarioRuleResponseValidator;
 import com.aifds.backend.scenario.ScenarioAggregationRuleResponseValidator;
@@ -37,6 +38,10 @@ import com.aifds.backend.scenario.ScenarioAggregationFacts;
 import com.aifds.backend.scenario.ScenarioAggregationFactsService;
 import com.aifds.backend.scenario.ScenarioFundFlowFacts;
 import com.aifds.backend.scenario.ScenarioFundFlowFactsService;
+import com.aifds.backend.scenario.ScenarioOpenBankingFacts;
+import com.aifds.backend.scenario.ScenarioOpenBankingFactsService;
+import com.aifds.backend.scenario.ScenarioOpenBankingRulePolicy;
+import com.aifds.backend.scenario.ScenarioOpenBankingRuleResponseValidator;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.aifds.backend.transaction.entity.TransactionProcessingStatus;
 import com.aifds.backend.transaction.exception.TransactionNotFoundException;
@@ -62,6 +67,7 @@ public class RuleAnalysisPersistenceService {
     private ScenarioFactsService scenarioFactsService;
     private ScenarioAggregationFactsService aggregationFactsService;
     private ScenarioFundFlowFactsService fundFlowFactsService;
+    private ScenarioOpenBankingFactsService openBankingFactsService;
 
     @Autowired(required = false)
     void setScenarioFactsService(ScenarioFactsService scenarioFactsService) {
@@ -76,6 +82,11 @@ public class RuleAnalysisPersistenceService {
     @Autowired(required = false)
     void setFundFlowFactsService(ScenarioFundFlowFactsService fundFlowFactsService) {
         this.fundFlowFactsService = fundFlowFactsService;
+    }
+
+    @Autowired(required = false)
+    void setOpenBankingFactsService(ScenarioOpenBankingFactsService openBankingFactsService) {
+        this.openBankingFactsService = openBankingFactsService;
     }
 
     private final FinancialTransactionRepository transactionRepository;
@@ -196,7 +207,9 @@ public class RuleAnalysisPersistenceService {
             throw new IllegalStateException("Scenario Rule requires a pinned ML model");
         }
         if (selectedPolicy >= 4) {
-            modelVersion = selectedPolicy == 6
+            modelVersion = selectedPolicy == 7
+                    ? MlDetectionPolicy.SCN008_MODEL_VERSION
+                    : selectedPolicy == 6
                     ? MlDetectionPolicy.SCN006_007_MODEL_VERSION
                     : selectedPolicy == 5
                     ? MlDetectionPolicy.SCN004_005_MODEL_VERSION
@@ -212,9 +225,14 @@ public class RuleAnalysisPersistenceService {
                         "ScenarioAggregationFactsService is required for Rule v5")
                         .snapshot(prepared.transaction())
                 : null;
-        ScenarioFundFlowFacts fundFlowFacts = selectedPolicy == 6
+        ScenarioFundFlowFacts fundFlowFacts = selectedPolicy >= 6
                 ? Objects.requireNonNull(fundFlowFactsService,
                         "ScenarioFundFlowFactsService is required for Rule v6")
+                        .snapshot(prepared.transaction())
+                : null;
+        ScenarioOpenBankingFacts openBankingFacts = selectedPolicy == 7
+                ? Objects.requireNonNull(openBankingFactsService,
+                        "ScenarioOpenBankingFactsService is required for Rule v7")
                         .snapshot(prepared.transaction())
                 : null;
         StartedRuleAnalysis started = persistStart(
@@ -234,7 +252,7 @@ public class RuleAnalysisPersistenceService {
                     .isEmpty();
         return new StartedRuleAnalysisV2Execution(started, request,
                 priorApprovedRecipientTransfer, scenarioFacts, aggregationFacts,
-                fundFlowFacts);
+                fundFlowFacts, openBankingFacts);
     }
 
     private PreparedRuleAnalysisStart prepareStart(UUID transactionId, boolean cutoffSafeMl) {
@@ -263,7 +281,9 @@ public class RuleAnalysisPersistenceService {
         int selectedPolicy = RulePolicyVersion.from(snapshot.request().ruleVersions());
         scoringPolicyVersion = RulePolicyVersion.scoringPolicy(selectedPolicy);
         featureVersion = RulePolicyVersion.feature(selectedPolicy);
-        if (modelVersion != null) scoringPolicyVersion = selectedPolicy == 6
+        if (modelVersion != null) scoringPolicyVersion = selectedPolicy == 7
+                ? MlDetectionPolicy.SCN008_POLICY_VERSION
+                : selectedPolicy == 6
                 ? MlDetectionPolicy.SCN006_007_POLICY_VERSION
                 : selectedPolicy == 5
                 ? MlDetectionPolicy.SCN004_005_POLICY_VERSION
@@ -288,7 +308,9 @@ public class RuleAnalysisPersistenceService {
                 analysisTraceId
         );
         if (modelVersion != null) {
-            pending.pinMl(selectedPolicy == 6
+            pending.pinMl(selectedPolicy == 7
+                            ? MlDetectionPolicy.SCN008_FEATURE_VERSION
+                            : selectedPolicy == 6
                             ? MlDetectionPolicy.SCN006_007_FEATURE_VERSION
                             : selectedPolicy == 5
                             ? MlDetectionPolicy.SCN004_005_FEATURE_VERSION
@@ -449,7 +471,7 @@ public class RuleAnalysisPersistenceService {
                                    RuleAnalysisResponse response,
                                    MlDetectionService.MlResult mlResult,
                                    Instant completedAt) {
-        completeAndAdoptScenario(started, request, null, null,
+        completeAndAdoptScenario(started, request, null, null, null,
                 response, mlResult, completedAt);
     }
 
@@ -459,7 +481,7 @@ public class RuleAnalysisPersistenceService {
                                    RuleAnalysisResponse response,
                                    MlDetectionService.MlResult mlResult,
                                    Instant completedAt) {
-        completeAndAdoptScenario(started, request.base(), request, null, response, mlResult,
+        completeAndAdoptScenario(started, request.base(), request, null, null, response, mlResult,
                 completedAt);
     }
 
@@ -470,19 +492,33 @@ public class RuleAnalysisPersistenceService {
                                    MlDetectionService.MlResult mlResult,
                                    Instant completedAt) {
         completeAndAdoptScenario(started, request.base().base(), request.base(),
-                request, response, mlResult, completedAt);
+                request, null, response, mlResult, completedAt);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void completeAndAdoptV7(StartedRuleAnalysis started,
+                                   RuleAnalysisRequestV6 request,
+                                   RuleAnalysisResponse response,
+                                   MlDetectionService.MlResult mlResult,
+                                   Instant completedAt) {
+        completeAndAdoptScenario(started, request.base().base().base(),
+                request.base().base(), request.base(), request,
+                response, mlResult, completedAt);
     }
 
     private void completeAndAdoptScenario(StartedRuleAnalysis started,
                                    RuleAnalysisRequestV3 request,
                                    RuleAnalysisRequestV4 aggregationRequest,
                                    RuleAnalysisRequestV5 fundRequest,
+                                   RuleAnalysisRequestV6 openRequest,
                                    RuleAnalysisResponse response,
                                    MlDetectionService.MlResult mlResult,
                                    Instant completedAt) {
         requireOpenGate();
         Objects.requireNonNull(mlResult, "Scenario Rule requires pinned ML result");
-        if (fundRequest != null) {
+        if (openRequest != null) {
+            ScenarioOpenBankingRuleResponseValidator.validate(openRequest, response);
+        } else if (fundRequest != null) {
             ScenarioFundFlowRuleResponseValidator.validate(fundRequest, response);
         } else if (aggregationRequest == null) {
             ScenarioRuleResponseValidator.validate(request, response);
@@ -495,25 +531,33 @@ public class RuleAnalysisPersistenceService {
         requireResultStatus(result, DetectionAnalysisStatus.IN_PROGRESS);
         requireStartedMatches(started, transaction, result);
         if (!result.belongsTo(transaction)
-                || !(fundRequest != null
+                || !(openRequest != null
+                        ? MlDetectionPolicy.SCN008_POLICY_VERSION
+                        : fundRequest != null
                         ? MlDetectionPolicy.SCN006_007_POLICY_VERSION
                         : aggregationRequest == null
                         ? MlDetectionPolicy.SCN001_002_POLICY_VERSION
                         : MlDetectionPolicy.SCN004_005_POLICY_VERSION)
                         .equals(result.getScoringPolicyVersion())
-                || !(fundRequest != null
+                || !(openRequest != null
+                        ? MlDetectionPolicy.SCN008_MODEL_VERSION
+                        : fundRequest != null
                         ? MlDetectionPolicy.SCN006_007_MODEL_VERSION
                         : aggregationRequest == null
                         ? MlDetectionPolicy.SCN001_002_MODEL_VERSION
                         : MlDetectionPolicy.SCN004_005_MODEL_VERSION)
                         .equals(result.getModelVersion())
-                || !(fundRequest != null
+                || !(openRequest != null
+                        ? MlDetectionPolicy.SCN008_FEATURE_VERSION
+                        : fundRequest != null
                         ? MlDetectionPolicy.SCN006_007_FEATURE_VERSION
                         : aggregationRequest == null
                         ? MlDetectionPolicy.SCN001_002_FEATURE_VERSION
                         : MlDetectionPolicy.SCN004_005_FEATURE_VERSION)
                         .equals(result.getMlFeatureVersion())
-                || !(fundRequest != null
+                || !(openRequest != null
+                        ? MlDetectionPolicy.SCN008_MODEL_SHA256
+                        : fundRequest != null
                         ? MlDetectionPolicy.SCN006_007_MODEL_SHA256
                         : aggregationRequest == null
                         ? MlDetectionPolicy.SCN001_002_MODEL_SHA256
@@ -558,7 +602,13 @@ public class RuleAnalysisPersistenceService {
             evidence.add(DetectionEvidence.fundFlowHistory(result,
                     fundRequest.fundFlowFacts(), evidence.size()));
         }
-        int ceiling = fundRequest != null
+        if (openRequest != null) {
+            evidence.add(DetectionEvidence.openBankingHistory(result,
+                    openRequest.openBankingFacts(), evidence.size()));
+        }
+        int ceiling = openRequest != null
+                ? ScenarioOpenBankingRulePolicy.scoreCeiling(scoring)
+                : fundRequest != null
                 ? ScenarioFundFlowRulePolicy.scoreCeiling(scoring)
                 : aggregationRequest == null ? 100
                 : ScenarioAggregationRulePolicy.scoreCeiling(scoring);

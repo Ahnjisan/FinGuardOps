@@ -50,6 +50,7 @@ abstract class PostgresqlIntegrationTestSupport {
     void cleanDatabase() {
         cleanupJdbcTemplate.execute("""
                 TRUNCATE TABLE
+                    fds_mock_open_account,
                     fds_mock_fund_link,
                     fds_mock_fact,
                     idempotency_recovery_audit_log,

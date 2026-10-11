@@ -7,6 +7,7 @@ import com.aifds.backend.rule.contract.RulePolicyVersion;
 import com.aifds.backend.scenario.ScenarioFacts;
 import com.aifds.backend.scenario.ScenarioAggregationFacts;
 import com.aifds.backend.scenario.ScenarioFundFlowFacts;
+import com.aifds.backend.scenario.ScenarioOpenBankingFacts;
 
 import java.util.Objects;
 
@@ -16,31 +17,41 @@ public record StartedRuleAnalysisV2Execution(
         boolean priorApprovedRecipientTransfer,
         ScenarioFacts scenarioFacts,
         ScenarioAggregationFacts aggregationFacts,
-        ScenarioFundFlowFacts fundFlowFacts
+        ScenarioFundFlowFacts fundFlowFacts,
+        ScenarioOpenBankingFacts openBankingFacts
 ) {
 
     public StartedRuleAnalysisV2Execution(
             StartedRuleAnalysis startedAnalysis, RuleAnalysisRequestV2 request) {
-        this(startedAnalysis, request, false, null, null, null);
+        this(startedAnalysis, request, false, null, null, null, null);
     }
 
     public StartedRuleAnalysisV2Execution(StartedRuleAnalysis startedAnalysis,
                                           RuleAnalysisRequestV2 request,
                                           boolean priorApprovedRecipientTransfer) {
-        this(startedAnalysis, request, priorApprovedRecipientTransfer, null, null, null);
+        this(startedAnalysis, request, priorApprovedRecipientTransfer, null, null, null, null);
     }
 
     public StartedRuleAnalysisV2Execution(StartedRuleAnalysis startedAnalysis,
             RuleAnalysisRequestV2 request, boolean priorApprovedRecipientTransfer,
             ScenarioFacts scenarioFacts) {
-        this(startedAnalysis, request, priorApprovedRecipientTransfer, scenarioFacts, null, null);
+        this(startedAnalysis, request, priorApprovedRecipientTransfer, scenarioFacts,
+                null, null, null);
     }
 
     public StartedRuleAnalysisV2Execution(StartedRuleAnalysis startedAnalysis,
             RuleAnalysisRequestV2 request, boolean priorApprovedRecipientTransfer,
             ScenarioFacts scenarioFacts, ScenarioAggregationFacts aggregationFacts) {
         this(startedAnalysis, request, priorApprovedRecipientTransfer, scenarioFacts,
-                aggregationFacts, null);
+                aggregationFacts, null, null);
+    }
+
+    public StartedRuleAnalysisV2Execution(StartedRuleAnalysis startedAnalysis,
+            RuleAnalysisRequestV2 request, boolean priorApprovedRecipientTransfer,
+            ScenarioFacts scenarioFacts, ScenarioAggregationFacts aggregationFacts,
+            ScenarioFundFlowFacts fundFlowFacts) {
+        this(startedAnalysis, request, priorApprovedRecipientTransfer, scenarioFacts,
+                aggregationFacts, fundFlowFacts, null);
     }
 
     public StartedRuleAnalysisV2Execution {
@@ -65,7 +76,9 @@ public record StartedRuleAnalysisV2Execution(
         }
         var calculator = new CanonicalRuleSetVersionCalculator();
         int policy = RulePolicyVersion.from(request.ruleVersions());
-        String requestRuleSetVersion = policy == 6
+        String requestRuleSetVersion = policy == 7
+                ? calculator.calculateV7(request.ruleVersions())
+                : policy == 6
                 ? calculator.calculateV6(request.ruleVersions())
                 : policy == 5
                 ? calculator.calculateV5(request.ruleVersions())
@@ -87,7 +100,8 @@ public record StartedRuleAnalysisV2Execution(
             );
         }
         if (policy >= 5 && (scenarioFacts == null || aggregationFacts == null)
-                || policy == 6 && fundFlowFacts == null) {
+                || policy >= 6 && fundFlowFacts == null
+                || policy == 7 && openBankingFacts == null) {
             throw new IllegalArgumentException("Scenario Rule facts are incomplete");
         }
     }

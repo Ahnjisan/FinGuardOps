@@ -18,6 +18,7 @@ RULE_ANALYSIS_PATHS = frozenset(
         "/api/v3/rule-analysis",
         "/api/v4/rule-analysis",
         "/api/v5/rule-analysis",
+        "/api/v6/rule-analysis",
     }
 )
 

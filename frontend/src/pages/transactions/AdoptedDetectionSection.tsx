@@ -96,6 +96,14 @@ export function AdoptedDetectionPanel({ state, onRetry }: {
           return flow && <li key={kind}>{kind === "atm" ? "입금 후 ATM 인출" : "대출금 신규 수취인 송금"}: {flow.status} · 근거 {flow.reasonCode} · 원천 {flow.sourceTransactionId ?? "미확인"} · 연결 {flow.currentLinkId ?? "미확인"} · 원천금 {flow.sourceAmount} KRW · 연결금 {flow.linkedAmount} KRW · 비율 {flow.ratioBasisPoints}bp · 과거 연결 {flow.linkedPriorTransactionIds.length}건</li>;
         })}</ol>
       </section>}
+      {state.data.adoptedResult.openBankingEvidence && <section aria-label="오픈뱅킹 다단계 흐름 근거">
+        <h4>SCN-008 오픈뱅킹 다단계 흐름</h4>
+        <p>로컬 Mock 출처 {state.data.adoptedResult.openBankingEvidence.mockSourceCode} · 계약 {state.data.adoptedResult.openBankingEvidence.sourceVersion} · 평가 cutoff {formatKstDateTime(state.data.adoptedResult.openBankingEvidence.evaluationCutoffAt)} KST</p>
+        <p>상태 {state.data.adoptedResult.openBankingEvidence.status} · 근거 {state.data.adoptedResult.openBankingEvidence.reasonCode} · 집금 {state.data.adoptedResult.openBankingEvidence.concentrationAmount} KRW · 재송금 {state.data.adoptedResult.openBankingEvidence.resendAmount} KRW · 비율 {state.data.adoptedResult.openBankingEvidence.ratioBasisPoints}bp</p>
+        <p>계좌 이력 증명 {state.data.adoptedResult.openBankingEvidence.historyCoverageFactId ?? "미확인"} · 검증된 외부 계좌 단계 {state.data.adoptedResult.openBankingEvidence.stages.length}건</p>
+        <ol>{state.data.adoptedResult.openBankingEvidence.stages.map(stage =>
+          <li key={stage.linkId}>원천 거래 {stage.sourceTransactionId} · 소유 Mock 증명 {stage.ownershipAssertionId} · 연결 {stage.linkId} · 승인 {formatKstDateTime(stage.approvedAt)} KST · {stage.amount} KRW</li>)}</ol>
+      </section>}
       {state.data.adoptedResult.scn003Evidence && <section aria-label="외부 위험 수취 계좌 근거">
         <h4>외부 위험 수취 계좌 근거</h4>
         <p>출처 {state.data.adoptedResult.scn003Evidence.providerCode} · 계약 {state.data.adoptedResult.scn003Evidence.sourceVersion}</p>

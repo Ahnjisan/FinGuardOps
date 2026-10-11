@@ -227,7 +227,8 @@ public class DetectionEvidence {
                                            int sortOrder) {
         if (result == null || !("rule-ml-policy-v3".equals(result.getScoringPolicyVersion())
                 || "rule-ml-policy-v4".equals(result.getScoringPolicyVersion())
-                || "rule-ml-policy-v5".equals(result.getScoringPolicyVersion()))
+                || "rule-ml-policy-v5".equals(result.getScoringPolicyVersion())
+                || "rule-ml-policy-v6".equals(result.getScoringPolicyVersion()))
                 || version == null || version.getStatus() != RuleVersionStatus.PUBLISHED
                 || validatedObservation == null || !validatedObservation.isObject()
                 || rawContribution != version.getWeight()
@@ -262,7 +263,8 @@ public class DetectionEvidence {
         if (appliedContribution < 0 || appliedContribution > contribution
                 || !("rule-ml-policy-v3".equals(result.getScoringPolicyVersion())
                         || "rule-ml-policy-v4".equals(result.getScoringPolicyVersion())
-                        || "rule-ml-policy-v5".equals(result.getScoringPolicyVersion()))) {
+                        || "rule-ml-policy-v5".equals(result.getScoringPolicyVersion())
+                        || "rule-ml-policy-v6".equals(result.getScoringPolicyVersion()))) {
             throw new IllegalArgumentException("Invalid ML v3 applied contribution");
         }
         evidence.appliedContribution = appliedContribution;
@@ -310,7 +312,8 @@ public class DetectionEvidence {
             ScenarioAggregationFacts facts, int sortOrder) {
         if (result == null || facts == null || sortOrder < 0
                 || !("rule-ml-policy-v4".equals(result.getScoringPolicyVersion())
-                        || "rule-ml-policy-v5".equals(result.getScoringPolicyVersion()))) {
+                        || "rule-ml-policy-v5".equals(result.getScoringPolicyVersion())
+                        || "rule-ml-policy-v6".equals(result.getScoringPolicyVersion()))) {
             throw new IllegalArgumentException("Invalid aggregation Evidence");
         }
         DetectionEvidence evidence = new DetectionEvidence();
@@ -350,7 +353,8 @@ public class DetectionEvidence {
     public static DetectionEvidence fundFlowHistory(DetectionResult result,
             ScenarioFundFlowFacts facts, int sortOrder) {
         if (result == null || facts == null || sortOrder < 0
-                || !"rule-ml-policy-v5".equals(result.getScoringPolicyVersion())) {
+                || !("rule-ml-policy-v5".equals(result.getScoringPolicyVersion())
+                        || "rule-ml-policy-v6".equals(result.getScoringPolicyVersion()))) {
             throw new IllegalArgumentException("Invalid fund flow Evidence");
         }
         DetectionEvidence evidence = new DetectionEvidence();
@@ -390,6 +394,49 @@ public class DetectionEvidence {
         }
         var prior = node.putArray("linkedPriorTransactionIds");
         flow.linkedPriorTransactionIds().forEach(id -> prior.add(id.toString()));
+    }
+
+    public static DetectionEvidence openBankingHistory(DetectionResult result,
+            com.aifds.backend.scenario.ScenarioOpenBankingFacts facts, int sortOrder) {
+        if (result == null || facts == null || sortOrder < 0
+                || !"rule-ml-policy-v6".equals(result.getScoringPolicyVersion())) {
+            throw new IllegalArgumentException("Invalid open banking Evidence");
+        }
+        DetectionEvidence evidence = new DetectionEvidence();
+        evidence.evidenceId = UUID.randomUUID();
+        evidence.detectionResult = result;
+        evidence.evidenceType = DetectionEvidenceType.BEHAVIOR_PATTERN;
+        evidence.reasonCode = "OPEN_BANKING_CHAIN_CONTEXT";
+        evidence.displayDescription = "Cutoff-fixed Mock-proven external concentration and resend";
+        var observation = JsonNodeFactory.instance.objectNode()
+                .put("sourceVersion", facts.sourceVersion())
+                .put("mockSourceCode", "LOCAL_OPEN_BANKING_MOCK")
+                .put("mockSourceVersion", "v1")
+                .put("evaluationCutoffAt", result.getEvaluationCutoffAt().toString())
+                .put("status", facts.status())
+                .put("reasonCode", facts.reasonCode())
+                .put("concentrationAmount", facts.concentrationAmount().toPlainString())
+                .put("resendAmount", facts.resendAmount().toPlainString())
+                .put("ratioBasisPoints", facts.ratioBasisPoints());
+        if (facts.historyCoverageFactId() != null) {
+            observation.put("historyCoverageFactId", facts.historyCoverageFactId().toString())
+                    .put("concentrationStartedAt", facts.concentrationStartedAt().toString())
+                    .put("concentrationCompletedAt", facts.concentrationCompletedAt().toString());
+        }
+        var stages = observation.putArray("stages");
+        for (var stage : facts.stages()) {
+            stages.addObject()
+                    .put("sourceTransactionId", stage.sourceTransactionId().toString())
+                    .put("ownershipAssertionId", stage.ownershipAssertionId().toString())
+                    .put("linkId", stage.linkId().toString())
+                    .put("occurredAt", stage.occurredAt().toString())
+                    .put("approvedAt", stage.approvedAt().toString())
+                    .put("amount", stage.amount().toPlainString());
+        }
+        evidence.observationSummary = observation;
+        evidence.evidenceOccurredAt = result.getEvaluationCutoffAt();
+        evidence.sortOrder = sortOrder;
+        return evidence;
     }
 
     public static DetectionEvidence externalRisk(

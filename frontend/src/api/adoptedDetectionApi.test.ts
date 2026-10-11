@@ -86,6 +86,19 @@ describe("adopted detection response", () => {
     expect(isAdoptedDetectionResponse({ ...v6, adoptedResult: { ...v6.adoptedResult,
       fundFlowEvidence: { ...flow, atm: { ...flow.atm, externalAccountRef: "unproved" } } } }))
       .toBe(false);
+    const open = { sourceVersion: "SCN008-contract-v1", mockSourceCode: "LOCAL_OPEN_BANKING_MOCK",
+      mockSourceVersion: "v1", evaluationCutoffAt: "2026-10-11T00:00:00Z",
+      status: "UNKNOWN", reasonCode: "ACCOUNT_HISTORY_INCOMPLETE", concentrationAmount: "0",
+      resendAmount: "0", ratioBasisPoints: 0, stages: [] };
+    const v7 = { ...v6, adoptedResult: { ...v6.adoptedResult,
+      scoringPolicyVersion: "rule-ml-policy-v6", modelVersion: "fraud-logistic-v6",
+      mlFeatureVersion: "fraud-feature-v5",
+      scoreGroupSummary: [...v6.adoptedResult.scoreGroupSummary,
+        { groupId: "open_banking_chain", rawScore: 0, cap: 50, appliedScore: 0, reduction: 0 }],
+      openBankingEvidence: open } };
+    expect(isAdoptedDetectionResponse(v7)).toBe(true);
+    expect(isAdoptedDetectionResponse({ ...v7, adoptedResult: { ...v7.adoptedResult,
+      openBankingEvidence: { ...open, externalAccountRef: "unproved" } } })).toBe(false);
   });
   it("accepts attributed v4 scoring and rejects missing rule attribution", () => {
     const v4 = {
