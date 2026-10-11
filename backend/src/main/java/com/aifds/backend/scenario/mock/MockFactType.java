@@ -3,6 +3,7 @@ package com.aifds.backend.scenario.mock;
 public enum MockFactType {
     TRANSFER_HISTORY_COMPLETE,
     INBOUND_ACCOUNT_HISTORY_COMPLETE,
+    ACCOUNT_FLOW_HISTORY_COMPLETE,
     DEVICE_HISTORY_COMPLETE,
     DEVICE_TRUST,
     LIMIT_CHANGE,

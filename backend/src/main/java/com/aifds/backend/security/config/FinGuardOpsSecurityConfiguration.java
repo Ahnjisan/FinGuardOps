@@ -191,6 +191,10 @@ public class FinGuardOpsSecurityConfiguration {
                                 HttpMethod.POST,
                                 "/api/v1/fds-mock-facts"
                         )).hasAuthority(BEHAVIOR_EVENT_INTAKE)
+                        .requestMatchers(paths.matcher(
+                                HttpMethod.POST,
+                                "/api/v1/fds-mock-fund-links"
+                        )).hasAuthority(BEHAVIOR_EVENT_INTAKE)
                           .requestMatchers(paths.matcher(
                                   HttpMethod.POST,
                                   "/api/v1/transactions/{transactionId}/mock-auth"
