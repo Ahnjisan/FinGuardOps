@@ -7,4 +7,5 @@
 - #389는 원격에서 사용자에 의해 병합됐고, clean commit `bffb697`의 공식 Browser Gate는 재검증 `Prepare → Validate → Service → Run` 종료 코드 모두 0, Browser 40건 통과였다. Issue #386은 열린 상태다.
 - #387은 새 `main` `db74a9b`에서 시작했다. V35/V36, 인증된 로컬 Mock 자금 연결과 계좌 흐름 완전성, cutoff 조회, Rule v6/ML v5, Evidence/대표 사건/화면 경로를 구현했다. Backend 단위 1,344건·PostgreSQL 통합 326건(기존 skip 1), AI 525건, Frontend 2,880건과 lint/typecheck/build를 통과했다. 이후 PostgreSQL 자금 연결 반례 2건을 추가해 대상 재검증을 통과했고, 최종 전체 수량은 clean commit에서 재확인한다. CI·공식 Browser Gate도 최종 clean commit에서 확인한다.
 - 계약 확장 지점: Rule v4는 R001~R010/4 그룹, ML v3는 12 feature로 고정된다. 신규 신호에는 미래 cutoff에서 선택되는 새 Rule 집합·ML feature/model과 Backend 독립 재계산, DB 제약·조회 projection·Frontend parser의 동시 버전 확장이 필요하다. 기존 v4 결과를 덮어쓰면 안 된다.
+- #388은 #390 미병합 상태의 최종 HEAD `78b6ecd`를 기반으로 시작했다. V37의 외부 계좌 등록·소유 Mock, V35 방향성 링크 재사용, 30분 집중/15분 재송금 cutoff 조회와 PostgreSQL 대상 2건을 먼저 구현했다. Rule/ML·Evidence·사건·화면·전체 검증은 진행 중이다.
 - 보존: 기존 PostgreSQL·kind·Docker 프로젝트와 사용자 변경을 정리하지 않는다. 성공 로그는 종료 코드와 건수만 기록한다.
