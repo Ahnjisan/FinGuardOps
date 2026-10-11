@@ -6,6 +6,7 @@ import { CaseDetailPage } from "../pages/CaseDetailPage";
 import { CaseListPage } from "../pages/CaseListPage";
 import { HealthPage } from "../pages/HealthPage";
 import { HomePage } from "../pages/HomePage";
+import { FdsDashboardPage } from "../pages/FdsDashboardPage";
 import { NotFoundPage } from "../pages/NotFoundPage";
 import { TransactionDetailPage } from "../pages/TransactionDetailPage";
 import { TransactionListPage } from "../pages/TransactionListPage";
@@ -19,6 +20,9 @@ export const routes: RouteObject[] = [
     element: <AppShell />,
     children: [
       { index: true, element: <HomePage /> },
+      { path: "fds-dashboard", element: <RequireCapability capability="fds-dashboard:view">
+        <FdsDashboardPage />
+      </RequireCapability> },
       {
         // The first production route behind a capability. The guard runs for a
         // direct URL entry exactly as it does for a click on the rail, because

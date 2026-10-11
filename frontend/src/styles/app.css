@@ -2250,3 +2250,16 @@ ul.notice__body li + li {
 .ai-operations th, .ai-operations td { text-align: left; padding: .6rem; border-bottom: 1px solid currentColor; }
 .ai-operations__pagination { display: flex; gap: 1rem; align-items: center; margin-top: 1rem; }
 @media (max-width: 390px) { .ai-operations { padding: .75rem; } }
+.fds-dashboard { display: grid; gap: 1rem; }
+.fds-dashboard section { min-width: 0; overflow-x: auto; }
+.fds-dashboard__filters { display: flex; align-items: end; flex-wrap: wrap; gap: .75rem; }
+.fds-dashboard__filters label { display: grid; gap: .25rem; }
+.fds-dashboard__cards { display: flex; flex-wrap: wrap; gap: .75rem; }
+.fds-dashboard__cards > div { padding: .8rem 1rem; border: 1px solid #b8c9d1; border-radius: .5rem; }
+.fds-dashboard__cards strong { display: block; font-size: 1.4rem; }
+.fds-dashboard table { border-collapse: collapse; width: 100%; margin-block: .75rem 1.5rem; }
+.fds-dashboard th, .fds-dashboard td { border-bottom: 1px solid #cbd5d9; padding: .45rem; text-align: right; white-space: nowrap; }
+.fds-dashboard th:first-child { text-align: left; }
+.fds-dashboard__bars { display: flex; gap: .3rem; height: 7rem; align-items: end; overflow-x: auto; }
+.fds-dashboard__bars > div { display: flex; flex-direction: column; justify-content: end; align-items: center; min-width: 2.5rem; height: 100%; }
+.fds-dashboard__bars span { display: block; width: 1.5rem; min-height: 1px; background: #146b82; }

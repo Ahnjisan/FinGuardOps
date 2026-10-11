@@ -63,6 +63,7 @@ function toQueryString(rule: BackendQueryValueRule, value: unknown): string {
       }
       return String(value);
     case "choice":
+    case "kst-date":
     case "instant":
     case "uuid":
     case "transaction-ref":

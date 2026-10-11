@@ -26,7 +26,7 @@ import { isCanonicalUuidV4 } from "../api/responseValidation";
  * literal written in this file or a route assembled here from thirty-six
  * characters of `[0-9a-f-]`.
  */
-export const ALLOWED_RETURN_ROUTES = ["/", "/health", "/transactions", "/cases", "/ai-operations"] as const;
+export const ALLOWED_RETURN_ROUTES = ["/", "/health", "/transactions", "/cases", "/ai-operations", "/fds-dashboard"] as const;
 export const OPEN_CASE_LIST_ROUTE = "/cases?caseStatus=OPEN" as const;
 export const INFORMATION_CASE_LIST_ROUTE = "/cases?caseStatus=ADDITIONAL_INFORMATION_REQUIRED" as const;
 
@@ -87,6 +87,9 @@ export function resolveReturnRoute(value: unknown): AllowedReturnRoute {
   }
   if (value === "/transactions") {
     return "/transactions";
+  }
+  if (value === "/fds-dashboard") {
+    return "/fds-dashboard";
   }
   // The list itself, exactly. Its parameterized sibling is decided below and
   // separately: no query or fragment is stripped here in the hope of
