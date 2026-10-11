@@ -50,11 +50,31 @@ public class ScenarioCaseCorrelationService {
         var result = tx.getAdoptedDetectionResult();
         if (result == null || !("rule-ml-policy-v3".equals(result.getScoringPolicyVersion())
                 || "rule-ml-policy-v4".equals(result.getScoringPolicyVersion())
-                || "rule-ml-policy-v5".equals(result.getScoringPolicyVersion()))) return Optional.empty();
+                || "rule-ml-policy-v5".equals(result.getScoringPolicyVersion())
+                || "rule-ml-policy-v6".equals(result.getScoringPolicyVersion()))) return Optional.empty();
         List<DetectionEvidence> rows = evidence
                 .findAllByDetectionResult_IdAndEvidenceTypeOrderBySortOrderAscIdAsc(
                         result.getId(), DetectionEvidenceType.RULE);
-        if ("rule-ml-policy-v5".equals(result.getScoringPolicyVersion())) {
+        if ("rule-ml-policy-v6".equals(result.getScoringPolicyVersion())) {
+            var hit = rows.stream().filter(row ->
+                    RuleV1ContractRegistry.VERIFIED_OPEN_BANKING_CONCENTRATION_RESEND
+                            .equals(row.getRuleCode())).findFirst();
+            if (hit.isPresent()) {
+                JsonNode stages = hit.get().getObservationSummary().path("stages");
+                if (!stages.isArray() || stages.size() < 2 || stages.size() > 100) {
+                    throw new IllegalStateException("Invalid open banking case stages");
+                }
+                List<String> parts = new java.util.ArrayList<>();
+                parts.add("SCN008");
+                for (JsonNode stage : stages) {
+                    parts.add(required(stage, "sourceTransactionId"));
+                }
+                parts.subList(1, parts.size()).sort(String::compareTo);
+                return Optional.of(new Correlation("SCN008", key(parts.toArray(String[]::new))));
+            }
+        }
+        if ("rule-ml-policy-v5".equals(result.getScoringPolicyVersion())
+                || "rule-ml-policy-v6".equals(result.getScoringPolicyVersion())) {
             for (var entry : List.of(
                     new String[] {RuleV1ContractRegistry.VERIFIED_INBOUND_ATM_DRAIN, "SCN006"},
                     new String[] {RuleV1ContractRegistry.VERIFIED_LOAN_NEW_RECIPIENT_DRAIN, "SCN007"})) {
@@ -67,7 +87,9 @@ public class ScenarioCaseCorrelationService {
             }
         }
         if (tx.getRecipientAccountRef() == null) return Optional.empty();
-        if ("rule-ml-policy-v4".equals(result.getScoringPolicyVersion())) {
+        if ("rule-ml-policy-v4".equals(result.getScoringPolicyVersion())
+                || "rule-ml-policy-v5".equals(result.getScoringPolicyVersion())
+                || "rule-ml-policy-v6".equals(result.getScoringPolicyVersion())) {
             if (rows.stream().anyMatch(row ->
                     RuleV1ContractRegistry.DISTRIBUTED_OUTBOUND_WINDOW.equals(row.getRuleCode()))) {
                 return Optional.of(new Correlation("SCN004", key("SCN004",
@@ -125,7 +147,10 @@ public class ScenarioCaseCorrelationService {
                                 : "SCN004".equals(correlation.scenarioCode())
                                         ? Duration.ofMinutes(10)
                                         : "SCN007".equals(correlation.scenarioCode())
-                                                ? Duration.ofMinutes(60) : Duration.ofMinutes(30))),
+                                                ? Duration.ofMinutes(60)
+                                                : "SCN008".equals(correlation.scenarioCode())
+                                                        ? Duration.ofMinutes(15)
+                                                        : Duration.ofMinutes(30))),
                 java.sql.Timestamp.from(tx.getOccurredAt()));
         if (ids.isEmpty()) return Optional.empty();
         var locked = cases.findAllByCaseIdsForUpdate(ids);
@@ -152,6 +177,10 @@ public class ScenarioCaseCorrelationService {
     /** Attach only as-of approved transfers sharing the proved aggregation key/window. */
     public void attachRelated(Correlation correlation, FraudCase fraudCase,
                               FinancialTransaction tx, Instant linkedAt) {
+        if ("SCN008".equals(correlation.scenarioCode())) {
+            attachOpenBanking(fraudCase, tx, linkedAt);
+            return;
+        }
         if ("SCN006".equals(correlation.scenarioCode())
                 || "SCN007".equals(correlation.scenarioCode())) {
             attachFundFlow(correlation, fraudCase, tx, linkedAt);
@@ -222,6 +251,35 @@ public class ScenarioCaseCorrelationService {
                     java.sql.Timestamp.from(tx.getOccurredAt()),
                     java.sql.Timestamp.from(tx.getOccurredAt()));
             if (matches.size() != 1) throw new IllegalStateException("Fund flow anchor changed");
+            linkWithAudit(fraudCase, tx, linkedAt, matches.get(0));
+        }
+    }
+
+    private void attachOpenBanking(FraudCase fraudCase, FinancialTransaction tx,
+                                   Instant linkedAt) {
+        JsonNode observation = evidence
+                .findAllByDetectionResult_IdAndEvidenceTypeOrderBySortOrderAscIdAsc(
+                        tx.getAdoptedDetectionResult().getId(), DetectionEvidenceType.RULE)
+                .stream().filter(row -> RuleV1ContractRegistry
+                        .VERIFIED_OPEN_BANKING_CONCENTRATION_RESEND.equals(row.getRuleCode()))
+                .findFirst().orElseThrow().getObservationSummary();
+        JsonNode stages = observation.path("stages");
+        if (!stages.isArray() || stages.size() < 2 || stages.size() > 100) {
+            throw new IllegalStateException("Invalid open banking case stages");
+        }
+        for (JsonNode stage : stages) {
+            UUID id = UUID.fromString(required(stage, "sourceTransactionId"));
+            List<RelatedTransfer> matches = jdbc.query("""
+                    SELECT id, transaction_id FROM financial_transaction
+                    WHERE transaction_id = ? AND transaction_type = 'OPEN_BANKING_TRANSFER'
+                      AND processing_status = 'APPROVED'
+                      AND occurred_at < ? AND created_at <= ? AND approved_at <= ?
+                    """, (rs, row) -> new RelatedTransfer(
+                            rs.getLong(1), rs.getObject(2, UUID.class)), id,
+                    java.sql.Timestamp.from(tx.getOccurredAt()),
+                    java.sql.Timestamp.from(tx.getOccurredAt()),
+                    java.sql.Timestamp.from(tx.getOccurredAt()));
+            if (matches.size() != 1) throw new IllegalStateException("Open banking stage changed");
             linkWithAudit(fraudCase, tx, linkedAt, matches.get(0));
         }
     }

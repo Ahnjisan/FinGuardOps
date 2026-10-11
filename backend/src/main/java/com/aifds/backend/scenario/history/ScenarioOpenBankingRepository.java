@@ -35,6 +35,15 @@ public class ScenarioOpenBankingRepository {
             return ScenarioOpenBankingFacts.unknown("NOT_OUTBOUND_RESEND");
         }
         Instant cutoff = target.getOccurredAt();
+        Long competing = jdbc.queryForObject("""
+                SELECT COUNT(*) FROM fds_mock_fund_link
+                WHERE scenario_code = 'SCN007' AND target_transaction_id = ?
+                  AND occurred_at <= ? AND created_at <= ?
+                """, Long.class, target.getTransactionId(),
+                Timestamp.from(cutoff), Timestamp.from(cutoff));
+        if (competing == null || competing > 0) {
+            return ScenarioOpenBankingFacts.unknown("COMPETING_SOURCE_FLOW");
+        }
         List<Link> links = jdbc.query("""
                 SELECT link_id, source_transaction_id, external_customer_ref,
                     account_ref, assertion_state
@@ -57,6 +66,14 @@ public class ScenarioOpenBankingRepository {
         for (Link link : links) {
             if (!sourceIds.add(link.sourceId())) {
                 return ScenarioOpenBankingFacts.unknown("SOURCE_LINK_CONFLICT");
+            }
+            Long targets = jdbc.queryForObject("""
+                    SELECT COUNT(DISTINCT target_transaction_id) FROM fds_mock_fund_link
+                    WHERE scenario_code = 'SCN008' AND source_transaction_id = ?
+                      AND occurred_at <= ? AND created_at <= ?
+                    """, Long.class, link.sourceId(), Timestamp.from(cutoff), Timestamp.from(cutoff));
+            if (targets == null || targets != 1L) {
+                return ScenarioOpenBankingFacts.unknown("SOURCE_REUSED_ACROSS_TARGETS");
             }
             if (!"VERIFIED".equals(link.state())) {
                 return ScenarioOpenBankingFacts.unknown("MOCK_PARTIAL_OR_FAILED");
@@ -81,6 +98,7 @@ public class ScenarioOpenBankingRepository {
                     || !link.customer().equals(source.customer())
                     || !link.account().equals(source.recipient())
                     || source.approvedAt() == null || source.approvedAt().isAfter(cutoff)
+                    || source.approvedAt().isBefore(source.occurredAt())
                     || source.createdAt().isAfter(cutoff)
                     || !source.occurredAt().isBefore(cutoff)) {
                 return ScenarioOpenBankingFacts.unknown("SOURCE_NOT_APPROVED_AS_OF_CUTOFF");

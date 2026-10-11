@@ -14,6 +14,17 @@ public final class RulePolicyVersion {
         if (snapshots.isEmpty()) {
             throw new IllegalArgumentException("RuleVersion set is empty");
         }
+        if (snapshots.size() == 15 || snapshots.stream().anyMatch(snapshot ->
+                RuleV1ContractRegistry.VERIFIED_OPEN_BANKING_CONCENTRATION_RESEND
+                        .equals(snapshot.ruleCode()))) {
+            if (snapshots.size() != 15 || from(snapshots.subList(0, 14)) != 6
+                    || !RuleV1ContractRegistry.VERIFIED_OPEN_BANKING_CONCENTRATION_RESEND
+                            .equals(snapshots.get(14).ruleCode())
+                    || snapshots.get(14).versionNumber() != 1) {
+                throw new IllegalArgumentException("Invalid SCN-008 RuleVersion set");
+            }
+            return 7;
+        }
         if (snapshots.size() == 14 || snapshots.stream().anyMatch(snapshot ->
                 RuleV1ContractRegistry.VERIFIED_INBOUND_ATM_DRAIN.equals(snapshot.ruleCode())
                 || RuleV1ContractRegistry.VERIFIED_LOAN_NEW_RECIPIENT_DRAIN

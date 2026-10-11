@@ -50,9 +50,10 @@ export interface AdoptedResult {
   readonly scn001002Evidence?: Scn001002Evidence;
   readonly aggregationEvidence?: AggregationEvidence;
   readonly fundFlowEvidence?: FundFlowEvidence;
+  readonly openBankingEvidence?: OpenBankingEvidence;
 }
 export interface ScoreGroupSummary {
-  readonly groupId: "amount" | "security" | "beneficiary" | "external_recipient" | "flow_aggregation" | "flow_link";
+  readonly groupId: "amount" | "security" | "beneficiary" | "external_recipient" | "flow_aggregation" | "flow_link" | "open_banking_chain";
   readonly rawScore: number;
   readonly cap: number;
   readonly appliedScore: number;
@@ -110,6 +111,29 @@ export interface FundFlowEvidence {
   readonly atm: FundFlowStep;
   readonly loan: FundFlowStep;
 }
+export interface OpenBankingStage {
+  readonly sourceTransactionId: string;
+  readonly ownershipAssertionId: string;
+  readonly linkId: string;
+  readonly occurredAt: string;
+  readonly approvedAt: string;
+  readonly amount: string;
+}
+export interface OpenBankingEvidence {
+  readonly sourceVersion: "SCN008-contract-v1";
+  readonly mockSourceCode: "LOCAL_OPEN_BANKING_MOCK";
+  readonly mockSourceVersion: "v1";
+  readonly evaluationCutoffAt: string;
+  readonly status: "AVAILABLE" | "UNKNOWN";
+  readonly reasonCode: string;
+  readonly concentrationAmount: string;
+  readonly resendAmount: string;
+  readonly ratioBasisPoints: number;
+  readonly historyCoverageFactId?: string;
+  readonly concentrationStartedAt?: string;
+  readonly concentrationCompletedAt?: string;
+  readonly stages: readonly OpenBankingStage[];
+}
 export interface AdoptedDetectionResponse {
   readonly transactionId: string;
   readonly availability: Availability;
@@ -136,7 +160,7 @@ function isRule(value: unknown): value is AdoptedRuleEvidence {
 }
 function isScoreGroup(value: unknown): value is ScoreGroupSummary {
   return isObjectWithExactKeys(value, ["groupId", "rawScore", "cap", "appliedScore", "reduction"]) &&
-    ["amount", "security", "beneficiary", "external_recipient", "flow_aggregation", "flow_link"].includes(String(value.groupId)) &&
+    ["amount", "security", "beneficiary", "external_recipient", "flow_aggregation", "flow_link", "open_banking_chain"].includes(String(value.groupId)) &&
     [value.rawScore, value.cap, value.appliedScore, value.reduction].every(item =>
       Number.isInteger(item) && (item as number) >= 0 && (item as number) <= 200) &&
     (value.rawScore as number) - (value.appliedScore as number) === value.reduction &&
@@ -210,6 +234,33 @@ function isFundFlow(value: unknown): value is FundFlowEvidence {
     isUtcInstantString(value.evaluationCutoffAt) &&
     isFundStep(value.atm, false) && isFundStep(value.loan, true);
 }
+function isOpenStage(value: unknown): value is OpenBankingStage {
+  return isObjectWithExactKeys(value, ["sourceTransactionId", "ownershipAssertionId", "linkId",
+    "occurredAt", "approvedAt", "amount"]) &&
+    isUuidV4String(value.sourceTransactionId) && isUuidV4String(value.ownershipAssertionId) &&
+    isUuidV4String(value.linkId) && isUtcInstantString(value.occurredAt) &&
+    isUtcInstantString(value.approvedAt) &&
+    typeof value.amount === "string" && /^[1-9][0-9]*$/.test(value.amount);
+}
+function isOpenBanking(value: unknown): value is OpenBankingEvidence {
+  if (!isJsonObject(value)) return false;
+  const base = ["sourceVersion", "mockSourceCode", "mockSourceVersion", "evaluationCutoffAt",
+    "status", "reasonCode", "concentrationAmount", "resendAmount", "ratioBasisPoints", "stages"];
+  const proven = [...base, "historyCoverageFactId", "concentrationStartedAt", "concentrationCompletedAt"];
+  if (!isObjectWithExactKeys(value, value.status === "AVAILABLE" ? proven : base) ||
+      value.sourceVersion !== "SCN008-contract-v1" || value.mockSourceCode !== "LOCAL_OPEN_BANKING_MOCK" ||
+      value.mockSourceVersion !== "v1" || !isUtcInstantString(value.evaluationCutoffAt) ||
+      typeof value.reasonCode !== "string" || !/^[A-Z][A-Z0-9_]{0,63}$/.test(value.reasonCode) ||
+      typeof value.concentrationAmount !== "string" || !/^(0|[1-9][0-9]*)$/.test(value.concentrationAmount) ||
+      typeof value.resendAmount !== "string" || !/^(0|[1-9][0-9]*)$/.test(value.resendAmount) ||
+      !Number.isSafeInteger(value.ratioBasisPoints) || (value.ratioBasisPoints as number) < 0 ||
+      (value.ratioBasisPoints as number) > 10000 || !isArrayOf(value.stages, isOpenStage)) return false;
+  if (value.status === "UNKNOWN") return value.stages.length === 0 &&
+    value.concentrationAmount === "0" && value.resendAmount === "0" && value.ratioBasisPoints === 0;
+  return value.status === "AVAILABLE" && isUuidV4String(value.historyCoverageFactId) &&
+    isUtcInstantString(value.concentrationStartedAt) && isUtcInstantString(value.concentrationCompletedAt) &&
+    value.stages.length >= 2 && new Set(value.stages.map(stage => stage.ownershipAssertionId)).size >= 2;
+}
 function isAdopted(value: unknown): value is AdoptedResult {
   if (!isJsonObject(value)) return false;
   const oldKeys = ["detectionResultId", "detectionResultVersion", "riskLevel", "riskScore",
@@ -221,15 +272,17 @@ function isAdopted(value: unknown): value is AdoptedResult {
   const v4 = hasV4Keys(value, [...newKeys, "scoreGroupSummary", "mlRawContribution", "scn001002Evidence"]);
   const v5 = hasV4Keys(value, [...newKeys, "scoreGroupSummary", "mlRawContribution", "scn001002Evidence", "aggregationEvidence"]);
   const v6 = hasV4Keys(value, [...newKeys, "scoreGroupSummary", "mlRawContribution", "scn001002Evidence", "aggregationEvidence", "fundFlowEvidence"]);
-  if (!(isObjectWithExactKeys(value, oldKeys) || isObjectWithExactKeys(value, newKeys) || scn003 || v4 || v5 || v6)) return false;
-  if (v4 || v5 || v6) {
-    if (value.scoringPolicyVersion !== (v6 ? "rule-ml-policy-v5" : v5 ? "rule-ml-policy-v4" : "rule-ml-policy-v3") ||
-      value.mlFeatureVersion !== (v6 ? "fraud-feature-v4" : v5 ? "fraud-feature-v3" : "fraud-feature-v2") ||
-      value.modelVersion !== (v6 ? "fraud-logistic-v5" : v5 ? "fraud-logistic-v4" : "fraud-logistic-v3") ||
-      ((v5 || v6) && !isAggregation(value.aggregationEvidence)) ||
-      (v6 && !isFundFlow(value.fundFlowEvidence)) ||
+  const v7 = hasV4Keys(value, [...newKeys, "scoreGroupSummary", "mlRawContribution", "scn001002Evidence", "aggregationEvidence", "fundFlowEvidence", "openBankingEvidence"]);
+  if (!(isObjectWithExactKeys(value, oldKeys) || isObjectWithExactKeys(value, newKeys) || scn003 || v4 || v5 || v6 || v7)) return false;
+  if (v4 || v5 || v6 || v7) {
+    if (value.scoringPolicyVersion !== (v7 ? "rule-ml-policy-v6" : v6 ? "rule-ml-policy-v5" : v5 ? "rule-ml-policy-v4" : "rule-ml-policy-v3") ||
+      value.mlFeatureVersion !== (v7 ? "fraud-feature-v5" : v6 ? "fraud-feature-v4" : v5 ? "fraud-feature-v3" : "fraud-feature-v2") ||
+      value.modelVersion !== (v7 ? "fraud-logistic-v6" : v6 ? "fraud-logistic-v5" : v5 ? "fraud-logistic-v4" : "fraud-logistic-v3") ||
+      ((v5 || v6 || v7) && !isAggregation(value.aggregationEvidence)) ||
+      ((v6 || v7) && !isFundFlow(value.fundFlowEvidence)) ||
+      (v7 && !isOpenBanking(value.openBankingEvidence)) ||
       !isScenario(value.scn001002Evidence) || !isArrayOf(value.scoreGroupSummary, isScoreGroup) ||
-      value.scoreGroupSummary.length !== (v6 ? 6 : v5 ? 5 : 4) || !isArrayOf(value.ruleEvidence, isRule) ||
+      value.scoreGroupSummary.length !== (v7 ? 7 : v6 ? 6 : v5 ? 5 : 4) || !isArrayOf(value.ruleEvidence, isRule) ||
       value.ruleEvidence.some(item => item.appliedContribution === undefined) ||
       !Number.isInteger(value.ruleScore) || !Number.isInteger(value.mlContribution) ||
       !Number.isInteger(value.mlRawContribution) ||
@@ -245,7 +298,7 @@ function isAdopted(value: unknown): value is AdoptedResult {
       !Number.isInteger(value.mlEvidence[0].probabilityBasisPoints) ||
       typeof value.modelVersion !== "string" ||
       typeof value.modelSha256 !== "string" || !/^[0-9a-f]{64}$/.test(value.modelSha256)) return false;
-    if (v6) {
+    if (v6 || v7) {
       const flow = value.fundFlowEvidence;
       if (!isFundFlow(flow)) return false;
       const rules = value.ruleEvidence as AdoptedRuleEvidence[];
@@ -253,6 +306,13 @@ function isAdopted(value: unknown): value is AdoptedResult {
             (flow.atm.status === "AVAILABLE" && flow.atm.ratioBasisPoints >= 8000) ||
           rules.some(item => item.ruleCode === "VERIFIED_LOAN_NEW_RECIPIENT_DRAIN") !==
             (flow.loan.status === "AVAILABLE" && flow.loan.ratioBasisPoints >= 8000)) return false;
+    }
+    if (v7) {
+      const open = value.openBankingEvidence;
+      if (!isOpenBanking(open) || value.ruleEvidence.some(item =>
+        item.ruleCode === "VERIFIED_OPEN_BANKING_CONCENTRATION_RESEND") !==
+        (open.status === "AVAILABLE" && open.stages.length >= 2 &&
+          Number(open.concentrationAmount) >= 5_000_000 && open.ratioBasisPoints >= 8000)) return false;
     }
     const level = value.riskScore < 20 ? "LOW" : value.riskScore < 50 ? "MEDIUM" :
       value.riskScore < 80 ? "HIGH" : "CRITICAL";

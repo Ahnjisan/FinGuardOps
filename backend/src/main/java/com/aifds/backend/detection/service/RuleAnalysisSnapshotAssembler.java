@@ -14,6 +14,7 @@ import com.aifds.backend.rule.contract.CanonicalRuleSetVersionCalculator;
 import com.aifds.backend.scenario.ScenarioRuleVersionContract;
 import com.aifds.backend.scenario.ScenarioAggregationRuleVersionContract;
 import com.aifds.backend.scenario.ScenarioFundFlowRuleVersionContract;
+import com.aifds.backend.scenario.ScenarioOpenBankingRuleVersionContract;
 import com.aifds.backend.rule.contract.RuleV1ExecutionPlanRegistry;
 import com.aifds.backend.rule.entity.FraudRule;
 import com.aifds.backend.rule.entity.FraudRuleLifecycleStatus;
@@ -77,6 +78,25 @@ public class RuleAnalysisSnapshotAssembler {
         List<RuleVersion> executableVersions = List.copyOf(
                 ruleVersionRepository.findAllExecutableVersions(cutoff)
         );
+        if (executableVersions.size() == 15 || executableVersions.stream().anyMatch(version ->
+                ScenarioOpenBankingRuleVersionContract.CODE.equals(
+                        version.getFraudRule().getRuleCode()))) {
+            List<RuleVersionSnapshotRequest> v7 = executableVersions.stream()
+                    .sorted(java.util.Comparator.comparingInt(version -> {
+                        String code = version.getFraudRule().getRuleCode();
+                        int old = ScenarioRuleVersionContract.CODES.indexOf(code);
+                        if (old >= 0) return old;
+                        int aggregation = ScenarioAggregationRuleVersionContract.CODES.indexOf(code);
+                        if (aggregation >= 0) return 10 + aggregation;
+                        int flow = ScenarioFundFlowRuleVersionContract.CODES.indexOf(code);
+                        return flow >= 0 ? 12 + flow : 14;
+                    }))
+                    .map(this::toRuleSnapshot).toList();
+            ScenarioOpenBankingRuleVersionContract.validate(v7, cutoff);
+            return new AssembledRuleAnalysisSnapshot(
+                    ruleSetVersionCalculator.calculateV7(v7),
+                    new RuleAnalysisRequest(cutoff, transactionSnapshot, List.of(), v7));
+        }
         if (executableVersions.size() == 14 || executableVersions.stream().anyMatch(version ->
                 ScenarioFundFlowRuleVersionContract.CODES.contains(
                         version.getFraudRule().getRuleCode()))) {

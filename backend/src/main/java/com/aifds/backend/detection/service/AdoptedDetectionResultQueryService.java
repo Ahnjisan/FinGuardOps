@@ -129,7 +129,8 @@ public class AdoptedDetectionResultQueryService {
                     || adopted.getMlProbabilityBasisPoints() == null
                     || (("rule-ml-policy-v3".equals(adopted.getScoringPolicyVersion())
                             || "rule-ml-policy-v4".equals(adopted.getScoringPolicyVersion())
-                            || "rule-ml-policy-v5".equals(adopted.getScoringPolicyVersion()))
+                            || "rule-ml-policy-v5".equals(adopted.getScoringPolicyVersion())
+                            || "rule-ml-policy-v6".equals(adopted.getScoringPolicyVersion()))
                             ? mlRows.get(0).getAppliedContribution() == null
                                     || mlRows.get(0).getAppliedContribution() != adopted.getMlContribution()
                             : ml.get(0).scoreContribution() != adopted.getMlContribution())
@@ -147,6 +148,7 @@ public class AdoptedDetectionResultQueryService {
         Scn001002EvidenceResponse scn001002 = null;
         com.fasterxml.jackson.databind.JsonNode aggregation = null;
         com.fasterxml.jackson.databind.JsonNode fundFlow = null;
+        com.fasterxml.jackson.databind.JsonNode openBanking = null;
         if ("scoring-policy-v3".equals(adopted.getScoringPolicyVersion())
                 || MlDetectionPolicy.SCN003_POLICY_VERSION.equals(
                         adopted.getScoringPolicyVersion())) {
@@ -177,7 +179,8 @@ public class AdoptedDetectionResultQueryService {
         }
         if ("rule-ml-policy-v3".equals(adopted.getScoringPolicyVersion())
                 || "rule-ml-policy-v4".equals(adopted.getScoringPolicyVersion())
-                || "rule-ml-policy-v5".equals(adopted.getScoringPolicyVersion())) {
+                || "rule-ml-policy-v5".equals(adopted.getScoringPolicyVersion())
+                || "rule-ml-policy-v6".equals(adopted.getScoringPolicyVersion())) {
             var external = evidence.findAllByDetectionResult_IdAndEvidenceTypeOrderBySortOrderAscIdAsc(
                     adopted.getId(), DetectionEvidenceType.EXTERNAL_RISK);
             var history = evidence.findAllByDetectionResult_IdAndEvidenceTypeOrderBySortOrderAscIdAsc(
@@ -188,13 +191,18 @@ public class AdoptedDetectionResultQueryService {
                     "AGGREGATION_HISTORY_CONTEXT".equals(row.getReasonCode())).toList();
             var fundHistory = history.stream().filter(row ->
                     "FUND_FLOW_HISTORY_CONTEXT".equals(row.getReasonCode())).toList();
-            boolean isFundFlow = "rule-ml-policy-v5".equals(adopted.getScoringPolicyVersion());
+            var openHistory = history.stream().filter(row ->
+                    "OPEN_BANKING_CHAIN_CONTEXT".equals(row.getReasonCode())).toList();
+            boolean isOpen = "rule-ml-policy-v6".equals(adopted.getScoringPolicyVersion());
+            boolean isFundFlow = isOpen
+                    || "rule-ml-policy-v5".equals(adopted.getScoringPolicyVersion());
             boolean isAggregation = isFundFlow
                     || "rule-ml-policy-v4".equals(adopted.getScoringPolicyVersion());
             if (external.size() != 1 || scenarioHistory.size() != 1
                     || aggregateHistory.size() != (isAggregation ? 1 : 0)
                     || fundHistory.size() != (isFundFlow ? 1 : 0)
-                    || history.size() != (isFundFlow ? 3 : isAggregation ? 2 : 1)
+                    || openHistory.size() != (isOpen ? 1 : 0)
+                    || history.size() != (isOpen ? 4 : isFundFlow ? 3 : isAggregation ? 2 : 1)
                     || adopted.getScoreGroupSummary() == null
                     || rules.stream().anyMatch(row -> row.appliedContribution() == null)
                     || rules.stream().mapToInt(AdoptedRuleEvidenceResponse::appliedContribution).sum()
@@ -279,6 +287,28 @@ public class AdoptedDetectionResultQueryService {
                     }
                 }
             }
+            if (isOpen) {
+                openBanking = openHistory.get(0).getObservationSummary();
+                if (!"SCN008-contract-v1".equals(openBanking.path("sourceVersion").asText())
+                        || !"LOCAL_OPEN_BANKING_MOCK".equals(
+                                openBanking.path("mockSourceCode").asText())
+                        || !"v1".equals(openBanking.path("mockSourceVersion").asText())
+                        || !openBanking.path("stages").isArray()
+                        || !openBanking.path("evaluationCutoffAt").isTextual()) {
+                    throw new IllegalStateException("Open banking Evidence is incomplete");
+                }
+                boolean expected = "AVAILABLE".equals(openBanking.path("status").asText())
+                        && openBanking.path("stages").size() >= 2
+                        && openBanking.path("ratioBasisPoints").asInt(-1) >= 8000
+                        && new java.math.BigDecimal(openBanking.path("concentrationAmount")
+                                .asText("0")).compareTo(
+                                        new java.math.BigDecimal("5000000")) >= 0;
+                if (rules.stream().anyMatch(row -> RuleV1ContractRegistry
+                        .VERIFIED_OPEN_BANKING_CONCENTRATION_RESEND.equals(row.ruleCode()))
+                        != expected) {
+                    throw new IllegalStateException("Open banking Evidence contradicts Rule");
+                }
+            }
         }
         return new AdoptedDetectionResultItemResponse(
                 adopted.getDetectionResultId(), adopted.getDetectionResultVersion(),
@@ -292,9 +322,10 @@ public class AdoptedDetectionResultQueryService {
                 adopted.getScoreGroupSummary(),
                 ("rule-ml-policy-v3".equals(adopted.getScoringPolicyVersion())
                         || "rule-ml-policy-v4".equals(adopted.getScoringPolicyVersion())
-                        || "rule-ml-policy-v5".equals(adopted.getScoringPolicyVersion()))
+                        || "rule-ml-policy-v5".equals(adopted.getScoringPolicyVersion())
+                        || "rule-ml-policy-v6".equals(adopted.getScoringPolicyVersion()))
                         ? mlRows.get(0).getScoreContribution() : null, scn001002,
-                aggregation, fundFlow
+                aggregation, fundFlow, openBanking
         );
     }
 

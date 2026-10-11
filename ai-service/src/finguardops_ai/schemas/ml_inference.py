@@ -11,6 +11,7 @@ from finguardops_ai.schemas.scenario_rule import (
     ScenarioAggregationFactsDto,
     ScenarioFactsDto,
     ScenarioFundFlowFactsDto,
+    ScenarioOpenBankingFactsDto,
 )
 
 
@@ -62,7 +63,11 @@ class MlInferenceRequest(MlDto):
     ]
     channel: Literal["MOBILE_BANKING", "OPEN_BANKING", "ATM", "CORE_BANKING"]
     featureVersion: Literal[
-        "fraud-feature-v1", "fraud-feature-v2", "fraud-feature-v3", "fraud-feature-v4"
+        "fraud-feature-v1",
+        "fraud-feature-v2",
+        "fraud-feature-v3",
+        "fraud-feature-v4",
+        "fraud-feature-v5",
     ]
     scoringPolicyVersion: Literal[
         "rule-ml-policy-v1",
@@ -70,6 +75,7 @@ class MlInferenceRequest(MlDto):
         "rule-ml-policy-v3",
         "rule-ml-policy-v4",
         "rule-ml-policy-v5",
+        "rule-ml-policy-v6",
     ]
     modelVersion: str = Field(min_length=1, max_length=64)
     modelSha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -77,6 +83,7 @@ class MlInferenceRequest(MlDto):
     scenarioFacts: ScenarioFactsDto | None = None
     aggregationFacts: ScenarioAggregationFactsDto | None = None
     fundFlowFacts: ScenarioFundFlowFactsDto | None = None
+    openBankingFacts: ScenarioOpenBankingFactsDto | None = None
 
     @field_validator("transactionId")
     @classmethod
@@ -99,13 +106,25 @@ class MlInferenceRequest(MlDto):
             for event in self.events
         ):
             raise ValueError("timestamps must have timezone")
-        if self.scoringPolicyVersion == "rule-ml-policy-v5":
+        if self.scoringPolicyVersion == "rule-ml-policy-v6":
+            if (
+                self.featureVersion != "fraud-feature-v5"
+                or self.modelVersion != "fraud-logistic-v6"
+                or self.scenarioFacts is None
+                or self.aggregationFacts is None
+                or self.fundFlowFacts is None
+                or self.openBankingFacts is None
+                or self.events
+            ):
+                raise ValueError("Rule+ML v6 requires pinned open banking facts")
+        elif self.scoringPolicyVersion == "rule-ml-policy-v5":
             if (
                 self.featureVersion != "fraud-feature-v4"
                 or self.modelVersion != "fraud-logistic-v5"
                 or self.scenarioFacts is None
                 or self.aggregationFacts is None
                 or self.fundFlowFacts is None
+                or self.openBankingFacts is not None
                 or self.events
             ):
                 raise ValueError("Rule+ML v5 requires pinned fund flow facts")
@@ -116,6 +135,7 @@ class MlInferenceRequest(MlDto):
                 or self.scenarioFacts is None
                 or self.aggregationFacts is None
                 or self.fundFlowFacts is not None
+                or self.openBankingFacts is not None
                 or self.events
             ):
                 raise ValueError("Rule+ML v4 requires pinned aggregation facts")
@@ -127,6 +147,7 @@ class MlInferenceRequest(MlDto):
                 or self.events
                 or self.aggregationFacts is not None
                 or self.fundFlowFacts is not None
+                or self.openBankingFacts is not None
             ):
                 raise ValueError("Rule+ML v3 requires pinned v2 facts and no legacy events")
         elif (
@@ -134,6 +155,7 @@ class MlInferenceRequest(MlDto):
             or self.scenarioFacts is not None
             or self.aggregationFacts is not None
             or self.fundFlowFacts is not None
+            or self.openBankingFacts is not None
         ):
             raise ValueError("Legacy Rule+ML requires legacy features")
         return self

@@ -155,3 +155,37 @@ class ScenarioFundFlowFactsDto(RuleAnalysisDto):
 
 class RuleAnalysisRequestV5(RuleAnalysisRequestV4):
     fund_flow_facts: ScenarioFundFlowFactsDto
+
+
+class ScenarioOpenBankingStageDto(RuleAnalysisDto):
+    source_transaction_id: CanonicalUuid4
+    ownership_assertion_id: CanonicalUuid4
+    link_id: CanonicalUuid4
+    occurred_at: UtcZDateTime
+    approved_at: UtcZDateTime
+    amount: Annotated[Decimal, Field(strict=False)]
+
+
+class ScenarioOpenBankingFactsDto(RuleAnalysisDto):
+    source_version: StrictText
+    status: StrictText
+    reason_code: StrictText
+    history_coverage_fact_id: CanonicalUuid4 | None
+    concentration_started_at: UtcZDateTime | None
+    concentration_completed_at: UtcZDateTime | None
+    concentration_amount: Annotated[Decimal, Field(strict=False)]
+    resend_amount: Annotated[Decimal, Field(strict=False)]
+    ratio_basis_points: int
+    stages: list[ScenarioOpenBankingStageDto]
+
+    def hit(self) -> bool:
+        return (
+            self.status == "AVAILABLE"
+            and len(self.stages) >= 2
+            and self.concentration_amount >= Decimal(5000000)
+            and self.ratio_basis_points >= 8000
+        )
+
+
+class RuleAnalysisRequestV6(RuleAnalysisRequestV5):
+    open_banking_facts: ScenarioOpenBankingFactsDto
