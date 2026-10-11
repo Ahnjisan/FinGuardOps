@@ -7,7 +7,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from finguardops_ai.schemas.scenario_rule import ScenarioAggregationFactsDto, ScenarioFactsDto
+from finguardops_ai.schemas.scenario_rule import (
+    ScenarioAggregationFactsDto,
+    ScenarioFactsDto,
+    ScenarioFundFlowFactsDto,
+)
 
 
 class MlDto(BaseModel):
@@ -57,15 +61,22 @@ class MlInferenceRequest(MlDto):
         "ACCOUNT_TRANSFER", "OPEN_BANKING_TRANSFER", "ATM_WITHDRAWAL", "LOAN_DISBURSED"
     ]
     channel: Literal["MOBILE_BANKING", "OPEN_BANKING", "ATM", "CORE_BANKING"]
-    featureVersion: Literal["fraud-feature-v1", "fraud-feature-v2", "fraud-feature-v3"]
+    featureVersion: Literal[
+        "fraud-feature-v1", "fraud-feature-v2", "fraud-feature-v3", "fraud-feature-v4"
+    ]
     scoringPolicyVersion: Literal[
-        "rule-ml-policy-v1", "rule-ml-policy-v2", "rule-ml-policy-v3", "rule-ml-policy-v4"
+        "rule-ml-policy-v1",
+        "rule-ml-policy-v2",
+        "rule-ml-policy-v3",
+        "rule-ml-policy-v4",
+        "rule-ml-policy-v5",
     ]
     modelVersion: str = Field(min_length=1, max_length=64)
     modelSha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     events: tuple[MlEvent, ...] = Field(max_length=1000)
     scenarioFacts: ScenarioFactsDto | None = None
     aggregationFacts: ScenarioAggregationFactsDto | None = None
+    fundFlowFacts: ScenarioFundFlowFactsDto | None = None
 
     @field_validator("transactionId")
     @classmethod
@@ -88,12 +99,23 @@ class MlInferenceRequest(MlDto):
             for event in self.events
         ):
             raise ValueError("timestamps must have timezone")
-        if self.scoringPolicyVersion == "rule-ml-policy-v4":
+        if self.scoringPolicyVersion == "rule-ml-policy-v5":
+            if (
+                self.featureVersion != "fraud-feature-v4"
+                or self.modelVersion != "fraud-logistic-v5"
+                or self.scenarioFacts is None
+                or self.aggregationFacts is None
+                or self.fundFlowFacts is None
+                or self.events
+            ):
+                raise ValueError("Rule+ML v5 requires pinned fund flow facts")
+        elif self.scoringPolicyVersion == "rule-ml-policy-v4":
             if (
                 self.featureVersion != "fraud-feature-v3"
                 or self.modelVersion != "fraud-logistic-v4"
                 or self.scenarioFacts is None
                 or self.aggregationFacts is None
+                or self.fundFlowFacts is not None
                 or self.events
             ):
                 raise ValueError("Rule+ML v4 requires pinned aggregation facts")
@@ -104,12 +126,14 @@ class MlInferenceRequest(MlDto):
                 or self.scenarioFacts is None
                 or self.events
                 or self.aggregationFacts is not None
+                or self.fundFlowFacts is not None
             ):
                 raise ValueError("Rule+ML v3 requires pinned v2 facts and no legacy events")
         elif (
             self.featureVersion != "fraud-feature-v1"
             or self.scenarioFacts is not None
             or self.aggregationFacts is not None
+            or self.fundFlowFacts is not None
         ):
             raise ValueError("Legacy Rule+ML requires legacy features")
         return self

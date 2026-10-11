@@ -93,7 +93,7 @@ class FraudRuleVersionPersistenceIntegrationTest
 
     @Test
     void migrationCreatesExtensionTablesConstraintsIndexesAndTriggers() {
-        assertThat(flyway.info().applied()).hasSize(34);
+        assertThat(flyway.info().applied()).hasSize(36);
         assertThat(jdbcTemplate.queryForObject(
                 """
                 SELECT COUNT(*)

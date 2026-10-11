@@ -49,11 +49,24 @@ public class ScenarioCaseCorrelationService {
     public Optional<Correlation> correlation(FinancialTransaction tx) {
         var result = tx.getAdoptedDetectionResult();
         if (result == null || !("rule-ml-policy-v3".equals(result.getScoringPolicyVersion())
-                || "rule-ml-policy-v4".equals(result.getScoringPolicyVersion()))
-                || tx.getRecipientAccountRef() == null) return Optional.empty();
+                || "rule-ml-policy-v4".equals(result.getScoringPolicyVersion())
+                || "rule-ml-policy-v5".equals(result.getScoringPolicyVersion()))) return Optional.empty();
         List<DetectionEvidence> rows = evidence
                 .findAllByDetectionResult_IdAndEvidenceTypeOrderBySortOrderAscIdAsc(
                         result.getId(), DetectionEvidenceType.RULE);
+        if ("rule-ml-policy-v5".equals(result.getScoringPolicyVersion())) {
+            for (var entry : List.of(
+                    new String[] {RuleV1ContractRegistry.VERIFIED_INBOUND_ATM_DRAIN, "SCN006"},
+                    new String[] {RuleV1ContractRegistry.VERIFIED_LOAN_NEW_RECIPIENT_DRAIN, "SCN007"})) {
+                var hit = rows.stream().filter(row -> entry[0].equals(row.getRuleCode()))
+                        .findFirst();
+                if (hit.isPresent()) {
+                    return Optional.of(new Correlation(entry[1], key(entry[1],
+                            required(hit.get().getObservationSummary(), "sourceTransactionId"))));
+                }
+            }
+        }
+        if (tx.getRecipientAccountRef() == null) return Optional.empty();
         if ("rule-ml-policy-v4".equals(result.getScoringPolicyVersion())) {
             if (rows.stream().anyMatch(row ->
                     RuleV1ContractRegistry.DISTRIBUTED_OUTBOUND_WINDOW.equals(row.getRuleCode()))) {
@@ -108,9 +121,11 @@ public class ScenarioCaseCorrelationService {
                 correlation.scenarioCode(),
                 java.sql.Timestamp.from(tx.getOccurredAt().minus(
                         "SCN005".equals(correlation.scenarioCode())
-                                ? Duration.ofHours(24)
+                        ? Duration.ofHours(24)
                                 : "SCN004".equals(correlation.scenarioCode())
-                                        ? Duration.ofMinutes(10) : Duration.ofMinutes(30))),
+                                        ? Duration.ofMinutes(10)
+                                        : "SCN007".equals(correlation.scenarioCode())
+                                                ? Duration.ofMinutes(60) : Duration.ofMinutes(30))),
                 java.sql.Timestamp.from(tx.getOccurredAt()));
         if (ids.isEmpty()) return Optional.empty();
         var locked = cases.findAllByCaseIdsForUpdate(ids);
@@ -137,6 +152,11 @@ public class ScenarioCaseCorrelationService {
     /** Attach only as-of approved transfers sharing the proved aggregation key/window. */
     public void attachRelated(Correlation correlation, FraudCase fraudCase,
                               FinancialTransaction tx, Instant linkedAt) {
+        if ("SCN006".equals(correlation.scenarioCode())
+                || "SCN007".equals(correlation.scenarioCode())) {
+            attachFundFlow(correlation, fraudCase, tx, linkedAt);
+            return;
+        }
         if (!("SCN004".equals(correlation.scenarioCode())
                 || "SCN005".equals(correlation.scenarioCode()))) return;
         boolean outbound = "SCN004".equals(correlation.scenarioCode());
@@ -169,34 +189,72 @@ public class ScenarioCaseCorrelationService {
             throw new IllegalStateException("Scenario related transfer limit exceeded");
         }
         for (RelatedTransfer prior : related) {
-            Long priorId = prior.id();
-            jdbc.queryForObject("SELECT 1 FROM (SELECT pg_advisory_xact_lock(hashtext(?))) held",
-                    Integer.class, "case-related:" + priorId);
-            int inserted = jdbc.update("""
-                    INSERT INTO case_transaction
-                      (fraud_case_id, financial_transaction_id, linked_at)
-                    SELECT ?, ?, ? WHERE NOT EXISTS (
-                        SELECT 1 FROM case_transaction existing
-                        JOIN fraud_case active ON active.id = existing.fraud_case_id
-                        WHERE existing.financial_transaction_id = ?
-                          AND active.case_status IN
-                              ('OPEN','IN_REVIEW','ADDITIONAL_INFORMATION_REQUIRED'))
-                    ON CONFLICT (fraud_case_id, financial_transaction_id) DO NOTHING
-                    """, fraudCase.getId(), priorId,
-                    java.sql.Timestamp.from(linkedAt), priorId);
-            if (inserted == 1) {
-                var result = tx.getAdoptedDetectionResult();
-                auditLogs.append(new AuditLogDraft(AuditActorType.SYSTEM,
-                        AuditLog.SYSTEM_ACTOR_ID, AuditAction.CASE_TRANSACTION_LINKED,
-                        AuditReasonCode.CASE_REQUIRED_BY_RISK_POLICY,
-                        AuditTargetType.FRAUD_CASE, fraudCase.getCaseId(),
-                        prior.transactionId(), fraudCase.getCaseId(),
-                        result.getAnalysisTraceId(), null,
-                        JsonNodeFactory.instance.objectNode().put("linked", true),
-                        JsonNodeFactory.instance.objectNode()
-                                .put("detectionResultId", result.getDetectionResultId().toString())
-                                .put("detectionResultVersion", result.getDetectionResultVersion())));
-            }
+            linkWithAudit(fraudCase, tx, linkedAt, prior);
+        }
+    }
+
+    private void attachFundFlow(Correlation correlation, FraudCase fraudCase,
+                                FinancialTransaction tx, Instant linkedAt) {
+        var result = tx.getAdoptedDetectionResult();
+        String code = "SCN006".equals(correlation.scenarioCode())
+                ? RuleV1ContractRegistry.VERIFIED_INBOUND_ATM_DRAIN
+                : RuleV1ContractRegistry.VERIFIED_LOAN_NEW_RECIPIENT_DRAIN;
+        JsonNode observation = evidence
+                .findAllByDetectionResult_IdAndEvidenceTypeOrderBySortOrderAscIdAsc(
+                        result.getId(), DetectionEvidenceType.RULE).stream()
+                .filter(row -> code.equals(row.getRuleCode())).findFirst().orElseThrow()
+                .getObservationSummary();
+        List<UUID> ids = new java.util.ArrayList<>();
+        ids.add(UUID.fromString(required(observation, "sourceTransactionId")));
+        JsonNode priors = observation.path("linkedPriorTransactionIds");
+        if (!priors.isArray() || priors.size() > 100) {
+            throw new IllegalStateException("Invalid linked fund flow history");
+        }
+        for (JsonNode prior : priors) ids.add(UUID.fromString(prior.asText()));
+        for (UUID id : ids) {
+            List<RelatedTransfer> matches = jdbc.query("""
+                    SELECT id, transaction_id FROM financial_transaction
+                    WHERE transaction_id = ? AND processing_status = 'APPROVED'
+                      AND occurred_at < ? AND created_at <= ? AND approved_at <= ?
+                    """, (rs, row) -> new RelatedTransfer(
+                            rs.getLong(1), rs.getObject(2, UUID.class)), id,
+                    java.sql.Timestamp.from(tx.getOccurredAt()),
+                    java.sql.Timestamp.from(tx.getOccurredAt()),
+                    java.sql.Timestamp.from(tx.getOccurredAt()));
+            if (matches.size() != 1) throw new IllegalStateException("Fund flow anchor changed");
+            linkWithAudit(fraudCase, tx, linkedAt, matches.get(0));
+        }
+    }
+
+    private void linkWithAudit(FraudCase fraudCase, FinancialTransaction tx,
+                               Instant linkedAt, RelatedTransfer prior) {
+        Long priorId = prior.id();
+        jdbc.queryForObject("SELECT 1 FROM (SELECT pg_advisory_xact_lock(hashtext(?))) held",
+                Integer.class, "case-related:" + priorId);
+        int inserted = jdbc.update("""
+                INSERT INTO case_transaction
+                  (fraud_case_id, financial_transaction_id, linked_at)
+                SELECT ?, ?, ? WHERE NOT EXISTS (
+                    SELECT 1 FROM case_transaction existing
+                    JOIN fraud_case active ON active.id = existing.fraud_case_id
+                    WHERE existing.financial_transaction_id = ?
+                      AND active.case_status IN
+                          ('OPEN','IN_REVIEW','ADDITIONAL_INFORMATION_REQUIRED'))
+                ON CONFLICT (fraud_case_id, financial_transaction_id) DO NOTHING
+                """, fraudCase.getId(), priorId,
+                java.sql.Timestamp.from(linkedAt), priorId);
+        if (inserted == 1) {
+            var result = tx.getAdoptedDetectionResult();
+            auditLogs.append(new AuditLogDraft(AuditActorType.SYSTEM,
+                    AuditLog.SYSTEM_ACTOR_ID, AuditAction.CASE_TRANSACTION_LINKED,
+                    AuditReasonCode.CASE_REQUIRED_BY_RISK_POLICY,
+                    AuditTargetType.FRAUD_CASE, fraudCase.getCaseId(),
+                    prior.transactionId(), fraudCase.getCaseId(),
+                    result.getAnalysisTraceId(), null,
+                    JsonNodeFactory.instance.objectNode().put("linked", true),
+                    JsonNodeFactory.instance.objectNode()
+                            .put("detectionResultId", result.getDetectionResultId().toString())
+                            .put("detectionResultVersion", result.getDetectionResultVersion())));
         }
     }
 

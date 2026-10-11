@@ -26,6 +26,31 @@ it("shows the Rule and fraud ML contributions with the synthetic policy warning"
   expect(screen.getByText(issue380Fixture.adopted.adoptedResult.modelSha256)).toBeInTheDocument();
 });
 
+it("shows verified funding and unknown source evidence without account ownership claims", () => {
+  const base = verified(issue380Fixture.adopted);
+  const extended = { ...base, adoptedResult: { ...base.adoptedResult!,
+    fundFlowEvidence: { sourceVersion: "SCN006-007-contract-v1" as const,
+      mockSourceCode: "LOCAL_FDS_MOCK" as const, mockSourceVersion: "v2" as const,
+      evaluationCutoffAt: "2026-10-11T00:00:00Z",
+      atm: { status: "AVAILABLE" as const, reasonCode: "VERIFIED_SOURCE_TO_USE",
+        sourceTransactionId: "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430112",
+        currentLinkId: "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430113",
+        historyCoverageFactId: "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430114",
+        sourceOccurredAt: "2026-10-10T23:40:00Z", sourceApprovedAt: "2026-10-10T23:41:00Z",
+        sourceAmount: "10000000", linkedAmount: "8000000", ratioBasisPoints: 8000,
+        linkedPriorTransactionIds: [] },
+      loan: { status: "UNKNOWN" as const, reasonCode: "NOT_OUTBOUND_TRANSFER",
+        sourceAmount: "0", linkedAmount: "0", ratioBasisPoints: 0,
+        linkedPriorTransactionIds: [] } },
+  } } as AdoptedDetectionResponse;
+  render(<AdoptedDetectionPanel onRetry={() => undefined} state={{ status: "success",
+    data: extended }} />);
+  expect(screen.getByText("SCN-006·007 선행 자금 연결")).toBeInTheDocument();
+  expect(screen.getByText(/VERIFIED_SOURCE_TO_USE/)).toBeInTheDocument();
+  expect(screen.getByText(/NOT_OUTBOUND_TRANSFER/)).toBeInTheDocument();
+  expect(screen.queryByText(/외부 계좌 소유 확정/)).not.toBeInTheDocument();
+});
+
 it("labels capped v4 Rule totals as adopted scores", () => {
   const legacy = verified(issue380Fixture.adopted);
   const adoptedResult = legacy.adoptedResult!;

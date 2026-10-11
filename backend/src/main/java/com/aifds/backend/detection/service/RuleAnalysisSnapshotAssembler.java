@@ -13,6 +13,7 @@ import com.aifds.backend.rule.client.dto.RuleVersionSnapshotRequest;
 import com.aifds.backend.rule.contract.CanonicalRuleSetVersionCalculator;
 import com.aifds.backend.scenario.ScenarioRuleVersionContract;
 import com.aifds.backend.scenario.ScenarioAggregationRuleVersionContract;
+import com.aifds.backend.scenario.ScenarioFundFlowRuleVersionContract;
 import com.aifds.backend.rule.contract.RuleV1ExecutionPlanRegistry;
 import com.aifds.backend.rule.entity.FraudRule;
 import com.aifds.backend.rule.entity.FraudRuleLifecycleStatus;
@@ -76,6 +77,25 @@ public class RuleAnalysisSnapshotAssembler {
         List<RuleVersion> executableVersions = List.copyOf(
                 ruleVersionRepository.findAllExecutableVersions(cutoff)
         );
+        if (executableVersions.size() == 14 || executableVersions.stream().anyMatch(version ->
+                ScenarioFundFlowRuleVersionContract.CODES.contains(
+                        version.getFraudRule().getRuleCode()))) {
+            List<RuleVersionSnapshotRequest> v6 = executableVersions.stream()
+                    .sorted(java.util.Comparator.comparingInt(version -> {
+                        String code = version.getFraudRule().getRuleCode();
+                        int oldIndex = ScenarioRuleVersionContract.CODES.indexOf(code);
+                        if (oldIndex >= 0) return oldIndex;
+                        int aggregateIndex = ScenarioAggregationRuleVersionContract.CODES
+                                .indexOf(code);
+                        return aggregateIndex >= 0 ? 10 + aggregateIndex
+                                : 12 + ScenarioFundFlowRuleVersionContract.CODES.indexOf(code);
+                    }))
+                    .map(this::toRuleSnapshot).toList();
+            ScenarioFundFlowRuleVersionContract.validate(v6, cutoff);
+            return new AssembledRuleAnalysisSnapshot(
+                    ruleSetVersionCalculator.calculateV6(v6),
+                    new RuleAnalysisRequest(cutoff, transactionSnapshot, List.of(), v6));
+        }
         if (executableVersions.size() == 12 || executableVersions.stream().anyMatch(version ->
                 ScenarioAggregationRuleVersionContract.CODES.contains(
                         version.getFraudRule().getRuleCode()))) {

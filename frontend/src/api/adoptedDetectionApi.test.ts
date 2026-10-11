@@ -59,6 +59,33 @@ describe("adopted detection response", () => {
       ...result.adoptedResult, aggregationEvidence: { ...aggregation,
         outbound: { ...aggregation.outbound, recipientAccountRef: "raw-account" } },
     } })).toBe(false);
+    const unknown = { status: "UNKNOWN", reasonCode: "NOT_OUTBOUND_TRANSFER",
+      sourceAmount: "0", linkedAmount: "0", ratioBasisPoints: 0,
+      linkedPriorTransactionIds: [] };
+    const flow = { sourceVersion: "SCN006-007-contract-v1", mockSourceCode: "LOCAL_FDS_MOCK",
+      mockSourceVersion: "v2", evaluationCutoffAt: "2026-10-11T00:00:00Z",
+      atm: { status: "AVAILABLE", reasonCode: "VERIFIED_SOURCE_TO_USE",
+        sourceTransactionId: "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430112",
+        currentLinkId: "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430113",
+        historyCoverageFactId: "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430114",
+        sourceOccurredAt: "2026-10-10T23:40:00Z", sourceApprovedAt: "2026-10-10T23:41:00Z",
+        sourceAmount: "10000000", linkedAmount: "8000000", ratioBasisPoints: 8000,
+        linkedPriorTransactionIds: [] }, loan: unknown };
+    const v6 = { ...result, adoptedResult: { ...result.adoptedResult,
+      scoringPolicyVersion: "rule-ml-policy-v5", modelVersion: "fraud-logistic-v5",
+      mlFeatureVersion: "fraud-feature-v4", riskLevel: "HIGH", riskScore: 79,
+      ruleScore: 75, mlContribution: 4,
+      ruleEvidence: [...result.adoptedResult.ruleEvidence,
+        { ruleCode: "VERIFIED_INBOUND_ATM_DRAIN", ruleVersion: "1",
+          reasonCode: "VERIFIED_INBOUND_ATM_DRAIN", scoreContribution: 50,
+          appliedContribution: 50 }],
+      scoreGroupSummary: [...result.adoptedResult.scoreGroupSummary,
+        { groupId: "flow_link", rawScore: 50, cap: 50, appliedScore: 50, reduction: 0 }],
+      fundFlowEvidence: flow } };
+    expect(isAdoptedDetectionResponse(v6)).toBe(true);
+    expect(isAdoptedDetectionResponse({ ...v6, adoptedResult: { ...v6.adoptedResult,
+      fundFlowEvidence: { ...flow, atm: { ...flow.atm, externalAccountRef: "unproved" } } } }))
+      .toBe(false);
   });
   it("accepts attributed v4 scoring and rejects missing rule attribution", () => {
     const v4 = {

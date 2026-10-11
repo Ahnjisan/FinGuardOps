@@ -128,7 +128,8 @@ public class AdoptedDetectionResultQueryService {
             if (ml.size() != 1 || adopted.getRuleRiskScore() == null
                     || adopted.getMlProbabilityBasisPoints() == null
                     || (("rule-ml-policy-v3".equals(adopted.getScoringPolicyVersion())
-                            || "rule-ml-policy-v4".equals(adopted.getScoringPolicyVersion()))
+                            || "rule-ml-policy-v4".equals(adopted.getScoringPolicyVersion())
+                            || "rule-ml-policy-v5".equals(adopted.getScoringPolicyVersion()))
                             ? mlRows.get(0).getAppliedContribution() == null
                                     || mlRows.get(0).getAppliedContribution() != adopted.getMlContribution()
                             : ml.get(0).scoreContribution() != adopted.getMlContribution())
@@ -145,6 +146,7 @@ public class AdoptedDetectionResultQueryService {
         Scn003EvidenceResponse scn003 = null;
         Scn001002EvidenceResponse scn001002 = null;
         com.fasterxml.jackson.databind.JsonNode aggregation = null;
+        com.fasterxml.jackson.databind.JsonNode fundFlow = null;
         if ("scoring-policy-v3".equals(adopted.getScoringPolicyVersion())
                 || MlDetectionPolicy.SCN003_POLICY_VERSION.equals(
                         adopted.getScoringPolicyVersion())) {
@@ -174,7 +176,8 @@ public class AdoptedDetectionResultQueryService {
                     matched, prior.path("priorApprovedRecipientTransferObserved").booleanValue());
         }
         if ("rule-ml-policy-v3".equals(adopted.getScoringPolicyVersion())
-                || "rule-ml-policy-v4".equals(adopted.getScoringPolicyVersion())) {
+                || "rule-ml-policy-v4".equals(adopted.getScoringPolicyVersion())
+                || "rule-ml-policy-v5".equals(adopted.getScoringPolicyVersion())) {
             var external = evidence.findAllByDetectionResult_IdAndEvidenceTypeOrderBySortOrderAscIdAsc(
                     adopted.getId(), DetectionEvidenceType.EXTERNAL_RISK);
             var history = evidence.findAllByDetectionResult_IdAndEvidenceTypeOrderBySortOrderAscIdAsc(
@@ -183,10 +186,15 @@ public class AdoptedDetectionResultQueryService {
                     "SCENARIO_HISTORY_CONTEXT".equals(row.getReasonCode())).toList();
             var aggregateHistory = history.stream().filter(row ->
                     "AGGREGATION_HISTORY_CONTEXT".equals(row.getReasonCode())).toList();
-            boolean isAggregation = "rule-ml-policy-v4".equals(adopted.getScoringPolicyVersion());
+            var fundHistory = history.stream().filter(row ->
+                    "FUND_FLOW_HISTORY_CONTEXT".equals(row.getReasonCode())).toList();
+            boolean isFundFlow = "rule-ml-policy-v5".equals(adopted.getScoringPolicyVersion());
+            boolean isAggregation = isFundFlow
+                    || "rule-ml-policy-v4".equals(adopted.getScoringPolicyVersion());
             if (external.size() != 1 || scenarioHistory.size() != 1
                     || aggregateHistory.size() != (isAggregation ? 1 : 0)
-                    || history.size() != (isAggregation ? 2 : 1)
+                    || fundHistory.size() != (isFundFlow ? 1 : 0)
+                    || history.size() != (isFundFlow ? 3 : isAggregation ? 2 : 1)
                     || adopted.getScoreGroupSummary() == null
                     || rules.stream().anyMatch(row -> row.appliedContribution() == null)
                     || rules.stream().mapToInt(AdoptedRuleEvidenceResponse::appliedContribution).sum()
@@ -247,6 +255,30 @@ public class AdoptedDetectionResultQueryService {
                     }
                 }
             }
+            if (isFundFlow) {
+                fundFlow = fundHistory.get(0).getObservationSummary();
+                if (!"SCN006-007-contract-v1".equals(
+                        fundFlow.path("sourceVersion").asText())
+                        || !"LOCAL_FDS_MOCK".equals(
+                                fundFlow.path("mockSourceCode").asText())
+                        || !"v2".equals(fundFlow.path("mockSourceVersion").asText())
+                        || !fundFlow.path("atm").isObject()
+                        || !fundFlow.path("loan").isObject()) {
+                    throw new IllegalStateException("Fund flow Evidence is incomplete");
+                }
+                for (var entry : java.util.Map.of(
+                        RuleV1ContractRegistry.VERIFIED_INBOUND_ATM_DRAIN, "atm",
+                        RuleV1ContractRegistry.VERIFIED_LOAN_NEW_RECIPIENT_DRAIN, "loan")
+                        .entrySet()) {
+                    var flow = fundFlow.path(entry.getValue());
+                    boolean expected = "AVAILABLE".equals(flow.path("status").asText())
+                            && flow.path("ratioBasisPoints").asInt(-1) >= 8000;
+                    if (rules.stream().anyMatch(row -> entry.getKey().equals(row.ruleCode()))
+                            != expected) {
+                        throw new IllegalStateException("Fund flow Evidence contradicts Rule");
+                    }
+                }
+            }
         }
         return new AdoptedDetectionResultItemResponse(
                 adopted.getDetectionResultId(), adopted.getDetectionResultVersion(),
@@ -259,9 +291,10 @@ public class AdoptedDetectionResultQueryService {
                 adopted.getMlFeatureVersion(), adopted.getModelSha256(), ml, scn003,
                 adopted.getScoreGroupSummary(),
                 ("rule-ml-policy-v3".equals(adopted.getScoringPolicyVersion())
-                        || "rule-ml-policy-v4".equals(adopted.getScoringPolicyVersion()))
+                        || "rule-ml-policy-v4".equals(adopted.getScoringPolicyVersion())
+                        || "rule-ml-policy-v5".equals(adopted.getScoringPolicyVersion()))
                         ? mlRows.get(0).getScoreContribution() : null, scn001002,
-                aggregation
+                aggregation, fundFlow
         );
     }
 

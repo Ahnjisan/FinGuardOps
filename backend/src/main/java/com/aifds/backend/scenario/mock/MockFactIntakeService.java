@@ -99,7 +99,7 @@ public class MockFactIntakeService {
                         || !"COMPLETE".equals(r.assertionState()) || hasLimit(r)
                         || r.countryCode() != null) throw invalid();
             }
-            case INBOUND_ACCOUNT_HISTORY_COMPLETE -> {
+            case INBOUND_ACCOUNT_HISTORY_COMPLETE, ACCOUNT_FLOW_HISTORY_COMPLETE -> {
                 if (r.accountRef() == null || r.deviceRef() != null
                         || r.behaviorEventId() != null || r.coverageFrom() == null
                         || r.coverageFrom().isAfter(r.occurredAt())

@@ -13,6 +13,7 @@ from finguardops_ai.schemas.rule_analysis import (
 from finguardops_ai.schemas.scenario_rule import (
     RuleAnalysisRequestV3,
     RuleAnalysisRequestV4,
+    RuleAnalysisRequestV5,
     RuleAnalysisResponseV3,
 )
 from finguardops_ai.services.rule_analysis import (
@@ -21,6 +22,7 @@ from finguardops_ai.services.rule_analysis import (
 )
 from finguardops_ai.services.scenario_rule import analyze as analyze_scenario
 from finguardops_ai.services.scenario_rule_v5 import analyze as analyze_aggregation
+from finguardops_ai.services.scenario_rule_v6 import analyze as analyze_fund_flow
 
 router = APIRouter(tags=["rule-analysis"])
 
@@ -67,6 +69,15 @@ def analyze_rule_v3(request_dto: RuleAnalysisRequestV3, request: Request) -> Rul
 )
 def analyze_rule_v4(request_dto: RuleAnalysisRequestV4, request: Request) -> RuleAnalysisResponseV3:
     return analyze_aggregation(request_dto, request.state.trace_id)
+
+
+@router.post(
+    "/v5/rule-analysis",
+    response_model=RuleAnalysisResponseV3,
+    status_code=status.HTTP_200_OK,
+)
+def analyze_rule_v5(request_dto: RuleAnalysisRequestV5, request: Request) -> RuleAnalysisResponseV3:
+    return analyze_fund_flow(request_dto, request.state.trace_id)
 
 
 def _analyze(

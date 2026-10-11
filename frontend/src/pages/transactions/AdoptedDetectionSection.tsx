@@ -88,6 +88,14 @@ export function AdoptedDetectionPanel({ state, onRetry }: {
           return window && <li key={direction}>{direction === "outbound" ? "10분 분산 송금" : "24시간 다고객 집금"}: {window.status} · 시작 {formatKstDateTime(window.windowStartAt)} KST · {window.transferCount}건 · 고유 관계 {window.distinctCount}개 · 합계 {window.totalAmount} KRW · 승인 시각 불명 {window.unknownCount}건 · Mock 증명 {window.coverageFactId ?? "없음"}</li>;
         })}</ol>
       </section>}
+      {state.data.adoptedResult.fundFlowEvidence && <section aria-label="선행 자금 연결 근거">
+        <h4>SCN-006·007 선행 자금 연결</h4>
+        <p>출처 {state.data.adoptedResult.fundFlowEvidence.mockSourceCode} · 계약 {state.data.adoptedResult.fundFlowEvidence.sourceVersion} · 평가 cutoff {formatKstDateTime(state.data.adoptedResult.fundFlowEvidence.evaluationCutoffAt)} KST</p>
+        <ol>{(["atm", "loan"] as const).map((kind) => {
+          const flow = state.data.adoptedResult?.fundFlowEvidence?.[kind];
+          return flow && <li key={kind}>{kind === "atm" ? "입금 후 ATM 인출" : "대출금 신규 수취인 송금"}: {flow.status} · 근거 {flow.reasonCode} · 원천 {flow.sourceTransactionId ?? "미확인"} · 연결 {flow.currentLinkId ?? "미확인"} · 원천금 {flow.sourceAmount} KRW · 연결금 {flow.linkedAmount} KRW · 비율 {flow.ratioBasisPoints}bp · 과거 연결 {flow.linkedPriorTransactionIds.length}건</li>;
+        })}</ol>
+      </section>}
       {state.data.adoptedResult.scn003Evidence && <section aria-label="외부 위험 수취 계좌 근거">
         <h4>외부 위험 수취 계좌 근거</h4>
         <p>출처 {state.data.adoptedResult.scn003Evidence.providerCode} · 계약 {state.data.adoptedResult.scn003Evidence.sourceVersion}</p>

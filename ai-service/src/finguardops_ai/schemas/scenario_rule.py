@@ -130,3 +130,28 @@ class ScenarioAggregationFactsDto(RuleAnalysisDto):
 
 class RuleAnalysisRequestV4(RuleAnalysisRequestV3):
     aggregation_facts: ScenarioAggregationFactsDto
+
+
+class ScenarioFundFlowDto(RuleAnalysisDto):
+    status: StrictText
+    reason_code: StrictText
+    source_transaction_id: CanonicalUuid4 | None
+    current_link_id: CanonicalUuid4 | None
+    history_coverage_fact_id: CanonicalUuid4 | None
+    beneficiary_event_id: CanonicalUuid4 | None
+    source_occurred_at: UtcZDateTime | None
+    source_approved_at: UtcZDateTime | None
+    source_amount: Annotated[Decimal, Field(strict=False)]
+    linked_amount: Annotated[Decimal, Field(strict=False)]
+    ratio_basis_points: int
+    linked_prior_transaction_ids: list[CanonicalUuid4]
+
+
+class ScenarioFundFlowFactsDto(RuleAnalysisDto):
+    source_version: StrictText
+    atm: ScenarioFundFlowDto
+    loan: ScenarioFundFlowDto
+
+
+class RuleAnalysisRequestV5(RuleAnalysisRequestV4):
+    fund_flow_facts: ScenarioFundFlowFactsDto

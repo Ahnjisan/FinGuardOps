@@ -36,6 +36,10 @@ public final class RuleV1ContractRegistry {
             "DISTRIBUTED_OUTBOUND_WINDOW";
     public static final String MANY_CUSTOMER_INBOUND_WINDOW =
             "MANY_CUSTOMER_INBOUND_WINDOW";
+    public static final String VERIFIED_INBOUND_ATM_DRAIN =
+            "VERIFIED_INBOUND_ATM_DRAIN";
+    public static final String VERIFIED_LOAN_NEW_RECIPIENT_DRAIN =
+            "VERIFIED_LOAN_NEW_RECIPIENT_DRAIN";
 
     private static final Map<String, Set<String>> ALLOWED_REASON_CODES =
             Map.ofEntries(
@@ -55,7 +59,10 @@ public final class RuleV1ContractRegistry {
                     Map.entry(MATERIAL_LIMIT_UPLIFT, Set.of(MATERIAL_LIMIT_UPLIFT)),
                     Map.entry(MOCK_OVERSEAS_NETWORK, Set.of(MOCK_OVERSEAS_NETWORK)),
                     Map.entry(DISTRIBUTED_OUTBOUND_WINDOW, Set.of(DISTRIBUTED_OUTBOUND_WINDOW)),
-                    Map.entry(MANY_CUSTOMER_INBOUND_WINDOW, Set.of(MANY_CUSTOMER_INBOUND_WINDOW))
+                    Map.entry(MANY_CUSTOMER_INBOUND_WINDOW, Set.of(MANY_CUSTOMER_INBOUND_WINDOW)),
+                    Map.entry(VERIFIED_INBOUND_ATM_DRAIN, Set.of(VERIFIED_INBOUND_ATM_DRAIN)),
+                    Map.entry(VERIFIED_LOAN_NEW_RECIPIENT_DRAIN,
+                            Set.of(VERIFIED_LOAN_NEW_RECIPIENT_DRAIN))
             );
     private static final Set<String> SUPPORTED_REASON_CODES = Set.of(
             TRANSFER_ABSOLUTE_HIGH_AMOUNT,
@@ -69,7 +76,9 @@ public final class RuleV1ContractRegistry {
             MATERIAL_LIMIT_UPLIFT,
             MOCK_OVERSEAS_NETWORK,
             DISTRIBUTED_OUTBOUND_WINDOW,
-            MANY_CUSTOMER_INBOUND_WINDOW
+            MANY_CUSTOMER_INBOUND_WINDOW,
+            VERIFIED_INBOUND_ATM_DRAIN,
+            VERIFIED_LOAN_NEW_RECIPIENT_DRAIN
     );
     private static final Map<String, String> DISPLAY_DESCRIPTIONS = Map.ofEntries(
             Map.entry(TRANSFER_ABSOLUTE_HIGH_AMOUNT, "절대 고액 이체"),
@@ -85,7 +94,10 @@ public final class RuleV1ContractRegistry {
             Map.entry(MATERIAL_LIMIT_UPLIFT, "큰 폭의 한도 상향"),
             Map.entry(MOCK_OVERSEAS_NETWORK, "Mock 해외 접속 신호"),
             Map.entry(DISTRIBUTED_OUTBOUND_WINDOW, "단시간 다수 수취 계좌 분산 송금"),
-            Map.entry(MANY_CUSTOMER_INBOUND_WINDOW, "다수 고객의 동일 계좌 집금")
+            Map.entry(MANY_CUSTOMER_INBOUND_WINDOW, "다수 고객의 동일 계좌 집금"),
+            Map.entry(VERIFIED_INBOUND_ATM_DRAIN, "검증된 입금 후 ATM 인출"),
+            Map.entry(VERIFIED_LOAN_NEW_RECIPIENT_DRAIN,
+                    "검증된 대출금의 신규 수취인 송금")
     );
 
     private RuleV1ContractRegistry() {
