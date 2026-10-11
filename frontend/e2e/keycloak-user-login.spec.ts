@@ -10915,6 +10915,127 @@ test("Issue 382: real Keycloak analyst reads SCN-003 case and adopted evidence",
   }
 });
 
+test("Issue 384: real Keycloak analyst reads one SCN-001/002 v4 case, transaction and score", async ({ page }) => {
+  test.setTimeout(600_000);
+  requireRunFixtureManifestOracle();
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+  const fixturePath = resolve(root, "infra/keycloak/run_scn001002_fixture.py");
+  const originalManifest = env[RUN_FIXTURE_MANIFEST_ENVIRONMENT];
+  requireCondition(typeof originalManifest === "string" && originalManifest.length > 0,
+    "The official Run fixture identity is absent.");
+  readRunFixtureManifest(originalManifest);
+  const output = await new Promise<string>((resolveOutput, reject) => {
+    const child = spawn("python", ["-B", fixturePath], {
+      cwd: root, shell: false,
+      env: { ...env, FINGUARDOPS_E2E_FIXTURE_DIR: dirname(originalManifest) },
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => { child.kill(); reject(new Error("SCN001002_FIXTURE_TIMEOUT")); }, 480_000);
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+      if (stdout.length > 512) { child.kill(); reject(new Error("SCN001002_FIXTURE_OUTPUT_INVALID")); }
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+      if (stderr.length > 512) { child.kill(); reject(new Error("SCN001002_FIXTURE_FAILED")); }
+    });
+    child.on("error", () => { clearTimeout(timer); reject(new Error("SCN001002_FIXTURE_START_FAILED")); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0 || stderr.length > 0) reject(new Error("SCN001002_FIXTURE_FAILED"));
+      else resolveOutput(stdout);
+    });
+  });
+  const created = JSON.parse(output) as Record<string, unknown>;
+  requireCondition(isDeepStrictEqual(sortedKeys(created), ["caseId", "detectionResultId",
+    "mlContribution", "riskScore", "ruleScore", "transactionId", "transactionStatus"]) &&
+    typeof created.caseId === "string" && CANONICAL_UUID_V4.test(created.caseId) &&
+    typeof created.transactionId === "string" && CANONICAL_UUID_V4.test(created.transactionId) &&
+    typeof created.detectionResultId === "string" && CANONICAL_UUID_V4.test(created.detectionResultId) &&
+    created.ruleScore === 90 && typeof created.mlContribution === "number" &&
+    created.riskScore === 90 + created.mlContribution && created.transactionStatus === "HELD",
+  "The SCN-001/002 fixture returned no verified stored identity.");
+  const caseId = created.caseId as string;
+  const transactionId = created.transactionId as string;
+  const relay = await installBackendRelay(page);
+  try {
+    await page.goto(`${APP_ORIGIN}/cases/${caseId}`);
+    await expect(page.getByRole("heading", { name: "로그인이 필요합니다" })).toBeVisible();
+    await signInFromGuard(page, readUserPassword(), `/cases/${caseId}`, false);
+    await expect(page.getByRole("heading", { name: `사건 ${caseId}`, level: 2 })).toBeVisible();
+    await expect(page.locator("article.audit__entry")).toHaveCount(2);
+    await expect(page.locator("article.audit__entry").filter({ hasText: "CASE_CREATED" })).toHaveCount(1);
+    await expect(page.locator("article.audit__entry").filter({ hasText: "CASE_TRANSACTION_LINKED" })).toHaveCount(1);
+    await expect(page.locator(".case-transactions__item a")).toHaveAttribute("href", `/transactions/${transactionId}`);
+    await page.locator(".case-transactions__item a").click();
+    await expect(page.getByRole("heading", { name: `거래 ${transactionId}`, level: 2 })).toBeVisible();
+    await expect(factValue(page.locator(".transaction-detail__record"), "처리 상태")).toHaveText("보류");
+    const adopted = await page.evaluate(async (id) => {
+      const [{ getOidcAuthClient }, { fetchAdoptedDetection }] = await Promise.all([
+        import("/src/auth/oidcAuthClient.ts"),
+        // @ts-expect-error Vite serves the production module at an absolute URL.
+        import("/src/api/adoptedDetectionApi.ts"),
+      ]);
+      return fetchAdoptedDetection(getOidcAuthClient(), id);
+    }, transactionId);
+    const item = adopted.adoptedResult;
+    requireCondition(adopted.availability === "AVAILABLE" &&
+      item?.detectionResultId === created.detectionResultId &&
+      item.riskScore === created.riskScore && item.ruleScore === created.ruleScore &&
+      item.mlContribution === created.mlContribution && item.riskLevel === "CRITICAL" &&
+      item.scoringPolicyVersion === "rule-ml-policy-v3" &&
+      item.mlFeatureVersion === "fraud-feature-v2" && item.modelVersion === "fraud-logistic-v3" &&
+      item.scn001002Evidence?.sourceVersion === "SCN001-002-contract-v1" &&
+      item.scn001002Evidence.baselineStatus === "AVAILABLE" &&
+      item.scn001002Evidence.recipientStatus === "FIRST" &&
+      item.scn001002Evidence.deviceStatus === "NEW_UNVERIFIED" &&
+      item.scn001002Evidence.providerCode === "PROVIDER_V1" &&
+      item.scoreGroupSummary?.length === 4 &&
+      item.scoreGroupSummary.reduce((sum: number, group: { appliedScore: number }) =>
+        sum + group.appliedScore, 0) === item.ruleScore &&
+      item.ruleEvidence.some((rule: { ruleCode: string }) =>
+        rule.ruleCode === "RECENT_DEVICE_REGISTRATION_HIGH_AMOUNT") &&
+      item.ruleEvidence.some((rule: { ruleCode: string }) =>
+        rule.ruleCode === "RECENT_SECURITY_CHANGE_HIGH_AMOUNT") &&
+      item.ruleEvidence.some((rule: { ruleCode: string }) =>
+        rule.ruleCode === "CUSTOMER_BASELINE_HIGH_AMOUNT") &&
+      !JSON.stringify(item).includes("issue384-browser-"),
+    "The Keycloak transaction did not expose one safe adopted SCN-001/002 result.");
+    await expect(page.locator(".adopted-detection")).toContainText(String(created.detectionResultId));
+    await expect(page.locator(".adopted-detection")).toContainText("Rule 채택 점수");
+    await expect(page.locator(".adopted-detection")).toContainText("그룹별 점수 배분");
+    await expect(page.locator(".adopted-detection")).toContainText("SCN-001·002 평가 근거");
+    await expect(page.locator(".adopted-detection")).toContainText("NEW_UNVERIFIED");
+    const panel = page.locator(".adopted-detection");
+    await expect(factValue(panel, "위험 등급")).toHaveText("CRITICAL");
+    await expect(factValue(panel, "위험 점수")).toHaveText(`${String(item.riskScore)} / 100`);
+    await expect(factValue(panel, "Rule 채택 점수")).toHaveText(`${String(item.ruleScore)} / 100`);
+    await expect(factValue(panel, "ML 기여도")).toHaveText(
+      `원점수 +${String(item.mlRawContribution)}점 · 채택 +${String(item.mlContribution)}점`);
+    for (const group of item.scoreGroupSummary ?? []) {
+      await expect(panel.getByRole("region", { name: "점수 그룹 상한" }).locator("li")
+        .filter({ hasText: `${group.groupId}:` })).toHaveText(
+        `${group.groupId}: 원점수 ${String(group.rawScore)} · 상한 ${String(group.cap)} · 채택 ${String(group.appliedScore)}`);
+    }
+    for (const rule of item.ruleEvidence) {
+      await expect(panel.locator(".adopted-detection__rules li").filter({ hasText: rule.ruleCode }))
+        .toContainText(`원점수: ${String(rule.scoreContribution)} · 채택: ${String(rule.appliedContribution)}`);
+    }
+    const r009 = item.ruleEvidence.find((rule: { ruleCode: string }) => rule.ruleCode === "MATERIAL_LIMIT_UPLIFT");
+    requireCondition(r009?.scoreContribution === 10 && r009.appliedContribution === 0 &&
+      item.scoreGroupSummary?.some((group: { groupId: string; rawScore: number; cap: number; appliedScore: number }) =>
+        group.groupId === "security" && group.rawScore === 80 && group.cap === 60 && group.appliedScore === 60),
+    "R009 or its capped security attribution was absent from the adopted result.");
+    requireCondition(relay.some((entry) => entry.pathname ===
+      `${TRANSACTION_LIST_PATH}/${transactionId}/adopted-detection-result` && entry.status === 200),
+    "The analyst did not read the owned adopted result through Backend.");
+  } finally {
+    await test.step("CLEANUP", () => relay.dispose());
+  }
+});
+
 /**
  * The address of the test-only geometry fixture, served by the same Vite dev
  * server that serves the application.
