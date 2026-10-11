@@ -17,6 +17,8 @@ it("shows the Rule and fraud ML contributions with the synthetic policy warning"
   expect(screen.getByText("85 / 100")).toBeInTheDocument();
   expect(screen.getByText("100 / 100")).toBeInTheDocument();
   expect(screen.getAllByText(/\+35점/)).toHaveLength(2);
+  expect(screen.getByText("+35점 (최종 100점 상한)")).toBeInTheDocument();
+  expect(screen.queryByText(/채택 \+35점/)).not.toBeInTheDocument();
   expect(screen.getByText("RECENT_SECURITY_CHANGE_HIGH_AMOUNT")).toBeInTheDocument();
   expect(screen.getByText(/합성 데이터로 검증하는 로컬 정책/)).toBeInTheDocument();
   expect(screen.getByText("fraud-logistic-v2")).toBeInTheDocument();
@@ -26,15 +28,39 @@ it("shows the Rule and fraud ML contributions with the synthetic policy warning"
 
 it("labels capped v4 Rule totals as adopted scores", () => {
   const legacy = verified(issue380Fixture.adopted);
+  const adoptedResult = legacy.adoptedResult!;
   render(<AdoptedDetectionPanel onRetry={() => undefined} state={{ status: "success", data: {
-    ...legacy,
-    adoptedResult: {
-      ...legacy.adoptedResult!,
+    ...verified({ ...legacy, adoptedResult: {
+      ...adoptedResult,
       scoringPolicyVersion: "rule-ml-policy-v3",
-      scoreGroupSummary: [{ groupId: "DEVICE", rawScore: 50, cap: 40, appliedScore: 40 }],
-    },
+      mlFeatureVersion: "fraud-feature-v2",
+      modelVersion: "fraud-logistic-v3",
+      ruleEvidence: [
+        { ruleCode: "R001", ruleVersion: "3", reasonCode: "TRANSFER_ABSOLUTE_HIGH_AMOUNT", scoreContribution: 20, appliedContribution: 20 },
+        { ruleCode: "R006", ruleVersion: "1", reasonCode: "NEW_DEVICE_HIGH_AMOUNT", scoreContribution: 50, appliedContribution: 50 },
+        { ruleCode: "R004", ruleVersion: "4", reasonCode: "RECENT_BENEFICIARY_TRANSFER", scoreContribution: 10, appliedContribution: 10 },
+      ],
+      ruleScore: 80,
+      mlRawContribution: 40,
+      mlContribution: 20,
+      mlEvidence: [{ reasonCode: "ML_RISK_SIGNAL", probabilityBasisPoints: 9364, scoreContribution: 40 }],
+      scoreGroupSummary: [
+        { groupId: "amount", rawScore: 20, cap: 20, appliedScore: 20, reduction: 0 },
+        { groupId: "security", rawScore: 50, cap: 60, appliedScore: 50, reduction: 0 },
+        { groupId: "beneficiary", rawScore: 10, cap: 10, appliedScore: 10, reduction: 0 },
+        { groupId: "external_recipient", rawScore: 0, cap: 40, appliedScore: 0, reduction: 0 },
+      ],
+      scn001002Evidence: {
+        sourceVersion: "SCN001-002-contract-v1", baselineStatus: "COMPLETE", baselineCount: 10, baselineDays: 90,
+        recipientStatus: "NEW", deviceStatus: "UNVERIFIED", providerCode: "MOCK",
+        providerAsOf: "2026-10-10T00:55:47Z", lookedUpAt: "2026-10-10T00:55:47Z",
+        recipientAccountMatched: false, exactDeviceMatched: false,
+      },
+    } }),
   } }} />);
   expect(screen.getByText("Rule 채택 점수")).toBeInTheDocument();
+  expect(screen.getByText("원점수 +40점 · 채택 +20점")).toBeInTheDocument();
+  expect(screen.getByText(/원기여 \+40점/)).toBeInTheDocument();
 });
 
 it("shows only the adopted version and keeps a later analysis separate", () => {

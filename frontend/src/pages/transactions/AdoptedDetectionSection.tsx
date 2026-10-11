@@ -52,7 +52,9 @@ export function AdoptedDetectionPanel({ state, onRetry }: {
           <div><dt>사기 탐지 ML 상태</dt><dd>{state.data.adoptedResult.mlStatus === "APPLIED" ?
             "결합됨" : "Rule 전용 결과"}</dd></div>}
         {state.data.adoptedResult.mlStatus === "APPLIED" && <>
-          <div><dt>ML 기여도</dt><dd>원점수 +{state.data.adoptedResult.mlRawContribution ?? state.data.adoptedResult.mlContribution}점 · 채택 +{state.data.adoptedResult.mlContribution}점</dd></div>
+          <div><dt>ML 기여도</dt><dd>{state.data.adoptedResult.mlRawContribution !== undefined
+            ? <>원점수 +{state.data.adoptedResult.mlRawContribution}점 · 채택 +{state.data.adoptedResult.mlContribution}점</>
+            : <>+{state.data.adoptedResult.mlContribution}점 (최종 100점 상한)</>}</dd></div>
           <div><dt>사기 탐지 모델 버전</dt><dd className="facts__ref">{state.data.adoptedResult.modelVersion}</dd></div>
           <div><dt>ML Feature 버전</dt><dd>{state.data.adoptedResult.mlFeatureVersion}</dd></div>
           <div><dt>모델 SHA-256</dt><dd className="facts__ref">{state.data.adoptedResult.modelSha256}</dd></div>
@@ -88,7 +90,7 @@ export function AdoptedDetectionPanel({ state, onRetry }: {
         <h4>채택 결과의 사기 탐지 ML 근거</h4>
         <p>5000bp 기준·최대 40점 가산은 합성 데이터로 검증하는 로컬 정책입니다. 실제 금융 사기 성능이나 운영 오탐 기준이 아닙니다.</p>
         <ol>{state.data.adoptedResult.mlEvidence?.map((item) =>
-          <li key={item.reasonCode}>{item.reasonCode} · 확률 {item.probabilityBasisPoints}bp · 기여 +{item.scoreContribution}점</li>)}</ol>
+          <li key={item.reasonCode}>{item.reasonCode} · 확률 {item.probabilityBasisPoints}bp · {state.data.adoptedResult?.mlRawContribution !== undefined ? "원기여" : "기여"} +{item.scoreContribution}점</li>)}</ol>
       </>}
     </>}
     {(state.status === "forbidden" || state.status === "not-found" ||
