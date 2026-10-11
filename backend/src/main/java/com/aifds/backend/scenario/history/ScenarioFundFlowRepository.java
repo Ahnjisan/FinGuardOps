@@ -109,7 +109,7 @@ public class ScenarioFundFlowRepository {
                   AND link.occurred_at <= ? AND link.created_at <= ?
                   AND linked.occurred_at >= ? AND linked.occurred_at < ?
                   AND linked.transaction_id <> ?
-                ORDER BY linked.transaction_id ASC LIMIT 1001
+                ORDER BY linked.transaction_id ASC LIMIT 101
                 """, (rs, row) -> new Use(rs.getObject(1, UUID.class), rs.getBigDecimal(2),
                 rs.getString(3), rs.getString(4), rs.getString(5), rs.getString(6),
                 time(rs.getTimestamp(7)), time(rs.getTimestamp(8)),
@@ -119,7 +119,7 @@ public class ScenarioFundFlowRepository {
                 link.sourceId(), Timestamp.from(cutoff), Timestamp.from(cutoff),
                 Timestamp.from(source.occurredAt()), Timestamp.from(cutoff),
                 target.getTransactionId());
-        if (uses.size() > 1000) return Flow.unknown("LINKED_HISTORY_LIMIT");
+        if (uses.size() > 100) return Flow.unknown("LINKED_HISTORY_LIMIT");
         BigDecimal linked = target.getAmount();
         List<UUID> priorIds = new ArrayList<>();
         for (Use use : uses) {

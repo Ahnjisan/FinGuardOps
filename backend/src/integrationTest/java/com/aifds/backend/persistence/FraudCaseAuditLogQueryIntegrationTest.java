@@ -328,9 +328,9 @@ class FraudCaseAuditLogQueryIntegrationTest
 
     @Test
     void keepsFreshV1ThroughV23ExactIndexAndAppendOnlyRollbackContracts() {
-        assertThat(flyway.info().applied()).hasSize(34);
+        assertThat(flyway.info().applied()).hasSize(36);
         assertThat(flyway.info().current().getVersion().getVersion())
-                .isEqualTo("34");
+                .isEqualTo("36");
         String indexDefinition = jdbcTemplate.queryForObject("""
                 SELECT indexdef
                 FROM pg_indexes

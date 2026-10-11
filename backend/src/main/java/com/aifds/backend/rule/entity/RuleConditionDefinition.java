@@ -46,6 +46,12 @@ public final class RuleConditionDefinition {
             RuleV1ContractRegistry.DISTRIBUTED_OUTBOUND_WINDOW, "THREE_RECIPIENTS_TEN_MINUTES",
             RuleV1ContractRegistry.MANY_CUSTOMER_INBOUND_WINDOW, "THREE_CUSTOMERS_TWENTY_FOUR_HOURS"
     );
+    private static final Map<String, String> V6_SIGNALS = Map.of(
+            RuleV1ContractRegistry.VERIFIED_INBOUND_ATM_DRAIN,
+            "APPROVED_INBOUND_LINKED_ATM_EIGHTY_PERCENT",
+            RuleV1ContractRegistry.VERIFIED_LOAN_NEW_RECIPIENT_DRAIN,
+            "APPROVED_LOAN_LINKED_NEW_RECIPIENT_EIGHTY_PERCENT"
+    );
     private static final Map<String, Set<String>> ALLOWED_FIELDS = Map.of(
             TRANSFER_ABSOLUTE_HIGH_AMOUNT,
             Set.of(
@@ -123,6 +129,17 @@ public final class RuleConditionDefinition {
             }
             requireExactText(value, "contractVersion", "SCN004-005-contract-v1");
             requireExactText(value, "signal", V5_SIGNALS.get(ruleCode));
+            return new RuleConditionDefinition(value);
+        }
+
+        if (V6_SIGNALS.containsKey(ruleCode)) {
+            Set<String> fields = new HashSet<>();
+            value.fieldNames().forEachRemaining(fields::add);
+            if (!fields.equals(Set.of("contractVersion", "signal"))) {
+                throw new IllegalArgumentException("Rule v6 condition fields mismatch");
+            }
+            requireExactText(value, "contractVersion", "SCN006-007-contract-v1");
+            requireExactText(value, "signal", V6_SIGNALS.get(ruleCode));
             return new RuleConditionDefinition(value);
         }
 

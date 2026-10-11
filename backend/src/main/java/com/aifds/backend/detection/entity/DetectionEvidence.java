@@ -7,6 +7,7 @@ import com.aifds.backend.externalrisk.domain.ExternalRiskReasonCode;
 import com.aifds.backend.externalrisk.domain.ExternalRiskSubjectType;
 import com.aifds.backend.externalrisk.domain.ExternalRiskType;
 import com.aifds.backend.scenario.ScenarioAggregationFacts;
+import com.aifds.backend.scenario.ScenarioFundFlowFacts;
 import com.aifds.backend.scenario.history.ScenarioTransferWindowRepository.Window;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
@@ -225,7 +226,8 @@ public class DetectionEvidence {
                                            Instant evidenceAt,
                                            int sortOrder) {
         if (result == null || !("rule-ml-policy-v3".equals(result.getScoringPolicyVersion())
-                || "rule-ml-policy-v4".equals(result.getScoringPolicyVersion()))
+                || "rule-ml-policy-v4".equals(result.getScoringPolicyVersion())
+                || "rule-ml-policy-v5".equals(result.getScoringPolicyVersion()))
                 || version == null || version.getStatus() != RuleVersionStatus.PUBLISHED
                 || validatedObservation == null || !validatedObservation.isObject()
                 || rawContribution != version.getWeight()
@@ -259,7 +261,8 @@ public class DetectionEvidence {
                 probabilityBasisPoints, cutoff, sortOrder);
         if (appliedContribution < 0 || appliedContribution > contribution
                 || !("rule-ml-policy-v3".equals(result.getScoringPolicyVersion())
-                        || "rule-ml-policy-v4".equals(result.getScoringPolicyVersion()))) {
+                        || "rule-ml-policy-v4".equals(result.getScoringPolicyVersion())
+                        || "rule-ml-policy-v5".equals(result.getScoringPolicyVersion()))) {
             throw new IllegalArgumentException("Invalid ML v3 applied contribution");
         }
         evidence.appliedContribution = appliedContribution;
@@ -306,7 +309,8 @@ public class DetectionEvidence {
     public static DetectionEvidence aggregationHistory(DetectionResult result,
             ScenarioAggregationFacts facts, int sortOrder) {
         if (result == null || facts == null || sortOrder < 0
-                || !"rule-ml-policy-v4".equals(result.getScoringPolicyVersion())) {
+                || !("rule-ml-policy-v4".equals(result.getScoringPolicyVersion())
+                        || "rule-ml-policy-v5".equals(result.getScoringPolicyVersion()))) {
             throw new IllegalArgumentException("Invalid aggregation Evidence");
         }
         DetectionEvidence evidence = new DetectionEvidence();
@@ -341,6 +345,51 @@ public class DetectionEvidence {
         evidence.evidenceOccurredAt = result.getEvaluationCutoffAt();
         evidence.sortOrder = sortOrder;
         return evidence;
+    }
+
+    public static DetectionEvidence fundFlowHistory(DetectionResult result,
+            ScenarioFundFlowFacts facts, int sortOrder) {
+        if (result == null || facts == null || sortOrder < 0
+                || !"rule-ml-policy-v5".equals(result.getScoringPolicyVersion())) {
+            throw new IllegalArgumentException("Invalid fund flow Evidence");
+        }
+        DetectionEvidence evidence = new DetectionEvidence();
+        evidence.evidenceId = UUID.randomUUID();
+        evidence.detectionResult = result;
+        evidence.evidenceType = DetectionEvidenceType.BEHAVIOR_PATTERN;
+        evidence.reasonCode = "FUND_FLOW_HISTORY_CONTEXT";
+        evidence.displayDescription = "Cutoff-fixed Mock-proven source-to-use flow";
+        var observation = JsonNodeFactory.instance.objectNode()
+                .put("sourceVersion", facts.sourceVersion())
+                .put("mockSourceCode", "LOCAL_FDS_MOCK")
+                .put("mockSourceVersion", "v2")
+                .put("evaluationCutoffAt", result.getEvaluationCutoffAt().toString());
+        appendFlow(observation.putObject("atm"), facts.atm());
+        appendFlow(observation.putObject("loan"), facts.loan());
+        evidence.observationSummary = observation;
+        evidence.evidenceOccurredAt = result.getEvaluationCutoffAt();
+        evidence.sortOrder = sortOrder;
+        return evidence;
+    }
+
+    private static void appendFlow(com.fasterxml.jackson.databind.node.ObjectNode node,
+            ScenarioFundFlowFacts.Flow flow) {
+        node.put("status", flow.status()).put("reasonCode", flow.reasonCode())
+                .put("sourceAmount", flow.sourceAmount().toPlainString())
+                .put("linkedAmount", flow.linkedAmount().toPlainString())
+                .put("ratioBasisPoints", flow.ratioBasisPoints());
+        if (flow.sourceTransactionId() != null) {
+            node.put("sourceTransactionId", flow.sourceTransactionId().toString())
+                    .put("currentLinkId", flow.currentLinkId().toString())
+                    .put("historyCoverageFactId", flow.historyCoverageFactId().toString())
+                    .put("sourceOccurredAt", flow.sourceOccurredAt().toString())
+                    .put("sourceApprovedAt", flow.sourceApprovedAt().toString());
+        }
+        if (flow.beneficiaryEventId() != null) {
+            node.put("beneficiaryEventId", flow.beneficiaryEventId().toString());
+        }
+        var prior = node.putArray("linkedPriorTransactionIds");
+        flow.linkedPriorTransactionIds().forEach(id -> prior.add(id.toString()));
     }
 
     public static DetectionEvidence externalRisk(

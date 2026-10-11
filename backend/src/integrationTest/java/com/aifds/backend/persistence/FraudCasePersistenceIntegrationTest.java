@@ -51,11 +51,11 @@ class FraudCasePersistenceIntegrationTest
 
     @Test
     void appliesFreshV1ThroughV23SchemaWithApprovedConstraintsAndIndexes() {
-        assertThat(flyway.info().applied()).hasSize(34);
+        assertThat(flyway.info().applied()).hasSize(36);
         assertThat(flyway.info().current().getVersion().getVersion())
-                .isEqualTo("34");
+                .isEqualTo("36");
         assertThat(flyway.info().current().getDescription())
-                .isEqualTo("pin aggregation rule ml identity");
+                .isEqualTo("pin fund flow rule ml identity");
         assertThat(columns("fraud_case")).containsExactlyInAnyOrder(
                 "id",
                 "case_id",

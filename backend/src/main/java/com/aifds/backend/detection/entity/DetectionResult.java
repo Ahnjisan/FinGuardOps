@@ -251,7 +251,8 @@ public class DetectionResult {
     public void setScoreGroupSummary(JsonNode summary) {
         requireStatus(DetectionAnalysisStatus.IN_PROGRESS);
         int groupCount = "rule-ml-policy-v3".equals(scoringPolicyVersion) ? 4
-                : "rule-ml-policy-v4".equals(scoringPolicyVersion) ? 5 : -1;
+                : "rule-ml-policy-v4".equals(scoringPolicyVersion) ? 5
+                : "rule-ml-policy-v5".equals(scoringPolicyVersion) ? 6 : -1;
         if (summary == null || !summary.isArray() || summary.size() != groupCount
                 || scoreGroupSummary != null) {
             throw new IllegalArgumentException("Invalid Rule v4 group summary");
@@ -284,7 +285,8 @@ public class DetectionResult {
                              int probabilityBasisPoints, RiskLevel finalLevel,
                              Instant completedAt) {
         if (!("rule-ml-policy-v3".equals(scoringPolicyVersion)
-                || "rule-ml-policy-v4".equals(scoringPolicyVersion))
+                || "rule-ml-policy-v4".equals(scoringPolicyVersion)
+                || "rule-ml-policy-v5".equals(scoringPolicyVersion))
                 || scoreGroupSummary == null || modelVersion == null
                 || mlFeatureVersion == null || modelSha256 == null) {
             throw new IllegalStateException("Rule v4 ML identity or groups are not pinned");

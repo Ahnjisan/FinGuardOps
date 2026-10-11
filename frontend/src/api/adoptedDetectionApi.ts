@@ -49,9 +49,10 @@ export interface AdoptedResult {
   readonly mlRawContribution?: number;
   readonly scn001002Evidence?: Scn001002Evidence;
   readonly aggregationEvidence?: AggregationEvidence;
+  readonly fundFlowEvidence?: FundFlowEvidence;
 }
 export interface ScoreGroupSummary {
-  readonly groupId: "amount" | "security" | "beneficiary" | "external_recipient" | "flow_aggregation";
+  readonly groupId: "amount" | "security" | "beneficiary" | "external_recipient" | "flow_aggregation" | "flow_link";
   readonly rawScore: number;
   readonly cap: number;
   readonly appliedScore: number;
@@ -87,6 +88,28 @@ export interface AggregationEvidence {
   readonly outbound: AggregationWindow;
   readonly inbound: AggregationWindow;
 }
+export interface FundFlowStep {
+  readonly status: "AVAILABLE" | "UNKNOWN";
+  readonly reasonCode: string;
+  readonly sourceAmount: string;
+  readonly linkedAmount: string;
+  readonly ratioBasisPoints: number;
+  readonly linkedPriorTransactionIds: readonly string[];
+  readonly sourceTransactionId?: string;
+  readonly currentLinkId?: string;
+  readonly historyCoverageFactId?: string;
+  readonly sourceOccurredAt?: string;
+  readonly sourceApprovedAt?: string;
+  readonly beneficiaryEventId?: string;
+}
+export interface FundFlowEvidence {
+  readonly sourceVersion: "SCN006-007-contract-v1";
+  readonly mockSourceCode: "LOCAL_FDS_MOCK";
+  readonly mockSourceVersion: "v2";
+  readonly evaluationCutoffAt: string;
+  readonly atm: FundFlowStep;
+  readonly loan: FundFlowStep;
+}
 export interface AdoptedDetectionResponse {
   readonly transactionId: string;
   readonly availability: Availability;
@@ -113,7 +136,7 @@ function isRule(value: unknown): value is AdoptedRuleEvidence {
 }
 function isScoreGroup(value: unknown): value is ScoreGroupSummary {
   return isObjectWithExactKeys(value, ["groupId", "rawScore", "cap", "appliedScore", "reduction"]) &&
-    ["amount", "security", "beneficiary", "external_recipient", "flow_aggregation"].includes(String(value.groupId)) &&
+    ["amount", "security", "beneficiary", "external_recipient", "flow_aggregation", "flow_link"].includes(String(value.groupId)) &&
     [value.rawScore, value.cap, value.appliedScore, value.reduction].every(item =>
       Number.isInteger(item) && (item as number) >= 0 && (item as number) <= 200) &&
     (value.rawScore as number) - (value.appliedScore as number) === value.reduction &&
@@ -154,6 +177,39 @@ function isAggregation(value: unknown): value is AggregationEvidence {
     isUtcInstantString(value.evaluationCutoffAt) &&
     isAggregationWindow(value.outbound) && isAggregationWindow(value.inbound);
 }
+function isFundStep(value: unknown, loan: boolean): value is FundFlowStep {
+  if (!isJsonObject(value)) return false;
+  const basic = ["status", "reasonCode", "sourceAmount", "linkedAmount",
+    "ratioBasisPoints", "linkedPriorTransactionIds"];
+  const proven = [...basic, "sourceTransactionId", "currentLinkId", "historyCoverageFactId",
+    "sourceOccurredAt", "sourceApprovedAt", ...(loan ? ["beneficiaryEventId"] : [])];
+  if (value.status === "UNKNOWN") {
+    return isObjectWithExactKeys(value, basic) &&
+      typeof value.reasonCode === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(value.reasonCode) &&
+      value.sourceAmount === "0" && value.linkedAmount === "0" &&
+      value.ratioBasisPoints === 0 && Array.isArray(value.linkedPriorTransactionIds) &&
+      value.linkedPriorTransactionIds.length === 0;
+  }
+  return value.status === "AVAILABLE" && isObjectWithExactKeys(value, proven) &&
+    typeof value.reasonCode === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(value.reasonCode) &&
+    isUuidV4String(value.sourceTransactionId) && isUuidV4String(value.currentLinkId) &&
+    isUuidV4String(value.historyCoverageFactId) &&
+    (!loan || isUuidV4String(value.beneficiaryEventId)) &&
+    isUtcInstantString(value.sourceOccurredAt) && isUtcInstantString(value.sourceApprovedAt) &&
+    typeof value.sourceAmount === "string" && /^[1-9][0-9]*$/.test(value.sourceAmount) &&
+    typeof value.linkedAmount === "string" && /^[1-9][0-9]*$/.test(value.linkedAmount) &&
+    Number.isSafeInteger(value.ratioBasisPoints) && (value.ratioBasisPoints as number) >= 0 &&
+    (value.ratioBasisPoints as number) <= 10000 &&
+    isArrayOf(value.linkedPriorTransactionIds, isUuidV4String);
+}
+function isFundFlow(value: unknown): value is FundFlowEvidence {
+  return isObjectWithExactKeys(value, ["sourceVersion", "mockSourceCode", "mockSourceVersion",
+    "evaluationCutoffAt", "atm", "loan"]) &&
+    value.sourceVersion === "SCN006-007-contract-v1" &&
+    value.mockSourceCode === "LOCAL_FDS_MOCK" && value.mockSourceVersion === "v2" &&
+    isUtcInstantString(value.evaluationCutoffAt) &&
+    isFundStep(value.atm, false) && isFundStep(value.loan, true);
+}
 function isAdopted(value: unknown): value is AdoptedResult {
   if (!isJsonObject(value)) return false;
   const oldKeys = ["detectionResultId", "detectionResultVersion", "riskLevel", "riskScore",
@@ -164,14 +220,16 @@ function isAdopted(value: unknown): value is AdoptedResult {
   const scn003 = isObjectWithExactKeys(value, scn003Keys);
   const v4 = hasV4Keys(value, [...newKeys, "scoreGroupSummary", "mlRawContribution", "scn001002Evidence"]);
   const v5 = hasV4Keys(value, [...newKeys, "scoreGroupSummary", "mlRawContribution", "scn001002Evidence", "aggregationEvidence"]);
-  if (!(isObjectWithExactKeys(value, oldKeys) || isObjectWithExactKeys(value, newKeys) || scn003 || v4 || v5)) return false;
-  if (v4 || v5) {
-    if (value.scoringPolicyVersion !== (v5 ? "rule-ml-policy-v4" : "rule-ml-policy-v3") ||
-      value.mlFeatureVersion !== (v5 ? "fraud-feature-v3" : "fraud-feature-v2") ||
-      value.modelVersion !== (v5 ? "fraud-logistic-v4" : "fraud-logistic-v3") ||
-      (v5 && !isAggregation(value.aggregationEvidence)) ||
+  const v6 = hasV4Keys(value, [...newKeys, "scoreGroupSummary", "mlRawContribution", "scn001002Evidence", "aggregationEvidence", "fundFlowEvidence"]);
+  if (!(isObjectWithExactKeys(value, oldKeys) || isObjectWithExactKeys(value, newKeys) || scn003 || v4 || v5 || v6)) return false;
+  if (v4 || v5 || v6) {
+    if (value.scoringPolicyVersion !== (v6 ? "rule-ml-policy-v5" : v5 ? "rule-ml-policy-v4" : "rule-ml-policy-v3") ||
+      value.mlFeatureVersion !== (v6 ? "fraud-feature-v4" : v5 ? "fraud-feature-v3" : "fraud-feature-v2") ||
+      value.modelVersion !== (v6 ? "fraud-logistic-v5" : v5 ? "fraud-logistic-v4" : "fraud-logistic-v3") ||
+      ((v5 || v6) && !isAggregation(value.aggregationEvidence)) ||
+      (v6 && !isFundFlow(value.fundFlowEvidence)) ||
       !isScenario(value.scn001002Evidence) || !isArrayOf(value.scoreGroupSummary, isScoreGroup) ||
-      value.scoreGroupSummary.length !== (v5 ? 5 : 4) || !isArrayOf(value.ruleEvidence, isRule) ||
+      value.scoreGroupSummary.length !== (v6 ? 6 : v5 ? 5 : 4) || !isArrayOf(value.ruleEvidence, isRule) ||
       value.ruleEvidence.some(item => item.appliedContribution === undefined) ||
       !Number.isInteger(value.ruleScore) || !Number.isInteger(value.mlContribution) ||
       !Number.isInteger(value.mlRawContribution) ||
@@ -187,6 +245,15 @@ function isAdopted(value: unknown): value is AdoptedResult {
       !Number.isInteger(value.mlEvidence[0].probabilityBasisPoints) ||
       typeof value.modelVersion !== "string" ||
       typeof value.modelSha256 !== "string" || !/^[0-9a-f]{64}$/.test(value.modelSha256)) return false;
+    if (v6) {
+      const flow = value.fundFlowEvidence;
+      if (!isFundFlow(flow)) return false;
+      const rules = value.ruleEvidence as AdoptedRuleEvidence[];
+      if (rules.some(item => item.ruleCode === "VERIFIED_INBOUND_ATM_DRAIN") !==
+            (flow.atm.status === "AVAILABLE" && flow.atm.ratioBasisPoints >= 8000) ||
+          rules.some(item => item.ruleCode === "VERIFIED_LOAN_NEW_RECIPIENT_DRAIN") !==
+            (flow.loan.status === "AVAILABLE" && flow.loan.ratioBasisPoints >= 8000)) return false;
+    }
     const level = value.riskScore < 20 ? "LOW" : value.riskScore < 50 ? "MEDIUM" :
       value.riskScore < 80 ? "HIGH" : "CRITICAL";
     return value.riskLevel === level && isUuidV4String(value.detectionResultId) &&

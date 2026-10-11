@@ -14,6 +14,21 @@ public final class RulePolicyVersion {
         if (snapshots.isEmpty()) {
             throw new IllegalArgumentException("RuleVersion set is empty");
         }
+        if (snapshots.size() == 14 || snapshots.stream().anyMatch(snapshot ->
+                RuleV1ContractRegistry.VERIFIED_INBOUND_ATM_DRAIN.equals(snapshot.ruleCode())
+                || RuleV1ContractRegistry.VERIFIED_LOAN_NEW_RECIPIENT_DRAIN
+                        .equals(snapshot.ruleCode()))) {
+            if (snapshots.size() != 14 || from(snapshots.subList(0, 12)) != 5
+                    || !RuleV1ContractRegistry.VERIFIED_INBOUND_ATM_DRAIN.equals(
+                            snapshots.get(12).ruleCode())
+                    || !RuleV1ContractRegistry.VERIFIED_LOAN_NEW_RECIPIENT_DRAIN.equals(
+                            snapshots.get(13).ruleCode())
+                    || snapshots.get(12).versionNumber() != 1
+                    || snapshots.get(13).versionNumber() != 1) {
+                throw new IllegalArgumentException("Invalid SCN-006/007 RuleVersion set");
+            }
+            return 6;
+        }
         if (snapshots.size() == 12 || snapshots.stream().anyMatch(snapshot ->
                 RuleV1ContractRegistry.DISTRIBUTED_OUTBOUND_WINDOW.equals(snapshot.ruleCode())
                 || RuleV1ContractRegistry.MANY_CUSTOMER_INBOUND_WINDOW.equals(snapshot.ruleCode()))) {

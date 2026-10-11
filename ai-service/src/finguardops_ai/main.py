@@ -23,6 +23,7 @@ def create_app() -> FastAPI:
                 f"{settings.api_prefix}/v2/rule-analysis",
                 f"{settings.api_prefix}/v3/rule-analysis",
                 f"{settings.api_prefix}/v4/rule-analysis",
+                f"{settings.api_prefix}/v5/rule-analysis",
             }
         ),
     )

@@ -12,5 +12,7 @@ public enum RuleId {
     R009,
     R010,
     R011,
-    R012
+    R012,
+    R013,
+    R014
 }

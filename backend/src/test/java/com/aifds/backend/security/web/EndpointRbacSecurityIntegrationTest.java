@@ -224,11 +224,14 @@ class EndpointRbacSecurityIntegrationTest {
                     "PLATFORM_ADMIN", com.aifds.backend.security.principal.FinGuardOpsAuthority.AI_DLQ_ACTION),
             endpoint(HttpMethod.POST, "/api/v1/fds-mock-facts",
                     "BEHAVIOR_INGESTOR", BEHAVIOR_EVENT_INTAKE),
+            endpoint(HttpMethod.POST, "/api/v1/fds-mock-fund-links",
+                    "BEHAVIOR_INGESTOR", BEHAVIOR_EVENT_INTAKE),
             endpoint(HttpMethod.POST, "/api/v1/transactions/" + TRANSACTION_ID + "/mock-auth",
                     "BEHAVIOR_INGESTOR", BEHAVIOR_EVENT_INTAKE)
     );
     private static final List<CorsProbe> APPROVED_PREFLIGHTS = Stream.concat(
             ENDPOINTS.stream().filter(endpoint -> !endpoint.path().equals("/api/v1/fds-mock-facts")
+                    && !endpoint.path().equals("/api/v1/fds-mock-fund-links")
                     && !endpoint.path().endsWith("/mock-auth"))
                     .map(endpoint -> new CorsProbe(
                     endpoint.path(),
@@ -407,7 +410,7 @@ class EndpointRbacSecurityIntegrationTest {
     void coversExistingFifteenAndFiveAiReportEndpointsAndMinimumRoles()
             throws Exception {
         assertThat(ENDPOINTS.subList(0, 15)).hasSize(15);
-        assertThat(ENDPOINTS).hasSize(26);
+        assertThat(ENDPOINTS).hasSize(27);
         assertThat(ENDPOINTS.stream().map(Endpoint::signature))
                 .doesNotHaveDuplicates();
         Set<String> actualMappings = requestMappingHandlerMapping
@@ -698,6 +701,7 @@ class EndpointRbacSecurityIntegrationTest {
                         .toList());
         Map<String, Set<String>> expectedCors = Stream.concat(
                 ENDPOINTS.stream().filter(endpoint -> !endpoint.path().equals("/api/v1/fds-mock-facts")
+                        && !endpoint.path().equals("/api/v1/fds-mock-fund-links")
                         && !endpoint.path().endsWith("/mock-auth"))
                         .map(endpoint -> Map.entry(
                         endpoint.registeredPath(), endpoint.method().name())),

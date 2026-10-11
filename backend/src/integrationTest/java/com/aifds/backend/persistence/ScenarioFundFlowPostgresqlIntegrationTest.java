@@ -106,6 +106,114 @@ class ScenarioFundFlowPostgresqlIntegrationTest extends PostgresqlIntegrationTes
         assertThat(fact.ratioBasisPoints()).isEqualTo(8000);
     }
 
+    @Test
+    void twoSourcesAndUnrelatedSameAccountUseNeverImplyAttribution() {
+        Instant t = future();
+        FinancialTransaction first = save(TransactionType.ACCOUNT_TRANSFER,
+                "payer-a", "payer-a-account", "owner-account", "10000000",
+                t.minus(Duration.ofMinutes(20)));
+        FinancialTransaction second = save(TransactionType.ACCOUNT_TRANSFER,
+                "payer-b", "payer-b-account", "owner-account", "10000000",
+                t.minus(Duration.ofMinutes(10)));
+        approve(first);
+        approve(second);
+        FinancialTransaction unrelated = save(TransactionType.ATM_WITHDRAWAL,
+                "owner", "owner-account", null, "2000000", t.minusSeconds(40));
+        approve(unrelated);
+        FinancialTransaction target = save(TransactionType.ATM_WITHDRAWAL,
+                "owner", "owner-account", null, "8000000", t);
+        coverage("owner", "owner-account", t.minus(Duration.ofMinutes(30)), t);
+        assertThat(flows.snapshot(target).atm().reasonCode()).isEqualTo("SOURCE_LINK_MISSING");
+        links.ingest(link("SCN006", first, target, "owner", "owner-account", "VERIFIED"));
+        var attributed = flows.snapshot(target).atm();
+        assertThat(attributed.hit()).isTrue();
+        assertThat(attributed.sourceTransactionId()).isEqualTo(first.getTransactionId());
+        assertThat(attributed.linkedPriorTransactionIds()).doesNotContain(unrelated.getTransactionId());
+    }
+
+    @Test
+    void reverseOrderAndLateApprovalAreUnknownAtOriginalCutoff() throws Exception {
+        Instant t = Instant.now().truncatedTo(ChronoUnit.MICROS).plusSeconds(2);
+        FinancialTransaction reverseSource = save(TransactionType.ACCOUNT_TRANSFER,
+                "payer", "payer-account", "owner-account", "10000000", t.plusSeconds(1));
+        approve(reverseSource);
+        FinancialTransaction target = save(TransactionType.ATM_WITHDRAWAL,
+                "owner", "owner-account", null, "8000000", t);
+        coverage("owner", "owner-account", t.minus(Duration.ofMinutes(30)), t);
+        links.ingest(link("SCN006", reverseSource, target,
+                "owner", "owner-account", "VERIFIED"));
+        assertThat(flows.snapshot(target).atm().reasonCode())
+                .isEqualTo("SOURCE_NOT_APPROVED_AS_OF_CUTOFF");
+
+        FinancialTransaction lateSource = save(TransactionType.ACCOUNT_TRANSFER,
+                "payer", "payer-account", "second-owner", "10000000",
+                t.minusSeconds(20));
+        FinancialTransaction lateTarget = save(TransactionType.ATM_WITHDRAWAL,
+                "owner", "second-owner", null, "8000000", t);
+        coverage("owner", "second-owner", t.minus(Duration.ofMinutes(30)), t);
+        links.ingest(link("SCN006", lateSource, lateTarget,
+                "owner", "second-owner", "VERIFIED"));
+        long pause = Duration.between(Instant.now(), t.plusMillis(100)).toMillis();
+        if (pause > 0) Thread.sleep(pause);
+        approve(lateSource);
+        assertThat(flows.snapshot(lateTarget).atm().reasonCode())
+                .isEqualTo("SOURCE_NOT_APPROVED_AS_OF_CUTOFF");
+    }
+
+    @Test
+    void onlyVerifiedApprovedPriorUsesContributeToSourceRatio() {
+        Instant t = future();
+        FinancialTransaction source = save(TransactionType.ACCOUNT_TRANSFER,
+                "payer", "payer-account", "owner-account", "10000000",
+                t.minus(Duration.ofMinutes(20)));
+        approve(source);
+        FinancialTransaction prior = save(TransactionType.ATM_WITHDRAWAL,
+                "owner", "owner-account", null, "4000000", t.minusSeconds(40));
+        approve(prior);
+        FinancialTransaction unlinked = save(TransactionType.ATM_WITHDRAWAL,
+                "owner", "owner-account", null, "5000000", t.minusSeconds(30));
+        approve(unlinked);
+        FinancialTransaction current = save(TransactionType.ATM_WITHDRAWAL,
+                "owner", "owner-account", null, "4000000", t);
+        coverage("owner", "owner-account", t.minus(Duration.ofMinutes(30)), t);
+        links.ingest(link("SCN006", source, prior, "owner", "owner-account", "VERIFIED"));
+        links.ingest(link("SCN006", source, current, "owner", "owner-account", "VERIFIED"));
+        var flow = flows.snapshot(current).atm();
+        assertThat(flow.hit()).isTrue();
+        assertThat(flow.ratioBasisPoints()).isEqualTo(8000);
+        assertThat(flow.linkedPriorTransactionIds()).containsExactly(prior.getTransactionId());
+        assertThat(flow.linkedPriorTransactionIds()).doesNotContain(unlinked.getTransactionId());
+    }
+
+    @Test
+    void lateMockReceiptAndCompetingSourceLinksFailClosed() throws Exception {
+        Instant t = Instant.now().truncatedTo(ChronoUnit.MICROS).plusSeconds(2);
+        FinancialTransaction first = save(TransactionType.ACCOUNT_TRANSFER,
+                "payer-a", "payer-a-account", "owner-account", "10000000",
+                t.minusSeconds(20));
+        FinancialTransaction second = save(TransactionType.ACCOUNT_TRANSFER,
+                "payer-b", "payer-b-account", "owner-account", "10000000",
+                t.minusSeconds(10));
+        approve(first);
+        approve(second);
+        FinancialTransaction target = save(TransactionType.ATM_WITHDRAWAL,
+                "owner", "owner-account", null, "8000000", t);
+        coverage("owner", "owner-account", t.minus(Duration.ofMinutes(30)), t);
+        links.ingest(link("SCN006", first, target, "owner", "owner-account", "VERIFIED"));
+        links.ingest(link("SCN006", second, target, "owner", "owner-account", "VERIFIED"));
+        assertThat(flows.snapshot(target).atm().reasonCode()).isEqualTo("SOURCE_LINK_CONFLICT");
+
+        FinancialTransaction lateTarget = save(TransactionType.ATM_WITHDRAWAL,
+                "owner", "owner-account", null, "8000000", t);
+        long pause = Duration.between(Instant.now(), t.plusMillis(100)).toMillis();
+        if (pause > 0) Thread.sleep(pause);
+        links.ingest(new MockFundLinkRequest(UUID.randomUUID(), "SCN006",
+                first.getTransactionId(), lateTarget.getTransactionId(),
+                "owner", "owner-account", "VERIFIED", t.minusSeconds(1)));
+        assertThat(flows.snapshot(lateTarget).atm().reasonCode())
+                .isEqualTo("SOURCE_LINK_MISSING");
+    }
+
     private Instant future() {
         return Instant.now().truncatedTo(ChronoUnit.MICROS).plus(Duration.ofMinutes(2));
     }
