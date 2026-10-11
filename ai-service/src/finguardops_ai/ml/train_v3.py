@@ -189,17 +189,22 @@ def build_artifacts(destination: Path) -> dict[str, object]:
         report[name] = [metrics(rows, probabilities, threshold) for threshold in (3000, 5000, 7000)]
     destination.mkdir(parents=True, exist_ok=True)
     (destination / "fraud_model_v3.json").write_bytes(raw)
-    (destination / "fraud_model_v3.manifest.json").write_text(
-        json.dumps(
-            {"modelVersion": model_version, "featureVersion": FEATURE_VERSION, "sha256": digest},
-            sort_keys=True,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
+    (destination / "fraud_model_v3.manifest.json").write_bytes(
+        (
+            json.dumps(
+                {
+                    "modelVersion": model_version,
+                    "featureVersion": FEATURE_VERSION,
+                    "sha256": digest,
+                },
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n"
+        ).encode("utf-8"),
     )
-    (destination / "fraud_model_v3.evaluation.json").write_text(
-        json.dumps(report, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    (destination / "fraud_model_v3.evaluation.json").write_bytes(
+        (json.dumps(report, sort_keys=True, indent=2) + "\n").encode("utf-8")
     )
     return report
 
