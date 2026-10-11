@@ -91,6 +91,41 @@ class ScenarioTransferWindowPostgresqlIntegrationTest extends PostgresqlIntegrat
         assertThat(windows.outbound(lateTarget).transferCount()).isEqualTo(1);
     }
 
+    @Test
+    void simultaneousAndReverseOccurredRowsAndPostCutoffApprovalCannotEnter() {
+        Instant future = Instant.now().truncatedTo(ChronoUnit.MICROS)
+                .plus(Duration.ofMinutes(2));
+        approve(save("boundary-customer", "boundary-sender", "early",
+                future.minusSeconds(1), "1000000"));
+        approve(save("boundary-customer", "boundary-sender", "same",
+                future, "1000000"));
+        approve(save("boundary-customer", "boundary-sender", "future",
+                future.plusSeconds(1), "1000000"));
+        var current = save("boundary-customer", "boundary-sender", "current",
+                future, "1000000");
+        assertThat(windows.outbound(current).transferCount()).isEqualTo(2);
+        assertThat(windows.outbound(current).distinctCount()).isEqualTo(2);
+
+        Instant past = Instant.now().minusSeconds(30).truncatedTo(ChronoUnit.MICROS);
+        var delayed = save("approval-customer", "approval-sender", "current",
+                past, "1000000");
+        UUID priorId = UUID.randomUUID();
+        jdbc.update("""
+                INSERT INTO financial_transaction (transaction_id, transaction_type,
+                    amount, currency_code, occurred_at, created_at,
+                    external_customer_ref, sender_account_ref, recipient_account_ref,
+                    channel, processing_status)
+                VALUES (?, 'ACCOUNT_TRANSFER', 1000000, 'KRW', ?, ?,
+                    'approval-customer', 'approval-sender', 'earlier',
+                    'MOBILE_BANKING', 'RECEIVED')
+                """, priorId, Timestamp.from(past.minusSeconds(10)),
+                Timestamp.from(past.minusSeconds(5)));
+        jdbc.update("UPDATE financial_transaction SET processing_status = 'APPROVED' "
+                + "WHERE transaction_id = ?", priorId);
+        assertThat(windows.outbound(delayed).transferCount()).isEqualTo(1);
+        assertThat(windows.outbound(delayed).unknownCount()).isZero();
+    }
+
     private FinancialTransaction save(String customer, String sender, String recipient,
                                       Instant occurredAt, String amount) {
         return transactions.saveAndFlush(new FinancialTransaction(UUID.randomUUID(),

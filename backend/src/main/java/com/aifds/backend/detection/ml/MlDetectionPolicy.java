@@ -8,8 +8,13 @@ public final class MlDetectionPolicy {
     public static final String POLICY_VERSION = "rule-ml-policy-v1";
     public static final String SCN003_POLICY_VERSION = "rule-ml-policy-v2";
     public static final String SCN001_002_POLICY_VERSION = "rule-ml-policy-v3";
+    public static final String SCN004_005_POLICY_VERSION = "rule-ml-policy-v4";
     public static final String FEATURE_VERSION = "fraud-feature-v1";
     public static final String SCN001_002_FEATURE_VERSION = "fraud-feature-v2";
+    public static final String SCN004_005_FEATURE_VERSION = "fraud-feature-v3";
+    public static final String SCN004_005_MODEL_VERSION = "fraud-logistic-v4";
+    public static final String SCN004_005_MODEL_SHA256 =
+            "259143c159225a276c3c2fc0ed9d60b55926a640b4b4fbcc08c916d87547fc41";
     public static final String SCN001_002_MODEL_VERSION = "fraud-logistic-v3";
     public static final String SCN001_002_MODEL_SHA256 =
             "630a7d078ab35f8b9b49e8d1aadfaaf583af64452edd68fa2542d13b5b4b4636";
@@ -29,6 +34,7 @@ public final class MlDetectionPolicy {
     }
 
     public static String shaForModel(String modelVersion) {
+        if (SCN004_005_MODEL_VERSION.equals(modelVersion)) return SCN004_005_MODEL_SHA256;
         if (SCN001_002_MODEL_VERSION.equals(modelVersion)) return SCN001_002_MODEL_SHA256;
         if (MODEL_V1_VERSION.equals(modelVersion)) return MODEL_V1_SHA256;
         if (MODEL_VERSION.equals(modelVersion)) return MODEL_SHA256;

@@ -20,6 +20,46 @@ beforeEach(() => vi.stubEnv("VITE_API_BASE_URL", "http://localhost:8080"));
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 
 describe("adopted detection response", () => {
+  it("accepts v5 aggregation evidence and rejects leaked account references", () => {
+    const aggregation = {
+      sourceVersion: "SCN004-005-contract-v1", mockSourceCode: "LOCAL_FDS_MOCK",
+      mockSourceVersion: "v1", evaluationCutoffAt: "2026-10-11T00:00:00Z",
+      outbound: { windowStartAt: "2026-10-10T23:50:00Z", status: "AVAILABLE", transferCount: 3, distinctCount: 3,
+        totalAmount: "3300000", unknownCount: 0,
+        coverageFactId: "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430111" },
+      inbound: { windowStartAt: "2026-10-10T00:00:00Z", status: "UNKNOWN", transferCount: 1, distinctCount: 1,
+        totalAmount: "1200000", unknownCount: 0 },
+    };
+    const result = { ...available, latestDetectionResultVersion: 1,
+      latestAnalysisStatus: "COMPLETED", adoptedResult: {
+        detectionResultId: resultId, detectionResultVersion: 1, riskLevel: "MEDIUM",
+        riskScore: 49, analysisCompletedAt: "2026-10-11T00:00:00Z",
+        ruleSetVersion: "a".repeat(64), scoringPolicyVersion: "rule-ml-policy-v4",
+        ruleEvidence: [{ ruleCode: "DISTRIBUTED_OUTBOUND_WINDOW", ruleVersion: "1",
+          reasonCode: "DISTRIBUTED_OUTBOUND_WINDOW", scoreContribution: 25,
+          appliedContribution: 25 }],
+        ruleScore: 25, mlContribution: 24, mlRawContribution: 32,
+        mlStatus: "APPLIED", modelVersion: "fraud-logistic-v4",
+        mlFeatureVersion: "fraud-feature-v3", modelSha256: "a".repeat(64),
+        mlEvidence: [{ reasonCode: "ML_RISK_SIGNAL", scoreContribution: 32,
+          probabilityBasisPoints: 9000 }],
+        scoreGroupSummary: ["amount", "security", "beneficiary", "external_recipient"].map(groupId =>
+          ({ groupId, rawScore: 0, cap: 40, appliedScore: 0, reduction: 0 })).concat([
+          { groupId: "flow_aggregation", rawScore: 25, cap: 40,
+            appliedScore: 25, reduction: 0 }]),
+        scn001002Evidence: { sourceVersion: "SCN001-002-contract-v1",
+          baselineStatus: "INSUFFICIENT", baselineCount: 0, baselineDays: 0,
+          recipientStatus: "UNKNOWN", deviceStatus: "UNKNOWN", providerCode: "PROVIDER_V1",
+          providerAsOf: "2026-10-11T00:00:00Z", lookedUpAt: "2026-10-11T00:00:00Z",
+          recipientAccountMatched: false, exactDeviceMatched: false },
+        aggregationEvidence: aggregation,
+      } };
+    expect(isAdoptedDetectionResponse(result)).toBe(true);
+    expect(isAdoptedDetectionResponse({ ...result, adoptedResult: {
+      ...result.adoptedResult, aggregationEvidence: { ...aggregation,
+        outbound: { ...aggregation.outbound, recipientAccountRef: "raw-account" } },
+    } })).toBe(false);
+  });
   it("accepts attributed v4 scoring and rejects missing rule attribution", () => {
     const v4 = {
       transactionId,

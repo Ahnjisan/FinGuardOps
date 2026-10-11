@@ -83,14 +83,12 @@ public final class ScenarioRulePolicy {
         caps.put(RuleScoreGroupId.external_recipient, 40);
         var raw = new EnumMap<RuleScoreGroupId, Integer>(RuleScoreGroupId.class);
         var applied = new EnumMap<RuleScoreGroupId, Integer>(RuleScoreGroupId.class);
-        for (RuleScoreGroupId group : RuleScoreGroupId.values()) {
+        for (RuleScoreGroupId group : caps.keySet()) {
             raw.put(group, 0);
             applied.put(group, 0);
         }
         List<RuleContributionResponse> contributions = new ArrayList<>();
         int acceptedTotal = 0;
-        RuleId[] ids = RuleId.values();
-        if (ids.length != 10) throw new IllegalStateException("Unexpected Rule IDs");
         for (int i = 0; i < matched.length; i++) {
             RuleScoreGroupId group = GROUPS[i];
             int original = matched[i] ? WEIGHTS[i] : 0;
@@ -99,12 +97,13 @@ public final class ScenarioRulePolicy {
             raw.put(group, raw.get(group) + original);
             applied.put(group, applied.get(group) + accepted);
             acceptedTotal += accepted;
-            contributions.add(new RuleContributionResponse(ids[i], i + 1,
+            contributions.add(new RuleContributionResponse(RuleId.valueOf(
+                    String.format(java.util.Locale.ROOT, "R%03d", i + 1)), i + 1,
                     matched[i], original, accepted));
         }
         List<RuleScoreGroupSummaryResponse> summaries = new ArrayList<>();
         int total = 0;
-        for (RuleScoreGroupId group : RuleScoreGroupId.values()) {
+        for (RuleScoreGroupId group : caps.keySet()) {
             int accepted = applied.get(group);
             summaries.add(new RuleScoreGroupSummaryResponse(group, raw.get(group),
                     caps.get(group), accepted, raw.get(group) - accepted));

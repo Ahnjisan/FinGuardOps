@@ -79,6 +79,15 @@ export function AdoptedDetectionPanel({ state, onRetry }: {
         <p>수취인 {state.data.adoptedResult.scn001002Evidence.recipientStatus} · 기기 {state.data.adoptedResult.scn001002Evidence.deviceStatus}</p>
         <p>외부 위험 출처 {state.data.adoptedResult.scn001002Evidence.providerCode} · 기기 정확 일치 {state.data.adoptedResult.scn001002Evidence.exactDeviceMatched ? "확인" : "없음"}</p>
       </section>}
+      {state.data.adoptedResult.aggregationEvidence && <section aria-label="송금 및 집금 집계 근거">
+        <h4>SCN-004·005 집계 근거</h4>
+        <p>출처 {state.data.adoptedResult.aggregationEvidence.mockSourceCode} · 계약 {state.data.adoptedResult.aggregationEvidence.sourceVersion}</p>
+        <p>평가 cutoff {formatKstDateTime(state.data.adoptedResult.aggregationEvidence.evaluationCutoffAt)} KST</p>
+        <ol>{(["outbound", "inbound"] as const).map((direction) => {
+          const window = state.data.adoptedResult?.aggregationEvidence?.[direction];
+          return window && <li key={direction}>{direction === "outbound" ? "10분 분산 송금" : "24시간 다고객 집금"}: {window.status} · 시작 {formatKstDateTime(window.windowStartAt)} KST · {window.transferCount}건 · 고유 관계 {window.distinctCount}개 · 합계 {window.totalAmount} KRW · 승인 시각 불명 {window.unknownCount}건 · Mock 증명 {window.coverageFactId ?? "없음"}</li>;
+        })}</ol>
+      </section>}
       {state.data.adoptedResult.scn003Evidence && <section aria-label="외부 위험 수취 계좌 근거">
         <h4>외부 위험 수취 계좌 근거</h4>
         <p>출처 {state.data.adoptedResult.scn003Evidence.providerCode} · 계약 {state.data.adoptedResult.scn003Evidence.sourceVersion}</p>

@@ -48,9 +48,10 @@ export interface AdoptedResult {
   readonly scoreGroupSummary?: readonly ScoreGroupSummary[];
   readonly mlRawContribution?: number;
   readonly scn001002Evidence?: Scn001002Evidence;
+  readonly aggregationEvidence?: AggregationEvidence;
 }
 export interface ScoreGroupSummary {
-  readonly groupId: "amount" | "security" | "beneficiary" | "external_recipient";
+  readonly groupId: "amount" | "security" | "beneficiary" | "external_recipient" | "flow_aggregation";
   readonly rawScore: number;
   readonly cap: number;
   readonly appliedScore: number;
@@ -68,6 +69,23 @@ export interface Scn001002Evidence {
   readonly lookedUpAt: string;
   readonly recipientAccountMatched: boolean;
   readonly exactDeviceMatched: boolean;
+}
+export interface AggregationWindow {
+  readonly windowStartAt: string;
+  readonly status: "AVAILABLE" | "UNKNOWN";
+  readonly transferCount: number;
+  readonly distinctCount: number;
+  readonly totalAmount: string;
+  readonly unknownCount: number;
+  readonly coverageFactId?: string;
+}
+export interface AggregationEvidence {
+  readonly sourceVersion: "SCN004-005-contract-v1";
+  readonly mockSourceCode: "LOCAL_FDS_MOCK";
+  readonly mockSourceVersion: "v1";
+  readonly evaluationCutoffAt: string;
+  readonly outbound: AggregationWindow;
+  readonly inbound: AggregationWindow;
 }
 export interface AdoptedDetectionResponse {
   readonly transactionId: string;
@@ -95,7 +113,7 @@ function isRule(value: unknown): value is AdoptedRuleEvidence {
 }
 function isScoreGroup(value: unknown): value is ScoreGroupSummary {
   return isObjectWithExactKeys(value, ["groupId", "rawScore", "cap", "appliedScore", "reduction"]) &&
-    ["amount", "security", "beneficiary", "external_recipient"].includes(String(value.groupId)) &&
+    ["amount", "security", "beneficiary", "external_recipient", "flow_aggregation"].includes(String(value.groupId)) &&
     [value.rawScore, value.cap, value.appliedScore, value.reduction].every(item =>
       Number.isInteger(item) && (item as number) >= 0 && (item as number) <= 200) &&
     (value.rawScore as number) - (value.appliedScore as number) === value.reduction &&
@@ -116,6 +134,26 @@ function isScenario(value: unknown): value is Scn001002Evidence {
 function hasV4Keys(value: unknown, keys: readonly string[]): boolean {
   return isObjectWithExactKeys(value, keys);
 }
+function isAggregationWindow(value: unknown): value is AggregationWindow {
+  if (!isObjectWithExactKeys(value, ["windowStartAt", "status", "transferCount", "distinctCount", "totalAmount", "unknownCount"]) &&
+      !isObjectWithExactKeys(value, ["windowStartAt", "status", "transferCount", "distinctCount", "totalAmount", "unknownCount", "coverageFactId"])) return false;
+  return ["AVAILABLE", "UNKNOWN"].includes(String(value.status)) &&
+    isUtcInstantString(value.windowStartAt) &&
+    [value.transferCount, value.distinctCount, value.unknownCount].every(item =>
+      Number.isSafeInteger(item) && (item as number) >= 0) &&
+    (value.distinctCount as number) <= (value.transferCount as number) &&
+    typeof value.totalAmount === "string" && /^(0|[1-9][0-9]*)$/.test(value.totalAmount) &&
+    (value.coverageFactId === undefined || isUuidV4String(value.coverageFactId)) &&
+    (value.status !== "AVAILABLE" ||
+      (value.coverageFactId !== undefined && value.unknownCount === 0));
+}
+function isAggregation(value: unknown): value is AggregationEvidence {
+  return isObjectWithExactKeys(value, ["sourceVersion", "mockSourceCode", "mockSourceVersion", "evaluationCutoffAt", "outbound", "inbound"]) &&
+    value.sourceVersion === "SCN004-005-contract-v1" &&
+    value.mockSourceCode === "LOCAL_FDS_MOCK" && value.mockSourceVersion === "v1" &&
+    isUtcInstantString(value.evaluationCutoffAt) &&
+    isAggregationWindow(value.outbound) && isAggregationWindow(value.inbound);
+}
 function isAdopted(value: unknown): value is AdoptedResult {
   if (!isJsonObject(value)) return false;
   const oldKeys = ["detectionResultId", "detectionResultVersion", "riskLevel", "riskScore",
@@ -125,12 +163,15 @@ function isAdopted(value: unknown): value is AdoptedResult {
   const scn003Keys = [...newKeys, "scn003Evidence"];
   const scn003 = isObjectWithExactKeys(value, scn003Keys);
   const v4 = hasV4Keys(value, [...newKeys, "scoreGroupSummary", "mlRawContribution", "scn001002Evidence"]);
-  if (!(isObjectWithExactKeys(value, oldKeys) || isObjectWithExactKeys(value, newKeys) || scn003 || v4)) return false;
-  if (v4) {
-    if (value.scoringPolicyVersion !== "rule-ml-policy-v3" ||
-      value.mlFeatureVersion !== "fraud-feature-v2" ||
+  const v5 = hasV4Keys(value, [...newKeys, "scoreGroupSummary", "mlRawContribution", "scn001002Evidence", "aggregationEvidence"]);
+  if (!(isObjectWithExactKeys(value, oldKeys) || isObjectWithExactKeys(value, newKeys) || scn003 || v4 || v5)) return false;
+  if (v4 || v5) {
+    if (value.scoringPolicyVersion !== (v5 ? "rule-ml-policy-v4" : "rule-ml-policy-v3") ||
+      value.mlFeatureVersion !== (v5 ? "fraud-feature-v3" : "fraud-feature-v2") ||
+      value.modelVersion !== (v5 ? "fraud-logistic-v4" : "fraud-logistic-v3") ||
+      (v5 && !isAggregation(value.aggregationEvidence)) ||
       !isScenario(value.scn001002Evidence) || !isArrayOf(value.scoreGroupSummary, isScoreGroup) ||
-      value.scoreGroupSummary.length !== 4 || !isArrayOf(value.ruleEvidence, isRule) ||
+      value.scoreGroupSummary.length !== (v5 ? 5 : 4) || !isArrayOf(value.ruleEvidence, isRule) ||
       value.ruleEvidence.some(item => item.appliedContribution === undefined) ||
       !Number.isInteger(value.ruleScore) || !Number.isInteger(value.mlContribution) ||
       !Number.isInteger(value.mlRawContribution) ||

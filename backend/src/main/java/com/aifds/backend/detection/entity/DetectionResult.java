@@ -250,8 +250,9 @@ public class DetectionResult {
 
     public void setScoreGroupSummary(JsonNode summary) {
         requireStatus(DetectionAnalysisStatus.IN_PROGRESS);
-        if (!"rule-ml-policy-v3".equals(scoringPolicyVersion)
-                || summary == null || !summary.isArray() || summary.size() != 4
+        int groupCount = "rule-ml-policy-v3".equals(scoringPolicyVersion) ? 4
+                : "rule-ml-policy-v4".equals(scoringPolicyVersion) ? 5 : -1;
+        if (summary == null || !summary.isArray() || summary.size() != groupCount
                 || scoreGroupSummary != null) {
             throw new IllegalArgumentException("Invalid Rule v4 group summary");
         }
@@ -282,7 +283,8 @@ public class DetectionResult {
     public void completeMlV4(int ruleScore, int appliedContribution,
                              int probabilityBasisPoints, RiskLevel finalLevel,
                              Instant completedAt) {
-        if (!"rule-ml-policy-v3".equals(scoringPolicyVersion)
+        if (!("rule-ml-policy-v3".equals(scoringPolicyVersion)
+                || "rule-ml-policy-v4".equals(scoringPolicyVersion))
                 || scoreGroupSummary == null || modelVersion == null
                 || mlFeatureVersion == null || modelSha256 == null) {
             throw new IllegalStateException("Rule v4 ML identity or groups are not pinned");
@@ -290,7 +292,9 @@ public class DetectionResult {
         int raw = com.aifds.backend.detection.ml.MlDetectionPolicy
                 .contribution(probabilityBasisPoints);
         if (ruleScore < 0 || ruleScore > 100
-                || appliedContribution != Math.min(raw, 100 - ruleScore)) {
+                || ("rule-ml-policy-v3".equals(scoringPolicyVersion)
+                    ? appliedContribution != Math.min(raw, 100 - ruleScore)
+                    : appliedContribution < 0 || appliedContribution > Math.min(raw, 100 - ruleScore))) {
             throw new IllegalArgumentException("Rule v4 applied ML contribution mismatch");
         }
         int score = ruleScore + appliedContribution;

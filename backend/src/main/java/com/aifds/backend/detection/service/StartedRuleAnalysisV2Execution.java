@@ -5,6 +5,7 @@ import com.aifds.backend.rule.contract.CanonicalRuleSetVersionCalculator;
 import com.aifds.backend.rule.contract.RuleV1ExecutionPlanRegistry;
 import com.aifds.backend.rule.contract.RulePolicyVersion;
 import com.aifds.backend.scenario.ScenarioFacts;
+import com.aifds.backend.scenario.ScenarioAggregationFacts;
 
 import java.util.Objects;
 
@@ -12,18 +13,25 @@ public record StartedRuleAnalysisV2Execution(
         StartedRuleAnalysis startedAnalysis,
         RuleAnalysisRequestV2 request,
         boolean priorApprovedRecipientTransfer,
-        ScenarioFacts scenarioFacts
+        ScenarioFacts scenarioFacts,
+        ScenarioAggregationFacts aggregationFacts
 ) {
 
     public StartedRuleAnalysisV2Execution(
             StartedRuleAnalysis startedAnalysis, RuleAnalysisRequestV2 request) {
-        this(startedAnalysis, request, false, null);
+        this(startedAnalysis, request, false, null, null);
     }
 
     public StartedRuleAnalysisV2Execution(StartedRuleAnalysis startedAnalysis,
                                           RuleAnalysisRequestV2 request,
                                           boolean priorApprovedRecipientTransfer) {
-        this(startedAnalysis, request, priorApprovedRecipientTransfer, null);
+        this(startedAnalysis, request, priorApprovedRecipientTransfer, null, null);
+    }
+
+    public StartedRuleAnalysisV2Execution(StartedRuleAnalysis startedAnalysis,
+            RuleAnalysisRequestV2 request, boolean priorApprovedRecipientTransfer,
+            ScenarioFacts scenarioFacts) {
+        this(startedAnalysis, request, priorApprovedRecipientTransfer, scenarioFacts, null);
     }
 
     public StartedRuleAnalysisV2Execution {
@@ -47,8 +55,10 @@ public record StartedRuleAnalysisV2Execution(
             );
         }
         var calculator = new CanonicalRuleSetVersionCalculator();
-        String requestRuleSetVersion = RulePolicyVersion.from(request.ruleVersions()) == 4
-                ? calculator.calculateV4(request.ruleVersions())
+        int policy = RulePolicyVersion.from(request.ruleVersions());
+        String requestRuleSetVersion = policy == 5
+                ? calculator.calculateV5(request.ruleVersions())
+                : policy == 4 ? calculator.calculateV4(request.ruleVersions())
                 : calculator.calculate(
                         request.ruleVersions().stream()
                                 .map(rule -> new RuleV1ExecutionPlanRegistry
@@ -64,6 +74,9 @@ public record StartedRuleAnalysisV2Execution(
             throw new IllegalArgumentException(
                     "Started analysis ruleSetVersion does not match request"
             );
+        }
+        if (policy == 5 && (scenarioFacts == null || aggregationFacts == null)) {
+            throw new IllegalArgumentException("Rule v5 facts are incomplete");
         }
     }
 }

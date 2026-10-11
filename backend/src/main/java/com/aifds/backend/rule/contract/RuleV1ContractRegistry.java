@@ -32,6 +32,10 @@ public final class RuleV1ContractRegistry {
             "MATERIAL_LIMIT_UPLIFT";
     public static final String MOCK_OVERSEAS_NETWORK =
             "MOCK_OVERSEAS_NETWORK";
+    public static final String DISTRIBUTED_OUTBOUND_WINDOW =
+            "DISTRIBUTED_OUTBOUND_WINDOW";
+    public static final String MANY_CUSTOMER_INBOUND_WINDOW =
+            "MANY_CUSTOMER_INBOUND_WINDOW";
 
     private static final Map<String, Set<String>> ALLOWED_REASON_CODES =
             Map.ofEntries(
@@ -49,7 +53,9 @@ public final class RuleV1ContractRegistry {
                     Map.entry(EXTERNAL_RISK_DEVICE_MATCH, Set.of(EXTERNAL_RISK_DEVICE_MATCH)),
                     Map.entry(MOCK_APP_SECURITY_ALERT, Set.of(MOCK_APP_SECURITY_ALERT)),
                     Map.entry(MATERIAL_LIMIT_UPLIFT, Set.of(MATERIAL_LIMIT_UPLIFT)),
-                    Map.entry(MOCK_OVERSEAS_NETWORK, Set.of(MOCK_OVERSEAS_NETWORK))
+                    Map.entry(MOCK_OVERSEAS_NETWORK, Set.of(MOCK_OVERSEAS_NETWORK)),
+                    Map.entry(DISTRIBUTED_OUTBOUND_WINDOW, Set.of(DISTRIBUTED_OUTBOUND_WINDOW)),
+                    Map.entry(MANY_CUSTOMER_INBOUND_WINDOW, Set.of(MANY_CUSTOMER_INBOUND_WINDOW))
             );
     private static final Set<String> SUPPORTED_REASON_CODES = Set.of(
             TRANSFER_ABSOLUTE_HIGH_AMOUNT,
@@ -61,7 +67,9 @@ public final class RuleV1ContractRegistry {
             EXTERNAL_RISK_DEVICE_MATCH,
             MOCK_APP_SECURITY_ALERT,
             MATERIAL_LIMIT_UPLIFT,
-            MOCK_OVERSEAS_NETWORK
+            MOCK_OVERSEAS_NETWORK,
+            DISTRIBUTED_OUTBOUND_WINDOW,
+            MANY_CUSTOMER_INBOUND_WINDOW
     );
     private static final Map<String, String> DISPLAY_DESCRIPTIONS = Map.ofEntries(
             Map.entry(TRANSFER_ABSOLUTE_HIGH_AMOUNT, "절대 고액 이체"),
@@ -75,7 +83,9 @@ public final class RuleV1ContractRegistry {
             Map.entry(EXTERNAL_RISK_DEVICE_MATCH, "외부 위험 기기 일치"),
             Map.entry(MOCK_APP_SECURITY_ALERT, "Mock 앱 보안 위험 신호"),
             Map.entry(MATERIAL_LIMIT_UPLIFT, "큰 폭의 한도 상향"),
-            Map.entry(MOCK_OVERSEAS_NETWORK, "Mock 해외 접속 신호")
+            Map.entry(MOCK_OVERSEAS_NETWORK, "Mock 해외 접속 신호"),
+            Map.entry(DISTRIBUTED_OUTBOUND_WINDOW, "단시간 다수 수취 계좌 분산 송금"),
+            Map.entry(MANY_CUSTOMER_INBOUND_WINDOW, "다수 고객의 동일 계좌 집금")
     );
 
     private RuleV1ContractRegistry() {

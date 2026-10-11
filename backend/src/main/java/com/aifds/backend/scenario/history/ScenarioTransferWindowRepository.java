@@ -2,6 +2,8 @@ package com.aifds.backend.scenario.history;
 
 import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.aifds.backend.transaction.entity.TransactionType;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -104,6 +106,7 @@ public class ScenarioTransferWindowRepository {
     }
 
     public record Window(long transferCount, long distinctCount,
+                         @JsonSerialize(using = ToStringSerializer.class)
                          BigDecimal totalAmount, long unknownCount, UUID coverageFactId) {
         public boolean available() {
             return coverageFactId != null && unknownCount == 0;

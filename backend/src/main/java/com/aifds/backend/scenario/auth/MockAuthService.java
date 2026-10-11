@@ -76,8 +76,10 @@ public class MockAuthService {
         if (!previous.isEmpty()) return previous.get(0);
         if (tx.getProcessingStatus() != TransactionProcessingStatus.ADDITIONAL_AUTH_REQUIRED
                 || tx.getAdoptedDetectionResult() == null
-                || !"rule-ml-policy-v3".equals(
-                        tx.getAdoptedDetectionResult().getScoringPolicyVersion())) {
+                || !("rule-ml-policy-v3".equals(
+                        tx.getAdoptedDetectionResult().getScoringPolicyVersion())
+                        || "rule-ml-policy-v4".equals(
+                                tx.getAdoptedDetectionResult().getScoringPolicyVersion()))) {
             throw new MockAuthException(HttpStatus.CONFLICT, "MOCK_AUTH_STATE_CONFLICT");
         }
         var links = cases.findAllByTransactionPk(tx.getId());

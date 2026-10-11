@@ -4,5 +4,6 @@ public enum RuleScoreGroupId {
     amount,
     security,
     beneficiary,
-    external_recipient
+    external_recipient,
+    flow_aggregation
 }

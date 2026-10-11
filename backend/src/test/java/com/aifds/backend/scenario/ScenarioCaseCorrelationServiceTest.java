@@ -1,6 +1,7 @@
 package com.aifds.backend.scenario;
 
 import com.aifds.backend.detection.entity.DetectionEvidence;
+import com.aifds.backend.audit.service.AuditLogPersistenceService;
 import com.aifds.backend.detection.entity.DetectionEvidenceType;
 import com.aifds.backend.detection.entity.DetectionResult;
 import com.aifds.backend.detection.repository.DetectionEvidenceRepository;
@@ -26,13 +27,14 @@ class ScenarioCaseCorrelationServiceTest {
     @Mock private DetectionEvidenceRepository evidence;
     @Mock private FraudCaseRepository cases;
     @Mock private JdbcTemplate jdbc;
+    @Mock private AuditLogPersistenceService auditLogs;
     @Mock private FinancialTransaction transaction;
     @Mock private DetectionResult result;
     private ScenarioCaseCorrelationService service;
 
     @BeforeEach
     void setUp() {
-        service = new ScenarioCaseCorrelationService(evidence, cases, jdbc);
+        service = new ScenarioCaseCorrelationService(evidence, cases, jdbc, auditLogs);
     }
 
     private void bind(List<DetectionEvidence> rows) {

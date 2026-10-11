@@ -6,4 +6,4 @@
 
 `approved_at IS NULL`인 과거 승인 행이 창에 있으면 `unknown_count>0`이고 탐지 확정에 쓰지 않는다. 현재 완료 상태가 승인인 것을 과거 승인으로 역추정하지 않는다. 창의 부재를 확정하려면 004는 고객별 `TRANSFER_HISTORY_COMPLETE`, 005는 수취 계좌별 `INBOUND_ACCOUNT_HISTORY_COMPLETE`의 `[coverage_from,coverage_through]`가 전체 창을 덮고 `occurred_at≤T`, `created_at≤T`여야 한다. 005 Mock의 `external_customer_ref`는 출처가 선언한 계좌 소유자 참조이며 집계 자체는 소유 관계를 추론하지 않는다. 사실 ID는 근거에 기록하되 원문 고객·계좌 참조는 외부 근거에 내보내지 않는다.
 
-이 인덱스와 Mock 타입만으로 탐지·사건 생성이 활성화되지는 않는다. Rule/ML 발행 시각 이후의 채택 경로와 Evidence·사건 정책은 Issue #386의 나머지 구현과 함께 검증해야 한다.
+이 인덱스와 Mock 타입만으로 탐지·사건 생성이 활성화되지는 않는다. Rule v5 발행 시각 이후의 채택 경로와 Evidence·사건 정책은 [탐지 DB 계약](scn004-005-detection.md)을 따른다.

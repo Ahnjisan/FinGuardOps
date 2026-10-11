@@ -10,6 +10,8 @@ from importlib.resources import files
 from finguardops_ai.ml.features import FEATURE_NAMES, FEATURE_VERSION
 from finguardops_ai.ml.features_v2 import FEATURE_NAMES as FEATURE_NAMES_V2
 from finguardops_ai.ml.features_v2 import FEATURE_VERSION as FEATURE_VERSION_V2
+from finguardops_ai.ml.features_v3 import FEATURE_NAMES as FEATURE_NAMES_V3
+from finguardops_ai.ml.features_v3 import FEATURE_VERSION as FEATURE_VERSION_V3
 
 
 class ModelUnavailable(Exception):
@@ -33,14 +35,31 @@ class FraudModel:
         return max(0, min(10000, math.floor(probability * 10000 + 0.5)))
 
 
-@lru_cache(maxsize=3)
+@lru_cache(maxsize=4)
 def load_model(version: str = "fraud-logistic-v2") -> FraudModel:
     try:
-        if version not in ("fraud-logistic-v1", "fraud-logistic-v2", "fraud-logistic-v3"):
+        if version not in (
+            "fraud-logistic-v1",
+            "fraud-logistic-v2",
+            "fraud-logistic-v3",
+            "fraud-logistic-v4",
+        ):
             raise ModelUnavailable("MODEL_VERSION_MISMATCH")
         suffix = version.rsplit("-", 1)[-1]
-        feature_version = FEATURE_VERSION_V2 if suffix == "v3" else FEATURE_VERSION
-        feature_names = FEATURE_NAMES_V2 if suffix == "v3" else FEATURE_NAMES
+        feature_version = (
+            FEATURE_VERSION_V3
+            if suffix == "v4"
+            else FEATURE_VERSION_V2
+            if suffix == "v3"
+            else FEATURE_VERSION
+        )
+        feature_names = (
+            FEATURE_NAMES_V3
+            if suffix == "v4"
+            else FEATURE_NAMES_V2
+            if suffix == "v3"
+            else FEATURE_NAMES
+        )
         asset = files("finguardops_ai.ml").joinpath(f"fraud_model_{suffix}.json")
         manifest_asset = files("finguardops_ai.ml").joinpath(f"fraud_model_{suffix}.manifest.json")
         raw = asset.read_bytes()

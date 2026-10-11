@@ -4,6 +4,7 @@ import com.aifds.backend.behavior.entity.BehaviorEvent;
 import com.aifds.backend.behavior.entity.BehaviorEventType;
 import com.aifds.backend.behavior.repository.BehaviorEventRepository;
 import com.aifds.backend.scenario.ScenarioFacts;
+import com.aifds.backend.scenario.ScenarioAggregationFacts;
 import com.aifds.backend.transaction.entity.FinancialTransaction;
 import com.aifds.backend.transaction.repository.FinancialTransactionRepository;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -105,11 +106,19 @@ public class MlDetectionService {
     public MlResult infer(UUID transactionId, Instant cutoff,
                           String scoringPolicyVersion, String modelVersion,
                           ScenarioFacts scenarioFacts) {
+        return infer(transactionId, cutoff, scoringPolicyVersion, modelVersion,
+                scenarioFacts, null);
+    }
+
+    public MlResult infer(UUID transactionId, Instant cutoff,
+                          String scoringPolicyVersion, String modelVersion,
+                          ScenarioFacts scenarioFacts,
+                          ScenarioAggregationFacts aggregationFacts) {
         long started = System.nanoTime();
         String category = "NONE";
         try {
             return inferValidated(transactionId, cutoff, scoringPolicyVersion, modelVersion,
-                    scenarioFacts);
+                    scenarioFacts, aggregationFacts);
         } catch (MlDetectionException exception) {
             category = exception.code();
             throw exception;
@@ -123,14 +132,18 @@ public class MlDetectionService {
 
     private MlResult inferValidated(UUID transactionId, Instant cutoff,
                                     String scoringPolicyVersion, String modelVersion,
-                                    ScenarioFacts scenarioFacts) {
+                                    ScenarioFacts scenarioFacts,
+                                    ScenarioAggregationFacts aggregationFacts) {
         boolean v3 = MlDetectionPolicy.SCN001_002_POLICY_VERSION.equals(scoringPolicyVersion);
+        boolean v4 = MlDetectionPolicy.SCN004_005_POLICY_VERSION.equals(scoringPolicyVersion);
         if (!(MlDetectionPolicy.POLICY_VERSION.equals(scoringPolicyVersion)
                 || MlDetectionPolicy.SCN003_POLICY_VERSION.equals(scoringPolicyVersion)
-                || v3)
-                || !(v3 ? MlDetectionPolicy.SCN001_002_MODEL_VERSION
+                || v3 || v4)
+                || !(v4 ? MlDetectionPolicy.SCN004_005_MODEL_VERSION
+                        : v3 ? MlDetectionPolicy.SCN001_002_MODEL_VERSION
                         : MlDetectionPolicy.modelForCutoff(cutoff)).equals(modelVersion)
-                || v3 != (scenarioFacts != null)) {
+                || (v3 || v4) != (scenarioFacts != null)
+                || v4 != (aggregationFacts != null)) {
             throw new MlDetectionException("ML_PINNED_VERSION_MISMATCH");
         }
         String modelSha256 = MlDetectionPolicy.shaForModel(modelVersion);
@@ -139,7 +152,7 @@ public class MlDetectionService {
         if (!transaction.getOccurredAt().equals(cutoff)) {
             throw new MlDetectionException("ML_CUTOFF_MISMATCH");
         }
-        List<BehaviorEvent> found = v3 ? List.of() : events.findForMlEvaluation(
+        List<BehaviorEvent> found = (v3 || v4) ? List.of() : events.findForMlEvaluation(
                 transaction.getExternalCustomerRef(), TYPES, cutoff.minus(Duration.ofHours(24)),
                 cutoff, PageRequest.of(0, MAX_EVENTS + 1));
         if (found.size() > MAX_EVENTS) throw new MlDetectionException("ML_EVENT_LIMIT_EXCEEDED");
@@ -147,11 +160,13 @@ public class MlDetectionService {
                 e.getEventId(), e.getEventType().name(), e.getOccurredAt(), e.getCreatedAt())).toList();
         MlRequest request = new MlRequest(transactionId, cutoff, transaction.getAmount().toPlainString(),
                 transaction.getTransactionType().name(), transaction.getChannel().name(),
-                v3 ? MlDetectionPolicy.SCN001_002_FEATURE_VERSION : MlDetectionPolicy.FEATURE_VERSION,
-                scoringPolicyVersion, modelVersion, modelSha256, safeEvents, scenarioFacts);
+                v4 ? MlDetectionPolicy.SCN004_005_FEATURE_VERSION
+                        : v3 ? MlDetectionPolicy.SCN001_002_FEATURE_VERSION : MlDetectionPolicy.FEATURE_VERSION,
+                scoringPolicyVersion, modelVersion, modelSha256, safeEvents,
+                scenarioFacts, aggregationFacts);
         final MlResponse response;
         try {
-            Object body = v3 ? mapper.writeValueAsString(request) : request;
+            Object body = (v3 || v4) ? mapper.writeValueAsString(request) : request;
             ResponseEntity<String> reply = client.post().uri("/api/v1/ml-inference")
                     .contentType(MediaType.APPLICATION_JSON).accept(MediaType.APPLICATION_JSON)
                     .body(body).retrieve().toEntity(String.class);
@@ -178,7 +193,8 @@ public class MlDetectionService {
         }
         if (response == null || !transactionId.equals(response.transactionId())
                 || !cutoff.equals(response.evaluationCutoffAt())
-                || !(v3 ? MlDetectionPolicy.SCN001_002_FEATURE_VERSION
+                || !(v4 ? MlDetectionPolicy.SCN004_005_FEATURE_VERSION
+                        : v3 ? MlDetectionPolicy.SCN001_002_FEATURE_VERSION
                         : MlDetectionPolicy.FEATURE_VERSION).equals(response.featureVersion())
                 || !scoringPolicyVersion.equals(response.scoringPolicyVersion())
                 || !modelVersion.equals(response.modelVersion())
@@ -243,14 +259,23 @@ public class MlDetectionService {
                             String transactionType, String channel, String featureVersion,
                             String scoringPolicyVersion,
                             String modelVersion, String modelSha256, List<MlEvent> events,
-                            ScenarioFacts scenarioFacts) {
+                            ScenarioFacts scenarioFacts,
+                            ScenarioAggregationFacts aggregationFacts) {
+        public MlRequest(UUID transactionId, Instant evaluationCutoffAt, String amount,
+                         String transactionType, String channel, String featureVersion,
+                         String scoringPolicyVersion, String modelVersion, String modelSha256,
+                         List<MlEvent> events, ScenarioFacts scenarioFacts) {
+            this(transactionId, evaluationCutoffAt, amount, transactionType, channel,
+                    featureVersion, scoringPolicyVersion, modelVersion, modelSha256,
+                    events, scenarioFacts, null);
+        }
         public MlRequest(UUID transactionId, Instant evaluationCutoffAt, String amount,
                          String transactionType, String channel, String featureVersion,
                          String scoringPolicyVersion, String modelVersion, String modelSha256,
                          List<MlEvent> events) {
             this(transactionId, evaluationCutoffAt, amount, transactionType, channel,
                     featureVersion, scoringPolicyVersion, modelVersion, modelSha256,
-                    events, null);
+                    events, null, null);
         }
     }
     public record MlResponse(UUID transactionId, Instant evaluationCutoffAt, String featureVersion,
