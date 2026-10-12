@@ -1,0 +1,5 @@
+services:
+  backend:
+    environment:
+      FINGUARDOPS_AI_SERVICE_BASE_URL: ${FINGUARDOPS_ISSUE394_RULE_BASE_URL:-http://ai-service:8000}
+      FINGUARDOPS_ML_BASE_URL: ${FINGUARDOPS_ISSUE394_ML_BASE_URL:-http://ai-service:8000}

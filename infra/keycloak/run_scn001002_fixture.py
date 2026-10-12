@@ -16,6 +16,18 @@ def stamp(value):
     return value.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def dashboard_counts(ctx, date):
+    return json.loads(gate.sql_scalar(ctx, """SELECT json_build_object(
+        'total',(SELECT count(DISTINCT transaction_id) FROM financial_transaction
+          WHERE (occurred_at AT TIME ZONE 'Asia/Seoul')::date='%s'),
+        'classified',(SELECT count(DISTINCT transaction_id) FROM financial_transaction
+          WHERE (occurred_at AT TIME ZONE 'Asia/Seoul')::date='%s'
+            AND adopted_detection_result_id IS NOT NULL),
+        'newCases',(SELECT count(DISTINCT case_id) FROM fraud_case
+          WHERE (created_at AT TIME ZONE 'Asia/Seoul')::date='%s'))""" %
+                                (date, date, date)))
+
+
 def publish(ctx):
     active = gate.sql_scalar(ctx, """SELECT version_number || '|' || count(*) FROM rule_version
         WHERE status='PUBLISHED' AND effective_from<=current_timestamp
@@ -142,7 +154,15 @@ def main():
         publish(ctx)
         suffix = uuid.uuid4().hex[:12]
         customer, sender = seed_history(ctx, suffix)
+        date = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=9)).date().isoformat()
+        before = dashboard_counts(ctx, date)
         result = create(ctx, suffix, customer, sender)
+        after = dashboard_counts(ctx, date)
+        if ((dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=9)).date().isoformat() != date or
+                after["total"] - before["total"] != 1 or
+                after["classified"] - before["classified"] != 1 or
+                after["newCases"] - before["newCases"] != 1):
+            gate.fail("SCN001002_DASHBOARD_DB_DELTA_INVALID")
         evidence_dir = ctx.repo / "backend" / "build"
         if evidence_dir.is_symlink():
             gate.fail("SCN001002_EVIDENCE_PATH_INVALID")
@@ -150,7 +170,9 @@ def main():
         path = evidence_dir / ("issue384-browser-" + contract.run_id + ".json")
         with path.open("x", encoding="utf-8", newline="\n") as stream:
             json.dump({"fixtureExitCode": 0, "commitSha": contract.commit_sha,
-                       "composeProject": project, **result}, stream,
+                       "composeProject": project, "dashboardDate": date,
+                       "dashboardBefore": before, "dashboardAfter": after,
+                       **result}, stream,
                       sort_keys=True, separators=(",", ":"))
             stream.write("\n")
         print(json.dumps(result, separators=(",", ":")))
