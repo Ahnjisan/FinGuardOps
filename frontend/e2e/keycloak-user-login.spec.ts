@@ -10975,7 +10975,7 @@ test("Issue 384: real Keycloak analyst reads one SCN-001/002 v4 case, transactio
   const originalManifest = env[RUN_FIXTURE_MANIFEST_ENVIRONMENT];
   requireCondition(typeof originalManifest === "string" && originalManifest.length > 0,
     "The official Run fixture identity is absent.");
-  readRunFixtureManifest(originalManifest);
+  const runFixture = readRunFixtureManifest(originalManifest);
   const output = await new Promise<string>((resolveOutput, reject) => {
     const child = spawn("python", ["-B", fixturePath], {
       cwd: root, shell: false,
@@ -11083,6 +11083,31 @@ test("Issue 384: real Keycloak analyst reads one SCN-001/002 v4 case, transactio
     requireCondition(relay.some((entry) => entry.pathname ===
       `${TRANSACTION_LIST_PATH}/${transactionId}/adopted-detection-result` && entry.status === 200),
     "The analyst did not read the owned adopted result through Backend.");
+    const evidencePath = resolve(root, "backend", "build", `issue384-browser-${runFixture.runId}.json`);
+    const evidence = JSON.parse(readFileSync(evidencePath, "utf8")) as Record<string, unknown>;
+    const date = String(evidence.dashboardDate);
+    const before = evidence.dashboardBefore as Record<string, number>;
+    const after = evidence.dashboardAfter as Record<string, number>;
+    requireCondition(evidence.fixtureExitCode === 0 && evidence.transactionId === transactionId &&
+      evidence.caseId === caseId && /^\d{4}-\d{2}-\d{2}$/.test(date) &&
+      after.total - before.total === 1 && after.classified - before.classified === 1 &&
+      after.newCases - before.newCases === 1,
+    "The Run fixture has no matching KST database dashboard delta.");
+    const next = new Date(Date.parse(`${date}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
+    const dashboards = await page.evaluate(async (range) => {
+      const [{ getOidcAuthClient }, { fetchTransactionDashboard, fetchCaseDashboard }] = await Promise.all([
+        import("/src/auth/oidcAuthClient.ts"),
+        // @ts-expect-error Vite serves the production module at an absolute URL.
+        import("/src/api/fdsDashboardApi.ts"),
+      ]);
+      const auth = getOidcAuthClient();
+      return Promise.all([fetchTransactionDashboard(auth, range), fetchCaseDashboard(auth, range)]);
+    }, { from: date, to: next });
+    requireCondition(dashboards[0].days[0]?.total === after.total &&
+      dashboards[0].days[0]?.classified === after.classified &&
+      dashboards[0].days[0]?.unclassified === after.total - after.classified &&
+      dashboards[1].days[0]?.newCases === after.newCases,
+    "The Keycloak analyst dashboard differs from this Run's database IDs.");
   } finally {
     await test.step("CLEANUP", () => relay.dispose());
   }
