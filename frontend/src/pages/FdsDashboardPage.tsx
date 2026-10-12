@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Icon } from "../shared/Icon";
 import { useAuth } from "../auth/useAuth";
 import { getOidcAuthClient } from "../auth/oidcAuthClient";
 import { ForbiddenError } from "../api/errors";
@@ -75,10 +76,10 @@ export function FdsDashboardPage() {
     }}>
       <label>시작일 (KST)<input type="date" value={fromInput} onChange={event => setFromInput(event.target.value)} required /></label>
       <label>종료일 (미포함, KST)<input type="date" value={toInput} onChange={event => setToInput(event.target.value)} required /></label>
-      <button type="submit">조회</button>
-      <button type="button" onClick={() => { const next = recentSevenDays();
+      <button className="button" type="submit"><Icon name="search" />조회</button>
+      <button className="button" type="button" onClick={() => { const next = recentSevenDays();
         setRange(next); setFromInput(next.from); setToInput(next.to); setRevision(n => n + 1); }}>최근 7일</button>
-      <button type="button" onClick={() => setRevision(n => n + 1)}>새로고침</button>
+      <button className="button" type="button" onClick={() => setRevision(n => n + 1)}><Icon name="refresh" />새로고침</button>
     </form>
     {from && to && <p>기간: {from}부터 {to} 전까지 · KST 일별 · 늦게 접수된 거래는 다음 조회에서 과거 수치를 바꿀 수 있습니다.</p>}
     <section aria-labelledby="fds-transactions-title">

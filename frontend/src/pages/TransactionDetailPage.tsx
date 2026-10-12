@@ -189,11 +189,13 @@ export function TransactionDetailPage({ useDetail = useTransactionDetail,
     <section className="detail" aria-labelledby="transaction-detail-heading">
       <div className="page-head">
         <nav className="detail__navigation" aria-label="거래 상세 돌아가기">
-          <Link className="button detail__nav-link" to="/transactions">
-            <Icon name="back" />거래 목록으로
+          <Link className="button detail__nav-link" to="/transactions"
+            aria-label="거래 목록으로" title="거래 목록으로">
+            <Icon name="transaction-list" />
           </Link>
-          {fromCaseId !== null && <Link className="button detail__nav-link" to={`/cases/${fromCaseId}`}>
-            <Icon name="back" />사건으로 돌아가기
+          {fromCaseId !== null && <Link className="button detail__nav-link" to={`/cases/${fromCaseId}`}
+            aria-label="사건으로 돌아가기" title="사건으로 돌아가기">
+            <Icon name="case-detail" />
           </Link>}
         </nav>
         <h2 id="transaction-detail-heading">

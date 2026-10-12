@@ -263,9 +263,12 @@ export function CaseDetailPage() {
   return (
     <section className="detail" aria-labelledby="case-detail-heading">
       <div className="page-head">
-        <p className="detail__back">
-          <Link to="/cases"><Icon name="back" />사건 목록으로</Link>
-        </p>
+        <nav className="detail__navigation" aria-label="사건 상세 돌아가기">
+          <Link className="button detail__nav-link" to="/cases"
+            aria-label="사건 목록으로" title="사건 목록으로">
+            <Icon name="case-list" />
+          </Link>
+        </nav>
         <h2 id="case-detail-heading">
           사건
           {caseId !== null && (

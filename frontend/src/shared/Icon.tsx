@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-type IconName = "home" | "transactions" | "cases" | "health" | "sign-in" | "sign-out" | "search" | "reset" | "arrow" | "refresh" | "back";
+type IconName = "home" | "transactions" | "cases" | "health" | "sign-in" | "sign-out" | "search" | "reset" | "arrow" | "refresh" | "back" | "transaction-list" | "case-detail" | "case-list" | "fds-dashboard" | "ai-operations";
 
 const paths: Record<IconName, ReactNode> = {
   home: <><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z" /><path d="M9 21v-7h6v7" /></>,
@@ -14,6 +14,19 @@ const paths: Record<IconName, ReactNode> = {
   arrow: <><path d="M5 12h14m-6-6 6 6-6 6" /></>,
   refresh: <><path d="M20 7v5h-5M4 17v-5h5" /><path d="M5.5 9a7 7 0 0 1 12-2l2.5 5M4 12l2.5 5a7 7 0 0 0 12-2" /></>,
   back: <><path d="M19 12H5m6-6-6 6 6 6" /></>,
+  "transaction-list": <><circle cx="4.5" cy="6" r="1.05" /><circle cx="4.5" cy="12" r="1.05" /><circle cx="4.5" cy="18" r="1.05" /><path d="M9 6h11M9 12h11M9 18h11" /></>,
+  "case-detail": <><path d="M7 3.5h7.5L19 8v11a1.5 1.5 0 0 1-1.5 1.5H7A1.5 1.5 0 0 1 5.5 19V5A1.5 1.5 0 0 1 7 3.5Z" /><path d="M14.5 3.5V8H19M9 12h7M9 16h6" /></>,
+  "case-list": <><path d="M4.5 5.5h5L12 8h7.5A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5V7a1.5 1.5 0 0 1 1.5-1.5Z" /></>,
+
+  "fds-dashboard": <path d="M5 18v-4M12 18V9M19 18V5" strokeWidth="2.4" />,
+  "ai-operations": <>
+    <rect x="4.5" y="4.5" width="15" height="15" rx="2.3" />
+    <path d="M2 9h2.5M2 15h2.5M19.5 9H22M19.5 15H22" />
+    <g transform="translate(12 12) scale(1.12) translate(-12 -12)" strokeWidth="1.4">
+      <path d="M12 8.9c-.9-1.15-2.6-.98-3.02.48-1.32.06-1.8 1.6-.72 2.55-.83.83-.63 2.17.42 2.76.32 1.12 1.91 1.52 3.32.62 1.41.9 3 .5 3.32-.62 1.05-.59 1.25-1.93.42-2.76 1.08-.95.6-2.49-.72-2.55-.42-1.46-2.12-1.63-3.02-.48Z" />
+      <path d="M12 8.9v6.41" />
+    </g>
+  </>,
 };
 
 export function Icon({ name }: { readonly name: IconName }) {
