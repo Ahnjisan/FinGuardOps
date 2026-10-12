@@ -30,8 +30,11 @@ export function AiOperationsPage() {
       setProblem(true); return;
     }
     setProblem(false);
-    setQuery({ from, to, reportStatus: status || undefined, provider: provider || undefined,
-      model: model || undefined, page: "0", size: "20", sort: "requestedAt,desc" });
+    setQuery({ from, to,
+      ...(status !== "" ? { reportStatus: status } : {}),
+      ...(provider !== "" ? { provider } : {}),
+      ...(model !== "" ? { model } : {}),
+      page: "0", size: "20", sort: "requestedAt,desc" });
   }
   const page = list.data?.page;
   return <section className="ai-operations" aria-labelledby="ai-operations-title">
