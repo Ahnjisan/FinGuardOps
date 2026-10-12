@@ -139,7 +139,7 @@ export function AppShell() {
             */}
             {capabilities.has("fds-dashboard:view") && (
               <li><NavLink className="rail__link" to="/fds-dashboard">
-                <Icon name="home" />FDS 집계
+                <Icon name="fds-dashboard" />FDS 집계
               </NavLink></li>
             )}
             {capabilities.has("transaction:view") && (
@@ -182,7 +182,7 @@ export function AppShell() {
               </NavLink>
             </li>
             {capabilities.has("ai-usage:view") && <li>
-              <NavLink className="rail__link" to="/ai-operations" end>AI 운영</NavLink>
+              <NavLink className="rail__link" to="/ai-operations" end><Icon name="ai-operations" />AI 운영</NavLink>
             </li>}
           </ul>
         </nav>
