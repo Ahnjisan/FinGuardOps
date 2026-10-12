@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Icon } from "../shared/Icon";
 import { Link } from "react-router-dom";
 import { type AiUsageListQuery } from "../api/aiOperationsApi";
 import { useAiUsage } from "../api/useAiOperations";
@@ -46,7 +47,7 @@ export function AiOperationsPage() {
       </select></label>
       <label>Provider<input value={provider} onChange={(event) => setProvider(event.target.value)} /></label>
       <label>모델 digest<input value={model} onChange={(event) => setModel(event.target.value)} /></label>
-      <button type="submit">조회</button>
+      <button className="button" type="submit"><Icon name="search" />조회</button>
     </form>
     {problem && <p role="alert">UTC 시작·끝과 31일 이하 기간, 필터 형식을 확인하세요.</p>}
     <section aria-label="선택 기간 전체 집계">
