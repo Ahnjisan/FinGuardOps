@@ -55,6 +55,18 @@ describe("adopted detection response", () => {
         aggregationEvidence: aggregation,
       } };
     expect(isAdoptedDetectionResponse(result)).toBe(true);
+    const persistedKrW = { ...result, adoptedResult: { ...result.adoptedResult,
+      aggregationEvidence: { ...aggregation,
+        outbound: { ...aggregation.outbound, totalAmount: "3300000.0000" },
+        inbound: { ...aggregation.inbound, totalAmount: "1200000.0000" },
+      },
+    } };
+    expect(isAdoptedDetectionResponse(persistedKrW)).toBe(true);
+    expect(isAdoptedDetectionResponse({ ...persistedKrW, adoptedResult: {
+      ...persistedKrW.adoptedResult, aggregationEvidence: { ...persistedKrW.adoptedResult.aggregationEvidence,
+        outbound: { ...aggregation.outbound, totalAmount: "3300000.0001" },
+      },
+    } })).toBe(false);
     expect(isAdoptedDetectionResponse({ ...result, adoptedResult: {
       ...result.adoptedResult, aggregationEvidence: { ...aggregation,
         outbound: { ...aggregation.outbound, recipientAccountRef: "raw-account" } },
@@ -83,6 +95,15 @@ describe("adopted detection response", () => {
         { groupId: "flow_link", rawScore: 50, cap: 50, appliedScore: 50, reduction: 0 }],
       fundFlowEvidence: flow } };
     expect(isAdoptedDetectionResponse(v6)).toBe(true);
+    const persistedFlow = { ...v6, adoptedResult: { ...v6.adoptedResult,
+      fundFlowEvidence: { ...flow, atm: { ...flow.atm,
+        sourceAmount: "10000000.0000", linkedAmount: "8000000.0000" } },
+    } };
+    expect(isAdoptedDetectionResponse(persistedFlow)).toBe(true);
+    expect(isAdoptedDetectionResponse({ ...persistedFlow, adoptedResult: {
+      ...persistedFlow.adoptedResult, fundFlowEvidence: { ...persistedFlow.adoptedResult.fundFlowEvidence,
+        atm: { ...flow.atm, sourceAmount: "10000000.0001" } },
+    } })).toBe(false);
     expect(isAdoptedDetectionResponse({ ...v6, adoptedResult: { ...v6.adoptedResult,
       fundFlowEvidence: { ...flow, atm: { ...flow.atm, externalAccountRef: "unproved" } } } }))
       .toBe(false);
@@ -97,6 +118,43 @@ describe("adopted detection response", () => {
         { groupId: "open_banking_chain", rawScore: 0, cap: 50, appliedScore: 0, reduction: 0 }],
       openBankingEvidence: open } };
     expect(isAdoptedDetectionResponse(v7)).toBe(true);
+    expect(isAdoptedDetectionResponse({ ...v7, adoptedResult: { ...v7.adoptedResult,
+      aggregationEvidence: persistedKrW.adoptedResult.aggregationEvidence,
+    } })).toBe(true);
+    const openAvailable = { ...open, status: "AVAILABLE", reasonCode: "VERIFIED_OPEN_BANKING_CHAIN",
+      concentrationAmount: "10000000.0000", resendAmount: "8000000.0000", ratioBasisPoints: 8000,
+      historyCoverageFactId: "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430114",
+      concentrationStartedAt: "2026-10-10T23:40:00Z",
+      concentrationCompletedAt: "2026-10-10T23:42:00Z",
+      stages: [
+        { sourceTransactionId: "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430112", ownershipAssertionId: resultId,
+          linkId: "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430115", occurredAt: "2026-10-10T23:40:00Z",
+          approvedAt: "2026-10-10T23:41:00Z", amount: "5000000.0000" },
+        { sourceTransactionId: "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430116", ownershipAssertionId: transactionId,
+          linkId: "7f4c0a4e-8a9d-4c2f-9a1b-7d6e5f430117", occurredAt: "2026-10-10T23:42:00Z",
+          approvedAt: "2026-10-10T23:43:00Z", amount: "5000000.0000" },
+      ],
+    };
+    const v7Open = { ...v7, adoptedResult: { ...v7.adoptedResult,
+      ruleEvidence: [v7.adoptedResult.ruleEvidence[0],
+        { ruleCode: "VERIFIED_OPEN_BANKING_CONCENTRATION_RESEND", ruleVersion: "1",
+          reasonCode: "VERIFIED_OPEN_BANKING_CONCENTRATION_RESEND", scoreContribution: 50,
+          appliedContribution: 50 }],
+      scoreGroupSummary: v7.adoptedResult.scoreGroupSummary.map(group =>
+        group.groupId === "flow_link" ? { ...group, rawScore: 0, appliedScore: 0 } :
+          group.groupId === "open_banking_chain" ? { ...group, rawScore: 50, appliedScore: 50 } : group),
+      fundFlowEvidence: { ...flow, atm: unknown },
+      openBankingEvidence: openAvailable,
+    } };
+    expect(isAdoptedDetectionResponse({ ...v7Open, adoptedResult: { ...v7Open.adoptedResult,
+      openBankingEvidence: { ...openAvailable, concentrationAmount: "10000000",
+        resendAmount: "8000000", stages: openAvailable.stages.map(stage => ({
+          ...stage, amount: "5000000" })) },
+    } })).toBe(true);
+    expect(isAdoptedDetectionResponse(v7Open)).toBe(true);
+    expect(isAdoptedDetectionResponse({ ...v7Open, adoptedResult: { ...v7Open.adoptedResult,
+      openBankingEvidence: { ...openAvailable, resendAmount: "8000000.0001" },
+    } })).toBe(false);
     expect(isAdoptedDetectionResponse({ ...v7, adoptedResult: { ...v7.adoptedResult,
       openBankingEvidence: { ...open, externalAccountRef: "unproved" } } })).toBe(false);
   });

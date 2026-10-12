@@ -189,7 +189,7 @@ function isAggregationWindow(value: unknown): value is AggregationWindow {
     [value.transferCount, value.distinctCount, value.unknownCount].every(item =>
       Number.isSafeInteger(item) && (item as number) >= 0) &&
     (value.distinctCount as number) <= (value.transferCount as number) &&
-    typeof value.totalAmount === "string" && /^(0|[1-9][0-9]*)$/.test(value.totalAmount) &&
+    typeof value.totalAmount === "string" && /^(0|[1-9][0-9]*)(?:\.0{1,4})?$/.test(value.totalAmount) &&
     (value.coverageFactId === undefined || isUuidV4String(value.coverageFactId)) &&
     (value.status !== "AVAILABLE" ||
       (value.coverageFactId !== undefined && value.unknownCount === 0));
@@ -220,8 +220,8 @@ function isFundStep(value: unknown, loan: boolean): value is FundFlowStep {
     isUuidV4String(value.historyCoverageFactId) &&
     (!loan || isUuidV4String(value.beneficiaryEventId)) &&
     isUtcInstantString(value.sourceOccurredAt) && isUtcInstantString(value.sourceApprovedAt) &&
-    typeof value.sourceAmount === "string" && /^[1-9][0-9]*$/.test(value.sourceAmount) &&
-    typeof value.linkedAmount === "string" && /^[1-9][0-9]*$/.test(value.linkedAmount) &&
+    typeof value.sourceAmount === "string" && /^[1-9][0-9]*(?:\.0{1,4})?$/.test(value.sourceAmount) &&
+    typeof value.linkedAmount === "string" && /^[1-9][0-9]*(?:\.0{1,4})?$/.test(value.linkedAmount) &&
     Number.isSafeInteger(value.ratioBasisPoints) && (value.ratioBasisPoints as number) >= 0 &&
     (value.ratioBasisPoints as number) <= 10000 &&
     isArrayOf(value.linkedPriorTransactionIds, isUuidV4String);
@@ -240,7 +240,7 @@ function isOpenStage(value: unknown): value is OpenBankingStage {
     isUuidV4String(value.sourceTransactionId) && isUuidV4String(value.ownershipAssertionId) &&
     isUuidV4String(value.linkId) && isUtcInstantString(value.occurredAt) &&
     isUtcInstantString(value.approvedAt) &&
-    typeof value.amount === "string" && /^[1-9][0-9]*$/.test(value.amount);
+    typeof value.amount === "string" && /^[1-9][0-9]*(?:\.0{1,4})?$/.test(value.amount);
 }
 function isOpenBanking(value: unknown): value is OpenBankingEvidence {
   if (!isJsonObject(value)) return false;
@@ -251,8 +251,8 @@ function isOpenBanking(value: unknown): value is OpenBankingEvidence {
       value.sourceVersion !== "SCN008-contract-v1" || value.mockSourceCode !== "LOCAL_OPEN_BANKING_MOCK" ||
       value.mockSourceVersion !== "v1" || !isUtcInstantString(value.evaluationCutoffAt) ||
       typeof value.reasonCode !== "string" || !/^[A-Z][A-Z0-9_]{0,63}$/.test(value.reasonCode) ||
-      typeof value.concentrationAmount !== "string" || !/^(0|[1-9][0-9]*)$/.test(value.concentrationAmount) ||
-      typeof value.resendAmount !== "string" || !/^(0|[1-9][0-9]*)$/.test(value.resendAmount) ||
+      typeof value.concentrationAmount !== "string" || !/^(0|[1-9][0-9]*)(?:\.0{1,4})?$/.test(value.concentrationAmount) ||
+      typeof value.resendAmount !== "string" || !/^(0|[1-9][0-9]*)(?:\.0{1,4})?$/.test(value.resendAmount) ||
       !Number.isSafeInteger(value.ratioBasisPoints) || (value.ratioBasisPoints as number) < 0 ||
       (value.ratioBasisPoints as number) > 10000 || !isArrayOf(value.stages, isOpenStage)) return false;
   if (value.status === "UNKNOWN") return value.stages.length === 0 &&

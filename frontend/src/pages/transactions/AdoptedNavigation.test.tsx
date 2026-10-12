@@ -40,6 +40,10 @@ it("returns from a case-linked transaction through a canonical case route", asyn
   await user.click(await screen.findByRole("link", { name: `거래 ${ID} 상세 보기` }));
   expect(await screen.findByRole("heading", { name: "채택된 탐지 결과" })).toBeInTheDocument();
   const back = screen.getByRole("link", { name: "사건으로 돌아가기" });
+  const navigation = screen.getByRole("navigation", { name: "거래 상세 돌아가기" });
+  expect(navigation).toContainElement(back);
+  expect(back).toHaveClass("detail__nav-link");
+  expect(back.querySelector('svg[aria-hidden="true"]')).toBeInTheDocument();
   expect(back).toHaveAttribute("href", `/cases/${CASE_ID}`);
   await user.tab();
   expect(screen.getByRole("link", { name: "거래 목록으로" })).toHaveFocus();
