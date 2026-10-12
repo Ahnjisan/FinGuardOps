@@ -306,8 +306,11 @@ test("SCN-001~008 real Keycloak visual capture", async ({ page }) => {
       await expect(caseLink).toBeVisible();
       const first = await listLink.boundingBox();
       const second = await caseLink.boundingBox();
-      if (!first || !second || second.y < first.y + first.height) {
-        throw new Error("mobile return controls overlap");
+      if (!first || !second || !(
+        second.x >= first.x + first.width + 4 ||
+        second.y >= first.y + first.height + 4
+      )) {
+        throw new Error("mobile return controls overlap or lack spacing");
       }
       await listLink.focus();
       await expect(listLink).toBeFocused();
