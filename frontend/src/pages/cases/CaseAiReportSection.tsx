@@ -1,4 +1,5 @@
 import { useAiReport } from "../../api/useAiReport";
+import { Icon } from "../../shared/Icon";
 import type { AiReportCurrent } from "../../api/aiReportApi";
 
 function failureMessage(code: string | null): string | null {
@@ -51,7 +52,7 @@ export function CaseAiReportPanel({ current, loading, error, busy, canCreate, on
     {error && <p role="alert">{error}</p>}
     {canCreate && <button type="button" className="button" disabled={busy || pending}
       onClick={onCreate}>리포트 생성 요청</button>}
-    <button type="button" className="button" onClick={onRefresh}>리포트 새로고침</button>
+    <button type="button" className="button" onClick={onRefresh}><Icon name="refresh" />리포트 새로고침</button>
     {latest && <p role="status">최근 요청: {latest.reportStatus} · 탐지 버전 {latest.detectionResultVersion}</p>}
     {earlier && <p>아래는 이전에 저장된 리포트입니다. 최신 요청 상태와 구분해 확인하세요.</p>}
     {latest?.reportStatus === "FAILED" && <p role="alert">최근 리포트 요청이 실패했습니다. {latestReason}</p>}
