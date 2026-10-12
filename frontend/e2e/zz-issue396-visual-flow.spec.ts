@@ -160,11 +160,25 @@ test("SCN-001~008 real Keycloak visual capture", async ({ page }) => {
         const scenario = evidence.entries.find(entry => entry.body.transactionId === result.transactionId)?.scenario;
         const window = (result.adoptedResult as Record<string, unknown> | null)?.aggregationEvidence as
           Record<string, unknown> | undefined;
-        const amount = (window?.outbound as Record<string, unknown> | undefined)?.totalAmount;
+        const fundFlow = (result.adoptedResult as Record<string, unknown> | null)?.fundFlowEvidence as
+          Record<string, unknown> | undefined;
+        const openBanking = (result.adoptedResult as Record<string, unknown> | null)?.openBankingEvidence as
+          Record<string, unknown> | undefined;
         const checks = diagnose(result);
+        const firstFailedValidator = checks.aggregation === false ? "aggregationEvidence" :
+          checks.fundFlow === false ? "fundFlowEvidence" :
+            checks.openBanking === false ? "openBankingEvidence" : "adoptedResult.other";
+        const amount = firstFailedValidator === "aggregationEvidence" ?
+          (window?.outbound as Record<string, unknown> | undefined)?.totalAmount :
+          firstFailedValidator === "fundFlowEvidence" ?
+            ((fundFlow?.atm as Record<string, unknown> | undefined)?.status === "AVAILABLE" ?
+              (fundFlow?.atm as Record<string, unknown>).sourceAmount :
+              (fundFlow?.loan as Record<string, unknown> | undefined)?.sourceAmount) :
+            openBanking?.concentrationAmount;
         appendFileSync(resolve(DIR, "validator-diagnostic.jsonl"), JSON.stringify({
           scenario: scenario ?? "UNLINKED", checks,
-          firstFailedCandidate: checks.aggregation === false ? "aggregationEvidence.outbound.totalAmount" : null,
+          firstFailedValidator, amountCandidate: firstFailedValidator === "adoptedResult.other" ?
+            null : firstFailedValidator + ".amount",
           expected: "integral KRW string; optional 1-4 zero fractional digits",
           actualType: typeof amount,
           actualFractionDigits: typeof amount === "string" && amount.includes(".") ?

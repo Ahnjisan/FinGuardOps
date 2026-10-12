@@ -136,10 +136,13 @@ class Context:
 
 
 def publish(ctx):
-    phases = [("v2", "rule-v2-local-publication", "PUBLISH_RULE_V2_LOCAL"),
-              ("v3", "rule-v3-local-publication", "PUBLISH_RULE_V3_LOCAL"),
-              ("v4", "rule-v4-local-publication", "PUBLISH_RULE_V4_LOCAL"),
-              ("v5", "rule-v5-local-publication", "PUBLISH_RULE_V5_LOCAL"),
+    # The stock Browser suite has already published v2, v3 and v4 in this DB.
+    active = int(ctx.sql_scalar("""SELECT count(*) FROM rule_version
+        WHERE status='PUBLISHED' AND effective_from<=now()
+          AND (effective_to IS NULL OR effective_to>now())"""))
+    if active != 10:
+        raise RuntimeError("complete Rule v4 predecessor set required")
+    phases = [("v5", "rule-v5-local-publication", "PUBLISH_RULE_V5_LOCAL"),
               ("v6", "rule-v6-local-publication", "PUBLISH_RULE_V6_LOCAL"),
               ("v7", "rule-v7-local-publication", "PUBLISH_RULE_V7_LOCAL")]
     for version, profile, confirmation in phases:
