@@ -445,4 +445,26 @@ test("SCN-001~008 real Keycloak visual capture", async ({ page }) => {
       `\`${item.transactionId}\` (${item.failedPredicates.join(", ")})`).join("; ") || "없음"}`);
   writeFileSync(resolve(DIR, "index.md"), index.join("\n") + "\n", "utf8");
   if (!dashboardVerified) throw new Error("dashboard API/DB/screen counts differ");
+  if (env.FINGUARDOPS_ISSUE399_UI === "1") {
+    mark("issue399-ui-start");
+    await new Promise<void>((done, fail) => {
+      const child = spawn(process.execPath,
+        [resolve(ROOT, "frontend/e2e/issue399-ui-capture.mjs"), RUN, SHA],
+        { cwd: ROOT, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+      child.stdout.resume();
+      child.stderr.resume();
+      child.on("error", () => fail(new Error("Issue #399 UI capture could not start")));
+      child.on("close", code => code === 0 ? done() : fail(new Error("Issue #399 UI capture failed")));
+    });
+    const ui = JSON.parse(readFileSync(resolve(DIR, "issue399-ui-result.json"), "utf8")) as
+      { runId: string; sha: string; status: string; images: string[] };
+    if (ui.runId !== RUN || ui.sha !== SHA || ui.status !== "passed" || ui.images.length !== 16) {
+      throw new Error("Issue #399 UI capture identity or image count invalid");
+    }
+    index.push("", "## PR #399 UI 검증", "",
+      "실제 Keycloak USER 화면에서 아이콘 이름·목적지·권한·focus·hover·좁은 화면과 FDS/AI 조회를 검증했습니다.", "");
+    for (const file of ui.images) index.push(`- [${file}](${file})`);
+    writeFileSync(resolve(DIR, "index.md"), index.join("\n") + "\n", "utf8");
+    mark("issue399-ui-captured");
+  }
 });
