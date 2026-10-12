@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-type IconName = "home" | "transactions" | "cases" | "health" | "sign-in" | "sign-out" | "search" | "reset" | "arrow" | "refresh" | "back";
+type IconName = "home" | "transactions" | "cases" | "health" | "sign-in" | "sign-out" | "search" | "reset" | "arrow" | "refresh" | "back" | "transaction-list" | "case-detail" | "case-list";
 
 const paths: Record<IconName, ReactNode> = {
   home: <><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z" /><path d="M9 21v-7h6v7" /></>,
@@ -14,6 +14,9 @@ const paths: Record<IconName, ReactNode> = {
   arrow: <><path d="M5 12h14m-6-6 6 6-6 6" /></>,
   refresh: <><path d="M20 7v5h-5M4 17v-5h5" /><path d="M5.5 9a7 7 0 0 1 12-2l2.5 5M4 12l2.5 5a7 7 0 0 0 12-2" /></>,
   back: <><path d="M19 12H5m6-6-6 6 6 6" /></>,
+  "transaction-list": <><circle cx="4.5" cy="6" r="1.05" /><circle cx="4.5" cy="12" r="1.05" /><circle cx="4.5" cy="18" r="1.05" /><path d="M9 6h11M9 12h11M9 18h11" /></>,
+  "case-detail": <><path d="M7 3.5h7.5L19 8v11a1.5 1.5 0 0 1-1.5 1.5H7A1.5 1.5 0 0 1 5.5 19V5A1.5 1.5 0 0 1 7 3.5Z" /><path d="M14.5 3.5V8H19M9 12h7M9 16h6" /></>,
+  "case-list": <><path d="M4.5 5.5h5L12 8h7.5A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5V7a1.5 1.5 0 0 1 1.5-1.5Z" /></>,
 };
 
 export function Icon({ name }: { readonly name: IconName }) {
