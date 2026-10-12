@@ -189,7 +189,7 @@ function isAggregationWindow(value: unknown): value is AggregationWindow {
     [value.transferCount, value.distinctCount, value.unknownCount].every(item =>
       Number.isSafeInteger(item) && (item as number) >= 0) &&
     (value.distinctCount as number) <= (value.transferCount as number) &&
-    typeof value.totalAmount === "string" && /^(0|[1-9][0-9]*)$/.test(value.totalAmount) &&
+    typeof value.totalAmount === "string" && /^(0|[1-9][0-9]*)(?:\.0{1,4})?$/.test(value.totalAmount) &&
     (value.coverageFactId === undefined || isUuidV4String(value.coverageFactId)) &&
     (value.status !== "AVAILABLE" ||
       (value.coverageFactId !== undefined && value.unknownCount === 0));

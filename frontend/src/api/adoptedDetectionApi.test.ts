@@ -55,6 +55,18 @@ describe("adopted detection response", () => {
         aggregationEvidence: aggregation,
       } };
     expect(isAdoptedDetectionResponse(result)).toBe(true);
+    const persistedKrW = { ...result, adoptedResult: { ...result.adoptedResult,
+      aggregationEvidence: { ...aggregation,
+        outbound: { ...aggregation.outbound, totalAmount: "3300000.0000" },
+        inbound: { ...aggregation.inbound, totalAmount: "1200000.0000" },
+      },
+    } };
+    expect(isAdoptedDetectionResponse(persistedKrW)).toBe(true);
+    expect(isAdoptedDetectionResponse({ ...persistedKrW, adoptedResult: {
+      ...persistedKrW.adoptedResult, aggregationEvidence: { ...persistedKrW.adoptedResult.aggregationEvidence,
+        outbound: { ...aggregation.outbound, totalAmount: "3300000.0001" },
+      },
+    } })).toBe(false);
     expect(isAdoptedDetectionResponse({ ...result, adoptedResult: {
       ...result.adoptedResult, aggregationEvidence: { ...aggregation,
         outbound: { ...aggregation.outbound, recipientAccountRef: "raw-account" } },
@@ -97,6 +109,9 @@ describe("adopted detection response", () => {
         { groupId: "open_banking_chain", rawScore: 0, cap: 50, appliedScore: 0, reduction: 0 }],
       openBankingEvidence: open } };
     expect(isAdoptedDetectionResponse(v7)).toBe(true);
+    expect(isAdoptedDetectionResponse({ ...v7, adoptedResult: { ...v7.adoptedResult,
+      aggregationEvidence: persistedKrW.adoptedResult.aggregationEvidence,
+    } })).toBe(true);
     expect(isAdoptedDetectionResponse({ ...v7, adoptedResult: { ...v7.adoptedResult,
       openBankingEvidence: { ...open, externalAccountRef: "unproved" } } })).toBe(false);
   });

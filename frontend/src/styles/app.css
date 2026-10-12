@@ -1245,8 +1245,25 @@ ul.notice__body li + li {
   }
 }
 
-.detail__back {
+.detail__navigation {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.detail__nav-link {
+  min-height: 38px;
+  padding: 7px 12px;
+  color: var(--text);
   font-size: 13px;
+  text-decoration: none;
+}
+
+@media (max-width: 479px) {
+  .detail__nav-link {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+  }
 }
 
 /* The identifier reads as the machine value it is, and is allowed to wrap on a
