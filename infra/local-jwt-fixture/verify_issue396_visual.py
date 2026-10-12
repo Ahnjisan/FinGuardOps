@@ -1,5 +1,6 @@
 """Issue #396 isolated visual evidence fixture for a committed checkout."""
 import datetime as dt
+import hashlib
 import importlib.util
 import json
 import os
@@ -453,6 +454,44 @@ def verify_report(ctx):
     print(json.dumps({"step": "report-linked", "exitCode": 0}), flush=True)
 
 
+def ai_invariant_snapshot(ctx):
+    payload = json.load(sys.stdin)
+    ids = (payload.get("caseId"), payload.get("transactionId"), payload.get("detectionResultId"))
+    if any(not isinstance(value, str) or not re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", value)
+            for value in ids):
+        raise RuntimeError("AI invariant identity invalid")
+    case_id, transaction_id, detection_id = ids
+    token = payload["analystToken"]
+    case = ctx.probe("GET", "/api/v1/cases/" + case_id, 200, token, None, {})["body"]["case"]
+    adopted = ctx.probe("GET", "/api/v1/transactions/" + transaction_id +
+                        "/adopted-detection-result", 200, token, None, {})["body"]
+    if case["caseId"] != case_id or case["caseStatus"] != "IN_REVIEW" or \
+            adopted["transactionId"] != transaction_id or \
+            adopted["adoptedResult"]["detectionResultId"] != detection_id:
+        raise RuntimeError("AI invariant API anchor invalid")
+    db = json.loads(ctx.sql_scalar("""SELECT json_build_object(
+        'case',to_jsonb(fc), 'transaction',to_jsonb(t), 'detection',to_jsonb(d))::text
+        FROM fraud_case fc JOIN case_transaction ct ON ct.fraud_case_id=fc.id
+        JOIN financial_transaction t ON t.id=ct.financial_transaction_id
+        JOIN detection_result d ON d.id=t.adopted_detection_result_id
+        WHERE fc.case_id='%s' AND t.transaction_id='%s'
+          AND d.detection_result_id='%s'""" % ids))
+    if db["case"]["case_status"] != case["caseStatus"] or \
+            db["case"]["concurrency_version"] != case["concurrencyVersion"] or \
+            db["case"]["assignee_ref"] != case["assigneeRef"] or \
+            db["detection"]["detection_result_version"] != \
+            adopted["adoptedResult"]["detectionResultVersion"]:
+        raise RuntimeError("AI invariant API and DB disagree")
+    def digest(value):
+        return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                         ensure_ascii=False).encode("utf-8")).hexdigest()
+    print(json.dumps({"caseApi": digest(case), "adoptedApi": digest(adopted),
+                      "caseDb": digest(db["case"]),
+                      "transactionDb": digest(db["transaction"]),
+                      "detectionDb": digest(db["detection"])}), flush=True)
+
+
 def dashboard_status(ctx):
     date = json.load(sys.stdin)["date"]
     if not re.fullmatch(r"20[0-9]{2}-[01][0-9]-[0-3][0-9]", date):
@@ -474,6 +513,8 @@ if __name__ == "__main__":
             relay(context)
         elif sys.argv[1] == "verify-report":
             verify_report(context)
+        elif sys.argv[1] == "ai-invariant-snapshot":
+            ai_invariant_snapshot(context)
         elif sys.argv[1] == "dashboard-status":
             dashboard_status(context)
         else:

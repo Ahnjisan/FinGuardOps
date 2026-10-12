@@ -64,7 +64,8 @@ function diagnose(result: Record<string, unknown>): Record<string, unknown> {
   };
 }
 
-function fixture(phase: "generate" | "validate" | "relay" | "verify-report" | "dashboard-status", input?: object): Promise<unknown> {
+function fixture(phase: "generate" | "validate" | "relay" | "verify-report" |
+  "ai-invariant-snapshot" | "dashboard-status", input?: object): Promise<unknown> {
   return new Promise((resolveDone, reject) => {
     const child = spawn("python", ["-B", SCRIPT, phase], {
       cwd: ROOT, env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
@@ -75,7 +76,7 @@ function fixture(phase: "generate" | "validate" | "relay" | "verify-report" | "d
     child.on("error", () => reject(new Error(`visual ${phase} process start failed`)));
     child.on("close", (code) => {
       if (code === 0) {
-        if (phase === "relay" || phase === "dashboard-status") {
+        if (phase === "relay" || phase === "dashboard-status" || phase === "ai-invariant-snapshot") {
           try { resolveDone(JSON.parse(Buffer.concat(stdout).toString("utf8"))); }
           catch { reject(new Error("visual relay output invalid")); }
         } else resolveDone(undefined);
@@ -323,6 +324,10 @@ test("SCN-001~008 real Keycloak visual capture", async ({ page }) => {
   await page.getByRole("textbox", { name: "담당자 UUID", exact: true }).fill(randomUUID());
   await page.getByRole("button", { name: "검토 시작", exact: true }).click();
   await expect(page.locator('section[aria-labelledby="case-summary-heading"]')).toContainText("검토 중");
+  const invariantInput = { analystToken: tokens.access_token,
+    caseId: scn3.response.caseId, transactionId: scn3.body.transactionId,
+    detectionResultId: scn3.response.adoptedDetectionResultId };
+  const beforeAi = await fixture("ai-invariant-snapshot", invariantInput);
   await page.getByText("AI 조사 보조 리포트 보기").click();
   const createReport = page.getByRole("button", { name: "리포트 생성 요청" });
   try {
@@ -352,11 +357,16 @@ test("SCN-001~008 real Keycloak visual capture", async ({ page }) => {
       executionId: current.currentReport.executionId, reportId: current.currentReport.reportId,
       version: current.latestRequest.detectionResultVersion,
       status: current.currentReport.reportStatus, source: current.currentReport.reportSource });
+    const afterAi = await fixture("ai-invariant-snapshot", invariantInput);
+    if (JSON.stringify(afterAi) !== JSON.stringify(beforeAi)) {
+      throw new Error("AI report changed case, transaction, or adopted detection state");
+    }
     const reportImage = "SCN003-ai-report.png";
     await page.screenshot({ path: resolve(DIR, reportImage), fullPage: true });
     mark("ai-report-captured");
     index.push(`| SCN003 | 별도 요청 뒤 저장 AI 리포트(로컬 Ollama mock) | \`${scn3.body.transactionId}\` | \`${scn3.response.adoptedDetectionResultId}\` | \`${scn3.response.caseId}\` | [PNG](${reportImage}) |`);
     index.push(`| SCN003 | AI 요청·execution·report ID 연결: \`${current.latestRequest.aiRequestId}\` / \`${current.currentReport.executionId}\` / \`${current.currentReport.reportId}\` | - | - | \`${scn3.response.caseId}\` | [PNG](${reportImage}) |`);
+    index.push(`| SCN003 | AI 전후 사건·거래·채택 탐지 API/DB 불변 대조 | \`${scn3.body.transactionId}\` | \`${scn3.response.adoptedDetectionResultId}\` | \`${scn3.response.caseId}\` | [PNG](${reportImage}) |`);
   } catch {
     const reportImage = "SCN003-ai-report-unavailable.png";
     await page.screenshot({ path: resolve(DIR, reportImage), fullPage: true,
